@@ -27,6 +27,10 @@ on:
         description: Base name of the compatible OpenVMM artifacts
         required: true
         type: string
+      nvx-rs-artifact:
+        description: Base name of the nvx-rs artifacts for the runner's OS
+        required: true
+        type: string
       teardown-mode:
         description: Guest teardown mode used by the benchmark
         required: true
@@ -44,7 +48,9 @@ on:
         required: true
         type: number
       package-release:
-        description: Whether the platform produces a development release package
+        description: >-
+          Whether the platform packages a release, which dev pushes upload for
+          the development release
         required: true
         type: boolean
     secrets:
@@ -126,11 +132,12 @@ jobs:
           host-cpu-reserve: ${{ inputs.host-cpu-reserve }}
           marker-timeout: ${{ inputs.marker-timeout }}
 
+      # Pull requests package and archive the release too, so that they prove
+      # that it builds, but only dev pushes upload it for publication.
       - name: Package release
-        if: >-
-          github.event_name == 'push' &&
-          github.ref == 'refs/heads/dev' &&
-          inputs.package-release
+        if: inputs.package-release
         uses: ./.github/actions/package-release
         with:
           platform: ${{ inputs.release-platform }}
+          nvx-rs-artifact: ${{ inputs.nvx-rs-artifact }}
+          upload: ${{ github.event_name == 'push' && github.ref == 'refs/heads/dev' }}

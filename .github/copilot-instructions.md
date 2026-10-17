@@ -50,9 +50,10 @@
   [copilot-setup-steps](./workflows/copilot-setup-steps.yml) prepares. It
   initializes `openvmm/`; installs `requirements-dev.txt` into a Python virtual
   environment on `PATH`, the Rust release that `rust-toolchain.toml` pins with
-  the OpenVMM test targets, the minimum supported Rust versions of the
-  `aci_edge_sandboxes` and `nvx-rs` crates, cargo-nextest, and the native guest build
-  prerequisites; grants `/dev/kvm` access; pulls the pinned shell linter images;
+  the OpenVMM test targets and the `x86_64-unknown-linux-musl` target used by
+  the Rust guest binaries, the minimum supported Rust versions of the
+  `aci_edge_sandboxes` and `nvx-rs` crates, cargo-nextest, and the remaining
+  native guest build prerequisites; grants `/dev/kvm` access; pulls the pinned shell linter images;
   and stages the pinned Linux and Ubuntu Base archives in `.cache/downloads`.
   When CI has cached them for the checked-out inputs, it also restores the guest
   artifacts into `build/` and the KVM OpenVMM binary into
@@ -65,6 +66,13 @@
   and guest artifacts only when their inputs changed. Leave `test-openvmm-unit`,
   `test-openvmm`, `build-guest --guest all`, `verify-guest-determinism`, and
   `benchmark` to CI.
+- `nvx.py sandbox`, `nvx.py run`, and the microVM scenarios that drive them run
+  `nvx-rs`, which `nvx.py` builds with Cargo into `nvx-rs/target/release/` the
+  first time that a command needs it, in about a minute. Rebuild it with
+  `cargo build --release --locked --features cli --manifest-path nvx-rs/Cargo.toml`
+  after changing `nvx-rs/`, or set `NVX_RS` to another build (see
+  [Usage](../doc/usage.md#nvx-rs)). The `managed-lifecycle` scenario runs an
+  `nvx-rs` test with Cargo.
 - Build trees are large. Check `df -h .` before a build, keep one OpenVMM build
   profile at a time, and delete trees you no longer need with `cargo clean` or
   `docker builder prune -af`. The setup disables incremental compilation and

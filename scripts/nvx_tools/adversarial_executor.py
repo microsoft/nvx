@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import cast
 
+from nvx_tools import nvx_rs
 from nvx_tools.adversarial_broker import (
     SCHEMA_VERSION,
     CaseDefinition,
@@ -57,9 +58,15 @@ _REQUIRED_OUTCOME_REPORTS = {
         {"structured-outcome.json", "structured-outcome-rejected.json"}
     ),
 }
+# The variables that the scenarios inherit. Besides the platform's own, they
+# are the paths that nvx-rs needs: NVX_RS, the executable that nvx.py runs, and
+# CARGO_HOME and RUSTUP_HOME, the Rust toolchain that builds it and runs the
+# managed-lifecycle test. RUSTUP_TOOLCHAIN stays out, so that
+# rust-toolchain.toml selects the Rust release, as do Cargo's other settings.
 _ENVIRONMENT_ALLOWLIST = frozenset(
     {
         "APPDATA",
+        "CARGO_HOME",
         "COMSPEC",
         "HOME",
         "HOMEDRIVE",
@@ -69,9 +76,11 @@ _ENVIRONMENT_ALLOWLIST = frozenset(
         "LD_LIBRARY_PATH",
         "LOCALAPPDATA",
         "NUMBER_OF_PROCESSORS",
+        "NVX_RS",
         "PATH",
         "PATHEXT",
         "PROCESSOR_ARCHITECTURE",
+        "RUSTUP_HOME",
         "SYSTEMDRIVE",
         "SYSTEMROOT",
         "TEMP",
@@ -169,6 +178,14 @@ def _artifact_metadata() -> dict[str, object]:
             artifact_path(OpenVMMBuildConstants.PROVENANCE_NAME),
             "OpenVMM provenance",
         ),
+        # The nvx-rs that the scenarios run through nvx.py, which never
+        # rebuilds it, so a stale one would run without its provenance check.
+        "nvx_rs": nvx_rs.find_binary()
+        or require_file(nvx_rs.binary_path(), "nvx-rs executable"),
+        "nvx_rs_provenance": require_file(
+            artifact_path(nvx_rs.PROVENANCE_NAME),
+            "nvx-rs provenance",
+        ),
     }
     validate_runtime_artifact_provenance()
     return {
@@ -187,6 +204,12 @@ def sanitized_environment() -> dict[str, str]:
         for key, value in os.environ.items()
         if key.upper() in _ENVIRONMENT_ALLOWLIST
     }
+    # The scenarios run in the repository root, where a relative NVX_RS would
+    # name another executable than the one that the initialization validated
+    # in the executor's working directory.
+    configured = environment.get(nvx_rs.VARIABLE)
+    if configured:
+        environment[nvx_rs.VARIABLE] = str(Path(configured).absolute())
     environment["PYTHONUNBUFFERED"] = "1"
     return environment
 

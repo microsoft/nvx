@@ -1,0 +1,223 @@
+//! The identity of the OpenVMM process of a running sandbox, as the former `sandbox_lifecycle.py`
+//! recorded and checked it: `_process_start_time` and `_process_running`.
+//!
+//! A runtime record names OpenVMM by its process ID and start time, which together never repeat:
+//! on Linux the `starttime` field of `/proc/PID/stat`, in clock ticks since boot, and on Windows
+//! the creation time of the process as a 64-bit `FILETIME`. Both implementations compute the same
+//! value, so a record that either wrote identifies the process for the other.
+
+use crate::host::cli::{Exit, Result};
+use crate::host::python::builtins::Int;
+#[cfg(any(target_os = "linux", windows))]
+use crate::host::python::fs::os_error_message;
+
+/// Returns the start time of a live process, or `None` if no live process has the ID, as
+/// `_process_start_time` does, or the message of the error with which the state of the process
+/// cannot be determined.
+///
+/// A process runs until its last thread exits, as [`crate::host::platform::process_start_time`]
+/// holds, so a zombie counts as exited only once its other threads have exited too, where Python
+/// counted every zombie as exited. On Windows, a process that the caller cannot open counts as
+/// exited: OpenVMM runs as the caller, so such a process cannot be its VM. Other hosts have no
+/// `/proc`, so every process counts as exited there, as in Python.
+pub(crate) fn process_start_time(pid: &Int) -> std::result::Result<Option<u64>, String> {
+    #[cfg(target_os = "linux")]
+    {
+        let path = format!("/proc/{pid}/stat");
+        let stat = match std::fs::read(&path) {
+            Ok(stat) => stat,
+            Err(error)
+                if error.kind() == std::io::ErrorKind::NotFound
+                    || error.raw_os_error() == Some(nix::errno::Errno::ESRCH as i32) =>
+            {
+                return Ok(None);
+            }
+            Err(error) => return Err(os_error_message(&error, Some(&path))),
+        };
+        linux_start_time(&stat, || {
+            pid.to_u32()
+                .map_or(Ok(false), crate::host::platform::other_threads_remain)
+                .map_err(|error| os_error_message(&error, Some(&format!("/proc/{pid}/task"))))
+        })
+    }
+    #[cfg(windows)]
+    {
+        let Some(pid) = pid.to_u32() else {
+            return Ok(None);
+        };
+        crate::host::platform::process_start_time(pid)
+            .map_err(|error| os_error_message(&error, None))
+    }
+    #[cfg(not(any(target_os = "linux", windows)))]
+    {
+        let _ = pid;
+        Ok(None)
+    }
+}
+
+/// Reads the start time from the `/proc/PID/stat` line of a process, as `_linux_start_time`
+/// does: the command name may contain spaces and parentheses, so the fields after it start at
+/// its last `)`, with the state as field 3 and `starttime` as field 22. Only for a zombie does it
+/// ask `other_threads_remain` whether the process still runs.
+#[cfg(any(target_os = "linux", test))]
+fn linux_start_time(
+    stat: &[u8],
+    other_threads_remain: impl FnOnce() -> std::result::Result<bool, String>,
+) -> std::result::Result<Option<u64>, String> {
+    let unexpected = || "process status has an unexpected format".to_owned();
+    let fields: Vec<&[u8]> = match stat.iter().rposition(|&byte| byte == b')') {
+        Some(end) => stat[end + 1..]
+            .split(|byte| matches!(byte, b' ' | b'\t' | b'\n' | b'\r' | 0x0b | 0x0c))
+            .filter(|field| !field.is_empty())
+            .collect(),
+        None => Vec::new(),
+    };
+    let start = fields.get(19).copied().unwrap_or_default();
+    if fields.len() < 20 || start.is_empty() || !start.iter().all(u8::is_ascii_digit) {
+        return Err(unexpected());
+    }
+    let state = fields[0];
+    if state == b"X" || (state == b"Z" && !other_threads_remain()?) {
+        return Ok(None);
+    }
+    std::str::from_utf8(start)
+        .ok()
+        .and_then(|start| start.parse().ok())
+        .map(Some)
+        .ok_or_else(unexpected)
+}
+
+/// Returns whether the OpenVMM process that a runtime record names still runs, as
+/// `_process_running` does. A record without a start time, written by an earlier NVX version,
+/// identifies OpenVMM by its process ID alone.
+pub(crate) fn process_running(pid: &Int, start_time: Option<&Int>) -> Result<bool> {
+    if !pid.is_positive() {
+        return Ok(false);
+    }
+    let current = process_start_time(pid).map_err(|message| {
+        Exit::error(format!(
+            "cannot determine whether OpenVMM process {pid} is running: {message}"
+        ))
+    })?;
+    Ok(match start_time {
+        None => current.is_some(),
+        Some(start_time) => current.map(Int::from).as_ref() == Some(start_time),
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stat_lines_give_the_start_time_of_live_processes() {
+        let line = |state: &str| {
+            format!(
+                "123 (my (odd) prog) {state} 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 4242 19 20\n"
+            )
+        };
+        let unasked =
+            || -> std::result::Result<bool, String> { panic!("only a zombie's threads matter") };
+        let alone = || Ok(false);
+        let threads = || Ok(true);
+        assert_eq!(
+            linux_start_time(line("S").as_bytes(), unasked),
+            Ok(Some(4242))
+        );
+        assert_eq!(
+            linux_start_time(line("R").as_bytes(), unasked),
+            Ok(Some(4242))
+        );
+        assert_eq!(linux_start_time(line("Z").as_bytes(), alone), Ok(None));
+        // A zombie main thread whose other threads still run is a live process.
+        assert_eq!(
+            linux_start_time(line("Z").as_bytes(), threads),
+            Ok(Some(4242))
+        );
+        assert_eq!(
+            linux_start_time(line("Z").as_bytes(), || Err("denied".to_owned())),
+            Err("denied".to_owned())
+        );
+        assert_eq!(linux_start_time(line("X").as_bytes(), unasked), Ok(None));
+        for malformed in [
+            &b"123 (prog) S 1 2"[..],
+            b"no parenthesis",
+            b"1 (p) S 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 x",
+        ] {
+            assert_eq!(
+                linux_start_time(malformed, unasked),
+                Err("process status has an unexpected format".to_owned())
+            );
+        }
+    }
+
+    /// Kills and reaps a child when dropped, so that a failed assertion leaves no process.
+    #[cfg(target_os = "linux")]
+    struct Reaped(std::process::Child);
+
+    #[cfg(target_os = "linux")]
+    impl Drop for Reaped {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_vm_runs_until_its_last_thread_exits() {
+        // As in `process::tests::a_process_runs_until_its_last_thread_exits`, the main thread
+        // leaves through pthread_exit, which turns it into a zombie, while another thread sleeps.
+        use std::time::{Duration, Instant};
+        let spawned = std::process::Command::new("python3")
+            .args([
+                "-c",
+                "import ctypes, threading, time\n\
+                 threading.Thread(target=time.sleep, args=(60,)).start()\n\
+                 ctypes.CDLL(None).pthread_exit(None)\n",
+            ])
+            .stdin(std::process::Stdio::null())
+            .spawn();
+        let mut child = match spawned {
+            Ok(child) => Reaped(child),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                eprintln!("skipping: python3 is not installed");
+                return;
+            }
+            Err(error) => panic!("cannot start python3: {error}"),
+        };
+        let pid = Int::from(child.0.id());
+        let start_time = Int::from(process_start_time(&pid).unwrap().expect("python3 runs"));
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap();
+            if stat[stat.rfind(')').unwrap() + 1..]
+                .trim_start()
+                .starts_with('Z')
+            {
+                break;
+            }
+            assert!(Instant::now() < deadline, "the main thread did not exit");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(process_running(&pid, Some(&start_time)).unwrap());
+        child.0.kill().unwrap();
+        child.0.wait().unwrap();
+        assert!(!process_running(&pid, Some(&start_time)).unwrap());
+    }
+
+    #[test]
+    fn this_process_runs_and_others_are_identified_by_start_time() {
+        let pid = Int::from(std::process::id());
+        let start_time = process_start_time(&pid).unwrap();
+        if cfg!(any(target_os = "linux", windows)) {
+            let start_time = Int::from(start_time.expect("this process runs"));
+            assert!(process_running(&pid, Some(&start_time)).unwrap());
+            assert!(!process_running(&pid, Some(&start_time.plus_one())).unwrap());
+            assert!(process_running(&pid, None).unwrap());
+        }
+        assert!(!process_running(&Int::zero(), None).unwrap());
+        assert!(!process_running(&Int::parse("-5").unwrap(), None).unwrap());
+        assert!(!process_running(&Int::parse("99999999999999999999").unwrap(), None).unwrap());
+    }
+}

@@ -331,6 +331,28 @@ impl ControlSession {
         Ok(())
     }
 
+    /// Sends an application request of `kind` with `request_id` and `payload` in the next
+    /// sequenced outer record, for a caller that checks the responses itself, as the `nvx-rs`
+    /// CLI does with the messages of `nvx.py`.
+    pub fn send_request(
+        &mut self,
+        kind: u8,
+        request_id: u64,
+        payload: &[u8],
+        deadline: Instant,
+    ) -> Result<(), SessionError> {
+        self.send_app(kind, request_id, payload, Some(deadline))
+    }
+
+    /// Reads the next application frame, checked against the session's identity and sequence,
+    /// and returns its kind, request ID, status, and payload.
+    pub fn read_response(
+        &mut self,
+        deadline: Option<Instant>,
+    ) -> Result<(u8, u64, i32, Vec<u8>), SessionError> {
+        self.read_app(deadline)
+    }
+
     /// Encodes and sends one application frame in the next sequenced outer record.
     fn send_app(
         &mut self,

@@ -37,6 +37,76 @@ impl Launched {
         #[cfg(windows)]
         return self.process.id();
     }
+
+    /// Waits up to `timeout` for the process to exit, and returns its status if it has, as
+    /// `Popen.wait` and `Popen.poll` report it: the exit code, or on Unix the negated number of
+    /// the signal that ended the process.
+    #[cfg(feature = "cli")]
+    pub(crate) fn wait_timeout(&mut self, timeout: Duration) -> io::Result<Option<i64>> {
+        #[cfg(windows)]
+        return Ok(self.process.wait_timeout(timeout)?.map(i64::from));
+        #[cfg(not(windows))]
+        {
+            let deadline = Instant::now().checked_add(timeout);
+            loop {
+                if let Some(status) = self.child.try_wait()? {
+                    return Ok(Some(status_value(status)));
+                }
+                let now = Instant::now();
+                match deadline {
+                    Some(deadline) if now >= deadline => return Ok(None),
+                    Some(deadline) => thread::sleep((deadline - now).min(POLL_INTERVAL)),
+                    None => thread::sleep(POLL_INTERVAL),
+                }
+            }
+        }
+    }
+
+    /// Asks the process to end, as `Popen.terminate` does: with `SIGTERM` on Unix, and by
+    /// terminating it with status 1 on Windows. A process that has exited is left alone.
+    #[cfg(feature = "cli")]
+    pub(crate) fn terminate(&mut self) -> io::Result<()> {
+        #[cfg(windows)]
+        return self.process.request_termination();
+        #[cfg(not(windows))]
+        self.signal(nix::sys::signal::Signal::SIGTERM)
+    }
+
+    /// Ends the process, as `Popen.kill` does: with `SIGKILL` on Unix, and by terminating it with
+    /// status 1 on Windows. A process that has exited is left alone.
+    #[cfg(feature = "cli")]
+    pub(crate) fn kill(&mut self) -> io::Result<()> {
+        #[cfg(windows)]
+        return self.process.request_termination();
+        #[cfg(not(windows))]
+        self.signal(nix::sys::signal::Signal::SIGKILL)
+    }
+
+    /// Sends `signal` to the process unless it has exited. The child is not reaped until it is
+    /// waited for, so its process ID cannot name another process meanwhile.
+    #[cfg(all(feature = "cli", not(windows)))]
+    fn signal(&mut self, signal: nix::sys::signal::Signal) -> io::Result<()> {
+        if self.child.try_wait()?.is_some() {
+            return Ok(());
+        }
+        let pid = i32::try_from(self.child.id()).map_err(io::Error::other)?;
+        match nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), signal) {
+            Ok(()) | Err(nix::errno::Errno::ESRCH) => Ok(()),
+            Err(error) => Err(error.into()),
+        }
+    }
+}
+
+/// Returns `Popen.returncode` for `status`: the exit code, or the negated signal number.
+#[cfg(all(feature = "cli", not(windows)))]
+fn status_value(status: std::process::ExitStatus) -> i64 {
+    use std::os::unix::process::ExitStatusExt;
+
+    match (status.code(), status.signal()) {
+        (Some(code), _) => i64::from(code),
+        (None, Some(signal)) => -i64::from(signal),
+        (None, None) => 0,
+    }
 }
 
 /// Starts OpenVMM detached from the caller.

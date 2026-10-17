@@ -1,12 +1,12 @@
-//! `nvx-time`, the guest side of NVX time ABI v1, which replaces `guest/common/nvx-time.c`.
+//! `nvx-time`, the guest side of NVX time ABI v1.
 //!
 //! It runs the conformance checks, the violation watcher and the wall-clock discipline in one
 //! daemon, and the snapshot agent's time steps: the guest preparation steps of the architecture
 //! guide's section 5.3.2 and the guest repair steps of its section 5.5.7, which the comments cite
 //! by number. Section 3.2.10 is the contract that it enforces. It prints nothing on success:
 //! checks record their results in the state file, and only violation events reach the console.
-//! The C program defines the check IDs, the guest codes, and the formats of the output lines and
-//! the state file, which this program keeps.
+//! It keeps the check IDs, the guest codes, and the formats of the output lines and the state
+//! file of the C program that it replaced.
 //!
 //! `nvx-time test NAME ARGUMENTS...` runs one of the C program's test hooks, which exercise its
 //! decoders, formats, and process structure without the hypervisor.

@@ -1,9 +1,22 @@
 # Package and source delivery
 
 `package` stages a release directory, `dist/<version>` by default, from the
-built OpenVMM binary and guest artifacts. [Build](build.md) lists the
-artifacts and provenance it requires and the binary release layout. Every
-package is either binary-only or source-inclusive, and you must choose one.
+built OpenVMM binary, `nvx-rs` executable, and guest artifacts. [Build](build.md)
+lists the artifacts and provenance it requires and the binary release layout.
+Every package is either binary-only or source-inclusive, and you must choose
+one.
+
+Every package ships the release build of `nvx-rs`, the Rust command-line
+interface that `nvx.py` runs ([Usage](usage.md#nvx-rs)): `bin/nvx-rs`, a
+static `x86_64-unknown-linux-musl` executable, in the Linux packages, and
+`bin/nvx-rs.exe`, an `x86_64-pc-windows-msvc` executable with a static C
+runtime, in the Windows package. `provenance/nvx-rs.provenance.json` binds it
+to the digest of the `nvx-rs` sources that built it, the Rust release, the
+target, and the `cli` feature, and the packaged `SOURCE-MANIFEST.json` records
+the same in its `nvx_rs` section with the executable's SHA-256. `package`
+requires `nvx-rs/target/release/nvx-rs[.exe]` and its provenance in `build/`,
+which must describe it as such a build of the checkout's sources; see
+[`record-nvx-rs-provenance`](usage.md#record-nvx-rs-provenance).
 
 ## Binary-only packages
 
@@ -80,6 +93,12 @@ OpenVMM is MIT licensed: retain its notice, but its source does not have to be
 published merely because it is aggregated with Linux. See
 `THIRD_PARTY_NOTICES.md`.
 
+The `nvx-rs` executables are MIT licensed NVX code that statically links the
+Rust standard library and permissively licensed crates, with musl and LLVM's
+`libunwind` on Linux and the Microsoft C runtime on Windows.
+`THIRD_PARTY_NOTICES.md` lists each with its license; `nvx-rs/Cargo.lock`
+pins every crate by checksum.
+
 ## Release archives
 
 Turn a staged release directory into one deterministic archive:
@@ -92,13 +111,31 @@ python3 scripts/nvx.py archive-release \
 
 `archive-release` checks the staged files against their `SHA256SUMS` before
 it writes a `.tar.gz` or `.zip` archive outside the staged directory; see
-[`archive-release`](usage.md#archive-release).
+[`archive-release`](usage.md#archive-release). `SHA256SUMS` lists every
+packaged file, `bin/nvx-rs[.exe]` and its provenance included, and every
+archive marks the executables in `bin/` executable.
 
-CI follows the binary-only path. On a `dev` push that changes more than
-documentation, the `linux-kvm`, `linux-mshv`, and `windows-whp` platform jobs
-each stage `dist/nvx-<version>-<platform>` with `--binary-only`, then archive
-it as `.tar.gz` on Linux and `.zip` on Windows through the
-[`package-release`](../.github/actions/package-release/action.yml) action.
+[`download`](usage.md#download) verifies the package against its `SHA256SUMS`
+and installs OpenVMM, the guest artifacts, their provenance, and `nvx-rs` into
+the checkout, `nvx-rs` at `nvx-rs/target/release/nvx-rs[.exe]` with its
+provenance in `build/`, so that `nvx.py run` and `nvx.py sandbox` need no
+Cargo. It installs `nvx-rs` only when its provenance describes the build of
+the checkout's `nvx-rs` sources that `nvx.py` runs. Releases from before
+packages shipped `nvx-rs` remain installable: `download` installs the rest and
+leaves `nvx.py` to build `nvx-rs` with Cargo, as it does for a fallback
+release whose `nvx-rs` sources differ from the checkout's.
+
+CI follows the binary-only path. On a `dev` push, or a ready pull request from
+a branch of this repository, that changes more than documentation, the
+`linux-kvm`, `linux-mshv`, and `windows-whp` platform jobs each stage
+`dist/nvx-<version>-<platform>` with `--binary-only`, then archive it as
+`.tar.gz` on Linux and `.zip` on Windows through the
+[`package-release`](../.github/actions/package-release/action.yml) action,
+with the `nvx-rs` and provenance that the NVX CLI job of their operating
+system built and tested. Only `dev` pushes upload the archives, so a pull
+request proves that its packages build without publishing them. The
+development release job checks that each package ships OpenVMM and `nvx-rs`
+before it publishes them.
 [Continuous integration](ci.md) describes the jobs that gate and publish the
 resulting development release.
 

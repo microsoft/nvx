@@ -18,3 +18,11 @@ kernel/config-microvm-debug text eol=lf
 scripts/setup/tool-versions.conf text eol=lf
 
 .github/workflows/*.lock.yml linguist-generated=true
+# Recorded from the Python code that nvx-rs replaced, by scripts/nvx_rs_fixtures.py,
+# which microsoft/nvx#359 retired with that code; they are frozen golden data.
+nvx-rs/src/host/python/unicode.rs linguist-generated=true
+nvx-rs/tests/fixtures/cli.json linguist-generated=true
+nvx-rs/tests/fixtures/egress-policy.json linguist-generated=true
+nvx-rs/tests/fixtures/python.json linguist-generated=true
+nvx-rs/tests/fixtures/sandbox.json linguist-generated=true
+nvx-rs/tests/fixtures/sandbox_options.json linguist-generated=true

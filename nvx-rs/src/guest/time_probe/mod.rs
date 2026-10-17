@@ -1,12 +1,11 @@
-//! `nvx-time-probe`, the guest-side diagnostics for the NVX time ABI, which replaces
-//! `guest/common/nvx-time-probe.c`.
+//! `nvx-time-probe`, the guest-side diagnostics for the NVX time ABI.
 //!
-//! It keeps the C program's commands, output, and exit statuses: 0 on success, 1 for a warp
-//! check that fails, 2 for an invalid command line, and 3 for a measurement that could not
-//! run. Its numeric options are plain decimal, or `0x`-prefixed hexadecimal for the integers,
-//! and its rate options decimal floating point, as the other guest programs read their
-//! arguments. It reads the kernel's numbers, such as `/proc/cpuinfo`'s rates, only in the form
-//! in which the kernel writes them.
+//! It keeps the commands, output, and exit statuses of the C program that it replaced: 0 on
+//! success, 1 for a warp check that fails, 2 for an invalid command line, and 3 for a
+//! measurement that could not run. Its numeric options are plain decimal, or `0x`-prefixed
+//! hexadecimal for the integers, and its rate options decimal floating point, as the other guest
+//! programs read their arguments. It reads the kernel's numbers, such as `/proc/cpuinfo`'s
+//! rates, only in the form in which the kernel writes them.
 
 mod clock;
 mod format;

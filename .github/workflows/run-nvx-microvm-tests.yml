@@ -19,6 +19,10 @@ on:
         description: Base name of the compatible OpenVMM artifacts
         required: true
         type: string
+      nvx-rs-artifact:
+        description: Base name of the nvx-rs artifacts for the runner's OS
+        required: true
+        type: string
       debug-kernel:
         description: >-
           Run the same-host restore scenarios on the CI debug kernel instead
@@ -83,6 +87,20 @@ jobs:
         if: runner.os != 'Windows'
         shell: bash
         run: chmod +x openvmm/target/release/openvmm
+
+      # nvx.py runs nvx-rs for its sandbox command, which the scenarios and
+      # the steps below drive, and for the egress and artifact steps of its run
+      # command. It looks for nvx-rs where `cargo build --release` puts it.
+      - name: Download nvx-rs executable
+        uses: actions/download-artifact@v8
+        with:
+          name: ${{ inputs.nvx-rs-artifact }}-executable
+          path: nvx-rs/target/release
+
+      - name: Make nvx-rs executable
+        if: runner.os != 'Windows'
+        shell: bash
+        run: chmod +x nvx-rs/target/release/nvx-rs
 
       # Qualification verifies the downloaded OpenVMM's time ABI preflight.
       - name: Validate runner

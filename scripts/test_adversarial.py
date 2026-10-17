@@ -78,6 +78,7 @@ from nvx_tools.build_constants import (
     ReleaseBuildConstants,
 )
 from nvx_tools.common import ScriptError
+from nvx_tools.nvx_rs import find_binary as find_nvx_rs
 
 
 def _executor_result(
@@ -2128,11 +2129,101 @@ class CopilotContainmentTests(unittest.TestCase):
         self.assertNotIn("SSH_AUTH_SOCK", environment)
         self.assertNotIn("UNRELATED_SECRET", environment)
 
+    def test_executor_environment_locates_nvx_rs_and_the_rust_toolchain(self) -> None:
+        # Scenarios run NVX_RS, or build nvx-rs and run the managed-lifecycle
+        # test with the toolchain that CARGO_HOME and RUSTUP_HOME locate.
+        # rust-toolchain.toml still selects the Rust release, and no other
+        # Cargo setting or credential passes.
+        with patch.dict(
+            os.environ,
+            {
+                "PATH": "test-path",
+                "NVX_RS": "test-nvx-rs",
+                "CARGO_HOME": "test-cargo-home",
+                "RUSTUP_HOME": "test-rustup-home",
+                "RUSTUP_TOOLCHAIN": "nightly",
+                "CARGO_TARGET_DIR": "test-target",
+                "RUSTFLAGS": "-Ctarget-cpu=native",
+                "CARGO_REGISTRY_TOKEN": "registry-secret",
+            },
+            clear=True,
+        ):
+            environment = sanitized_environment()
+        self.assertEqual(
+            environment,
+            {
+                "PATH": "test-path",
+                "NVX_RS": str(Path("test-nvx-rs").absolute()),
+                "CARGO_HOME": "test-cargo-home",
+                "RUSTUP_HOME": "test-rustup-home",
+                "PYTHONUNBUFFERED": "1",
+            },
+        )
+
+    def test_scenarios_run_the_relative_nvx_rs_that_the_executor_validated(
+        self,
+    ) -> None:
+        # The executor validates a relative NVX_RS in its own working
+        # directory, and the scenarios run in another, the repository root,
+        # so the environment that they inherit names that executable.
+        previous = Path.cwd()
+        self.addCleanup(os.chdir, previous)
+        with tempfile.TemporaryDirectory() as temporary:
+            executor_directory = Path(temporary)
+            executable = executor_directory / "bin" / "nvx-rs"
+            executable.parent.mkdir()
+            executable.write_bytes(b"")
+            os.chdir(executor_directory)
+            try:
+                with patch.dict(os.environ, {"NVX_RS": os.path.join("bin", "nvx-rs")}):
+                    validated = find_nvx_rs()
+                    environment = sanitized_environment()
+            finally:
+                os.chdir(previous)
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    "-c",
+                    "from nvx_tools import nvx_rs; print(nvx_rs.find_binary())",
+                ],
+                cwd=Path(__file__).resolve().parent,
+                env=environment,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertEqual(validated, executable.absolute())
+        self.assertEqual(completed.stdout.strip(), str(validated))
+
+    def test_scenarios_find_nvx_rs_with_the_executor_environment(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            nvx_rs = Path(temporary) / "nvx-rs"
+            nvx_rs.write_bytes(b"")
+            with patch.dict(os.environ, {"NVX_RS": str(nvx_rs)}):
+                environment = sanitized_environment()
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    "-c",
+                    "from nvx_tools import nvx_rs; print(nvx_rs.find_binary())",
+                ],
+                cwd=Path(__file__).resolve().parent,
+                env=environment,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertEqual(completed.stdout.strip(), str(nvx_rs.absolute()))
+
     def test_executor_resolves_build_artifacts_with_shared_helper(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             openvmm = root / OpenVMMBuildConstants.BINARY_NAME
             openvmm.write_bytes(b"openvmm")
+            nvx_rs_executable = root / "nvx-rs"
+            nvx_rs_executable.write_bytes(b"nvx-rs")
 
             def artifact_path(name: str) -> Path:
                 path = root / name
@@ -2148,11 +2239,30 @@ class CopilotContainmentTests(unittest.TestCase):
                     "nvx_tools.adversarial_executor.openvmm_binary_path",
                     return_value=openvmm,
                 ),
+                # The nvx-rs that nvx.py runs, which NVX_RS may name.
+                patch(
+                    "nvx_tools.adversarial_executor.nvx_rs.find_binary",
+                    return_value=nvx_rs_executable,
+                ),
                 patch(
                     "nvx_tools.adversarial_executor.validate_runtime_artifact_provenance"
-                ),
+                ) as validate,
             ):
-                _artifact_metadata()
+                artifacts = _artifact_metadata()
+
+            validate.assert_called_once_with()
+            self.assertEqual(
+                artifacts["nvx_rs"],
+                {
+                    "path": str(nvx_rs_executable),
+                    "sha256": hashlib.sha256(b"nvx-rs").hexdigest(),
+                    "size": len(b"nvx-rs"),
+                },
+            )
+            self.assertEqual(
+                cast(dict[str, object], artifacts["nvx_rs_provenance"])["path"],
+                str(root / "nvx-rs.provenance.json"),
+            )
 
         self.assertEqual(
             [entry.args[0] for entry in resolve.call_args_list],
@@ -2163,8 +2273,48 @@ class CopilotContainmentTests(unittest.TestCase):
                 InitramfsBuildConstants.PROVENANCE_NAME,
                 KernelBuildConstants.PROVENANCE_NAME,
                 OpenVMMBuildConstants.PROVENANCE_NAME,
+                "nvx-rs.provenance.json",
             ],
         )
+
+    def test_executor_requires_the_nvx_rs_that_the_scenarios_run(self) -> None:
+        # Without NVX_RS, the scenarios run nvx-rs/target/release/nvx-rs,
+        # which nvx.py would otherwise build during a scenario's timeout.
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+
+            def artifact_path(name: str) -> Path:
+                path = root / name
+                path.write_bytes(name.encode())
+                return path
+
+            missing = root / "missing" / "nvx-rs"
+            with (
+                patch(
+                    "nvx_tools.adversarial_executor.artifact_path",
+                    side_effect=artifact_path,
+                ),
+                patch(
+                    "nvx_tools.adversarial_executor.openvmm_binary_path",
+                    return_value=artifact_path("openvmm"),
+                ),
+                patch(
+                    "nvx_tools.adversarial_executor.nvx_rs.find_binary",
+                    return_value=None,
+                ),
+                patch(
+                    "nvx_tools.adversarial_executor.nvx_rs.binary_path",
+                    return_value=missing,
+                ),
+                patch(
+                    "nvx_tools.adversarial_executor.validate_runtime_artifact_provenance"
+                ) as validate,
+                self.assertRaisesRegex(
+                    ScriptError, f"nvx-rs executable not found: .*{missing.name}"
+                ),
+            ):
+                _artifact_metadata()
+            validate.assert_not_called()
 
     def test_external_executor_also_drops_controller_credentials(self) -> None:
         process = MagicMock()

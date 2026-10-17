@@ -61,7 +61,8 @@ runs:
         cargo "+${{ steps.toolchains.outputs.toolchain }}" test --locked --all-features
         cargo "+${{ steps.toolchains.outputs.toolchain }}" test --locked
 
-    # Stages a synthetic release, which the bundled-artifacts test then requires to find.
+    # Stages a synthetic release in the current layout, with nvx-rs and its
+    # provenance, which the bundled-artifacts test then requires to find.
     - name: Check artifact bundling
       shell: bash
       working-directory: nvx-rs
@@ -69,18 +70,23 @@ runs:
         set -euo pipefail
         bundle=$(mktemp -d)
         executable=openvmm
+        cli=nvx-rs
         bundle_dir="${bundle}"
         if [[ "${RUNNER_OS}" == Windows ]]; then
           executable=openvmm.exe
+          cli=nvx-rs.exe
           bundle_dir=$(cygpath -w "${bundle}")
         fi
-        mkdir -p "${bundle}/bin" "${bundle}/guest"
+        mkdir -p "${bundle}/bin" "${bundle}/guest" "${bundle}/provenance"
         printf openvmm > "${bundle}/bin/${executable}"
+        printf nvx-rs > "${bundle}/bin/${cli}"
+        printf '{}' > "${bundle}/provenance/nvx-rs.provenance.json"
         printf kernel > "${bundle}/guest/vmlinux"
         printf initramfs > "${bundle}/guest/initramfs.cpio.gz"
         cp ../SOURCE-MANIFEST.json "${bundle}/"
-        (cd "${bundle}" && sha256sum "bin/${executable}" guest/vmlinux \
-          guest/initramfs.cpio.gz SOURCE-MANIFEST.json > SHA256SUMS)
+        (cd "${bundle}" && sha256sum "bin/${executable}" "bin/${cli}" guest/vmlinux \
+          guest/initramfs.cpio.gz provenance/nvx-rs.provenance.json \
+          SOURCE-MANIFEST.json > SHA256SUMS)
         NVX_BUNDLE_DIR="${bundle_dir}" cargo "+${{ steps.toolchains.outputs.toolchain }}" test --locked --lib \
           --features bundled artifacts
 

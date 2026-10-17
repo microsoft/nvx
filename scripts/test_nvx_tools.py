@@ -4,7 +4,6 @@
 import argparse
 import ast
 import contextlib
-import errno
 import hashlib
 import http.client
 import http.server
@@ -30,9 +29,9 @@ import urllib.error
 import urllib.request
 import uuid
 import zipfile
-from collections.abc import Callable
+from collections.abc import Callable, Generator, Mapping
 from pathlib import Path, PurePosixPath
-from typing import Any, cast
+from typing import cast
 from unittest.mock import MagicMock, call, patch
 
 sys.path.insert(0, str(Path(__file__).parent))
@@ -49,12 +48,12 @@ from nvx_tools import (  # noqa: E402
     collect_alpine_sources,
     collect_ubuntu_sources,
     common,
-    control_session,
     elf,
+    guest_binaries,
     guests,
+    nvx_rs,
     release,
     sandbox,
-    sandbox_lifecycle,
     ubuntu,
 )
 from nvx_tools.build_constants import (  # noqa: E402
@@ -253,6 +252,15 @@ def _write_release_fixture(
     ):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(path.name.encode("ascii"))
+    # The release build of nvx-rs, static as the Linux packages require, and
+    # its provenance.
+    nvx_rs_binary = root / "nvx-rs" / "target" / "release" / nvx_rs.binary_path().name
+    nvx_rs_binary.parent.mkdir(parents=True, exist_ok=True)
+    nvx_rs_binary.write_bytes(_elf_file())
+    (build_dir / nvx_rs.PROVENANCE_NAME).write_text(
+        json.dumps(nvx_rs.provenance_record(nvx_rs_binary, nvx_rs.release_target())),
+        encoding="utf-8",
+    )
     for artifact_name, manifest_name in (
         (
             "initramfs-ubuntu.cpio.gz",
@@ -317,6 +325,10 @@ def _write_release_fixture(
             "control_session_protocol_version": 1,
             "control_contract_revision": "nvx-microvm-v2-control-v2",
         },
+        "guest_rust": {
+            "toolchain": GuestRustBuildConstants.TOOLCHAIN,
+            "target": GuestRustBuildConstants.TARGET,
+        },
         "linux": {
             "version": "6.18.38",
             "upstream_url": (
@@ -338,7 +350,11 @@ def _write_release_fixture(
                 "x86_64/alpine-minirootfs-3.24.1-x86_64.tar.gz"
             ),
             "minirootfs_sha256": AlpineBuildConstants.MINIROOTFS_SHA256,
-            "guest_sources": ["guest/common", "guest/alpine"],
+            "guest_sources": [
+                "guest/common",
+                "guest/alpine",
+                *GuestRustBuildConstants.SOURCE_PATHS,
+            ],
             "package_manifests": ["build/initramfs.cpio.gz.packages.json"],
             "source_output": "build/sources/alpine",
         },
@@ -357,6 +373,7 @@ def _write_release_fixture(
                 "guest/common",
                 "guest/ubuntu",
                 "ubuntu/packages.lock.json",
+                *GuestRustBuildConstants.SOURCE_PATHS,
             ],
             "package_manifests": [
                 "build/initramfs-ubuntu.cpio.gz.packages.json",
@@ -378,6 +395,7 @@ def _write_release_fixture(
                     for path in AzureLinuxBuildConstants.GUEST_SOURCE_DIRECTORIES
                 ),
                 "azurelinux/packages.lock.json",
+                *GuestRustBuildConstants.SOURCE_PATHS,
             ],
             "package_manifests": [
                 (
@@ -446,11 +464,39 @@ def _write_release_fixture(
         "source": source_dir,
         "openvmm": openvmm_dir,
         "binary": binary,
+        "nvx_rs": nvx_rs_binary,
     }
     return paths, kernel_inputs, revision
 
 
-class CliTests(unittest.TestCase):
+def _checkout_artifacts() -> nvx_rs.ArtifactPaths:
+    """Return the artifact paths of this checkout as `nvx-rs artifacts` prints
+    them, for tests of `nvx.py run` that need no nvx-rs."""
+    return nvx_rs.ArtifactPaths(
+        openvmm=common.openvmm_binary_path(),
+        kernel=common.artifact_path(KernelBuildConstants.BINARY_NAME),
+        guests=tuple(
+            nvx_rs.GuestArtifacts(
+                name,
+                guests.guest_descriptor(name).distribution,
+                common.artifact_path(guests.guest_descriptor(name).initramfs_name),
+            )
+            for name in guests.GUEST_NAMES
+        ),
+    )
+
+
+class _CheckoutArtifacts(unittest.TestCase):
+    """Answers the artifact lookups of `nvx.py run` without nvx-rs."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        patcher = patch.object(nvx_rs, "artifacts", side_effect=_checkout_artifacts)
+        self.artifacts = patcher.start()
+        self.addCleanup(patcher.stop)
+
+
+class CliTests(_CheckoutArtifacts):
     def test_usage_documents_every_command_and_option(self):
         # doc/usage.md is the CLI reference: every command has a row in its
         # command table and a section that names exactly the options of the
@@ -919,429 +965,6 @@ class CliTests(unittest.TestCase):
         with self.assertRaisesRegex(common.ScriptError, "snapshot already fixes"):
             nvx.command_run(args)
 
-    def test_sandbox_rejects_systemd_entrypoint(self):
-        for entrypoint in nvx.SYSTEMD_ENTRYPOINTS:
-            with self.subTest(entrypoint=entrypoint):
-                args = nvx.parse_args(
-                    [
-                        "sandbox",
-                        "--entrypoint",
-                        entrypoint,
-                        "--layer",
-                        "distro,distro.erofs,11111111-1111-1111-1111-111111111111",
-                        "--scratch",
-                        "scratch.ext4",
-                    ]
-                )
-                with self.assertRaisesRegex(
-                    common.ScriptError,
-                    "systemd entrypoints",
-                ):
-                    nvx.command_sandbox(args)
-
-    def test_sandbox_allows_non_systemd_sbin_init(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            layer = root / "distro.erofs"
-            scratch = root / "scratch.ext4"
-            layer.write_bytes(b"distro")
-            scratch.write_bytes(b"scratch")
-            args = nvx.parse_args(
-                [
-                    "sandbox",
-                    "--entrypoint",
-                    "/sbin/init",
-                    "--layer",
-                    f"distro,{layer},11111111-1111-1111-1111-111111111111",
-                    "--scratch",
-                    str(scratch),
-                    "--dry-run",
-                ]
-            )
-
-            def require(path: Path, _description: str) -> Path:
-                return path
-
-            with (
-                patch.object(nvx, "require_file", side_effect=require),
-                patch.object(nvx, "_format_command", return_value="formatted"),
-            ):
-                nvx.command_sandbox(args)
-
-    def test_sandbox_rejects_systemd_from_bound_distro_metadata(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            layer = root / "distro.erofs"
-            scratch = root / "scratch.ext4"
-            layer.write_bytes(b"distro")
-            scratch.write_bytes(b"scratch")
-            layer.with_name(f"{layer.name}.manifest.json").write_text(
-                json.dumps(
-                    {
-                        "format": 1,
-                        "artifact": layer.name,
-                        "artifact_sha256": common.sha256_file(layer),
-                        "packages": [{"name": "systemd"}],
-                    }
-                ),
-                encoding="utf-8",
-            )
-            args = nvx.parse_args(
-                [
-                    "sandbox",
-                    "--entrypoint",
-                    "/sbin/init",
-                    "--layer",
-                    f"distro,{layer},11111111-1111-1111-1111-111111111111",
-                    "--scratch",
-                    str(scratch),
-                ]
-            )
-            with self.assertRaisesRegex(common.ScriptError, "systemd images"):
-                nvx.command_sandbox(args)
-
-    def test_sandbox_command_parses_typed_launch_contract(self):
-        args = nvx.parse_args(
-            [
-                "sandbox",
-                "--layer",
-                "distro,distro.erofs,11111111-1111-1111-1111-111111111111",
-                "--scratch",
-                "scratch.ext4",
-                "--entrypoint",
-                "/bin/workload",
-                "--arg=--serve",
-                "--memory-max",
-                "268435456",
-                "--pids-max",
-                "64",
-                "--workload-user",
-                "1000:1001",
-            ]
-        )
-
-        self.assertEqual(args.layer[0].role, "distro")
-        self.assertEqual(args.scratch, Path("scratch.ext4"))
-        self.assertEqual(args.sandbox_arg, ["--serve"])
-        self.assertEqual(args.memory_max, 268435456)
-        self.assertEqual(args.pids_max, 64)
-        self.assertEqual(args.workload_user, (1000, 1001))
-        self.assertIs(args.handler, nvx.command_sandbox)
-
-    def test_sandbox_command_parses_state_aware_operations(self):
-        provision = nvx.parse_args(
-            [
-                "sandbox",
-                "provision",
-                "--state-dir",
-                "state",
-                "--layer",
-                "distro,distro.erofs,11111111-1111-1111-1111-111111111111",
-                "--scratch",
-                "scratch.ext4",
-            ]
-        )
-        self.assertEqual(provision.sandbox_operation, "provision")
-        self.assertEqual(provision.state_dir, Path("state"))
-
-        execute = nvx.parse_args(
-            [
-                "sandbox",
-                "exec",
-                "--state-dir",
-                "state",
-                "--entrypoint",
-                "/bin/sh",
-                "--arg=-c",
-                "--arg=echo managed",
-                "--exec-timeout-ms",
-                "5000",
-            ]
-        )
-        self.assertEqual(execute.sandbox_operation, "exec")
-        self.assertEqual(execute.sandbox_arg, ["-c", "echo managed"])
-        self.assertEqual(execute.exec_timeout_ms, 5000)
-        self.assertFalse(execute.inherit_default_environment)
-
-        configured = nvx.parse_args(
-            [
-                "sandbox",
-                "exec",
-                "--state-dir",
-                "state",
-                "--cwd",
-                "/work tree",
-                "--environment",
-                "EMPTY=",
-                "--environment",
-                "VALUE=space = value",
-                "--inherit-default-environment",
-            ]
-        )
-        self.assertEqual(configured.cwd, "/work tree")
-        self.assertEqual(
-            configured.environment,
-            ["EMPTY=", "VALUE=space = value"],
-        )
-        self.assertTrue(configured.inherit_default_environment)
-
-        report = nvx.parse_args(
-            [
-                "sandbox",
-                "exec",
-                "--state-dir",
-                "state",
-                "--outcome-report",
-                "exec-outcome.json",
-            ]
-        )
-        self.assertEqual(report.outcome_report, Path("exec-outcome.json"))
-
-    def test_sandbox_timeout_must_be_finite_and_positive(self):
-        for value in ("0", "-1", "nan", "inf"):
-            stderr = io.StringIO()
-            with (
-                self.subTest(value=value),
-                contextlib.redirect_stderr(stderr),
-                self.assertRaises(SystemExit),
-            ):
-                nvx.parse_args(
-                    ["sandbox", "start", "--state-dir", "state", "--timeout", value]
-                )
-            self.assertIn("must be finite and greater than 0", stderr.getvalue())
-
-    def test_sandbox_managed_operations_reject_dry_run_before_state_access(self):
-        lifecycle_methods = (
-            ("provision", "provision"),
-            ("start", "start"),
-            ("exec", "exec_workload"),
-            ("stop", "stop"),
-            ("deprovision", "deprovision"),
-        )
-        with tempfile.TemporaryDirectory() as temporary:
-            state = Path(temporary) / "state"
-            state.mkdir()
-            marker = state / "marker"
-            marker.write_text("preserved", encoding="utf-8")
-
-            for operation, lifecycle_method in lifecycle_methods:
-                with self.subTest(operation=operation):
-                    args = nvx.parse_args(
-                        [
-                            "sandbox",
-                            operation,
-                            "--state-dir",
-                            str(state),
-                            "--dry-run",
-                        ]
-                    )
-                    with (
-                        patch.object(
-                            sandbox_lifecycle,
-                            lifecycle_method,
-                        ) as lifecycle,
-                        self.assertRaisesRegex(
-                            common.ScriptError,
-                            "--dry-run is only valid for sandbox run",
-                        ),
-                    ):
-                        nvx.command_sandbox(args)
-                    lifecycle.assert_not_called()
-                    self.assertEqual(marker.read_text(encoding="utf-8"), "preserved")
-
-    def test_sandbox_exec_forwards_explicit_empty_environment_and_cwd(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            environment_file = Path(temporary) / "environment.json"
-            environment_file.write_text("[]", encoding="utf-8")
-            args = nvx.parse_args(
-                [
-                    "sandbox",
-                    "exec",
-                    "--state-dir",
-                    "state",
-                    "--cwd",
-                    "/work",
-                    "--environment-file",
-                    str(environment_file),
-                ]
-            )
-            result = sandbox_lifecycle.ManagedExecResult(0, "exit", b"", b"")
-            with (
-                patch.object(
-                    sandbox_lifecycle,
-                    "exec_workload",
-                    return_value=result,
-                ) as execute,
-                self.assertRaises(SystemExit) as exit_context,
-            ):
-                nvx.command_sandbox(args)
-
-        self.assertEqual(exit_context.exception.code, 0)
-        execute.assert_called_once_with(
-            Path("state"),
-            ("/bin/sh",),
-            timeout_ms=0,
-            response_timeout=60.0,
-            cwd="/work",
-            environment=(),
-            inherit_default_environment=False,
-        )
-
-    def test_sandbox_exec_forwards_environment_inheritance(self):
-        cases: tuple[tuple[list[str], tuple[str, ...] | None], ...] = (
-            (["--environment", "A=1"], ("A=1",)),
-            (
-                ["--environment", "A=1", "--environment", "TERM=dumb"],
-                ("A=1", "TERM=dumb"),
-            ),
-            # Without entries the workload gets the defaults whatever the flag says.
-            ([], None),
-        )
-        for environment_args, environment in cases:
-            with self.subTest(environment=environment):
-                args = nvx.parse_args(
-                    [
-                        "sandbox",
-                        "exec",
-                        "--state-dir",
-                        "state",
-                        *environment_args,
-                        "--inherit-default-environment",
-                    ]
-                )
-                result = sandbox_lifecycle.ManagedExecResult(0, "exit", b"", b"")
-                with (
-                    patch.object(
-                        sandbox_lifecycle,
-                        "exec_workload",
-                        return_value=result,
-                    ) as execute,
-                    self.assertRaises(SystemExit),
-                ):
-                    nvx.command_sandbox(args)
-                execute.assert_called_once_with(
-                    Path("state"),
-                    ("/bin/sh",),
-                    timeout_ms=0,
-                    response_timeout=60.0,
-                    cwd=None,
-                    environment=environment,
-                    inherit_default_environment=True,
-                )
-
-    def test_sandbox_exec_rejects_ambiguous_or_one_shot_environment(self):
-        both = nvx.parse_args(
-            [
-                "sandbox",
-                "exec",
-                "--state-dir",
-                "state",
-                "--environment",
-                "A=1",
-                "--environment-file",
-                "environment.json",
-            ]
-        )
-        with self.assertRaisesRegex(common.ScriptError, "mutually exclusive"):
-            nvx.command_sandbox(both)
-
-        one_shot = nvx.parse_args(["sandbox", "run", "--environment", "A=1"])
-        with self.assertRaisesRegex(common.ScriptError, "require.*exec"):
-            nvx.command_sandbox(one_shot)
-
-        for operation in ("run", "start"):
-            inheriting = nvx.parse_args(
-                ["sandbox", operation, "--inherit-default-environment"]
-            )
-            with (
-                self.subTest(operation=operation),
-                self.assertRaisesRegex(common.ScriptError, "require.*exec"),
-            ):
-                nvx.command_sandbox(inheriting)
-
-    def test_sandbox_environment_file_is_bounded_before_state_access(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            path = Path(temporary) / "environment.json"
-            path.write_bytes(b" " * (1024 * 1024 + 1))
-            args = nvx.parse_args(
-                [
-                    "sandbox",
-                    "exec",
-                    "--state-dir",
-                    "absent-state",
-                    "--environment-file",
-                    str(path),
-                ]
-            )
-            with (
-                patch.object(sandbox_lifecycle, "exec_workload") as execute,
-                self.assertRaisesRegex(common.ScriptError, "exceeds.*byte limit"),
-            ):
-                nvx.command_sandbox(args)
-            execute.assert_not_called()
-
-    def test_sandbox_environment_is_validated_before_state_access(self):
-        too_many = [
-            value
-            for index in range(257)
-            for value in ("--environment", f"KEY{index}=value")
-        ]
-        cases = (
-            (too_many, "exceeds 256 entries"),
-            (["--environment", "NO_EQUALS"], "non-empty KEY=VALUE"),
-            (["--environment", "=empty-key"], "non-empty KEY=VALUE"),
-            (["--environment", "KEY=embedded\0nul"], "non-empty KEY=VALUE"),
-            (
-                ["--environment", "KEY=" + "\N{SNOWMAN}" * 1365],
-                "at most 4096 bytes",
-            ),
-            (
-                ["--environment", "DUPLICATE=one", "--environment", "DUPLICATE=two"],
-                "duplicate key",
-            ),
-        )
-        for environment_args, message in cases:
-            with self.subTest(message=message):
-                args = nvx.parse_args(
-                    [
-                        "sandbox",
-                        "exec",
-                        "--state-dir",
-                        "absent-state",
-                        *environment_args,
-                    ]
-                )
-                with (
-                    patch.object(sandbox_lifecycle, "exec_workload") as execute,
-                    self.assertRaisesRegex(common.ScriptError, message),
-                ):
-                    nvx.command_sandbox(args)
-                execute.assert_not_called()
-
-    def test_sandbox_environment_file_entries_are_validated_before_state_access(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            path = Path(temporary) / "environment.json"
-            path.write_text(
-                json.dumps(["DUPLICATE=one", "DUPLICATE=two"]),
-                encoding="utf-8",
-            )
-            args = nvx.parse_args(
-                [
-                    "sandbox",
-                    "exec",
-                    "--state-dir",
-                    "absent-state",
-                    "--environment-file",
-                    str(path),
-                ]
-            )
-            with (
-                patch.object(sandbox_lifecycle, "exec_workload") as execute,
-                self.assertRaisesRegex(common.ScriptError, "duplicate key"),
-            ):
-                nvx.command_sandbox(args)
-            execute.assert_not_called()
-
     def test_network_requires_explicit_portable_profile(self):
         args = nvx.parse_args(
             [
@@ -1362,7 +985,7 @@ class CliTests(unittest.TestCase):
         with self.assertRaisesRegex(common.ScriptError, "--net and --network-profile"):
             nvx.command_run(missing_network)
 
-    def test_run_and_sandbox_forward_network_arguments(self):
+    def test_run_forwards_network_arguments(self):
         network_arguments = (
             "--net 10.0.0.2/24 --network-profile portable "
             "--network-egress deny --network-ingress deny "
@@ -1370,41 +993,73 @@ class CliTests(unittest.TestCase):
             "--network-egress-deny 10.0.0.0/8 --host-loopback allow "
             "--network-proxy 10.0.0.1:3128 --host-loopback-forward tcp:8080:80"
         ).split()
-        commands = [
-            ["run", "--dry-run", *network_arguments],
-            [
-                "sandbox",
-                "--dry-run",
-                "--layer",
-                "distro,distro.erofs,11111111-1111-1111-1111-111111111111",
-                "--scratch",
-                "scratch.ext4",
-                *network_arguments,
-            ],
-        ]
 
         def require(path: Path, _description: str) -> Path:
             return path
 
-        for arguments in commands:
-            with self.subTest(command=arguments[0]):
-                args = nvx.parse_args(arguments)
-                with (
-                    patch.object(nvx, "require_file", side_effect=require),
-                    patch.object(sandbox, "require_file", side_effect=require),
-                    patch.object(
-                        nvx, "_format_command", return_value="formatted"
-                    ) as format_command,
-                ):
-                    args.handler(args)
+        args = nvx.parse_args(["run", "--dry-run", *network_arguments])
+        with (
+            patch.object(nvx, "require_file", side_effect=require),
+            patch.object(
+                nvx, "_format_command", return_value="formatted"
+            ) as format_command,
+        ):
+            args.handler(args)
 
-                command = format_command.call_args.args[0]
-                self.assertEqual(
-                    command[command.index("--net") :],
-                    network_arguments,
-                )
+        command = format_command.call_args.args[0]
+        self.assertEqual(command[command.index("--net") :], network_arguments)
 
     def test_run_lowers_structured_egress_policy_before_launch(self):
+        args = nvx.parse_args(
+            [
+                "run",
+                "--dry-run",
+                "--network-egress",
+                "deny",
+                "--network-egress-policy-file",
+                "policy.json",
+            ]
+        )
+
+        def require(path: Path, _description: str) -> Path:
+            return path
+
+        rules = nvx_rs.EgressRules(
+            allow=("192.0.2.0/25:tcp:8000-8001", "192.0.2.200/32"),
+            deny=("192.0.2.0/24:tcp:8001",),
+        )
+        with (
+            patch.object(
+                nvx_rs, "compile_egress_policy", return_value=rules
+            ) as compile_policy,
+            patch.object(nvx, "require_file", side_effect=require),
+            patch.object(
+                nvx, "_format_command", return_value="formatted"
+            ) as format_command,
+        ):
+            nvx.command_run(args)
+
+        compile_policy.assert_called_once_with(Path("policy.json"))
+        command = format_command.call_args.args[0]
+        self.assertNotIn("--network-egress-policy-file", command)
+        self.assertEqual(
+            command[command.index("--network-egress") :],
+            [
+                "--network-egress",
+                "deny",
+                "--network-egress-allow",
+                "192.0.2.0/25:tcp:8000-8001",
+                "--network-egress-allow",
+                "192.0.2.200/32",
+                "--network-egress-deny",
+                "192.0.2.0/24:tcp:8001",
+            ],
+        )
+
+    @unittest.skipUnless(
+        os.environ.get("NVX_RS"), "set NVX_RS to an nvx-rs executable to run"
+    )
+    def test_run_lowers_structured_egress_policy_with_nvx_rs(self):
         with tempfile.TemporaryDirectory() as temporary:
             policy = Path(temporary) / "policy.json"
             policy.write_text(
@@ -1459,14 +1114,32 @@ class CliTests(unittest.TestCase):
                 ) as format_command,
             ):
                 nvx.command_run(args)
-
-        command = format_command.call_args.args[0]
-        self.assertNotIn("--network-egress-policy-file", command)
-        self.assertEqual(command.count("--network-egress-allow"), 2)
-        self.assertIn("192.0.2.0/25:tcp:8000-8001", command)
-        self.assertIn("192.0.2.200/32", command)
-        self.assertEqual(command.count("--network-egress-deny"), 1)
-        self.assertIn("192.0.2.0/24:tcp:8001", command)
+            command = format_command.call_args.args[0]
+            self.assertEqual(
+                command[command.index("--network-egress-allow") :],
+                [
+                    "--network-egress-allow",
+                    "192.0.2.0/25:tcp:8000-8001",
+                    "--network-egress-allow",
+                    "192.0.2.200/32",
+                    "--network-egress-deny",
+                    "192.0.2.0/24:tcp:8001",
+                ],
+            )
+            # A refused policy fails with the compiler's message, before the
+            # artifacts are looked up.
+            policy.write_text(
+                json.dumps({"allow": [{"to": [{"cidr": "fe80::1%eth0/64"}]}]}),
+                encoding="utf-8",
+            )
+            self.artifacts.reset_mock()
+            with self.assertRaisesRegex(
+                common.ScriptError,
+                r"^allow\[0\]\.to\[0\]\.cidr must not name an IPv6 scope: "
+                r"fe80::1%eth0/64$",
+            ):
+                nvx.command_run(args)
+            self.artifacts.assert_not_called()
 
     def test_policy_file_rejects_ambiguous_flags_before_artifact_access(self):
         cases = (
@@ -1490,261 +1163,11 @@ class CliTests(unittest.TestCase):
                     nvx.command_run(args)
                 require.assert_not_called()
 
-    def test_sandbox_rejects_policy_mixing_before_validating_layer_files(self):
-        for operation in ("run", "provision"):
-            with self.subTest(operation=operation):
-                args = nvx.parse_args(
-                    [
-                        "sandbox",
-                        operation,
-                        "--layer",
-                        "distro,absent.erofs,00000000-0000-4000-8000-000000000001",
-                        "--scratch",
-                        "absent.ext4",
-                        "--network-egress",
-                        "deny",
-                        "--network-egress-policy-file",
-                        "absent.json",
-                        "--network-egress-allow",
-                        "192.0.2.1",
-                    ]
-                )
-                with (
-                    patch.object(nvx.SandboxLaunch, "validated") as validated,
-                    self.assertRaisesRegex(common.ScriptError, "cannot be combined"),
-                ):
-                    nvx.command_sandbox(args)
-                validated.assert_not_called()
-
-    def test_policy_file_rejects_scoped_ipv6_before_launch_or_provision(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            policy = root / "policy.json"
-            policy.write_text(
-                json.dumps({"allow": [{"to": [{"cidr": "fe80::1%eth0/64"}]}]}),
-                encoding="utf-8",
-            )
-            options = [
-                "--network-egress",
-                "deny",
-                "--network-egress-policy-file",
-                str(policy),
-            ]
-            message = (
-                r"^allow\[0\]\.to\[0\]\.cidr must not name an IPv6 scope: "
-                r"fe80::1%eth0/64$"
-            )
-            args = nvx.parse_args(["run", "--dry-run", *options])
-            with (
-                patch.object(nvx, "require_file") as require,
-                self.assertRaisesRegex(common.ScriptError, message),
-            ):
-                nvx.command_run(args)
-            require.assert_not_called()
-
-            state = root / "state"
-            operations: tuple[tuple[str, list[str]], ...] = (
-                ("run", []),
-                ("provision", ["--state-dir", str(state)]),
-            )
-            for operation, extra in operations:
-                with self.subTest(operation=operation):
-                    args = nvx.parse_args(
-                        [
-                            "sandbox",
-                            operation,
-                            *extra,
-                            "--layer",
-                            "distro,absent.erofs,00000000-0000-4000-8000-000000000001",
-                            "--scratch",
-                            "absent.ext4",
-                            *options,
-                        ]
-                    )
-                    with (
-                        patch.object(nvx.SandboxLaunch, "validated") as validated,
-                        self.assertRaisesRegex(common.ScriptError, message),
-                    ):
-                        nvx.command_sandbox(args)
-                    validated.assert_not_called()
-            self.assertFalse(state.exists())
-
-    def test_managed_provision_persists_lowered_policy_not_source_path(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            layer = root / "distro.erofs"
-            scratch = root / "scratch.ext4"
-            policy = root / "policy.json"
-            state = root / "state"
-            layer.write_bytes(b"layer")
-            scratch.write_bytes(b"scratch")
-            policy.write_text(
-                json.dumps(
-                    {
-                        "allow": [
-                            {
-                                "to": [
-                                    {
-                                        "cidr": "192.0.2.0/24",
-                                        "except": ["192.0.2.128/25"],
-                                    }
-                                ],
-                            }
-                        ]
-                    }
-                ),
-                encoding="utf-8",
-            )
-            args = nvx.parse_args(
-                [
-                    "sandbox",
-                    "provision",
-                    "--state-dir",
-                    str(state),
-                    "--layer",
-                    f"distro,{layer},11111111-1111-1111-1111-111111111111",
-                    "--scratch",
-                    str(scratch),
-                    "--network-egress",
-                    "deny",
-                    "--network-egress-policy-file",
-                    str(policy),
-                ]
-            )
-
-            nvx.command_sandbox(args)
-            config = json.loads(
-                (state / sandbox_lifecycle.CONFIG_NAME).read_text(encoding="utf-8")
-            )
-            policy.unlink()
-
-            self.assertEqual(config["network_egress"], "deny")
-            self.assertEqual(config["network_egress_allow"], ["192.0.2.0/25"])
-            self.assertEqual(config["network_egress_deny"], [])
-            self.assertNotIn("network_egress_policy_file", config)
-
-    def test_public_cli_provision_persists_policy_after_source_removal(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            layer = root / "distro.erofs"
-            scratch = root / "scratch.ext4"
-            policy = root / "policy.json"
-            state = root / "state"
-            layer.write_bytes(b"layer")
-            scratch.write_bytes(b"scratch")
-            policy.write_text(
-                json.dumps(
-                    {
-                        "allow": [
-                            {
-                                "to": [
-                                    {
-                                        "cidr": "192.0.2.0/24",
-                                        "except": ["192.0.2.128/25"],
-                                    }
-                                ],
-                                "ports": [
-                                    {
-                                        "protocol": "tcp",
-                                        "port": 8000,
-                                        "endPort": 8001,
-                                    }
-                                ],
-                            }
-                        ],
-                        "deny": [
-                            {
-                                "to": [{"cidr": "192.0.2.0/24"}],
-                                "ports": [{"protocol": "tcp", "port": 8001}],
-                            }
-                        ],
-                    }
-                ),
-                encoding="utf-8",
-            )
-            result = subprocess.run(
-                [
-                    sys.executable,
-                    str(Path(nvx.__file__).resolve()),
-                    "sandbox",
-                    "provision",
-                    "--state-dir",
-                    str(state),
-                    "--layer",
-                    f"distro,{layer},11111111-1111-1111-1111-111111111111",
-                    "--scratch",
-                    str(scratch),
-                    "--network-egress",
-                    "deny",
-                    "--network-egress-policy-file",
-                    str(policy),
-                ],
-                cwd=BuildConstants.REPO_ROOT,
-                capture_output=True,
-                timeout=10,
-            )
-            self.assertEqual(
-                result.returncode,
-                0,
-                result.stderr.decode("utf-8", "replace"),
-            )
-            policy.unlink()
-            config = json.loads(
-                (state / sandbox_lifecycle.CONFIG_NAME).read_text(encoding="utf-8")
-            )
-
-            self.assertEqual(
-                config["network_egress_allow"],
-                ["192.0.2.0/25:tcp:8000-8001"],
-            )
-            self.assertEqual(
-                config["network_egress_deny"],
-                ["192.0.2.0/24:tcp:8001"],
-            )
-            self.assertNotIn(str(policy), json.dumps(config))
-
-    def test_invalid_policy_has_no_managed_state_side_effect(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            layer = root / "distro.erofs"
-            scratch = root / "scratch.ext4"
-            policy = root / "policy.json"
-            state = root / "state"
-            layer.write_bytes(b"layer")
-            scratch.write_bytes(b"scratch")
-            policy.write_text(
-                '{"allow":[{"to":[{"cidr":"192.0.2.0/24"}],'
-                '"ports":[{"protocol":"icmp","port":8}]}]}',
-                encoding="utf-8",
-            )
-            args = nvx.parse_args(
-                [
-                    "sandbox",
-                    "provision",
-                    "--state-dir",
-                    str(state),
-                    "--layer",
-                    f"distro,{layer},11111111-1111-1111-1111-111111111111",
-                    "--scratch",
-                    str(scratch),
-                    "--network-egress",
-                    "deny",
-                    "--network-egress-policy-file",
-                    str(policy),
-                ]
-            )
-
-            with self.assertRaises(common.ScriptError):
-                nvx.command_sandbox(args)
-            self.assertFalse(state.exists())
-
-    def test_managed_non_launch_operations_reject_network_policy_options(self):
+    def test_run_reports_policy_errors_before_looking_up_artifacts(self):
         args = nvx.parse_args(
             [
-                "sandbox",
-                "start",
-                "--state-dir",
-                "state",
+                "run",
+                "--dry-run",
                 "--network-egress",
                 "deny",
                 "--network-egress-policy-file",
@@ -1752,13 +1175,64 @@ class CliTests(unittest.TestCase):
             ]
         )
         with (
-            patch.object(sandbox_lifecycle, "start") as start,
+            patch.object(
+                nvx_rs,
+                "compile_egress_policy",
+                side_effect=common.ScriptError("egress policy must be an object"),
+            ),
+            patch.object(nvx, "require_file") as require,
             self.assertRaisesRegex(
-                common.ScriptError, "only valid for sandbox run or provision"
+                common.ScriptError, "^egress policy must be an object$"
             ),
         ):
-            nvx.command_sandbox(args)
-        start.assert_not_called()
+            nvx.command_run(args)
+        self.artifacts.assert_not_called()
+        require.assert_not_called()
+
+    def test_run_takes_its_artifacts_from_nvx_rs(self):
+        root = Path("alternate")
+        artifacts = nvx_rs.ArtifactPaths(
+            openvmm=root / "openvmm",
+            kernel=root / "vmlinux",
+            guests=(
+                nvx_rs.GuestArtifacts("alpine", "Alpine Linux", root / "alpine.gz"),
+                nvx_rs.GuestArtifacts("ubuntu", "Ubuntu Base", root / "ubuntu.gz"),
+            ),
+        )
+        self.artifacts.side_effect = None
+        self.artifacts.return_value = artifacts
+
+        def require(path: Path, _description: str) -> Path:
+            return path
+
+        args = nvx.parse_args(["run", "--guest", "ubuntu", "--dry-run"])
+        with (
+            patch.object(nvx, "require_file", side_effect=require) as require_file,
+            patch.object(
+                nvx, "_format_command", return_value="formatted"
+            ) as format_command,
+        ):
+            nvx.command_run(args)
+        command = format_command.call_args.args[0]
+        self.assertEqual(command[0], str(root / "openvmm"))
+        self.assertEqual(command[command.index("--kernel") + 1], str(root / "vmlinux"))
+        self.assertEqual(
+            command[command.index("--initrd") + 1], str(root / "ubuntu.gz")
+        )
+        # The checks and their messages are those of nvx.py.
+        self.assertEqual(
+            require_file.call_args_list,
+            [
+                call(root / "openvmm", "OpenVMM release binary"),
+                call(root / "vmlinux", "Linux direct kernel"),
+                call(root / "ubuntu.gz", "Ubuntu Base initramfs"),
+            ],
+        )
+        with self.assertRaisesRegex(
+            common.ScriptError,
+            "^OpenVMM release binary not found: " + re.escape(str(root / "openvmm")),
+        ):
+            nvx.command_run(args)
 
     def test_run_parses_denied_filesystem_paths(self):
         args = nvx.parse_args(
@@ -2452,6 +1926,995 @@ class CliTests(unittest.TestCase):
         self.assertIs(args.handler, nvx.command_record_openvmm_provenance)
 
 
+SCRIPTS_DIRECTORY = Path(__file__).parent
+# A stand-in for nvx-rs that the process tests run in its place: it acts as its
+# first argument asks.
+FAKE_NVX_RS = r"""
+import os
+import signal
+import sys
+import time
+
+mode = sys.argv[1]
+if mode == "streams":
+    os.write(1, b"standard output\n")
+    os.write(2, b"standard error\n")
+    sys.exit(int(sys.argv[2]))
+if mode == "interruptible":
+    # Like nvx-rs, which records each SIGINT, report the first one only.
+    reported = []
+
+    def interrupted(signum, frame):
+        if not reported:
+            reported.append(signum)
+            os.write(2, b"Interrupted\n")
+            os._exit(130)
+
+    signal.signal(signal.SIGINT, interrupted)
+    open(sys.argv[2], "w").close()
+    time.sleep(60)
+    sys.exit(99)
+if mode == "signaled":
+    signum = getattr(signal, sys.argv[2])
+    signal.signal(signum, signal.SIG_DFL)
+    os.kill(os.getpid(), signum)
+    time.sleep(60)
+sys.exit(f"unknown mode {mode}")
+"""
+# Runs nvx_rs.run in a fresh Python, with the stand-in in place of nvx-rs.
+NVX_RS_DRIVER = r"""
+import sys
+
+sys.path.insert(0, sys.argv[1])
+from nvx_tools import nvx_rs
+
+fake = sys.argv[2]
+nvx_rs._command = lambda arguments, program: [sys.executable, fake, *arguments]
+raise SystemExit(nvx_rs.run(sys.argv[3:], program="nvx.py"))
+"""
+# Runs nvx.main in a fresh Python, with the stand-in in place of nvx-rs: the
+# arguments before "--" tell the stand-in what to do.
+NVX_PY_DRIVER = r"""
+import sys
+
+sys.path.insert(0, sys.argv[1])
+import nvx
+from nvx_tools import nvx_rs
+
+separator = sys.argv.index("--")
+fake = [sys.executable, sys.argv[2], *sys.argv[3:separator]]
+nvx_rs._command = lambda arguments, program: fake
+raise SystemExit(nvx.main(sys.argv[separator + 1 :]))
+"""
+# Runs nvx.main as nvx.py in a fresh Python, with the nvx-rs that NVX_RS names
+# and the artifact root that the second argument names.
+NVX_PY_REAL_DRIVER = r"""
+import sys
+from pathlib import Path
+
+sys.path.insert(0, sys.argv[1])
+sys.argv[0] = "nvx.py"
+import nvx
+from nvx_tools import nvx_rs
+
+nvx_rs.ROOT = Path(sys.argv[2])
+raise SystemExit(nvx.main(sys.argv[3:]))
+"""
+
+
+@contextlib.contextmanager
+def _without_nvx_rs_variable() -> Generator[None]:
+    with patch.dict(os.environ):
+        os.environ.pop(nvx_rs.VARIABLE, None)
+        yield
+
+
+def _completed(
+    returncode: int, stdout: bytes = b"", stderr: bytes = b""
+) -> subprocess.CompletedProcess[bytes]:
+    return subprocess.CompletedProcess(["nvx-rs"], returncode, stdout, stderr)
+
+
+def _signal_process_group(pid: int, name: str) -> None:
+    """Send the POSIX signal `name` to the process group `pid`, as a terminal
+    sends Ctrl-C to its foreground group."""
+    killpg = cast(Callable[[int, int], None], getattr(os, "killpg"))  # noqa: B009
+    killpg(pid, cast(int, getattr(signal, name)))
+
+
+class NvxRsTests(unittest.TestCase):
+    def _fake(self, directory: Path) -> Path:
+        fake = directory / "fake_nvx_rs.py"
+        fake.write_text(FAKE_NVX_RS, encoding="utf-8")
+        return fake
+
+    def _driver(self, fake: Path, *arguments: str) -> list[str]:
+        return [
+            sys.executable,
+            "-c",
+            NVX_RS_DRIVER,
+            str(SCRIPTS_DIRECTORY),
+            str(fake),
+            *arguments,
+        ]
+
+    def test_nvx_rs_variable_names_the_executable(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            binary = Path(temporary) / "nvx-rs"
+            binary.write_bytes(b"")
+            with (
+                patch.dict(os.environ, {"NVX_RS": str(binary)}),
+                patch.object(nvx_rs, "build_binary") as build,
+            ):
+                self.assertEqual(nvx_rs.require_binary(), binary.absolute())
+            build.assert_not_called()
+            missing = Path(temporary) / "missing"
+            with (
+                patch.dict(os.environ, {"NVX_RS": str(missing)}),
+                self.assertRaisesRegex(
+                    common.ScriptError, "NVX_RS does not name an nvx-rs executable"
+                ),
+            ):
+                nvx_rs.require_binary()
+
+    def test_the_checkout_binary_runs_without_a_build(self):
+        self.assertEqual(
+            nvx_rs.binary_path(),
+            BuildConstants.REPO_ROOT
+            / "nvx-rs"
+            / "target"
+            / "release"
+            / ("nvx-rs.exe" if os.name == "nt" else "nvx-rs"),
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            binary = Path(temporary) / "nvx-rs"
+            binary.write_bytes(b"")
+            with (
+                _without_nvx_rs_variable(),
+                patch.object(nvx_rs, "binary_path", return_value=binary),
+                patch("subprocess.run") as run,
+            ):
+                self.assertEqual(nvx_rs.require_binary(), binary)
+            run.assert_not_called()
+
+    def test_cargo_builds_a_missing_binary_onto_standard_error(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            binary = Path(temporary) / "nvx-rs"
+
+            def build(
+                command: tuple[str, ...], **_: object
+            ) -> subprocess.CompletedProcess[bytes]:
+                binary.write_bytes(b"")
+                return _completed(0)
+
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            with (
+                _without_nvx_rs_variable(),
+                patch.object(nvx_rs, "binary_path", return_value=binary),
+                patch("shutil.which", return_value="cargo"),
+                patch("subprocess.run", side_effect=build) as run,
+                patch.object(nvx_rs, "_stderr_target", return_value=2),
+                patch.object(nvx_rs, "record_provenance") as record,
+                contextlib.redirect_stdout(stdout),
+                contextlib.redirect_stderr(stderr),
+            ):
+                self.assertEqual(nvx_rs.require_binary(), binary)
+        run.assert_called_once()
+        # The build records the provenance of what it built, for the host.
+        record.assert_called_once_with()
+        self.assertEqual(
+            run.call_args.args[0],
+            (
+                "cargo",
+                "build",
+                "--release",
+                "--locked",
+                "--features",
+                "cli",
+                "--manifest-path",
+                "nvx-rs/Cargo.toml",
+                "--target-dir",
+                "nvx-rs/target",
+            ),
+        )
+        # From the repository root, so that rust-toolchain.toml applies, and
+        # with Cargo's output on standard error, away from the command's.
+        self.assertEqual(run.call_args.kwargs["cwd"], BuildConstants.REPO_ROOT)
+        self.assertEqual(run.call_args.kwargs["stdout"], 2)
+        self.assertEqual(stdout.getvalue(), "")
+        self.assertEqual(
+            stderr.getvalue(),
+            ">> cargo build --release --locked --features cli --manifest-path "
+            "nvx-rs/Cargo.toml --target-dir nvx-rs/target\n",
+        )
+
+    def test_build_output_goes_to_the_descriptor_of_standard_error(self):
+        stream = MagicMock()
+        stream.fileno.return_value = 2
+        with patch("sys.stderr", stream):
+            self.assertEqual(nvx_rs._stderr_target(), 2)
+        stream.flush.assert_called_once_with()
+        with patch("sys.stderr", new_callable=io.StringIO):
+            self.assertEqual(nvx_rs._stderr_target(), subprocess.DEVNULL)
+
+    def test_missing_cargo_names_every_way_to_get_nvx_rs(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            binary = Path(temporary) / "nvx-rs"
+            with (
+                _without_nvx_rs_variable(),
+                patch.object(nvx_rs, "binary_path", return_value=binary),
+                patch("shutil.which", return_value=None),
+                patch("subprocess.run") as run,
+                self.assertRaises(common.ScriptError) as raised,
+            ):
+                nvx_rs.require_binary()
+        run.assert_not_called()
+        message = str(raised.exception)
+        for expected in (
+            f"nvx-rs is not built at {binary}, and Cargo is not on PATH",
+            "set NVX_RS to an nvx-rs executable",
+            "`nvx.py download`",
+            "https://rustup.rs",
+            "cargo build --release --locked --features cli --manifest-path "
+            "nvx-rs/Cargo.toml --target-dir nvx-rs/target",
+        ):
+            self.assertIn(expected, message)
+
+    def test_release_targets_follow_the_operating_system(self):
+        self.assertEqual(
+            nvx_rs.release_target(),
+            "x86_64-pc-windows-msvc"
+            if os.name == "nt"
+            else "x86_64-unknown-linux-musl",
+        )
+        self.assertEqual(nvx_rs.FEATURES, ("cli",))
+        # BUILD_COMMAND builds the features that releases ship.
+        features = nvx_rs.BUILD_COMMAND.index("--features") + 1
+        self.assertEqual(nvx_rs.BUILD_COMMAND[features].split(","), ["cli"])
+
+    def test_source_digest_covers_the_build_inputs_in_any_line_endings(self):
+        relative = [
+            path.relative_to(BuildConstants.REPO_ROOT).as_posix()
+            for path in nvx_rs.source_files()
+        ]
+        self.assertEqual(relative, sorted(relative))
+        for name in (
+            "nvx-rs/Cargo.toml",
+            "nvx-rs/Cargo.lock",
+            "nvx-rs/build.rs",
+            "nvx-rs/src/bin/nvx-rs.rs",
+            "rust-toolchain.toml",
+        ):
+            self.assertIn(name, relative)
+        # Tests, documentation, and the bundled release pin build no part of
+        # the executable.
+        for name in relative:
+            self.assertNotRegex(name, r"^nvx-rs/(tests/|README\.md$|artifacts\.json$)")
+        self.assertEqual(nvx_rs.source_sha256(), nvx_rs.source_sha256())
+
+        with tempfile.TemporaryDirectory() as temporary:
+            checkouts = [Path(temporary) / "lf", Path(temporary) / "crlf"]
+            for checkout, newline in zip(checkouts, (b"\n", b"\r\n"), strict=True):
+                for name in (
+                    "nvx-rs/Cargo.toml",
+                    "nvx-rs/Cargo.lock",
+                    "nvx-rs/build.rs",
+                    "nvx-rs/src/lib.rs",
+                    "nvx-rs/src/bin/nvx-rs.rs",
+                    "rust-toolchain.toml",
+                ):
+                    path = checkout / name
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_bytes(newline.join((name.encode(), b"line", b"")))
+            digest = nvx_rs.source_sha256(checkouts[0])
+            # Checkouts differ only in line endings, as on Windows.
+            self.assertEqual(nvx_rs.source_sha256(checkouts[1]), digest)
+            source = checkouts[0] / "nvx-rs" / "src" / "lib.rs"
+            source.write_bytes(b"changed\n")
+            self.assertNotEqual(nvx_rs.source_sha256(checkouts[0]), digest)
+            # A new source file changes the digest too.
+            (checkouts[1] / "nvx-rs" / "src" / "new.rs").write_bytes(b"")
+            self.assertNotEqual(nvx_rs.source_sha256(checkouts[1]), digest)
+            shutil.rmtree(checkouts[1] / "nvx-rs" / "src")
+            with self.assertRaisesRegex(
+                common.ScriptError, "nvx-rs source directory not found"
+            ):
+                nvx_rs.source_sha256(checkouts[1])
+
+    def test_host_target_is_the_host_of_the_pinned_rust(self):
+        version = (
+            "rustc 1.95.0 (abc 2026-01-01)\nbinary: rustc\n"
+            "host: x86_64-unknown-linux-gnu\nrelease: 1.95.0\n"
+        )
+        with patch(
+            "subprocess.run",
+            return_value=subprocess.CompletedProcess(["rustc"], 0, version, ""),
+        ) as run:
+            self.assertEqual(nvx_rs.host_target(), "x86_64-unknown-linux-gnu")
+        self.assertEqual(run.call_args.args[0], ("rustc", "-vV"))
+        # From the repository root, so that rust-toolchain.toml applies.
+        self.assertEqual(run.call_args.kwargs["cwd"], BuildConstants.REPO_ROOT)
+        for result in (
+            subprocess.CompletedProcess(["rustc"], 1, "", "no rustc"),
+            subprocess.CompletedProcess(["rustc"], 0, "release: 1.95.0\n", ""),
+        ):
+            with (
+                self.subTest(result=result),
+                patch("subprocess.run", return_value=result),
+                self.assertRaisesRegex(common.ScriptError, "host target"),
+            ):
+                nvx_rs.host_target()
+        with (
+            patch("subprocess.run", side_effect=OSError("missing")),
+            self.assertRaisesRegex(common.ScriptError, "failed to run rustc"),
+        ):
+            nvx_rs.host_target()
+
+    def test_provenance_binds_the_executable_that_nvx_py_runs(self):
+        linux = nvx_rs.RELEASE_TARGETS["linux"]
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            binary = root / "nvx-rs"
+            other = root / "other-nvx-rs"
+            provenance = root / "build" / nvx_rs.PROVENANCE_NAME
+            with (
+                patch.object(nvx_rs, "binary_path", return_value=binary),
+                patch.object(nvx_rs, "provenance_path", return_value=provenance),
+                patch.object(nvx_rs, "host_target", return_value="host-triple"),
+            ):
+                with (
+                    _without_nvx_rs_variable(),
+                    self.assertRaisesRegex(
+                        common.ScriptError,
+                        f"nvx-rs is not built at {re.escape(str(binary))}",
+                    ),
+                ):
+                    nvx_rs.record_provenance()
+                self.assertFalse(provenance.exists())
+
+                binary.write_bytes(b"nvx-rs")
+                with _without_nvx_rs_variable():
+                    self.assertEqual(nvx_rs.record_provenance(), provenance)
+                self.assertEqual(
+                    json.loads(provenance.read_text(encoding="utf-8")),
+                    {
+                        "format": 1,
+                        "source_sha256": nvx_rs.source_sha256(),
+                        "toolchain": GuestRustBuildConstants.TOOLCHAIN,
+                        "target": "host-triple",
+                        "features": ["cli"],
+                        "executable_sha256": common.sha256_file(binary),
+                    },
+                )
+
+                # The executable that NVX_RS names is the one that nvx.py
+                # runs, and so the one that the record describes.
+                other.write_bytes(b"other nvx-rs")
+                with patch.dict(os.environ, {nvx_rs.VARIABLE: str(other)}):
+                    nvx_rs.record_provenance("x86_64-pc-windows-msvc")
+                record = json.loads(provenance.read_text(encoding="utf-8"))
+                self.assertEqual(record["target"], "x86_64-pc-windows-msvc")
+                self.assertEqual(record["executable_sha256"], common.sha256_file(other))
+
+                # A record for the Linux release target needs the static
+                # executable that such a build gives.
+                with (
+                    _without_nvx_rs_variable(),
+                    self.assertRaisesRegex(
+                        common.ScriptError, f"invalid {linux} nvx-rs executable"
+                    ),
+                ):
+                    nvx_rs.record_provenance(linux)
+                binary.write_bytes(
+                    _elf_file(((1, b"code"), (3, b"/lib/ld-musl.so.1\0")), elf_type=3)
+                )
+                with (
+                    _without_nvx_rs_variable(),
+                    self.assertRaisesRegex(common.ScriptError, "is not static"),
+                ):
+                    nvx_rs.record_provenance(linux)
+                binary.write_bytes(_elf_file(elf_type=3))
+                with _without_nvx_rs_variable():
+                    nvx_rs.record_provenance(linux)
+                self.assertEqual(
+                    json.loads(provenance.read_text(encoding="utf-8"))["target"],
+                    linux,
+                )
+
+    def test_record_command_records_the_provenance(self):
+        args = nvx.parse_args(
+            ["record-nvx-rs-provenance", "--target", "x86_64-unknown-linux-musl"]
+        )
+        self.assertEqual(args.target, "x86_64-unknown-linux-musl")
+        self.assertIsNone(nvx.parse_args(["record-nvx-rs-provenance"]).target)
+        recorded = Path("build") / nvx_rs.PROVENANCE_NAME
+        with (
+            patch.object(nvx_rs, "record_provenance", return_value=recorded) as record,
+            contextlib.redirect_stdout(io.StringIO()) as stdout,
+        ):
+            args.handler(args)
+        record.assert_called_once_with("x86_64-unknown-linux-musl")
+        self.assertEqual(
+            stdout.getvalue(), f">> recorded the provenance of nvx-rs in {recorded}\n"
+        )
+
+    def test_failed_builds_report_cargo(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            binary = Path(temporary) / "nvx-rs"
+            for returncode, message in (
+                (101, r"Cargo failed to build nvx-rs \(exit 101\)"),
+                (0, "Cargo did not build"),
+            ):
+                with (
+                    self.subTest(returncode=returncode),
+                    _without_nvx_rs_variable(),
+                    patch.object(nvx_rs, "binary_path", return_value=binary),
+                    patch("shutil.which", return_value="cargo"),
+                    patch("subprocess.run", return_value=_completed(returncode)),
+                    patch.object(nvx_rs, "record_provenance") as record,
+                    contextlib.redirect_stderr(io.StringIO()),
+                    self.assertRaisesRegex(common.ScriptError, message),
+                ):
+                    nvx_rs.require_binary()
+                record.assert_not_called()
+
+    def test_commands_name_the_program_and_the_repository_root(self):
+        binary = Path("bin") / "nvx-rs"
+        with patch.object(nvx_rs, "require_binary", return_value=binary):
+            self.assertEqual(
+                nvx_rs._command(["sandbox", "exec"], "nvx.py"),
+                [
+                    os.fspath(binary),
+                    "--prog",
+                    "nvx.py",
+                    "--root",
+                    os.fspath(BuildConstants.REPO_ROOT),
+                    "sandbox",
+                    "exec",
+                ],
+            )
+            self.assertEqual(
+                nvx_rs._command(["artifacts"], None),
+                [
+                    os.fspath(binary),
+                    "--root",
+                    os.fspath(BuildConstants.REPO_ROOT),
+                    "artifacts",
+                ],
+            )
+
+    def test_exit_statuses_pass_through(self):
+        for returncode, status in ((0, 0), (1, 1), (2, 2), (130, 130), (255, 255)):
+            with self.subTest(returncode=returncode):
+                self.assertEqual(nvx_rs.exit_status(returncode), status)
+        # A signal that ends nvx-rs gives the status that a shell reports.
+        self.assertEqual(nvx_rs.exit_status(-15), 143)
+        self.assertEqual(nvx_rs.exit_status(-9), 137)
+        if os.name == "nt":
+            # Windows statuses are 32-bit; SystemExit takes them signed.
+            self.assertEqual(nvx_rs.exit_status(0xC000013A), -0x3FFFFEC6)
+
+    def test_run_shares_the_standard_streams_and_passes_the_status_through(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            fake = self._fake(Path(temporary))
+            for status in (0, 1, 2, 7):
+                with self.subTest(status=status):
+                    result = subprocess.run(
+                        self._driver(fake, "streams", str(status)),
+                        capture_output=True,
+                        timeout=60,
+                    )
+                    self.assertEqual(result.returncode, status)
+                    self.assertEqual(result.stdout, b"standard output\n")
+                    self.assertEqual(result.stderr, b"standard error\n")
+
+    @unittest.skipIf(os.name == "nt", "Windows has no POSIX signals")
+    def test_ctrl_c_ends_the_command_as_nvx_rs_ends_it(self):
+        # A terminal's Ctrl-C reaches the whole process group, and a SIGINT sent
+        # to nvx.py alone reaches nvx-rs through nvx.py. Either way nvx-rs
+        # prints Interrupted, and nvx.py neither prints it again nor changes
+        # the status.
+        for group in (True, False):
+            with (
+                self.subTest(group=group),
+                tempfile.TemporaryDirectory() as temporary,
+            ):
+                fake = self._fake(Path(temporary))
+                started = Path(temporary) / "started"
+                process = subprocess.Popen(
+                    self._driver(fake, "interruptible", str(started)),
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    start_new_session=True,
+                )
+                try:
+                    deadline = time.monotonic() + 30
+                    while not started.exists():
+                        self.assertLess(time.monotonic(), deadline)
+                        self.assertIsNone(process.poll())
+                        time.sleep(0.02)
+                    if group:
+                        _signal_process_group(process.pid, "SIGINT")
+                    else:
+                        process.send_signal(signal.SIGINT)
+                    stdout, stderr = process.communicate(timeout=30)
+                finally:
+                    if process.poll() is None:
+                        _signal_process_group(process.pid, "SIGKILL")
+                        process.wait()
+                self.assertEqual(process.returncode, 130)
+                self.assertEqual(stderr, b"Interrupted\n")
+                self.assertEqual(stdout, b"")
+
+    @unittest.skipIf(os.name == "nt", "Windows has no POSIX signals")
+    def test_signals_that_end_nvx_rs_give_shell_statuses(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            fake = self._fake(Path(temporary))
+            for name, status, stderr in (
+                ("SIGTERM", 143, b""),
+                # SIGINT ended nvx-rs before it could print Interrupted.
+                ("SIGINT", 130, b"Interrupted\n"),
+            ):
+                with self.subTest(signal=name):
+                    result = subprocess.run(
+                        self._driver(fake, "signaled", name),
+                        capture_output=True,
+                        timeout=60,
+                    )
+                    self.assertEqual(result.returncode, status)
+                    self.assertEqual(result.stderr, stderr)
+
+    def test_an_interrupted_wait_still_waits_for_nvx_rs(self):
+        process = MagicMock()
+        process.wait.side_effect = [KeyboardInterrupt, 130]
+        stderr = io.StringIO()
+        with (
+            patch.object(nvx_rs, "_command", return_value=["nvx-rs", "sandbox"]),
+            patch("subprocess.Popen", return_value=process) as popen,
+            contextlib.redirect_stderr(stderr),
+        ):
+            self.assertEqual(nvx_rs.run(["sandbox"], program="nvx.py"), 130)
+        # The standard streams are shared with nvx-rs.
+        popen.assert_called_once_with(["nvx-rs", "sandbox"])
+        self.assertEqual(process.wait.call_count, 2)
+        self.assertEqual(stderr.getvalue(), "")
+        if os.name != "nt":
+            process.send_signal.assert_called_once_with(signal.SIGINT)
+
+    def test_signal_handlers_change_only_while_nvx_rs_runs(self):
+        before = signal.getsignal(signal.SIGINT)
+        during: list[object] = []
+        process = MagicMock()
+
+        def wait() -> int:
+            during.append(signal.getsignal(signal.SIGINT))
+            return 0
+
+        process.wait.side_effect = wait
+        with (
+            patch.object(nvx_rs, "_command", return_value=["nvx-rs"]),
+            patch("subprocess.Popen", return_value=process),
+        ):
+            self.assertEqual(nvx_rs.run([], program="nvx.py"), 0)
+        self.assertEqual(len(during), 1)
+        self.assertIsNot(during[0], before)
+        self.assertIs(signal.getsignal(signal.SIGINT), before)
+
+    def test_unstartable_nvx_rs_is_an_error(self):
+        with (
+            patch.object(nvx_rs, "_command", return_value=["nvx-rs"]),
+            patch("subprocess.Popen", side_effect=OSError("no such file")),
+            self.assertRaisesRegex(
+                common.ScriptError, "failed to run nvx-rs: no such file"
+            ),
+        ):
+            nvx_rs.run([], program="nvx.py")
+
+    def test_queries_report_the_messages_of_nvx_rs(self):
+        for stderr, message in (
+            (b"error: invalid egress policy\r\n", "invalid egress policy"),
+            (b"error: first\nsecond\n", "first\nsecond"),
+            (b"usage: nvx-rs\n", "usage: nvx-rs"),
+            (b"", "nvx-rs exited with status 1"),
+        ):
+            with (
+                self.subTest(stderr=stderr),
+                patch.object(nvx_rs, "_command", return_value=["nvx-rs"]),
+                patch("subprocess.run", return_value=_completed(1, stderr=stderr)),
+                self.assertRaises(common.ScriptError) as raised,
+            ):
+                nvx_rs.query(["egress", "compile", "policy.json"])
+            self.assertEqual(str(raised.exception), message)
+        with (
+            patch.object(nvx_rs, "_command", return_value=["nvx-rs"]),
+            patch("subprocess.run", return_value=_completed(0, stdout=b"{")),
+            self.assertRaisesRegex(common.ScriptError, "printed invalid JSON"),
+        ):
+            nvx_rs.query(["artifacts"])
+
+    def test_egress_policies_compile_to_the_rules_that_nvx_rs_prints(self):
+        with patch.object(
+            nvx_rs,
+            "query",
+            return_value={"allow": ["192.0.2.0/24:tcp:80"], "deny": []},
+        ) as query:
+            self.assertEqual(
+                nvx_rs.compile_egress_policy(Path("policy.json")),
+                nvx_rs.EgressRules(allow=("192.0.2.0/24:tcp:80",), deny=()),
+            )
+        query.assert_called_once_with(("egress", "compile", "policy.json"))
+        invalid: tuple[object, ...] = ([], {"allow": []}, {"allow": [1], "deny": []})
+        for document in invalid:
+            with (
+                self.subTest(document=document),
+                patch.object(nvx_rs, "query", return_value=document),
+                self.assertRaises(common.ScriptError),
+            ):
+                nvx_rs.compile_egress_policy(Path("policy.json"))
+
+    def test_artifacts_are_the_paths_that_nvx_rs_prints(self):
+        document = {
+            "guests": [
+                {
+                    "distribution": "Alpine Linux",
+                    "distro_layer": None,
+                    "initramfs": "/nvx/build/initramfs.cpio.gz",
+                    "name": "alpine",
+                },
+                {
+                    "distribution": "Ubuntu Base",
+                    "distro_layer": "/nvx/build/ubuntu-distro.erofs",
+                    "initramfs": "/nvx/build/initramfs-ubuntu.cpio.gz",
+                    "name": "ubuntu",
+                },
+            ],
+            "kernel": "/nvx/build/vmlinux",
+            "layout": "repository",
+            "openvmm": "/nvx/openvmm/target/release/openvmm",
+            "root": "/nvx",
+        }
+        with patch.object(nvx_rs, "query", return_value=document) as query:
+            paths = nvx_rs.artifacts()
+        query.assert_called_once_with(("artifacts",))
+        self.assertEqual(paths.openvmm, Path("/nvx/openvmm/target/release/openvmm"))
+        self.assertEqual(paths.kernel, Path("/nvx/build/vmlinux"))
+        self.assertEqual(
+            paths.guest("ubuntu"),
+            nvx_rs.GuestArtifacts(
+                "ubuntu", "Ubuntu Base", Path("/nvx/build/initramfs-ubuntu.cpio.gz")
+            ),
+        )
+        with self.assertRaisesRegex(common.ScriptError, "no artifacts of the x"):
+            paths.guest("x")
+        for broken in (
+            {**document, "guests": None},
+            {**document, "kernel": 1},
+            {**document, "guests": [{"name": "alpine"}]},
+        ):
+            with (
+                self.subTest(broken=broken),
+                patch.object(nvx_rs, "query", return_value=broken),
+                self.assertRaises(common.ScriptError),
+            ):
+                nvx_rs.artifacts()
+
+    @unittest.skipUnless(
+        os.environ.get("NVX_RS"), "set NVX_RS to an nvx-rs executable to run"
+    )
+    def test_the_real_nvx_rs_prints_what_nvx_py_reads(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            (root / "build").mkdir()
+            policy = root / "policy.json"
+            policy.write_text(
+                json.dumps(
+                    {
+                        "allow": [
+                            {"cidr": "192.0.2.0/24", "except": ["192.0.2.128/25"]}
+                        ],
+                        "deny": [{"cidr": "198.51.100.0/24", "protocol": "icmp"}],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            with patch.object(nvx_rs, "ROOT", root), patch.dict(os.environ):
+                os.environ.pop("NVX_OPENVMM", None)
+                self.assertEqual(
+                    nvx_rs.compile_egress_policy(policy),
+                    nvx_rs.EgressRules(
+                        allow=("192.0.2.0/25",), deny=("198.51.100.0/24:icmp",)
+                    ),
+                )
+                policy.write_text("[]", encoding="utf-8")
+                with self.assertRaisesRegex(
+                    common.ScriptError, "^egress policy must be an object$"
+                ):
+                    nvx_rs.compile_egress_policy(policy)
+                paths = nvx_rs.artifacts()
+            self.assertEqual(paths.kernel, root / "build" / "vmlinux")
+            self.assertEqual(
+                paths.openvmm,
+                root
+                / "openvmm"
+                / "target"
+                / "release"
+                / ("openvmm.exe" if os.name == "nt" else "openvmm"),
+            )
+            self.assertEqual(
+                [
+                    (guest.name, guest.distribution, guest.initramfs)
+                    for guest in paths.guests
+                ],
+                [
+                    (
+                        name,
+                        guests.guest_descriptor(name).distribution,
+                        root / "build" / guests.guest_descriptor(name).initramfs_name,
+                    )
+                    for name in guests.GUEST_NAMES
+                ],
+            )
+
+
+class SandboxDelegationTests(unittest.TestCase):
+    def test_sandbox_records_canonical_options_in_command_line_order(self):
+        args = nvx.parse_args(
+            [
+                "sandbox",
+                "--layer",
+                "distro,a.erofs,11111111-1111-1111-1111-111111111111",
+                "--scratch=s.ext4",
+                "--mount",
+                "/a,dir-a",
+                "--mount-deny",
+                "x",
+                "--mount=/b,dir-b,rw",
+                "--mount-write",
+                "y",
+                "provision",
+                "--state",
+                "state",
+                "--arg=-c",
+                "--arg",
+                "true",
+                "--environment",
+                "A=B=C",
+                "--inherit",
+                "--dry",
+                "--hyp",
+                "kvm",
+                "--cmdline=",
+                "--timeout",
+                "-1",
+            ]
+        )
+        self.assertEqual(args.sandbox_operation, "provision")
+        # Abbreviations are resolved, the order is kept, and every value is
+        # attached, so that a value that starts with "-" stays a value.
+        self.assertEqual(
+            args.sandbox_arguments,
+            [
+                "--layer=distro,a.erofs,11111111-1111-1111-1111-111111111111",
+                "--scratch=s.ext4",
+                "--mount=/a,dir-a",
+                "--mount-deny=x",
+                "--mount=/b,dir-b,rw",
+                "--mount-write=y",
+                "--state-dir=state",
+                "--arg=-c",
+                "--arg=true",
+                "--environment=A=B=C",
+                "--inherit-default-environment",
+                "--dry-run",
+                "--hypervisor=kvm",
+                "--cmdline=",
+                "--timeout=-1",
+            ],
+        )
+        # nvx-rs converts, checks, and defaults every value.
+        for name in ("layer", "scratch", "workload_user", "timeout", "memory_mib"):
+            self.assertFalse(hasattr(args, name), name)
+        default = nvx.parse_args(["sandbox"])
+        self.assertEqual(default.sandbox_operation, "run")
+        self.assertEqual(default.sandbox_arguments, [])
+
+    def test_sandbox_runs_nvx_rs_and_exits_with_its_status(self):
+        program = argparse.ArgumentParser().prog
+        with patch.object(nvx_rs, "run", return_value=7) as run:
+            self.assertEqual(
+                nvx.main(
+                    [
+                        "sandbox",
+                        "exec",
+                        "--state-dir",
+                        "state",
+                        "--entrypoint",
+                        "/bin/true",
+                    ]
+                ),
+                7,
+            )
+        run.assert_called_once_with(
+            ["sandbox", "exec", "--state-dir=state", "--entrypoint=/bin/true"],
+            program=program,
+        )
+
+    def test_sandbox_usage_errors_stay_with_argparse(self):
+        for arguments in (
+            ["sandbox", "--bogus"],
+            ["sandbox", "--hypervisor", "hyper-v"],
+            ["sandbox", "pause"],
+            ["sandbox", "--layer"],
+        ):
+            with (
+                self.subTest(arguments=arguments),
+                patch.object(nvx_rs, "run") as run,
+                patch("sys.stderr", new_callable=io.StringIO),
+                self.assertRaises(SystemExit) as raised,
+            ):
+                nvx.main(arguments)
+            self.assertEqual(raised.exception.code, 2)
+            run.assert_not_called()
+
+    def test_sandbox_reports_a_missing_nvx_rs_as_an_error(self):
+        stderr = io.StringIO()
+        with (
+            patch.object(
+                nvx_rs, "require_binary", side_effect=common.ScriptError("no nvx-rs")
+            ),
+            contextlib.redirect_stderr(stderr),
+        ):
+            self.assertEqual(nvx.main(["sandbox", "stop", "--state-dir", "s"]), 1)
+        self.assertEqual(stderr.getvalue(), "error: no nvx-rs\n")
+
+    def _main_driver(self, fake: Path, mode: list[str], arguments: list[str]):
+        return [
+            sys.executable,
+            "-c",
+            NVX_PY_DRIVER,
+            str(SCRIPTS_DIRECTORY),
+            str(fake),
+            *mode,
+            "--",
+            *arguments,
+        ]
+
+    def test_sandbox_shares_the_standard_streams_and_status_of_nvx_rs(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            fake = Path(temporary) / "fake_nvx_rs.py"
+            fake.write_text(FAKE_NVX_RS, encoding="utf-8")
+            result = subprocess.run(
+                self._main_driver(
+                    fake,
+                    ["streams", "3"],
+                    ["sandbox", "exec", "--state-dir", "state"],
+                ),
+                capture_output=True,
+                timeout=60,
+            )
+        self.assertEqual(result.returncode, 3)
+        self.assertEqual(result.stdout, b"standard output\n")
+        self.assertEqual(result.stderr, b"standard error\n")
+
+    @unittest.skipIf(os.name == "nt", "Windows has no POSIX signals")
+    def test_ctrl_c_ends_a_sandbox_command_once(self):
+        # nvx-rs reports Ctrl-C; nvx.py prints nothing more and keeps 130.
+        with tempfile.TemporaryDirectory() as temporary:
+            fake = Path(temporary) / "fake_nvx_rs.py"
+            fake.write_text(FAKE_NVX_RS, encoding="utf-8")
+            started = Path(temporary) / "started"
+            process = subprocess.Popen(
+                self._main_driver(
+                    fake,
+                    ["interruptible", str(started)],
+                    ["sandbox", "exec", "--state-dir", "state"],
+                ),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                start_new_session=True,
+            )
+            try:
+                deadline = time.monotonic() + 30
+                while not started.exists():
+                    self.assertLess(time.monotonic(), deadline)
+                    self.assertIsNone(process.poll())
+                    time.sleep(0.02)
+                _signal_process_group(process.pid, "SIGINT")
+                stdout, stderr = process.communicate(timeout=30)
+            finally:
+                if process.poll() is None:
+                    _signal_process_group(process.pid, "SIGKILL")
+                    process.wait()
+        self.assertEqual(process.returncode, 130)
+        self.assertEqual(stderr, b"Interrupted\n")
+        self.assertEqual(stdout, b"")
+
+    @unittest.skipUnless(
+        os.environ.get("NVX_RS"), "set NVX_RS to an nvx-rs executable to run"
+    )
+    def test_the_real_nvx_rs_runs_the_options_that_nvx_py_reads(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            openvmm = (
+                f"openvmm/target/release/openvmm{'.exe' if os.name == 'nt' else ''}"
+            )
+            for relative in ("build/vmlinux", "build/initramfs.cpio.gz", openvmm):
+                path = root / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(b"artifact")
+            (root / "distro.erofs").write_bytes(b"layer")
+            (root / "scratch.ext4").write_bytes(b"scratch")
+            (root / "share" / "hidden").mkdir(parents=True)
+            uuid = "11111111-1111-1111-1111-111111111111"
+
+            def nvx_py(*arguments: str) -> subprocess.CompletedProcess[bytes]:
+                return subprocess.run(
+                    [
+                        sys.executable,
+                        "-c",
+                        NVX_PY_REAL_DRIVER,
+                        str(SCRIPTS_DIRECTORY),
+                        str(root),
+                        *arguments,
+                    ],
+                    cwd=root,
+                    capture_output=True,
+                    timeout=60,
+                )
+
+            result = nvx_py(
+                "sandbox",
+                "--dry",
+                "--layer",
+                f"distro,distro.erofs,{uuid}",
+                "--scratch",
+                "scratch.ext4",
+                "--arg=-c",
+                "--arg",
+                "true",
+                "--mount",
+                f"/data,{root / 'share'},rw",
+                "--mount-deny",
+                "hidden",
+                "--hyp",
+                "kvm",
+                "--memory-max",
+                "268435456",
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stderr, b"")
+            command = result.stdout.decode("utf-8")
+            self.assertTrue(command.startswith(">> "), command)
+            for expected in (
+                "--microvm-sandbox-block distro:file:distro.erofs,ro",
+                "--microvm-sandbox-block scratch:file:scratch.ext4",
+                "--hypervisor kvm",
+                "nvx_arg=-c nvx_arg=true nvx_memory_max=268435456",
+                "--mount-deny hidden",
+            ):
+                self.assertIn(expected, command)
+            # A value that nvx-rs refuses is a usage error of nvx.py sandbox.
+            result = nvx_py("sandbox", "--workload-user", "0:0")
+            self.assertEqual(result.returncode, 2)
+            stderr = result.stderr.decode("utf-8").replace("\r\n", "\n")
+            self.assertTrue(stderr.startswith("usage: nvx.py sandbox [-h] "), stderr)
+            self.assertTrue(
+                stderr.endswith(
+                    "nvx.py sandbox: error: argument --workload-user: "
+                    "--workload-user UID must be between 1 and 4294967295\n"
+                ),
+                stderr,
+            )
+            result = nvx_py("sandbox", "exec", "--state-dir", "state")
+            self.assertEqual(result.returncode, 1)
+            self.assertEqual(
+                result.stderr.decode("utf-8").replace("\r\n", "\n"),
+                f"error: sandbox state path is not a plain directory: "
+                f"{root / 'state'}\n",
+            )
+
+
 class CiTests(unittest.TestCase):
     def test_openvmm_unit_tests_run_nextest_and_doctests(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -3032,6 +3495,31 @@ class CiConfigurationTests(unittest.TestCase):
                 self.assertIn(f"uses: ./.github/actions/{action}", definition)
         self.assertEqual(ci.REQUIRED_CI_RESULT_ENVIRONMENTS["nvx-rs"], "NVX_RS_RESULT")
 
+    def test_nvx_rs_bundles_a_release_in_the_current_layout(self):
+        # The bundled feature stages what a release holds besides nvx-rs, so
+        # its synthetic release ships nvx-rs and its provenance, as releases
+        # do, and the pinned older release, which doesn't, stages as well.
+        action = (
+            BuildConstants.REPO_ROOT
+            / ".github"
+            / "actions"
+            / "check-nvx-rs"
+            / "action.yml"
+        ).read_text(encoding="utf-8")
+        script = _composite_action_script(action, "Check artifact bundling")
+        for member in (
+            "bin/${executable}",
+            "bin/${cli}",
+            "guest/vmlinux",
+            "guest/initramfs.cpio.gz",
+            f"provenance/{nvx_rs.PROVENANCE_NAME}",
+        ):
+            with self.subTest(member=member):
+                self.assertIn(f'"${{bundle}}/{member}"', script)
+                self.assertIn(member, script.split("sha256sum", 1)[1])
+        self.assertIn("cli=nvx-rs.exe", script)
+        self.assertIn("--features bundled artifacts", script)
+
     def test_nvx_rs_builds_and_checks_every_guest_binary_for_musl(self):
         crate = BuildConstants.REPO_ROOT / "nvx-rs"
         action = (
@@ -3316,8 +3804,8 @@ class CiConfigurationTests(unittest.TestCase):
             (("ubuntu/packages.lock.json",), (True, True, False, False)),
             (("azurelinux/packages.lock.json",), (True, True, False, False)),
             (("aci_edge_sandboxes/src/lib.rs",), (True, True, False, False)),
-            (("nvx-rs/src/lib.rs",), (True, True, False, False)),
-            (("nvx-rs/Cargo.lock",), (True, True, False, False)),
+            (("nvx-rs/src/lib.rs",), (True, True, False, True)),
+            (("nvx-rs/Cargo.lock",), (True, True, False, True)),
             (("scripts/nvx_tools/microvm_tests.py",), (True, True, False, False)),
             (
                 (".github/workflows/run-nvx-microvm-tests.yml",),
@@ -3419,6 +3907,7 @@ class CiConfigurationTests(unittest.TestCase):
             match.group(1): {
                 path.replace("**", "example").replace("*", "example")
                 for path in re.findall(r"'([^']+)'", match.group(2))
+                if not path.startswith("!")
             }
             for match in re.finditer(
                 r"^\s+([A-Z_]+)_INPUT_HASH: \$\{\{ hashFiles\((.+)\) \}\}$",
@@ -4103,8 +4592,10 @@ python3() {
         self.assertNotIn("build-mode: ${{ inputs.build-mode }}", build_workflow)
         self.assertEqual(build_workflow.count("overwrite: true"), 2)
         self.assertEqual(build_workflow.count("retention-days: 1"), 2)
+        # The microVM workflow also downloads nvx-rs, which the benchmarks
+        # don't run.
         for consumer_workflow, download_count in (
-            (microvm_workflow, 4),
+            (microvm_workflow, 5),
             (platform_workflow, 3),
         ):
             self.assertIn("path: openvmm/target/release", consumer_workflow)
@@ -4706,6 +5197,219 @@ python3() {
                         self.assertIn(
                             f"        needs.{cli}.result == 'success' &&\n", job
                         )
+
+    def test_ci_hands_nvx_rs_to_the_microvm_and_platform_jobs(self):
+        # nvx.py runs nvx-rs for its sandbox command and for run's egress and
+        # artifact steps, and finds it where `cargo build --release` puts it.
+        # Each NVX CLI job builds it for its OS, records its provenance, tests
+        # with it, and hands both to the microVM jobs, which run it, and to the
+        # platform jobs, which package it, as the OpenVMM build jobs hand
+        # over OpenVMM.
+        github = BuildConstants.REPO_ROOT / ".github"
+        workflow = (github / "workflows" / "ci.yml").read_text(encoding="utf-8")
+        microvm = (github / "workflows" / "run-nvx-microvm-tests.yml").read_text(
+            encoding="utf-8"
+        )
+        platform = (github / "workflows" / "run-platform.yml").read_text(
+            encoding="utf-8"
+        )
+        package = (github / "actions" / "package-release" / "action.yml").read_text(
+            encoding="utf-8"
+        )
+        builds = {
+            "nvx-cli-linux": (
+                "nvx-rs-linux-musl",
+                "nvx-rs/target/release/nvx-rs",
+                "x86_64-unknown-linux-musl",
+            ),
+            "nvx-cli-windows": (
+                "nvx-rs-windows-msvc",
+                "nvx-rs/target/release/nvx-rs.exe",
+                "x86_64-pc-windows-msvc",
+            ),
+        }
+        current = builds["nvx-cli-windows" if os.name == "nt" else "nvx-cli-linux"]
+        self.assertEqual(
+            nvx_rs.binary_path().relative_to(BuildConstants.REPO_ROOT).as_posix(),
+            current[1],
+        )
+        # Packages ship the build for the release target of their OS.
+        self.assertEqual(nvx_rs.release_target(), current[2])
+        self.assertEqual(
+            set(nvx_rs.RELEASE_TARGETS.values()),
+            {target for _, _, target in builds.values()},
+        )
+        for job_name, (artifact, path, target) in builds.items():
+            with self.subTest(job=job_name):
+                job = _workflow_job(workflow, job_name)
+                build = _workflow_step(workflow, job_name, "Build nvx-rs")
+                record = _workflow_step(workflow, job_name, "Record nvx-rs provenance")
+                upload = _workflow_step(workflow, job_name, "Upload nvx-rs executable")
+                provenance = _workflow_step(
+                    workflow, job_name, "Upload nvx-rs provenance"
+                )
+                for option in ("--release", "--locked", "--features cli"):
+                    self.assertIn(option, build)
+                self.assertIn("--manifest-path nvx-rs/Cargo.toml", build)
+                self.assertIn(
+                    f"record-nvx-rs-provenance --target {target}",
+                    _yaml_scalar(record, "run"),
+                )
+                self.assertIn(f"name: {artifact}-executable\n", upload)
+                self.assertIn(f"path: {path}\n", upload)
+                self.assertIn(f"name: {artifact}-provenance\n", provenance)
+                self.assertIn(f"path: build/{nvx_rs.PROVENANCE_NAME}\n", provenance)
+                for step in (upload, provenance):
+                    self.assertIn("if-no-files-found: error", step)
+                # The build is recorded as it is built, the CLI tests run with
+                # it, and only a validated build leaves the job.
+                validate = job.index("uses: ./.github/actions/validate-nvx")
+                self.assertLess(
+                    job.index("- name: Build nvx-rs"),
+                    job.index("- name: Record nvx-rs provenance"),
+                )
+                self.assertLess(job.index("- name: Record nvx-rs provenance"), validate)
+                self.assertGreater(
+                    job.index("- name: Upload nvx-rs executable"), validate
+                )
+                self.assertGreater(
+                    job.index("- name: Upload nvx-rs provenance"), validate
+                )
+        # Self-contained executables run on every self-hosted runner.
+        linux = _workflow_step(workflow, "nvx-cli-linux", "Build nvx-rs")
+        self.assertEqual(linux.count("x86_64-unknown-linux-musl"), 3)
+        self.assertIn("rust-toolchain.toml", linux)
+        self.assertIn(
+            "install -D -m 0755 nvx-rs/target/x86_64-unknown-linux-musl/release/"
+            "nvx-rs \\\n            nvx-rs/target/release/nvx-rs",
+            linux,
+        )
+        # The tests that run nvx-rs directly need NVX_RS to name the build.
+        self.assertIn(
+            'echo "NVX_RS=${GITHUB_WORKSPACE}/nvx-rs/target/release/nvx-rs" '
+            '>> "${GITHUB_ENV}"',
+            linux,
+        )
+        windows = _workflow_job(workflow, "nvx-cli-windows")
+        windows_build = _workflow_step(workflow, "nvx-cli-windows", "Build nvx-rs")
+        self.assertIn("RUSTFLAGS: -C target-feature=+crt-static", windows_build)
+        self.assertIn(
+            '"NVX_RS=$env:GITHUB_WORKSPACE\\nvx-rs\\target\\release\\nvx-rs.exe" |\n'
+            "            Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append",
+            windows_build,
+        )
+        self.assertLess(
+            windows.index("- name: Install the pinned Rust release"),
+            windows.index("- name: Build nvx-rs"),
+        )
+
+        for job_name in (
+            *ci.REQUIRED_CI_MICROVM_TEST_JOBS,
+            *ci.REQUIRED_CI_MICROVM_DEBUG_JOBS,
+            *ci.REQUIRED_CI_MICROVM_DEBUG_PUSH_JOBS,
+            *ci.REQUIRED_CI_PLATFORM_JOBS,
+        ):
+            cli = "nvx-cli-windows" if job_name.endswith("-whp") else "nvx-cli-linux"
+            with self.subTest(consumer=job_name):
+                job = _workflow_job(workflow, job_name)
+                self.assertIn(
+                    "uses: ./.github/workflows/run-platform.yml"
+                    if job_name in ci.REQUIRED_CI_PLATFORM_JOBS
+                    else "uses: ./.github/workflows/run-nvx-microvm-tests.yml",
+                    job,
+                )
+                self.assertEqual(
+                    re.findall(r"^      nvx-rs-artifact: (\S+)$", job, re.MULTILINE),
+                    [builds[cli][0]],
+                )
+
+        for configuration in (microvm, platform):
+            self.assertIn(
+                "      nvx-rs-artifact:\n"
+                "        description: Base name of the nvx-rs artifacts for the "
+                "runner's OS\n"
+                "        required: true\n"
+                "        type: string\n",
+                configuration,
+            )
+        download = microvm.index("      - name: Download nvx-rs executable\n")
+        self.assertIn(
+            "        uses: actions/download-artifact@v8\n"
+            "        with:\n"
+            "          name: ${{ inputs.nvx-rs-artifact }}-executable\n"
+            "          path: nvx-rs/target/release\n",
+            microvm[download:],
+        )
+        chmod = microvm.index("      - name: Make nvx-rs executable\n")
+        self.assertIn(
+            "        if: runner.os != 'Windows'\n"
+            "        shell: bash\n"
+            "        run: chmod +x nvx-rs/target/release/nvx-rs\n",
+            microvm[chmod:],
+        )
+        self.assertLess(download, chmod)
+        self.assertLess(chmod, microvm.index("scripts/nvx.py"))
+
+        # The platform jobs package nvx-rs with its provenance: they download
+        # both where nvx.py package looks for them, before they package.
+        self.assertIn(
+            "          nvx-rs-artifact: ${{ inputs.nvx-rs-artifact }}",
+            _workflow_step(platform, "run", "Package release").splitlines(),
+        )
+        steps = _composite_action_steps(package)
+        names = [_yaml_scalar(step, "name") for step in steps]
+        executable = steps[names.index("Download nvx-rs executable")]
+        provenance = steps[names.index("Download nvx-rs provenance")]
+        self.assertIn("name: ${{ inputs.nvx-rs-artifact }}-executable\n", executable)
+        self.assertIn("path: nvx-rs/target/release\n", executable)
+        self.assertIn("name: ${{ inputs.nvx-rs-artifact }}-provenance\n", provenance)
+        self.assertIn("path: build\n", provenance)
+        self.assertIn(
+            "run: chmod +x nvx-rs/target/release/nvx-rs",
+            steps[names.index("Make nvx-rs executable")],
+        )
+        for name in ("Package Linux release", "Package Windows release"):
+            self.assertLess(
+                names.index("Download nvx-rs executable"), names.index(name)
+            )
+            self.assertLess(
+                names.index("Download nvx-rs provenance"), names.index(name)
+            )
+            self.assertLess(names.index("Make nvx-rs executable"), names.index(name))
+
+    def test_pull_requests_package_releases_that_only_dev_uploads(self):
+        # Pull requests package and archive each platform's release, which
+        # proves that it builds; only a dev push uploads it for publication.
+        github = BuildConstants.REPO_ROOT / ".github"
+        platform = (github / "workflows" / "run-platform.yml").read_text(
+            encoding="utf-8"
+        )
+        package = (github / "actions" / "package-release" / "action.yml").read_text(
+            encoding="utf-8"
+        )
+        step = _workflow_step(platform, "run", "Package release")
+        self.assertIn("        if: inputs.package-release\n", step)
+        self.assertNotIn("github.event_name", _yaml_scalar(step, "if"))
+        self.assertIn(
+            "          upload: ${{ github.event_name == 'push' && "
+            "github.ref == 'refs/heads/dev' }}",
+            step,
+        )
+        steps = _composite_action_steps(package)
+        names = [_yaml_scalar(step, "name") for step in steps]
+        for name, operating_system in (
+            ("Upload Linux release", "runner.os != 'Windows'"),
+            ("Upload Windows release", "runner.os == 'Windows'"),
+        ):
+            with self.subTest(step=name):
+                self.assertEqual(
+                    _yaml_scalar(steps[names.index(name)], "if"),
+                    f"{operating_system} && inputs.upload == 'true'",
+                )
+        for name in ("Package Linux release", "Package Windows release"):
+            self.assertNotIn("upload", _yaml_scalar(steps[names.index(name)], "if"))
+            self.assertIn("--binary-only", steps[names.index(name)])
+            self.assertIn("archive-release", steps[names.index(name)])
 
     def test_ci_preserves_failed_openvmm_test_diagnostics(self):
         workflow = (
@@ -5316,6 +6020,7 @@ Write-Output (Get-ActionsRunnerLabels)
 
         setup = (workflows / "copilot-setup-steps.yml").read_text(encoding="utf-8")
         self.assertIn("      - rust-toolchain.toml\n", setup)
+        self.assertIn("      - nvx-rs/**\n", setup)
         self.assertIn(
             "rust-toolchain.toml",
             _workflow_step(
@@ -5324,6 +6029,7 @@ Write-Output (Get-ActionsRunnerLabels)
         )
         rust = _workflow_step(setup, "copilot-setup-steps", "Install Rust toolchains")
         self.assertIn('rustup default "${RUST_TOOLCHAIN}"', rust)
+        self.assertIn("x86_64-unknown-linux-musl", rust)
         self.assertNotIn("stable", rust)
 
         # A binary built by another compiler must not satisfy the cache.
@@ -5874,7 +6580,7 @@ Write-Output (Get-BenchmarkScratchDirectory)
 
     def test_cli_validation_runs_every_script_test_module(self):
         # Each scripts/test_*.py module must run in both CLI validation jobs;
-        # test_control_session.py once ran in neither (#229).
+        # the retired test_control_session.py once ran in neither (#229).
         action = (
             BuildConstants.REPO_ROOT
             / ".github"
@@ -5886,7 +6592,7 @@ Write-Output (Get-BenchmarkScratchDirectory)
             path.name
             for path in (BuildConstants.REPO_ROOT / "scripts").glob("test_*.py")
         }
-        self.assertIn("test_control_session.py", modules)
+        self.assertIn("test_nvx_tools.py", modules)
         for step in ("Validate NVX CLI on Linux", "Validate NVX CLI on Windows"):
             with self.subTest(step=step):
                 script = _composite_action_script(action, step)
@@ -6430,6 +7136,20 @@ class BuildConstantsTests(unittest.TestCase):
             OpenVMMBuildConstants.CONTROL_CONTRACT_REVISION,
             manifest["openvmm"]["control_contract_revision"],
         )
+        self.assertEqual(
+            manifest["guest_rust"],
+            {
+                "toolchain": GuestRustBuildConstants.TOOLCHAIN,
+                "target": GuestRustBuildConstants.TARGET,
+            },
+        )
+        for guest in ("alpine", "ubuntu", "azurelinux"):
+            with self.subTest(guest=guest):
+                self.assertTrue(
+                    set(GuestRustBuildConstants.SOURCE_PATHS).issubset(
+                        manifest[guest]["guest_sources"]
+                    )
+                )
 
     def test_cache_defaults_are_resolved_for_each_configuration(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -6469,13 +7189,13 @@ class BuildConstantsTests(unittest.TestCase):
         records = cast(list[dict[str, str]], original["source_files"])
         self.assertEqual(
             [record for record in records if record["path"] == relative],
-            [{"path": relative, "sha256": common.sha256_file(source)}],
+            [{"path": relative, "sha256": common.normalized_sha256_file(source)}],
         )
 
         def changed_sha256(path: Path) -> str:
-            return "f" * 64 if path == source else common.sha256_file(path)
+            return "f" * 64 if path == source else common.normalized_sha256_file(path)
 
-        with patch.object(build, "sha256_file", side_effect=changed_sha256):
+        with patch.object(build, "normalized_sha256_file", side_effect=changed_sha256):
             changed = build.initramfs_provenance_inputs()
         self.assertNotEqual(original, changed)
         self.assertEqual(original["alpine"], changed["alpine"])
@@ -6486,6 +7206,11 @@ class BuildConstantsTests(unittest.TestCase):
         )
         self.assertIn("COPY scripts/ /repo/scripts/", dockerfile)
         self.assertIn("scripts", ReleaseBuildConstants.PROJECT_SOURCE_PATHS)
+        self.assertIn("nvx-rs", ReleaseBuildConstants.PROJECT_SOURCE_PATHS)
+        self.assertIn(
+            Path("nvx-rs") / "target",
+            ReleaseBuildConstants.PROJECT_SOURCE_EXCLUDES,
+        )
         self.assertTrue(
             (
                 BuildConstants.REPO_ROOT
@@ -6507,6 +7232,156 @@ class BuildConstantsTests(unittest.TestCase):
                     check=False,
                 )
                 self.assertEqual(tracked.returncode, 0, tracked.stderr)
+
+    def test_no_c_or_assembler_sources_remain_outside_openvmm(self):
+        tracked = subprocess.run(
+            ["git", "ls-files", "-z", "--cached", "--others", "--exclude-standard"],
+            cwd=BuildConstants.REPO_ROOT,
+            capture_output=True,
+            check=True,
+        ).stdout.split(b"\0")
+        forbidden = sorted(
+            path.decode("utf-8")
+            for path in tracked
+            if path
+            and (BuildConstants.REPO_ROOT / path.decode("utf-8")).is_file()
+            and not path.startswith(b"openvmm/")
+            and PurePosixPath(path.decode("utf-8")).suffix.lower() in {".c", ".h", ".s"}
+        )
+        self.assertEqual(forbidden, [])
+
+    def test_guest_binary_third_party_notices_cover_the_rust_runtime(self):
+        notices = (BuildConstants.REPO_ROOT / "THIRD_PARTY_NOTICES.md").read_text(
+            encoding="utf-8"
+        )
+        musl = next(
+            line for line in notices.splitlines() if line.startswith("| musl libc |")
+        )
+        self.assertEqual(
+            set(re.findall(r"`/sbin/(nvx-[a-z-]+)`", musl)),
+            set(GuestRustBuildConstants.BINARIES),
+        )
+        for component in (
+            "Rust core and standard libraries",
+            "Rust `compiler_builtins`",
+            "Rust `libc` crate",
+            "Rust `nix` crate 0.31.3",
+            "Rust `getrandom` crate 0.4.3",
+            "Rust `bitflags` crate 2.13.2",
+            "Rust `cfg-if` crate 1.0.5",
+            "Rust `memoffset` crate 0.9.1",
+            "Apache-2.0 WITH LLVM-exception",
+        ):
+            with self.subTest(component=component):
+                self.assertIn(component, notices)
+
+    def test_nvx_rs_third_party_notices_cover_every_linked_crate(self):
+        # The crates of `cargo tree --locked --features cli -e normal` for the
+        # release targets, x86_64-unknown-linux-musl and x86_64-pc-windows-msvc:
+        # what bin/nvx-rs[.exe] links, and serde_derive with the crates that it
+        # runs on while nvx-rs builds.
+        shipped = {
+            "bitflags",
+            "block-buffer",
+            "cfg-if",
+            "cpufeatures",
+            "crypto-common",
+            "digest",
+            "generic-array",
+            "getrandom",
+            "itoa",
+            "libc",
+            "memchr",
+            "memoffset",
+            "nix",
+            "proc-macro2",
+            "quote",
+            "serde",
+            "serde_core",
+            "serde_derive",
+            "serde_json",
+            "sha2",
+            "syn",
+            "typenum",
+            "unicode-ident",
+            "windows-link",
+            "windows-sys",
+            "zmij",
+        }
+        # Build scripts, other targets, and the tests.
+        unshipped = {
+            "autocfg",
+            "cfg_aliases",
+            "errno",
+            "fastrand",
+            "linux-raw-sys",
+            "once_cell",
+            "r-efi",
+            "rustix",
+            "tempfile",
+            "version_check",
+        }
+        lock = (BuildConstants.REPO_ROOT / "nvx-rs" / "Cargo.lock").read_text(
+            encoding="utf-8"
+        )
+        versions = dict(
+            re.findall(
+                r'^\[\[package\]\]\nname = "([^"]+)"\nversion = "([^"]+)"$',
+                lock,
+                re.MULTILINE,
+            )
+        )
+        # A new dependency is one or the other, and a shipped one needs notices.
+        self.assertEqual(set(versions) - {"nvx-rs"}, shipped | unshipped)
+        self.assertFalse(shipped & unshipped)
+        notices = (BuildConstants.REPO_ROOT / "THIRD_PARTY_NOTICES.md").read_text(
+            encoding="utf-8"
+        )
+        rows = {
+            line.split(" | ", 1)[0]: line
+            for line in notices.splitlines()
+            if line.startswith("| ")
+        }
+        for name in sorted(shipped):
+            with self.subTest(crate=name):
+                row = rows[f"| Rust `{name}` crate {versions[name]}"]
+                self.assertIn("bin/nvx-rs", row)
+                self.assertIn("nvx-rs/Cargo.lock", row)
+        # The runtimes that the release executables link statically.
+        for component, location in (
+            ("| Rust core and standard libraries", "`bin/nvx-rs`"),
+            ("| Rust `compiler_builtins`", "`bin/nvx-rs[.exe]`"),
+            ("| musl libc", "`bin/nvx-rs` of the `linux-kvm` and `linux-mshv`"),
+            ("| LLVM `libunwind`", "the Linux `bin/nvx-rs`"),
+            (
+                "| Microsoft C runtime: the Visual C++ runtime and the Universal C "
+                "Runtime",
+                "`bin/nvx-rs.exe`",
+            ),
+        ):
+            with self.subTest(component=component):
+                self.assertIn(location, rows[component])
+
+    def test_project_source_archive_excludes_the_nvx_rs_target(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            crate = root / "nvx-rs"
+            (crate / "src").mkdir(parents=True)
+            (crate / "src" / "lib.rs").write_text("source\n", encoding="utf-8")
+            (crate / "target" / "debug").mkdir(parents=True)
+            (crate / "target" / "debug" / "nvx-rs").write_text(
+                "build output\n", encoding="utf-8"
+            )
+            output = root / "source.tar.gz"
+            archive.create_reproducible_tar_gz(
+                output,
+                [(crate, "nvx-project-source/nvx-rs")],
+            )
+            with tarfile.open(output, "r:gz") as source_archive:
+                names = source_archive.getnames()
+
+        self.assertIn("nvx-project-source/nvx-rs/src/lib.rs", names)
+        self.assertFalse(any("/target" in name for name in names))
 
     def test_constants_consumers_import_in_either_order(self):
         modules = (
@@ -7802,6 +8677,99 @@ class BuildTests(unittest.TestCase):
                 "control_contract_revision": "nvx-microvm-v2-control-v2",
             },
         )
+        self.assertEqual(
+            manifest["guest_rust"],
+            {
+                "toolchain": GuestRustBuildConstants.TOOLCHAIN,
+                "target": GuestRustBuildConstants.TARGET,
+            },
+        )
+
+    def test_guest_artifact_inputs_cover_every_rust_binary_source(self):
+        rust_sources = set(guest_binaries.guest_binary_source_files())
+        inputs = {
+            "alpine provenance": set(build._initramfs_source_files()),
+            "alpine customization": set(
+                build._guest_customization_files(guests.ALPINE_GUEST)
+            ),
+            "ubuntu customization": set(ubuntu.customization_files()),
+            "azure linux": set(azurelinux.input_files()),
+        }
+        for name, files in inputs.items():
+            with self.subTest(inputs=name):
+                self.assertTrue(rust_sources.issubset(files))
+        self.assertIn(
+            BuildConstants.REPO_ROOT / "scripts" / "nvx_tools" / "guest_binaries.py",
+            inputs["alpine provenance"],
+        )
+
+    def test_guest_artifact_identities_normalize_source_line_endings(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "nvx-rs" / "src" / "lib.rs"
+            source.parent.mkdir(parents=True)
+            source.write_bytes(b"pub fn fixture() {}\n")
+            with (
+                patch.object(BuildConstants, "REPO_ROOT", root),
+                patch.object(build, "_initramfs_source_files", return_value=(source,)),
+                patch.object(ubuntu, "load_package_lock", return_value=()),
+                patch.object(azurelinux, "input_files", return_value=(source,)),
+            ):
+                lf = {
+                    "alpine": build.initramfs_provenance_inputs(),
+                    "ubuntu": ubuntu.converter_input_sha256((source,)),
+                    "azurelinux": azurelinux.input_sha256(),
+                }
+                source.write_bytes(b"pub fn fixture() {}\r\n")
+                crlf = {
+                    "alpine": build.initramfs_provenance_inputs(),
+                    "ubuntu": ubuntu.converter_input_sha256((source,)),
+                    "azurelinux": azurelinux.input_sha256(),
+                }
+
+        self.assertEqual(crlf, lf)
+
+    def test_ubuntu_input_digest_orders_paths_alike_on_every_os(self):
+        # Linux hosts build the Ubuntu artifacts, and every host checks their
+        # manifests, so the digest must take the files in the order of POSIX
+        # paths: by component, with case. Windows paths compare without case,
+        # which put build.rs before Cargo.toml.
+        names = (
+            "nvx-rs/build.rs",
+            "nvx-rs/Cargo.toml",
+            "nvx-rs/src/cli.rs",
+            "nvx-rs/src/cli/args.rs",
+            "guest/common/init",
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            files = [root / name for name in names]
+            for path in files:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(path.name.encode())
+            with (
+                patch.object(BuildConstants, "REPO_ROOT", root),
+                patch.object(ubuntu, "load_package_lock", return_value=()),
+                patch.object(ubuntu.json, "dumps", wraps=ubuntu.json.dumps) as dumps,
+            ):
+                forward = ubuntu.converter_input_sha256(files)
+                backward = ubuntu.converter_input_sha256(files[::-1])
+
+        self.assertEqual(forward, backward)
+        document = cast(dict[str, object], dumps.call_args.args[0])
+        self.assertEqual(
+            [
+                cast(dict[str, str], entry)["path"]
+                for entry in cast(list[object], document["customization_files"])
+            ],
+            [
+                "guest/common/init",
+                "nvx-rs/Cargo.toml",
+                "nvx-rs/build.rs",
+                "nvx-rs/src/cli/args.rs",
+                "nvx-rs/src/cli.rs",
+            ],
+        )
 
     def test_guest_descriptors_preserve_alpine_and_select_guest_outputs(self):
         alpine = guests.guest_descriptor("alpine")
@@ -8635,6 +9603,29 @@ class BuildTests(unittest.TestCase):
             action,
         )
 
+    def test_ci_guest_image_keys_include_the_rust_source_identity(self):
+        # hashFiles hashes contents only, so a module move that kept every
+        # file's bytes reused images whose provenance named the old paths.
+        action = (
+            BuildConstants.REPO_ROOT
+            / ".github"
+            / "actions"
+            / "build-guest-artifacts"
+            / "action.yml"
+        ).read_text(encoding="utf-8")
+        self.assertIn(
+            "rust_source_identity=$(python3 scripts/nvx.py guest-binary-source-identity)",
+            action,
+        )
+        for key in (
+            "alpine=alpine-image-v2-${ALPINE_VERSION}-${ALPINE_INPUT_HASH}",
+            "ubuntu=ubuntu-initramfs-v2-${UBUNTU_VERSION}-${UBUNTU_INPUT_HASH}",
+            "ubuntu-distro=ubuntu-distro-v2-${UBUNTU_VERSION}-${UBUNTU_INPUT_HASH}",
+            "azurelinux=azurelinux-initramfs-v2-${AZURELINUX_VERSION}-${AZURELINUX_INPUT_HASH}",
+        ):
+            with self.subTest(key=key.split("=", 1)[0]):
+                self.assertIn(f'echo "{key}-${{rust_source_identity}}"', action)
+
     def test_ci_guest_cache_keys_include_build_configuration(self):
         action = (
             BuildConstants.REPO_ROOT
@@ -8788,10 +9779,28 @@ class BuildTests(unittest.TestCase):
             / "build-guest-artifacts"
             / "action.yml"
         ).read_text(encoding="utf-8")
-        for variable in ("ALPINE_INPUT_HASH", "UBUNTU_INPUT_HASH"):
+        for variable in (
+            "ALPINE_INPUT_HASH",
+            "UBUNTU_INPUT_HASH",
+            "AZURELINUX_INPUT_HASH",
+        ):
             assignment = next(line for line in action.splitlines() if variable in line)
             self.assertIn("'scripts/nvx_tools/common.py'", assignment)
             self.assertIn("'scripts/nvx_tools/guests.py'", assignment)
+            self.assertIn("'scripts/nvx_tools/elf.py'", assignment)
+            self.assertIn("'scripts/nvx_tools/guest_binaries.py'", assignment)
+            self.assertIn("'nvx-rs/**'", assignment)
+            self.assertIn("'!nvx-rs/target/**'", assignment)
+            self.assertIn("'rust-toolchain.toml'", assignment)
+        for prefix in (
+            "alpine-image",
+            "ubuntu-initramfs",
+            "ubuntu-distro",
+            "azurelinux-initramfs",
+        ):
+            with self.subTest(cache=prefix):
+                self.assertIn(f"{prefix}-v2-", action)
+                self.assertNotIn(f"{prefix}-v1-", action)
 
     def test_quality_checks_include_shared_identity_probe(self):
         action = (
@@ -8816,13 +9825,132 @@ class BuildTests(unittest.TestCase):
         self.assertIn("ARG EROFS_UTILS_VERSION=1.5-1", dockerfile)
         self.assertIn("erofs-utils=${EROFS_UTILS_VERSION}", dockerfile)
 
+    def test_docker_builds_one_shared_rust_guest_binary_set(self):
+        dockerfile = (BuildConstants.REPO_ROOT / "docker" / "Dockerfile").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn(
+            f"ARG RUST_BUILDER_IMAGE={DockerBuildConstants.RUST_BUILDER_IMAGE}",
+            dockerfile,
+        )
+        builder = dockerfile.split("FROM ${RUST_BUILDER_IMAGE} AS guest-binaries", 1)[
+            1
+        ].split("\nFROM ", 1)[0]
+        self.assertIn("COPY rust-toolchain.toml /repo/", builder)
+        self.assertIn("COPY nvx-rs/ /repo/nvx-rs/", builder)
+        self.assertIn(
+            'rustup target add --toolchain "$toolchain" x86_64-unknown-linux-musl',
+            builder,
+        )
+        self.assertIn(
+            "python3 scripts/nvx.py build-guest-binaries --output /out/guest-binaries",
+            builder,
+        )
+        self.assertEqual(dockerfile.count("build-guest-binaries"), 1)
+
+        base = dockerfile.split("FROM ${DEBIAN_IMAGE} AS base", 1)[1].split(
+            "\nFROM ", 1
+        )[0]
+        self.assertIn("        build-essential \\\n", base)
+        self.assertNotIn("musl-tools", base)
+        self.assertNotIn("nvx-rs", base)
+        self.assertNotIn("rust-toolchain.toml", base)
+        self.assertNotIn("guest-binaries", base)
+
+        guest_base = dockerfile.split("FROM base AS guest-base", 1)[1].split(
+            "\nFROM ", 1
+        )[0]
+        self.assertIn("COPY nvx-rs/ /repo/nvx-rs/", guest_base)
+        self.assertIn("COPY rust-toolchain.toml /repo/", guest_base)
+        self.assertIn(
+            "COPY --from=guest-binaries /out/guest-binaries/ "
+            "/repo/build/guest-binaries/",
+            guest_base,
+        )
+        self.assertIn(
+            "ENV NVX_GUEST_BINARIES=/repo/build/guest-binaries",
+            guest_base,
+        )
+
+        determinism = dockerfile.split("FROM guest-base AS ubuntu-determinism", 1)[
+            1
+        ].split("\nFROM ", 1)[0]
+        self.assertIn(
+            "COPY --from=guest-binaries /usr/local/cargo/ /usr/local/cargo/",
+            determinism,
+        )
+        self.assertIn(
+            "COPY --from=guest-binaries /usr/local/rustup/ /usr/local/rustup/",
+            determinism,
+        )
+        self.assertIn(
+            "RUN NVX_GUEST_BINARIES= python3 scripts/nvx.py verify-guest-determinism",
+            determinism,
+        )
+
+        azure = dockerfile.split("FROM guest-base AS azurelinux-initramfs", 1)[1].split(
+            "\nFROM ", 1
+        )[0]
+        self.assertIn(
+            "source = Path('/repo/build/guest-binaries')",
+            azure,
+        )
+        self.assertIn("inspect_guest_binaries", azure)
+        self.assertIn("for name in GuestRustBuildConstants.BINARIES:", azure)
+        self.assertIn("'helpers': helpers", azure)
+        self.assertNotIn("azurelinux-helpers", dockerfile)
+        self.assertNotIn("musl-gcc", dockerfile)
+        self.assertNotIn("cc -static", dockerfile)
+
+    def test_docker_kernel_targets_do_not_build_the_guest_binaries(self):
+        # BuildKit builds every stage that a target inherits or copies from, so
+        # a kernel-only build must not compile the Rust guest binaries.
+        dockerfile = (BuildConstants.REPO_ROOT / "docker" / "Dockerfile").read_text(
+            encoding="utf-8"
+        )
+        dependencies: dict[str, set[str]] = {}
+        stage = ""
+        for line in dockerfile.splitlines():
+            if match := re.fullmatch(r"FROM (\S+) AS (\S+)", line):
+                stage = match.group(2)
+                dependencies[stage] = {match.group(1)}
+            elif match := re.match(r"COPY --from=(\S+) ", line):
+                dependencies[stage].add(match.group(1))
+
+        def stages_built_for(target: str) -> set[str]:
+            built: set[str] = set()
+            pending = [target]
+            while pending:
+                for dependency in dependencies.get(pending.pop(), set()):
+                    if dependency not in built:
+                        built.add(dependency)
+                        pending.append(dependency)
+            return built
+
+        for target in (
+            "kernel-artifacts",
+            DockerBuildConstants.DEBUG_KERNEL_TARGET,
+            DockerBuildConstants.LINUX_SOURCE_TARGET,
+        ):
+            with self.subTest(target=target):
+                self.assertIn("base", stages_built_for(target))
+                self.assertNotIn("guest-binaries", stages_built_for(target))
+        for target in (
+            DockerBuildConstants.ALPINE_TARGET,
+            DockerBuildConstants.UBUNTU_TARGET,
+            DockerBuildConstants.AZURELINUX_TARGET,
+            "ubuntu-determinism",
+        ):
+            with self.subTest(target=target):
+                self.assertIn("guest-binaries", stages_built_for(target))
+
     def test_azurelinux_initramfs_uses_locked_busybox_applets(self):
         dockerfile = (BuildConstants.REPO_ROOT / "docker" / "Dockerfile").read_text(
             encoding="utf-8"
         )
         base_stage = dockerfile.split("FROM base AS kernel", 1)[0]
         self.assertNotIn("busybox", base_stage)
-        azure_stage = dockerfile.split("FROM base AS azurelinux-initramfs", 1)[1]
+        azure_stage = dockerfile.split("FROM guest-base AS azurelinux-initramfs", 1)[1]
         self.assertIn("ln -sf ../sbin/busybox /rootfs/usr/bin/busybox", azure_stage)
         applets = (
             azure_stage.split("for utility in ", 1)[1]
@@ -8850,7 +9978,7 @@ class BuildTests(unittest.TestCase):
         dockerfile = (BuildConstants.REPO_ROOT / "docker" / "Dockerfile").read_text(
             encoding="utf-8"
         )
-        azure_stage = dockerfile.split("FROM base AS azurelinux-initramfs", 1)[1]
+        azure_stage = dockerfile.split("FROM guest-base AS azurelinux-initramfs", 1)[1]
         self.assertIn(
             "sed -i 's#^\\(nobody:[^:]*:65534:65534:[^:]*:\\)/dev/null:"
             "#\\1/nonexistent:#'",
@@ -8897,7 +10025,7 @@ class BuildTests(unittest.TestCase):
         dockerfile = (BuildConstants.REPO_ROOT / "docker" / "Dockerfile").read_text(
             encoding="utf-8"
         )
-        azure_stage = dockerfile.split("FROM base AS azurelinux-initramfs", 1)[1]
+        azure_stage = dockerfile.split("FROM guest-base AS azurelinux-initramfs", 1)[1]
         cleanup = azure_stage.index(
             "rm -rf /rootfs/usr/lib/sysimage/tdnf /rootfs/var/cache/tdnf \\\n"
             "    /rootfs/var/cache/ldconfig /rootfs/var/lib/rpm"
@@ -8914,7 +10042,7 @@ class BuildTests(unittest.TestCase):
         dockerfile = (BuildConstants.REPO_ROOT / "docker" / "Dockerfile").read_text(
             encoding="utf-8"
         )
-        azure_stage = dockerfile.split("FROM base AS azurelinux-initramfs", 1)[1]
+        azure_stage = dockerfile.split("FROM guest-base AS azurelinux-initramfs", 1)[1]
         self.assertIn("from nvx_tools.azurelinux import input_sha256", azure_stage)
         self.assertIn(
             "'input_sha256': input_sha256(\n"
@@ -8947,6 +10075,9 @@ class BuildTests(unittest.TestCase):
                     "scripts/nvx_tools/azurelinux.py",
                     "scripts/nvx_tools/build_constants.py",
                     "scripts/nvx_tools/common.py",
+                    "scripts/nvx_tools/guest_binaries.py",
+                    "nvx-rs/src/lib.rs",
+                    "rust-toolchain.toml",
                 ):
                     with self.subTest(path=relative):
                         path = root / relative
@@ -8967,23 +10098,39 @@ class BuildTests(unittest.TestCase):
             installed.append(destination)
             return {}
 
-        root = Path("rootfs")
-        with (
-            patch.object(build, "_install", side_effect=install),
-            patch.object(build, "_build_static_helper", return_value={}),
-            patch.object(build, "_build_device_io_helper", return_value={}),
-        ):
-            build._install_guest_files(
-                build_config.InitramfsBuildConfig(work=Path("work")),
-                root,
-                guests.ALPINE_GUEST,
+        def stage_binaries(output: Path) -> guest_binaries.GuestBinaryBuildResult:
+            output.mkdir()
+            binaries: dict[str, str] = {}
+            for name in GuestRustBuildConstants.BINARIES:
+                path = output / name
+                path.write_bytes(name.encode("ascii"))
+                binaries[name] = common.sha256_file(path)
+            return guest_binaries.GuestBinaryBuildResult(
+                source_sha256="a" * 64,
+                binaries=binaries,
             )
-        self.assertIn(root / "sbin" / "nvx-hostmount", installed)
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "rootfs"
+            work = Path(temporary) / "work"
+            (root / "sbin").mkdir(parents=True)
+            (root / "etc").mkdir()
+            work.mkdir()
+            with (
+                patch.object(build, "_install", side_effect=install),
+                patch.object(build, "build_guest_binaries", side_effect=stage_binaries),
+            ):
+                build._install_guest_files(
+                    build_config.InitramfsBuildConfig(work=work),
+                    root,
+                    guests.ALPINE_GUEST,
+                )
+            self.assertIn(root / "sbin" / "nvx-hostmount", installed)
 
         dockerfile = (BuildConstants.REPO_ROOT / "docker" / "Dockerfile").read_text(
             encoding="utf-8"
         )
-        azure_stage = dockerfile.split("FROM base AS azurelinux-initramfs", 1)[1]
+        azure_stage = dockerfile.split("FROM guest-base AS azurelinux-initramfs", 1)[1]
         azure_sbin_scripts = azure_stage.split(
             "install -m 0755 /repo/guest/common/init /rootfs/init\n", 1
         )[1].split("/rootfs/sbin/", 1)[0]
@@ -9036,43 +10183,31 @@ class BuildTests(unittest.TestCase):
             environment = run.call_args.kwargs["env"]
             self.assertEqual(environment["SSL_CERT_FILE"], "/etc/configured-ca.pem")
 
-    def test_device_io_helper_is_static_with_nonexecutable_stack(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            work = root / "work"
-            destination = root / "root" / "sbin" / "nvx-device-io"
-            work.mkdir()
-            destination.parent.mkdir(parents=True)
-
-            def compile_helper(
-                command: list[str | os.PathLike[str]], **_kwargs: object
-            ) -> None:
-                output = Path(command[command.index("-o") + 1])
-                output.write_bytes(b"static-elf")
-
-            with (
-                patch.object(build, "require_tool", return_value="cc"),
-                patch.object(build, "run_checked", side_effect=compile_helper) as run,
-            ):
-                provenance = build._build_device_io_helper(work, destination)
-
-            command = run.call_args.args[0]
-            self.assertIn("-nostdlib", command)
-            self.assertIn("-static", command)
-            self.assertIn("-Wl,-z,noexecstack", command)
-            self.assertEqual(destination.read_bytes(), b"static-elf")
-            self.assertEqual(
-                provenance["binary_sha256"], common.sha256_file(destination)
-            )
-            self.assertEqual(len(provenance["source_sha256"]), 64)
-
-    def test_device_io_provenance_uses_shared_helper_source(self):
+    def test_device_io_provenance_uses_shared_rust_source_digest(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             checkout = root / "nvx"
-            source = checkout / "guest" / "common" / "nvx-device-io.c"
-            source.parent.mkdir(parents=True)
-            source.write_bytes(b"shared helper source")
+            crate = checkout / "nvx-rs"
+            (crate / "src").mkdir(parents=True)
+            sources = {
+                crate / "Cargo.toml": "[package]\nname = 'fixture'\n",
+                crate / "Cargo.lock": "# lock\n",
+                crate / "build.rs": "fn main() {}\n",
+                crate / "src" / "lib.rs": "pub fn fixture() {}\n",
+                checkout / "rust-toolchain.toml": (
+                    f'[toolchain]\nchannel = "{GuestRustBuildConstants.TOOLCHAIN}"\n'
+                ),
+                checkout / "scripts" / "nvx_tools" / "build_constants.py": (
+                    "PROFILE = 'guest'\n"
+                ),
+                checkout / "scripts" / "nvx_tools" / "guest_binaries.py": (
+                    "def build(): pass\n"
+                ),
+            }
+            for path, contents in sources.items():
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(contents, encoding="utf-8")
+            source_sha256 = guest_binaries.guest_binary_source_sha256(checkout)
             initrd = root / "initramfs.cpio.gz"
             manifest = initrd.with_name(f"{initrd.name}.packages.json")
             manifest.write_text(
@@ -9080,7 +10215,7 @@ class BuildTests(unittest.TestCase):
                     {
                         "helpers": {
                             "nvx-device-io": {
-                                "source_sha256": common.sha256_file(source),
+                                "source_sha256": source_sha256,
                                 "binary_sha256": "1" * 64,
                             }
                         }
@@ -9094,11 +10229,32 @@ class BuildTests(unittest.TestCase):
                 initrd,
             )
 
-            self.assertEqual(provenance["source"], str(source.resolve()))
-            self.assertEqual(
-                provenance["source_sha256"],
-                common.sha256_file(source),
-            )
+            self.assertEqual(provenance["source"], str(crate.resolve()))
+            self.assertEqual(provenance["source_sha256"], source_sha256)
+            self.assertEqual(provenance["toolchain"], GuestRustBuildConstants.TOOLCHAIN)
+            self.assertEqual(provenance["target"], GuestRustBuildConstants.TARGET)
+
+            with (
+                patch.object(GuestRustBuildConstants, "TOOLCHAIN", "9.9.9"),
+                self.assertRaisesRegex(
+                    common.ScriptError,
+                    "Rust guest build toolchain mismatch",
+                ),
+            ):
+                benchmark._device_io_helper_provenance(
+                    argparse.Namespace(nvx_dir=checkout),
+                    initrd,
+                )
+
+            (crate / "src" / "lib.rs").write_text("changed\n", encoding="utf-8")
+            with self.assertRaisesRegex(
+                ValueError,
+                "Rust guest binary sources do not match",
+            ):
+                benchmark._device_io_helper_provenance(
+                    argparse.Namespace(nvx_dir=checkout),
+                    initrd,
+                )
 
     def test_sandbox_kernel_config_requires_every_feature(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -9496,36 +10652,89 @@ class BuildTests(unittest.TestCase):
             debug.work.name, KernelBuildConstants.DEBUG_WORK_DIRECTORY_NAME
         )
 
-    def test_guest_files_build_time_probe_with_its_own_flags(self):
-        source = BuildConstants.REPO_ROOT / "guest" / "common" / "nvx-time-probe.c"
-        header = source.read_text(encoding="utf-8").splitlines()[:2]
-        self.assertEqual(
-            header,
-            [
-                "// Copyright (c) Microsoft Corporation.",
-                "// Licensed under the MIT License.",
-            ],
-        )
+    def test_guest_files_install_one_checked_rust_build(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary) / "root"
             work = Path(temporary) / "work"
             for directory in (root / "sbin", root / "etc", work):
                 directory.mkdir(parents=True)
-            commands: list[list[str]] = []
+            payloads = {
+                name: f"rust-guest-binary {name}".encode()
+                for name in GuestRustBuildConstants.BINARIES
+            }
+            result = guest_binaries.GuestBinaryBuildResult(
+                source_sha256="a" * 64,
+                binaries={
+                    name: hashlib.sha256(payload).hexdigest()
+                    for name, payload in payloads.items()
+                },
+            )
 
-            def compile_helper(
-                command: list[str | os.PathLike[str]], **_kwargs: object
-            ) -> None:
-                commands.append([os.fspath(part) for part in command])
-                output = Path(command[command.index("-o") + 1])
-                output.write_bytes(f"static-elf {output.name}".encode())
+            def stage_binaries(output: Path) -> guest_binaries.GuestBinaryBuildResult:
+                output.mkdir()
+                for name, payload in payloads.items():
+                    (output / name).write_bytes(payload)
+                return result
 
-            def find_tool(name: str) -> str:
-                return name
+            with patch.object(
+                build, "build_guest_binaries", side_effect=stage_binaries
+            ) as rust_build:
+                helpers = build._install_guest_files(
+                    build_config.InitramfsBuildConfig(work=work),
+                    root,
+                    guests.guest_descriptor("alpine"),
+                )
 
+            rust_build.assert_called_once_with(
+                work / GuestRustBuildConstants.OUTPUT_DIRECTORY_NAME
+            )
+            for name, payload in payloads.items():
+                with self.subTest(helper=name):
+                    installed = root / "sbin" / name
+                    self.assertEqual(installed.read_bytes(), payload)
+                    if os.name != "nt":
+                        self.assertEqual(installed.stat().st_mode & 0o777, 0o755)
+                    self.assertEqual(
+                        helpers[name],
+                        {
+                            "source_sha256": result.source_sha256,
+                            "binary_sha256": result.binaries[name],
+                        },
+                    )
+        for name in (
+            "STATIC_HELPER_CFLAGS",
+            "DEVICE_IO_CFLAGS",
+            "STATIC_HELPERS",
+            "MUSL_COMPILER",
+            "MUSL_STATIC_HELPERS",
+            "TIME_PROBE_CFLAGS",
+        ):
+            with self.subTest(helper=name):
+                self.assertFalse(hasattr(InitramfsBuildConstants, name))
+
+    def test_guest_files_reuse_the_configured_prebuilt_rust_binaries(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "root"
+            work = Path(temporary) / "work"
+            prebuilt = Path(temporary) / "prebuilt"
+            for directory in (root / "sbin", root / "etc", work, prebuilt):
+                directory.mkdir(parents=True)
+            binaries: dict[str, str] = {}
+            for name in GuestRustBuildConstants.BINARIES:
+                path = prebuilt / name
+                path.write_bytes(name.encode("ascii"))
+                binaries[name] = common.sha256_file(path)
+            result = guest_binaries.GuestBinaryBuildResult(
+                source_sha256="a" * 64,
+                binaries=binaries,
+            )
+            environment = GuestRustBuildConstants.BINARIES_VARIABLE
             with (
-                patch.object(build, "require_tool", side_effect=find_tool),
-                patch.object(build, "run_checked", side_effect=compile_helper),
+                patch.dict(os.environ, {environment: str(prebuilt)}),
+                patch.object(
+                    build, "inspect_guest_binaries", return_value=result
+                ) as inspect,
+                patch.object(build, "build_guest_binaries") as rust_build,
             ):
                 helpers = build._install_guest_files(
                     build_config.InitramfsBuildConfig(work=work),
@@ -9533,49 +10742,15 @@ class BuildTests(unittest.TestCase):
                     guests.guest_descriptor("alpine"),
                 )
 
-        probe = InitramfsBuildConstants.TIME_PROBE_NAME
-        flags_by_source = {
-            Path(command[-1]).stem: command[1 : command.index("-o")]
-            for command in commands
-        }
-        compiler_by_source = {
-            Path(command[-1]).stem: command[0] for command in commands
-        }
-        self.assertEqual(
-            flags_by_source[probe], list(InitramfsBuildConstants.TIME_PROBE_CFLAGS)
-        )
-        self.assertIn("-pthread", flags_by_source[probe])
-        musl = InitramfsBuildConstants.MUSL_COMPILER
-        self.assertEqual(compiler_by_source[probe], musl)
-        for name in InitramfsBuildConstants.STATIC_HELPERS:
-            with self.subTest(helper=name):
-                self.assertEqual(
-                    flags_by_source[name],
-                    list(InitramfsBuildConstants.STATIC_HELPER_CFLAGS),
-                )
-                self.assertEqual(compiler_by_source[name], "cc")
-        for name in InitramfsBuildConstants.MUSL_STATIC_HELPERS:
-            with self.subTest(helper=name):
-                self.assertEqual(
-                    flags_by_source[name],
-                    list(InitramfsBuildConstants.STATIC_HELPER_CFLAGS),
-                )
-                self.assertEqual(compiler_by_source[name], musl)
-        dockerfile = (BuildConstants.REPO_ROOT / "docker" / "Dockerfile").read_text(
-            encoding="utf-8"
-        )
-        self.assertIn("        musl-tools \\\n", dockerfile)
-        self.assertIn(
-            "    for helper in "
-            + " ".join(InitramfsBuildConstants.MUSL_STATIC_HELPERS)
-            + "; do \\\n        musl-gcc ",
-            dockerfile,
-        )
-        self.assertEqual(helpers[probe]["source_sha256"], common.sha256_file(source))
-        self.assertEqual(
-            helpers[probe]["binary_sha256"],
-            hashlib.sha256(f"static-elf {probe}".encode()).hexdigest(),
-        )
+            inspect.assert_called_once_with(prebuilt)
+            rust_build.assert_not_called()
+            for name in GuestRustBuildConstants.BINARIES:
+                with self.subTest(helper=name):
+                    self.assertEqual(
+                        (root / "sbin" / name).read_bytes(), name.encode("ascii")
+                    )
+                    self.assertEqual(helpers[name]["source_sha256"], "a" * 64)
+                    self.assertEqual(helpers[name]["binary_sha256"], binaries[name])
 
     def test_docker_debug_kernel_target_exports_debug_artifacts(self):
         dockerfile = (BuildConstants.REPO_ROOT / "docker" / "Dockerfile").read_text(
@@ -10103,6 +11278,9 @@ class SandboxShareAgentTests(unittest.TestCase):
             ("0,/file,ro", "not a directory"),
             ("0,/etc/machine-id,ro,file", "reserved"),
             ("0,/etc/machine-id/child,ro", "reserved"),
+            ("0,/run,ro", "reserved"),
+            ("0,/run/nvx,ro", "reserved"),
+            ("0,/run/nvx/time/state,ro", "reserved"),
         ):
             with self.subTest(child=child):
                 result, log = self._run(self._aggregate(child))
@@ -10815,266 +11993,6 @@ class SandboxSmokeProfileTests(unittest.TestCase):
         self.assertNotIn("NVX-UBUNTU-SANDBOX-OK", result.stdout)
 
 
-class ManagedAgentCgroupTests(unittest.TestCase):
-    SOURCE = Path(__file__).parents[1] / "guest" / "common" / "nvx-managed-agent.c"
-
-    def setUp(self):
-        if sys.platform != "linux":
-            self.skipTest("the managed agent requires Linux")
-        compiler = shutil.which("cc") or shutil.which("gcc")
-        if compiler is None:
-            self.skipTest("C compiler is unavailable")
-        temporary = tempfile.TemporaryDirectory()
-        self.addCleanup(temporary.cleanup)
-        root = Path(temporary.name)
-        self.cgroup = root / "cgroup"
-        self.cgroup.mkdir()
-        (self.cgroup / "cgroup.procs").touch()
-        self.subtree_control = self.cgroup / "cgroup.subtree_control"
-        self.subtree_control.touch()
-        self.execution = self.cgroup / "nvx-exec"
-        self.execution.mkdir()
-        self.tasks = self.execution / "pids.current"
-        self.tasks.write_bytes(b"0\n")
-        (self.execution / "cgroup.kill").touch()
-        source = root / "cgroup-test.c"
-        source.write_text(
-            f"""#define _GNU_SOURCE
-#include <sys/types.h>
-#include <sys/wait.h>
-static pid_t harness_waitpid(pid_t pid, int *status, int options);
-#define waitpid(pid, status, options) harness_waitpid(pid, status, options)
-#define CGROUP_ROOT {json.dumps(str(self.cgroup))}
-#define main managed_agent_main
-#include {json.dumps(str(self.SOURCE))}
-#undef main
-#undef waitpid
-
-static pid_t harness_process = -1;
-
-/* Like the pids controller, stops charging a process once it is reaped. */
-static pid_t harness_waitpid(pid_t pid, int *status, int options)
-{{
-    pid_t result = waitpid(pid, status, options);
-
-    if (result > 0 && result == harness_process) {{
-        int fd = open(EXEC_CGROUP "/pids.current", O_WRONLY | O_TRUNC | O_CLOEXEC);
-
-        if (fd < 0 || write(fd, "0\\n", 2) != 2 || close(fd) != 0) {{
-            _exit(3);
-        }}
-        harness_process = -1;
-    }}
-    return result;
-}}
-
-/*
- * Calls `check` while a workload process that the cgroup charges exits, or
- * once it has exited if `exited` is set, and requires `check` to reap it.
- */
-static int with_exiting_process(int (*check)(void), int exited)
-{{
-    siginfo_t information = {{0}};
-    int result;
-    int status;
-    pid_t child = fork();
-
-    if (child < 0) {{
-        _exit(2);
-    }}
-    if (child == 0) {{
-        const struct timespec delay = {{.tv_nsec = 50L * 1000L * 1000L}};
-
-        nanosleep(&delay, NULL);
-        _exit(0);
-    }}
-    harness_process = child;
-    if (exited && waitid(P_PID, (id_t)child, &information, WEXITED | WNOWAIT) != 0) {{
-        _exit(2);
-    }}
-    result = check();
-    status = errno;
-    if (harness_process >= 0 || waitpid(child, NULL, WNOHANG) >= 0 || errno != ECHILD) {{
-        _exit(4);
-    }}
-    errno = status;
-    return result;
-}}
-
-int main(int argc, char **argv)
-{{
-    int result;
-    if (argc != 2) {{
-        return 2;
-    }}
-    errno = 0;
-    if (strcmp(argv[1], "retry") == 0) {{
-        struct control_session session = {{.fd = STDOUT_FILENO}};
-        struct agent_config config = {{.direct = 1}};
-        struct exec_config exec_config = {{0}};
-        char *command[] = {{"/bin/true", NULL}};
-        result = run_exec(&session, &config, 42, 0, command, &exec_config);
-        return result == 0
-                   ? run_exec(&session, &config, 43, 0, command, &exec_config)
-                   : result;
-    }}
-    if (strcmp(argv[1], "tasks") == 0) {{
-        result = exec_cgroup_has_tasks();
-    }} else if (strcmp(argv[1], "prepare") == 0) {{
-        result = prepare_exec_cgroup();
-    }} else if (strcmp(argv[1], "settle") == 0) {{
-        result = settle_exec_cgroup();
-    }} else if (strcmp(argv[1], "settle-reap") == 0) {{
-        result = with_exiting_process(settle_exec_cgroup, 0);
-    }} else if (strcmp(argv[1], "verify-reap") == 0) {{
-        result = with_exiting_process(reap_exec_cgroup, 1);
-    }} else {{
-        return 2;
-    }}
-    printf("%d %d\\n", result, errno);
-    return 0;
-}}
-""",
-            encoding="utf-8",
-        )
-        self.helper = root / "cgroup-test"
-        flags = [
-            flag
-            for flag in InitramfsBuildConstants.STATIC_HELPER_CFLAGS
-            if flag != "-static"
-        ]
-        result = subprocess.run(
-            [compiler, *flags, "-o", str(self.helper), str(source)],
-            capture_output=True,
-            text=True,
-            timeout=30,
-            check=False,
-        )
-        self.assertEqual(result.returncode, 0, result.stderr)
-
-    def _check(self, mode: str) -> tuple[int, int]:
-        result = subprocess.run(
-            [str(self.helper), mode],
-            capture_output=True,
-            text=True,
-            timeout=5,
-            check=False,
-        )
-        self.assertEqual(result.returncode, 0, result.stderr)
-        value, status = result.stdout.split()
-        return int(value), int(status)
-
-    def _assert_further_exec_refused(self):
-        result = subprocess.run(
-            [str(self.helper), "retry"],
-            capture_output=True,
-            timeout=5,
-            check=False,
-        )
-        self.assertEqual(result.returncode, 0, result.stderr)
-        frames = result.stdout
-        for expected_id in (42, 43):
-            outer = ManagedAgentStopTests.OUTER
-            app = ManagedAgentStopTests.APP
-            *_, length = outer.unpack(frames[: outer.size])
-            frame = frames[outer.size : outer.size + length]
-            _, _, kind, _, request_id, status, payload_len = app.unpack(
-                frame[: app.size]
-            )
-            payload = frame[app.size :]
-            self.assertEqual((kind, request_id, status), (0xFF, expected_id, 125))
-            self.assertEqual(payload_len, len(payload))
-            self.assertEqual(payload, b"containment-failed")
-            frames = frames[outer.size + length :]
-        self.assertEqual(frames, b"")
-
-    def test_task_count_requires_a_canonical_decimal(self):
-        for contents, expected in (
-            (b"0\n", 0),
-            (b"1\n", 1),
-            (b"10\n", 1),
-            (b"4194304\n", 1),
-        ):
-            with self.subTest(contents=contents):
-                self.tasks.write_bytes(contents)
-                self.assertEqual(self._check("tasks")[0], expected)
-        for contents in (
-            b"",
-            b"\n",
-            b"0",
-            b"00\n",
-            b"01\n",
-            b"-1\n",
-            b"+1\n",
-            b" 1\n",
-            b"1 \n",
-            b"0\n0\n",
-            b"1\x00\n",
-            b"max\n",
-        ):
-            with self.subTest(contents=contents):
-                self.tasks.write_bytes(contents)
-                self.assertEqual(self._check("tasks"), (-1, errno.EPROTO))
-        self.tasks.write_bytes(b"1" * 40 + b"\n")
-        self.assertEqual(self._check("tasks"), (-1, errno.EOVERFLOW))
-
-    def test_missing_and_unreadable_task_counts_are_errors(self):
-        self.tasks.unlink()
-        self.assertEqual(self._check("tasks"), (-1, errno.ENOENT))
-        self._assert_further_exec_refused()
-        self.tasks.mkdir()
-        self.assertEqual(self._check("tasks"), (-1, errno.EISDIR))
-        self._assert_further_exec_refused()
-
-    def test_preparation_enables_the_pids_controller_once(self):
-        self.assertEqual(self._check("prepare")[0], 0)
-        self.assertEqual(self.subtree_control.read_bytes(), b"")
-        self.tasks.unlink()
-        self.assertEqual(self._check("prepare")[0], 0)
-        self.assertEqual(self.subtree_control.read_bytes(), b"+pids")
-        self.subtree_control.unlink()
-        self.assertEqual(self._check("prepare"), (-1, errno.ENOENT))
-
-    def test_settlement_verifies_emptiness(self):
-        self.assertEqual(self._check("settle")[0], 0)
-        self.assertEqual((self.execution / "cgroup.kill").read_bytes(), b"1")
-
-    def test_settlement_and_verification_reap_what_the_workload_left(self):
-        for mode in ("settle-reap", "verify-reap"):
-            with self.subTest(mode=mode):
-                self.tasks.write_bytes(b"1\n")
-                self.assertEqual(self._check(mode)[0], 0)
-                self.assertEqual(self.tasks.read_bytes(), b"0\n")
-
-    def test_settlement_does_not_hide_kill_or_verification_failures(self):
-        self.tasks.write_bytes(b"1\n")
-        (self.execution / "cgroup.kill").unlink()
-        self.assertEqual(self._check("settle"), (-1, errno.ENOENT))
-        self._assert_further_exec_refused()
-        (self.execution / "cgroup.kill").touch()
-        self.tasks.unlink()
-        self.assertEqual(self._check("settle"), (-1, errno.ENOENT))
-        self._assert_further_exec_refused()
-
-    def test_unreaped_tasks_at_deadline_are_not_settled(self):
-        # cgroup.events no longer counts a killed process that awaits its
-        # reaper, but the pids controller still charges it.
-        (self.execution / "cgroup.events").write_bytes(b"populated 0\nfrozen 0\n")
-        self.tasks.write_bytes(b"1\n")
-        started = time.monotonic()
-        self.assertEqual(self._check("settle"), (-1, errno.ETIMEDOUT))
-        self.assertGreaterEqual(time.monotonic() - started, 1.9)
-        self._assert_further_exec_refused()
-
-    def test_malformed_task_count_refuses_further_exec_until_verified_empty(self):
-        self.tasks.write_bytes(b"max\n")
-        self.assertEqual(self._check("settle"), (-1, errno.EPROTO))
-        self._assert_further_exec_refused()
-        self.tasks.write_bytes(b"0\n")
-        self.assertEqual(self._check("tasks")[0], 0)
-        self.assertEqual(self._check("settle")[0], 0)
-
-
 def _elf_file(
     segments: tuple[tuple[int, bytes], ...] = ((1, b"code"),),
     *,
@@ -11227,631 +12145,6 @@ class StaticElfTests(unittest.TestCase):
                 nvx.main(["check-static-elf", str(static), str(dynamic)]), 1
             )
         self.assertIn("not static executables", error.getvalue())
-
-
-class GuestExitTests(unittest.TestCase):
-    """nvx-exit's arguments, and its single one-byte write at port 0x604."""
-
-    SOURCE = Path(__file__).parents[1] / "guest" / "common" / "nvx-exit.c"
-    PORT = 0x604
-
-    def setUp(self):
-        if sys.platform != "linux":
-            self.skipTest("nvx-exit builds on Linux")
-        compiler = shutil.which("cc") or shutil.which("gcc")
-        if compiler is None:
-            self.skipTest("C compiler is unavailable")
-        temporary = tempfile.TemporaryDirectory()
-        self.addCleanup(temporary.cleanup)
-        root = Path(temporary.name)
-        # A regular file stands in for /dev/port, so no test writes a port.
-        self.device = root / "port"
-        flags = [
-            flag
-            for flag in InitramfsBuildConstants.STATIC_HELPER_CFLAGS
-            if flag != "-static"
-        ]
-        self.binaries: dict[str, Path] = {}
-        for name, device in (("ok", self.device), ("missing", root / "no" / "port")):
-            binary = root / f"nvx-exit-{name}"
-            result = subprocess.run(
-                [
-                    compiler,
-                    *flags,
-                    f'-DNVX_EXIT_DEVICE="{device}"',
-                    "-o",
-                    str(binary),
-                    str(self.SOURCE),
-                ],
-                capture_output=True,
-                text=True,
-                check=False,
-            )
-            self.assertEqual(result.returncode, 0, result.stderr)
-            self.binaries[name] = binary
-
-    def _run(self, name: str, *arguments: str) -> subprocess.CompletedProcess[bytes]:
-        return subprocess.run(
-            [str(self.binaries[name]), *arguments],
-            capture_output=True,
-            check=False,
-            timeout=10,
-        )
-
-    def test_writes_the_exit_code_as_one_byte_at_the_control_port(self):
-        cases = (
-            ((), 1),
-            (("",), 1),
-            (("0",), 0),
-            (("37",), 37),
-            (("255",), 255),
-            (("256",), 1),
-            (("-1",), 1),
-            (("+5",), 1),
-            ((" 7",), 1),
-            (("12a",), 1),
-            (("99999999999999999999",), 1),
-            # Out of range after any digit, so the value never wraps.
-            (("4294967296",), 1),
-            (("4294967551",), 1),
-            (("00000000000000000255",), 255),
-            # Decimal: the old script's printf read a leading zero as octal.
-            (("010",), 10),
-            (("7", "9"), 7),
-        )
-        for arguments, expected in cases:
-            with self.subTest(arguments=arguments):
-                self.device.write_bytes(b"")
-                result = self._run("ok", *arguments)
-                self.assertEqual(
-                    (result.returncode, result.stdout, result.stderr), (0, b"", b"")
-                )
-                self.assertEqual(
-                    self.device.read_bytes(), bytes(self.PORT) + bytes([expected])
-                )
-
-    def test_fails_silently_when_the_port_cannot_be_opened(self):
-        result = self._run("missing", "0")
-        self.assertEqual(
-            (result.returncode, result.stdout, result.stderr), (1, b"", b"")
-        )
-
-
-class ManagedAgentStopTests(unittest.TestCase):
-    SOURCE = Path(__file__).parents[1] / "guest" / "common" / "nvx-managed-agent.c"
-    OUTER = struct.Struct("<4sHBB16sQQI")
-    APP = struct.Struct("<4sBBHQiI")
-
-    def setUp(self):
-        if sys.platform != "linux":
-            self.skipTest("the managed agent requires a Linux pseudo-terminal")
-        compiler = shutil.which("cc") or shutil.which("gcc")
-        if compiler is None:
-            self.skipTest("C compiler is unavailable")
-        temporary = tempfile.TemporaryDirectory()
-        self.addCleanup(temporary.cleanup)
-        self.agent = Path(temporary.name) / "nvx-managed-agent"
-        flags = [
-            flag
-            for flag in InitramfsBuildConstants.STATIC_HELPER_CFLAGS
-            if flag != "-static"
-        ]
-        result = subprocess.run(
-            [compiler, *flags, "-o", str(self.agent), str(self.SOURCE)],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        self.assertEqual(result.returncode, 0, result.stderr)
-
-    def _record(
-        self, record_type: int, instance: bytes, sequence: int, payload: bytes = b""
-    ) -> bytes:
-        header = self.OUTER.pack(
-            b"NVXS", 1, record_type, 0, instance, 1, sequence, len(payload)
-        )
-        return header + payload
-
-    def _read_exact(self, fd: int, length: int, deadline: float) -> bytes:
-        data = b""
-        while len(data) < length:
-            remaining = deadline - time.monotonic()
-            self.assertGreater(remaining, 0, "managed agent did not respond")
-            readable, _, _ = select.select([fd], [], [], remaining)
-            if readable:
-                chunk = os.read(fd, length - len(data))
-                self.assertTrue(chunk, "managed agent closed the control tty")
-                data += chunk
-        return data
-
-    def _read_record(self, fd: int, deadline: float) -> tuple[int, int, bytes]:
-        header = self._read_exact(fd, self.OUTER.size, deadline)
-        magic, version, record_type, flags, _, _, sequence, length = self.OUTER.unpack(
-            header
-        )
-        self.assertEqual((magic, version, flags), (b"NVXS", 1, 0))
-        return record_type, sequence, self._read_exact(fd, length, deadline)
-
-    @staticmethod
-    def _reap(process: subprocess.Popen[bytes]) -> None:
-        if process.poll() is None:
-            process.kill()
-        process.wait(timeout=5)
-        if process.stderr is not None:
-            process.stderr.close()
-
-    def _open_session(
-        self, rootfs: str
-    ) -> tuple[subprocess.Popen[bytes], int, bytes, float]:
-        """Starts an agent and completes the attach and reset handshake."""
-        if sys.platform != "linux":
-            self.skipTest("the managed agent requires a Linux pseudo-terminal")
-        import pty
-
-        master, slave = pty.openpty()
-        self.addCleanup(os.close, master)
-        self.addCleanup(os.close, slave)
-        process = subprocess.Popen(
-            [
-                str(self.agent),
-                os.ttyname(slave),
-                rootfs,
-                "nvx-sandbox",
-                "65534",
-                "65534",
-                "nobody",
-                "/nonexistent",
-            ],
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.PIPE,
-        )
-        self.addCleanup(self._reap, process)
-        deadline = time.monotonic() + 10
-        instance = bytes(range(1, 17))
-
-        self.assertEqual(self._read_record(master, deadline)[0], 1)
-        os.write(master, self._record(3, instance, 7))
-        record_type, sequence, credit = self._read_record(master, deadline)
-        self.assertEqual((record_type, sequence, len(credit)), (4, 0, 4))
-        return process, master, instance, deadline
-
-    def _request(
-        self, rootfs: str, kind: int, payload: bytes = b""
-    ) -> tuple[int, int, int, bytes]:
-        """Sends one request to a fresh agent; returns the kind, request ID, status, and payload of its answer."""
-        _, master, instance, deadline = self._open_session(rootfs)
-        frame = self.APP.pack(b"NVXC", 1, kind, 0, 42, 0, len(payload)) + payload
-        os.write(master, self._record(5, instance, 8, frame))
-        self.assertEqual(self._read_record(master, deadline)[0], 9)
-        record_type, _, answer = self._read_record(master, deadline)
-        self.assertEqual(record_type, 5)
-        _, _, answered, _, request_id, status, length = self.APP.unpack(
-            answer[: self.APP.size]
-        )
-        body = answer[self.APP.size :]
-        self.assertEqual(length, len(body))
-        return answered, request_id, status, body
-
-    def test_sandbox_agent_returns_to_init_agent_after_stop(self):
-        if sys.platform != "linux":
-            self.skipTest("the managed agent requires a Linux pseudo-terminal")
-        process, master, instance, deadline = self._open_session("/run/nvx/rootfs")
-        stop = self.APP.pack(b"NVXC", 1, 3, 0, 42, 0, 0)
-        os.write(master, self._record(5, instance, 8, stop))
-        self.assertEqual(self._read_record(master, deadline)[0], 9)
-        record_type, _, payload = self._read_record(master, deadline)
-        self.assertEqual(record_type, 5)
-        _, _, kind, _, request_id, status, length = self.APP.unpack(payload)
-        self.assertEqual((kind, request_id, status, length), (0x85, 42, 0, 0))
-
-        _, stderr = process.communicate(timeout=10)
-        self.assertEqual(process.returncode, 0, stderr)
-
-    def test_agent_advertises_the_control_features_of_its_mode(self):
-        cancel, workload_account, exec_cgroup, environment = (1, 4, 8, 16)
-        exec_cwd, host_mapping_table = (32, 64)
-        for rootfs, expected in (
-            # Only the direct agent maps host paths, gives each workload a cgroup, and
-            # refuses a working directory that the workload cannot enter. Bit 1, which
-            # announced nvx_map= kernel tokens, is retired.
-            (
-                "-",
-                cancel
-                | workload_account
-                | exec_cgroup
-                | environment
-                | exec_cwd
-                | host_mapping_table,
-            ),
-            ("/run/nvx/rootfs", cancel | workload_account | environment),
-        ):
-            with self.subTest(rootfs=rootfs):
-                kind, request_id, status, body = self._request(rootfs, 5)
-                self.assertEqual((kind, request_id, status), (0x81, 42, 0))
-                self.assertEqual(struct.unpack("<I", body), (expected,))
-
-    def test_agent_refuses_a_features_request_with_a_payload(self):
-        kind, request_id, status, body = self._request("-", 5, b"abc")
-        self.assertEqual((kind, request_id, status), (0xFF, 42, 22))
-        self.assertEqual(body, b"invalid-request")
-
-    def test_agent_refuses_a_mapping_table_that_nvx_maps_did_not_announce(self):
-        table = struct.pack("<IIHHH", 0, 1, 0, 1, 2) + b"0/w"
-        for rootfs in ("-", "/run/nvx/rootfs"):
-            with self.subTest(rootfs=rootfs):
-                kind, request_id, status, body = self._request(rootfs, 6, table)
-                self.assertEqual((kind, request_id, status), (0xFF, 42, 22))
-                self.assertEqual(body, b"invalid-request")
-
-    def test_agent_refuses_malformed_working_directories(self):
-        argument = struct.pack("<I", 9) + b"/bin/true"
-        cases = {
-            "unknown payload revision": struct.pack("<IHH", 0, 1, 2) + argument,
-            "truncated extended header": struct.pack("<IHHH", 0, 1, 1, 1),
-            "unknown flag": _managed_exec_payload(b"/work", flags=1 | 8),
-            # Only the agent tells its launch helper that it entered the directory.
-            "launch helper flag": _managed_exec_payload(b"/work", flags=1 | 0x8000),
-            "layering without an environment": _managed_exec_payload(
-                b"/work", flags=1 | 4
-            ),
-            "environment entries without the flag": _managed_exec_payload(
-                b"/work", entries=1
-            ),
-            "flag without a directory": _managed_exec_payload(b"", flags=1),
-            "directory without the flag": _managed_exec_payload(b"/work", flags=0),
-            "directory beyond 4096 bytes": _managed_exec_payload(b"/" + b"d" * 4096),
-            "relative directory": _managed_exec_payload(b"work"),
-            "NUL in the directory": _managed_exec_payload(b"/wo\0rk"),
-            "truncated directory": _managed_exec_payload(b"/work")[:-1],
-            "trailing bytes": _managed_exec_payload(b"/work") + b"x",
-        }
-        for name, payload in cases.items():
-            with self.subTest(name):
-                kind, request_id, status, body = self._request("-", 2, payload)
-                self.assertEqual((kind, request_id, status), (0xFF, 42, 22))
-                self.assertEqual(body, b"invalid-request")
-
-
-def _managed_exec_payload(
-    cwd: bytes,
-    *,
-    argv: tuple[bytes, ...] = (b"/bin/true",),
-    flags: int = 1,
-    entries: int = 0,
-) -> bytes:
-    """Encodes an extended EXEC payload that carries `cwd` after the arguments."""
-    arguments = b"".join(struct.pack("<I", len(value)) + value for value in argv)
-    header = struct.pack("<IHHHHI", 0, len(argv), 1, flags, entries, len(cwd))
-    return header + arguments + cwd
-
-
-class ManagedAgentWorkingDirectoryTests(unittest.TestCase):
-    """Runs direct-mode workloads through `run_exec` with an unprivileged harness.
-
-    The harness records identity changes instead of making them, so the working
-    directory is entered with the test user's credentials, and a `setpriv` shim
-    runs the harness in place of the agent's launch helper without changing its
-    identity. The shim first runs `HARNESS_BEFORE_LAUNCH`, which can change the
-    file system after the agent checked the directory, as another process could.
-    """
-
-    SOURCE = Path(__file__).parents[1] / "guest" / "common" / "nvx-managed-agent.c"
-    OUTER = ManagedAgentStopTests.OUTER
-    APP = ManagedAgentStopTests.APP
-
-    def setUp(self):
-        if sys.platform != "linux":
-            self.skipTest("the managed agent requires Linux")
-        compiler = shutil.which("cc") or shutil.which("gcc")
-        if compiler is None:
-            self.skipTest("C compiler is unavailable")
-        temporary = tempfile.TemporaryDirectory()
-        self.addCleanup(temporary.cleanup)
-        # PWD and /bin/pwd -P agree only for a physical path.
-        self.root = Path(temporary.name).resolve()
-        cgroup = self.root / "cgroup"
-        execution = cgroup / "nvx-exec"
-        execution.mkdir(parents=True)
-        (cgroup / "cgroup.procs").touch()
-        (execution / "cgroup.procs").touch()
-        (execution / "cgroup.kill").touch()
-        (execution / "pids.current").write_text("0\n")
-        tools = self.root / "bin"
-        tools.mkdir()
-        self.harness = self.root / "working-directory-test"
-        setpriv = tools / "setpriv"
-        setpriv.write_text(
-            "#!/bin/sh\n"
-            "while :; do\n"
-            '    case "$1" in\n'
-            "    --reuid | --regid) shift 2 ;;\n"
-            "    --*) shift ;;\n"
-            "    *) break ;;\n"
-            "    esac\n"
-            "done\n"
-            'if [ "$1" = /sbin/nvx-managed-agent ]; then\n'
-            "    shift\n"
-            f'    set -- {shlex.quote(str(self.harness))} "$@"\n'
-            "fi\n"
-            'if [ -n "${HARNESS_BEFORE_LAUNCH:-}" ]; then\n'
-            '    eval "$HARNESS_BEFORE_LAUNCH"\n'
-            "fi\n"
-            'exec "$@"\n'
-        )
-        setpriv.chmod(0o755)
-        source = self.root / "working-directory-test.c"
-        source.write_text(
-            f"""#define _GNU_SOURCE
-#include <stdlib.h>
-int harness_setenv(const char *name, const char *value, int overwrite);
-#define setenv(name, value, overwrite) harness_setenv(name, value, overwrite)
-#define CGROUP_ROOT {json.dumps(str(cgroup))}
-#define setgroups(size, list) harness_setgroups(size, list)
-#define setegid(gid) harness_setegid(gid)
-#define seteuid(uid) harness_seteuid(uid)
-#define main managed_agent_main
-#include {json.dumps(str(self.SOURCE))}
-#undef main
-
-int harness_setenv(const char *name, const char *value, int overwrite)
-{{
-    if (strcmp(name, "PWD") == 0 && getenv("HARNESS_FAIL_PWD") != NULL) {{
-        errno = ENOMEM;
-        return -1;
-    }}
-    return (setenv)(name, value, overwrite);
-}}
-
-int harness_setgroups(size_t size, const gid_t *list)
-{{
-    (void)size;
-    (void)list;
-    if (getenv("HARNESS_FAIL_SETGROUPS") != NULL) {{
-        errno = EPERM;
-        return -1;
-    }}
-    return 0;
-}}
-
-int harness_setegid(gid_t gid)
-{{
-    (void)gid;
-    return 0;
-}}
-
-int harness_seteuid(uid_t uid)
-{{
-    (void)uid;
-    return 0;
-}}
-
-int main(int argc, char **argv)
-{{
-    if (argc >= 2 && strcmp(argv[1], "--exec-config-fd") == 0) {{
-        return launch_workload(argc, argv);
-    }}
-
-    struct control_session session = {{.fd = STDOUT_FILENO}};
-    struct agent_config config = {{
-        .direct = 1,
-        .uid = "65534",
-        .gid = "65534",
-        .user = "nobody",
-        .home = "/",
-    }};
-    char *environment[] = {{getenv("HARNESS_ENVIRONMENT"), NULL}};
-    struct exec_config exec_config = {{
-        .cwd = argc == 3 ? argv[2] : NULL,
-        .environment = environment[0] == NULL ? NULL : environment,
-        .environment_count = environment[0] == NULL ? 0 : 1,
-        .environment_present = environment[0] != NULL,
-        .inherit_default_env =
-            environment[0] != NULL && getenv("HARNESS_LAYER_ENVIRONMENT") != NULL,
-    }};
-    char *command[] = {{"/bin/sh", "-c", argv[1], NULL}};
-
-    if (argc != 2 && argc != 3) {{
-        return 2;
-    }}
-    return run_exec(&session, &config, 42, 0, command, &exec_config) == 0 ? 0 : 1;
-}}
-""",
-            encoding="utf-8",
-        )
-        flags = [
-            flag
-            for flag in InitramfsBuildConstants.STATIC_HELPER_CFLAGS
-            if flag != "-static"
-        ]
-        result = subprocess.run(
-            [compiler, *flags, "-o", str(self.harness), str(source)],
-            capture_output=True,
-            text=True,
-            timeout=60,
-            check=False,
-        )
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.environment = {
-            **os.environ,
-            "PATH": f"{tools}{os.pathsep}{os.environ.get('PATH', '/usr/bin:/bin')}",
-        }
-        for name in (
-            "HARNESS_BEFORE_LAUNCH",
-            "HARNESS_ENVIRONMENT",
-            "HARNESS_FAIL_PWD",
-            "HARNESS_FAIL_SETGROUPS",
-            "HARNESS_LAYER_ENVIRONMENT",
-        ):
-            self.environment.pop(name, None)
-
-    def _exec(
-        self,
-        script: str,
-        cwd: str | None = None,
-        environment: dict[str, str] | None = None,
-    ) -> list[tuple[int, int, int, bytes]]:
-        """Runs one workload; returns the kind, request ID, status, and payload of each frame."""
-        arguments = [str(self.harness), script]
-        if cwd is not None:
-            arguments.append(cwd)
-        result = subprocess.run(
-            arguments,
-            capture_output=True,
-            timeout=30,
-            env=environment or self.environment,
-            check=False,
-        )
-        self.assertEqual(result.returncode, 0, result.stderr)
-        frames: list[tuple[int, int, int, bytes]] = []
-        rest = result.stdout
-        while rest:
-            _, _, record_type, _, _, _, _, length = self.OUTER.unpack(
-                rest[: self.OUTER.size]
-            )
-            payload = rest[self.OUTER.size : self.OUTER.size + length]
-            rest = rest[self.OUTER.size + length :]
-            self.assertEqual(record_type, 5)
-            _, _, kind, _, request_id, status, payload_len = self.APP.unpack(
-                payload[: self.APP.size]
-            )
-            body = payload[self.APP.size :]
-            self.assertEqual(payload_len, len(body))
-            frames.append((kind, request_id, status, body))
-        return frames
-
-    def _completed(self, frames: list[tuple[int, int, int, bytes]]) -> bytes:
-        """Returns the standard output of a workload that exited with status zero."""
-        self.assertEqual(frames[-1], (0x84, 42, 0, b"exit"), frames)
-        self.assertTrue(all(kind == 0x82 for kind, *_ in frames[:-1]), frames)
-        return b"".join(body for *_, body in frames[:-1])
-
-    def _refused(
-        self, frames: list[tuple[int, int, int, bytes]], cwd: str, error: int
-    ) -> None:
-        diagnostic = (
-            f"nvx-managed-agent: cannot enter working directory {cwd}: "
-            f"{os.strerror(error)}\n"
-        ).encode()
-        self.assertEqual(
-            frames,
-            [(0x83, 42, 0, diagnostic), (0xFF, 42, error, b"cwd-failed")],
-        )
-
-    def test_workloads_start_in_the_root_directory_by_default(self):
-        output = self._completed(self._exec('pwd; printf "%s\\n" "$PWD"'))
-        self.assertEqual(output, b"/\n/\n")
-
-    def test_workloads_start_in_the_requested_directory(self):
-        for name in ("a", "b"):
-            directory = self.root / "work" / name
-            directory.mkdir(parents=True)
-            with self.subTest(directory=directory):
-                output = self._completed(
-                    self._exec('pwd; printf "%s\\n" "$PWD"', str(directory))
-                )
-                self.assertEqual(output, f"{directory}\n{directory}\n".encode())
-
-    def test_pwd_keeps_the_requested_name_of_a_canonical_path(self):
-        target = self.root / "target"
-        target.mkdir()
-        link = self.root / "link"
-        link.symlink_to(target)
-        output = self._completed(self._exec("pwd; /bin/pwd -P", str(link)))
-        self.assertEqual(output, f"{link}\n{target}\n".encode())
-        # Without a canonical name, PWD names the directory itself.
-        output = self._completed(self._exec('printf "%s\\n" "$PWD"', f"{link}/."))
-        self.assertEqual(output, f"{target}\n".encode())
-
-    def test_unusable_directories_refuse_the_launch(self):
-        marker = self.root / "ran"
-        regular = self.root / "file"
-        regular.touch()
-        cases = [
-            (self.root / "missing", errno.ENOENT),
-            (regular, errno.ENOTDIR),
-        ]
-        # Root may search any directory, so only an unprivileged user observes EACCES.
-        if sys.platform == "linux" and os.geteuid() != 0:
-            locked = self.root / "locked"
-            locked.mkdir(mode=0)
-            self.addCleanup(locked.chmod, 0o755)
-            cases.append((locked, errno.EACCES))
-        for directory, error in cases:
-            with self.subTest(directory=directory):
-                frames = self._exec(f"touch {marker}", str(directory))
-                self._refused(frames, str(directory), error)
-                self.assertFalse(marker.exists())
-
-    def test_identity_failures_refuse_the_launch(self):
-        environment = {**self.environment, "HARNESS_FAIL_SETGROUPS": "1"}
-        frames = self._exec(f"touch {self.root / 'ran'}", None, environment)
-        self.assertEqual(frames, [(0xFF, 42, 125, b"launch-failed")])
-        self.assertFalse((self.root / "ran").exists())
-
-    def test_workloads_start_in_the_directory_that_was_checked(self):
-        checked = self.root / "checked"
-        retarget = self.root / "retarget"
-        renamed = self.root / "renamed"
-        checked.mkdir()
-        retarget.mkdir()
-        link = self.root / "link"
-        link.symlink_to(checked)
-        # Neither a retargeted link nor a renamed directory may fail the
-        # launch or move the workload to a directory that was not checked.
-        quote = shlex.quote
-        for cwd, change, expected in (
-            (link, f"ln -sfn {quote(str(retarget))} {quote(str(link))}", checked),
-            (retarget, f"mv {quote(str(retarget))} {quote(str(renamed))}", renamed),
-        ):
-            with self.subTest(cwd=cwd):
-                environment = {**self.environment, "HARNESS_BEFORE_LAUNCH": change}
-                frames = self._exec("/bin/pwd -P", str(cwd), environment)
-                self.assertEqual(self._completed(frames), f"{expected}\n".encode())
-
-    def test_pwd_failures_refuse_the_launch(self):
-        marker = self.root / "ran"
-        environment = {**self.environment, "HARNESS_FAIL_PWD": "1"}
-        for cwd in (None, str(self.root)):
-            with self.subTest(cwd=cwd):
-                frames = self._exec(f"touch {marker}", cwd, environment)
-                self.assertEqual(frames, [(0xFF, 42, 125, b"launch-failed")])
-                self.assertFalse(marker.exists())
-
-    def test_exact_environments_control_pwd(self):
-        # The agent leaves PWD to a request that replaces the environment, so
-        # it does not try to set PWD, and cannot fail to.
-        environment = {
-            **self.environment,
-            "HARNESS_ENVIRONMENT": "MODE=exact",
-            "HARNESS_FAIL_PWD": "1",
-        }
-        output = self._completed(
-            self._exec(
-                'printf "%s\\n" "$MODE"; /bin/pwd -P', str(self.root), environment
-            )
-        )
-        self.assertEqual(output, f"exact\n{self.root}\n".encode())
-
-    def test_layered_environments_keep_the_agents_pwd(self):
-        # Entries layered over the default environment keep the PWD that the
-        # agent points at the directory, which, unlike a PWD that the shell
-        # computes, names a link as the request did.
-        target = self.root / "target"
-        target.mkdir()
-        link = self.root / "link"
-        link.symlink_to(target)
-        layered = {
-            **self.environment,
-            "HARNESS_ENVIRONMENT": "MODE=layered",
-            "HARNESS_LAYER_ENVIRONMENT": "1",
-        }
-        output = self._completed(
-            self._exec('printf "%s %s\\n" "$MODE" "$PWD"', str(link), layered)
-        )
-        self.assertEqual(output, f"layered {link}\n".encode())
-        frames = self._exec("true", str(link), {**layered, "HARNESS_FAIL_PWD": "1"})
-        self.assertEqual(frames, [(0xFF, 42, 125, b"launch-failed")])
 
 
 class AciSandboxRunnerTests(unittest.TestCase):
@@ -12057,306 +12350,6 @@ class AciSandboxRunnerTests(unittest.TestCase):
         self.assertIn(f"{sandbox} (OpenVMM pid 77)", stderr)
 
 
-def _write_managed_runtime(state: Path, pid: int, start_time: int | None) -> None:
-    runtime: dict[str, object] = {
-        "format": sandbox_lifecycle.STATE_FORMAT,
-        "pid": pid,
-        "control_endpoint": os.fspath(state / sandbox_lifecycle.CONTROL_SOCKET_NAME),
-    }
-    if start_time is not None:
-        runtime["start_time"] = start_time
-    sandbox_lifecycle._write_json(state / sandbox_lifecycle.RUNTIME_NAME, runtime)
-    (state / sandbox_lifecycle.CAPABILITY_NAME).write_bytes(b"x" * 32)
-
-
-def _provision_managed_sandbox(root: Path) -> Path:
-    layer_path = root / "distro.erofs"
-    scratch_path = root / "scratch.ext4"
-    layer_path.write_bytes(b"layer")
-    scratch_path.write_bytes(b"scratch")
-    state = root / "state"
-    sandbox_lifecycle.provision(
-        state,
-        sandbox.SandboxLaunch(
-            layers=(
-                sandbox.SandboxLayer(
-                    role="distro",
-                    path=layer_path,
-                    uuid="11111111-1111-1111-1111-111111111111",
-                ),
-            ),
-            scratch=scratch_path,
-        ),
-        hypervisor="whp",
-        memory_mib=256,
-        net=None,
-        network_profile=None,
-        network_egress=None,
-        network_ingress=None,
-        network_egress_allow=(),
-        network_egress_deny=(),
-        host_loopback=None,
-        network_proxy=None,
-        host_loopback_forward=(),
-        cmdline="quiet",
-        timeout=10,
-    )
-    return state
-
-
-def _stdin_bound_child() -> subprocess.Popen[bytes]:
-    return subprocess.Popen(
-        [sys.executable, "-c", "import sys; sys.stdin.read()"],
-        stdin=subprocess.PIPE,
-    )
-
-
-def _finish_child(child: subprocess.Popen[bytes]) -> None:
-    if child.stdin is not None:
-        child.stdin.close()
-    child.wait(timeout=30)
-
-
-def _exit_unreaped(child: subprocess.Popen[bytes]) -> None:
-    if sys.platform != "linux":
-        raise unittest.SkipTest("zombie processes require a Linux host")
-    assert child.stdin is not None
-    child.stdin.close()
-    # WNOWAIT leaves the exited child unreaped, so it stays a zombie.
-    os.waitid(os.P_PID, child.pid, os.WEXITED | os.WNOWAIT)
-
-
-def _end_child(child: subprocess.Popen[bytes]) -> None:
-    if child.poll() is None:
-        child.kill()
-        child.wait(timeout=30)
-
-
-def _openvmm_mock(status: int | None) -> MagicMock:
-    """Mocks an OpenVMM process that exits on its own with `status`.
-
-    With None, it runs until it is terminated and then exits with status 1.
-    """
-    process = MagicMock()
-    process.pid = 123
-    process.stdin = io.BytesIO()
-    process.poll.return_value = status
-
-    def wait(timeout: float) -> int:
-        if process.terminate.called:
-            return 1
-        if status is None:
-            raise subprocess.TimeoutExpired("openvmm", timeout)
-        return status
-
-    process.wait.side_effect = wait
-    return process
-
-
-# Stands in for OpenVMM when the managed guest exits during startup. Like OpenVMM,
-# it closes the control endpoint before it publishes its outcome report through a
-# staging file, and a slow flush keeps that file in place for a second. It takes
-# the size of the attach request and then OpenVMM's arguments.
-_EXITING_OPENVMM = r"""
-import json
-import os
-import socket
-import sys
-import tempfile
-import time
-
-attach_size = int(sys.argv[1])
-arguments = sys.argv[2:]
-endpoint = arguments[arguments.index("--microvm-control-console") + 1]
-endpoint = endpoint.removeprefix("listen=")
-report = arguments[arguments.index("--microvm-report") + 1]
-sys.stdin.buffer.read()
-received = 0
-if os.name == "nt":
-    import _winapi
-
-    pipe = _winapi.CreateNamedPipe(
-        endpoint.replace("/", "\\"),
-        _winapi.PIPE_ACCESS_DUPLEX,
-        _winapi.PIPE_WAIT,
-        1,
-        65536,
-        65536,
-        0,
-        _winapi.NULL,
-    )
-    try:
-        _winapi.ConnectNamedPipe(pipe, False)
-    except OSError as error:
-        if error.winerror != _winapi.ERROR_PIPE_CONNECTED:
-            raise
-    while received < attach_size:
-        data, _ = _winapi.ReadFile(pipe, attach_size - received)
-        received += len(data)
-    _winapi.CloseHandle(pipe)
-else:
-    listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    listener.bind(endpoint)
-    listener.listen(1)
-    connection, _ = listener.accept()
-    while received < attach_size:
-        chunk = connection.recv(attach_size - received)
-        if not chunk:
-            sys.exit("the control client closed before it attached")
-        received += len(chunk)
-    connection.close()
-    listener.close()
-report_document = json.dumps(
-    {
-        "schema_version": 1,
-        "outcome": {
-            "operation": "managed",
-            "category": "guest-exit",
-            "status_code": 125,
-        },
-        "network_policy": {"status": "not-requested"},
-        "teardown": {"vm_stopped": True},
-    }
-).encode()
-staging = tempfile.NamedTemporaryFile(
-    dir=os.path.dirname(report), prefix=".tmp", delete=False
-)
-staging.write(report_document[: len(report_document) // 2])
-staging.flush()
-time.sleep(1)
-staging.write(report_document[len(report_document) // 2 :])
-staging.close()
-os.rename(staging.name, report)
-sys.exit(125)
-"""
-
-# Stands in for the OpenVMM of a managed sandbox that runs until it is stopped.
-# Like OpenVMM, it reads its capability from standard input, serves the control
-# endpoint one client at a time, rejects an attach with another capability,
-# acknowledges a ping, and on a stop publishes its outcome report and exits.
-_SERVING_OPENVMM = r"""
-import json
-import os
-import secrets
-import socket
-import struct
-import sys
-
-OUTER = struct.Struct("<4sHBB16sQQI")
-APP = struct.Struct("<4sBBHQiI")
-arguments = sys.argv[1:]
-endpoint = arguments[arguments.index("--microvm-control-console") + 1]
-endpoint = endpoint.removeprefix("listen=")
-report = arguments[arguments.index("--microvm-report") + 1]
-capability = sys.stdin.buffer.read()
-instance = secrets.token_bytes(16)
-if os.name == "nt":
-    import _winapi
-
-    def accept():
-        pipe = _winapi.CreateNamedPipe(
-            endpoint.replace("/", "\\"),
-            _winapi.PIPE_ACCESS_DUPLEX,
-            _winapi.PIPE_WAIT,
-            1,
-            65536,
-            65536,
-            0,
-            _winapi.NULL,
-        )
-        try:
-            _winapi.ConnectNamedPipe(pipe, False)
-        except OSError as error:
-            if error.winerror != _winapi.ERROR_PIPE_CONNECTED:
-                raise
-        return pipe
-
-    def receive(pipe, length):
-        return _winapi.ReadFile(pipe, length)[0]
-
-    def send(pipe, data):
-        _winapi.WriteFile(pipe, data)
-
-    def close(pipe):
-        _winapi.CloseHandle(pipe)
-
-else:
-    listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    listener.bind(endpoint)
-    listener.listen(1)
-
-    def accept():
-        return listener.accept()[0]
-
-    def receive(connection, length):
-        return connection.recv(length)
-
-    def send(connection, data):
-        connection.sendall(data)
-
-    def close(connection):
-        connection.close()
-
-
-def read_exact(connection, length):
-    data = b""
-    while len(data) < length:
-        chunk = receive(connection, length - len(data))
-        if not chunk:
-            raise EOFError
-        data += chunk
-    return data
-
-
-def read_record(connection):
-    header = OUTER.unpack(read_exact(connection, OUTER.size))
-    return header[2], read_exact(connection, header[7]) if header[7] else b""
-
-
-def write_record(connection, kind, sequence, payload=b""):
-    header = OUTER.pack(b"NVXS", 1, kind, 0, instance, 1, sequence, len(payload))
-    send(connection, header + payload)
-
-
-while True:
-    connection = accept()
-    try:
-        kind, payload = read_record(connection)
-        if kind != 2 or payload != capability:
-            write_record(connection, 8, 0)
-            continue
-        write_record(connection, 7, 0)
-        sequence = 1
-        while True:
-            request = APP.unpack(read_record(connection)[1][: APP.size])
-            stopping = request[2] == 3
-            if stopping:
-                with open(report, "w", encoding="utf-8") as output:
-                    json.dump(
-                        {
-                            "schema_version": 1,
-                            "outcome": {
-                                "operation": "managed",
-                                "category": "success",
-                                "status_code": 0,
-                            },
-                            "network_policy": {"status": "not-requested"},
-                            "teardown": {"vm_stopped": True},
-                        },
-                        output,
-                    )
-            reply = APP.pack(b"NVXC", 1, 0x85 if stopping else 0x81, 0, request[4], 0, 0)
-            write_record(connection, 5, sequence, reply)
-            sequence += 1
-            if stopping:
-                sys.exit(0)
-    except (EOFError, OSError):
-        pass
-    finally:
-        close(connection)
-"""
-
-
 class AgentBundlingTests(unittest.TestCase):
     def test_cli_registers_the_bundling_check(self):
         args = nvx.parse_args(["test-agent-bundling", "--toolchain", "1.95.0"])
@@ -12546,116 +12539,21 @@ class AgentBundlingTests(unittest.TestCase):
             self._check(self._outcomes(pinned=(101, "cannot read the bundle")))
 
 
-class SandboxTests(unittest.TestCase):
-    def test_launch_contract_orders_roles_and_builds_agent_command_line(self):
-        custom = sandbox.SandboxLayer.parse(
-            "custom,custom.erofs,22222222-2222-2222-2222-222222222222"
-        )
-        distro = sandbox.SandboxLayer.parse(
-            "distro,distro.erofs,11111111-1111-1111-1111-111111111111"
-        )
-        launch = sandbox.SandboxLaunch(
-            layers=(custom, distro),
-            scratch=Path("scratch.ext4"),
-            entrypoint="/bin/workload",
-            args=("--serve",),
-            hostname="example",
-            workload_identity=(1000, 1001),
-            memory_max=268435456,
-            pids_max=64,
-        )
+class RunShareTests(_CheckoutArtifacts):
+    """The share helpers of sandbox.py, which `nvx.py run` uses; nvx-rs owns
+    those of `nvx.py sandbox`."""
 
+    def test_mount_value_defaults_to_read_only_and_accepts_rw(self):
         self.assertEqual(
-            [layer.role for layer in launch.ordered_layers()],
-            ["distro", "custom"],
+            sandbox.parse_mount_value("/workspace,host-dir"),
+            ("/workspace", "host-dir", "ro"),
         )
         self.assertEqual(
-            launch.kernel_command_line("quiet"),
-            (
-                "quiet nvx_sandbox=1 "
-                "nvx_layer=distro,0xd0003000,11111111-1111-1111-1111-111111111111 "
-                "nvx_layer=custom,0xd0005000,22222222-2222-2222-2222-222222222222 "
-                "nvx_scratch=0xd0006000,ext4 "
-                "nvx_entrypoint=/bin/workload nvx_hostname=example "
-                "nvx_arg=--serve nvx_memory_max=268435456 nvx_pids_max=65"
-            ),
-        )
-        self.assertEqual(
-            launch.openvmm_arguments(),
-            [
-                "--machine",
-                "microvm",
-                "--microvm-sandbox-block",
-                "distro:file:distro.erofs,ro",
-                "--microvm-sandbox-block",
-                "custom:file:custom.erofs,ro",
-                "--microvm-sandbox-block",
-                "scratch:file:scratch.ext4",
-                "--microvm-workload-identity",
-                "1000:1001",
-            ],
+            sandbox.parse_mount_value("/opt/hostedtoolcache,host-dir,rw"),
+            ("/opt/hostedtoolcache", "host-dir", "rw"),
         )
 
-    def test_launch_contract_rejects_duplicates_and_reserved_tokens(self):
-        distro = sandbox.SandboxLayer.parse(
-            "distro,distro.erofs,11111111-1111-1111-1111-111111111111"
-        )
-        with self.assertRaisesRegex(common.ScriptError, "duplicate.*distro"):
-            sandbox.SandboxLaunch(
-                layers=(distro, distro),
-                scratch=Path("scratch.ext4"),
-            )
-
-        launch = sandbox.SandboxLaunch(
-            layers=(distro,),
-            scratch=Path("scratch.ext4"),
-        )
-        with self.assertRaisesRegex(common.ScriptError, "owned"):
-            launch.kernel_command_line("nvx_sandbox=0")
-        with self.assertRaisesRegex(common.ScriptError, "owned"):
-            launch.kernel_command_line(r"foo=bar\ nvx_memory_max=max")
-        with self.assertRaisesRegex(common.ScriptError, "1024-byte"):
-            launch.kernel_command_line("x" * sandbox.SANDBOX_COMMAND_LINE_MAX_SIZE)
-        with self.assertRaisesRegex(common.ScriptError, "between 1"):
-            sandbox.parse_workload_identity("0:0")
-
-    def test_layer_parser_rejects_invalid_role_and_uuid(self):
-        with self.assertRaisesRegex(common.ScriptError, "unsupported layer role"):
-            sandbox.SandboxLayer.parse(
-                "unknown,layer.erofs,11111111-1111-1111-1111-111111111111"
-            )
-        with self.assertRaisesRegex(common.ScriptError, "UUID is invalid"):
-            sandbox.SandboxLayer.parse("distro,layer.erofs,not-a-uuid")
-
-    def test_mount_parser_defaults_to_read_only_and_accepts_rw(self):
-        default = sandbox.SandboxMount.parse("/workspace,host-dir")
-        self.assertEqual(default.guest_target, "/workspace")
-        self.assertEqual(default.host_path, Path("host-dir"))
-        self.assertEqual(default.access, "ro")
-        self.assertEqual(default.denied_paths, ())
-
-        writable = sandbox.SandboxMount.parse(
-            "/opt/hostedtoolcache,host-dir,rw", ("logs", "secrets")
-        )
-        self.assertEqual(writable.access, "rw")
-        self.assertEqual(writable.denied_paths, ("logs", "secrets"))
-        self.assertEqual(
-            sandbox.mounts_openvmm_arguments((writable,)),
-            [
-                "--mount",
-                f"/opt/hostedtoolcache,{os.fspath(Path('host-dir'))},rw",
-                "--mount-deny",
-                "logs",
-                "--mount-deny",
-                "secrets",
-            ],
-        )
-        self.assertEqual(
-            writable.command_line_fragment(),
-            " virtfs_dir=/opt/hostedtoolcache virtfs_tag=microvm virtfs_mode=rw",
-        )
-
-    def test_mount_parser_rejects_malformed_specifications(self):
+    def test_mount_value_rejects_malformed_specifications(self):
         for value, message in (
             ("/workspace", "GUEST_TARGET,HOST_PATH"),
             ("/workspace,", "host path is empty"),
@@ -12668,13 +12566,9 @@ class SandboxTests(unittest.TestCase):
         ):
             with self.subTest(value=value):
                 with self.assertRaisesRegex(common.ScriptError, message):
-                    sandbox.SandboxMount.parse(value)
-        with self.assertRaisesRegex(common.ScriptError, "NUL"):
-            sandbox.SandboxMount(guest_target="/workspace", host_path=Path("a\0b"))
-        with self.assertRaisesRegex(common.ScriptError, "parent component"):
-            sandbox.SandboxMount.parse("/workspace,link/../share")
+                    sandbox.parse_mount_value(value)
 
-    def test_mount_parser_accepts_host_paths_with_commas(self):
+    def test_mount_value_accepts_host_paths_with_commas(self):
         alpha_path = r"C:\projects\alpha,beta"
         reports_path = r"C:\reports\2026, final"
         for value, target, host_path, access in (
@@ -12692,363 +12586,14 @@ class SandboxTests(unittest.TestCase):
                 self.assertEqual(
                     sandbox.parse_mount_value(value), (target, host_path, access)
                 )
-                mount = sandbox.SandboxMount.parse(value, ("secret",))
-                self.assertEqual(mount.host_path, Path(host_path))
-                self.assertEqual(mount.access, access)
-                # OpenVMM finds the end of the host path before the mode, which
-                # NVX therefore always gives.
-                self.assertEqual(
-                    sandbox.mounts_openvmm_arguments((mount,)),
-                    [
-                        "--mount",
-                        f"{target},{os.fspath(Path(host_path))},{access}",
-                        "--mount-deny",
-                        "secret",
-                    ],
-                )
 
-        alpha = sandbox.SandboxMount.parse(f"/work,{alpha_path},rw")
-        reports = sandbox.SandboxMount.parse(f"/reports,{reports_path},ro")
-        arguments = sandbox.mounts_openvmm_arguments((alpha, reports))
-        self.assertEqual(
-            [
-                arguments[index + 1]
-                for index, value in enumerate(arguments)
-                if value == "--mount-child"
-            ],
-            [
-                f"{sandbox.aggregate_child_name(0, '/work')},"
-                f"{os.fspath(Path(alpha_path))},rw",
-                f"{sandbox.aggregate_child_name(1, '/reports')},"
-                f"{os.fspath(Path(reports_path))},ro",
-            ],
-        )
-
-    def test_mount_owner_defaults_to_vmm_and_forwards_caller(self):
-        default = sandbox.SandboxMount.parse("/workspace,host-dir,rw")
-        self.assertEqual(default.owner, "vmm")
-        self.assertNotIn("--mount-owner", sandbox.mounts_openvmm_arguments((default,)))
-
-        caller = sandbox.SandboxMount.parse(
-            "/workspace,host-dir,rw", ("secrets",), "caller"
-        )
-        self.assertEqual(
-            sandbox.mounts_openvmm_arguments((caller,)),
-            [
-                "--mount",
-                f"/workspace,{os.fspath(Path('host-dir'))},rw",
-                "--mount-deny",
-                "secrets",
-                "--mount-owner",
-                "caller",
-            ],
-        )
-        self.assertEqual(caller.absolute().owner, "caller")
-        self.assertEqual(
-            caller.command_line_fragment(), default.command_line_fragment()
-        )
-        with self.assertRaisesRegex(
-            common.ScriptError, "unsupported sandbox mount owner"
-        ):
-            sandbox.SandboxMount.parse("/workspace,host-dir", (), "root")
-
-    def test_mount_access_policy_is_validated_and_forwarded(self):
-        mount = sandbox.SandboxMount.parse(
-            "/tmp/mcp-runtime,host-dir,rw",
-            ("mcp-logs",),
-            allowed_paths=("mcp-logs/payloads",),
-            writable_paths=("agent", "cache"),
-        )
-        self.assertEqual(
-            sandbox.mounts_openvmm_arguments((mount,)),
-            [
-                "--mount",
-                f"/tmp/mcp-runtime,{os.fspath(Path('host-dir'))},rw",
-                "--mount-deny",
-                "mcp-logs",
-                "--mount-allow",
-                "mcp-logs/payloads",
-                "--mount-write",
-                "agent",
-                "--mount-write",
-                "cache",
-            ],
-        )
-        absolute = mount.absolute()
-        self.assertEqual(absolute.allowed_paths, ("mcp-logs/payloads",))
-        self.assertEqual(absolute.writable_paths, ("agent", "cache"))
-        # OpenVMM enforces the policy on the host, so the guest's bootstrap
-        # tokens are those of the plain share.
-        self.assertEqual(
-            mount.command_line_fragment(),
-            " virtfs_dir=/tmp/mcp-runtime virtfs_tag=microvm virtfs_mode=rw",
-        )
-        for create_mount, message in (
-            (
-                lambda: sandbox.SandboxMount.parse(
-                    "/w,host,ro", writable_paths=("out",)
-                ),
-                "/w is read-only",
-            ),
-            (
-                lambda: sandbox.SandboxMount.parse(
-                    "/w,host,rw", allowed_paths=("logs/payloads",)
-                ),
-                "which has none",
-            ),
-            (
-                lambda: sandbox.SandboxMount.parse(
-                    "/w,host,rw", ("logs",), allowed_paths=("logs/a", "logs/a")
-                ),
-                "allowed paths must be unique",
-            ),
-            (
-                lambda: sandbox.SandboxMount.parse("/w,host,rw", writable_paths=("",)),
-                "writable paths must be nonempty",
-            ),
-            (
-                lambda: sandbox.SandboxMount.parse(
-                    "/w,host,rw",
-                    writable_paths=tuple(f"path-{index}" for index in range(129)),
-                ),
-                "at most 128 writable paths",
-            ),
-        ):
-            with self.subTest(message=message):
-                with self.assertRaisesRegex(common.ScriptError, message):
-                    create_mount()
-
-    def test_caller_owner_requires_linux_and_a_directory_that_root_does_not_own(self):
+    def test_caller_owner_requires_a_linux_host(self):
         with patch.object(sandbox.os, "name", "nt"):
             with self.assertRaisesRegex(common.ScriptError, "requires a Linux host"):
                 sandbox.require_mount_owner_supported("caller")
             sandbox.require_mount_owner_supported("vmm")
-        if sys.platform == "win32":
-            with tempfile.TemporaryDirectory() as temporary:
-                mount = sandbox.SandboxMount(
-                    guest_target="/workspace", host_path=Path(temporary), owner="caller"
-                )
-                with self.assertRaisesRegex(
-                    common.ScriptError, "requires a Linux host"
-                ):
-                    mount.validated()
-            return
-
-        with tempfile.TemporaryDirectory() as temporary:
-            mount = sandbox.SandboxMount(
-                guest_target="/workspace", host_path=Path(temporary), owner="caller"
-            )
-            owner = Path(temporary).stat()
-            if owner.st_uid != 0 and owner.st_gid != 0:
-                self.assertIs(mount.validated(), mount)
-        filesystem_root = Path("/")
-        if filesystem_root.stat().st_uid == 0:
-            root_owned = sandbox.SandboxMount(
-                guest_target="/workspace", host_path=filesystem_root, owner="caller"
-            )
-            with self.assertRaisesRegex(common.ScriptError, "UID 0 or GID 0"):
-                root_owned.validated()
-            sandbox.SandboxMount(
-                guest_target="/workspace", host_path=filesystem_root
-            ).validated()
-
-    def test_mount_absolute_path_keeps_symbolic_link_components(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            (root / "link-target" / "share").mkdir(parents=True)
-            try:
-                (root / "link").symlink_to(
-                    root / "link-target", target_is_directory=True
-                )
-            except OSError as error:
-                self.skipTest(f"symbolic links are unavailable: {error}")
-            previous = Path.cwd()
-            os.chdir(root)
-            try:
-                mount = sandbox.SandboxMount.parse("/workspace,link/share,rw")
-                absolute = mount.absolute()
-                expected = Path.cwd() / "link" / "share"
-            finally:
-                os.chdir(previous)
-
-        self.assertEqual(absolute.host_path, expected)
-        self.assertNotIn("link-target", absolute.host_path.parts)
-        self.assertEqual(absolute.absolute(), absolute)
-        with self.assertRaisesRegex(common.ScriptError, "unique"):
-            sandbox.SandboxMount.parse("/workspace,host", ("logs", "logs"))
-        with self.assertRaisesRegex(common.ScriptError, "nonempty"):
-            sandbox.SandboxMount.parse("/workspace,host", ("",))
-        with self.assertRaisesRegex(common.ScriptError, "at most 128"):
-            sandbox.SandboxMount.parse(
-                "/workspace,host", tuple(f"path-{index}" for index in range(129))
-            )
-
-    def test_mount_target_validation_rejects_unsafe_and_reserved_targets(self):
-        for target in (
-            "",
-            "/",
-            "workspace",
-            "/workspace/",
-            "/work//space",
-            "/work/./space",
-            "/work/../space",
-            "/work space",
-            "/work=space",
-            "/work\\space",
-            "/" + "x" * 4096,
-        ):
-            with self.subTest(target=target):
-                with self.assertRaisesRegex(common.ScriptError, "invalid sandbox"):
-                    sandbox.validate_mount_target(target)
-        for target in (
-            "/proc",
-            "/proc/self",
-            "/sys",
-            "/sys/fs",
-            "/dev",
-            "/dev/shm",
-            "/.nvx-agent",
-            "/.nvx-agent/tools",
-            "/etc",
-        ):
-            with self.subTest(target=target):
-                with self.assertRaisesRegex(common.ScriptError, "reserved"):
-                    sandbox.validate_mount_target(target)
-        for target in ("/workspace", "/procfs", "/etc/app", "/opt/hostedtoolcache"):
-            with self.subTest(target=target):
-                self.assertEqual(sandbox.validate_mount_target(target), target)
-
-    def test_launch_contract_attaches_mount_and_reserves_bootstrap_tokens(self):
-        distro = sandbox.SandboxLayer.parse(
-            "distro,distro.erofs,11111111-1111-1111-1111-111111111111"
-        )
-        launch = sandbox.SandboxLaunch(
-            layers=(distro,),
-            scratch=Path("scratch.ext4"),
-            mounts=(sandbox.SandboxMount.parse("/workspace,share,rw", ("secrets",)),),
-        )
-
-        arguments = launch.openvmm_arguments()
-        self.assertEqual(
-            arguments[arguments.index("--mount") :],
-            [
-                "--mount",
-                f"/workspace,{os.fspath(Path('share'))},rw",
-                "--mount-deny",
-                "secrets",
-            ],
-        )
-        self.assertNotIn("virtfs_", launch.kernel_command_line("quiet"))
-        for token in ("virtfs_dir=/other", "virtfs_tag=other", "virtfs_mode=rw"):
-            with self.subTest(token=token):
-                with self.assertRaisesRegex(common.ScriptError, "--mount option"):
-                    launch.kernel_command_line(token)
-
-        unmounted = sandbox.SandboxLaunch(layers=(distro,), scratch=Path("s.ext4"))
-        base = unmounted.kernel_command_line()
-        fragment = sandbox.mounts_command_line_fragment(launch.mounts)
-        self.assertEqual(
-            fragment, " virtfs_dir=/workspace virtfs_tag=microvm virtfs_mode=rw"
-        )
-        fitting = "x" * (
-            sandbox.SANDBOX_COMMAND_LINE_MAX_SIZE - len(base) - len(fragment) - 2
-        )
-        launch.kernel_command_line(fitting)
-        with self.assertRaisesRegex(common.ScriptError, "1024-byte"):
-            launch.kernel_command_line(fitting + "x")
-
-    def test_launch_contract_attaches_several_shares_as_an_aggregate(self):
-        distro = sandbox.SandboxLayer.parse(
-            "distro,distro.erofs,11111111-1111-1111-1111-111111111111"
-        )
-        launch = sandbox.SandboxLaunch(
-            layers=(distro,),
-            scratch=Path("scratch.ext4"),
-            mounts=(
-                sandbox.SandboxMount.parse("/workspace,work,rw", ("secrets",)),
-                sandbox.SandboxMount.parse(
-                    "/opt/hostedtoolcache,tools,ro", ("credentials",)
-                ),
-                sandbox.SandboxMount.parse("/srv/cache,cache,ro"),
-            ),
-        )
-
-        arguments = launch.openvmm_arguments()
-        workspace, toolcache, cache = (
-            sandbox.aggregate_child_name(index, mount.guest_target)
-            for index, mount in enumerate(launch.mounts)
-        )
-        # Several shares are the children of one aggregate, and OpenVMM
-        # attributes each denied path to the child that contains it, so
-        # relative paths are joined to their share.
-        self.assertNotIn("--mount", arguments)
-        self.assertEqual(
-            arguments[arguments.index("--mount-aggregate") :],
-            [
-                "--mount-aggregate",
-                "/run/nvx/shares",
-                "--mount-child",
-                f"{workspace},{os.fspath(Path('work'))},rw",
-                "--mount-child",
-                f"{toolcache},{os.fspath(Path('tools'))},ro",
-                "--mount-child",
-                f"{cache},{os.fspath(Path('cache'))},ro",
-                "--mount-deny",
-                os.fspath(Path.cwd() / "work" / "secrets"),
-                "--mount-deny",
-                os.fspath(Path.cwd() / "tools" / "credentials"),
-            ],
-        )
-        fragment = sandbox.mounts_command_line_fragment(launch.mounts)
-        self.assertEqual(
-            fragment,
-            " virtfs_dir=/run/nvx/shares virtfs_tag=microvm virtfs_mode=rw"
-            " virtfs_aggregate=1",
-        )
-        # The guest binds each child at its target, in order.
-        command_line = launch.kernel_command_line()
-        self.assertNotIn("virtfs_", command_line)
-        self.assertTrue(
-            command_line.endswith(
-                f" nvx_share={workspace},/workspace,rw"
-                f" nvx_share={toolcache},/opt/hostedtoolcache,ro"
-                f" nvx_share={cache},/srv/cache,ro"
-            ),
-            command_line,
-        )
-        self.assertEqual(
-            sandbox.mounts_command_line_fragment(launch.mounts[1:]),
-            " virtfs_dir=/run/nvx/shares virtfs_tag=microvm virtfs_mode=ro"
-            " virtfs_aggregate=1",
-        )
-        with self.assertRaisesRegex(common.ScriptError, "owned by the sandbox"):
-            launch.kernel_command_line("nvx_share=0,/etc,rw")
-
-        # Every share's tokens count toward the x86 budget.
-        base = sandbox.SandboxLaunch(
-            layers=(distro,), scratch=Path("s.ext4")
-        ).kernel_command_line()
-        shares = len(command_line) - len(base)
-        fitting = "x" * (
-            sandbox.SANDBOX_COMMAND_LINE_MAX_SIZE
-            - len(base)
-            - shares
-            - len(fragment)
-            - 2
-        )
-        launch.kernel_command_line(fitting)
-        with self.assertRaisesRegex(common.ScriptError, "1024-byte"):
-            launch.kernel_command_line(fitting + "x")
-
-        caller = tuple(
-            sandbox.SandboxMount(
-                guest_target=target, host_path=Path(path), owner="caller"
-            )
-            for target, path in (("/workspace", "work"), ("/tools", "tools"))
-        )
-        arguments = sandbox.mounts_openvmm_arguments(caller)
-        self.assertEqual(arguments.count("--mount-owner"), 1)
-        self.assertEqual(arguments[-2:], ["--mount-owner", "caller"])
+        with patch.object(sandbox.os, "name", "posix"):
+            sandbox.require_mount_owner_supported("caller")
 
     def test_aggregate_child_names_pin_their_targets(self):
         name = sandbox.aggregate_child_name(0, "/workspace")
@@ -13065,433 +12610,6 @@ class SandboxTests(unittest.TestCase):
                 r"\A[0-9]+-[0-9a-f]{32}\Z",
             )
         self.assertLessEqual(len(sandbox.aggregate_child_name(999, "/w")), 64)
-
-    def test_launch_bounds_shares_by_the_kernel_command_line(self):
-        distro = sandbox.SandboxLayer.parse(
-            "distro,distro.erofs,11111111-1111-1111-1111-111111111111"
-        )
-
-        def launch(count: int) -> sandbox.SandboxLaunch:
-            return sandbox.SandboxLaunch(
-                layers=(distro,),
-                scratch=Path("s.ext4"),
-                mounts=tuple(
-                    sandbox.SandboxMount.parse(f"/share/{index:02},host{index}")
-                    for index in range(count)
-                ),
-            )
-
-        # No fixed number of shares is the limit, only the command line.
-        launch(10).kernel_command_line()
-        with self.assertRaisesRegex(common.ScriptError, "fewer --mount shares"):
-            launch(20).kernel_command_line()
-
-    def test_launch_rejects_invalid_share_sets(self):
-        distro = sandbox.SandboxLayer.parse(
-            "distro,distro.erofs,11111111-1111-1111-1111-111111111111"
-        )
-
-        def mount(value: str, owner: str = "vmm") -> sandbox.SandboxMount:
-            return sandbox.SandboxMount.parse(value, (), owner)
-
-        for mounts, message in (
-            ((mount("/workspace,a,rw"), mount("/workspace,b")), "overlap"),
-            ((mount("/workspace,a,rw"), mount("/workspace/cache,b")), "overlap"),
-            ((mount("/opt/tools/node,a"), mount("/opt,b,rw")), "overlap"),
-            (
-                (mount("/workspace,a,rw"), mount("/tools,b", "caller")),
-                "same --mount-owner",
-            ),
-        ):
-            with self.subTest(mounts=[item.guest_target for item in mounts]):
-                with self.assertRaisesRegex(common.ScriptError, message):
-                    sandbox.SandboxLaunch(
-                        layers=(distro,), scratch=Path("s.ext4"), mounts=mounts
-                    )
-        # A shared prefix that is not a path component is not an overlap.
-        sandbox.SandboxLaunch(
-            layers=(distro,),
-            scratch=Path("s.ext4"),
-            mounts=(mount("/work,a,rw"), mount("/workspace,b")),
-        )
-
-    def test_launch_validation_rejects_overlapping_or_foreign_host_paths(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            layer = root / "distro.erofs"
-            scratch = root / "scratch.ext4"
-            work = root / "work"
-            tools = root / "tools"
-            layer.write_bytes(b"layer")
-            scratch.write_bytes(b"scratch")
-            (work / "nested").mkdir(parents=True)
-            (tools / "credentials").mkdir(parents=True)
-
-            def launch(*mounts: sandbox.SandboxMount) -> sandbox.SandboxLaunch:
-                return sandbox.SandboxLaunch(
-                    layers=(
-                        sandbox.SandboxLayer(
-                            role="distro",
-                            path=layer,
-                            uuid="11111111-1111-1111-1111-111111111111",
-                        ),
-                    ),
-                    scratch=scratch,
-                    mounts=mounts,
-                )
-
-            workspace = sandbox.SandboxMount.parse(f"/workspace,{work},rw")
-            for host_path in (work / "nested", work, root):
-                with self.subTest(host_path=host_path):
-                    with self.assertRaisesRegex(common.ScriptError, "overlap"):
-                        launch(
-                            workspace,
-                            sandbox.SandboxMount.parse(
-                                f"/opt/hostedtoolcache,{host_path}"
-                            ),
-                        ).validated()
-
-            # Each denied path must be inside its own share.
-            foreign = sandbox.SandboxMount.parse(
-                f"/workspace,{work},rw", (os.fspath(tools / "credentials"),)
-            )
-            toolcache = sandbox.SandboxMount.parse(f"/opt/hostedtoolcache,{tools}")
-            with self.assertRaisesRegex(common.ScriptError, "not inside"):
-                launch(foreign, toolcache).validated()
-            # A denied path may name a share's root, which OpenVMM then hides
-            # behind its allowed paths, but no allowed or writable path may.
-            launch(
-                sandbox.SandboxMount.parse(
-                    f"/workspace,{work},rw",
-                    (".",),
-                    allowed_paths=(os.fspath(work / "nested"),),
-                ),
-                toolcache,
-            ).validated()
-            for allowed_paths, writable_paths in (((".",), ()), ((), (".",))):
-                with self.subTest(allowed=allowed_paths, writable=writable_paths):
-                    with self.assertRaisesRegex(common.ScriptError, "not inside"):
-                        launch(
-                            sandbox.SandboxMount.parse(
-                                f"/workspace,{work},rw",
-                                ("nested",),
-                                allowed_paths=allowed_paths,
-                                writable_paths=writable_paths,
-                            ),
-                            toolcache,
-                        ).validated()
-
-            validated = launch(
-                sandbox.SandboxMount.parse(f"/workspace,{work},rw", ("nested",)),
-                sandbox.SandboxMount.parse(
-                    f"/opt/hostedtoolcache,{tools}",
-                    (os.fspath(tools / "credentials"),),
-                ),
-            ).validated()
-            self.assertEqual(len(validated.mounts), 2)
-
-            # Resolving a path doesn't see through a bind mount, so one directory
-            # reached through two paths, or a share inside a bind mount of the
-            # other share's directory, is rejected by its file identities.
-            sandbox.validate_mount_host_paths((workspace, toolcache))
-            with patch.object(sandbox, "_path_identity", return_value=(1, 1)):
-                with self.assertRaisesRegex(common.ScriptError, "same directory"):
-                    sandbox.validate_mount_host_paths((workspace, toolcache))
-            alias = root / "alias"
-            (alias / "cache").mkdir(parents=True)
-
-            def identity(path: Path) -> tuple[int, int]:
-                # `alias` is a bind mount of the workspace's directory.
-                if path in (work.resolve(), alias.resolve()):
-                    return 1, 1
-                return 0, hash(path)
-
-            cache = sandbox.SandboxMount.parse(
-                f"/opt/hostedtoolcache,{alias / 'cache'}"
-            )
-            with patch.object(sandbox, "_path_identity", side_effect=identity):
-                sandbox.validate_mount_host_paths((workspace, toolcache))
-                for mounts in ((workspace, cache), (cache, workspace)):
-                    with self.assertRaisesRegex(common.ScriptError, "inside the other"):
-                        sandbox.validate_mount_host_paths(mounts)
-
-    def test_launch_validation_requires_plain_mount_directory(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            layer = root / "distro.erofs"
-            scratch = root / "scratch.ext4"
-            share = root / "share"
-            layer.write_bytes(b"layer")
-            scratch.write_bytes(b"scratch")
-
-            def launch(host_path: Path) -> sandbox.SandboxLaunch:
-                return sandbox.SandboxLaunch(
-                    layers=(
-                        sandbox.SandboxLayer(
-                            role="distro",
-                            path=layer,
-                            uuid="11111111-1111-1111-1111-111111111111",
-                        ),
-                    ),
-                    scratch=scratch,
-                    mounts=(
-                        sandbox.SandboxMount(
-                            guest_target="/workspace", host_path=host_path
-                        ),
-                    ),
-                )
-
-            with self.assertRaisesRegex(common.ScriptError, "plain directory"):
-                launch(share).validated()
-            share.write_bytes(b"file")
-            with self.assertRaisesRegex(common.ScriptError, "plain directory"):
-                launch(share).validated()
-            share.unlink()
-            share.mkdir()
-            validated = launch(share).validated()
-            self.assertEqual(validated.mounts[0].host_path, share)
-
-    def test_sandbox_command_forwards_mount_to_openvmm(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            layer = root / "distro.erofs"
-            scratch = root / "scratch.ext4"
-            share = root / "share"
-            layer.write_bytes(b"distro")
-            scratch.write_bytes(b"scratch")
-            share.mkdir()
-            args = nvx.parse_args(
-                [
-                    "sandbox",
-                    "--layer",
-                    f"distro,{layer},11111111-1111-1111-1111-111111111111",
-                    "--scratch",
-                    str(scratch),
-                    "--mount",
-                    f"/workspace,{share},rw",
-                    "--mount-deny",
-                    "secrets",
-                    "--dry-run",
-                ]
-            )
-
-            def require(path: Path, _description: str) -> Path:
-                return path
-
-            with (
-                patch.object(nvx, "require_file", side_effect=require),
-                patch.object(
-                    nvx, "_format_command", return_value="formatted"
-                ) as format_command,
-            ):
-                nvx.command_sandbox(args)
-
-            command = format_command.call_args.args[0]
-            self.assertEqual(
-                command[command.index("--mount") + 1], f"/workspace,{share},rw"
-            )
-            self.assertEqual(command[command.index("--mount-deny") + 1], "secrets")
-            self.assertNotIn("--mount-owner", command)
-
-    def test_sandbox_command_shares_a_file(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            layer = root / "distro.erofs"
-            scratch = root / "scratch.ext4"
-            settings = root / "settings.json"
-            layer.write_bytes(b"distro")
-            scratch.write_bytes(b"scratch")
-            settings.write_bytes(b"{}")
-
-            def sandbox_args(*mount: str) -> argparse.Namespace:
-                return nvx.parse_args(
-                    [
-                        "sandbox",
-                        "--layer",
-                        f"distro,{layer},11111111-1111-1111-1111-111111111111",
-                        "--scratch",
-                        str(scratch),
-                        *mount,
-                        "--dry-run",
-                    ]
-                )
-
-            def require(path: Path, _description: str) -> Path:
-                return path
-
-            with (
-                patch.object(nvx, "require_file", side_effect=require),
-                patch.object(
-                    nvx, "_format_command", return_value="formatted"
-                ) as format_command,
-            ):
-                nvx.command_sandbox(
-                    sandbox_args("--mount", f"/etc/app/settings.json,{settings},ro")
-                )
-                command = format_command.call_args.args[0]
-                name = sandbox.aggregate_child_name(0, "/etc/app/settings.json")
-                # The regular file is a child of its own, without its directory,
-                # which OpenVMM must find to be a regular file.
-                self.assertNotIn("--mount", command)
-                self.assertEqual(
-                    command[command.index("--mount-child") + 1],
-                    f"{name},{settings},ro,file",
-                )
-                self.assertIn(
-                    f"nvx_share={name},/etc/app/settings.json,ro,file",
-                    command[command.index("--cmdline") + 1],
-                )
-                with self.assertRaisesRegex(common.ScriptError, "shares a file"):
-                    nvx.command_sandbox(
-                        sandbox_args(
-                            "--mount",
-                            f"/etc/app/settings.json,{settings},rw",
-                            "--mount-write",
-                            str(settings),
-                        )
-                    )
-
-    def test_sandbox_command_shares_host_paths_with_commas(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary).resolve()
-            layer = root / "distro.erofs"
-            scratch = root / "scratch.ext4"
-            alpha = root / "alpha,beta"
-            reports = root / "2026, final"
-            layer.write_bytes(b"distro")
-            scratch.write_bytes(b"scratch")
-            for share in (alpha, reports):
-                (share / "secret").mkdir(parents=True)
-
-            def sandbox_args(*mounts: str) -> argparse.Namespace:
-                return nvx.parse_args(
-                    [
-                        "sandbox",
-                        "--layer",
-                        f"distro,{layer},11111111-1111-1111-1111-111111111111",
-                        "--scratch",
-                        str(scratch),
-                        *mounts,
-                        "--dry-run",
-                    ]
-                )
-
-            def require(path: Path, _description: str) -> Path:
-                return path
-
-            with (
-                patch.object(nvx, "require_file", side_effect=require),
-                patch.object(
-                    nvx, "_format_command", return_value="formatted"
-                ) as format_command,
-            ):
-                nvx.command_sandbox(
-                    sandbox_args(
-                        "--mount", f"/work,{alpha},rw", "--mount-deny", "secret"
-                    )
-                )
-                command = format_command.call_args.args[0]
-                self.assertEqual(
-                    command[command.index("--mount") + 1], f"/work,{alpha},rw"
-                )
-                self.assertEqual(command[command.index("--mount-deny") + 1], "secret")
-
-                nvx.command_sandbox(
-                    sandbox_args(
-                        "--mount",
-                        f"/work,{alpha},rw",
-                        "--mount-deny",
-                        "secret",
-                        "--mount",
-                        f"/reports,{reports},ro",
-                        "--mount-deny",
-                        "secret",
-                    )
-                )
-                command = format_command.call_args.args[0]
-                work, report = (
-                    sandbox.aggregate_child_name(index, target)
-                    for index, target in enumerate(("/work", "/reports"))
-                )
-                self.assertEqual(
-                    [
-                        (value, command[index + 1])
-                        for index, value in enumerate(command)
-                        if value in ("--mount-child", "--mount-deny")
-                    ],
-                    [
-                        ("--mount-child", f"{work},{alpha},rw"),
-                        ("--mount-child", f"{report},{reports},ro"),
-                        ("--mount-deny", os.fspath(alpha / "secret")),
-                        ("--mount-deny", os.fspath(reports / "secret")),
-                    ],
-                )
-                with self.assertRaisesRegex(
-                    common.ScriptError, "end the value with ,ro or ,rw"
-                ):
-                    nvx.command_sandbox(sandbox_args("--mount", f"/work,{alpha}"))
-
-            # A managed sandbox records the host path as given and attaches it
-            # on start.
-            state = root / "state"
-            sandbox_lifecycle.provision(
-                state,
-                sandbox.SandboxLaunch(
-                    layers=(
-                        sandbox.SandboxLayer(
-                            role="distro",
-                            path=layer,
-                            uuid="11111111-1111-1111-1111-111111111111",
-                        ),
-                    ),
-                    scratch=scratch,
-                    mounts=(
-                        sandbox.SandboxMount.parse(
-                            f"/reports,{reports},ro", ("secret",)
-                        ),
-                    ),
-                ),
-                hypervisor="whp",
-                memory_mib=256,
-                net=None,
-                network_profile=None,
-                network_egress=None,
-                network_ingress=None,
-                network_egress_allow=(),
-                network_egress_deny=(),
-                host_loopback=None,
-                network_proxy=None,
-                host_loopback_forward=(),
-                cmdline="quiet",
-                timeout=10,
-            )
-            config = json.loads(
-                (state / sandbox_lifecycle.CONFIG_NAME).read_text(encoding="utf-8")
-            )
-            self.assertEqual(config["mount"]["host_path"], os.fspath(reports))
-            process = MagicMock()
-            process.pid = 123
-            process.stdin = io.BytesIO()
-            with (
-                patch.object(sandbox_lifecycle, "require_file", side_effect=require),
-                patch.object(
-                    sandbox_lifecycle.subprocess, "Popen", return_value=process
-                ) as popen,
-                patch.object(
-                    sandbox_lifecycle, "_process_start_time", return_value=456
-                ),
-                patch.object(
-                    sandbox_lifecycle.ControlSession,
-                    "connect",
-                    return_value=MagicMock(),
-                ),
-            ):
-                sandbox_lifecycle.start(state, 10)
-            command = popen.call_args.args[0]
-            self.assertEqual(
-                command[command.index("--mount") + 1], f"/reports,{reports},ro"
-            )
-            self.assertEqual(command[command.index("--mount-deny") + 1], "secret")
 
     def test_run_attaches_a_file_as_an_aggregate_child(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -13580,433 +12698,6 @@ class SandboxTests(unittest.TestCase):
                     common.ScriptError, "invalid --mount target"
                 ):
                     nvx.command_run(invalid)
-
-    def test_sandbox_command_forwards_mount_owner(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            layer = root / "distro.erofs"
-            scratch = root / "scratch.ext4"
-            share = root / "share"
-            layer.write_bytes(b"distro")
-            scratch.write_bytes(b"scratch")
-            share.mkdir()
-            args = nvx.parse_args(
-                [
-                    "sandbox",
-                    "--layer",
-                    f"distro,{layer},11111111-1111-1111-1111-111111111111",
-                    "--scratch",
-                    str(scratch),
-                    "--mount",
-                    f"/workspace,{share},rw",
-                    "--mount-owner",
-                    "caller",
-                    "--dry-run",
-                ]
-            )
-
-            def require(path: Path, _description: str) -> Path:
-                return path
-
-            with (
-                patch.object(nvx, "require_file", side_effect=require),
-                patch.object(
-                    nvx, "_format_command", return_value="formatted"
-                ) as format_command,
-            ):
-                if sys.platform == "win32":
-                    with self.assertRaisesRegex(common.ScriptError, "Linux host"):
-                        nvx.command_sandbox(args)
-                    format_command.assert_not_called()
-                    return
-                if share.stat().st_uid == 0:
-                    self.skipTest("caller ownership refuses a root-owned share")
-                nvx.command_sandbox(args)
-
-            command = format_command.call_args.args[0]
-            self.assertEqual(command[command.index("--mount-owner") + 1], "caller")
-            self.assertLess(command.index("--mount"), command.index("--mount-owner"))
-
-    def test_sandbox_command_rejects_misplaced_mount_options(self):
-        deny_only = nvx.parse_args(
-            [
-                "sandbox",
-                "--layer",
-                "distro,distro.erofs,11111111-1111-1111-1111-111111111111",
-                "--scratch",
-                "scratch.ext4",
-                "--mount-deny",
-                "secrets",
-            ]
-        )
-        with self.assertRaisesRegex(common.ScriptError, "requires --mount"):
-            nvx.command_sandbox(deny_only)
-        owner_only = nvx.parse_args(
-            [
-                "sandbox",
-                "--layer",
-                "distro,distro.erofs,11111111-1111-1111-1111-111111111111",
-                "--scratch",
-                "scratch.ext4",
-                "--mount-owner",
-                "caller",
-            ]
-        )
-        with self.assertRaisesRegex(common.ScriptError, "--mount-owner requires"):
-            nvx.command_sandbox(owner_only)
-        for operation in ("start", "exec", "stop", "deprovision"):
-            with self.subTest(operation=operation):
-                args = nvx.parse_args(
-                    [
-                        "sandbox",
-                        operation,
-                        "--state-dir",
-                        "state",
-                        "--mount",
-                        "/workspace,share,rw",
-                    ]
-                )
-                with self.assertRaisesRegex(common.ScriptError, "only valid"):
-                    nvx.command_sandbox(args)
-
-    def test_sandbox_command_attributes_policy_paths_to_the_preceding_mount(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            layer = root / "distro.erofs"
-            scratch = root / "scratch.ext4"
-            work = root / "work"
-            tools = root / "tools"
-            layer.write_bytes(b"distro")
-            scratch.write_bytes(b"scratch")
-            work.mkdir()
-            tools.mkdir()
-            common_args = [
-                "sandbox",
-                "--layer",
-                f"distro,{layer},11111111-1111-1111-1111-111111111111",
-                "--scratch",
-                str(scratch),
-            ]
-            args = nvx.parse_args(
-                [
-                    *common_args,
-                    "--mount",
-                    f"/workspace,{work},rw",
-                    "--mount-deny",
-                    "logs",
-                    "--mount-allow",
-                    "logs/payloads",
-                    "--mount-write",
-                    "out",
-                    "--mount",
-                    f"/opt/hostedtoolcache,{tools},ro",
-                    "--mount-deny",
-                    "credentials",
-                    "--dry-run",
-                ]
-            )
-            workspace, toolcache = nvx._sandbox_mounts(args)
-            self.assertEqual(
-                (
-                    workspace.denied_paths,
-                    workspace.allowed_paths,
-                    workspace.writable_paths,
-                ),
-                (("logs",), ("logs/payloads",), ("out",)),
-            )
-            self.assertEqual(
-                (
-                    toolcache.denied_paths,
-                    toolcache.allowed_paths,
-                    toolcache.writable_paths,
-                ),
-                (("credentials",), (), ()),
-            )
-
-            def require(path: Path, _description: str) -> Path:
-                return path
-
-            with (
-                patch.object(nvx, "require_file", side_effect=require),
-                patch.object(
-                    nvx, "_format_command", return_value="formatted"
-                ) as format_command,
-            ):
-                nvx.command_sandbox(args)
-
-            command = format_command.call_args.args[0]
-
-            def values(option: str) -> list[str]:
-                return [
-                    command[index + 1]
-                    for index, value in enumerate(command)
-                    if value == option
-                ]
-
-            # With several shares, OpenVMM attributes absolute paths.
-            self.assertEqual(
-                values("--mount-allow"), [os.fspath(work / "logs" / "payloads")]
-            )
-            self.assertEqual(values("--mount-write"), [os.fspath(work / "out")])
-
-            for arguments, message in (
-                (["--mount-write", "out"], "--mount-write requires --mount"),
-                # A --mount-write after the read-only share would narrow it.
-                (
-                    [
-                        "--mount",
-                        f"/workspace,{work},rw",
-                        "--mount",
-                        f"/opt/hostedtoolcache,{tools},ro",
-                        "--mount-write",
-                        "cache",
-                    ],
-                    "is read-only",
-                ),
-                (
-                    [
-                        "--mount-allow",
-                        "logs",
-                        "--mount",
-                        f"/workspace,{work},rw",
-                        "--mount",
-                        f"/opt/hostedtoolcache,{tools}",
-                    ],
-                    "each --mount-allow must follow the --mount",
-                ),
-                # A path in one share cannot be attributed to the other.
-                (
-                    [
-                        "--mount",
-                        f"/workspace,{work},rw",
-                        "--mount-write",
-                        os.fspath(tools / "cache"),
-                        "--mount",
-                        f"/opt/hostedtoolcache,{tools}",
-                    ],
-                    "--mount-write .* is not inside the host directory",
-                ),
-                # Only a denied path may name a share's root.
-                (
-                    [
-                        "--mount",
-                        f"/workspace,{work},rw",
-                        "--mount-deny",
-                        "logs",
-                        "--mount-allow",
-                        os.fspath(work),
-                        "--mount",
-                        f"/opt/hostedtoolcache,{tools}",
-                    ],
-                    "--mount-allow .* is not inside the host directory",
-                ),
-                (
-                    [
-                        "--mount",
-                        f"/workspace,{work},rw",
-                        "--mount-write",
-                        os.fspath(work),
-                        "--mount",
-                        f"/opt/hostedtoolcache,{tools}",
-                    ],
-                    "--mount-write .* is not inside the host directory",
-                ),
-            ):
-                with self.subTest(message=message):
-                    with self.assertRaisesRegex(common.ScriptError, message):
-                        nvx.command_sandbox(nvx.parse_args([*common_args, *arguments]))
-
-    def test_sandbox_command_hides_a_share_root_behind_its_allowed_paths(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            layer = root / "distro.erofs"
-            scratch = root / "scratch.ext4"
-            work = root / "work"
-            tools = root / "tools"
-            layer.write_bytes(b"distro")
-            scratch.write_bytes(b"scratch")
-            (work / "src").mkdir(parents=True)
-            tools.mkdir()
-            args = nvx.parse_args(
-                [
-                    "sandbox",
-                    "--layer",
-                    f"distro,{layer},11111111-1111-1111-1111-111111111111",
-                    "--scratch",
-                    str(scratch),
-                    "--mount",
-                    f"/workspace,{work},rw",
-                    "--mount-deny",
-                    os.fspath(work),
-                    "--mount-allow",
-                    os.fspath(work / "src"),
-                    "--mount",
-                    f"/opt/hostedtoolcache,{tools}",
-                    "--dry-run",
-                ]
-            )
-
-            def require(path: Path, _description: str) -> Path:
-                return path
-
-            with (
-                patch.object(nvx, "require_file", side_effect=require),
-                patch.object(
-                    nvx, "_format_command", return_value="formatted"
-                ) as format_command,
-            ):
-                nvx.command_sandbox(args)
-
-            command = format_command.call_args.args[0]
-
-            def values(option: str) -> list[str]:
-                return [
-                    command[index + 1]
-                    for index, value in enumerate(command)
-                    if value == option
-                ]
-
-            # OpenVMM hides the workspace's root behind its one allowed path.
-            workspace = sandbox.aggregate_child_name(0, "/workspace")
-            toolcache = sandbox.aggregate_child_name(1, "/opt/hostedtoolcache")
-            self.assertEqual(
-                values("--mount-child"),
-                [f"{workspace},{work},rw", f"{toolcache},{tools},ro"],
-            )
-            self.assertEqual(values("--mount-deny"), [os.fspath(work)])
-            self.assertEqual(values("--mount-allow"), [os.fspath(work / "src")])
-
-    def test_sandbox_command_attributes_mount_deny_to_the_preceding_mount(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            layer = root / "distro.erofs"
-            scratch = root / "scratch.ext4"
-            work = root / "work"
-            tools = root / "tools"
-            layer.write_bytes(b"distro")
-            scratch.write_bytes(b"scratch")
-            work.mkdir()
-            tools.mkdir()
-            common_args = [
-                "sandbox",
-                "--layer",
-                f"distro,{layer},11111111-1111-1111-1111-111111111111",
-                "--scratch",
-                str(scratch),
-            ]
-            args = nvx.parse_args(
-                [
-                    *common_args,
-                    "--mount",
-                    f"/workspace,{work},rw",
-                    "--mount-deny",
-                    "secrets",
-                    "--mount",
-                    f"/opt/hostedtoolcache,{tools},ro",
-                    "--mount-deny",
-                    "credentials",
-                    "--mount-deny",
-                    "logs",
-                    "--dry-run",
-                ]
-            )
-            mounts = nvx._sandbox_mounts(args)
-            self.assertEqual(
-                [(mount.guest_target, mount.denied_paths) for mount in mounts],
-                [
-                    ("/workspace", ("secrets",)),
-                    ("/opt/hostedtoolcache", ("credentials", "logs")),
-                ],
-            )
-
-            def require(path: Path, _description: str) -> Path:
-                return path
-
-            with (
-                patch.object(nvx, "require_file", side_effect=require),
-                patch.object(
-                    nvx, "_format_command", return_value="formatted"
-                ) as format_command,
-            ):
-                nvx.command_sandbox(args)
-
-            command = format_command.call_args.args[0]
-            workspace = sandbox.aggregate_child_name(0, "/workspace")
-            toolcache = sandbox.aggregate_child_name(1, "/opt/hostedtoolcache")
-            self.assertNotIn("--mount", command)
-            self.assertEqual(
-                [
-                    command[index + 1]
-                    for index, value in enumerate(command)
-                    if value in ("--mount-aggregate", "--mount-child")
-                ],
-                [
-                    "/run/nvx/shares",
-                    f"{workspace},{work},rw",
-                    f"{toolcache},{tools},ro",
-                ],
-            )
-            self.assertEqual(
-                [
-                    command[index + 1]
-                    for index, value in enumerate(command)
-                    if value == "--mount-deny"
-                ],
-                [
-                    os.fspath(work / "secrets"),
-                    os.fspath(tools / "credentials"),
-                    os.fspath(tools / "logs"),
-                ],
-            )
-            cmdline = command[command.index("--cmdline") + 1]
-            self.assertIn(
-                f"nvx_share={workspace},/workspace,rw "
-                f"nvx_share={toolcache},/opt/hostedtoolcache,ro",
-                cmdline,
-            )
-
-            # With one share, a --mount-deny may come first; with several, it
-            # must follow the share whose directory it hides.
-            single = nvx.parse_args(
-                [*common_args, "--mount-deny", "secrets", "--mount", f"/w,{work},rw"]
-            )
-            self.assertEqual(nvx._sandbox_mounts(single)[0].denied_paths, ("secrets",))
-            leading = nvx.parse_args(
-                [
-                    *common_args,
-                    "--mount-deny",
-                    "secrets",
-                    "--mount",
-                    f"/workspace,{work},rw",
-                    "--mount",
-                    f"/opt/hostedtoolcache,{tools}",
-                ]
-            )
-            with self.assertRaisesRegex(common.ScriptError, "must follow the --mount"):
-                nvx.command_sandbox(leading)
-            # More shares are children of the same aggregate.
-            (root / "cache").mkdir()
-            three = nvx.parse_args(
-                [
-                    *common_args,
-                    "--mount",
-                    f"/a,{work}",
-                    "--mount",
-                    f"/b,{tools}",
-                    "--mount",
-                    f"/c,{root / 'cache'}",
-                    "--dry-run",
-                ]
-            )
-            with (
-                patch.object(nvx, "require_file", side_effect=require),
-                patch.object(
-                    nvx, "_format_command", return_value="formatted"
-                ) as format_command,
-            ):
-                nvx.command_sandbox(three)
-            command = format_command.call_args.args[0]
-            self.assertEqual(command.count("--mount-child"), 3)
 
     def test_run_shares_host_paths_with_commas(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -14238,2804 +12929,14 @@ class SandboxTests(unittest.TestCase):
             with self.assertRaisesRegex(common.ScriptError, "absolute host path"):
                 nvx.command_run(relative)
 
-    def test_managed_lifecycle_persists_and_replays_two_shares(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary).resolve()
-            layer_path = root / "distro.erofs"
-            scratch_path = root / "scratch.ext4"
-            work = root / "work"
-            tools = root / "tools"
-            layer_path.write_bytes(b"layer")
-            scratch_path.write_bytes(b"scratch")
-            work.mkdir()
-            tools.mkdir()
-            state = root / "state"
-            sandbox_lifecycle.provision(
-                state,
-                sandbox.SandboxLaunch(
-                    layers=(
-                        sandbox.SandboxLayer(
-                            role="distro",
-                            path=layer_path,
-                            uuid="11111111-1111-1111-1111-111111111111",
-                        ),
-                    ),
-                    scratch=scratch_path,
-                    mounts=(
-                        sandbox.SandboxMount.parse(
-                            f"/workspace,{work},rw", ("secrets",)
-                        ),
-                        sandbox.SandboxMount.parse(f"/opt/hostedtoolcache,{tools}"),
-                    ),
-                ),
-                hypervisor="whp",
-                memory_mib=256,
-                net=None,
-                network_profile=None,
-                network_egress=None,
-                network_ingress=None,
-                network_egress_allow=(),
-                network_egress_deny=(),
-                host_loopback=None,
-                network_proxy=None,
-                host_loopback_forward=(),
-                cmdline="quiet",
-                timeout=10,
-            )
-
-            config = json.loads(
-                (state / sandbox_lifecycle.CONFIG_NAME).read_text(encoding="utf-8")
-            )
-            self.assertEqual(
-                config["format"], sandbox_lifecycle.MULTI_MOUNT_CONFIG_FORMAT
-            )
-            # Older releases know only the single `mount`, and reject format 4.
-            self.assertNotIn("mount", config)
-            with self.assertRaisesRegex(common.ScriptError, "unsupported format"):
-                sandbox_lifecycle._read_json(
-                    state / sandbox_lifecycle.CONFIG_NAME,
-                    "sandbox configuration",
-                    version=(1, 2, 3),
-                )
-            self.assertEqual(
-                config["mounts"],
-                [
-                    {
-                        "guest_target": "/workspace",
-                        "host_path": os.fspath(work),
-                        "access": "rw",
-                        "denied_paths": ["secrets"],
-                        "owner": "vmm",
-                    },
-                    {
-                        "guest_target": "/opt/hostedtoolcache",
-                        "host_path": os.fspath(tools),
-                        "access": "ro",
-                        "denied_paths": [],
-                        "owner": "vmm",
-                    },
-                ],
-            )
-
-            process = MagicMock()
-            process.pid = 123
-            process.stdin = io.BytesIO()
-
-            def require(path: Path, _description: str) -> Path:
-                return path
-
-            with (
-                patch.object(sandbox_lifecycle, "require_file", side_effect=require),
-                patch.object(
-                    sandbox_lifecycle.subprocess, "Popen", return_value=process
-                ) as popen,
-                patch.object(
-                    sandbox_lifecycle, "_process_start_time", return_value=456
-                ),
-                patch.object(
-                    sandbox_lifecycle.ControlSession,
-                    "connect",
-                    return_value=MagicMock(),
-                ),
-            ):
-                sandbox_lifecycle.start(state, 10)
-
-            command = popen.call_args.args[0]
-            self.assertEqual(
-                [
-                    command[index + 1]
-                    for index, value in enumerate(command)
-                    if value in ("--mount-aggregate", "--mount-child", "--mount-deny")
-                ],
-                [
-                    "/run/nvx/shares",
-                    f"{sandbox.aggregate_child_name(0, '/workspace')},{work},rw",
-                    f"{sandbox.aggregate_child_name(1, '/opt/hostedtoolcache')},"
-                    f"{tools},ro",
-                    os.fspath(work / "secrets"),
-                ],
-            )
-
-    def test_managed_lifecycle_persists_and_replays_the_access_policy(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary).resolve()
-            layer_path = root / "distro.erofs"
-            scratch_path = root / "scratch.ext4"
-            work = root / "work"
-            layer_path.write_bytes(b"layer")
-            scratch_path.write_bytes(b"scratch")
-            work.mkdir()
-            state = root / "state"
-            sandbox_lifecycle.provision(
-                state,
-                sandbox.SandboxLaunch(
-                    layers=(
-                        sandbox.SandboxLayer(
-                            role="distro",
-                            path=layer_path,
-                            uuid="11111111-1111-1111-1111-111111111111",
-                        ),
-                    ),
-                    scratch=scratch_path,
-                    mounts=(
-                        sandbox.SandboxMount.parse(
-                            f"/workspace,{work},rw",
-                            ("logs",),
-                            allowed_paths=("logs/payloads",),
-                            writable_paths=("out",),
-                        ),
-                    ),
-                ),
-                hypervisor="whp",
-                memory_mib=256,
-                net=None,
-                network_profile=None,
-                network_egress=None,
-                network_ingress=None,
-                network_egress_allow=(),
-                network_egress_deny=(),
-                host_loopback=None,
-                network_proxy=None,
-                host_loopback_forward=(),
-                cmdline="quiet",
-                timeout=10,
-            )
-
-            config = json.loads(
-                (state / sandbox_lifecycle.CONFIG_NAME).read_text(encoding="utf-8")
-            )
-            self.assertEqual(config["format"], sandbox_lifecycle.POLICY_CONFIG_FORMAT)
-            # Earlier releases read at most format 4, which would start the
-            # share without its policy, so they must reject format 5.
-            self.assertNotIn("mount", config)
-            with self.assertRaisesRegex(common.ScriptError, "unsupported format"):
-                sandbox_lifecycle._read_json(
-                    state / sandbox_lifecycle.CONFIG_NAME,
-                    "sandbox configuration",
-                    version=(1, 2, 3, 4),
-                )
-            self.assertEqual(
-                config["mounts"],
-                [
-                    {
-                        "guest_target": "/workspace",
-                        "host_path": os.fspath(work),
-                        "access": "rw",
-                        "denied_paths": ["logs"],
-                        "allowed_paths": ["logs/payloads"],
-                        "writable_paths": ["out"],
-                        "owner": "vmm",
-                    },
-                ],
-            )
-
-            process = MagicMock()
-            process.pid = 123
-            process.stdin = io.BytesIO()
-
-            def require(path: Path, _description: str) -> Path:
-                return path
-
-            with (
-                patch.object(sandbox_lifecycle, "require_file", side_effect=require),
-                patch.object(
-                    sandbox_lifecycle.subprocess, "Popen", return_value=process
-                ) as popen,
-                patch.object(
-                    sandbox_lifecycle, "_process_start_time", return_value=456
-                ),
-                patch.object(
-                    sandbox_lifecycle.ControlSession,
-                    "connect",
-                    return_value=MagicMock(),
-                ),
-            ):
-                sandbox_lifecycle.start(state, 10)
-
-            command = popen.call_args.args[0]
-            self.assertEqual(
-                [
-                    (value, command[index + 1])
-                    for index, value in enumerate(command)
-                    if value.startswith("--mount")
-                ],
-                [
-                    ("--mount", f"/workspace,{work},rw"),
-                    ("--mount-deny", "logs"),
-                    ("--mount-allow", "logs/payloads"),
-                    ("--mount-write", "out"),
-                ],
-            )
-
-            # Format 5 holds an access policy, and only format 5 does.
-            config["mounts"][0]["allowed_paths"] = []
-            config["mounts"][0]["writable_paths"] = []
-            with (
-                patch.object(sandbox, "require_file", side_effect=require),
-                self.assertRaisesRegex(common.ScriptError, "does not match"),
-            ):
-                sandbox_lifecycle._deserialize_launch(config)
-
-    def test_launch_contract_attaches_a_file_as_an_aggregate_child(self):
-        distro = sandbox.SandboxLayer.parse(
-            "distro,distro.erofs,11111111-1111-1111-1111-111111111111"
-        )
-        settings = sandbox.SandboxMount.parse(
-            "/etc/app/settings.json,settings.json,ro", kind="file"
-        )
-        launch = sandbox.SandboxLaunch(
-            layers=(distro,), scratch=Path("scratch.ext4"), mounts=(settings,)
-        )
-        name = sandbox.aggregate_child_name(0, "/etc/app/settings.json")
-        # Even alone, a file is the child of an aggregate, because the guest
-        # mounts the device's root, which is a directory.
-        self.assertTrue(sandbox.mounts_use_aggregate(launch.mounts))
-        arguments = launch.openvmm_arguments()
-        self.assertNotIn("--mount", arguments)
-        self.assertEqual(
-            arguments[arguments.index("--mount-aggregate") :],
-            [
-                "--mount-aggregate",
-                "/run/nvx/shares",
-                "--mount-child",
-                f"{name},{os.fspath(Path('settings.json'))},ro,file",
-            ],
-        )
-        self.assertEqual(
-            sandbox.mounts_command_line_fragment(launch.mounts),
-            " virtfs_dir=/run/nvx/shares virtfs_tag=microvm virtfs_mode=ro"
-            " virtfs_aggregate=1",
-        )
-        self.assertTrue(
-            launch.kernel_command_line().endswith(
-                f" nvx_share={name},/etc/app/settings.json,ro,file"
-            )
-        )
-
-        # Files and directories share one aggregate, and only a file's token
-        # is marked.
-        workspace = sandbox.SandboxMount.parse("/workspace,work,rw", ("secrets",))
-        output = sandbox.SandboxMount.parse(
-            "/results/output.txt,output.txt,rw", kind="file"
-        )
-        mixed = sandbox.SandboxLaunch(
-            layers=(distro,),
-            scratch=Path("scratch.ext4"),
-            mounts=(workspace, settings, output),
-        )
-        names = [
-            sandbox.aggregate_child_name(index, mount.guest_target)
-            for index, mount in enumerate(mixed.mounts)
-        ]
-        self.assertTrue(
-            mixed.kernel_command_line().endswith(
-                f" nvx_share={names[0]},/workspace,rw"
-                f" nvx_share={names[1]},/etc/app/settings.json,ro,file"
-                f" nvx_share={names[2]},/results/output.txt,rw,file"
-            )
-        )
-        arguments = mixed.openvmm_arguments()
-        self.assertEqual(
-            arguments[arguments.index("--mount-deny") + 1],
-            os.fspath(Path.cwd() / "work" / "secrets"),
-        )
-
-        # A file's mode applies to the whole file, so no policy path names
-        # one, and the runtime owns the machine ID's path.
-        for option in ("denied_paths", "allowed_paths", "writable_paths"):
-            policy: dict[str, Any] = {option: ("x",)}
-            with self.subTest(option=option):
-                with self.assertRaisesRegex(common.ScriptError, "shares a file"):
-                    sandbox.SandboxMount(
-                        guest_target="/results/output.txt",
-                        host_path=Path("output.txt"),
-                        access="rw",
-                        kind="file",
-                        **policy,
-                    )
-        with self.assertRaisesRegex(
-            common.ScriptError, "unsupported sandbox mount kind"
-        ):
-            sandbox.SandboxMount.parse("/a,a", kind="socket")
-        # The runtime replaces /etc/machine-id with a file, so nothing at or
-        # below it may be shared.
-        for target in ("/etc/machine-id", "/etc/machine-id/child"):
-            with self.subTest(target=target):
-                with self.assertRaisesRegex(common.ScriptError, "reserved"):
-                    sandbox.SandboxMount.parse(f"{target},id", kind="file")
-        # Only /etc itself is reserved, not what lies below it.
-        sandbox.SandboxMount.parse("/etc/app,app")
-
-    def test_launch_validation_requires_the_kind_of_each_share(self):
+    def test_mount_kind_follows_the_host_path(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            config = root / "config"
-            config.mkdir()
-            settings = config / "settings.json"
+            settings = root / "settings.json"
             settings.write_bytes(b"{}")
             self.assertEqual(sandbox.mount_kind(settings), "file")
-            self.assertEqual(sandbox.mount_kind(config), "directory")
+            self.assertEqual(sandbox.mount_kind(root), "directory")
             self.assertEqual(sandbox.mount_kind(root / "missing"), "directory")
-            share = sandbox.SandboxMount(
-                guest_target="/etc/app/settings.json", host_path=settings, kind="file"
-            )
-            self.assertIs(share.validated(), share)
-            # A directory at the file's path is not shared in its place.
-            settings.unlink()
-            settings.mkdir()
-            with self.assertRaisesRegex(common.ScriptError, "not a regular file"):
-                share.validated()
-            settings.rmdir()
-            with self.assertRaisesRegex(common.ScriptError, "not a regular file"):
-                share.validated()
-
-            # A file overlaps a shared directory that contains it, and another
-            # share of the same file, such as through a hard link, but not a
-            # file beside it.
-            settings.write_bytes(b"{}")
-            other = config / "other.json"
-            other.write_bytes(b"{}")
-            link = root / "link.json"
-            os.link(settings, link)
-
-            def file_share(target: str, path: Path) -> sandbox.SandboxMount:
-                return sandbox.SandboxMount(
-                    guest_target=target, host_path=path, kind="file"
-                )
-
-            sandbox.validate_mount_host_paths(
-                (file_share("/a.json", settings), file_share("/b.json", other))
-            )
-            for mounts, message in (
-                (
-                    (
-                        sandbox.SandboxMount(guest_target="/config", host_path=config),
-                        file_share("/a.json", settings),
-                    ),
-                    "overlap",
-                ),
-                (
-                    (file_share("/a.json", settings), file_share("/b.json", link)),
-                    "same directory or file",
-                ),
-            ):
-                with self.subTest(message=message):
-                    with self.assertRaisesRegex(common.ScriptError, message):
-                        sandbox.validate_mount_host_paths(mounts)
-
-    def test_managed_configuration_format_records_file_shares(self):
-        def entry(target: str, path: str, kind: str) -> dict[str, object]:
-            return {
-                "guest_target": target,
-                "host_path": path,
-                "access": "ro",
-                "denied_paths": [],
-                "owner": "vmm",
-                "allowed_paths": [],
-                "writable_paths": [],
-                "kind": kind,
-            }
-
-        config: dict[str, object] = {
-            "format": sandbox_lifecycle.FILE_MOUNT_CONFIG_FORMAT,
-            "layers": [
-                {
-                    "role": "distro",
-                    "path": "distro.erofs",
-                    "uuid": "11111111-1111-1111-1111-111111111111",
-                }
-            ],
-            "scratch": "scratch.ext4",
-            "hostname": "nvx-sandbox",
-            "workload_uid": 65534,
-            "workload_gid": 65534,
-            "memory_max": None,
-            "pids_max": None,
-            "mounts": [entry("/etc/app/settings.json", "settings.json", "file")],
-        }
-
-        def require(path: Path, _description: str) -> Path:
-            return path
-
-        def unchanged(mount: sandbox.SandboxMount) -> sandbox.SandboxMount:
-            return mount
-
-        with (
-            patch.object(sandbox, "require_file", side_effect=require),
-            patch.object(sandbox.SandboxMount, "validated", unchanged),
-        ):
-            launch = sandbox_lifecycle._deserialize_launch(config)
-            self.assertEqual([mount.kind for mount in launch.mounts], ["file"])
-            serialized = sandbox_lifecycle._serialize_launch(
-                launch,
-                hypervisor="kvm",
-                memory_mib=256,
-                net=None,
-                network_profile=None,
-                network_egress=None,
-                network_ingress=None,
-                network_egress_allow=(),
-                network_egress_deny=(),
-                host_loopback=None,
-                network_proxy=None,
-                host_loopback_forward=(),
-                cmdline="",
-            )
-            self.assertEqual(
-                serialized["format"], sandbox_lifecycle.FILE_MOUNT_CONFIG_FORMAT
-            )
-            self.assertEqual(serialized["mounts"][0]["kind"], "file")
-            # Only format 6 holds a file share, and every format-6 share
-            # records its kind.
-            config["mounts"] = [entry("/workspace", "work", "directory")]
-            with self.assertRaisesRegex(common.ScriptError, "does not match"):
-                sandbox_lifecycle._deserialize_launch(config)
-            config["mounts"] = [{**entry("/a.json", "a.json", "file"), "kind": None}]
-            with self.assertRaisesRegex(common.ScriptError, "kind"):
-                sandbox_lifecycle._deserialize_launch(config)
-            unmarked = entry("/a.json", "a.json", "file")
-            del unmarked["kind"]
-            config["mounts"] = [unmarked]
-            with self.assertRaisesRegex(common.ScriptError, "malformed"):
-                sandbox_lifecycle._deserialize_launch(config)
-            config["format"] = sandbox_lifecycle.POLICY_CONFIG_FORMAT
-            config["mounts"] = [entry("/a.json", "a.json", "file")]
-            with self.assertRaisesRegex(common.ScriptError, "does not match"):
-                sandbox_lifecycle._deserialize_launch(config)
-
-    def test_managed_configuration_format_binds_several_mounts(self):
-        def entry(target: str, path: str, owner: str = "vmm") -> dict[str, object]:
-            return {
-                "guest_target": target,
-                "host_path": path,
-                "access": "rw",
-                "denied_paths": [],
-                "owner": owner,
-            }
-
-        config: dict[str, object] = {
-            "format": sandbox_lifecycle.MULTI_MOUNT_CONFIG_FORMAT,
-            "layers": [
-                {
-                    "role": "distro",
-                    "path": "distro.erofs",
-                    "uuid": "11111111-1111-1111-1111-111111111111",
-                }
-            ],
-            "scratch": "scratch.ext4",
-            "hostname": "nvx-sandbox",
-            "workload_uid": 65534,
-            "workload_gid": 65534,
-            "memory_max": None,
-            "pids_max": None,
-            "mounts": [entry("/workspace", "work"), entry("/tools", "tools")],
-        }
-
-        def require(path: Path, _description: str) -> Path:
-            return path
-
-        def unchanged(mount: sandbox.SandboxMount) -> sandbox.SandboxMount:
-            return mount
-
-        def identity(path: Path) -> tuple[int, int]:
-            return 0, hash(path)
-
-        with (
-            patch.object(sandbox, "require_file", side_effect=require),
-            patch.object(sandbox.SandboxMount, "validated", unchanged),
-            patch.object(sandbox, "_path_identity", side_effect=identity),
-        ):
-            launch = sandbox_lifecycle._deserialize_launch(config)
-            self.assertEqual(
-                [mount.guest_target for mount in launch.mounts],
-                ["/workspace", "/tools"],
-            )
-            # Format 4 always holds several shares, and only format 4 does.
-            config["mounts"] = [entry("/workspace", "work")]
-            with self.assertRaisesRegex(common.ScriptError, "does not match"):
-                sandbox_lifecycle._deserialize_launch(config)
-            config["mounts"] = {"guest_target": "/workspace"}
-            with self.assertRaisesRegex(common.ScriptError, "malformed"):
-                sandbox_lifecycle._deserialize_launch(config)
-            config["mounts"] = [entry("/workspace", "work"), entry("/a", "a", "caller")]
-            with self.assertRaisesRegex(common.ScriptError, "same --mount-owner"):
-                sandbox_lifecycle._deserialize_launch(config)
-            config["mounts"] = [entry("/workspace", "work"), entry("/workspace", "b")]
-            with self.assertRaisesRegex(common.ScriptError, "overlap"):
-                sandbox_lifecycle._deserialize_launch(config)
-            config["format"] = sandbox_lifecycle.MOUNT_CONFIG_FORMAT
-            config["mounts"] = [entry("/workspace", "work"), entry("/tools", "tools")]
-            with self.assertRaisesRegex(common.ScriptError, "does not match"):
-                sandbox_lifecycle._deserialize_launch(config)
-
-    def test_managed_lifecycle_persists_and_replays_mount(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary).resolve()
-            layer_path = root / "distro.erofs"
-            scratch_path = root / "scratch.ext4"
-            share = root / "share"
-            layer_path.write_bytes(b"layer")
-            scratch_path.write_bytes(b"scratch")
-            share.mkdir()
-            state = root / "state"
-            previous = Path.cwd()
-            os.chdir(root)
-            try:
-                sandbox_lifecycle.provision(
-                    state,
-                    sandbox.SandboxLaunch(
-                        layers=(
-                            sandbox.SandboxLayer(
-                                role="distro",
-                                path=layer_path,
-                                uuid="11111111-1111-1111-1111-111111111111",
-                            ),
-                        ),
-                        scratch=scratch_path,
-                        mounts=(
-                            sandbox.SandboxMount.parse(
-                                "/workspace,share,rw", ("secrets",)
-                            ),
-                        ),
-                    ),
-                    hypervisor="whp",
-                    memory_mib=256,
-                    net=None,
-                    network_profile=None,
-                    network_egress=None,
-                    network_ingress=None,
-                    network_egress_allow=(),
-                    network_egress_deny=(),
-                    host_loopback=None,
-                    network_proxy=None,
-                    host_loopback_forward=(),
-                    cmdline="quiet",
-                    timeout=10,
-                )
-            finally:
-                os.chdir(previous)
-
-            config = json.loads(
-                (state / sandbox_lifecycle.CONFIG_NAME).read_text(encoding="utf-8")
-            )
-            self.assertEqual(config["format"], sandbox_lifecycle.MOUNT_CONFIG_FORMAT)
-            with self.assertRaisesRegex(common.ScriptError, "unsupported format"):
-                sandbox_lifecycle._read_json(
-                    state / sandbox_lifecycle.CONFIG_NAME,
-                    "sandbox configuration",
-                    version=1,
-                )
-            self.assertEqual(
-                config["mount"],
-                {
-                    "guest_target": "/workspace",
-                    "host_path": os.fspath(share),
-                    "access": "rw",
-                    "denied_paths": ["secrets"],
-                    "owner": "vmm",
-                },
-            )
-
-            process = MagicMock()
-            process.pid = 123
-            process.stdin = io.BytesIO()
-            context = MagicMock()
-
-            def require(path: Path, _description: str) -> Path:
-                return path
-
-            with (
-                patch.object(sandbox_lifecycle, "require_file", side_effect=require),
-                patch.object(
-                    sandbox_lifecycle.subprocess, "Popen", return_value=process
-                ) as popen,
-                patch.object(
-                    sandbox_lifecycle, "_process_start_time", return_value=456
-                ),
-                patch.object(
-                    sandbox_lifecycle.ControlSession, "connect", return_value=context
-                ),
-            ):
-                sandbox_lifecycle.start(state, 10)
-
-            command = popen.call_args.args[0]
-            self.assertEqual(
-                command[command.index("--mount") + 1], f"/workspace,{share},rw"
-            )
-            self.assertEqual(command[command.index("--mount-deny") + 1], "secrets")
-
-    def test_managed_lifecycle_accepts_configuration_without_mount(self):
-        config: dict[str, object] = {
-            "format": sandbox_lifecycle.CONFIG_FORMAT,
-            "layers": [
-                {
-                    "role": "distro",
-                    "path": "distro.erofs",
-                    "uuid": "11111111-1111-1111-1111-111111111111",
-                }
-            ],
-            "scratch": "scratch.ext4",
-            "hostname": "nvx-sandbox",
-            "workload_uid": 65534,
-            "workload_gid": 65534,
-            "memory_max": None,
-            "pids_max": None,
-        }
-
-        def require(path: Path, _description: str) -> Path:
-            return path
-
-        with (
-            patch.object(sandbox, "require_file", side_effect=require),
-        ):
-            self.assertEqual(sandbox_lifecycle._deserialize_launch(config).mounts, ())
-            config["format"] = sandbox_lifecycle.MOUNT_CONFIG_FORMAT
-            with self.assertRaisesRegex(common.ScriptError, "does not match"):
-                sandbox_lifecycle._deserialize_launch(config)
-            config["mount"] = {"guest_target": "/workspace"}
-            with self.assertRaisesRegex(common.ScriptError, "malformed"):
-                sandbox_lifecycle._deserialize_launch(config)
-            config["mount"] = {
-                "guest_target": "/proc",
-                "host_path": "share",
-                "access": "rw",
-                "denied_paths": [],
-            }
-            with self.assertRaisesRegex(common.ScriptError, "reserved"):
-                sandbox_lifecycle._deserialize_launch(config)
-            config["mount"] = {
-                "guest_target": "/workspace",
-                "host_path": "share",
-                "access": "rw",
-                "denied_paths": [],
-            }
-            config["format"] = sandbox_lifecycle.CONFIG_FORMAT
-            with self.assertRaisesRegex(common.ScriptError, "does not match"):
-                sandbox_lifecycle._deserialize_launch(config)
-
-    def test_managed_configuration_format_binds_the_mount_owner(self):
-        mount: dict[str, object] = {
-            "guest_target": "/workspace",
-            "host_path": "share",
-            "access": "rw",
-            "denied_paths": [],
-        }
-        config: dict[str, object] = {
-            "format": sandbox_lifecycle.MOUNT_CONFIG_FORMAT,
-            "layers": [
-                {
-                    "role": "distro",
-                    "path": "distro.erofs",
-                    "uuid": "11111111-1111-1111-1111-111111111111",
-                }
-            ],
-            "scratch": "scratch.ext4",
-            "hostname": "nvx-sandbox",
-            "workload_uid": 65534,
-            "workload_gid": 65534,
-            "memory_max": None,
-            "pids_max": None,
-            "mount": mount,
-        }
-
-        def require(path: Path, _description: str) -> Path:
-            return path
-
-        def unchanged(mount: sandbox.SandboxMount) -> sandbox.SandboxMount:
-            return mount
-
-        with (
-            patch.object(sandbox, "require_file", side_effect=require),
-            patch.object(sandbox.SandboxMount, "validated", unchanged),
-        ):
-            # A share configured before ownership modes runs as the VMM.
-            launch = sandbox_lifecycle._deserialize_launch(config)
-            self.assertEqual(launch.mounts[0].owner, "vmm")
-            mount["owner"] = "vmm"
-            launch = sandbox_lifecycle._deserialize_launch(config)
-            self.assertEqual(launch.mounts[0].owner, "vmm")
-            # Only format 3, which older releases reject, carries caller ownership.
-            mount["owner"] = "caller"
-            with self.assertRaisesRegex(common.ScriptError, "does not match"):
-                sandbox_lifecycle._deserialize_launch(config)
-            config["format"] = sandbox_lifecycle.OWNER_CONFIG_FORMAT
-            launch = sandbox_lifecycle._deserialize_launch(config)
-            self.assertEqual(launch.mounts[0].owner, "caller")
-            mount["owner"] = "vmm"
-            with self.assertRaisesRegex(common.ScriptError, "does not match"):
-                sandbox_lifecycle._deserialize_launch(config)
-            mount["owner"] = "root"
-            with self.assertRaisesRegex(
-                common.ScriptError, "unsupported sandbox mount owner"
-            ):
-                sandbox_lifecycle._deserialize_launch(config)
-
-    def test_managed_lifecycle_persists_and_replays_caller_owner(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary).resolve()
-            layer_path = root / "distro.erofs"
-            scratch_path = root / "scratch.ext4"
-            share = root / "share"
-            layer_path.write_bytes(b"layer")
-            scratch_path.write_bytes(b"scratch")
-            share.mkdir()
-            state = root / "state"
-            launch = sandbox.SandboxLaunch(
-                layers=(
-                    sandbox.SandboxLayer(
-                        role="distro",
-                        path=layer_path,
-                        uuid="11111111-1111-1111-1111-111111111111",
-                    ),
-                ),
-                scratch=scratch_path,
-                mounts=(
-                    sandbox.SandboxMount.parse(f"/workspace,{share},rw", (), "caller"),
-                ),
-            )
-
-            def provision() -> None:
-                sandbox_lifecycle.provision(
-                    state,
-                    launch,
-                    hypervisor="whp" if sys.platform == "win32" else "kvm",
-                    memory_mib=256,
-                    net=None,
-                    network_profile=None,
-                    network_egress=None,
-                    network_ingress=None,
-                    network_egress_allow=(),
-                    network_egress_deny=(),
-                    host_loopback=None,
-                    network_proxy=None,
-                    host_loopback_forward=(),
-                    cmdline="quiet",
-                    timeout=10,
-                )
-
-            if sys.platform == "win32":
-                with self.assertRaisesRegex(common.ScriptError, "Linux host"):
-                    provision()
-                self.assertFalse((state / sandbox_lifecycle.CONFIG_NAME).exists())
-                return
-            if share.stat().st_uid == 0:
-                self.skipTest("caller ownership refuses a root-owned share")
-            provision()
-
-            config = json.loads(
-                (state / sandbox_lifecycle.CONFIG_NAME).read_text(encoding="utf-8")
-            )
-            self.assertEqual(config["format"], sandbox_lifecycle.OWNER_CONFIG_FORMAT)
-            self.assertEqual(config["mount"]["owner"], "caller")
-            # NVX releases that know only formats 1 and 2 refuse to start it.
-            with self.assertRaisesRegex(common.ScriptError, "unsupported format"):
-                sandbox_lifecycle._read_json(
-                    state / sandbox_lifecycle.CONFIG_NAME,
-                    "sandbox configuration",
-                    version=(
-                        sandbox_lifecycle.CONFIG_FORMAT,
-                        sandbox_lifecycle.MOUNT_CONFIG_FORMAT,
-                    ),
-                )
-
-            process = MagicMock()
-            process.pid = 123
-            process.stdin = io.BytesIO()
-
-            def require(path: Path, _description: str) -> Path:
-                return path
-
-            with (
-                patch.object(sandbox_lifecycle, "require_file", side_effect=require),
-                patch.object(
-                    sandbox_lifecycle.subprocess, "Popen", return_value=process
-                ) as popen,
-                patch.object(
-                    sandbox_lifecycle, "_process_start_time", return_value=456
-                ),
-                patch.object(
-                    sandbox_lifecycle.ControlSession,
-                    "connect",
-                    return_value=MagicMock(),
-                ),
-            ):
-                sandbox_lifecycle.start(state, 10)
-
-            command = popen.call_args.args[0]
-            self.assertEqual(command[command.index("--mount-owner") + 1], "caller")
-
-    def test_managed_lifecycle_provisions_and_deprovisions_state(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            layer_path = root / "distro.erofs"
-            scratch_path = root / "scratch.ext4"
-            layer_path.write_bytes(b"layer")
-            scratch_path.write_bytes(b"scratch")
-            launch = sandbox.SandboxLaunch(
-                layers=(
-                    sandbox.SandboxLayer(
-                        role="distro",
-                        path=layer_path,
-                        uuid="11111111-1111-1111-1111-111111111111",
-                    ),
-                ),
-                scratch=scratch_path,
-            )
-            state = root / "state"
-
-            sandbox_lifecycle.provision(
-                state,
-                launch,
-                hypervisor="whp",
-                memory_mib=256,
-                net=None,
-                network_profile=None,
-                network_egress=None,
-                network_ingress=None,
-                network_egress_allow=(),
-                network_egress_deny=(),
-                host_loopback=None,
-                network_proxy=None,
-                host_loopback_forward=(),
-                cmdline="quiet",
-                timeout=10,
-            )
-
-            config = json.loads(
-                (state / sandbox_lifecycle.CONFIG_NAME).read_text(encoding="utf-8")
-            )
-            self.assertEqual(config["format"], sandbox_lifecycle.CONFIG_FORMAT)
-            self.assertIsNone(config["mount"])
-            self.assertEqual(config["workload_uid"], 65534)
-            self.assertEqual(config["hypervisor"], "whp")
-            self.assertFalse((state / sandbox_lifecycle.RUNTIME_NAME).exists())
-
-            config["network_egress_allow"] = None
-            (state / sandbox_lifecycle.CONFIG_NAME).write_text(
-                json.dumps(config), encoding="utf-8"
-            )
-
-            def require(path: Path, _description: str) -> Path:
-                return path
-
-            with (
-                patch.object(
-                    sandbox_lifecycle,
-                    "require_file",
-                    side_effect=require,
-                ),
-                self.assertRaisesRegex(
-                    common.ScriptError, "sandbox configuration is malformed"
-                ),
-            ):
-                sandbox_lifecycle.start(state, 10)
-
-            with self.assertRaisesRegex(common.ScriptError, "already provisioned"):
-                sandbox_lifecycle.provision(
-                    state,
-                    launch,
-                    hypervisor="whp",
-                    memory_mib=256,
-                    net=None,
-                    network_profile=None,
-                    network_egress=None,
-                    network_ingress=None,
-                    network_egress_allow=(),
-                    network_egress_deny=(),
-                    host_loopback=None,
-                    network_proxy=None,
-                    host_loopback_forward=(),
-                    cmdline="quiet",
-                    timeout=10,
-                )
-
-            sandbox_lifecycle.deprovision(state, 10)
-            self.assertFalse(state.exists())
-
-    def test_managed_lifecycle_start_requests_openvmm_outcome(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary).resolve()
-            layer_path = root / "distro.erofs"
-            scratch_path = root / "scratch.ext4"
-            layer_path.write_bytes(b"layer")
-            scratch_path.write_bytes(b"scratch")
-            state = root / "state"
-            sandbox_lifecycle.provision(
-                state,
-                sandbox.SandboxLaunch(
-                    layers=(
-                        sandbox.SandboxLayer(
-                            role="distro",
-                            path=layer_path,
-                            uuid="11111111-1111-1111-1111-111111111111",
-                        ),
-                    ),
-                    scratch=scratch_path,
-                ),
-                hypervisor="whp",
-                memory_mib=256,
-                net=None,
-                network_profile=None,
-                network_egress=None,
-                network_ingress=None,
-                network_egress_allow=(),
-                network_egress_deny=(),
-                host_loopback=None,
-                network_proxy=None,
-                host_loopback_forward=(),
-                cmdline="quiet",
-                timeout=10,
-            )
-            process = MagicMock()
-            process.pid = 123
-            process.stdin = io.BytesIO()
-            session = MagicMock()
-            context = MagicMock()
-            context.__enter__.return_value = session
-
-            def require(path: Path, _description: str) -> Path:
-                return path
-
-            with (
-                patch.object(
-                    sandbox_lifecycle,
-                    "require_file",
-                    side_effect=require,
-                ),
-                patch.object(
-                    sandbox_lifecycle.subprocess,
-                    "Popen",
-                    return_value=process,
-                ) as popen,
-                patch.object(
-                    sandbox_lifecycle,
-                    "_process_start_time",
-                    return_value=456,
-                ) as process_start_time,
-                patch.object(
-                    sandbox_lifecycle.ControlSession,
-                    "connect",
-                    return_value=context,
-                ),
-            ):
-                sandbox_lifecycle.start(state, 10)
-
-            command = popen.call_args.args[0]
-            self.assertEqual(
-                Path(command[command.index("--microvm-report") + 1]),
-                state / sandbox_lifecycle.OUTCOME_NAME,
-            )
-            session.ping.assert_called_once_with(10)
-            process_start_time.assert_called_once_with(123)
-            runtime = json.loads(
-                (state / sandbox_lifecycle.RUNTIME_NAME).read_text(encoding="utf-8")
-            )
-            self.assertEqual((runtime["pid"], runtime["start_time"]), (123, 456))
-
-    def test_versioned_json_reader_supports_custom_version_field(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            path = Path(temporary) / "outcome.json"
-            payload = {"schema_version": sandbox_lifecycle.OUTCOME_SCHEMA_VERSION}
-            path.write_text(json.dumps(payload), encoding="utf-8")
-
-            self.assertEqual(
-                sandbox_lifecycle._read_json(
-                    path,
-                    "OpenVMM outcome report",
-                    version_field="schema_version",
-                    version=sandbox_lifecycle.OUTCOME_SCHEMA_VERSION,
-                ),
-                payload,
-            )
-            with self.assertRaisesRegex(common.ScriptError, "unsupported format"):
-                sandbox_lifecycle._read_json(
-                    path,
-                    "OpenVMM outcome report",
-                    version_field="schema_version",
-                    version=sandbox_lifecycle.OUTCOME_SCHEMA_VERSION + 1,
-                )
-
-    def test_versioned_json_reader_rejects_invalid_utf8(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            path = Path(temporary) / "config.json"
-            path.write_bytes(b"\xff")
-
-            with self.assertRaisesRegex(common.ScriptError, "failed to read"):
-                sandbox_lifecycle._read_json(path, "sandbox configuration")
-
-    def test_managed_exec_outcome_excludes_workload_data(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            path = Path(temporary) / "outcome.json"
-            sandbox_lifecycle.write_exec_outcome(
-                path,
-                sandbox_lifecycle.ManagedExecResult(
-                    124,
-                    "timeout",
-                    b"sensitive stdout",
-                    b"sensitive stderr",
-                ),
-            )
-            outcome = json.loads(path.read_text(encoding="utf-8"))
-
-        self.assertEqual(outcome["schema_version"], 1)
-        self.assertEqual(
-            outcome["outcome"],
-            {
-                "operation": "exec",
-                "category": "timeout",
-                "status_code": 124,
-            },
-        )
-        self.assertEqual(len(outcome["operation_id"]), 32)
-        encoded = json.dumps(outcome)
-        self.assertNotIn("stdout", encoded)
-        self.assertNotIn("stderr", encoded)
-        self.assertNotIn("sensitive", encoded)
-
-    def test_managed_exec_outcome_does_not_overwrite(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            path = Path(temporary) / "outcome.json"
-            path.write_text("existing", encoding="utf-8")
-            with self.assertRaisesRegex(common.ScriptError, "already exists"):
-                sandbox_lifecycle.write_exec_outcome(
-                    path,
-                    sandbox_lifecycle.ManagedExecResult(0, "exit", b"", b""),
-                )
-
-    def test_managed_exec_outcome_rejects_existing_symlink(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            directory = Path(temporary)
-            target = directory / "missing-target"
-            path = directory / "outcome.json"
-            try:
-                path.symlink_to(target)
-            except OSError as error:
-                self.skipTest(f"symlinks are unavailable: {error}")
-            with self.assertRaisesRegex(common.ScriptError, "already exists"):
-                sandbox_lifecycle.write_exec_outcome(
-                    path,
-                    sandbox_lifecycle.ManagedExecResult(0, "exit", b"", b""),
-                )
-
-    def test_managed_stop_cleans_runtime_state_if_report_is_invalid(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            state = Path(temporary)
-            sandbox_lifecycle._write_json(
-                state / sandbox_lifecycle.RUNTIME_NAME,
-                {
-                    "format": sandbox_lifecycle.STATE_FORMAT,
-                    "pid": 123,
-                    "control_endpoint": "control.sock",
-                },
-            )
-            (state / sandbox_lifecycle.CAPABILITY_NAME).write_bytes(b"x" * 32)
-            (state / sandbox_lifecycle.CONTROL_SOCKET_NAME).touch()
-            (state / sandbox_lifecycle.OUTCOME_NAME).write_text(
-                "invalid",
-                encoding="utf-8",
-            )
-            context = MagicMock()
-            with (
-                patch.object(
-                    sandbox_lifecycle,
-                    "_process_running",
-                    side_effect=(True, False),
-                ),
-                patch.object(
-                    sandbox_lifecycle.ControlSession,
-                    "connect",
-                    return_value=context,
-                ),
-                self.assertRaisesRegex(common.ScriptError, "outcome report"),
-            ):
-                sandbox_lifecycle.stop(state, 10)
-
-            self.assertFalse((state / sandbox_lifecycle.RUNTIME_NAME).exists())
-            self.assertFalse((state / sandbox_lifecycle.CAPABILITY_NAME).exists())
-            self.assertFalse((state / sandbox_lifecycle.CONTROL_SOCKET_NAME).exists())
-            self.assertTrue((state / sandbox_lifecycle.OUTCOME_NAME).exists())
-
-    def test_process_identity_parses_linux_process_status(self):
-        def status(state: bytes, start_time: bytes = b"98765") -> bytes:
-            fields = b" ".join([state, *(b"0" for _ in range(18)), start_time, b"0"])
-            # The command name contains a space and parentheses.
-            return b"42 (sh) x (y) " + fields + b"\n"
-
-        self.assertEqual(sandbox_lifecycle._linux_start_time(status(b"S")), 98765)
-        self.assertEqual(sandbox_lifecycle._linux_start_time(status(b"D")), 98765)
-        for state in (b"Z", b"X"):
-            self.assertIsNone(sandbox_lifecycle._linux_start_time(status(state)))
-        for malformed in (
-            b"42 (sh",
-            b"42 (sh) S 1 2\n",
-            status(b"S", b"-1"),
-            status(b"S", b"tick"),
-        ):
-            with self.assertRaisesRegex(ValueError, "unexpected format"):
-                sandbox_lifecycle._linux_start_time(malformed)
-
-    def test_process_identity_requires_the_recorded_start_time(self):
-        if os.name != "nt" and sys.platform != "linux":
-            self.skipTest("process identity requires a Linux or Windows host")
-        pid = os.getpid()
-        start_time = sandbox_lifecycle._process_start_time(pid)
-        assert isinstance(start_time, int)
-
-        self.assertTrue(sandbox_lifecycle._process_running(pid, start_time))
-        self.assertFalse(sandbox_lifecycle._process_running(pid, start_time + 1))
-        # Records from earlier NVX versions identify OpenVMM by process ID alone.
-        self.assertTrue(sandbox_lifecycle._process_running(pid, None))
-
-    def test_runtime_records_report_whether_their_process_runs(self):
-        if os.name != "nt" and sys.platform != "linux":
-            self.skipTest("process identity requires a Linux or Windows host")
-        pid = os.getpid()
-        start_time = sandbox_lifecycle._process_start_time(pid)
-        assert isinstance(start_time, int)
-
-        self.assertTrue(
-            sandbox_lifecycle.runtime_process_running(
-                {"pid": pid, "start_time": start_time}
-            )
-        )
-        self.assertFalse(
-            sandbox_lifecycle.runtime_process_running(
-                {"pid": pid, "start_time": start_time + 1}
-            )
-        )
-        with self.assertRaisesRegex(common.ScriptError, "invalid process ID"):
-            sandbox_lifecycle.runtime_process_running({"pid": "openvmm"})
-        with self.assertRaisesRegex(common.ScriptError, "invalid process start"):
-            sandbox_lifecycle.runtime_process_running({"pid": pid, "start_time": -1})
-
-    def test_process_identity_counts_an_exited_process_as_stopped(self):
-        if os.name != "nt" and sys.platform != "linux":
-            self.skipTest("process identity requires a Linux or Windows host")
-        child = _stdin_bound_child()
-        try:
-            start_time = sandbox_lifecycle._process_start_time(child.pid)
-            assert isinstance(start_time, int)
-            self.assertTrue(sandbox_lifecycle._process_running(child.pid, start_time))
-        finally:
-            _finish_child(child)
-
-        # On Windows, the handle that Popen holds keeps the exited process's ID.
-        self.assertFalse(sandbox_lifecycle._process_running(child.pid, start_time))
-        self.assertFalse(sandbox_lifecycle._process_running(child.pid, None))
-
-    def test_process_identity_counts_a_zombie_as_stopped(self):
-        if sys.platform != "linux":
-            self.skipTest("zombie processes require a Linux host")
-        child = _stdin_bound_child()
-        try:
-            start_time = sandbox_lifecycle._process_start_time(child.pid)
-            assert isinstance(start_time, int)
-            _exit_unreaped(child)
-            stat = Path(f"/proc/{child.pid}/stat").read_bytes()
-            self.assertEqual(stat[stat.rfind(b")") + 2 :][:1], b"Z")
-
-            self.assertIsNone(sandbox_lifecycle._process_start_time(child.pid))
-            self.assertFalse(sandbox_lifecycle._process_running(child.pid, start_time))
-            self.assertFalse(sandbox_lifecycle._process_running(child.pid, None))
-        finally:
-            _finish_child(child)
-
-    def test_managed_stop_completes_while_openvmm_remains_unreaped(self):
-        if sys.platform != "linux":
-            self.skipTest("zombie processes require a Linux host")
-        child = _stdin_bound_child()
-        try:
-            with tempfile.TemporaryDirectory() as temporary:
-                state = Path(temporary)
-                _write_managed_runtime(
-                    state,
-                    child.pid,
-                    sandbox_lifecycle._process_start_time(child.pid),
-                )
-                outcome = {
-                    "schema_version": sandbox_lifecycle.OUTCOME_SCHEMA_VERSION,
-                    "outcome": {"category": "stopped"},
-                    "network_policy": {},
-                    "teardown": {},
-                }
-                (state / sandbox_lifecycle.OUTCOME_NAME).write_text(
-                    json.dumps(outcome), encoding="utf-8"
-                )
-                session = MagicMock()
-                context = MagicMock()
-                context.__enter__.return_value = session
-
-                def acknowledge_stop(_timeout: float) -> None:
-                    # OpenVMM exits after the guest acknowledges STOP, but its
-                    # parent, such as a container init without --init, never
-                    # reaps it.
-                    _exit_unreaped(child)
-
-                session.stop.side_effect = acknowledge_stop
-                with patch.object(
-                    sandbox_lifecycle.ControlSession,
-                    "connect",
-                    return_value=context,
-                ):
-                    self.assertEqual(sandbox_lifecycle.stop(state, 10), outcome)
-
-                session.stop.assert_called_once_with(10)
-                self.assertFalse((state / sandbox_lifecycle.RUNTIME_NAME).exists())
-                self.assertFalse((state / sandbox_lifecycle.CAPABILITY_NAME).exists())
-        finally:
-            _finish_child(child)
-
-    def test_managed_lifecycle_treats_a_reused_process_id_as_stopped(self):
-        if os.name != "nt" and sys.platform != "linux":
-            self.skipTest("process identity requires a Linux or Windows host")
-        with tempfile.TemporaryDirectory() as temporary:
-            state = Path(temporary) / "state"
-            state.mkdir()
-            start_time = sandbox_lifecycle._process_start_time(os.getpid())
-            assert isinstance(start_time, int)
-            # OpenVMM is gone, and this test process now has its process ID.
-            _write_managed_runtime(state, os.getpid(), start_time + 1)
-            (state / sandbox_lifecycle.CONFIG_NAME).write_text("{}", encoding="utf-8")
-
-            with patch.object(sandbox_lifecycle.ControlSession, "connect") as connect:
-                with self.assertRaisesRegex(
-                    common.ScriptError, "runtime state is stale"
-                ):
-                    sandbox_lifecycle.stop(state, 10)
-                with self.assertRaisesRegex(
-                    common.ScriptError, "runtime state is stale"
-                ):
-                    sandbox_lifecycle.exec_workload(
-                        state, ("/bin/true",), timeout_ms=0, response_timeout=10
-                    )
-            connect.assert_not_called()
-
-            sandbox_lifecycle.deprovision(state, 10)
-            self.assertFalse(state.exists())
-
-    def test_managed_lifecycle_identifies_legacy_records_by_process_id(self):
-        if os.name != "nt" and sys.platform != "linux":
-            self.skipTest("process identity requires a Linux or Windows host")
-        with tempfile.TemporaryDirectory() as temporary:
-            state = Path(temporary)
-            _write_managed_runtime(state, os.getpid(), None)
-
-            with self.assertRaisesRegex(common.ScriptError, "must be stopped"):
-                sandbox_lifecycle.deprovision(state, 10)
-            self.assertTrue((state / sandbox_lifecycle.RUNTIME_NAME).exists())
-
-    def test_managed_lifecycle_rejects_invalid_process_start_times(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            state = Path(temporary)
-            for start_time in ("1", True, -1, 1.5):
-                with self.subTest(start_time=start_time):
-                    sandbox_lifecycle._write_json(
-                        state / sandbox_lifecycle.RUNTIME_NAME,
-                        {
-                            "format": sandbox_lifecycle.STATE_FORMAT,
-                            "pid": os.getpid(),
-                            "start_time": start_time,
-                            "control_endpoint": "control.sock",
-                        },
-                    )
-                    for operation in (
-                        lambda: sandbox_lifecycle.stop(state, 10),
-                        lambda: sandbox_lifecycle.deprovision(state, 10),
-                    ):
-                        with self.assertRaisesRegex(
-                            common.ScriptError, "invalid process start time"
-                        ):
-                            operation()
-
-    def test_managed_start_fails_closed_without_openvmm_identity(self):
-        def require(path: Path, _description: str) -> Path:
-            return path
-
-        # A side effect that yields None reports that no live process has the ID.
-        for identity, exit_status, message in (
-            ((None,), 1, "OpenVMM exited during startup"),
-            ((None,), None, "cannot identify the OpenVMM process$"),
-            (OSError("denied"), None, "cannot identify the OpenVMM process: denied"),
-        ):
-            with (
-                self.subTest(message=message),
-                tempfile.TemporaryDirectory() as temporary,
-            ):
-                state = _provision_managed_sandbox(Path(temporary).resolve())
-                process = MagicMock()
-                process.pid = 123
-                process.stdin = io.BytesIO()
-                process.poll.return_value = exit_status
-                with (
-                    patch.object(
-                        sandbox_lifecycle, "require_file", side_effect=require
-                    ),
-                    patch.object(
-                        sandbox_lifecycle.subprocess, "Popen", return_value=process
-                    ),
-                    patch.object(
-                        sandbox_lifecycle, "_process_start_time", side_effect=identity
-                    ),
-                    patch.object(
-                        sandbox_lifecycle.ControlSession, "connect"
-                    ) as connect,
-                    self.assertRaisesRegex(common.ScriptError, message),
-                ):
-                    sandbox_lifecycle.start(state, 10)
-
-                connect.assert_not_called()
-                self.assertEqual(process.terminate.called, exit_status is None)
-                self.assertFalse((state / sandbox_lifecycle.RUNTIME_NAME).exists())
-                self.assertFalse((state / sandbox_lifecycle.CAPABILITY_NAME).exists())
-                self.assertTrue((state / sandbox_lifecycle.CONFIG_NAME).exists())
-
-    def test_managed_start_lets_exiting_openvmm_publish_its_outcome(self):
-        # A guest that exits during startup, such as one that refuses the workload
-        # identity, makes OpenVMM close the control endpoint before it publishes
-        # its outcome report. Terminating OpenVMM then left the report's staging
-        # file, which deprovision refuses to remove (issue #438).
-        if os.name != "nt" and sys.platform != "linux":
-            self.skipTest("managed sandboxes require a Linux or Windows host")
-        temporary = tempfile.TemporaryDirectory()
-        self.addCleanup(temporary.cleanup)
-        state = _provision_managed_sandbox(Path(temporary.name).resolve())
-        popen = subprocess.Popen
-        launched: list[subprocess.Popen[bytes]] = []
-
-        def launch(command: list[str], **options: Any) -> subprocess.Popen[bytes]:
-            attach_size = control_session.OUTER_HEADER.size + 32
-            # With unknown options, the type checker cannot tell that start
-            # requests binary streams.
-            process = cast(
-                "subprocess.Popen[bytes]",
-                popen(
-                    [
-                        sys.executable,
-                        "-c",
-                        _EXITING_OPENVMM,
-                        str(attach_size),
-                        *command[1:],
-                    ],
-                    **options,
-                ),
-            )
-            self.addCleanup(_end_child, process)
-            launched.append(process)
-            return process
-
-        def require(path: Path, _description: str) -> Path:
-            return path
-
-        with (
-            patch.object(sandbox_lifecycle, "require_file", side_effect=require),
-            patch.object(sandbox_lifecycle.subprocess, "Popen", side_effect=launch),
-            self.assertRaisesRegex(
-                common.ScriptError,
-                "^OpenVMM exited during startup: guest-exit status 125$",
-            ),
-        ):
-            sandbox_lifecycle.start(state, 30)
-
-        log = (state / sandbox_lifecycle.LOG_NAME).read_text(
-            encoding="utf-8", errors="replace"
-        )
-        # OpenVMM exited on its own, after it published the report.
-        self.assertEqual([process.returncode for process in launched], [125], log)
-        self.assertEqual(
-            sorted(path.name for path in state.iterdir()),
-            [
-                sandbox_lifecycle.CONFIG_NAME,
-                sandbox_lifecycle.LOCK_NAME,
-                sandbox_lifecycle.LOG_NAME,
-                sandbox_lifecycle.OUTCOME_NAME,
-            ],
-            log,
-        )
-        sandbox_lifecycle.deprovision(state, 10)
-        self.assertFalse(state.exists())
-
-    def test_managed_start_waits_only_for_openvmm_that_closed_its_endpoint(self):
-        def require(path: Path, _description: str) -> Path:
-            return path
-
-        closed = control_session.ControlEndpointClosed()
-        # Each case holds the control failure, the status with which OpenVMM exits
-        # on its own or None if it runs until terminated, the waits for it, and the
-        # error that start raises.
-        for failure, status, waits, raised, message in (
-            # OpenVMM closed the endpoint and exits within the grace period.
-            (
-                closed,
-                7,
-                [call(timeout=10)],
-                common.ScriptError,
-                "^OpenVMM exited during startup with status 7$",
-            ),
-            # It closed the endpoint but outlives the grace period.
-            (
-                closed,
-                None,
-                [call(timeout=10), call(timeout=5)],
-                control_session.ControlEndpointClosed,
-                "^managed control endpoint closed$",
-            ),
-            # It still serves the endpoint, so it gets no grace period.
-            (
-                TimeoutError("managed control response timed out"),
-                None,
-                [call(timeout=5)],
-                TimeoutError,
-                "^managed control response timed out$",
-            ),
-            # A session reset also comes from an OpenVMM that serves the endpoint.
-            (
-                ConnectionError("managed control session was reset"),
-                None,
-                [call(timeout=5)],
-                ConnectionError,
-                "^managed control session was reset$",
-            ),
-            # An interrupt propagates even if OpenVMM exited.
-            (KeyboardInterrupt(), 0, [], KeyboardInterrupt, ""),
-        ):
-            with (
-                self.subTest(failure=failure, status=status),
-                tempfile.TemporaryDirectory() as temporary,
-            ):
-                state = _provision_managed_sandbox(Path(temporary).resolve())
-                process = _openvmm_mock(status)
-                session = MagicMock()
-                session.ping.side_effect = failure
-                context = MagicMock()
-                context.__enter__.return_value = session
-                context.__exit__.return_value = False
-                with (
-                    patch.object(
-                        sandbox_lifecycle, "require_file", side_effect=require
-                    ),
-                    patch.object(
-                        sandbox_lifecycle.subprocess, "Popen", return_value=process
-                    ),
-                    patch.object(
-                        sandbox_lifecycle, "_process_start_time", return_value=456
-                    ),
-                    patch.object(
-                        sandbox_lifecycle.ControlSession,
-                        "connect",
-                        return_value=context,
-                    ),
-                    self.assertRaisesRegex(raised, message),
-                ):
-                    sandbox_lifecycle.start(state, 10)
-
-                self.assertEqual(process.wait.call_args_list, waits)
-                self.assertEqual(process.terminate.called, status is None)
-                self.assertEqual(
-                    sorted(path.name for path in state.iterdir()),
-                    [
-                        sandbox_lifecycle.CONFIG_NAME,
-                        sandbox_lifecycle.LOCK_NAME,
-                        sandbox_lifecycle.LOG_NAME,
-                    ],
-                )
-
-    def test_managed_start_spawns_openvmm_with_a_prepared_capability_pipe(self):
-        # OpenVMM reads its capability as soon as it starts, so start hands it a
-        # pipe that already holds the capability and the end of file (#440).
-        def require(path: Path, _description: str) -> Path:
-            return path
-
-        capability = bytes(range(1, 33))
-        prepared: list[int] = []
-        spawned: list[object] = []
-
-        def prepare(value: bytes) -> int:
-            self.assertEqual(value, capability)
-            descriptor = control_session.capability_pipe(value)
-            prepared.append(descriptor)
-            return descriptor
-
-        process = MagicMock()
-        process.pid = 123
-        process.stdin = None
-
-        def launch(_command: list[str], *, stdin: object, **_options: object) -> Any:
-            # The pipe stays open until OpenVMM has started with it.
-            self.assertIsInstance(stdin, int)
-            os.fstat(cast(int, stdin))
-            spawned.append(stdin)
-            return process
-
-        session = MagicMock()
-        context = MagicMock()
-        context.__enter__.return_value = session
-        context.__exit__.return_value = False
-        with tempfile.TemporaryDirectory() as temporary:
-            state = _provision_managed_sandbox(Path(temporary).resolve())
-            with (
-                patch.object(sandbox_lifecycle, "require_file", side_effect=require),
-                patch.object(
-                    sandbox_lifecycle.secrets, "token_bytes", return_value=capability
-                ),
-                patch.object(sandbox_lifecycle, "capability_pipe", side_effect=prepare),
-                patch.object(sandbox_lifecycle.subprocess, "Popen", side_effect=launch),
-                patch.object(
-                    sandbox_lifecycle, "_process_start_time", return_value=456
-                ),
-                patch.object(
-                    sandbox_lifecycle.ControlSession, "connect", return_value=context
-                ) as connect,
-            ):
-                sandbox_lifecycle.start(state, 10)
-
-            self.assertEqual(
-                (state / sandbox_lifecycle.CAPABILITY_NAME).read_bytes(), capability
-            )
-        self.assertEqual(len(prepared), 1)
-        self.assertEqual(spawned, prepared)
-        # start closes its copy of the pipe once OpenVMM has it.
-        with self.assertRaises(OSError):
-            os.fstat(prepared[0])
-        self.assertEqual(connect.call_args.args[1], capability)
-        session.ping.assert_called_once_with(10)
-
-    def test_managed_start_launches_one_openvmm_for_overlapping_starts(self):
-        # Overlapping starts of one sandbox each launched OpenVMM. The runtime
-        # record and capability could then name different VMs, so that stop
-        # ended one VM or neither, and a failed start removed the other's files
-        # (#464).
-        if os.name != "nt" and sys.platform != "linux":
-            self.skipTest("managed sandboxes require a Linux or Windows host")
-        temporary = tempfile.TemporaryDirectory()
-        self.addCleanup(temporary.cleanup)
-        state = _provision_managed_sandbox(Path(temporary.name).resolve())
-        popen = subprocess.Popen
-        launched: list[subprocess.Popen[bytes]] = []
-        attempts: list[None] = []
-        attempts_lock = threading.Lock()
-        overtaken = threading.Event()
-
-        def launch(command: list[str], **options: Any) -> subprocess.Popen[bytes]:
-            with attempts_lock:
-                first = not attempts
-                attempts.append(None)
-            if first:
-                # Gives the other start time to launch its own OpenVMM before
-                # this one records its own, as it could without the lock.
-                overtaken.wait(0.5)
-            else:
-                overtaken.set()
-            # With unknown options, the type checker cannot tell that start
-            # requests binary streams.
-            process = cast(
-                "subprocess.Popen[bytes]",
-                popen(
-                    [sys.executable, "-c", _SERVING_OPENVMM, *command[1:]], **options
-                ),
-            )
-            self.addCleanup(_end_child, process)
-            launched.append(process)
-            return process
-
-        def require(path: Path, _description: str) -> Path:
-            return path
-
-        barrier = threading.Barrier(2)
-        results: list[str] = []
-
-        def contend() -> None:
-            barrier.wait()
-            try:
-                sandbox_lifecycle.start(state, 30)
-                results.append("started")
-            except common.ScriptError as error:
-                results.append(str(error))
-
-        with (
-            patch.object(sandbox_lifecycle, "require_file", side_effect=require),
-            patch.object(sandbox_lifecycle.subprocess, "Popen", side_effect=launch),
-        ):
-            contenders = [
-                threading.Thread(target=contend, daemon=True) for _ in range(2)
-            ]
-            for contender in contenders:
-                contender.start()
-            for contender in contenders:
-                contender.join(120)
-        self.assertFalse(any(contender.is_alive() for contender in contenders))
-
-        self.assertEqual(len(launched), 1)
-        self.assertEqual(
-            sorted(results),
-            ["sandbox is already running or has stale runtime state", "started"],
-        )
-        runtime = json.loads(
-            (state / sandbox_lifecycle.RUNTIME_NAME).read_text(encoding="utf-8")
-        )
-        self.assertEqual(runtime["pid"], launched[0].pid)
-
-        # OpenVMM does not inherit the lock, so the next transition can take it
-        # while the VM runs.
-        relocked = threading.Event()
-
-        def relock() -> None:
-            with sandbox_lifecycle._LifecycleLock(state, 30):
-                relocked.set()
-
-        threading.Thread(target=relock, daemon=True).start()
-        self.assertTrue(relocked.wait(30))
-
-        # The capability on record authenticates stop to the only VM, which ends.
-        outcome = sandbox_lifecycle.stop(state, 30)
-        self.assertEqual(outcome["outcome"]["category"], "success")
-        self.assertEqual(launched[0].wait(timeout=30), 0)
-        sandbox_lifecycle.deprovision(state, 10)
-        self.assertFalse(state.exists())
-
-    def test_managed_start_refuses_runtime_files_without_a_record(self):
-        # A start that was killed can leave its capability or control socket, but
-        # no runtime record, while its OpenVMM still runs. Start and deprovision
-        # refuse them rather than launch a second VM for the sandbox or remove
-        # the files of a VM that may still run.
-        def require(path: Path, _description: str) -> Path:
-            return path
-
-        for name in (
-            sandbox_lifecycle.CAPABILITY_NAME,
-            sandbox_lifecycle.CONTROL_SOCKET_NAME,
-        ):
-            with (
-                self.subTest(name=name),
-                tempfile.TemporaryDirectory() as temporary,
-            ):
-                state = _provision_managed_sandbox(Path(temporary).resolve())
-                leftover = state / name
-                leftover.write_bytes(b"leftover")
-                with (
-                    patch.object(
-                        sandbox_lifecycle, "require_file", side_effect=require
-                    ),
-                    patch.object(sandbox_lifecycle.subprocess, "Popen") as popen,
-                    self.assertRaisesRegex(
-                        common.ScriptError,
-                        "^sandbox is already running or has stale runtime state$",
-                    ),
-                ):
-                    sandbox_lifecycle.start(state, 10)
-
-                popen.assert_not_called()
-                self.assertEqual(leftover.read_bytes(), b"leftover")
-                self.assertFalse((state / sandbox_lifecycle.RUNTIME_NAME).exists())
-
-                with self.assertRaisesRegex(
-                    common.ScriptError,
-                    "^sandbox has runtime files but no runtime record, so its "
-                    "OpenVMM process may still run",
-                ):
-                    sandbox_lifecycle.deprovision(state, 10)
-                self.assertEqual(leftover.read_bytes(), b"leftover")
-                self.assertEqual(
-                    sorted(path.name for path in state.iterdir()),
-                    sorted(
-                        (
-                            sandbox_lifecycle.CONFIG_NAME,
-                            sandbox_lifecycle.LOCK_NAME,
-                            name,
-                        )
-                    ),
-                )
-
-        # A start creates its capability only if no other holds one.
-        with tempfile.TemporaryDirectory() as temporary:
-            capability = Path(temporary) / sandbox_lifecycle.CAPABILITY_NAME
-            capability.write_bytes(b"leftover")
-            with self.assertRaisesRegex(
-                common.ScriptError,
-                "^sandbox is already running or has stale runtime state$",
-            ):
-                sandbox_lifecycle._create_capability(capability, bytes(range(1, 33)))
-            self.assertEqual(capability.read_bytes(), b"leftover")
-
-    def test_managed_cleanups_remove_the_runtime_record_last(self):
-        # An interrupted cleanup then leaves a record that shows OpenVMM gone,
-        # which deprovision accepts, rather than runtime files that it refuses.
-        unlink = Path.unlink
-        removed: list[str] = []
-        expected = [
-            sandbox_lifecycle.CONTROL_SOCKET_NAME,
-            sandbox_lifecycle.CAPABILITY_NAME,
-            sandbox_lifecycle.RUNTIME_NAME,
-        ]
-
-        def tracked_unlink(path: Path, missing_ok: bool = False) -> None:
-            if path.name in sandbox_lifecycle.RUNTIME_FILE_NAMES:
-                removed.append(path.name)
-            unlink(path, missing_ok=missing_ok)
-
-        with tempfile.TemporaryDirectory() as temporary:
-            state = Path(temporary)
-            _write_managed_runtime(state, 123, 456)
-            (state / sandbox_lifecycle.OUTCOME_NAME).write_text(
-                json.dumps(
-                    {
-                        "schema_version": sandbox_lifecycle.OUTCOME_SCHEMA_VERSION,
-                        "outcome": {"category": "success"},
-                        "network_policy": {},
-                        "teardown": {},
-                    }
-                ),
-                encoding="utf-8",
-            )
-            with (
-                patch.object(
-                    sandbox_lifecycle, "_process_running", side_effect=(True, False)
-                ),
-                patch.object(
-                    sandbox_lifecycle.ControlSession,
-                    "connect",
-                    return_value=MagicMock(),
-                ),
-                patch.object(Path, "unlink", autospec=True, side_effect=tracked_unlink),
-            ):
-                sandbox_lifecycle.stop(state, 10)
-        self.assertEqual(removed, expected)
-
-        def require(path: Path, _description: str) -> Path:
-            return path
-
-        removed.clear()
-        session = MagicMock()
-        session.ping.side_effect = TimeoutError("managed control response timed out")
-        context = MagicMock()
-        context.__enter__.return_value = session
-        context.__exit__.return_value = False
-        with tempfile.TemporaryDirectory() as temporary:
-            state = _provision_managed_sandbox(Path(temporary).resolve())
-            with (
-                patch.object(sandbox_lifecycle, "require_file", side_effect=require),
-                patch.object(
-                    sandbox_lifecycle.subprocess,
-                    "Popen",
-                    return_value=_openvmm_mock(None),
-                ),
-                patch.object(
-                    sandbox_lifecycle, "_process_start_time", return_value=456
-                ),
-                patch.object(
-                    sandbox_lifecycle.ControlSession, "connect", return_value=context
-                ),
-                patch.object(Path, "unlink", autospec=True, side_effect=tracked_unlink),
-                self.assertRaisesRegex(TimeoutError, "response timed out"),
-            ):
-                sandbox_lifecycle.start(state, 10)
-        self.assertEqual(removed, expected)
-
-    def test_managed_start_keeps_runtime_files_while_openvmm_may_run(self):
-        # A failed start that cannot end its OpenVMM process leaves the runtime
-        # files in place rather than make the sandbox look stopped, so start and
-        # deprovision refuse it while OpenVMM may still run.
-        def require(path: Path, _description: str) -> Path:
-            return path
-
-        process = _openvmm_mock(None)
-        process.wait.side_effect = subprocess.TimeoutExpired("openvmm", 5)
-        session = MagicMock()
-        session.ping.side_effect = TimeoutError("managed control response timed out")
-        context = MagicMock()
-        context.__enter__.return_value = session
-        context.__exit__.return_value = False
-        with tempfile.TemporaryDirectory() as temporary:
-            state = _provision_managed_sandbox(Path(temporary).resolve())
-            with (
-                patch.object(sandbox_lifecycle, "require_file", side_effect=require),
-                patch.object(
-                    sandbox_lifecycle.subprocess, "Popen", return_value=process
-                ),
-                patch.object(
-                    sandbox_lifecycle, "_process_start_time", return_value=456
-                ),
-                patch.object(
-                    sandbox_lifecycle.ControlSession, "connect", return_value=context
-                ),
-                self.assertRaises(subprocess.TimeoutExpired),
-            ):
-                sandbox_lifecycle.start(state, 10)
-
-            process.kill.assert_called_once_with()
-            self.assertTrue((state / sandbox_lifecycle.RUNTIME_NAME).is_file())
-            self.assertTrue((state / sandbox_lifecycle.CAPABILITY_NAME).is_file())
-            with self.assertRaisesRegex(
-                common.ScriptError,
-                "^sandbox is already running or has stale runtime state$",
-            ):
-                sandbox_lifecycle.start(state, 10)
-            with (
-                patch.object(sandbox_lifecycle, "_process_running", return_value=True),
-                self.assertRaisesRegex(
-                    common.ScriptError, "^sandbox must be stopped before deprovision$"
-                ),
-            ):
-                sandbox_lifecycle.deprovision(state, 10)
-
-    def test_lifecycle_lock_excludes_other_holders(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            state = _provision_managed_sandbox(Path(temporary).resolve())
-            acquired = threading.Event()
-
-            def wait_for_lock() -> None:
-                with sandbox_lifecycle._LifecycleLock(state, 30):
-                    acquired.set()
-
-            waiter = threading.Thread(target=wait_for_lock, daemon=True)
-            with sandbox_lifecycle._LifecycleLock(state, 30):
-                waiter.start()
-                self.assertFalse(acquired.wait(0.5))
-            self.assertTrue(acquired.wait(30))
-            waiter.join(30)
-            self.assertFalse(waiter.is_alive())
-            self.assertTrue((state / sandbox_lifecycle.LOCK_NAME).is_file())
-
-    def test_lifecycle_lock_waits_at_most_the_timeout(self):
-        # A transition queued behind another that does not end fails once its
-        # own timeout passes, and changes nothing.
-        with tempfile.TemporaryDirectory() as temporary:
-            state = _provision_managed_sandbox(Path(temporary).resolve())
-            config = (state / sandbox_lifecycle.CONFIG_NAME).read_bytes()
-            with (
-                sandbox_lifecycle._LifecycleLock(state, 30),
-                patch.object(sandbox_lifecycle.subprocess, "Popen") as popen,
-            ):
-                for operation in (
-                    lambda: sandbox_lifecycle.start(state, 0.2),
-                    lambda: sandbox_lifecycle.stop(state, 0.2),
-                    lambda: sandbox_lifecycle.deprovision(state, 0.2),
-                ):
-                    began = time.monotonic()
-                    with self.assertRaisesRegex(
-                        TimeoutError,
-                        "^another lifecycle transition of the sandbox is still "
-                        "in progress$",
-                    ):
-                        operation()
-                    self.assertLess(time.monotonic() - began, 10)
-            popen.assert_not_called()
-            self.assertEqual(
-                sorted(path.name for path in state.iterdir()),
-                [sandbox_lifecycle.CONFIG_NAME, sandbox_lifecycle.LOCK_NAME],
-            )
-            self.assertEqual(
-                (state / sandbox_lifecycle.CONFIG_NAME).read_bytes(), config
-            )
-
-    def test_lifecycle_lock_waiter_fails_after_deprovision(self):
-        # A transition that waits while deprovision removes the sandbox fails as
-        # for an unprovisioned sandbox, without opening the lock file again.
-        if os.name != "nt" and sys.platform != "linux":
-            self.skipTest("process identity requires a Linux or Windows host")
-        temporary = tempfile.TemporaryDirectory()
-        self.addCleanup(temporary.cleanup)
-        state = _provision_managed_sandbox(Path(temporary.name).resolve())
-        # A stale record makes deprovision check its process while it holds the
-        # lock.
-        _write_managed_runtime(state, os.getpid(), None)
-        try_lock_file = sandbox_lifecycle._try_lock_file
-        open_lock_file = sandbox_lifecycle._open_lock_file
-        waiting = threading.Event()
-        waiter_opens: list[Path] = []
-        errors: list[BaseException] = []
-
-        def waiter_thread() -> bool:
-            return threading.current_thread() is not threading.main_thread()
-
-        def try_lock(descriptor: int) -> bool:
-            if waiter_thread():
-                waiting.set()
-            return try_lock_file(descriptor)
-
-        def open_lock(path: Path) -> int:
-            if waiter_thread():
-                waiter_opens.append(path)
-            return open_lock_file(path)
-
-        def stop() -> None:
-            try:
-                sandbox_lifecycle.stop(state, 10)
-            except BaseException as error:  # noqa: BLE001
-                errors.append(error)
-
-        waiter = threading.Thread(target=stop, daemon=True)
-
-        def process_running(_pid: int, _start_time: int | None) -> bool:
-            waiter.start()
-            self.assertTrue(waiting.wait(30))
-            return False
-
-        with (
-            patch.object(sandbox_lifecycle, "_try_lock_file", side_effect=try_lock),
-            patch.object(sandbox_lifecycle, "_open_lock_file", side_effect=open_lock),
-            patch.object(
-                sandbox_lifecycle, "_process_running", side_effect=process_running
-            ),
-        ):
-            sandbox_lifecycle.deprovision(state, 10)
-            waiter.join(30)
-
-        self.assertFalse(waiter.is_alive())
-        self.assertEqual(len(errors), 1)
-        self.assertIsInstance(errors[0], common.ScriptError)
-        self.assertEqual(str(errors[0]), "sandbox is not provisioned")
-        self.assertEqual(waiter_opens, [state / sandbox_lifecycle.LOCK_NAME])
-        self.assertFalse(state.exists())
-
-    def test_managed_deprovision_releases_its_lock_if_the_lock_file_lingers(self):
-        # NFS, and Windows file systems without POSIX deletion such as ReFS, keep
-        # a removed file in its directory while it is open, so the directory
-        # empties only once deprovision releases the lock.
-        with tempfile.TemporaryDirectory() as temporary:
-            state = _provision_managed_sandbox(Path(temporary).resolve())
-            rmdir = Path.rmdir
-            release = sandbox_lifecycle._LifecycleLock.release
-            events: list[str] = []
-
-            def lingering_rmdir(path: Path) -> None:
-                events.append("rmdir")
-                if events.count("rmdir") == 1:
-                    raise OSError(errno.ENOTEMPTY, "Directory not empty", str(path))
-                rmdir(path)
-
-            def tracked_release(lock: sandbox_lifecycle._LifecycleLock) -> None:
-                events.append("release")
-                release(lock)
-
-            with (
-                patch.object(Path, "rmdir", autospec=True, side_effect=lingering_rmdir),
-                patch.object(
-                    sandbox_lifecycle._LifecycleLock,
-                    "release",
-                    autospec=True,
-                    side_effect=tracked_release,
-                ),
-            ):
-                sandbox_lifecycle.deprovision(state, 10)
-
-            self.assertEqual(events, ["rmdir", "release", "rmdir", "release"])
-            self.assertFalse(state.exists())
-
-    def test_managed_deprovision_retries_only_while_lock_files_linger(self):
-        # Deprovision retries removing the emptied directory only while it is not
-        # empty, at once if the last lingering lock file is gone by then. Any
-        # other failure, such as a parent that denies the removal, it reports at
-        # once rather than after its timeout.
-        def check(
-            failure: int, failures: int | None, attempts: int, pauses: int
-        ) -> None:
-            with tempfile.TemporaryDirectory() as temporary:
-                state = _provision_managed_sandbox(Path(temporary).resolve())
-                rmdir = Path.rmdir
-                removals: list[Path] = []
-
-                def failing_rmdir(path: Path) -> None:
-                    if path == state:
-                        removals.append(path)
-                        if failures is None or len(removals) <= failures:
-                            raise OSError(failure, os.strerror(failure), str(path))
-                    rmdir(path)
-
-                with (
-                    patch.object(
-                        Path, "rmdir", autospec=True, side_effect=failing_rmdir
-                    ),
-                    patch.object(
-                        sandbox_lifecycle, "_pause", wraps=sandbox_lifecycle._pause
-                    ) as pause,
-                ):
-                    if failures is None:
-                        with self.assertRaises(PermissionError):
-                            sandbox_lifecycle.deprovision(state, 1)
-                    else:
-                        sandbox_lifecycle.deprovision(state, 30)
-
-                self.assertEqual(len(removals), attempts)
-                self.assertEqual(pause.call_count, pauses)
-                if failures is None:
-                    self.assertEqual(list(state.iterdir()), [])
-                else:
-                    self.assertFalse(state.exists())
-
-        for name, failure, failures, attempts, pauses in (
-            ("last lock file gone", errno.ENOTEMPTY, 2, 3, 0),
-            ("hidden lock file", errno.ENOTEMPTY, 4, 5, 1),
-            ("removal denied", errno.EACCES, None, 1, 0),
-        ):
-            with self.subTest(name):
-                check(failure, failures, attempts, pauses)
-
-    def test_managed_deprovision_outlasts_waiters_that_keep_the_lock_file(self):
-        # On NFS and on Windows file systems without POSIX deletion, each waiter's
-        # handle keeps the removed lock file in the directory until the waiter
-        # finds the sandbox gone. Deprovision then retries until they have
-        # closed it, and no waiter creates a new lock file.
-        if os.name != "nt" and sys.platform != "linux":
-            self.skipTest("process identity requires a Linux or Windows host")
-        temporary = tempfile.TemporaryDirectory()
-        self.addCleanup(temporary.cleanup)
-        state = _provision_managed_sandbox(Path(temporary.name).resolve())
-        _write_managed_runtime(state, os.getpid(), None)
-        rmdir = Path.rmdir
-        try_lock_file = sandbox_lifecycle._try_lock_file
-        polling: set[int] = set()
-        polling_lock = threading.Lock()
-        both_polling = threading.Event()
-        errors: list[BaseException] = []
-
-        def try_lock(descriptor: int) -> bool:
-            if threading.current_thread() is not threading.main_thread():
-                with polling_lock:
-                    polling.add(threading.get_ident())
-                    if len(polling) == 2:
-                        both_polling.set()
-            return try_lock_file(descriptor)
-
-        def stop() -> None:
-            try:
-                sandbox_lifecycle.stop(state, 30)
-            except BaseException as error:  # noqa: BLE001
-                errors.append(error)
-
-        waiters = [threading.Thread(target=stop, daemon=True) for _ in range(2)]
-
-        def process_running(_pid: int, _start_time: int | None) -> bool:
-            for waiter in waiters:
-                waiter.start()
-            self.assertTrue(both_polling.wait(30))
-            return False
-
-        def lingering_rmdir(path: Path) -> None:
-            if path == state and any(waiter.is_alive() for waiter in waiters):
-                raise OSError(errno.ENOTEMPTY, "Directory not empty", str(path))
-            rmdir(path)
-
-        with (
-            patch.object(sandbox_lifecycle, "_try_lock_file", side_effect=try_lock),
-            patch.object(
-                sandbox_lifecycle, "_process_running", side_effect=process_running
-            ),
-            patch.object(Path, "rmdir", autospec=True, side_effect=lingering_rmdir),
-        ):
-            sandbox_lifecycle.deprovision(state, 30)
-        for waiter in waiters:
-            waiter.join(30)
-
-        self.assertFalse(any(waiter.is_alive() for waiter in waiters))
-        self.assertEqual(
-            [str(error) for error in errors], ["sandbox is not provisioned"] * 2
-        )
-        self.assertFalse(state.exists())
-
-    def test_managed_deprovision_outlasts_a_transition_that_starts_meanwhile(self):
-        # A transition that starts after deprovision removed the lock file holds
-        # a new one in the directory until it finds the sandbox gone, which must
-        # not make deprovision fail.
-        with tempfile.TemporaryDirectory() as temporary:
-            state = _provision_managed_sandbox(Path(temporary).resolve())
-            rmdir = Path.rmdir
-            arrived = threading.Event()
-            leave = threading.Event()
-            attempts: list[bool] = []
-
-            def arrive() -> None:
-                with sandbox_lifecycle._LifecycleLock(state, 30):
-                    arrived.set()
-                    leave.wait(30)
-
-            arrival = threading.Thread(target=arrive, daemon=True)
-
-            def contended_rmdir(path: Path) -> None:
-                if path != state:
-                    rmdir(path)
-                    return
-                if not attempts:
-                    attempts.append(False)
-                    arrival.start()
-                    self.assertTrue(arrived.wait(30))
-                    raise OSError(errno.ENOTEMPTY, "Directory not empty", str(path))
-                try:
-                    rmdir(path)
-                except OSError:
-                    attempts.append(False)
-                    leave.set()
-                    raise
-                attempts.append(True)
-
-            with patch.object(
-                Path, "rmdir", autospec=True, side_effect=contended_rmdir
-            ):
-                sandbox_lifecycle.deprovision(state, 30)
-            arrival.join(30)
-
-            self.assertFalse(arrival.is_alive())
-            self.assertEqual(attempts[0], False)
-            self.assertIn(False, attempts[1:])
-            self.assertEqual(attempts[-1], True)
-            self.assertFalse(state.exists())
-
-    def test_provision_waiting_on_deprovision_provisions_a_new_directory(self):
-        # A provision that waits while deprovision removes the sandbox creates
-        # nothing in the directory being removed. Once deprovision has removed
-        # it, the provision creates the directory again, and both succeed.
-        if os.name != "nt" and sys.platform != "linux":
-            self.skipTest("process identity requires a Linux or Windows host")
-        temporary = tempfile.TemporaryDirectory()
-        self.addCleanup(temporary.cleanup)
-        root = Path(temporary.name).resolve()
-        state = _provision_managed_sandbox(root)
-        _write_managed_runtime(state, os.getpid(), None)
-        rmdir = Path.rmdir
-        try_lock_file = sandbox_lifecycle._try_lock_file
-        polling = threading.Event()
-        removals: list[bool] = []
-        errors: list[BaseException] = []
-
-        def try_lock(descriptor: int) -> bool:
-            if threading.current_thread() is not threading.main_thread():
-                polling.set()
-            return try_lock_file(descriptor)
-
-        def provision() -> None:
-            try:
-                _provision_managed_sandbox(root)
-            except BaseException as error:  # noqa: BLE001
-                errors.append(error)
-
-        waiter = threading.Thread(target=provision, daemon=True)
-
-        def process_running(_pid: int, _start_time: int | None) -> bool:
-            waiter.start()
-            self.assertTrue(polling.wait(30))
-            return False
-
-        def lingering_rmdir(path: Path) -> None:
-            if path == state and not removals:
-                # As on NFS, the waiter's handle keeps the removed lock file.
-                removals.append(False)
-                raise OSError(errno.ENOTEMPTY, "Directory not empty", str(path))
-            rmdir(path)
-            if path == state:
-                removals.append(True)
-
-        with (
-            patch.object(sandbox_lifecycle, "_try_lock_file", side_effect=try_lock),
-            patch.object(
-                sandbox_lifecycle, "_process_running", side_effect=process_running
-            ),
-            patch.object(Path, "rmdir", autospec=True, side_effect=lingering_rmdir),
-        ):
-            sandbox_lifecycle.deprovision(state, 30)
-            waiter.join(30)
-
-        self.assertFalse(waiter.is_alive())
-        self.assertEqual(errors, [])
-        self.assertEqual(removals[0], False)
-        self.assertIn(True, removals[1:])
-        self.assertEqual(
-            sorted(path.name for path in state.iterdir()),
-            [sandbox_lifecycle.CONFIG_NAME, sandbox_lifecycle.LOCK_NAME],
-        )
-
-    def test_provision_waiting_on_deprovision_retries_once_deprovision_ends(self):
-        # Deprovision clears the mark of the removed lock file once it has removed
-        # the directory, or failed to remove it or the lock file, so a provision
-        # that waited for it retries at once. It then finds the sandbox that
-        # another provision created in between, or provisions the directory that
-        # deprovision left.
-        if os.name != "nt" and sys.platform != "linux":
-            self.skipTest("process identity requires a Linux or Windows host")
-
-        def check(ending: str) -> None:
-            temporary = tempfile.TemporaryDirectory()
-            self.addCleanup(temporary.cleanup)
-            root = Path(temporary.name).resolve()
-            state = _provision_managed_sandbox(root)
-            _write_managed_runtime(state, os.getpid(), None)
-            rmdir = Path.rmdir
-            unlink = Path.unlink
-            try_lock_file = sandbox_lifecycle._try_lock_file
-            polling = threading.Event()
-            denials: list[Path] = []
-            errors: list[BaseException] = []
-
-            def deny(path: Path) -> None:
-                denials.append(path)
-                raise PermissionError(
-                    errno.EACCES, os.strerror(errno.EACCES), str(path)
-                )
-
-            def try_lock(descriptor: int) -> bool:
-                if threading.current_thread() is not threading.main_thread():
-                    polling.set()
-                return try_lock_file(descriptor)
-
-            def provision() -> None:
-                try:
-                    _provision_managed_sandbox(root)
-                except BaseException as error:  # noqa: BLE001
-                    errors.append(error)
-
-            waiter = threading.Thread(target=provision, daemon=True)
-
-            def process_running(_pid: int, _start_time: int | None) -> bool:
-                waiter.start()
-                self.assertTrue(polling.wait(30))
-                return False
-
-            def ending_rmdir(path: Path) -> None:
-                if path == state and ending == "removal denied":
-                    deny(path)
-                rmdir(path)
-                if path == state and ending == "replaced":
-                    # Another provision recreates the directory before the waiter
-                    # could find it gone.
-                    _provision_managed_sandbox(root)
-
-            def ending_unlink(path: Path, missing_ok: bool = False) -> None:
-                # Only the first removal of the lock file fails, so the release
-                # that follows removes it.
-                lock = path == state / sandbox_lifecycle.LOCK_NAME
-                if lock and ending == "unlink denied" and not denials:
-                    deny(path)
-                unlink(path, missing_ok=missing_ok)
-
-            with (
-                patch.object(sandbox_lifecycle, "_try_lock_file", side_effect=try_lock),
-                patch.object(
-                    sandbox_lifecycle, "_process_running", side_effect=process_running
-                ),
-                patch.object(Path, "rmdir", autospec=True, side_effect=ending_rmdir),
-                patch.object(Path, "unlink", autospec=True, side_effect=ending_unlink),
-            ):
-                if ending == "replaced":
-                    sandbox_lifecycle.deprovision(state, 30)
-                else:
-                    with self.assertRaises(PermissionError):
-                        sandbox_lifecycle.deprovision(state, 30)
-                waiter.join(30)
-
-            self.assertFalse(waiter.is_alive())
-            self.assertEqual(len(denials), 0 if ending == "replaced" else 1)
-            self.assertEqual(
-                [str(error) for error in errors],
-                ["sandbox is already provisioned"] if ending == "replaced" else [],
-            )
-            self.assertEqual(
-                sorted(path.name for path in state.iterdir()),
-                [sandbox_lifecycle.CONFIG_NAME, sandbox_lifecycle.LOCK_NAME],
-            )
-
-        for ending in ("replaced", "removal denied", "unlink denied"):
-            with self.subTest(ending):
-                check(ending)
-
-    def test_provision_handoff_completes_or_ends_the_removal(self):
-        # While only lingering lock files keep the directory that deprovision
-        # removes, a provision waits. It stops once the path names no directory or
-        # another one, or the directory holds anything else, and once nothing
-        # keeps the directory, it removes it itself, in case deprovision has given
-        # up. A removal that fails for another reason leaves it to provision the
-        # directory in place.
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary).resolve()
-            state = root / "state"
-            state.mkdir()
-            lingering = state / sandbox_lifecycle.LOCK_NAME
-            lingering.write_bytes(b"")
-            removing = os.lstat(state)
-            with self.assertRaisesRegex(
-                TimeoutError,
-                "^another lifecycle transition of the sandbox is still in progress$",
-            ):
-                sandbox_lifecycle._wait_for_handoff(
-                    state, removing, time.monotonic() + 0.1
-                )
-
-            def wait() -> None:
-                sandbox_lifecycle._wait_for_handoff(
-                    state, removing, time.monotonic() + 30
-                )
-
-            with patch.object(sandbox_lifecycle, "_pause", return_value=False) as pause:
-                for name in (sandbox_lifecycle.CONFIG_NAME, "foreign"):
-                    (state / name).write_text("{}", encoding="utf-8")
-                    wait()
-                    (state / name).unlink()
-                # The old directory keeps its identity under another name, so the
-                # new one cannot reuse it.
-                state.rename(root / "old")
-                state.mkdir()
-                wait()
-                self.assertTrue(state.is_dir())
-                state.rmdir()
-                (root / "old").rename(state)
-                lingering.unlink()
-                with patch.object(
-                    Path,
-                    "rmdir",
-                    autospec=True,
-                    side_effect=PermissionError(errno.EACCES, "denied"),
-                ):
-                    wait()
-                self.assertTrue(state.is_dir())
-                wait()
-                self.assertFalse(state.exists())
-                wait()
-            pause.assert_not_called()
-
-    def test_provision_completes_a_removal_that_deprovision_gave_up(self):
-        # Once a lingering lock file makes deprovision release the lock before the
-        # directory is gone, a provision that waits for the removal completes it
-        # itself if deprovision gives up, and then provisions the path again.
-        if os.name != "nt" and sys.platform != "linux":
-            self.skipTest("process identity requires a Linux or Windows host")
-        temporary = tempfile.TemporaryDirectory()
-        self.addCleanup(temporary.cleanup)
-        root = Path(temporary.name).resolve()
-        state = _provision_managed_sandbox(root)
-        _write_managed_runtime(state, os.getpid(), None)
-        rmdir = Path.rmdir
-        try_lock_file = sandbox_lifecycle._try_lock_file
-        wait_for_handoff = sandbox_lifecycle._wait_for_handoff
-        polling = threading.Event()
-        deprovisioned = threading.Event()
-        attempts: list[Path] = []
-        handoffs: list[Path] = []
-        errors: list[BaseException] = []
-
-        def try_lock(descriptor: int) -> bool:
-            if threading.current_thread() is not threading.main_thread():
-                polling.set()
-            return try_lock_file(descriptor)
-
-        def provision() -> None:
-            try:
-                _provision_managed_sandbox(root)
-            except BaseException as error:  # noqa: BLE001
-                errors.append(error)
-
-        waiter = threading.Thread(target=provision, daemon=True)
-
-        def process_running(_pid: int, _start_time: int | None) -> bool:
-            waiter.start()
-            self.assertTrue(polling.wait(30))
-            return False
-
-        def abandoned_rmdir(path: Path) -> None:
-            # A lock file lingers at deprovision's first attempt, and its retry is
-            # denied, so that it gives up.
-            if path == state and threading.current_thread() is threading.main_thread():
-                attempts.append(path)
-                if len(attempts) == 1:
-                    raise OSError(errno.ENOTEMPTY, os.strerror(errno.ENOTEMPTY))
-                raise PermissionError(errno.EACCES, os.strerror(errno.EACCES))
-            rmdir(path)
-
-        def handoff(state_dir: Path, removing: os.stat_result, deadline: float) -> None:
-            handoffs.append(state_dir)
-            if not deprovisioned.wait(30):
-                raise AssertionError("deprovision did not give up")
-            wait_for_handoff(state_dir, removing, deadline)
-
-        with (
-            patch.object(sandbox_lifecycle, "_try_lock_file", side_effect=try_lock),
-            patch.object(
-                sandbox_lifecycle, "_process_running", side_effect=process_running
-            ),
-            patch.object(Path, "rmdir", autospec=True, side_effect=abandoned_rmdir),
-            patch.object(sandbox_lifecycle, "_wait_for_handoff", side_effect=handoff),
-        ):
-            with self.assertRaises(PermissionError):
-                sandbox_lifecycle.deprovision(state, 30)
-            deprovisioned.set()
-            waiter.join(30)
-
-        self.assertFalse(waiter.is_alive())
-        self.assertEqual(errors, [])
-        self.assertEqual(attempts, [state, state])
-        self.assertEqual(handoffs, [state])
-        self.assertEqual(
-            sorted(path.name for path in state.iterdir()),
-            [sandbox_lifecycle.CONFIG_NAME, sandbox_lifecycle.LOCK_NAME],
-        )
-
-    def test_managed_deprovision_accepts_a_removal_that_a_provision_completed(self):
-        # A provision that waits for deprovision to remove the directory may
-        # remove it first and provision the path again. Deprovision then succeeds
-        # rather than report the new sandbox as provisioned again, which it tells
-        # apart even where a new directory could reuse the old inode number.
-        if os.name != "nt" and sys.platform != "linux":
-            self.skipTest("process identity requires a Linux or Windows host")
-        temporary = tempfile.TemporaryDirectory()
-        self.addCleanup(temporary.cleanup)
-        root = Path(temporary.name).resolve()
-        state = _provision_managed_sandbox(root)
-        _write_managed_runtime(state, os.getpid(), None)
-        rmdir = Path.rmdir
-        try_lock_file = sandbox_lifecycle._try_lock_file
-        polling = threading.Event()
-        provisioned = threading.Event()
-        attempts: list[Path] = []
-        errors: list[BaseException] = []
-
-        def try_lock(descriptor: int) -> bool:
-            if threading.current_thread() is not threading.main_thread():
-                polling.set()
-            return try_lock_file(descriptor)
-
-        def provision() -> None:
-            try:
-                _provision_managed_sandbox(root)
-            except BaseException as error:  # noqa: BLE001
-                errors.append(error)
-            finally:
-                provisioned.set()
-
-        waiter = threading.Thread(target=provision, daemon=True)
-
-        def process_running(_pid: int, _start_time: int | None) -> bool:
-            waiter.start()
-            self.assertTrue(polling.wait(30))
-            return False
-
-        def contended_rmdir(path: Path) -> None:
-            if path == state and threading.current_thread() is threading.main_thread():
-                attempts.append(path)
-                if len(attempts) == 1:
-                    raise OSError(errno.ENOTEMPTY, os.strerror(errno.ENOTEMPTY))
-                # Deprovision retries only once the waiting provision has removed
-                # the directory and provisioned the path again.
-                self.assertTrue(provisioned.wait(30))
-            rmdir(path)
-
-        with (
-            patch.object(sandbox_lifecycle, "_try_lock_file", side_effect=try_lock),
-            patch.object(
-                sandbox_lifecycle, "_process_running", side_effect=process_running
-            ),
-            patch.object(Path, "rmdir", autospec=True, side_effect=contended_rmdir),
-        ):
-            sandbox_lifecycle.deprovision(state, 30)
-            waiter.join(30)
-
-        self.assertFalse(waiter.is_alive())
-        self.assertEqual(errors, [])
-        self.assertEqual(attempts, [state, state])
-        self.assertEqual(
-            sorted(path.name for path in state.iterdir()),
-            [sandbox_lifecycle.CONFIG_NAME, sandbox_lifecycle.LOCK_NAME],
-        )
-
-    def test_lifecycle_lock_file_transfers_complete_despite_short_counts(self):
-        # The tombstone must be complete before deprovision removes the lock file,
-        # and a waiter must read all of it, even if os.write() or os.read()
-        # transfers only part of it at a time.
-        with tempfile.TemporaryDirectory() as temporary:
-            descriptor = sandbox_lifecycle._open_lock_file(
-                Path(temporary) / sandbox_lifecycle.LOCK_NAME
-            )
-            try:
-                self._check_lock_file_transfers(descriptor)
-            finally:
-                os.close(descriptor)
-
-    def _check_lock_file_transfers(self, descriptor: int) -> None:
-        write = os.write
-        read = os.read
-        tombstone = sandbox_lifecycle.LOCK_TOMBSTONE
-
-        def short_write(fd: int, data: memoryview) -> int:
-            return write(fd, bytes(data[:3]))
-
-        def short_read(fd: int, size: int) -> bytes:
-            return read(fd, min(size, 3))
-
-        with (
-            patch.object(
-                sandbox_lifecycle.os, "write", side_effect=short_write
-            ) as writes,
-            patch.object(sandbox_lifecycle.os, "read", side_effect=short_read),
-        ):
-            sandbox_lifecycle._write_lock_file(descriptor, tombstone)
-            self.assertEqual(
-                sandbox_lifecycle._read_lock_file(descriptor, len(tombstone)),
-                tombstone,
-            )
-        self.assertEqual(writes.call_count, -(-len(tombstone) // 3))
-        self.assertEqual(os.lseek(descriptor, 0, os.SEEK_CUR), 0)
-        with (
-            patch.object(sandbox_lifecycle.os, "write", return_value=0),
-            self.assertRaisesRegex(OSError, "made no progress"),
-        ):
-            sandbox_lifecycle._write_lock_file(descriptor, tombstone)
-
-    def test_managed_deprovision_reports_a_provision_that_starts_meanwhile(self):
-        # A provision that starts after deprovision removed the lock file, and
-        # before it removed the directory, provisions the directory again first.
-        # Deprovision then reports that rather than remove the new sandbox.
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary).resolve()
-            state = _provision_managed_sandbox(root)
-            rmdir = Path.rmdir
-            provisioned: list[Path] = []
-
-            def contended_rmdir(path: Path) -> None:
-                if path == state and not provisioned:
-                    arrival = threading.Thread(
-                        target=lambda: provisioned.append(
-                            _provision_managed_sandbox(root)
-                        ),
-                        daemon=True,
-                    )
-                    arrival.start()
-                    arrival.join(30)
-                rmdir(path)
-
-            with (
-                patch.object(Path, "rmdir", autospec=True, side_effect=contended_rmdir),
-                self.assertRaisesRegex(
-                    common.ScriptError,
-                    "^sandbox was provisioned again while deprovision removed it$",
-                ),
-            ):
-                sandbox_lifecycle.deprovision(state, 10)
-
-            self.assertEqual(provisioned, [state])
-            self.assertEqual(
-                sorted(path.name for path in state.iterdir()),
-                [sandbox_lifecycle.CONFIG_NAME, sandbox_lifecycle.LOCK_NAME],
-            )
-
-    def test_lifecycle_deadlines_reject_retries_after_they_pass(self):
-        # Each wait sleeps at most until its deadline, and no retry starts after
-        # it, so neither a directory that deprovision removes only then nor a lock
-        # file that another transition replaces only then counts.
-        self.assertFalse(sandbox_lifecycle._pause(time.monotonic() - 1))
-        with tempfile.TemporaryDirectory() as temporary:
-            directory = Path(temporary) / "going"
-            directory.mkdir()
-            # A lock file lingers in the directory until the deadline.
-            lingering = directory / sandbox_lifecycle.LOCK_NAME
-            lingering.write_bytes(b"")
-            deadline = 3 / 64
-            clock = [0.0]
-            sleeps: list[float] = []
-
-            def sleep(seconds: float) -> None:
-                sleeps.append(seconds)
-                clock[0] += seconds
-                if clock[0] >= deadline and directory.exists():
-                    lingering.unlink()
-                    directory.rmdir()
-
-            with (
-                patch.object(sandbox_lifecycle, "LOCK_RETRY_INTERVAL", 1 / 32),
-                patch.object(
-                    sandbox_lifecycle.time, "monotonic", side_effect=lambda: clock[0]
-                ),
-                patch.object(sandbox_lifecycle.time, "sleep", side_effect=sleep),
-                self.assertRaisesRegex(
-                    TimeoutError,
-                    "^another lifecycle transition of the sandbox is still in "
-                    "progress$",
-                ),
-            ):
-                sandbox_lifecycle._wait_for_handoff(
-                    directory, os.lstat(directory), deadline
-                )
-
-            self.assertEqual(sleeps, [1 / 32, 1 / 64])
-            self.assertFalse(directory.exists())
-
-        with tempfile.TemporaryDirectory() as temporary:
-            state = _provision_managed_sandbox(Path(temporary).resolve())
-            names_open_file = sandbox_lifecycle._names_open_file
-            clock = [0.0]
-            checks: list[Path] = []
-
-            def replaced_late(path: Path, descriptor: int) -> bool:
-                checks.append(path)
-                if len(checks) > 1:
-                    return names_open_file(path, descriptor)
-                clock[0] = 1.0
-                return False
-
-            with (
-                patch.object(
-                    sandbox_lifecycle.time, "monotonic", side_effect=lambda: clock[0]
-                ),
-                patch.object(
-                    sandbox_lifecycle, "_names_open_file", side_effect=replaced_late
-                ),
-                self.assertRaisesRegex(
-                    TimeoutError,
-                    "^another lifecycle transition of the sandbox is still in "
-                    "progress$",
-                ),
-                sandbox_lifecycle._LifecycleLock(state, 1),
-            ):
-                self.fail("the lock was acquired after its deadline")
-
-            self.assertEqual(checks, [state / sandbox_lifecycle.LOCK_NAME])
-            self.assertEqual(
-                sorted(path.name for path in state.iterdir()),
-                [sandbox_lifecycle.CONFIG_NAME, sandbox_lifecycle.LOCK_NAME],
-            )
-
-    def test_provision_recreates_a_state_directory_that_deprovision_removed(self):
-        # A deprovision can remove the state directory after provision prepared
-        # it and before provision opens the lock file in it. The provision then
-        # creates the directory again instead of failing.
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary).resolve()
-            state = root / "state"
-            open_lock_file = sandbox_lifecycle._open_lock_file
-            opened: list[Path] = []
-
-            def open_after_deprovision(path: Path) -> int:
-                if not opened:
-                    shutil.rmtree(state)
-                opened.append(path)
-                return open_lock_file(path)
-
-            with patch.object(
-                sandbox_lifecycle, "_open_lock_file", side_effect=open_after_deprovision
-            ):
-                self.assertEqual(_provision_managed_sandbox(root), state)
-
-            self.assertEqual(len(opened), 2)
-            self.assertEqual(
-                sorted(path.name for path in state.iterdir()),
-                [sandbox_lifecycle.CONFIG_NAME, sandbox_lifecycle.LOCK_NAME],
-            )
-
-    def test_provision_waits_out_a_lock_file_pending_deletion(self):
-        # Without POSIX deletion semantics, Windows denies opening a lock file
-        # that deprovision removed until its last handle closes, so a provision
-        # retries. Elsewhere, such a denial is a real error.
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary).resolve()
-            open_lock_path = sandbox_lifecycle._open_lock_path
-            attempts: list[Path] = []
-
-            def pending_deletion(path: Path) -> int:
-                attempts.append(path)
-                if len(attempts) == 1:
-                    raise PermissionError(errno.EACCES, "Access is denied", str(path))
-                return open_lock_path(path)
-
-            with patch.object(
-                sandbox_lifecycle, "_open_lock_path", side_effect=pending_deletion
-            ):
-                if os.name == "nt":
-                    _provision_managed_sandbox(root)
-                    self.assertEqual(len(attempts), 2)
-                    self.assertTrue(
-                        (root / "state" / sandbox_lifecycle.CONFIG_NAME).is_file()
-                    )
-                else:
-                    with self.assertRaises(PermissionError):
-                        _provision_managed_sandbox(root)
-                    self.assertEqual(len(attempts), 1)
-
-    def test_lifecycle_lock_refuses_a_linked_lock_file(self):
-        # Deprovision writes to the lock file, so a link to a file elsewhere must
-        # not stand in for it.
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary).resolve()
-            state = _provision_managed_sandbox(root)
-            target = root / "precious"
-            target.write_bytes(b"precious data")
-            lock = state / sandbox_lifecycle.LOCK_NAME
-            links: dict[str, Callable[[], None]] = {
-                "hard link": lambda: os.link(target, lock),
-                "symbolic link": lambda: os.symlink(target, lock),
-            }
-            for kind, link in links.items():
-                with self.subTest(kind=kind):
-                    lock.unlink(missing_ok=True)
-                    try:
-                        link()
-                    except OSError as error:
-                        self.skipTest(f"cannot create a {kind}: {error}")
-                    with self.assertRaisesRegex(
-                        common.ScriptError,
-                        "^sandbox lifecycle lock is not a standalone regular file",
-                    ):
-                        sandbox_lifecycle.deprovision(state, 10)
-                    self.assertEqual(target.read_bytes(), b"precious data")
-                    self.assertTrue((state / sandbox_lifecycle.CONFIG_NAME).is_file())
-
-    def test_lifecycle_lock_rejects_an_unbounded_timeout(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            state = _provision_managed_sandbox(Path(temporary).resolve())
-            for timeout in (0.0, -1.0, float("nan"), float("inf")):
-                with (
-                    self.subTest(timeout=timeout),
-                    self.assertRaisesRegex(
-                        ValueError,
-                        "^lifecycle timeout must be finite and greater than 0$",
-                    ),
-                ):
-                    sandbox_lifecycle.stop(state, timeout)
-
-    def test_lifecycle_lock_file_stays_only_in_a_provisioned_sandbox(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary).resolve()
-            unprovisioned = root / "unprovisioned"
-            unprovisioned.mkdir()
-            with self.assertRaisesRegex(common.ScriptError, "sandbox configuration"):
-                sandbox_lifecycle.start(unprovisioned, 10)
-            with self.assertRaisesRegex(common.ScriptError, "sandbox is not running"):
-                sandbox_lifecycle.stop(unprovisioned, 10)
-            self.assertEqual(list(unprovisioned.iterdir()), [])
-
-            state = _provision_managed_sandbox(root)
-            self.assertEqual(
-                sorted(path.name for path in state.iterdir()),
-                [sandbox_lifecycle.CONFIG_NAME, sandbox_lifecycle.LOCK_NAME],
-            )
-            # A sandbox that an earlier NVX version provisioned gains a lock file.
-            (state / sandbox_lifecycle.LOCK_NAME).unlink()
-            with self.assertRaisesRegex(common.ScriptError, "sandbox is not running"):
-                sandbox_lifecycle.stop(state, 10)
-            self.assertTrue((state / sandbox_lifecycle.LOCK_NAME).is_file())
-
-            # Deprovision removes every NVX file, the lock file included, even when
-            # a file of another owner keeps the directory.
-            foreign = state / "operator-note.txt"
-            foreign.write_text("operator data\n", encoding="utf-8")
-            with self.assertRaisesRegex(common.ScriptError, "operator-note.txt"):
-                sandbox_lifecycle.deprovision(state, 10)
-            self.assertEqual(list(state.iterdir()), [foreign])
-            foreign.unlink()
-            sandbox_lifecycle.deprovision(state, 10)
-            self.assertFalse(state.exists())
-
-    def test_launch_contract_rejects_disk_option_delimiters(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            layer_path = root / "layer;create=1G"
-            scratch = root / "scratch.ext4"
-            layer_path.touch()
-            scratch.touch()
-            layer = sandbox.SandboxLayer(
-                role="distro",
-                path=layer_path,
-                uuid="11111111-1111-1111-1111-111111111111",
-            )
-
-            with self.assertRaisesRegex(common.ScriptError, "semicolons"):
-                sandbox.SandboxLaunch(
-                    layers=(layer,),
-                    scratch=scratch,
-                ).validated()
 
 
 class BenchmarkTests(unittest.TestCase):
@@ -20578,6 +16479,17 @@ def _missing_release() -> urllib.error.HTTPError:
 
 
 class ReleaseTests(unittest.TestCase):
+    def setUp(self) -> None:
+        super().setUp()
+        # Installing a release replaces or removes nvx-rs; no test may do
+        # either to the nvx-rs of this checkout.
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.nvx_rs_path = Path(temporary.name) / nvx_rs.binary_path().name
+        patcher = patch.object(nvx_rs, "binary_path", return_value=self.nvx_rs_path)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def test_alpine_source_validation_rejects_malformed_manifest(self):
         with tempfile.TemporaryDirectory() as temporary:
             source_dir = Path(temporary)
@@ -21298,6 +17210,7 @@ class ReleaseTests(unittest.TestCase):
                     side_effect=artifact_path,
                 ),
                 patch.object(release, "openvmm_binary_path", return_value=binary),
+                patch.object(nvx_rs, "binary_path", return_value=paths["nvx_rs"]),
                 patch.object(
                     release,
                     "kernel_provenance_inputs",
@@ -21318,6 +17231,14 @@ class ReleaseTests(unittest.TestCase):
                 )
 
             self.assertTrue((destination / "bin" / binary.name).is_file())
+            # The release build of nvx-rs ships beside OpenVMM, under the name
+            # that nvx.py download installs on this OS.
+            packaged_nvx_rs = destination / "bin" / nvx_rs.binary_path().name
+            self.assertEqual(packaged_nvx_rs.read_bytes(), paths["nvx_rs"].read_bytes())
+            self.assertEqual(
+                sorted(path.name for path in (destination / "bin").iterdir()),
+                sorted((binary.name, packaged_nvx_rs.name)),
+            )
             for name in ReleaseBuildConstants.GUEST_ARTIFACT_NAMES:
                 self.assertTrue((destination / "guest" / name).is_file())
             self.assertTrue(
@@ -21379,7 +17300,44 @@ class ReleaseTests(unittest.TestCase):
                     / AzureLinuxBuildConstants.PACKAGE_MANIFEST_NAME
                 ),
             )
-            common.verify_sha256_sums(destination)
+            # The package ships the provenance of nvx-rs, which binds it to the
+            # sources that build it, the Rust release, the target, and the
+            # features, and the manifest records them with its digest.
+            packaged_provenance = json.loads(
+                (destination / "provenance" / nvx_rs.PROVENANCE_NAME).read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual(
+                packaged_provenance,
+                {
+                    "format": 1,
+                    "source_sha256": nvx_rs.source_sha256(root),
+                    "toolchain": GuestRustBuildConstants.TOOLCHAIN,
+                    "target": nvx_rs.release_target(),
+                    "features": ["cli"],
+                    "executable_sha256": common.sha256_file(packaged_nvx_rs),
+                },
+            )
+            self.assertEqual(
+                packaged_provenance["source_sha256"], nvx_rs.source_sha256()
+            )
+            self.assertEqual(
+                manifest["nvx_rs"],
+                {
+                    "executable_sha256": common.sha256_file(packaged_nvx_rs),
+                    "features": ["cli"],
+                    "source_sha256": nvx_rs.source_sha256(root),
+                    "target": nvx_rs.release_target(),
+                    "toolchain": GuestRustBuildConstants.TOOLCHAIN,
+                },
+            )
+            inventory = dict(common.verify_sha256_sums(destination).files)
+            self.assertEqual(
+                inventory[f"bin/{packaged_nvx_rs.name}"],
+                common.sha256_file(paths["nvx_rs"]),
+            )
+            self.assertIn(f"provenance/{nvx_rs.PROVENANCE_NAME}", inventory)
             self.assertIn("binary-only package", stderr.getvalue())
 
     def test_source_package_omits_azure_linux_artifacts(self):
@@ -21441,6 +17399,7 @@ class ReleaseTests(unittest.TestCase):
                 side_effect=artifact_path,
             ),
             patch.object(release, "openvmm_binary_path", return_value=binary),
+            patch.object(nvx_rs, "binary_path", return_value=paths["nvx_rs"]),
             patch.object(
                 release,
                 "kernel_provenance_inputs",
@@ -21492,12 +17451,98 @@ class ReleaseTests(unittest.TestCase):
             (destination / "SOURCE-MANIFEST.json").read_text(encoding="utf-8")
         )
         self.assertNotIn("azurelinux", manifest)
+        # Source-inclusive packages ship nvx-rs too; the project source
+        # archive holds the sources that build it.
+        packaged_nvx_rs = destination / "bin" / paths["nvx_rs"].name
+        self.assertEqual(packaged_nvx_rs.read_bytes(), paths["nvx_rs"].read_bytes())
+        self.assertEqual(
+            manifest["nvx_rs"]["executable_sha256"],
+            common.sha256_file(packaged_nvx_rs),
+        )
         common.verify_sha256_sums(destination)
         self.assertIn("omits the Azure Linux guest", stderr.getvalue())
+
+    def test_packages_require_the_release_build_of_nvx_rs(self):
+        # A package ships the nvx-rs build for the release target of its
+        # operating system, with the provenance that binds it to the current
+        # sources. On Linux, that build is the static musl executable that
+        # runs on every host, which a build for the host's own target is not.
+        linux = nvx_rs.RELEASE_TARGETS["linux"]
+        windows = nvx_rs.RELEASE_TARGETS["windows"]
+        dynamic = _elf_file(
+            ((1, b"code"), (3, b"/lib64/ld-linux-x86-64.so.2\0")), elf_type=3
+        )
+        mismatch = "from the current nvx-rs sources"
+        with tempfile.TemporaryDirectory() as temporary:
+            build_dir = Path(temporary) / "build"
+            build_dir.mkdir()
+            executable = Path(temporary) / "nvx-rs"
+            provenance = build_dir / nvx_rs.PROVENANCE_NAME
+            cases: tuple[
+                tuple[str, bytes | None, dict[str, object] | None, str | None], ...
+            ] = (
+                (linux, _elf_file(), {}, None),
+                (linux, _elf_file(elf_type=3), {}, None),
+                (windows, b"MZ", {}, None),
+                (linux, dynamic, {}, "is not static"),
+                (linux, b"MZ", {}, f"invalid {linux} nvx-rs executable"),
+                (linux, _elf_file(), {"target": windows}, f"as a {linux} build"),
+                (windows, b"MZ", {"target": linux}, f"as a {windows} build"),
+                (linux, _elf_file(), {"source_sha256": "0" * 64}, mismatch),
+                (linux, _elf_file(), {"executable_sha256": "0" * 64}, mismatch),
+                (linux, _elf_file(), {"toolchain": "1.0.0"}, mismatch),
+                (linux, _elf_file(), {"features": []}, mismatch),
+                (linux, _elf_file(), {"format": 2}, mismatch),
+                (linux, _elf_file(), None, "nvx-rs build provenance not found"),
+                (linux, None, {}, "nvx-rs release executable not found"),
+            )
+            for target, contents, changes, error in cases:
+                with self.subTest(target=target, changes=changes, error=error):
+                    executable.unlink(missing_ok=True)
+                    provenance.unlink(missing_ok=True)
+                    if contents is not None:
+                        executable.write_bytes(contents)
+                    if contents is not None and changes is not None:
+                        record = nvx_rs.provenance_record(executable, target)
+                        record.update(changes)
+                        provenance.write_text(json.dumps(record), encoding="utf-8")
+                    with (
+                        patch.object(nvx_rs, "binary_path", return_value=executable),
+                        patch.object(nvx_rs, "release_target", return_value=target),
+                        patch.object(
+                            release, "artifact_path", side_effect=build_dir.joinpath
+                        ),
+                    ):
+                        if error is None:
+                            self.assertEqual(
+                                release._require_release_nvx_rs(),
+                                (
+                                    executable,
+                                    provenance,
+                                    json.loads(provenance.read_text(encoding="utf-8")),
+                                ),
+                            )
+                            continue
+                        with self.assertRaisesRegex(
+                            common.ScriptError, re.escape(error)
+                        ) as raised:
+                            release._require_release_nvx_rs()
+                    if error == "is not static":
+                        # The message names the build that packages need.
+                        self.assertIn(
+                            f"--features cli --manifest-path nvx-rs/Cargo.toml "
+                            f"--target {linux}",
+                            str(raised.exception),
+                        )
+                    if error == mismatch:
+                        self.assertIn(
+                            "nvx.py record-nvx-rs-provenance", str(raised.exception)
+                        )
 
     def test_runtime_provenance_validation_uses_required_paths(self):
         build_dir = Path("build")
         binary = Path("openvmm")
+        nvx_rs_binary = Path("nvx-rs")
 
         def artifact_path(name: str) -> Path:
             return build_dir / name
@@ -21508,6 +17553,7 @@ class ReleaseTests(unittest.TestCase):
         with (
             patch.object(release, "artifact_path", side_effect=artifact_path),
             patch.object(release, "openvmm_binary_path", return_value=binary),
+            patch.object(nvx_rs, "find_binary", return_value=nvx_rs_binary),
             patch.object(
                 release,
                 "require_file",
@@ -21516,11 +17562,12 @@ class ReleaseTests(unittest.TestCase):
             patch.object(release, "_validate_openvmm_provenance") as openvmm,
             patch.object(release, "_validate_kernel_provenance"),
             patch.object(release, "_validate_initramfs_provenance"),
+            patch.object(release, "_validate_nvx_rs_provenance") as nvx_rs_check,
         ):
             release.validate_runtime_artifact_provenance()
 
         self.assertEqual(
-            require.call_args_list[-3:],
+            require.call_args_list[-4:],
             [
                 call(
                     build_dir / OpenVMMBuildConstants.PROVENANCE_NAME,
@@ -21534,11 +17581,83 @@ class ReleaseTests(unittest.TestCase):
                     build_dir / InitramfsBuildConstants.PROVENANCE_NAME,
                     "initramfs build provenance",
                 ),
+                call(build_dir / nvx_rs.PROVENANCE_NAME, "nvx-rs build provenance"),
             ],
         )
         openvmm.assert_called_once_with(
             binary, build_dir / OpenVMMBuildConstants.PROVENANCE_NAME
         )
+        # The nvx-rs that nvx.py runs, of any target.
+        nvx_rs_check.assert_called_once_with(
+            nvx_rs_binary, build_dir / nvx_rs.PROVENANCE_NAME, target=None
+        )
+
+    def test_runtime_provenance_validation_rejects_a_stale_nvx_rs(self):
+        # nvx.py never rebuilds an nvx-rs that exists, so one left from
+        # before a change of its sources, or that its provenance does not
+        # describe, would run. The adversarial executor validates it first.
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            build_dir = root / "build"
+            build_dir.mkdir()
+            provenance = build_dir / nvx_rs.PROVENANCE_NAME
+            other = root / "other-nvx-rs"
+            other.write_bytes(b"another nvx-rs")
+
+            def require_file(path: Path, _description: str) -> Path:
+                return path
+
+            def validate() -> None:
+                with (
+                    patch.object(
+                        release, "artifact_path", side_effect=build_dir.joinpath
+                    ),
+                    patch.object(release, "openvmm_binary_path"),
+                    patch.object(release, "require_file", side_effect=require_file),
+                    patch.object(release, "_validate_openvmm_provenance"),
+                    patch.object(release, "_validate_kernel_provenance"),
+                    patch.object(release, "_validate_initramfs_provenance"),
+                ):
+                    release.validate_runtime_artifact_provenance()
+
+            self.nvx_rs_path.write_bytes(b"nvx-rs")
+            provenance.write_text(
+                json.dumps(
+                    nvx_rs.provenance_record(
+                        self.nvx_rs_path, "x86_64-unknown-linux-gnu"
+                    )
+                ),
+                encoding="utf-8",
+            )
+            with _without_nvx_rs_variable():
+                validate()
+                # A rebuild after the record.
+                self.nvx_rs_path.write_bytes(b"rebuilt nvx-rs")
+                with self.assertRaisesRegex(
+                    common.ScriptError, "does not describe .* as a build from the"
+                ):
+                    validate()
+            # The nvx-rs that NVX_RS names is the one that nvx.py runs.
+            with (
+                patch.dict(os.environ, {nvx_rs.VARIABLE: str(other)}),
+                self.assertRaisesRegex(common.ScriptError, re.escape(str(other))),
+            ):
+                validate()
+            provenance.write_text(
+                json.dumps(nvx_rs.provenance_record(other, "x86_64-unknown-linux-gnu")),
+                encoding="utf-8",
+            )
+            with patch.dict(os.environ, {nvx_rs.VARIABLE: str(other)}):
+                validate()
+            # A record of other sources.
+            record = nvx_rs.provenance_record(other, "x86_64-unknown-linux-gnu")
+            record["source_sha256"] = "0" * 64
+            provenance.write_text(json.dumps(record), encoding="utf-8")
+            with (
+                patch.dict(os.environ, {nvx_rs.VARIABLE: str(other)}),
+                self.assertRaisesRegex(common.ScriptError, "current nvx-rs sources"),
+            ):
+                validate()
 
     def test_package_rejects_dirty_openvmm_provenance(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -21805,6 +17924,18 @@ class ReleaseTests(unittest.TestCase):
                 "0" * 64,
                 "Alpine minirootfs_sha256",
             ),
+            (
+                "alpine",
+                "guest_sources",
+                ["guest/common", "guest/alpine"],
+                "Alpine guest_sources",
+            ),
+            (
+                "guest_rust",
+                "toolchain",
+                "stable",
+                "Rust guest toolchain",
+            ),
         )
         for section, field, invalid_value, error in cases:
             with (
@@ -21852,6 +17983,7 @@ class ReleaseTests(unittest.TestCase):
                         "openvmm_binary_path",
                         return_value=paths["binary"],
                     ),
+                    patch.object(nvx_rs, "binary_path", return_value=paths["nvx_rs"]),
                     patch.object(
                         release,
                         "kernel_provenance_inputs",
@@ -21881,6 +18013,14 @@ class ReleaseTests(unittest.TestCase):
                 )
 
     def test_failed_staged_verification_preserves_existing_release(self):
+        for corrupted, error in (
+            ("binary", "packaged OpenVMM executable"),
+            ("nvx_rs", "packaged nvx-rs executable does not match its build"),
+        ):
+            with self.subTest(corrupted=corrupted):
+                self._check_failed_staged_verification(corrupted, error)
+
+    def _check_failed_staged_verification(self, corrupted: str, error: str) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             paths, kernel_inputs, revision = _write_release_fixture(root)
@@ -21897,7 +18037,7 @@ class ReleaseTests(unittest.TestCase):
 
             def corrupt_packaged_binary(source: Path, target: Path) -> None:
                 original_copy(source, target)
-                if target.name == paths["binary"].name:
+                if target.name == paths[corrupted].name:
                     target.write_bytes(b"corrupt")
 
             with (
@@ -21915,6 +18055,7 @@ class ReleaseTests(unittest.TestCase):
                     "openvmm_binary_path",
                     return_value=paths["binary"],
                 ),
+                patch.object(nvx_rs, "binary_path", return_value=paths["nvx_rs"]),
                 patch.object(
                     release,
                     "kernel_provenance_inputs",
@@ -21931,10 +18072,7 @@ class ReleaseTests(unittest.TestCase):
                     side_effect=corrupt_packaged_binary,
                 ),
                 patch("sys.stderr", io.StringIO()),
-                self.assertRaisesRegex(
-                    common.ScriptError,
-                    "packaged OpenVMM executable",
-                ),
+                self.assertRaisesRegex(common.ScriptError, error),
             ):
                 release.package_release(
                     version="1.0.0",
@@ -22080,59 +18218,98 @@ class ReleaseTests(unittest.TestCase):
             )
             self.assertFalse(staging.exists())
 
+    def _runtime_release_archive(
+        self,
+        root: Path,
+        *,
+        nvx_rs_contents: bytes | None,
+        nvx_rs_provenance: Mapping[str, object] | None,
+    ) -> Path:
+        """Write the archive of a binary package for this OS, with or without
+        nvx-rs, and with or without its provenance, which `nvx_rs_provenance`
+        changes from the record of a build of this checkout's sources."""
+        package_root = root / "package" / "nvx-1.2.3-test"
+        binary_name = "openvmm.exe" if os.name == "nt" else "openvmm"
+        binary = package_root / "bin" / binary_name
+        binary.parent.mkdir(parents=True)
+        binary.write_bytes(b"openvmm")
+        for name in ReleaseBuildConstants.GUEST_ARTIFACT_NAMES:
+            guest = package_root / "guest" / name
+            guest.parent.mkdir(parents=True, exist_ok=True)
+            guest.write_bytes(name.encode("ascii"))
+        for name in (
+            OpenVMMBuildConstants.PROVENANCE_NAME,
+            KernelBuildConstants.PROVENANCE_NAME,
+            InitramfsBuildConstants.PROVENANCE_NAME,
+        ):
+            provenance = package_root / "provenance" / name
+            provenance.parent.mkdir(parents=True, exist_ok=True)
+            provenance.write_bytes(name.encode("ascii"))
+        if nvx_rs_contents is not None:
+            packaged_nvx_rs = package_root / "bin" / self.nvx_rs_path.name
+            packaged_nvx_rs.write_bytes(nvx_rs_contents)
+            # The installed nvx-rs is executable, whatever mode the archive
+            # records.
+            packaged_nvx_rs.chmod(0o644)
+            if nvx_rs_provenance is not None:
+                record = nvx_rs.provenance_record(
+                    packaged_nvx_rs, nvx_rs.release_target()
+                )
+                record.update(nvx_rs_provenance)
+                (package_root / "provenance" / nvx_rs.PROVENANCE_NAME).write_text(
+                    json.dumps(record), encoding="utf-8"
+                )
+        (package_root / "SOURCE-MANIFEST.json").write_text(
+            json.dumps({"linux": {}, "alpine": {}, "ubuntu": {}, "azurelinux": {}}),
+            encoding="utf-8",
+        )
+        common.write_sha256_sums(package_root)
+        if os.name == "nt":
+            archive_path = root / "nvx-1.2.3-windows-whp.zip"
+            with zipfile.ZipFile(archive_path, "w") as package:
+                for path in package_root.rglob("*"):
+                    package.write(path, path.relative_to(package_root.parent))
+        else:
+            archive_path = root / "nvx-1.2.3-linux-kvm.tar.gz"
+            with tarfile.open(archive_path, "w:gz") as package:
+                package.add(package_root, arcname=package_root.name)
+        return archive_path
+
+    def _install_runtime_archive(self, root: Path, archive_path: Path) -> str:
+        """Install the archive into the runtime directory below `root`, and
+        return what the installer printed."""
+        binary_name = "openvmm.exe" if os.name == "nt" else "openvmm"
+        with (
+            patch.object(
+                release,
+                "artifact_path",
+                side_effect=(root / "runtime" / "build").joinpath,
+            ),
+            patch.object(
+                release,
+                "openvmm_binary_path",
+                return_value=root / "runtime" / "openvmm" / binary_name,
+            ),
+            contextlib.redirect_stdout(io.StringIO()) as stdout,
+        ):
+            release._install_release_archive(archive_path)
+        return stdout.getvalue()
+
     def test_release_archive_installs_runtime_layout(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            package_root = root / "package" / "nvx-1.2.3-test"
-            binary_name = "openvmm.exe" if os.name == "nt" else "openvmm"
-            binary = package_root / "bin" / binary_name
-            binary.parent.mkdir(parents=True)
-            binary.write_bytes(b"openvmm")
-            for name in ReleaseBuildConstants.GUEST_ARTIFACT_NAMES:
-                guest = package_root / "guest" / name
-                guest.parent.mkdir(parents=True, exist_ok=True)
-                guest.write_bytes(name.encode("ascii"))
-            for name in (
-                OpenVMMBuildConstants.PROVENANCE_NAME,
-                KernelBuildConstants.PROVENANCE_NAME,
-                InitramfsBuildConstants.PROVENANCE_NAME,
-            ):
-                provenance = package_root / "provenance" / name
-                provenance.parent.mkdir(parents=True, exist_ok=True)
-                provenance.write_bytes(name.encode("ascii"))
-            common.write_sha256_sums(package_root)
-
-            if os.name == "nt":
-                archive_path = root / "nvx-1.2.3-windows-whp.zip"
-                with zipfile.ZipFile(archive_path, "w") as package:
-                    for path in package_root.rglob("*"):
-                        package.write(path, path.relative_to(package_root.parent))
-            else:
-                archive_path = root / "nvx-1.2.3-linux-kvm.tar.gz"
-                with tarfile.open(archive_path, "w:gz") as package:
-                    package.add(package_root, arcname=package_root.name)
-
+            archive_path = self._runtime_release_archive(
+                root, nvx_rs_contents=b"nvx-rs", nvx_rs_provenance={}
+            )
             build_dir = root / "runtime" / "build"
             binary_destination = (
-                root / "runtime" / "openvmm" / "target" / "release" / binary_name
+                root
+                / "runtime"
+                / "openvmm"
+                / ("openvmm.exe" if os.name == "nt" else "openvmm")
             )
 
-            def artifact_path(name: str) -> Path:
-                return build_dir / name
-
-            with (
-                patch.object(
-                    release,
-                    "artifact_path",
-                    side_effect=artifact_path,
-                ),
-                patch.object(
-                    release,
-                    "openvmm_binary_path",
-                    return_value=binary_destination,
-                ),
-            ):
-                release._install_release_archive(archive_path)
+            output = self._install_runtime_archive(root, archive_path)
 
             self.assertEqual(binary_destination.read_bytes(), b"openvmm")
             for name in ReleaseBuildConstants.GUEST_ARTIFACT_NAMES:
@@ -22149,6 +18326,123 @@ class ReleaseTests(unittest.TestCase):
                     (build_dir / name).read_bytes(),
                     name.encode("ascii"),
                 )
+            # nvx-rs, which this checkout's sources built, goes where nvx.py
+            # finds it, executable, with its provenance beside OpenVMM's.
+            self.assertEqual(self.nvx_rs_path.read_bytes(), b"nvx-rs")
+            self.assertEqual(output, "")
+            if os.name != "nt":
+                self.assertEqual(self.nvx_rs_path.stat().st_mode & 0o777, 0o755)
+                self.assertEqual(binary_destination.stat().st_mode & 0o777, 0o755)
+            installed_provenance = build_dir / nvx_rs.PROVENANCE_NAME
+            self.assertEqual(
+                json.loads(installed_provenance.read_text(encoding="utf-8")),
+                nvx_rs.provenance_record(self.nvx_rs_path, nvx_rs.release_target()),
+            )
+            release._validate_nvx_rs_provenance(
+                self.nvx_rs_path, installed_provenance, target=None
+            )
+            # nvx.py then runs it without Cargo.
+            with (
+                _without_nvx_rs_variable(),
+                patch("shutil.which", return_value=None),
+                patch("subprocess.run") as run,
+            ):
+                self.assertEqual(nvx_rs.require_binary(), self.nvx_rs_path)
+            run.assert_not_called()
+
+    def test_release_archive_leaves_nvx_rs_of_other_sources_to_cargo(self):
+        # nvx.py runs the nvx-rs that download installs without rebuilding it,
+        # so download installs only the build of the checkout's nvx-rs sources
+        # that nvx.py runs, and removes an earlier one and its provenance, so
+        # that nvx.py builds nvx-rs from the checkout instead. Releases that
+        # predate nvx-rs install too.
+        name = self.nvx_rs_path.name
+        archive_name = (
+            "nvx-1.2.3-windows-whp.zip"
+            if os.name == "nt"
+            else "nvx-1.2.3-linux-kvm.tar.gz"
+        )
+        target = nvx_rs.release_target()
+        other_target = (
+            "x86_64-unknown-linux-gnu"
+            if target == nvx_rs.RELEASE_TARGETS["linux"]
+            else nvx_rs.RELEASE_TARGETS["linux"]
+        )
+        other_build = (
+            f"the bin/{name} of {archive_name} is not the {target} build of this "
+            "checkout's nvx-rs sources that nvx.py runs"
+        )
+        cases: tuple[tuple[str, bytes | None, dict[str, object] | None, str], ...] = (
+            ("older release", None, None, f"{archive_name} ships no bin/{name}"),
+            (
+                "no provenance",
+                b"nvx-rs",
+                None,
+                f"{archive_name} ships no provenance for its bin/{name}",
+            ),
+            ("other sources", b"nvx-rs", {"source_sha256": "0" * 64}, other_build),
+            ("other Rust release", b"nvx-rs", {"toolchain": "1.0.0"}, other_build),
+            ("other features", b"nvx-rs", {"features": ["cli", "x"]}, other_build),
+            ("other target", b"nvx-rs", {"target": other_target}, other_build),
+            ("other format", b"nvx-rs", {"format": 2}, other_build),
+        )
+        for case, contents, provenance, reason in cases:
+            with (
+                self.subTest(case=case),
+                tempfile.TemporaryDirectory() as temporary,
+            ):
+                root = Path(temporary)
+                archive_path = self._runtime_release_archive(
+                    root, nvx_rs_contents=contents, nvx_rs_provenance=provenance
+                )
+                build_dir = root / "runtime" / "build"
+                build_dir.mkdir(parents=True)
+                stale_provenance = build_dir / nvx_rs.PROVENANCE_NAME
+                stale_provenance.write_text("{}", encoding="utf-8")
+                self.nvx_rs_path.write_bytes(b"stale nvx-rs")
+
+                output = self._install_runtime_archive(root, archive_path)
+
+                self.assertTrue(
+                    (build_dir / KernelBuildConstants.BINARY_NAME).is_file()
+                )
+                self.assertFalse(self.nvx_rs_path.exists())
+                self.assertFalse(stale_provenance.exists())
+                self.assertIn(reason, output)
+                self.assertIn(
+                    "so nvx.py builds nvx-rs from this checkout with Cargo when a "
+                    "command needs it, unless NVX_RS names one",
+                    output,
+                )
+                # Without Cargo, nvx.py names the ways to get nvx-rs.
+                with (
+                    _without_nvx_rs_variable(),
+                    patch("shutil.which", return_value=None),
+                    self.assertRaisesRegex(common.ScriptError, "nvx.py download"),
+                ):
+                    nvx_rs.require_binary()
+
+    def test_release_archive_with_inconsistent_nvx_rs_installs_nothing(self):
+        # A package whose nvx-rs does not match its own provenance is broken,
+        # so download fails before it replaces anything.
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            archive_path = self._runtime_release_archive(
+                root,
+                nvx_rs_contents=b"nvx-rs",
+                nvx_rs_provenance={"executable_sha256": "0" * 64},
+            )
+            self.nvx_rs_path.write_bytes(b"earlier nvx-rs")
+            with self.assertRaisesRegex(
+                common.ScriptError,
+                re.escape(
+                    f"the bin/{self.nvx_rs_path.name} of {archive_path.name} does "
+                    "not match its build provenance"
+                ),
+            ):
+                self._install_runtime_archive(root, archive_path)
+            self.assertFalse((root / "runtime").exists())
+            self.assertEqual(self.nvx_rs_path.read_bytes(), b"earlier nvx-rs")
 
     def test_source_release_archive_removes_stale_azure_artifacts(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -22210,6 +18504,7 @@ class ReleaseTests(unittest.TestCase):
                     "openvmm_binary_path",
                     return_value=binary_destination,
                 ),
+                contextlib.redirect_stdout(io.StringIO()),
             ):
                 release._install_release_archive(archive_path)
 
@@ -22542,6 +18837,45 @@ class SharedFileTests(unittest.TestCase):
                                 for member in members.values()
                             )
                         )
+
+    def test_release_archives_ship_both_executables_executable(self):
+        # Every package ships OpenVMM and nvx-rs in bin/, executable whatever
+        # mode the staging host stored, and publication finds both.
+        for suffix, platform, extension in (
+            (".tar.gz", "linux-kvm", ""),
+            (".zip", "windows-whp", ".exe"),
+        ):
+            with (
+                self.subTest(suffix=suffix),
+                tempfile.TemporaryDirectory() as temporary,
+            ):
+                root = Path(temporary)
+                source = root / f"nvx-1.0.0-{platform}"
+                for name in (f"openvmm{extension}", f"nvx-rs{extension}"):
+                    executable = source / "bin" / name
+                    executable.parent.mkdir(parents=True, exist_ok=True)
+                    executable.write_bytes(name.encode("ascii"))
+                    executable.chmod(0o644)
+                common.write_sha256_sums(source)
+                package = root / f"nvx-1.0.0-{platform}{suffix}"
+                release.create_release_archive(source, package)
+
+                if suffix == ".tar.gz":
+                    with tarfile.open(package, "r:gz") as archive_file:
+                        modes = {
+                            member.name: member.mode
+                            for member in archive_file.getmembers()
+                        }
+                else:
+                    with zipfile.ZipFile(package) as archive_file:
+                        modes = {
+                            member.filename: (member.external_attr >> 16) & 0o777
+                            for member in archive_file.infolist()
+                        }
+                for path in release.release_package_executables(platform):
+                    self.assertEqual(modes[f"{source.name}/{path}"], 0o755)
+                self.assertEqual(modes[f"{source.name}/SHA256SUMS"], 0o644)
+                release.require_release_package_executables(package, platform)
 
     def test_release_archive_rejects_internally_inconsistent_staging(self):
         with tempfile.TemporaryDirectory() as temporary:
