@@ -54,7 +54,7 @@ nvx-rs/
 | `nvx::host::filesystem` | The `ExportPlan` of host paths through OpenVMM's aggregate virtio-fs device, the host-mapping table, the reserved guest targets, and `guest_path` and `resolve_guest_path` (also at `nvx::`) |
 | `nvx::host::instance` | `Instance`: a VM in a directory of its own. It starts OpenVMM with a fresh capability and waits until the guest is ready and has mounted the mapped paths, reconciles recorded state, recovers interrupted launches, runs workloads and pumps their output, and stops the VM with a forced fallback |
 | `nvx::host::session`, `process`, `platform`, `report` | The authenticated control session, OpenVMM processes, Linux and Windows primitives, and OpenVMM's outcome report |
-| `nvx::host::sandbox` | The launch profile of `nvx.py sandbox`, ported from `scripts/nvx_tools/sandbox.py`: `SandboxLaunch`, with one to three EROFS `SandboxLayer`s in role order, the ext4 scratch disk, the entrypoint, arguments, hostname, workload identity, and resource limits, and its `--microvm-sandbox-block` and `--microvm-workload-identity` arguments and kernel command line, within the 1024-byte budget that OpenVMM leaves it. `mount`: `SandboxMount` live shares of host directories and files, their guest targets and the reserved ones, their access policies and owner, the aggregate of several shares, and the checks of their host paths. `options`: the checks that `nvx.py sandbox` and `nvx.py run` apply to their options: the attribution of `--mount-deny`, `--mount-allow`, and `--mount-write` to shares, the systemd policy, the targets of `nvx.py run` shares, and the managed exec environment; see [Python parity](#python-parity) |
+| `nvx::host::sandbox` | The launch profile of `nvx.py sandbox`, ported from the one that `scripts/nvx_tools/sandbox.py` held: `SandboxLaunch`, with one to three EROFS `SandboxLayer`s in role order, the ext4 scratch disk, the entrypoint, arguments, hostname, workload identity, and resource limits, and its `--microvm-sandbox-block` and `--microvm-workload-identity` arguments and kernel command line, within the 1024-byte budget that OpenVMM leaves it. `mount`: `SandboxMount` live shares of host directories and files, their guest targets and the reserved ones, their access policies and owner, the aggregate of several shares, and the checks of their host paths. `options`: the checks that `nvx.py sandbox` and `nvx.py run` apply to their options: the attribution of `--mount-deny`, `--mount-allow`, and `--mount-write` to shares, the systemd policy, the targets of `nvx.py run` shares, and the managed exec environment; see [Python parity](#python-parity) |
 | `nvx::testing::fake_openvmm` | A fake OpenVMM that serves the control console and runs scripted workloads without a VM, for direct launches and for the managed and one-shot sandboxes of `nvx-rs sandbox` and `nvx.py sandbox` |
 | `nvx::host::cli` | Feature `cli`: the `nvx-rs` executable; see [The nvx-rs CLI](#the-nvx-rs-cli) |
 | `nvx::guest` | The programs that run in Linux guests; see [Guest binaries](#guest-binaries) |
@@ -67,10 +67,10 @@ fields.
 
 `nvx::host::network::policy` compiles the egress policy files that
 `nvx.py run` and `nvx.py sandbox` take with `--network-egress-policy-file`
-([format](../doc/run.md#run-openvmm-directly)). It is a faithful port of
-[`egress_policy.py`](../scripts/nvx_tools/egress_policy.py), which stays
-authoritative until `nvx.py` delegates to `nvx-rs`: it accepts the same files,
-compiles them to the same rules, and fails with the same messages.
+([format](../doc/run.md#run-openvmm-directly)). It is a faithful port of the
+former `scripts/nvx_tools/egress_policy.py`, which it replaced when `nvx.py`
+delegated to `nvx-rs`: it accepts the same files, compiles them to the same
+rules, and fails with the same messages.
 
 - A policy is at most 1 MiB of UTF-8 JSON whose root has only `allow` and
   `deny` arrays. JSON is read as Python's `json.loads` reads it, so `NaN` and
@@ -114,7 +114,7 @@ in the same format. See [Python parity](#python-parity).
 ## Python parity
 
 `nvx::host::network::policy`, `nvx::host::sandbox`, and the guest lookups of
-`nvx::host::artifacts` replace Python code that `nvx.py` runs, so they keep its
+`nvx::host::artifacts` replaced Python code that `nvx.py` ran, so they keep its
 contract byte for byte: its limits, option semantics, outputs, and messages.
 They check values as Python does: whitespace is what `str.isspace` accepts,
 integers are what `int` reads, UUIDs what `uuid.UUID` reads, and JSON what
@@ -268,8 +268,9 @@ before them.
   "exec", "status_code": STATUS}, "schema_version": 1}`. `stop` shuts the VM
   down and prints nothing. `deprovision` removes the state directory.
 
-The state directory and its files are those of `nvx.py`, so either
-implementation can operate a sandbox that the other provisioned or started:
+The state directory and its files are those that `nvx.py` wrote before it
+delegated to `nvx-rs`, so `nvx-rs` and an older `nvx.py` can each operate a
+sandbox that the other provisioned or started:
 
 | File | Contents |
 | --- | --- |

@@ -1,8 +1,9 @@
 //! The sandbox launch profile: a microVM that runs one workload in a container over read-only
 //! EROFS layers and a private ext4 scratch disk, with live virtio-fs shares.
 //!
-//! This is the profile of `nvx.py sandbox`, ported from `scripts/nvx_tools/sandbox.py` with its
-//! limits, option semantics, OpenVMM arguments, kernel command line, and messages:
+//! This is the profile of `nvx.py sandbox`, ported from the launch profile that
+//! `scripts/nvx_tools/sandbox.py` held until microsoft/nvx#359, with its limits, option
+//! semantics, OpenVMM arguments, kernel command line, and messages:
 //!
 //! - [`SandboxLayer`]: one to three EROFS layers, `ROLE,PATH,EROFS_UUID`, each of a
 //!   [`LayerRole`], which the guest stacks in role order on its own block device.

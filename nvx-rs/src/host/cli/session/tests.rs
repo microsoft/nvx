@@ -1,5 +1,5 @@
-//! The tests of `scripts/test_control_session.py`, on in-memory streams and on the endpoints of
-//! each host, except those that the tests of [`crate::host::session`] cover.
+//! The tests of the former `scripts/test_control_session.py`, on in-memory streams and on the
+//! endpoints of each host, except those that the tests of [`crate::host::session`] cover.
 
 use std::collections::VecDeque;
 use std::sync::Mutex;

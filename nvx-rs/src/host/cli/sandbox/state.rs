@@ -1,5 +1,5 @@
 //! The files of a state directory: `config.json` in formats 1 to 6, `runtime.json`, and the JSON
-//! reading and writing of `sandbox_lifecycle.py`.
+//! reading and writing of the former `sandbox_lifecycle.py`.
 //!
 //! - [`write_json`] writes `json.dumps(value, indent=2, sort_keys=True) + "\n"` as
 //!   `Path.write_text` does, with the `\n`s turned into `os.linesep`, into a temporary file of

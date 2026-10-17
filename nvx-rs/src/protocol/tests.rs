@@ -1,7 +1,7 @@
 //! Tests of the control protocol, including golden byte fixtures.
 //!
-//! The fixtures are literal bytes, produced with Python's struct module using the formats of
-//! `scripts/nvx_tools/control_session.py` and the guest agent: `"<4sHBB16sQQI"` for outer
+//! The fixtures are literal bytes, produced with Python's struct module using the formats of the
+//! former `scripts/nvx_tools/control_session.py` and the guest agent: `"<4sHBB16sQQI"` for outer
 //! headers, `"<4sBBHQiI"` for application frames, `"<IHH"` and `"<IHHHHI"` for `EXEC` payloads,
 //! `"<II"` and `"<HHH"` for `MAPS` payloads, and `"<I"` for features. The host's encoders and the
 //! decoders that the fake OpenVMM shares with it must both match them, so a change to the codec

@@ -31,7 +31,6 @@ import nvx  # noqa: E402
 from nvx_tools import (  # noqa: E402
     benchmark,
     common,
-    control_session,
     managed_exec_tests,
     microvm_tests,
     nvx_rs,
@@ -2632,29 +2631,6 @@ class FilesystemCommaPathsScenarioTests(unittest.TestCase):
         self.assertIn("filesystem-comma-paths", microvm_tests.MICROVM_TEST_SCENARIOS)
         script = microvm_tests._read_script("filesystem-comma-paths.sh.in")
         self.assertIn("nvx-exit 0", script)
-
-
-class ControlSessionTests(unittest.TestCase):
-    def test_named_pipe_connect_retries_transient_invalid_argument(self):
-        error = OSError(control_session.errno.EINVAL, "Invalid argument")
-        with (
-            patch.object(control_session, "_winapi") as winapi,
-            patch.object(
-                control_session.time,
-                "monotonic",
-                side_effect=[0.0, 0.0],
-            ),
-            patch.object(control_session.time, "sleep") as sleep,
-        ):
-            winapi.CreateFile.side_effect = [error, 123]
-            stream = control_session._NamedPipeStream.connect(
-                Path(r"\\.\pipe\nvx-test"),
-                1.0,
-            )
-
-        self.assertEqual(stream._handle, 123)
-        self.assertEqual(winapi.CreateFile.call_count, 2)
-        sleep.assert_called_once_with(0.025)
 
 
 class _PortExclusionSockets:

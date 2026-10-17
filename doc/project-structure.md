@@ -128,11 +128,9 @@ nvx/
 |   |   |-- collect_alpine_sources.py Alpine source collection
 |   |   |-- collect_ubuntu_sources.py Ubuntu source collection
 |   |   |-- common.py            Shared process and configuration helpers
-|   |   |-- control_session.py   Control-session client for managed workloads
 |   |   |-- create_linux_source_archive.py Linux source packaging
 |   |   |-- development_release.py Resumable development release publication
 |   |   |-- doctor.py            Time ABI host qualification
-|   |   |-- egress_policy.py     Egress policy compiler for OpenVMM's rule grammar
 |   |   |-- elf.py               Static-executable check of ELF binaries
 |   |   |-- guests.py            Typed guest descriptors
 |   |   |-- host_telemetry.py    Benchmark host provenance and Windows capture storage telemetry
@@ -144,8 +142,7 @@ nvx/
 |   |   |-- performance.py       CI performance collection, persistence, and gates
 |   |   |-- process_supervisor.py Linux supervisor for one owned process tree
 |   |   |-- release.py           Release download, source collection, and packaging
-|   |   |-- sandbox.py           Host-side sandbox launch contract
-|   |   |-- sandbox_lifecycle.py Managed sandbox lifecycle operations
+|   |   |-- sandbox.py           Live-share arguments of `nvx.py run`
 |   |   |-- sandbox_lifecycle_tests.py Managed sandbox lifecycle and security tests
 |   |   |-- time_abi.py          Time ABI harness checks and CPU profile guidance
 |   |   `-- ubuntu.py            Verified Ubuntu rootfs and EROFS preparation

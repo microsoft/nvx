@@ -1,12 +1,12 @@
 //! IP networks as Python's `ipaddress` module parses, orders, and prints them, and the intervals
 //! of addresses that egress rules select.
 //!
-//! The egress policy compiler ports `scripts/nvx_tools/egress_policy.py`, which reads CIDRs with
-//! `ipaddress.ip_interface`, so [`parse_interface`] accepts exactly what it accepts: host bits,
-//! which it clears, IPv4 netmasks and hostmasks such as `/255.0.0.0`, prefix lengths with leading
-//! zeros, embedded IPv4 in IPv6 addresses, and IPv6 scopes, which callers reject. A [`Network`]
-//! prints as `str(network)` does in Python 3.13 and later, which writes an IPv4-mapped IPv6
-//! address such as `::ffff:192.0.2.0` with its IPv4 address in dotted form.
+//! The egress policy compiler ports the former `scripts/nvx_tools/egress_policy.py`, which read
+//! CIDRs with `ipaddress.ip_interface`, so [`parse_interface`] accepts exactly what it accepted:
+//! host bits, which it clears, IPv4 netmasks and hostmasks such as `/255.0.0.0`, prefix lengths
+//! with leading zeros, embedded IPv4 in IPv6 addresses, and IPv6 scopes, which callers reject. A
+//! [`Network`] prints as `str(network)` does in Python 3.13 and later, which writes an
+//! IPv4-mapped IPv6 address such as `::ffff:192.0.2.0` with its IPv4 address in dotted form.
 
 use std::fmt;
 use std::net::Ipv4Addr;

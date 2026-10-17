@@ -1,5 +1,6 @@
-//! The control session of `nvx.py sandbox`, a port of `scripts/nvx_tools/control_session.py` on
-//! the framing, sequencing, attachment, and transports of [`crate::host::session`].
+//! The control session of `nvx.py sandbox`, a port of the former
+//! `scripts/nvx_tools/control_session.py` on the framing, sequencing, attachment, and transports
+//! of [`crate::host::session`].
 //!
 //! It keeps the observable behavior of the Python session:
 //!
@@ -173,7 +174,7 @@ pub(crate) struct ExecResult {
     pub(crate) stderr: Vec<u8>,
 }
 
-/// An authenticated control session: `ControlSession` of `control_session.py`.
+/// An authenticated control session: `ControlSession` of the former `control_session.py`.
 pub(crate) struct Session {
     /// The session, until a transfer fails.
     inner: Option<ControlSession>,

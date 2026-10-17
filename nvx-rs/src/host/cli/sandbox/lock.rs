@@ -1,5 +1,6 @@
-//! The lifecycle lock of a state directory, `_LifecycleLock` of `sandbox_lifecycle.py`, with the
-//! file primitives that it shares with Python, so that both implementations exclude each other:
+//! The lifecycle lock of a state directory, `_LifecycleLock` of the former `sandbox_lifecycle.py`,
+//! with the file primitives that it shares with that Python implementation, so that an older
+//! `nvx.py` and `nvx-rs` exclude each other:
 //!
 //! - `lifecycle.lock` is opened or created without following a link that it names: with
 //!   `O_NOFOLLOW` on POSIX, and on Windows with `FILE_FLAG_OPEN_REPARSE_POINT` and every sharing
@@ -12,7 +13,8 @@
 //!   a waiter that then takes the lock of the removed file knows that the directory goes away.
 //!
 //! [`LifecycleLock::acquire`] and [`LifecycleLock::release`] follow `__enter__` and `release`
-//! step by step; see the comments of `_LifecycleLock` for the protocol.
+//! step by step; see the comments of `_LifecycleLock`, in the history of
+//! `scripts/nvx_tools/sandbox_lifecycle.py`, for the protocol.
 
 use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};

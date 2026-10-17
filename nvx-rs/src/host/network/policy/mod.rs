@@ -1,8 +1,9 @@
 //! Egress policy files, which `nvx.py run` and `nvx.py sandbox` accept with
 //! `--network-egress-policy-file`, and their compilation into OpenVMM's native rules.
 //!
-//! This is a faithful port of `scripts/nvx_tools/egress_policy.py`: it accepts the same
-//! documents, compiles them to the same rules, and fails with the same messages.
+//! This is a faithful port of the former `scripts/nvx_tools/egress_policy.py`, which it replaced
+//! (microsoft/nvx#359): it accepts the same documents, compiles them to the same rules, and fails
+//! with the same messages.
 //!
 //! # Format
 //!
@@ -83,7 +84,8 @@ pub struct CompiledEgressPolicy {
     pub deny: Vec<String>,
 }
 
-/// Compiles the egress policy file at `path`, as `compile_policy_file` in `nvx.py` does.
+/// Compiles the egress policy file at `path`, as `compile_policy_file` of the former
+/// `egress_policy.py` did for `nvx.py`.
 ///
 /// Messages name the file as `str(pathlib.Path(path))`, which drops empty and `.` components and,
 /// on Windows, writes `\` for `/`, and the file opened is that normalized path, as in Python.

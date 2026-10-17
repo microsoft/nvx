@@ -1,5 +1,5 @@
 //! Tests of the egress policy compiler: the parity fixture that the Python compiler recorded, and
-//! ports of the cases of `scripts/test_egress_policy.py`.
+//! ports of the cases of the former `scripts/test_egress_policy.py`.
 
 use std::path::{Path, PathBuf};
 
@@ -133,7 +133,8 @@ fn paths_print_as_pathlib_prints_them() {
     }
 }
 
-// Ports of `scripts/test_egress_policy.py`, one test for each of its tests, under the same names.
+// Ports of the former `scripts/test_egress_policy.py`, one test for each of its tests, under the
+// same names.
 
 /// Compiles `value` as `EgressPolicyTests.compile` does, from its JSON text in a policy file, and
 /// checks that compiling the value itself agrees.

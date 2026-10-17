@@ -1,5 +1,5 @@
-//! The identity of the OpenVMM process of a running sandbox, as `sandbox_lifecycle.py` records and
-//! checks it: `_process_start_time` and `_process_running`.
+//! The identity of the OpenVMM process of a running sandbox, as the former `sandbox_lifecycle.py`
+//! recorded and checked it: `_process_start_time` and `_process_running`.
 //!
 //! A runtime record names OpenVMM by its process ID and start time, which together never repeat:
 //! on Linux the `starttime` field of `/proc/PID/stat`, in clock ticks since boot, and on Windows

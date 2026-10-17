@@ -1,10 +1,11 @@
 //! The lowering of egress rules into OpenVMM's native rules, which the egress policy compiler of
 //! [`policy`](super::policy) and [`openvmm_arguments`](super::openvmm_arguments) share.
 //!
-//! It ports `scripts/nvx_tools/egress_policy.py` exactly. Rules of one action, allow or deny,
-//! become [`Rule`]s: one address family, the address intervals that the rule's destinations
-//! select once their exceptions are subtracted, and a protocol and port range. [`lower`] then
-//! emits the native rules of each family, within one budget of [`MAX_RULES_PER_ACTION`]:
+//! It ports the former `scripts/nvx_tools/egress_policy.py` exactly. Rules of one action, allow
+//! or deny, become [`Rule`]s: one address family, the address intervals that the rule's
+//! destinations select once their exceptions are subtracted, and a protocol and port range.
+//! [`lower`] then emits the native rules of each family, within one budget of
+//! [`MAX_RULES_PER_ACTION`]:
 //!
 //! 1. the union of the rules for every protocol, as the fewest networks that cover it;
 //! 2. for ICMP, TCP, and UDP, the union of the rules for every port of the protocol, as the

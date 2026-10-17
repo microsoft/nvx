@@ -1,4 +1,5 @@
-//! The lifecycle of a managed sandbox, a port of `scripts/nvx_tools/sandbox_lifecycle.py`.
+//! The lifecycle of a managed sandbox, a port of the former
+//! `scripts/nvx_tools/sandbox_lifecycle.py`, which it replaced (microsoft/nvx#359).
 //!
 //! A sandbox lives in its state directory:
 //!
@@ -15,8 +16,8 @@
 //!
 //! [`provision`], [`start`], [`stop`], and [`deprovision`] hold the [`LifecycleLock`] for their
 //! whole transition; [`exec_workload`] does not, so a long workload cannot delay a stop. Every
-//! state file is written as `sandbox_lifecycle.py` writes it, and a state directory that either
-//! implementation wrote serves the other.
+//! state file is written as `sandbox_lifecycle.py` wrote it, and a state directory that either
+//! implementation wrote serves the other, so an older `nvx.py` and `nvx-rs` share sandboxes.
 
 use std::fs::{File, OpenOptions};
 use std::io::Write;
