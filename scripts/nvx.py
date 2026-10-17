@@ -69,7 +69,6 @@ from nvx_tools.collect_ubuntu_sources import (
 from nvx_tools.common import (
     ScriptError,
     artifact_path,
-    openvmm_binary_path,
     require_file,
 )
 from nvx_tools.create_linux_source_archive import (
@@ -77,7 +76,6 @@ from nvx_tools.create_linux_source_archive import (
 )
 from nvx_tools.doctor import configure_parser as configure_doctor_parser
 from nvx_tools.doctor import host_cpu_signature
-from nvx_tools.egress_policy import compile_policy_file
 from nvx_tools.elf import check_static_executables
 from nvx_tools.guest_binaries import (
     build_guest_binaries,
@@ -430,7 +428,7 @@ def _resolve_network_egress_rules(
         raise ScriptError(
             "--network-egress is required with --network-egress-policy-file"
         )
-    compiled = compile_policy_file(policy_path)
+    compiled = nvx_rs.compile_egress_policy(policy_path)
     return compiled.allow, compiled.deny
 
 
@@ -485,7 +483,8 @@ def command_run(args: argparse.Namespace) -> None:
                 "--restore-processors cannot exceed --processors capacity"
             )
     network_egress_allow, network_egress_deny = _resolve_network_egress_rules(args)
-    executable = require_file(openvmm_binary_path(), "OpenVMM release binary")
+    artifacts = nvx_rs.artifacts()
+    executable = require_file(artifacts.openvmm, "OpenVMM release binary")
     command = [
         str(executable),
         "--single-process",
@@ -505,13 +504,9 @@ def command_run(args: argparse.Namespace) -> None:
         if args.restore_ready_path is not None:
             command.extend(["--restore-ready-path", str(args.restore_ready_path)])
     else:
-        kernel = require_file(
-            artifact_path(KernelBuildConstants.BINARY_NAME), "Linux direct kernel"
-        )
-        initrd = require_file(
-            artifact_path(descriptor.initramfs_name),
-            f"{descriptor.distribution} initramfs",
-        )
+        kernel = require_file(artifacts.kernel, "Linux direct kernel")
+        guest = artifacts.guest(descriptor.name)
+        initrd = require_file(guest.initramfs, f"{guest.distribution} initramfs")
         command.extend(
             [
                 "--memory",

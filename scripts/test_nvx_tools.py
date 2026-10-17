@@ -462,7 +462,34 @@ def _write_release_fixture(
     return paths, kernel_inputs, revision
 
 
-class CliTests(unittest.TestCase):
+def _checkout_artifacts() -> nvx_rs.ArtifactPaths:
+    """Return the artifact paths of this checkout as `nvx-rs artifacts` prints
+    them, for tests of `nvx.py run` that need no nvx-rs."""
+    return nvx_rs.ArtifactPaths(
+        openvmm=common.openvmm_binary_path(),
+        kernel=common.artifact_path(KernelBuildConstants.BINARY_NAME),
+        guests=tuple(
+            nvx_rs.GuestArtifacts(
+                name,
+                guests.guest_descriptor(name).distribution,
+                common.artifact_path(guests.guest_descriptor(name).initramfs_name),
+            )
+            for name in guests.GUEST_NAMES
+        ),
+    )
+
+
+class _CheckoutArtifacts(unittest.TestCase):
+    """Answers the artifact lookups of `nvx.py run` without nvx-rs."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        patcher = patch.object(nvx_rs, "artifacts", side_effect=_checkout_artifacts)
+        self.artifacts = patcher.start()
+        self.addCleanup(patcher.stop)
+
+
+class CliTests(_CheckoutArtifacts):
     def test_usage_documents_every_command_and_option(self):
         # doc/usage.md is the CLI reference: every command has a row in its
         # command table and a section that names exactly the options of the
@@ -976,6 +1003,56 @@ class CliTests(unittest.TestCase):
         self.assertEqual(command[command.index("--net") :], network_arguments)
 
     def test_run_lowers_structured_egress_policy_before_launch(self):
+        args = nvx.parse_args(
+            [
+                "run",
+                "--dry-run",
+                "--network-egress",
+                "deny",
+                "--network-egress-policy-file",
+                "policy.json",
+            ]
+        )
+
+        def require(path: Path, _description: str) -> Path:
+            return path
+
+        rules = nvx_rs.EgressRules(
+            allow=("192.0.2.0/25:tcp:8000-8001", "192.0.2.200/32"),
+            deny=("192.0.2.0/24:tcp:8001",),
+        )
+        with (
+            patch.object(
+                nvx_rs, "compile_egress_policy", return_value=rules
+            ) as compile_policy,
+            patch.object(nvx, "require_file", side_effect=require),
+            patch.object(
+                nvx, "_format_command", return_value="formatted"
+            ) as format_command,
+        ):
+            nvx.command_run(args)
+
+        compile_policy.assert_called_once_with(Path("policy.json"))
+        command = format_command.call_args.args[0]
+        self.assertNotIn("--network-egress-policy-file", command)
+        self.assertEqual(
+            command[command.index("--network-egress") :],
+            [
+                "--network-egress",
+                "deny",
+                "--network-egress-allow",
+                "192.0.2.0/25:tcp:8000-8001",
+                "--network-egress-allow",
+                "192.0.2.200/32",
+                "--network-egress-deny",
+                "192.0.2.0/24:tcp:8001",
+            ],
+        )
+
+    @unittest.skipUnless(
+        os.environ.get("NVX_RS"), "set NVX_RS to an nvx-rs executable to run"
+    )
+    def test_run_lowers_structured_egress_policy_with_nvx_rs(self):
         with tempfile.TemporaryDirectory() as temporary:
             policy = Path(temporary) / "policy.json"
             policy.write_text(
@@ -1030,14 +1107,32 @@ class CliTests(unittest.TestCase):
                 ) as format_command,
             ):
                 nvx.command_run(args)
-
-        command = format_command.call_args.args[0]
-        self.assertNotIn("--network-egress-policy-file", command)
-        self.assertEqual(command.count("--network-egress-allow"), 2)
-        self.assertIn("192.0.2.0/25:tcp:8000-8001", command)
-        self.assertIn("192.0.2.200/32", command)
-        self.assertEqual(command.count("--network-egress-deny"), 1)
-        self.assertIn("192.0.2.0/24:tcp:8001", command)
+            command = format_command.call_args.args[0]
+            self.assertEqual(
+                command[command.index("--network-egress-allow") :],
+                [
+                    "--network-egress-allow",
+                    "192.0.2.0/25:tcp:8000-8001",
+                    "--network-egress-allow",
+                    "192.0.2.200/32",
+                    "--network-egress-deny",
+                    "192.0.2.0/24:tcp:8001",
+                ],
+            )
+            # A refused policy fails with the compiler's message, before the
+            # artifacts are looked up.
+            policy.write_text(
+                json.dumps({"allow": [{"to": [{"cidr": "fe80::1%eth0/64"}]}]}),
+                encoding="utf-8",
+            )
+            self.artifacts.reset_mock()
+            with self.assertRaisesRegex(
+                common.ScriptError,
+                r"^allow\[0\]\.to\[0\]\.cidr must not name an IPv6 scope: "
+                r"fe80::1%eth0/64$",
+            ):
+                nvx.command_run(args)
+            self.artifacts.assert_not_called()
 
     def test_policy_file_rejects_ambiguous_flags_before_artifact_access(self):
         cases = (
@@ -1061,33 +1156,76 @@ class CliTests(unittest.TestCase):
                     nvx.command_run(args)
                 require.assert_not_called()
 
-    def test_run_policy_file_rejects_scoped_ipv6_before_launch(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            policy = Path(temporary) / "policy.json"
-            policy.write_text(
-                json.dumps({"allow": [{"to": [{"cidr": "fe80::1%eth0/64"}]}]}),
-                encoding="utf-8",
-            )
-            args = nvx.parse_args(
-                [
-                    "run",
-                    "--dry-run",
-                    "--network-egress",
-                    "deny",
-                    "--network-egress-policy-file",
-                    str(policy),
-                ]
-            )
-            with (
-                patch.object(nvx, "require_file") as require,
-                self.assertRaisesRegex(
-                    common.ScriptError,
-                    r"^allow\[0\]\.to\[0\]\.cidr must not name an IPv6 scope: "
-                    r"fe80::1%eth0/64$",
-                ),
-            ):
-                nvx.command_run(args)
-            require.assert_not_called()
+    def test_run_reports_policy_errors_before_looking_up_artifacts(self):
+        args = nvx.parse_args(
+            [
+                "run",
+                "--dry-run",
+                "--network-egress",
+                "deny",
+                "--network-egress-policy-file",
+                "policy.json",
+            ]
+        )
+        with (
+            patch.object(
+                nvx_rs,
+                "compile_egress_policy",
+                side_effect=common.ScriptError("egress policy must be an object"),
+            ),
+            patch.object(nvx, "require_file") as require,
+            self.assertRaisesRegex(
+                common.ScriptError, "^egress policy must be an object$"
+            ),
+        ):
+            nvx.command_run(args)
+        self.artifacts.assert_not_called()
+        require.assert_not_called()
+
+    def test_run_takes_its_artifacts_from_nvx_rs(self):
+        root = Path("alternate")
+        artifacts = nvx_rs.ArtifactPaths(
+            openvmm=root / "openvmm",
+            kernel=root / "vmlinux",
+            guests=(
+                nvx_rs.GuestArtifacts("alpine", "Alpine Linux", root / "alpine.gz"),
+                nvx_rs.GuestArtifacts("ubuntu", "Ubuntu Base", root / "ubuntu.gz"),
+            ),
+        )
+        self.artifacts.side_effect = None
+        self.artifacts.return_value = artifacts
+
+        def require(path: Path, _description: str) -> Path:
+            return path
+
+        args = nvx.parse_args(["run", "--guest", "ubuntu", "--dry-run"])
+        with (
+            patch.object(nvx, "require_file", side_effect=require) as require_file,
+            patch.object(
+                nvx, "_format_command", return_value="formatted"
+            ) as format_command,
+        ):
+            nvx.command_run(args)
+        command = format_command.call_args.args[0]
+        self.assertEqual(command[0], str(root / "openvmm"))
+        self.assertEqual(command[command.index("--kernel") + 1], str(root / "vmlinux"))
+        self.assertEqual(
+            command[command.index("--initrd") + 1], str(root / "ubuntu.gz")
+        )
+        # The checks and their messages are those of nvx.py.
+        self.assertEqual(
+            require_file.call_args_list,
+            [
+                call(root / "openvmm", "OpenVMM release binary"),
+                call(root / "vmlinux", "Linux direct kernel"),
+                call(root / "ubuntu.gz", "Ubuntu Base initramfs"),
+            ],
+        )
+        with self.assertRaisesRegex(
+            common.ScriptError,
+            "^OpenVMM release binary not found: " + re.escape(str(root / "openvmm")),
+        ):
+            nvx.command_run(args)
 
     def test_run_parses_denied_filesystem_paths(self):
         args = nvx.parse_args(
@@ -12139,7 +12277,7 @@ class AgentBundlingTests(unittest.TestCase):
             self._check(self._outcomes(pinned=(101, "cannot read the bundle")))
 
 
-class SandboxTests(unittest.TestCase):
+class SandboxTests(_CheckoutArtifacts):
     def test_launch_contract_orders_roles_and_builds_agent_command_line(self):
         custom = sandbox.SandboxLayer.parse(
             "custom,custom.erofs,22222222-2222-2222-2222-222222222222"
