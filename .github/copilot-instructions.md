@@ -50,9 +50,10 @@
   [copilot-setup-steps](./workflows/copilot-setup-steps.yml) prepares. It
   initializes `openvmm/`; installs `requirements-dev.txt` into a Python virtual
   environment on `PATH`, the Rust release that `rust-toolchain.toml` pins with
-  the OpenVMM test targets, the minimum supported Rust versions of the
-  `aci_edge_sandboxes` and `nvx-rs` crates, cargo-nextest, and the native guest build
-  prerequisites; grants `/dev/kvm` access; pulls the pinned shell linter images;
+  the OpenVMM test targets and the `x86_64-unknown-linux-musl` target used by
+  the Rust guest binaries, the minimum supported Rust versions of the
+  `aci_edge_sandboxes` and `nvx-rs` crates, cargo-nextest, and the remaining
+  native guest build prerequisites; grants `/dev/kvm` access; pulls the pinned shell linter images;
   and stages the pinned Linux and Ubuntu Base archives in `.cache/downloads`.
   When CI has cached them for the checked-out inputs, it also restores the guest
   artifacts into `build/` and the KVM OpenVMM binary into

@@ -227,9 +227,14 @@ install_rust_tools() {
     fi
 
     rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
+    rustup target add --toolchain "$RUST_TOOLCHAIN" \
+        x86_64-unknown-linux-musl
     rust_version=$(RUSTUP_TOOLCHAIN=$RUST_TOOLCHAIN rustc --version | awk '{print $2}')
     [ "$rust_version" = "$RUST_TOOLCHAIN" ] ||
         die "Rust ${RUST_TOOLCHAIN} is required, found ${rust_version}"
+    rustup target list --installed --toolchain "$RUST_TOOLCHAIN" |
+        grep -Fxq x86_64-unknown-linux-musl ||
+        die "Rust target x86_64-unknown-linux-musl is not installed"
     if ! command -v cargo-nextest >/dev/null 2>&1 ||
         ! cargo nextest --version | grep -Fq "cargo-nextest ${CARGO_NEXTEST_VERSION}"; then
         cargo +"$RUST_TOOLCHAIN" install --locked cargo-nextest \

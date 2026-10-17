@@ -38,10 +38,12 @@ from .adversarial_oracles import ProcessTreeContainment
 from .build_constants import (
     AlpineBuildConstants,
     BuildConstants,
+    GuestRustBuildConstants,
     KernelBuildConstants,
     OpenVMMBuildConstants,
 )
 from .common import bytes_to_mib, sha256_file
+from .guest_binaries import guest_binary_source_sha256, pinned_guest_rust_toolchain
 from .time_abi import TimeAbiFailure, TimeAbiMonitor, status_script
 
 BOOT_MARKER = b"ALPINE-MICROVM-BOOT-OK"
@@ -4440,10 +4442,8 @@ def _git_status(repository: Path) -> list[str] | None:
 def _device_io_helper_provenance(
     args: argparse.Namespace, initrd: Path
 ) -> dict[str, str]:
-    source = require_file(
-        args.nvx_dir.resolve() / "guest" / "common" / "nvx-device-io.c",
-        "device I/O helper source",
-    )
+    checkout = args.nvx_dir.resolve()
+    source = checkout / "nvx-rs"
     manifest_path = require_file(
         initrd.with_name(f"{initrd.name}{BuildConstants.PACKAGE_MANIFEST_SUFFIX}"),
         "initramfs package manifest",
@@ -4457,10 +4457,11 @@ def _device_io_helper_provenance(
         raise ValueError(
             f"invalid nvx-device-io provenance in {manifest_path}"
         ) from error
-    actual_source_sha256 = sha256_file(source)
+    toolchain = pinned_guest_rust_toolchain(checkout)
+    actual_source_sha256 = guest_binary_source_sha256(checkout)
     if source_sha256 != actual_source_sha256:
         raise ValueError(
-            "initramfs device I/O helper source does not match the current checkout"
+            "initramfs Rust guest binary sources do not match the current checkout"
         )
     if not isinstance(binary_sha256, str) or not re.fullmatch(
         r"[0-9a-f]{64}", binary_sha256
@@ -4470,6 +4471,8 @@ def _device_io_helper_provenance(
         "source": str(source),
         "source_sha256": actual_source_sha256,
         "binary_sha256": binary_sha256,
+        "toolchain": toolchain,
+        "target": GuestRustBuildConstants.TARGET,
     }
 
 

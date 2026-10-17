@@ -7,10 +7,10 @@ use super::{ProtocolError, array, violation};
 /// Control features of a guest image, advertised in the response to
 /// [`APP_FEATURES`](super::APP_FEATURES).
 ///
-/// The bits are defined by the guest agent in `guest/common/nvx-managed-agent.c`, which also
-/// speaks for the features of its image's init script. A host drives a sandbox only when its
-/// guest provides every feature in [`GuestFeatures::REQUIRED`]; an older image would silently
-/// ignore the policy or the request that depends on the missing feature.
+/// The Rust guest agent uses these shared definitions and also speaks for the features of its
+/// image's init script. A host drives a sandbox only when its guest provides every feature in
+/// [`GuestFeatures::REQUIRED`]; an older image would silently ignore the policy or the request
+/// that depends on the missing feature.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GuestFeatures(u32);
 

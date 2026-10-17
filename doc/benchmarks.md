@@ -214,8 +214,10 @@ MSHV, and WHP. They do not create TAP devices or require host firewall rules.
 Each workload directory includes `benchmark-metadata.json` with the platform, backend, ABI,
 processor count, host affinity set, memory sizes, artifact revisions, repository dirty state,
 warmups, measured run counts, and SHA-256 values for the VMM, kernel, initramfs, and coordinator.
-Device metadata also records helper source and packaged-binary hashes. Collection rejects
-mismatched lifecycle/workload metadata and duplicate topology rows.
+Device metadata also records the aggregate Rust guest-source digest, pinned
+toolchain and target, and the packaged `nvx-device-io` binary hash from the
+initramfs manifest. Collection rejects mismatched lifecycle/workload metadata
+and duplicate topology rows.
 
 Use a fixed affinity set containing one logical processor per physical core
 and at least `N+2` processors for an `N`-vCPU guest. The additional processors
@@ -398,8 +400,9 @@ measures complete process wall time while host and guest exchange files through 
 
 The dedicated suite always uses the canonical microVM and attaches the block
 backing object as the writable `scratch` role. There is no ABI selector or
-legacy unroled `--virtio-blk` control. Every guest has 256 MiB RAM and runs the same static, dependency-free
-x86-64 helper from the reproducible initramfs. Canonical runs execute five warmups followed by 30
+legacy unroled `--virtio-blk` control. Every guest has 256 MiB RAM and runs the
+same static Rust x86-64 binary from the reproducible initramfs.
+Canonical runs execute five warmups followed by 30
 retained attempts for each device. Every operation window lasts ten seconds against a 512 MiB
 backing object.
 
