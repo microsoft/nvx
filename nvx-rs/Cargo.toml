@@ -19,14 +19,25 @@ name = "nvx"
 [features]
 default = ["host"]
 # The host side: artifact discovery, launch, network and filesystem lowering, control sessions,
-# process and platform primitives, and the supervision of VM instances.
-host = ["serde", "dep:getrandom", "dep:serde_json", "dep:nix", "dep:windows-sys"]
+# process and platform primitives, the supervision of VM instances, and the sandbox launch
+# profile, whose aggregate child names are SHA-256 digests.
+host = [
+    "serde",
+    "dep:getrandom",
+    "dep:serde_json",
+    "dep:sha2",
+    "dep:nix",
+    "dep:windows-sys",
+]
 # Stages the OpenVMM executable, guest kernel, and control initramfs at build time; see
 # `Artifacts::bundled`. The build script downloads the release pinned in `artifacts.json`, or
 # copies the release directory named by `NVX_BUNDLE_DIR`.
 bundled = ["host", "dep:sha2"]
 # Test doubles: the fake OpenVMM of `testing::fake_openvmm` and its `nvx-fake-openvmm` binary.
 testing = ["dep:getrandom", "dep:serde", "dep:serde_json", "dep:nix", "dep:windows-sys"]
+# The `nvx-rs` command-line interface of `host::cli` and its `nvx-rs` binary, which `nvx.py`
+# runs for the steps that it delegates.
+cli = ["host"]
 # The serde form of `Hypervisor`. The `host` feature enables it.
 serde = ["dep:serde"]
 # The programs that run in Linux guests: the `guest` module and the `nvx-*` guest binaries. Build
@@ -37,12 +48,15 @@ guest = ["dep:nix", "dep:getrandom"]
 getrandom = { version = "0.4", optional = true }
 serde = { version = "1.0.200", features = ["derive"], optional = true }
 serde_json = { version = "1.0.120", optional = true }
+# The same release as the build script's: `host` enables both.
+sha2 = { version = "0.10", optional = true }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", optional = true, features = [
     "Win32_Foundation",
     "Win32_Security",
     "Win32_Storage_FileSystem",
+    "Win32_System_Console",
     "Win32_System_IO",
     "Win32_System_LibraryLoader",
     "Win32_System_Pipes",
@@ -69,7 +83,8 @@ nix = { version = "0.31.3", default-features = false, optional = true, features 
 ] }
 
 [build-dependencies]
-# Only the `bundled` build script reads JSON; `host`, which `bundled` enables, enables it here too.
+# Only the `bundled` build script reads JSON and computes digests; `host`, which `bundled`
+# enables, enables both here too.
 serde_json = { version = "1.0.120", optional = true }
 sha2 = { version = "0.10", optional = true }
 
@@ -81,6 +96,12 @@ tempfile = "3.10"
 name = "nvx-fake-openvmm"
 path = "src/bin/nvx-fake-openvmm.rs"
 required-features = ["testing"]
+doc = false
+
+[[bin]]
+name = "nvx-rs"
+path = "src/bin/nvx-rs.rs"
+required-features = ["cli"]
 doc = false
 
 # The guest binaries. Their unit tests live in the library, so the binaries have no test harness.

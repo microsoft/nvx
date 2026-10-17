@@ -37,6 +37,7 @@ python3 scripts/nvx.py performance gate --help
 | `setup-cross-os-cache` | Install GNU tar and zstd for GitHub Actions cross-OS caches. |
 | `classify-ci-changes` | Select the CI suites that a list of changed files runs. |
 | `kernel-patch-identity` | Print the digest of the kernel patch paths and contents that keys the kernel cache. |
+| `guest-binary-source-identity` | Print the digest of the Rust guest binary source paths and contents that keys the guest image caches. |
 | `check-required-ci` | Validate required GitHub Actions job results. |
 | `check-static-elf` | Check that executables are static ELF files without an interpreter. |
 | `test-openvmm-unit` | Run the OpenVMM workspace unit and documentation tests. |
@@ -96,6 +97,20 @@ Prints a digest of each file under `kernel/patches/` by relative path, in path
 order, together with its content. The guest build appends it to both kernel
 cache keys, because `hashFiles` hashes contents only: a renamed patch changes
 the key even when its bytes do not.
+
+### `guest-binary-source-identity`
+
+```text
+python3 scripts/nvx.py guest-binary-source-identity [--root PATH]
+```
+
+Prints the source digest that guest package manifests record for the Rust guest
+binaries: a digest of the relative path and content of every file under
+`nvx-rs/src/`, the crate's manifest, lockfile, and build script,
+`rust-toolchain.toml`, and the `build_constants.py` and `guest_binaries.py`
+build modules. The guest build appends it to the Alpine, Ubuntu, and Azure
+Linux cache keys, because `hashFiles` hashes contents only: moving a module
+into its own `mod.rs` changes the key even when no bytes change.
 
 ### `classify-ci-changes`
 

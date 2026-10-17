@@ -51,6 +51,7 @@ from nvx_tools import (  # noqa: E402
     common,
     control_session,
     elf,
+    guest_binaries,
     guests,
     release,
     sandbox,
@@ -317,6 +318,10 @@ def _write_release_fixture(
             "control_session_protocol_version": 1,
             "control_contract_revision": "nvx-microvm-v2-control-v2",
         },
+        "guest_rust": {
+            "toolchain": GuestRustBuildConstants.TOOLCHAIN,
+            "target": GuestRustBuildConstants.TARGET,
+        },
         "linux": {
             "version": "6.18.38",
             "upstream_url": (
@@ -338,7 +343,11 @@ def _write_release_fixture(
                 "x86_64/alpine-minirootfs-3.24.1-x86_64.tar.gz"
             ),
             "minirootfs_sha256": AlpineBuildConstants.MINIROOTFS_SHA256,
-            "guest_sources": ["guest/common", "guest/alpine"],
+            "guest_sources": [
+                "guest/common",
+                "guest/alpine",
+                *GuestRustBuildConstants.SOURCE_PATHS,
+            ],
             "package_manifests": ["build/initramfs.cpio.gz.packages.json"],
             "source_output": "build/sources/alpine",
         },
@@ -357,6 +366,7 @@ def _write_release_fixture(
                 "guest/common",
                 "guest/ubuntu",
                 "ubuntu/packages.lock.json",
+                *GuestRustBuildConstants.SOURCE_PATHS,
             ],
             "package_manifests": [
                 "build/initramfs-ubuntu.cpio.gz.packages.json",
@@ -378,6 +388,7 @@ def _write_release_fixture(
                     for path in AzureLinuxBuildConstants.GUEST_SOURCE_DIRECTORIES
                 ),
                 "azurelinux/packages.lock.json",
+                *GuestRustBuildConstants.SOURCE_PATHS,
             ],
             "package_manifests": [
                 (
@@ -3316,8 +3327,8 @@ class CiConfigurationTests(unittest.TestCase):
             (("ubuntu/packages.lock.json",), (True, True, False, False)),
             (("azurelinux/packages.lock.json",), (True, True, False, False)),
             (("aci_edge_sandboxes/src/lib.rs",), (True, True, False, False)),
-            (("nvx-rs/src/lib.rs",), (True, True, False, False)),
-            (("nvx-rs/Cargo.lock",), (True, True, False, False)),
+            (("nvx-rs/src/lib.rs",), (True, True, False, True)),
+            (("nvx-rs/Cargo.lock",), (True, True, False, True)),
             (("scripts/nvx_tools/microvm_tests.py",), (True, True, False, False)),
             (
                 (".github/workflows/run-nvx-microvm-tests.yml",),
@@ -3419,6 +3430,7 @@ class CiConfigurationTests(unittest.TestCase):
             match.group(1): {
                 path.replace("**", "example").replace("*", "example")
                 for path in re.findall(r"'([^']+)'", match.group(2))
+                if not path.startswith("!")
             }
             for match in re.finditer(
                 r"^\s+([A-Z_]+)_INPUT_HASH: \$\{\{ hashFiles\((.+)\) \}\}$",
@@ -5316,6 +5328,7 @@ Write-Output (Get-ActionsRunnerLabels)
 
         setup = (workflows / "copilot-setup-steps.yml").read_text(encoding="utf-8")
         self.assertIn("      - rust-toolchain.toml\n", setup)
+        self.assertIn("      - nvx-rs/**\n", setup)
         self.assertIn(
             "rust-toolchain.toml",
             _workflow_step(
@@ -5324,6 +5337,7 @@ Write-Output (Get-ActionsRunnerLabels)
         )
         rust = _workflow_step(setup, "copilot-setup-steps", "Install Rust toolchains")
         self.assertIn('rustup default "${RUST_TOOLCHAIN}"', rust)
+        self.assertIn("x86_64-unknown-linux-musl", rust)
         self.assertNotIn("stable", rust)
 
         # A binary built by another compiler must not satisfy the cache.
@@ -6430,6 +6444,20 @@ class BuildConstantsTests(unittest.TestCase):
             OpenVMMBuildConstants.CONTROL_CONTRACT_REVISION,
             manifest["openvmm"]["control_contract_revision"],
         )
+        self.assertEqual(
+            manifest["guest_rust"],
+            {
+                "toolchain": GuestRustBuildConstants.TOOLCHAIN,
+                "target": GuestRustBuildConstants.TARGET,
+            },
+        )
+        for guest in ("alpine", "ubuntu", "azurelinux"):
+            with self.subTest(guest=guest):
+                self.assertTrue(
+                    set(GuestRustBuildConstants.SOURCE_PATHS).issubset(
+                        manifest[guest]["guest_sources"]
+                    )
+                )
 
     def test_cache_defaults_are_resolved_for_each_configuration(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -6469,13 +6497,13 @@ class BuildConstantsTests(unittest.TestCase):
         records = cast(list[dict[str, str]], original["source_files"])
         self.assertEqual(
             [record for record in records if record["path"] == relative],
-            [{"path": relative, "sha256": common.sha256_file(source)}],
+            [{"path": relative, "sha256": common.normalized_sha256_file(source)}],
         )
 
         def changed_sha256(path: Path) -> str:
-            return "f" * 64 if path == source else common.sha256_file(path)
+            return "f" * 64 if path == source else common.normalized_sha256_file(path)
 
-        with patch.object(build, "sha256_file", side_effect=changed_sha256):
+        with patch.object(build, "normalized_sha256_file", side_effect=changed_sha256):
             changed = build.initramfs_provenance_inputs()
         self.assertNotEqual(original, changed)
         self.assertEqual(original["alpine"], changed["alpine"])
@@ -6486,6 +6514,11 @@ class BuildConstantsTests(unittest.TestCase):
         )
         self.assertIn("COPY scripts/ /repo/scripts/", dockerfile)
         self.assertIn("scripts", ReleaseBuildConstants.PROJECT_SOURCE_PATHS)
+        self.assertIn("nvx-rs", ReleaseBuildConstants.PROJECT_SOURCE_PATHS)
+        self.assertIn(
+            Path("nvx-rs") / "target",
+            ReleaseBuildConstants.PROJECT_SOURCE_EXCLUDES,
+        )
         self.assertTrue(
             (
                 BuildConstants.REPO_ROOT
@@ -6507,6 +6540,69 @@ class BuildConstantsTests(unittest.TestCase):
                     check=False,
                 )
                 self.assertEqual(tracked.returncode, 0, tracked.stderr)
+
+    def test_no_c_or_assembler_sources_remain_outside_openvmm(self):
+        tracked = subprocess.run(
+            ["git", "ls-files", "-z", "--cached", "--others", "--exclude-standard"],
+            cwd=BuildConstants.REPO_ROOT,
+            capture_output=True,
+            check=True,
+        ).stdout.split(b"\0")
+        forbidden = sorted(
+            path.decode("utf-8")
+            for path in tracked
+            if path
+            and (BuildConstants.REPO_ROOT / path.decode("utf-8")).is_file()
+            and not path.startswith(b"openvmm/")
+            and PurePosixPath(path.decode("utf-8")).suffix.lower() in {".c", ".h", ".s"}
+        )
+        self.assertEqual(forbidden, [])
+
+    def test_guest_binary_third_party_notices_cover_the_rust_runtime(self):
+        notices = (BuildConstants.REPO_ROOT / "THIRD_PARTY_NOTICES.md").read_text(
+            encoding="utf-8"
+        )
+        musl = next(
+            line for line in notices.splitlines() if line.startswith("| musl libc |")
+        )
+        self.assertEqual(
+            set(re.findall(r"`/sbin/(nvx-[a-z-]+)`", musl)),
+            set(GuestRustBuildConstants.BINARIES),
+        )
+        for component in (
+            "Rust core and standard libraries",
+            "Rust `compiler_builtins`",
+            "Rust `libc` crate",
+            "Rust `nix` crate 0.31.3",
+            "Rust `getrandom` crate 0.4.3",
+            "Rust `bitflags` crate 2.13.2",
+            "Rust `cfg-if` crate 1.0.5",
+            "Rust `memoffset` crate 0.9.1",
+            "Apache-2.0 WITH LLVM-exception",
+        ):
+            with self.subTest(component=component):
+                self.assertIn(component, notices)
+
+    def test_project_source_archive_excludes_the_nvx_rs_target(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            crate = root / "nvx-rs"
+            (crate / "src").mkdir(parents=True)
+            (crate / "src" / "lib.rs").write_text("source\n", encoding="utf-8")
+            (crate / "target" / "debug").mkdir(parents=True)
+            (crate / "target" / "debug" / "nvx-rs").write_text(
+                "build output\n", encoding="utf-8"
+            )
+            output = root / "source.tar.gz"
+            archive.create_reproducible_tar_gz(
+                output,
+                [(crate, "nvx-project-source/nvx-rs")],
+            )
+            with tarfile.open(output, "r:gz") as source_archive:
+                names = source_archive.getnames()
+
+        self.assertIn("nvx-project-source/nvx-rs/src/lib.rs", names)
+        self.assertFalse(any("/target" in name for name in names))
 
     def test_constants_consumers_import_in_either_order(self):
         modules = (
@@ -7802,6 +7898,57 @@ class BuildTests(unittest.TestCase):
                 "control_contract_revision": "nvx-microvm-v2-control-v2",
             },
         )
+        self.assertEqual(
+            manifest["guest_rust"],
+            {
+                "toolchain": GuestRustBuildConstants.TOOLCHAIN,
+                "target": GuestRustBuildConstants.TARGET,
+            },
+        )
+
+    def test_guest_artifact_inputs_cover_every_rust_binary_source(self):
+        rust_sources = set(guest_binaries.guest_binary_source_files())
+        inputs = {
+            "alpine provenance": set(build._initramfs_source_files()),
+            "alpine customization": set(
+                build._guest_customization_files(guests.ALPINE_GUEST)
+            ),
+            "ubuntu customization": set(ubuntu.customization_files()),
+            "azure linux": set(azurelinux.input_files()),
+        }
+        for name, files in inputs.items():
+            with self.subTest(inputs=name):
+                self.assertTrue(rust_sources.issubset(files))
+        self.assertIn(
+            BuildConstants.REPO_ROOT / "scripts" / "nvx_tools" / "guest_binaries.py",
+            inputs["alpine provenance"],
+        )
+
+    def test_guest_artifact_identities_normalize_source_line_endings(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "nvx-rs" / "src" / "lib.rs"
+            source.parent.mkdir(parents=True)
+            source.write_bytes(b"pub fn fixture() {}\n")
+            with (
+                patch.object(BuildConstants, "REPO_ROOT", root),
+                patch.object(build, "_initramfs_source_files", return_value=(source,)),
+                patch.object(ubuntu, "load_package_lock", return_value=()),
+                patch.object(azurelinux, "input_files", return_value=(source,)),
+            ):
+                lf = {
+                    "alpine": build.initramfs_provenance_inputs(),
+                    "ubuntu": ubuntu.converter_input_sha256((source,)),
+                    "azurelinux": azurelinux.input_sha256(),
+                }
+                source.write_bytes(b"pub fn fixture() {}\r\n")
+                crlf = {
+                    "alpine": build.initramfs_provenance_inputs(),
+                    "ubuntu": ubuntu.converter_input_sha256((source,)),
+                    "azurelinux": azurelinux.input_sha256(),
+                }
+
+        self.assertEqual(crlf, lf)
 
     def test_guest_descriptors_preserve_alpine_and_select_guest_outputs(self):
         alpine = guests.guest_descriptor("alpine")
@@ -8635,6 +8782,29 @@ class BuildTests(unittest.TestCase):
             action,
         )
 
+    def test_ci_guest_image_keys_include_the_rust_source_identity(self):
+        # hashFiles hashes contents only, so a module move that kept every
+        # file's bytes reused images whose provenance named the old paths.
+        action = (
+            BuildConstants.REPO_ROOT
+            / ".github"
+            / "actions"
+            / "build-guest-artifacts"
+            / "action.yml"
+        ).read_text(encoding="utf-8")
+        self.assertIn(
+            "rust_source_identity=$(python3 scripts/nvx.py guest-binary-source-identity)",
+            action,
+        )
+        for key in (
+            "alpine=alpine-image-v2-${ALPINE_VERSION}-${ALPINE_INPUT_HASH}",
+            "ubuntu=ubuntu-initramfs-v2-${UBUNTU_VERSION}-${UBUNTU_INPUT_HASH}",
+            "ubuntu-distro=ubuntu-distro-v2-${UBUNTU_VERSION}-${UBUNTU_INPUT_HASH}",
+            "azurelinux=azurelinux-initramfs-v2-${AZURELINUX_VERSION}-${AZURELINUX_INPUT_HASH}",
+        ):
+            with self.subTest(key=key.split("=", 1)[0]):
+                self.assertIn(f'echo "{key}-${{rust_source_identity}}"', action)
+
     def test_ci_guest_cache_keys_include_build_configuration(self):
         action = (
             BuildConstants.REPO_ROOT
@@ -8788,10 +8958,28 @@ class BuildTests(unittest.TestCase):
             / "build-guest-artifacts"
             / "action.yml"
         ).read_text(encoding="utf-8")
-        for variable in ("ALPINE_INPUT_HASH", "UBUNTU_INPUT_HASH"):
+        for variable in (
+            "ALPINE_INPUT_HASH",
+            "UBUNTU_INPUT_HASH",
+            "AZURELINUX_INPUT_HASH",
+        ):
             assignment = next(line for line in action.splitlines() if variable in line)
             self.assertIn("'scripts/nvx_tools/common.py'", assignment)
             self.assertIn("'scripts/nvx_tools/guests.py'", assignment)
+            self.assertIn("'scripts/nvx_tools/elf.py'", assignment)
+            self.assertIn("'scripts/nvx_tools/guest_binaries.py'", assignment)
+            self.assertIn("'nvx-rs/**'", assignment)
+            self.assertIn("'!nvx-rs/target/**'", assignment)
+            self.assertIn("'rust-toolchain.toml'", assignment)
+        for prefix in (
+            "alpine-image",
+            "ubuntu-initramfs",
+            "ubuntu-distro",
+            "azurelinux-initramfs",
+        ):
+            with self.subTest(cache=prefix):
+                self.assertIn(f"{prefix}-v2-", action)
+                self.assertNotIn(f"{prefix}-v1-", action)
 
     def test_quality_checks_include_shared_identity_probe(self):
         action = (
@@ -8816,13 +9004,132 @@ class BuildTests(unittest.TestCase):
         self.assertIn("ARG EROFS_UTILS_VERSION=1.5-1", dockerfile)
         self.assertIn("erofs-utils=${EROFS_UTILS_VERSION}", dockerfile)
 
+    def test_docker_builds_one_shared_rust_guest_binary_set(self):
+        dockerfile = (BuildConstants.REPO_ROOT / "docker" / "Dockerfile").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn(
+            f"ARG RUST_BUILDER_IMAGE={DockerBuildConstants.RUST_BUILDER_IMAGE}",
+            dockerfile,
+        )
+        builder = dockerfile.split("FROM ${RUST_BUILDER_IMAGE} AS guest-binaries", 1)[
+            1
+        ].split("\nFROM ", 1)[0]
+        self.assertIn("COPY rust-toolchain.toml /repo/", builder)
+        self.assertIn("COPY nvx-rs/ /repo/nvx-rs/", builder)
+        self.assertIn(
+            'rustup target add --toolchain "$toolchain" x86_64-unknown-linux-musl',
+            builder,
+        )
+        self.assertIn(
+            "python3 scripts/nvx.py build-guest-binaries --output /out/guest-binaries",
+            builder,
+        )
+        self.assertEqual(dockerfile.count("build-guest-binaries"), 1)
+
+        base = dockerfile.split("FROM ${DEBIAN_IMAGE} AS base", 1)[1].split(
+            "\nFROM ", 1
+        )[0]
+        self.assertIn("        build-essential \\\n", base)
+        self.assertNotIn("musl-tools", base)
+        self.assertNotIn("nvx-rs", base)
+        self.assertNotIn("rust-toolchain.toml", base)
+        self.assertNotIn("guest-binaries", base)
+
+        guest_base = dockerfile.split("FROM base AS guest-base", 1)[1].split(
+            "\nFROM ", 1
+        )[0]
+        self.assertIn("COPY nvx-rs/ /repo/nvx-rs/", guest_base)
+        self.assertIn("COPY rust-toolchain.toml /repo/", guest_base)
+        self.assertIn(
+            "COPY --from=guest-binaries /out/guest-binaries/ "
+            "/repo/build/guest-binaries/",
+            guest_base,
+        )
+        self.assertIn(
+            "ENV NVX_GUEST_BINARIES=/repo/build/guest-binaries",
+            guest_base,
+        )
+
+        determinism = dockerfile.split("FROM guest-base AS ubuntu-determinism", 1)[
+            1
+        ].split("\nFROM ", 1)[0]
+        self.assertIn(
+            "COPY --from=guest-binaries /usr/local/cargo/ /usr/local/cargo/",
+            determinism,
+        )
+        self.assertIn(
+            "COPY --from=guest-binaries /usr/local/rustup/ /usr/local/rustup/",
+            determinism,
+        )
+        self.assertIn(
+            "RUN NVX_GUEST_BINARIES= python3 scripts/nvx.py verify-guest-determinism",
+            determinism,
+        )
+
+        azure = dockerfile.split("FROM guest-base AS azurelinux-initramfs", 1)[1].split(
+            "\nFROM ", 1
+        )[0]
+        self.assertIn(
+            "source = Path('/repo/build/guest-binaries')",
+            azure,
+        )
+        self.assertIn("inspect_guest_binaries", azure)
+        self.assertIn("for name in GuestRustBuildConstants.BINARIES:", azure)
+        self.assertIn("'helpers': helpers", azure)
+        self.assertNotIn("azurelinux-helpers", dockerfile)
+        self.assertNotIn("musl-gcc", dockerfile)
+        self.assertNotIn("cc -static", dockerfile)
+
+    def test_docker_kernel_targets_do_not_build_the_guest_binaries(self):
+        # BuildKit builds every stage that a target inherits or copies from, so
+        # a kernel-only build must not compile the Rust guest binaries.
+        dockerfile = (BuildConstants.REPO_ROOT / "docker" / "Dockerfile").read_text(
+            encoding="utf-8"
+        )
+        dependencies: dict[str, set[str]] = {}
+        stage = ""
+        for line in dockerfile.splitlines():
+            if match := re.fullmatch(r"FROM (\S+) AS (\S+)", line):
+                stage = match.group(2)
+                dependencies[stage] = {match.group(1)}
+            elif match := re.match(r"COPY --from=(\S+) ", line):
+                dependencies[stage].add(match.group(1))
+
+        def stages_built_for(target: str) -> set[str]:
+            built: set[str] = set()
+            pending = [target]
+            while pending:
+                for dependency in dependencies.get(pending.pop(), set()):
+                    if dependency not in built:
+                        built.add(dependency)
+                        pending.append(dependency)
+            return built
+
+        for target in (
+            "kernel-artifacts",
+            DockerBuildConstants.DEBUG_KERNEL_TARGET,
+            DockerBuildConstants.LINUX_SOURCE_TARGET,
+        ):
+            with self.subTest(target=target):
+                self.assertIn("base", stages_built_for(target))
+                self.assertNotIn("guest-binaries", stages_built_for(target))
+        for target in (
+            DockerBuildConstants.ALPINE_TARGET,
+            DockerBuildConstants.UBUNTU_TARGET,
+            DockerBuildConstants.AZURELINUX_TARGET,
+            "ubuntu-determinism",
+        ):
+            with self.subTest(target=target):
+                self.assertIn("guest-binaries", stages_built_for(target))
+
     def test_azurelinux_initramfs_uses_locked_busybox_applets(self):
         dockerfile = (BuildConstants.REPO_ROOT / "docker" / "Dockerfile").read_text(
             encoding="utf-8"
         )
         base_stage = dockerfile.split("FROM base AS kernel", 1)[0]
         self.assertNotIn("busybox", base_stage)
-        azure_stage = dockerfile.split("FROM base AS azurelinux-initramfs", 1)[1]
+        azure_stage = dockerfile.split("FROM guest-base AS azurelinux-initramfs", 1)[1]
         self.assertIn("ln -sf ../sbin/busybox /rootfs/usr/bin/busybox", azure_stage)
         applets = (
             azure_stage.split("for utility in ", 1)[1]
@@ -8850,7 +9157,7 @@ class BuildTests(unittest.TestCase):
         dockerfile = (BuildConstants.REPO_ROOT / "docker" / "Dockerfile").read_text(
             encoding="utf-8"
         )
-        azure_stage = dockerfile.split("FROM base AS azurelinux-initramfs", 1)[1]
+        azure_stage = dockerfile.split("FROM guest-base AS azurelinux-initramfs", 1)[1]
         self.assertIn(
             "sed -i 's#^\\(nobody:[^:]*:65534:65534:[^:]*:\\)/dev/null:"
             "#\\1/nonexistent:#'",
@@ -8897,7 +9204,7 @@ class BuildTests(unittest.TestCase):
         dockerfile = (BuildConstants.REPO_ROOT / "docker" / "Dockerfile").read_text(
             encoding="utf-8"
         )
-        azure_stage = dockerfile.split("FROM base AS azurelinux-initramfs", 1)[1]
+        azure_stage = dockerfile.split("FROM guest-base AS azurelinux-initramfs", 1)[1]
         cleanup = azure_stage.index(
             "rm -rf /rootfs/usr/lib/sysimage/tdnf /rootfs/var/cache/tdnf \\\n"
             "    /rootfs/var/cache/ldconfig /rootfs/var/lib/rpm"
@@ -8914,7 +9221,7 @@ class BuildTests(unittest.TestCase):
         dockerfile = (BuildConstants.REPO_ROOT / "docker" / "Dockerfile").read_text(
             encoding="utf-8"
         )
-        azure_stage = dockerfile.split("FROM base AS azurelinux-initramfs", 1)[1]
+        azure_stage = dockerfile.split("FROM guest-base AS azurelinux-initramfs", 1)[1]
         self.assertIn("from nvx_tools.azurelinux import input_sha256", azure_stage)
         self.assertIn(
             "'input_sha256': input_sha256(\n"
@@ -8947,6 +9254,9 @@ class BuildTests(unittest.TestCase):
                     "scripts/nvx_tools/azurelinux.py",
                     "scripts/nvx_tools/build_constants.py",
                     "scripts/nvx_tools/common.py",
+                    "scripts/nvx_tools/guest_binaries.py",
+                    "nvx-rs/src/lib.rs",
+                    "rust-toolchain.toml",
                 ):
                     with self.subTest(path=relative):
                         path = root / relative
@@ -8967,23 +9277,39 @@ class BuildTests(unittest.TestCase):
             installed.append(destination)
             return {}
 
-        root = Path("rootfs")
-        with (
-            patch.object(build, "_install", side_effect=install),
-            patch.object(build, "_build_static_helper", return_value={}),
-            patch.object(build, "_build_device_io_helper", return_value={}),
-        ):
-            build._install_guest_files(
-                build_config.InitramfsBuildConfig(work=Path("work")),
-                root,
-                guests.ALPINE_GUEST,
+        def stage_binaries(output: Path) -> guest_binaries.GuestBinaryBuildResult:
+            output.mkdir()
+            binaries: dict[str, str] = {}
+            for name in GuestRustBuildConstants.BINARIES:
+                path = output / name
+                path.write_bytes(name.encode("ascii"))
+                binaries[name] = common.sha256_file(path)
+            return guest_binaries.GuestBinaryBuildResult(
+                source_sha256="a" * 64,
+                binaries=binaries,
             )
-        self.assertIn(root / "sbin" / "nvx-hostmount", installed)
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "rootfs"
+            work = Path(temporary) / "work"
+            (root / "sbin").mkdir(parents=True)
+            (root / "etc").mkdir()
+            work.mkdir()
+            with (
+                patch.object(build, "_install", side_effect=install),
+                patch.object(build, "build_guest_binaries", side_effect=stage_binaries),
+            ):
+                build._install_guest_files(
+                    build_config.InitramfsBuildConfig(work=work),
+                    root,
+                    guests.ALPINE_GUEST,
+                )
+            self.assertIn(root / "sbin" / "nvx-hostmount", installed)
 
         dockerfile = (BuildConstants.REPO_ROOT / "docker" / "Dockerfile").read_text(
             encoding="utf-8"
         )
-        azure_stage = dockerfile.split("FROM base AS azurelinux-initramfs", 1)[1]
+        azure_stage = dockerfile.split("FROM guest-base AS azurelinux-initramfs", 1)[1]
         azure_sbin_scripts = azure_stage.split(
             "install -m 0755 /repo/guest/common/init /rootfs/init\n", 1
         )[1].split("/rootfs/sbin/", 1)[0]
@@ -9036,43 +9362,31 @@ class BuildTests(unittest.TestCase):
             environment = run.call_args.kwargs["env"]
             self.assertEqual(environment["SSL_CERT_FILE"], "/etc/configured-ca.pem")
 
-    def test_device_io_helper_is_static_with_nonexecutable_stack(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            work = root / "work"
-            destination = root / "root" / "sbin" / "nvx-device-io"
-            work.mkdir()
-            destination.parent.mkdir(parents=True)
-
-            def compile_helper(
-                command: list[str | os.PathLike[str]], **_kwargs: object
-            ) -> None:
-                output = Path(command[command.index("-o") + 1])
-                output.write_bytes(b"static-elf")
-
-            with (
-                patch.object(build, "require_tool", return_value="cc"),
-                patch.object(build, "run_checked", side_effect=compile_helper) as run,
-            ):
-                provenance = build._build_device_io_helper(work, destination)
-
-            command = run.call_args.args[0]
-            self.assertIn("-nostdlib", command)
-            self.assertIn("-static", command)
-            self.assertIn("-Wl,-z,noexecstack", command)
-            self.assertEqual(destination.read_bytes(), b"static-elf")
-            self.assertEqual(
-                provenance["binary_sha256"], common.sha256_file(destination)
-            )
-            self.assertEqual(len(provenance["source_sha256"]), 64)
-
-    def test_device_io_provenance_uses_shared_helper_source(self):
+    def test_device_io_provenance_uses_shared_rust_source_digest(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             checkout = root / "nvx"
-            source = checkout / "guest" / "common" / "nvx-device-io.c"
-            source.parent.mkdir(parents=True)
-            source.write_bytes(b"shared helper source")
+            crate = checkout / "nvx-rs"
+            (crate / "src").mkdir(parents=True)
+            sources = {
+                crate / "Cargo.toml": "[package]\nname = 'fixture'\n",
+                crate / "Cargo.lock": "# lock\n",
+                crate / "build.rs": "fn main() {}\n",
+                crate / "src" / "lib.rs": "pub fn fixture() {}\n",
+                checkout / "rust-toolchain.toml": (
+                    f'[toolchain]\nchannel = "{GuestRustBuildConstants.TOOLCHAIN}"\n'
+                ),
+                checkout / "scripts" / "nvx_tools" / "build_constants.py": (
+                    "PROFILE = 'guest'\n"
+                ),
+                checkout / "scripts" / "nvx_tools" / "guest_binaries.py": (
+                    "def build(): pass\n"
+                ),
+            }
+            for path, contents in sources.items():
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(contents, encoding="utf-8")
+            source_sha256 = guest_binaries.guest_binary_source_sha256(checkout)
             initrd = root / "initramfs.cpio.gz"
             manifest = initrd.with_name(f"{initrd.name}.packages.json")
             manifest.write_text(
@@ -9080,7 +9394,7 @@ class BuildTests(unittest.TestCase):
                     {
                         "helpers": {
                             "nvx-device-io": {
-                                "source_sha256": common.sha256_file(source),
+                                "source_sha256": source_sha256,
                                 "binary_sha256": "1" * 64,
                             }
                         }
@@ -9094,11 +9408,32 @@ class BuildTests(unittest.TestCase):
                 initrd,
             )
 
-            self.assertEqual(provenance["source"], str(source.resolve()))
-            self.assertEqual(
-                provenance["source_sha256"],
-                common.sha256_file(source),
-            )
+            self.assertEqual(provenance["source"], str(crate.resolve()))
+            self.assertEqual(provenance["source_sha256"], source_sha256)
+            self.assertEqual(provenance["toolchain"], GuestRustBuildConstants.TOOLCHAIN)
+            self.assertEqual(provenance["target"], GuestRustBuildConstants.TARGET)
+
+            with (
+                patch.object(GuestRustBuildConstants, "TOOLCHAIN", "9.9.9"),
+                self.assertRaisesRegex(
+                    common.ScriptError,
+                    "Rust guest build toolchain mismatch",
+                ),
+            ):
+                benchmark._device_io_helper_provenance(
+                    argparse.Namespace(nvx_dir=checkout),
+                    initrd,
+                )
+
+            (crate / "src" / "lib.rs").write_text("changed\n", encoding="utf-8")
+            with self.assertRaisesRegex(
+                ValueError,
+                "Rust guest binary sources do not match",
+            ):
+                benchmark._device_io_helper_provenance(
+                    argparse.Namespace(nvx_dir=checkout),
+                    initrd,
+                )
 
     def test_sandbox_kernel_config_requires_every_feature(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -9496,36 +9831,89 @@ class BuildTests(unittest.TestCase):
             debug.work.name, KernelBuildConstants.DEBUG_WORK_DIRECTORY_NAME
         )
 
-    def test_guest_files_build_time_probe_with_its_own_flags(self):
-        source = BuildConstants.REPO_ROOT / "guest" / "common" / "nvx-time-probe.c"
-        header = source.read_text(encoding="utf-8").splitlines()[:2]
-        self.assertEqual(
-            header,
-            [
-                "// Copyright (c) Microsoft Corporation.",
-                "// Licensed under the MIT License.",
-            ],
-        )
+    def test_guest_files_install_one_checked_rust_build(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary) / "root"
             work = Path(temporary) / "work"
             for directory in (root / "sbin", root / "etc", work):
                 directory.mkdir(parents=True)
-            commands: list[list[str]] = []
+            payloads = {
+                name: f"rust-guest-binary {name}".encode()
+                for name in GuestRustBuildConstants.BINARIES
+            }
+            result = guest_binaries.GuestBinaryBuildResult(
+                source_sha256="a" * 64,
+                binaries={
+                    name: hashlib.sha256(payload).hexdigest()
+                    for name, payload in payloads.items()
+                },
+            )
 
-            def compile_helper(
-                command: list[str | os.PathLike[str]], **_kwargs: object
-            ) -> None:
-                commands.append([os.fspath(part) for part in command])
-                output = Path(command[command.index("-o") + 1])
-                output.write_bytes(f"static-elf {output.name}".encode())
+            def stage_binaries(output: Path) -> guest_binaries.GuestBinaryBuildResult:
+                output.mkdir()
+                for name, payload in payloads.items():
+                    (output / name).write_bytes(payload)
+                return result
 
-            def find_tool(name: str) -> str:
-                return name
+            with patch.object(
+                build, "build_guest_binaries", side_effect=stage_binaries
+            ) as rust_build:
+                helpers = build._install_guest_files(
+                    build_config.InitramfsBuildConfig(work=work),
+                    root,
+                    guests.guest_descriptor("alpine"),
+                )
 
+            rust_build.assert_called_once_with(
+                work / GuestRustBuildConstants.OUTPUT_DIRECTORY_NAME
+            )
+            for name, payload in payloads.items():
+                with self.subTest(helper=name):
+                    installed = root / "sbin" / name
+                    self.assertEqual(installed.read_bytes(), payload)
+                    if os.name != "nt":
+                        self.assertEqual(installed.stat().st_mode & 0o777, 0o755)
+                    self.assertEqual(
+                        helpers[name],
+                        {
+                            "source_sha256": result.source_sha256,
+                            "binary_sha256": result.binaries[name],
+                        },
+                    )
+        for name in (
+            "STATIC_HELPER_CFLAGS",
+            "DEVICE_IO_CFLAGS",
+            "STATIC_HELPERS",
+            "MUSL_COMPILER",
+            "MUSL_STATIC_HELPERS",
+            "TIME_PROBE_CFLAGS",
+        ):
+            with self.subTest(helper=name):
+                self.assertFalse(hasattr(InitramfsBuildConstants, name))
+
+    def test_guest_files_reuse_the_configured_prebuilt_rust_binaries(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "root"
+            work = Path(temporary) / "work"
+            prebuilt = Path(temporary) / "prebuilt"
+            for directory in (root / "sbin", root / "etc", work, prebuilt):
+                directory.mkdir(parents=True)
+            binaries: dict[str, str] = {}
+            for name in GuestRustBuildConstants.BINARIES:
+                path = prebuilt / name
+                path.write_bytes(name.encode("ascii"))
+                binaries[name] = common.sha256_file(path)
+            result = guest_binaries.GuestBinaryBuildResult(
+                source_sha256="a" * 64,
+                binaries=binaries,
+            )
+            environment = GuestRustBuildConstants.BINARIES_VARIABLE
             with (
-                patch.object(build, "require_tool", side_effect=find_tool),
-                patch.object(build, "run_checked", side_effect=compile_helper),
+                patch.dict(os.environ, {environment: str(prebuilt)}),
+                patch.object(
+                    build, "inspect_guest_binaries", return_value=result
+                ) as inspect,
+                patch.object(build, "build_guest_binaries") as rust_build,
             ):
                 helpers = build._install_guest_files(
                     build_config.InitramfsBuildConfig(work=work),
@@ -9533,49 +9921,15 @@ class BuildTests(unittest.TestCase):
                     guests.guest_descriptor("alpine"),
                 )
 
-        probe = InitramfsBuildConstants.TIME_PROBE_NAME
-        flags_by_source = {
-            Path(command[-1]).stem: command[1 : command.index("-o")]
-            for command in commands
-        }
-        compiler_by_source = {
-            Path(command[-1]).stem: command[0] for command in commands
-        }
-        self.assertEqual(
-            flags_by_source[probe], list(InitramfsBuildConstants.TIME_PROBE_CFLAGS)
-        )
-        self.assertIn("-pthread", flags_by_source[probe])
-        musl = InitramfsBuildConstants.MUSL_COMPILER
-        self.assertEqual(compiler_by_source[probe], musl)
-        for name in InitramfsBuildConstants.STATIC_HELPERS:
-            with self.subTest(helper=name):
-                self.assertEqual(
-                    flags_by_source[name],
-                    list(InitramfsBuildConstants.STATIC_HELPER_CFLAGS),
-                )
-                self.assertEqual(compiler_by_source[name], "cc")
-        for name in InitramfsBuildConstants.MUSL_STATIC_HELPERS:
-            with self.subTest(helper=name):
-                self.assertEqual(
-                    flags_by_source[name],
-                    list(InitramfsBuildConstants.STATIC_HELPER_CFLAGS),
-                )
-                self.assertEqual(compiler_by_source[name], musl)
-        dockerfile = (BuildConstants.REPO_ROOT / "docker" / "Dockerfile").read_text(
-            encoding="utf-8"
-        )
-        self.assertIn("        musl-tools \\\n", dockerfile)
-        self.assertIn(
-            "    for helper in "
-            + " ".join(InitramfsBuildConstants.MUSL_STATIC_HELPERS)
-            + "; do \\\n        musl-gcc ",
-            dockerfile,
-        )
-        self.assertEqual(helpers[probe]["source_sha256"], common.sha256_file(source))
-        self.assertEqual(
-            helpers[probe]["binary_sha256"],
-            hashlib.sha256(f"static-elf {probe}".encode()).hexdigest(),
-        )
+            inspect.assert_called_once_with(prebuilt)
+            rust_build.assert_not_called()
+            for name in GuestRustBuildConstants.BINARIES:
+                with self.subTest(helper=name):
+                    self.assertEqual(
+                        (root / "sbin" / name).read_bytes(), name.encode("ascii")
+                    )
+                    self.assertEqual(helpers[name]["source_sha256"], "a" * 64)
+                    self.assertEqual(helpers[name]["binary_sha256"], binaries[name])
 
     def test_docker_debug_kernel_target_exports_debug_artifacts(self):
         dockerfile = (BuildConstants.REPO_ROOT / "docker" / "Dockerfile").read_text(
@@ -10815,266 +11169,6 @@ class SandboxSmokeProfileTests(unittest.TestCase):
         self.assertNotIn("NVX-UBUNTU-SANDBOX-OK", result.stdout)
 
 
-class ManagedAgentCgroupTests(unittest.TestCase):
-    SOURCE = Path(__file__).parents[1] / "guest" / "common" / "nvx-managed-agent.c"
-
-    def setUp(self):
-        if sys.platform != "linux":
-            self.skipTest("the managed agent requires Linux")
-        compiler = shutil.which("cc") or shutil.which("gcc")
-        if compiler is None:
-            self.skipTest("C compiler is unavailable")
-        temporary = tempfile.TemporaryDirectory()
-        self.addCleanup(temporary.cleanup)
-        root = Path(temporary.name)
-        self.cgroup = root / "cgroup"
-        self.cgroup.mkdir()
-        (self.cgroup / "cgroup.procs").touch()
-        self.subtree_control = self.cgroup / "cgroup.subtree_control"
-        self.subtree_control.touch()
-        self.execution = self.cgroup / "nvx-exec"
-        self.execution.mkdir()
-        self.tasks = self.execution / "pids.current"
-        self.tasks.write_bytes(b"0\n")
-        (self.execution / "cgroup.kill").touch()
-        source = root / "cgroup-test.c"
-        source.write_text(
-            f"""#define _GNU_SOURCE
-#include <sys/types.h>
-#include <sys/wait.h>
-static pid_t harness_waitpid(pid_t pid, int *status, int options);
-#define waitpid(pid, status, options) harness_waitpid(pid, status, options)
-#define CGROUP_ROOT {json.dumps(str(self.cgroup))}
-#define main managed_agent_main
-#include {json.dumps(str(self.SOURCE))}
-#undef main
-#undef waitpid
-
-static pid_t harness_process = -1;
-
-/* Like the pids controller, stops charging a process once it is reaped. */
-static pid_t harness_waitpid(pid_t pid, int *status, int options)
-{{
-    pid_t result = waitpid(pid, status, options);
-
-    if (result > 0 && result == harness_process) {{
-        int fd = open(EXEC_CGROUP "/pids.current", O_WRONLY | O_TRUNC | O_CLOEXEC);
-
-        if (fd < 0 || write(fd, "0\\n", 2) != 2 || close(fd) != 0) {{
-            _exit(3);
-        }}
-        harness_process = -1;
-    }}
-    return result;
-}}
-
-/*
- * Calls `check` while a workload process that the cgroup charges exits, or
- * once it has exited if `exited` is set, and requires `check` to reap it.
- */
-static int with_exiting_process(int (*check)(void), int exited)
-{{
-    siginfo_t information = {{0}};
-    int result;
-    int status;
-    pid_t child = fork();
-
-    if (child < 0) {{
-        _exit(2);
-    }}
-    if (child == 0) {{
-        const struct timespec delay = {{.tv_nsec = 50L * 1000L * 1000L}};
-
-        nanosleep(&delay, NULL);
-        _exit(0);
-    }}
-    harness_process = child;
-    if (exited && waitid(P_PID, (id_t)child, &information, WEXITED | WNOWAIT) != 0) {{
-        _exit(2);
-    }}
-    result = check();
-    status = errno;
-    if (harness_process >= 0 || waitpid(child, NULL, WNOHANG) >= 0 || errno != ECHILD) {{
-        _exit(4);
-    }}
-    errno = status;
-    return result;
-}}
-
-int main(int argc, char **argv)
-{{
-    int result;
-    if (argc != 2) {{
-        return 2;
-    }}
-    errno = 0;
-    if (strcmp(argv[1], "retry") == 0) {{
-        struct control_session session = {{.fd = STDOUT_FILENO}};
-        struct agent_config config = {{.direct = 1}};
-        struct exec_config exec_config = {{0}};
-        char *command[] = {{"/bin/true", NULL}};
-        result = run_exec(&session, &config, 42, 0, command, &exec_config);
-        return result == 0
-                   ? run_exec(&session, &config, 43, 0, command, &exec_config)
-                   : result;
-    }}
-    if (strcmp(argv[1], "tasks") == 0) {{
-        result = exec_cgroup_has_tasks();
-    }} else if (strcmp(argv[1], "prepare") == 0) {{
-        result = prepare_exec_cgroup();
-    }} else if (strcmp(argv[1], "settle") == 0) {{
-        result = settle_exec_cgroup();
-    }} else if (strcmp(argv[1], "settle-reap") == 0) {{
-        result = with_exiting_process(settle_exec_cgroup, 0);
-    }} else if (strcmp(argv[1], "verify-reap") == 0) {{
-        result = with_exiting_process(reap_exec_cgroup, 1);
-    }} else {{
-        return 2;
-    }}
-    printf("%d %d\\n", result, errno);
-    return 0;
-}}
-""",
-            encoding="utf-8",
-        )
-        self.helper = root / "cgroup-test"
-        flags = [
-            flag
-            for flag in InitramfsBuildConstants.STATIC_HELPER_CFLAGS
-            if flag != "-static"
-        ]
-        result = subprocess.run(
-            [compiler, *flags, "-o", str(self.helper), str(source)],
-            capture_output=True,
-            text=True,
-            timeout=30,
-            check=False,
-        )
-        self.assertEqual(result.returncode, 0, result.stderr)
-
-    def _check(self, mode: str) -> tuple[int, int]:
-        result = subprocess.run(
-            [str(self.helper), mode],
-            capture_output=True,
-            text=True,
-            timeout=5,
-            check=False,
-        )
-        self.assertEqual(result.returncode, 0, result.stderr)
-        value, status = result.stdout.split()
-        return int(value), int(status)
-
-    def _assert_further_exec_refused(self):
-        result = subprocess.run(
-            [str(self.helper), "retry"],
-            capture_output=True,
-            timeout=5,
-            check=False,
-        )
-        self.assertEqual(result.returncode, 0, result.stderr)
-        frames = result.stdout
-        for expected_id in (42, 43):
-            outer = ManagedAgentStopTests.OUTER
-            app = ManagedAgentStopTests.APP
-            *_, length = outer.unpack(frames[: outer.size])
-            frame = frames[outer.size : outer.size + length]
-            _, _, kind, _, request_id, status, payload_len = app.unpack(
-                frame[: app.size]
-            )
-            payload = frame[app.size :]
-            self.assertEqual((kind, request_id, status), (0xFF, expected_id, 125))
-            self.assertEqual(payload_len, len(payload))
-            self.assertEqual(payload, b"containment-failed")
-            frames = frames[outer.size + length :]
-        self.assertEqual(frames, b"")
-
-    def test_task_count_requires_a_canonical_decimal(self):
-        for contents, expected in (
-            (b"0\n", 0),
-            (b"1\n", 1),
-            (b"10\n", 1),
-            (b"4194304\n", 1),
-        ):
-            with self.subTest(contents=contents):
-                self.tasks.write_bytes(contents)
-                self.assertEqual(self._check("tasks")[0], expected)
-        for contents in (
-            b"",
-            b"\n",
-            b"0",
-            b"00\n",
-            b"01\n",
-            b"-1\n",
-            b"+1\n",
-            b" 1\n",
-            b"1 \n",
-            b"0\n0\n",
-            b"1\x00\n",
-            b"max\n",
-        ):
-            with self.subTest(contents=contents):
-                self.tasks.write_bytes(contents)
-                self.assertEqual(self._check("tasks"), (-1, errno.EPROTO))
-        self.tasks.write_bytes(b"1" * 40 + b"\n")
-        self.assertEqual(self._check("tasks"), (-1, errno.EOVERFLOW))
-
-    def test_missing_and_unreadable_task_counts_are_errors(self):
-        self.tasks.unlink()
-        self.assertEqual(self._check("tasks"), (-1, errno.ENOENT))
-        self._assert_further_exec_refused()
-        self.tasks.mkdir()
-        self.assertEqual(self._check("tasks"), (-1, errno.EISDIR))
-        self._assert_further_exec_refused()
-
-    def test_preparation_enables_the_pids_controller_once(self):
-        self.assertEqual(self._check("prepare")[0], 0)
-        self.assertEqual(self.subtree_control.read_bytes(), b"")
-        self.tasks.unlink()
-        self.assertEqual(self._check("prepare")[0], 0)
-        self.assertEqual(self.subtree_control.read_bytes(), b"+pids")
-        self.subtree_control.unlink()
-        self.assertEqual(self._check("prepare"), (-1, errno.ENOENT))
-
-    def test_settlement_verifies_emptiness(self):
-        self.assertEqual(self._check("settle")[0], 0)
-        self.assertEqual((self.execution / "cgroup.kill").read_bytes(), b"1")
-
-    def test_settlement_and_verification_reap_what_the_workload_left(self):
-        for mode in ("settle-reap", "verify-reap"):
-            with self.subTest(mode=mode):
-                self.tasks.write_bytes(b"1\n")
-                self.assertEqual(self._check(mode)[0], 0)
-                self.assertEqual(self.tasks.read_bytes(), b"0\n")
-
-    def test_settlement_does_not_hide_kill_or_verification_failures(self):
-        self.tasks.write_bytes(b"1\n")
-        (self.execution / "cgroup.kill").unlink()
-        self.assertEqual(self._check("settle"), (-1, errno.ENOENT))
-        self._assert_further_exec_refused()
-        (self.execution / "cgroup.kill").touch()
-        self.tasks.unlink()
-        self.assertEqual(self._check("settle"), (-1, errno.ENOENT))
-        self._assert_further_exec_refused()
-
-    def test_unreaped_tasks_at_deadline_are_not_settled(self):
-        # cgroup.events no longer counts a killed process that awaits its
-        # reaper, but the pids controller still charges it.
-        (self.execution / "cgroup.events").write_bytes(b"populated 0\nfrozen 0\n")
-        self.tasks.write_bytes(b"1\n")
-        started = time.monotonic()
-        self.assertEqual(self._check("settle"), (-1, errno.ETIMEDOUT))
-        self.assertGreaterEqual(time.monotonic() - started, 1.9)
-        self._assert_further_exec_refused()
-
-    def test_malformed_task_count_refuses_further_exec_until_verified_empty(self):
-        self.tasks.write_bytes(b"max\n")
-        self.assertEqual(self._check("settle"), (-1, errno.EPROTO))
-        self._assert_further_exec_refused()
-        self.tasks.write_bytes(b"0\n")
-        self.assertEqual(self._check("tasks")[0], 0)
-        self.assertEqual(self._check("settle")[0], 0)
-
-
 def _elf_file(
     segments: tuple[tuple[int, bytes], ...] = ((1, b"code"),),
     *,
@@ -11227,631 +11321,6 @@ class StaticElfTests(unittest.TestCase):
                 nvx.main(["check-static-elf", str(static), str(dynamic)]), 1
             )
         self.assertIn("not static executables", error.getvalue())
-
-
-class GuestExitTests(unittest.TestCase):
-    """nvx-exit's arguments, and its single one-byte write at port 0x604."""
-
-    SOURCE = Path(__file__).parents[1] / "guest" / "common" / "nvx-exit.c"
-    PORT = 0x604
-
-    def setUp(self):
-        if sys.platform != "linux":
-            self.skipTest("nvx-exit builds on Linux")
-        compiler = shutil.which("cc") or shutil.which("gcc")
-        if compiler is None:
-            self.skipTest("C compiler is unavailable")
-        temporary = tempfile.TemporaryDirectory()
-        self.addCleanup(temporary.cleanup)
-        root = Path(temporary.name)
-        # A regular file stands in for /dev/port, so no test writes a port.
-        self.device = root / "port"
-        flags = [
-            flag
-            for flag in InitramfsBuildConstants.STATIC_HELPER_CFLAGS
-            if flag != "-static"
-        ]
-        self.binaries: dict[str, Path] = {}
-        for name, device in (("ok", self.device), ("missing", root / "no" / "port")):
-            binary = root / f"nvx-exit-{name}"
-            result = subprocess.run(
-                [
-                    compiler,
-                    *flags,
-                    f'-DNVX_EXIT_DEVICE="{device}"',
-                    "-o",
-                    str(binary),
-                    str(self.SOURCE),
-                ],
-                capture_output=True,
-                text=True,
-                check=False,
-            )
-            self.assertEqual(result.returncode, 0, result.stderr)
-            self.binaries[name] = binary
-
-    def _run(self, name: str, *arguments: str) -> subprocess.CompletedProcess[bytes]:
-        return subprocess.run(
-            [str(self.binaries[name]), *arguments],
-            capture_output=True,
-            check=False,
-            timeout=10,
-        )
-
-    def test_writes_the_exit_code_as_one_byte_at_the_control_port(self):
-        cases = (
-            ((), 1),
-            (("",), 1),
-            (("0",), 0),
-            (("37",), 37),
-            (("255",), 255),
-            (("256",), 1),
-            (("-1",), 1),
-            (("+5",), 1),
-            ((" 7",), 1),
-            (("12a",), 1),
-            (("99999999999999999999",), 1),
-            # Out of range after any digit, so the value never wraps.
-            (("4294967296",), 1),
-            (("4294967551",), 1),
-            (("00000000000000000255",), 255),
-            # Decimal: the old script's printf read a leading zero as octal.
-            (("010",), 10),
-            (("7", "9"), 7),
-        )
-        for arguments, expected in cases:
-            with self.subTest(arguments=arguments):
-                self.device.write_bytes(b"")
-                result = self._run("ok", *arguments)
-                self.assertEqual(
-                    (result.returncode, result.stdout, result.stderr), (0, b"", b"")
-                )
-                self.assertEqual(
-                    self.device.read_bytes(), bytes(self.PORT) + bytes([expected])
-                )
-
-    def test_fails_silently_when_the_port_cannot_be_opened(self):
-        result = self._run("missing", "0")
-        self.assertEqual(
-            (result.returncode, result.stdout, result.stderr), (1, b"", b"")
-        )
-
-
-class ManagedAgentStopTests(unittest.TestCase):
-    SOURCE = Path(__file__).parents[1] / "guest" / "common" / "nvx-managed-agent.c"
-    OUTER = struct.Struct("<4sHBB16sQQI")
-    APP = struct.Struct("<4sBBHQiI")
-
-    def setUp(self):
-        if sys.platform != "linux":
-            self.skipTest("the managed agent requires a Linux pseudo-terminal")
-        compiler = shutil.which("cc") or shutil.which("gcc")
-        if compiler is None:
-            self.skipTest("C compiler is unavailable")
-        temporary = tempfile.TemporaryDirectory()
-        self.addCleanup(temporary.cleanup)
-        self.agent = Path(temporary.name) / "nvx-managed-agent"
-        flags = [
-            flag
-            for flag in InitramfsBuildConstants.STATIC_HELPER_CFLAGS
-            if flag != "-static"
-        ]
-        result = subprocess.run(
-            [compiler, *flags, "-o", str(self.agent), str(self.SOURCE)],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        self.assertEqual(result.returncode, 0, result.stderr)
-
-    def _record(
-        self, record_type: int, instance: bytes, sequence: int, payload: bytes = b""
-    ) -> bytes:
-        header = self.OUTER.pack(
-            b"NVXS", 1, record_type, 0, instance, 1, sequence, len(payload)
-        )
-        return header + payload
-
-    def _read_exact(self, fd: int, length: int, deadline: float) -> bytes:
-        data = b""
-        while len(data) < length:
-            remaining = deadline - time.monotonic()
-            self.assertGreater(remaining, 0, "managed agent did not respond")
-            readable, _, _ = select.select([fd], [], [], remaining)
-            if readable:
-                chunk = os.read(fd, length - len(data))
-                self.assertTrue(chunk, "managed agent closed the control tty")
-                data += chunk
-        return data
-
-    def _read_record(self, fd: int, deadline: float) -> tuple[int, int, bytes]:
-        header = self._read_exact(fd, self.OUTER.size, deadline)
-        magic, version, record_type, flags, _, _, sequence, length = self.OUTER.unpack(
-            header
-        )
-        self.assertEqual((magic, version, flags), (b"NVXS", 1, 0))
-        return record_type, sequence, self._read_exact(fd, length, deadline)
-
-    @staticmethod
-    def _reap(process: subprocess.Popen[bytes]) -> None:
-        if process.poll() is None:
-            process.kill()
-        process.wait(timeout=5)
-        if process.stderr is not None:
-            process.stderr.close()
-
-    def _open_session(
-        self, rootfs: str
-    ) -> tuple[subprocess.Popen[bytes], int, bytes, float]:
-        """Starts an agent and completes the attach and reset handshake."""
-        if sys.platform != "linux":
-            self.skipTest("the managed agent requires a Linux pseudo-terminal")
-        import pty
-
-        master, slave = pty.openpty()
-        self.addCleanup(os.close, master)
-        self.addCleanup(os.close, slave)
-        process = subprocess.Popen(
-            [
-                str(self.agent),
-                os.ttyname(slave),
-                rootfs,
-                "nvx-sandbox",
-                "65534",
-                "65534",
-                "nobody",
-                "/nonexistent",
-            ],
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.PIPE,
-        )
-        self.addCleanup(self._reap, process)
-        deadline = time.monotonic() + 10
-        instance = bytes(range(1, 17))
-
-        self.assertEqual(self._read_record(master, deadline)[0], 1)
-        os.write(master, self._record(3, instance, 7))
-        record_type, sequence, credit = self._read_record(master, deadline)
-        self.assertEqual((record_type, sequence, len(credit)), (4, 0, 4))
-        return process, master, instance, deadline
-
-    def _request(
-        self, rootfs: str, kind: int, payload: bytes = b""
-    ) -> tuple[int, int, int, bytes]:
-        """Sends one request to a fresh agent; returns the kind, request ID, status, and payload of its answer."""
-        _, master, instance, deadline = self._open_session(rootfs)
-        frame = self.APP.pack(b"NVXC", 1, kind, 0, 42, 0, len(payload)) + payload
-        os.write(master, self._record(5, instance, 8, frame))
-        self.assertEqual(self._read_record(master, deadline)[0], 9)
-        record_type, _, answer = self._read_record(master, deadline)
-        self.assertEqual(record_type, 5)
-        _, _, answered, _, request_id, status, length = self.APP.unpack(
-            answer[: self.APP.size]
-        )
-        body = answer[self.APP.size :]
-        self.assertEqual(length, len(body))
-        return answered, request_id, status, body
-
-    def test_sandbox_agent_returns_to_init_agent_after_stop(self):
-        if sys.platform != "linux":
-            self.skipTest("the managed agent requires a Linux pseudo-terminal")
-        process, master, instance, deadline = self._open_session("/run/nvx/rootfs")
-        stop = self.APP.pack(b"NVXC", 1, 3, 0, 42, 0, 0)
-        os.write(master, self._record(5, instance, 8, stop))
-        self.assertEqual(self._read_record(master, deadline)[0], 9)
-        record_type, _, payload = self._read_record(master, deadline)
-        self.assertEqual(record_type, 5)
-        _, _, kind, _, request_id, status, length = self.APP.unpack(payload)
-        self.assertEqual((kind, request_id, status, length), (0x85, 42, 0, 0))
-
-        _, stderr = process.communicate(timeout=10)
-        self.assertEqual(process.returncode, 0, stderr)
-
-    def test_agent_advertises_the_control_features_of_its_mode(self):
-        cancel, workload_account, exec_cgroup, environment = (1, 4, 8, 16)
-        exec_cwd, host_mapping_table = (32, 64)
-        for rootfs, expected in (
-            # Only the direct agent maps host paths, gives each workload a cgroup, and
-            # refuses a working directory that the workload cannot enter. Bit 1, which
-            # announced nvx_map= kernel tokens, is retired.
-            (
-                "-",
-                cancel
-                | workload_account
-                | exec_cgroup
-                | environment
-                | exec_cwd
-                | host_mapping_table,
-            ),
-            ("/run/nvx/rootfs", cancel | workload_account | environment),
-        ):
-            with self.subTest(rootfs=rootfs):
-                kind, request_id, status, body = self._request(rootfs, 5)
-                self.assertEqual((kind, request_id, status), (0x81, 42, 0))
-                self.assertEqual(struct.unpack("<I", body), (expected,))
-
-    def test_agent_refuses_a_features_request_with_a_payload(self):
-        kind, request_id, status, body = self._request("-", 5, b"abc")
-        self.assertEqual((kind, request_id, status), (0xFF, 42, 22))
-        self.assertEqual(body, b"invalid-request")
-
-    def test_agent_refuses_a_mapping_table_that_nvx_maps_did_not_announce(self):
-        table = struct.pack("<IIHHH", 0, 1, 0, 1, 2) + b"0/w"
-        for rootfs in ("-", "/run/nvx/rootfs"):
-            with self.subTest(rootfs=rootfs):
-                kind, request_id, status, body = self._request(rootfs, 6, table)
-                self.assertEqual((kind, request_id, status), (0xFF, 42, 22))
-                self.assertEqual(body, b"invalid-request")
-
-    def test_agent_refuses_malformed_working_directories(self):
-        argument = struct.pack("<I", 9) + b"/bin/true"
-        cases = {
-            "unknown payload revision": struct.pack("<IHH", 0, 1, 2) + argument,
-            "truncated extended header": struct.pack("<IHHH", 0, 1, 1, 1),
-            "unknown flag": _managed_exec_payload(b"/work", flags=1 | 8),
-            # Only the agent tells its launch helper that it entered the directory.
-            "launch helper flag": _managed_exec_payload(b"/work", flags=1 | 0x8000),
-            "layering without an environment": _managed_exec_payload(
-                b"/work", flags=1 | 4
-            ),
-            "environment entries without the flag": _managed_exec_payload(
-                b"/work", entries=1
-            ),
-            "flag without a directory": _managed_exec_payload(b"", flags=1),
-            "directory without the flag": _managed_exec_payload(b"/work", flags=0),
-            "directory beyond 4096 bytes": _managed_exec_payload(b"/" + b"d" * 4096),
-            "relative directory": _managed_exec_payload(b"work"),
-            "NUL in the directory": _managed_exec_payload(b"/wo\0rk"),
-            "truncated directory": _managed_exec_payload(b"/work")[:-1],
-            "trailing bytes": _managed_exec_payload(b"/work") + b"x",
-        }
-        for name, payload in cases.items():
-            with self.subTest(name):
-                kind, request_id, status, body = self._request("-", 2, payload)
-                self.assertEqual((kind, request_id, status), (0xFF, 42, 22))
-                self.assertEqual(body, b"invalid-request")
-
-
-def _managed_exec_payload(
-    cwd: bytes,
-    *,
-    argv: tuple[bytes, ...] = (b"/bin/true",),
-    flags: int = 1,
-    entries: int = 0,
-) -> bytes:
-    """Encodes an extended EXEC payload that carries `cwd` after the arguments."""
-    arguments = b"".join(struct.pack("<I", len(value)) + value for value in argv)
-    header = struct.pack("<IHHHHI", 0, len(argv), 1, flags, entries, len(cwd))
-    return header + arguments + cwd
-
-
-class ManagedAgentWorkingDirectoryTests(unittest.TestCase):
-    """Runs direct-mode workloads through `run_exec` with an unprivileged harness.
-
-    The harness records identity changes instead of making them, so the working
-    directory is entered with the test user's credentials, and a `setpriv` shim
-    runs the harness in place of the agent's launch helper without changing its
-    identity. The shim first runs `HARNESS_BEFORE_LAUNCH`, which can change the
-    file system after the agent checked the directory, as another process could.
-    """
-
-    SOURCE = Path(__file__).parents[1] / "guest" / "common" / "nvx-managed-agent.c"
-    OUTER = ManagedAgentStopTests.OUTER
-    APP = ManagedAgentStopTests.APP
-
-    def setUp(self):
-        if sys.platform != "linux":
-            self.skipTest("the managed agent requires Linux")
-        compiler = shutil.which("cc") or shutil.which("gcc")
-        if compiler is None:
-            self.skipTest("C compiler is unavailable")
-        temporary = tempfile.TemporaryDirectory()
-        self.addCleanup(temporary.cleanup)
-        # PWD and /bin/pwd -P agree only for a physical path.
-        self.root = Path(temporary.name).resolve()
-        cgroup = self.root / "cgroup"
-        execution = cgroup / "nvx-exec"
-        execution.mkdir(parents=True)
-        (cgroup / "cgroup.procs").touch()
-        (execution / "cgroup.procs").touch()
-        (execution / "cgroup.kill").touch()
-        (execution / "pids.current").write_text("0\n")
-        tools = self.root / "bin"
-        tools.mkdir()
-        self.harness = self.root / "working-directory-test"
-        setpriv = tools / "setpriv"
-        setpriv.write_text(
-            "#!/bin/sh\n"
-            "while :; do\n"
-            '    case "$1" in\n'
-            "    --reuid | --regid) shift 2 ;;\n"
-            "    --*) shift ;;\n"
-            "    *) break ;;\n"
-            "    esac\n"
-            "done\n"
-            'if [ "$1" = /sbin/nvx-managed-agent ]; then\n'
-            "    shift\n"
-            f'    set -- {shlex.quote(str(self.harness))} "$@"\n'
-            "fi\n"
-            'if [ -n "${HARNESS_BEFORE_LAUNCH:-}" ]; then\n'
-            '    eval "$HARNESS_BEFORE_LAUNCH"\n'
-            "fi\n"
-            'exec "$@"\n'
-        )
-        setpriv.chmod(0o755)
-        source = self.root / "working-directory-test.c"
-        source.write_text(
-            f"""#define _GNU_SOURCE
-#include <stdlib.h>
-int harness_setenv(const char *name, const char *value, int overwrite);
-#define setenv(name, value, overwrite) harness_setenv(name, value, overwrite)
-#define CGROUP_ROOT {json.dumps(str(cgroup))}
-#define setgroups(size, list) harness_setgroups(size, list)
-#define setegid(gid) harness_setegid(gid)
-#define seteuid(uid) harness_seteuid(uid)
-#define main managed_agent_main
-#include {json.dumps(str(self.SOURCE))}
-#undef main
-
-int harness_setenv(const char *name, const char *value, int overwrite)
-{{
-    if (strcmp(name, "PWD") == 0 && getenv("HARNESS_FAIL_PWD") != NULL) {{
-        errno = ENOMEM;
-        return -1;
-    }}
-    return (setenv)(name, value, overwrite);
-}}
-
-int harness_setgroups(size_t size, const gid_t *list)
-{{
-    (void)size;
-    (void)list;
-    if (getenv("HARNESS_FAIL_SETGROUPS") != NULL) {{
-        errno = EPERM;
-        return -1;
-    }}
-    return 0;
-}}
-
-int harness_setegid(gid_t gid)
-{{
-    (void)gid;
-    return 0;
-}}
-
-int harness_seteuid(uid_t uid)
-{{
-    (void)uid;
-    return 0;
-}}
-
-int main(int argc, char **argv)
-{{
-    if (argc >= 2 && strcmp(argv[1], "--exec-config-fd") == 0) {{
-        return launch_workload(argc, argv);
-    }}
-
-    struct control_session session = {{.fd = STDOUT_FILENO}};
-    struct agent_config config = {{
-        .direct = 1,
-        .uid = "65534",
-        .gid = "65534",
-        .user = "nobody",
-        .home = "/",
-    }};
-    char *environment[] = {{getenv("HARNESS_ENVIRONMENT"), NULL}};
-    struct exec_config exec_config = {{
-        .cwd = argc == 3 ? argv[2] : NULL,
-        .environment = environment[0] == NULL ? NULL : environment,
-        .environment_count = environment[0] == NULL ? 0 : 1,
-        .environment_present = environment[0] != NULL,
-        .inherit_default_env =
-            environment[0] != NULL && getenv("HARNESS_LAYER_ENVIRONMENT") != NULL,
-    }};
-    char *command[] = {{"/bin/sh", "-c", argv[1], NULL}};
-
-    if (argc != 2 && argc != 3) {{
-        return 2;
-    }}
-    return run_exec(&session, &config, 42, 0, command, &exec_config) == 0 ? 0 : 1;
-}}
-""",
-            encoding="utf-8",
-        )
-        flags = [
-            flag
-            for flag in InitramfsBuildConstants.STATIC_HELPER_CFLAGS
-            if flag != "-static"
-        ]
-        result = subprocess.run(
-            [compiler, *flags, "-o", str(self.harness), str(source)],
-            capture_output=True,
-            text=True,
-            timeout=60,
-            check=False,
-        )
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.environment = {
-            **os.environ,
-            "PATH": f"{tools}{os.pathsep}{os.environ.get('PATH', '/usr/bin:/bin')}",
-        }
-        for name in (
-            "HARNESS_BEFORE_LAUNCH",
-            "HARNESS_ENVIRONMENT",
-            "HARNESS_FAIL_PWD",
-            "HARNESS_FAIL_SETGROUPS",
-            "HARNESS_LAYER_ENVIRONMENT",
-        ):
-            self.environment.pop(name, None)
-
-    def _exec(
-        self,
-        script: str,
-        cwd: str | None = None,
-        environment: dict[str, str] | None = None,
-    ) -> list[tuple[int, int, int, bytes]]:
-        """Runs one workload; returns the kind, request ID, status, and payload of each frame."""
-        arguments = [str(self.harness), script]
-        if cwd is not None:
-            arguments.append(cwd)
-        result = subprocess.run(
-            arguments,
-            capture_output=True,
-            timeout=30,
-            env=environment or self.environment,
-            check=False,
-        )
-        self.assertEqual(result.returncode, 0, result.stderr)
-        frames: list[tuple[int, int, int, bytes]] = []
-        rest = result.stdout
-        while rest:
-            _, _, record_type, _, _, _, _, length = self.OUTER.unpack(
-                rest[: self.OUTER.size]
-            )
-            payload = rest[self.OUTER.size : self.OUTER.size + length]
-            rest = rest[self.OUTER.size + length :]
-            self.assertEqual(record_type, 5)
-            _, _, kind, _, request_id, status, payload_len = self.APP.unpack(
-                payload[: self.APP.size]
-            )
-            body = payload[self.APP.size :]
-            self.assertEqual(payload_len, len(body))
-            frames.append((kind, request_id, status, body))
-        return frames
-
-    def _completed(self, frames: list[tuple[int, int, int, bytes]]) -> bytes:
-        """Returns the standard output of a workload that exited with status zero."""
-        self.assertEqual(frames[-1], (0x84, 42, 0, b"exit"), frames)
-        self.assertTrue(all(kind == 0x82 for kind, *_ in frames[:-1]), frames)
-        return b"".join(body for *_, body in frames[:-1])
-
-    def _refused(
-        self, frames: list[tuple[int, int, int, bytes]], cwd: str, error: int
-    ) -> None:
-        diagnostic = (
-            f"nvx-managed-agent: cannot enter working directory {cwd}: "
-            f"{os.strerror(error)}\n"
-        ).encode()
-        self.assertEqual(
-            frames,
-            [(0x83, 42, 0, diagnostic), (0xFF, 42, error, b"cwd-failed")],
-        )
-
-    def test_workloads_start_in_the_root_directory_by_default(self):
-        output = self._completed(self._exec('pwd; printf "%s\\n" "$PWD"'))
-        self.assertEqual(output, b"/\n/\n")
-
-    def test_workloads_start_in_the_requested_directory(self):
-        for name in ("a", "b"):
-            directory = self.root / "work" / name
-            directory.mkdir(parents=True)
-            with self.subTest(directory=directory):
-                output = self._completed(
-                    self._exec('pwd; printf "%s\\n" "$PWD"', str(directory))
-                )
-                self.assertEqual(output, f"{directory}\n{directory}\n".encode())
-
-    def test_pwd_keeps_the_requested_name_of_a_canonical_path(self):
-        target = self.root / "target"
-        target.mkdir()
-        link = self.root / "link"
-        link.symlink_to(target)
-        output = self._completed(self._exec("pwd; /bin/pwd -P", str(link)))
-        self.assertEqual(output, f"{link}\n{target}\n".encode())
-        # Without a canonical name, PWD names the directory itself.
-        output = self._completed(self._exec('printf "%s\\n" "$PWD"', f"{link}/."))
-        self.assertEqual(output, f"{target}\n".encode())
-
-    def test_unusable_directories_refuse_the_launch(self):
-        marker = self.root / "ran"
-        regular = self.root / "file"
-        regular.touch()
-        cases = [
-            (self.root / "missing", errno.ENOENT),
-            (regular, errno.ENOTDIR),
-        ]
-        # Root may search any directory, so only an unprivileged user observes EACCES.
-        if sys.platform == "linux" and os.geteuid() != 0:
-            locked = self.root / "locked"
-            locked.mkdir(mode=0)
-            self.addCleanup(locked.chmod, 0o755)
-            cases.append((locked, errno.EACCES))
-        for directory, error in cases:
-            with self.subTest(directory=directory):
-                frames = self._exec(f"touch {marker}", str(directory))
-                self._refused(frames, str(directory), error)
-                self.assertFalse(marker.exists())
-
-    def test_identity_failures_refuse_the_launch(self):
-        environment = {**self.environment, "HARNESS_FAIL_SETGROUPS": "1"}
-        frames = self._exec(f"touch {self.root / 'ran'}", None, environment)
-        self.assertEqual(frames, [(0xFF, 42, 125, b"launch-failed")])
-        self.assertFalse((self.root / "ran").exists())
-
-    def test_workloads_start_in_the_directory_that_was_checked(self):
-        checked = self.root / "checked"
-        retarget = self.root / "retarget"
-        renamed = self.root / "renamed"
-        checked.mkdir()
-        retarget.mkdir()
-        link = self.root / "link"
-        link.symlink_to(checked)
-        # Neither a retargeted link nor a renamed directory may fail the
-        # launch or move the workload to a directory that was not checked.
-        quote = shlex.quote
-        for cwd, change, expected in (
-            (link, f"ln -sfn {quote(str(retarget))} {quote(str(link))}", checked),
-            (retarget, f"mv {quote(str(retarget))} {quote(str(renamed))}", renamed),
-        ):
-            with self.subTest(cwd=cwd):
-                environment = {**self.environment, "HARNESS_BEFORE_LAUNCH": change}
-                frames = self._exec("/bin/pwd -P", str(cwd), environment)
-                self.assertEqual(self._completed(frames), f"{expected}\n".encode())
-
-    def test_pwd_failures_refuse_the_launch(self):
-        marker = self.root / "ran"
-        environment = {**self.environment, "HARNESS_FAIL_PWD": "1"}
-        for cwd in (None, str(self.root)):
-            with self.subTest(cwd=cwd):
-                frames = self._exec(f"touch {marker}", cwd, environment)
-                self.assertEqual(frames, [(0xFF, 42, 125, b"launch-failed")])
-                self.assertFalse(marker.exists())
-
-    def test_exact_environments_control_pwd(self):
-        # The agent leaves PWD to a request that replaces the environment, so
-        # it does not try to set PWD, and cannot fail to.
-        environment = {
-            **self.environment,
-            "HARNESS_ENVIRONMENT": "MODE=exact",
-            "HARNESS_FAIL_PWD": "1",
-        }
-        output = self._completed(
-            self._exec(
-                'printf "%s\\n" "$MODE"; /bin/pwd -P', str(self.root), environment
-            )
-        )
-        self.assertEqual(output, f"exact\n{self.root}\n".encode())
-
-    def test_layered_environments_keep_the_agents_pwd(self):
-        # Entries layered over the default environment keep the PWD that the
-        # agent points at the directory, which, unlike a PWD that the shell
-        # computes, names a link as the request did.
-        target = self.root / "target"
-        target.mkdir()
-        link = self.root / "link"
-        link.symlink_to(target)
-        layered = {
-            **self.environment,
-            "HARNESS_ENVIRONMENT": "MODE=layered",
-            "HARNESS_LAYER_ENVIRONMENT": "1",
-        }
-        output = self._completed(
-            self._exec('printf "%s %s\\n" "$MODE" "$PWD"', str(link), layered)
-        )
-        self.assertEqual(output, f"layered {link}\n".encode())
-        frames = self._exec("true", str(link), {**layered, "HARNESS_FAIL_PWD": "1"})
-        self.assertEqual(frames, [(0xFF, 42, 125, b"launch-failed")])
 
 
 class AciSandboxRunnerTests(unittest.TestCase):
@@ -21804,6 +21273,18 @@ class ReleaseTests(unittest.TestCase):
                 "minirootfs_sha256",
                 "0" * 64,
                 "Alpine minirootfs_sha256",
+            ),
+            (
+                "alpine",
+                "guest_sources",
+                ["guest/common", "guest/alpine"],
+                "Alpine guest_sources",
+            ),
+            (
+                "guest_rust",
+                "toolchain",
+                "stable",
+                "Rust guest toolchain",
             ),
         )
         for section, field, invalid_value, error in cases:

@@ -7,8 +7,23 @@ use std::time::Duration;
 use super::Transport;
 use crate::hypervisor::Hypervisor;
 
+#[cfg(all(feature = "cli", unix))]
+pub(crate) use crate::host::sys::{interrupted, watch_interrupts};
+
 /// Whether this host can run NVX microVMs.
 pub const SUPPORTED: bool = false;
+
+/// Does nothing: this host has no console interrupts to watch.
+#[cfg(all(feature = "cli", not(unix)))]
+pub(crate) fn watch_interrupts() -> io::Result<()> {
+    Ok(())
+}
+
+/// Reports no interrupt: this host has no console interrupts to watch.
+#[cfg(all(feature = "cli", not(unix)))]
+pub(crate) fn interrupted() -> bool {
+    false
+}
 
 fn unsupported() -> io::Error {
     io::Error::new(

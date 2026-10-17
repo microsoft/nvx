@@ -10,8 +10,11 @@ NVX was jointly developed by the [MSR Systems Research Group][msr-systems] and
 [msr-systems]: https://www.microsoft.com/en-us/research/group/systems-research-group-redmond/
 [azure-systems]: https://www.microsoft.com/en-us/research/group/azure-research-systems/
 
-This repository includes version pins for Linux and OpenVMM, along with the patches, guest source
-files, build tools, and benchmarks needed to use NVX.
+This repository includes version pins for Linux, OpenVMM, and the Rust guest
+toolchain, along with the patches, guest source files, build tools, and
+benchmarks needed to use NVX. Alpine, Ubuntu, and Azure Linux ship the nine
+static guest binaries from [`nvx-rs`](nvx-rs/README.md#guest-binaries) at
+their common `/sbin/nvx-*` paths.
 
 ## Quick Start
 

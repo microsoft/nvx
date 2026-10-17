@@ -47,6 +47,22 @@
 //! predates it, and `fake_refuse_maps=1` fails every `MAPS` request like a guest that cannot
 //! mount a mapped path. The command line is recorded in `fake-openvmm-<token>.json` next to the
 //! kernel.
+//!
+//! The fake also serves the sandbox profile of `nvx.py sandbox` and `nvx-rs sandbox`, which a
+//! `--microvm-sandbox-block` option selects: read-only `distro`, `runtime`, and `custom` layers
+//! and a `scratch` disk, each an existing file, with `nvx_sandbox=1`, `nvx_entrypoint=`, and
+//! `nvx_hostname=` on the kernel command line, and shares through one `--mount` or the children
+//! of an aggregate at `/run/nvx/shares`. Its guest advertises the features of the sandbox agent,
+//! [`GuestFeatures::SANDBOX_AGENT`], and the guest targets of its directory shares are
+//! directories that a workload can enter. With `--microvm-lifecycle managed`, it serves the
+//! control console as above. With `--microvm-lifecycle one-shot`, it reads no capability and
+//! serves no console: it runs the entrypoint and arguments of the kernel command line with its
+//! own standard streams, `/bin/echo` printing its arguments, `/bin/sleep` sleeping for its
+//! argument in seconds, `/bin/true` and `/bin/false` exiting with 0 and 1, and any other program
+//! not found with 127, then writes an outcome report
+//! of operation `run` if `--microvm-report` asks for one, and exits with the workload's status,
+//! or with `STATUS` if the kernel command line has `fake_exit_status=STATUS`. Sandbox outcome
+//! reports take the form of OpenVMM's.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, OpenOptions};
@@ -139,14 +155,29 @@ fn atoi(value: &str) -> i32 {
     }
 }
 
+/// The lifecycle that the command line selects.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Lifecycle {
+    /// `--microvm-lifecycle managed`: the guest serves the control console until a stop.
+    Managed,
+    /// `--microvm-lifecycle one-shot`: the guest runs its entrypoint once, and OpenVMM exits with
+    /// its status. Only the sandbox profile uses it.
+    OneShot,
+}
+
 /// Parsed OpenVMM-compatible command line and fake-specific test controls.
 struct Options {
     /// Name of the executable, which prefixes the fake's diagnostics.
     program: String,
-    /// Control endpoint at which the fake accepts host sessions.
+    /// The lifecycle.
+    lifecycle: Lifecycle,
+    /// Whether the command line launches the sandbox profile of `nvx.py sandbox`: a container
+    /// over EROFS layers and an ext4 scratch disk.
+    sandbox: bool,
+    /// Control endpoint at which the fake accepts host sessions; empty for a one-shot run.
     endpoint: String,
-    /// Path to the synthetic OpenVMM outcome report.
-    report: PathBuf,
+    /// Path to the synthetic OpenVMM outcome report, which a one-shot run may omit.
+    report: Option<PathBuf>,
     /// Backend name recorded in the synthetic report.
     hypervisor: String,
     /// Path that receives the parsed command-line dump.
@@ -155,6 +186,8 @@ struct Options {
     maps_dump: PathBuf,
     /// Status with which to stop immediately after launch, when requested.
     exit_on_start: Option<u8>,
+    /// Status with which a one-shot workload ends instead of its own, when requested.
+    exit_status: Option<i32>,
     /// Artificial delay before the fake guest becomes ready.
     boot_delay: Duration,
     /// Artificial delay before the fake OpenVMM crashes, when requested.
@@ -175,6 +208,28 @@ struct Options {
     children: Vec<PathBuf>,
     /// Number of host mappings that the kernel command line announces.
     maps: usize,
+    /// The guest directories at which a sandbox's directory shares appear.
+    share_targets: Vec<String>,
+    /// The entrypoint and arguments of a sandbox, from its kernel command line.
+    workload: Vec<String>,
+    /// The network policy of the command line, as OpenVMM summarizes it in its report.
+    network: NetworkSummary,
+}
+
+/// The network policy of a command line, as the `network_policy` section of OpenVMM's outcome
+/// report summarizes it.
+#[derive(Debug, Clone, Default)]
+struct NetworkSummary {
+    /// Whether any network option was given.
+    requested: bool,
+    /// `rules`, `deny-all`, `allow-all`, or `none`.
+    mode: &'static str,
+    /// The number of `--network-egress-allow` rules.
+    allow: usize,
+    /// The number of `--network-egress-deny` rules.
+    deny: usize,
+    /// `allow`, `deny`, or `none`.
+    host_loopback: &'static str,
 }
 
 /// A host path mapped into the guest.
@@ -210,6 +265,12 @@ pub fn main() -> ExitCode {
         eprintln!("{program}: failing the launch as requested");
         return ExitCode::from(code);
     }
+    if options.lifecycle == Lifecycle::OneShot {
+        let status = run_one_shot(&options);
+        let _ = io::stdout().flush();
+        let _ = io::stderr().flush();
+        std::process::exit(status);
+    }
     let capability = match read_capability() {
         Ok(capability) => capability,
         Err(message) => {
@@ -233,6 +294,51 @@ pub fn main() -> ExitCode {
     }
 }
 
+/// Runs the entrypoint of a one-shot sandbox with its output on the fake's own, as OpenVMM runs
+/// the guest on its console, writes the outcome report, and returns the status with which
+/// OpenVMM exits: the workload's.
+///
+/// The entrypoint is `/bin/echo`, which prints its arguments, `/bin/sleep`, which sleeps for its
+/// argument in seconds, `/bin/true` or `/bin/false`, or any other program, which is not found;
+/// the `fake_exit_status=STATUS` token replaces the status.
+fn run_one_shot(options: &Options) -> i32 {
+    let (program, arguments) = options
+        .workload
+        .split_first()
+        .map_or(("", &[][..]), |(program, arguments)| {
+            (program.as_str(), arguments)
+        });
+    let status = match program {
+        "/bin/echo" => {
+            println!("{}", arguments.join(" "));
+            0
+        }
+        "/bin/sleep" => {
+            let seconds = arguments
+                .first()
+                .and_then(|value| value.parse::<f64>().ok())
+                .filter(|seconds| seconds.is_finite())
+                .unwrap_or(0.0);
+            thread::sleep(Duration::from_secs_f64(seconds.clamp(0.0, 3600.0)));
+            0
+        }
+        "/bin/true" => 0,
+        "/bin/false" => 1,
+        _ => {
+            eprintln!("{}: {program}: not found", options.program);
+            127
+        }
+    };
+    let status = options.exit_status.unwrap_or(status);
+    let (category, status_code) = if status == 0 {
+        ("success", 0)
+    } else {
+        ("guest-exit", status)
+    };
+    write_report(options, "run", category, status_code);
+    status
+}
+
 /// Returns the name of the running executable, such as `nvx-fake-openvmm`.
 fn program_name() -> String {
     std::env::args_os()
@@ -247,17 +353,20 @@ fn program_name() -> String {
 
 /// Parses the OpenVMM command line plus fake controls, rejecting unsupported combinations.
 fn parse(program: &str, arguments: &[String]) -> Result<Options, String> {
-    const VALUED: [&str; 24] = [
+    const VALUED: [&str; 28] = [
         "--mount-aggregate",
         "--mount-child",
         "--mount-deny",
         "--mount-allow",
         "--mount-write",
+        "--mount",
+        "--mount-owner",
         "--network-egress-allow",
         "--network-egress-deny",
         "--machine",
         "--microvm-workload-identity",
         "--microvm-lifecycle",
+        "--microvm-sandbox-block",
         "--hypervisor",
         "--memory",
         "--kernel",
@@ -270,6 +379,7 @@ fn parse(program: &str, arguments: &[String]) -> Result<Options, String> {
         "--network-profile",
         "--network-egress",
         "--network-ingress",
+        "--network-proxy",
         "--host-loopback",
         "--host-loopback-forward",
     ];
@@ -304,13 +414,46 @@ fn parse(program: &str, arguments: &[String]) -> Result<Options, String> {
         }
     };
     expect("--machine", "microvm")?;
-    expect("--microvm-lifecycle", "managed")?;
-    expect("--virtio-console", "none")?;
-    for flag in ["--single-process", "--microvm-control-auth-stdin"] {
-        if !flags.contains(flag) {
-            return Err(format!("{flag} is required"));
-        }
+    // The sandbox profile of `nvx.py sandbox` puts its layers and scratch disk on sandbox block
+    // devices, and may run one-shot.
+    let sandbox = values.contains_key("--microvm-sandbox-block");
+    let lifecycle = match single("--microvm-lifecycle")? {
+        "managed" => Lifecycle::Managed,
+        "one-shot" if sandbox => Lifecycle::OneShot,
+        other => return Err(format!("unsupported lifecycle {other}")),
+    };
+    if !flags.contains("--single-process") {
+        return Err("--single-process is required".to_owned());
     }
+    let (endpoint, report) = match lifecycle {
+        Lifecycle::Managed => {
+            expect("--virtio-console", "none")?;
+            if !flags.contains("--microvm-control-auth-stdin") {
+                return Err("--microvm-control-auth-stdin is required".to_owned());
+            }
+            let endpoint = single("--microvm-control-console")?
+                .strip_prefix("listen=")
+                .ok_or("--microvm-control-console must use listen=")?
+                .to_owned();
+            (endpoint, Some(PathBuf::from(single("--microvm-report")?)))
+        }
+        Lifecycle::OneShot => {
+            for option in ["--virtio-console", "--microvm-control-console"] {
+                if values.contains_key(option) {
+                    return Err(format!("a one-shot run takes no {option}"));
+                }
+            }
+            if flags.contains("--microvm-control-auth-stdin") {
+                return Err("a one-shot run takes no --microvm-control-auth-stdin".to_owned());
+            }
+            let report = match values.get("--microvm-report").map(Vec::as_slice) {
+                None => None,
+                Some([report]) => Some(PathBuf::from(report)),
+                Some(_) => return Err("--microvm-report must be given at most once".to_owned()),
+            };
+            (String::new(), report)
+        }
+    };
     let hypervisor = single("--hypervisor")?;
     if !["kvm", "mshv", "whp"].contains(&hypervisor) {
         return Err(format!("unsupported hypervisor {hypervisor}"));
@@ -331,37 +474,230 @@ fn parse(program: &str, arguments: &[String]) -> Result<Options, String> {
             return Err(format!("{} does not exist", path.display()));
         }
     }
-    let endpoint = single("--microvm-control-console")?
-        .strip_prefix("listen=")
-        .ok_or("--microvm-control-console must use listen=")?
-        .to_owned();
-    let report = PathBuf::from(single("--microvm-report")?);
-    if report.exists() {
+    if let Some(report) = &report
+        && report.exists()
+    {
         return Err(format!("report path {} already exists", report.display()));
     }
     let command_line = single("--cmdline")?;
     let tokens: Vec<&str> = command_line.split_whitespace().collect();
-    if tokens.iter().any(|token| {
-        token.starts_with("nvx_")
-            && !token.starts_with(MAPS_TOKEN)
-            && *token != WORKLOAD_ACCOUNT_TOKEN
-    }) {
-        return Err("the kernel command line must not select a sandbox".to_owned());
-    }
-    let maps = match tokens
-        .iter()
-        .filter_map(|token| token.strip_prefix(MAPS_TOKEN))
-        .collect::<Vec<_>>()
-        .as_slice()
-    {
-        [] => 0,
-        [count] => count
-            .parse::<usize>()
-            .ok()
-            .filter(|count| (1..=MAX_HOST_MAPPINGS).contains(count))
-            .ok_or_else(|| format!("invalid {MAPS_TOKEN}{count}"))?,
-        _ => return Err(format!("{MAPS_TOKEN} must be given at most once")),
+    let token_values = |name: &str| -> Vec<&str> {
+        tokens
+            .iter()
+            .filter_map(|token| token.strip_prefix(name))
+            .collect()
     };
+    let (maps, children, share_targets, workload) = if sandbox {
+        if !tokens.contains(&"nvx_sandbox=1") {
+            return Err("a sandbox block device requires nvx_sandbox=1".to_owned());
+        }
+        check_sandbox_blocks(values.get("--microvm-sandbox-block").into_iter().flatten())?;
+        let mut workload: Vec<String> = match token_values("nvx_entrypoint=").as_slice() {
+            [entrypoint] => vec![(*entrypoint).to_owned()],
+            _ => return Err("the kernel command line must set one nvx_entrypoint".to_owned()),
+        };
+        workload.extend(token_values("nvx_arg=").into_iter().map(str::to_owned));
+        if token_values("nvx_hostname=").len() != 1 {
+            return Err("the kernel command line must set one nvx_hostname".to_owned());
+        }
+        if !token_values(MAPS_TOKEN).is_empty() {
+            return Err(format!("a sandbox takes no {MAPS_TOKEN}"));
+        }
+        let (children, mut share_targets) = sandbox_shares(&values)?;
+        // The guest binds each directory child of an aggregate at the target of its
+        // `nvx_share=NAME,TARGET,ACCESS[,file]` token.
+        for share in token_values("nvx_share=") {
+            match share.split(',').collect::<Vec<_>>().as_slice() {
+                [_, target, _] => share_targets.push((*target).to_owned()),
+                [_, _, _, "file"] => {}
+                _ => return Err(format!("invalid nvx_share={share}")),
+            }
+        }
+        (0, children, share_targets, workload)
+    } else {
+        for option in ["--mount", "--mount-owner"] {
+            if values.contains_key(option) {
+                return Err(format!("unsupported argument {option}"));
+            }
+        }
+        if tokens.iter().any(|token| {
+            token.starts_with("nvx_")
+                && !token.starts_with(MAPS_TOKEN)
+                && *token != WORKLOAD_ACCOUNT_TOKEN
+        }) {
+            return Err("the kernel command line must not select a sandbox".to_owned());
+        }
+        if !tokens.iter().any(|token| token.starts_with("hostname=")) {
+            return Err("the kernel command line must set the hostname".to_owned());
+        }
+        let maps = match token_values(MAPS_TOKEN).as_slice() {
+            [] => 0,
+            [count] => count
+                .parse::<usize>()
+                .ok()
+                .filter(|count| (1..=MAX_HOST_MAPPINGS).contains(count))
+                .ok_or_else(|| format!("invalid {MAPS_TOKEN}{count}"))?,
+            _ => return Err(format!("{MAPS_TOKEN} must be given at most once")),
+        };
+        let children = mapped_children(&values, maps)?;
+        (maps, children, Vec::new(), Vec::new())
+    };
+    for option in ["--mount-deny", "--mount-allow", "--mount-write"] {
+        for path in values.get(option).into_iter().flatten() {
+            let path = Path::new(path);
+            // No policy path names a file child, which contains nothing.
+            if !path.exists()
+                || !children
+                    .iter()
+                    .any(|root| root.is_dir() && path.starts_with(root))
+            {
+                return Err(format!("invalid {option} {}", path.display()));
+            }
+        }
+    }
+    if (values.contains_key("--network-egress-allow")
+        || values.contains_key("--network-egress-deny"))
+        && !values.contains_key("--network-egress")
+    {
+        return Err("--network-egress is required with egress rules".to_owned());
+    }
+    if values.contains_key("--host-loopback-forward")
+        && values.get("--host-loopback").map(Vec::as_slice) != Some(&["allow"][..])
+    {
+        return Err("--host-loopback-forward requires explicit --host-loopback allow".to_owned());
+    }
+    if values.contains_key("--net") {
+        expect("--network-profile", "portable")?;
+    }
+    let knob = |name: &str| {
+        tokens
+            .iter()
+            .find_map(|token| token.strip_prefix(name)?.strip_prefix('='))
+    };
+    let millis = |name: &str| {
+        knob(name)
+            .and_then(|value| value.parse().ok())
+            .map(Duration::from_millis)
+    };
+    let token = report
+        .as_ref()
+        .and_then(|report| report.parent())
+        .and_then(Path::file_name)
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let default_features = if sandbox {
+        GuestFeatures::SANDBOX_AGENT
+    } else {
+        GUEST_FEATURES
+    };
+    Ok(Options {
+        program: program.to_owned(),
+        lifecycle,
+        sandbox,
+        endpoint,
+        args_dump: kernel.with_file_name(format!("fake-openvmm-{token}.json")),
+        maps_dump: kernel.with_file_name(format!("fake-openvmm-{token}-maps.json")),
+        report,
+        hypervisor: hypervisor.to_owned(),
+        exit_on_start: knob("fake_exit_on_start").and_then(|value| value.parse().ok()),
+        exit_status: knob("fake_exit_status").and_then(|value| value.parse().ok()),
+        boot_delay: millis("fake_boot_delay_ms").unwrap_or_default(),
+        crash_after: millis("fake_crash_after_ms"),
+        ignore_stop: knob("fake_ignore_stop") == Some("1"),
+        ignore_cancel: knob("fake_ignore_cancel") == Some("1"),
+        legacy_guest: knob("fake_legacy_guest") == Some("1"),
+        refuse_maps: knob("fake_refuse_maps") == Some("1"),
+        workload_uid,
+        guest_features: knob("fake_guest_features")
+            .and_then(|value| value.parse().ok())
+            .map_or(default_features, GuestFeatures::from_bits),
+        children,
+        maps,
+        share_targets,
+        workload,
+        network: network_summary(&values),
+    })
+}
+
+/// Checks the sandbox block devices of a sandbox: each layer, `ROLE:file:PATH,ro` with a role of
+/// `distro`, `runtime`, or `custom`, at most once each, and one scratch disk, `scratch:file:PATH`,
+/// each an existing regular file.
+fn check_sandbox_blocks<'a>(blocks: impl Iterator<Item = &'a &'a str>) -> Result<(), String> {
+    let mut roles = BTreeSet::new();
+    for block in blocks {
+        let invalid = || format!("invalid --microvm-sandbox-block {block}");
+        let (role, rest) = block.split_once(':').ok_or_else(invalid)?;
+        let path = rest.strip_prefix("file:").ok_or_else(invalid)?;
+        let path = match role {
+            "distro" | "runtime" | "custom" => path.strip_suffix(",ro").ok_or_else(invalid)?,
+            "scratch" => path,
+            _ => return Err(invalid()),
+        };
+        if !roles.insert(role) || !Path::new(path).is_file() {
+            return Err(invalid());
+        }
+    }
+    if !roles.contains("scratch") || roles.len() < 2 {
+        return Err("a sandbox needs a layer and a scratch disk".to_owned());
+    }
+    Ok(())
+}
+
+/// Returns the host directories of a sandbox's shares, for the checks of its policy paths, and
+/// the guest targets of its directory shares: one `--mount TARGET,HOST,MODE` of a directory, or
+/// the `--mount-child NAME,HOST,MODE[,file]` children of an aggregate at `/run/nvx/shares`.
+fn sandbox_shares(
+    values: &BTreeMap<&str, Vec<&str>>,
+) -> Result<(Vec<PathBuf>, Vec<String>), String> {
+    let mut roots = Vec::new();
+    let mut targets = Vec::new();
+    for share in values.get("--mount").into_iter().flatten() {
+        let invalid = || format!("invalid --mount {share}");
+        let (target, rest) = share.split_once(',').ok_or_else(invalid)?;
+        let (host, mode) = rest.rsplit_once(',').ok_or_else(invalid)?;
+        if !Path::new(host).is_dir() || !["ro", "rw"].contains(&mode) {
+            return Err(invalid());
+        }
+        roots.push(PathBuf::from(host));
+        targets.push(target.to_owned());
+    }
+    match values.get("--mount-aggregate").map(Vec::as_slice) {
+        None => {}
+        Some(["/run/nvx/shares"]) if roots.is_empty() => {
+            for child in values.get("--mount-child").into_iter().flatten() {
+                let invalid = || format!("invalid --mount-child {child}");
+                let (_, rest) = child.split_once(',').ok_or_else(invalid)?;
+                let (rest, file) = match rest.strip_suffix(",file") {
+                    Some(rest) => (rest, true),
+                    None => (rest, false),
+                };
+                let (host, mode) = rest.rsplit_once(',').ok_or_else(invalid)?;
+                let kind_matches = if file {
+                    Path::new(host).is_file()
+                } else {
+                    Path::new(host).is_dir()
+                };
+                if !kind_matches || !["ro", "rw"].contains(&mode) {
+                    return Err(invalid());
+                }
+                roots.push(PathBuf::from(host));
+            }
+        }
+        Some(_) => return Err("invalid --mount-aggregate".to_owned()),
+    }
+    if values.contains_key("--mount-child") && !values.contains_key("--mount-aggregate") {
+        return Err("--mount-child requires --mount-aggregate".to_owned());
+    }
+    Ok((roots, targets))
+}
+
+/// Returns the host directories that the aggregate export of the host mapping table shares, in
+/// child order, which `--mount-aggregate` and the `nvx_maps=` count of the kernel command line
+/// must agree on.
+fn mapped_children(
+    values: &BTreeMap<&str, Vec<&str>>,
+    maps: usize,
+) -> Result<Vec<PathBuf>, String> {
     let children = match values.get("--mount-aggregate").map(Vec::as_slice) {
         None if maps == 0 => Vec::new(),
         Some([GUEST_EXPORT]) if maps > 0 => {
@@ -403,72 +739,55 @@ fn parse(program: &str, arguments: &[String]) -> Result<Options, String> {
     if children.is_empty() && values.contains_key("--mount-child") {
         return Err("--mount-child requires --mount-aggregate".to_owned());
     }
-    for option in ["--mount-deny", "--mount-allow", "--mount-write"] {
-        for path in values.get(option).into_iter().flatten() {
-            let path = Path::new(path);
-            // No policy path names a file child, which contains nothing.
-            if !path.exists()
-                || !children
-                    .iter()
-                    .any(|root| root.is_dir() && path.starts_with(root))
-            {
-                return Err(format!("invalid {option} {}", path.display()));
-            }
-        }
-    }
-    if (values.contains_key("--network-egress-allow")
-        || values.contains_key("--network-egress-deny"))
-        && !values.contains_key("--network-egress")
-    {
-        return Err("--network-egress is required with egress rules".to_owned());
-    }
-    if values.contains_key("--host-loopback-forward")
-        && values.get("--host-loopback").map(Vec::as_slice) != Some(&["allow"][..])
-    {
-        return Err("--host-loopback-forward requires explicit --host-loopback allow".to_owned());
-    }
-    if !tokens.iter().any(|token| token.starts_with("hostname=")) {
-        return Err("the kernel command line must set the hostname".to_owned());
-    }
-    if values.contains_key("--net") {
-        expect("--network-profile", "portable")?;
-    }
-    let knob = |name: &str| {
-        tokens
-            .iter()
-            .find_map(|token| token.strip_prefix(name)?.strip_prefix('='))
+    Ok(children)
+}
+
+/// Summarizes the network policy of a command line as OpenVMM's outcome report does.
+fn network_summary(values: &BTreeMap<&str, Vec<&str>>) -> NetworkSummary {
+    let count = |name: &str| values.get(name).map_or(0, Vec::len);
+    let requested = [
+        "--net",
+        "--network-profile",
+        "--network-egress",
+        "--network-ingress",
+        "--network-egress-allow",
+        "--network-egress-deny",
+        "--host-loopback",
+        "--network-proxy",
+        "--host-loopback-forward",
+    ]
+    .iter()
+    .any(|name| values.contains_key(name));
+    let egress = values
+        .get("--network-egress")
+        .and_then(|values| values.last());
+    let mode = if count("--network-egress-allow") + count("--network-egress-deny") > 0 {
+        "rules"
+    } else if egress == Some(&"deny") {
+        "deny-all"
+    } else if requested {
+        "allow-all"
+    } else {
+        "none"
     };
-    let millis = |name: &str| {
-        knob(name)
-            .and_then(|value| value.parse().ok())
-            .map(Duration::from_millis)
+    let host_loopback = if !requested {
+        "none"
+    } else if values
+        .get("--host-loopback")
+        .and_then(|values| values.last())
+        == Some(&"deny")
+    {
+        "deny"
+    } else {
+        "allow"
     };
-    let token = report
-        .parent()
-        .and_then(Path::file_name)
-        .map(|name| name.to_string_lossy().into_owned())
-        .unwrap_or_default();
-    Ok(Options {
-        program: program.to_owned(),
-        endpoint,
-        args_dump: kernel.with_file_name(format!("fake-openvmm-{token}.json")),
-        maps_dump: kernel.with_file_name(format!("fake-openvmm-{token}-maps.json")),
-        report,
-        hypervisor: hypervisor.to_owned(),
-        exit_on_start: knob("fake_exit_on_start").and_then(|value| value.parse().ok()),
-        boot_delay: millis("fake_boot_delay_ms").unwrap_or_default(),
-        crash_after: millis("fake_crash_after_ms"),
-        ignore_stop: knob("fake_ignore_stop") == Some("1"),
-        ignore_cancel: knob("fake_ignore_cancel") == Some("1"),
-        legacy_guest: knob("fake_legacy_guest") == Some("1"),
-        refuse_maps: knob("fake_refuse_maps") == Some("1"),
-        workload_uid,
-        guest_features: knob("fake_guest_features")
-            .and_then(|value| value.parse().ok())
-            .map_or(GUEST_FEATURES, GuestFeatures::from_bits),
-        children,
-        maps,
-    })
+    NetworkSummary {
+        requested,
+        mode,
+        allow: count("--network-egress-allow"),
+        deny: count("--network-egress-deny"),
+        host_loopback,
+    }
 }
 
 /// Reads exactly one nonzero control capability from standard input.
@@ -525,7 +844,11 @@ impl Guest {
         Self {
             values: BTreeMap::new(),
             default_environment,
-            directories: ["/", "/tmp", "/work"].map(str::to_owned).into(),
+            directories: ["/", "/tmp", "/work"]
+                .into_iter()
+                .map(str::to_owned)
+                .chain(options.share_targets.iter().cloned())
+                .collect(),
             files: BTreeSet::new(),
             mapped: Vec::new(),
         }
@@ -1034,28 +1357,66 @@ fn serve_client<S: Read + Write + Pending>(
     };
     match session.run(options, guest) {
         Ok(Flow::Exit) => {
-            write_report(options);
+            write_report(options, "managed", "success", 0);
             Flow::Exit
         }
         _ => Flow::Continue,
     }
 }
 
-/// Writes the successful synthetic OpenVMM outcome report if the destination is new.
-fn write_report(options: &Options) {
-    let report = serde_json::json!({
-        "schema_version": 1,
-        "backend": options.hypervisor,
-        "outcome": { "operation": "managed", "category": "success", "status_code": 0 },
-        "network_policy": { "status": "not-requested" },
-        "teardown": { "workers": true, "memory": true },
-    });
-    if let Ok(mut file) = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&options.report)
-    {
-        let _ = file.write_all(report.to_string().as_bytes());
+/// Writes the synthetic OpenVMM outcome report of `operation` if a report was requested and its
+/// destination is new.
+///
+/// A sandbox's report takes the form of OpenVMM's, with the instance, the network policy that the
+/// command line requested, and every step of the teardown; a direct launch's keeps a shorter
+/// form.
+fn write_report(options: &Options, operation: &str, category: &str, status_code: i32) {
+    let Some(path) = &options.report else {
+        return;
+    };
+    let report = if options.sandbox {
+        let mut instance = [0u8; 16];
+        let _ = getrandom::fill(&mut instance);
+        let instance: String = instance.iter().map(|byte| format!("{byte:02x}")).collect();
+        let network = &options.network;
+        let teardown = serde_json::json!({
+            "guest_workload_stopped": true,
+            "vm_stopped": true,
+            "openvmm_process_terminated": true,
+            "virtiofs_released": true,
+            "network_released": true,
+            "temporary_storage_removed": true,
+            "control_channels_closed": true,
+        });
+        let text = serde_json::to_string_pretty(&serde_json::json!({
+            "schema_version": 1,
+            "instance_id": instance,
+            "backend": options.hypervisor,
+            "outcome": { "operation": operation, "category": category, "status_code": status_code },
+            "network_policy": {
+                "status": if network.requested { "applied" } else { "not-requested" },
+                "status_code": 0,
+                "mode": network.mode,
+                "allow_rule_count": network.allow,
+                "deny_rule_count": network.deny,
+                "host_loopback": network.host_loopback,
+            },
+            "teardown": teardown,
+        }))
+        .unwrap_or_default();
+        format!("{text}\n")
+    } else {
+        serde_json::json!({
+            "schema_version": 1,
+            "backend": options.hypervisor,
+            "outcome": { "operation": operation, "category": category, "status_code": status_code },
+            "network_policy": { "status": "not-requested" },
+            "teardown": { "workers": true, "memory": true },
+        })
+        .to_string()
+    };
+    if let Ok(mut file) = OpenOptions::new().write(true).create_new(true).open(path) {
+        let _ = file.write_all(report.as_bytes());
     }
 }
 

@@ -7,10 +7,10 @@ use super::{ProtocolError, array, violation};
 /// Control features of a guest image, advertised in the response to
 /// [`APP_FEATURES`](super::APP_FEATURES).
 ///
-/// The bits are defined by the guest agent in `guest/common/nvx-managed-agent.c`, which also
-/// speaks for the features of its image's init script. A host drives a sandbox only when its
-/// guest provides every feature in [`GuestFeatures::REQUIRED`]; an older image would silently
-/// ignore the policy or the request that depends on the missing feature.
+/// The Rust guest agent uses these shared definitions and also speaks for the features of its
+/// image's init script. A host drives a sandbox only when its guest provides every feature in
+/// [`GuestFeatures::REQUIRED`]; an older image would silently ignore the policy or the request
+/// that depends on the missing feature.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GuestFeatures(u32);
 
@@ -50,6 +50,17 @@ impl GuestFeatures {
         Self(Self::CANCEL.0 | Self::WORKLOAD_ACCOUNT.0 | Self::EXEC_ENVIRONMENT.0);
     /// The features that the host depends on.
     pub const REQUIRED: Self = Self::DIRECT_AGENT;
+    /// The features that `nvx-rs sandbox` depends on in the layered sandbox root, whose agent
+    /// announces [`SANDBOX_AGENT`](Self::SANDBOX_AGENT): only
+    /// [`EXEC_ENVIRONMENT`](Self::EXEC_ENVIRONMENT), because `exec` sends a working directory and
+    /// an environment in an extended `EXEC`.
+    ///
+    /// It holds no [`CANCEL`](Self::CANCEL), because the CLI sends no `APP_CANCEL`: as `nvx.py`
+    /// did, Ctrl-C ends an `exec` by closing the session, and the guest agent ends the workload
+    /// when OpenVMM resets the session that it ran for. It holds no
+    /// [`WORKLOAD_ACCOUNT`](Self::WORKLOAD_ACCOUNT), because no sandbox launch requests account
+    /// creation, which the layered root does not perform (microsoft/nvx#566).
+    pub const LAYERED_SANDBOX: Self = Self::EXEC_ENVIRONMENT;
 
     /// Human-readable names of every required feature, used in compatibility errors.
     pub(crate) const NAMES: [(Self, &'static str); 6] = [

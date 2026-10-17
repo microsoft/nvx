@@ -231,10 +231,15 @@ process exits, so delayed final output chunks cannot create a false failure.
 
 Shared guest artifacts are built with Docker on a GitHub-hosted Ubuntu runner.
 The kernel, Alpine initramfs, Ubuntu initramfs, and Ubuntu EROFS layer use
-separate cache keys. Ubuntu keys include the Canonical archive pin,
-supplemental package lock, common guest sources, shared download and guest
-descriptor modules, converter implementation, Dockerfile, and `.dockerignore`.
-Artifact upload
+separate cache keys. Every guest key includes `nvx-rs/**` except its `target`
+directory, `rust-toolchain.toml`, the shared binary-build modules, the
+Dockerfile, and `.dockerignore`; the Rust builder image itself is pinned by
+digest. Because `hashFiles` hashes contents only, every guest key also ends
+with the path-aware Rust source digest that the guest package manifests
+record, which `nvx.py guest-binary-source-identity` prints. Ubuntu keys also
+include the Canonical archive pin, supplemental
+package lock, common guest sources, shared download and guest descriptor
+modules, and converter implementation. Artifact upload
 retains the Alpine filenames and adds the distinct Ubuntu filenames. Each
 backend also boots the Ubuntu initramfs and runs
 `/sbin/nvx-sandbox-smoke` from the Ubuntu EROFS layer as UID/GID 65534 over a
@@ -590,8 +595,9 @@ the `guest` profile. The action delegates the musl lint and tests to
 path-remapped build, static-ELF check, and digest manifest to
 [`nvx.py build-guest-binaries`](usage.md#build-guest-binaries),
 and the prebuilt-binary integration run to
-`nvx.py test-guest-binaries`. The guests ship the C programs in
-`guest/common/` until their build switches to these binaries.
+`nvx.py test-guest-binaries`. The same shared routine supplies every native
+and Docker guest build, and Alpine, Ubuntu, and Azure Linux ship its nine
+executables.
 
 The development release job depends on `aci-edge-sandboxes` and `nvx-rs` and
 requires their combined Linux/Windows results to be successful; failed,
@@ -657,7 +663,8 @@ restore repeats the key, paths, and gzip compression of the cache entry that
 they differ, because a mismatch would otherwise only cause a silent cache miss.
 Because the agent firewall blocks `cdn.kernel.org` and `cdimage.ubuntu.com`,
 even inside containers, the workflow also installs the native guest build
-prerequisites, allows the unprivileged user namespaces that Alpine's `apk` uses
+prerequisites, including the pinned Rust toolchain's
+`x86_64-unknown-linux-musl` target, allows the unprivileged user namespaces that Alpine's `apk` uses
 for package triggers, and stages the pinned Linux and Ubuntu Base archives, so
 agents can rebuild guest artifacts with `build-guest --native`. When a runner
 has a separate `/mnt` disk with more free space than `/`, it mounts the
@@ -669,7 +676,7 @@ Copilot always runs the version on `dev`, even for sessions based on other
 branches, so changes reach agent sessions only after they merge. Pushes run it
 as a normal workflow for validation when they change the workflow or a file
 that its steps take versions, requirements, metadata, or code from: the
-`build-guest-artifacts` action, the files that pin its Rust, cargo-nextest,
+`build-guest-artifacts` action, all `nvx-rs/**` files, the files that pin its Rust, cargo-nextest,
 and shell linter versions, `requirements-dev.txt`, `SOURCE-MANIFEST.json`,
 `.gitmodules`, the OpenVMM submodule pin, and the NVX CLI and its modules.
 

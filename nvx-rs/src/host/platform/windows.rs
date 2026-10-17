@@ -20,11 +20,17 @@ use windows_sys::Win32::Storage::FileSystem::{
     GetFileInformationByHandle, OPEN_EXISTING, ReadFile, SECURITY_IDENTIFICATION,
     SECURITY_SQOS_PRESENT, WriteFile,
 };
+#[cfg(feature = "cli")]
+use windows_sys::Win32::Storage::FileSystem::{LockFile, UnlockFile};
+#[cfg(feature = "cli")]
+use windows_sys::Win32::System::Console::{CTRL_C_EVENT, SetConsoleCtrlHandler};
 use windows_sys::Win32::System::IO::{CancelIoEx, GetOverlappedResult, OVERLAPPED};
 use windows_sys::Win32::System::LibraryLoader::{
     GetProcAddress, LOAD_LIBRARY_SEARCH_SYSTEM32, LoadLibraryExW,
 };
 use windows_sys::Win32::System::Pipes::{GetNamedPipeServerProcessId, WaitNamedPipeW};
+#[cfg(feature = "cli")]
+use windows_sys::Win32::System::Threading::GetExitCodeProcess;
 use windows_sys::Win32::System::Threading::{
     CREATE_BREAKAWAY_FROM_JOB, CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW,
     CREATE_UNICODE_ENVIRONMENT, CreateEventW, CreateProcessW, DeleteProcThreadAttributeList,
@@ -186,6 +192,40 @@ impl LaunchedProcess {
         let milliseconds = u32::try_from(timeout.as_millis()).unwrap_or(INFINITE - 1);
         // SAFETY: as above.
         unsafe { WaitForSingleObject(raw(&self.process), milliseconds) == WAIT_OBJECT_0 }
+    }
+
+    /// Waits up to `timeout` for the process to exit, and returns its exit status if it has,
+    /// as `Popen.wait` reads it with `GetExitCodeProcess`.
+    #[cfg(feature = "cli")]
+    pub(crate) fn wait_timeout(&self, timeout: Duration) -> io::Result<Option<u32>> {
+        let milliseconds = u32::try_from(timeout.as_millis()).unwrap_or(INFINITE - 1);
+        // SAFETY: CreateProcessW returned the handle with full access.
+        match unsafe { WaitForSingleObject(raw(&self.process), milliseconds) } {
+            WAIT_OBJECT_0 => {}
+            WAIT_TIMEOUT => return Ok(None),
+            _ => return Err(io::Error::last_os_error()),
+        }
+        let mut status = 0u32;
+        // SAFETY: as above, and the output pointer is valid.
+        if unsafe { GetExitCodeProcess(raw(&self.process), &mut status) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(Some(status))
+    }
+
+    /// Asks the process to end with status 1 without waiting for it, as `Popen.terminate` and
+    /// `Popen.kill` do on Windows.
+    #[cfg(feature = "cli")]
+    pub(crate) fn request_termination(&self) -> io::Result<()> {
+        // SAFETY: CreateProcessW returned the handle with full access.
+        if unsafe { TerminateProcess(raw(&self.process), 1) } == 0 {
+            let error = io::Error::last_os_error();
+            // A process that already exited cannot be terminated; Python ignores that too.
+            if self.wait_timeout(Duration::ZERO)?.is_none() {
+                return Err(error);
+            }
+        }
+        Ok(())
     }
 }
 
@@ -649,6 +689,61 @@ impl Transport for PipeTransport {
         }
         Ok(())
     }
+}
+
+/// Whether Ctrl-C reached the console since [`watch_interrupts`] installed its handler.
+#[cfg(feature = "cli")]
+static INTERRUPTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// The console control handler, which records Ctrl-C and leaves every other event, such as
+/// Ctrl-Break, to the next handler, which terminates the process.
+#[cfg(feature = "cli")]
+unsafe extern "system" fn record_interrupt(control: u32) -> windows_sys::core::BOOL {
+    if control == CTRL_C_EVENT {
+        INTERRUPTED.store(true, std::sync::atomic::Ordering::SeqCst);
+        1
+    } else {
+        0
+    }
+}
+
+/// Records each Ctrl-C for [`interrupted`] instead of letting it terminate the process, as
+/// Python's `SIGINT` handler, which raises `KeyboardInterrupt`, does. Ctrl-Break still
+/// terminates it, as it terminates Python.
+#[cfg(feature = "cli")]
+pub(crate) fn watch_interrupts() -> io::Result<()> {
+    // SAFETY: the handler only stores to an atomic, and stays valid for the process's lifetime.
+    if unsafe { SetConsoleCtrlHandler(Some(record_interrupt), 1) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+/// Returns whether Ctrl-C reached the console since [`watch_interrupts`].
+#[cfg(feature = "cli")]
+pub(crate) fn interrupted() -> bool {
+    INTERRUPTED.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+/// Locks the first byte of `file` unless another handle holds a lock on it, as
+/// `msvcrt.locking(fd, LK_NBLCK, 1)` does at offset 0, and returns whether it took the lock.
+///
+/// Like the C runtime, which reports every failure of `LockFile` as `EACCES` in this mode, any
+/// failure counts as a lock that another handle holds.
+#[cfg(feature = "cli")]
+pub(crate) fn try_lock_first_byte(file: &fs::File) -> bool {
+    // SAFETY: the handle is open for as long as `file` is borrowed.
+    unsafe { LockFile(file.as_raw_handle() as HANDLE, 0, 0, 1, 0) != 0 }
+}
+
+/// Unlocks the first byte of `file`, as `msvcrt.locking(fd, LK_UNLCK, 1)` does at offset 0.
+#[cfg(feature = "cli")]
+pub(crate) fn unlock_first_byte(file: &fs::File) -> io::Result<()> {
+    // SAFETY: the handle is open for as long as `file` is borrowed.
+    if unsafe { UnlockFile(file.as_raw_handle() as HANDLE, 0, 0, 1, 0) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
 }
 
 #[cfg(test)]
