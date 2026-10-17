@@ -161,8 +161,9 @@ validate_share_target() {
     esac
     # The container runtime mounts or binds these paths after the share, so a
     # share there would be shadowed or would expose host data to runtime writes.
+    # It also creates /run and /run/nvx, and binds its time state over /run/nvx/time.
     case "$1" in
-        /proc | /proc/* | /sys | /sys/* | /dev | /dev/* | /.nvx-agent | /.nvx-agent/* | /etc | /etc/machine-id | /etc/machine-id/*)
+        /proc | /proc/* | /sys | /sys/* | /dev | /dev/* | /.nvx-agent | /.nvx-agent/* | /etc | /etc/machine-id | /etc/machine-id/* | /run | /run/nvx | /run/nvx/time | /run/nvx/time/*)
             fatal "live share target is reserved: $1"
             ;;
     esac

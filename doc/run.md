@@ -831,9 +831,11 @@ only by the sandbox's 1024-byte kernel command-line budget. A one-shot
 workload exit, a managed `stop`, and any failure after a share is mounted
 unmount the binds in reverse order, then the aggregate, before the overlay is
 unmounted or the VM powers off. Each target must be an absolute, canonical
-path; `/` and `/etc`, and the `/etc/machine-id`, `/proc`, `/sys`, `/dev`, and
-`/.nvx-agent` trees, are reserved for the container runtime, which replaces
-`/etc/machine-id` with the workload's machine ID.
+path; `/`, `/etc`, `/run`, and `/run/nvx`, and the `/etc/machine-id`,
+`/proc`, `/sys`, `/dev`, `/.nvx-agent`, and `/run/nvx/time` trees, are
+reserved for the container runtime, which replaces `/etc/machine-id` with the
+workload's machine ID, creates `/run` and `/run/nvx`, and binds its time state
+over `/run/nvx/time`.
 The guest refuses a target whose path crosses a symbolic link in a container
 layer, a target that a container layer holds as another kind of file than the
 share's, a repeated child, and overlapping targets, and any validation or mount

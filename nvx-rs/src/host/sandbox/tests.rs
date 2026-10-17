@@ -545,8 +545,14 @@ fn launch_contract_attaches_a_file_as_an_aggregate_child() {
         message(MountKind::from_name("socket")),
         "unsupported sandbox mount kind 'socket'; choose directory or file"
     );
-    // The runtime replaces /etc/machine-id with a file, so nothing at or below it may be shared.
-    for target in ["/etc/machine-id", "/etc/machine-id/child"] {
+    // The runtime replaces /etc/machine-id with a file, and binds its time state over
+    // /run/nvx/time, so nothing at or below them may be shared.
+    for target in [
+        "/etc/machine-id",
+        "/etc/machine-id/child",
+        "/run/nvx/time",
+        "/run/nvx/time/state",
+    ] {
         let error = SandboxMount::parse(
             &format!("{target},id"),
             MountPolicy::default(),
@@ -556,8 +562,27 @@ fn launch_contract_attaches_a_file_as_an_aggregate_child() {
         .unwrap_err();
         assert!(error.to_string().contains("reserved"), "{error}");
     }
-    // Only /etc itself is reserved, not what lies below it.
+    // Only /etc itself is reserved, not what lies below it, and the runtime creates /run and
+    // /run/nvx, but nothing else of them (microsoft/nvx#486).
     mount("/etc/app,app", &[]);
+    for target in ["/etc", "/run", "/run/nvx"] {
+        assert_eq!(
+            message(mount::validate_mount_target(target)),
+            format!("sandbox mount target {target} is reserved")
+        );
+    }
+    assert_eq!(
+        message(mount::validate_mount_target("/run/nvx/time/state")),
+        "sandbox mount target /run/nvx/time/state overlaps the reserved /run/nvx/time tree"
+    );
+    for target in [
+        "/run/secrets",
+        "/run/nvx/other",
+        "/run/nvxtime",
+        "/run/nvx/timer",
+    ] {
+        mount::validate_mount_target(target).unwrap();
+    }
 }
 
 /// A sandbox's distro layer and scratch image in a temporary directory.

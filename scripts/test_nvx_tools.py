@@ -10716,6 +10716,9 @@ class SandboxShareAgentTests(unittest.TestCase):
             ("0,/file,ro", "not a directory"),
             ("0,/etc/machine-id,ro,file", "reserved"),
             ("0,/etc/machine-id/child,ro", "reserved"),
+            ("0,/run,ro", "reserved"),
+            ("0,/run/nvx,ro", "reserved"),
+            ("0,/run/nvx/time/state,ro", "reserved"),
         ):
             with self.subTest(child=child):
                 result, log = self._run(self._aggregate(child))

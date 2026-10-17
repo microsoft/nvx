@@ -30,12 +30,19 @@ pub const MOUNT_TAG: &str = "microvm";
 pub const AGGREGATE_MOUNT_TARGET: &str = "/run/nvx/shares";
 /// The guest trees that the container runtime owns, which a share may neither be in nor contain:
 /// it mounts procfs, sysfs, and a private `/dev` over them, stages its tools under
-/// `/.nvx-agent`, and binds the workload machine ID at `/etc/machine-id`, which it first
-/// replaces with a regular file.
-pub const RESERVED_MOUNT_TARGETS: [&str; 5] =
-    ["/proc", "/sys", "/dev", "/.nvx-agent", "/etc/machine-id"];
-/// The guest paths at which a share may not be, though it may be below them.
-pub const RESERVED_EXACT_MOUNT_TARGETS: [&str; 1] = ["/etc"];
+/// `/.nvx-agent`, binds the workload machine ID at `/etc/machine-id`, which it first replaces
+/// with a regular file, and binds its time ABI state over `/run/nvx/time`.
+pub const RESERVED_MOUNT_TARGETS: [&str; 6] = [
+    "/proc",
+    "/sys",
+    "/dev",
+    "/.nvx-agent",
+    "/etc/machine-id",
+    "/run/nvx/time",
+];
+/// The guest paths at which a share may not be, though it may be below them: `/etc`, and `/run`
+/// and `/run/nvx`, which the container runtime creates below the container root.
+pub const RESERVED_EXACT_MOUNT_TARGETS: [&str; 3] = ["/etc", "/run", "/run/nvx"];
 /// The most denied, allowed, and writable paths each that OpenVMM accepts for a share.
 pub const MAX_MOUNT_POLICY_PATHS: usize = 128;
 /// The longest guest target, in UTF-8 bytes.
