@@ -23,7 +23,7 @@ import unittest
 from collections.abc import Callable, Collection
 from contextlib import ExitStack, nullcontext, redirect_stdout
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, str(Path(__file__).parent))
@@ -32,17 +32,25 @@ from nvx_tools import (  # noqa: E402
     benchmark,
     common,
     control_session,
-    egress_policy,
     managed_exec_tests,
     microvm_tests,
+    nvx_rs,
     openvmm_process,
-    sandbox_lifecycle,
     sandbox_lifecycle_tests,
     time_abi,
 )
 from nvx_tools.build_constants import (  # noqa: E402
     BuildConstants,
 )
+
+
+def _compile(policy: dict[str, object]) -> nvx_rs.EgressRules:
+    """Compiles an egress policy with nvx-rs, as nvx.py run compiles its
+    --network-egress-policy-file."""
+    with tempfile.TemporaryDirectory(prefix="nvx-egress-policy-") as temporary:
+        path = Path(temporary) / "policy.json"
+        path.write_text(json.dumps(policy), encoding="utf-8")
+        return nvx_rs.compile_egress_policy(path)
 
 
 def _posix_shell() -> str | None:
@@ -1156,9 +1164,6 @@ class _FakeSandboxCli:
     def processes(self, _: str) -> tuple[int, ...]:
         return tuple(sorted(pid for pid, running in self.running.items() if running))
 
-    def process_running(self, runtime: dict[str, object]) -> bool:
-        return self.running.get(cast(int, runtime["pid"]), False)
-
     def endpoint_present(self, runtime: dict[str, object]) -> bool:
         return runtime["control_endpoint"] in self.endpoints.values()
 
@@ -1251,11 +1256,6 @@ class PublicSandboxLifecycleTests(unittest.TestCase):
                 sandbox_lifecycle_tests,
                 "terminate_process",
                 side_effect=fake.terminate,
-            ),
-            patch.object(
-                sandbox_lifecycle,
-                "runtime_process_running",
-                side_effect=fake.process_running,
             ),
         ):
             sandbox_lifecycle_tests.run_sandbox_lifecycle(
@@ -1449,19 +1449,36 @@ class PublicSandboxLifecycleTests(unittest.TestCase):
                 sandbox_lifecycle_tests.scratch_journal_clean(image)
 
     def test_kill_ends_the_recorded_process(self):
-        if os.name != "nt" and sys.platform != "linux":
-            self.skipTest("process identity requires a Linux or Windows host")
         child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+
+        def processes(marker: str) -> tuple[int, ...]:
+            # The scan finds the child under its fixture's name while it runs.
+            self.assertEqual(marker, "nvx-public-lifecycle-kill")
+            return (child.pid,) if child.poll() is None else ()
+
+        runtime: dict[str, object] = {
+            "format": 1,
+            "pid": child.pid,
+            "start_time": 1,
+            "control_endpoint": "unused",
+        }
         try:
-            runtime: dict[str, object] = {
-                "format": 1,
-                "pid": child.pid,
-                "start_time": sandbox_lifecycle._process_start_time(child.pid),
-                "control_endpoint": "unused",
-            }
-            self.assertTrue(sandbox_lifecycle.runtime_process_running(runtime))
-            sandbox_lifecycle_tests.kill_openvmm(runtime, 30)
-            self.assertFalse(sandbox_lifecycle.runtime_process_running(runtime))
+            with patch.object(
+                sandbox_lifecycle_tests, "openvmm_processes", side_effect=processes
+            ):
+                self.assertTrue(
+                    sandbox_lifecycle_tests.openvmm_running(
+                        runtime, "nvx-public-lifecycle-kill"
+                    )
+                )
+                sandbox_lifecycle_tests.kill_openvmm(
+                    runtime, 30, "nvx-public-lifecycle-kill"
+                )
+                self.assertFalse(
+                    sandbox_lifecycle_tests.openvmm_running(
+                        runtime, "nvx-public-lifecycle-kill"
+                    )
+                )
             self.assertNotEqual(child.wait(timeout=30), 0)
         finally:
             if child.poll() is None:
@@ -5614,6 +5631,7 @@ class MicrovmTests(unittest.TestCase):
                 "_bind_consecutive_ports",
                 side_effect=[endpoints, RuntimeError("UDP unavailable")],
             ),
+            patch.object(microvm_tests, "compile_egress_policy") as compile_policy,
             self.assertRaisesRegex(RuntimeError, "UDP unavailable"),
         ):
             microvm_tests.run_l3_l4_egress_policy(
@@ -5627,6 +5645,7 @@ class MicrovmTests(unittest.TestCase):
             )
         for endpoint in endpoints:
             endpoint.close.assert_called_once_with()
+        compile_policy.assert_not_called()
 
     def test_bounded_egress_acceptance_policy_lowers_ranges_and_exclusions(self):
         policy = microvm_tests._bounded_egress_policy(
@@ -5696,6 +5715,11 @@ class MicrovmTests(unittest.TestCase):
                     ),
                     patch.object(microvm_tests, "run_guest_script") as run_guest_script,
                     patch.object(microvm_tests, "OpenvmmProcess") as openvmm_process,
+                    patch.object(
+                        microvm_tests,
+                        "compile_egress_policy",
+                        return_value=nvx_rs.EgressRules(allow=(), deny=()),
+                    ),
                     patch.object(
                         microvm_tests.threading,
                         "Thread",
@@ -5847,6 +5871,11 @@ class MicrovmTests(unittest.TestCase):
                             return_value=(tcp, udp),
                         ),
                         patch.object(microvm_tests, "run_guest_script"),
+                        patch.object(
+                            microvm_tests,
+                            "compile_egress_policy",
+                            return_value=nvx_rs.EgressRules(allow=(), deny=()),
+                        ),
                         patch.object(
                             microvm_tests.threading,
                             "Thread",
@@ -6385,7 +6414,7 @@ class MicrovmTests(unittest.TestCase):
             "192.0.2.1", 20001, 20002, 20003
         ):
             with self.subTest(case=case.name):
-                compiled = egress_policy.compile_policy(
+                compiled = _compile(
                     {"allow": list(case.allow), "deny": list(case.deny)}
                 )
                 self.assertEqual((compiled.allow, compiled.deny), expected[case.name])
@@ -6464,12 +6493,17 @@ class MicrovmTests(unittest.TestCase):
                 return MagicMock(returncode=0, output=microvm_tests.BOOT_MARKER)
             return MagicMock(returncode=2, output=output)
 
-        def public_dry_run(command: list[str], **_kwargs: object) -> MagicMock:
+        run_process = subprocess.run
+
+        def public_dry_run(command: list[str], **kwargs: Any) -> object:
+            if "--dry-run" not in command:
+                # nvx-rs, which compiles each policy.
+                return cast(object, run_process(command, **kwargs))
             if nvx_accepts == policy_name(command):
                 return MagicMock(returncode=0, stderr=b"")
             path = Path(command[command.index("--network-egress-policy-file") + 1])
             try:
-                egress_policy.compile_policy_file(path)
+                nvx_rs.compile_egress_policy(path)
             except common.ScriptError as error:
                 return MagicMock(returncode=1, stderr=f"error: {error}\n".encode())
             return MagicMock(returncode=0, stderr=b"")
@@ -6596,7 +6630,12 @@ class MicrovmTests(unittest.TestCase):
             self.assertEqual(
                 rejected, ["192.0.2.1:tcp:20003-20001", "192.0.2.1:udp:-20003"]
             )
-            dry_runs = [call.args[0] for call in nvx_run.call_args_list]
+            # The other calls are nvx-rs, which compiles each case's policy.
+            dry_runs = [
+                call.args[0]
+                for call in nvx_run.call_args_list
+                if "--dry-run" in call.args[0]
+            ]
             self.assertEqual(len(dry_runs), 2)
             for command, name in zip(
                 dry_runs, ("reversed-end-port", "end-port-without-port"), strict=True
@@ -6894,9 +6933,7 @@ class MicrovmTests(unittest.TestCase):
         every_probe = set(microvm_tests.IPV6_EGRESS_PROBES)
         lowered = {}
         for case in cases:
-            compiled = egress_policy.compile_policy(
-                {"allow": list(case.allow), "deny": list(case.deny)}
-            )
+            compiled = _compile({"allow": list(case.allow), "deny": list(case.deny)})
             lowered[case.name] = (
                 case.default,
                 compiled.allow,

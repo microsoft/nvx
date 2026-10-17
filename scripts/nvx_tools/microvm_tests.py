@@ -62,9 +62,9 @@ from .common import (
     sha256_file,
 )
 from .control_session import ControlSession, ManagedExecRefused, capability_pipe
-from .egress_policy import CompiledEgressPolicy, compile_policy_file
 from .guests import GUEST_NAMES, GuestDescriptor, guest_descriptor
 from .managed_exec_tests import run_managed_exec_configuration
+from .nvx_rs import EgressRules, compile_egress_policy
 from .openvmm_process import OpenvmmProcess, TcpConsole
 from .sandbox_lifecycle_tests import run_sandbox_lifecycle
 from .time_abi import (
@@ -1901,7 +1901,7 @@ def _bounded_egress_policy(
     udp_ports: tuple[int, int, int],
     *,
     policy_file: Path | None = None,
-) -> CompiledEgressPolicy:
+) -> EgressRules:
     allow: list[dict[str, object]] = []
     deny: list[dict[str, object]] = []
     for protocol, (start, denied, end) in (
@@ -1942,9 +1942,9 @@ def _bounded_egress_policy(
             )
         )
 
-    def compile_file(path: Path) -> CompiledEgressPolicy:
+    def compile_file(path: Path) -> EgressRules:
         path.write_text(json.dumps({"allow": allow, "deny": deny}), encoding="utf-8")
-        return compile_policy_file(path)
+        return compile_egress_policy(path)
 
     if policy_file is not None:
         return compile_file(policy_file)
@@ -2597,7 +2597,7 @@ def run_l3_l4_egress_port_ranges(
             )
             # Each range must reach OpenVMM as one native rule, not as a rule
             # for each of its ports.
-            native = compile_policy_file(policy_path)
+            native = compile_egress_policy(policy_path)
             if not any(
                 rule.endswith(f":{first}-{last}")
                 for rule in (*native.allow, *native.deny)
@@ -3027,7 +3027,7 @@ def run_ipv6_egress_policy(
                 json.dumps({"allow": case.allow, "deny": case.deny}, indent=2) + "\n",
                 encoding="utf-8",
             )
-            native = compile_policy_file(policy_path)
+            native = compile_egress_policy(policy_path)
             command = [
                 sys.executable,
                 str(Path(__file__).parents[1] / "nvx.py"),
