@@ -1,19 +1,31 @@
-#!/usr/bin/env python3
-"""Generate the egress policy parity fixture of nvx-rs from the Python compiler.
+"""Generate the golden fixtures and Python-parity tables of nvx-rs.
 
-`nvx::host::network::policy` ports `scripts/nvx_tools/egress_policy.py`: it must
-accept the same policy files, compile them to the same native rules, and fail
-with the same messages. This script runs the Python compiler over every policy
-that `scripts/test_egress_policy.py` compiles, hand-written edge cases, and a
-seeded random corpus, and records each input with its outcome in
-`nvx-rs/tests/fixtures/egress-policy.json`, which the Rust tests replay without
-Python. It also records how `pathlib` prints policy paths.
+nvx-rs ports Python code that nvx.py runs, and must accept the same inputs and
+give the same outputs and messages. This script records what that Python code,
+and the parts of Python that it relies on, do with fixed cases and seeded random
+corpora, so that the Rust tests replay them without Python:
 
-Python 3.13 or later is required: earlier releases print IPv4-mapped IPv6
-addresses such as `::ffff:192.0.2.0` in hexadecimal. The output depends only on
-the seed and the corpus size, so `--check` verifies that the fixture is current:
+- nvx-rs/src/host/python/unicode.rs: the Unicode tables of str.isprintable and
+  int(), from this interpreter's Unicode database.
+- nvx-rs/tests/fixtures/egress-policy.json: scripts/nvx_tools/egress_policy.py
+  over every policy that scripts/test_egress_policy.py compiles, hand-written
+  edge cases, and a seeded random corpus, and how pathlib prints policy paths.
 
-    python3 scripts/generate_egress_policy_fixtures.py [--check]
+The outputs depend on the interpreter, so run the script with CPython 3.14, from
+any directory:
+
+    python3 scripts/nvx_rs_fixtures.py           # rewrite every generated file
+    python3 scripts/nvx_rs_fixtures.py --check   # fail if any is out of date
+
+With --output, it writes or checks only an egress policy corpus of
+--random-cases random policies at that path, such as a larger corpus for the
+NVX_EGRESS_POLICY_FIXTURE variable of the Rust tests.
+
+Windows paths are recorded with PureWindowsPath, whose ntpath functions are C
+functions that index UTF-16 code units on Windows and Python functions that
+index code points elsewhere. The corpora have no character beyond the Basic
+Multilingual Plane before a colon, on which the two differ, so the script writes
+the same files on Windows and Linux.
 """
 
 from __future__ import annotations
@@ -27,12 +39,13 @@ import random
 import re
 import sys
 import tempfile
+import unicodedata
 import unittest
-from collections.abc import Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import AnyStr
 
-sys.path.insert(0, str(Path(__file__).parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 import test_egress_policy  # noqa: E402
 from nvx_tools.common import ScriptError  # noqa: E402
 from nvx_tools.egress_policy import (  # noqa: E402
@@ -42,14 +55,13 @@ from nvx_tools.egress_policy import (  # noqa: E402
     compile_policy_file,
 )
 
-DESCRIPTION = "Generate the egress policy parity fixture of nvx-rs."
-FIXTURE = (
-    Path(__file__).resolve().parent.parent
-    / "nvx-rs"
-    / "tests"
-    / "fixtures"
-    / "egress-policy.json"
-)
+REPO_ROOT = Path(__file__).resolve().parents[1]
+UNICODE_TABLES = REPO_ROOT / "nvx-rs" / "src" / "host" / "python" / "unicode.rs"
+FIXTURE_DIR = REPO_ROOT / "nvx-rs" / "tests" / "fixtures"
+EGRESS_POLICY_FIXTURE = FIXTURE_DIR / "egress-policy.json"
+# The interpreter whose behavior the fixtures record.
+PYTHON = (3, 14)
+MAX_CODE_POINT = 0x10FFFF
 SEED = 359
 RANDOM_CASES = 200
 # Messages name the policy file; the fixture writes its path as this placeholder.
@@ -70,6 +82,86 @@ Entry = dict[str, object]
 Rule = dict[str, object]
 Policy = dict[str, list[Rule]]
 Network = ipaddress.IPv4Network | ipaddress.IPv6Network
+
+
+# Unicode tables.
+
+
+def _ranges(predicate: Callable[[int], bool], start: int) -> list[tuple[int, int]]:
+    """Return the inclusive ranges of code points from start that satisfy predicate."""
+    ranges: list[tuple[int, int]] = []
+    first: int | None = None
+    for code in range(start, MAX_CODE_POINT + 1):
+        if predicate(code):
+            if first is None:
+                first = code
+        elif first is not None:
+            ranges.append((first, code - 1))
+            first = None
+    if first is not None:
+        ranges.append((first, MAX_CODE_POINT))
+    return ranges
+
+
+def decimal_starts() -> list[int]:
+    starts: list[int] = []
+    for first, last in _ranges(lambda code: chr(code).isdecimal(), 0):
+        if (last - first + 1) % 10:
+            raise SystemExit(f"decimal digits {first:#x}-{last:#x} are not runs of ten")
+        for start in range(first, last + 1, 10):
+            values = [unicodedata.decimal(chr(start + value)) for value in range(10)]
+            if values != list(range(10)):
+                raise SystemExit(f"decimal digits at {start:#x} are not 0 to 9")
+            starts.append(start)
+    return starts
+
+
+def non_printable_ranges() -> list[tuple[int, int]]:
+    return _ranges(lambda code: not chr(code).isprintable(), 0x80)
+
+
+def unicode_tables_source() -> str:
+    """Return the Rust source of the Unicode tables."""
+    starts = decimal_starts()
+    non_printable = non_printable_ranges()
+    lines = [
+        "//! Unicode properties of Python's `str`, from the Unicode "
+        f"{unicodedata.unidata_version} database",
+        f"//! of Python {sys.version_info.major}.{sys.version_info.minor}.",
+        "//!",
+        "//! Generated by `scripts/nvx_rs_fixtures.py`; do not edit.",
+        "",
+        "/// The first code point of each run of ten decimal digits, of category Nd, "
+        "which `int`",
+        "/// reads as the digits zero to nine.",
+        "#[rustfmt::skip]",
+        "pub(crate) const DECIMAL_STARTS: &[u32] = &[",
+    ]
+    for index in range(0, len(starts), 8):
+        row = ", ".join(f"0x{start:05X}" for start in starts[index : index + 8])
+        lines.append(f"    {row},")
+    lines.extend(
+        (
+            "];",
+            "",
+            "/// The inclusive ranges of the code points from U+0080 for which "
+            "`str.isprintable` is false,",
+            "/// in order: `repr` escapes them.",
+            "#[rustfmt::skip]",
+            "pub(crate) const NON_PRINTABLE: &[(u32, u32)] = &[",
+        )
+    )
+    for index in range(0, len(non_printable), 4):
+        row = ", ".join(
+            f"(0x{first:05X}, 0x{last:05X})"
+            for first, last in non_printable[index : index + 4]
+        )
+        lines.append(f"    {row},")
+    lines.extend(("];", ""))
+    return "\n".join(lines)
+
+
+# The egress policy compiler.
 
 
 def printable(text: str) -> str:
@@ -879,7 +971,7 @@ PATHS = (
 )
 
 
-def build(random_cases: int) -> dict[str, list[Entry]]:
+def egress_policy_fixture(random_cases: int) -> dict[str, list[Entry]]:
     """Return the fixture: compiled policies, unreadable files, and paths."""
     if str(ipaddress.IPv6Address("::ffff:192.0.2.1")) != "::ffff:192.0.2.1":
         raise SystemExit(
@@ -916,12 +1008,11 @@ def build(random_cases: int) -> dict[str, list[Entry]]:
     return {"cases": cases, "files": files, "paths": paths}
 
 
-def dump(fixture: dict[str, list[Entry]]) -> str:
+def egress_policy_text(fixture: dict[str, list[Entry]]) -> str:
     """Write the fixture as ASCII JSON with one entry per line."""
     lines = [
         "{",
-        '  "comment": "Generated by scripts/generate_egress_policy_fixtures.py; '
-        'do not edit.",',
+        '  "comment": "Generated by scripts/nvx_rs_fixtures.py; do not edit.",',
     ]
     sections = list(fixture.items())
     for position, (name, entries) in enumerate(sections):
@@ -934,37 +1025,60 @@ def dump(fixture: dict[str, list[Entry]]) -> str:
     return "\n".join(lines) + "\n"
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser(description=DESCRIPTION)
+def _write(path: Path, contents: str, check: bool) -> bool:
+    """Write contents to path, or with check, report whether it would change."""
+    current = path.read_text(encoding="utf-8") if path.is_file() else None
+    if current == contents:
+        return False
+    if check:
+        print(f"{path} is out of date; regenerate it", file=sys.stderr)
+        return True
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(contents, encoding="utf-8", newline="\n")
+    print(f"wrote {path}")
+    return False
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(
+        description="Generate the golden fixtures and Python-parity tables of nvx-rs."
+    )
     parser.add_argument(
         "--check",
         action="store_true",
-        help="fail if the fixture differs from what this script generates",
+        help="fail instead of writing when a generated file would change",
     )
     parser.add_argument(
         "--random-cases",
         type=int,
-        default=RANDOM_CASES,
-        help=f"number of random policies (default: {RANDOM_CASES})",
+        help="with --output, the number of random egress policies "
+        f"(default: {RANDOM_CASES})",
     )
     parser.add_argument(
         "--output",
         type=Path,
-        default=FIXTURE,
-        help="fixture to write or check (default: the nvx-rs fixture)",
+        help="write or check only an egress policy fixture at this path",
     )
-    args = parser.parse_args()
-    output: Path = args.output
-    text = dump(build(args.random_cases))
-    if args.check:
-        current = output.read_text(encoding="utf-8").replace("\r\n", "\n")
-        if current != text:
-            print(f"{output} is out of date; regenerate it", file=sys.stderr)
-            return 1
-        return 0
-    output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text(text, encoding="utf-8", newline="\n")
-    return 0
+    args = parser.parse_args(argv)
+    if args.random_cases is not None and args.output is None:
+        parser.error("--random-cases needs --output")
+    if (sys.implementation.name, sys.version_info[:2]) != ("cpython", PYTHON):
+        version = f"{sys.version_info.major}.{sys.version_info.minor}"
+        raise SystemExit(
+            f"nvx_rs_fixtures.py records CPython {PYTHON[0]}.{PYTHON[1]}, "
+            f"not {sys.implementation.name} {version}"
+        )
+    if args.output is not None:
+        random_cases = RANDOM_CASES if args.random_cases is None else args.random_cases
+        fixture = egress_policy_text(egress_policy_fixture(random_cases))
+        return 1 if _write(args.output, fixture, args.check) else 0
+    stale = _write(UNICODE_TABLES, unicode_tables_source(), args.check)
+    stale |= _write(
+        EGRESS_POLICY_FIXTURE,
+        egress_policy_text(egress_policy_fixture(RANDOM_CASES)),
+        args.check,
+    )
+    return 1 if stale else 0
 
 
 if __name__ == "__main__":

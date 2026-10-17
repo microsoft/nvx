@@ -155,10 +155,10 @@ nvx/
 |   |   |-- setup-windows-whp.ps1 Windows/WHP development-host and Actions runner bootstrap
 |   |   `-- tool-versions.conf    Shared tool release and checksum pins
 |   |-- check_markdown_links.py  Markdown link, anchor, and doc/ path check run by CI
-|   |-- generate_egress_policy_fixtures.py Egress policy parity fixture of nvx-rs, from egress_policy.py
 |   |-- nvx-hosts.example.json   Template for the ignored .nvx-hosts.json
 |   |-- nvx.py                   Supported command-line entry point
 |   |-- nvx_adversarial_executor.py Restricted adversarial executor entry point
+|   |-- nvx_rs_fixtures.py       Golden fixtures of the nvx-rs ports of Python code, recorded from that code
 |   |-- publish_development_release.py Development release publisher run by CI
 |   `-- test_*.py                Python tooling unit tests
 |-- SECURITY.md                 Microsoft security vulnerability reporting policy

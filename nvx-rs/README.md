@@ -96,14 +96,14 @@ from a `\ud800` escape or a path that is not Unicode, shows the surrogate as
 document nested more deeply than its stack allows; this reader has no such
 limit, so those documents fail as invalid policies instead.
 
-[`scripts/generate_egress_policy_fixtures.py`](../scripts/generate_egress_policy_fixtures.py)
-records the Python compiler's outcomes for every policy that
-`scripts/test_egress_policy.py` compiles, hand-written edge cases, and a seeded
-random corpus in
+[`scripts/nvx_rs_fixtures.py`](../scripts/nvx_rs_fixtures.py) records the
+Python compiler's outcomes for every policy that `scripts/test_egress_policy.py`
+compiles, hand-written edge cases, and a seeded random corpus in
 [`tests/fixtures/egress-policy.json`](tests/fixtures/egress-policy.json), which
 the tests replay without Python; `--check` verifies that the fixture is current,
 and `NVX_EGRESS_POLICY_FIXTURE` points the tests at a larger corpus that the
-script writes with `--random-cases` and `--output`.
+script writes with `--output` and `--random-cases`. The fixture depends on the
+interpreter, so regenerate it with CPython 3.14.
 
 ## Features
 
