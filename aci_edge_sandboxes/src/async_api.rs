@@ -241,28 +241,23 @@ impl AsyncExecution {
         let stderr = self.stderr.take();
         let control = Arc::clone(&self.control);
         blocking(move || {
-            let stderr = match stderr {
-                Some(stream) => Some(
-                    thread::Builder::new()
-                        .name("nvx-exec-collect".to_owned())
-                        .spawn(move || stream.reader.read_to_end_blocking())
-                        .map_err(|error| {
-                            Error::backend_error("failed to start an output collector thread")
-                                .with_source(error)
-                        })?,
-                ),
-                None => None,
+            // Both streams drain while the outcome is awaited, so a timeout that closes
+            // retained output can end either collector instead of waiting for end-of-stream.
+            let stdout = spawn_output_collector(stdout)?;
+            let stderr = match spawn_output_collector(stderr) {
+                Ok(stderr) => stderr,
+                Err(error) => {
+                    // Cancelling ends the workload's output, so the stdout collector can finish
+                    // rather than block on a stream that nothing else will drain.
+                    let _ = control.cancel();
+                    let _ = control.wait();
+                    let _ = join_output_collector(stdout);
+                    return Err(error);
+                }
             };
-            let stdout = stdout
-                .map(|stream| stream.reader.read_to_end_blocking())
-                .unwrap_or_default();
             let outcome = control.wait();
-            let stderr = match stderr {
-                Some(collector) => collector
-                    .join()
-                    .map_err(|_| Error::backend_error("output collector thread panicked"))?,
-                None => Vec::new(),
-            };
+            let stdout = join_output_collector(stdout)?;
+            let stderr = join_output_collector(stderr)?;
             Ok(ExecOutput {
                 outcome: outcome?,
                 stdout,
@@ -270,6 +265,30 @@ impl AsyncExecution {
             })
         })
         .await
+    }
+}
+
+type OutputCollector = Option<thread::JoinHandle<Vec<u8>>>;
+
+fn spawn_output_collector(stream: Option<OutputStream>) -> Result<OutputCollector> {
+    let Some(stream) = stream else {
+        return Ok(None);
+    };
+    thread::Builder::new()
+        .name("nvx-exec-collect".to_owned())
+        .spawn(move || stream.reader.read_to_end_blocking())
+        .map(Some)
+        .map_err(|error| {
+            Error::backend_error("failed to start an output collector thread").with_source(error)
+        })
+}
+
+fn join_output_collector(collector: OutputCollector) -> Result<Vec<u8>> {
+    match collector {
+        Some(collector) => collector
+            .join()
+            .map_err(|_| Error::backend_error("output collector thread panicked")),
+        None => Ok(Vec::new()),
     }
 }
 

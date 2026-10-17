@@ -264,3 +264,105 @@ fn async_cancel_and_timeout_close_retained_input_streams() {
         }
     });
 }
+
+/// Delegates to a [`MockBackend`], but keeps each execution's output open until it is waited on,
+/// as the native agent does while the workload runs. `wait` then applies the timeout and closes
+/// the output sinks, the same way the native agent does on timeout.
+#[derive(Debug)]
+struct OpenUntilWaitBackend {
+    inner: MockBackend,
+}
+
+impl Backend for OpenUntilWaitBackend {
+    fn name(&self) -> &str {
+        self.inner.name()
+    }
+
+    fn capabilities(&self) -> Capabilities {
+        self.inner.capabilities()
+    }
+
+    fn probe(&self) -> Result<()> {
+        self.inner.probe()
+    }
+
+    fn provision(&self, request: &ProvisionRequest) -> Result<ProvisionResult> {
+        self.inner.provision(request)
+    }
+
+    fn start(&self, sandbox_id: &SandboxId) -> Result<StartResult> {
+        self.inner.start(sandbox_id)
+    }
+
+    fn exec(
+        &self,
+        _sandbox_id: &SandboxId,
+        request: &ExecRequest,
+        io: ExecIo,
+    ) -> Result<Box<dyn ExecControl>> {
+        Ok(Box::new(OpenUntilWait {
+            io: Mutex::new(io),
+            timeout: request.process.timeout.expect("the test sets a timeout"),
+        }))
+    }
+
+    fn stop(&self, sandbox_id: &SandboxId) -> Result<StopResult> {
+        self.inner.stop(sandbox_id)
+    }
+
+    fn deprovision(&self, sandbox_id: &SandboxId) -> Result<DeprovisionResult> {
+        self.inner.deprovision(sandbox_id)
+    }
+}
+
+struct OpenUntilWait {
+    io: Mutex<ExecIo>,
+    timeout: Duration,
+}
+
+impl ExecControl for OpenUntilWait {
+    fn wait(&self) -> Result<ExecOutcome> {
+        std::thread::sleep(self.timeout);
+        let io = self.io.lock().unwrap();
+        for closer in [io.stdout.close_handle(), io.stderr.close_handle()]
+            .into_iter()
+            .flatten()
+        {
+            closer.close();
+        }
+        Ok(ExecOutcome::TimedOut)
+    }
+
+    fn cancel(&self) -> Result<()> {
+        Ok(())
+    }
+}
+
+#[test]
+fn async_wait_with_output_honors_the_workload_timeout() {
+    // Run on a separate thread so a regression fails the test instead of hanging the runtime,
+    // whose shutdown waits for the blocked output collector.
+    let (done, outcome) = mpsc::channel();
+    std::thread::spawn(move || {
+        runtime().block_on(async {
+            let client = AsyncAciEdgeSandbox::new(AciEdgeSandbox::new(OpenUntilWaitBackend {
+                inner: MockBackend::new(),
+            }));
+            let sandbox_id = client.provision(request()).await.unwrap().sandbox_id;
+            client.start(sandbox_id.clone()).await.unwrap();
+            let mut exec_request = ExecRequest::command_line("sleep");
+            exec_request.process.timeout = Some(Duration::from_millis(100));
+            let execution = client.exec(sandbox_id, exec_request).await.unwrap();
+            let output = execution.wait_with_output().await.unwrap();
+            done.send(output.outcome).unwrap();
+        });
+    });
+    // Before the fix, collection read stdout to end-of-stream before `wait` ran, so no outcome
+    // arrived and this deadline fired.
+    assert_eq!(
+        outcome
+            .recv_timeout(Duration::from_secs(10))
+            .expect("wait_with_output ignored the workload timeout"),
+        ExecOutcome::TimedOut
+    );
+}
