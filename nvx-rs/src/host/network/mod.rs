@@ -1,4 +1,5 @@
-//! Translation of a network posture into OpenVMM options.
+//! Translation of a network posture into OpenVMM options, and the egress policy files of
+//! `nvx.py`.
 //!
 //! OpenVMM's portable profile enforces an egress default plus IPv4 and IPv6 allow and deny rules
 //! that match a network of one family and, optionally, one protocol (TCP, UDP, or ICMP) and, for
@@ -6,10 +7,15 @@
 //! are expanded into that form exactly: exceptions are subtracted from their networks, a rule
 //! without destinations matches `0.0.0.0/0` and `::/0`, and `any` protocol with a port or a port
 //! range becomes a TCP and a UDP rule. Rules that cannot be expressed exactly are rejected.
+//! [`policy`] compiles the egress policy files of `nvx.py` into OpenVMM's rules too.
 //!
 //! Host-loopback access is bidirectional: with it allowed, the guest reaches host loopback
 //! services through its gateway, and OpenVMM publishes the guest's listeners on host loopback.
 //! [`LoopbackForward`]s publish further host loopback ports at guest ports of their choice.
+
+mod address;
+mod lowering;
+pub mod policy;
 
 use std::collections::HashSet;
 use std::net::Ipv4Addr;
