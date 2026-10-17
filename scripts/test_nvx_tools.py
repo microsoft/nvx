@@ -10103,6 +10103,9 @@ class SandboxShareAgentTests(unittest.TestCase):
             ("0,/file,ro", "not a directory"),
             ("0,/etc/machine-id,ro,file", "reserved"),
             ("0,/etc/machine-id/child,ro", "reserved"),
+            ("0,/run,ro", "reserved"),
+            ("0,/run/nvx,ro", "reserved"),
+            ("0,/run/nvx/time/state,ro", "reserved"),
         ):
             with self.subTest(child=child):
                 result, log = self._run(self._aggregate(child))
@@ -12910,11 +12913,23 @@ class SandboxTests(unittest.TestCase):
             "/.nvx-agent",
             "/.nvx-agent/tools",
             "/etc",
+            "/run",
+            "/run/nvx",
+            "/run/nvx/time",
+            "/run/nvx/time/state",
         ):
             with self.subTest(target=target):
                 with self.assertRaisesRegex(common.ScriptError, "reserved"):
                     sandbox.validate_mount_target(target)
-        for target in ("/workspace", "/procfs", "/etc/app", "/opt/hostedtoolcache"):
+        for target in (
+            "/workspace",
+            "/procfs",
+            "/etc/app",
+            "/opt/hostedtoolcache",
+            "/run/secrets",
+            "/run/nvx/other",
+            "/run/nvxtime",
+        ):
             with self.subTest(target=target):
                 self.assertEqual(sandbox.validate_mount_target(target), target)
 

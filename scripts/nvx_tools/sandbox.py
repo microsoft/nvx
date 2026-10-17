@@ -41,11 +41,20 @@ AGGREGATE_MOUNT_TARGET = "/run/nvx/shares"
 # guest caller's identity, with guest root squashed to the share owner.
 MOUNT_OWNERS = ("vmm", "caller")
 # The container runtime owns these guest paths: it mounts procfs, sysfs, and a
-# private /dev over them, stages its tools under /.nvx-agent, and bind-mounts the
+# private /dev over them, stages its tools under /.nvx-agent, bind-mounts the
 # workload machine ID at /etc/machine-id, which it first replaces with a regular
-# file. A live share must not shadow or be shadowed by them.
-RESERVED_MOUNT_TARGETS = ("/proc", "/sys", "/dev", "/.nvx-agent", "/etc/machine-id")
-RESERVED_EXACT_MOUNT_TARGETS = ("/etc",)
+# file, and binds its time ABI state over /run/nvx/time. It also creates /run and
+# /run/nvx below the container root. A live share must not shadow or be shadowed
+# by them.
+RESERVED_MOUNT_TARGETS = (
+    "/proc",
+    "/sys",
+    "/dev",
+    "/.nvx-agent",
+    "/etc/machine-id",
+    "/run/nvx/time",
+)
+RESERVED_EXACT_MOUNT_TARGETS = ("/etc", "/run", "/run/nvx")
 # OpenVMM accepts at most this many denied, allowed, and writable paths each.
 MAX_MOUNT_POLICY_PATHS = 128
 # The option that requests each kind of share access-policy path. `--mount-deny`
