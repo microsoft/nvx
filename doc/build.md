@@ -127,7 +127,11 @@ input configuration, generated configuration, and output hash; bind the
 initramfs and package manifest to the pinned Alpine inputs, Rust guest inputs,
 and source files; and bind OpenVMM to the exact clean gitlink revision and
 executable hash. Packaging rejects missing, dirty, stale, or mismatched
-provenance.
+provenance. `build/nvx-rs.provenance.json` likewise binds the `nvx-rs`
+executable that `nvx.py` runs to the digest of its sources and its build's
+Rust release, target, and features; `nvx.py` writes it when it builds
+`nvx-rs`, and [`record-nvx-rs-provenance`](usage.md#record-nvx-rs-provenance)
+writes it for a build made otherwise.
 
 Ubuntu adds:
 

@@ -11,11 +11,18 @@ steps of `nvx.py run` (nvx-rs/README.md). It runs, in this order:
    standard error so that it never mixes with the output of the command.
 
 Without Cargo, nvx.py fails and names these choices.
+
+The provenance of an nvx-rs, build/nvx-rs.provenance.json, binds the digest
+of its executable to source_sha256() of the sources that built it, and to the
+Rust release, target, and features of the build, as OpenVMM's provenance
+binds it to its source revision. nvx.py records it for the nvx-rs that it
+builds, and `nvx.py record-nvx-rs-provenance` for one built otherwise.
 """
 
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import json
 import os
 import shlex
@@ -30,8 +37,16 @@ from pathlib import Path
 from types import FrameType
 from typing import cast
 
-from .build_constants import BuildConstants
-from .common import ScriptError
+from .build_constants import BuildConstants, OpenVMMBuildConstants
+from .common import (
+    ScriptError,
+    artifact_path,
+    normalized_sha256_file,
+    require_file,
+    sha256_file,
+)
+from .elf import read_elf_executable
+from .guest_binaries import pinned_guest_rust_toolchain
 
 # The environment variable that names the nvx-rs executable to run.
 VARIABLE = "NVX_RS"
@@ -55,6 +70,23 @@ BUILD_COMMAND = (
     "--target-dir",
     "nvx-rs/target",
 )
+# The features of the nvx-rs that BUILD_COMMAND builds and that releases ship.
+FEATURES = ("cli",)
+# The Rust targets of the nvx-rs that releases ship, by operating system, as
+# CI's NVX CLI jobs build it: a static musl executable, which runs on every
+# x86-64 Linux host, and an MSVC executable that links the C runtime
+# statically, which runs without the Visual C++ redistributable.
+RELEASE_TARGETS = {
+    "linux": OpenVMMBuildConstants.MUSL_RUST_TARGET,
+    "windows": OpenVMMBuildConstants.WINDOWS_RUST_TARGET,
+}
+# The domain and format of the inventory that source_sha256() hashes.
+SOURCE_DIGEST_DOMAIN = "nvx-rs-cli-sources"
+SOURCE_DIGEST_FORMAT = 1
+# The provenance of the nvx-rs that nvx.py runs, in build/, beside that of
+# OpenVMM, and the format of its record.
+PROVENANCE_NAME = "nvx-rs.provenance.json"
+PROVENANCE_FORMAT = 1
 
 
 def binary_path() -> Path:
@@ -67,6 +99,104 @@ def binary_path() -> Path:
     """
     name = f"{BINARY_NAME}.exe" if os.name == "nt" else BINARY_NAME
     return DIRECTORY / "target" / "release" / name
+
+
+def release_target() -> str:
+    """Return the Rust target of the nvx-rs that releases for this host's
+    operating system ship."""
+    return RELEASE_TARGETS["windows" if os.name == "nt" else "linux"]
+
+
+def source_files(root: Path | None = None) -> tuple[Path, ...]:
+    """Return the files that determine the nvx-rs executable of the checkout at
+    `root`, this one by default, in path order: the crate's manifest, lock
+    file, build script, and sources, and rust-toolchain.toml, which pins the
+    Rust release that builds it."""
+    root = DIRECTORY.parent if root is None else root
+    crate = root / DIRECTORY.name
+    files = [
+        crate / "Cargo.toml",
+        crate / "Cargo.lock",
+        crate / "build.rs",
+        root / "rust-toolchain.toml",
+    ]
+    sources = crate / "src"
+    if not sources.is_dir():
+        raise ScriptError(f"nvx-rs source directory not found: {sources}")
+    files.extend(path for path in sources.rglob("*") if path.is_file())
+    return tuple(
+        sorted(
+            (require_file(path, "nvx-rs source") for path in files),
+            key=lambda path: path.relative_to(root).as_posix(),
+        )
+    )
+
+
+def source_sha256(root: Path | None = None) -> str:
+    """Hash the paths and contents of source_files(root), with line endings
+    normalized, so that every checkout of the same sources has one digest."""
+    root = DIRECTORY.parent if root is None else root
+    inventory = {
+        "domain": SOURCE_DIGEST_DOMAIN,
+        "format": SOURCE_DIGEST_FORMAT,
+        "files": [
+            {
+                "path": path.relative_to(root).as_posix(),
+                "sha256": normalized_sha256_file(path),
+            }
+            for path in source_files(root)
+        ],
+    }
+    encoded = json.dumps(inventory, sort_keys=True, separators=(",", ":")).encode()
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def provenance_path() -> Path:
+    """Return build/nvx-rs.provenance.json, the provenance of the nvx-rs that
+    nvx.py runs."""
+    return artifact_path(PROVENANCE_NAME)
+
+
+def host_target() -> str:
+    """Return the target that Cargo builds for by default here: the host of
+    the Rust release that rust-toolchain.toml selects."""
+    try:
+        completed = subprocess.run(
+            ("rustc", "-vV"),
+            cwd=BuildConstants.REPO_ROOT,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except OSError as error:
+        raise ScriptError(f"failed to run rustc for its host target: {error}") from (
+            error
+        )
+    if completed.returncode == 0:
+        for line in completed.stdout.splitlines():
+            if line.startswith("host: "):
+                return line.removeprefix("host: ").strip()
+    raise ScriptError(f"rustc -vV did not report a host target: {completed.stderr}")
+
+
+def check_target(executable: Path, target: str) -> None:
+    """Fail unless `executable` is what a build for `target` gives, where the
+    target makes that checkable: for the Linux release target, a static
+    executable, which a build for the host's own target is not."""
+    if target != RELEASE_TARGETS["linux"]:
+        return
+    try:
+        static = read_elf_executable(executable).static
+    except (OSError, ValueError) as error:
+        raise ScriptError(f"invalid {target} nvx-rs executable: {error}") from error
+    if not static:
+        raise ScriptError(
+            f"nvx-rs executable {executable} is not static, but a {target} build "
+            f"is: build it with `cargo build --release --locked --features cli "
+            f"--manifest-path nvx-rs/Cargo.toml --target {target}`, and copy "
+            f"nvx-rs/target/{target}/release/{BINARY_NAME} to {binary_path()}"
+        )
 
 
 def _format_command(command: Sequence[str]) -> str:
@@ -103,6 +233,46 @@ def find_binary() -> Path | None:
     return path if path.is_file() else None
 
 
+def provenance_record(executable: Path, target: str) -> dict[str, object]:
+    """Return the provenance of the nvx-rs executable at `executable`, built
+    for `target` with FEATURES from this checkout's sources."""
+    return {
+        "format": PROVENANCE_FORMAT,
+        "source_sha256": source_sha256(),
+        "toolchain": pinned_guest_rust_toolchain(DIRECTORY.parent),
+        "target": target,
+        "features": list(FEATURES),
+        "executable_sha256": sha256_file(executable),
+    }
+
+
+def record_provenance(target: str | None = None) -> Path:
+    """Record the provenance of the nvx-rs that nvx.py runs without building
+    it, built from this checkout for `target`, by default the host's, and
+    return where.
+
+    The caller vouches for the build; the record binds its executable to this
+    checkout's sources, which is what packaging and the adversarial executor
+    check.
+    """
+    executable = find_binary()
+    if executable is None:
+        raise ScriptError(
+            f"nvx-rs is not built at {binary_path()}: build it with "
+            f"`{_format_command(BUILD_COMMAND)}`, or set {VARIABLE} to an "
+            "nvx-rs executable"
+        )
+    target = target or host_target()
+    check_target(executable, target)
+    path = provenance_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(provenance_record(executable, target), indent=2) + "\n",
+        encoding="utf-8",
+    )
+    return path
+
+
 def _stderr_target() -> int:
     """Return the descriptor of standard error, to which a build's output goes,
     or DEVNULL if standard error has none, as when a test replaced it."""
@@ -136,6 +306,8 @@ def build_binary() -> Path:
     path = binary_path()
     if not path.is_file():
         raise ScriptError(f"Cargo did not build {path}")
+    # A Cargo build replaces the executable that an earlier record described.
+    record_provenance()
     return path
 
 

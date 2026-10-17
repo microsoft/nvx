@@ -2085,11 +2085,14 @@ class NvxRsTests(unittest.TestCase):
                 patch("shutil.which", return_value="cargo"),
                 patch("subprocess.run", side_effect=build) as run,
                 patch.object(nvx_rs, "_stderr_target", return_value=2),
+                patch.object(nvx_rs, "record_provenance") as record,
                 contextlib.redirect_stdout(stdout),
                 contextlib.redirect_stderr(stderr),
             ):
                 self.assertEqual(nvx_rs.require_binary(), binary)
         run.assert_called_once()
+        # The build records the provenance of what it built, for the host.
+        record.assert_called_once_with()
         self.assertEqual(
             run.call_args.args[0],
             (
@@ -2148,6 +2151,184 @@ class NvxRsTests(unittest.TestCase):
         ):
             self.assertIn(expected, message)
 
+    def test_release_targets_follow_the_operating_system(self):
+        self.assertEqual(
+            nvx_rs.release_target(),
+            "x86_64-pc-windows-msvc"
+            if os.name == "nt"
+            else "x86_64-unknown-linux-musl",
+        )
+        self.assertEqual(nvx_rs.FEATURES, ("cli",))
+        # BUILD_COMMAND builds the features that releases ship.
+        features = nvx_rs.BUILD_COMMAND.index("--features") + 1
+        self.assertEqual(nvx_rs.BUILD_COMMAND[features].split(","), ["cli"])
+
+    def test_source_digest_covers_the_build_inputs_in_any_line_endings(self):
+        relative = [
+            path.relative_to(BuildConstants.REPO_ROOT).as_posix()
+            for path in nvx_rs.source_files()
+        ]
+        self.assertEqual(relative, sorted(relative))
+        for name in (
+            "nvx-rs/Cargo.toml",
+            "nvx-rs/Cargo.lock",
+            "nvx-rs/build.rs",
+            "nvx-rs/src/bin/nvx-rs.rs",
+            "rust-toolchain.toml",
+        ):
+            self.assertIn(name, relative)
+        # Tests, documentation, and the bundled release pin build no part of
+        # the executable.
+        for name in relative:
+            self.assertNotRegex(name, r"^nvx-rs/(tests/|README\.md$|artifacts\.json$)")
+        self.assertEqual(nvx_rs.source_sha256(), nvx_rs.source_sha256())
+
+        with tempfile.TemporaryDirectory() as temporary:
+            checkouts = [Path(temporary) / "lf", Path(temporary) / "crlf"]
+            for checkout, newline in zip(checkouts, (b"\n", b"\r\n"), strict=True):
+                for name in (
+                    "nvx-rs/Cargo.toml",
+                    "nvx-rs/Cargo.lock",
+                    "nvx-rs/build.rs",
+                    "nvx-rs/src/lib.rs",
+                    "nvx-rs/src/bin/nvx-rs.rs",
+                    "rust-toolchain.toml",
+                ):
+                    path = checkout / name
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_bytes(newline.join((name.encode(), b"line", b"")))
+            digest = nvx_rs.source_sha256(checkouts[0])
+            # Checkouts differ only in line endings, as on Windows.
+            self.assertEqual(nvx_rs.source_sha256(checkouts[1]), digest)
+            source = checkouts[0] / "nvx-rs" / "src" / "lib.rs"
+            source.write_bytes(b"changed\n")
+            self.assertNotEqual(nvx_rs.source_sha256(checkouts[0]), digest)
+            # A new source file changes the digest too.
+            (checkouts[1] / "nvx-rs" / "src" / "new.rs").write_bytes(b"")
+            self.assertNotEqual(nvx_rs.source_sha256(checkouts[1]), digest)
+            shutil.rmtree(checkouts[1] / "nvx-rs" / "src")
+            with self.assertRaisesRegex(
+                common.ScriptError, "nvx-rs source directory not found"
+            ):
+                nvx_rs.source_sha256(checkouts[1])
+
+    def test_host_target_is_the_host_of_the_pinned_rust(self):
+        version = (
+            "rustc 1.95.0 (abc 2026-01-01)\nbinary: rustc\n"
+            "host: x86_64-unknown-linux-gnu\nrelease: 1.95.0\n"
+        )
+        with patch(
+            "subprocess.run",
+            return_value=subprocess.CompletedProcess(["rustc"], 0, version, ""),
+        ) as run:
+            self.assertEqual(nvx_rs.host_target(), "x86_64-unknown-linux-gnu")
+        self.assertEqual(run.call_args.args[0], ("rustc", "-vV"))
+        # From the repository root, so that rust-toolchain.toml applies.
+        self.assertEqual(run.call_args.kwargs["cwd"], BuildConstants.REPO_ROOT)
+        for result in (
+            subprocess.CompletedProcess(["rustc"], 1, "", "no rustc"),
+            subprocess.CompletedProcess(["rustc"], 0, "release: 1.95.0\n", ""),
+        ):
+            with (
+                self.subTest(result=result),
+                patch("subprocess.run", return_value=result),
+                self.assertRaisesRegex(common.ScriptError, "host target"),
+            ):
+                nvx_rs.host_target()
+        with (
+            patch("subprocess.run", side_effect=OSError("missing")),
+            self.assertRaisesRegex(common.ScriptError, "failed to run rustc"),
+        ):
+            nvx_rs.host_target()
+
+    def test_provenance_binds_the_executable_that_nvx_py_runs(self):
+        linux = nvx_rs.RELEASE_TARGETS["linux"]
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            binary = root / "nvx-rs"
+            other = root / "other-nvx-rs"
+            provenance = root / "build" / nvx_rs.PROVENANCE_NAME
+            with (
+                patch.object(nvx_rs, "binary_path", return_value=binary),
+                patch.object(nvx_rs, "provenance_path", return_value=provenance),
+                patch.object(nvx_rs, "host_target", return_value="host-triple"),
+            ):
+                with (
+                    _without_nvx_rs_variable(),
+                    self.assertRaisesRegex(
+                        common.ScriptError,
+                        f"nvx-rs is not built at {re.escape(str(binary))}",
+                    ),
+                ):
+                    nvx_rs.record_provenance()
+                self.assertFalse(provenance.exists())
+
+                binary.write_bytes(b"nvx-rs")
+                with _without_nvx_rs_variable():
+                    self.assertEqual(nvx_rs.record_provenance(), provenance)
+                self.assertEqual(
+                    json.loads(provenance.read_text(encoding="utf-8")),
+                    {
+                        "format": 1,
+                        "source_sha256": nvx_rs.source_sha256(),
+                        "toolchain": GuestRustBuildConstants.TOOLCHAIN,
+                        "target": "host-triple",
+                        "features": ["cli"],
+                        "executable_sha256": common.sha256_file(binary),
+                    },
+                )
+
+                # The executable that NVX_RS names is the one that nvx.py
+                # runs, and so the one that the record describes.
+                other.write_bytes(b"other nvx-rs")
+                with patch.dict(os.environ, {nvx_rs.VARIABLE: str(other)}):
+                    nvx_rs.record_provenance("x86_64-pc-windows-msvc")
+                record = json.loads(provenance.read_text(encoding="utf-8"))
+                self.assertEqual(record["target"], "x86_64-pc-windows-msvc")
+                self.assertEqual(record["executable_sha256"], common.sha256_file(other))
+
+                # A record for the Linux release target needs the static
+                # executable that such a build gives.
+                with (
+                    _without_nvx_rs_variable(),
+                    self.assertRaisesRegex(
+                        common.ScriptError, f"invalid {linux} nvx-rs executable"
+                    ),
+                ):
+                    nvx_rs.record_provenance(linux)
+                binary.write_bytes(
+                    _elf_file(((1, b"code"), (3, b"/lib/ld-musl.so.1\0")), elf_type=3)
+                )
+                with (
+                    _without_nvx_rs_variable(),
+                    self.assertRaisesRegex(common.ScriptError, "is not static"),
+                ):
+                    nvx_rs.record_provenance(linux)
+                binary.write_bytes(_elf_file(elf_type=3))
+                with _without_nvx_rs_variable():
+                    nvx_rs.record_provenance(linux)
+                self.assertEqual(
+                    json.loads(provenance.read_text(encoding="utf-8"))["target"],
+                    linux,
+                )
+
+    def test_record_command_records_the_provenance(self):
+        args = nvx.parse_args(
+            ["record-nvx-rs-provenance", "--target", "x86_64-unknown-linux-musl"]
+        )
+        self.assertEqual(args.target, "x86_64-unknown-linux-musl")
+        self.assertIsNone(nvx.parse_args(["record-nvx-rs-provenance"]).target)
+        recorded = Path("build") / nvx_rs.PROVENANCE_NAME
+        with (
+            patch.object(nvx_rs, "record_provenance", return_value=recorded) as record,
+            contextlib.redirect_stdout(io.StringIO()) as stdout,
+        ):
+            args.handler(args)
+        record.assert_called_once_with("x86_64-unknown-linux-musl")
+        self.assertEqual(
+            stdout.getvalue(), f">> recorded the provenance of nvx-rs in {recorded}\n"
+        )
+
     def test_failed_builds_report_cargo(self):
         with tempfile.TemporaryDirectory() as temporary:
             binary = Path(temporary) / "nvx-rs"
@@ -2161,10 +2342,12 @@ class NvxRsTests(unittest.TestCase):
                     patch.object(nvx_rs, "binary_path", return_value=binary),
                     patch("shutil.which", return_value="cargo"),
                     patch("subprocess.run", return_value=_completed(returncode)),
+                    patch.object(nvx_rs, "record_provenance") as record,
                     contextlib.redirect_stderr(io.StringIO()),
                     self.assertRaisesRegex(common.ScriptError, message),
                 ):
                     nvx_rs.require_binary()
+                record.assert_not_called()
 
     def test_commands_name_the_program_and_the_repository_root(self):
         binary = Path("bin") / "nvx-rs"

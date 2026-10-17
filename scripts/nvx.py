@@ -293,6 +293,11 @@ def command_record_openvmm_provenance(_: argparse.Namespace) -> None:
     record_openvmm_provenance(OpenVmmBuildConfig())
 
 
+def command_record_nvx_rs_provenance(args: argparse.Namespace) -> None:
+    path = nvx_rs.record_provenance(args.target)
+    print(f">> recorded the provenance of nvx-rs in {path}")
+
+
 def command_materialize_kernel_provenance_inputs(_: argparse.Namespace) -> None:
     materialize_kernel_provenance_inputs()
 
@@ -799,6 +804,19 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help="bind an existing OpenVMM binary to the pinned source revision",
     )
     provenance.set_defaults(handler=command_record_openvmm_provenance)
+
+    nvx_rs_provenance = subparsers.add_parser(
+        "record-nvx-rs-provenance",
+        help="bind an existing nvx-rs executable to the nvx-rs sources",
+    )
+    nvx_rs_provenance.add_argument(
+        "--target",
+        help=(
+            "Rust target that built nvx-rs (default: the host target that "
+            "rustc reports)"
+        ),
+    )
+    nvx_rs_provenance.set_defaults(handler=command_record_nvx_rs_provenance)
 
     kernel_provenance = subparsers.add_parser(
         "materialize-kernel-provenance-inputs",

@@ -41,6 +41,15 @@ or delete the executable, after changing `nvx-rs`. The `managed-lifecycle`
 scenario of [`test-microvm`](#test-microvm) also needs Cargo, which runs its
 `nvx-rs` test.
 
+The provenance of the `nvx-rs` that `nvx.py` runs,
+`build/nvx-rs.provenance.json`, binds the SHA-256 of its executable to a
+digest of the `nvx-rs` sources that built it, the crate's manifest, lock
+file, build script, and `src/` tree and `rust-toolchain.toml`, and to the
+Rust release, target, and Cargo features of the build. `nvx.py` records it
+when it builds `nvx-rs`, and
+[`record-nvx-rs-provenance`](#record-nvx-rs-provenance) records it for a
+build made otherwise.
+
 ## Commands
 
 | Command | Description |
@@ -56,6 +65,7 @@ scenario of [`test-microvm`](#test-microvm) also needs Cargo, which runs its
 | `verify-guest-determinism` | Rebuild Ubuntu guest artifacts twice and compare SHA-256 values. |
 | `build-openvmm` | Build the OpenVMM release binary. |
 | `record-openvmm-provenance` | Bind an existing OpenVMM binary to the pinned source revision. |
+| `record-nvx-rs-provenance` | Bind an existing `nvx-rs` executable to its sources, Rust release, target, and features. |
 | `materialize-kernel-provenance-inputs` | Write kernel provenance inputs from raw run-head blobs. |
 | `setup-cross-os-cache` | Install GNU tar and zstd for GitHub Actions cross-OS caches. |
 | `classify-ci-changes` | Select the CI suites that a list of changed files runs. |
@@ -332,6 +342,25 @@ the OpenVMM submodule to be checked out/initialized and the release binary to
 already exist at `openvmm/target/release/openvmm` on POSIX or
 `openvmm/target/release/openvmm.exe` on Windows. The command fails if either
 prerequisite is missing.
+
+### `record-nvx-rs-provenance`
+
+```text
+python3 scripts/nvx.py record-nvx-rs-provenance [--target TARGET]
+```
+
+| Option | Default | Description |
+| --- | --- | --- |
+| `--target TARGET` | the host target that `rustc -vV` reports | Rust target that built `nvx-rs`. |
+
+Records `build/nvx-rs.provenance.json` for the `nvx-rs` that `nvx.py` runs
+without building it, the one that `NVX_RS` names or else
+`nvx-rs/target/release/nvx-rs[.exe]`; see [nvx-rs](#nvx-rs). The record binds
+the executable's SHA-256 to the digest of this checkout's `nvx-rs` sources,
+the Rust release that `rust-toolchain.toml` pins, the target, and the `cli`
+feature, so record it right after building `nvx-rs` from this checkout. For
+`x86_64-unknown-linux-musl`, the target of the Linux release packages, the
+executable must be static. `nvx.py` records the builds that it makes itself.
 
 ### `build`
 
