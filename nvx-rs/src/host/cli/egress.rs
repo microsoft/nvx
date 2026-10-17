@@ -5,19 +5,17 @@
 
 use std::path::Path;
 
-use super::args::{Parser, Spec};
+use super::args::{Parser, Spec, Syntax};
 use super::{Exit, Result, args, output};
 use crate::host::network::policy::compile_policy_file;
 use crate::host::python::dumps::{self, Value};
 
-/// The name of the parser in usage messages.
-const PROG: &str = "nvx-rs egress";
-/// The usage of the parser.
-const USAGE: &str = "usage: nvx-rs egress [-h] {compile} ...";
-/// The help of the parser.
-const HELP: &str = "\
-usage: nvx-rs egress [-h] {compile} ...
-
+/// The usage and help of the parser.
+const SYNTAX: Syntax = Syntax {
+    command: "egress",
+    optionals: &["[-h]"],
+    positionals: &["{compile} ..."],
+    help: "\
 Compile egress policy files.
 
 positional arguments:
@@ -25,17 +23,16 @@ positional arguments:
     compile   compile an egress policy file into native OpenVMM rules
 
 options:
-  -h, --help  show this help message and exit";
+  -h, --help  show this help message and exit",
+};
 /// The actions, in the order in which usage messages list them.
 const ACTIONS: [&str; 1] = ["compile"];
-/// The name of the `compile` parser in usage messages.
-const COMPILE_PROG: &str = "nvx-rs egress compile";
-/// The usage of the `compile` parser.
-const COMPILE_USAGE: &str = "usage: nvx-rs egress compile [-h] PATH";
-/// The help of the `compile` parser.
-const COMPILE_HELP: &str = "\
-usage: nvx-rs egress compile [-h] PATH
-
+/// The usage and help of the `compile` parser.
+const COMPILE_SYNTAX: Syntax = Syntax {
+    command: "egress compile",
+    optionals: &["[-h]"],
+    positionals: &["PATH"],
+    help: "\
 Compile the egress policy file at PATH, as --network-egress-policy-file does,
 and print its native rules as a JSON object: {\"allow\": [...], \"deny\": [...]}.
 
@@ -44,24 +41,25 @@ positional arguments:
               lists of rules
 
 options:
-  -h, --help  show this help message and exit";
+  -h, --help  show this help message and exit",
+};
 
-/// Parses the arguments of `egress`, and returns the policy file and the arguments that no
-/// parser recognizes.
-pub(super) fn parse(arguments: &[String]) -> Result<(String, Vec<String>)> {
+/// Parses the arguments of `egress` for the program `program`, and returns the policy file and
+/// the arguments that no parser recognizes.
+pub(super) fn parse(arguments: &[String], program: &str) -> Result<(String, Vec<String>)> {
     let parser = Parser::new(&[], &[Spec::one("action")]);
     let (index, mut extras) = parser
         .split_command(arguments, &mut |_: &'static str, _: Option<&str>| Ok(()))
-        .map_err(|stop| Exit::from_stop(stop, PROG, USAGE, HELP))?;
+        .map_err(|stop| Exit::from_stop(stop, &SYNTAX, program))?;
     if arguments[index] != "compile" {
-        return Err(Exit::Usage {
-            usage: USAGE,
-            prog: PROG,
-            message: format!(
+        return Err(Exit::usage(
+            &SYNTAX,
+            program,
+            format!(
                 "argument action: {}",
                 args::invalid_choice(&arguments[index], &ACTIONS)
             ),
-        });
+        ));
     }
     let mut path = String::new();
     let unrecognized = Parser::new(&[], &[Spec::one("PATH")])
@@ -72,7 +70,7 @@ pub(super) fn parse(arguments: &[String]) -> Result<(String, Vec<String>)> {
                 Ok(())
             },
         )
-        .map_err(|stop| Exit::from_stop(stop, COMPILE_PROG, COMPILE_USAGE, COMPILE_HELP))?;
+        .map_err(|stop| Exit::from_stop(stop, &COMPILE_SYNTAX, program))?;
     extras.extend(unrecognized);
     Ok((path, extras))
 }

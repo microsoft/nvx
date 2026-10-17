@@ -2560,7 +2560,9 @@ NVX_RS_DIR = REPO_ROOT / "nvx-rs"
 EXE = ".exe" if os.name == "nt" else ""
 # The top-level usage of nvx-rs, which replaces that of nvx.py in the usage
 # errors that the top-level parser reports, such as unrecognized arguments.
-NVX_RS_USAGE = "usage: nvx-rs [-h] [--root PATH] {artifacts,egress,sandbox} ..."
+NVX_RS_USAGE = (
+    "usage: nvx-rs [-h] [--root PATH] [--prog PROG] {artifacts,egress,sandbox} ..."
+)
 CLI_STEP_TIMEOUT = 120
 LAYER_UUIDS = {
     "distro": "11111111-1111-1111-1111-111111111111",

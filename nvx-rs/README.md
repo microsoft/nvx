@@ -154,9 +154,9 @@ runtime steps of `nvx.py` that `nvx.py` delegates to it
 ([microsoft/nvx#359](https://github.com/microsoft/nvx/issues/359)):
 
 ```text
-nvx-rs [-h] [--root PATH] artifacts
-nvx-rs [-h] [--root PATH] egress compile PATH
-nvx-rs [-h] [--root PATH] sandbox [run|provision|start|exec|stop|deprovision] [OPTIONS]
+nvx-rs [-h] [--root PATH] [--prog PROG] artifacts
+nvx-rs [-h] [--root PATH] [--prog PROG] egress compile PATH
+nvx-rs [-h] [--root PATH] [--prog PROG] sandbox [run|provision|start|exec|stop|deprovision] [OPTIONS]
 ```
 
 ```bash
@@ -171,6 +171,13 @@ exits with status 0. Ctrl-C prints `Interrupted` and exits with status 130.
 `sandbox run` and `sandbox exec` exit with the status of OpenVMM or of the
 workload. Text ends its lines as Python's `print` ends them, with `\r\n` on
 Windows and `\n` elsewhere, while workload output passes through unchanged.
+
+`--prog PROG` names the program in usage, help, and error messages, `nvx-rs` by
+default. `nvx.py` passes its own name, so that the usage errors of
+`nvx.py sandbox` that `nvx-rs` reports, such as an invalid `--layer`, read
+`usage: nvx.py sandbox ...` and `nvx.py sandbox: error: ...` as they did before
+`nvx.py` delegated the command. The usage wraps for the name as `argparse` wraps
+it for 80 columns.
 
 ### Artifact root
 

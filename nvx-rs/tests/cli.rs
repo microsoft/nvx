@@ -563,7 +563,7 @@ fn a_relative_openvmm_override_is_relative_to_the_working_directory() {
 
 #[test]
 fn top_level_usage_errors_exit_with_status_2() {
-    let usage = "usage: nvx-rs [-h] [--root PATH] {artifacts,egress,sandbox} ...\n";
+    let usage = "usage: nvx-rs [-h] [--root PATH] [--prog PROG] {artifacts,egress,sandbox} ...\n";
     for (arguments, message) in [
         (
             &[][..],
@@ -597,6 +597,82 @@ fn top_level_usage_errors_exit_with_status_2() {
         "usage: nvx-rs egress compile [-h] PATH\n\
          nvx-rs egress compile: error: the following arguments are required: PATH\n"
     );
+}
+
+/// What `nvx.py sandbox` printed for a refused `--workload-user` before it ran `nvx-rs`, as
+/// CPython 3.14 prints it for 80 columns: the usage of its parser, wrapped after its name.
+const NVX_PY_SANDBOX_USAGE_ERROR: &str = "\
+usage: nvx.py sandbox [-h] [--layer ROLE,PATH,EROFS_UUID] [--scratch SCRATCH]
+                      [--state-dir STATE_DIR] [--entrypoint ENTRYPOINT]
+                      [--arg SANDBOX_ARG] [--hostname HOSTNAME]
+                      [--workload-user UID:GID] [--memory-max MEMORY_MAX]
+                      [--pids-max PIDS_MAX] [--memory-mib MEMORY_MIB]
+                      [--timeout TIMEOUT] [--exec-timeout-ms EXEC_TIMEOUT_MS]
+                      [--cwd CWD] [--environment KEY=VALUE]
+                      [--environment-file PATH]
+                      [--inherit-default-environment]
+                      [--hypervisor {auto,whp,kvm,mshv}]
+                      [--mount GUEST_TARGET,HOST_PATH[,ro|rw]]
+                      [--mount-deny HOST_PATH] [--mount-allow HOST_PATH]
+                      [--mount-write HOST_PATH] [--mount-owner {vmm,caller}]
+                      [--net IPV4/PREFIX] [--network-profile {portable}]
+                      [--network-egress {allow,deny}]
+                      [--network-ingress {allow,deny}]
+                      [--network-egress-allow CIDR[:PROTOCOL[:PORT[-PORT]]]]
+                      [--network-egress-deny CIDR[:PROTOCOL[:PORT[-PORT]]]]
+                      [--network-egress-policy-file PATH]
+                      [--host-loopback {allow,deny}]
+                      [--network-proxy IPV4:TCP-PORT]
+                      [--host-loopback-forward HOST_LOOPBACK_FORWARD]
+                      [--outcome-report OUTCOME_REPORT] [--cmdline CMDLINE]
+                      [--dry-run]
+                      [{run,provision,start,exec,stop,deprovision}]
+nvx.py sandbox: error: argument --workload-user: --workload-user UID must be between 1 and \
+4294967295
+";
+
+#[test]
+fn messages_name_the_program_that_prog_names() {
+    // nvx.py passes its own name, so that usage errors read as they did before it delegated.
+    let output = Command::new(NVX_RS)
+        .args(["--prog", "nvx.py", "sandbox", "--workload-user", "0:0"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    assert_eq!(text(&output.stderr), NVX_PY_SANDBOX_USAGE_ERROR);
+    assert!(output.stdout.is_empty());
+    // The usage wraps for the name as argparse wraps it: a long name takes a line of its own.
+    let long = "a-program-whose-name-is-long-enough-to-take-its-own-line.py";
+    let output = Command::new(NVX_RS)
+        .args(["--prog", long, "egress", "compile"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    assert_eq!(
+        text(&output.stderr),
+        format!(
+            "usage: {long} egress compile\n       [-h] PATH\n\
+             {long} egress compile: error: the following arguments are required: PATH\n"
+        )
+    );
+    // The top-level parser names it as soon as it has read it, and so does the help.
+    let output = Command::new(NVX_RS)
+        .args(["--prog=nvx.py", "build"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    assert_eq!(
+        text(&output.stderr),
+        "usage: nvx.py [-h] [--root PATH] [--prog PROG] {artifacts,egress,sandbox} ...\n\
+         nvx.py: error: argument command: invalid choice: 'build' (choose from 'artifacts', \
+         'egress', 'sandbox')\n"
+    );
+    let output = Command::new(NVX_RS)
+        .args(["--prog", "nvx.py", "artifacts", "--help"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert!(text(&output.stdout).starts_with("usage: nvx.py artifacts [-h]\n\nPrint the paths"));
 }
 
 #[cfg(unix)]

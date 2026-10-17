@@ -1,9 +1,9 @@
 //! The `nvx-rs` command-line interface, the backend of the runtime steps of `nvx.py`.
 //!
 //! ```text
-//! nvx-rs [-h] [--root PATH] artifacts
-//! nvx-rs [-h] [--root PATH] egress compile PATH
-//! nvx-rs [-h] [--root PATH] sandbox [run|provision|start|exec|stop|deprovision] [OPTIONS]
+//! nvx-rs [-h] [--root PATH] [--prog PROG] artifacts
+//! nvx-rs [-h] [--root PATH] [--prog PROG] egress compile PATH
+//! nvx-rs [-h] [--root PATH] [--prog PROG] sandbox [run|provision|start|exec|stop|deprovision] [OPTIONS]
 //! ```
 //!
 //! - `artifacts` prints the paths of the artifacts that `nvx.py` runs as JSON.
@@ -14,6 +14,9 @@
 //!
 //! The artifact root is `--root`, or else the release or repository checkout that holds the
 //! executable, and the `NVX_OPENVMM` environment variable names another OpenVMM executable.
+//! `--prog` names the program in usage and error messages, `nvx-rs` by default: `nvx.py`, which
+//! runs `nvx-rs` for its `sandbox` command, passes its own name, so that its users see the
+//! messages that it printed before it delegated the command.
 //!
 //! Errors print `error: MESSAGE` to standard error and exit with status 1, as `nvx.py` reports a
 //! `ScriptError`. Usage errors print the usage and `PROG: error: MESSAGE`, and exit with status
@@ -30,20 +33,20 @@ mod session;
 
 use std::ffi::OsString;
 
-use self::args::{Parser, Receiver, Spec, Stop};
+use self::args::{Parser, Receiver, Spec, Stop, Syntax};
 use crate::host::platform;
 use crate::host::python::builtins::repr;
 
-/// The name of the program in usage messages.
+/// The name of the program in usage messages unless `--prog` names another.
 const PROGRAM: &str = "nvx-rs";
 /// The commands, in the order in which usage messages list them.
 const COMMANDS: [&str; 3] = ["artifacts", "egress", "sandbox"];
-/// The usage of the top-level parser.
-const USAGE: &str = "usage: nvx-rs [-h] [--root PATH] {artifacts,egress,sandbox} ...";
-/// The help of the top-level parser.
-const HELP: &str = "\
-usage: nvx-rs [-h] [--root PATH] {artifacts,egress,sandbox} ...
-
+/// The usage and help of the top-level parser.
+const SYNTAX: Syntax = Syntax {
+    command: "",
+    optionals: &["[-h]", "[--root PATH]", "[--prog PROG]"],
+    positionals: &["{artifacts,egress,sandbox} ..."],
+    help: "\
 Run the NVX steps that nvx.py delegates: artifact lookup, egress policy
 compilation, and sandboxes.
 
@@ -57,12 +60,16 @@ positional arguments:
 options:
   -h, --help            show this help message and exit
   --root PATH           the NVX repository checkout or extracted release whose
-                        artifacts to use (default: the release or checkout that
-                        holds this executable)
+                        artifacts to use (default: the release or checkout
+                        that holds this executable)
+  --prog PROG           the program name that usage and error messages show,
+                        such as nvx.py, which runs nvx-rs for its commands
+                        (default: nvx-rs)
 
 environment:
   NVX_OPENVMM           the OpenVMM executable to run instead of the one of the
-                        artifact root";
+                        artifact root",
+};
 
 /// How a command ends other than by succeeding.
 #[derive(Debug)]
@@ -75,15 +82,15 @@ pub(crate) enum Exit {
     EndpointClosed,
     /// A usage error of the parser `prog`: its usage, then `PROG: error: MESSAGE`, and status 2.
     Usage {
-        /// The parser's usage line.
-        usage: &'static str,
+        /// The parser's usage.
+        usage: String,
         /// The parser's name, such as `nvx-rs sandbox`.
-        prog: &'static str,
+        prog: String,
         /// The message.
         message: String,
     },
     /// Help on standard output, and status 0.
-    Help(&'static str),
+    Help(String),
     /// Ctrl-C: `Interrupted` on standard error, and status 130.
     Interrupted,
     /// `SystemExit(status)`: the status of OpenVMM or of a managed workload.
@@ -99,21 +106,21 @@ impl Exit {
         Self::Error(message.into())
     }
 
-    /// Returns the end of a parse that `stop` ended, for the parser `prog` with `usage` and
-    /// `help`.
-    pub(crate) fn from_stop(
-        stop: Stop,
-        prog: &'static str,
-        usage: &'static str,
-        help: &'static str,
-    ) -> Self {
+    /// Returns the usage error `message` of the parser of `syntax` for the program `program`.
+    pub(crate) fn usage(syntax: &Syntax, program: &str, message: String) -> Self {
+        Self::Usage {
+            usage: syntax.usage(program),
+            prog: syntax.prog(program),
+            message,
+        }
+    }
+
+    /// Returns the end of a parse that `stop` ended, for the parser of `syntax` and the program
+    /// `program`.
+    pub(crate) fn from_stop(stop: Stop, syntax: &Syntax, program: &str) -> Self {
         match stop {
-            Stop::Usage(message) => Self::Usage {
-                usage,
-                prog,
-                message,
-            },
-            Stop::Help => Self::Help(help),
+            Stop::Usage(message) => Self::usage(syntax, program, message),
+            Stop::Help => Self::Help(syntax.help(program)),
         }
     }
 
@@ -141,7 +148,7 @@ impl Exit {
                 output::print_stderr(&format!("{usage}\n{prog}: error: {message}"));
                 2
             }
-            Self::Help(text) => match output::print_stdout(text) {
+            Self::Help(text) => match output::print_stdout(&text) {
                 Ok(()) => 0,
                 Err(error) => Self::Error(output::stream_error(&error)).report(),
             },
@@ -208,51 +215,57 @@ enum Command {
 struct TopLevel {
     /// `--root`, if given.
     root: Option<String>,
+    /// `--prog`, if given.
+    prog: Option<String>,
 }
 
 impl Receiver for TopLevel {
-    fn take(
-        &mut self,
-        _name: &'static str,
-        value: Option<&str>,
-    ) -> std::result::Result<(), String> {
-        self.root = value.map(str::to_owned);
+    fn take(&mut self, name: &'static str, value: Option<&str>) -> std::result::Result<(), String> {
+        let value = value.map(str::to_owned);
+        match name {
+            "--root" => self.root = value,
+            _ => self.prog = value,
+        }
         Ok(())
     }
 }
 
 /// Parses the arguments, reports the unrecognized ones, and runs the command.
 fn run(arguments: &[OsString]) -> Result {
-    let usage = |message: String| Exit::Usage {
-        usage: USAGE,
-        prog: PROGRAM,
-        message,
-    };
     let mut strings = Vec::with_capacity(arguments.len());
     for (index, argument) in arguments.iter().enumerate() {
         let text = argument.to_str().ok_or_else(|| {
-            usage(format!(
-                "argument {} is not valid Unicode: {}",
-                index + 1,
-                repr(&argument.to_string_lossy())
-            ))
+            Exit::usage(
+                &SYNTAX,
+                PROGRAM,
+                format!(
+                    "argument {} is not valid Unicode: {}",
+                    index + 1,
+                    repr(&argument.to_string_lossy())
+                ),
+            )
         })?;
         strings.push(text.to_owned());
     }
-    let parser = Parser::new(&[Spec::one("--root")], &[Spec::one("command")]);
+    let parser = Parser::new(
+        &[Spec::one("--root"), Spec::one("--prog")],
+        &[Spec::one("command")],
+    );
     let mut top = TopLevel::default();
-    let (index, mut extras) = parser
-        .split_command(&strings, &mut top)
-        .map_err(|stop| Exit::from_stop(stop, PROGRAM, USAGE, HELP))?;
+    let split = parser.split_command(&strings, &mut top);
+    // A usage error names the program that the options before it named.
+    let program = top.prog.clone().unwrap_or_else(|| PROGRAM.to_owned());
+    let usage = |message: String| Exit::usage(&SYNTAX, &program, message);
+    let (index, mut extras) = split.map_err(|stop| Exit::from_stop(stop, &SYNTAX, &program))?;
     let rest = &strings[index + 1..];
     let (command, unrecognized) = match strings[index].as_str() {
-        "artifacts" => (Command::Artifacts, artifacts::parse(rest)?),
+        "artifacts" => (Command::Artifacts, artifacts::parse(rest, &program)?),
         "egress" => {
-            let (path, unrecognized) = egress::parse(rest)?;
+            let (path, unrecognized) = egress::parse(rest, &program)?;
             (Command::EgressCompile(path), unrecognized)
         }
         "sandbox" => {
-            let (options, unrecognized) = sandbox::parse(rest)?;
+            let (options, unrecognized) = sandbox::parse(rest, &program)?;
             (Command::Sandbox(Box::new(options)), unrecognized)
         }
         other => {

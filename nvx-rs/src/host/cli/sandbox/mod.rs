@@ -19,7 +19,7 @@ use std::process::{Child, Command};
 use std::thread;
 use std::time::Duration;
 
-use super::args::{Parser, Receiver, Spec, invalid_choice, invalid_value};
+use super::args::{Parser, Receiver, Spec, Syntax, invalid_choice, invalid_value};
 use super::artifacts::{Located, locate};
 use super::{Exit, Result, output};
 use crate::host::artifacts::{Guest, KERNEL_NAME};
@@ -40,65 +40,49 @@ use crate::host::sandbox::{
 
 pub(crate) use self::lifecycle::ProvisionConfig;
 
-/// The name of the parser in usage messages.
-const PROG: &str = "nvx-rs sandbox";
-/// The usage of the parser.
-const USAGE: &str = "\
-usage: nvx-rs sandbox [-h] [--layer ROLE,PATH,EROFS_UUID] [--scratch SCRATCH]
-                      [--state-dir STATE_DIR] [--entrypoint ENTRYPOINT]
-                      [--arg SANDBOX_ARG] [--hostname HOSTNAME]
-                      [--workload-user UID:GID] [--memory-max MEMORY_MAX]
-                      [--pids-max PIDS_MAX] [--memory-mib MEMORY_MIB]
-                      [--timeout TIMEOUT] [--exec-timeout-ms EXEC_TIMEOUT_MS]
-                      [--cwd CWD] [--environment KEY=VALUE]
-                      [--environment-file PATH]
-                      [--inherit-default-environment]
-                      [--hypervisor {auto,whp,kvm,mshv}]
-                      [--mount GUEST_TARGET,HOST_PATH[,ro|rw]]
-                      [--mount-deny HOST_PATH] [--mount-allow HOST_PATH]
-                      [--mount-write HOST_PATH] [--mount-owner {vmm,caller}]
-                      [--net IPV4/PREFIX] [--network-profile {portable}]
-                      [--network-egress {allow,deny}]
-                      [--network-ingress {allow,deny}]
-                      [--network-egress-allow CIDR[:PROTOCOL[:PORT[-PORT]]]]
-                      [--network-egress-deny CIDR[:PROTOCOL[:PORT[-PORT]]]]
-                      [--network-egress-policy-file PATH]
-                      [--host-loopback {allow,deny}]
-                      [--network-proxy IPV4:TCP-PORT]
-                      [--host-loopback-forward HOST_LOOPBACK_FORWARD]
-                      [--outcome-report OUTCOME_REPORT] [--cmdline CMDLINE]
-                      [--dry-run]
-                      [{run,provision,start,exec,stop,deprovision}]";
-/// The help of the parser, after its usage.
-const HELP: &str = concat!(
-    "\
-usage: nvx-rs sandbox [-h] [--layer ROLE,PATH,EROFS_UUID] [--scratch SCRATCH]
-                      [--state-dir STATE_DIR] [--entrypoint ENTRYPOINT]
-                      [--arg SANDBOX_ARG] [--hostname HOSTNAME]
-                      [--workload-user UID:GID] [--memory-max MEMORY_MAX]
-                      [--pids-max PIDS_MAX] [--memory-mib MEMORY_MIB]
-                      [--timeout TIMEOUT] [--exec-timeout-ms EXEC_TIMEOUT_MS]
-                      [--cwd CWD] [--environment KEY=VALUE]
-                      [--environment-file PATH]
-                      [--inherit-default-environment]
-                      [--hypervisor {auto,whp,kvm,mshv}]
-                      [--mount GUEST_TARGET,HOST_PATH[,ro|rw]]
-                      [--mount-deny HOST_PATH] [--mount-allow HOST_PATH]
-                      [--mount-write HOST_PATH] [--mount-owner {vmm,caller}]
-                      [--net IPV4/PREFIX] [--network-profile {portable}]
-                      [--network-egress {allow,deny}]
-                      [--network-ingress {allow,deny}]
-                      [--network-egress-allow CIDR[:PROTOCOL[:PORT[-PORT]]]]
-                      [--network-egress-deny CIDR[:PROTOCOL[:PORT[-PORT]]]]
-                      [--network-egress-policy-file PATH]
-                      [--host-loopback {allow,deny}]
-                      [--network-proxy IPV4:TCP-PORT]
-                      [--host-loopback-forward HOST_LOOPBACK_FORWARD]
-                      [--outcome-report OUTCOME_REPORT] [--cmdline CMDLINE]
-                      [--dry-run]
-                      [{run,provision,start,exec,stop,deprovision}]
-",
-    "
+/// The usage and help of the parser.
+const SYNTAX: Syntax = Syntax {
+    command: "sandbox",
+    optionals: &[
+        "[-h]",
+        "[--layer ROLE,PATH,EROFS_UUID]",
+        "[--scratch SCRATCH]",
+        "[--state-dir STATE_DIR]",
+        "[--entrypoint ENTRYPOINT]",
+        "[--arg SANDBOX_ARG]",
+        "[--hostname HOSTNAME]",
+        "[--workload-user UID:GID]",
+        "[--memory-max MEMORY_MAX]",
+        "[--pids-max PIDS_MAX]",
+        "[--memory-mib MEMORY_MIB]",
+        "[--timeout TIMEOUT]",
+        "[--exec-timeout-ms EXEC_TIMEOUT_MS]",
+        "[--cwd CWD]",
+        "[--environment KEY=VALUE]",
+        "[--environment-file PATH]",
+        "[--inherit-default-environment]",
+        "[--hypervisor {auto,whp,kvm,mshv}]",
+        "[--mount GUEST_TARGET,HOST_PATH[,ro|rw]]",
+        "[--mount-deny HOST_PATH]",
+        "[--mount-allow HOST_PATH]",
+        "[--mount-write HOST_PATH]",
+        "[--mount-owner {vmm,caller}]",
+        "[--net IPV4/PREFIX]",
+        "[--network-profile {portable}]",
+        "[--network-egress {allow,deny}]",
+        "[--network-ingress {allow,deny}]",
+        "[--network-egress-allow CIDR[:PROTOCOL[:PORT[-PORT]]]]",
+        "[--network-egress-deny CIDR[:PROTOCOL[:PORT[-PORT]]]]",
+        "[--network-egress-policy-file PATH]",
+        "[--host-loopback {allow,deny}]",
+        "[--network-proxy IPV4:TCP-PORT]",
+        "[--host-loopback-forward HOST_LOOPBACK_FORWARD]",
+        "[--outcome-report OUTCOME_REPORT]",
+        "[--cmdline CMDLINE]",
+        "[--dry-run]",
+    ],
+    positionals: &["[{run,provision,start,exec,stop,deprovision}]"],
+    help: "\
 positional arguments:
   {run,provision,start,exec,stop,deprovision}
 
@@ -182,8 +166,8 @@ options:
                         write a bounded local JSON outcome report for run or
                         exec
   --cmdline CMDLINE
-  --dry-run             print the one-shot run command without launching it"
-);
+  --dry-run             print the one-shot run command without launching it",
+};
 
 /// The operations, in the order in which usage messages list them.
 const OPERATIONS: [&str; 6] = ["run", "provision", "start", "exec", "stop", "deprovision"];
@@ -446,13 +430,13 @@ impl Receiver for Options {
     }
 }
 
-/// Parses the arguments of `sandbox`, and returns the options and the arguments that the
-/// parser does not recognize.
-pub(super) fn parse(arguments: &[String]) -> Result<(Options, Vec<String>)> {
+/// Parses the arguments of `sandbox` for the program `program`, and returns the options and the
+/// arguments that the parser does not recognize.
+pub(super) fn parse(arguments: &[String], program: &str) -> Result<(Options, Vec<String>)> {
     let mut options = Options::default();
     let unrecognized = Parser::new(&OPTIONS, &[Spec::optional("sandbox_operation")])
         .parse(arguments, &mut options)
-        .map_err(|stop| Exit::from_stop(stop, PROG, USAGE, HELP))?;
+        .map_err(|stop| Exit::from_stop(stop, &SYNTAX, program))?;
     Ok((options, unrecognized))
 }
 

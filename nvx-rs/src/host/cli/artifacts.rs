@@ -10,7 +10,7 @@
 
 use std::path::{Path, PathBuf};
 
-use super::args::Parser;
+use super::args::{Parser, Syntax};
 use super::{Exit, Result, output};
 use crate::host::artifacts::{ArtifactDir, ArtifactPaths, MANIFEST_NAME, absolute};
 use crate::host::python::builtins::Int;
@@ -19,27 +19,27 @@ use crate::host::python::dumps::{self, Value};
 /// The environment variable that names the OpenVMM executable to run instead of the root's.
 pub(crate) const OPENVMM_VARIABLE: &str = "NVX_OPENVMM";
 
-/// The name of the parser in usage messages.
-const PROG: &str = "nvx-rs artifacts";
-/// The usage of the parser.
-const USAGE: &str = "usage: nvx-rs artifacts [-h]";
-/// The help of the parser.
-const HELP: &str = "\
-usage: nvx-rs artifacts [-h]
-
+/// The usage and help of the parser.
+const SYNTAX: Syntax = Syntax {
+    command: "artifacts",
+    optionals: &["[-h]"],
+    positionals: &[],
+    help: "\
 Print the paths of the NVX artifacts as a JSON object: the layout and root of
 the artifact directory, the OpenVMM executable, the guest kernel, and for each
 guest, its name and distribution, its initramfs and package manifest, and its
 distro layer and manifest, or null.
 
 options:
-  -h, --help  show this help message and exit";
+  -h, --help  show this help message and exit",
+};
 
-/// Parses the arguments of `artifacts` and returns those that it does not recognize.
-pub(super) fn parse(arguments: &[String]) -> Result<Vec<String>> {
+/// Parses the arguments of `artifacts` for the program `program`, and returns those that it does
+/// not recognize.
+pub(super) fn parse(arguments: &[String], program: &str) -> Result<Vec<String>> {
     Parser::new(&[], &[])
         .parse(arguments, &mut |_: &'static str, _: Option<&str>| Ok(()))
-        .map_err(|stop| Exit::from_stop(stop, PROG, USAGE, HELP))
+        .map_err(|stop| Exit::from_stop(stop, &SYNTAX, program))
 }
 
 /// Prints the paths of the artifacts of the root.
