@@ -2,8 +2,8 @@
 //! performs them on Linux and Windows.
 //!
 //! - [`cwd`]: the current directory, as `Path.cwd()` gives it.
-//! - [`is_file`], [`is_dir`], and [`is_symlink`]: `os.path.isfile`, `isdir`, and `islink`, which
-//!   follow symbolic links, except `islink`, and are false on any error. On
+//! - [`is_file`], [`is_dir`], [`is_symlink`], and [`exists`]: `os.path.isfile`, `isdir`, `islink`,
+//!   and `exists`, which follow symbolic links, except `islink`, and are false on any error. On
 //!   Windows, only `IO_REPARSE_TAG_SYMLINK` reparse points are links, not junctions.
 //! - [`stat`]: the identity and owner that `os.stat` reports. On Windows, the identity is the
 //!   64-bit volume serial number and the 128-bit file ID of `FILE_ID_INFO`, as Python 3.12 and
@@ -67,6 +67,11 @@ pub(crate) fn is_symlink(path: &Path) -> bool {
     imp::is_symlink(path)
 }
 
+/// Returns `os.path.exists(path)`: whether `path` exists, following links.
+pub(crate) fn exists(path: &Path) -> bool {
+    imp::exists(path)
+}
+
 /// Returns `os.stat(path)`, following links.
 pub(crate) fn stat(path: &Path) -> io::Result<Stat> {
     imp::stat(path)
@@ -128,6 +133,11 @@ mod imp {
     /// See [`super::is_symlink`].
     pub(super) fn is_symlink(path: &Path) -> bool {
         fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_symlink())
+    }
+
+    /// See [`super::exists`].
+    pub(super) fn exists(path: &Path) -> bool {
+        fs::metadata(path).is_ok()
     }
 
     /// See [`super::stat`].
@@ -264,6 +274,11 @@ mod imp {
     /// See [`super::is_symlink`].
     pub(super) fn is_symlink(path: &Path) -> bool {
         win32::stat(path, false).is_ok_and(|status| status.mode == StatMode::Link)
+    }
+
+    /// See [`super::exists`].
+    pub(super) fn exists(path: &Path) -> bool {
+        win32::stat(path, true).is_ok()
     }
 
     /// See [`super::stat`].
@@ -453,6 +468,10 @@ mod imp {
         false
     }
 
+    pub(super) fn exists(_path: &Path) -> bool {
+        false
+    }
+
     pub(super) fn stat(_path: &Path) -> io::Result<Stat> {
         Err(unsupported())
     }
@@ -478,7 +497,7 @@ mod tests {
         fs::create_dir(&folder).unwrap();
         assert!(is_file(&file) && !is_dir(&file) && !is_symlink(&file));
         assert!(is_dir(&folder) && !is_file(&folder) && !is_symlink(&folder));
-        assert!(!is_file(&root.join("missing")) && !is_dir(&root.join("missing")));
+        assert!(!exists(&root.join("missing")) && !is_file(&root.join("missing")));
         assert!(!is_file(Path::new("nul\0byte")));
         let link = root.join("link");
         #[cfg(unix)]

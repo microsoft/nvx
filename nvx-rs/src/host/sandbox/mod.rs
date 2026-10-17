@@ -13,6 +13,9 @@
 //!   hostname, the workload identity, the resource limits, and the shares, with
 //!   [`openvmm_arguments`](SandboxLaunch::openvmm_arguments) and
 //!   [`kernel_command_line`](SandboxLaunch::kernel_command_line).
+//! - [`options`]: the checks that `nvx.py sandbox` and `nvx.py run` apply to their options: the
+//!   attribution of access-policy paths to shares, the systemd policy, the targets of
+//!   `nvx.py run` shares, and the managed exec environment.
 //!
 //! Values are checked as Python checked them: whitespace is what `str.isspace` accepts,
 //! integers are what `int` reads ([`Int`]), UUIDs are what `uuid.UUID` reads, host paths are
@@ -29,6 +32,7 @@
 
 pub mod layer;
 pub mod mount;
+pub mod options;
 
 use std::io;
 use std::path::Path;

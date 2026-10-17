@@ -313,6 +313,11 @@ impl Flavor {
         Self::Posix
     };
 
+    /// Returns whether `character` separates components: `os.sep` or `os.altsep`.
+    pub(crate) fn is_separator(self, character: char) -> bool {
+        character == '/' || (self == Self::Windows && character == '\\')
+    }
+
     /// Returns `os.path.splitroot(path)`: its drive, root, and the rest, as slices of `path`.
     pub(crate) fn split_root(self, path: &str) -> (&str, &str, &str) {
         let (drive, root) = match self {
@@ -639,6 +644,11 @@ impl PurePath {
             .collect()
     }
 
+    /// Returns `path.name`: the last component, or an empty string.
+    pub(crate) fn name(&self) -> &str {
+        self.tail.last().map_or("", String::as_str)
+    }
+
     /// Returns `path.parents`, from the parent to the anchor.
     pub(crate) fn parents(&self) -> impl Iterator<Item = Self> + '_ {
         (0..self.tail.len()).rev().map(|length| {
@@ -660,6 +670,23 @@ impl PurePath {
     #[must_use]
     pub(crate) fn join(&self, segment: &str) -> Self {
         Self::new(self.flavor, &self.flavor.join(&self.text, segment))
+    }
+
+    /// Returns `path.with_name(name)`, or `None` where it raises `ValueError`: for a name that is
+    /// empty, `.`, or holds a separator, and for a path without components.
+    pub(crate) fn with_name(&self, name: &str) -> Option<Self> {
+        if name.is_empty() || name == "." || name.chars().any(|c| self.flavor.is_separator(c)) {
+            return None;
+        }
+        let (_, rest) = self.tail.split_last()?;
+        let mut tail = rest.to_vec();
+        tail.push(name.to_owned());
+        Some(Self::from_parts(
+            self.flavor,
+            self.drive.clone(),
+            self.root.clone(),
+            tail,
+        ))
     }
 
     /// Returns the string by which `pathlib` compares the path: `str(path)`, in lowercase on
@@ -794,6 +821,7 @@ mod tests {
         assert!(pure_posix("//a").is_absolute());
         assert!(!pure_posix("a/b").is_absolute());
         assert_eq!(pure_posix("/a/b").parts(), ["/", "a", "b"]);
+        assert_eq!(pure_posix("a/b").name(), "b");
         assert_eq!(
             pure_posix("/a/b/c")
                 .parents()
@@ -804,6 +832,14 @@ mod tests {
         assert_eq!(pure_posix("/a/b").join("c").as_str(), "/a/b/c");
         assert_eq!(pure_posix("/a/b").join("/c").as_str(), "/c");
         assert_ne!(pure_posix("/A"), pure_posix("/a"));
+        assert_eq!(
+            pure_posix("/a/b.erofs")
+                .with_name("b.erofs.manifest.json")
+                .unwrap()
+                .as_str(),
+            "/a/b.erofs.manifest.json"
+        );
+        assert!(pure_posix("/").with_name("x").is_none());
     }
 
     #[test]

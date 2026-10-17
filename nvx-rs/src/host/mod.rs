@@ -14,7 +14,7 @@
 //!   OpenVMM processes, and [`platform`] holds the primitives of Linux and Windows hosts. Other
 //!   hosts compile but report NVX as unavailable.
 //! - [`sandbox`] is the launch profile of `nvx.py sandbox`: a container over read-only EROFS
-//!   layers and a private ext4 scratch disk, with live shares.
+//!   layers and a private ext4 scratch disk, with live shares, and the checks of its options.
 //!
 //! The ports of `nvx.py` code keep its Python semantics, which the private `python` module
 //! provides.

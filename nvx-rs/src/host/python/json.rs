@@ -1,20 +1,29 @@
-//! A JSON reader that accepts exactly what Python's `json.loads` accepts.
+//! A JSON reader that accepts exactly what Python's `json.loads` accepts, and refuses the rest as
+//! Python refuses it.
 //!
 //! Python's decoder differs from strict JSON parsers such as `serde_json`:
 //!
 //! - it reads the constants `NaN`, `Infinity`, and `-Infinity` as floats, and numbers beyond the
 //!   range of a float as infinities;
-//! - it reads integers of any length, which `parse_int` receives as written;
+//! - it reads integers of any length, which `parse_int` receives as written, although `int`, its
+//!   default, refuses more than 4300 digits;
 //! - it keeps a `\ud800` escape without its pair as an unpaired surrogate; and
 //! - it hands each object's members, duplicates included, to `object_pairs_hook` when the object
 //!   closes, and each integer to `parse_int` when it reads the integer, so the errors that these
-//!   hooks raise surface in document order. [`Hooks`] are their equivalents.
+//!   hooks raise surface in document order. [`Hooks`] are their equivalents, and [`Loads`] are
+//!   those of `json.loads` without arguments.
+//!
+//! [`read`] ports the C scanner of CPython 3.14, `scan_once_unicode` and the functions that it
+//! calls in `Modules/_json.c`, with the checks of `JSONDecoder.decode` around it, so a document
+//! that it refuses fails with the message and at the position of the `JSONDecodeError` that
+//! Python raises, which [`syntax_error`] formats as Python does.
 //!
 //! The reader keeps values in an arena and never recurses, so it reads documents nested to any
 //! depth. Python's decoder recurses and raises `RecursionError` at a depth that depends on the
 //! Python version and the stack, so documents nested that deep are the one input on which the two
 //! differ.
 
+use super::builtins::{Int, IntError};
 use super::text::PyText;
 
 /// Index of a value in a [`Document`].
@@ -58,6 +67,19 @@ impl Document {
     /// returned.
     pub(crate) fn node(&self, id: NodeId) -> &Node {
         &self.nodes[id]
+    }
+
+    /// Returns `value.get(name)` for the `dict` that Python builds from the object at `id`, in
+    /// which the last of repeated names wins, or `None` if the value at `id` is not an object.
+    pub(crate) fn get(&self, id: NodeId, name: &str) -> Option<&Node> {
+        let Node::Object(members) = self.node(id) else {
+            return None;
+        };
+        members
+            .iter()
+            .rev()
+            .find(|(member, _)| member.as_bytes() == name.as_bytes())
+            .map(|&(_, value)| self.node(value))
     }
 
     /// Returns the document that Python's decoder reads from the JSON text of `value`.
@@ -127,146 +149,127 @@ pub(crate) trait Hooks {
     }
 }
 
+/// The hooks of `json.loads` without arguments: `int`, the default `parse_int`, refuses an
+/// integer of more than 4300 digits with a `ValueError` that [`IntError::message`] gives.
+pub(crate) struct Loads;
+
+impl Hooks for Loads {
+    type Error = IntError;
+
+    fn integer(&mut self, literal: &str) -> Result<(), IntError> {
+        Int::parse(literal).map(drop)
+    }
+}
+
 /// Why [`read`] failed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ReadError<E> {
-    /// The text is not a document that Python's decoder accepts; reading stopped at this byte
-    /// offset.
+    /// The text is not a document that Python's decoder accepts: Python raises a
+    /// `JSONDecodeError` with this message, at the character at this byte offset.
     Syntax {
-        /// Byte offset in the text at which reading stopped.
+        /// The message of the `JSONDecodeError`, such as `Expecting value`.
+        message: &'static str,
+        /// Byte offset in the text of the character at which Python reports the error.
         offset: usize,
     },
     /// A hook failed.
     Hook(E),
 }
 
+/// Returns `str()` of the `JSONDecodeError` that Python raises with `message` at byte `offset`
+/// of `text`: the message, the line and column of the position, and the position itself, in
+/// characters, such as `Expecting value: line 1 column 2 (char 1)`.
+pub(crate) fn syntax_error(text: &str, message: &str, offset: usize) -> String {
+    let before = &text[..offset];
+    let position = before.chars().count();
+    let line = before.matches('\n').count() + 1;
+    let column = match before.rfind('\n') {
+        Some(newline) => before[newline + 1..].chars().count() + 1,
+        None => position + 1,
+    };
+    format!("{message}: line {line} column {column} (char {position})")
+}
+
 /// Reads `text` as `json.loads(text)` does, running `hooks` as the document is read.
 pub(crate) fn read<H: Hooks>(text: &str, hooks: &mut H) -> Result<Document, ReadError<H::Error>> {
     // Python refuses a string that starts with a byte-order mark before decoding it.
     if text.starts_with('\u{FEFF}') {
-        return Err(ReadError::Syntax { offset: 0 });
+        return Err(ReadError::Syntax {
+            message: "Unexpected UTF-8 BOM (decode using utf-8-sig)",
+            offset: 0,
+        });
     }
-    let mut reader = Reader {
+    let mut scanner = Scanner {
         text,
         bytes: text.as_bytes(),
-        position: 0,
         nodes: Vec::new(),
         hooks,
     };
-    reader.skip_whitespace();
-    // The containers that enclose the value being read, innermost last.
-    let mut open: Vec<Container> = Vec::new();
-    loop {
-        let mut value = match reader.peek() {
-            Some(b'{') => {
-                reader.position += 1;
-                reader.skip_whitespace();
-                if reader.peek() == Some(b'}') {
-                    reader.position += 1;
-                    reader.close(Container::Object(Vec::new(), PyText::new()))?
-                } else {
-                    let name = reader.member_name()?;
-                    open.push(Container::Object(Vec::new(), name));
-                    continue;
-                }
-            }
-            Some(b'[') => {
-                reader.position += 1;
-                reader.skip_whitespace();
-                if reader.peek() == Some(b']') {
-                    reader.position += 1;
-                    reader.close(Container::Array(Vec::new()))?
-                } else {
-                    open.push(Container::Array(Vec::new()));
-                    continue;
-                }
-            }
-            _ => reader.scalar()?,
-        };
-        // Adds the value to its container, and closes the containers that end after it.
-        loop {
-            let Some(mut container) = open.pop() else {
-                reader.skip_whitespace();
-                if reader.position != reader.bytes.len() {
-                    return Err(reader.syntax());
-                }
-                return Ok(Document {
-                    nodes: reader.nodes,
-                    root: value,
-                });
-            };
-            let closing = match &mut container {
-                Container::Array(elements) => {
-                    elements.push(value);
-                    b']'
-                }
-                Container::Object(members, name) => {
-                    members.push((std::mem::take(name), value));
-                    b'}'
-                }
-            };
-            reader.skip_whitespace();
-            match reader.peek() {
-                Some(b',') => {
-                    reader.position += 1;
-                    reader.skip_whitespace();
-                    if let Container::Object(_, name) = &mut container {
-                        *name = reader.member_name()?;
-                    }
-                    open.push(container);
-                    break;
-                }
-                Some(byte) if byte == closing => {
-                    reader.position += 1;
-                    value = reader.close(container)?;
-                }
-                _ => return Err(reader.syntax()),
-            }
-        }
+    let start = scanner.skip_whitespace(0);
+    let (root, end) = scanner.scan(start).map_err(|failure| match failure {
+        Failure::Stop(offset) => ReadError::Syntax {
+            message: "Expecting value",
+            offset,
+        },
+        Failure::Decode(message, offset) => ReadError::Syntax { message, offset },
+        Failure::Hook(error) => ReadError::Hook(error),
+    })?;
+    let end = scanner.skip_whitespace(end);
+    if end != text.len() {
+        return Err(ReadError::Syntax {
+            message: "Extra data",
+            offset: end,
+        });
     }
+    Ok(Document {
+        nodes: scanner.nodes,
+        root,
+    })
 }
 
-/// An array or object whose elements are being read.
-enum Container {
-    /// The elements read so far.
-    Array(Vec<NodeId>),
-    /// The members read so far, and the name of the member whose value is being read.
-    Object(Vec<(PyText, NodeId)>, PyText),
+/// Why scanning stopped.
+enum Failure<E> {
+    /// No value starts at this byte offset: the scanner's `StopIteration`.
+    Stop(usize),
+    /// A `JSONDecodeError` with this message at this byte offset.
+    Decode(&'static str, usize),
+    /// A hook failed.
+    Hook(E),
+}
+
+/// An array or object whose values are being scanned.
+enum Frame {
+    /// An array, by its node.
+    Array(NodeId),
+    /// An object, by its node, with the name of the member whose value is being scanned.
+    Object(NodeId, PyText),
 }
 
 /// The state of [`read`].
-struct Reader<'a, H> {
+struct Scanner<'a, H> {
     /// The text being read.
     text: &'a str,
     /// The bytes of `text`.
     bytes: &'a [u8],
-    /// Byte offset of the next unread byte.
-    position: usize,
     /// The values read so far.
     nodes: Vec<Node>,
     /// The checks to run.
     hooks: &'a mut H,
 }
 
-impl<H: Hooks> Reader<'_, H> {
-    /// Returns the next unread byte.
-    fn peek(&self) -> Option<u8> {
-        self.bytes.get(self.position).copied()
+impl<H: Hooks> Scanner<'_, H> {
+    /// Returns the byte at `index`, if any.
+    fn at(&self, index: usize) -> Option<u8> {
+        self.bytes.get(index).copied()
     }
 
-    /// Returns a syntax error at the current position.
-    fn syntax(&self) -> ReadError<H::Error> {
-        ReadError::Syntax {
-            offset: self.position,
+    /// Returns the offset of the first byte from `index` that is not whitespace that Python's
+    /// decoder skips: a space, a tab, a line feed, or a carriage return.
+    fn skip_whitespace(&self, mut index: usize) -> usize {
+        while matches!(self.at(index), Some(b' ' | b'\t' | b'\n' | b'\r')) {
+            index += 1;
         }
-    }
-
-    /// Skips the whitespace that Python's decoder skips: spaces, tabs, and line feeds and
-    /// carriage returns.
-    fn skip_whitespace(&mut self) {
-        while matches!(self.peek(), Some(b' ' | b'\t' | b'\n' | b'\r')) {
-            self.position += 1;
-        }
+        index
     }
 
     /// Adds a value to the document and returns its index.
@@ -275,191 +278,284 @@ impl<H: Hooks> Reader<'_, H> {
         self.nodes.len() - 1
     }
 
-    /// Adds a container whose closing bracket was read, after running the object hook on an
-    /// object.
-    fn close(&mut self, container: Container) -> Result<NodeId, ReadError<H::Error>> {
-        Ok(match container {
-            Container::Array(elements) => self.push(Node::Array(elements)),
-            Container::Object(members, _) => {
-                self.hooks.object(&members).map_err(ReadError::Hook)?;
-                self.push(Node::Object(members))
-            }
-        })
+    /// Runs the object hook on the members of the object at `node`, which has just closed.
+    fn close_object(&mut self, node: NodeId) -> Result<(), Failure<H::Error>> {
+        if let Node::Object(members) = &self.nodes[node] {
+            self.hooks.object(members).map_err(Failure::Hook)?;
+        }
+        Ok(())
     }
 
-    /// Reads a member's name, the `:` after it, and the whitespace around the `:`.
-    fn member_name(&mut self) -> Result<PyText, ReadError<H::Error>> {
-        if self.peek() != Some(b'"') {
-            return Err(self.syntax());
-        }
-        let name = self.string()?;
-        self.skip_whitespace();
-        if self.peek() != Some(b':') {
-            return Err(self.syntax());
-        }
-        self.position += 1;
-        self.skip_whitespace();
-        Ok(name)
-    }
-
-    /// Reads a string, a constant, or a number.
-    fn scalar(&mut self) -> Result<NodeId, ReadError<H::Error>> {
-        let rest = &self.bytes[self.position..];
-        // Python matches the constants as prefixes, so whatever follows one is read separately.
-        let (node, length) = match rest.first() {
-            Some(b'"') => {
-                let text = self.string()?;
-                return Ok(self.push(Node::String(text)));
-            }
-            Some(b'n') if rest.starts_with(b"null") => (Node::Null, 4),
-            Some(b't') if rest.starts_with(b"true") => (Node::Bool(true), 4),
-            Some(b'f') if rest.starts_with(b"false") => (Node::Bool(false), 5),
-            Some(b'N') if rest.starts_with(b"NaN") => (Node::Float(f64::NAN), 3),
-            Some(b'I') if rest.starts_with(b"Infinity") => (Node::Float(f64::INFINITY), 8),
-            Some(b'-') if rest.starts_with(b"-Infinity") => (Node::Float(f64::NEG_INFINITY), 9),
-            _ => return self.number(),
-        };
-        self.position += length;
-        Ok(self.push(node))
-    }
-
-    /// Reads a number as the C scanner's `_match_number_unicode` does: an optional `-`, `0` or
-    /// digits without a leading zero, a fraction if a digit follows the point, and an exponent if
-    /// a digit follows the `e` and its optional sign. A number with a fraction or an exponent is a
-    /// float, and any other is an integer, which the integer hook receives.
-    fn number(&mut self) -> Result<NodeId, ReadError<H::Error>> {
-        let bytes = self.bytes;
-        let digit = |index: usize| bytes.get(index).is_some_and(u8::is_ascii_digit);
-        let start = self.position;
-        let mut end = start;
-        if bytes.get(end) == Some(&b'-') {
-            end += 1;
-        }
-        match bytes.get(end) {
-            Some(b'1'..=b'9') => {
-                end += 1;
-                while digit(end) {
-                    end += 1;
+    /// Scans the value at `index`, returning its node and the offset after it, as `scan_once`
+    /// does, without recursion.
+    fn scan(&mut self, mut index: usize) -> Result<(NodeId, usize), Failure<H::Error>> {
+        let mut frames: Vec<Frame> = Vec::new();
+        loop {
+            // Scan one value, or open an array or object.
+            let mut value = None;
+            let Some(first) = self.at(index) else {
+                return Err(Failure::Stop(index));
+            };
+            match first {
+                b'"' => {
+                    let (string, next) = self.scan_string(index + 1)?;
+                    value = Some(self.push(Node::String(string)));
+                    index = next;
+                }
+                b'[' => {
+                    let node = self.push(Node::Array(Vec::new()));
+                    index = self.skip_whitespace(index + 1);
+                    if self.at(index) == Some(b']') {
+                        value = Some(node);
+                        index += 1;
+                    } else {
+                        frames.push(Frame::Array(node));
+                    }
+                }
+                b'{' => {
+                    let node = self.push(Node::Object(Vec::new()));
+                    index = self.skip_whitespace(index + 1);
+                    if self.at(index) == Some(b'}') {
+                        self.close_object(node)?;
+                        value = Some(node);
+                        index += 1;
+                    } else {
+                        let (name, next) = self.scan_name(index)?;
+                        frames.push(Frame::Object(node, name));
+                        index = next;
+                    }
+                }
+                _ => {
+                    let (node, next) = self.scan_scalar(index)?;
+                    value = Some(self.push(node));
+                    index = next;
                 }
             }
-            Some(b'0') => end += 1,
-            _ => return Err(self.syntax()),
+            // Attach finished values to their arrays and objects.
+            while let Some(finished) = value.take() {
+                let Some(frame) = frames.last_mut() else {
+                    return Ok((finished, index));
+                };
+                index = self.skip_whitespace(index);
+                let (node, closing) = match frame {
+                    Frame::Array(node) => (*node, b']'),
+                    Frame::Object(node, _) => (*node, b'}'),
+                };
+                match (&mut self.nodes[node], frame) {
+                    (Node::Array(values), Frame::Array(_)) => values.push(finished),
+                    (Node::Object(members), Frame::Object(_, name)) => {
+                        members.push((std::mem::take(name), finished));
+                    }
+                    _ => unreachable!("frames refer to their own arrays and objects"),
+                }
+                if self.at(index) == Some(closing) {
+                    frames.pop();
+                    if closing == b'}' {
+                        self.close_object(node)?;
+                    }
+                    value = Some(node);
+                    index += 1;
+                    continue;
+                }
+                if self.at(index) != Some(b',') {
+                    return Err(Failure::Decode("Expecting ',' delimiter", index));
+                }
+                let comma = index;
+                index = self.skip_whitespace(index + 1);
+                if self.at(index) == Some(closing) {
+                    return Err(Failure::Decode(
+                        if closing == b']' {
+                            "Illegal trailing comma before end of array"
+                        } else {
+                            "Illegal trailing comma before end of object"
+                        },
+                        comma,
+                    ));
+                }
+                if let Some(Frame::Object(_, name)) = frames.last_mut() {
+                    let (next_name, next) = self.scan_name(index)?;
+                    *name = next_name;
+                    index = next;
+                }
+            }
+        }
+    }
+
+    /// Scans a member's name at `index`, its colon, and the whitespace after them, returning the
+    /// name and the offset of its value.
+    fn scan_name(&self, index: usize) -> Result<(PyText, usize), Failure<H::Error>> {
+        if self.at(index) != Some(b'"') {
+            return Err(Failure::Decode(
+                "Expecting property name enclosed in double quotes",
+                index,
+            ));
+        }
+        let (name, next) = self.scan_string(index + 1)?;
+        let index = self.skip_whitespace(next);
+        if self.at(index) != Some(b':') {
+            return Err(Failure::Decode("Expecting ':' delimiter", index));
+        }
+        Ok((name, self.skip_whitespace(index + 1)))
+    }
+
+    /// Scans a constant or a number at `index`. Python matches the constants as prefixes, so
+    /// whatever follows one is scanned separately.
+    fn scan_scalar(&mut self, index: usize) -> Result<(Node, usize), Failure<H::Error>> {
+        for (literal, node) in [
+            ("null", Node::Null),
+            ("true", Node::Bool(true)),
+            ("false", Node::Bool(false)),
+            ("NaN", Node::Float(f64::NAN)),
+            ("Infinity", Node::Float(f64::INFINITY)),
+            ("-Infinity", Node::Float(f64::NEG_INFINITY)),
+        ] {
+            if self.bytes[index..].starts_with(literal.as_bytes()) {
+                return Ok((node, index + literal.len()));
+            }
+        }
+        self.scan_number(index)
+    }
+
+    /// Scans a number at `start` as `_match_number_unicode` does: an optional `-`, `0` or digits
+    /// without a leading zero, a fraction if a digit follows the point, and an exponent if a
+    /// digit follows the `e` and its optional sign. A number with a fraction or an exponent is a
+    /// float, and any other is an integer, which the integer hook receives.
+    fn scan_number(&mut self, start: usize) -> Result<(Node, usize), Failure<H::Error>> {
+        let digit = |index: usize| self.at(index).is_some_and(|byte| byte.is_ascii_digit());
+        let last = self.bytes.len().saturating_sub(1);
+        let mut index = start;
+        if self.at(index) == Some(b'-') {
+            index += 1;
+            if index > last {
+                return Err(Failure::Stop(start));
+            }
+        }
+        match self.at(index) {
+            Some(b'1'..=b'9') => {
+                index += 1;
+                while digit(index) {
+                    index += 1;
+                }
+            }
+            Some(b'0') => index += 1,
+            _ => return Err(Failure::Stop(start)),
         }
         let mut float = false;
-        if bytes.get(end) == Some(&b'.') && digit(end + 1) {
+        if index < last && self.at(index) == Some(b'.') && digit(index + 1) {
             float = true;
-            end += 2;
-            while digit(end) {
-                end += 1;
+            index += 2;
+            while digit(index) {
+                index += 1;
             }
         }
-        if matches!(bytes.get(end), Some(b'e' | b'E')) {
-            let mut exponent = end + 1;
-            if matches!(bytes.get(exponent), Some(b'+' | b'-')) {
-                exponent += 1;
+        if index < last && matches!(self.at(index), Some(b'e' | b'E')) {
+            let exponent = index;
+            index += 1;
+            if index < last && matches!(self.at(index), Some(b'-' | b'+')) {
+                index += 1;
             }
-            if digit(exponent) {
-                while digit(exponent) {
-                    exponent += 1;
-                }
+            while digit(index) {
+                index += 1;
+            }
+            if digit(index - 1) {
                 float = true;
-                end = exponent;
+            } else {
+                index = exponent;
             }
         }
-        let literal = &self.text[start..end];
-        let node = if float {
+        let literal = &self.text[start..index];
+        if float {
             // Like Python's `float`, Rust rounds correctly and overflows to an infinity, so any
             // literal of this form parses.
-            Node::Float(literal.parse().map_err(|_| self.syntax())?)
-        } else {
-            self.hooks.integer(literal).map_err(ReadError::Hook)?;
-            Node::Integer(literal.into())
-        };
-        self.position = end;
-        Ok(self.push(node))
+            return Ok((Node::Float(literal.parse().unwrap_or(f64::NAN)), index));
+        }
+        self.hooks.integer(literal).map_err(Failure::Hook)?;
+        Ok((Node::Integer(literal.into()), index))
     }
 
-    /// Reads a string whose opening quote is the next byte, as the C scanner's
-    /// `scanstring_unicode` does: control characters are refused, and a `\u` escape of a high
-    /// surrogate followed by a `\u` escape of a low surrogate is one character, while any other
-    /// surrogate escape stays an unpaired surrogate.
-    fn string(&mut self) -> Result<PyText, ReadError<H::Error>> {
-        let bytes = self.bytes;
-        let mut text = PyText::new();
-        let mut index = self.position + 1;
+    /// Scans a string whose opening quote precedes `end`, as `scanstring_unicode` does in strict
+    /// mode, returning it and the offset after its closing quote: control characters are refused,
+    /// and a `\u` escape of a high surrogate followed by a `\u` escape of a low surrogate is one
+    /// character, while any other surrogate escape stays an unpaired surrogate.
+    fn scan_string(&self, mut end: usize) -> Result<(PyText, usize), Failure<H::Error>> {
+        let length = self.bytes.len();
+        let begin = end - 1;
+        let mut decoded = PyText::new();
         loop {
-            let chunk = index;
-            while let Some(&byte) = bytes.get(index) {
+            // Find the end of the string or the next escape.
+            let mut next = end;
+            let mut found = None;
+            while next < length {
+                let byte = self.bytes[next];
                 if byte == b'"' || byte == b'\\' {
+                    found = Some(byte);
                     break;
                 }
                 if byte <= 0x1F {
-                    self.position = index;
-                    return Err(self.syntax());
+                    return Err(Failure::Decode("Invalid control character at", next));
                 }
-                index += 1;
+                next += 1;
             }
-            text.push_str(&self.text[chunk..index]);
-            match bytes.get(index) {
-                Some(b'"') => {
-                    self.position = index + 1;
-                    return Ok(text);
-                }
-                Some(_) => index += 1,
-                None => {
-                    self.position = index;
-                    return Err(self.syntax());
-                }
-            }
-            // The escape after a backslash.
-            let character = match bytes.get(index) {
-                Some(b'"') => u32::from(b'"'),
-                Some(b'\\') => u32::from(b'\\'),
-                Some(b'/') => u32::from(b'/'),
-                Some(b'b') => 0x08,
-                Some(b'f') => 0x0C,
-                Some(b'n') => u32::from(b'\n'),
-                Some(b'r') => u32::from(b'\r'),
-                Some(b't') => u32::from(b'\t'),
-                Some(b'u') => {
-                    let Some(mut code_point) = hex_escape(bytes, index + 1) else {
-                        self.position = index;
-                        return Err(self.syntax());
-                    };
-                    index += 4;
-                    if (0xD800..=0xDBFF).contains(&code_point)
-                        && bytes.get(index + 1..index + 3) == Some(b"\\u")
-                    {
-                        let Some(low) = hex_escape(bytes, index + 3) else {
-                            self.position = index + 2;
-                            return Err(self.syntax());
-                        };
-                        if (0xDC00..=0xDFFF).contains(&low) {
-                            code_point = 0x10000 + ((code_point - 0xD800) << 10) + (low - 0xDC00);
-                            index += 6;
-                        }
-                    }
-                    code_point
-                }
-                _ => {
-                    self.position = index;
-                    return Err(self.syntax());
-                }
+            let Some(terminator) = found else {
+                return Err(Failure::Decode("Unterminated string starting at", begin));
             };
-            text.push_code_point(character);
-            index += 1;
+            decoded.push_str(&self.text[end..next]);
+            next += 1;
+            if terminator == b'"' {
+                return Ok((decoded, next));
+            }
+            let Some(escape) = self.at(next) else {
+                return Err(Failure::Decode("Unterminated string starting at", begin));
+            };
+            if escape != b'u' {
+                end = next + 1;
+                let character = match escape {
+                    b'"' | b'\\' | b'/' => char::from(escape),
+                    b'b' => '\u{8}',
+                    b'f' => '\u{c}',
+                    b'n' => '\n',
+                    b'r' => '\r',
+                    b't' => '\t',
+                    _ => return Err(Failure::Decode("Invalid \\escape", end - 2)),
+                };
+                decoded.push_code_point(u32::from(character));
+                continue;
+            }
+            next += 1;
+            end = next + 4;
+            if end > length {
+                return Err(Failure::Decode("Invalid \\uXXXX escape", next - 1));
+            }
+            let mut code_point = self
+                .hex4(next)
+                .ok_or(Failure::Decode("Invalid \\uXXXX escape", end - 5))?;
+            // A high surrogate and a low-surrogate escape after it form one character.
+            if (0xD800..=0xDBFF).contains(&code_point)
+                && end + 6 < length
+                && self.at(end) == Some(b'\\')
+                && self.at(end + 1) == Some(b'u')
+            {
+                let low = self
+                    .hex4(end + 2)
+                    .ok_or(Failure::Decode("Invalid \\uXXXX escape", end + 1))?;
+                if (0xDC00..=0xDFFF).contains(&low) {
+                    code_point = 0x10000 + (((code_point - 0xD800) << 10) | (low - 0xDC00));
+                    end += 6;
+                }
+            }
+            decoded.push_code_point(code_point);
         }
     }
-}
 
-/// Returns the value of the four hexadecimal digits at `start`, of either case.
-fn hex_escape(bytes: &[u8], start: usize) -> Option<u32> {
-    bytes
-        .get(start..start + 4)?
-        .iter()
-        .try_fold(0, |value, &digit| {
-            Some((value << 4) | char::from(digit).to_digit(16)?)
-        })
+    /// Returns the value of the four hexadecimal digits at `index`, of either case.
+    fn hex4(&self, index: usize) -> Option<u32> {
+        self.bytes
+            .get(index..index + 4)?
+            .iter()
+            .try_fold(0, |value, &digit| {
+                Some((value << 4) | char::from(digit).to_digit(16)?)
+            })
+    }
 }
 
 #[cfg(test)]
@@ -650,5 +746,100 @@ mod tests {
         );
         let text = format!("{}1{}", "{\"a\":".repeat(depth), "}".repeat(depth));
         read(&text, &mut Strict).unwrap();
+    }
+
+    /// Reads `text` as `json.loads(text)` does and describes its error as Python prints it.
+    fn error(text: &str) -> String {
+        match read(text, &mut Loads) {
+            Ok(_) => panic!("{text:?} was read"),
+            Err(ReadError::Syntax { message, offset }) => syntax_error(text, message, offset),
+            Err(ReadError::Hook(error)) => error.message(text),
+        }
+    }
+
+    #[test]
+    fn documents_read_as_json_loads_reads_them() {
+        let text = " [\"a\", 1, -2.5e1, NaN, -Infinity, null, true, {\"k\": [], \"k\": {}}] ";
+        let document = read(text, &mut Loads).unwrap();
+        let Node::Array(values) = document.node(document.root()) else {
+            panic!("not an array");
+        };
+        let nodes: Vec<&Node> = values.iter().map(|&id| document.node(id)).collect();
+        assert_eq!(nodes[0], &Node::String(PyText::from("a")));
+        assert_eq!(nodes[1], &Node::Integer("1".into()));
+        assert_eq!(nodes[2], &Node::Float(-25.0));
+        assert!(matches!(nodes[3], Node::Float(value) if value.is_nan()));
+        assert_eq!(nodes[4], &Node::Float(f64::NEG_INFINITY));
+        assert_eq!(nodes[5], &Node::Null);
+        assert_eq!(nodes[6], &Node::Bool(true));
+        // The last of repeated names wins, as in the `dict` that Python builds.
+        assert_eq!(
+            document.get(values[7], "k"),
+            Some(&Node::Object(Vec::new()))
+        );
+        assert_eq!(document.get(values[7], "missing"), None);
+        assert_eq!(document.get(values[0], "k"), None);
+    }
+
+    #[test]
+    fn errors_read_as_python_reports_them() {
+        for (text, expected) in [
+            ("", "Expecting value: line 1 column 1 (char 0)"),
+            ("[", "Expecting value: line 1 column 2 (char 1)"),
+            ("[1", "Expecting ',' delimiter: line 1 column 3 (char 2)"),
+            (
+                "[1,]",
+                "Illegal trailing comma before end of array: line 1 column 3 (char 2)",
+            ),
+            (
+                "{\"a\":1,}",
+                "Illegal trailing comma before end of object: line 1 column 7 (char 6)",
+            ),
+            (
+                "{1:2}",
+                "Expecting property name enclosed in double quotes: line 1 column 2 (char 1)",
+            ),
+            (
+                "{\"a\" 1}",
+                "Expecting ':' delimiter: line 1 column 6 (char 5)",
+            ),
+            (
+                "\"abc",
+                "Unterminated string starting at: line 1 column 1 (char 0)",
+            ),
+            (
+                "\"a\tb\"",
+                "Invalid control character at: line 1 column 3 (char 2)",
+            ),
+            ("\"\\x\"", "Invalid \\escape: line 1 column 2 (char 1)"),
+            (
+                "\"\\u12\"",
+                "Invalid \\uXXXX escape: line 1 column 3 (char 2)",
+            ),
+            ("[]\n x", "Extra data: line 2 column 2 (char 4)"),
+            (
+                "\u{feff}[]",
+                "Unexpected UTF-8 BOM (decode using utf-8-sig): line 1 column 1 (char 0)",
+            ),
+            ("-", "Expecting value: line 1 column 1 (char 0)"),
+            ("01", "Extra data: line 1 column 2 (char 1)"),
+            // Positions count characters, not bytes.
+            (
+                "[\"é\" x]",
+                "Expecting ',' delimiter: line 1 column 6 (char 5)",
+            ),
+            (
+                "{\"\u{1F600}\":\n 1 2}",
+                "Expecting ',' delimiter: line 2 column 4 (char 9)",
+            ),
+            (
+                &format!("[{}]", "1".repeat(4301)),
+                "Exceeds the limit (4300 digits) for integer string conversion: value has 4301 \
+                 digits; use sys.set_int_max_str_digits() to increase the limit",
+            ),
+        ] {
+            assert_eq!(error(text), expected, "{text:?}");
+        }
+        assert!(read(&format!("[-{}]", "1".repeat(4300)), &mut Loads).is_ok());
     }
 }

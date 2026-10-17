@@ -5,10 +5,11 @@
 //! paths, and queries the filesystem. These modules implement what the ports rely on, after
 //! CPython 3.14:
 //!
-//! - [`text`]: Python strings, which may hold unpaired surrogates, and how Python prints them.
+//! - [`text`]: Python strings, which may hold unpaired surrogates, how Python prints them, and
+//!   the errors of its UTF-8 codec.
 //! - [`builtins`]: `str.isspace`, `str.split()`, `str.strip()`, `repr` of a `str`, and `int`.
 //! - [`json`]: a JSON reader that accepts what `json.loads` accepts, with the equivalents of its
-//!   `object_pairs_hook` and `parse_int` hooks.
+//!   `object_pairs_hook` and `parse_int` hooks, and that fails with its messages.
 //! - [`path`]: `str(pathlib.Path(...))`, which Python messages show, the path that Python opens
 //!   for it, and the pure paths of `pathlib` with the `os.path` operations that they use.
 //! - [`uuid`]: the UUIDs that `uuid.UUID` reads.

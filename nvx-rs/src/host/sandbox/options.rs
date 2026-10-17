@@ -1,0 +1,586 @@
+//! The checks that `nvx.py sandbox` and `nvx.py run` apply to their options, ported from
+//! `scripts/nvx.py` with their order and messages:
+//!
+//! - [`SandboxOptions::check`]: the checks of `command_sandbox` before it builds the launch: the
+//!   operations that each option is valid for, the options that need others, and the managed exec
+//!   environment, from `--environment` or `--environment-file`.
+//! - [`sandbox_mounts`]: the shares of the `--mount` options, with each `--mount-deny`,
+//!   `--mount-allow`, and `--mount-write` attributed to its share, and each share's kind.
+//! - [`validate_sandbox_systemd_policy`]: the refusal of systemd entrypoints and images.
+//! - [`validate_run_share_targets`]: the guest targets of several `nvx.py run` shares, or of a
+//!   shared file.
+//! - [`validate_exec_environment`] and [`exec_environment_from_file`]: the environment of a
+//!   managed exec.
+
+use std::fmt;
+use std::fs::File;
+use std::io::Read;
+
+use sha2::{Digest, Sha256};
+
+use super::layer::LayerRole;
+use super::mount::{
+    AGGREGATE_MOUNT_TARGET, MountKind, MountOwner, MountPolicy, POLICY_KINDS, PolicyKind,
+    SandboxMount, has_forbidden_character, has_irregular_component, mount_kind, os_error,
+};
+use super::{SandboxLaunch, refused};
+use crate::error::Result;
+use crate::host::python::builtins::repr;
+use crate::host::python::fs;
+use crate::host::python::json::{self, Loads, Node, ReadError};
+use crate::host::python::path::{Flavor, PurePath};
+use crate::host::python::text::{PyText, decode_utf8};
+
+/// The entrypoints of systemd, which the sandbox security profile does not run.
+pub const SYSTEMD_ENTRYPOINTS: [&str; 2] = ["/usr/lib/systemd/systemd", "/lib/systemd/systemd"];
+/// The largest environment file of a managed exec, in bytes.
+pub const MAX_ENVIRONMENT_FILE_BYTES: usize = 1024 * 1024;
+/// The most entries of a managed exec environment.
+pub const MAX_EXEC_ENVIRONMENT: usize = 256;
+/// The longest entry of a managed exec environment, in UTF-8 bytes.
+pub const MAX_EXEC_ENVIRONMENT_BYTES: usize = 4096;
+/// The suffix of the manifest next to a distro layer.
+const DISTRO_MANIFEST_SUFFIX: &str = ".manifest.json";
+
+/// An operation of `nvx.py sandbox`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum SandboxOperation {
+    /// `run`: a one-shot sandbox, the default.
+    Run,
+    /// `provision`: record a managed sandbox's launch in its state directory.
+    Provision,
+    /// `start`: start a provisioned sandbox.
+    Start,
+    /// `exec`: run a workload in a started sandbox.
+    Exec,
+    /// `stop`: stop a started sandbox.
+    Stop,
+    /// `deprovision`: remove a sandbox's state directory.
+    Deprovision,
+}
+
+impl SandboxOperation {
+    /// Returns the operation's name.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Run => "run",
+            Self::Provision => "provision",
+            Self::Start => "start",
+            Self::Exec => "exec",
+            Self::Stop => "stop",
+            Self::Deprovision => "deprovision",
+        }
+    }
+
+    /// Returns whether the operation launches a sandbox: `run` or `provision`.
+    fn launches(self) -> bool {
+        matches!(self, Self::Run | Self::Provision)
+    }
+}
+
+impl fmt::Display for SandboxOperation {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+/// A `--mount-deny`, `--mount-allow`, or `--mount-write` option, with the position among the
+/// `--mount` options of the one before it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PolicyPathOption {
+    /// The kind of path, which the option gives.
+    pub kind: PolicyKind,
+    /// The index of the last `--mount` option before this one, if any.
+    pub preceding_mount: Option<usize>,
+    /// The host path, as given.
+    pub path: String,
+}
+
+/// The options of `nvx.py sandbox` that [`SandboxOptions::check`] examines, as given.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SandboxOptions {
+    /// The operation.
+    pub operation: SandboxOperation,
+    /// `--dry-run`.
+    pub dry_run: bool,
+    /// `--cwd`.
+    pub cwd: Option<String>,
+    /// The `--environment` options.
+    pub environment: Vec<String>,
+    /// `--environment-file`.
+    pub environment_file: Option<String>,
+    /// `--inherit-default-environment`.
+    pub inherit_default_environment: bool,
+    /// Whether any network policy option was given: `--net`, `--network-profile`,
+    /// `--network-egress`, `--network-ingress`, `--network-egress-policy-file`,
+    /// `--host-loopback`, `--network-proxy`, `--network-egress-allow`,
+    /// `--network-egress-deny`, or `--host-loopback-forward`.
+    pub network_options: bool,
+    /// Whether `--net` was given.
+    pub net: bool,
+    /// Whether `--network-profile` was given.
+    pub network_profile: bool,
+    /// `--entrypoint`.
+    pub entrypoint: String,
+    /// Whether `--outcome-report` was given.
+    pub outcome_report: bool,
+    /// The `--mount` options.
+    pub mounts: Vec<String>,
+    /// The `--mount-deny`, `--mount-allow`, and `--mount-write` options, in order.
+    pub policy_paths: Vec<PolicyPathOption>,
+    /// `--mount-owner`.
+    pub mount_owner: Option<MountOwner>,
+    /// Whether any `--layer` was given.
+    pub layers: bool,
+    /// Whether `--scratch` was given.
+    pub scratch: bool,
+}
+
+impl SandboxOptions {
+    /// Returns the options of an operation with the defaults of `nvx.py sandbox`.
+    pub fn new(operation: SandboxOperation) -> Self {
+        Self {
+            operation,
+            dry_run: false,
+            cwd: None,
+            environment: Vec::new(),
+            environment_file: None,
+            inherit_default_environment: false,
+            network_options: false,
+            net: false,
+            network_profile: false,
+            entrypoint: super::DEFAULT_ENTRYPOINT.to_owned(),
+            outcome_report: false,
+            mounts: Vec::new(),
+            policy_paths: Vec::new(),
+            mount_owner: None,
+            layers: false,
+            scratch: false,
+        }
+    }
+
+    /// Applies the checks of `command_sandbox` that precede the launch, in its order, and
+    /// returns the managed exec environment of an `exec`, if one was given.
+    ///
+    /// It refuses `--dry-run` except for `run`, both `--environment` and `--environment-file`,
+    /// the managed exec options except for `exec`, an `exec` environment that
+    /// [`exec_environment_from_file`] or [`validate_exec_environment`] refuses, network policy
+    /// options except for `run` and `provision`, a systemd entrypoint for `run`, `provision`,
+    /// and `exec`, `--outcome-report` except for `run` and `exec`, share options without a
+    /// `--mount`, `--mount` except for `run` and `provision`, and for `run` and `provision`,
+    /// `--net` without `--network-profile` or the reverse, and a missing `--layer` or
+    /// `--scratch`.
+    ///
+    /// Fails with [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported).
+    pub fn check(&self) -> Result<Option<Vec<String>>> {
+        let operation = self.operation;
+        if self.dry_run && operation != SandboxOperation::Run {
+            return Err(refused("--dry-run is only valid for sandbox run"));
+        }
+        if !self.environment.is_empty() && self.environment_file.is_some() {
+            return Err(refused(
+                "--environment and --environment-file are mutually exclusive",
+            ));
+        }
+        if operation != SandboxOperation::Exec
+            && (self.cwd.is_some()
+                || !self.environment.is_empty()
+                || self.environment_file.is_some()
+                || self.inherit_default_environment)
+        {
+            return Err(refused(
+                "managed execution options require the sandbox exec operation",
+            ));
+        }
+        let mut environment = None;
+        if operation == SandboxOperation::Exec {
+            if let Some(file) = &self.environment_file {
+                environment = Some(exec_environment_from_file(file)?);
+            } else if !self.environment.is_empty() {
+                validate_exec_environment(&self.environment)?;
+                environment = Some(self.environment.clone());
+            }
+        }
+        if !operation.launches() && self.network_options {
+            return Err(refused(
+                "network policy options are only valid for sandbox run or provision",
+            ));
+        }
+        if matches!(
+            operation,
+            SandboxOperation::Run | SandboxOperation::Provision | SandboxOperation::Exec
+        ) && SYSTEMD_ENTRYPOINTS.contains(&self.entrypoint.as_str())
+        {
+            return Err(refused(
+                "systemd entrypoints are unsupported by the sandbox security profile",
+            ));
+        }
+        if self.outcome_report
+            && !matches!(operation, SandboxOperation::Run | SandboxOperation::Exec)
+        {
+            return Err(refused(
+                "--outcome-report is only valid for one-shot run or managed exec",
+            ));
+        }
+        for kind in POLICY_KINDS {
+            if self.mounts.is_empty() && self.policy_paths.iter().any(|path| path.kind == kind) {
+                return Err(refused(format!("{} requires --mount", kind.option())));
+            }
+        }
+        if self.mount_owner.is_some() && self.mounts.is_empty() {
+            return Err(refused("--mount-owner requires --mount"));
+        }
+        if !self.mounts.is_empty() && !operation.launches() {
+            return Err(refused(
+                "--mount is only valid for sandbox run or provision",
+            ));
+        }
+        if operation.launches() {
+            if self.net != self.network_profile {
+                return Err(refused(
+                    "--net and --network-profile must be specified together",
+                ));
+            }
+            if !self.layers || !self.scratch {
+                return Err(refused(format!(
+                    "sandbox {operation} requires --layer and --scratch"
+                )));
+            }
+        }
+        Ok(environment)
+    }
+}
+
+/// Returns the shares of the `--mount` values in `mounts`, each with its access-policy paths, the
+/// `owner` (`vmm` by default), and the kind that [`mount_kind`] finds for its host path.
+///
+/// With one `--mount`, every policy path names a path in it. With several, each names a path in
+/// the `--mount` before it. Fails with [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported)
+/// for a policy path without a `--mount` before it among several, and as
+/// [`SandboxMount::parse`] and [`SandboxMount::with_kind`] do.
+pub fn sandbox_mounts(
+    mounts: &[String],
+    policy_paths: &[PolicyPathOption],
+    owner: Option<MountOwner>,
+) -> Result<Vec<SandboxMount>> {
+    sandbox_mounts_with(Flavor::NATIVE, mounts, policy_paths, owner, &|mount| {
+        mount_kind(mount.host_path())
+    })
+}
+
+/// Implements [`sandbox_mounts`] for host paths of `flavor`, with `kind_of` as [`mount_kind`].
+pub(crate) fn sandbox_mounts_with(
+    flavor: Flavor,
+    mounts: &[String],
+    policy_paths: &[PolicyPathOption],
+    owner: Option<MountOwner>,
+    kind_of: &dyn Fn(&SandboxMount) -> MountKind,
+) -> Result<Vec<SandboxMount>> {
+    let mut policies = vec![MountPolicy::default(); mounts.len()];
+    for kind in POLICY_KINDS {
+        for option in policy_paths.iter().filter(|option| option.kind == kind) {
+            let index = match (mounts.len(), option.preceding_mount) {
+                (1, _) => 0,
+                (_, Some(index)) => index,
+                (_, None) => {
+                    return Err(refused(format!(
+                        "with several --mount options, each {} must follow the --mount whose \
+                         host directory it names",
+                        kind.option()
+                    )));
+                }
+            };
+            let policy = policies.get_mut(index).ok_or_else(|| {
+                refused(format!(
+                    "{} follows --mount number {}, which is missing",
+                    kind.option(),
+                    index + 1
+                ))
+            })?;
+            match kind {
+                PolicyKind::Denied => &mut policy.denied,
+                PolicyKind::Allowed => &mut policy.allowed,
+                PolicyKind::Writable => &mut policy.writable,
+            }
+            .push(option.path.clone());
+        }
+    }
+    let owner = owner.unwrap_or(MountOwner::Vmm);
+    mounts
+        .iter()
+        .zip(policies)
+        .map(|(value, policy)| {
+            let mount = SandboxMount::parse_in(flavor, value, policy, owner, MountKind::Directory)?;
+            mount.with_kind(kind_of(&mount))
+        })
+        .collect()
+}
+
+/// Refuses the guest targets of `nvx.py run` shares that the guest cannot bind from an
+/// aggregate: targets that would not survive the kernel command line, or that hide each other or
+/// the aggregate itself. `nvx.py run` checks them when it attaches several shares, or a file.
+///
+/// Fails with [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported).
+pub fn validate_run_share_targets(targets: &[&str]) -> Result<()> {
+    for (index, target) in targets.iter().enumerate() {
+        if !target.starts_with('/')
+            || *target == "/"
+            || has_forbidden_character(target)
+            || has_irregular_component(target)
+        {
+            return Err(refused(format!(
+                "invalid --mount target {}: with several shares, or a shared file, each target \
+                 must be an absolute non-root path without empty, dot, or parent components, \
+                 whitespace, '\\', '=', or ','",
+                repr(target)
+            )));
+        }
+        for other in std::iter::once(&AGGREGATE_MOUNT_TARGET).chain(&targets[..index]) {
+            let inside = |path: &str, directory: &str| {
+                path.strip_prefix(directory)
+                    .is_some_and(|rest| rest.starts_with('/'))
+            };
+            if target == other || inside(target, other) || inside(other, target) {
+                return Err(refused(format!(
+                    "--mount targets {other} and {target} overlap; a share cannot hide another"
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Refuses a launch that would run systemd: a systemd entrypoint, or a distro layer whose
+/// manifest, `LAYER.manifest.json` next to it, lists the `systemd` package.
+///
+/// A layer without a manifest passes. A manifest must be a JSON object of format 1 that names
+/// the layer and its SHA-256 digest, with a list of packages that each have a name. Fails with
+/// [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported), or
+/// [`ErrorKind::Io`](crate::ErrorKind::Io) if the layer cannot be read to compute its digest.
+pub fn validate_sandbox_systemd_policy(launch: &SandboxLaunch) -> Result<()> {
+    if SYSTEMD_ENTRYPOINTS.contains(&launch.settings().entrypoint.as_str()) {
+        return Err(refused(
+            "systemd entrypoints are unsupported by the sandbox security profile",
+        ));
+    }
+    let Some(distro) = launch
+        .layers()
+        .iter()
+        .find(|layer| layer.role() == LayerRole::Distro)
+    else {
+        return Ok(());
+    };
+    let path = distro.pure_path();
+    let Some(manifest) = path.with_name(&format!("{}{DISTRO_MANIFEST_SUFFIX}", path.name())) else {
+        // `with_name` raises `ValueError` for a path without a name.
+        let class = match path.flavor() {
+            Flavor::Posix => "PosixPath",
+            Flavor::Windows => "WindowsPath",
+        };
+        return Err(refused(format!(
+            "{class}({}) has an empty name",
+            repr(&path.as_str().replace('\\', "/"))
+        )));
+    };
+    if !fs::exists(manifest.as_path()) {
+        return Ok(());
+    }
+    let invalid = |detail: String| refused(format!("invalid sandbox distro manifest: {detail}"));
+    let bytes = std::fs::read(manifest.as_path())
+        .map_err(|error| invalid(fs::os_error_message(&error, Some(manifest.as_str()))))?;
+    // `read_text` decodes strictly, outside the errors that become this message, and reads with
+    // universal newlines.
+    let text = decode_utf8(&bytes)
+        .map_err(refused)?
+        .replace("\r\n", "\n")
+        .replace('\r', "\n");
+    let document = match json::read(&text, &mut Loads) {
+        Ok(document) => document,
+        Err(ReadError::Syntax { message, offset }) => {
+            return Err(invalid(json::syntax_error(&text, message, offset)));
+        }
+        Err(ReadError::Hook(error)) => return Err(refused(error.message(&text))),
+    };
+    let root = document.root();
+    if !matches!(document.node(root), Node::Object(_)) {
+        return Err(invalid("expected a JSON object".to_owned()));
+    }
+    let mismatch = || refused("sandbox distro manifest does not match its artifact");
+    if !document.get(root, "format").is_some_and(equals_one) {
+        return Err(mismatch());
+    }
+    if !document
+        .get(root, "artifact")
+        .is_some_and(|artifact| string_equals(artifact, path.name()))
+    {
+        return Err(mismatch());
+    }
+    let digest = sha256_file(path)?;
+    if !document
+        .get(root, "artifact_sha256")
+        .is_some_and(|value| string_equals(value, &digest))
+    {
+        return Err(mismatch());
+    }
+    let invalid_packages = || refused("sandbox distro manifest has invalid package metadata");
+    let Some(Node::Array(packages)) = document.get(root, "packages") else {
+        return Err(invalid_packages());
+    };
+    let mut systemd = false;
+    for &package in packages {
+        if !matches!(document.node(package), Node::Object(_)) {
+            return Err(invalid_packages());
+        }
+        let Some(Node::String(name)) = document.get(package, "name") else {
+            return Err(invalid_packages());
+        };
+        systemd |= name.as_bytes() == b"systemd";
+    }
+    if systemd {
+        return Err(refused(
+            "systemd images are unsupported by the sandbox security profile",
+        ));
+    }
+    Ok(())
+}
+
+/// Returns whether a JSON value equals Python's `1`: the integer, a float of that value, or
+/// `true`.
+fn equals_one(value: &Node) -> bool {
+    match value {
+        Node::Integer(literal) => literal.as_ref() == "1",
+        Node::Float(float) => *float == 1.0,
+        Node::Bool(boolean) => *boolean,
+        _ => false,
+    }
+}
+
+/// Returns whether a JSON value is the string `text`.
+fn string_equals(value: &Node, text: &str) -> bool {
+    matches!(value, Node::String(string) if string.as_bytes() == text.as_bytes())
+}
+
+/// Returns the lowercase hexadecimal SHA-256 digest of the file at `path`.
+fn sha256_file(path: &PurePath) -> Result<String> {
+    let io_error = |error: std::io::Error| os_error(&error, Some(path.as_str()));
+    let mut file = File::open(path.as_path()).map_err(io_error)?;
+    let mut hasher = Sha256::new();
+    let mut buffer = vec![0; 1024 * 1024];
+    loop {
+        let read = file.read(&mut buffer).map_err(io_error)?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok(hasher
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect())
+}
+
+/// Checks a managed exec environment, as `encode_exec_environment` does: at most
+/// [`MAX_EXEC_ENVIRONMENT`] entries, each a `KEY=VALUE` string with a nonempty key, without NUL,
+/// of at most [`MAX_EXEC_ENVIRONMENT_BYTES`] bytes, and no key twice.
+///
+/// Fails with [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported).
+pub fn validate_exec_environment(entries: &[String]) -> Result<()> {
+    let entries: Vec<PyText> = entries
+        .iter()
+        .map(|entry| PyText::from(entry.as_str()))
+        .collect();
+    validate_entries(&entries)
+}
+
+/// Implements [`validate_exec_environment`] for strings that may hold surrogates.
+fn validate_entries(entries: &[PyText]) -> Result<()> {
+    if entries.len() > MAX_EXEC_ENVIRONMENT {
+        return Err(refused(format!(
+            "managed exec environment exceeds {MAX_EXEC_ENVIRONMENT} entries"
+        )));
+    }
+    let mut names = std::collections::HashSet::new();
+    for entry in entries {
+        // Python encodes the entry, which fails at its first run of surrogates, before it
+        // checks it.
+        let entry = entry.encode_utf8().map_err(refused)?;
+        let (name, separator) = match entry.split_once('=') {
+            Some((name, _)) => (name, true),
+            None => (entry, false),
+        };
+        if !separator
+            || name.is_empty()
+            || entry.contains('\0')
+            || entry.len() > MAX_EXEC_ENVIRONMENT_BYTES
+        {
+            return Err(refused(format!(
+                "managed exec environment entries must be non-empty KEY=VALUE strings of at most \
+                 {MAX_EXEC_ENVIRONMENT_BYTES} bytes"
+            )));
+        }
+        if !names.insert(name.to_owned()) {
+            return Err(refused(format!(
+                "managed exec environment contains duplicate key: {name}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Reads the managed exec environment of `--environment-file`: a JSON array of `KEY=VALUE`
+/// strings of at most [`MAX_ENVIRONMENT_FILE_BYTES`] bytes, which must then pass
+/// [`validate_exec_environment`].
+///
+/// The file is read as `json.loads` reads it, so Python's extensions to JSON are accepted, and
+/// `\u` escapes of unpaired surrogates fail as Python fails to encode them. Fails with
+/// [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported), naming the file as `pathlib`
+/// normalizes it when it cannot be read or decoded.
+pub fn exec_environment_from_file(path: &str) -> Result<Vec<String>> {
+    let path = PurePath::native(path);
+    let unreadable = || {
+        refused(format!(
+            "failed to read managed execution environment: {path}"
+        ))
+    };
+    let mut data = Vec::new();
+    File::open(path.as_path())
+        .and_then(|file| {
+            file.take(MAX_ENVIRONMENT_FILE_BYTES as u64 + 1)
+                .read_to_end(&mut data)
+        })
+        .map_err(|_| unreadable())?;
+    if data.len() > MAX_ENVIRONMENT_FILE_BYTES {
+        return Err(refused(format!(
+            "managed execution environment file exceeds {MAX_ENVIRONMENT_FILE_BYTES}-byte limit"
+        )));
+    }
+    let text = std::str::from_utf8(&data).map_err(|_| unreadable())?;
+    let document = match json::read(text, &mut Loads) {
+        Ok(document) => document,
+        Err(ReadError::Syntax { .. }) => return Err(unreadable()),
+        // `int` raises a `ValueError` that is not a decoding error.
+        Err(ReadError::Hook(error)) => return Err(refused(error.message(text))),
+    };
+    let not_strings = || {
+        refused("managed execution environment file must contain a JSON array of KEY=VALUE strings")
+    };
+    let Node::Array(values) = document.node(document.root()) else {
+        return Err(not_strings());
+    };
+    let entries = values
+        .iter()
+        .map(|&index| match document.node(index) {
+            Node::String(string) => Ok(string.clone()),
+            _ => Err(not_strings()),
+        })
+        .collect::<Result<Vec<_>>>()?;
+    validate_entries(&entries)?;
+    Ok(entries
+        .iter()
+        .map(|entry| entry.as_str().unwrap_or_default().to_owned())
+        .collect())
+}
+
+#[cfg(test)]
+mod tests;
