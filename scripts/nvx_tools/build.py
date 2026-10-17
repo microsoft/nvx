@@ -958,6 +958,13 @@ def build_initramfs(config: InitramfsBuildConfig) -> None:
     provenance_path = output.with_name(InitramfsBuildConstants.PROVENANCE_NAME)
     if provenance_inputs is not None:
         provenance_path.unlink(missing_ok=True)
+    # Snapshot before the root is prepared so the manifest describes the sources
+    # this build consumed; the post-pack comparison catches any edit in between.
+    ubuntu_input_sha256 = (
+        ubuntu.converter_input_sha256(ubuntu.customization_files())
+        if descriptor.name == "ubuntu"
+        else None
+    )
     root = _prepare_guest_root(config, descriptor)
     helpers = _install_guest_files(config, root, descriptor)
     if descriptor.name == "ubuntu":
@@ -965,13 +972,15 @@ def build_initramfs(config: InitramfsBuildConfig) -> None:
     else:
         _write_apk_manifest(root, output, helpers)
     _pack_initramfs(root, output)
-    if descriptor.name == "ubuntu":
-        _write_ubuntu_manifest(
-            root,
-            output,
-            helpers,
-            ubuntu.converter_input_sha256(ubuntu.customization_files()),
-        )
+    if ubuntu_input_sha256 is not None:
+        _write_ubuntu_manifest(root, output, helpers, ubuntu_input_sha256)
+        if (
+            ubuntu.converter_input_sha256(ubuntu.customization_files())
+            != ubuntu_input_sha256
+        ):
+            output.unlink(missing_ok=True)
+            package_manifest.unlink(missing_ok=True)
+            raise ScriptError("initramfs source inputs changed during the build")
     if (
         provenance_inputs is not None
         and initramfs_provenance_inputs() != provenance_inputs

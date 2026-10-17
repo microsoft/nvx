@@ -8145,6 +8145,75 @@ class BuildTests(unittest.TestCase):
             )
             self.assertEqual(manifest["input_sha256"], "a" * 64)
 
+    def test_ubuntu_initramfs_rejects_source_mutation_during_pack(self):
+        # The manifest must describe the sources the build actually consumed,
+        # so an edit made while the root is packed must fail the build.
+        for mutate in (False, True):
+            with (
+                self.subTest(mutate=mutate),
+                tempfile.TemporaryDirectory() as temporary,
+            ):
+                root = Path(temporary)
+                source = root / "nvx-bashrc"
+                source.write_bytes(b"old\n")
+                output = root / "output" / "initramfs-ubuntu.cpio.gz"
+                output.parent.mkdir()
+
+                def digest(files: tuple[Path, ...]) -> str:
+                    content = b"".join(Path(path).read_bytes() for path in files)
+                    return hashlib.sha256(content).hexdigest()
+
+                def pack(
+                    _root: Path,
+                    archive: Path,
+                    mutate: bool = mutate,
+                    source: Path = source,
+                ) -> None:
+                    archive.write_bytes(b"old initramfs")
+                    if mutate:
+                        source.write_bytes(b"new\n")
+
+                with (
+                    patch.object(build, "_require_linux"),
+                    patch.object(build, "_prepare_guest_root", return_value=root),
+                    patch.object(build, "_install_guest_files", return_value={}),
+                    patch.object(build, "_pack_initramfs", side_effect=pack),
+                    patch.object(ubuntu, "customization_files", return_value=(source,)),
+                    patch.object(ubuntu, "converter_input_sha256", side_effect=digest),
+                    patch.object(ubuntu, "apply_metadata_policy"),
+                    patch.object(
+                        ubuntu,
+                        "package_manifest",
+                        return_value={"format": 1, "guest": "ubuntu"},
+                    ),
+                ):
+                    config = build_config.InitramfsBuildConfig(
+                        guest="ubuntu",
+                        work=root / "work",
+                        output=output,
+                    )
+                    if mutate:
+                        with self.assertRaisesRegex(
+                            common.ScriptError,
+                            "inputs changed during the build",
+                        ):
+                            build.build_initramfs(config)
+                        self.assertFalse(output.exists())
+                        self.assertFalse(
+                            output.with_name(f"{output.name}.packages.json").exists()
+                        )
+                    else:
+                        build.build_initramfs(config)
+                        manifest = json.loads(
+                            output.with_name(f"{output.name}.packages.json").read_text(
+                                encoding="utf-8"
+                            )
+                        )
+                        self.assertEqual(
+                            manifest["input_sha256"],
+                            digest((source,)),
+                        )
+
     def test_ubuntu_source_requirements_deduplicate_binary_manifests(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
