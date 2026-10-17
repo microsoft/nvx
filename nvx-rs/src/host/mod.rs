@@ -1,6 +1,7 @@
 //! The host side of NVX.
 //!
-//! - [`artifacts`] locates the OpenVMM executable and the guest kernel and initramfs.
+//! - [`artifacts`] locates the OpenVMM executable and the guest kernel and initramfs, and every
+//!   artifact of the guests that `nvx.py` runs, in a repository checkout or a release.
 //! - [`launch`] builds OpenVMM's command line from a [`LaunchSpec`](launch::LaunchSpec): the
 //!   managed lifecycle, the workload identity, the kernel command line, and the network and
 //!   filesystem options.

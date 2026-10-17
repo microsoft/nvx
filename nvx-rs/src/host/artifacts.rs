@@ -1,20 +1,43 @@
-//! Locating the OpenVMM executable and the NVX guest kernel and initramfs.
+//! Locating the OpenVMM executable and the NVX guest artifacts.
 //!
 //! [`Artifacts`] names the three files that a VM runs. They come from an extracted NVX release
 //! archive, an NVX repository checkout, explicit paths, or a bundle that the build script staged
 //! with the `bundled` feature. [`Artifacts::discover`] tries these sources in a fixed order so
 //! consumers such as MXC need no NVX-specific configuration.
+//!
+//! [`ArtifactDir`] names every artifact of the guests that `nvx.py` runs, which [`Guest`]
+//! describes, in a repository checkout or an extracted release:
+//!
+//! | Artifact | Repository layout | Release layout |
+//! | --- | --- | --- |
+//! | OpenVMM | `openvmm/target/release/openvmm[.exe]` | `bin/openvmm[.exe]` |
+//! | Kernel | `build/vmlinux` | `guest/vmlinux` |
+//! | Alpine initramfs | `build/initramfs.cpio.gz` | `guest/initramfs.cpio.gz` |
+//! | Ubuntu initramfs | `build/initramfs-ubuntu.cpio.gz` | `guest/initramfs-ubuntu.cpio.gz` |
+//! | Azure Linux initramfs | `build/initramfs-azurelinux.cpio.gz` | `guest/initramfs-azurelinux.cpio.gz` |
+//! | Ubuntu distro layer | `build/ubuntu-distro.erofs` | `guest/ubuntu-distro.erofs` |
+//!
+//! Each initramfs has a package manifest beside it, `NAME.packages.json`, and the distro layer a
+//! manifest, `NAME.manifest.json`. A release package holds the guest artifacts that its
+//! `SOURCE-MANIFEST.json` declares, and `nvx.py download` installs them into the repository
+//! layout of a checkout, with the release's OpenVMM executable. The paths and messages are those
+//! of `artifact_path`, `openvmm_binary_path`, and `require_file` in
+//! `scripts/nvx_tools/common.py`, so the `nvx.py` commands can look their artifacts up here.
 
 use std::env;
 use std::ffi::OsString;
+use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use serde::Serialize;
 use serde_json::Value;
 
 use crate::contract;
 use crate::error::{Error, Result};
 use crate::host::platform;
+use crate::host::python::builtins::repr;
+use crate::host::sandbox::require_file;
 
 /// Name of the release manifest at the root of a release archive or repository checkout.
 pub const MANIFEST_NAME: &str = "SOURCE-MANIFEST.json";
@@ -123,12 +146,7 @@ impl Artifacts {
     /// other directory is a repository checkout.
     pub fn from_dir(directory: impl AsRef<Path>) -> Result<Self> {
         let directory = directory.as_ref();
-        let release_artifacts = [
-            directory.join("bin").join(openvmm_executable()),
-            directory.join(RELEASE_KERNEL[0]).join(RELEASE_KERNEL[1]),
-            directory.join(RELEASE_INITRD[0]).join(RELEASE_INITRD[1]),
-        ];
-        if release_artifacts.iter().any(|path| path.is_file()) {
+        if is_release_dir(directory) {
             Self::from_release_dir(directory)
         } else {
             Self::from_repo_layout(directory)
@@ -235,6 +253,18 @@ fn discover_with(
     )))
 }
 
+/// Returns whether `directory` is in the release layout: whether it contains `bin/openvmm[.exe]`,
+/// `guest/vmlinux`, or `guest/initramfs.cpio.gz`.
+fn is_release_dir(directory: &Path) -> bool {
+    [
+        directory.join("bin").join(openvmm_executable()),
+        directory.join(RELEASE_KERNEL[0]).join(RELEASE_KERNEL[1]),
+        directory.join(RELEASE_INITRD[0]).join(RELEASE_INITRD[1]),
+    ]
+    .iter()
+    .any(|path| path.is_file())
+}
+
 /// Returns the file name of the OpenVMM executable on this host.
 pub fn openvmm_executable() -> &'static str {
     if cfg!(windows) {
@@ -280,6 +310,343 @@ pub fn check_manifest(path: &Path) -> Result<()> {
             contract::CONTROL_CONTRACT_REVISION
         )))
     }
+}
+
+/// File name of the guest kernel in both layouts.
+pub const KERNEL_NAME: &str = "vmlinux";
+/// Suffix of the package manifest that lists the packages of an initramfs.
+pub const PACKAGE_MANIFEST_SUFFIX: &str = ".packages.json";
+/// Suffix of the manifest of a distro layer, which binds the layer's digest and packages.
+pub const DISTRO_MANIFEST_SUFFIX: &str = ".manifest.json";
+/// Repository-layout path of the OpenVMM build output directory.
+const REPO_OPENVMM_DIR: [&str; 3] = ["openvmm", "target", "release"];
+/// Release-layout directory of the OpenVMM executable.
+const RELEASE_BIN_DIR: &str = "bin";
+/// Release-layout directory of the guest artifacts.
+const RELEASE_GUEST_DIR: &str = "guest";
+
+/// A Linux guest that `nvx.py` builds and runs, as `scripts/nvx_tools/guests.py` describes it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Guest {
+    /// Alpine Linux: the default guest of `nvx.py run`, and the one that runs sandboxes.
+    Alpine,
+    /// Ubuntu Base, which also provides the distro layer of sandbox workloads.
+    Ubuntu,
+    /// Azure Linux.
+    AzureLinux,
+}
+
+impl Guest {
+    /// Every guest, in the order in which `nvx.py` lists them.
+    pub const ALL: [Self; 3] = [Self::Alpine, Self::Ubuntu, Self::AzureLinux];
+
+    /// Returns the guest's name in `nvx.py` options: `alpine`, `ubuntu`, or `azurelinux`.
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Alpine => "alpine",
+            Self::Ubuntu => "ubuntu",
+            Self::AzureLinux => "azurelinux",
+        }
+    }
+
+    /// Returns the guest named `name`.
+    ///
+    /// Fails with [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported) and the message of
+    /// `guest_descriptor` in `nvx.py`: `unsupported guest 'NAME'; choose alpine, ubuntu,
+    /// azurelinux`.
+    pub fn from_name(name: &str) -> Result<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|guest| guest.name() == name)
+            .ok_or_else(|| {
+                let names: Vec<&str> = Self::ALL.iter().map(|guest| guest.name()).collect();
+                Error::unsupported(format!(
+                    "unsupported guest {}; choose {}",
+                    repr(name),
+                    names.join(", ")
+                ))
+            })
+    }
+
+    /// Returns the name of the guest's distribution, as messages show it: `Alpine Linux`,
+    /// `Ubuntu Base`, or `Azure Linux`.
+    pub const fn distribution(self) -> &'static str {
+        match self {
+            Self::Alpine => "Alpine Linux",
+            Self::Ubuntu => "Ubuntu Base",
+            Self::AzureLinux => "Azure Linux",
+        }
+    }
+
+    /// Returns the file name of the guest's initramfs.
+    pub const fn initramfs_name(self) -> &'static str {
+        match self {
+            Self::Alpine => "initramfs.cpio.gz",
+            Self::Ubuntu => "initramfs-ubuntu.cpio.gz",
+            Self::AzureLinux => "initramfs-azurelinux.cpio.gz",
+        }
+    }
+
+    /// Returns the file name of the package manifest of the guest's initramfs.
+    pub fn package_manifest_name(self) -> String {
+        format!("{}{PACKAGE_MANIFEST_SUFFIX}", self.initramfs_name())
+    }
+
+    /// Returns the file name of the guest's EROFS distro layer, `GUEST-distro.erofs`, if the
+    /// guest provides one: only Ubuntu does.
+    pub const fn distro_layer_name(self) -> Option<&'static str> {
+        match self {
+            Self::Ubuntu => Some("ubuntu-distro.erofs"),
+            Self::Alpine | Self::AzureLinux => None,
+        }
+    }
+
+    /// Returns the file name of the manifest of the guest's distro layer, if it has one.
+    pub fn distro_manifest_name(self) -> Option<String> {
+        self.distro_layer_name()
+            .map(|name| format!("{name}{DISTRO_MANIFEST_SUFFIX}"))
+    }
+}
+
+impl fmt::Display for Guest {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.name())
+    }
+}
+
+/// The layout of a directory of NVX artifacts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Layout {
+    /// A repository checkout: the guest artifacts in `build/`, and OpenVMM in
+    /// `openvmm/target/release/`, where a local build writes them and where `nvx.py download`
+    /// installs a release.
+    Repository,
+    /// An extracted release package: the guest artifacts in `guest/`, and OpenVMM in `bin/`.
+    Release,
+}
+
+/// A directory of the artifacts that `nvx.py` runs: a repository checkout or an extracted
+/// release, with the paths that `artifact_path` and `openvmm_binary_path` of
+/// `scripts/nvx_tools/common.py` give for a checkout.
+///
+/// Paths are joined to the directory, made absolute, without checking that they exist; the
+/// `require_*` methods check them with the messages of `nvx.py`. Unlike [`Artifacts`], nothing
+/// here reads the release's `SOURCE-MANIFEST.json`, which `nvx.py` does not check either.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ArtifactDir {
+    /// The absolute directory.
+    root: PathBuf,
+    /// Its layout.
+    layout: Layout,
+}
+
+impl ArtifactDir {
+    /// Uses a repository checkout.
+    ///
+    /// Fails with [`ErrorKind::Unavailable`](crate::ErrorKind::Unavailable) if a relative
+    /// `root` meets an unreadable current directory.
+    pub fn repository(root: impl AsRef<Path>) -> Result<Self> {
+        Self::new(root.as_ref(), Layout::Repository)
+    }
+
+    /// Uses an extracted release package.
+    ///
+    /// Fails as [`repository`](Self::repository) does.
+    pub fn release(root: impl AsRef<Path>) -> Result<Self> {
+        Self::new(root.as_ref(), Layout::Release)
+    }
+
+    /// Uses a directory in the layout that its built artifacts reveal, as
+    /// [`Artifacts::from_dir`] tells them apart: a directory that contains `bin/openvmm[.exe]`,
+    /// `guest/vmlinux`, or `guest/initramfs.cpio.gz` is a release, and any other directory is a
+    /// repository checkout.
+    ///
+    /// Fails as [`repository`](Self::repository) does.
+    pub fn from_dir(directory: impl AsRef<Path>) -> Result<Self> {
+        let directory = directory.as_ref();
+        let layout = if is_release_dir(directory) {
+            Layout::Release
+        } else {
+            Layout::Repository
+        };
+        Self::new(directory, layout)
+    }
+
+    /// Returns the directory of `layout` at `root`, made absolute.
+    fn new(root: &Path, layout: Layout) -> Result<Self> {
+        Ok(Self {
+            root: absolute(root)?,
+            layout,
+        })
+    }
+
+    /// Returns the absolute directory.
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
+    /// Returns the directory's layout.
+    pub fn layout(&self) -> Layout {
+        self.layout
+    }
+
+    /// Returns the path of the guest artifact `name`, `artifact_path(name)` of `nvx.py`:
+    /// `build/NAME` in a checkout, and `guest/NAME` in a release.
+    pub fn artifact(&self, name: &str) -> PathBuf {
+        let directory = match self.layout {
+            Layout::Repository => REPO_BUILD_DIR,
+            Layout::Release => RELEASE_GUEST_DIR,
+        };
+        self.root.join(directory).join(name)
+    }
+
+    /// Returns the path of the OpenVMM executable, `openvmm_binary_path()` of `nvx.py`:
+    /// `openvmm/target/release/openvmm[.exe]` in a checkout, and `bin/openvmm[.exe]` in a
+    /// release.
+    pub fn openvmm(&self) -> PathBuf {
+        let directory = match self.layout {
+            Layout::Repository => REPO_OPENVMM_DIR.iter().collect(),
+            Layout::Release => PathBuf::from(RELEASE_BIN_DIR),
+        };
+        self.root.join(directory).join(openvmm_executable())
+    }
+
+    /// Returns the path of the guest kernel, which every guest boots.
+    pub fn kernel(&self) -> PathBuf {
+        self.artifact(KERNEL_NAME)
+    }
+
+    /// Returns the path of a guest's initramfs.
+    pub fn initramfs(&self, guest: Guest) -> PathBuf {
+        self.artifact(guest.initramfs_name())
+    }
+
+    /// Returns the path of the package manifest of a guest's initramfs.
+    pub fn package_manifest(&self, guest: Guest) -> PathBuf {
+        self.artifact(&guest.package_manifest_name())
+    }
+
+    /// Returns the path of a guest's distro layer, if the guest provides one.
+    pub fn distro_layer(&self, guest: Guest) -> Option<PathBuf> {
+        guest.distro_layer_name().map(|name| self.artifact(name))
+    }
+
+    /// Returns the path of the manifest of a guest's distro layer, if the guest provides one.
+    pub fn distro_manifest(&self, guest: Guest) -> Option<PathBuf> {
+        guest
+            .distro_manifest_name()
+            .map(|name| self.artifact(&name))
+    }
+
+    /// Checks that the OpenVMM executable is a regular file and returns its path.
+    ///
+    /// Fails as [`require_file`] does, with the message `OpenVMM release binary not found:
+    /// PATH`.
+    pub fn require_openvmm(&self) -> Result<PathBuf> {
+        required(self.openvmm(), "OpenVMM release binary")
+    }
+
+    /// Checks that the guest kernel is a regular file and returns its path.
+    ///
+    /// Fails as [`require_file`] does, with the message `Linux direct kernel not found: PATH`.
+    pub fn require_kernel(&self) -> Result<PathBuf> {
+        required(self.kernel(), "Linux direct kernel")
+    }
+
+    /// Checks that a guest's initramfs is a regular file and returns its path, as `nvx.py run`
+    /// does before it boots the guest.
+    ///
+    /// Fails as [`require_file`] does, with the message `DISTRIBUTION initramfs not found:
+    /// PATH`, such as `Ubuntu Base initramfs not found: PATH`.
+    pub fn require_initramfs(&self, guest: Guest) -> Result<PathBuf> {
+        required(
+            self.initramfs(guest),
+            &format!("{} initramfs", guest.distribution()),
+        )
+    }
+
+    /// Returns the artifacts of a sandbox, as `nvx.py sandbox run` and `nvx.py sandbox start`
+    /// require them: the OpenVMM executable, the kernel, and the Alpine initramfs, in that order.
+    ///
+    /// Fails as [`require_file`] does for the first one that is not a regular file, with the
+    /// messages of [`require_openvmm`](Self::require_openvmm) and
+    /// [`require_kernel`](Self::require_kernel), or `initramfs not found: PATH`.
+    pub fn sandbox_artifacts(&self) -> Result<Artifacts> {
+        let openvmm = self.require_openvmm()?;
+        let kernel = self.require_kernel()?;
+        let initrd = required(self.initramfs(Guest::Alpine), "initramfs")?;
+        Ok(Artifacts::new(openvmm, kernel, initrd))
+    }
+
+    /// Returns the paths of every artifact, for a caller to show or record.
+    pub fn paths(&self) -> ArtifactPaths {
+        ArtifactPaths {
+            layout: self.layout,
+            root: self.root.clone(),
+            openvmm: self.openvmm(),
+            kernel: self.kernel(),
+            guests: Guest::ALL
+                .iter()
+                .map(|&guest| GuestPaths {
+                    name: guest.name(),
+                    distribution: guest.distribution(),
+                    initramfs: self.initramfs(guest),
+                    package_manifest: self.package_manifest(guest),
+                    distro_layer: self.distro_layer(guest),
+                    distro_manifest: self.distro_manifest(guest),
+                })
+                .collect(),
+        }
+    }
+}
+
+/// Checks that `path` is a regular file, as `require_file` of `nvx.py` does, and returns it.
+fn required(path: PathBuf, description: &str) -> Result<PathBuf> {
+    require_file(&path, description)?;
+    Ok(path)
+}
+
+/// The paths of the artifacts of an [`ArtifactDir`], which serialize as a JSON object such as:
+///
+/// ```json
+/// {"layout": "repository", "root": "/nvx", "openvmm": "/nvx/openvmm/target/release/openvmm",
+///  "kernel": "/nvx/build/vmlinux", "guests": [{"name": "alpine",
+///  "distribution": "Alpine Linux", "initramfs": "/nvx/build/initramfs.cpio.gz",
+///  "package_manifest": "/nvx/build/initramfs.cpio.gz.packages.json", "distro_layer": null,
+///  "distro_manifest": null}, ...]}
+/// ```
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[non_exhaustive]
+pub struct ArtifactPaths {
+    /// The directory's layout.
+    pub layout: Layout,
+    /// The absolute directory.
+    pub root: PathBuf,
+    /// The OpenVMM executable.
+    pub openvmm: PathBuf,
+    /// The guest kernel.
+    pub kernel: PathBuf,
+    /// The artifacts of each guest, in the order of [`Guest::ALL`].
+    pub guests: Vec<GuestPaths>,
+}
+
+/// The paths of the artifacts of one guest.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[non_exhaustive]
+pub struct GuestPaths {
+    /// The guest's name, [`Guest::name`].
+    pub name: &'static str,
+    /// The guest's distribution, [`Guest::distribution`].
+    pub distribution: &'static str,
+    /// The initramfs.
+    pub initramfs: PathBuf,
+    /// The package manifest of the initramfs.
+    pub package_manifest: PathBuf,
+    /// The distro layer, if the guest provides one.
+    pub distro_layer: Option<PathBuf>,
+    /// The manifest of the distro layer, if the guest provides one.
+    pub distro_manifest: Option<PathBuf>,
 }
 
 #[cfg(test)]
@@ -393,6 +760,9 @@ mod tests {
             let artifacts = Artifacts::from_dir(root).unwrap();
             let kernel = std::path::absolute(root).unwrap().join("build");
             assert_eq!(artifacts.kernel, kernel.join("vmlinux"));
+            let directory = ArtifactDir::from_dir(root).unwrap();
+            assert_eq!(directory.layout(), Layout::Repository);
+            assert_eq!(directory.kernel(), artifacts.kernel);
         }
     }
 
@@ -492,6 +862,237 @@ mod tests {
         if manifest.is_file() {
             check_manifest(&manifest).unwrap();
         }
+    }
+
+    #[test]
+    fn guests_name_their_artifacts_as_nvx_py_does() {
+        assert_eq!(
+            Guest::ALL.map(Guest::name),
+            ["alpine", "ubuntu", "azurelinux"]
+        );
+        for guest in Guest::ALL {
+            assert_eq!(Guest::from_name(guest.name()).unwrap(), guest);
+            assert_eq!(guest.to_string(), guest.name());
+        }
+        let error = Guest::from_name("Ubuntu").unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::Unsupported);
+        assert_eq!(
+            error.message(),
+            "unsupported guest 'Ubuntu'; choose alpine, ubuntu, azurelinux"
+        );
+        assert_eq!(
+            Guest::ALL.map(Guest::distribution),
+            ["Alpine Linux", "Ubuntu Base", "Azure Linux"]
+        );
+        assert_eq!(
+            Guest::ALL.map(Guest::package_manifest_name),
+            [
+                "initramfs.cpio.gz.packages.json",
+                "initramfs-ubuntu.cpio.gz.packages.json",
+                "initramfs-azurelinux.cpio.gz.packages.json",
+            ]
+        );
+        assert_eq!(
+            Guest::ALL.map(Guest::distro_layer_name),
+            [None, Some("ubuntu-distro.erofs"), None]
+        );
+        assert_eq!(
+            Guest::Ubuntu.distro_manifest_name().as_deref(),
+            Some("ubuntu-distro.erofs.manifest.json")
+        );
+        assert_eq!(Guest::Alpine.distro_manifest_name(), None);
+    }
+
+    #[test]
+    fn a_checkout_holds_the_guest_artifacts_in_build() {
+        let directory = tempfile::tempdir().unwrap();
+        checkout(directory.path());
+        let artifacts = ArtifactDir::from_dir(directory.path()).unwrap();
+        let root = std::path::absolute(directory.path()).unwrap();
+        let build = root.join("build");
+        assert_eq!(artifacts.layout(), Layout::Repository);
+        assert_eq!(artifacts.root(), root);
+        assert_eq!(
+            artifacts.openvmm(),
+            root.join("openvmm")
+                .join("target")
+                .join("release")
+                .join(openvmm_executable())
+        );
+        assert_eq!(artifacts.kernel(), build.join("vmlinux"));
+        assert_eq!(
+            Guest::ALL.map(|guest| artifacts.initramfs(guest)),
+            [
+                build.join("initramfs.cpio.gz"),
+                build.join("initramfs-ubuntu.cpio.gz"),
+                build.join("initramfs-azurelinux.cpio.gz"),
+            ]
+        );
+        assert_eq!(
+            artifacts.package_manifest(Guest::Ubuntu),
+            build.join("initramfs-ubuntu.cpio.gz.packages.json")
+        );
+        assert_eq!(
+            Guest::ALL.map(|guest| artifacts.distro_layer(guest)),
+            [None, Some(build.join("ubuntu-distro.erofs")), None]
+        );
+        assert_eq!(
+            artifacts.distro_manifest(Guest::Ubuntu),
+            Some(build.join("ubuntu-distro.erofs.manifest.json"))
+        );
+        assert_eq!(
+            artifacts.artifact("vmlinux.provenance.json"),
+            build.join("vmlinux.provenance.json")
+        );
+
+        // A relative directory is made absolute, and an explicit layout overrides detection.
+        let relative = ArtifactDir::repository(".").unwrap();
+        assert_eq!(relative.root(), std::path::absolute(".").unwrap());
+        release(directory.path());
+        assert_eq!(
+            ArtifactDir::repository(directory.path()).unwrap().layout(),
+            Layout::Repository
+        );
+    }
+
+    #[test]
+    fn a_release_holds_the_guest_artifacts_in_guest() {
+        let directory = tempfile::tempdir().unwrap();
+        release(directory.path());
+        let artifacts = ArtifactDir::from_dir(directory.path()).unwrap();
+        let root = std::path::absolute(directory.path()).unwrap();
+        let guest = root.join("guest");
+        assert_eq!(artifacts.layout(), Layout::Release);
+        assert_eq!(artifacts, ArtifactDir::release(directory.path()).unwrap());
+        assert_eq!(
+            artifacts.openvmm(),
+            root.join("bin").join(openvmm_executable())
+        );
+        assert_eq!(artifacts.kernel(), guest.join("vmlinux"));
+        assert_eq!(
+            Guest::ALL.map(|guest| artifacts.initramfs(guest)),
+            [
+                guest.join("initramfs.cpio.gz"),
+                guest.join("initramfs-ubuntu.cpio.gz"),
+                guest.join("initramfs-azurelinux.cpio.gz"),
+            ]
+        );
+        assert_eq!(
+            artifacts.distro_layer(Guest::Ubuntu),
+            Some(guest.join("ubuntu-distro.erofs"))
+        );
+
+        // The release's artifacts are the ones that discovery finds for its directory.
+        let discovered = Artifacts::from_dir(directory.path()).unwrap();
+        assert_eq!(artifacts.sandbox_artifacts().unwrap(), discovered);
+    }
+
+    #[test]
+    fn guest_artifacts_are_required_in_the_order_and_words_of_nvx_py() {
+        let directory = tempfile::tempdir().unwrap();
+        checkout(directory.path());
+        let artifacts = ArtifactDir::repository(directory.path()).unwrap();
+        fn missing<T: std::fmt::Debug>(result: Result<T>, description: &str, path: PathBuf) {
+            let error = result.unwrap_err();
+            assert_eq!(error.kind(), ErrorKind::Unavailable);
+            assert_eq!(
+                error.message(),
+                format!("{description} not found: {}", path.display())
+            );
+        }
+        let create = |path: PathBuf| {
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, b"artifact").unwrap();
+        };
+        missing(
+            artifacts.sandbox_artifacts(),
+            "OpenVMM release binary",
+            artifacts.openvmm(),
+        );
+        create(artifacts.openvmm());
+        missing(
+            artifacts.sandbox_artifacts(),
+            "Linux direct kernel",
+            artifacts.kernel(),
+        );
+        create(artifacts.kernel());
+        missing(
+            artifacts.sandbox_artifacts(),
+            "initramfs",
+            artifacts.initramfs(Guest::Alpine),
+        );
+        create(artifacts.initramfs(Guest::Alpine));
+        assert_eq!(
+            artifacts.sandbox_artifacts().unwrap(),
+            Artifacts::new(
+                artifacts.openvmm(),
+                artifacts.kernel(),
+                artifacts.initramfs(Guest::Alpine)
+            )
+        );
+
+        assert_eq!(artifacts.require_openvmm().unwrap(), artifacts.openvmm());
+        assert_eq!(artifacts.require_kernel().unwrap(), artifacts.kernel());
+        missing(
+            artifacts.require_initramfs(Guest::Ubuntu),
+            "Ubuntu Base initramfs",
+            artifacts.initramfs(Guest::Ubuntu),
+        );
+        missing(
+            artifacts.require_initramfs(Guest::AzureLinux),
+            "Azure Linux initramfs",
+            artifacts.initramfs(Guest::AzureLinux),
+        );
+        create(artifacts.initramfs(Guest::Ubuntu));
+        assert_eq!(
+            artifacts.require_initramfs(Guest::Ubuntu).unwrap(),
+            artifacts.initramfs(Guest::Ubuntu)
+        );
+
+        // A directory is not a regular file.
+        fs::create_dir_all(artifacts.initramfs(Guest::AzureLinux)).unwrap();
+        missing(
+            artifacts.require_initramfs(Guest::AzureLinux),
+            "Azure Linux initramfs",
+            artifacts.initramfs(Guest::AzureLinux),
+        );
+    }
+
+    #[test]
+    fn artifact_paths_serialize_every_guest_in_order() {
+        let directory = tempfile::tempdir().unwrap();
+        release(directory.path());
+        let artifacts = ArtifactDir::from_dir(directory.path()).unwrap();
+        let text = |path: PathBuf| Value::from(path.to_str().unwrap());
+        let value = serde_json::to_value(artifacts.paths()).unwrap();
+        assert_eq!(value["layout"], "release");
+        assert_eq!(value["root"], text(artifacts.root().to_path_buf()));
+        assert_eq!(value["openvmm"], text(artifacts.openvmm()));
+        assert_eq!(value["kernel"], text(artifacts.kernel()));
+        let guests = value["guests"].as_array().unwrap();
+        assert_eq!(guests.len(), Guest::ALL.len());
+        for (paths, guest) in guests.iter().zip(Guest::ALL) {
+            assert_eq!(paths["name"], guest.name());
+            assert_eq!(paths["distribution"], guest.distribution());
+            assert_eq!(paths["initramfs"], text(artifacts.initramfs(guest)));
+            assert_eq!(
+                paths["package_manifest"],
+                text(artifacts.package_manifest(guest))
+            );
+            assert_eq!(
+                paths["distro_layer"],
+                artifacts.distro_layer(guest).map_or(Value::Null, text)
+            );
+            assert_eq!(
+                paths["distro_manifest"],
+                artifacts.distro_manifest(guest).map_or(Value::Null, text)
+            );
+        }
+        let repository = ArtifactDir::repository(directory.path()).unwrap();
+        assert_eq!(
+            serde_json::to_value(repository.paths()).unwrap()["layout"],
+            "repository"
+        );
     }
 
     #[cfg(feature = "bundled")]

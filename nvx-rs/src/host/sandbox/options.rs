@@ -25,6 +25,7 @@ use super::mount::{
 };
 use super::{SandboxLaunch, refused};
 use crate::error::Result;
+use crate::host::artifacts::DISTRO_MANIFEST_SUFFIX;
 use crate::host::python::builtins::repr;
 use crate::host::python::fs;
 use crate::host::python::json::{self, Loads, Node, ReadError};
@@ -39,8 +40,6 @@ pub const MAX_ENVIRONMENT_FILE_BYTES: usize = 1024 * 1024;
 pub const MAX_EXEC_ENVIRONMENT: usize = 256;
 /// The longest entry of a managed exec environment, in UTF-8 bytes.
 pub const MAX_EXEC_ENVIRONMENT_BYTES: usize = 4096;
-/// The suffix of the manifest next to a distro layer.
-const DISTRO_MANIFEST_SUFFIX: &str = ".manifest.json";
 
 /// An operation of `nvx.py sandbox`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
