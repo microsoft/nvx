@@ -4614,7 +4614,7 @@ def run_sandbox_blocks(
             memory_mib,
             "quiet loglevel=0",
         )
-        for role in ("distro", "runtime", "custom", "scratch"):
+        for role in ("distro", "scratch"):
             path = root / f"{role}.img"
             with path.open("wb") as disk:
                 disk.truncate(SANDBOX_BLOCK_SIZE)
