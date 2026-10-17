@@ -28,7 +28,6 @@ import time
 from pathlib import Path
 from typing import Any, cast
 
-from . import sandbox_lifecycle
 from .build_constants import BuildConstants
 from .common import sha256_file
 from .managed_exec_tests import (
@@ -69,13 +68,14 @@ MANAGED_SUCCESS = {"operation": "managed", "category": "success", "status_code":
 MANAGED_REFUSAL = {"operation": "managed", "category": "guest-exit", "status_code": 125}
 REFUSED_START = b"error: OpenVMM exited during startup: guest-exit status 125"
 
-CONFIG = sandbox_lifecycle.CONFIG_NAME
-RUNTIME = sandbox_lifecycle.RUNTIME_NAME
-CAPABILITY = sandbox_lifecycle.CAPABILITY_NAME
-LOG = sandbox_lifecycle.LOG_NAME
-SOCKET = sandbox_lifecycle.CONTROL_SOCKET_NAME
-OUTCOME = sandbox_lifecycle.OUTCOME_NAME
-LOCK = sandbox_lifecycle.LOCK_NAME
+# The files of a state directory, as nvx.py sandbox documents them.
+CONFIG = "config.json"
+RUNTIME = "runtime.json"
+CAPABILITY = "control.capability"
+LOG = "openvmm.log"
+SOCKET = "control.sock"
+OUTCOME = "outcome.json"
+LOCK = "lifecycle.lock"
 PROVISIONED_ENTRIES = frozenset({CONFIG, LOCK})
 # Windows hosts serve the control endpoint as a named pipe outside the state.
 RUNNING_ENTRIES = frozenset(
@@ -125,6 +125,13 @@ def openvmm_processes(marker: str) -> tuple[int, ...]:
     return tuple(sorted(processes))
 
 
+def openvmm_running(runtime: dict[str, Any], marker: str) -> bool:
+    """Returns whether the OpenVMM process of a runtime record still runs: an
+    OpenVMM process with its ID whose arguments contain marker, the name of
+    the fixture, which no other process names."""
+    return int(runtime["pid"]) in openvmm_processes(marker)
+
+
 def control_endpoint_present(runtime: dict[str, Any]) -> bool:
     endpoint = str(runtime["control_endpoint"])
     if sys.platform == "win32":
@@ -139,17 +146,18 @@ def terminate_process(pid: int) -> None:
         os.kill(pid, signal.SIGKILL)
 
 
-def kill_openvmm(runtime: dict[str, Any], timeout: float) -> None:
-    """Ends the OpenVMM process of a runtime record, as a crash would."""
-    if sandbox_lifecycle.runtime_process_running(runtime):
+def kill_openvmm(runtime: dict[str, Any], timeout: float, marker: str) -> None:
+    """Ends the OpenVMM process of a runtime record, as a crash would; marker
+    names the fixture, as for openvmm_running."""
+    if openvmm_running(runtime, marker):
         try:
             terminate_process(int(runtime["pid"]))
         except OSError:
             # The process may have exited since the check.
-            if sandbox_lifecycle.runtime_process_running(runtime):
+            if openvmm_running(runtime, marker):
                 raise
     deadline = time.monotonic() + timeout
-    while sandbox_lifecycle.runtime_process_running(runtime):
+    while openvmm_running(runtime, marker):
         if time.monotonic() >= deadline:
             raise RuntimeError(f"OpenVMM process {runtime['pid']} survived its kill")
         time.sleep(0.05)
@@ -172,10 +180,50 @@ def state_entries(state: Path) -> list[str] | None:
 
 def managed_outcome(state: Path) -> object:
     """Returns the outcome section of the OpenVMM report in a state directory."""
+    return managed_report(state).get("outcome")
+
+
+def managed_report(state: Path) -> dict[str, object]:
+    """Returns the OpenVMM report in a state directory, or an empty mapping if
+    it is not an object."""
     report: object = json.loads((state / OUTCOME).read_text(encoding="utf-8"))
     if not isinstance(report, dict):
-        return None
-    return cast(dict[str, object], report).get("outcome")
+        return {}
+    return cast(dict[str, object], report)
+
+
+def check_managed_report(report: dict[str, object], backend: str) -> None:
+    """Checks the report of a managed sandbox that stopped cleanly.
+
+    These are the report checks of the direct-mode managed lifecycle
+    (nvx-rs/tests/managed_lifecycle.rs) that hold for the layered root too: the
+    report names the backend, no network policy was requested, and every
+    teardown step completed.
+    """
+    outcome = report.get("outcome")
+    if outcome != MANAGED_SUCCESS:
+        raise RuntimeError(f"the managed outcome is {outcome!r}")
+    if report.get("backend") != backend:
+        raise RuntimeError(
+            f"the managed report names backend {report.get('backend')!r}"
+        )
+    policy = report.get("network_policy")
+    status = (
+        cast(dict[str, object], policy).get("status")
+        if isinstance(policy, dict)
+        else None
+    )
+    if status != "not-requested":
+        raise RuntimeError(f"the managed report has network policy status {status!r}")
+    teardown = report.get("teardown")
+    if (
+        not isinstance(teardown, dict)
+        or not teardown
+        or not all(
+            value is True for value in cast(dict[str, object], teardown).values()
+        )
+    ):
+        raise RuntimeError(f"the managed report has incomplete teardown: {teardown!r}")
 
 
 def bounded_evidence(data: bytes, omitted: int = 0) -> bytes:
@@ -540,7 +588,7 @@ class LifecycleAcceptance:
         self.save_evidence(
             "runtime.json", (json.dumps(runtime, indent=2) + "\n").encode()
         )
-        if not sandbox_lifecycle.runtime_process_running(runtime):
+        if not openvmm_running(runtime, self.root.name):
             raise RuntimeError(f"OpenVMM is not running after the {description}")
         if not control_endpoint_present(runtime):
             raise RuntimeError(
@@ -667,15 +715,13 @@ class LifecycleAcceptance:
     def stop(self, runtime: dict[str, Any], layer_digest: str) -> None:
         self.invoke("stop", state=self.state)
         self.require_entries(self.state, STOPPED_ENTRIES, "after stop")
-        if sandbox_lifecycle.runtime_process_running(runtime):
+        if openvmm_running(runtime, self.root.name):
             raise RuntimeError("OpenVMM still runs after stop")
         if control_endpoint_present(runtime):
             raise RuntimeError("stop left the control endpoint behind")
         self.require_processes((), "after stop")
         self.copy_evidence(self.state / OUTCOME, "outcome.json")
-        outcome = managed_outcome(self.state)
-        if outcome != MANAGED_SUCCESS:
-            raise RuntimeError(f"the managed outcome is {outcome!r}")
+        check_managed_report(managed_report(self.state), self.backend)
         # A clean journal shows that stop unmounted the overlay and scratch
         # before the VM powered off.
         if not scratch_journal_clean(self.scratch):
@@ -695,7 +741,7 @@ class LifecycleAcceptance:
 
     def check_crash(self, runtime: dict[str, Any]) -> None:
         # OpenVMM exits without a stop, so its runtime record goes stale.
-        kill_openvmm(runtime, self.timeout)
+        kill_openvmm(runtime, self.timeout, self.root.name)
         self.require_processes((), "after OpenVMM was killed")
         if sys.platform == "win32" and control_endpoint_present(runtime):
             raise RuntimeError("the control pipe outlived OpenVMM")
@@ -757,7 +803,7 @@ class LifecycleAcceptance:
                 if (state / RUNTIME).is_file():
                     runtime = read_runtime(state)
                     self.run_cli("stop", state=state)
-                    kill_openvmm(runtime, self.timeout)
+                    kill_openvmm(runtime, self.timeout, self.root.name)
             except Exception as error:
                 errors.append(error)
         # Every OpenVMM process whose arguments name the fixture is the

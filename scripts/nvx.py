@@ -10,11 +10,10 @@ import shlex
 import subprocess
 import sys
 from collections.abc import Sequence
-from dataclasses import replace
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
-from nvx_tools import sandbox_lifecycle
+from nvx_tools import nvx_rs
 from nvx_tools.aci_edge_sandboxes_tests import (
     configure_parser as configure_aci_edge_sandboxes_test_parser,
 )
@@ -23,7 +22,6 @@ from nvx_tools.agent_bundling_tests import (
     configure_parser as configure_agent_bundling_test_parser,
 )
 from nvx_tools.benchmark import configure_parser as configure_benchmark_parser
-from nvx_tools.benchmark import positive_float
 from nvx_tools.benchmark import run as run_benchmark
 from nvx_tools.build import (
     build_all,
@@ -45,7 +43,6 @@ from nvx_tools.build_config import (
     OpenVmmBuildConfig,
 )
 from nvx_tools.build_constants import (
-    AlpineBuildConstants,
     BuildConstants,
     InitramfsBuildConstants,
     KernelBuildConstants,
@@ -72,21 +69,18 @@ from nvx_tools.collect_ubuntu_sources import (
 from nvx_tools.common import (
     ScriptError,
     artifact_path,
-    openvmm_binary_path,
     require_file,
-    sha256_file,
 )
-from nvx_tools.control_session import encode_exec_environment
 from nvx_tools.create_linux_source_archive import (
     configure_parser as configure_linux_source_archive_parser,
 )
 from nvx_tools.doctor import configure_parser as configure_doctor_parser
 from nvx_tools.doctor import host_cpu_signature
-from nvx_tools.egress_policy import compile_policy_file
 from nvx_tools.elf import check_static_executables
 from nvx_tools.guest_binaries import (
     build_guest_binaries,
     check_guest_binaries,
+    guest_binary_source_sha256,
     test_guest_binaries,
 )
 from nvx_tools.guests import GUEST_NAMES, guest_descriptor
@@ -104,9 +98,6 @@ from nvx_tools.sandbox import (
     MOUNT_OWNERS,
     MOUNT_POLICY_OPTIONS,
     SANDBOX_COMMAND_LINE_MAX_SIZE,
-    SandboxLaunch,
-    SandboxLayer,
-    SandboxMount,
     aggregate_child_argument,
     aggregate_child_name,
     aggregate_command_line_fragment,
@@ -114,7 +105,6 @@ from nvx_tools.sandbox import (
     mount_argument,
     mount_kind,
     parse_mount_value,
-    parse_workload_identity,
     require_mount_owner_supported,
 )
 from nvx_tools.time_abi import (
@@ -132,8 +122,9 @@ NETWORK_EGRESS_RULE_HELP = (
     "tcp, udp, or icmp, and for tcp or udp only on PORT or on the inclusive range "
     "PORT-PORT; repeat to add rules"
 )
-MAX_ENVIRONMENT_FILE_BYTES = 1024 * 1024
-SYSTEMD_ENTRYPOINTS = frozenset(("/usr/lib/systemd/systemd", "/lib/systemd/systemd"))
+SANDBOX_OPERATIONS = ("run", "provision", "start", "exec", "stop", "deprovision")
+# The namespace attribute in which the sandbox parser records its options.
+SANDBOX_ARGUMENTS = "sandbox_arguments"
 
 
 def _mount_policy_destination(option: str) -> str:
@@ -141,9 +132,27 @@ def _mount_policy_destination(option: str) -> str:
     return option.removeprefix("--").replace("-", "_")
 
 
-class _MountPolicyPathAction(argparse.Action):
-    """Record each --mount-deny, --mount-allow, or --mount-write with the index
-    of the --mount before it."""
+class _SandboxOption(argparse.Action):
+    """Record an option of `nvx.py sandbox` for nvx-rs, which checks and uses
+    every value.
+
+    argparse resolves abbreviations and the --option=VALUE form, so nvx-rs
+    receives each option under its canonical name, in command-line order,
+    which attributes each --mount-deny, --mount-allow, and --mount-write to the
+    --mount before it, and with its value attached, so that a value that
+    starts with "-" stays a value.
+    """
+
+    def __init__(
+        self,
+        option_strings: Sequence[str],
+        dest: str,
+        nargs: int | str | None = None,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(
+            option_strings, dest, nargs=nargs, default=argparse.SUPPRESS, **kwargs
+        )
 
     def __call__(
         self,
@@ -152,50 +161,10 @@ class _MountPolicyPathAction(argparse.Action):
         values: str | Sequence[object] | None,
         option_string: str | None = None,
     ) -> None:
-        mounts = cast(list[str], getattr(namespace, "mount", None) or [])
-        paths = list(
-            cast(list[tuple[int, str]], getattr(namespace, self.dest, None) or [])
-        )
-        paths.append((len(mounts) - 1, cast(str, values)))
-        setattr(namespace, self.dest, paths)
-
-
-def _sandbox_mounts(args: argparse.Namespace) -> tuple[SandboxMount, ...]:
-    """Attribute each access-policy path to its share and parse the --mount
-    options, each of which shares a directory or, when its host path is a
-    regular file, that file.
-
-    With one --mount, every --mount-deny, --mount-allow, and --mount-write
-    names a path in it. With several, each names a path in the --mount that
-    precedes it.
-    """
-    mounts = cast(list[str], args.mount)
-    attributed: dict[str, list[list[str]]] = {}
-    for kind, option in MOUNT_POLICY_OPTIONS.items():
-        paths: list[list[str]] = [[] for _ in mounts]
-        destination = _mount_policy_destination(option)
-        for index, path in cast(list[tuple[int, str]], getattr(args, destination)):
-            if len(mounts) == 1:
-                index = 0
-            elif index < 0:
-                raise ScriptError(
-                    f"with several --mount options, each {option} must follow the "
-                    "--mount whose host directory it names"
-                )
-            paths[index].append(path)
-        attributed[kind] = paths
-    owner = args.mount_owner or "vmm"
-    parsed: list[SandboxMount] = []
-    for index, value in enumerate(mounts):
-        mount = SandboxMount.parse(
-            value,
-            tuple(attributed["denied"][index]),
-            owner,
-            allowed_paths=tuple(attributed["allowed"][index]),
-            writable_paths=tuple(attributed["writable"][index]),
-        )
-        parsed.append(replace(mount, kind=mount_kind(mount.host_path)))
-    return tuple(parsed)
+        name = self.option_strings[0]
+        argument = name if self.nargs == 0 else f"{name}={cast(str, values)}"
+        recorded = cast(list[str], getattr(namespace, SANDBOX_ARGUMENTS, None) or [])
+        setattr(namespace, SANDBOX_ARGUMENTS, [*recorded, argument])
 
 
 def _validate_run_share_targets(targets: list[str]) -> None:
@@ -233,52 +202,6 @@ def _run(
     command = [os.fspath(arg) for arg in args]
     print(f">> {shlex.join(command)}")
     subprocess.run(command, cwd=cwd, check=True)
-
-
-def _validate_sandbox_systemd_policy(launch: SandboxLaunch) -> None:
-    if launch.entrypoint in SYSTEMD_ENTRYPOINTS:
-        raise ScriptError(
-            "systemd entrypoints are unsupported by the sandbox security profile"
-        )
-    distro = next(
-        (layer for layer in launch.layers if layer.role == "distro"),
-        None,
-    )
-    if distro is None:
-        return
-    manifest = distro.path.with_name(
-        f"{distro.path.name}{BuildConstants.DISTRO_MANIFEST_SUFFIX}"
-    )
-    if not manifest.exists():
-        return
-    try:
-        document: object = json.loads(manifest.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError) as error:
-        raise ScriptError(f"invalid sandbox distro manifest: {error}") from error
-    if not isinstance(document, dict):
-        raise ScriptError("invalid sandbox distro manifest: expected a JSON object")
-    manifest_document = cast(dict[str, object], document)
-    if (
-        manifest_document.get("format") != 1
-        or manifest_document.get("artifact") != distro.path.name
-        or manifest_document.get("artifact_sha256") != sha256_file(distro.path)
-    ):
-        raise ScriptError("sandbox distro manifest does not match its artifact")
-    raw_packages = manifest_document.get("packages")
-    if not isinstance(raw_packages, list):
-        raise ScriptError("sandbox distro manifest has invalid package metadata")
-    packages: list[dict[str, object]] = []
-    for raw_package in cast(list[object], raw_packages):
-        if not isinstance(raw_package, dict):
-            raise ScriptError("sandbox distro manifest has invalid package metadata")
-        package = cast(dict[str, object], raw_package)
-        if not isinstance(package.get("name"), str):
-            raise ScriptError("sandbox distro manifest has invalid package metadata")
-        packages.append(package)
-    if any(package["name"] == "systemd" for package in packages):
-        raise ScriptError(
-            "systemd images are unsupported by the sandbox security profile"
-        )
 
 
 def command_init(_: argparse.Namespace) -> None:
@@ -393,6 +316,10 @@ def command_kernel_patch_identity(args: argparse.Namespace) -> None:
     print(kernel_patch_identity(args.root))
 
 
+def command_guest_binary_source_identity(args: argparse.Namespace) -> None:
+    print(guest_binary_source_sha256(args.root))
+
+
 def command_check_required_ci(args: argparse.Namespace) -> None:
     results = {
         job: os.environ.get(environment, "")
@@ -501,7 +428,7 @@ def _resolve_network_egress_rules(
         raise ScriptError(
             "--network-egress is required with --network-egress-policy-file"
         )
-    compiled = compile_policy_file(policy_path)
+    compiled = nvx_rs.compile_egress_policy(policy_path)
     return compiled.allow, compiled.deny
 
 
@@ -556,7 +483,8 @@ def command_run(args: argparse.Namespace) -> None:
                 "--restore-processors cannot exceed --processors capacity"
             )
     network_egress_allow, network_egress_deny = _resolve_network_egress_rules(args)
-    executable = require_file(openvmm_binary_path(), "OpenVMM release binary")
+    artifacts = nvx_rs.artifacts()
+    executable = require_file(artifacts.openvmm, "OpenVMM release binary")
     command = [
         str(executable),
         "--single-process",
@@ -576,13 +504,9 @@ def command_run(args: argparse.Namespace) -> None:
         if args.restore_ready_path is not None:
             command.extend(["--restore-ready-path", str(args.restore_ready_path)])
     else:
-        kernel = require_file(
-            artifact_path(KernelBuildConstants.BINARY_NAME), "Linux direct kernel"
-        )
-        initrd = require_file(
-            artifact_path(descriptor.initramfs_name),
-            f"{descriptor.distribution} initramfs",
-        )
+        kernel = require_file(artifacts.kernel, "Linux direct kernel")
+        guest = artifacts.guest(descriptor.name)
+        initrd = require_file(guest.initramfs, f"{guest.distribution} initramfs")
         command.extend(
             [
                 "--memory",
@@ -699,210 +623,13 @@ def _run_openvmm(
     return returncode
 
 
-def command_sandbox(args: argparse.Namespace) -> None:
-    operation = args.sandbox_operation
-    exec_environment: tuple[str, ...] | None = None
-    if args.dry_run and operation != "run":
-        raise ScriptError("--dry-run is only valid for sandbox run")
-    if args.environment and args.environment_file is not None:
-        raise ScriptError("--environment and --environment-file are mutually exclusive")
-    if operation != "exec" and (
-        args.cwd is not None
-        or args.environment
-        or args.environment_file is not None
-        or args.inherit_default_environment
-    ):
-        raise ScriptError(
-            "managed execution options require the sandbox exec operation"
-        )
-    if operation == "exec":
-        if args.environment_file is not None:
-            try:
-                with args.environment_file.open("rb") as stream:
-                    data = stream.read(MAX_ENVIRONMENT_FILE_BYTES + 1)
-                if len(data) > MAX_ENVIRONMENT_FILE_BYTES:
-                    raise ScriptError(
-                        "managed execution environment file exceeds "
-                        f"{MAX_ENVIRONMENT_FILE_BYTES}-byte limit"
-                    )
-                value = json.loads(data.decode("utf-8"))
-            except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
-                raise ScriptError(
-                    f"failed to read managed execution environment: "
-                    f"{args.environment_file}"
-                ) from error
-            entries = cast(list[object], value) if isinstance(value, list) else None
-            if entries is None or not all(isinstance(entry, str) for entry in entries):
-                raise ScriptError(
-                    "managed execution environment file must contain a JSON "
-                    "array of KEY=VALUE strings"
-                )
-            exec_environment = tuple(cast(list[str], entries))
-        elif args.environment:
-            exec_environment = tuple(args.environment)
-        if exec_environment is not None:
-            try:
-                encode_exec_environment(exec_environment)
-            except (TypeError, ValueError) as error:
-                raise ScriptError(str(error)) from error
-    network_options = (
-        args.net,
-        args.network_profile,
-        args.network_egress,
-        args.network_ingress,
-        args.network_egress_policy_file,
-        args.host_loopback,
-        args.network_proxy,
+def command_sandbox(args: argparse.Namespace) -> int:
+    """Run the sandbox command with nvx-rs, which checks its options and runs it
+    on the standard streams, and return the status that nvx.py exits with."""
+    return nvx_rs.run(
+        ["sandbox", args.sandbox_operation, *getattr(args, SANDBOX_ARGUMENTS)],
+        program=args.program,
     )
-    if operation not in ("run", "provision") and (
-        any(value is not None for value in network_options)
-        or args.network_egress_allow
-        or args.network_egress_deny
-        or args.host_loopback_forward
-    ):
-        raise ScriptError(
-            "network policy options are only valid for sandbox run or provision"
-        )
-    if operation in ("run", "provision", "exec") and (
-        args.entrypoint in SYSTEMD_ENTRYPOINTS
-    ):
-        raise ScriptError(
-            "systemd entrypoints are unsupported by the sandbox security profile"
-        )
-    if args.outcome_report is not None and operation not in ("run", "exec"):
-        raise ScriptError(
-            "--outcome-report is only valid for one-shot run or managed exec"
-        )
-    for option in MOUNT_POLICY_OPTIONS.values():
-        if getattr(args, _mount_policy_destination(option)) and not args.mount:
-            raise ScriptError(f"{option} requires --mount")
-    if args.mount_owner is not None and not args.mount:
-        raise ScriptError("--mount-owner requires --mount")
-    if args.mount and operation not in ("run", "provision"):
-        raise ScriptError("--mount is only valid for sandbox run or provision")
-    if operation in ("run", "provision"):
-        if (args.net is None) != (args.network_profile is None):
-            raise ScriptError("--net and --network-profile must be specified together")
-        if not args.layer or args.scratch is None:
-            raise ScriptError(f"sandbox {operation} requires --layer and --scratch")
-        network_egress_allow, network_egress_deny = _resolve_network_egress_rules(args)
-        launch = SandboxLaunch(
-            layers=tuple(args.layer),
-            scratch=args.scratch,
-            entrypoint=args.entrypoint,
-            args=tuple(args.sandbox_arg),
-            hostname=args.hostname,
-            workload_identity=args.workload_user,
-            memory_max=args.memory_max,
-            pids_max=args.pids_max,
-            mounts=_sandbox_mounts(args),
-        ).validated()
-        _validate_sandbox_systemd_policy(launch)
-    else:
-        launch = None
-        network_egress_allow = ()
-        network_egress_deny = ()
-
-    if operation == "provision":
-        if args.state_dir is None:
-            raise ScriptError("sandbox provision requires --state-dir")
-        assert launch is not None
-        sandbox_lifecycle.provision(
-            args.state_dir,
-            launch,
-            hypervisor=_hypervisor(args.hypervisor),
-            memory_mib=args.memory_mib,
-            net=args.net,
-            network_profile=args.network_profile,
-            network_egress=args.network_egress,
-            network_ingress=args.network_ingress,
-            network_egress_allow=network_egress_allow,
-            network_egress_deny=network_egress_deny,
-            host_loopback=args.host_loopback,
-            network_proxy=args.network_proxy,
-            host_loopback_forward=tuple(args.host_loopback_forward),
-            cmdline=args.cmdline,
-            timeout=args.timeout,
-        )
-        return
-    if operation == "start":
-        if args.state_dir is None:
-            raise ScriptError("sandbox start requires --state-dir")
-        sandbox_lifecycle.start(args.state_dir, args.timeout)
-        return
-    if operation == "exec":
-        if args.state_dir is None:
-            raise ScriptError("sandbox exec requires --state-dir")
-        if args.outcome_report is not None:
-            sandbox_lifecycle.validate_outcome_destination(args.outcome_report)
-        result = sandbox_lifecycle.exec_workload(
-            args.state_dir,
-            (args.entrypoint, *args.sandbox_arg),
-            timeout_ms=args.exec_timeout_ms,
-            response_timeout=args.timeout,
-            cwd=args.cwd,
-            environment=exec_environment,
-            inherit_default_environment=args.inherit_default_environment,
-        )
-        sys.stdout.buffer.write(result.stdout)
-        sys.stdout.buffer.flush()
-        sys.stderr.buffer.write(result.stderr)
-        sys.stderr.buffer.flush()
-        if args.outcome_report is not None:
-            sandbox_lifecycle.write_exec_outcome(args.outcome_report, result)
-        raise SystemExit(result.returncode)
-    if operation == "stop":
-        if args.state_dir is None:
-            raise ScriptError("sandbox stop requires --state-dir")
-        sandbox_lifecycle.stop(args.state_dir, args.timeout)
-        return
-    if operation == "deprovision":
-        if args.state_dir is None:
-            raise ScriptError("sandbox deprovision requires --state-dir")
-        sandbox_lifecycle.deprovision(args.state_dir, args.timeout)
-        return
-    if args.state_dir is not None:
-        raise ScriptError(
-            "one-shot sandbox execution rejects persistent --state-dir settings"
-        )
-    assert operation == "run"
-    assert launch is not None
-    executable = require_file(openvmm_binary_path(), "OpenVMM release binary")
-    kernel = require_file(
-        artifact_path(KernelBuildConstants.BINARY_NAME), "Linux direct kernel"
-    )
-    initrd = require_file(
-        artifact_path(AlpineBuildConstants.INITRAMFS_NAME),
-        "initramfs",
-    )
-    command = [
-        str(executable),
-        *launch.openvmm_arguments(),
-        "--microvm-lifecycle",
-        "one-shot",
-        "--single-process",
-        "--hypervisor",
-        _hypervisor(args.hypervisor),
-        "--memory",
-        f"{args.memory_mib}M",
-        "--kernel",
-        str(kernel),
-        "--initrd",
-        str(initrd),
-        "--cmdline",
-        launch.kernel_command_line(args.cmdline),
-    ]
-    _extend_network_arguments(
-        command,
-        args,
-        network_egress_allow,
-        network_egress_deny,
-    )
-    if args.outcome_report is not None:
-        command.extend(["--microvm-report", str(args.outcome_report)])
-    print(f">> {_format_command(command)}")
-    if not args.dry_run:
-        raise SystemExit(subprocess.run(command).returncode)
 
 
 def command_collect_sources(_: argparse.Namespace) -> None:
@@ -1123,6 +850,20 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     )
     patch_identity.set_defaults(handler=command_kernel_patch_identity)
 
+    source_identity = subparsers.add_parser(
+        "guest-binary-source-identity",
+        help=(
+            "print the digest of the Rust guest binary source paths and contents "
+            "that keys the guest image caches"
+        ),
+    )
+    source_identity.add_argument(
+        "--root",
+        type=Path,
+        default=BuildConstants.REPO_ROOT,
+    )
+    source_identity.set_defaults(handler=command_guest_binary_source_identity)
+
     required_ci = subparsers.add_parser(
         "check-required-ci",
         help="validate required GitHub Actions job results",
@@ -1341,91 +1082,69 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help="run or manage workloads over EROFS layers and private ext4 scratch",
     )
 
-    def sandbox_layer(value: str) -> SandboxLayer:
-        try:
-            return SandboxLayer.parse(value)
-        except ScriptError as error:
-            raise argparse.ArgumentTypeError(str(error)) from error
-
-    def sandbox_identity(value: str) -> tuple[int, int]:
-        try:
-            return parse_workload_identity(value)
-        except ScriptError as error:
-            raise argparse.ArgumentTypeError(str(error)) from error
+    # nvx-rs checks the values and applies the defaults; these options define
+    # the command line and its help.
+    def sandbox_option(*names: str, flag: bool = False, **kwargs: Any) -> None:
+        sandbox.add_argument(
+            *names, action=_SandboxOption, nargs=0 if flag else None, **kwargs
+        )
 
     sandbox.add_argument(
         "sandbox_operation",
         nargs="?",
-        choices=("run", "provision", "start", "exec", "stop", "deprovision"),
+        choices=SANDBOX_OPERATIONS,
         default="run",
     )
-    sandbox.add_argument(
-        "--layer",
-        action="append",
-        default=[],
-        type=sandbox_layer,
-        metavar="ROLE,PATH,EROFS_UUID",
-    )
-    sandbox.add_argument("--scratch", type=Path)
-    sandbox.add_argument("--state-dir", type=Path)
-    sandbox.add_argument("--entrypoint", default="/bin/sh")
-    sandbox.add_argument("--arg", action="append", default=[], dest="sandbox_arg")
-    sandbox.add_argument("--hostname", default="nvx-sandbox")
-    sandbox.add_argument(
+    sandbox_option("--layer", metavar="ROLE,PATH,EROFS_UUID")
+    sandbox_option("--scratch")
+    sandbox_option("--state-dir")
+    sandbox_option("--entrypoint")
+    sandbox_option("--arg", dest="sandbox_arg")
+    sandbox_option("--hostname")
+    sandbox_option(
         "--workload-user",
-        type=sandbox_identity,
-        default=parse_workload_identity("65534:65534"),
         metavar="UID:GID",
         help="fixed non-root workload identity (default: 65534:65534)",
     )
-    sandbox.add_argument("--memory-max", type=int)
-    sandbox.add_argument("--pids-max", type=int)
-    sandbox.add_argument("--memory-mib", type=int, default=256)
-    sandbox.add_argument(
+    sandbox_option("--memory-max")
+    sandbox_option("--pids-max")
+    sandbox_option("--memory-mib")
+    sandbox_option(
         "--timeout",
-        type=positive_float,
-        default=60.0,
         help=(
             "control operation timeout, and the longest wait for another "
             "lifecycle transition of the sandbox, in seconds (default: 60)"
         ),
     )
-    sandbox.add_argument(
+    sandbox_option(
         "--exec-timeout-ms",
-        type=int,
-        default=0,
         help="guest workload timeout in milliseconds; zero disables it",
     )
-    sandbox.add_argument(
+    sandbox_option(
         "--cwd",
         help="absolute guest working directory for managed exec (default: /)",
     )
-    sandbox.add_argument(
+    sandbox_option(
         "--environment",
-        action="append",
-        default=[],
         metavar="KEY=VALUE",
         help="set the exact managed exec environment; repeat for multiple entries",
     )
-    sandbox.add_argument(
+    sandbox_option(
         "--environment-file",
-        type=Path,
         metavar="PATH",
         help="read the exact managed exec environment from a JSON string array",
     )
-    sandbox.add_argument(
+    sandbox_option(
         "--inherit-default-environment",
-        action="store_true",
+        flag=True,
         help=(
             "layer the managed exec environment over the guest default "
             "environment instead of replacing it"
         ),
     )
-    sandbox.add_argument("--hypervisor", choices=HYPERVISORS, default="auto")
-    sandbox.add_argument(
+    sandbox_option("--hypervisor", choices=HYPERVISORS)
+    sandbox_option(
         "--mount",
-        action="append",
-        default=[],
         metavar="GUEST_TARGET,HOST_PATH[,ro|rw]",
         help=(
             "live-share a host directory, or a single regular host file without "
@@ -1435,37 +1154,31 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
             "children of one virtio-fs device"
         ),
     )
-    sandbox.add_argument(
+    sandbox_option(
         "--mount-deny",
-        action=_MountPolicyPathAction,
-        default=[],
         metavar="HOST_PATH",
         help=(
             "hide one existing path inside a --mount host directory; with "
             "several --mount options, it applies to the --mount before it"
         ),
     )
-    sandbox.add_argument(
+    sandbox_option(
         "--mount-allow",
-        action=_MountPolicyPathAction,
-        default=[],
         metavar="HOST_PATH",
         help=(
             "expose one existing path inside a --mount-deny path of the same "
             "share again; the hidden directories on the way list only it"
         ),
     )
-    sandbox.add_argument(
+    sandbox_option(
         "--mount-write",
-        action=_MountPolicyPathAction,
-        default=[],
         metavar="HOST_PATH",
         help=(
             "make one existing path one of the only writable parts of a "
             "read-write --mount; the rest of the share is read-only"
         ),
     )
-    sandbox.add_argument(
+    sandbox_option(
         "--mount-owner",
         choices=MOUNT_OWNERS,
         help=(
@@ -1474,48 +1187,44 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
             "owner of the shared directory or file (Linux only)"
         ),
     )
-    sandbox.add_argument("--net", metavar="IPV4/PREFIX")
-    sandbox.add_argument("--network-profile", choices=NETWORK_PROFILES)
-    sandbox.add_argument("--network-egress", choices=("allow", "deny"))
-    sandbox.add_argument("--network-ingress", choices=("allow", "deny"))
-    sandbox.add_argument(
+    sandbox_option("--net", metavar="IPV4/PREFIX")
+    sandbox_option("--network-profile", choices=NETWORK_PROFILES)
+    sandbox_option("--network-egress", choices=("allow", "deny"))
+    sandbox_option("--network-ingress", choices=("allow", "deny"))
+    sandbox_option(
         "--network-egress-allow",
-        action="append",
-        default=[],
         metavar=NETWORK_EGRESS_RULE_METAVAR,
         help=NETWORK_EGRESS_RULE_HELP.format(action="allow"),
     )
-    sandbox.add_argument(
+    sandbox_option(
         "--network-egress-deny",
-        action="append",
-        default=[],
         metavar=NETWORK_EGRESS_RULE_METAVAR,
         help=NETWORK_EGRESS_RULE_HELP.format(action="deny"),
     )
-    sandbox.add_argument(
+    sandbox_option(
         "--network-egress-policy-file",
-        type=Path,
         metavar="PATH",
         help=(
             "load bounded IPv4 and IPv6 ranges and rule-local exclusions for "
             "run/provision"
         ),
     )
-    sandbox.add_argument("--host-loopback", choices=("allow", "deny"))
-    sandbox.add_argument("--network-proxy", metavar="IPV4:TCP-PORT")
-    sandbox.add_argument("--host-loopback-forward", action="append", default=[])
-    sandbox.add_argument(
+    sandbox_option("--host-loopback", choices=("allow", "deny"))
+    sandbox_option("--network-proxy", metavar="IPV4:TCP-PORT")
+    sandbox_option("--host-loopback-forward")
+    sandbox_option(
         "--outcome-report",
-        type=Path,
         help="write a bounded local JSON outcome report for run or exec",
     )
-    sandbox.add_argument("--cmdline", default="")
-    sandbox.add_argument(
+    sandbox_option("--cmdline")
+    sandbox_option(
         "--dry-run",
-        action="store_true",
+        flag=True,
         help="print the one-shot run command without launching it",
     )
-    sandbox.set_defaults(handler=command_sandbox)
+    sandbox.set_defaults(
+        handler=command_sandbox, program=parser.prog, **{SANDBOX_ARGUMENTS: []}
+    )
 
     benchmark = subparsers.add_parser(
         "benchmark",

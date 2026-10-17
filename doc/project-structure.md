@@ -16,7 +16,7 @@ are build products or caches and are not part of the tracked source tree. The
 | `doc` | User and contributor documentation |
 | `docker` | Reproducible guest build environment |
 | `kernel` | Reproducible configs and complete Linux patch series |
-| `guest` | Common guest sources plus Alpine-control and Ubuntu shell helpers |
+| `guest` | Common and distribution-specific guest scripts |
 | `ubuntu` | Pinned Ubuntu supplemental binary-package lock |
 | `azurelinux` | Checksum-pinned Azure Linux supplemental RPM lock |
 | `aci_edge_sandboxes` | Rust crate `aci_edge_sandboxes`: state-aware sandbox API with an OpenVMM backend and an opt-in native-agent backend |
@@ -52,9 +52,9 @@ nvx/
 |   |-- actionlint.yaml          Self-hosted runner labels for actionlint
 |   `-- copilot-instructions.md  Repository-wide Copilot instructions
 |-- .vscode/settings.json        Shared VS Code settings
-|-- guest/                       Guest-owned scripts and static helpers
-|   |-- common/                  Shared init, agent, snapshot, time, and test helpers
-|   |-- alpine/                  Alpine-control container entry helpers
+|-- guest/                       Guest-owned scripts
+|   |-- common/                  Shared init, agent, snapshot, and probe scripts
+|   |-- alpine/                  Alpine-control container entry scripts
 |   `-- ubuntu/                  Ubuntu interactive-shell startup policy
 |-- ubuntu/
 |   `-- packages.lock.json       Exact supplemental Ubuntu binary package closure
@@ -101,11 +101,11 @@ nvx/
 |   |   |-- protocol/            Control-console codec shared by the host and the guest
 |   |   |-- contract.rs          Control-contract versions and release compatibility
 |   |   |-- net/                 CIDR parsing and subtraction, and hostname and guest-network forms
-|   |   |-- host/                Artifacts, launch, policy lowering, sessions, and VM instances
+|   |   |-- host/                Artifacts, launch, network and egress-policy lowering, sessions, VM instances, the sandbox launch profile, and the `nvx-rs` CLI (feature `cli`)
 |   |   |-- testing/             Fake OpenVMM (feature `testing`)
 |   |   |-- guest/               Programs that run in Linux guests (feature `guest`)
-|   |   `-- bin/                 nvx-fake-openvmm test double and the guest binaries
-|   |-- tests/                   Fake-OpenVMM instance lifecycle and guest-binary tests
+|   |   `-- bin/                 nvx-rs CLI, nvx-fake-openvmm test double, and the guest binaries
+|   |-- tests/                   Fake-OpenVMM instance lifecycle, CLI, guest-binary, and hypervisor managed-lifecycle tests, and the golden fixtures that Python recorded
 |   |-- build.rs                 Stages the bundled artifacts (feature `bundled`)
 |   `-- artifacts.json           Release package pinned for the bundled artifacts
 |-- openvmm/                     OpenVMM Git submodule
@@ -128,11 +128,9 @@ nvx/
 |   |   |-- collect_alpine_sources.py Alpine source collection
 |   |   |-- collect_ubuntu_sources.py Ubuntu source collection
 |   |   |-- common.py            Shared process and configuration helpers
-|   |   |-- control_session.py   Control-session client for managed workloads
 |   |   |-- create_linux_source_archive.py Linux source packaging
 |   |   |-- development_release.py Resumable development release publication
 |   |   |-- doctor.py            Time ABI host qualification
-|   |   |-- egress_policy.py     Egress policy compiler for OpenVMM's rule grammar
 |   |   |-- elf.py               Static-executable check of ELF binaries
 |   |   |-- guests.py            Typed guest descriptors
 |   |   |-- host_telemetry.py    Benchmark host provenance and Windows capture storage telemetry
@@ -140,12 +138,12 @@ nvx/
 |   |   |-- managed_exec_tests.py Managed workload environment, directory, and timeout tests
 |   |   |-- microvm_test_scripts/ Guest workloads for the microVM tests
 |   |   |-- microvm_tests.py     NVX microVM correctness tests
+|   |   |-- nvx_rs.py            Finds, builds, and runs nvx-rs, to which nvx.py delegates
 |   |   |-- openvmm_process.py   Foreground OpenVMM process control for tests
 |   |   |-- performance.py       CI performance collection, persistence, and gates
 |   |   |-- process_supervisor.py Linux supervisor for one owned process tree
 |   |   |-- release.py           Release download, source collection, and packaging
-|   |   |-- sandbox.py           Host-side sandbox launch contract
-|   |   |-- sandbox_lifecycle.py Managed sandbox lifecycle operations
+|   |   |-- sandbox.py           Live-share arguments of `nvx.py run`
 |   |   |-- sandbox_lifecycle_tests.py Managed sandbox lifecycle and security tests
 |   |   |-- time_abi.py          Time ABI harness checks and CPU profile guidance
 |   |   `-- ubuntu.py            Verified Ubuntu rootfs and EROFS preparation
@@ -201,9 +199,10 @@ OpenVMM release.
 
 ### `guest/`, `ubuntu/`, and `azurelinux/`
 
-`guest/common` contains scripts and static helper sources shared by the Alpine,
-Ubuntu, and Azure Linux initramfs builds, plus the Azure Linux variants of the
-container-entry helpers. `init` controls early boot and then starts an
+`guest/common` contains scripts shared by the Alpine, Ubuntu, and Azure Linux
+initramfs builds, plus the Azure Linux variants of the container-entry
+scripts. The nine compiled `/sbin/nvx-*` programs live under `nvx-rs/src/guest`
+and `nvx-rs/src/bin`. `init` controls early boot and then starts an
 initramfs program named by `nvx_exec=`, the Alpine-only `nvx-init-agent`
 sandbox profile, `nvx-managed-agent` for a managed workload, a virtio restore
 probe for benchmark profiling, or the interactive shell. On an interactive
@@ -213,14 +212,16 @@ the container launch and entry scripts that only the Alpine initramfs installs;
 the entry script stages Alpine's musl loader and `setpriv` inside the
 workload's root.
 
-The sandbox helpers resolve fixed virtio-blk roles through
+The sandbox scripts resolve fixed virtio-blk roles through
 sysfs, assemble EROFS lower layers over ext4 scratch, place the workload in its
 cgroup before release, construct its mount/PID/UTS namespaces, enter its
 filesystem root after dropping capabilities, and retain the agent as the outer
 PID 1. In a managed sandbox, the agent supervises `nvx-managed-agent` and
 performs the ordered unmount teardown after a stop request. The remaining
 common helpers handle shutdown, virtio-fs mounting, snapshot preparation, and
-the guest side of the time ABI, or provide device-access and diagnostic probes.
+the guest side of the time ABI. The Rust guest binaries provide shutdown,
+managed control, restore repair, device access, ingress announcements, and
+diagnostic probes.
 
 `ubuntu/packages.lock.json` pins the complete
 supplemental `.deb` closure installed without maintainer-script execution.
@@ -268,10 +269,14 @@ API, the policy honor matrix, and tests.
 The Rust crate `nvx-rs`, whose library `nvx` holds the NVX mechanics: the
 authenticated control protocol of the guest agent, artifact discovery and
 bundled-release staging, OpenVMM's command line, the lowering of network and
-filesystem policies, process and platform primitives for Linux and Windows
-hosts, the supervision of VM instances, and a fake OpenVMM for tests. Its
-`guest` feature adds the programs that will replace the C programs of
-`guest/common/`, built as static musl executables. It is a
+filesystem policies, the compiler of `nvx.py`'s egress policy files, process
+and platform primitives for Linux and Windows
+hosts, the supervision of VM instances, the sandbox launch profile of
+`nvx.py sandbox`, the `nvx-rs` command-line interface that ports
+`nvx.py sandbox`, egress policy compilation, and artifact lookup, and a fake
+OpenVMM for tests. Its
+`guest` feature builds the nine static executables that every guest image
+installs at `/sbin/nvx-*`. It is a
 standalone crate with its own `Cargo.lock`, like `aci_edge_sandboxes`, and
 builds independently of the OpenVMM submodule. See its
 [README](../nvx-rs/README.md).
@@ -326,7 +331,7 @@ see [Automated environment bootstrap](setup.md#automated-environment-bootstrap).
 | `pyproject.toml` | Strict Pyright policy plus Ruff lint and format settings |
 | `requirements-dev.txt` | Pinned Python tools used by contributors and CI |
 | `rust-toolchain.toml` | Rust release that builds OpenVMM, its test guests, and the repository's Rust code |
-| `SOURCE-MANIFEST.json` | Distribution version, OpenVMM microVM ABI and control-protocol versions, and exact Linux, Alpine, Ubuntu, and Azure Linux input identities and output locations |
+| `SOURCE-MANIFEST.json` | Distribution version, OpenVMM microVM ABI and control-protocol versions, Rust guest toolchain and source roots, and exact Linux, Alpine, Ubuntu, and Azure Linux input identities and output locations |
 | `VERSION` | Distribution version consumed by packaging tools |
 | `.gitmodules` | OpenVMM repository URL, path, and tracking branch |
 | `.gitignore` | Excludes build products, caches, virtual environments, logs, and platform metadata |

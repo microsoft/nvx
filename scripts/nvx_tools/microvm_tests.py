@@ -9,8 +9,9 @@ import os
 import queue
 import random
 import re
-import secrets
 import selectors
+import shlex
+import shutil
 import socket
 import struct
 import subprocess
@@ -26,6 +27,7 @@ from pathlib import Path
 from stat import S_ISUID
 from typing import Any, cast
 
+from . import nvx_rs
 from .benchmark import (
     CAPTURE_LOG_FILTER,
     RESTORE_MARKER,
@@ -38,7 +40,6 @@ from .benchmark import (
     parse_snapshot_profile_line,
     positive_float,
     positive_int,
-    record_adversarial_openvmm_pid,
     smp_probe_script,
     snapshot_restore_command,
     workload_boot_command,
@@ -61,10 +62,9 @@ from .common import (
     require_file,
     sha256_file,
 )
-from .control_session import ControlSession, ManagedExecRefused, capability_pipe
-from .egress_policy import CompiledEgressPolicy, compile_policy_file
 from .guests import GUEST_NAMES, GuestDescriptor, guest_descriptor
 from .managed_exec_tests import run_managed_exec_configuration
+from .nvx_rs import EgressRules, compile_egress_policy
 from .openvmm_process import OpenvmmProcess, TcpConsole
 from .sandbox_lifecycle_tests import run_sandbox_lifecycle
 from .time_abi import (
@@ -80,7 +80,6 @@ from .time_abi import (
     TimeAbiMonitor,
     check_cpu_budget_us,
     check_warp_probe,
-    describe_exit_status,
     parse_cpu_profile_fallback,
     parse_fields,
     parse_marker,
@@ -269,14 +268,6 @@ SCRATCH_FRESH_POST_MARKER = b"NVX-SCRATCH-FRESH-POST-OUT"
 SCRATCH_FRESH_VALUE_PREFIX = b"NVX-SCRATCH-FRESH-VALUE-"
 SCRATCH_FRESH_VALUE_SUFFIX = b"-END"
 WORKLOAD_IDENTITY_MARKER = b"NVX-WORKLOAD-IDENTITY-OK uid=65534 gid=65534"
-# A direct-mode guest refuses a working directory that the workload cannot
-# enter with the Linux error number, which does not depend on the host.
-MANAGED_REFUSED_CWDS = (
-    ("missing", "/does-not-exist", 2),  # ENOENT
-    ("file", "/etc/passwd", 20),  # ENOTDIR
-    ("inaccessible", "/root", 13),  # EACCES
-)
-MANAGED_REFUSED_CWD_MARKER = "/tmp/nvx-refused-cwd-ran"
 BOOT_MARKER = b"NVX-GUEST-BOOT-OK:"
 GUEST_BOOT_COMPLETION_MARKER = b"NVX-GUEST-BOOT-CHECK-OK"
 GUEST_IDENTITY_COMPLETION_MARKER = b"NVX-GUEST-IDENTITY-OK"
@@ -857,24 +848,25 @@ def run_workload_identity(
         raise RuntimeError("root workload identity was not rejected before boot")
 
 
-def _refused_managed_exec(
-    session: ControlSession, cwd: str, *, timeout: float
-) -> ManagedExecRefused:
-    """Runs a workload in an unusable directory; returns the guest's refusal."""
-    try:
-        result = session.exec(
-            ("/bin/touch", MANAGED_REFUSED_CWD_MARKER),
-            timeout_ms=5_000,
-            response_timeout=timeout,
-            cwd=cwd,
-        )
-    except ManagedExecRefused as refusal:
-        return refusal
-    raise RuntimeError(
-        f"managed working directory {cwd} was not refused: "
-        f"returncode={result.returncode} category={result.category} "
-        f"stderr={result.stderr!r}"
-    )
+# The ignored nvx-rs test that drives the managed lifecycle of a guest whose
+# init hands the boot to the managed agent: nvx-rs/tests/managed_lifecycle.rs.
+MANAGED_LIFECYCLE_TEST = "managed_lifecycle"
+
+
+def managed_lifecycle_test_command(cargo: str) -> list[str]:
+    """Return the Cargo command that runs MANAGED_LIFECYCLE_TEST."""
+    return [
+        cargo,
+        "test",
+        "--manifest-path",
+        os.fspath(nvx_rs.DIRECTORY / "Cargo.toml"),
+        "--locked",
+        "--test",
+        MANAGED_LIFECYCLE_TEST,
+        "--",
+        "--ignored",
+        "--nocapture",
+    ]
 
 
 def run_managed_lifecycle(
@@ -887,20 +879,39 @@ def run_managed_lifecycle(
     timeout: float,
     output_dir: Path,
 ) -> None:
+    """Run the managed lifecycle of a guest whose init hands the boot to the
+    managed agent.
+
+    The nvx-rs test MANAGED_LIFECYCLE_TEST starts OpenVMM with the command
+    built here and drives the guest's control session with nvx-rs, so that no
+    Python client of the control protocol remains. This checks what the test
+    leaves: OpenVMM's outcome report and the guest console.
+    """
+    cargo = shutil.which("cargo")
+    if cargo is None:
+        raise ScriptError(
+            "the managed-lifecycle scenario runs the nvx-rs test "
+            f"{MANAGED_LIFECYCLE_TEST} with Cargo, which is not on PATH; "
+            "install Rust (https://rustup.rs)"
+        )
+    # Cargo runs the test in the nvx-rs directory, so every path is absolute.
+    output_dir = output_dir.resolve()
     with tempfile.TemporaryDirectory(prefix="nvx-managed-lifecycle-") as temporary:
-        root = Path(temporary)
+        root = Path(temporary).resolve()
         endpoint_value = (
             str(root / "control.sock"),
             f"//./pipe/openvmm-microvm-{uuid.uuid4().hex}",
         )[os.name == "nt"]
-        boot_console_address = _available_tcp_address()
-        capability = secrets.token_bytes(32)
         report_path = root / "managed-outcome.json"
+        # The test copies the guest console, which listens on TCP, to this log.
+        console_address = _available_tcp_address()
+        guest_log_path = output_dir / "managed-lifecycle-guest.log"
+        guest_log_path.unlink(missing_ok=True)
         command = workload_boot_command(
-            executable,
+            executable.resolve(),
             backend,
-            kernel,
-            initrd,
+            kernel.resolve(),
+            initrd.resolve(),
             memory_mib,
             "quiet loglevel=0",
         )
@@ -911,7 +922,7 @@ def run_managed_lifecycle(
                 "--microvm-lifecycle",
                 "managed",
                 "--virtio-console",
-                f"listen=tcp:{boot_console_address[0]}:{boot_console_address[1]}",
+                f"listen=tcp:{console_address[0]}:{console_address[1]}",
                 "--microvm-control-console",
                 f"listen={endpoint_value}",
                 "--microvm-control-auth-stdin",
@@ -919,255 +930,96 @@ def run_managed_lifecycle(
                 str(report_path),
             )
         )
-        log_path = output_dir / "managed-lifecycle.log"
-        guest_log_path = output_dir / "managed-lifecycle-guest.log"
-        process: subprocess.Popen[bytes] | None = None
-        boot_console: TcpConsole | None = None
-        with log_path.open("wb") as log:
-            try:
-                environment = os.environ.copy()
-                environment["OPENVMM_LOG"] = "off"
-                # OpenVMM reads its capability as soon as it starts.
-                capability_input = capability_pipe(capability)
-                try:
-                    process = subprocess.Popen(
-                        command,
-                        stdin=capability_input,
-                        stdout=log,
-                        stderr=subprocess.STDOUT,
-                        env=environment,
-                    )
-                finally:
-                    os.close(capability_input)
-                record_adversarial_openvmm_pid(process.pid, environment)
-                # The guest console has no shell to query: init hands the boot
-                # to the managed agent, which serves the control console. The
-                # monitor still fails the run on a violation or failed check
-                # printed there, and a failed boot check powers the guest off
-                # with status 193, which fails the exit check below.
-                boot_console = TcpConsole.connect(
-                    boot_console_address, timeout, monitor=TimeAbiMonitor(command)
-                )
-                with ControlSession.connect(
-                    Path(endpoint_value), capability, timeout
-                ) as session:
-                    session.ping(timeout)
-                    first = session.exec(
-                        (
-                            "/bin/sh",
-                            "-c",
-                            "/bin/touch nvx-managed-state; "
-                            'printf \'%s|%s|%s\' "$PWD" "$EMPTY" "$COMPLEX"',
-                        ),
-                        timeout_ms=5_000,
-                        response_timeout=timeout,
-                        cwd="/tmp",
-                        environment=(
-                            "EMPTY=",
-                            "COMPLEX=space = \N{SNOWMAN}",
-                        ),
-                    )
-                if (
-                    first.returncode != 0
-                    or first.category != "exit"
-                    or first.stdout != "/tmp||space = \N{SNOWMAN}".encode()
-                    or first.stderr
-                ):
-                    raise RuntimeError(
-                        "first managed workload returned an invalid result"
-                    )
-
-                with ControlSession.connect(
-                    Path(endpoint_value), capability, timeout
-                ) as session:
-                    empty_environment = session.exec(
-                        ("/usr/bin/env",),
-                        timeout_ms=5_000,
-                        response_timeout=timeout,
-                        environment=(),
-                    )
-                    exact_environment = session.exec(
-                        ("/usr/bin/env",),
-                        timeout_ms=5_000,
-                        response_timeout=timeout,
-                        environment=("EMPTY=", "COMPLEX=space = \N{SNOWMAN}"),
-                    )
-                    if (
-                        empty_environment.returncode != 0
-                        or empty_environment.stdout
-                        or empty_environment.stderr
-                        or exact_environment.returncode != 0
-                        or exact_environment.stderr
-                        or exact_environment.stdout
-                        != "EMPTY=\nCOMPLEX=space = \N{SNOWMAN}\n".encode()
-                    ):
-                        raise RuntimeError(
-                            "managed exec did not preserve the exact exec environment"
-                        )
-                    for workload_timeout in (0, 3_600_001, 86_400_000, 0xFFFFFFFF):
-                        boundary = session.exec(
-                            ("/bin/true",),
-                            timeout_ms=workload_timeout,
-                            response_timeout=timeout,
-                        )
-                        if (
-                            boundary.returncode != 0
-                            or boundary.category != "exit"
-                            or boundary.stdout
-                            or boundary.stderr
-                        ):
-                            raise RuntimeError(
-                                "managed exec rejected a valid uint32 timeout"
-                            )
-                    second = session.exec(
-                        (
-                            "/bin/sh",
-                            "-c",
-                            "pwd; test -f /tmp/nvx-managed-state; "
-                            'test "${COMPLEX-unset}" = unset; '
-                            "test ! -e /run/nvx/workload-machine-id; "
-                            "printf second-exec",
-                        ),
-                        timeout_ms=5_000,
-                        response_timeout=timeout,
-                    )
-                    timed_out = session.exec(
-                        ("/bin/sleep", "5"),
-                        timeout_ms=100,
-                        response_timeout=timeout,
-                    )
-                    after_timeout = session.exec(
-                        ("/bin/sh", "-c", "printf still-usable"),
-                        timeout_ms=5_000,
-                        response_timeout=timeout,
-                    )
-                    refused_cwds = [
-                        (
-                            description,
-                            cwd,
-                            error,
-                            _refused_managed_exec(session, cwd, timeout=timeout),
-                        )
-                        for description, cwd, error in MANAGED_REFUSED_CWDS
-                    ]
-                    after_refusals = session.exec(
-                        (
-                            "/bin/sh",
-                            "-c",
-                            f"test ! -e {MANAGED_REFUSED_CWD_MARKER} && "
-                            "printf still-usable",
-                        ),
-                        timeout_ms=5_000,
-                        response_timeout=timeout,
-                    )
-                    session.stop(timeout)
-                if (
-                    second.returncode != 0
-                    or second.category != "exit"
-                    or second.stdout != b"/\nsecond-exec"
-                    or second.stderr
-                ):
-                    raise RuntimeError(
-                        "managed workload state did not survive across exec requests"
-                    )
-                if timed_out.returncode != 124 or timed_out.category != "timeout":
-                    raise RuntimeError("managed workload timeout was not reported")
-                if (
-                    after_timeout.returncode != 0
-                    or after_timeout.category != "exit"
-                    or after_timeout.stdout != b"still-usable"
-                    or after_timeout.stderr
-                ):
-                    raise RuntimeError(
-                        "managed guest was not usable after a workload timeout"
-                    )
-                for description, cwd, error, refusal in refused_cwds:
-                    if (
-                        refusal.category != "cwd-failed"
-                        or refusal.status != error
-                        or refusal.stdout
-                        or f"cannot enter working directory {cwd}: ".encode()
-                        not in refusal.stderr
-                    ):
-                        raise RuntimeError(
-                            f"{description} managed working directory was not "
-                            f"refused clearly: {refusal} stderr={refusal.stderr!r}"
-                        )
-                if (
-                    after_refusals.returncode != 0
-                    or after_refusals.category != "exit"
-                    or after_refusals.stdout != b"still-usable"
-                    or after_refusals.stderr
-                ):
-                    raise RuntimeError(
-                        "a refused managed workload ran, or the guest was not "
-                        "usable after refusals"
-                    )
-                result = process.wait(timeout=timeout)
-                if result != 0:
-                    reason = describe_exit_status(result)
-                    raise RuntimeError(
-                        f"managed OpenVMM process exited with status {result}"
-                        + (f": {reason}; see {log_path}" if reason else "")
-                    )
-                report = _read_outcome_report(report_path)
-                _preserve_outcome_report(
-                    output_dir / "managed-outcome.json",
-                    report,
-                )
-                if report["backend"] != backend or report["outcome"] != {
-                    "operation": "managed",
-                    "category": "success",
-                    "status_code": 0,
-                }:
-                    raise RuntimeError("managed lifecycle outcome report was invalid")
-                if report["network_policy"]["status"] != "not-requested":
-                    raise RuntimeError(
-                        "managed lifecycle reported an unexpected network policy"
-                    )
-                if not all(report["teardown"].values()):
-                    raise RuntimeError("managed lifecycle reported incomplete teardown")
-                # Keep the guest log, then fail on anything the monitor found
-                # in the console's tail.
-                guest_log_path.write_bytes(boot_console.finish(check=False))
-                boot_console.finish()
-                boot_console = None
-            finally:
-                if boot_console is not None:
-                    guest_log_path.write_bytes(boot_console.finish(check=False))
-                if process is not None and process.poll() is None:
-                    process.terminate()
-                    try:
-                        process.wait(timeout=5)
-                    except subprocess.TimeoutExpired:
-                        process.kill()
-                        process.wait(timeout=5)
-
-        invalid = workload_boot_command(
-            executable,
-            backend,
-            kernel,
-            initrd,
-            memory_mib,
-            "quiet loglevel=0",
-        )
-        invalid.extend(
-            (
-                "--microvm-workload-identity",
-                "65534:65534",
-                "--microvm-lifecycle",
-                "managed",
+        environment = os.environ.copy()
+        # The test records OpenVMM's process ID for an adversarial campaign
+        # as the microVM scenarios do, but from the nvx-rs directory, so a
+        # relative journal resolves here.
+        journal = environment.get("NVX_ADVERSARIAL_OPENVMM_PID_JOURNAL")
+        if journal:
+            environment["NVX_ADVERSARIAL_OPENVMM_PID_JOURNAL"] = os.path.abspath(
+                journal
             )
+        environment.update(
+            {
+                "OPENVMM_LOG": "off",
+                "NVX_MANAGED_LIFECYCLE_COMMAND": json.dumps(command),
+                "NVX_MANAGED_LIFECYCLE_ENDPOINT": endpoint_value,
+                "NVX_MANAGED_LIFECYCLE_CONSOLE": (
+                    f"{console_address[0]}:{console_address[1]}"
+                ),
+                "NVX_MANAGED_LIFECYCLE_TIMEOUT": str(timeout),
+                "NVX_MANAGED_LIFECYCLE_OUTPUT_DIR": os.fspath(output_dir),
+            }
         )
-        with OpenvmmProcess(
-            invalid,
-            output_dir / "managed-lifecycle-invalid-transition.log",
-        ) as rejected:
-            result = rejected.wait(timeout)
-        if result.returncode == 0 or BOOT_MARKER in result.output:
+        test_command = managed_lifecycle_test_command(cargo)
+        print(f">> {shlex.join(test_command)}", flush=True)
+        result = subprocess.run(
+            test_command,
+            cwd=BuildConstants.REPO_ROOT,
+            env=environment,
+            check=False,
+        )
+        # The guest console has no shell to query: init hands the boot to the
+        # managed agent, which serves the control console. The monitor still
+        # fails the run on a violation or failed check printed there, before
+        # the test's own failure, which it may explain. A failed boot check
+        # powers the guest off with status 193, which fails the test.
+        try:
+            guest_output = guest_log_path.read_bytes()
+        except FileNotFoundError:
+            guest_output = b""
+        monitor = TimeAbiMonitor(command)
+        monitor.feed(guest_output)
+        monitor.finish()
+        if result.returncode != 0:
             raise RuntimeError(
-                "managed lifecycle without a control endpoint was not rejected before boot"
+                f"the managed lifecycle test {MANAGED_LIFECYCLE_TEST} failed with "
+                f"exit status {result.returncode}; see its output above and "
+                f"{output_dir / 'managed-lifecycle.log'}"
             )
+        report = _read_outcome_report(report_path)
+        _preserve_outcome_report(
+            output_dir / "managed-outcome.json",
+            report,
+        )
+        if report["backend"] != backend or report["outcome"] != {
+            "operation": "managed",
+            "category": "success",
+            "status_code": 0,
+        }:
+            raise RuntimeError("managed lifecycle outcome report was invalid")
+        if report["network_policy"]["status"] != "not-requested":
+            raise RuntimeError(
+                "managed lifecycle reported an unexpected network policy"
+            )
+        if not all(report["teardown"].values()):
+            raise RuntimeError("managed lifecycle reported incomplete teardown")
+
+    invalid = workload_boot_command(
+        executable,
+        backend,
+        kernel,
+        initrd,
+        memory_mib,
+        "quiet loglevel=0",
+    )
+    invalid.extend(
+        (
+            "--microvm-workload-identity",
+            "65534:65534",
+            "--microvm-lifecycle",
+            "managed",
+        )
+    )
+    with OpenvmmProcess(
+        invalid,
+        output_dir / "managed-lifecycle-invalid-transition.log",
+    ) as rejected:
+        result = rejected.wait(timeout)
+    if result.returncode == 0 or BOOT_MARKER in result.output:
+        raise RuntimeError(
+            "managed lifecycle without a control endpoint was not rejected before boot"
+        )
 
 
 def run_structured_outcome(
@@ -1901,7 +1753,7 @@ def _bounded_egress_policy(
     udp_ports: tuple[int, int, int],
     *,
     policy_file: Path | None = None,
-) -> CompiledEgressPolicy:
+) -> EgressRules:
     allow: list[dict[str, object]] = []
     deny: list[dict[str, object]] = []
     for protocol, (start, denied, end) in (
@@ -1942,9 +1794,9 @@ def _bounded_egress_policy(
             )
         )
 
-    def compile_file(path: Path) -> CompiledEgressPolicy:
+    def compile_file(path: Path) -> EgressRules:
         path.write_text(json.dumps({"allow": allow, "deny": deny}), encoding="utf-8")
-        return compile_policy_file(path)
+        return compile_egress_policy(path)
 
     if policy_file is not None:
         return compile_file(policy_file)
@@ -2597,7 +2449,7 @@ def run_l3_l4_egress_port_ranges(
             )
             # Each range must reach OpenVMM as one native rule, not as a rule
             # for each of its ports.
-            native = compile_policy_file(policy_path)
+            native = compile_egress_policy(policy_path)
             if not any(
                 rule.endswith(f":{first}-{last}")
                 for rule in (*native.allow, *native.deny)
@@ -3027,7 +2879,7 @@ def run_ipv6_egress_policy(
                 json.dumps({"allow": case.allow, "deny": case.deny}, indent=2) + "\n",
                 encoding="utf-8",
             )
-            native = compile_policy_file(policy_path)
+            native = compile_egress_policy(policy_path)
             command = [
                 sys.executable,
                 str(Path(__file__).parents[1] / "nvx.py"),
@@ -4614,7 +4466,7 @@ def run_sandbox_blocks(
             memory_mib,
             "quiet loglevel=0",
         )
-        for role in ("distro", "runtime", "custom", "scratch"):
+        for role in ("distro", "scratch"):
             path = root / f"{role}.img"
             with path.open("wb") as disk:
                 disk.truncate(SANDBOX_BLOCK_SIZE)

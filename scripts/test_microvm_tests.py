@@ -23,26 +23,34 @@ import unittest
 from collections.abc import Callable, Collection
 from contextlib import ExitStack, nullcontext, redirect_stdout
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, str(Path(__file__).parent))
 import nvx  # noqa: E402
 from nvx_tools import (  # noqa: E402
+    adversarial_executor,
     benchmark,
     common,
-    control_session,
-    egress_policy,
     managed_exec_tests,
     microvm_tests,
+    nvx_rs,
     openvmm_process,
-    sandbox_lifecycle,
     sandbox_lifecycle_tests,
     time_abi,
 )
 from nvx_tools.build_constants import (  # noqa: E402
     BuildConstants,
 )
+
+
+def _compile(policy: dict[str, object]) -> nvx_rs.EgressRules:
+    """Compiles an egress policy with nvx-rs, as nvx.py run compiles its
+    --network-egress-policy-file."""
+    with tempfile.TemporaryDirectory(prefix="nvx-egress-policy-") as temporary:
+        path = Path(temporary) / "policy.json"
+        path.write_text(json.dumps(policy), encoding="utf-8")
+        return nvx_rs.compile_egress_policy(path)
 
 
 def _posix_shell() -> str | None:
@@ -937,7 +945,12 @@ class _FakeSandboxCli:
         state.mkdir(parents=True, exist_ok=True)
         (state / "lifecycle.lock").touch()
         (state / "config.json").write_text(
-            json.dumps({"user": values.get("--workload-user", "65534:65534")}),
+            json.dumps(
+                {
+                    "user": values.get("--workload-user", "65534:65534"),
+                    "hypervisor": values["--hypervisor"],
+                }
+            ),
             encoding="utf-8",
         )
         return 0, b"", b""
@@ -1106,13 +1119,29 @@ class _FakeSandboxCli:
         if "stop-leaks-capability" not in self.faults:
             (state / "control.capability").unlink()
         (state / "control.sock").unlink(missing_ok=True)
+        config = json.loads((state / "config.json").read_text(encoding="utf-8"))
+        teardown = {name: True for name in microvm_tests.OUTCOME_TEARDOWN_FIELDS}
+        if "stop-reports-incomplete-teardown" in self.faults:
+            teardown["vm_stopped"] = False
         (state / "outcome.json").write_text(
             json.dumps(
                 {
                     "schema_version": 1,
+                    "instance_id": "22" * 16,
+                    "backend": (
+                        "auto"
+                        if "stop-reports-another-backend" in self.faults
+                        else config["hypervisor"]
+                    ),
                     "outcome": sandbox_lifecycle_tests.MANAGED_SUCCESS,
-                    "network_policy": {},
-                    "teardown": {},
+                    "network_policy": {
+                        "status": (
+                            "applied"
+                            if "stop-reports-a-network-policy" in self.faults
+                            else "not-requested"
+                        )
+                    },
+                    "teardown": teardown,
                 }
             ),
             encoding="utf-8",
@@ -1155,9 +1184,6 @@ class _FakeSandboxCli:
 
     def processes(self, _: str) -> tuple[int, ...]:
         return tuple(sorted(pid for pid, running in self.running.items() if running))
-
-    def process_running(self, runtime: dict[str, object]) -> bool:
-        return self.running.get(cast(int, runtime["pid"]), False)
 
     def endpoint_present(self, runtime: dict[str, object]) -> bool:
         return runtime["control_endpoint"] in self.endpoints.values()
@@ -1251,11 +1277,6 @@ class PublicSandboxLifecycleTests(unittest.TestCase):
                 sandbox_lifecycle_tests,
                 "terminate_process",
                 side_effect=fake.terminate,
-            ),
-            patch.object(
-                sandbox_lifecycle,
-                "runtime_process_running",
-                side_effect=fake.process_running,
             ),
         ):
             sandbox_lifecycle_tests.run_sandbox_lifecycle(
@@ -1352,6 +1373,13 @@ class PublicSandboxLifecycleTests(unittest.TestCase):
             "overwrite-report": "exec returned 0, expected 1",
             "stop-leaks-capability": "after stop: the state directory holds",
             "stop-leaks-process": "OpenVMM still runs after stop",
+            "stop-reports-another-backend": "the managed report names backend 'auto'",
+            "stop-reports-a-network-policy": (
+                "the managed report has network policy status 'applied'"
+            ),
+            "stop-reports-incomplete-teardown": (
+                "the managed report has incomplete teardown"
+            ),
             "restart-loses-state": "the restarted sandbox's state returned status 1",
             "unserialized-starts": "overlapping public starts returned status 0",
             "deprovision-removes-foreign": "deprovision returned 0, expected 1",
@@ -1449,19 +1477,36 @@ class PublicSandboxLifecycleTests(unittest.TestCase):
                 sandbox_lifecycle_tests.scratch_journal_clean(image)
 
     def test_kill_ends_the_recorded_process(self):
-        if os.name != "nt" and sys.platform != "linux":
-            self.skipTest("process identity requires a Linux or Windows host")
         child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+
+        def processes(marker: str) -> tuple[int, ...]:
+            # The scan finds the child under its fixture's name while it runs.
+            self.assertEqual(marker, "nvx-public-lifecycle-kill")
+            return (child.pid,) if child.poll() is None else ()
+
+        runtime: dict[str, object] = {
+            "format": 1,
+            "pid": child.pid,
+            "start_time": 1,
+            "control_endpoint": "unused",
+        }
         try:
-            runtime: dict[str, object] = {
-                "format": 1,
-                "pid": child.pid,
-                "start_time": sandbox_lifecycle._process_start_time(child.pid),
-                "control_endpoint": "unused",
-            }
-            self.assertTrue(sandbox_lifecycle.runtime_process_running(runtime))
-            sandbox_lifecycle_tests.kill_openvmm(runtime, 30)
-            self.assertFalse(sandbox_lifecycle.runtime_process_running(runtime))
+            with patch.object(
+                sandbox_lifecycle_tests, "openvmm_processes", side_effect=processes
+            ):
+                self.assertTrue(
+                    sandbox_lifecycle_tests.openvmm_running(
+                        runtime, "nvx-public-lifecycle-kill"
+                    )
+                )
+                sandbox_lifecycle_tests.kill_openvmm(
+                    runtime, 30, "nvx-public-lifecycle-kill"
+                )
+                self.assertFalse(
+                    sandbox_lifecycle_tests.openvmm_running(
+                        runtime, "nvx-public-lifecycle-kill"
+                    )
+                )
             self.assertNotEqual(child.wait(timeout=30), 0)
         finally:
             if child.poll() is None:
@@ -2589,29 +2634,6 @@ class FilesystemCommaPathsScenarioTests(unittest.TestCase):
         self.assertIn("nvx-exit 0", script)
 
 
-class ControlSessionTests(unittest.TestCase):
-    def test_named_pipe_connect_retries_transient_invalid_argument(self):
-        error = OSError(control_session.errno.EINVAL, "Invalid argument")
-        with (
-            patch.object(control_session, "_winapi") as winapi,
-            patch.object(
-                control_session.time,
-                "monotonic",
-                side_effect=[0.0, 0.0],
-            ),
-            patch.object(control_session.time, "sleep") as sleep,
-        ):
-            winapi.CreateFile.side_effect = [error, 123]
-            stream = control_session._NamedPipeStream.connect(
-                Path(r"\\.\pipe\nvx-test"),
-                1.0,
-            )
-
-        self.assertEqual(stream._handle, 123)
-        self.assertEqual(winapi.CreateFile.call_count, 2)
-        sleep.assert_called_once_with(0.025)
-
-
 class _PortExclusionSockets:
     """Create sockets that refuse ports excluded per protocol, as Windows does."""
 
@@ -2668,29 +2690,180 @@ class _EphemeralPortSockets:
 
 
 class MicrovmTests(unittest.TestCase):
-    def test_managed_lifecycle_spawns_openvmm_with_a_prepared_capability_pipe(self):
-        # OpenVMM reads its capability as soon as it starts, so the scenario hands
-        # it a pipe that already holds the capability and the end of file (#440).
-        prepared: list[int] = []
-        spawned: list[object] = []
+    @staticmethod
+    def _managed_report(backend: str = "kvm") -> dict[str, object]:
+        return {
+            "schema_version": 1,
+            "instance_id": "33" * 16,
+            "backend": backend,
+            "outcome": {
+                "operation": "managed",
+                "category": "success",
+                "status_code": 0,
+            },
+            "network_policy": {
+                "status": "not-requested",
+                "status_code": 0,
+                "mode": "none",
+                "allow_rule_count": 0,
+                "deny_rule_count": 0,
+                "host_loopback": False,
+            },
+            "teardown": {name: True for name in microvm_tests.OUTCOME_TEARDOWN_FIELDS},
+        }
 
-        def prepare(capability: bytes) -> int:
-            descriptor = control_session.capability_pipe(capability)
-            prepared.append(descriptor)
-            return descriptor
+    def _run_managed_lifecycle(
+        self,
+        output_dir: Path,
+        *,
+        returncode: int = 0,
+        console: bytes = b"NVX-GUEST-BOOT-OK: managed\n",
+        report: dict[str, object] | None = None,
+        rejected: int = 1,
+    ) -> list[tuple[list[str], dict[str, str], object]]:
+        """Runs the scenario with a stand-in for the nvx-rs test, which leaves
+        `console`, `report`, and `returncode` as the real one would."""
+        runs: list[tuple[list[str], dict[str, str], object]] = []
 
-        def launch(_command: list[str], *, stdin: object, **_options: object) -> None:
-            # The pipe stays open until OpenVMM has started with it.
-            self.assertIsInstance(stdin, int)
-            os.fstat(cast(int, stdin))
-            spawned.append(stdin)
-            raise RuntimeError("stopped after the spawn")
+        def run_test(
+            command: list[str], *, cwd: object, env: dict[str, str], check: bool
+        ) -> subprocess.CompletedProcess[bytes]:
+            self.assertFalse(check)
+            runs.append((command, env, cwd))
+            openvmm = cast(list[str], json.loads(env["NVX_MANAGED_LIFECYCLE_COMMAND"]))
+            # The test copies the guest console into the output directory.
+            output_dir = Path(env["NVX_MANAGED_LIFECYCLE_OUTPUT_DIR"])
+            (output_dir / "managed-lifecycle-guest.log").write_bytes(console)
+            report_path = Path(openvmm[openvmm.index("--microvm-report") + 1])
+            report_path.write_text(
+                json.dumps(self._managed_report() if report is None else report),
+                encoding="utf-8",
+            )
+            return subprocess.CompletedProcess(command, returncode)
 
         with (
+            patch.object(microvm_tests.shutil, "which", return_value="cargo"),
+            patch.object(microvm_tests.subprocess, "run", side_effect=run_test),
+            patch.object(microvm_tests, "OpenvmmProcess") as process,
+        ):
+            process.return_value.__enter__.return_value.wait.return_value = (
+                openvmm_process.OpenvmmProcessResult(rejected, b"")
+            )
+            microvm_tests.run_managed_lifecycle(
+                Path("openvmm"),
+                Path("vmlinux"),
+                Path("initramfs.cpio.gz"),
+                "kvm",
+                memory_mib=256,
+                timeout=5,
+                output_dir=output_dir,
+            )
+        return runs
+
+    def test_managed_lifecycle_runs_the_nvx_rs_test_and_checks_what_it_leaves(self):
+        # nvx-rs/tests/managed_lifecycle.rs drives the control session; the
+        # scenario hands it OpenVMM's command, then checks the outcome report
+        # and the guest console.
+        with tempfile.TemporaryDirectory() as temporary:
+            output_dir = Path(temporary)
+            runs = self._run_managed_lifecycle(output_dir)
+            preserved = json.loads(
+                (output_dir / "managed-outcome.json").read_text(encoding="utf-8")
+            )
+            # An adversarial campaign requires this report, with its teardown.
+            reports, teardown_complete = adversarial_executor._inventory_outcomes(
+                output_dir,
+                required_names=adversarial_executor._REQUIRED_OUTCOME_REPORTS[
+                    "managed-lifecycle"
+                ],
+            )
+
+        self.assertTrue(teardown_complete, reports)
+        self.assertEqual(
+            [report["path"] for report in reports], ["managed-outcome.json"]
+        )
+        self.assertEqual(len(runs), 1)
+        command, environment, cwd = runs[0]
+        self.assertEqual(
+            command,
+            [
+                "cargo",
+                "test",
+                "--manifest-path",
+                os.fspath(BuildConstants.REPO_ROOT / "nvx-rs" / "Cargo.toml"),
+                "--locked",
+                "--test",
+                "managed_lifecycle",
+                "--",
+                "--ignored",
+                "--nocapture",
+            ],
+        )
+        # The repository root selects the pinned Rust release.
+        self.assertEqual(cwd, BuildConstants.REPO_ROOT)
+        self.assertEqual(environment["OPENVMM_LOG"], "off")
+        self.assertEqual(environment["NVX_MANAGED_LIFECYCLE_TIMEOUT"], "5")
+        self.assertEqual(
+            environment["NVX_MANAGED_LIFECYCLE_OUTPUT_DIR"],
+            os.fspath(output_dir.resolve()),
+        )
+        openvmm = json.loads(environment["NVX_MANAGED_LIFECYCLE_COMMAND"])
+        # Cargo runs the test in the nvx-rs directory, so every path is absolute.
+        for option in ("--kernel", "--initrd", "--microvm-report"):
+            self.assertTrue(Path(openvmm[openvmm.index(option) + 1]).is_absolute())
+        self.assertTrue(Path(openvmm[0]).is_absolute())
+        # The microVM console listens on TCP, at the address that the test
+        # copies it from.
+        self.assertEqual(
+            openvmm[openvmm.index("--virtio-console") + 1],
+            f"listen=tcp:{environment['NVX_MANAGED_LIFECYCLE_CONSOLE']}",
+        )
+        self.assertRegex(
+            environment["NVX_MANAGED_LIFECYCLE_CONSOLE"], r"\A127\.0\.0\.1:[0-9]+\Z"
+        )
+        self.assertEqual(
+            openvmm[openvmm.index("--microvm-control-console") + 1],
+            f"listen={environment['NVX_MANAGED_LIFECYCLE_ENDPOINT']}",
+        )
+        for option, value in (
+            ("--microvm-workload-identity", "65534:65534"),
+            ("--microvm-lifecycle", "managed"),
+        ):
+            self.assertEqual(openvmm[openvmm.index(option) + 1], value)
+        self.assertIn("--microvm-control-auth-stdin", openvmm)
+        self.assertEqual(preserved, self._managed_report())
+
+    def test_managed_lifecycle_hands_the_test_an_absolute_pid_journal(self):
+        # The nvx-rs test records OpenVMM in an adversarial campaign's journal
+        # from the nvx-rs directory, so a relative journal resolves here.
+        variable = "NVX_ADVERSARIAL_OPENVMM_PID_JOURNAL"
+        relative = os.path.join("journal", "openvmm-pids.jsonl")
+        for value, expected in (
+            (relative, os.path.abspath(relative)),
+            (os.path.abspath(relative), os.path.abspath(relative)),
+            (None, None),
+        ):
+            with (
+                self.subTest(value=value),
+                tempfile.TemporaryDirectory() as temporary,
+                patch.dict(os.environ),
+            ):
+                os.environ.pop(variable, None)
+                if value is not None:
+                    os.environ[variable] = value
+                runs = self._run_managed_lifecycle(Path(temporary))
+                self.assertEqual(runs[0][1].get(variable), expected)
+
+    def test_managed_lifecycle_requires_cargo(self):
+        with (
             tempfile.TemporaryDirectory() as temporary,
-            patch.object(microvm_tests, "capability_pipe", side_effect=prepare),
-            patch.object(microvm_tests.subprocess, "Popen", side_effect=launch),
-            self.assertRaisesRegex(RuntimeError, "^stopped after the spawn$"),
+            patch.object(microvm_tests.shutil, "which", return_value=None),
+            patch.object(microvm_tests.subprocess, "run") as run,
+            self.assertRaisesRegex(
+                common.ScriptError,
+                "runs the nvx-rs test managed_lifecycle with Cargo, which is not "
+                "on PATH",
+            ),
         ):
             microvm_tests.run_managed_lifecycle(
                 Path("openvmm"),
@@ -2701,12 +2874,46 @@ class MicrovmTests(unittest.TestCase):
                 timeout=5,
                 output_dir=Path(temporary),
             )
+        run.assert_not_called()
 
-        self.assertEqual(len(prepared), 1)
-        self.assertEqual(spawned, prepared)
-        # The scenario closes its copy of the pipe once OpenVMM has it.
-        with self.assertRaises(OSError):
-            os.fstat(prepared[0])
+    def test_managed_lifecycle_fails_with_the_test_and_with_the_report(self):
+        violation = f"{time_abi.VIOLATION_PREFIX}code=bogus\n".encode()
+        failures: tuple[tuple[dict[str, Any], type[Exception], str], ...] = (
+            (
+                {"returncode": 101},
+                RuntimeError,
+                "the managed lifecycle test managed_lifecycle failed with exit "
+                "status 101",
+            ),
+            # The guest's own explanation comes before the test's failure.
+            (
+                {"returncode": 101, "console": violation},
+                time_abi.TimeAbiFailure,
+                "guest reported time ABI violation",
+            ),
+            (
+                {"report": self._managed_report(backend="whp")},
+                RuntimeError,
+                "managed lifecycle outcome report was invalid",
+            ),
+            (
+                {"report": {**self._managed_report(), "teardown": {}}},
+                RuntimeError,
+                "structured outcome report has an invalid teardown outcome",
+            ),
+            (
+                {"rejected": 0},
+                RuntimeError,
+                "managed lifecycle without a control endpoint was not rejected",
+            ),
+        )
+        for options, error, message in failures:
+            with (
+                self.subTest(message=message),
+                tempfile.TemporaryDirectory() as temporary,
+                self.assertRaisesRegex(error, re.escape(message)),
+            ):
+                self._run_managed_lifecycle(Path(temporary), **options)
 
     def test_host_loopback_port_candidates_are_spread_across_the_dynamic_range(self):
         first, last = microvm_tests.HOST_LOOPBACK_PORT_RANGE
@@ -4740,13 +4947,29 @@ class MicrovmTests(unittest.TestCase):
             if isinstance(node, ast.Call)
             and ast.unparse(node.func) == "TcpConsole.connect"
         ]
-        # The managed lifecycle, the console-snapshot capture and restore, and
-        # the snapshot-tier capture, restore, and gate-timeout restore.
-        self.assertEqual(len(connects), 6)
+        # The console-snapshot capture and restore, and the snapshot-tier
+        # capture, restore, and gate-timeout restore.
+        self.assertEqual(len(connects), 5)
         for keywords in connects:
             self.assertRegex(
                 keywords.get("monitor", ""), r"^TimeAbiMonitor\(\w*command\)$"
             )
+        # The managed lifecycle's console is a file, which the same monitor
+        # scans once the nvx-rs test that drives the guest has ended.
+        managed = next(
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.FunctionDef)
+            and node.name == "run_managed_lifecycle"
+        )
+        self.assertIn(
+            "TimeAbiMonitor(command)",
+            [
+                ast.unparse(node)
+                for node in ast.walk(managed)
+                if isinstance(node, ast.Call)
+            ],
+        )
         # Only the cold boots whose shell is on the virtio console ask for
         # nvx-time status. Restores never ask, and in the managed lifecycle
         # init starts the managed agent instead of a shell.
@@ -5614,6 +5837,7 @@ class MicrovmTests(unittest.TestCase):
                 "_bind_consecutive_ports",
                 side_effect=[endpoints, RuntimeError("UDP unavailable")],
             ),
+            patch.object(microvm_tests, "compile_egress_policy") as compile_policy,
             self.assertRaisesRegex(RuntimeError, "UDP unavailable"),
         ):
             microvm_tests.run_l3_l4_egress_policy(
@@ -5627,6 +5851,7 @@ class MicrovmTests(unittest.TestCase):
             )
         for endpoint in endpoints:
             endpoint.close.assert_called_once_with()
+        compile_policy.assert_not_called()
 
     def test_bounded_egress_acceptance_policy_lowers_ranges_and_exclusions(self):
         policy = microvm_tests._bounded_egress_policy(
@@ -5696,6 +5921,11 @@ class MicrovmTests(unittest.TestCase):
                     ),
                     patch.object(microvm_tests, "run_guest_script") as run_guest_script,
                     patch.object(microvm_tests, "OpenvmmProcess") as openvmm_process,
+                    patch.object(
+                        microvm_tests,
+                        "compile_egress_policy",
+                        return_value=nvx_rs.EgressRules(allow=(), deny=()),
+                    ),
                     patch.object(
                         microvm_tests.threading,
                         "Thread",
@@ -5847,6 +6077,11 @@ class MicrovmTests(unittest.TestCase):
                             return_value=(tcp, udp),
                         ),
                         patch.object(microvm_tests, "run_guest_script"),
+                        patch.object(
+                            microvm_tests,
+                            "compile_egress_policy",
+                            return_value=nvx_rs.EgressRules(allow=(), deny=()),
+                        ),
                         patch.object(
                             microvm_tests.threading,
                             "Thread",
@@ -6385,7 +6620,7 @@ class MicrovmTests(unittest.TestCase):
             "192.0.2.1", 20001, 20002, 20003
         ):
             with self.subTest(case=case.name):
-                compiled = egress_policy.compile_policy(
+                compiled = _compile(
                     {"allow": list(case.allow), "deny": list(case.deny)}
                 )
                 self.assertEqual((compiled.allow, compiled.deny), expected[case.name])
@@ -6464,12 +6699,17 @@ class MicrovmTests(unittest.TestCase):
                 return MagicMock(returncode=0, output=microvm_tests.BOOT_MARKER)
             return MagicMock(returncode=2, output=output)
 
-        def public_dry_run(command: list[str], **_kwargs: object) -> MagicMock:
+        run_process = subprocess.run
+
+        def public_dry_run(command: list[str], **kwargs: Any) -> object:
+            if "--dry-run" not in command:
+                # nvx-rs, which compiles each policy.
+                return cast(object, run_process(command, **kwargs))
             if nvx_accepts == policy_name(command):
                 return MagicMock(returncode=0, stderr=b"")
             path = Path(command[command.index("--network-egress-policy-file") + 1])
             try:
-                egress_policy.compile_policy_file(path)
+                nvx_rs.compile_egress_policy(path)
             except common.ScriptError as error:
                 return MagicMock(returncode=1, stderr=f"error: {error}\n".encode())
             return MagicMock(returncode=0, stderr=b"")
@@ -6596,7 +6836,12 @@ class MicrovmTests(unittest.TestCase):
             self.assertEqual(
                 rejected, ["192.0.2.1:tcp:20003-20001", "192.0.2.1:udp:-20003"]
             )
-            dry_runs = [call.args[0] for call in nvx_run.call_args_list]
+            # The other calls are nvx-rs, which compiles each case's policy.
+            dry_runs = [
+                call.args[0]
+                for call in nvx_run.call_args_list
+                if "--dry-run" in call.args[0]
+            ]
             self.assertEqual(len(dry_runs), 2)
             for command, name in zip(
                 dry_runs, ("reversed-end-port", "end-port-without-port"), strict=True
@@ -6894,9 +7139,7 @@ class MicrovmTests(unittest.TestCase):
         every_probe = set(microvm_tests.IPV6_EGRESS_PROBES)
         lowered = {}
         for case in cases:
-            compiled = egress_policy.compile_policy(
-                {"allow": list(case.allow), "deny": list(case.deny)}
-            )
+            compiled = _compile({"allow": list(case.allow), "deny": list(case.deny)})
             lowered[case.name] = (
                 case.default,
                 compiled.allow,
@@ -7588,13 +7831,11 @@ class MicrovmTests(unittest.TestCase):
             for index, value in enumerate(command)
             if value == "--microvm-sandbox-block"
         ]
-        self.assertEqual(len(values), 4)
+        self.assertEqual(len(values), 2)
         self.assertTrue(values[0].startswith("distro:file:"))
-        self.assertTrue(values[1].startswith("runtime:file:"))
-        self.assertTrue(values[2].startswith("custom:file:"))
-        self.assertTrue(values[3].startswith("scratch:file:"))
-        self.assertTrue(all(value.endswith(",ro") for value in values[:3]))
-        self.assertFalse(values[3].endswith(",ro"))
+        self.assertTrue(values[0].endswith(",ro"))
+        self.assertTrue(values[1].startswith("scratch:file:"))
+        self.assertFalse(values[1].endswith(",ro"))
         self.assertEqual(
             run_guest_script.call_args.args[2],
             microvm_tests.SANDBOX_BLOCKS_COMPLETION_MARKER,

@@ -18,6 +18,29 @@ python3 scripts/nvx.py run --help
 python3 scripts/nvx.py performance gate --help
 ```
 
+## nvx-rs
+
+`nvx.py` runs [`nvx-rs`](../nvx-rs/README.md#the-nvx-rs-cli), the Rust
+implementation of NVX's runtime steps, for the [`sandbox`](#sandbox) command,
+which it runs entirely, and for the egress-policy and artifact steps of
+[`run`](#run). It runs, in this order:
+
+1. the executable that the `NVX_RS` environment variable names;
+2. `nvx-rs/target/release/nvx-rs`, or `nvx-rs.exe` on Windows, in the
+   checkout, where `cargo build --release` puts it; or else
+3. that executable, after it builds it from the repository root with
+   `cargo build --release --locked --features cli --manifest-path
+   nvx-rs/Cargo.toml --target-dir nvx-rs/target`, the Rust release that
+   `rust-toolchain.toml` pins, and Cargo's output on standard error, so that
+   it never mixes with the output of the command.
+
+Without `NVX_RS`, a built executable, or Cargo, such a command fails and names
+these choices; [rustup](https://rustup.rs) installs Cargo. `nvx.py` rebuilds
+nothing on its own once the executable exists, so run the build command again,
+or delete the executable, after changing `nvx-rs`. The `managed-lifecycle`
+scenario of [`test-microvm`](#test-microvm) also needs Cargo, which runs its
+`nvx-rs` test.
+
 ## Commands
 
 | Command | Description |
@@ -37,6 +60,7 @@ python3 scripts/nvx.py performance gate --help
 | `setup-cross-os-cache` | Install GNU tar and zstd for GitHub Actions cross-OS caches. |
 | `classify-ci-changes` | Select the CI suites that a list of changed files runs. |
 | `kernel-patch-identity` | Print the digest of the kernel patch paths and contents that keys the kernel cache. |
+| `guest-binary-source-identity` | Print the digest of the Rust guest binary source paths and contents that keys the guest image caches. |
 | `check-required-ci` | Validate required GitHub Actions job results. |
 | `check-static-elf` | Check that executables are static ELF files without an interpreter. |
 | `test-openvmm-unit` | Run the OpenVMM workspace unit and documentation tests. |
@@ -96,6 +120,20 @@ Prints a digest of each file under `kernel/patches/` by relative path, in path
 order, together with its content. The guest build appends it to both kernel
 cache keys, because `hashFiles` hashes contents only: a renamed patch changes
 the key even when its bytes do not.
+
+### `guest-binary-source-identity`
+
+```text
+python3 scripts/nvx.py guest-binary-source-identity [--root PATH]
+```
+
+Prints the source digest that guest package manifests record for the Rust guest
+binaries: a digest of the relative path and content of every file under
+`nvx-rs/src/`, the crate's manifest, lockfile, and build script,
+`rust-toolchain.toml`, and the `build_constants.py` and `guest_binaries.py`
+build modules. The guest build appends it to the Alpine, Ubuntu, and Azure
+Linux cache keys, because `hashFiles` hashes contents only: moving a module
+into its own `mod.rs` changes the key even when no bytes change.
 
 ### `classify-ci-changes`
 
@@ -369,9 +407,14 @@ only the same-host restore scenarios `smp`, `smp-snapshot`,
 test hook, which makes OpenVMM's default CPU profile selection, `auto`, fall
 back to a host profile on a host that a built-in profile serves, checks the
 fallback's warning, captures the guest, and restores it on the snapshot's host
-profile. The command
-requires `build/vmlinux` (with `--debug-kernel`, `build/vmlinux-debug` and its
-`build/vmlinux-debug.config`), the selected initramfs, and
+profile. The `managed-lifecycle` scenario boots a guest whose init hands
+the boot to the managed agent, and runs the ignored `nvx-rs` test
+`tests/managed_lifecycle.rs` with Cargo, which starts OpenVMM with the
+scenario's command line and drives the guest's control session; the scenario
+then checks OpenVMM's outcome report and the guest console. The scenarios that
+drive `sandbox`, or that compile egress policies, run [`nvx-rs`](#nvx-rs). The
+command requires `build/vmlinux` (with `--debug-kernel`, `build/vmlinux-debug`
+and its `build/vmlinux-debug.config`), the selected initramfs, and
 `openvmm/target/release/openvmm[.exe]`.
 
 ### `doctor`
@@ -624,9 +667,11 @@ python3 scripts/nvx.py run
 | `--dry-run` | off | Print the generated OpenVMM command without running it. |
 
 The command requires the OpenVMM release binary, `build/vmlinux`, and the
-selected `build/initramfs*.cpio.gz`. Ubuntu selection never falls back to
-Alpine. See [Run](run.md) for host setup, guest shutdown, networking, and
-virtio-fs examples.
+selected `build/initramfs*.cpio.gz`, which it looks up with `nvx-rs artifacts`,
+and compiles `--network-egress-policy-file` with `nvx-rs egress compile`; see
+[nvx-rs](#nvx-rs). It builds and runs the OpenVMM command itself. Ubuntu
+selection never falls back to Alpine. See [Run](run.md) for host setup, guest
+shutdown, networking, and virtio-fs examples.
 
 If no built-in CPU profile serves an Intel or AMD host's CPU, OpenVMM falls
 back to a host profile and warns with `NVX-CPU-PROFILE-FALLBACK:` at every
@@ -688,10 +733,20 @@ python3 scripts/nvx.py sandbox
 Network policy and live-share options configure only the `run` and `provision`
 launches.
 
+`sandbox` runs `nvx-rs sandbox` (see [nvx-rs](#nvx-rs)) with the operation and
+the options given, and its exit status is the command's: 1 for an error, 2 for
+a usage error, 130 after Ctrl-C, and otherwise the status that the workload or
+OpenVMM returns. `nvx.py` parses the options only for its help and for the
+usage errors of unknown options, invalid choices, and missing values, so it
+still accepts abbreviated options, which it passes to `nvx-rs` in full.
+`nvx-rs` checks their values, and its usage and messages name
+`nvx.py sandbox`; its usage text wraps at 80 columns whatever the terminal's
+width.
+
 | Option | Default | Description |
 | --- | --- | --- |
 | `{run,provision,start,exec,stop,deprovision}` | `run` | Select a one-shot run or a managed lifecycle operation. |
-| `--layer ROLE,PATH,EROFS_UUID` | required for `run` and `provision` | Attach a `distro`, `runtime`, or `custom` EROFS layer. Repeat once per distinct role. |
+| `--layer ROLE,PATH,EROFS_UUID` | required for `run` and `provision` | Attach the `distro` EROFS layer. Only `distro` is accepted. |
 | `--scratch PATH` | required for `run` and `provision` | Attach a preformatted ext4 scratch image as the writable overlay. |
 | `--state-dir PATH` | required for managed operations | Select persistent sandbox state. One-shot `run` rejects this option. |
 | `--entrypoint PATH` | `/bin/sh` | Select an absolute workload entrypoint without whitespace. |
@@ -708,7 +763,7 @@ launches.
 | `--environment-file PATH` | omitted | Read the exact managed `exec` environment from a UTF-8 JSON array of `KEY=VALUE` strings, limited to 1 MiB of input. An empty array requests an empty environment. This option is mutually exclusive with `--environment`; omitting both preserves guest defaults. |
 | `--inherit-default-environment` | off | Layer the managed `exec` environment from `--environment` or `--environment-file` over the guest default environment instead of replacing it; an entry replaces the default variable of the same name. Without either option the workload already receives the defaults, so the flag has no effect. |
 | `--hypervisor {auto,whp,kvm,mshv}` | `auto` | Select the host hypervisor. |
-| `--mount GUEST_TARGET,HOST_PATH[,ro\|rw]` | none | Live-share a host directory, or a single regular host file without its directory, at the absolute target inside the container rootfs for `run` or `provision`; defaults to `ro`. The mode follows the last comma, so `HOST_PATH` may contain commas when the mode is given. Repeat to attach more shares, each with its own target and mode, for example a read-write workspace and a read-only tool cache, as the children of an aggregate that the guest binds at their targets; a shared file always uses the aggregate. Targets and host paths must not overlap, and the shares' kernel command-line tokens count toward the sandbox's 1024-byte budget. An `rw` share accepts guest-created symbolic links, which the host never follows. `/` and `/etc`, and the `/etc/machine-id`, `/proc`, `/sys`, `/dev`, and `/.nvx-agent` trees, are reserved. |
+| `--mount GUEST_TARGET,HOST_PATH[,ro\|rw]` | none | Live-share a host directory, or a single regular host file without its directory, at the absolute target inside the container rootfs for `run` or `provision`; defaults to `ro`. The mode follows the last comma, so `HOST_PATH` may contain commas when the mode is given. Repeat to attach more shares, each with its own target and mode, for example a read-write workspace and a read-only tool cache, as the children of an aggregate that the guest binds at their targets; a shared file always uses the aggregate. Targets and host paths must not overlap, and the shares' kernel command-line tokens count toward the sandbox's 1024-byte budget. An `rw` share accepts guest-created symbolic links, which the host never follows. `/`, `/etc`, `/run`, and `/run/nvx`, and the `/etc/machine-id`, `/proc`, `/sys`, `/dev`, `/.nvx-agent`, and `/run/nvx/time` trees, are reserved. |
 | `--mount-deny HOST_PATH` | none | Hide one existing file or directory inside a `--mount` host directory; relative paths are resolved inside it. It may name the directory itself when `--mount-allow` paths inside it remain. With several shares, it applies to the `--mount` before it, which must share a directory. Repeat to deny multiple paths. |
 | `--mount-allow HOST_PATH` | none | Expose one existing file or directory inside a `--mount-deny` path of the same share again, for example a readable `mcp-payloads` directory inside hidden logs. The hidden directories on the way list only the entries that lead to it, and the workload cannot modify them. Relative paths are resolved inside the share; with several shares, it applies to the `--mount` before it. Repeat to allow multiple paths. See [Access policy](run.md#access-policy). |
 | `--mount-write HOST_PATH` | none | Make one existing file or directory one of the only writable parts of an `rw` share; the workload's writes anywhere else in the share fail with `EROFS`. Relative paths are resolved inside the share; with several shares, it applies to the `--mount` before it, which must be `rw`. Repeat to declare multiple writable paths. `provision` persists the denied, allowed, and writable paths. |

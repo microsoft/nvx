@@ -231,10 +231,15 @@ process exits, so delayed final output chunks cannot create a false failure.
 
 Shared guest artifacts are built with Docker on a GitHub-hosted Ubuntu runner.
 The kernel, Alpine initramfs, Ubuntu initramfs, and Ubuntu EROFS layer use
-separate cache keys. Ubuntu keys include the Canonical archive pin,
-supplemental package lock, common guest sources, shared download and guest
-descriptor modules, converter implementation, Dockerfile, and `.dockerignore`.
-Artifact upload
+separate cache keys. Every guest key includes `nvx-rs/**` except its `target`
+directory, `rust-toolchain.toml`, the shared binary-build modules, the
+Dockerfile, and `.dockerignore`; the Rust builder image itself is pinned by
+digest. Because `hashFiles` hashes contents only, every guest key also ends
+with the path-aware Rust source digest that the guest package manifests
+record, which `nvx.py guest-binary-source-identity` prints. Ubuntu keys also
+include the Canonical archive pin, supplemental
+package lock, common guest sources, shared download and guest descriptor
+modules, and converter implementation. Artifact upload
 retains the Alpine filenames and adds the distinct Ubuntu filenames. Each
 backend also boots the Ubuntu initramfs and runs
 `/sbin/nvx-sandbox-smoke` from the Ubuntu EROFS layer as UID/GID 65534 over a
@@ -357,7 +362,26 @@ hash.
 
 The producer handoff uses one-day workflow artifacts rather than caches. Each
 consumer downloads both the normalized executable and its build provenance,
-then restores executable permissions on Linux. Once the required artifacts are
+then restores executable permissions on Linux.
+
+`nvx.py` runs [`nvx-rs`](../nvx-rs/README.md#the-nvx-rs-cli) for its `sandbox`
+command and for the egress-policy and artifact steps of its `run` command, so
+the microVM test jobs take `nvx-rs` the same way. Each NVX CLI job builds it
+for its operating system with `--release --locked --features cli`, puts it at
+`nvx-rs/target/release/`, where `nvx.py` looks for it, and runs the CLI tests
+with it, with `NVX_RS` naming it for the tests that run it directly: `nvx-cli-linux` builds a static `x86_64-unknown-linux-musl`
+executable, which runs on every self-hosted Linux runner, and
+`nvx-cli-windows` an executable with a static C runtime, which needs no Visual
+C++ redistributable. Once the tests pass, the job uploads it as the one-day
+`nvx-rs-linux-musl-executable` or `nvx-rs-windows-msvc-executable` artifact,
+and each microVM test job of that operating system downloads it into
+`nvx-rs/target/release/` and restores its executable permission on Linux.
+The platform jobs run neither `nvx.py sandbox` nor `nvx.py run`, so they don't
+take it. The `managed-lifecycle` scenario also builds and runs the ignored
+`nvx-rs` test `tests/managed_lifecycle.rs` with Cargo on the runner, as
+`test-aci-edge-sandboxes` builds the tests of its crate.
+
+Once the required artifacts are
 ready, benchmarks run in parallel with the NVX test layer, each on its backend's
 benchmark runner. All three use virtual-machine performance
 series and the constrained eight-CPU affinity policy. Development releases and
@@ -411,7 +435,9 @@ system in `nvx-cli-linux` and `nvx-cli-windows` rather than in every
 hypervisor job. Each checks out OpenVMM, whose pinned CPU profiles a test
 reads, and uses Python 3.12, the release that the self-hosted runners provide;
 the Windows job also installs the pinned Rust release with the minimal profile
-for the curl shim test. Fork pull requests lack the OpenVMM deploy key, so the
+for the curl shim test and the `nvx-rs` build. Each job first builds the
+`nvx-rs` executable that `nvx.py` runs, tests with it, and hands it to the
+microVM test jobs of its operating system, as described above. Fork pull requests lack the OpenVMM deploy key, so the
 CLI jobs run, like the hypervisor jobs, only for pushes and same-repository
 pull requests. Because the microVM and platform jobs of each operating system
 wait for its CLI job, a broken CLI does not occupy the hypervisor runners.
@@ -590,8 +616,9 @@ the `guest` profile. The action delegates the musl lint and tests to
 path-remapped build, static-ELF check, and digest manifest to
 [`nvx.py build-guest-binaries`](usage.md#build-guest-binaries),
 and the prebuilt-binary integration run to
-`nvx.py test-guest-binaries`. The guests ship the C programs in
-`guest/common/` until their build switches to these binaries.
+`nvx.py test-guest-binaries`. The same shared routine supplies every native
+and Docker guest build, and Alpine, Ubuntu, and Azure Linux ship its nine
+executables.
 
 The development release job depends on `aci-edge-sandboxes` and `nvx-rs` and
 requires their combined Linux/Windows results to be successful; failed,
@@ -622,7 +649,10 @@ Copilot or initiate login.
 
 The wrapper provisions a distinct disposable KVM, MSHV, or WHP target with no
 production or GitHub credentials and forwards only the typed executor
-protocol. Existing persistent microVM and performance runners are not valid
+protocol. Besides the guest and OpenVMM artifacts, the target needs the Rust
+toolchain and a prebuilt nvx-rs for the scenarios that run it, as
+[nvx-rs on the target](adversarial-testing.md#nvx-rs-on-the-target) explains.
+Existing persistent microVM and performance runners are not valid
 adversarial targets. Loss of the target heartbeat, a policy oracle, or a
 teardown/post-campaign boot failure fails the job and requires quarantine and
 reimage.
@@ -650,14 +680,17 @@ pin. It restores the shared guest artifacts
 through the `restore-only` input of
 [`build-guest-artifacts`](../.github/actions/build-guest-artifacts/action.yml)
 and the KVM OpenVMM binary that `build-openvmm` caches for the pinned revision,
-so agents can run microVM tests without rebuilding either. The guest artifact
+so agents can run microVM tests without rebuilding either. It doesn't build
+`nvx-rs`: `nvx.py` builds it with Cargo the first time that a command needs
+it. The guest artifact
 restore computes its keys with the same action that saves them. The binary
 restore repeats the key, paths, and gzip compression of the cache entry that
 `build-openvmm` saves, and a test in `scripts/test_nvx_tools.py` fails when
 they differ, because a mismatch would otherwise only cause a silent cache miss.
 Because the agent firewall blocks `cdn.kernel.org` and `cdimage.ubuntu.com`,
 even inside containers, the workflow also installs the native guest build
-prerequisites, allows the unprivileged user namespaces that Alpine's `apk` uses
+prerequisites, including the pinned Rust toolchain's
+`x86_64-unknown-linux-musl` target, allows the unprivileged user namespaces that Alpine's `apk` uses
 for package triggers, and stages the pinned Linux and Ubuntu Base archives, so
 agents can rebuild guest artifacts with `build-guest --native`. When a runner
 has a separate `/mnt` disk with more free space than `/`, it mounts the
@@ -669,7 +702,7 @@ Copilot always runs the version on `dev`, even for sessions based on other
 branches, so changes reach agent sessions only after they merge. Pushes run it
 as a normal workflow for validation when they change the workflow or a file
 that its steps take versions, requirements, metadata, or code from: the
-`build-guest-artifacts` action, the files that pin its Rust, cargo-nextest,
+`build-guest-artifacts` action, all `nvx-rs/**` files, the files that pin its Rust, cargo-nextest,
 and shell linter versions, `requirements-dev.txt`, `SOURCE-MANIFEST.json`,
 `.gitmodules`, the OpenVMM submodule pin, and the NVX CLI and its modules.
 

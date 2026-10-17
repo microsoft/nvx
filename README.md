@@ -10,14 +10,19 @@ NVX was jointly developed by the [MSR Systems Research Group][msr-systems] and
 [msr-systems]: https://www.microsoft.com/en-us/research/group/systems-research-group-redmond/
 [azure-systems]: https://www.microsoft.com/en-us/research/group/azure-research-systems/
 
-This repository includes version pins for Linux and OpenVMM, along with the patches, guest source
-files, build tools, and benchmarks needed to use NVX.
+This repository includes version pins for Linux, OpenVMM, and the Rust guest
+toolchain, along with the patches, guest source files, build tools, and
+benchmarks needed to use NVX. Alpine, Ubuntu, and Azure Linux ship the nine
+static guest binaries from [`nvx-rs`](nvx-rs/README.md#guest-binaries) at
+their common `/sbin/nvx-*` paths.
 
 ## Quick Start
 
-Python 3.10 or newer is required. The commands below download the prebuilt NVX package for the
+Python 3.10 or newer is required, and so is [rustup](https://rustup.rs/): `nvx.py run` runs
+[`nvx-rs`](doc/usage.md#nvx-rs), which `nvx.py` builds with Cargo the first time. The commands
+below download the prebuilt NVX package for the
 selected platform from the cloned revision's release when available, or from its nearest released
-first-parent ancestor otherwise, so no local build is required. A successful boot prints
+first-parent ancestor otherwise, so no build of the guest or OpenVMM is required. A successful boot prints
 `NVX-GUEST-BOOT-OK: alpine` and opens a root shell. Select Ubuntu or Azure Linux userland with the
 same NVX kernel by passing `--guest ubuntu` or `--guest azurelinux`.
 

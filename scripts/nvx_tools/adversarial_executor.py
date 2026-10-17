@@ -57,9 +57,15 @@ _REQUIRED_OUTCOME_REPORTS = {
         {"structured-outcome.json", "structured-outcome-rejected.json"}
     ),
 }
+# The variables that the scenarios inherit. Besides the platform's own, they
+# are the paths that nvx-rs needs: NVX_RS, the executable that nvx.py runs, and
+# CARGO_HOME and RUSTUP_HOME, the Rust toolchain that builds it and runs the
+# managed-lifecycle test. RUSTUP_TOOLCHAIN stays out, so that
+# rust-toolchain.toml selects the Rust release, as do Cargo's other settings.
 _ENVIRONMENT_ALLOWLIST = frozenset(
     {
         "APPDATA",
+        "CARGO_HOME",
         "COMSPEC",
         "HOME",
         "HOMEDRIVE",
@@ -69,9 +75,11 @@ _ENVIRONMENT_ALLOWLIST = frozenset(
         "LD_LIBRARY_PATH",
         "LOCALAPPDATA",
         "NUMBER_OF_PROCESSORS",
+        "NVX_RS",
         "PATH",
         "PATHEXT",
         "PROCESSOR_ARCHITECTURE",
+        "RUSTUP_HOME",
         "SYSTEMDRIVE",
         "SYSTEMROOT",
         "TEMP",

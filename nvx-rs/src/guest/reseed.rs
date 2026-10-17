@@ -22,7 +22,7 @@ const SEED_BYTES: usize = 64;
 const GENERATION_ID_BYTES: usize = 16;
 /// Number of random bytes printed by `--sample`.
 const RANDOM_SAMPLE_BYTES: usize = 32;
-/// Exact usage diagnostic inherited from the C program.
+/// Exact public usage diagnostic.
 const USAGE: &[u8] =
     b"usage: nvx-reseed --sample | [--generation-only] SEED_FILE [PREVIOUS_GENERATION_ID]\n";
 
@@ -52,8 +52,8 @@ fn run(
     {
         return print_random_sample(out, err);
     }
-    // As in the C program, a first argument of `--generation-only` names the seed file unless
-    // three arguments follow the program name.
+    // A first argument of `--generation-only` names the seed file unless three arguments follow
+    // the program name.
     let (generation_only, seed_path, previous) = match args {
         [_, seed] => (false, seed, None),
         [_, seed, previous] => (false, seed, Some(previous)),
@@ -107,8 +107,7 @@ fn reseed(random: &CStr, seed: &[u8; SEED_BYTES], err: &mut dyn Write) -> Result
     })
 }
 
-/// Reads exactly `bytes.len()` bytes from the file at `path`. Like the C program, it does not
-/// retry after `EINTR`.
+/// Reads exactly `bytes.len()` bytes from the file at `path`, without retrying after `EINTR`.
 fn read_seed(path: &CStr, bytes: &mut [u8], err: &mut dyn Write) -> Result<(), CommandError> {
     let fail = |err: &mut dyn Write, operation: &[u8], reason: &[u8]| {
         let path = path.to_bytes();

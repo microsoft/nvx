@@ -1,8 +1,8 @@
 //! Codec of the OpenVMM control-console protocol.
 //!
 //! OpenVMM brokers an authenticated stream of outer records (magic `NVXS`) between one host
-//! client and the guest agent. Data records carry application frames (magic `NVXC`) that belong
-//! to the guest agent in `guest/common/nvx-managed-agent.c`. All integers are little-endian.
+//! client and the Rust guest agent. Data records carry application frames (magic `NVXC`) that
+//! the host and guest share from this module. All integers are little-endian.
 //!
 //! - Outer records: [`encode_outer`] and [`decode_outer_header`], and the `OUTER_*` record types.
 //! - Application frames: [`encode_app`] and [`decode_app`], the `APP_*` request and response
@@ -17,8 +17,7 @@
 //!   such as [`MAPS_TOKEN`].
 //!
 //! The module depends on nothing outside the standard library, so the host, the guest, and test
-//! doubles share it. Its wire constants are those of the guest agent, which tests compare with
-//! the agent's source, and golden byte fixtures pin every record that both sides exchange.
+//! doubles share it. Tests pin its wire constants as literals and its records as golden bytes.
 
 use std::fmt;
 

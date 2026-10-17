@@ -120,8 +120,37 @@ jobs:
         with:
           python-version: "3.12"
 
+      # nvx.py runs nvx-rs for its sandbox command and for the egress and
+      # artifact steps of its run command. A static musl build runs on every
+      # self-hosted Linux runner, so the microVM jobs take this one, as they
+      # take OpenVMM from its build jobs. It goes where `cargo build
+      # --release` puts it, where nvx.py, and so the CLI tests, look for it,
+      # and NVX_RS names it for the tests that run it directly.
+      - name: Build nvx-rs
+        shell: bash
+        run: |
+          set -euo pipefail
+          toolchain=$(sed -n 's/^channel = "\([^"]*\)".*/\1/p' rust-toolchain.toml)
+          test -n "${toolchain}"
+          rustup toolchain install "${toolchain}" --profile minimal --no-self-update \
+            --target x86_64-unknown-linux-musl
+          cargo "+${toolchain}" build --release --locked --features cli \
+            --manifest-path nvx-rs/Cargo.toml --target x86_64-unknown-linux-musl
+          install -D -m 0755 nvx-rs/target/x86_64-unknown-linux-musl/release/nvx-rs \
+            nvx-rs/target/release/nvx-rs
+          echo "NVX_RS=${GITHUB_WORKSPACE}/nvx-rs/target/release/nvx-rs" >> "${GITHUB_ENV}"
+
       - name: Validate NVX CLI
         uses: ./.github/actions/validate-nvx
+
+      - name: Upload nvx-rs executable
+        uses: actions/upload-artifact@v7
+        with:
+          name: nvx-rs-linux-musl-executable
+          path: nvx-rs/target/release/nvx-rs
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 1
 
   nvx-cli-windows:
     name: NVX CLI / Windows
@@ -155,9 +184,9 @@ jobs:
         with:
           python-version: "3.12"
 
-      # The curl shim test compiles the shim with the release that
-      # rust-toolchain.toml pins, which rustup would otherwise install with
-      # its default profile.
+      # The curl shim test compiles the shim, and the next step builds nvx-rs,
+      # with the release that rust-toolchain.toml pins, which rustup would
+      # otherwise install with its default profile.
       - name: Install the pinned Rust release
         shell: powershell
         run: |
@@ -171,8 +200,30 @@ jobs:
             --profile minimal --no-self-update
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+      # As on Linux, for the microVM jobs and the CLI tests. The static C
+      # runtime spares the self-hosted runners the Visual C++ redistributable.
+      - name: Build nvx-rs
+        shell: powershell
+        env:
+          RUSTFLAGS: -C target-feature=+crt-static
+        run: |
+          $ErrorActionPreference = "Stop"
+          cargo build --release --locked --features cli --manifest-path nvx-rs/Cargo.toml
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          "NVX_RS=$env:GITHUB_WORKSPACE\nvx-rs\target\release\nvx-rs.exe" |
+            Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
       - name: Validate NVX CLI
         uses: ./.github/actions/validate-nvx
+
+      - name: Upload nvx-rs executable
+        uses: actions/upload-artifact@v7
+        with:
+          name: nvx-rs-windows-msvc-executable
+          path: nvx-rs/target/release/nvx-rs.exe
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 1
 
   openvmm-changes:
     name: Detect CI workload inputs
@@ -902,6 +953,7 @@ jobs:
       runner: '["self-hosted", "linux", "kvm", "virtual-machine"]'
       backend: kvm
       openvmm-artifact: openvmm-linux-gnu
+      nvx-rs-artifact: nvx-rs-linux-musl-executable
     secrets:
       OPENVMM_DEPLOY_KEY: ${{ secrets.OPENVMM_DEPLOY_KEY }}
 
@@ -934,6 +986,7 @@ jobs:
       runner: '["self-hosted", "linux", "mshv", "virtual-machine"]'
       backend: mshv
       openvmm-artifact: openvmm-linux-gnu
+      nvx-rs-artifact: nvx-rs-linux-musl-executable
     secrets:
       OPENVMM_DEPLOY_KEY: ${{ secrets.OPENVMM_DEPLOY_KEY }}
 
@@ -966,6 +1019,7 @@ jobs:
       runner: '["self-hosted", "windows", "whp", "virtual-machine"]'
       backend: whp
       openvmm-artifact: openvmm-windows-msvc
+      nvx-rs-artifact: nvx-rs-windows-msvc-executable
     secrets:
       OPENVMM_DEPLOY_KEY: ${{ secrets.OPENVMM_DEPLOY_KEY }}
 
@@ -1001,6 +1055,7 @@ jobs:
       runner: '["self-hosted", "linux", "kvm", "virtual-machine"]'
       backend: kvm
       openvmm-artifact: openvmm-linux-gnu
+      nvx-rs-artifact: nvx-rs-linux-musl-executable
       debug-kernel: true
     secrets:
       OPENVMM_DEPLOY_KEY: ${{ secrets.OPENVMM_DEPLOY_KEY }}
@@ -1028,6 +1083,7 @@ jobs:
       runner: '["self-hosted", "linux", "mshv", "virtual-machine"]'
       backend: mshv
       openvmm-artifact: openvmm-linux-gnu
+      nvx-rs-artifact: nvx-rs-linux-musl-executable
       debug-kernel: true
     secrets:
       OPENVMM_DEPLOY_KEY: ${{ secrets.OPENVMM_DEPLOY_KEY }}
@@ -1055,6 +1111,7 @@ jobs:
       runner: '["self-hosted", "windows", "whp", "virtual-machine"]'
       backend: whp
       openvmm-artifact: openvmm-windows-msvc
+      nvx-rs-artifact: nvx-rs-windows-msvc-executable
       debug-kernel: true
     secrets:
       OPENVMM_DEPLOY_KEY: ${{ secrets.OPENVMM_DEPLOY_KEY }}

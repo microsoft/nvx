@@ -2128,6 +2128,58 @@ class CopilotContainmentTests(unittest.TestCase):
         self.assertNotIn("SSH_AUTH_SOCK", environment)
         self.assertNotIn("UNRELATED_SECRET", environment)
 
+    def test_executor_environment_locates_nvx_rs_and_the_rust_toolchain(self) -> None:
+        # Scenarios run NVX_RS, or build nvx-rs and run the managed-lifecycle
+        # test with the toolchain that CARGO_HOME and RUSTUP_HOME locate.
+        # rust-toolchain.toml still selects the Rust release, and no other
+        # Cargo setting or credential passes.
+        with patch.dict(
+            os.environ,
+            {
+                "PATH": "test-path",
+                "NVX_RS": "test-nvx-rs",
+                "CARGO_HOME": "test-cargo-home",
+                "RUSTUP_HOME": "test-rustup-home",
+                "RUSTUP_TOOLCHAIN": "nightly",
+                "CARGO_TARGET_DIR": "test-target",
+                "RUSTFLAGS": "-Ctarget-cpu=native",
+                "CARGO_REGISTRY_TOKEN": "registry-secret",
+            },
+            clear=True,
+        ):
+            environment = sanitized_environment()
+        self.assertEqual(
+            environment,
+            {
+                "PATH": "test-path",
+                "NVX_RS": "test-nvx-rs",
+                "CARGO_HOME": "test-cargo-home",
+                "RUSTUP_HOME": "test-rustup-home",
+                "PYTHONUNBUFFERED": "1",
+            },
+        )
+
+    def test_scenarios_find_nvx_rs_with_the_executor_environment(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            nvx_rs = Path(temporary) / "nvx-rs"
+            nvx_rs.write_bytes(b"")
+            with patch.dict(os.environ, {"NVX_RS": str(nvx_rs)}):
+                environment = sanitized_environment()
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    "-c",
+                    "from nvx_tools import nvx_rs; print(nvx_rs.find_binary())",
+                ],
+                cwd=Path(__file__).resolve().parent,
+                env=environment,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertEqual(completed.stdout.strip(), str(nvx_rs.absolute()))
+
     def test_executor_resolves_build_artifacts_with_shared_helper(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

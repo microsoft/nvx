@@ -30,7 +30,9 @@ python3 scripts/nvx.py init
 Python 3.10 or newer and Git are required on every platform. Building OpenVMM
 or the Rust crates also requires [rustup](https://rustup.rs/), which installs
 the Rust release that [`rust-toolchain.toml`](../rust-toolchain.toml) pins on
-first use.
+first use. `nvx.py run` and `nvx.py sandbox` run `nvx-rs`, which `nvx.py`
+builds with that release the first time that a command needs it, unless
+`NVX_RS` names an executable; see [Usage](usage.md#nvx-rs).
 
 By default, a microVM boots on the built-in
 [CPU profile](usage.md#cpu-profiles) of its host's CPU: four Intel
@@ -52,11 +54,21 @@ For Debian/Ubuntu hosts:
 sudo apt-get update
 sudo apt-get install -y \
   bc binutils bison build-essential ca-certificates cpio curl erofs-utils flex \
-  gzip libelf-dev libssl-dev musl-tools python3 rsync tar xz-utils zstd
+  gzip libelf-dev libssl-dev python3 rsync tar xz-utils zstd
 ```
 
-`musl-tools` provides `musl-gcc`, which native initramfs builds use for the
-guest time tools; Docker builds install it in the build image.
+Native guest builds use the exact Rust release in `rust-toolchain.toml` and
+its musl standard-library target:
+
+```bash
+toolchain=$(sed -n 's/^channel = "\([^"]*\)".*/\1/p' rust-toolchain.toml)
+rustup toolchain install "$toolchain" --profile minimal
+rustup target add --toolchain "$toolchain" x86_64-unknown-linux-musl
+```
+
+The Linux runner setup scripts and Copilot setup install this target
+automatically. `build-essential` remains necessary for the kernel and as
+Rust's linker driver; no separate guest libc compiler is required.
 
 ### Linux / KVM
 
@@ -239,7 +251,8 @@ Production campaigns also require an administrator-owned, no-argument
 executor wrapper that provisions a separate disposable target and forwards
 the bounded executor protocol. See
 [Copilot-driven adversarial testing](adversarial-testing.md)
-for the containment and credential requirements.
+for the containment and credential requirements, and for the Rust toolchain
+and nvx-rs that the target needs.
 
 Apply the configured Python and POSIX shell formatters with:
 

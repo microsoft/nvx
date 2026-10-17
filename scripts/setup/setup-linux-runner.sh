@@ -596,8 +596,7 @@ install_rust_tools() {
     run_as_root env \
         CARGO_HOME="$trusted_cargo_home" \
         RUSTUP_HOME="$trusted_rustup_home" \
-        RUSTUP_TOOLCHAIN="$RUST_TOOLCHAIN" \
-        "$rustup" target add \
+        "$rustup" target add --toolchain "$RUST_TOOLCHAIN" \
         x86_64-unknown-none \
         x86_64-unknown-linux-musl \
         x86_64-unknown-uefi

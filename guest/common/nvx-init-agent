@@ -161,8 +161,9 @@ validate_share_target() {
     esac
     # The container runtime mounts or binds these paths after the share, so a
     # share there would be shadowed or would expose host data to runtime writes.
+    # It also creates /run and /run/nvx, and binds its time state over /run/nvx/time.
     case "$1" in
-        /proc | /proc/* | /sys | /sys/* | /dev | /dev/* | /.nvx-agent | /.nvx-agent/* | /etc | /etc/machine-id | /etc/machine-id/*)
+        /proc | /proc/* | /sys | /sys/* | /dev | /dev/* | /.nvx-agent | /.nvx-agent/* | /etc | /etc/machine-id | /etc/machine-id/* | /run | /run/nvx | /run/nvx/time | /run/nvx/time/*)
             fatal "live share target is reserved: $1"
             ;;
     esac
@@ -396,13 +397,11 @@ teardown() {
         echo "NVX-SANDBOX-ERROR: failed to unmount the container overlay" >&2
         status=1
     fi
-    for role in custom runtime distro; do
-        directory=$layers/$role
-        if mountpoint -q "$directory" && ! umount "$directory"; then
-            echo "NVX-SANDBOX-ERROR: failed to unmount the $role layer" >&2
-            status=1
-        fi
-    done
+    directory=$layers/distro
+    if mountpoint -q "$directory" && ! umount "$directory"; then
+        echo "NVX-SANDBOX-ERROR: failed to unmount the distro layer" >&2
+        status=1
+    fi
     if ! umount "$scratch"; then
         echo "NVX-SANDBOX-ERROR: failed to unmount scratch" >&2
         status=1
@@ -423,8 +422,6 @@ configure_cgroups
 
 layer_capacity=$(cmdline_value nvx_layer_capacity_sectors || true)
 distro=false
-runtime_layer=false
-custom=false
 layer_count=0
 # Kernel command-line tokens are deliberately split on spaces.
 # shellcheck disable=SC2086
@@ -446,18 +443,10 @@ for token in $cmdline; do
                     [ "$distro" = false ] || fatal "duplicate distro layer"
                     distro=true
                     ;;
-                runtime)
-                    [ "$runtime_layer" = false ] || fatal "duplicate runtime layer"
-                    runtime_layer=true
-                    ;;
-                custom)
-                    [ "$custom" = false ] || fatal "duplicate custom layer"
-                    custom=true
-                    ;;
                 *) fatal "unknown layer role: $role" ;;
             esac
             layer_count=$((layer_count + 1))
-            [ "$layer_count" -le 3 ] || fatal "at most three layers are supported"
+            [ "$layer_count" -le 1 ] || fatal "only the distro layer is supported"
             set +f
             mount_layer "$role" "$address" "$expected_uuid" "$layer_capacity"
             set -f
@@ -467,16 +456,7 @@ done
 set +f
 [ "$layer_count" -gt 0 ] || fatal "at least one EROFS layer is required"
 
-lowerdirs=
-if [ "$distro" = true ]; then
-    lowerdirs=$layers/distro
-fi
-if [ "$runtime_layer" = true ]; then
-    lowerdirs=$layers/runtime${lowerdirs:+:$lowerdirs}
-fi
-if [ "$custom" = true ]; then
-    lowerdirs=$layers/custom${lowerdirs:+:$lowerdirs}
-fi
+lowerdirs=$layers/distro
 
 scratch_spec=$(cmdline_value nvx_scratch || true)
 [ -n "$scratch_spec" ] || fatal "a scratch device is required"
