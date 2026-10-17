@@ -17,9 +17,11 @@
 //!   for it, and the pure paths of `pathlib` with the `os.path` operations that they use.
 //! - [`uuid`]: the UUIDs that `uuid.UUID` reads.
 //! - [`fs`]: the filesystem queries of `os`, `os.path`, and `pathlib.Path`, among them
-//!   `Path.resolve()` and the file identities of `os.stat`.
+//!   `Path.resolve()` and the file identities of `os.stat`, `os.lstat`, and `os.fstat`.
 //! - [`shell`]: `subprocess.list2cmdline` and `shlex.join`, with which `nvx.py` prints the
 //!   commands that it runs.
+//! - [`value`]: `str()`, `int()`, and `==` of the values that `json.loads` returns, as `nvx.py`
+//!   applies them to its state files.
 //!
 //! Character properties come from the Unicode 16.0.0 database of Python 3.14, in [`unicode`],
 //! which `scripts/nvx_rs_fixtures.py` generates. The same script records what Python does with
@@ -41,6 +43,8 @@ pub(crate) mod shell;
 pub(crate) mod text;
 pub(crate) mod unicode;
 pub(crate) mod uuid;
+#[cfg(feature = "cli")]
+pub(crate) mod value;
 #[cfg(windows)]
 mod windows;
 

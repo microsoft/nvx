@@ -22,9 +22,11 @@
 
 mod args;
 mod artifacts;
+mod deadline;
 mod egress;
 mod output;
 mod sandbox;
+mod session;
 
 use std::ffi::OsString;
 
@@ -68,6 +70,9 @@ pub(crate) enum Exit {
     /// `error: MESSAGE` on standard error, and status 1: what `nvx.py` does for a `ScriptError`,
     /// an `OSError`, a `RuntimeError`, or a `ValueError`.
     Error(String),
+    /// OpenVMM closed the control endpoint, as it does when it shuts down: Python's
+    /// `ControlEndpointClosed`, which `nvx.py` reports as any other error.
+    EndpointClosed,
     /// A usage error of the parser `prog`: its usage, then `PROG: error: MESSAGE`, and status 2.
     Usage {
         /// The parser's usage line.
@@ -84,6 +89,9 @@ pub(crate) enum Exit {
     /// `SystemExit(status)`: the status of OpenVMM or of a managed workload.
     Status(i32),
 }
+
+/// The message of [`Exit::EndpointClosed`], `str(ControlEndpointClosed())`.
+pub(crate) const ENDPOINT_CLOSED: &str = "managed control endpoint closed";
 
 impl Exit {
     /// Returns the error that prints `message`.
@@ -109,11 +117,20 @@ impl Exit {
         }
     }
 
+    /// Returns the message that the end prints after `error: `, if it is an error.
+    pub(crate) fn message(&self) -> Option<&str> {
+        match self {
+            Self::Error(message) => Some(message),
+            Self::EndpointClosed => Some(ENDPOINT_CLOSED),
+            _ => None,
+        }
+    }
+
     /// Reports the end on the standard streams and returns the exit status.
     fn report(self) -> i32 {
         match self {
-            Self::Error(message) => {
-                output::print_stderr(&format!("error: {message}"));
+            Self::Error(_) | Self::EndpointClosed => {
+                output::print_stderr(&format!("error: {}", self.message().unwrap_or_default()));
                 1
             }
             Self::Usage {
@@ -145,6 +162,15 @@ impl From<crate::Error> for Exit {
 
 /// The result of a command.
 pub(crate) type Result<T = ()> = std::result::Result<T, Exit>;
+
+/// Fails with [`Exit::Interrupted`] if Ctrl-C arrived.
+pub(crate) fn check_interrupt() -> Result {
+    if platform::interrupted() {
+        Err(Exit::Interrupted)
+    } else {
+        Ok(())
+    }
+}
 
 /// Runs `nvx-rs` with the process's arguments and returns its exit status.
 ///

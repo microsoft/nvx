@@ -360,6 +360,84 @@ fn stat_wide(path: &[u16], mut traverse: bool) -> io::Result<Status> {
     })
 }
 
+/// Returns `os.fstat` of an open file, as CPython's `_Py_fstat_noraise` computes it: a disk file's
+/// type, identity, and link count come from `GetFileInformationByHandle` and `FILE_ID_INFO`, as
+/// [`stat`] reads them, and its attributes tell whether the handle is a reparse point that was
+/// opened as itself.
+#[cfg(feature = "cli")]
+pub(crate) fn fstat(file: &impl AsRawHandle) -> io::Result<HandleStatus> {
+    let handle = file.as_raw_handle() as HANDLE;
+    // SAFETY: the handle is open for as long as `file` is borrowed.
+    let file_type = unsafe { GetFileType(handle) };
+    if file_type != FILE_TYPE_DISK {
+        if file_type == FILE_TYPE_UNKNOWN && last_error() != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let mode = match file_type {
+            FILE_TYPE_CHAR => StatMode::Character,
+            FILE_TYPE_PIPE => StatMode::Fifo,
+            _ => StatMode::Unknown,
+        };
+        return Ok(HandleStatus {
+            mode,
+            device: 0,
+            inode: 0,
+            links: 0,
+            reparse_point: false,
+        });
+    }
+    // SAFETY: BY_HANDLE_FILE_INFORMATION is plain data, for which all-zero bytes are valid.
+    let mut information: BY_HANDLE_FILE_INFORMATION = unsafe { mem::zeroed() };
+    // SAFETY: the handle is open and the output pointer is valid.
+    if unsafe { GetFileInformationByHandle(handle, &mut information) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: FILE_ID_INFO is plain data, for which all-zero bytes are valid.
+    let mut id: FILE_ID_INFO = unsafe { mem::zeroed() };
+    // SAFETY: the handle is open, and the buffer is a FILE_ID_INFO of the size that is passed.
+    let has_id = unsafe {
+        GetFileInformationByHandleEx(
+            handle,
+            FileIdInfo,
+            (&raw mut id).cast::<c_void>(),
+            mem::size_of::<FILE_ID_INFO>() as u32,
+        )
+    } != 0;
+    let device = if has_id {
+        id.VolumeSerialNumber
+    } else {
+        u64::from(information.dwVolumeSerialNumber)
+    };
+    let inode = match has_id.then(|| u128::from_le_bytes(id.FileId.Identifier)) {
+        Some(inode) if inode != 0 => inode,
+        _ => (u128::from(information.nFileIndexHigh) << 32) | u128::from(information.nFileIndexLow),
+    };
+    Ok(HandleStatus {
+        mode: mode(information.dwFileAttributes, 0),
+        device,
+        inode,
+        links: information.nNumberOfLinks,
+        reparse_point: information.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0,
+    })
+}
+
+/// The fields of `os.fstat` that NVX reads.
+#[cfg(feature = "cli")]
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct HandleStatus {
+    /// The type of file. `os.fstat` reads no reparse tag, so a link opened as itself is no
+    /// [`StatMode::Link`].
+    pub(crate) mode: StatMode,
+    /// `st_dev`: the volume serial number.
+    pub(crate) device: u64,
+    /// `st_ino`: the file ID.
+    pub(crate) inode: u128,
+    /// `st_nlink`: the number of names that link the file.
+    pub(crate) links: u32,
+    /// Whether `st_file_attributes` has `FILE_ATTRIBUTE_REPARSE_POINT`.
+    pub(crate) reparse_point: bool,
+}
+
 /// Returns `nt._getfinalpathname(path)`: the path that Windows gives for the file, with its
 /// `\\?\` prefix.
 pub(crate) fn final_path_name(path: &Path) -> io::Result<String> {

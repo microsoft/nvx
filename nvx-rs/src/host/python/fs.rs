@@ -5,9 +5,11 @@
 //! - [`is_file`], [`is_dir`], [`is_symlink`], and [`exists`]: `os.path.isfile`, `isdir`, `islink`,
 //!   and `exists`, which follow symbolic links, except `islink`, and are false on any error. On
 //!   Windows, only `IO_REPARSE_TAG_SYMLINK` reparse points are links, not junctions.
-//! - [`stat`]: the identity and owner that `os.stat` reports. On Windows, the identity is the
-//!   64-bit volume serial number and the 128-bit file ID of `FILE_ID_INFO`, as Python 3.12 and
-//!   later report them, which also tell apart the files of ReFS volumes.
+//! - [`stat`], [`lstat`], and [`fstat`]: the identity and owner that `os.stat` and `os.lstat`
+//!   report for a path, and the identity, type, and link count that `os.fstat` reports for an
+//!   open file. On Windows, the identity is the 64-bit volume serial number and the 128-bit file
+//!   ID of `FILE_ID_INFO`, as Python 3.12 and later report them, which also tell apart the files
+//!   of ReFS volumes. [`lexists`] is `os.path.lexists`.
 //! - [`resolve`]: `Path.resolve()`, which follows `os.path.realpath`: it resolves symbolic links
 //!   component by component on POSIX, keeping the components that do not exist, and asks Windows
 //!   for the final path of the longest existing prefix, dropping the `\\?\` prefix again.
@@ -77,6 +79,39 @@ pub(crate) fn stat(path: &Path) -> io::Result<Stat> {
     imp::stat(path)
 }
 
+/// Returns `os.lstat(path)`, which does not follow a link that `path` names.
+#[cfg(feature = "cli")]
+pub(crate) fn lstat(path: &Path) -> io::Result<Stat> {
+    imp::lstat(path)
+}
+
+/// Returns `os.path.lexists(path)`: whether `os.lstat(path)` succeeds, so a link counts even if
+/// its target is missing.
+#[cfg(feature = "cli")]
+pub(crate) fn lexists(path: &Path) -> bool {
+    lstat(path).is_ok()
+}
+
+/// The fields of `os.fstat` on an open file that NVX reads.
+#[cfg(all(feature = "cli", any(unix, windows)))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct FileStat {
+    /// `st_dev` and `st_ino`, the identity that [`Stat::identity`] gives for the same file.
+    pub(crate) identity: (u64, u128),
+    /// Whether `st_mode` is a regular file.
+    pub(crate) regular: bool,
+    /// `st_nlink`: the number of names that link the file.
+    pub(crate) links: u64,
+    /// Whether the file is a reparse point, from `st_file_attributes` on Windows; never on POSIX.
+    pub(crate) reparse_point: bool,
+}
+
+/// Returns `os.fstat` of an open file, as CPython's `_Py_fstat_noraise` computes it.
+#[cfg(all(feature = "cli", any(unix, windows)))]
+pub(crate) fn fstat(file: &std::fs::File) -> io::Result<FileStat> {
+    imp::fstat(file)
+}
+
 /// Returns `path.resolve()`: the absolute path of `path`, with symbolic links resolved and `..`
 /// components removed, as `os.path.realpath(path)` gives it.
 pub(crate) fn resolve(path: &PurePath) -> io::Result<PurePath> {
@@ -142,12 +177,34 @@ mod imp {
 
     /// See [`super::stat`].
     pub(super) fn stat(path: &Path) -> io::Result<Stat> {
-        let metadata = fs::metadata(path)?;
+        status(fs::metadata(path)?)
+    }
+
+    /// See [`super::lstat`].
+    #[cfg(feature = "cli")]
+    pub(super) fn lstat(path: &Path) -> io::Result<Stat> {
+        status(fs::symlink_metadata(path)?)
+    }
+
+    /// Returns the fields of [`Stat`] that `metadata` holds.
+    fn status(metadata: fs::Metadata) -> io::Result<Stat> {
         Ok(Stat {
             device: metadata.dev(),
             inode: u128::from(metadata.ino()),
             uid: metadata.uid(),
             gid: metadata.gid(),
+        })
+    }
+
+    /// See [`super::fstat`].
+    #[cfg(feature = "cli")]
+    pub(super) fn fstat(file: &fs::File) -> io::Result<super::FileStat> {
+        let metadata = file.metadata()?;
+        Ok(super::FileStat {
+            identity: (metadata.dev(), u128::from(metadata.ino())),
+            regular: metadata.file_type().is_file(),
+            links: metadata.nlink(),
+            reparse_point: false,
         })
     }
 
@@ -289,6 +346,30 @@ mod imp {
             inode: status.inode,
             uid: 0,
             gid: 0,
+        })
+    }
+
+    /// See [`super::lstat`].
+    #[cfg(feature = "cli")]
+    pub(super) fn lstat(path: &Path) -> io::Result<Stat> {
+        let status = win32::stat(path, false)?;
+        Ok(Stat {
+            device: status.device,
+            inode: status.inode,
+            uid: 0,
+            gid: 0,
+        })
+    }
+
+    /// See [`super::fstat`].
+    #[cfg(feature = "cli")]
+    pub(super) fn fstat(file: &std::fs::File) -> io::Result<super::FileStat> {
+        let status = win32::fstat(file)?;
+        Ok(super::FileStat {
+            identity: (status.device, status.inode),
+            regular: status.mode == StatMode::Regular,
+            links: u64::from(status.links),
+            reparse_point: status.reparse_point,
         })
     }
 
@@ -473,6 +554,11 @@ mod imp {
     }
 
     pub(super) fn stat(_path: &Path) -> io::Result<Stat> {
+        Err(unsupported())
+    }
+
+    #[cfg(feature = "cli")]
+    pub(super) fn lstat(_path: &Path) -> io::Result<Stat> {
         Err(unsupported())
     }
 

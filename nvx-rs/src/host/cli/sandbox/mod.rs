@@ -3,12 +3,17 @@
 //!
 //! - `run`, the default, boots a one-shot sandbox: it prints the OpenVMM command as `>> COMMAND`,
 //!   then runs it on the terminal, unless `--dry-run`, and exits with OpenVMM's status.
-//! - `provision`, `start`, `exec`, `stop`, and `deprovision` will manage a persistent sandbox in
-//!   its `--state-dir`.
+//! - `provision`, `start`, `exec`, `stop`, and `deprovision` manage a persistent sandbox in its
+//!   `--state-dir`; see [`lifecycle`].
 //!
 //! The parser reads the options of `nvx.py sandbox` with their names, defaults, types, and
 //! choices, and fails as `argparse` fails, with status 2. The `--mount-deny`, `--mount-allow`,
 //! and `--mount-write` options name paths of the `--mount` before them.
+
+mod identity;
+mod lifecycle;
+mod lock;
+mod state;
 
 use std::process::{Child, Command};
 use std::thread;
@@ -32,6 +37,8 @@ use crate::host::sandbox::{
     DEFAULT_ENTRYPOINT, DEFAULT_HOSTNAME, DEFAULT_WORKLOAD_IDENTITY, SandboxLaunch, SandboxLayer,
     SandboxSettings, parse_workload_identity, require_file,
 };
+
+pub(crate) use self::lifecycle::ProvisionConfig;
 
 /// The name of the parser in usage messages.
 const PROG: &str = "nvx-rs sandbox";
@@ -596,7 +603,7 @@ pub(super) fn run(root: Option<&str>, options: Options) -> Result {
         layers: !options.layers.is_empty(),
         scratch: options.scratch.is_some(),
     };
-    checks.check()?;
+    let environment = checks.check()?;
     let launch = if matches!(
         operation,
         SandboxOperation::Run | SandboxOperation::Provision
@@ -624,7 +631,70 @@ pub(super) fn run(root: Option<&str>, options: Options) -> Result {
         None
     };
     let artifacts = Artifacts { root };
+    let state_dir = |operation: &str| {
+        options
+            .state_dir
+            .as_deref()
+            .ok_or_else(|| Exit::error(format!("sandbox {operation} requires --state-dir")))
+    };
     match (operation, launch) {
+        (SandboxOperation::Provision, Some((launch, rules))) => {
+            let state_dir = state_dir("provision")?;
+            lifecycle::provision(
+                state_dir,
+                &launch,
+                &ProvisionConfig {
+                    hypervisor: hypervisor(options.hypervisor),
+                    memory_mib: &options.memory_mib,
+                    net: options.net.as_deref(),
+                    network_profile: options.network_profile,
+                    network_egress: options.network_egress,
+                    network_ingress: options.network_ingress,
+                    network_egress_allow: &rules.allow,
+                    network_egress_deny: &rules.deny,
+                    host_loopback: options.host_loopback,
+                    network_proxy: options.network_proxy.as_deref(),
+                    host_loopback_forward: &options.host_loopback_forward,
+                    cmdline: &options.cmdline,
+                },
+                options.timeout,
+            )
+        }
+        (SandboxOperation::Start, _) => {
+            lifecycle::start(state_dir("start")?, &artifacts, options.timeout)
+        }
+        (SandboxOperation::Exec, _) => {
+            let state_dir = state_dir("exec")?;
+            if let Some(report) = &options.outcome_report {
+                lifecycle::validate_outcome_destination(report)?;
+            }
+            let mut arguments = vec![options.entrypoint.clone()];
+            arguments.extend(options.args.iter().cloned());
+            let result = lifecycle::exec_workload(
+                state_dir,
+                &super::session::ExecRequest {
+                    arguments,
+                    timeout_ms: options.exec_timeout_ms.clone(),
+                    cwd: options.cwd.clone(),
+                    environment,
+                    inherit_default_environment: options.inherit_default_environment,
+                },
+                options.timeout,
+            )?;
+            output::write_stdout(&result.stdout)
+                .and_then(|()| output::write_stderr(&result.stderr))
+                .map_err(|error| Exit::error(output::stream_error(&error)))?;
+            if let Some(report) = &options.outcome_report {
+                lifecycle::write_exec_outcome(report, &result)?;
+            }
+            Err(Exit::Status(result.returncode))
+        }
+        (SandboxOperation::Stop, _) => {
+            lifecycle::stop(state_dir("stop")?, options.timeout).map(drop)
+        }
+        (SandboxOperation::Deprovision, _) => {
+            lifecycle::deprovision(state_dir("deprovision")?, options.timeout)
+        }
         (SandboxOperation::Run, Some((launch, rules))) => {
             if options.state_dir.is_some() {
                 return Err(Exit::error(
@@ -665,12 +735,9 @@ pub(super) fn run(root: Option<&str>, options: Options) -> Result {
             }
             Err(Exit::Status(run_openvmm(&command)?))
         }
-        (SandboxOperation::Run, None) => unreachable!("run builds its launch"),
-        // The lifecycle of a managed sandbox follows.
-        (operation, _) => Err(Exit::error(format!(
-            "sandbox {} is not supported yet",
-            operation.as_str()
-        ))),
+        (SandboxOperation::Run | SandboxOperation::Provision, None) => {
+            unreachable!("run and provision build their launch")
+        }
     }
 }
 
