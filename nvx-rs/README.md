@@ -25,11 +25,14 @@ nvx-rs/
 │   ├── net/         CIDR parsing and subtraction, and hostname and guest-network forms
 │   ├── hypervisor.rs
 │   ├── error.rs     nvx::Error and its ErrorKind
-│   ├── host/        feature `host` (default): artifacts, launch, network, filesystem, session,
-│   │                process, platform, VM instances, and outcome reports
+│   ├── host/        feature `host` (default): artifacts, launch, network and egress policy files,
+│   │                filesystem, session, process, platform, VM instances, outcome reports, and
+│   │                the sandbox launch profile of `nvx.py`, with the Python semantics they keep
 │   ├── testing/     feature `testing`: the fake OpenVMM
 │   ├── guest/       feature `guest`: the programs that run in Linux guests
 │   └── bin/         nvx-fake-openvmm and the guest binaries
+├── tests/           fake-OpenVMM and guest-binary tests, and the golden fixtures that Python
+│                    recorded for the ports of its code, in fixtures/
 ├── build.rs         bundled-release staging
 └── artifacts.json   the NVX release that the `bundled` feature stages
 ```
@@ -40,12 +43,14 @@ nvx-rs/
 | `nvx::contract` | The OpenVMM microVM ABI, broker protocol, and control-contract revision that the crate speaks, and `manifest_is_compatible` for a release's `SOURCE-MANIFEST.json` |
 | `nvx::net` | `Cidr`: IPv4 and IPv6 networks and their subtraction; `is_valid_hostname` and `is_valid_guest_network`, the forms of a VM's hostname and guest address |
 | `nvx::Hypervisor` | KVM, MSHV, or WHP, with its serde form behind the `serde` feature |
-| `nvx::host::artifacts` | `Artifacts` (also `nvx::Artifacts`): the OpenVMM executable, guest kernel, and Alpine initramfs, from a release, a repository checkout, the environment, a directory next to the executable, or the bundle |
+| `nvx::host::artifacts` | `Artifacts` (also `nvx::Artifacts`): the OpenVMM executable, guest kernel, and Alpine initramfs, from a release, a repository checkout, the environment, a directory next to the executable, or the bundle. `ArtifactDir` and `Guest`: every artifact of the guests that `nvx.py` runs, the OpenVMM executable, the kernel, the Alpine, Ubuntu, and Azure Linux initramfs images and their package manifests, and the Ubuntu distro layer and its manifest, in a checkout's `build/` and `openvmm/target/release/` or a release's `guest/` and `bin/`, checked in the order and with the messages of `nvx.py`. `ArtifactPaths` lists them all and serializes as JSON |
 | `nvx::host::launch` | `LaunchSpec` and OpenVMM's command line: the managed lifecycle, the `WorkloadIdentity`, the 1024-byte kernel command line, its reserved parameters, the 32,767-character limit of a Windows command line, and `LaunchSpec::check`, which every command line applies to the memory size, the non-root identity, the hostname, the guest network, and the kernel parameters |
-| `nvx::host::network` | Egress rules and their exact expansion into OpenVMM's IPv4 and IPv6 rules: exceptions, protocol-only rules, and port ranges, with at most 256 rules for each action |
+| `nvx::host::network` | `NetworkPolicy` and `openvmm_arguments`: the egress default and rules, ingress, host-loopback access and forwards as OpenVMM options. Egress rules are lowered exactly into OpenVMM's IPv4 and IPv6 rules by the lowering of egress policy files, with at most 256 rules for each action |
+| `nvx::host::network::policy` | Egress policy files: `compile_policy_file`, `compile_policy_bytes`, and `compile_policy` compile one to a `CompiledEgressPolicy` of native rules; see [Egress policy files](#egress-policy-files) |
 | `nvx::host::filesystem` | The `ExportPlan` of host paths through OpenVMM's aggregate virtio-fs device, the host-mapping table, the reserved guest targets, and `guest_path` and `resolve_guest_path` (also at `nvx::`) |
 | `nvx::host::instance` | `Instance`: a VM in a directory of its own. It starts OpenVMM with a fresh capability and waits until the guest is ready and has mounted the mapped paths, reconciles recorded state, recovers interrupted launches, runs workloads and pumps their output, and stops the VM with a forced fallback |
 | `nvx::host::session`, `process`, `platform`, `report` | The authenticated control session, OpenVMM processes, Linux and Windows primitives, and OpenVMM's outcome report |
+| `nvx::host::sandbox` | The launch profile of `nvx.py sandbox`, ported from `scripts/nvx_tools/sandbox.py`: `SandboxLaunch`, with one to three EROFS `SandboxLayer`s in role order, the ext4 scratch disk, the entrypoint, arguments, hostname, workload identity, and resource limits, and its `--microvm-sandbox-block` and `--microvm-workload-identity` arguments and kernel command line, within the 1024-byte budget that OpenVMM leaves it. `mount`: `SandboxMount` live shares of host directories and files, their guest targets and the reserved ones, their access policies and owner, the aggregate of several shares, and the checks of their host paths. `options`: the checks that `nvx.py sandbox` and `nvx.py run` apply to their options: the attribution of `--mount-deny`, `--mount-allow`, and `--mount-write` to shares, the systemd policy, the targets of `nvx.py run` shares, and the managed exec environment; see [Python parity](#python-parity) |
 | `nvx::testing::fake_openvmm` | A fake OpenVMM that serves the control console and runs scripted workloads without a VM |
 | `nvx::guest` | The programs that run in Linux guests; see [Guest binaries](#guest-binaries) |
 
@@ -53,11 +58,94 @@ Lowering functions take the names by which messages refer to their inputs, such
 as `EgressRules::name` and `PathList::name`, so callers' messages name their own
 fields.
 
+## Egress policy files
+
+`nvx::host::network::policy` compiles the egress policy files that
+`nvx.py run` and `nvx.py sandbox` take with `--network-egress-policy-file`
+([format](../doc/run.md#run-openvmm-directly)). It is a faithful port of
+[`egress_policy.py`](../scripts/nvx_tools/egress_policy.py), which stays
+authoritative until `nvx.py` delegates to `nvx-rs`: it accepts the same files,
+compiles them to the same rules, and fails with the same messages.
+
+- A policy is at most 1 MiB of UTF-8 JSON whose root has only `allow` and
+  `deny` arrays. JSON is read as Python's `json.loads` reads it, so `NaN` and
+  `Infinity` are numbers, while a repeated field and an integer of more than 64
+  digits are errors.
+- Rules take the MXC form, with optional `to` destinations (`cidr` and
+  `except`) and `ports` selectors (`protocol`, `port`, and `endPort`), or the
+  legacy flat form (`cidr`, `except`, `protocol`, `port`, and `endPort`).
+  Protocols are `tcp`, `udp`, `icmp`, and `any`, and TCP and UDP take one port
+  or a range. A CIDR is read as Python's `ipaddress.ip_interface` reads it:
+  host bits are cleared, IPv4 netmasks such as `/255.255.0.0` are accepted, and
+  IPv6 scopes are refused.
+- Each action, `allow` or `deny`, lowers to at most 256 native rules:
+  exceptions are subtracted, destinations merge into the fewest networks, rules
+  for every port of a protocol subsume the narrower rules that they cover, and
+  a sweep over the port boundaries merges overlapping and adjacent ranges. The
+  rules sort by family, address, prefix length, protocol, and ports, and read
+  `CIDR`, `CIDR:PROTOCOL`, `CIDR:PROTOCOL:PORT`, or `CIDR:PROTOCOL:FIRST-LAST`.
+
+`openvmm_arguments` lowers `NetworkPolicy` rules, and so `aci_edge_sandboxes`
+policies, the same way: an `EgressRule` is a policy file's MXC rule, its
+messages name `EgressRules::name` where a file's name `allow` or `deny`, such
+as `network.egress.allow[0].to[1].cidr is not a valid IPv4 or IPv6 CIDR: x`,
+and the checks that only `NetworkPolicy` has, such as the host-loopback ones,
+stay in `openvmm_arguments`.
+
+Messages match Python's byte for byte, but two cases have no Rust equivalent. A
+string that Python would hold with an unpaired surrogate, such as one decoded
+from a `\ud800` escape or a path that is not Unicode, shows the surrogate as
+`\udXXX`, which is how Python prints it, and paths show as
+`str(pathlib.Path(path))` does. Python's decoder raises `RecursionError` for a
+document nested more deeply than its stack allows; this reader has no such
+limit, so those documents fail as invalid policies instead.
+
+[`scripts/nvx_rs_fixtures.py`](../scripts/nvx_rs_fixtures.py) records the
+Python compiler's outcomes for every policy that `scripts/test_egress_policy.py`
+compiles, hand-written edge cases, and a seeded random corpus in
+[`tests/fixtures/egress-policy.json`](tests/fixtures/egress-policy.json), which
+the tests replay without Python; `NVX_EGRESS_POLICY_FIXTURE` points the tests at
+a larger corpus that the script writes with `--output` and `--random-cases`. See
+[Python parity](#python-parity) for how to regenerate and check the fixtures.
+
+## Python parity
+
+`nvx::host::network::policy`, `nvx::host::sandbox`, and the guest lookups of
+`nvx::host::artifacts` replace Python code that `nvx.py` runs, so they keep its
+contract byte for byte: its limits, option semantics, outputs, and messages.
+They check values as Python does: whitespace is what `str.isspace` accepts,
+integers are what `int` reads, UUIDs what `uuid.UUID` reads, and JSON what
+`json.loads` reads, failing with its messages; host paths are normalized as
+`pathlib` normalizes them, with backslashes on Windows, and resolved as
+`Path.resolve` resolves them; file identities are those of `os.stat`, which on
+Windows are the volume serial number and the 128-bit file ID; and messages
+quote values as `repr` does. The private `python` module implements these
+semantics after CPython 3.14, with the Unicode 16.0.0 tables of Python 3.14.
+Python decodes operating-system strings that are not valid Unicode into
+surrogates: paths print as Python prints them, and the filesystem queries
+refuse them.
+
+[`scripts/nvx_rs_fixtures.py`](../scripts/nvx_rs_fixtures.py) records what the
+Python code does with fixed inputs and seeded random corpora in
+`tests/fixtures`: `python.json` for the Python semantics, `sandbox.json` and
+`sandbox_options.json` for the launch profile and the sandbox options, for
+POSIX and Windows paths alike, and `egress-policy.json` for the policy
+compiler. It also generates the Unicode tables of `src/host/python/unicode.rs`.
+The golden tests compare the ports with these records and need no Python. The
+records depend on the interpreter, so regenerate them with CPython 3.14 after a
+change to the Python code or the generator; CI's Pythons are older, so CI does
+not check them:
+
+```bash
+python3 scripts/nvx_rs_fixtures.py           # rewrite every generated file
+python3 scripts/nvx_rs_fixtures.py --check   # fail if any is out of date
+```
+
 ## Features
 
 | Feature | Contents |
 | --- | --- |
-| `host` (default) | The `host` module. It enables `serde` |
+| `host` (default) | The `host` module. It enables `serde`, and `sha2`, which names the children of a sandbox's aggregate share |
 | `bundled` | Stages a release at build time; see [Bundled artifacts](#bundled-artifacts) |
 | `testing` | The fake OpenVMM and the `nvx-fake-openvmm` binary |
 | `serde` | The serde form of `Hypervisor` |
@@ -155,8 +243,8 @@ as `nvx/`.
 ## Guest binaries
 
 The `guest` feature adds the programs that run in NVX's Linux guests: the
-`nvx::guest` module and one binary per program. Guest images install these
-executables as `/sbin/nvx-*`.
+`nvx::guest` module and one binary per program. The Alpine, Ubuntu, and Azure
+Linux images ship all nine at their established `/sbin/nvx-*` paths.
 
 | Binary | Program |
 | --- | --- |
@@ -181,20 +269,23 @@ python3 scripts/nvx.py build-guest-binaries \
   --output build/nvx-rs-guest-binaries
 ```
 
+Native guest builds, the digest-pinned Docker Rust stage, and CI all call this
+routine. Docker builds the set once and installs identical bytes in all three
+guest images; Ubuntu determinism checks rebuild from fresh targets.
+
 ## Testing
 
 ```bash
 cd nvx-rs
-NVX_BUNDLE=skip cargo test --all-features   # unit, golden-fixture, and fake-OpenVMM tests
+NVX_BUNDLE=skip cargo test --all-features   # unit, golden-fixture, parity-fixture, and fake-OpenVMM tests
 ```
 
 The tests need no hypervisor. The fake-OpenVMM test drives `Instance` end to end
-against `nvx-fake-openvmm`, and the protocol tests compare the wire constants
-with the guest agent's source in `guest/common/nvx-managed-agent.c`. On Linux,
-a loopback test drives the host `ControlSession` through a broker shim into the
-real managed agent's session, dispatch, and execution engine, and `nvx.py` also
-lints and tests the guest binaries, and runs their integration tests against a
-build of them:
+against `nvx-fake-openvmm`, and shared protocol definitions plus golden byte
+fixtures cover both sides of every record. On Linux, a loopback test drives the
+host `ControlSession` through a broker shim into the real managed agent's
+session, dispatch, and execution engine, and `nvx.py` also lints and tests the
+guest binaries, and runs their integration tests against a build of them:
 
 ```bash
 python3 ../scripts/nvx.py check-guest-binaries

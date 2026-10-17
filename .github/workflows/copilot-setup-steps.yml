@@ -22,7 +22,7 @@ on:
       - .gitmodules
       - SOURCE-MANIFEST.json
       - aci_edge_sandboxes/Cargo.toml
-      - nvx-rs/Cargo.toml
+      - nvx-rs/**
       - openvmm
       - requirements-dev.txt
       - rust-toolchain.toml

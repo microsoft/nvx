@@ -58,9 +58,10 @@
 //! or read-write. OpenVMM enforces each mapping's access on the host, except that of a read-only
 //! path inside a read-write mapping, and hides denied paths and everything that is not mapped
 //! beside mapped files. A whole volume, or a file directly in a volume's root, is not mapped.
-//! Egress rules are expanded
-//! into OpenVMM's IPv4 and IPv6 rules exactly; rules that would need more than 256 OpenVMM rules
-//! are rejected. Egress denied without allow rules, with ingress and host loopback denied,
+//! Egress rules are lowered into OpenVMM's IPv4 and IPv6 rules exactly, by the lowering that
+//! compiles NVX's egress policy files ([`nvx::host::network::policy`]): destinations and port
+//! ranges merge into the fewest rules, and an action that still needs more than 256 OpenVMM rules
+//! is rejected. Egress denied without allow rules, with ingress and host loopback denied,
 //! attaches no network device. With `network.ingress.default: allow`, OpenVMM listens on every
 //! host address at the TCP and UDP ports where the workload listens, and admits clients on the
 //! host's private networks, whose addresses are not globally reachable, but not clients inside
@@ -924,7 +925,8 @@ mod tests {
                 guest_port: 8080,
             }]
         );
-        // Messages name the contract's fields.
+        // Messages name the contract's fields, as the shared lowering of NVX's egress policy
+        // files words them.
         let icmp_port = NetworkPolicy {
             egress: EgressPolicy::new(Access::Deny)
                 .with_allow(NetworkRule::to("10.0.0.0/8").on_port(Protocol::Icmp, 8)),
@@ -937,7 +939,43 @@ mod tests {
         assert_eq!(error.code(), ErrorCode::PolicyValidation);
         assert_eq!(
             error.message(),
-            "network.egress.allow[0].ports[0]: ICMP has no ports"
+            "network.egress.allow[0].ports[0].port is not supported with icmp"
+        );
+        let scoped = NetworkPolicy {
+            egress: EgressPolicy::new(Access::Allow)
+                .with_deny(NetworkRule::to("192.0.2.0/24"))
+                .with_deny(NetworkRule::to("fe80::1%eth0/64")),
+            ..NetworkPolicy::deny_all()
+        };
+        let error = Error::from(
+            network::openvmm_arguments(Some(&network_policy(&scoped, &[])), "10.0.0.2/24")
+                .unwrap_err(),
+        );
+        assert_eq!(error.code(), ErrorCode::PolicyValidation);
+        assert_eq!(
+            error.message(),
+            "network.egress.deny[1].to[0].cidr must not name an IPv6 scope: fe80::1%eth0/64"
+        );
+        let mut crowded = NetworkRule::to("192.0.2.0/24");
+        crowded.ports = (0..257)
+            .map(|index| NetworkPort {
+                protocol: Protocol::Tcp,
+                port: Some(2 * index + 1),
+                end_port: None,
+            })
+            .collect();
+        let crowded = NetworkPolicy {
+            egress: EgressPolicy::new(Access::Deny).with_allow(crowded),
+            ..NetworkPolicy::deny_all()
+        };
+        let error = Error::from(
+            network::openvmm_arguments(Some(&network_policy(&crowded, &[])), "10.0.0.2/24")
+                .unwrap_err(),
+        );
+        assert_eq!(error.code(), ErrorCode::PolicyValidation);
+        assert_eq!(
+            error.message(),
+            "network.egress.allow emits at most 256 native rules"
         );
     }
 

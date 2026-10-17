@@ -52,11 +52,21 @@ For Debian/Ubuntu hosts:
 sudo apt-get update
 sudo apt-get install -y \
   bc binutils bison build-essential ca-certificates cpio curl erofs-utils flex \
-  gzip libelf-dev libssl-dev musl-tools python3 rsync tar xz-utils zstd
+  gzip libelf-dev libssl-dev python3 rsync tar xz-utils zstd
 ```
 
-`musl-tools` provides `musl-gcc`, which native initramfs builds use for the
-guest time tools; Docker builds install it in the build image.
+Native guest builds use the exact Rust release in `rust-toolchain.toml` and
+its musl standard-library target:
+
+```bash
+toolchain=$(sed -n 's/^channel = "\([^"]*\)".*/\1/p' rust-toolchain.toml)
+rustup toolchain install "$toolchain" --profile minimal
+rustup target add --toolchain "$toolchain" x86_64-unknown-linux-musl
+```
+
+The Linux runner setup scripts and Copilot setup install this target
+automatically. `build-essential` remains necessary for the kernel and as
+Rust's linker driver; no separate guest libc compiler is required.
 
 ### Linux / KVM
 

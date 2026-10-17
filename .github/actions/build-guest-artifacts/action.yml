@@ -73,21 +73,23 @@ runs:
         AZURELINUX_VERSION: ${{ steps.guest-versions.outputs.azurelinux-version }}
         KERNEL_INPUT_HASH: ${{ hashFiles('SOURCE-MANIFEST.json', 'kernel/config-microvm', 'kernel/patches/**', 'docker/Dockerfile', '.dockerignore', 'scripts/nvx_tools/build.py', 'scripts/nvx_tools/build_config.py', 'scripts/nvx_tools/build_constants.py') }}
         DEBUG_KERNEL_INPUT_HASH: ${{ hashFiles('SOURCE-MANIFEST.json', 'kernel/config-microvm', 'kernel/config-microvm-debug', 'kernel/patches/**', 'docker/Dockerfile', '.dockerignore', 'scripts/nvx_tools/build.py', 'scripts/nvx_tools/build_config.py', 'scripts/nvx_tools/build_constants.py') }}
-        ALPINE_INPUT_HASH: ${{ hashFiles('SOURCE-MANIFEST.json', 'guest/common/**', 'guest/alpine/**', 'docker/Dockerfile', '.dockerignore', 'scripts/nvx_tools/build.py', 'scripts/nvx_tools/build_config.py', 'scripts/nvx_tools/build_constants.py', 'scripts/nvx_tools/common.py', 'scripts/nvx_tools/guests.py') }}
-        UBUNTU_INPUT_HASH: ${{ hashFiles('SOURCE-MANIFEST.json', 'guest/common/**', 'guest/ubuntu/**', 'ubuntu/**', 'docker/Dockerfile', '.dockerignore', 'scripts/nvx_tools/build.py', 'scripts/nvx_tools/build_config.py', 'scripts/nvx_tools/build_constants.py', 'scripts/nvx_tools/common.py', 'scripts/nvx_tools/guests.py', 'scripts/nvx_tools/ubuntu.py') }}
-        AZURELINUX_INPUT_HASH: ${{ hashFiles('SOURCE-MANIFEST.json', 'guest/common/**', 'azurelinux/**', 'docker/Dockerfile', '.dockerignore', 'scripts/nvx_tools/azurelinux.py', 'scripts/nvx_tools/build.py', 'scripts/nvx_tools/build_config.py', 'scripts/nvx_tools/build_constants.py', 'scripts/nvx_tools/common.py', 'scripts/nvx_tools/guests.py') }}
+        ALPINE_INPUT_HASH: ${{ hashFiles('SOURCE-MANIFEST.json', 'guest/common/**', 'guest/alpine/**', 'nvx-rs/**', '!nvx-rs/target/**', 'rust-toolchain.toml', 'docker/Dockerfile', '.dockerignore', 'scripts/nvx_tools/build.py', 'scripts/nvx_tools/build_config.py', 'scripts/nvx_tools/build_constants.py', 'scripts/nvx_tools/common.py', 'scripts/nvx_tools/elf.py', 'scripts/nvx_tools/guest_binaries.py', 'scripts/nvx_tools/guests.py') }}
+        UBUNTU_INPUT_HASH: ${{ hashFiles('SOURCE-MANIFEST.json', 'guest/common/**', 'guest/ubuntu/**', 'ubuntu/**', 'nvx-rs/**', '!nvx-rs/target/**', 'rust-toolchain.toml', 'docker/Dockerfile', '.dockerignore', 'scripts/nvx_tools/build.py', 'scripts/nvx_tools/build_config.py', 'scripts/nvx_tools/build_constants.py', 'scripts/nvx_tools/common.py', 'scripts/nvx_tools/elf.py', 'scripts/nvx_tools/guest_binaries.py', 'scripts/nvx_tools/guests.py', 'scripts/nvx_tools/ubuntu.py') }}
+        AZURELINUX_INPUT_HASH: ${{ hashFiles('SOURCE-MANIFEST.json', 'guest/common/**', 'azurelinux/**', 'nvx-rs/**', '!nvx-rs/target/**', 'rust-toolchain.toml', 'docker/Dockerfile', '.dockerignore', 'scripts/nvx_tools/azurelinux.py', 'scripts/nvx_tools/build.py', 'scripts/nvx_tools/build_config.py', 'scripts/nvx_tools/build_constants.py', 'scripts/nvx_tools/common.py', 'scripts/nvx_tools/elf.py', 'scripts/nvx_tools/guest_binaries.py', 'scripts/nvx_tools/guests.py') }}
       run: |
         set -euo pipefail
         # hashFiles hashes contents only, so the kernel keys also name each patch
-        # path and its order.
+        # path and its order, and the guest image keys the path-aware digest of
+        # the Rust guest sources that their package manifests record.
         patch_identity=$(python3 scripts/nvx.py kernel-patch-identity)
+        rust_source_identity=$(python3 scripts/nvx.py guest-binary-source-identity)
         {
           echo "kernel=linux-kernel-v1-${KERNEL_VERSION}-${KERNEL_INPUT_HASH}-${patch_identity}"
           echo "kernel-debug=linux-kernel-debug-v1-${KERNEL_VERSION}-${DEBUG_KERNEL_INPUT_HASH}-${patch_identity}"
-          echo "alpine=alpine-image-v1-${ALPINE_VERSION}-${ALPINE_INPUT_HASH}"
-          echo "ubuntu=ubuntu-initramfs-v1-${UBUNTU_VERSION}-${UBUNTU_INPUT_HASH}"
-          echo "ubuntu-distro=ubuntu-distro-v1-${UBUNTU_VERSION}-${UBUNTU_INPUT_HASH}"
-          echo "azurelinux=azurelinux-initramfs-v1-${AZURELINUX_VERSION}-${AZURELINUX_INPUT_HASH}"
+          echo "alpine=alpine-image-v2-${ALPINE_VERSION}-${ALPINE_INPUT_HASH}-${rust_source_identity}"
+          echo "ubuntu=ubuntu-initramfs-v2-${UBUNTU_VERSION}-${UBUNTU_INPUT_HASH}-${rust_source_identity}"
+          echo "ubuntu-distro=ubuntu-distro-v2-${UBUNTU_VERSION}-${UBUNTU_INPUT_HASH}-${rust_source_identity}"
+          echo "azurelinux=azurelinux-initramfs-v2-${AZURELINUX_VERSION}-${AZURELINUX_INPUT_HASH}-${rust_source_identity}"
         } >> "${GITHUB_OUTPUT}"
 
     - name: Restore Linux kernel (zstd)
