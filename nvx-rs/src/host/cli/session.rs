@@ -502,3 +502,6 @@ fn request_id() -> Result<u64> {
         .map_err(|error| Exit::error(format!("cannot generate a request ID: {error}")))?;
     Ok(u64::from_le_bytes(bytes).max(1))
 }
+
+#[cfg(test)]
+mod tests;
