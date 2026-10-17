@@ -20,6 +20,7 @@ scripts/setup/tool-versions.conf text eol=lf
 .github/workflows/*.lock.yml linguist-generated=true
 # Generated from Python by scripts/nvx_rs_fixtures.py.
 nvx-rs/src/host/python/unicode.rs linguist-generated=true
+nvx-rs/tests/fixtures/cli.json linguist-generated=true
 nvx-rs/tests/fixtures/egress-policy.json linguist-generated=true
 nvx-rs/tests/fixtures/python.json linguist-generated=true
 nvx-rs/tests/fixtures/sandbox.json linguist-generated=true

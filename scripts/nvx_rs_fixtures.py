@@ -17,12 +17,27 @@ corpora, so that the Rust tests replay them without Python:
 - nvx-rs/tests/fixtures/egress-policy.json: scripts/nvx_tools/egress_policy.py
   over every policy that scripts/test_egress_policy.py compiles, hand-written
   edge cases, and a seeded random corpus, and how pathlib prints policy paths.
+- nvx-rs/tests/fixtures/cli.json: `nvx.py sandbox`, run as a command in fresh
+  directories with the fake OpenVMM of nvx-rs, nvx-fake-openvmm, and what the
+  Python functions behind `nvx-rs egress compile` and `nvx-rs artifacts` give:
+  exit statuses, standard output and error, and the files that each step
+  leaves, such as the state directory of a sandbox, with temporary paths,
+  process IDs, and random identifiers replaced by placeholders. Its `posix` and
+  `windows` sections hold the scenarios of each kind of host, recorded there:
+  the script rewrites or checks the section of the host that runs it and keeps
+  the other. It builds nvx-rs and nvx-fake-openvmm with cargo, then also plays
+  every scenario with nvx-rs, and each interoperability scenario, a sandbox's
+  lifecycle, with nvx.py and nvx-rs taking turns both ways, and fails if any
+  step differs from nvx.py.
 
 The outputs depend on the interpreter, so run the script with CPython 3.14, from
 any directory:
 
     python3 scripts/nvx_rs_fixtures.py           # rewrite every generated file
     python3 scripts/nvx_rs_fixtures.py --check   # fail if any is out of date
+
+Run it on both Linux and Windows when the CLI changes, so that both sections of
+nvx-rs/tests/fixtures/cli.json are current.
 
 With --output, it writes or checks only an egress policy corpus of
 --random-cases random policies at that path, such as a larger corpus for the
@@ -41,16 +56,24 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import difflib
+import hashlib
 import inspect
 import io
 import ipaddress
 import json
 import ntpath
+import os
 import random
 import re
+import shutil
+import signal
+import stat
 import struct
+import subprocess
 import sys
 import tempfile
+import time
 import unicodedata
 import unittest
 import uuid
@@ -62,7 +85,14 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import nvx  # noqa: E402
 import test_egress_policy  # noqa: E402
-from nvx_tools import common, control_session, sandbox, sandbox_lifecycle  # noqa: E402
+from nvx_tools import (  # noqa: E402
+    build_constants,
+    common,
+    control_session,
+    guests,
+    sandbox,
+    sandbox_lifecycle,
+)
 from nvx_tools.common import ScriptError  # noqa: E402
 from nvx_tools.egress_policy import (  # noqa: E402
     MAX_POLICY_FILE_SIZE,
@@ -2521,6 +2551,1421 @@ def egress_policy_text(fixture: dict[str, list[Entry]]) -> str:
     return "\n".join(lines) + "\n"
 
 
+# The nvx-rs CLI.
+
+CLI_FIXTURE = FIXTURE_DIR / "cli.json"
+CLI_PLATFORM = "windows" if os.name == "nt" else "posix"
+CLI_PLATFORMS = ("posix", "windows")
+NVX_RS_DIR = REPO_ROOT / "nvx-rs"
+EXE = ".exe" if os.name == "nt" else ""
+# The top-level usage of nvx-rs, which replaces that of nvx.py in the usage
+# errors that the top-level parser reports, such as unrecognized arguments.
+NVX_RS_USAGE = "usage: nvx-rs [-h] [--root PATH] {artifacts,egress,sandbox} ..."
+CLI_STEP_TIMEOUT = 120
+LAYER_UUIDS = {
+    "distro": "11111111-1111-1111-1111-111111111111",
+    "runtime": "22222222-2222-2222-2222-222222222222",
+    "custom": "33333333-3333-3333-3333-333333333333",
+}
+# The tree of every scenario, below its root: files with their text, and
+# directories with None. The OpenVMM executable of the root is a copy of
+# nvx-fake-openvmm.
+CLI_TREE: tuple[tuple[str, str | None], ...] = (
+    ("build/vmlinux", "kernel\n"),
+    ("build/initramfs.cpio.gz", "initramfs\n"),
+    ("distro.erofs", "distro\n"),
+    ("runtime.erofs", "runtime\n"),
+    ("custom.erofs", "custom\n"),
+    ("scratch.ext4", "scratch\n"),
+    ("share/file.txt", "file\n"),
+    ("share/sub/data.txt", "data\n"),
+    ("share/hidden/shown/data.txt", "data\n"),
+    ("share/writable/data.txt", "data\n"),
+    ("share2/data.txt", "data\n"),
+    ("single.txt", "single\n"),
+    ("reports", None),
+)
+CLI_OPENVMM = "openvmm/target/release/openvmm{exe}"
+# The files whose permissions the CLI sets, rather than the umask or OpenVMM.
+CLI_MODE_NAMES = frozenset(
+    (
+        "state",
+        sandbox_lifecycle.CONFIG_NAME,
+        sandbox_lifecycle.RUNTIME_NAME,
+        sandbox_lifecycle.CAPABILITY_NAME,
+        sandbox_lifecycle.LOCK_NAME,
+        "exec.json",
+    )
+)
+VOLATILE = (
+    (re.compile(r'("(?:pid|start_time)": )\d+'), r"\1{int}"),
+    (re.compile(r"openvmm-microvm-[0-9a-f]{32}"), "openvmm-microvm-{hex32}"),
+    (re.compile(r'("(?:operation_id|instance_id)": ")[0-9a-f]{32}"'), r'\1{hex32}"'),
+)
+# Runs `nvx.py sandbox` with the artifacts of NVX_FIXTURE_ROOT and the OpenVMM
+# executable NVX_FIXTURE_OPENVMM.
+PYTHON_SANDBOX = """\
+import os
+import sys
+from pathlib import Path
+
+sys.path.insert(0, os.environ["NVX_FIXTURE_SCRIPTS"])
+import nvx
+from nvx_tools import sandbox_lifecycle
+
+root = Path(os.environ["NVX_FIXTURE_ROOT"])
+openvmm = Path(os.environ["NVX_FIXTURE_OPENVMM"])
+for module in (nvx, sandbox_lifecycle):
+    module.artifact_path = lambda name: root / "build" / name
+    module.openvmm_binary_path = lambda: openvmm
+sys.argv[0] = "nvx.py"
+raise SystemExit(nvx.main(sys.argv[1:]))
+"""
+
+Step = dict[str, object]
+Scenario = dict[str, object]
+
+
+def _r(path: str = "") -> str:
+    """Return the native path of `path` below the scenario root."""
+    return "{root}" + (os.sep + path.replace("/", os.sep) if path else "")
+
+
+def _layer(role: str = "distro", path: str | None = None) -> list[str]:
+    image = _r(path if path is not None else f"{role}.erofs")
+    return ["--layer", f"{role},{image},{LAYER_UUIDS[role]}"]
+
+
+BASE = [*_layer(), "--scratch", _r("scratch.ext4")]
+STATE = ["--state-dir", _r("state")]
+# What a lifecycle step shows of the state directory.
+STATE_FILES = (
+    "state",
+    "state/config.json",
+    "state/runtime.json",
+    "state/control.capability",
+    "state/outcome.json",
+    "state/openvmm.log",
+)
+START_FILES = (*STATE_FILES, "build/fake-openvmm-state.json")
+
+
+def _step(
+    *argv: str,
+    write: dict[str, object] | None = None,
+    remove: Sequence[str] = (),
+    check: Sequence[str] = (),
+    env: dict[str, str] | None = None,
+) -> Step:
+    """Return a step that runs `nvx-rs ARGV` after writing and removing files.
+
+    A written file takes text, or a dict with `hex` bytes, or with `text`, if
+    any, then `fill` repeated to `size` bytes. After the step, the files of
+    `check` are recorded."""
+    step: Step = {"argv": list(argv)}
+    if write:
+        step["write"] = write
+    if remove:
+        step["remove"] = list(remove)
+    if check:
+        step["check"] = list(check)
+    if env:
+        step["env"] = env
+    return step
+
+
+def _sandbox(
+    *argv: str,
+    write: dict[str, object] | None = None,
+    remove: Sequence[str] = (),
+    check: Sequence[str] = (),
+) -> Step:
+    return _step("sandbox", *argv, write=write, remove=remove, check=check)
+
+
+def _scenario(
+    name: str,
+    *steps: Step,
+    platforms: Sequence[str] = CLI_PLATFORMS,
+    interop: bool = False,
+) -> Scenario | None:
+    """Return a scenario of `steps` in a fresh root, if it runs on this platform.
+
+    An interoperability scenario also runs with nvx.py and nvx-rs taking turns,
+    as the checks of this script do, so that a state directory that either
+    leaves is valid for the other."""
+    if CLI_PLATFORM not in platforms:
+        return None
+    scenario: Scenario = {"name": name, "steps": list(steps)}
+    if interop:
+        scenario["interop"] = True
+    return scenario
+
+
+def _distro_manifest(packages: list[str] | None, digest: str | None = None) -> str:
+    """Return a manifest of the distro layer of the tree, `distro.erofs`."""
+    value: dict[str, object] = {
+        "format": 1,
+        "artifact": "distro.erofs",
+        "artifact_sha256": digest or hashlib.sha256(b"distro\n").hexdigest(),
+    }
+    if packages is not None:
+        value["packages"] = [{"name": name, "version": "1"} for name in packages]
+    return json.dumps(value)
+
+
+def _validation_scenarios() -> list[Scenario | None]:
+    """Return the option checks of `command_sandbox`, each in its own root."""
+    environment = {"env.json": '["A=1"]'}
+    cases: list[tuple[str, list[str], dict[str, object] | None]] = [
+        ("dry run outside run", ["provision", "--dry-run"], None),
+        (
+            "environment and environment file",
+            ["exec", "--environment", "A=1", "--environment-file", _r("env.json")],
+            environment,
+        ),
+        ("cwd outside exec", ["run", "--cwd", "/"], None),
+        ("environment outside exec", ["start", "--environment", "A=1"], None),
+        (
+            "environment file outside exec",
+            ["provision", "--environment-file", _r("env.json")],
+            environment,
+        ),
+        (
+            "inherited environment outside exec",
+            ["stop", "--inherit-default-environment"],
+            None,
+        ),
+        (
+            "environment file too large",
+            ["exec", "--environment-file", _r("env.json")],
+            {"env.json": {"fill": " ", "size": nvx.MAX_ENVIRONMENT_FILE_BYTES + 1}},
+        ),
+        (
+            "environment file at the limit",
+            ["exec", "--environment-file", _r("env.json")],
+            {
+                "env.json": {
+                    "text": '["A=1"]',
+                    "fill": " ",
+                    "size": nvx.MAX_ENVIRONMENT_FILE_BYTES,
+                }
+            },
+        ),
+        (
+            "environment file missing",
+            ["exec", "--environment-file", _r("missing.json")],
+            None,
+        ),
+        (
+            "environment file directory",
+            ["exec", "--environment-file", _r("share")],
+            None,
+        ),
+        (
+            "environment file not UTF-8",
+            ["exec", "--environment-file", _r("env.json")],
+            {"env.json": {"hex": "5b22ff225d"}},
+        ),
+        (
+            "environment file not JSON",
+            ["exec", "--environment-file", _r("env.json")],
+            {"env.json": '["A=1"'},
+        ),
+        (
+            "environment file object",
+            ["exec", "--environment-file", _r("env.json")],
+            {"env.json": '{"A": "1"}'},
+        ),
+        (
+            "environment file non-string",
+            ["exec", "--environment-file", _r("env.json")],
+            {"env.json": '["A=1", 2]'},
+        ),
+        (
+            "environment file entry without equals",
+            ["exec", "--environment-file", _r("env.json")],
+            {"env.json": '["A"]'},
+        ),
+        (
+            "environment file entry with NUL",
+            ["exec", "--environment-file", _r("env.json")],
+            {"env.json": '["A=\\u0000"]'},
+        ),
+        (
+            "environment file duplicate entry",
+            ["exec", "--environment-file", _r("env.json")],
+            {"env.json": '["A=1", "A=2"]'},
+        ),
+        ("environment entry without name", ["exec", "--environment", "=x"], None),
+        ("environment entry with space", ["exec", "--environment", "A B=x"], None),
+        ("network outside run", ["start", "--net", "10.0.0.2/24"], None),
+        (
+            "egress rule outside run",
+            ["exec", "--network-egress-allow", "10.0.0.0/8"],
+            None,
+        ),
+        ("forward outside run", ["stop", "--host-loopback-forward", "80"], None),
+        (
+            "policy file outside run",
+            ["deprovision", "--network-egress-policy-file", _r("policy.json")],
+            None,
+        ),
+        (
+            "systemd entrypoint of run",
+            ["run", *BASE, "--entrypoint", "/usr/lib/systemd/systemd"],
+            None,
+        ),
+        (
+            "systemd entrypoint of exec",
+            ["exec", "--entrypoint", "/lib/systemd/systemd"],
+            None,
+        ),
+        (
+            "outcome report outside run",
+            ["provision", "--outcome-report", _r("reports/exec.json")],
+            None,
+        ),
+        ("deny without mount", ["run", "--mount-deny", _r("share/hidden")], None),
+        ("allow without mount", ["run", "--mount-allow", _r("share/hidden")], None),
+        ("write without mount", ["run", "--mount-write", _r("share/writable")], None),
+        ("owner without mount", ["run", "--mount-owner", "vmm"], None),
+        ("mount outside run", ["start", "--mount", "/data," + _r("share")], None),
+        ("net without profile", ["run", *BASE, "--net", "10.0.0.2/24"], None),
+        ("profile without net", ["run", *BASE, "--network-profile", "portable"], None),
+        ("run without layers", ["run"], None),
+        ("provision without scratch", ["provision", *_layer()], None),
+        ("run without layer", ["run", "--scratch", _r("scratch.ext4")], None),
+        (
+            "policy file with rules",
+            [
+                "run",
+                *BASE,
+                "--network-egress",
+                "allow",
+                "--network-egress-policy-file",
+                _r("policy.json"),
+                "--network-egress-deny",
+                "10.0.0.0/8",
+            ],
+            None,
+        ),
+        (
+            "policy file without egress",
+            ["run", *BASE, "--network-egress-policy-file", _r("policy.json")],
+            None,
+        ),
+        (
+            "policy file missing",
+            [
+                "run",
+                *BASE,
+                "--network-egress",
+                "deny",
+                "--network-egress-policy-file",
+                _r("missing.json"),
+            ],
+            None,
+        ),
+        (
+            "policy file invalid",
+            [
+                "run",
+                *BASE,
+                "--network-egress",
+                "deny",
+                "--network-egress-policy-file",
+                _r("policy.json"),
+            ],
+            {"policy.json": '{"allow": [{"cidr": "10.0.0.0/8", "port": 0}]}'},
+        ),
+        ("provision without state directory", ["provision", *BASE], None),
+        ("start without state directory", ["start"], None),
+        ("exec without state directory", ["exec"], None),
+        ("stop without state directory", ["stop"], None),
+        ("deprovision without state directory", ["deprovision"], None),
+        ("run with state directory", ["run", *BASE, *STATE], None),
+        (
+            "invalid layer UUID",
+            [
+                "run",
+                "--layer",
+                f"distro,{_r('distro.erofs')},nope",
+                "--scratch",
+                _r("scratch.ext4"),
+            ],
+            None,
+        ),
+        (
+            "invalid layer role",
+            ["run", "--layer", f"base,{_r('distro.erofs')},{LAYER_UUIDS['distro']}"],
+            None,
+        ),
+        (
+            "missing layer",
+            [
+                "run",
+                *_layer("distro", "missing.erofs"),
+                "--scratch",
+                _r("scratch.ext4"),
+            ],
+            None,
+        ),
+        (
+            "duplicate layer",
+            ["run", *_layer(), *_layer(), "--scratch", _r("scratch.ext4")],
+            None,
+        ),
+        ("missing scratch", ["run", *_layer(), "--scratch", _r("missing.ext4")], None),
+        ("relative entrypoint", ["run", *BASE, "--entrypoint", "bin/sh"], None),
+        ("invalid hostname", ["run", *BASE, "--hostname", "bad host"], None),
+        ("argument with space", ["run", *BASE, "--arg", "a b"], None),
+        ("root workload", ["run", *BASE, "--workload-user", "0:0"], None),
+        ("invalid workload user", ["run", *BASE, "--workload-user", "x"], None),
+        ("invalid memory limit", ["run", *BASE, "--memory-max", "x"], None),
+        ("invalid process limit", ["run", *BASE, "--pids-max", "0"], None),
+        (
+            "relative mount target",
+            ["run", *BASE, "--mount", "data," + _r("share")],
+            None,
+        ),
+        (
+            "missing mount host",
+            ["run", *BASE, "--mount", "/data," + _r("missing")],
+            None,
+        ),
+        (
+            "invalid mount mode",
+            ["run", *BASE, "--mount", "/data," + _r("share") + ",rx"],
+            None,
+        ),
+        (
+            "deny outside share",
+            [
+                "run",
+                *BASE,
+                "--mount",
+                "/data," + _r("share"),
+                "--mount-deny",
+                _r("share2"),
+            ],
+            None,
+        ),
+        (
+            "allow outside denied path",
+            [
+                "run",
+                *BASE,
+                "--mount",
+                "/data," + _r("share"),
+                "--mount-allow",
+                _r("share/hidden/shown"),
+            ],
+            None,
+        ),
+        (
+            "write in read-only share",
+            [
+                "run",
+                *BASE,
+                "--mount",
+                "/data," + _r("share") + ",ro",
+                "--mount-write",
+                _r("share/writable"),
+            ],
+            None,
+        ),
+        (
+            "reserved command-line token",
+            ["run", *BASE, "--cmdline", "nvx_sandbox=0"],
+            None,
+        ),
+        (
+            "systemd distro image",
+            ["run", *BASE],
+            {"distro.erofs.manifest.json": _distro_manifest(["busybox", "systemd"])},
+        ),
+        (
+            "mismatched distro manifest",
+            ["run", *BASE],
+            {"distro.erofs.manifest.json": _distro_manifest([], "0" * 64)},
+        ),
+        (
+            "invalid distro manifest",
+            ["run", *BASE],
+            {"distro.erofs.manifest.json": "{"},
+        ),
+        (
+            "distro manifest without packages",
+            ["run", *BASE],
+            {"distro.erofs.manifest.json": _distro_manifest(None)},
+        ),
+    ]
+    scenarios: list[Scenario | None] = []
+    for name, argv, write in cases:
+        scenarios.append(_scenario(f"validation: {name}", _sandbox(*argv, write=write)))
+    scenarios.append(
+        _scenario(
+            "validation: caller-owned share on Windows",
+            _sandbox(
+                "run",
+                *BASE,
+                "--mount",
+                "/data," + _r("share"),
+                "--mount-owner",
+                "caller",
+            ),
+            platforms=("windows",),
+        )
+    )
+    return scenarios
+
+
+def _usage_scenarios() -> list[Scenario | None]:
+    """Return the usage errors of the sandbox parser, and its help."""
+    cases: list[tuple[str, list[str]]] = [
+        ("help", ["-h"]),
+        ("help after operation", ["exec", "--help"]),
+        ("timeout not a number", ["--timeout", "x"]),
+        ("zero timeout", ["--timeout", "0"]),
+        ("negative timeout", ["--timeout", "-1"]),
+        ("infinite timeout", ["--timeout", "inf"]),
+        ("timeout not finite", ["--timeout=1e400"]),
+        ("timeout not a number either", ["--timeout", "nan"]),
+        ("exec timeout not an integer", ["--exec-timeout-ms", "1.5"]),
+        ("memory not an integer", ["--memory-mib", "x"]),
+        ("invalid hypervisor", ["--hypervisor", "hyperv"]),
+        ("invalid operation", ["restart"]),
+        ("second operation", ["run", "start"]),
+        ("invalid mount owner", ["--mount-owner", "root"]),
+        ("invalid network profile", ["--network-profile", "open"]),
+        ("invalid egress default", ["--network-egress", "block"]),
+        ("invalid host loopback", ["--host-loopback", "yes"]),
+        ("missing value", ["--layer"]),
+        ("option as value", ["--layer", "--scratch"]),
+        ("dash value", ["--arg", "-x"]),
+        ("flag with value", ["--dry-run=1"]),
+        ("unrecognized option", ["--bogus"]),
+        ("unrecognized short option", ["-x"]),
+        ("unrecognized after separator", ["run", "--", "extra"]),
+    ]
+    return [_scenario(f"usage: {name}", _sandbox(*argv)) for name, argv in cases]
+
+
+def _dry_run_scenarios() -> list[Scenario | None]:
+    """Return one-shot commands, which --dry-run prints without running."""
+    policy: dict[str, object] = {
+        "policy.json": json.dumps(
+            {
+                "allow": [
+                    {"cidr": "192.0.2.0/24", "except": ["192.0.2.128/25"]},
+                    {"cidr": "2001:db8::/32", "protocol": "tcp", "port": 443},
+                ],
+                "deny": [{"cidr": "198.51.100.0/24", "protocol": "udp"}],
+            }
+        )
+    }
+    cases: list[tuple[str, list[str], dict[str, object] | None]] = [
+        ("minimal", [*BASE], None),
+        (
+            "every layer and option",
+            [
+                *_layer("custom"),
+                *_layer("runtime"),
+                *_layer("distro"),
+                "--scratch",
+                _r("scratch.ext4"),
+                "--entrypoint",
+                "/bin/server",
+                "--arg=--port",
+                "--arg",
+                "8080",
+                "--hostname",
+                "worker",
+                "--workload-user",
+                "1000:1000",
+                "--memory-max",
+                "268435456",
+                "--pids-max",
+                "64",
+                "--memory-mib",
+                "512",
+                "--hypervisor",
+                "mshv",
+                "--cmdline",
+                "quiet loglevel=3",
+                "--outcome-report",
+                _r("reports/openvmm-run.json"),
+            ],
+            None,
+        ),
+        ("explicit hypervisor", [*BASE, "--hypervisor", "kvm"], None),
+        ("one share", [*BASE, "--mount", "/data," + _r("share")], None),
+        ("writable share", [*BASE, "--mount", "/data," + _r("share") + ",rw"], None),
+        (
+            "file share",
+            [*BASE, "--mount", "/etc/single.txt," + _r("single.txt") + ",ro"],
+            None,
+        ),
+        (
+            "several shares with policies",
+            [
+                *BASE,
+                "--mount",
+                "/data," + _r("share") + ",rw",
+                "--mount-deny",
+                _r("share/hidden"),
+                "--mount-allow",
+                _r("share/hidden/shown"),
+                "--mount-write",
+                _r("share/writable"),
+                "--mount",
+                "/other," + _r("share2"),
+            ],
+            None,
+        ),
+        (
+            "network",
+            [
+                *BASE,
+                "--net",
+                "10.0.0.2/24",
+                "--network-profile",
+                "portable",
+                "--network-egress",
+                "deny",
+                "--network-ingress",
+                "allow",
+                "--network-egress-allow",
+                "10.0.0.0/8:tcp:443",
+                "--network-egress-deny",
+                "10.1.0.0/16",
+                "--host-loopback",
+                "allow",
+                "--network-proxy",
+                "10.0.0.1:3128",
+                "--host-loopback-forward",
+                "8080",
+            ],
+            None,
+        ),
+        (
+            "egress policy file",
+            [
+                *BASE,
+                "--network-egress",
+                "deny",
+                "--network-egress-policy-file",
+                _r("policy.json"),
+            ],
+            policy,
+        ),
+        ("quoted arguments", [*BASE, "--cmdline", 'a="b c" d'], None),
+    ]
+    scenarios = [
+        _scenario(f"dry run: {name}", _sandbox("run", *argv, "--dry-run", write=write))
+        for name, argv, write in cases
+    ]
+    scenarios.append(
+        _scenario(
+            "dry run: caller-owned share",
+            _sandbox(
+                "run",
+                *BASE,
+                "--mount",
+                "/data," + _r("share"),
+                "--mount-owner",
+                "caller",
+                "--dry-run",
+            ),
+            platforms=("posix",),
+        )
+    )
+    return scenarios
+
+
+def _run_scenarios() -> list[Scenario | None]:
+    """Return one-shot runs of the fake OpenVMM."""
+    echo = ["--entrypoint", "/bin/echo", "--arg", "hello", "--arg", "world"]
+    return [
+        _scenario("run: echo", _sandbox("run", *BASE, *echo)),
+        _scenario("run: default operation", _sandbox(*BASE, *echo)),
+        _scenario("run: failure", _sandbox("run", *BASE, "--entrypoint", "/bin/false")),
+        _scenario(
+            "run: missing program",
+            _sandbox("run", *BASE, "--entrypoint", "/bin/missing"),
+        ),
+        _scenario(
+            "run: exit status",
+            _sandbox(
+                "run",
+                *BASE,
+                "--entrypoint",
+                "/bin/true",
+                "--cmdline",
+                "fake_exit_status=7",
+            ),
+        ),
+        _scenario(
+            "run: outcome report",
+            _sandbox(
+                "run",
+                *BASE,
+                *echo,
+                "--outcome-report",
+                _r("reports/openvmm-run.json"),
+                check=("reports/openvmm-run.json", "build/fake-openvmm-reports.json"),
+            ),
+        ),
+        _scenario(
+            "run: network outcome report",
+            _sandbox(
+                "run",
+                *BASE,
+                "--entrypoint",
+                "/bin/true",
+                "--net",
+                "10.0.0.2/24",
+                "--network-profile",
+                "portable",
+                "--network-egress",
+                "deny",
+                "--network-egress-allow",
+                "10.0.0.0/8:tcp:443",
+                "--outcome-report",
+                _r("reports/openvmm-run.json"),
+                check=("reports/openvmm-run.json",),
+            ),
+        ),
+        _scenario(
+            "run: OpenVMM refuses its options",
+            _sandbox("run", *BASE, "--host-loopback-forward", "8080"),
+        ),
+        _scenario(
+            "run: missing OpenVMM",
+            _sandbox("run", *BASE, remove=(CLI_OPENVMM,)),
+        ),
+        _scenario(
+            "run: missing kernel",
+            _sandbox("run", *BASE, remove=("build/vmlinux",)),
+        ),
+        _scenario(
+            "run: missing initramfs",
+            _sandbox("run", *BASE, remove=("build/initramfs.cpio.gz",)),
+        ),
+    ]
+
+
+def _exec(
+    *argv: str,
+    write: dict[str, object] | None = None,
+    check: Sequence[str] = (),
+) -> Step:
+    return _sandbox("exec", *STATE, *argv, write=write, check=check)
+
+
+def _lifecycle(
+    name: str,
+    provision: Sequence[str],
+    *execs: Step,
+    write: dict[str, object] | None = None,
+    platforms: Sequence[str] = CLI_PLATFORMS,
+) -> Scenario | None:
+    """Return a sandbox's lifecycle: provision, start, `execs`, stop, start, stop,
+    and deprovision."""
+    return _scenario(
+        f"lifecycle: {name}",
+        _sandbox(
+            "provision", *STATE, *BASE, *provision, write=write, check=STATE_FILES
+        ),
+        _sandbox("start", *STATE, check=START_FILES),
+        *execs,
+        _sandbox("stop", *STATE, check=STATE_FILES),
+        _sandbox("start", *STATE, check=STATE_FILES),
+        _sandbox("stop", *STATE, check=STATE_FILES),
+        _sandbox("deprovision", *STATE, check=("state",)),
+        platforms=platforms,
+        interop=True,
+    )
+
+
+def _lifecycle_scenarios() -> list[Scenario | None]:
+    """Return managed sandboxes from provisioning to deprovisioning."""
+    report = _r("reports/exec.json")
+    return [
+        _lifecycle(
+            "minimal",
+            (),
+            _exec("--entrypoint", "/bin/echo", "--arg", "hello", "--arg", "world"),
+            _exec("--entrypoint", "/bin/pwd", "--cwd", "/tmp"),
+            _exec(
+                "--entrypoint",
+                "/bin/sh",
+                "--arg=-c",
+                "--arg",
+                "echo out; echoerr err; exit 3",
+                "--outcome-report",
+                report,
+                check=("reports/exec.json",),
+            ),
+            _exec(
+                "--entrypoint",
+                "/usr/bin/env",
+                "--environment",
+                "A=1",
+                "--environment",
+                "B=two",
+            ),
+            _exec(
+                "--entrypoint",
+                "/usr/bin/printenv",
+                "--arg",
+                "PATH",
+                "--inherit-default-environment",
+                "--environment",
+                "A=1",
+            ),
+            _exec(
+                "--entrypoint",
+                "/usr/bin/env",
+                "--environment-file",
+                _r("env.json"),
+                write={"env.json": '["X=1", "Y=two words"]'},
+            ),
+            _exec(
+                "--entrypoint",
+                "/usr/bin/env",
+                "--environment-file",
+                _r("empty.json"),
+                write={"empty.json": "[]"},
+            ),
+            _exec(
+                "--entrypoint",
+                "/bin/sh",
+                "--arg=-c",
+                "--arg",
+                "sleep 5000",
+                "--exec-timeout-ms",
+                "50",
+                "--outcome-report",
+                _r("reports/exec-timeout.json"),
+                check=("reports/exec-timeout.json",),
+            ),
+            _exec("--entrypoint", "/bin/sh", "--arg=-c", "--arg", "signal 9"),
+            _exec("--entrypoint", "/bin/missing"),
+            _exec("--entrypoint", "/bin/pwd", "--cwd", "/missing"),
+            _exec("--entrypoint", "/bin/pwd", "--cwd", "relative"),
+            _exec(
+                "--entrypoint",
+                "/bin/echo",
+                "--outcome-report",
+                report,
+            ),
+            _exec(
+                "--entrypoint", "/bin/echo", "--outcome-report", _r("missing/exec.json")
+            ),
+        ),
+        _lifecycle(
+            "one share",
+            ("--mount", "/data," + _r("share")),
+            _exec("--entrypoint", "/bin/pwd", "--cwd", "/data"),
+        ),
+        _lifecycle(
+            "caller-owned share",
+            ("--mount", "/data," + _r("share") + ",rw", "--mount-owner", "caller"),
+            platforms=("posix",),
+        ),
+        _lifecycle(
+            "several shares",
+            (
+                "--mount",
+                "/data," + _r("share"),
+                "--mount",
+                "/other," + _r("share2") + ",rw",
+            ),
+            _exec("--entrypoint", "/bin/pwd", "--cwd", "/other"),
+        ),
+        _lifecycle(
+            "share policies",
+            (
+                "--mount",
+                "/data," + _r("share") + ",rw",
+                "--mount-deny",
+                _r("share/hidden"),
+                "--mount-allow",
+                _r("share/hidden/shown"),
+                "--mount-write",
+                _r("share/writable"),
+            ),
+        ),
+        _lifecycle(
+            "file share",
+            ("--mount", "/etc/single.txt," + _r("single.txt") + ",ro"),
+        ),
+        _lifecycle(
+            "network and launch options",
+            (
+                *_layer("runtime"),
+                "--entrypoint",
+                "/bin/server",
+                "--arg=--serve",
+                "--hostname",
+                "worker",
+                "--workload-user",
+                "1000:1000",
+                "--memory-max",
+                "268435456",
+                "--pids-max",
+                "64",
+                "--memory-mib",
+                "384",
+                "--hypervisor",
+                "auto",
+                "--cmdline",
+                "quiet",
+                "--net",
+                "10.0.0.2/24",
+                "--network-profile",
+                "portable",
+                "--network-egress",
+                "deny",
+                "--network-ingress",
+                "deny",
+                "--network-egress-policy-file",
+                _r("policy.json"),
+                "--host-loopback",
+                "allow",
+                "--network-proxy",
+                "10.0.0.1:3128",
+                "--host-loopback-forward",
+                "8080",
+                "--host-loopback-forward",
+                "9090",
+            ),
+            write={"policy.json": LIFECYCLE_POLICY},
+        ),
+    ]
+
+
+LIFECYCLE_POLICY = json.dumps(
+    {
+        "allow": [{"cidr": "192.0.2.0/24", "protocol": "tcp", "port": 443}],
+        "deny": [{"cidr": "192.0.2.128/25"}],
+    }
+)
+
+
+def _state_scenarios() -> list[Scenario | None]:
+    """Return the refusals and failures of the lifecycle operations."""
+    provision = _sandbox("provision", *STATE, *BASE)
+    return [
+        _scenario(
+            "state: operations without a sandbox",
+            _sandbox("start", *STATE),
+            _sandbox("exec", *STATE),
+            _sandbox("stop", *STATE),
+            _sandbox("deprovision", *STATE),
+        ),
+        _scenario(
+            "state: refusals of a running sandbox",
+            provision,
+            _sandbox("provision", *STATE, *BASE),
+            _sandbox("start", *STATE),
+            _sandbox("start", *STATE),
+            _sandbox("deprovision", *STATE),
+            _sandbox("stop", *STATE),
+            _sandbox("stop", *STATE),
+            _sandbox("exec", *STATE),
+            _sandbox("deprovision", *STATE, check=("state",)),
+            interop=True,
+        ),
+        _scenario(
+            "state: relative and nested state directory",
+            _sandbox(
+                "provision",
+                "--state-dir",
+                "nested/state",
+                *BASE,
+                check=("nested/state", "nested/state/config.json"),
+            ),
+            _sandbox(
+                "deprovision", "--state-dir", "nested/state", check=("nested/state",)
+            ),
+        ),
+        _scenario(
+            "state: failed start",
+            _sandbox("provision", *STATE, *BASE, "--cmdline", "fake_exit_on_start=5"),
+            # Like nvx.py, nvx-rs waits until --timeout for the control endpoint
+            # of an OpenVMM that exits at once.
+            _sandbox("start", *STATE, "--timeout", "0.5", check=STATE_FILES),
+            _sandbox("start", *STATE, "--timeout", "0.5", check=STATE_FILES),
+            _sandbox("deprovision", *STATE, check=("state",)),
+            interop=True,
+        ),
+        _scenario(
+            "state: start without OpenVMM",
+            provision,
+            _sandbox("start", *STATE, remove=(CLI_OPENVMM,), check=STATE_FILES),
+            _sandbox("deprovision", *STATE),
+        ),
+        _scenario(
+            "state: malformed configuration",
+            provision,
+            _sandbox("start", *STATE, write={"state/config.json": '{"format": 7}'}),
+            _sandbox("start", *STATE, write={"state/config.json": "[]"}),
+            _sandbox("start", *STATE, write={"state/config.json": '{"format": 1}'}),
+            _sandbox("deprovision", *STATE, check=("state",)),
+        ),
+        _scenario(
+            "state: not a directory",
+            _sandbox("start", "--state-dir", _r("single.txt")),
+            _sandbox("provision", "--state-dir", _r("single.txt"), *BASE),
+            _sandbox("deprovision", "--state-dir", _r("single.txt")),
+        ),
+        _scenario(
+            "state: foreign file",
+            provision,
+            _sandbox(
+                "deprovision",
+                *STATE,
+                write={"state/foreign.txt": "x"},
+                check=("state",),
+            ),
+        ),
+    ]
+
+
+def _artifact_expectation(root: str, openvmm: str | None) -> str:
+    """Return what `nvx-rs artifacts` prints for the checkout at `root`, from the
+    paths of scripts/nvx_tools/common.py and guests.py."""
+
+    def path(original: Path) -> str:
+        return str(Path(root) / original.relative_to(REPO_ROOT))
+
+    constants = {
+        "alpine": build_constants.AlpineBuildConstants,
+        "ubuntu": build_constants.UbuntuBuildConstants,
+        "azurelinux": build_constants.AzureLinuxBuildConstants,
+    }
+    entries: list[dict[str, object]] = []
+    for name, descriptor in guests.GUEST_DESCRIPTORS.items():
+        distro = cast(str | None, getattr(constants[name], "DISTRO_NAME", None))
+        manifest = cast(
+            str | None, getattr(constants[name], "DISTRO_MANIFEST_NAME", None)
+        )
+        entries.append(
+            {
+                "name": name,
+                "distribution": descriptor.distribution,
+                "initramfs": path(common.artifact_path(descriptor.initramfs_name)),
+                "package_manifest": path(
+                    common.artifact_path(descriptor.package_manifest_name)
+                ),
+                "distro_layer": None
+                if distro is None
+                else path(common.artifact_path(distro)),
+                "distro_manifest": None
+                if manifest is None
+                else path(common.artifact_path(manifest)),
+            }
+        )
+    value = {
+        "layout": "repository",
+        "root": root,
+        "openvmm": openvmm
+        if openvmm is not None
+        else path(common.openvmm_binary_path()),
+        "kernel": path(
+            common.artifact_path(build_constants.KernelBuildConstants.BINARY_NAME)
+        ),
+        "guests": entries,
+    }
+    return json.dumps(value, indent=2, sort_keys=True)
+
+
+def _command_scenarios() -> list[Scenario | None]:
+    """Return the other commands: artifacts and egress compile."""
+    policies: list[tuple[str, str]] = [
+        ("empty", "{}"),
+        ("allow", '{"allow": [{"cidr": "192.0.2.0/24"}]}'),
+        (
+            "both",
+            json.dumps(
+                {
+                    "allow": [
+                        {"cidr": "192.0.2.0/24", "except": ["192.0.2.128/25"]},
+                        {
+                            "to": [{"cidr": "2001:db8::/32"}],
+                            "ports": [{"protocol": "tcp", "port": 80, "endPort": 81}],
+                        },
+                    ],
+                    "deny": [{"cidr": "198.51.100.0/24", "protocol": "icmp"}],
+                }
+            ),
+        ),
+        ("invalid JSON", "{"),
+        ("invalid rule", '{"allow": [{"cidr": "192.0.2.0/24", "port": 70000}]}'),
+        ("unknown field", '{"allow": [], "other": []}'),
+    ]
+    scenarios: list[Scenario | None] = [
+        _scenario(
+            f"egress compile: {name}",
+            _step("egress", "compile", _r("policy.json"), write={"policy.json": text}),
+        )
+        for name, text in policies
+    ]
+    scenarios += [
+        _scenario(
+            "egress compile: missing file",
+            _step("egress", "compile", _r("missing.json")),
+        ),
+        _scenario("egress compile: directory", _step("egress", "compile", _r("share"))),
+        _scenario("artifacts: checkout", _step("artifacts")),
+        _scenario(
+            "artifacts: OpenVMM override",
+            _step("artifacts", env={"NVX_OPENVMM": _r("alt/openvmm{exe}")}),
+        ),
+    ]
+    return scenarios
+
+
+def cli_scenarios() -> list[Scenario]:
+    """Return the scenarios of this platform."""
+    scenarios = [
+        *_command_scenarios(),
+        *_usage_scenarios(),
+        *_validation_scenarios(),
+        *_dry_run_scenarios(),
+        *_run_scenarios(),
+        *_lifecycle_scenarios(),
+        *_state_scenarios(),
+    ]
+    return [scenario for scenario in scenarios if scenario is not None]
+
+
+def _expand(text: str, root: Path) -> str:
+    return text.replace("{root}", str(root)).replace("{exe}", EXE)
+
+
+def _below(root: Path, relative: str) -> Path:
+    return root.joinpath(*_expand(relative, root).split("/"))
+
+
+def _make_tree(root: Path, fake: Path) -> None:
+    for relative, text in CLI_TREE:
+        path = _below(root, relative)
+        if text is None:
+            path.mkdir(parents=True, exist_ok=True)
+        else:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(text.encode())
+    openvmm = _below(root, CLI_OPENVMM)
+    openvmm.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(fake, openvmm)
+
+
+def _write_file(path: Path, content: object) -> None:
+    if isinstance(content, str):
+        data = content.encode()
+    else:
+        spec = cast(dict[str, object], content)
+        if "hex" in spec:
+            data = bytes.fromhex(cast(str, spec["hex"]))
+        else:
+            data = cast(str, spec.get("text", "")).encode()
+            data += cast(str, spec["fill"]).encode() * (
+                cast(int, spec["size"]) - len(data)
+            )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(data)
+
+
+def _child_environment() -> dict[str, str]:
+    """Return the environment of a recorded command: no terminal size, color,
+    or OpenVMM override, and UTF-8 standard streams."""
+    variables = ("COLUMNS", "LINES", "FORCE_COLOR", "PYTHON_COLORS", "NVX_OPENVMM")
+    environment = {
+        name: value for name, value in os.environ.items() if name not in variables
+    }
+    environment["NO_COLOR"] = "1"
+    environment["PYTHONIOENCODING"] = "utf-8"
+    return environment
+
+
+def _lines(text: str) -> str:
+    """Return `text` as `print` writes it to a standard stream."""
+    return text.replace("\n", os.linesep) + os.linesep
+
+
+def _nvx_rs_prog(stdout: str, stderr: str) -> tuple[str, str]:
+    """Return the output of nvx.py with the program names of nvx-rs.
+
+    The sandbox parser's name, `nvx.py sandbox`, has the length of
+    `nvx-rs sandbox`, so its usage wraps the same way. Errors that the
+    top-level parser reports show its usage, which nvx-rs replaces with its
+    own."""
+    stdout = stdout.replace("usage: nvx.py sandbox", "usage: nvx-rs sandbox", 1)
+    stderr = stderr.replace("usage: nvx.py sandbox", "usage: nvx-rs sandbox", 1)
+    stderr = stderr.replace("nvx.py sandbox: error: ", "nvx-rs sandbox: error: ")
+    lines = stderr.splitlines(keepends=True)
+    if (
+        lines
+        and lines[-1].startswith("nvx.py: error: ")
+        and lines[0].startswith("usage: nvx.py ")
+    ):
+        last = lines[-1].replace("nvx.py: error: ", "nvx-rs: error: ", 1)
+        stderr = _lines(NVX_RS_USAGE) + last
+    return stdout, stderr
+
+
+def _normalize(text: str, root: Path) -> str:
+    """Replace the root, as printed and as JSON writes it, and volatile values,
+    such as process IDs and random identifiers, with placeholders."""
+    raw = str(root)
+    escaped = json.dumps(raw)[1:-1]
+    if escaped != raw:
+        text = text.replace(escaped, "{root_json}")
+    text = text.replace(raw, "{root}")
+    for pattern, replacement in VOLATILE:
+        text = pattern.sub(replacement, text)
+    return text
+
+
+def _decode(data: bytes) -> str:
+    return data.decode("utf-8", "backslashreplace")
+
+
+def _snapshot(root: Path, relative: str) -> object:
+    """Return what a step shows of a file or directory below the root."""
+    path = _below(root, relative)
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        return None
+    entry: Entry = {}
+    if stat.S_ISDIR(info.st_mode):
+        entry["entries"] = sorted(os.listdir(path))
+    elif path.name == sandbox_lifecycle.CAPABILITY_NAME:
+        entry["size"] = info.st_size
+    else:
+        entry["text"] = _normalize(_decode(path.read_bytes()), root)
+    if os.name != "nt" and (
+        path.name in CLI_MODE_NAMES or path.name.startswith("exec")
+    ):
+        entry["mode"] = stat.S_IMODE(info.st_mode)
+    return entry
+
+
+def _python_command(argv: list[str], root: Path, step: Step) -> tuple[int, str, str]:
+    """Return what nvx.py, or the Python functions that nvx-rs ports for the
+    commands that nvx.py lacks, give for `nvx-rs ARGV`."""
+    environment = {
+        name: _expand(value, root)
+        for name, value in cast(dict[str, str], step.get("env", {})).items()
+    }
+    if argv[0] == "egress":
+        try:
+            compiled = compile_policy_file(Path(argv[2]))
+        except (ScriptError, OSError, ValueError) as error:
+            return 1, "", _lines(f"error: {error}")
+        value = {"allow": list(compiled.allow), "deny": list(compiled.deny)}
+        return 0, _lines(json.dumps(value, indent=2, sort_keys=True)), ""
+    if argv[0] == "artifacts":
+        text = _artifact_expectation(str(root), environment.get("NVX_OPENVMM"))
+        return 0, _lines(text), ""
+    child = _child_environment()
+    child.update(
+        NVX_FIXTURE_SCRIPTS=str(REPO_ROOT / "scripts"),
+        NVX_FIXTURE_ROOT=str(root),
+        NVX_FIXTURE_OPENVMM=str(_below(root, CLI_OPENVMM)),
+    )
+    result = subprocess.run(
+        [sys.executable, "-u", "-c", PYTHON_SANDBOX, *argv],
+        cwd=root,
+        env=child,
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        timeout=CLI_STEP_TIMEOUT,
+        check=False,
+    )
+    stdout, stderr = _nvx_rs_prog(_decode(result.stdout), _decode(result.stderr))
+    return result.returncode, stdout, stderr
+
+
+def _rust_command(
+    nvx_rs: Path, argv: list[str], root: Path, step: Step
+) -> tuple[int, str, str]:
+    """Return what `nvx-rs --root ROOT ARGV` gives."""
+    child = _child_environment()
+    child.update(
+        {
+            name: _expand(value, root)
+            for name, value in cast(dict[str, str], step.get("env", {})).items()
+        }
+    )
+    result = subprocess.run(
+        [str(nvx_rs), "--root", str(root), *argv],
+        cwd=root,
+        env=child,
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        timeout=CLI_STEP_TIMEOUT,
+        check=False,
+    )
+    return result.returncode, _decode(result.stdout), _decode(result.stderr)
+
+
+def _end_leftovers(root: Path) -> None:
+    """Kill the fake OpenVMM processes that a failed scenario leaves running."""
+    for record in root.rglob(sandbox_lifecycle.RUNTIME_NAME):
+        with contextlib.suppress(OSError, ValueError, KeyError, TypeError):
+            pid = int(json.loads(record.read_text(encoding="utf-8"))["pid"])
+            os.kill(pid, signal.SIGTERM if os.name == "nt" else signal.SIGKILL)
+            time.sleep(0.2)
+
+
+def play(
+    scenario: Scenario, binaries: tuple[Path, Path], implementations: Sequence[str]
+) -> list[Entry]:
+    """Play a scenario in a fresh root, with its steps taking turns among
+    `implementations`, `python` or `rust`, and return what each step gave."""
+    nvx_rs, fake = binaries
+    with tempfile.TemporaryDirectory(
+        prefix="nvx-cli-", ignore_cleanup_errors=True
+    ) as temporary:
+        root = Path(temporary).resolve()
+        _make_tree(root, fake)
+        results: list[Entry] = []
+        try:
+            for index, step in enumerate(cast(list[Step], scenario["steps"])):
+                for relative in cast(list[str], step.get("remove", [])):
+                    _below(root, relative).unlink()
+                for relative, content in cast(
+                    dict[str, object], step.get("write", {})
+                ).items():
+                    _write_file(_below(root, relative), content)
+                argv = [_expand(value, root) for value in cast(list[str], step["argv"])]
+                implementation = implementations[index % len(implementations)]
+                if implementation == "python":
+                    status, stdout, stderr = _python_command(argv, root, step)
+                else:
+                    status, stdout, stderr = _rust_command(nvx_rs, argv, root, step)
+                result: Entry = {
+                    "status": status,
+                    "stdout": _normalize(stdout, root),
+                    "stderr": _normalize(stderr, root),
+                }
+                checks = cast(list[str], step.get("check", []))
+                if checks:
+                    result["files"] = {
+                        relative: _snapshot(root, relative) for relative in checks
+                    }
+                results.append(result)
+        finally:
+            _end_leftovers(root)
+        return results
+
+
+def cli_binaries() -> tuple[Path, Path]:
+    """Build nvx-rs and nvx-fake-openvmm, and return their paths."""
+    subprocess.run(
+        [
+            "cargo",
+            "build",
+            "--locked",
+            "--quiet",
+            "--features",
+            "cli,testing",
+            "--bin",
+            "nvx-rs",
+            "--bin",
+            "nvx-fake-openvmm",
+        ],
+        cwd=NVX_RS_DIR,
+        env=dict(os.environ, NVX_BUNDLE="skip"),
+        check=True,
+    )
+    target = Path(os.environ.get("CARGO_TARGET_DIR", "target"))
+    directory = (target if target.is_absolute() else NVX_RS_DIR / target) / "debug"
+    return directory / f"nvx-rs{EXE}", directory / f"nvx-fake-openvmm{EXE}"
+
+
+def cli_section(binaries: tuple[Path, Path]) -> list[Entry]:
+    """Record the scenarios of this platform with nvx.py."""
+    if sys.version_info < (3, 14, 5):
+        raise SystemExit(
+            "recording nvx-rs/tests/fixtures/cli.json needs CPython 3.14.5 or later, "
+            "whose argparse quotes the choices of an invalid choice, as nvx-rs does"
+        )
+    section: list[Entry] = []
+    for scenario in cli_scenarios():
+        results = play(scenario, binaries, ("python",))
+        steps = [
+            {**step, **result}
+            for step, result in zip(
+                cast(list[Step], scenario["steps"]), results, strict=True
+            )
+        ]
+        section.append({**scenario, "steps": steps})
+    return section
+
+
+def cli_fixture(section: list[Entry]) -> dict[str, object]:
+    """Return the fixture with this platform's section and the other's."""
+    sections: dict[str, object] = {}
+    if CLI_FIXTURE.is_file():
+        current = cast(dict[str, object], json.loads(CLI_FIXTURE.read_text("utf-8")))
+        sections = {name: current.get(name, []) for name in CLI_PLATFORMS}
+    sections[CLI_PLATFORM] = section
+    tree: list[Entry] = [
+        {"path": relative, "text": text} if text is not None else {"path": relative}
+        for relative, text in CLI_TREE
+    ]
+    tree.append({"path": CLI_OPENVMM, "openvmm": True})
+    return {
+        **_header(),
+        "tree": tree,
+        **{name: sections.get(name, []) for name in CLI_PLATFORMS},
+    }
+
+
+def _differences(
+    name: str, mode: str, expected: list[Entry], actual: list[Entry]
+) -> list[str]:
+    problems: list[str] = []
+    for index, (want, got) in enumerate(zip(expected, actual, strict=True)):
+        for field in ("status", "stdout", "stderr", "files"):
+            if want.get(field) != got.get(field):
+                diff = "\n".join(
+                    difflib.unified_diff(
+                        json.dumps(want.get(field), indent=1).splitlines(),
+                        json.dumps(got.get(field), indent=1).splitlines(),
+                        "nvx.py",
+                        mode,
+                        lineterm="",
+                    )
+                )
+                problems.append(f"{name}, step {index + 1}, {field}:\n{diff}")
+    return problems
+
+
+def check_cli_parity(section: list[Entry], binaries: tuple[Path, Path]) -> list[str]:
+    """Play every scenario with nvx-rs, and interoperability scenarios with
+    nvx.py and nvx-rs taking turns both ways, and return how any differs from
+    nvx.py."""
+    problems: list[str] = []
+    for scenario in section:
+        name = cast(str, scenario["name"])
+        expected = cast(list[Entry], scenario["steps"])
+        modes = [("rust",)]
+        if scenario.get("interop"):
+            modes += [("python", "rust"), ("rust", "python")]
+        for implementations in modes:
+            actual = play(scenario, binaries, implementations)
+            problems += _differences(name, "-".join(implementations), expected, actual)
+    return problems
+
+
 def _write(path: Path, contents: str, check: bool) -> bool:
     """Write contents to path, or with check, report whether it would change."""
     current = path.read_text(encoding="utf-8") if path.is_file() else None
@@ -2576,7 +4021,13 @@ def main(argv: list[str] | None = None) -> int:
         egress_policy_text(egress_policy_fixture(RANDOM_CASES)),
         args.check,
     )
-    return 1 if stale else 0
+    binaries = cli_binaries()
+    section = cli_section(binaries)
+    stale |= _write(CLI_FIXTURE, fixture_text(cli_fixture(section)), args.check)
+    problems = check_cli_parity(section, binaries)
+    for problem in problems:
+        print(f"nvx-rs differs from nvx.py: {problem}", file=sys.stderr)
+    return 1 if stale or problems else 0
 
 
 if __name__ == "__main__":
