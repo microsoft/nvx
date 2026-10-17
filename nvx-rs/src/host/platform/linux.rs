@@ -64,7 +64,7 @@ pub(crate) fn start_time_from_stat(
 }
 
 /// Returns whether a process has threads besides its main thread.
-fn other_threads_remain(pid: u32) -> io::Result<bool> {
+pub(crate) fn other_threads_remain(pid: u32) -> io::Result<bool> {
     match fs::read_dir(format!("/proc/{pid}/task")) {
         Ok(threads) => Ok(threads.count() > 1),
         Err(error)
