@@ -21213,12 +21213,12 @@ class ReleaseTests(unittest.TestCase):
                         "artifact_path",
                         side_effect=build_dir.joinpath,
                     ),
-                    self.assertRaisesRegex(
-                        common.ScriptError,
-                        "Ubuntu artifact manifest does not match",
-                    ),
+                    self.assertRaises(common.ScriptError) as raised,
                 ):
                     release._guest_release_inputs(include_azurelinux=True)
+                message = str(raised.exception)
+                self.assertIn("artifact_sha256", message)
+                self.assertNotIn("input_sha256", message)
 
     def test_guest_release_inputs_reject_stale_azurelinux_initramfs(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -21356,12 +21356,51 @@ class ReleaseTests(unittest.TestCase):
                     "artifact_path",
                     side_effect=build_dir.joinpath,
                 ),
-                self.assertRaisesRegex(
-                    common.ScriptError,
-                    "Ubuntu artifact manifest does not match",
-                ),
+                self.assertRaises(common.ScriptError) as raised,
             ):
                 release._guest_release_inputs(include_azurelinux=True)
+            message = str(raised.exception)
+            self.assertIn("input_sha256", message)
+            self.assertNotIn("artifact_sha256", message)
+
+    def test_guest_release_inputs_report_multiple_mismatches_and_missing_fields(
+        self,
+    ):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            paths, _kernel_inputs, _revision = _write_release_fixture(root)
+            build_dir = paths["build"]
+            manifest_path = build_dir / "initramfs-ubuntu.cpio.gz.packages.json"
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest["format"] = 2
+            manifest["input_sha256"] = "0" * 64
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+            with (
+                patch.object(
+                    release,
+                    "artifact_path",
+                    side_effect=build_dir.joinpath,
+                ),
+                self.assertRaises(common.ScriptError) as raised,
+            ):
+                release._guest_release_inputs(include_azurelinux=True)
+            message = str(raised.exception)
+            self.assertIn("initramfs-ubuntu.cpio.gz.packages.json", message)
+            self.assertIn("format", message)
+            self.assertIn("input_sha256", message)
+
+            del manifest["artifact_sha256"]
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+            with (
+                patch.object(
+                    release,
+                    "artifact_path",
+                    side_effect=build_dir.joinpath,
+                ),
+                self.assertRaises(common.ScriptError) as raised,
+            ):
+                release._guest_release_inputs(include_azurelinux=True)
+            self.assertIn("artifact_sha256 missing", str(raised.exception))
 
     def test_package_rejects_tampered_source_metadata_without_replacing_output(self):
         cases: tuple[tuple[str, str, object, str], ...] = (

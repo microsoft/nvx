@@ -988,15 +988,25 @@ def _guest_release_inputs(
     ):
         artifact = artifact_path(artifact_name)
         document = _read_json_object(manifest, f"{artifact_name} manifest")
-        if (
-            document.get("format") != UbuntuBuildConstants.PACKAGE_MANIFEST_VERSION
-            or document.get("guest") != UbuntuBuildConstants.GUEST_NAME
-            or document.get("artifact") != artifact.name
-            or document.get("artifact_sha256") != sha256_file(artifact)
-            or document.get("input_sha256") != expected_input_sha256
-        ):
+        expected = {
+            "format": UbuntuBuildConstants.PACKAGE_MANIFEST_VERSION,
+            "guest": UbuntuBuildConstants.GUEST_NAME,
+            "artifact": artifact.name,
+            "artifact_sha256": sha256_file(artifact),
+            "input_sha256": expected_input_sha256,
+        }
+        mismatches = []
+        for field, expected_value in expected.items():
+            actual = document.get(field)
+            if actual != expected_value:
+                actual_display = "missing" if field not in document else actual
+                mismatches.append(
+                    f"{field} {actual_display} (expected {expected_value})"
+                )
+        if mismatches:
             raise ScriptError(
-                f"Ubuntu artifact manifest does not match {artifact_name}"
+                f"Ubuntu artifact manifest does not match {artifact_name}: "
+                f"{manifest.name} has " + "; ".join(mismatches)
             )
     return guest_names, alpine_manifests, ubuntu_manifests, azurelinux_manifests
 
