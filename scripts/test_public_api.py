@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import contextlib
 import io
+import json
 import os
 import re
 import subprocess
@@ -22,6 +23,7 @@ import tempfile
 import unittest
 from collections.abc import Generator, Mapping, Sequence
 from pathlib import Path
+from typing import cast
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).parent))
@@ -51,6 +53,34 @@ def _option(command: Sequence[str], option: str) -> str | None:
     )
 
 
+def _document(
+    modules: Sequence[str], defaults: Sequence[tuple[str, str, object]] = ()
+) -> dict[str, object]:
+    """Return a rustdoc JSON document that reaches `modules`, each a path from
+    `nvx`, and a struct at each path of `defaults` whose generic parameter has
+    the default type."""
+    index: dict[str, dict[str, object]] = {}
+    ids: dict[str, int] = {}
+
+    def add(path: str, inner: dict[str, object]) -> None:
+        identifier = len(index)
+        ids[path] = identifier
+        index[str(identifier)] = {"name": path.rsplit("::", 1)[-1], "inner": inner}
+        parent = path.rpartition("::")[0]
+        if parent:
+            items = index[str(ids[parent])]["inner"]
+            cast(
+                list[int], cast(dict[str, dict[str, object]], items)["module"]["items"]
+            ).append(identifier)
+
+    for path in sorted({"nvx", *modules}, key=lambda path: path.count("::")):
+        add(path, {"module": {"items": []}})
+    for path, name, default in defaults:
+        parameter = {"name": name, "kind": {"type": {"default": default}}}
+        add(path, {"struct": {"generics": {"params": [parameter]}}})
+    return {"root": ids["nvx"], "index": index}
+
+
 class FakeCargo:
     """Answers the commands of the gate as the pinned tools would."""
 
@@ -63,6 +93,9 @@ class FakeCargo:
             ("host", WINDOWS): HOST,
             ("guest", MUSL): GUEST,
         }
+        # The generic defaults of each listing's rustdoc JSON.
+        self.defaults: dict[tuple[str, str], list[tuple[str, str, object]]] = {}
+        self.listed: dict[str, tuple[str, str]] = {}
         self.commands: list[list[str]] = []
 
     def __call__(self, command: Sequence[str]) -> str:
@@ -77,7 +110,18 @@ class FakeCargo:
         listing = self.listings[(name, target)]
         if isinstance(listing, Exception):
             raise listing
+        self.listed[target] = (name, listing)
         return listing
+
+    def document(self, target: str) -> dict[str, object]:
+        """Return the rustdoc JSON of the last listing for `target`."""
+        name, listing = self.listed[target]
+        modules = [
+            line.removeprefix("pub mod ")
+            for line in listing.splitlines()
+            if line.startswith("pub mod ")
+        ]
+        return _document(modules, self.defaults.get((name, target), []))
 
 
 @contextlib.contextmanager
@@ -105,6 +149,7 @@ def _main(
         os.environ.update(environment or {})
         with (
             patch.object(gate, "run", cargo),
+            patch.object(gate, "rustdoc_document", cargo.document),
             contextlib.redirect_stdout(stdout),
             contextlib.redirect_stderr(stderr),
         ):
@@ -376,6 +421,147 @@ class CheckTests(unittest.TestCase):
         self.assertIn("The snapshots in `tests/public-api` match", passed)
         self.assertIn(f"| guest | `guest` | `{MUSL}` | 4 |\n", failed)
         self.assertIn("The snapshots in `tests/public-api` differ", failed)
+
+
+class GenericDefaultTests(unittest.TestCase):
+    def test_defaults_are_recorded_at_their_public_paths(self):
+        # `Result<T, E = Error, const N: usize = 4>` lives in a private module
+        # and is re-exported at the root; `Wide<T = u8>` comes from a glob
+        # re-export; `Hidden<T = u8>` is reachable from nowhere.
+        error = {"resolved_path": {"path": "Error", "id": 9, "args": None}}
+        result = {
+            "name": "Result",
+            "inner": {
+                "type_alias": {
+                    "generics": {
+                        "params": [
+                            {"name": "T", "kind": {"type": {"default": None}}},
+                            {"name": "E", "kind": {"type": {"default": error}}},
+                            {"name": "N", "kind": {"const": {"default": "4"}}},
+                        ]
+                    }
+                }
+            },
+        }
+        byte = {"type": {"default": {"primitive": "u8"}}}
+        struct = {"generics": {"params": [{"name": "T", "kind": byte}]}}
+        document = {
+            "root": 0,
+            "index": {
+                "0": {"name": "nvx", "inner": {"module": {"items": [1, 3]}}},
+                "1": {
+                    "name": None,
+                    "inner": {"use": {"id": 2, "name": "Result", "is_glob": False}},
+                },
+                "2": result,
+                "3": {
+                    "name": None,
+                    "inner": {"use": {"id": 4, "name": "wide", "is_glob": True}},
+                },
+                "4": {"name": "wide", "inner": {"module": {"items": [5]}}},
+                "5": {"name": "Wide", "inner": {"struct": struct}},
+                "6": {"name": "Hidden", "inner": {"struct": struct}},
+            },
+        }
+        self.assertEqual(
+            gate.generic_defaults(document),
+            [
+                'generic default nvx::Result<E> = {"resolved_path":{"args":null,'
+                '"path":"Error"}}',
+                'generic default nvx::Result<N> = "4"',
+                'generic default nvx::Wide<T> = {"primitive":"u8"}',
+            ],
+        )
+        paths = gate.public_paths(document)
+        self.assertEqual(paths["0"], ["nvx"])
+        self.assertNotIn("4", paths)
+        self.assertNotIn("6", paths)
+
+    def test_a_default_only_change_fails_the_check(self):
+        cargo = FakeCargo()
+        for target in (LINUX, WINDOWS):
+            cargo.defaults[("host", target)] = [
+                ("nvx::host::Pool", "T", {"primitive": "u8"})
+            ]
+        with _repository() as snapshots:
+            self.assertEqual(_main(cargo, "--update")[0], 0)
+            self.assertIn(
+                'generic default nvx::host::Pool<T> = {"primitive":"u8"}\n',
+                (snapshots / "host.txt").read_text(encoding="utf-8"),
+            )
+            self.assertEqual(_main(cargo)[0], 0)
+            for target in (LINUX, WINDOWS):
+                cargo.defaults[("host", target)] = [
+                    ("nvx::host::Pool", "T", {"primitive": "u16"})
+                ]
+            status, stdout, _ = _main(cargo)
+        self.assertEqual(status, 1)
+        self.assertIn(
+            '-generic default nvx::host::Pool<T> = {"primitive":"u8"}\n', stdout
+        )
+        self.assertIn(
+            '+generic default nvx::host::Pool<T> = {"primitive":"u16"}\n', stdout
+        )
+        self.assertIn("tests/public-api/host.txt: the host API of nvx differs", stdout)
+
+    def test_rustdoc_json_of_other_modules_is_a_tooling_error(self):
+        # A stale rustdoc JSON, such as one of another configuration, reaches
+        # other modules than the listing names.
+        cargo = FakeCargo()
+        cargo.document = lambda target: _document(["nvx::protocol", "nvx::guest"])
+        with _repository() as snapshots:
+            status, _, stderr = _main(cargo, "--update")
+            self.assertEqual(_files(snapshots), {})
+        self.assertEqual(status, 2)
+        self.assertIn(
+            f"the rustdoc JSON for {LINUX} does not match the protocol listing: "
+            "its modules differ by ['nvx::guest']",
+            stderr,
+        )
+
+    def test_rustdoc_document_reads_the_json_of_the_library_for_the_target(self):
+        with tempfile.TemporaryDirectory() as directory:
+            target_directory = Path(directory)
+            metadata = {
+                "target_directory": os.fspath(target_directory),
+                "packages": [
+                    {
+                        "manifest_path": os.fspath(gate.MANIFEST),
+                        "targets": [
+                            {"name": "nvx-fake-openvmm", "kind": ["bin"]},
+                            {"name": "nvx", "kind": ["lib"]},
+                        ],
+                    }
+                ],
+            }
+            commands: list[list[str]] = []
+
+            def run(command: Sequence[str]) -> str:
+                commands.append(list(command))
+                return json.dumps(metadata)
+
+            with patch.object(gate, "run", run):
+                with self.assertRaises(gate.CheckError) as raised:
+                    gate.rustdoc_document(MUSL)
+                self.assertIn(
+                    f"cannot read the rustdoc JSON for {MUSL}", str(raised.exception)
+                )
+                path = target_directory / MUSL / "doc" / "nvx.json"
+                path.parent.mkdir(parents=True)
+                path.write_text('{"root": 0}', encoding="utf-8")
+                self.assertEqual(gate.rustdoc_document(MUSL), {"root": 0})
+        self.assertEqual(
+            commands[0],
+            [
+                "cargo",
+                "metadata",
+                "--format-version",
+                "1",
+                "--no-deps",
+                "--manifest-path",
+                os.fspath(gate.MANIFEST),
+            ],
+        )
 
 
 class ToolTests(unittest.TestCase):

@@ -864,3 +864,4 @@ impl core::marker::UnsafeUnpin for nvx::Error
 impl !core::panic::unwind_safe::RefUnwindSafe for nvx::Error
 impl !core::panic::unwind_safe::UnwindSafe for nvx::Error
 pub type nvx::Result<T, E> = core::result::Result<T, E>
+generic default nvx::Result<E> = {"resolved_path":{"args":null,"path":"Error"}}

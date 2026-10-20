@@ -5,7 +5,9 @@ An adapter builds on nvx in one of three configurations: protocol-only,
 without features, host-only, with `host`, and guest-only, with `guest`.
 tests/public-api records the public API of each configuration on each of its
 targets, as the pinned cargo-public-api lists it
-from the rustdoc JSON of the pinned nightly toolchain. NAME.txt holds the items
+from the rustdoc JSON of the pinned nightly toolchain, followed by the defaults
+of generic parameters, which cargo-public-api leaves out and the check reads
+from the same rustdoc JSON. NAME.txt holds the items
 that every target of configuration NAME lists, and NAME.TARGET.txt, present
 when TARGET lists items that another target doesn't, those items. The check
 fails when the snapshots differ from the listings, which `--update` writes to
@@ -20,6 +22,7 @@ from __future__ import annotations
 
 import argparse
 import difflib
+import json
 import os
 import shlex
 import subprocess
@@ -28,6 +31,7 @@ from collections import Counter
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any, cast
 
 from nvx_tools.build_constants import GuestRustBuildConstants, OpenVMMBuildConstants
 
@@ -242,6 +246,150 @@ def unified_diff(old: str, new: str, old_name: str, new_name: str) -> Iterable[s
     )
 
 
+def rustdoc_document(target: str) -> dict[str, Any]:
+    """Return the rustdoc JSON that the last listing for `target` produced."""
+    try:
+        metadata = json.loads(
+            run(
+                [
+                    "cargo",
+                    "metadata",
+                    "--format-version",
+                    "1",
+                    "--no-deps",
+                    "--manifest-path",
+                    os.fspath(MANIFEST),
+                ]
+            )
+        )
+        package = next(
+            item
+            for item in metadata["packages"]
+            if Path(item["manifest_path"]).resolve() == MANIFEST.resolve()
+        )
+        library = next(
+            item["name"].replace("-", "_")
+            for item in package["targets"]
+            if "lib" in item["kind"]
+        )
+        path = Path(metadata["target_directory"]) / target / "doc" / f"{library}.json"
+        return cast(dict[str, Any], json.loads(path.read_text(encoding="utf-8")))
+    except (OSError, ValueError, KeyError, StopIteration) as error:
+        raise CheckError(
+            f"cannot read the rustdoc JSON for {target}: {error}"
+        ) from error
+
+
+def public_paths(document: Mapping[str, Any]) -> dict[str, list[str]]:
+    """Return the public paths of each item that the crate's root reaches
+    through its public modules and re-exports, by item ID."""
+    index: Mapping[str, Any] = document["index"]
+    paths: dict[str, list[str]] = {}
+
+    def visit(module: str, prefix: list[str], seen: frozenset[str]) -> None:
+        if module in seen:
+            return
+        seen = seen | {module}
+        for child in index[module]["inner"]["module"]["items"]:
+            item = index.get(str(child))
+            if item is None:
+                continue
+            inner = item["inner"]
+            if "use" in inner:
+                target = inner["use"].get("id")
+                if target is None or str(target) not in index:
+                    continue
+                target = str(target)
+                is_module = "module" in index[target]["inner"]
+                if inner["use"]["is_glob"]:
+                    if is_module:
+                        visit(target, prefix, seen)
+                    continue
+                path = [*prefix, inner["use"]["name"]]
+            else:
+                target = str(child)
+                is_module = "module" in inner
+                path = [*prefix, item["name"]]
+            paths.setdefault(target, []).append("::".join(path))
+            if is_module:
+                visit(target, path, seen)
+
+    root = str(document["root"])
+    name = index[root]["name"]
+    paths[root] = [name]
+    visit(root, [name], frozenset())
+    return paths
+
+
+def without_ids(value: Any) -> Any:
+    """Return `value` without the item IDs, which change between builds."""
+    if isinstance(value, dict):
+        entries = cast(dict[str, Any], value)
+        return {key: without_ids(item) for key, item in entries.items() if key != "id"}
+    if isinstance(value, list):
+        return [without_ids(item) for item in cast(list[Any], value)]
+    return value
+
+
+def generic_defaults(document: Mapping[str, Any]) -> list[str]:
+    """Return a line for each default of a generic parameter of a public item.
+
+    cargo-public-api leaves these defaults out, as in `pub type nvx::Result<T,
+    E>` for `Result<T, E = Error>`, so the check records them from the rustdoc
+    JSON, with each default type as its JSON without item IDs."""
+    index: Mapping[str, Any] = document["index"]
+    found: set[str] = set()
+    for identifier, paths in public_paths(document).items():
+        inner: Mapping[str, Any] = index[identifier]["inner"]
+        for body in inner.values():
+            if not isinstance(body, dict):
+                continue
+            generics = cast(dict[str, Any], body).get("generics")
+            if not generics:
+                continue
+            parameters: list[dict[str, Any]] = generics["params"]
+            for parameter in parameters:
+                kind: dict[str, Any] = parameter["kind"]
+                default: Any = None
+                for key in ("type", "const"):
+                    if key in kind and kind[key].get("default") is not None:
+                        default = without_ids(kind[key]["default"])
+                if default is None:
+                    continue
+                text = json.dumps(default, sort_keys=True, separators=(",", ":"))
+                found.update(
+                    f"generic default {path}<{parameter['name']}> = {text}"
+                    for path in paths
+                )
+    return sorted(found)
+
+
+def listing(configuration: Configuration, target: str) -> str:
+    """Return the public API of `configuration` on `target`: the items that
+    cargo-public-api lists, then the defaults of their generic parameters."""
+    items = run(listing_command(configuration, target))
+    document = rustdoc_document(target)
+    # The rustdoc JSON is the one that cargo-public-api just read only if it
+    # reaches the modules that the listing names.
+    listed = {
+        line.removeprefix("pub mod ")
+        for line in items.splitlines()
+        if line.startswith("pub mod ")
+    }
+    reached = {
+        path
+        for identifier, paths in public_paths(document).items()
+        if "module" in document["index"][identifier]["inner"]
+        for path in paths
+    }
+    if listed != reached:
+        raise CheckError(
+            f"the rustdoc JSON for {target} does not match the {configuration.name} "
+            f"listing: its modules differ by {sorted(listed ^ reached)}"
+        )
+    return items + lines(generic_defaults(document))
+
+
 def check(update: bool) -> tuple[list[Surface], list[str]]:
     """List each configuration on each of its targets, then compare the
     snapshots with the listings, or update them. Return the size of each
@@ -251,8 +399,7 @@ def check(update: bool) -> tuple[list[Surface], list[str]]:
     expected: list[Snapshot] = []
     for configuration in CONFIGURATIONS:
         listings = {
-            target: run(listing_command(configuration, target))
-            for target in configuration.targets
+            target: listing(configuration, target) for target in configuration.targets
         }
         surfaces.extend(
             Surface(configuration, target, len(listing.splitlines()))
