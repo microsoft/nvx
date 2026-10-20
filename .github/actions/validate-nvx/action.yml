@@ -11,7 +11,7 @@ runs:
         set -euo pipefail
         python3 -m pip install --requirement scripts/setup/azure/requirements.txt
         python3 -m compileall -q scripts
-        python3 -m unittest scripts/test_performance.py scripts/test_nvx_tools.py scripts/test_guest_binaries.py scripts/test_microvm_tests.py scripts/test_development_release.py scripts/test_host_telemetry.py scripts/test_time_abi.py scripts/test_tool_versions.py scripts/test_markdown_links.py scripts/test_setup_azure.py -v
+        python3 -m unittest scripts/test_performance.py scripts/test_nvx_tools.py scripts/test_guest_binaries.py scripts/test_microvm_tests.py scripts/test_development_release.py scripts/test_host_telemetry.py scripts/test_time_abi.py scripts/test_tool_versions.py scripts/test_markdown_links.py scripts/test_public_api.py scripts/test_setup_azure.py -v
         python3 scripts/test_adversarial.py -v
         python3 .github/skills/nvx-host-connect/scripts/test_hosts.py -v
         python3 scripts/nvx.py --help
@@ -33,7 +33,7 @@ runs:
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
         python -m compileall -q scripts
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-        python -m unittest scripts/test_performance.py scripts/test_nvx_tools.py scripts/test_guest_binaries.py scripts/test_microvm_tests.py scripts/test_development_release.py scripts/test_host_telemetry.py scripts/test_time_abi.py scripts/test_tool_versions.py scripts/test_markdown_links.py scripts/test_setup_azure.py -v
+        python -m unittest scripts/test_performance.py scripts/test_nvx_tools.py scripts/test_guest_binaries.py scripts/test_microvm_tests.py scripts/test_development_release.py scripts/test_host_telemetry.py scripts/test_time_abi.py scripts/test_tool_versions.py scripts/test_markdown_links.py scripts/test_public_api.py scripts/test_setup_azure.py -v
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
         python scripts\test_adversarial.py -v
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

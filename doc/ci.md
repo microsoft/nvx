@@ -662,6 +662,20 @@ enables only its side of `nvx`, the guest-only build pulls in neither Tokio
 nor a dependency that only the host side declares, and the guest binary is a
 static executable.
 
+On Linux, the `nvx-rs` job also checks the public API of `nvx` in each of
+these configurations against the
+[snapshots in `tests/public-api`](../tests/public-api/README.md).
+[`check_public_api.py`](../scripts/check_public_api.py) lists the API of each
+configuration on each of its targets, `x86_64-unknown-linux-gnu` and
+`x86_64-pc-windows-msvc` for the protocol-only and host-only ones and
+`x86_64-unknown-linux-musl` for the guest-only one, with the cargo-public-api
+release and nightly toolchain that it pins. It fails on any difference from
+the snapshots, additions included, and reports the size of each listing in the
+job summary. cargo-public-api publishes no binaries, so `dev` pushes cache its
+build under the hash of the script. A pull request that changes the API
+updates the snapshots and answers the adapter-contract question of the
+[pull request template](../.github/pull_request_template.md).
+
 The development release job depends on `aci-edge-sandboxes` and `nvx-rs` and
 requires their combined Linux/Windows results to be successful; failed,
 cancelled, or skipped crate checks cannot publish a release. Before it uploads

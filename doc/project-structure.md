@@ -22,6 +22,7 @@ are build products or caches and are not part of the tracked source tree. The
 | `aci_edge_sandboxes` | Rust crate `aci_edge_sandboxes`: state-aware sandbox API with an OpenVMM backend and an opt-in native-agent backend |
 | `nvx-rs` | Rust crate `nvx`: the NVX mechanics that the OpenVMM backend builds on |
 | `tests/runtime-adapter` | Rust crate `runtime-adapter`: an independent adapter that CI builds against `nvx` through its public API |
+| `tests/public-api` | Snapshots of the public API of `nvx` that adapters build on, which CI checks |
 | `openvmm` | Public OpenVMM Git submodule from `microsoft/openvmm`, tracking its `feature/microvm/dev` branch |
 | `data` | Tracked performance history and generated benchmark data |
 | `scripts/nvx_tools` | Implementation of the `nvx.py` commands |
@@ -51,7 +52,8 @@ nvx/
 |   |   |-- run-platform.yml     Reusable platform benchmark and package job
 |   |   `-- specula-release.yml  Specula verification of published releases
 |   |-- actionlint.yaml          Self-hosted runner labels for actionlint
-|   `-- copilot-instructions.md  Repository-wide Copilot instructions
+|   |-- copilot-instructions.md  Repository-wide Copilot instructions
+|   `-- pull_request_template.md Pull request description template
 |-- .vscode/settings.json        Shared VS Code settings
 |-- guest/                       Guest-owned scripts
 |   |-- common/                  Shared init, agent, snapshot, and probe scripts
@@ -154,12 +156,14 @@ nvx/
 |   |   |-- setup-windows-whp.ps1 Windows/WHP development-host and Actions runner bootstrap
 |   |   `-- tool-versions.conf    Shared tool release and checksum pins
 |   |-- check_markdown_links.py  Markdown link, anchor, and doc/ path check run by CI
+|   |-- check_public_api.py      Public API check of nvx run by CI
 |   |-- nvx-hosts.example.json   Template for the ignored .nvx-hosts.json
 |   |-- nvx.py                   Supported command-line entry point
 |   |-- nvx_adversarial_executor.py Restricted adversarial executor entry point
 |   |-- publish_development_release.py Development release publisher run by CI
 |   `-- test_*.py                Python tooling unit tests
 |-- tests/                       Tests that build on the repository's crates from outside them
+|   |-- public-api/              Snapshots of the public API of nvx that adapters build on
 |   `-- runtime-adapter/         Rust crate `runtime-adapter`, an independent adapter of nvx
 |       |-- src/                 Its library, and its host and guest skeleton binaries
 |       `-- tests/               Consumer-contract scenario C0, the independent build
@@ -198,7 +202,9 @@ The `actions/` directory contains the reusable implementations for validation,
 artifact builds, benchmarks, packaging, releases, and performance history
 management. The `skills/` directory defines Copilot agent skills for common
 development workflows, and `copilot-instructions.md` holds the repository-wide
-Copilot instructions. The `specula/` directory contains the adapter, tests, and
+Copilot instructions. `pull_request_template.md` prefills pull request
+descriptions, including the question of whether a change touches the adapter
+contract. The `specula/` directory contains the adapter, tests, and
 dedicated runner setup for incremental formal verification of the pinned
 OpenVMM release.
 
@@ -326,7 +332,9 @@ using the [tool manifest](../scripts/setup/tool-versions.conf);
 see [Automated environment bootstrap](setup.md#automated-environment-bootstrap).
 `nvx-hosts.example.json` is the template for the
 [remote agent host](setup.md#remote-agent-hosts) inventory, and CI runs
-`publish_development_release.py` to publish development releases.
+`publish_development_release.py` to publish development releases and
+`check_public_api.py` to check the public API of `nvx` against its
+[snapshots](../tests/public-api/README.md).
 
 ### `tests/`
 
@@ -336,7 +344,9 @@ crate with its own `Cargo.lock` that depends on `nvx` with default features
 off and uses its public API only. Its protocol-only, host-only, and guest-only
 configurations build in CI, and its tests check that each one builds as an
 independent adapter's does. See its
-[README](../tests/runtime-adapter/README.md).
+[README](../tests/runtime-adapter/README.md). `public-api/` records the public
+API of `nvx` in the same configurations, which CI checks so that every
+change to it shows in review; see its [README](../tests/public-api/README.md).
 
 ## Root files
 

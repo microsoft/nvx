@@ -38,7 +38,7 @@ and a maintainer stages it on a `microsoft/nvx` branch to run the rest; see
 | Commit subject | `area: summary`, where `area` is the component, command, or directory that changes, such as `doc`, `ci`, `guest`, `sandbox`, or `openvmm`. Start the summary with a lowercase imperative verb and omit the trailing period: `ci: run each OpenVMM suite only when its inputs change`. |
 | Commit body | What changed and why, when the subject does not say enough. |
 | Pull request title | The commit subject of a single-commit pull request; otherwise a summary in the same form. |
-| Pull request body | What changed and why, then a `Validation` section that lists the checks you ran and the gates you leave to CI, such as backends you could not test. |
+| Pull request body | What changed and why, then a `Validation` section that lists the checks you ran and the gates you leave to CI, such as backends you could not test, and the answer to the adapter-contract question of the [pull request template](../.github/pull_request_template.md). A change to the adapter contract carries a migration note and conformance cases, and a change to the public API of `nvx` updates its [snapshots](../tests/public-api/README.md). |
 | Issue references | `Closes #N` or `Fixes #N` first when the pull request completes the issue; `Part of #N` or `Refs #N` otherwise. |
 | Review threads | Reply with the commit that addresses the comment, or with the evidence that no change is needed, then resolve the thread. |
 
@@ -77,6 +77,7 @@ the Python, shell, and link checks.
 | `aci_edge_sandboxes/` | rustfmt, Clippy and rustdoc with warnings denied, tests, and the minimum supported Rust version; see [Rust crates](ci.md#rust-crates) | [check-aci-edge-sandboxes](../.github/actions/check-aci-edge-sandboxes/action.yml) |
 | `nvx-rs/` | rustfmt, Clippy and rustdoc with warnings denied, tests including a bundled-release fixture, the minimum supported Rust version, a macOS check, and, through `nvx.py`, the musl lint, tests, build, digest manifest, and static-ELF check of the guest binaries; see [Rust crates](ci.md#rust-crates) | [check-nvx-rs](../.github/actions/check-nvx-rs/action.yml) |
 | `tests/runtime-adapter/` | rustfmt, then Clippy with warnings denied, the build, the tests, and the minimum supported Rust version of `nvx`, in the protocol-only, host-only, and, on Linux, static musl guest-only configurations; see [Rust crates](ci.md#rust-crates) | [check-nvx-rs](../.github/actions/check-nvx-rs/action.yml) |
+| Public API of `nvx` | On Linux, the public API of the protocol-only, host-only, and guest-only configurations on each of their targets, against the snapshots in `tests/public-api`, with pinned tools; `python3 scripts/check_public_api.py --update` rewrites the snapshots; see [Public API snapshots](../tests/public-api/README.md) | [check-nvx-rs](../.github/actions/check-nvx-rs/action.yml), [check_public_api.py](../scripts/check_public_api.py) |
 | NVX CLI | Compiles `scripts/`, runs every `scripts/test_*.py` module, and checks command help, on Linux and Windows | [validate-nvx](../.github/actions/validate-nvx/action.yml) |
 
 check-quality names each shell script that it checks, and a CLI test fails

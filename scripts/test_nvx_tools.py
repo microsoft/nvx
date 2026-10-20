@@ -3722,6 +3722,65 @@ class CiConfigurationTests(unittest.TestCase):
                         f'rustup target add --toolchain "${{toolchain}}" {musl}', script
                     )
 
+    def test_nvx_rs_checks_the_public_api_on_linux(self):
+        # The public-API gate lists every target of each adapter-facing
+        # configuration of nvx, so it runs once, on Linux, with the tools
+        # that check_public_api.py pins. As for the other caches, only dev
+        # pushes save their build, and they save it before the check, which a
+        # changed API fails.
+        action = (
+            BuildConstants.REPO_ROOT
+            / ".github"
+            / "actions"
+            / "check-nvx-rs"
+            / "action.yml"
+        ).read_text(encoding="utf-8")
+        names = (
+            "Restore the public API tools",
+            "Install the public API tools",
+            "Save the public API tools",
+            "Check the public API of nvx",
+        )
+        positions = [action.index(f"    - name: {name}\n") for name in names]
+        self.assertEqual(positions, sorted(positions))
+        restore, install, save, check = (
+            _composite_action_step(action, name) for name in names
+        )
+        for step in (restore, install, save, check):
+            self.assertIn("runner.os == 'Linux'", step)
+        tools = "${{ runner.temp }}/public-api-tools"
+        self.assertIn("      id: public-api-tools\n", restore)
+        self.assertIn("      uses: actions/cache/restore@v5\n", restore)
+        self.assertIn(
+            "        key: public-api-tools-v1-${{ runner.os }}-${{ runner.arch }}-"
+            "${{ hashFiles('scripts/check_public_api.py') }}\n",
+            restore,
+        )
+        self.assertIn("      uses: actions/cache/save@v5\n", save)
+        self.assertIn(
+            "        key: ${{ steps.public-api-tools.outputs.cache-primary-key }}",
+            save,
+        )
+        for condition in (
+            "github.event_name == 'push' &&",
+            "github.ref == 'refs/heads/dev' &&",
+            "steps.public-api-tools.outputs.cache-hit != 'true'",
+        ):
+            self.assertIn(condition, save)
+        for step in (restore, save):
+            self.assertIn(f"        path: {tools}\n", step)
+        self.assertIn(f"        TOOLS: {tools}\n", install)
+        script = _composite_action_script(action, "Install the public API tools")
+        self.assertEqual(
+            script.splitlines(),
+            [
+                "set -euo pipefail",
+                'python3 scripts/check_public_api.py --install-tools --root "${TOOLS}"',
+                'echo "${TOOLS}/bin" >> "${GITHUB_PATH}"',
+            ],
+        )
+        self.assertIn("      run: python3 scripts/check_public_api.py\n", check + "\n")
+
     def test_required_ci_result_policy(self):
         always_successful = {
             "quality",

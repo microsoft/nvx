@@ -1,0 +1,1036 @@
+pub mod nvx
+pub mod nvx::contract
+pub const nvx::contract::CONTROL_CONTRACT_REVISION: &str
+pub const nvx::contract::CONTROL_SESSION_PROTOCOL_VERSION: u64
+pub const nvx::contract::MICROVM_ABI_VERSION: u64
+pub mod nvx::guest
+pub mod nvx::guest::console_pending
+pub fn nvx::guest::console_pending::main() -> std::process::ExitCode
+pub mod nvx::guest::device_io
+pub fn nvx::guest::device_io::main() -> std::process::ExitCode
+pub mod nvx::guest::exit
+pub fn nvx::guest::exit::main() -> std::process::ExitCode
+pub mod nvx::guest::ingress
+pub fn nvx::guest::ingress::main() -> std::process::ExitCode
+pub mod nvx::guest::managed_agent
+pub fn nvx::guest::managed_agent::main() -> std::process::ExitCode
+pub mod nvx::guest::mmio_write
+pub fn nvx::guest::mmio_write::main() -> std::process::ExitCode
+pub mod nvx::guest::nvxs
+#[non_exhaustive] pub enum nvx::guest::nvxs::GuestConnectionError
+pub nvx::guest::nvxs::GuestConnectionError::Closed
+pub nvx::guest::nvxs::GuestConnectionError::Ended
+pub nvx::guest::nvxs::GuestConnectionError::Io(std::io::error::Error)
+pub nvx::guest::nvxs::GuestConnectionError::Protocol(nvx::protocol::nvxs::SessionError)
+impl core::error::Error for nvx::guest::nvxs::GuestConnectionError
+pub fn nvx::guest::nvxs::GuestConnectionError::source(&self) -> core::option::Option<&(dyn core::error::Error + 'static)>
+impl core::fmt::Debug for nvx::guest::nvxs::GuestConnectionError
+pub fn nvx::guest::nvxs::GuestConnectionError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for nvx::guest::nvxs::GuestConnectionError
+pub fn nvx::guest::nvxs::GuestConnectionError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for nvx::guest::nvxs::GuestConnectionError
+impl core::marker::Send for nvx::guest::nvxs::GuestConnectionError
+impl core::marker::Sync for nvx::guest::nvxs::GuestConnectionError
+impl core::marker::Unpin for nvx::guest::nvxs::GuestConnectionError
+impl core::marker::UnsafeUnpin for nvx::guest::nvxs::GuestConnectionError
+impl !core::panic::unwind_safe::RefUnwindSafe for nvx::guest::nvxs::GuestConnectionError
+impl !core::panic::unwind_safe::UnwindSafe for nvx::guest::nvxs::GuestConnectionError
+pub struct nvx::guest::nvxs::GuestConnection<S>
+impl<S: std::io::Read + std::io::Write> nvx::guest::nvxs::GuestConnection<S>
+pub fn nvx::guest::nvxs::GuestConnection<S>::acknowledge(&mut self, u32) -> core::result::Result<(), nvx::guest::nvxs::GuestConnectionError>
+pub fn nvx::guest::nvxs::GuestConnection<S>::attach(&mut self) -> core::result::Result<(), nvx::guest::nvxs::GuestConnectionError>
+pub fn nvx::guest::nvxs::GuestConnection<S>::credit(&mut self, u32) -> core::result::Result<(), nvx::guest::nvxs::GuestConnectionError>
+pub fn nvx::guest::nvxs::GuestConnection<S>::get_ref(&self) -> &S
+pub fn nvx::guest::nvxs::GuestConnection<S>::into_inner(self) -> S
+pub fn nvx::guest::nvxs::GuestConnection<S>::new(S) -> Self
+pub fn nvx::guest::nvxs::GuestConnection<S>::next_event(&mut self) -> core::result::Result<nvx::protocol::nvxs::GuestEvent, nvx::guest::nvxs::GuestConnectionError>
+pub fn nvx::guest::nvxs::GuestConnection<S>::send(&mut self, &[u8]) -> core::result::Result<(), nvx::guest::nvxs::GuestConnectionError>
+pub fn nvx::guest::nvxs::GuestConnection<S>::session(&self) -> &nvx::protocol::nvxs::GuestSession
+impl<S> core::marker::Freeze for nvx::guest::nvxs::GuestConnection<S> where S: core::marker::Freeze
+impl<S> core::marker::Send for nvx::guest::nvxs::GuestConnection<S> where S: core::marker::Send
+impl<S> core::marker::Sync for nvx::guest::nvxs::GuestConnection<S> where S: core::marker::Sync
+impl<S> core::marker::Unpin for nvx::guest::nvxs::GuestConnection<S> where S: core::marker::Unpin
+impl<S> core::marker::UnsafeUnpin for nvx::guest::nvxs::GuestConnection<S> where S: core::marker::UnsafeUnpin
+impl<S> core::panic::unwind_safe::RefUnwindSafe for nvx::guest::nvxs::GuestConnection<S> where S: core::panic::unwind_safe::RefUnwindSafe
+impl<S> core::panic::unwind_safe::UnwindSafe for nvx::guest::nvxs::GuestConnection<S> where S: core::panic::unwind_safe::UnwindSafe
+pub mod nvx::guest::reseed
+pub fn nvx::guest::reseed::main() -> std::process::ExitCode
+pub mod nvx::guest::spawn
+#[non_exhaustive] pub enum nvx::guest::spawn::LaunchStage
+pub nvx::guest::spawn::LaunchStage::Cgroup
+pub nvx::guest::spawn::LaunchStage::Credentials
+pub nvx::guest::spawn::LaunchStage::Descriptors
+pub nvx::guest::spawn::LaunchStage::Exec
+pub nvx::guest::spawn::LaunchStage::PhysicalWorkingDirectory
+pub nvx::guest::spawn::LaunchStage::ProcessGroup
+pub nvx::guest::spawn::LaunchStage::Root
+pub nvx::guest::spawn::LaunchStage::WorkingDirectory
+impl core::clone::Clone for nvx::guest::spawn::LaunchStage
+pub fn nvx::guest::spawn::LaunchStage::clone(&self) -> nvx::guest::spawn::LaunchStage
+impl core::cmp::Eq for nvx::guest::spawn::LaunchStage
+impl core::cmp::PartialEq for nvx::guest::spawn::LaunchStage
+pub fn nvx::guest::spawn::LaunchStage::eq(&self, &nvx::guest::spawn::LaunchStage) -> bool
+impl core::fmt::Debug for nvx::guest::spawn::LaunchStage
+pub fn nvx::guest::spawn::LaunchStage::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for nvx::guest::spawn::LaunchStage
+pub fn nvx::guest::spawn::LaunchStage::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for nvx::guest::spawn::LaunchStage
+pub fn nvx::guest::spawn::LaunchStage::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for nvx::guest::spawn::LaunchStage
+impl core::marker::StructuralPartialEq for nvx::guest::spawn::LaunchStage
+impl core::marker::Freeze for nvx::guest::spawn::LaunchStage
+impl core::marker::Send for nvx::guest::spawn::LaunchStage
+impl core::marker::Sync for nvx::guest::spawn::LaunchStage
+impl core::marker::Unpin for nvx::guest::spawn::LaunchStage
+impl core::marker::UnsafeUnpin for nvx::guest::spawn::LaunchStage
+impl core::panic::unwind_safe::RefUnwindSafe for nvx::guest::spawn::LaunchStage
+impl core::panic::unwind_safe::UnwindSafe for nvx::guest::spawn::LaunchStage
+pub struct nvx::guest::spawn::Cgroup
+impl nvx::guest::spawn::Cgroup
+pub fn nvx::guest::spawn::Cgroup::open(&std::path::Path) -> std::io::error::Result<Self>
+impl core::fmt::Debug for nvx::guest::spawn::Cgroup
+pub fn nvx::guest::spawn::Cgroup::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for nvx::guest::spawn::Cgroup
+impl core::marker::Send for nvx::guest::spawn::Cgroup
+impl core::marker::Sync for nvx::guest::spawn::Cgroup
+impl core::marker::Unpin for nvx::guest::spawn::Cgroup
+impl core::marker::UnsafeUnpin for nvx::guest::spawn::Cgroup
+impl core::panic::unwind_safe::RefUnwindSafe for nvx::guest::spawn::Cgroup
+impl core::panic::unwind_safe::UnwindSafe for nvx::guest::spawn::Cgroup
+pub struct nvx::guest::spawn::Command
+impl nvx::guest::spawn::Command
+pub fn nvx::guest::spawn::Command::cgroup(self, nvx::guest::spawn::Cgroup) -> Self
+pub fn nvx::guest::spawn::Command::check_working_directory_as(self, u32, u32) -> Self
+pub fn nvx::guest::spawn::Command::environment(self, alloc::vec::Vec<alloc::ffi::c_str::CString>) -> Self
+pub fn nvx::guest::spawn::Command::export_physical_working_directory(self) -> Self
+pub fn nvx::guest::spawn::Command::inherit(self, impl core::convert::Into<std::os::fd::owned::OwnedFd>) -> Self
+pub fn nvx::guest::spawn::Command::new(alloc::ffi::c_str::CString, alloc::vec::Vec<alloc::ffi::c_str::CString>) -> Self
+pub fn nvx::guest::spawn::Command::new_process_group(self) -> Self
+pub fn nvx::guest::spawn::Command::root(self, impl core::convert::Into<std::os::fd::owned::OwnedFd>) -> Self
+pub fn nvx::guest::spawn::Command::spawn(self) -> std::io::error::Result<nvx::guest::spawn::Spawned>
+pub fn nvx::guest::spawn::Command::stderr(self, impl core::convert::Into<std::os::fd::owned::OwnedFd>) -> Self
+pub fn nvx::guest::spawn::Command::stdin(self, impl core::convert::Into<std::os::fd::owned::OwnedFd>) -> Self
+pub fn nvx::guest::spawn::Command::stdout(self, impl core::convert::Into<std::os::fd::owned::OwnedFd>) -> Self
+pub fn nvx::guest::spawn::Command::working_directory(self, alloc::ffi::c_str::CString) -> Self
+impl core::fmt::Debug for nvx::guest::spawn::Command
+pub fn nvx::guest::spawn::Command::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for nvx::guest::spawn::Command
+impl core::marker::Send for nvx::guest::spawn::Command
+impl core::marker::Sync for nvx::guest::spawn::Command
+impl core::marker::Unpin for nvx::guest::spawn::Command
+impl core::marker::UnsafeUnpin for nvx::guest::spawn::Command
+impl core::panic::unwind_safe::RefUnwindSafe for nvx::guest::spawn::Command
+impl core::panic::unwind_safe::UnwindSafe for nvx::guest::spawn::Command
+pub struct nvx::guest::spawn::LaunchFailure
+impl nvx::guest::spawn::LaunchFailure
+pub fn nvx::guest::spawn::LaunchFailure::raw_os_error(&self) -> i32
+pub fn nvx::guest::spawn::LaunchFailure::stage(&self) -> nvx::guest::spawn::LaunchStage
+impl core::clone::Clone for nvx::guest::spawn::LaunchFailure
+pub fn nvx::guest::spawn::LaunchFailure::clone(&self) -> nvx::guest::spawn::LaunchFailure
+impl core::cmp::Eq for nvx::guest::spawn::LaunchFailure
+impl core::cmp::PartialEq for nvx::guest::spawn::LaunchFailure
+pub fn nvx::guest::spawn::LaunchFailure::eq(&self, &nvx::guest::spawn::LaunchFailure) -> bool
+impl core::error::Error for nvx::guest::spawn::LaunchFailure
+impl core::fmt::Debug for nvx::guest::spawn::LaunchFailure
+pub fn nvx::guest::spawn::LaunchFailure::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for nvx::guest::spawn::LaunchFailure
+pub fn nvx::guest::spawn::LaunchFailure::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for nvx::guest::spawn::LaunchFailure
+impl core::marker::StructuralPartialEq for nvx::guest::spawn::LaunchFailure
+impl core::marker::Freeze for nvx::guest::spawn::LaunchFailure
+impl core::marker::Send for nvx::guest::spawn::LaunchFailure
+impl core::marker::Sync for nvx::guest::spawn::LaunchFailure
+impl core::marker::Unpin for nvx::guest::spawn::LaunchFailure
+impl core::marker::UnsafeUnpin for nvx::guest::spawn::LaunchFailure
+impl core::panic::unwind_safe::RefUnwindSafe for nvx::guest::spawn::LaunchFailure
+impl core::panic::unwind_safe::UnwindSafe for nvx::guest::spawn::LaunchFailure
+pub struct nvx::guest::spawn::LaunchReport
+impl nvx::guest::spawn::LaunchReport
+pub fn nvx::guest::spawn::LaunchReport::wait(self) -> std::io::error::Result<core::option::Option<nvx::guest::spawn::LaunchFailure>>
+impl core::fmt::Debug for nvx::guest::spawn::LaunchReport
+pub fn nvx::guest::spawn::LaunchReport::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for nvx::guest::spawn::LaunchReport
+impl core::marker::Send for nvx::guest::spawn::LaunchReport
+impl core::marker::Sync for nvx::guest::spawn::LaunchReport
+impl core::marker::Unpin for nvx::guest::spawn::LaunchReport
+impl core::marker::UnsafeUnpin for nvx::guest::spawn::LaunchReport
+impl core::panic::unwind_safe::RefUnwindSafe for nvx::guest::spawn::LaunchReport
+impl core::panic::unwind_safe::UnwindSafe for nvx::guest::spawn::LaunchReport
+pub struct nvx::guest::spawn::Spawned
+impl nvx::guest::spawn::Spawned
+pub fn nvx::guest::spawn::Spawned::id(&self) -> u32
+pub fn nvx::guest::spawn::Spawned::into_report(self) -> nvx::guest::spawn::LaunchReport
+impl core::fmt::Debug for nvx::guest::spawn::Spawned
+pub fn nvx::guest::spawn::Spawned::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for nvx::guest::spawn::Spawned
+impl core::marker::Send for nvx::guest::spawn::Spawned
+impl core::marker::Sync for nvx::guest::spawn::Spawned
+impl core::marker::Unpin for nvx::guest::spawn::Spawned
+impl core::marker::UnsafeUnpin for nvx::guest::spawn::Spawned
+impl core::panic::unwind_safe::RefUnwindSafe for nvx::guest::spawn::Spawned
+impl core::panic::unwind_safe::UnwindSafe for nvx::guest::spawn::Spawned
+pub mod nvx::guest::time
+pub fn nvx::guest::time::main() -> std::process::ExitCode
+pub mod nvx::guest::time_probe
+pub fn nvx::guest::time_probe::main() -> std::process::ExitCode
+pub mod nvx::net
+pub mod nvx::net::cidr
+pub struct nvx::net::cidr::Cidr
+impl nvx::net::cidr::Cidr
+pub fn nvx::net::cidr::Cidr::contains(self, Self) -> bool
+pub fn nvx::net::cidr::Cidr::everything(bool) -> Self
+pub fn nvx::net::cidr::Cidr::is_ipv6(self) -> bool
+pub fn nvx::net::cidr::Cidr::parse(&str) -> core::result::Result<Self, alloc::string::String>
+pub fn nvx::net::cidr::Cidr::subtract(self, &[Self], usize) -> core::option::Option<alloc::vec::Vec<Self>>
+impl core::clone::Clone for nvx::net::cidr::Cidr
+pub fn nvx::net::cidr::Cidr::clone(&self) -> nvx::net::cidr::Cidr
+impl core::cmp::Eq for nvx::net::cidr::Cidr
+impl core::cmp::Ord for nvx::net::cidr::Cidr
+pub fn nvx::net::cidr::Cidr::cmp(&self, &nvx::net::cidr::Cidr) -> core::cmp::Ordering
+impl core::cmp::PartialEq for nvx::net::cidr::Cidr
+pub fn nvx::net::cidr::Cidr::eq(&self, &nvx::net::cidr::Cidr) -> bool
+impl core::cmp::PartialOrd for nvx::net::cidr::Cidr
+pub fn nvx::net::cidr::Cidr::partial_cmp(&self, &nvx::net::cidr::Cidr) -> core::option::Option<core::cmp::Ordering>
+impl core::fmt::Debug for nvx::net::cidr::Cidr
+pub fn nvx::net::cidr::Cidr::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for nvx::net::cidr::Cidr
+pub fn nvx::net::cidr::Cidr::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for nvx::net::cidr::Cidr
+impl core::marker::StructuralPartialEq for nvx::net::cidr::Cidr
+impl core::marker::Freeze for nvx::net::cidr::Cidr
+impl core::marker::Send for nvx::net::cidr::Cidr
+impl core::marker::Sync for nvx::net::cidr::Cidr
+impl core::marker::Unpin for nvx::net::cidr::Cidr
+impl core::marker::UnsafeUnpin for nvx::net::cidr::Cidr
+impl core::panic::unwind_safe::RefUnwindSafe for nvx::net::cidr::Cidr
+impl core::panic::unwind_safe::UnwindSafe for nvx::net::cidr::Cidr
+pub fn nvx::net::cidr::parse_prefix_length(&str) -> core::option::Option<u8>
+pub struct nvx::net::Cidr
+impl nvx::net::cidr::Cidr
+pub fn nvx::net::cidr::Cidr::contains(self, Self) -> bool
+pub fn nvx::net::cidr::Cidr::everything(bool) -> Self
+pub fn nvx::net::cidr::Cidr::is_ipv6(self) -> bool
+pub fn nvx::net::cidr::Cidr::parse(&str) -> core::result::Result<Self, alloc::string::String>
+pub fn nvx::net::cidr::Cidr::subtract(self, &[Self], usize) -> core::option::Option<alloc::vec::Vec<Self>>
+impl core::clone::Clone for nvx::net::cidr::Cidr
+pub fn nvx::net::cidr::Cidr::clone(&self) -> nvx::net::cidr::Cidr
+impl core::cmp::Eq for nvx::net::cidr::Cidr
+impl core::cmp::Ord for nvx::net::cidr::Cidr
+pub fn nvx::net::cidr::Cidr::cmp(&self, &nvx::net::cidr::Cidr) -> core::cmp::Ordering
+impl core::cmp::PartialEq for nvx::net::cidr::Cidr
+pub fn nvx::net::cidr::Cidr::eq(&self, &nvx::net::cidr::Cidr) -> bool
+impl core::cmp::PartialOrd for nvx::net::cidr::Cidr
+pub fn nvx::net::cidr::Cidr::partial_cmp(&self, &nvx::net::cidr::Cidr) -> core::option::Option<core::cmp::Ordering>
+impl core::fmt::Debug for nvx::net::cidr::Cidr
+pub fn nvx::net::cidr::Cidr::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for nvx::net::cidr::Cidr
+pub fn nvx::net::cidr::Cidr::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for nvx::net::cidr::Cidr
+impl core::marker::StructuralPartialEq for nvx::net::cidr::Cidr
+impl core::marker::Freeze for nvx::net::cidr::Cidr
+impl core::marker::Send for nvx::net::cidr::Cidr
+impl core::marker::Sync for nvx::net::cidr::Cidr
+impl core::marker::Unpin for nvx::net::cidr::Cidr
+impl core::marker::UnsafeUnpin for nvx::net::cidr::Cidr
+impl core::panic::unwind_safe::RefUnwindSafe for nvx::net::cidr::Cidr
+impl core::panic::unwind_safe::UnwindSafe for nvx::net::cidr::Cidr
+pub fn nvx::net::is_valid_guest_network(&str) -> bool
+pub fn nvx::net::is_valid_hostname(&str) -> bool
+pub mod nvx::protocol
+pub mod nvx::protocol::nvxs
+pub enum nvx::protocol::nvxs::ErrorCode
+pub nvx::protocol::nvxs::ErrorCode::Authentication
+impl nvx::protocol::nvxs::ErrorCode
+pub const fn nvx::protocol::nvxs::ErrorCode::code(self) -> u32
+pub const fn nvx::protocol::nvxs::ErrorCode::from_code(u32) -> core::option::Option<Self>
+impl core::clone::Clone for nvx::protocol::nvxs::ErrorCode
+pub fn nvx::protocol::nvxs::ErrorCode::clone(&self) -> nvx::protocol::nvxs::ErrorCode
+impl core::cmp::Eq for nvx::protocol::nvxs::ErrorCode
+impl core::cmp::PartialEq for nvx::protocol::nvxs::ErrorCode
+pub fn nvx::protocol::nvxs::ErrorCode::eq(&self, &nvx::protocol::nvxs::ErrorCode) -> bool
+impl core::fmt::Debug for nvx::protocol::nvxs::ErrorCode
+pub fn nvx::protocol::nvxs::ErrorCode::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for nvx::protocol::nvxs::ErrorCode
+pub fn nvx::protocol::nvxs::ErrorCode::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for nvx::protocol::nvxs::ErrorCode
+pub fn nvx::protocol::nvxs::ErrorCode::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for nvx::protocol::nvxs::ErrorCode
+impl core::marker::StructuralPartialEq for nvx::protocol::nvxs::ErrorCode
+impl core::marker::Freeze for nvx::protocol::nvxs::ErrorCode
+impl core::marker::Send for nvx::protocol::nvxs::ErrorCode
+impl core::marker::Sync for nvx::protocol::nvxs::ErrorCode
+impl core::marker::Unpin for nvx::protocol::nvxs::ErrorCode
+impl core::marker::UnsafeUnpin for nvx::protocol::nvxs::ErrorCode
+impl core::panic::unwind_safe::RefUnwindSafe for nvx::protocol::nvxs::ErrorCode
+impl core::panic::unwind_safe::UnwindSafe for nvx::protocol::nvxs::ErrorCode
+pub enum nvx::protocol::nvxs::GuestEvent
+pub nvx::protocol::nvxs::GuestEvent::Data(alloc::vec::Vec<u8>)
+pub nvx::protocol::nvxs::GuestEvent::Reset(nvx::protocol::nvxs::Identity)
+impl core::clone::Clone for nvx::protocol::nvxs::GuestEvent
+pub fn nvx::protocol::nvxs::GuestEvent::clone(&self) -> nvx::protocol::nvxs::GuestEvent
+impl core::cmp::Eq for nvx::protocol::nvxs::GuestEvent
+impl core::cmp::PartialEq for nvx::protocol::nvxs::GuestEvent
+pub fn nvx::protocol::nvxs::GuestEvent::eq(&self, &nvx::protocol::nvxs::GuestEvent) -> bool
+impl core::fmt::Debug for nvx::protocol::nvxs::GuestEvent
+pub fn nvx::protocol::nvxs::GuestEvent::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for nvx::protocol::nvxs::GuestEvent
+impl core::marker::Freeze for nvx::protocol::nvxs::GuestEvent
+impl core::marker::Send for nvx::protocol::nvxs::GuestEvent
+impl core::marker::Sync for nvx::protocol::nvxs::GuestEvent
+impl core::marker::Unpin for nvx::protocol::nvxs::GuestEvent
+impl core::marker::UnsafeUnpin for nvx::protocol::nvxs::GuestEvent
+impl core::panic::unwind_safe::RefUnwindSafe for nvx::protocol::nvxs::GuestEvent
+impl core::panic::unwind_safe::UnwindSafe for nvx::protocol::nvxs::GuestEvent
+pub enum nvx::protocol::nvxs::GuestState
+pub nvx::protocol::nvxs::GuestState::Active
+pub nvx::protocol::nvxs::GuestState::Attaching
+pub nvx::protocol::nvxs::GuestState::Closed
+pub nvx::protocol::nvxs::GuestState::Detached
+pub nvx::protocol::nvxs::GuestState::Failed
+pub nvx::protocol::nvxs::GuestState::Resetting
+impl core::clone::Clone for nvx::protocol::nvxs::GuestState
+pub fn nvx::protocol::nvxs::GuestState::clone(&self) -> nvx::protocol::nvxs::GuestState
+impl core::cmp::Eq for nvx::protocol::nvxs::GuestState
+impl core::cmp::PartialEq for nvx::protocol::nvxs::GuestState
+pub fn nvx::protocol::nvxs::GuestState::eq(&self, &nvx::protocol::nvxs::GuestState) -> bool
+impl core::fmt::Debug for nvx::protocol::nvxs::GuestState
+pub fn nvx::protocol::nvxs::GuestState::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for nvx::protocol::nvxs::GuestState
+pub fn nvx::protocol::nvxs::GuestState::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for nvx::protocol::nvxs::GuestState
+impl core::marker::StructuralPartialEq for nvx::protocol::nvxs::GuestState
+impl core::marker::Freeze for nvx::protocol::nvxs::GuestState
+impl core::marker::Send for nvx::protocol::nvxs::GuestState
+impl core::marker::Sync for nvx::protocol::nvxs::GuestState
+impl core::marker::Unpin for nvx::protocol::nvxs::GuestState
+impl core::marker::UnsafeUnpin for nvx::protocol::nvxs::GuestState
+impl core::panic::unwind_safe::RefUnwindSafe for nvx::protocol::nvxs::GuestState
+impl core::panic::unwind_safe::UnwindSafe for nvx::protocol::nvxs::GuestState
+pub enum nvx::protocol::nvxs::HostEvent
+pub nvx::protocol::nvxs::HostEvent::Attached(nvx::protocol::nvxs::Identity)
+pub nvx::protocol::nvxs::HostEvent::Data(alloc::vec::Vec<u8>)
+pub nvx::protocol::nvxs::HostEvent::Rejected(nvx::protocol::nvxs::ErrorCode)
+pub nvx::protocol::nvxs::HostEvent::Reset(nvx::protocol::nvxs::Identity)
+pub nvx::protocol::nvxs::HostEvent::Wait
+impl core::clone::Clone for nvx::protocol::nvxs::HostEvent
+pub fn nvx::protocol::nvxs::HostEvent::clone(&self) -> nvx::protocol::nvxs::HostEvent
+impl core::cmp::Eq for nvx::protocol::nvxs::HostEvent
+impl core::cmp::PartialEq for nvx::protocol::nvxs::HostEvent
+pub fn nvx::protocol::nvxs::HostEvent::eq(&self, &nvx::protocol::nvxs::HostEvent) -> bool
+impl core::fmt::Debug for nvx::protocol::nvxs::HostEvent
+pub fn nvx::protocol::nvxs::HostEvent::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for nvx::protocol::nvxs::HostEvent
+impl core::marker::Freeze for nvx::protocol::nvxs::HostEvent
+impl core::marker::Send for nvx::protocol::nvxs::HostEvent
+impl core::marker::Sync for nvx::protocol::nvxs::HostEvent
+impl core::marker::Unpin for nvx::protocol::nvxs::HostEvent
+impl core::marker::UnsafeUnpin for nvx::protocol::nvxs::HostEvent
+impl core::panic::unwind_safe::RefUnwindSafe for nvx::protocol::nvxs::HostEvent
+impl core::panic::unwind_safe::UnwindSafe for nvx::protocol::nvxs::HostEvent
+pub enum nvx::protocol::nvxs::HostState
+pub nvx::protocol::nvxs::HostState::Attached
+pub nvx::protocol::nvxs::HostState::Attaching
+pub nvx::protocol::nvxs::HostState::Closed
+pub nvx::protocol::nvxs::HostState::Detached
+pub nvx::protocol::nvxs::HostState::Failed
+pub nvx::protocol::nvxs::HostState::Rejected
+pub nvx::protocol::nvxs::HostState::Reset
+impl core::clone::Clone for nvx::protocol::nvxs::HostState
+pub fn nvx::protocol::nvxs::HostState::clone(&self) -> nvx::protocol::nvxs::HostState
+impl core::cmp::Eq for nvx::protocol::nvxs::HostState
+impl core::cmp::PartialEq for nvx::protocol::nvxs::HostState
+pub fn nvx::protocol::nvxs::HostState::eq(&self, &nvx::protocol::nvxs::HostState) -> bool
+impl core::fmt::Debug for nvx::protocol::nvxs::HostState
+pub fn nvx::protocol::nvxs::HostState::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for nvx::protocol::nvxs::HostState
+pub fn nvx::protocol::nvxs::HostState::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for nvx::protocol::nvxs::HostState
+impl core::marker::StructuralPartialEq for nvx::protocol::nvxs::HostState
+impl core::marker::Freeze for nvx::protocol::nvxs::HostState
+impl core::marker::Send for nvx::protocol::nvxs::HostState
+impl core::marker::Sync for nvx::protocol::nvxs::HostState
+impl core::marker::Unpin for nvx::protocol::nvxs::HostState
+impl core::marker::UnsafeUnpin for nvx::protocol::nvxs::HostState
+impl core::panic::unwind_safe::RefUnwindSafe for nvx::protocol::nvxs::HostState
+impl core::panic::unwind_safe::UnwindSafe for nvx::protocol::nvxs::HostState
+#[non_exhaustive] pub enum nvx::protocol::nvxs::RecordError
+pub nvx::protocol::nvxs::RecordError::BootstrapIdentity(nvx::protocol::nvxs::RecordType)
+pub nvx::protocol::nvxs::RecordError::Credit(u32)
+pub nvx::protocol::nvxs::RecordError::ErrorCode(u32)
+pub nvx::protocol::nvxs::RecordError::Flags(u8)
+pub nvx::protocol::nvxs::RecordError::Length
+pub nvx::protocol::nvxs::RecordError::Length::length: usize
+pub nvx::protocol::nvxs::RecordError::Length::record_type: nvx::protocol::nvxs::RecordType
+pub nvx::protocol::nvxs::RecordError::Magic([u8; 4])
+pub nvx::protocol::nvxs::RecordError::ReceiveWindow(u32)
+pub nvx::protocol::nvxs::RecordError::Type(u8)
+pub nvx::protocol::nvxs::RecordError::Version(u16)
+impl core::clone::Clone for nvx::protocol::nvxs::RecordError
+pub fn nvx::protocol::nvxs::RecordError::clone(&self) -> nvx::protocol::nvxs::RecordError
+impl core::cmp::Eq for nvx::protocol::nvxs::RecordError
+impl core::cmp::PartialEq for nvx::protocol::nvxs::RecordError
+pub fn nvx::protocol::nvxs::RecordError::eq(&self, &nvx::protocol::nvxs::RecordError) -> bool
+impl core::convert::From<nvx::protocol::nvxs::RecordError> for nvx::protocol::nvxs::SessionError
+pub fn nvx::protocol::nvxs::SessionError::from(nvx::protocol::nvxs::RecordError) -> Self
+impl core::error::Error for nvx::protocol::nvxs::RecordError
+impl core::fmt::Debug for nvx::protocol::nvxs::RecordError
+pub fn nvx::protocol::nvxs::RecordError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for nvx::protocol::nvxs::RecordError
+pub fn nvx::protocol::nvxs::RecordError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for nvx::protocol::nvxs::RecordError
+impl core::marker::Freeze for nvx::protocol::nvxs::RecordError
+impl core::marker::Send for nvx::protocol::nvxs::RecordError
+impl core::marker::Sync for nvx::protocol::nvxs::RecordError
+impl core::marker::Unpin for nvx::protocol::nvxs::RecordError
+impl core::marker::UnsafeUnpin for nvx::protocol::nvxs::RecordError
+impl core::panic::unwind_safe::RefUnwindSafe for nvx::protocol::nvxs::RecordError
+impl core::panic::unwind_safe::UnwindSafe for nvx::protocol::nvxs::RecordError
+#[repr(u8)] pub enum nvx::protocol::nvxs::RecordType
+pub nvx::protocol::nvxs::RecordType::Ack = 4
+pub nvx::protocol::nvxs::RecordType::Credit = 9
+pub nvx::protocol::nvxs::RecordType::Data = 5
+pub nvx::protocol::nvxs::RecordType::Error = 8
+pub nvx::protocol::nvxs::RecordType::GuestAttach = 1
+pub nvx::protocol::nvxs::RecordType::HostAttach = 2
+pub nvx::protocol::nvxs::RecordType::Ready = 7
+pub nvx::protocol::nvxs::RecordType::Reset = 3
+pub nvx::protocol::nvxs::RecordType::Wait = 6
+impl nvx::protocol::nvxs::RecordType
+pub const fn nvx::protocol::nvxs::RecordType::allows_length(self, usize) -> bool
+pub const fn nvx::protocol::nvxs::RecordType::code(self) -> u8
+pub const fn nvx::protocol::nvxs::RecordType::from_code(u8) -> core::option::Option<Self>
+pub const fn nvx::protocol::nvxs::RecordType::is_bootstrap(self) -> bool
+pub const fn nvx::protocol::nvxs::RecordType::name(self) -> &'static str
+impl core::clone::Clone for nvx::protocol::nvxs::RecordType
+pub fn nvx::protocol::nvxs::RecordType::clone(&self) -> nvx::protocol::nvxs::RecordType
+impl core::cmp::Eq for nvx::protocol::nvxs::RecordType
+impl core::cmp::PartialEq for nvx::protocol::nvxs::RecordType
+pub fn nvx::protocol::nvxs::RecordType::eq(&self, &nvx::protocol::nvxs::RecordType) -> bool
+impl core::fmt::Debug for nvx::protocol::nvxs::RecordType
+pub fn nvx::protocol::nvxs::RecordType::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for nvx::protocol::nvxs::RecordType
+pub fn nvx::protocol::nvxs::RecordType::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for nvx::protocol::nvxs::RecordType
+pub fn nvx::protocol::nvxs::RecordType::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for nvx::protocol::nvxs::RecordType
+impl core::marker::StructuralPartialEq for nvx::protocol::nvxs::RecordType
+impl core::marker::Freeze for nvx::protocol::nvxs::RecordType
+impl core::marker::Send for nvx::protocol::nvxs::RecordType
+impl core::marker::Sync for nvx::protocol::nvxs::RecordType
+impl core::marker::Unpin for nvx::protocol::nvxs::RecordType
+impl core::marker::UnsafeUnpin for nvx::protocol::nvxs::RecordType
+impl core::panic::unwind_safe::RefUnwindSafe for nvx::protocol::nvxs::RecordType
+impl core::panic::unwind_safe::UnwindSafe for nvx::protocol::nvxs::RecordType
+#[non_exhaustive] pub enum nvx::protocol::nvxs::SessionError
+pub nvx::protocol::nvxs::SessionError::Credit
+pub nvx::protocol::nvxs::SessionError::Credit::bytes: u32
+pub nvx::protocol::nvxs::SessionError::Credit::outstanding: u32
+pub nvx::protocol::nvxs::SessionError::Epoch
+pub nvx::protocol::nvxs::SessionError::Epoch::actual: u64
+pub nvx::protocol::nvxs::SessionError::Epoch::expected: u64
+pub nvx::protocol::nvxs::SessionError::Instance
+pub nvx::protocol::nvxs::SessionError::Instance::actual: [u8; 16]
+pub nvx::protocol::nvxs::SessionError::Instance::expected: [u8; 16]
+pub nvx::protocol::nvxs::SessionError::InvalidState
+pub nvx::protocol::nvxs::SessionError::MissingIdentity(nvx::protocol::nvxs::RecordType)
+pub nvx::protocol::nvxs::SessionError::Record(nvx::protocol::nvxs::RecordError)
+pub nvx::protocol::nvxs::SessionError::Sequence
+pub nvx::protocol::nvxs::SessionError::Sequence::actual: u64
+pub nvx::protocol::nvxs::SessionError::Sequence::expected: u64
+pub nvx::protocol::nvxs::SessionError::SequenceOverflow
+pub nvx::protocol::nvxs::SessionError::StaleEpoch
+pub nvx::protocol::nvxs::SessionError::StaleEpoch::actual: u64
+pub nvx::protocol::nvxs::SessionError::StaleEpoch::current: u64
+pub nvx::protocol::nvxs::SessionError::Truncated
+pub nvx::protocol::nvxs::SessionError::Truncated::buffered: usize
+pub nvx::protocol::nvxs::SessionError::Unexpected(nvx::protocol::nvxs::RecordType)
+pub nvx::protocol::nvxs::SessionError::Window
+pub nvx::protocol::nvxs::SessionError::Window::length: u32
+pub nvx::protocol::nvxs::SessionError::Window::outstanding: u32
+pub nvx::protocol::nvxs::SessionError::Window::window: u32
+impl core::clone::Clone for nvx::protocol::nvxs::SessionError
+pub fn nvx::protocol::nvxs::SessionError::clone(&self) -> nvx::protocol::nvxs::SessionError
+impl core::cmp::Eq for nvx::protocol::nvxs::SessionError
+impl core::cmp::PartialEq for nvx::protocol::nvxs::SessionError
+pub fn nvx::protocol::nvxs::SessionError::eq(&self, &nvx::protocol::nvxs::SessionError) -> bool
+impl core::convert::From<nvx::protocol::nvxs::RecordError> for nvx::protocol::nvxs::SessionError
+pub fn nvx::protocol::nvxs::SessionError::from(nvx::protocol::nvxs::RecordError) -> Self
+impl core::error::Error for nvx::protocol::nvxs::SessionError
+pub fn nvx::protocol::nvxs::SessionError::source(&self) -> core::option::Option<&(dyn core::error::Error + 'static)>
+impl core::fmt::Debug for nvx::protocol::nvxs::SessionError
+pub fn nvx::protocol::nvxs::SessionError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for nvx::protocol::nvxs::SessionError
+pub fn nvx::protocol::nvxs::SessionError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for nvx::protocol::nvxs::SessionError
+impl core::marker::Freeze for nvx::protocol::nvxs::SessionError
+impl core::marker::Send for nvx::protocol::nvxs::SessionError
+impl core::marker::Sync for nvx::protocol::nvxs::SessionError
+impl core::marker::Unpin for nvx::protocol::nvxs::SessionError
+impl core::marker::UnsafeUnpin for nvx::protocol::nvxs::SessionError
+impl core::panic::unwind_safe::RefUnwindSafe for nvx::protocol::nvxs::SessionError
+impl core::panic::unwind_safe::UnwindSafe for nvx::protocol::nvxs::SessionError
+pub struct nvx::protocol::nvxs::GuestSession
+impl nvx::protocol::nvxs::GuestSession
+pub fn nvx::protocol::nvxs::GuestSession::acknowledge(&mut self, u32, &mut alloc::vec::Vec<u8>) -> core::result::Result<(), nvx::protocol::nvxs::SessionError>
+pub fn nvx::protocol::nvxs::GuestSession::attach(&mut self, &mut alloc::vec::Vec<u8>) -> core::result::Result<(), nvx::protocol::nvxs::SessionError>
+pub fn nvx::protocol::nvxs::GuestSession::credit(&mut self, u32, &mut alloc::vec::Vec<u8>) -> core::result::Result<(), nvx::protocol::nvxs::SessionError>
+pub fn nvx::protocol::nvxs::GuestSession::disconnect(&mut self) -> core::result::Result<(), nvx::protocol::nvxs::SessionError>
+pub fn nvx::protocol::nvxs::GuestSession::identity(&self) -> core::option::Option<nvx::protocol::nvxs::Identity>
+pub fn nvx::protocol::nvxs::GuestSession::needed(&self) -> usize
+pub const fn nvx::protocol::nvxs::GuestSession::new() -> Self
+pub fn nvx::protocol::nvxs::GuestSession::outstanding(&self) -> u32
+pub fn nvx::protocol::nvxs::GuestSession::receive(&mut self, &[u8]) -> core::result::Result<(usize, core::option::Option<nvx::protocol::nvxs::GuestEvent>), nvx::protocol::nvxs::SessionError>
+pub fn nvx::protocol::nvxs::GuestSession::send(&mut self, &[u8], &mut alloc::vec::Vec<u8>) -> core::result::Result<usize, nvx::protocol::nvxs::SessionError>
+pub fn nvx::protocol::nvxs::GuestSession::state(&self) -> nvx::protocol::nvxs::GuestState
+pub fn nvx::protocol::nvxs::GuestSession::window(&self) -> core::option::Option<u32>
+impl core::clone::Clone for nvx::protocol::nvxs::GuestSession
+pub fn nvx::protocol::nvxs::GuestSession::clone(&self) -> nvx::protocol::nvxs::GuestSession
+impl core::default::Default for nvx::protocol::nvxs::GuestSession
+pub fn nvx::protocol::nvxs::GuestSession::default() -> Self
+impl core::fmt::Debug for nvx::protocol::nvxs::GuestSession
+pub fn nvx::protocol::nvxs::GuestSession::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for nvx::protocol::nvxs::GuestSession
+impl core::marker::Send for nvx::protocol::nvxs::GuestSession
+impl core::marker::Sync for nvx::protocol::nvxs::GuestSession
+impl core::marker::Unpin for nvx::protocol::nvxs::GuestSession
+impl core::marker::UnsafeUnpin for nvx::protocol::nvxs::GuestSession
+impl core::panic::unwind_safe::RefUnwindSafe for nvx::protocol::nvxs::GuestSession
+impl core::panic::unwind_safe::UnwindSafe for nvx::protocol::nvxs::GuestSession
+pub struct nvx::protocol::nvxs::HostSession
+impl nvx::protocol::nvxs::HostSession
+pub fn nvx::protocol::nvxs::HostSession::attach(&mut self, &[u8; 32], &mut alloc::vec::Vec<u8>) -> core::result::Result<(), nvx::protocol::nvxs::SessionError>
+pub fn nvx::protocol::nvxs::HostSession::disconnect(&mut self) -> core::result::Result<(), nvx::protocol::nvxs::SessionError>
+pub fn nvx::protocol::nvxs::HostSession::identity(&self) -> core::option::Option<nvx::protocol::nvxs::Identity>
+pub fn nvx::protocol::nvxs::HostSession::needed(&self) -> usize
+pub const fn nvx::protocol::nvxs::HostSession::new() -> Self
+pub fn nvx::protocol::nvxs::HostSession::receive(&mut self, &[u8]) -> core::result::Result<(usize, core::option::Option<nvx::protocol::nvxs::HostEvent>), nvx::protocol::nvxs::SessionError>
+pub fn nvx::protocol::nvxs::HostSession::send(&mut self, &[u8], &mut alloc::vec::Vec<u8>) -> core::result::Result<usize, nvx::protocol::nvxs::SessionError>
+pub fn nvx::protocol::nvxs::HostSession::state(&self) -> nvx::protocol::nvxs::HostState
+impl core::clone::Clone for nvx::protocol::nvxs::HostSession
+pub fn nvx::protocol::nvxs::HostSession::clone(&self) -> nvx::protocol::nvxs::HostSession
+impl core::default::Default for nvx::protocol::nvxs::HostSession
+pub fn nvx::protocol::nvxs::HostSession::default() -> Self
+impl core::fmt::Debug for nvx::protocol::nvxs::HostSession
+pub fn nvx::protocol::nvxs::HostSession::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for nvx::protocol::nvxs::HostSession
+impl core::marker::Send for nvx::protocol::nvxs::HostSession
+impl core::marker::Sync for nvx::protocol::nvxs::HostSession
+impl core::marker::Unpin for nvx::protocol::nvxs::HostSession
+impl core::marker::UnsafeUnpin for nvx::protocol::nvxs::HostSession
+impl core::panic::unwind_safe::RefUnwindSafe for nvx::protocol::nvxs::HostSession
+impl core::panic::unwind_safe::UnwindSafe for nvx::protocol::nvxs::HostSession
+pub struct nvx::protocol::nvxs::Identity
+pub nvx::protocol::nvxs::Identity::epoch: u64
+pub nvx::protocol::nvxs::Identity::instance_id: [u8; 16]
+impl core::clone::Clone for nvx::protocol::nvxs::Identity
+pub fn nvx::protocol::nvxs::Identity::clone(&self) -> nvx::protocol::nvxs::Identity
+impl core::cmp::Eq for nvx::protocol::nvxs::Identity
+impl core::cmp::PartialEq for nvx::protocol::nvxs::Identity
+pub fn nvx::protocol::nvxs::Identity::eq(&self, &nvx::protocol::nvxs::Identity) -> bool
+impl core::fmt::Debug for nvx::protocol::nvxs::Identity
+pub fn nvx::protocol::nvxs::Identity::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for nvx::protocol::nvxs::Identity
+pub fn nvx::protocol::nvxs::Identity::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for nvx::protocol::nvxs::Identity
+impl core::marker::StructuralPartialEq for nvx::protocol::nvxs::Identity
+impl core::marker::Freeze for nvx::protocol::nvxs::Identity
+impl core::marker::Send for nvx::protocol::nvxs::Identity
+impl core::marker::Sync for nvx::protocol::nvxs::Identity
+impl core::marker::Unpin for nvx::protocol::nvxs::Identity
+impl core::marker::UnsafeUnpin for nvx::protocol::nvxs::Identity
+impl core::panic::unwind_safe::RefUnwindSafe for nvx::protocol::nvxs::Identity
+impl core::panic::unwind_safe::UnwindSafe for nvx::protocol::nvxs::Identity
+pub struct nvx::protocol::nvxs::Record
+impl nvx::protocol::nvxs::Record
+pub fn nvx::protocol::nvxs::Record::credit(&self) -> core::option::Option<u32>
+pub fn nvx::protocol::nvxs::Record::epoch(&self) -> u64
+pub fn nvx::protocol::nvxs::Record::error_code(&self) -> core::option::Option<nvx::protocol::nvxs::ErrorCode>
+pub fn nvx::protocol::nvxs::Record::instance_id(&self) -> [u8; 16]
+pub fn nvx::protocol::nvxs::Record::into_payload(self) -> alloc::vec::Vec<u8>
+pub fn nvx::protocol::nvxs::Record::payload(&self) -> &[u8]
+pub fn nvx::protocol::nvxs::Record::record_type(&self) -> nvx::protocol::nvxs::RecordType
+pub fn nvx::protocol::nvxs::Record::sequence(&self) -> u64
+pub fn nvx::protocol::nvxs::Record::window(&self) -> core::option::Option<u32>
+impl core::clone::Clone for nvx::protocol::nvxs::Record
+pub fn nvx::protocol::nvxs::Record::clone(&self) -> nvx::protocol::nvxs::Record
+impl core::cmp::Eq for nvx::protocol::nvxs::Record
+impl core::cmp::PartialEq for nvx::protocol::nvxs::Record
+pub fn nvx::protocol::nvxs::Record::eq(&self, &nvx::protocol::nvxs::Record) -> bool
+impl core::fmt::Debug for nvx::protocol::nvxs::Record
+pub fn nvx::protocol::nvxs::Record::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for nvx::protocol::nvxs::Record
+impl core::marker::Freeze for nvx::protocol::nvxs::Record
+impl core::marker::Send for nvx::protocol::nvxs::Record
+impl core::marker::Sync for nvx::protocol::nvxs::Record
+impl core::marker::Unpin for nvx::protocol::nvxs::Record
+impl core::marker::UnsafeUnpin for nvx::protocol::nvxs::Record
+impl core::panic::unwind_safe::RefUnwindSafe for nvx::protocol::nvxs::Record
+impl core::panic::unwind_safe::UnwindSafe for nvx::protocol::nvxs::Record
+pub struct nvx::protocol::nvxs::RecordParser
+impl nvx::protocol::nvxs::RecordParser
+pub fn nvx::protocol::nvxs::RecordParser::buffered(&self) -> usize
+pub fn nvx::protocol::nvxs::RecordParser::needed(&self) -> usize
+pub const fn nvx::protocol::nvxs::RecordParser::new() -> Self
+pub fn nvx::protocol::nvxs::RecordParser::push(&mut self, &[u8]) -> core::result::Result<(usize, core::option::Option<nvx::protocol::nvxs::Record>), nvx::protocol::nvxs::RecordError>
+impl core::clone::Clone for nvx::protocol::nvxs::RecordParser
+pub fn nvx::protocol::nvxs::RecordParser::clone(&self) -> nvx::protocol::nvxs::RecordParser
+impl core::default::Default for nvx::protocol::nvxs::RecordParser
+pub fn nvx::protocol::nvxs::RecordParser::default() -> Self
+impl core::fmt::Debug for nvx::protocol::nvxs::RecordParser
+pub fn nvx::protocol::nvxs::RecordParser::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for nvx::protocol::nvxs::RecordParser
+impl core::marker::Send for nvx::protocol::nvxs::RecordParser
+impl core::marker::Sync for nvx::protocol::nvxs::RecordParser
+impl core::marker::Unpin for nvx::protocol::nvxs::RecordParser
+impl core::marker::UnsafeUnpin for nvx::protocol::nvxs::RecordParser
+impl core::panic::unwind_safe::RefUnwindSafe for nvx::protocol::nvxs::RecordParser
+impl core::panic::unwind_safe::UnwindSafe for nvx::protocol::nvxs::RecordParser
+pub fn nvx::protocol::nvxs::encode_record(nvx::protocol::nvxs::RecordType, &[u8; 16], u64, u64, &[u8], &mut alloc::vec::Vec<u8>) -> core::result::Result<(), nvx::protocol::nvxs::RecordError>
+pub enum nvx::protocol::ExitCategory
+pub nvx::protocol::ExitCategory::Cancelled
+pub nvx::protocol::ExitCategory::Exit
+pub nvx::protocol::ExitCategory::Failed
+pub nvx::protocol::ExitCategory::OutputLimit
+pub nvx::protocol::ExitCategory::Signal
+pub nvx::protocol::ExitCategory::Timeout
+impl nvx::protocol::ExitCategory
+pub const fn nvx::protocol::ExitCategory::as_str(self) -> &'static str
+pub fn nvx::protocol::ExitCategory::parse(&[u8]) -> core::result::Result<Self, nvx::protocol::ProtocolError>
+impl core::clone::Clone for nvx::protocol::ExitCategory
+pub fn nvx::protocol::ExitCategory::clone(&self) -> nvx::protocol::ExitCategory
+impl core::cmp::Eq for nvx::protocol::ExitCategory
+impl core::cmp::PartialEq for nvx::protocol::ExitCategory
+pub fn nvx::protocol::ExitCategory::eq(&self, &nvx::protocol::ExitCategory) -> bool
+impl core::fmt::Debug for nvx::protocol::ExitCategory
+pub fn nvx::protocol::ExitCategory::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for nvx::protocol::ExitCategory
+impl core::marker::StructuralPartialEq for nvx::protocol::ExitCategory
+impl core::marker::Freeze for nvx::protocol::ExitCategory
+impl core::marker::Send for nvx::protocol::ExitCategory
+impl core::marker::Sync for nvx::protocol::ExitCategory
+impl core::marker::Unpin for nvx::protocol::ExitCategory
+impl core::marker::UnsafeUnpin for nvx::protocol::ExitCategory
+impl core::panic::unwind_safe::RefUnwindSafe for nvx::protocol::ExitCategory
+impl core::panic::unwind_safe::UnwindSafe for nvx::protocol::ExitCategory
+pub enum nvx::protocol::WorkloadEnvironment<'a>
+pub nvx::protocol::WorkloadEnvironment::Default
+pub nvx::protocol::WorkloadEnvironment::Layered(&'a [alloc::string::String])
+pub nvx::protocol::WorkloadEnvironment::Replaced(&'a [alloc::string::String])
+impl<'a> core::clone::Clone for nvx::protocol::WorkloadEnvironment<'a>
+pub fn nvx::protocol::WorkloadEnvironment<'a>::clone(&self) -> nvx::protocol::WorkloadEnvironment<'a>
+impl<'a> core::cmp::Eq for nvx::protocol::WorkloadEnvironment<'a>
+impl<'a> core::cmp::PartialEq for nvx::protocol::WorkloadEnvironment<'a>
+pub fn nvx::protocol::WorkloadEnvironment<'a>::eq(&self, &nvx::protocol::WorkloadEnvironment<'a>) -> bool
+impl<'a> core::fmt::Debug for nvx::protocol::WorkloadEnvironment<'a>
+pub fn nvx::protocol::WorkloadEnvironment<'a>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl<'a> core::marker::Copy for nvx::protocol::WorkloadEnvironment<'a>
+impl<'a> core::marker::StructuralPartialEq for nvx::protocol::WorkloadEnvironment<'a>
+impl<'a> core::marker::Freeze for nvx::protocol::WorkloadEnvironment<'a>
+impl<'a> core::marker::Send for nvx::protocol::WorkloadEnvironment<'a>
+impl<'a> core::marker::Sync for nvx::protocol::WorkloadEnvironment<'a>
+impl<'a> core::marker::Unpin for nvx::protocol::WorkloadEnvironment<'a>
+impl<'a> core::marker::UnsafeUnpin for nvx::protocol::WorkloadEnvironment<'a>
+impl<'a> core::panic::unwind_safe::RefUnwindSafe for nvx::protocol::WorkloadEnvironment<'a>
+impl<'a> core::panic::unwind_safe::UnwindSafe for nvx::protocol::WorkloadEnvironment<'a>
+pub struct nvx::protocol::AppFrame<'a>
+pub nvx::protocol::AppFrame::kind: u8
+pub nvx::protocol::AppFrame::payload: &'a [u8]
+pub nvx::protocol::AppFrame::request_id: u64
+pub nvx::protocol::AppFrame::status: i32
+impl<'a> core::clone::Clone for nvx::protocol::AppFrame<'a>
+pub fn nvx::protocol::AppFrame<'a>::clone(&self) -> nvx::protocol::AppFrame<'a>
+impl<'a> core::cmp::Eq for nvx::protocol::AppFrame<'a>
+impl<'a> core::cmp::PartialEq for nvx::protocol::AppFrame<'a>
+pub fn nvx::protocol::AppFrame<'a>::eq(&self, &nvx::protocol::AppFrame<'a>) -> bool
+impl<'a> core::fmt::Debug for nvx::protocol::AppFrame<'a>
+pub fn nvx::protocol::AppFrame<'a>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl<'a> core::marker::Copy for nvx::protocol::AppFrame<'a>
+impl<'a> core::marker::StructuralPartialEq for nvx::protocol::AppFrame<'a>
+impl<'a> core::marker::Freeze for nvx::protocol::AppFrame<'a>
+impl<'a> core::marker::Send for nvx::protocol::AppFrame<'a>
+impl<'a> core::marker::Sync for nvx::protocol::AppFrame<'a>
+impl<'a> core::marker::Unpin for nvx::protocol::AppFrame<'a>
+impl<'a> core::marker::UnsafeUnpin for nvx::protocol::AppFrame<'a>
+impl<'a> core::panic::unwind_safe::RefUnwindSafe for nvx::protocol::AppFrame<'a>
+impl<'a> core::panic::unwind_safe::UnwindSafe for nvx::protocol::AppFrame<'a>
+pub struct nvx::protocol::ExecPayload
+pub nvx::protocol::ExecPayload::argv: alloc::vec::Vec<alloc::string::String>
+pub nvx::protocol::ExecPayload::cwd: core::option::Option<alloc::string::String>
+pub nvx::protocol::ExecPayload::environment: core::option::Option<alloc::vec::Vec<alloc::string::String>>
+pub nvx::protocol::ExecPayload::inherit_default_env: bool
+pub nvx::protocol::ExecPayload::timeout_ms: u32
+impl core::clone::Clone for nvx::protocol::ExecPayload
+pub fn nvx::protocol::ExecPayload::clone(&self) -> nvx::protocol::ExecPayload
+impl core::cmp::Eq for nvx::protocol::ExecPayload
+impl core::cmp::PartialEq for nvx::protocol::ExecPayload
+pub fn nvx::protocol::ExecPayload::eq(&self, &nvx::protocol::ExecPayload) -> bool
+impl core::fmt::Debug for nvx::protocol::ExecPayload
+pub fn nvx::protocol::ExecPayload::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for nvx::protocol::ExecPayload
+impl core::marker::Freeze for nvx::protocol::ExecPayload
+impl core::marker::Send for nvx::protocol::ExecPayload
+impl core::marker::Sync for nvx::protocol::ExecPayload
+impl core::marker::Unpin for nvx::protocol::ExecPayload
+impl core::marker::UnsafeUnpin for nvx::protocol::ExecPayload
+impl core::panic::unwind_safe::RefUnwindSafe for nvx::protocol::ExecPayload
+impl core::panic::unwind_safe::UnwindSafe for nvx::protocol::ExecPayload
+pub struct nvx::protocol::GuestExecPayload
+pub nvx::protocol::GuestExecPayload::argv: alloc::vec::Vec<alloc::vec::Vec<u8>>
+pub nvx::protocol::GuestExecPayload::cwd: core::option::Option<alloc::vec::Vec<u8>>
+pub nvx::protocol::GuestExecPayload::environment: core::option::Option<alloc::vec::Vec<alloc::vec::Vec<u8>>>
+pub nvx::protocol::GuestExecPayload::inherit_default_env: bool
+pub nvx::protocol::GuestExecPayload::timeout_ms: u32
+impl core::clone::Clone for nvx::protocol::GuestExecPayload
+pub fn nvx::protocol::GuestExecPayload::clone(&self) -> nvx::protocol::GuestExecPayload
+impl core::cmp::Eq for nvx::protocol::GuestExecPayload
+impl core::cmp::PartialEq for nvx::protocol::GuestExecPayload
+pub fn nvx::protocol::GuestExecPayload::eq(&self, &nvx::protocol::GuestExecPayload) -> bool
+impl core::fmt::Debug for nvx::protocol::GuestExecPayload
+pub fn nvx::protocol::GuestExecPayload::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for nvx::protocol::GuestExecPayload
+impl core::marker::Freeze for nvx::protocol::GuestExecPayload
+impl core::marker::Send for nvx::protocol::GuestExecPayload
+impl core::marker::Sync for nvx::protocol::GuestExecPayload
+impl core::marker::Unpin for nvx::protocol::GuestExecPayload
+impl core::marker::UnsafeUnpin for nvx::protocol::GuestExecPayload
+impl core::panic::unwind_safe::RefUnwindSafe for nvx::protocol::GuestExecPayload
+impl core::panic::unwind_safe::UnwindSafe for nvx::protocol::GuestExecPayload
+pub struct nvx::protocol::GuestFeatures(_)
+impl nvx::protocol::GuestFeatures
+pub const nvx::protocol::GuestFeatures::CANCEL: Self
+pub const nvx::protocol::GuestFeatures::DIRECT_AGENT: Self
+pub const nvx::protocol::GuestFeatures::EXEC_CGROUP: Self
+pub const nvx::protocol::GuestFeatures::EXEC_CWD: Self
+pub const nvx::protocol::GuestFeatures::EXEC_ENVIRONMENT: Self
+pub const nvx::protocol::GuestFeatures::HOST_MAPPING_TABLE: Self
+pub const nvx::protocol::GuestFeatures::LAYERED_SANDBOX: Self
+pub const nvx::protocol::GuestFeatures::NONE: Self
+pub const nvx::protocol::GuestFeatures::REQUIRED: Self
+pub const nvx::protocol::GuestFeatures::SANDBOX_AGENT: Self
+pub const nvx::protocol::GuestFeatures::WORKLOAD_ACCOUNT: Self
+pub const fn nvx::protocol::GuestFeatures::bits(self) -> u32
+pub const fn nvx::protocol::GuestFeatures::contains(self, Self) -> bool
+pub fn nvx::protocol::GuestFeatures::decode(&[u8]) -> core::result::Result<Self, nvx::protocol::ProtocolError>
+pub const fn nvx::protocol::GuestFeatures::encode(self) -> [u8; 4]
+pub const fn nvx::protocol::GuestFeatures::from_bits(u32) -> Self
+pub fn nvx::protocol::GuestFeatures::missing(self, Self) -> alloc::vec::Vec<&'static str>
+impl core::clone::Clone for nvx::protocol::GuestFeatures
+pub fn nvx::protocol::GuestFeatures::clone(&self) -> nvx::protocol::GuestFeatures
+impl core::cmp::Eq for nvx::protocol::GuestFeatures
+impl core::cmp::PartialEq for nvx::protocol::GuestFeatures
+pub fn nvx::protocol::GuestFeatures::eq(&self, &nvx::protocol::GuestFeatures) -> bool
+impl core::fmt::Debug for nvx::protocol::GuestFeatures
+pub fn nvx::protocol::GuestFeatures::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for nvx::protocol::GuestFeatures
+impl core::marker::StructuralPartialEq for nvx::protocol::GuestFeatures
+impl core::ops::bit::BitOr for nvx::protocol::GuestFeatures
+pub type nvx::protocol::GuestFeatures::Output = nvx::protocol::GuestFeatures
+pub fn nvx::protocol::GuestFeatures::bitor(self, Self) -> Self
+impl core::marker::Freeze for nvx::protocol::GuestFeatures
+impl core::marker::Send for nvx::protocol::GuestFeatures
+impl core::marker::Sync for nvx::protocol::GuestFeatures
+impl core::marker::Unpin for nvx::protocol::GuestFeatures
+impl core::marker::UnsafeUnpin for nvx::protocol::GuestFeatures
+impl core::panic::unwind_safe::RefUnwindSafe for nvx::protocol::GuestFeatures
+impl core::panic::unwind_safe::UnwindSafe for nvx::protocol::GuestFeatures
+pub struct nvx::protocol::GuestHostMap
+pub nvx::protocol::GuestHostMap::read_only: bool
+pub nvx::protocol::GuestHostMap::source: alloc::vec::Vec<u8>
+pub nvx::protocol::GuestHostMap::target: alloc::vec::Vec<u8>
+impl core::clone::Clone for nvx::protocol::GuestHostMap
+pub fn nvx::protocol::GuestHostMap::clone(&self) -> nvx::protocol::GuestHostMap
+impl core::cmp::Eq for nvx::protocol::GuestHostMap
+impl core::cmp::PartialEq for nvx::protocol::GuestHostMap
+pub fn nvx::protocol::GuestHostMap::eq(&self, &nvx::protocol::GuestHostMap) -> bool
+impl core::fmt::Debug for nvx::protocol::GuestHostMap
+pub fn nvx::protocol::GuestHostMap::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for nvx::protocol::GuestHostMap
+impl core::marker::Freeze for nvx::protocol::GuestHostMap
+impl core::marker::Send for nvx::protocol::GuestHostMap
+impl core::marker::Sync for nvx::protocol::GuestHostMap
+impl core::marker::Unpin for nvx::protocol::GuestHostMap
+impl core::marker::UnsafeUnpin for nvx::protocol::GuestHostMap
+impl core::panic::unwind_safe::RefUnwindSafe for nvx::protocol::GuestHostMap
+impl core::panic::unwind_safe::UnwindSafe for nvx::protocol::GuestHostMap
+pub struct nvx::protocol::GuestMapsPayload
+pub nvx::protocol::GuestMapsPayload::first: u32
+pub nvx::protocol::GuestMapsPayload::maps: alloc::vec::Vec<nvx::protocol::GuestHostMap>
+impl core::clone::Clone for nvx::protocol::GuestMapsPayload
+pub fn nvx::protocol::GuestMapsPayload::clone(&self) -> nvx::protocol::GuestMapsPayload
+impl core::cmp::Eq for nvx::protocol::GuestMapsPayload
+impl core::cmp::PartialEq for nvx::protocol::GuestMapsPayload
+pub fn nvx::protocol::GuestMapsPayload::eq(&self, &nvx::protocol::GuestMapsPayload) -> bool
+impl core::fmt::Debug for nvx::protocol::GuestMapsPayload
+pub fn nvx::protocol::GuestMapsPayload::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for nvx::protocol::GuestMapsPayload
+impl core::marker::Freeze for nvx::protocol::GuestMapsPayload
+impl core::marker::Send for nvx::protocol::GuestMapsPayload
+impl core::marker::Sync for nvx::protocol::GuestMapsPayload
+impl core::marker::Unpin for nvx::protocol::GuestMapsPayload
+impl core::marker::UnsafeUnpin for nvx::protocol::GuestMapsPayload
+impl core::panic::unwind_safe::RefUnwindSafe for nvx::protocol::GuestMapsPayload
+impl core::panic::unwind_safe::UnwindSafe for nvx::protocol::GuestMapsPayload
+pub struct nvx::protocol::HostMap
+pub nvx::protocol::HostMap::read_only: bool
+pub nvx::protocol::HostMap::source: alloc::string::String
+pub nvx::protocol::HostMap::target: alloc::string::String
+impl core::clone::Clone for nvx::protocol::HostMap
+pub fn nvx::protocol::HostMap::clone(&self) -> nvx::protocol::HostMap
+impl core::cmp::Eq for nvx::protocol::HostMap
+impl core::cmp::PartialEq for nvx::protocol::HostMap
+pub fn nvx::protocol::HostMap::eq(&self, &nvx::protocol::HostMap) -> bool
+impl core::fmt::Debug for nvx::protocol::HostMap
+pub fn nvx::protocol::HostMap::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for nvx::protocol::HostMap
+impl core::marker::Freeze for nvx::protocol::HostMap
+impl core::marker::Send for nvx::protocol::HostMap
+impl core::marker::Sync for nvx::protocol::HostMap
+impl core::marker::Unpin for nvx::protocol::HostMap
+impl core::marker::UnsafeUnpin for nvx::protocol::HostMap
+impl core::panic::unwind_safe::RefUnwindSafe for nvx::protocol::HostMap
+impl core::panic::unwind_safe::UnwindSafe for nvx::protocol::HostMap
+pub struct nvx::protocol::MapsPayload
+pub nvx::protocol::MapsPayload::first: u32
+pub nvx::protocol::MapsPayload::maps: alloc::vec::Vec<nvx::protocol::HostMap>
+impl core::clone::Clone for nvx::protocol::MapsPayload
+pub fn nvx::protocol::MapsPayload::clone(&self) -> nvx::protocol::MapsPayload
+impl core::cmp::Eq for nvx::protocol::MapsPayload
+impl core::cmp::PartialEq for nvx::protocol::MapsPayload
+pub fn nvx::protocol::MapsPayload::eq(&self, &nvx::protocol::MapsPayload) -> bool
+impl core::fmt::Debug for nvx::protocol::MapsPayload
+pub fn nvx::protocol::MapsPayload::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for nvx::protocol::MapsPayload
+impl core::marker::Freeze for nvx::protocol::MapsPayload
+impl core::marker::Send for nvx::protocol::MapsPayload
+impl core::marker::Sync for nvx::protocol::MapsPayload
+impl core::marker::Unpin for nvx::protocol::MapsPayload
+impl core::marker::UnsafeUnpin for nvx::protocol::MapsPayload
+impl core::panic::unwind_safe::RefUnwindSafe for nvx::protocol::MapsPayload
+impl core::panic::unwind_safe::UnwindSafe for nvx::protocol::MapsPayload
+pub struct nvx::protocol::OuterHeader
+pub nvx::protocol::OuterHeader::epoch: u64
+pub nvx::protocol::OuterHeader::instance_id: [u8; 16]
+pub nvx::protocol::OuterHeader::length: usize
+pub nvx::protocol::OuterHeader::record_type: u8
+pub nvx::protocol::OuterHeader::sequence: u64
+impl core::clone::Clone for nvx::protocol::OuterHeader
+pub fn nvx::protocol::OuterHeader::clone(&self) -> nvx::protocol::OuterHeader
+impl core::cmp::Eq for nvx::protocol::OuterHeader
+impl core::cmp::PartialEq for nvx::protocol::OuterHeader
+pub fn nvx::protocol::OuterHeader::eq(&self, &nvx::protocol::OuterHeader) -> bool
+impl core::fmt::Debug for nvx::protocol::OuterHeader
+pub fn nvx::protocol::OuterHeader::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for nvx::protocol::OuterHeader
+impl core::marker::StructuralPartialEq for nvx::protocol::OuterHeader
+impl core::marker::Freeze for nvx::protocol::OuterHeader
+impl core::marker::Send for nvx::protocol::OuterHeader
+impl core::marker::Sync for nvx::protocol::OuterHeader
+impl core::marker::Unpin for nvx::protocol::OuterHeader
+impl core::marker::UnsafeUnpin for nvx::protocol::OuterHeader
+impl core::panic::unwind_safe::RefUnwindSafe for nvx::protocol::OuterHeader
+impl core::panic::unwind_safe::UnwindSafe for nvx::protocol::OuterHeader
+pub struct nvx::protocol::ProtocolError(_)
+impl nvx::protocol::ProtocolError
+pub fn nvx::protocol::ProtocolError::into_message(self) -> alloc::string::String
+pub fn nvx::protocol::ProtocolError::message(&self) -> &str
+impl core::clone::Clone for nvx::protocol::ProtocolError
+pub fn nvx::protocol::ProtocolError::clone(&self) -> nvx::protocol::ProtocolError
+impl core::cmp::Eq for nvx::protocol::ProtocolError
+impl core::cmp::PartialEq for nvx::protocol::ProtocolError
+pub fn nvx::protocol::ProtocolError::eq(&self, &nvx::protocol::ProtocolError) -> bool
+impl core::error::Error for nvx::protocol::ProtocolError
+impl core::fmt::Debug for nvx::protocol::ProtocolError
+pub fn nvx::protocol::ProtocolError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for nvx::protocol::ProtocolError
+pub fn nvx::protocol::ProtocolError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for nvx::protocol::ProtocolError
+impl core::marker::Freeze for nvx::protocol::ProtocolError
+impl core::marker::Send for nvx::protocol::ProtocolError
+impl core::marker::Sync for nvx::protocol::ProtocolError
+impl core::marker::Unpin for nvx::protocol::ProtocolError
+impl core::marker::UnsafeUnpin for nvx::protocol::ProtocolError
+impl core::panic::unwind_safe::RefUnwindSafe for nvx::protocol::ProtocolError
+impl core::panic::unwind_safe::UnwindSafe for nvx::protocol::ProtocolError
+pub struct nvx::protocol::Workload<'a>
+pub nvx::protocol::Workload::argv: alloc::vec::Vec<alloc::string::String>
+pub nvx::protocol::Workload::cwd: core::option::Option<&'a str>
+pub nvx::protocol::Workload::environment: nvx::protocol::WorkloadEnvironment<'a>
+pub nvx::protocol::Workload::timeout_ms: u32
+impl<'a> core::clone::Clone for nvx::protocol::Workload<'a>
+pub fn nvx::protocol::Workload<'a>::clone(&self) -> nvx::protocol::Workload<'a>
+impl<'a> core::cmp::Eq for nvx::protocol::Workload<'a>
+impl<'a> core::cmp::PartialEq for nvx::protocol::Workload<'a>
+pub fn nvx::protocol::Workload<'a>::eq(&self, &nvx::protocol::Workload<'a>) -> bool
+impl<'a> core::fmt::Debug for nvx::protocol::Workload<'a>
+pub fn nvx::protocol::Workload<'a>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl<'a> core::marker::StructuralPartialEq for nvx::protocol::Workload<'a>
+impl<'a> core::marker::Freeze for nvx::protocol::Workload<'a>
+impl<'a> core::marker::Send for nvx::protocol::Workload<'a>
+impl<'a> core::marker::Sync for nvx::protocol::Workload<'a>
+impl<'a> core::marker::Unpin for nvx::protocol::Workload<'a>
+impl<'a> core::marker::UnsafeUnpin for nvx::protocol::Workload<'a>
+impl<'a> core::panic::unwind_safe::RefUnwindSafe for nvx::protocol::Workload<'a>
+impl<'a> core::panic::unwind_safe::UnwindSafe for nvx::protocol::Workload<'a>
+pub const nvx::protocol::APP_CANCEL: u8
+pub const nvx::protocol::APP_ERROR: u8
+pub const nvx::protocol::APP_EXEC: u8
+pub const nvx::protocol::APP_EXIT: u8
+pub const nvx::protocol::APP_FEATURES: u8
+pub const nvx::protocol::APP_HEADER_LEN: usize
+pub const nvx::protocol::APP_MAGIC: [u8; 4]
+pub const nvx::protocol::APP_MAPS: u8
+pub const nvx::protocol::APP_PING: u8
+pub const nvx::protocol::APP_READY: u8
+pub const nvx::protocol::APP_STDERR: u8
+pub const nvx::protocol::APP_STDOUT: u8
+pub const nvx::protocol::APP_STOP: u8
+pub const nvx::protocol::APP_STOPPED: u8
+pub const nvx::protocol::APP_VERSION: u8
+pub const nvx::protocol::BUSY: &str
+pub const nvx::protocol::CAPABILITY_LEN: usize
+pub const nvx::protocol::CWD_FAILED: &str
+pub const nvx::protocol::EXEC_CWD_PRESENT: u16
+pub const nvx::protocol::EXEC_ENVIRONMENT_PRESENT: u16
+pub const nvx::protocol::EXEC_EXTENDED: u16
+pub const nvx::protocol::EXEC_INHERIT_DEFAULT_ENV: u16
+pub const nvx::protocol::INVALID_REQUEST: &str
+pub const nvx::protocol::LAUNCH_FAILED: &str
+pub const nvx::protocol::MAPPINGS_INCOMPLETE: &str
+pub const nvx::protocol::MAPPING_FAILED: &str
+pub const nvx::protocol::MAPS_HEADER_LEN: usize
+pub const nvx::protocol::MAPS_TOKEN: &str
+pub const nvx::protocol::MAP_ENTRY_HEADER_LEN: usize
+pub const nvx::protocol::MAP_READ_ONLY: u16
+pub const nvx::protocol::MAX_ARGUMENTS: usize
+pub const nvx::protocol::MAX_ARGUMENT_BYTES: usize
+pub const nvx::protocol::MAX_CWD_BYTES: usize
+pub const nvx::protocol::MAX_ENVIRONMENT: usize
+pub const nvx::protocol::MAX_GUEST_CWD_BYTES: usize
+pub const nvx::protocol::MAX_HOST_MAPPINGS: usize
+pub const nvx::protocol::MAX_MAP_PATH_BYTES: usize
+pub const nvx::protocol::MAX_OUTPUT_BYTES: usize
+pub const nvx::protocol::MAX_TIMEOUT_MS: u32
+pub const nvx::protocol::OUTER_ACK: u8
+pub const nvx::protocol::OUTER_CREDIT: u8
+pub const nvx::protocol::OUTER_DATA: u8
+pub const nvx::protocol::OUTER_ERROR: u8
+pub const nvx::protocol::OUTER_GUEST_ATTACH: u8
+pub const nvx::protocol::OUTER_HEADER_LEN: usize
+pub const nvx::protocol::OUTER_HOST_ATTACH: u8
+pub const nvx::protocol::OUTER_MAGIC: [u8; 4]
+pub const nvx::protocol::OUTER_MAX_PAYLOAD: usize
+pub const nvx::protocol::OUTER_MAX_RECEIVE_WINDOW: u32
+pub const nvx::protocol::OUTER_MIN_RECEIVE_WINDOW: u32
+pub const nvx::protocol::OUTER_READY: u8
+pub const nvx::protocol::OUTER_RECEIVE_WINDOW: u32
+pub const nvx::protocol::OUTER_RESET: u8
+pub const nvx::protocol::OUTER_VERSION: u16
+pub const nvx::protocol::OUTER_WAIT: u8
+pub const nvx::protocol::UNSUPPORTED_OPERATION: &[u8]
+pub const nvx::protocol::WORKLOAD_ACCOUNT_TOKEN: &str
+pub fn nvx::protocol::decode_ack_payload(&[u8]) -> core::result::Result<u32, nvx::protocol::ProtocolError>
+pub fn nvx::protocol::decode_app(&[u8]) -> core::result::Result<nvx::protocol::AppFrame<'_>, nvx::protocol::ProtocolError>
+pub fn nvx::protocol::decode_credit_payload(&[u8]) -> core::result::Result<u32, nvx::protocol::ProtocolError>
+pub fn nvx::protocol::decode_exec_payload(&[u8]) -> core::result::Result<nvx::protocol::ExecPayload, nvx::protocol::ProtocolError>
+pub fn nvx::protocol::decode_guest_exec_payload(&[u8]) -> core::result::Result<nvx::protocol::GuestExecPayload, nvx::protocol::ProtocolError>
+pub fn nvx::protocol::decode_guest_maps_payload(&[u8]) -> core::result::Result<nvx::protocol::GuestMapsPayload, nvx::protocol::ProtocolError>
+pub fn nvx::protocol::decode_maps_payload(&[u8]) -> core::result::Result<nvx::protocol::MapsPayload, nvx::protocol::ProtocolError>
+pub fn nvx::protocol::decode_outer_header(&[u8; 44]) -> core::result::Result<nvx::protocol::OuterHeader, nvx::protocol::ProtocolError>
+pub fn nvx::protocol::encode_ack_payload(u32) -> core::result::Result<[u8; 4], nvx::protocol::ProtocolError>
+pub fn nvx::protocol::encode_app(u8, u64, i32, &[u8]) -> alloc::vec::Vec<u8>
+pub fn nvx::protocol::encode_credit_payload(u32) -> core::result::Result<[u8; 4], nvx::protocol::ProtocolError>
+pub fn nvx::protocol::encode_exec_payload(&nvx::protocol::Workload<'_>) -> core::result::Result<alloc::vec::Vec<u8>, nvx::protocol::ProtocolError>
+pub fn nvx::protocol::encode_maps_payloads(&[nvx::protocol::HostMap], usize) -> core::result::Result<alloc::vec::Vec<alloc::vec::Vec<u8>>, nvx::protocol::ProtocolError>
+pub fn nvx::protocol::encode_outer(u8, &[u8; 16], u64, u64, &[u8]) -> core::result::Result<alloc::vec::Vec<u8>, nvx::protocol::ProtocolError>
+pub fn nvx::protocol::parse_host_mapping_count(&[u8]) -> core::result::Result<u32, nvx::protocol::ProtocolError>
+#[non_exhaustive] pub enum nvx::ErrorKind
+pub nvx::ErrorKind::Exited
+pub nvx::ErrorKind::Io
+pub nvx::ErrorKind::Other
+pub nvx::ErrorKind::Protocol
+pub nvx::ErrorKind::TimedOut
+pub nvx::ErrorKind::Unavailable
+pub nvx::ErrorKind::Unsupported
+impl nvx::ErrorKind
+pub const fn nvx::ErrorKind::as_str(self) -> &'static str
+impl core::clone::Clone for nvx::ErrorKind
+pub fn nvx::ErrorKind::clone(&self) -> nvx::ErrorKind
+impl core::cmp::Eq for nvx::ErrorKind
+impl core::cmp::PartialEq for nvx::ErrorKind
+pub fn nvx::ErrorKind::eq(&self, &nvx::ErrorKind) -> bool
+impl core::fmt::Debug for nvx::ErrorKind
+pub fn nvx::ErrorKind::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for nvx::ErrorKind
+pub fn nvx::ErrorKind::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for nvx::ErrorKind
+pub fn nvx::ErrorKind::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for nvx::ErrorKind
+impl core::marker::StructuralPartialEq for nvx::ErrorKind
+impl core::marker::Freeze for nvx::ErrorKind
+impl core::marker::Send for nvx::ErrorKind
+impl core::marker::Sync for nvx::ErrorKind
+impl core::marker::Unpin for nvx::ErrorKind
+impl core::marker::UnsafeUnpin for nvx::ErrorKind
+impl core::panic::unwind_safe::RefUnwindSafe for nvx::ErrorKind
+impl core::panic::unwind_safe::UnwindSafe for nvx::ErrorKind
+pub enum nvx::Hypervisor
+pub nvx::Hypervisor::Kvm
+pub nvx::Hypervisor::Mshv
+pub nvx::Hypervisor::Whp
+impl nvx::Hypervisor
+pub const nvx::Hypervisor::ENV: &'static str
+pub const fn nvx::Hypervisor::as_str(self) -> &'static str
+pub fn nvx::Hypervisor::from_env_or_default() -> nvx::Result<Self>
+pub fn nvx::Hypervisor::platform_default() -> core::option::Option<Self>
+pub fn nvx::Hypervisor::supported_on_host(self) -> bool
+impl core::clone::Clone for nvx::Hypervisor
+pub fn nvx::Hypervisor::clone(&self) -> nvx::Hypervisor
+impl core::cmp::Eq for nvx::Hypervisor
+impl core::cmp::PartialEq for nvx::Hypervisor
+pub fn nvx::Hypervisor::eq(&self, &nvx::Hypervisor) -> bool
+impl core::fmt::Debug for nvx::Hypervisor
+pub fn nvx::Hypervisor::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for nvx::Hypervisor
+pub fn nvx::Hypervisor::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for nvx::Hypervisor
+pub fn nvx::Hypervisor::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for nvx::Hypervisor
+impl core::marker::StructuralPartialEq for nvx::Hypervisor
+impl core::str::traits::FromStr for nvx::Hypervisor
+pub type nvx::Hypervisor::Err = nvx::Error
+pub fn nvx::Hypervisor::from_str(&str) -> nvx::Result<Self>
+impl core::marker::Freeze for nvx::Hypervisor
+impl core::marker::Send for nvx::Hypervisor
+impl core::marker::Sync for nvx::Hypervisor
+impl core::marker::Unpin for nvx::Hypervisor
+impl core::marker::UnsafeUnpin for nvx::Hypervisor
+impl core::panic::unwind_safe::RefUnwindSafe for nvx::Hypervisor
+impl core::panic::unwind_safe::UnwindSafe for nvx::Hypervisor
+pub struct nvx::Error
+impl nvx::Error
+pub fn nvx::Error::exited(impl core::convert::Into<alloc::string::String>) -> Self
+pub fn nvx::Error::into_parts(self) -> (nvx::ErrorKind, alloc::string::String, core::option::Option<alloc::boxed::Box<(dyn core::error::Error + core::marker::Send + core::marker::Sync + 'static)>>)
+pub fn nvx::Error::io(impl core::convert::Into<alloc::string::String>) -> Self
+pub fn nvx::Error::kind(&self) -> nvx::ErrorKind
+pub fn nvx::Error::message(&self) -> &str
+pub fn nvx::Error::new(nvx::ErrorKind, impl core::convert::Into<alloc::string::String>) -> Self
+pub fn nvx::Error::other(impl core::convert::Into<alloc::string::String>) -> Self
+pub fn nvx::Error::protocol(impl core::convert::Into<alloc::string::String>) -> Self
+pub fn nvx::Error::timed_out(impl core::convert::Into<alloc::string::String>) -> Self
+pub fn nvx::Error::unavailable(impl core::convert::Into<alloc::string::String>) -> Self
+pub fn nvx::Error::unsupported(impl core::convert::Into<alloc::string::String>) -> Self
+pub fn nvx::Error::with_source(self, impl core::convert::Into<alloc::boxed::Box<(dyn core::error::Error + core::marker::Send + core::marker::Sync + 'static)>>) -> Self
+impl core::error::Error for nvx::Error
+pub fn nvx::Error::source(&self) -> core::option::Option<&(dyn core::error::Error + 'static)>
+impl core::fmt::Debug for nvx::Error
+pub fn nvx::Error::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for nvx::Error
+pub fn nvx::Error::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for nvx::Error
+impl core::marker::Send for nvx::Error
+impl core::marker::Sync for nvx::Error
+impl core::marker::Unpin for nvx::Error
+impl core::marker::UnsafeUnpin for nvx::Error
+impl !core::panic::unwind_safe::RefUnwindSafe for nvx::Error
+impl !core::panic::unwind_safe::UnwindSafe for nvx::Error
+pub type nvx::Result<T, E> = core::result::Result<T, E>

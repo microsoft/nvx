@@ -1,7 +1,8 @@
 name: Check nvx-rs
 description: >-
-  Format, lint, document, and test the nvx crate, and the runtime adapter that builds on it
-  as an independent adapter
+  Format, lint, document, and test the nvx crate, check its public API against the snapshots
+  that adapters build on, and check the runtime adapter that builds on it as an independent
+  adapter
 
 inputs:
   toolchain:
@@ -186,3 +187,42 @@ runs:
           --features guest --target x86_64-unknown-linux-musl
         cargo "+${{ steps.toolchains.outputs.msrv }}" check --locked --all-targets \
           --features guest --target x86_64-unknown-linux-musl
+
+    # The public API of nvx in each configuration that adapters build on must match the
+    # snapshots in tests/public-api; see its README. The check lists every target of each
+    # configuration, so it runs once, on Linux. cargo-public-api publishes no binaries, so dev
+    # pushes cache the build of the release that the script pins.
+    - name: Restore the public API tools
+      id: public-api-tools
+      if: runner.os == 'Linux'
+      uses: actions/cache/restore@v5
+      with:
+        path: ${{ runner.temp }}/public-api-tools
+        key: public-api-tools-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/check_public_api.py') }}
+
+    - name: Install the public API tools
+      if: runner.os == 'Linux'
+      shell: bash
+      env:
+        TOOLS: ${{ runner.temp }}/public-api-tools
+      run: |
+        set -euo pipefail
+        python3 scripts/check_public_api.py --install-tools --root "${TOOLS}"
+        echo "${TOOLS}/bin" >> "${GITHUB_PATH}"
+
+    - name: Save the public API tools
+      if: >-
+        success() &&
+        github.event_name == 'push' &&
+        github.ref == 'refs/heads/dev' &&
+        runner.os == 'Linux' &&
+        steps.public-api-tools.outputs.cache-hit != 'true'
+      uses: actions/cache/save@v5
+      with:
+        path: ${{ runner.temp }}/public-api-tools
+        key: ${{ steps.public-api-tools.outputs.cache-primary-key }}
+
+    - name: Check the public API of nvx
+      if: runner.os == 'Linux'
+      shell: bash
+      run: python3 scripts/check_public_api.py

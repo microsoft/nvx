@@ -27,7 +27,10 @@
   changes under `nvx-rs/`, those in [check-nvx-rs](./actions/check-nvx-rs/action.yml)
   and, because `aci_edge_sandboxes` builds on the `nvx` crate there, check-aci-edge-sandboxes too.
   check-nvx-rs also checks the runtime adapter in `tests/runtime-adapter/`, which
-  builds on `nvx`; run its steps for changes to either.
+  builds on `nvx`; run its steps for changes to either. On Linux, it also checks the
+  public API of `nvx` against `tests/public-api/`; after a deliberate API change, run
+  `python3 scripts/check_public_api.py --update`, which needs the tools that
+  `--install-tools` installs, and commit the snapshots.
   They need no hypervisor. `scripts/nvx.py test-aci-edge-sandboxes` exercises both
   crates on a real hypervisor.
 - OpenVMM source changes also require the package-scoped checks prescribed by the
