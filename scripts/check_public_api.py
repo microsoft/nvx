@@ -321,13 +321,17 @@ def public_paths(document: Mapping[str, Any]) -> dict[str, list[str]]:
     return paths
 
 
-def without_ids(value: Any) -> Any:
-    """Return `value` without the item IDs, which change between builds."""
+def resolve_ids(value: Any, names: Mapping[str, str]) -> Any:
+    """Return `value` with each item ID, which changes between builds, replaced
+    by the qualified path of the item, in `names`, or `null` if it has none."""
     if isinstance(value, dict):
         entries = cast(dict[str, Any], value)
-        return {key: without_ids(item) for key, item in entries.items() if key != "id"}
+        return {
+            key: names.get(str(item)) if key == "id" else resolve_ids(item, names)
+            for key, item in entries.items()
+        }
     if isinstance(value, list):
-        return [without_ids(item) for item in cast(list[Any], value)]
+        return [resolve_ids(item, names) for item in cast(list[Any], value)]
     return value
 
 
@@ -336,10 +340,20 @@ def generic_defaults(document: Mapping[str, Any]) -> list[str]:
 
     cargo-public-api leaves these defaults out, as in `pub type nvx::Result<T,
     E>` for `Result<T, E = Error>`, so the check records them from the rustdoc
-    JSON, with each default type as its JSON without item IDs."""
+    JSON, with each default type as its JSON in which each item ID is replaced
+    by the qualified path of the item: the first public path of an item of the
+    crate, or the path that rustdoc records for any other."""
     index: Mapping[str, Any] = document["index"]
+    reachable = public_paths(document)
+    names = {
+        identifier: "::".join(summary["path"])
+        for identifier, summary in cast(
+            Mapping[str, Any], document.get("paths", {})
+        ).items()
+    }
+    names.update((identifier, min(paths)) for identifier, paths in reachable.items())
     found: set[str] = set()
-    for identifier, paths in public_paths(document).items():
+    for identifier, paths in reachable.items():
         inner: Mapping[str, Any] = index[identifier]["inner"]
         for body in inner.values():
             if not isinstance(body, dict):
@@ -353,7 +367,7 @@ def generic_defaults(document: Mapping[str, Any]) -> list[str]:
                 default: Any = None
                 for key in ("type", "const"):
                     if key in kind and kind[key].get("default") is not None:
-                        default = without_ids(kind[key]["default"])
+                        default = resolve_ids(kind[key]["default"], names)
                 if default is None:
                     continue
                 text = json.dumps(default, sort_keys=True, separators=(",", ":"))

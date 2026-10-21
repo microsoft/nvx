@@ -26,9 +26,11 @@ cargo-public-api leaves out the defaults of generic parameters: it lists
 `pub type nvx::Result<T, E>` for `Result<T, E = Error>`. So the check reads the
 rustdoc JSON that each listing builds and appends a line for each default of a
 public item, such as
-`generic default nvx::Result<E> = {"resolved_path":{"args":null,"path":"Error"}}`,
-which records the default type as its rustdoc JSON without item IDs. A change
-to a default then changes the snapshot too.
+`generic default nvx::Result<E> = {"resolved_path":{"args":null,"id":"nvx::Error","path":"Error"}}`,
+which records the default type as its rustdoc JSON, with each item ID, which
+changes between builds, replaced by the qualified path of the item. A change
+to a default, or to the type that its name resolves to, then changes the
+snapshot too.
 
 `NAME.txt` holds the items that every target of configuration `NAME` lists. A
 target that lists more, such as an API for Windows handles, gets

@@ -462,12 +462,13 @@ class GenericDefaultTests(unittest.TestCase):
                 "5": {"name": "Wide", "inner": {"struct": struct}},
                 "6": {"name": "Hidden", "inner": {"struct": struct}},
             },
+            "paths": {"9": {"crate_id": 0, "path": ["nvx", "error", "Error"]}},
         }
         self.assertEqual(
             gate.generic_defaults(document),
             [
                 'generic default nvx::Result<E> = {"resolved_path":{"args":null,'
-                '"path":"Error"}}',
+                '"id":"nvx::error::Error","path":"Error"}}',
                 'generic default nvx::Result<N> = "4"',
                 'generic default nvx::Wide<T> = {"primitive":"u8"}',
             ],
@@ -476,6 +477,47 @@ class GenericDefaultTests(unittest.TestCase):
         self.assertEqual(paths["0"], ["nvx"])
         self.assertNotIn("4", paths)
         self.assertNotIn("6", paths)
+
+    def test_defaults_record_the_item_that_their_name_resolves_to(self):
+        # A private import can make the same spelling name another type.
+        def default(identifier: int) -> list[str]:
+            reference = {"resolved_path": {"path": "Error", "id": identifier}}
+            kind = {"type": {"default": reference}}
+            struct = {"generics": {"params": [{"name": "T", "kind": kind}]}}
+            document: dict[str, object] = {
+                "root": 0,
+                "index": {
+                    "0": {"name": "nvx", "inner": {"module": {"items": [1, 2]}}},
+                    "1": {"name": "Pool", "inner": {"struct": struct}},
+                    "2": {"name": "Error", "inner": {"struct": {}}},
+                },
+                "paths": {
+                    "2": {"crate_id": 0, "path": ["nvx", "left", "Error"]},
+                    "7": {"crate_id": 3, "path": ["std", "io", "error", "Error"]},
+                },
+            }
+            return gate.generic_defaults(document)
+
+        self.assertEqual(
+            default(2),
+            [
+                'generic default nvx::Pool<T> = {"resolved_path":'
+                '{"id":"nvx::Error","path":"Error"}}'
+            ],
+        )
+        self.assertEqual(
+            default(7),
+            [
+                'generic default nvx::Pool<T> = {"resolved_path":'
+                '{"id":"std::io::error::Error","path":"Error"}}'
+            ],
+        )
+        self.assertEqual(
+            default(8),
+            [
+                'generic default nvx::Pool<T> = {"resolved_path":{"id":null,"path":"Error"}}'
+            ],
+        )
 
     def test_a_default_only_change_fails_the_check(self):
         cargo = FakeCargo()
