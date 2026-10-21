@@ -25,7 +25,10 @@
 //! The kernel creates a disk's partitions before its reread returns, but another program, such as
 //! a device manager that probes the disk, may make it drop and create them again at any time. The
 //! comparison therefore repeats, after pauses that grow from 1 ms to 50 ms, until the deadline,
-//! which also bounds a caller that waits for partitions that the kernel creates late.
+//! which also bounds a caller that waits for partitions that the kernel creates late. It reads
+//! each partition's description through one descriptor of the partition's sysfs directory, so
+//! that the description never combines a partition that the kernel dropped with the one that
+//! replaced it.
 //!
 //! The reread needs `CAP_SYS_ADMIN`, and fails while any partition of the disk is open, for
 //! example while a layer is mounted.
@@ -54,11 +57,12 @@ mod error;
 #[cfg(test)]
 mod tests;
 
-use std::ffi::{OsStr, OsString};
+use std::ffi::{CStr, OsStr, OsString};
 use std::fmt;
 use std::fs::{self, File};
-use std::io;
+use std::io::{self, Read};
 use std::os::fd::AsFd;
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{FileTypeExt, MetadataExt};
 use std::path::{Path, PathBuf};
 use std::thread;
@@ -67,7 +71,7 @@ use std::time::{Duration, Instant};
 pub use error::{DeviceError, DeviceOperation, Mismatch};
 
 use super::parse::parse_decimal;
-use super::sys::{self, Errno};
+use super::sys::{self, Errno, FileDescriptor, Mode, OpenFlags};
 use crate::gpt::{Disk, Expected, Partition};
 
 /// The first pause between two comparisons of the kernel's partitions with a table.
@@ -139,21 +143,19 @@ impl<'a> BlockDevice<'a> {
         };
         let number = DeviceNumber { major, minor };
         let directory = Path::new(sys::BLOCK_DEVICE_DIRECTORY).join(number.to_string());
-        // The disk's own description confirms that sysfs describes this device.
-        let path = directory.join("dev");
-        match read_device_number(&path)? {
+        // The disk's own description, read through one descriptor of its sysfs directory,
+        // confirms that sysfs describes this device, and that the device is a whole disk.
+        let absent = |path: &Path| DeviceError::sysfs(path, io::ErrorKind::NotFound.into());
+        let Some(description) = SysfsDirectory::open(directory.clone())? else {
+            return Err(absent(&directory));
+        };
+        match description.device_number(c"dev")? {
             Some(described) if described == number => {}
-            Some(_) => return Err(malformed(&path)),
-            None => {
-                let source = io::Error::from(io::ErrorKind::NotFound);
-                return Err(DeviceError::sysfs(&path, source));
-            }
+            Some(_) => return Err(malformed(&description.path_of(c"dev"))),
+            None => return Err(absent(&description.path_of(c"dev"))),
         }
-        let path = directory.join("partition");
-        match fs::metadata(&path) {
-            Ok(_) => return Err(DeviceError::NotWholeDisk),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            Err(source) => return Err(DeviceError::sysfs(&path, source)),
+        if description.attribute(c"partition")?.is_some() {
+            return Err(DeviceError::NotWholeDisk);
         }
         let logical_block_size = sys::logical_block_size(file.as_fd()).map_err(|errno| {
             DeviceError::device(DeviceOperation::LogicalBlockSize, errno.into())
@@ -385,21 +387,25 @@ fn wait_for_partitions(
 /// Reads the kernel's partitions of the disk whose sysfs directory is `directory`, in the order
 /// of their numbers.
 ///
-/// A partition that the kernel drops while this reads it is left out, as if the kernel had
-/// dropped it before.
+/// It reads each partition's attributes through one descriptor of the partition's directory, so
+/// that they all describe one partition, even when the kernel drops the partition and creates
+/// another under its name while they're read. A partition that the kernel drops while this reads
+/// it is left out, as if the kernel had dropped it before.
 fn observe_partitions(directory: &Path) -> Result<Vec<KernelPartition>, DeviceError> {
     let entries =
         fs::read_dir(directory).map_err(|source| DeviceError::sysfs(directory, source))?;
     let mut partitions = Vec::new();
     for entry in entries {
         let entry = entry.map_err(|source| DeviceError::sysfs(directory, source))?;
-        let path = entry.path();
         // Each partition has a directory, unlike the disk's attributes and links.
         let is_directory = entry
             .file_type()
-            .map_err(|source| DeviceError::sysfs(&path, source))?
+            .map_err(|source| DeviceError::sysfs(&entry.path(), source))?
             .is_dir();
-        if is_directory && let Some(partition) = read_partition(&path, entry.file_name())? {
+        if is_directory
+            && let Some(subdirectory) = SysfsDirectory::open(entry.path())?
+            && let Some(partition) = subdirectory.partition(entry.file_name())?
+        {
             partitions.push(partition);
         }
     }
@@ -407,91 +413,124 @@ fn observe_partitions(directory: &Path) -> Result<Vec<KernelPartition>, DeviceEr
     Ok(partitions)
 }
 
-/// Reads the partition named `name` whose sysfs directory is `directory`, or returns `None` if
-/// the directory describes no partition, as the disk's other directories do, or no longer
-/// exists.
-fn read_partition(
-    directory: &Path,
-    name: OsString,
-) -> Result<Option<KernelPartition>, DeviceError> {
-    let path = directory.join("partition");
-    let Some(number) = read_number(&path)? else {
-        return Ok(None);
-    };
-    let number = u8::try_from(number)
-        .ok()
-        .filter(|number| *number != 0)
-        .ok_or_else(|| malformed(&path))?;
-    let path = directory.join("start");
-    let Some(start) = read_number(&path)? else {
-        return Ok(None);
-    };
-    let start = start
-        .checked_mul(sys::SYSFS_SECTOR_SIZE)
-        .ok_or_else(|| malformed(&path))?;
-    let path = directory.join("size");
-    let Some(size) = read_number(&path)? else {
-        return Ok(None);
-    };
-    let size = size
-        .checked_mul(sys::SYSFS_SECTOR_SIZE)
-        .ok_or_else(|| malformed(&path))?;
-    let Some(device_number) = read_device_number(&directory.join("dev"))? else {
-        return Ok(None);
-    };
-    Ok(Some(KernelPartition {
-        number,
-        name,
-        device_number,
-        start,
-        size,
-    }))
+/// The sysfs directory of a disk or of one of its partitions, open, so that every attribute read
+/// through it describes the same device: once the kernel drops the device, even to create another
+/// under the same name, the directory holds no attributes.
+struct SysfsDirectory {
+    /// The open directory.
+    descriptor: FileDescriptor,
+    /// The directory's path, which errors name.
+    path: PathBuf,
 }
 
-/// Reads the device number, `MAJOR:MINOR`, that the sysfs attribute at `path` holds, or returns
-/// `None` if the attribute no longer exists.
-fn read_device_number(path: &Path) -> Result<Option<DeviceNumber>, DeviceError> {
-    let Some(text) = read_attribute(path)? else {
-        return Ok(None);
-    };
-    let number = |text: &[u8]| parse_decimal(text).and_then(|number| u32::try_from(number).ok());
-    let mut parts = text.splitn(2, |byte| *byte == b':');
-    match (parts.next().and_then(number), parts.next().and_then(number)) {
-        (Some(major), Some(minor)) => Ok(Some(DeviceNumber { major, minor })),
-        _ => Err(malformed(path)),
+impl SysfsDirectory {
+    /// Opens the directory at `path`, or returns `None` if it doesn't exist.
+    fn open(path: PathBuf) -> Result<Option<Self>, DeviceError> {
+        let name =
+            sys::path_c_string(&path).map_err(|errno| DeviceError::sysfs(&path, errno.into()))?;
+        let flags = OpenFlags::O_RDONLY | OpenFlags::O_DIRECTORY | OpenFlags::O_CLOEXEC;
+        match sys::open(&name, flags, Mode::empty()) {
+            Ok(descriptor) => Ok(Some(Self { descriptor, path })),
+            Err(Errno::ENOENT | Errno::ENODEV) => Ok(None),
+            Err(errno) => Err(DeviceError::sysfs(&path, errno.into())),
+        }
     }
-}
 
-/// Reads the decimal number that the sysfs attribute at `path` holds, or returns `None` if the
-/// attribute no longer exists.
-fn read_number(path: &Path) -> Result<Option<u64>, DeviceError> {
-    let Some(text) = read_attribute(path)? else {
-        return Ok(None);
-    };
-    parse_decimal(&text)
-        .map(Some)
-        .ok_or_else(|| malformed(path))
-}
+    /// Returns the path of the attribute `name`, which errors name.
+    fn path_of(&self, name: &CStr) -> PathBuf {
+        self.path.join(OsStr::from_bytes(name.to_bytes()))
+    }
 
-/// Reads the value of the sysfs attribute at `path`, the one line that the kernel writes, without
-/// its newline, or returns `None` if the attribute no longer exists.
-fn read_attribute(path: &Path) -> Result<Option<Vec<u8>>, DeviceError> {
-    match fs::read(path) {
-        Ok(mut text) => {
-            if text.pop() != Some(b'\n') || text.contains(&b'\n') {
-                return Err(malformed(path));
-            }
-            Ok(Some(text))
+    /// Reads the partition that the directory describes, named `name`, or returns `None` if the
+    /// directory describes no partition, as the disk's other directories do, or the kernel
+    /// dropped it.
+    fn partition(&self, name: OsString) -> Result<Option<KernelPartition>, DeviceError> {
+        let Some(number) = self.number(c"partition")? else {
+            return Ok(None);
+        };
+        let number = u8::try_from(number)
+            .ok()
+            .filter(|number| *number != 0)
+            .ok_or_else(|| malformed(&self.path_of(c"partition")))?;
+        let Some(start) = self.bytes(c"start")? else {
+            return Ok(None);
+        };
+        let Some(size) = self.bytes(c"size")? else {
+            return Ok(None);
+        };
+        let Some(device_number) = self.device_number(c"dev")? else {
+            return Ok(None);
+        };
+        Ok(Some(KernelPartition {
+            number,
+            name,
+            device_number,
+            start,
+            size,
+        }))
+    }
+
+    /// Reads the number of 512-byte sectors that the attribute `name` holds, as sysfs counts a
+    /// partition's start and size whatever the disk's logical block size, and returns it in
+    /// bytes, or returns `None` if the attribute doesn't exist.
+    fn bytes(&self, name: &CStr) -> Result<Option<u64>, DeviceError> {
+        let Some(sectors) = self.number(name)? else {
+            return Ok(None);
+        };
+        sectors
+            .checked_mul(sys::SYSFS_SECTOR_SIZE)
+            .map(Some)
+            .ok_or_else(|| malformed(&self.path_of(name)))
+    }
+
+    /// Reads the device number, `MAJOR:MINOR`, that the attribute `name` holds, or returns
+    /// `None` if the attribute doesn't exist.
+    fn device_number(&self, name: &CStr) -> Result<Option<DeviceNumber>, DeviceError> {
+        let Some(text) = self.attribute(name)? else {
+            return Ok(None);
+        };
+        let number =
+            |text: &[u8]| parse_decimal(text).and_then(|number| u32::try_from(number).ok());
+        let mut parts = text.splitn(2, |byte| *byte == b':');
+        match (parts.next().and_then(number), parts.next().and_then(number)) {
+            (Some(major), Some(minor)) => Ok(Some(DeviceNumber { major, minor })),
+            _ => Err(malformed(&self.path_of(name))),
         }
-        // Opening an attribute of a device that the kernel dropped fails with `ENOENT`, and
-        // reading one that it dropped after the open with `ENODEV`.
-        Err(error)
-            if error.kind() == io::ErrorKind::NotFound
-                || error.raw_os_error() == Some(Errno::ENODEV as i32) =>
-        {
-            Ok(None)
+    }
+
+    /// Reads the decimal number that the attribute `name` holds, or returns `None` if the
+    /// attribute doesn't exist.
+    fn number(&self, name: &CStr) -> Result<Option<u64>, DeviceError> {
+        let Some(text) = self.attribute(name)? else {
+            return Ok(None);
+        };
+        parse_decimal(&text)
+            .map(Some)
+            .ok_or_else(|| malformed(&self.path_of(name)))
+    }
+
+    /// Reads the value of the attribute `name`, the one line that the kernel writes, without its
+    /// newline, or returns `None` if the attribute doesn't exist.
+    fn attribute(&self, name: &CStr) -> Result<Option<Vec<u8>>, DeviceError> {
+        let flags = OpenFlags::O_RDONLY | OpenFlags::O_CLOEXEC;
+        // Opening an attribute of a device that the kernel dropped fails with `ENOENT`, or with
+        // `ENODEV` while the kernel drops it, and reading one that it dropped after the open
+        // fails with `ENODEV`.
+        let mut file = match sys::open_at(&self.descriptor, name, flags, Mode::empty()) {
+            Ok(file) => file,
+            Err(Errno::ENOENT | Errno::ENODEV) => return Ok(None),
+            Err(errno) => return Err(DeviceError::sysfs(&self.path_of(name), errno.into())),
+        };
+        let mut text = Vec::new();
+        match file.read_to_end(&mut text) {
+            Ok(_) => {}
+            Err(error) if error.raw_os_error() == Some(Errno::ENODEV as i32) => return Ok(None),
+            Err(source) => return Err(DeviceError::sysfs(&self.path_of(name), source)),
         }
-        Err(source) => Err(DeviceError::sysfs(path, source)),
+        if text.pop() != Some(b'\n') || text.contains(&b'\n') {
+            return Err(malformed(&self.path_of(name)));
+        }
+        Ok(Some(text))
     }
 }
 

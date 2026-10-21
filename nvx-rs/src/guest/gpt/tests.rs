@@ -257,6 +257,36 @@ fn partitions_that_vanish_while_read_are_left_out() {
 }
 
 #[test]
+fn a_partition_that_the_kernel_creates_again_is_never_read_in_parts() {
+    let disk = disk_directory();
+    partition_directory(disk.path(), 1, 34, 1);
+    partition_directory(disk.path(), 3, 43, 16);
+    // The table's p2 runs from sector 35 for 8 sectors. The kernel's first p2 starts there but is
+    // shorter, and the p2 that replaces it has that size but starts later, so a start read from
+    // the first and a size read from the second would match the table.
+    let path = partition_directory(disk.path(), 2, 35, 4);
+    let directory = SysfsDirectory::open(path.clone()).unwrap().unwrap();
+    assert_eq!(directory.bytes(c"start").unwrap(), Some(35 * 512));
+    fs::remove_dir_all(&path).unwrap();
+    partition_directory(disk.path(), 2, 36, 8);
+    assert_eq!(directory.bytes(c"size").unwrap(), None);
+    assert_eq!(directory.partition(OsString::from("vda2")).unwrap(), None);
+    // A new observation reads the second p2 whole, and it differs from the table.
+    let observed = observe_partitions(disk.path()).unwrap();
+    assert_eq!(observed[1], kernel(2, 36 * 512, 8 * 512));
+    assert_eq!(
+        compare(&standard_disk(), &observed).unwrap_err(),
+        Mismatch::Extent {
+            number: 2,
+            start: 36 * 512,
+            size: 8 * 512,
+            expected_start: 35 * 512,
+            expected_size: 8 * 512,
+        }
+    );
+}
+
+#[test]
 fn attributes_in_other_forms_than_the_kernel_writes_fail() {
     for (name, value) in [
         ("partition", "0\n"),
