@@ -103,10 +103,11 @@ pub(crate) fn reap(workload: &mut Execution) {
     }
 }
 
-/// Collects the status of every child that has ended once the workload's status is known, when
-/// every child left is an orphaned descendant. Like the C agent's loop, it stops once no ended
+/// Collects the status of every child that has ended, when every child left is an orphaned
+/// descendant, or a daemon that the PID 1 agent inherited: once the workload's status is known,
+/// and between requests, when no workload runs. Like the C agent's loop, it stops once no ended
 /// child is left to collect, and has no failure to report.
-fn reap_orphans() {
+pub(super) fn reap_orphans() {
     while sys::reap_any_nonblocking().is_some() {}
 }
 

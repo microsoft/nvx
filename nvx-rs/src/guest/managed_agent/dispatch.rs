@@ -8,7 +8,7 @@ use super::diagnostics;
 use super::mappings::{HostMappings, MappingError};
 use super::seam::System;
 use super::session::{Event, ReceiveFailure, Session};
-use super::{AgentConfig, exec, tty};
+use super::{AgentConfig, exec, idle, tty};
 
 /// Terminal outcome of the long-lived dispatch loop.
 #[derive(Debug)]
@@ -26,6 +26,7 @@ pub(crate) fn run(
 ) -> Result<Outcome, Errno> {
     session.send_attach()?;
     loop {
+        idle::wait_for_request(session);
         let payload = match session.next_event() {
             Ok(Event::Reset) => {
                 session.acknowledge().inspect_err(|error| {

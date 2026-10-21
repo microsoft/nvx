@@ -46,6 +46,9 @@
 //! when it ends its workload, and the sandbox agent places each launcher in the `container`
 //! cgroup that the init agent prepared, and ends only the workload's process group.
 //!
+//! Between requests no workload runs, and an agent that is PID 1 collects the status of every
+//! child that ends while it waits for the next one, such as a daemon that `/init` started.
+//!
 //! Linux arguments, paths, and environment strings are bytes, not necessarily UTF-8, so the
 //! protocol's guest `EXEC` and `MAPS` decoders accept what the C guest accepts. The boot contract
 //! is one `nvx_maps=COUNT` token from 1 through 4096, and retired `nvx_map=` tokens are ignored.
@@ -71,6 +74,8 @@ mod exec;
 mod exec_config;
 /// Short-lived post-privilege-drop helper mode.
 mod helper;
+/// The wait between requests, in which PID 1 collects the children that end.
+mod idle;
 /// Direct and sandbox launch commands.
 mod launch;
 #[cfg(all(test, feature = "host"))]
