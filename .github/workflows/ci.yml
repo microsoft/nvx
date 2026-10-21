@@ -609,6 +609,54 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
+  # The test-only programs that the microVM guest library scenarios, such as
+  # gpt-device, share into an Alpine guest rather than grow its initramfs.
+  # Beside the guest artifacts, so that their build delays only the microVM
+  # guest and sandbox jobs, which run them.
+  guest-test-programs:
+    name: Build guest test programs
+    needs: [openvmm-changes]
+    if: >-
+      ${{
+        always() &&
+        !cancelled() &&
+        (
+          github.event_name != 'pull_request' ||
+          github.event.pull_request.draft == false
+        ) &&
+        (
+          needs.openvmm-changes.result != 'success' ||
+          needs.openvmm-changes.outputs.run-guest-artifacts == 'true'
+        )
+      }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - name: Build guest test programs
+        shell: bash
+        run: |
+          set -euo pipefail
+          toolchain=$(sed -n 's/^channel = "\([^"]*\)".*/\1/p' rust-toolchain.toml)
+          test -n "${toolchain}"
+          rustup toolchain install "${toolchain}" --profile minimal --no-self-update \
+            --target x86_64-unknown-linux-musl
+          python3 scripts/nvx.py build-guest-tests --output build/guest-tests
+
+      # A one-file artifact keeps its file at its root, so the jobs that run
+      # the programs download it into build/guest-tests.
+      - name: Upload guest test programs
+        uses: actions/upload-artifact@v7
+        with:
+          name: guest-test-programs
+          path: build/guest-tests/gpt-device
+          if-no-files-found: error
+          retention-days: 1
+
   build-openvmm-linux-gnu:
     name: OpenVMM binary / Linux GNU
     needs: [openvmm-changes]
@@ -1444,11 +1492,12 @@ jobs:
   # The steps that follow each backend's default suite, from the public
   # managed sandbox acceptance to the runtime adapter scenarios, depend on
   # none of its results, so a second job runs them beside it, on the same
-  # runner pool. They alone read the Ubuntu and Azure Linux artifacts, so
-  # only this job waits for distro-artifacts.
+  # runner pool. They alone read the Ubuntu and Azure Linux artifacts and the
+  # guest test programs, so only this job waits for distro-artifacts and
+  # guest-test-programs.
   nvx-microvm-guests-kvm:
     name: NVX microVM tests / Linux / KVM / Guests and sandboxes
-    needs: [artifacts, distro-artifacts, build-openvmm-linux-gnu, nvx-cli-linux, openvmm-changes]
+    needs: [artifacts, distro-artifacts, guest-test-programs, build-openvmm-linux-gnu, nvx-cli-linux, openvmm-changes]
     if: >-
       ${{
         always() &&
@@ -1463,6 +1512,7 @@ jobs:
         ) &&
         needs.artifacts.result == 'success' &&
         needs.distro-artifacts.result == 'success' &&
+        needs.guest-test-programs.result == 'success' &&
         needs.build-openvmm-linux-gnu.result == 'success' &&
         needs.nvx-cli-linux.result == 'success' &&
         (
@@ -1483,7 +1533,7 @@ jobs:
 
   nvx-microvm-guests-mshv:
     name: NVX microVM tests / Linux / MSHV / Guests and sandboxes
-    needs: [artifacts, distro-artifacts, build-openvmm-linux-gnu, nvx-cli-linux, openvmm-changes]
+    needs: [artifacts, distro-artifacts, guest-test-programs, build-openvmm-linux-gnu, nvx-cli-linux, openvmm-changes]
     if: >-
       ${{
         always() &&
@@ -1498,6 +1548,7 @@ jobs:
         ) &&
         needs.artifacts.result == 'success' &&
         needs.distro-artifacts.result == 'success' &&
+        needs.guest-test-programs.result == 'success' &&
         needs.build-openvmm-linux-gnu.result == 'success' &&
         needs.nvx-cli-linux.result == 'success' &&
         (
@@ -1518,7 +1569,7 @@ jobs:
 
   nvx-microvm-guests-whp:
     name: NVX microVM tests / Windows / WHP / Guests and sandboxes
-    needs: [artifacts, distro-artifacts, build-openvmm-windows-msvc, nvx-cli-windows, openvmm-changes]
+    needs: [artifacts, distro-artifacts, guest-test-programs, build-openvmm-windows-msvc, nvx-cli-windows, openvmm-changes]
     if: >-
       ${{
         always() &&
@@ -1533,6 +1584,7 @@ jobs:
         ) &&
         needs.artifacts.result == 'success' &&
         needs.distro-artifacts.result == 'success' &&
+        needs.guest-test-programs.result == 'success' &&
         needs.build-openvmm-windows-msvc.result == 'success' &&
         needs.nvx-cli-windows.result == 'success' &&
         (
@@ -1780,6 +1832,7 @@ jobs:
     name: Publish development release
     needs:
       - debug-kernel
+      - guest-test-programs
       - quality
       - aci-edge-sandboxes
       - nvx-rs
@@ -1811,6 +1864,7 @@ jobs:
         github.ref == 'refs/heads/dev' &&
         !cancelled() &&
         needs.debug-kernel.result == 'success' &&
+        needs.guest-test-programs.result == 'success' &&
         needs.quality.result == 'success' &&
         needs.aci-edge-sandboxes.result == 'success' &&
         needs.nvx-rs.result == 'success' &&
@@ -1930,6 +1984,7 @@ jobs:
       - distro-artifacts
       - debug-kernel
       - guest-artifact-reuse
+      - guest-test-programs
       - build-openvmm-linux-gnu
       - build-openvmm-linux-musl
       - build-openvmm-windows-msvc
@@ -1984,6 +2039,7 @@ jobs:
           DISTRO_ARTIFACTS_RESULT: ${{ needs.distro-artifacts.result }}
           DEBUG_KERNEL_RESULT: ${{ needs.debug-kernel.result }}
           GUEST_ARTIFACT_REUSE_RESULT: ${{ needs.guest-artifact-reuse.result }}
+          GUEST_TEST_PROGRAMS_RESULT: ${{ needs.guest-test-programs.result }}
           BUILD_LINUX_GNU_RESULT: ${{ needs.build-openvmm-linux-gnu.result }}
           BUILD_LINUX_MUSL_RESULT: ${{ needs.build-openvmm-linux-musl.result }}
           BUILD_WINDOWS_MSVC_RESULT: ${{ needs.build-openvmm-windows-msvc.result }}
@@ -2019,6 +2075,7 @@ jobs:
     name: Persist performance baseline
     needs:
       - debug-kernel
+      - guest-test-programs
       - nvx-cli-linux
       - nvx-cli-windows
       - openvmm-changes
@@ -2047,6 +2104,7 @@ jobs:
         github.ref == 'refs/heads/dev' &&
         !cancelled() &&
         needs.debug-kernel.result == 'success' &&
+        needs.guest-test-programs.result == 'success' &&
         needs.nvx-cli-linux.result == 'success' &&
         needs.nvx-cli-windows.result == 'success' &&
         (

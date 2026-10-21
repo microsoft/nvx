@@ -54,6 +54,7 @@ from nvx_tools import (  # noqa: E402
     elf,
     guest_artifact_reuse,
     guest_binaries,
+    guest_test_programs,
     guests,
     microvm_durations,
     microvm_shards,
@@ -76,6 +77,7 @@ from nvx_tools.build_constants import (  # noqa: E402
     ZstdBuildConstants,
 )
 from nvx_tools.microvm_tests import (  # noqa: E402
+    GUEST_TEST_PROGRAM_SCENARIOS,
     MICROVM_PROCESSOR_COUNTS,
     PUBLIC_SANDBOX_SCENARIOS,
     default_suite,
@@ -6030,19 +6032,23 @@ class CiConfigurationTests(unittest.TestCase):
                 AzureLinuxBuildConstants.PACKAGE_MANIFEST_NAME,
             },
             "guest-debug-kernel": set(DockerBuildConstants.DEBUG_KERNEL_ARTIFACT_NAMES),
+            "guest-test-programs": set(guest_test_programs.GUEST_TEST_PROGRAMS),
         }
         guest_files = set[str]().union(*components.values())
-        # Every file that the guest builds produce is handed over.
+        # Every file that the guest builds produce is handed over, and so is
+        # every test-only guest program.
         self.assertEqual(
             guest_files,
             {
                 *DockerBuildConstants.ALL_GUEST_ARTIFACT_NAMES,
                 *DockerBuildConstants.DEBUG_KERNEL_ARTIFACT_NAMES,
                 scratch,
+                *guest_test_programs.GUEST_TEST_PROGRAMS,
             },
         )
 
         producers: dict[str, str] = {}
+        roots: dict[str, str] = {}
         for job_name, job in jobs.items():
             for step in job.get("steps", []):
                 arguments = step.get("with", {})
@@ -6060,6 +6066,11 @@ class CiConfigurationTests(unittest.TestCase):
                         {PurePosixPath(path).name for path in paths}, components[name]
                     )
                     self.assertEqual(arguments["if-no-files-found"], "error")
+                    # An artifact holds the files of one directory at its root,
+                    # so a job downloads it into that directory.
+                    directories = {str(PurePosixPath(path).parent) for path in paths}
+                    self.assertEqual(len(directories), 1, paths)
+                    roots[name] = directories.pop()
         self.assertEqual(set(producers), set(components))
         # Each guest artifact job builds exactly the components that it
         # uploads, and no component builds in two jobs.
@@ -6175,6 +6186,8 @@ class CiConfigurationTests(unittest.TestCase):
                     scenarios = set(re.findall(r"--scenario (\S+)", script))
                     if scenarios & PUBLIC_SANDBOX_SCENARIOS:
                         files |= workload
+                    # A guest library scenario runs the program of its name.
+                    files |= scenarios & GUEST_TEST_PROGRAM_SCENARIOS
                 else:
                     self.assertIn(command, commands)
                     files |= commands[command]
@@ -6220,7 +6233,8 @@ class CiConfigurationTests(unittest.TestCase):
                     "guest-"
                 ):
                     self.assertNotIn("pattern", arguments)
-                    self.assertEqual(arguments["path"], "build")
+                    self.assertIn(arguments["name"], roots)
+                    self.assertEqual(arguments["path"], roots[arguments["name"]])
                     if holds(step.get("if"), context):
                         downloads.add(arguments["name"])
             if not downloads:
@@ -6537,6 +6551,7 @@ class CiConfigurationTests(unittest.TestCase):
             ci.REQUIRED_CI_ARTIFACT_JOB,
             ci.REQUIRED_CI_DISTRO_ARTIFACT_JOB,
             ci.REQUIRED_CI_DEBUG_KERNEL_JOB,
+            ci.REQUIRED_CI_GUEST_TEST_PROGRAM_JOB,
         }
         platforms = set(ci.REQUIRED_CI_PLATFORM_JOBS)
         # A same-repository pull request that builds the guest artifacts also
@@ -6803,6 +6818,7 @@ class CiConfigurationTests(unittest.TestCase):
             ci.REQUIRED_CI_DISTRO_ARTIFACT_JOB: "run-guest-artifacts",
             ci.REQUIRED_CI_DEBUG_KERNEL_JOB: "run-guest-artifacts",
             ci.REQUIRED_CI_GUEST_ARTIFACT_REUSE_JOB: "run-guest-artifacts",
+            ci.REQUIRED_CI_GUEST_TEST_PROGRAM_JOB: "run-guest-artifacts",
             **dict.fromkeys(ci.REQUIRED_CI_BUILD_JOBS, "run-openvmm-binaries"),
             **dict.fromkeys(ci.REQUIRED_CI_OPENVMM_TEST_JOBS, "run-openvmm-unit-tests"),
             **dict.fromkeys(
@@ -7602,6 +7618,7 @@ class CiConfigurationTests(unittest.TestCase):
                 ci.REQUIRED_CI_ARTIFACT_JOB,
                 ci.REQUIRED_CI_DISTRO_ARTIFACT_JOB,
                 ci.REQUIRED_CI_DEBUG_KERNEL_JOB,
+                ci.REQUIRED_CI_GUEST_TEST_PROGRAM_JOB,
                 *ci.REQUIRED_CI_BUILD_JOBS,
             )
             | nvx_rs_inputs
@@ -8557,10 +8574,14 @@ python3() {
                 # Only the jobs that boot the Ubuntu or Azure Linux images wait
                 # for them: the default suites boot the kernel and the Alpine
                 # initramfs alone, and the debug-kernel jobs the debug kernel.
+                # Of those, only the guest and sandbox jobs run the guest test
+                # programs, so only they wait for them.
                 if job_name.startswith("nvx-microvm-debug-"):
                     guest_producer = "debug-kernel, "
                 elif job_name.startswith("nvx-microvm-tests-"):
                     guest_producer = ""
+                elif job_name.startswith("nvx-microvm-guests-"):
+                    guest_producer = "distro-artifacts, guest-test-programs, "
                 else:
                     guest_producer = "distro-artifacts, "
                 cli = (
@@ -8599,10 +8620,11 @@ python3() {
         self.assertEqual(build_workflow.count("overwrite: true"), 2)
         self.assertEqual(build_workflow.count("retention-days: 1"), 2)
         # The microVM workflow also downloads nvx-rs, which the benchmarks
-        # don't run, and the Ubuntu sandbox scratch template and the debug
-        # kernel, which the platform jobs don't read.
+        # don't run, and the Ubuntu sandbox scratch template, the debug
+        # kernel, and the guest test programs, which the platform jobs don't
+        # read.
         for consumer_workflow, download_count in (
-            (microvm_workflow, 10),
+            (microvm_workflow, 11),
             (platform_workflow, 7),
         ):
             self.assertIn("path: openvmm/target/release", consumer_workflow)
@@ -9233,7 +9255,8 @@ python3() {
         # The artifacts that reuse downloads for each component are those in
         # which the job that builds it hands its files over, and together they
         # hold every file of the component; the scratch template, which every
-        # run formats anew, is in none.
+        # run formats anew, is in none, and neither are the debug kernel and
+        # the guest test programs, which no package ships.
         github = BuildConstants.REPO_ROOT / ".github"
         workflow = yaml.safe_load(
             (github / "workflows" / "ci.yml").read_text(encoding="utf-8")
@@ -9264,7 +9287,7 @@ python3() {
                 )
         self.assertEqual(
             set(uploads) - handed_over,
-            {"guest-ubuntu-scratch", "guest-debug-kernel"},
+            {"guest-ubuntu-scratch", "guest-debug-kernel", "guest-test-programs"},
         )
 
     def test_ci_runs_debug_kernel_on_kvm_for_prs_and_all_for_non_prs(self):
@@ -9379,10 +9402,10 @@ python3() {
         # after its ten-minute default suite. Each backend now runs them in a
         # second job beside the suite, on the same runner pool and with the
         # same OpenVMM and nvx-rs builds. Of the two, only that job reads the
-        # Ubuntu and Azure Linux artifacts, so only it downloads and waits for
-        # them. Together, the two jobs run every step of the former single job
-        # exactly once, and the debug-kernel jobs, which never set the
-        # selector, run as before.
+        # Ubuntu and Azure Linux artifacts and the guest test programs, so only
+        # it downloads and waits for them. Together, the two jobs run every
+        # step of the former single job exactly once, and the debug-kernel
+        # jobs, which never set the selector, run as before.
         workflows = BuildConstants.REPO_ROOT / ".github" / "workflows"
         jobs = yaml.safe_load((workflows / "ci.yml").read_text(encoding="utf-8"))[
             "jobs"
@@ -9423,9 +9446,11 @@ python3() {
                 )
                 self.assertEqual(suite["needs"][0], "artifacts")
                 self.assertNotIn("distro-artifacts", suite["needs"])
+                self.assertNotIn("guest-test-programs", suite["needs"])
                 # The guest and sandbox job also waits for the Ubuntu and Azure
-                # Linux artifacts, and otherwise equals the suite's job but for
-                # its name, the selector, and the suite's shards
+                # Linux artifacts and the guest test programs, and otherwise
+                # equals the suite's job but for its name, the selector, and the
+                # suite's shards
                 # (test_ci_runs_each_default_microvm_suite_in_its_shards).
                 conjuncts = _expression_conjuncts(suite["if"])
                 after = conjuncts.index("needs.artifacts.result == 'success'") + 1
@@ -9442,10 +9467,16 @@ python3() {
                     unsharded
                     | {
                         "name": f"NVX microVM tests / {name}",
-                        "needs": ["artifacts", "distro-artifacts", *suite["needs"][1:]],
+                        "needs": [
+                            "artifacts",
+                            "distro-artifacts",
+                            "guest-test-programs",
+                            *suite["needs"][1:],
+                        ],
                         "if": [
                             *conjuncts[:after],
                             "needs.distro-artifacts.result == 'success'",
+                            "needs.guest-test-programs.result == 'success'",
                             *conjuncts[after:],
                         ],
                         "with": inputs
@@ -9537,6 +9568,7 @@ python3() {
                 )
                 for step_name in (
                     f"Run public managed sandbox acceptance on {system}",
+                    f"Run guest library scenarios on {system}",
                     f"Run Ubuntu guest smoke tests on {system}",
                     f"Run Azure Linux guest smoke tests on {system}",
                     f"Run Ubuntu sandbox layer smoke test on {system}",
@@ -11782,6 +11814,76 @@ Write-Output (Get-BenchmarkScratchDirectory)
             artifacts,
         )
         self.assertEqual(len(artifacts), 2 * legs)
+
+    def test_ci_runs_the_guest_library_scenarios_on_every_backend(self):
+        # A GitHub-hosted job builds the test-only guest programs beside the
+        # guest artifacts, under the same condition, and the microVM guest and
+        # sandbox job of every backend, Windows' too, downloads them into
+        # build/guest-tests, where test-microvm looks for them
+        # (test_ci_jobs_download_exactly_the_guest_artifacts_that_they_read),
+        # and runs every guest library scenario with them.
+        workflows = BuildConstants.REPO_ROOT / ".github" / "workflows"
+        workflow = (workflows / "ci.yml").read_text(encoding="utf-8")
+        microvm_workflow = (workflows / "run-nvx-microvm-tests.yml").read_text(
+            encoding="utf-8"
+        )
+        producer = ci.REQUIRED_CI_GUEST_TEST_PROGRAM_JOB
+        job = _workflow_job(workflow, producer)
+
+        def condition(definition: str) -> str:
+            return definition[
+                definition.index("    if: >-\n") : definition.index("    runs-on:")
+            ]
+
+        self.assertIn("    needs: [openvmm-changes]\n", job)
+        self.assertIn("    runs-on: ubuntu-latest\n", job)
+        self.assertEqual(
+            condition(job), condition(_workflow_job(workflow, "artifacts"))
+        )
+        build = _workflow_step(workflow, producer, "Build guest test programs")
+        self.assertIn("--target x86_64-unknown-linux-musl", build)
+        self.assertIn(
+            "python3 scripts/nvx.py build-guest-tests --output build/guest-tests", build
+        )
+        self.assertEqual(
+            guest_test_programs.OUTPUT_DIRECTORY,
+            BuildConstants.BUILD_DIR / "guest-tests",
+        )
+        self.assertIn(
+            "name: guest-test-programs\n",
+            _workflow_step(workflow, producer, "Upload guest test programs"),
+        )
+        # The release and the performance persistence accept skipped microVM
+        # jobs, so they require the build themselves, as they do the debug
+        # kernel's.
+        for consumer in ("release", "performance-persist"):
+            with self.subTest(consumer=consumer):
+                definition = _workflow_job(workflow, consumer)
+                self.assertIn(f"      - {producer}\n", definition)
+                self.assertIn(f"needs.{producer}.result == 'success' &&", definition)
+        for system in ("Linux", "Windows"):
+            with self.subTest(system=system):
+                scenarios = _workflow_step(
+                    microvm_workflow,
+                    "test",
+                    f"Run guest library scenarios on {system}",
+                )
+                self.assertIn(
+                    "inputs.guests-and-sandboxes && !inputs.debug-kernel", scenarios
+                )
+                self.assertEqual(
+                    set(re.findall(r"--scenario (\S+)", scenarios)),
+                    GUEST_TEST_PROGRAM_SCENARIOS,
+                )
+                self.assertIn(
+                    '--output-dir "build/test-results/guest-library-'
+                    '${{ inputs.backend }}"',
+                    scenarios,
+                )
+        logs = _workflow_step(
+            microvm_workflow, "test", "Upload NVX microVM failure logs"
+        )
+        self.assertIn("build/test-results/guest-library-${{ inputs.backend }}", logs)
 
     @unittest.skipUnless(os.name == "nt", "requires Windows PowerShell")
     def test_windows_cli_validation_stops_at_each_failed_command(self):

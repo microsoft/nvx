@@ -5,8 +5,9 @@
 //! accounts, kills, and settles the processes of its executions; [`mappings`], through which it
 //! bind-mounts host mappings below the roots that it names; [`exec`], which drives each program
 //! as one execution, with its launch, its bounded output and input, its ending, and its outcome;
-//! and [`root`], through which it bootstraps the guest for a layered root, assembles the root,
-//! mounts live shares in it, and tears it down.
+//! [`root`], through which it bootstraps the guest for a layered root, assembles the root, mounts
+//! live shares in it, and tears it down; and [`gpt`], which validates a GPT disk that the kernel
+//! attached as a block device against the partitions that the kernel created from its table.
 //!
 //! Each other module holds one program, and the crate's binary of the same name runs its `main`.
 //! Two of them also offer their steps as typed calls, which any guest init or agent runs in its
@@ -83,6 +84,7 @@ pub mod device_io;
 pub mod exec;
 #[cfg(target_arch = "x86_64")]
 pub mod exit;
+pub mod gpt;
 pub mod ingress;
 pub mod managed_agent;
 pub mod mappings;

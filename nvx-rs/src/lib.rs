@@ -32,11 +32,12 @@
 //!   each child that it names (`guest::process`), places, kills, and settles the processes of
 //!   its executions in cgroups (`guest::cgroup`), bind-mounts host mappings below the roots that
 //!   it names (`guest::mappings`), drives each program as one execution, with its launch, bounded
-//!   output, input, ending, and outcome (`guest::exec`), and bootstraps the guest for a layered
-//!   root, assembles the root, mounts live shares in it, and tears it down (`guest::root`), and
-//!   the typed calls through which it runs the time ABI's steps (`guest::time`) and reseeds after
-//!   a restore (`guest::reseed`) in its own process. The crate's `nvx-*` guest binaries run the
-//!   programs.
+//!   output, input, ending, and outcome (`guest::exec`), bootstraps the guest for a layered root,
+//!   assembles the root, mounts live shares in it, and tears it down (`guest::root`), and
+//!   validates a GPT disk's block device against the partitions that the kernel created from its
+//!   table (`guest::gpt`), and the typed calls through which it runs the time ABI's steps
+//!   (`guest::time`) and reseeds after a restore (`guest::reseed`) in its own process. The
+//!   crate's `nvx-*` guest binaries run the programs.
 //!
 //! # Example
 //!

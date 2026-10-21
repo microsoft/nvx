@@ -70,6 +70,7 @@ REQUIRED_CI_RESULT_ENVIRONMENTS = {
     "distro-artifacts": "DISTRO_ARTIFACTS_RESULT",
     "debug-kernel": "DEBUG_KERNEL_RESULT",
     "guest-artifact-reuse": "GUEST_ARTIFACT_REUSE_RESULT",
+    "guest-test-programs": "GUEST_TEST_PROGRAMS_RESULT",
     "build-openvmm-linux-gnu": "BUILD_LINUX_GNU_RESULT",
     "build-openvmm-linux-musl": "BUILD_LINUX_MUSL_RESULT",
     "build-openvmm-windows-msvc": "BUILD_WINDOWS_MSVC_RESULT",
@@ -137,6 +138,10 @@ REQUIRED_CI_DEBUG_KERNEL_JOB = "debug-kernel"
 # request, whose artifacts it checks as the dev push that merges it would
 # before it reuses them; only the required status check waits for it.
 REQUIRED_CI_GUEST_ARTIFACT_REUSE_JOB = "guest-artifact-reuse"
+# GitHub-hosted, beside the guest artifacts, under the same condition; only the
+# microVM guest and sandbox jobs, which run the test-only guest programs, wait
+# for it.
+REQUIRED_CI_GUEST_TEST_PROGRAM_JOB = "guest-test-programs"
 REQUIRED_CI_PLATFORM_JOBS = (
     "platform-kvm",
     "platform-mshv",
@@ -205,8 +210,9 @@ BENCHMARK_INPUT_PATHS = re.compile(
     r"scripts/nvx\.py$|"
     r"scripts/nvx_tools/(?!(aci_edge_sandboxes_tests|adversarial|"
     r"adversarial_broker|adversarial_executor|agent_bundling_tests|"
-    r"create_linux_source_archive|managed_exec_tests|microvm_shards|"
-    r"microvm_tests|openvmm_process|sandbox|sandbox_lifecycle_tests)\.py$|"
+    r"create_linux_source_archive|gpt_image|guest_test_programs|"
+    r"managed_exec_tests|microvm_shards|microvm_tests|openvmm_process|"
+    r"sandbox|sandbox_lifecycle_tests)\.py$|"
     r"microvm_shards\.json$|adversarial_cases/|microvm_test_scripts/))"
 )
 # Inputs of the OpenVMM unit and documentation tests: the pinned revision, the
@@ -474,6 +480,9 @@ def required_ci_expected_results(
             "success"
             if event_name == "pull_request" and same_repository and run_guest_artifacts
             else "skipped"
+        ),
+        REQUIRED_CI_GUEST_TEST_PROGRAM_JOB: (
+            "success" if run_guest_artifacts else "skipped"
         ),
         "performance-gate": (
             "success"

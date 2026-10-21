@@ -6,6 +6,7 @@ import io
 import json
 import os
 import re
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -16,7 +17,7 @@ from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, str(Path(__file__).parent))
 import nvx  # noqa: E402
-from nvx_tools import guest_binaries  # noqa: E402
+from nvx_tools import guest_binaries, guest_test_programs  # noqa: E402
 from nvx_tools.build_constants import (  # noqa: E402
     BuildConstants,
     GuestRustBuildConstants,
@@ -1038,6 +1039,141 @@ class GuestBinaryCliTests(unittest.TestCase):
                     args.handler(args)
                 identity.assert_called_once_with(root)
                 self.assertEqual(stdout.getvalue(), "c" * 64 + "\n")
+
+
+def _cargo_messages(executable: Path | None) -> str:
+    """Return the JSON messages of a ``cargo test --no-run`` that built the library
+    and, unless ``executable`` is ``None``, the ``gpt_device`` test there."""
+    messages: list[dict[str, object]] = [
+        {
+            "reason": "compiler-artifact",
+            "target": {"name": "nvx", "kind": ["lib"]},
+            "executable": None,
+        },
+        {
+            "reason": "compiler-artifact",
+            "target": {"name": "nvx", "kind": ["lib"]},
+            "profile": {"test": True},
+            "executable": "/target/debug/deps/nvx-0123",
+        },
+    ]
+    if executable is not None:
+        messages.append(
+            {
+                "reason": "compiler-artifact",
+                "target": {"name": "gpt_device", "kind": ["test"]},
+                "executable": str(executable),
+            }
+        )
+    messages.append({"reason": "build-finished", "success": True})
+    return "".join(json.dumps(message) + "\n" for message in messages)
+
+
+class GuestTestProgramTests(unittest.TestCase):
+    def _build(
+        self, output: Path, *, stdout: str, returncode: int = 0
+    ) -> tuple[dict[str, Path], MagicMock, MagicMock]:
+        """Build into ``output`` with a Cargo that prints ``stdout``."""
+        run = MagicMock(
+            return_value=subprocess.CompletedProcess([], returncode, stdout=stdout)
+        )
+        check = MagicMock()
+        with (
+            patch.object(guest_test_programs.sys, "platform", "linux"),
+            patch.object(guest_test_programs, "require_tool", side_effect=_tool),
+            patch.object(guest_test_programs.subprocess, "run", run),
+            patch.object(guest_test_programs, "check_static_executables", check),
+        ):
+            programs = guest_test_programs.build_guest_test_programs(output)
+        return programs, run, check
+
+    def test_build_installs_the_test_executable_that_cargo_reports(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            built = Path(temporary) / "gpt_device-4e44e7b343e76e7a"
+            built.write_bytes(b"static test program")
+            output = Path(temporary) / "guest-tests"
+            programs, run, check = self._build(output, stdout=_cargo_messages(built))
+            program = output / "gpt-device"
+            self.assertEqual(programs, {"gpt-device": program})
+            self.assertEqual(program.read_bytes(), b"static test program")
+            if os.name != "nt":
+                self.assertEqual(program.stat().st_mode & 0o777, 0o755)
+        check.assert_called_once_with([program])
+        command = cast(list[str], run.call_args.args[0])
+        self.assertEqual(
+            command,
+            [
+                "cargo",
+                f"+{GuestRustBuildConstants.TOOLCHAIN}",
+                "test",
+                "--locked",
+                "--no-run",
+                "--message-format=json-render-diagnostics",
+                "--config",
+                'profile.test.strip="debuginfo"',
+                "--target",
+                GuestRustBuildConstants.TARGET,
+                "--no-default-features",
+                "--features",
+                "guest",
+                "--test",
+                "gpt_device",
+            ],
+        )
+        self.assertEqual(run.call_args.kwargs["cwd"], GuestRustBuildConstants.DIRECTORY)
+
+    def test_build_fails_when_cargo_fails_or_builds_no_test(self):
+        for stdout, returncode, message in (
+            ("", 101, "command failed with exit 101"),
+            (_cargo_messages(None), 0, "no executable for the gpt_device test"),
+        ):
+            with (
+                self.subTest(message=message),
+                tempfile.TemporaryDirectory() as temporary,
+                self.assertRaisesRegex(guest_test_programs.ScriptError, message),
+            ):
+                self._build(
+                    Path(temporary) / "guest-tests",
+                    stdout=stdout,
+                    returncode=returncode,
+                )
+
+    def test_build_runs_only_on_linux(self):
+        with (
+            patch.object(guest_test_programs.sys, "platform", "win32"),
+            patch.object(guest_test_programs.subprocess, "run") as run,
+            self.assertRaisesRegex(guest_test_programs.ScriptError, "only on Linux"),
+        ):
+            guest_test_programs.build_guest_test_programs(Path("guest-tests"))
+        run.assert_not_called()
+
+    def test_build_command_defaults_to_the_directory_that_scenarios_read(self):
+        default = guest_test_programs.OUTPUT_DIRECTORY
+        self.assertEqual(default, BuildConstants.BUILD_DIR / "guest-tests")
+        self.assertEqual(
+            guest_test_programs.guest_test_program_path("gpt-device"),
+            default / "gpt-device",
+        )
+        for argv, output in (
+            (["build-guest-tests"], default),
+            (["build-guest-tests", "--output", "tests"], Path("tests")),
+        ):
+            with self.subTest(argv=argv):
+                args = nvx.parse_args(argv)
+                stdout = io.StringIO()
+                with (
+                    patch.object(
+                        nvx,
+                        "build_guest_test_programs",
+                        return_value={"gpt-device": output / "gpt-device"},
+                    ) as build,
+                    contextlib.redirect_stdout(stdout),
+                ):
+                    args.handler(args)
+                build.assert_called_once_with(output)
+                self.assertEqual(
+                    stdout.getvalue(), f"gpt-device: {output / 'gpt-device'}\n"
+                )
 
 
 if __name__ == "__main__":

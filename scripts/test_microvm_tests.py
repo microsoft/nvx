@@ -15,12 +15,15 @@ import queue
 import re
 import shutil
 import socket
+import struct
 import subprocess
 import sys
 import tempfile
 import threading
 import time
 import unittest
+import uuid
+import zlib
 from collections.abc import Callable, Collection
 from contextlib import ExitStack, nullcontext, redirect_stdout
 from datetime import datetime
@@ -34,6 +37,8 @@ from nvx_tools import (  # noqa: E402
     adversarial_executor,
     benchmark,
     common,
+    gpt_image,
+    guest_test_programs,
     managed_exec_tests,
     microvm_durations,
     microvm_shards,
@@ -5890,7 +5895,7 @@ class MicrovmTests(unittest.TestCase):
 
     def test_smp_lapic_remains_an_explicit_scenario(self):
         # #286 keeps `test-microvm --scenario smp-lapic` for local use.
-        self.assertEqual(microvm_tests.MICROVM_EXPLICIT_SCENARIOS, ("smp-lapic",))
+        self.assertIn("smp-lapic", microvm_tests.MICROVM_EXPLICIT_SCENARIOS)
         args = nvx.parse_args(
             ["test-microvm", "--backend", "kvm", "--scenario", "smp-lapic"]
         )
@@ -8261,6 +8266,252 @@ class MicrovmTests(unittest.TestCase):
             run_guest_script.call_args.args[2],
             microvm_tests.SANDBOX_BLOCKS_COMPLETION_MARKER,
         )
+
+    def test_gpt_device_runs_only_when_named(self):
+        self.assertIn("gpt-device", microvm_tests.GUEST_TEST_PROGRAM_SCENARIOS)
+        # Each guest library scenario is an explicit scenario, which no default
+        # suite, and so no shard, runs, and has a program of its name.
+        programs = microvm_tests.GUEST_TEST_PROGRAM_SCENARIOS
+        self.assertLessEqual(programs, set(microvm_tests.MICROVM_EXPLICIT_SCENARIOS))
+        self.assertTrue(programs.isdisjoint(microvm_tests.MICROVM_TEST_SCENARIOS))
+        self.assertTrue(programs.isdisjoint(microvm_tests.DEBUG_KERNEL_SCENARIOS))
+        self.assertTrue(programs.isdisjoint(microvm_tests.default_suite()))
+        self.assertLessEqual(programs, set(guest_test_programs.GUEST_TEST_PROGRAMS))
+
+        def require(path: Path, _description: str) -> Path:
+            return path
+
+        for selection, named in (([], False), (["--scenario", "gpt-device"], True)):
+            with (
+                self.subTest(named=named),
+                tempfile.TemporaryDirectory() as temporary,
+            ):
+                args = nvx.parse_args(
+                    [
+                        "test-microvm",
+                        "--backend",
+                        "kvm",
+                        "--output-dir",
+                        temporary,
+                        *selection,
+                    ]
+                )
+                with (
+                    patch.object(microvm_tests, "validate_openvmm_test_backend"),
+                    patch.object(
+                        microvm_tests, "MICROVM_TEST_SCENARIOS", ("guest-boot",)
+                    ),
+                    patch.object(microvm_tests, "require_file", side_effect=require),
+                    patch.object(microvm_tests, "run_guest_boot") as guest_boot,
+                    patch.object(microvm_tests, "run_gpt_device") as gpt_device,
+                ):
+                    self.assertEqual(microvm_tests.run(args), 0)
+                self.assertEqual(gpt_device.called, named)
+                self.assertEqual(guest_boot.called, not named)
+                if named:
+                    self.assertEqual(
+                        gpt_device.call_args.kwargs["log_path"],
+                        Path(temporary) / "gpt-device.log",
+                    )
+
+    def test_gpt_device_shares_its_program_and_images_beside_two_disks(self):
+        disks = microvm_tests.gpt_device_disks()
+        seen: dict[str, object] = {}
+
+        def run_guest_script(
+            command: list[str], script: str, marker: bytes, **_kwargs: object
+        ) -> None:
+            guest, share, mode = cast(str, boot.call_args.kwargs["mount"]).split(",")
+            seen["mount"] = (guest, mode)
+            seen["share"] = sorted(path.name for path in Path(share).iterdir())
+            for name, image in disks.images.items():
+                self.assertEqual((Path(share) / name).read_bytes(), image, name)
+            seen["program"] = (Path(share) / "gpt-device").read_bytes()
+            blocks = [
+                command[index + 1]
+                for index, value in enumerate(command)
+                if value == "--microvm-sandbox-block"
+            ]
+            seen["blocks"] = blocks
+            disk = Path(blocks[0].removeprefix("distro:file:").removesuffix(",ro"))
+            scratch = Path(blocks[1].removeprefix("scratch:file:"))
+            seen["disk"] = disk.read_bytes()
+            seen["scratch"] = scratch.read_bytes()
+            seen["script"] = script
+            seen["marker"] = marker
+
+        with tempfile.TemporaryDirectory() as temporary:
+            program = Path(temporary) / "gpt-device"
+            program.write_bytes(b"test program")
+            with (
+                patch.object(
+                    microvm_tests, "guest_test_program_path", return_value=program
+                ) as program_path,
+                patch.object(
+                    microvm_tests,
+                    "workload_boot_command",
+                    return_value=["openvmm", "boot"],
+                ) as boot,
+                patch.object(
+                    microvm_tests, "run_guest_script", side_effect=run_guest_script
+                ),
+            ):
+                microvm_tests.run_gpt_device(
+                    Path("openvmm"),
+                    Path("vmlinux"),
+                    Path("initrd"),
+                    "whp",
+                    memory_mib=128,
+                    timeout=60,
+                    log_path=Path("gpt-device.log"),
+                )
+
+        # The scenario runs the program of its name (GUEST_TEST_PROGRAM_SCENARIOS).
+        program_path.assert_called_once_with("gpt-device")
+        self.assertEqual(seen["mount"], ("/mnt/share", "ro"))
+        self.assertEqual(
+            seen["share"],
+            ["four.img", "gpt-device", "mbr.img", "moved.img", "three.img", "two.img"],
+        )
+        self.assertEqual(seen["program"], b"test program")
+        blocks = cast(list[str], seen["blocks"])
+        self.assertEqual(len(blocks), 2)
+        self.assertTrue(blocks[0].startswith("distro:file:"))
+        self.assertTrue(blocks[0].endswith(",ro"))
+        self.assertTrue(blocks[1].startswith("scratch:file:"))
+        self.assertFalse(blocks[1].endswith(",ro"))
+        self.assertEqual(seen["disk"], disks.disk)
+        self.assertEqual(seen["scratch"], bytes(len(disks.disk)))
+        script = cast(str, seen["script"])
+        self.assertNotIn("@", script)
+        guid = microvm_tests.GPT_DEVICE_DISK_GUID
+        self.assertIn(f"NVX_GPT_DEVICE_DISK_GUID={guid}", script)
+        partitions = " ".join(
+            f"{uuid.UUID(int=guid.int + number)}:{size}"
+            for number, size in ((1, 64 * 1024), (2, 512 * 1024), (3, 512 * 1024))
+        )
+        self.assertIn(f"NVX_GPT_DEVICE_PARTITIONS='{partitions}'", script)
+        self.assertIn(f"NVX_GPT_DEVICE_P1={microvm_tests.GPT_DEVICE_P1.hex()}", script)
+        self.assertIn("--ignored --test-threads=1", script)
+        self.assertTrue(script.endswith("nvx-exit 0\n"))
+        self.assertEqual(seen["marker"], microvm_tests.GPT_DEVICE_COMPLETION_MARKER)
+
+    def test_gpt_device_needs_its_built_program(self):
+        with (
+            tempfile.TemporaryDirectory() as temporary,
+            patch.object(
+                microvm_tests,
+                "guest_test_program_path",
+                return_value=Path(temporary) / "gpt-device",
+            ),
+            patch.object(microvm_tests, "run_guest_script") as run_guest_script,
+            self.assertRaisesRegex(common.ScriptError, "nvx.py build-guest-tests"),
+        ):
+            microvm_tests.run_gpt_device(
+                Path("openvmm"),
+                Path("vmlinux"),
+                Path("initrd"),
+                "whp",
+                memory_mib=128,
+                timeout=60,
+                log_path=Path("gpt-device.log"),
+            )
+        run_guest_script.assert_not_called()
+
+    def test_gpt_device_disks_hold_the_layouts_that_its_guest_test_expects(self):
+        disks = microvm_tests.gpt_device_disks()
+        blocks = microvm_tests.GPT_DEVICE_BLOCKS
+        sector = gpt_image.SECTOR_SIZE
+        array_size = gpt_image.ENTRY_COUNT * gpt_image.ENTRY_SIZE
+
+        def entries(image: bytes) -> list[tuple[uuid.UUID, int, int]]:
+            """Check the image's headers and arrays, and return its used entries."""
+            self.assertEqual(len(image), blocks * sector)
+            headers: list[tuple[Any, ...]] = []
+            for lba in (1, blocks - 1):
+                header = image[lba * sector :][: gpt_image.HEADER_SIZE]
+                fields = struct.unpack("<8sIIIIQQQQ16sQIII", header)
+                self.assertEqual(fields[:5:2], (b"EFI PART", 92, 0))
+                self.assertEqual(fields[1], 0x0001_0000)
+                self.assertEqual(
+                    zlib.crc32(header[:16] + bytes(4) + header[20:]), fields[3]
+                )
+                headers.append(fields)
+            primary, backup = headers
+            self.assertEqual(primary[5:7], (1, blocks - 1))
+            self.assertEqual(backup[5:7], (blocks - 1, 1))
+            self.assertEqual(primary[7:9], (34, blocks - 34))
+            self.assertEqual(primary[7:10], backup[7:10])
+            self.assertEqual((primary[10], backup[10]), (2, blocks - 33))
+            self.assertEqual(primary[11:13], (128, 128))
+            array = image[2 * sector :][:array_size]
+            self.assertEqual(image[backup[10] * sector :][:array_size], array)
+            self.assertEqual(zlib.crc32(array), primary[13])
+            used: list[tuple[uuid.UUID, int, int]] = []
+            for index in range(gpt_image.ENTRY_COUNT):
+                kind, unique, first, last = struct.unpack_from(
+                    "<16s16sQQ", array, index * gpt_image.ENTRY_SIZE
+                )
+                if kind != bytes(16):
+                    self.assertEqual(uuid.UUID(bytes_le=kind), gpt_image.LINUX_DATA)
+                    used.append((uuid.UUID(bytes_le=unique), first, last))
+            return used
+
+        def mbr(image: bytes) -> list[tuple[int, int, int]]:
+            """Return the type, first LBA, and size of each MBR record."""
+            self.assertEqual(image[510:512], b"\x55\xaa")
+            return [
+                struct.unpack_from("<4xB3xII", image, 446 + 16 * index)
+                for index in range(4)
+            ]
+
+        def layout(
+            disk_guid: uuid.UUID, *extents: tuple[int, int]
+        ) -> list[tuple[uuid.UUID, int, int]]:
+            return [
+                (uuid.UUID(int=disk_guid.int + number), first, last)
+                for number, (first, last) in enumerate(extents, start=1)
+            ]
+
+        p1, p2, p3 = (2048, 2175), (4096, 5119), (6144, 7167)
+        disk_guid = microvm_tests.GPT_DEVICE_DISK_GUID
+        self.assertEqual(entries(disks.disk), layout(disk_guid, p1, p2, p3))
+        self.assertEqual(disks.disk[sector + 56 :][:16], disk_guid.bytes_le)
+        self.assertEqual(
+            mbr(disks.disk), [(0xEE, 1, blocks - 1), (0, 0, 0), (0, 0, 0), (0, 0, 0)]
+        )
+        self.assertEqual(
+            [(p.unique_guid, p.first_lba, p.last_lba) for p in disks.partitions],
+            entries(disks.disk),
+        )
+        configuration = disks.disk[p1[0] * sector :][: (p1[1] - p1[0] + 1) * sector]
+        self.assertNotEqual(configuration.rstrip(b"\0"), microvm_tests.GPT_DEVICE_P1)
+        self.assertEqual(
+            configuration.rstrip(b"\0 \t\n\r\x0c"), microvm_tests.GPT_DEVICE_P1
+        )
+        for number, (first, _) in ((2, p2), (3, p3)):
+            marker = f"NVX-GPT-LAYER-{number}".encode()
+            self.assertEqual(disks.disk[first * sector :][: len(marker)], marker)
+
+        scratch = microvm_tests.GPT_DEVICE_SCRATCH_GUID
+        images = disks.images
+        self.assertEqual(entries(images["three.img"]), layout(scratch, p1, p2, p3))
+        self.assertEqual(entries(images["two.img"]), layout(scratch, p1, p2))
+        self.assertEqual(
+            entries(images["four.img"]), layout(scratch, p1, p2, p3, (7168, 7679))
+        )
+        self.assertEqual(
+            entries(images["moved.img"]), layout(scratch, p1, (4608, 5631), p3)
+        )
+        # The MBR replaces only the protective MBR, so the GPT behind it remains.
+        self.assertEqual(entries(images["mbr.img"]), layout(scratch, p1, p2, p3))
+        self.assertEqual(
+            mbr(images["mbr.img"]),
+            [(0x83, 2048, 3072), (0x83, 6144, 1024), (0, 0, 0), (0, 0, 0)],
+        )
+        self.assertEqual(images["mbr.img"][sector:], images["three.img"][sector:])
+        with self.assertRaisesRegex(ValueError, "at most four records"):
+            gpt_image.with_mbr(images["three.img"], [bytes(16)] * 5)
 
     def test_smp_snapshot_runs_the_warp_probe_after_each_restore(self):
         def measure(command: list[str], **kwargs: object) -> None:

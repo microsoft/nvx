@@ -35,10 +35,10 @@ on:
         description: >-
           Run the steps that follow the default suite instead of it, in a
           second job of the backend beside the default suite: the public
-          managed sandbox acceptance, the Ubuntu and Azure Linux guest tests,
-          the Ubuntu sandbox steps, the aci_edge_sandboxes lifecycle, and the
-          runtime adapter scenarios. Not for the debug-kernel jobs, which skip
-          these steps
+          managed sandbox acceptance, the guest library scenarios, the Ubuntu
+          and Azure Linux guest tests, the Ubuntu sandbox steps, the
+          aci_edge_sandboxes lifecycle, and the runtime adapter scenarios. Not
+          for the debug-kernel jobs, which skip these steps
         required: false
         type: boolean
         default: false
@@ -89,7 +89,8 @@ jobs:
       # qualifies its runner with the kernel and the Alpine initramfs, the
       # default suite boots only those, and the debug-kernel jobs run only
       # Alpine scenarios on the debug kernel, so only the guest and sandbox
-      # steps take the Ubuntu and Azure Linux artifacts.
+      # steps take the Ubuntu and Azure Linux artifacts and the guest test
+      # programs.
       - name: Download guest kernel
         uses: actions/download-artifact@v8
         with:
@@ -136,6 +137,15 @@ jobs:
         with:
           name: guest-azurelinux
           path: build
+
+      # The artifact holds the programs at its root, and test-microvm looks
+      # for them in build/guest-tests.
+      - name: Download guest test programs
+        if: ${{ inputs.guests-and-sandboxes && !inputs.debug-kernel }}
+        uses: actions/download-artifact@v8
+        with:
+          name: guest-test-programs
+          path: build/guest-tests
 
       - name: Download OpenVMM executable
         uses: actions/download-artifact@v8
@@ -214,6 +224,26 @@ jobs:
           --scenario managed-exec-config
           --scenario sandbox-lifecycle
           --output-dir "build/test-results/public-exec-${{ inputs.backend }}"
+
+      # The guest library scenarios run the test-only guest programs that the
+      # guest-test-programs job builds.
+      - name: Run guest library scenarios on Linux
+        if: runner.os != 'Windows' && inputs.guests-and-sandboxes && !inputs.debug-kernel
+        shell: bash
+        run: >-
+          python3 scripts/nvx.py test-microvm
+          --backend "${{ inputs.backend }}"
+          --scenario gpt-device
+          --output-dir "build/test-results/guest-library-${{ inputs.backend }}"
+
+      - name: Run guest library scenarios on Windows
+        if: runner.os == 'Windows' && inputs.guests-and-sandboxes && !inputs.debug-kernel
+        shell: powershell
+        run: >-
+          python scripts\nvx.py test-microvm
+          --backend "${{ inputs.backend }}"
+          --scenario gpt-device
+          --output-dir "build/test-results/guest-library-${{ inputs.backend }}"
 
       - name: Run Ubuntu guest smoke tests on Linux
         if: runner.os != 'Windows' && inputs.guests-and-sandboxes && !inputs.debug-kernel
@@ -1275,6 +1305,7 @@ jobs:
           name: nvx-microvm-tests-${{ inputs.backend }}${{ inputs.debug-kernel && '-debug' || '' }}${{ inputs.guests-and-sandboxes && '-guests' || '' }}${{ inputs.shard && format('-shard-{0}', inputs.shard) || '' }}
           path: |
             build/test-results/public-exec-${{ inputs.backend }}
+            build/test-results/guest-library-${{ inputs.backend }}
             build/test-results/microvm-${{ inputs.backend }}
             build/test-results/microvm-${{ inputs.backend }}-debug
             build/test-results/ubuntu-${{ inputs.backend }}

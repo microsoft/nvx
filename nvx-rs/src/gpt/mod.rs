@@ -61,7 +61,7 @@ mod crc;
 mod error;
 mod source;
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 
 use crc::{Crc32, crc32};
 pub use error::GptError;

@@ -250,6 +250,13 @@ impl Spec {
     }
 }
 
+/// Returns [`Spec::standard`]'s disk, for the tests of other modules: p1 in LBA 34, and layers in
+/// LBAs 35 through 42 and 43 through 58, of 512 bytes each.
+#[cfg(all(feature = "guest", target_os = "linux"))]
+pub(crate) fn standard_disk() -> Disk {
+    Spec::standard().read().unwrap()
+}
+
 /// A source that records the byte ranges that the reader reads.
 struct Recording<'a> {
     /// The disk.

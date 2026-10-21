@@ -1,0 +1,34 @@
+set -eu
+fail() {
+    code="$1"
+    echo "NVX-GPT-DEVICE-FAIL code=$code"
+    nvx-exit "$code"
+    exit "$code"
+}
+
+for name in vda vdb; do
+    tries=0
+    while [ ! -b "/dev/$name" ] && [ "$tries" -lt 200 ]; do
+        sleep 0.05
+        tries=$((tries + 1))
+    done
+    [ -b "/dev/$name" ] || fail 20
+done
+grep -q ' /mnt/share virtiofs ' /proc/mounts || fail 21
+[ "$(cat /sys/block/vda/ro)" = 1 ] || fail 22
+[ "$(cat /sys/block/vdb/ro)" = 0 ] || fail 23
+# The share need not keep the program's mode, so a copy runs.
+cp /mnt/share/gpt-device /tmp/nvx-gpt-device || fail 24
+chmod 0755 /tmp/nvx-gpt-device || fail 25
+if ! NVX_GPT_DEVICE_DISK=/dev/vda \
+    NVX_GPT_DEVICE_DISK_GUID=@DISK_GUID@ \
+    NVX_GPT_DEVICE_PARTITIONS='@PARTITIONS@' \
+    NVX_GPT_DEVICE_P1=@P1@ \
+    NVX_GPT_DEVICE_SCRATCH=/dev/vdb \
+    NVX_GPT_DEVICE_IMAGES=/mnt/share \
+    /tmp/nvx-gpt-device --ignored --test-threads=1; then
+    fail 30
+fi
+rm -f /tmp/nvx-gpt-device
+echo NVX-GPT-DEVICE-OK
+nvx-exit 0

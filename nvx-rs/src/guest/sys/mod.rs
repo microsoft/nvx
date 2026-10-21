@@ -40,6 +40,7 @@
 //! and the processor's interfaces, such as procfs and sysfs paths, OpenVMM's ports, CPUID
 //! leaves, and MSRs, are defined here once, so that the programs name them.
 
+mod block;
 mod clock;
 mod discipline;
 mod fd;
@@ -70,6 +71,10 @@ pub(crate) use nix::errno::Errno;
 pub(crate) use nix::sys::signal::Signal;
 pub(crate) use nix::sys::time::{TimeSpec, TimeValLike};
 
+pub(crate) use block::{
+    BLOCK_DEVICE_DIRECTORY, SYSFS_SECTOR_SIZE, block_device_size, logical_block_size,
+    reread_partitions, split_device_number,
+};
 pub(crate) use clock::{Clock, clock_time, monotonic_ms, sleep_once, sleep_until_monotonic};
 #[cfg(target_arch = "x86_64")]
 pub(crate) use clock::{monotonic_ns, syscall_monotonic_nanoseconds};

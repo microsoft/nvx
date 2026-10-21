@@ -90,6 +90,8 @@ from nvx_tools.guest_binaries import (
     guest_binary_source_sha256,
     test_guest_binaries,
 )
+from nvx_tools.guest_test_programs import OUTPUT_DIRECTORY as GUEST_TESTS_DIRECTORY
+from nvx_tools.guest_test_programs import build_guest_test_programs
 from nvx_tools.guests import GUEST_NAMES, guest_descriptor
 from nvx_tools.microvm_tests import configure_parser as configure_microvm_test_parser
 from nvx_tools.microvm_tests import (
@@ -259,6 +261,11 @@ def command_build_guest_binaries(args: argparse.Namespace) -> None:
 
 def command_test_guest_binaries(args: argparse.Namespace) -> None:
     test_guest_binaries(args.binaries)
+
+
+def command_build_guest_tests(args: argparse.Namespace) -> None:
+    for program, path in build_guest_test_programs(args.output).items():
+        print(f"{program}: {path}")
 
 
 def command_build_kernel(args: argparse.Namespace) -> None:
@@ -775,6 +782,18 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     )
     guest_binary_tests.add_argument("--binaries", type=Path, required=True)
     guest_binary_tests.set_defaults(handler=command_test_guest_binaries)
+
+    guest_tests = subparsers.add_parser(
+        "build-guest-tests",
+        help="build the test-only Rust programs that microVM scenarios run in a guest",
+    )
+    guest_tests.add_argument(
+        "--output",
+        type=Path,
+        default=GUEST_TESTS_DIRECTORY,
+        help="directory for the programs (default: build/guest-tests)",
+    )
+    guest_tests.set_defaults(handler=command_build_guest_tests)
 
     kernel = subparsers.add_parser(
         "build-kernel",

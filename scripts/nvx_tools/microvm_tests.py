@@ -27,7 +27,7 @@ from pathlib import Path
 from stat import S_ISUID
 from typing import Any, cast
 
-from . import nvx_rs
+from . import gpt_image, nvx_rs
 from .adversarial_oracles import terminate_process_tree
 from .benchmark import (
     CAPTURE_LOG_FILTER,
@@ -63,6 +63,7 @@ from .common import (
     require_file,
     sha256_file,
 )
+from .guest_test_programs import guest_test_program_path
 from .guests import GUEST_NAMES, GuestDescriptor, guest_descriptor
 from .managed_exec_tests import run_managed_exec_configuration
 from .microvm_durations import REPORT_NAME, DurationReport
@@ -146,6 +147,10 @@ SANDBOX_CONTROL_SCENARIOS = frozenset(
 # the guest-artifact build produces and packages omit, so they run only when
 # named.
 PUBLIC_SANDBOX_SCENARIOS = frozenset(("managed-exec-config", "sandbox-lifecycle"))
+# The scenarios that test guest library code each run the test-only program of
+# their name, which `nvx.py build-guest-tests` builds and packages omit, so
+# they are explicit scenarios, which run only when named.
+GUEST_TEST_PROGRAM_SCENARIOS = frozenset(("gpt-device",))
 # The same-host restore cases also run on the CI debug kernel (doc/ci.md),
 # whose soft-lockup and hung-task detectors the guest's time ABI watcher
 # reports.
@@ -159,8 +164,9 @@ DEBUG_KERNEL_SCENARIOS = (
 # Scenarios that run only when named, never in a default suite. The time ABI
 # hides TSC-deadline on every backend, so `smp` already runs on the one-shot
 # counting LAPIC; `smp-lapic` repeats it and asserts the counting-LAPIC facts,
-# for explicit local use (#286).
-MICROVM_EXPLICIT_SCENARIOS = ("smp-lapic",)
+# for explicit local use (#286). The guest library scenarios need their
+# test-only programs.
+MICROVM_EXPLICIT_SCENARIOS = ("smp-lapic", *sorted(GUEST_TEST_PROGRAM_SCENARIOS))
 SMP_LAPIC_COUNTING_MARKER = b"NVX-SMP-LAPIC-COUNTING-OK"
 MICROVM_PROCESSOR_COUNTS = (1, 2, 4, 8)
 MICROVM_TEST_SCRIPTS_DIR = Path(__file__).with_name("microvm_test_scripts")
@@ -244,6 +250,16 @@ PRIVATE_INGRESS_TCP_REPLY = b"NVX-PRIVATE-INGRESS-TCP-REPLY\n"
 PRIVATE_INGRESS_UDP_REQUEST = b"NVX-PRIVATE-INGRESS-UDP-REQUEST\n"
 PRIVATE_INGRESS_UDP_REPLY = b"NVX-PRIVATE-INGRESS-UDP-REPLY\n"
 SANDBOX_BLOCK_SIZE = 8 * 1024 * 1024
+GPT_DEVICE_COMPLETION_MARKER = b"NVX-GPT-DEVICE-OK"
+# The disks of the gpt-device scenario have 4 MiB of 512-byte blocks: p1, 64 KiB
+# at LBA 2048, and layers of 512 KiB at LBAs 4096 and 6144.
+GPT_DEVICE_BLOCKS = 8192
+GPT_DEVICE_DISK_GUID = uuid.UUID("6a1f3c2e-8b4d-4e5f-9a7b-1c2d3e4f5a00")
+GPT_DEVICE_SCRATCH_GUID = uuid.UUID("7b2e4d3f-9c5e-4f60-8b8c-2d3e4f5a6b00")
+# p1's bytes, which are not UTF-8 and hold a NUL, and the padding after them,
+# trailing NUL bytes and ASCII whitespace, which reading p1 removes.
+GPT_DEVICE_P1 = b"\xff\xfeNVX p1\x00opaque\x80bytes"
+GPT_DEVICE_P1_PADDING = b" \t\n\r\x0c\x00" * 4
 SNAPSHOT_CORE_CONTINUED_MARKER = b"NVX-SNAPSHOT-CORE-CONTINUED"
 SNAPSHOT_CORE_COMPLETION_MARKER = b"NVX-SNAPSHOT-CORE-OK"
 CONSOLE_BINARY_MARKER = b"\0\r\n\x7f\xffNVX-CONSOLE-BINARY"
@@ -385,8 +401,8 @@ def configure_parser(parser: argparse.ArgumentParser) -> None:
         choices=(*MICROVM_TEST_SCENARIOS, *MICROVM_EXPLICIT_SCENARIOS),
         help=(
             "scenario to run; repeat to select multiple (default: all except "
-            "smp-lapic, managed-exec-config, and sandbox-lifecycle, which run "
-            "only when named)"
+            "smp-lapic, managed-exec-config, sandbox-lifecycle, and gpt-device, "
+            "which run only when named)"
         ),
     )
     parser.add_argument(
@@ -4668,6 +4684,144 @@ def run_sandbox_blocks(
         )
 
 
+@dataclass(frozen=True)
+class GptDeviceDisks:
+    """The disks of the gpt-device scenario: the read-only disk's GPT, and the images
+    that the guest writes over the writable disk, by name."""
+
+    disk: bytes
+    disk_guid: uuid.UUID
+    partitions: tuple[gpt_image.Partition, ...]
+    images: dict[str, bytes]
+
+
+def _gpt_device_partitions(disk_guid: uuid.UUID) -> list[gpt_image.Partition]:
+    """Return p1 and two layers, whose unique GUIDs follow ``disk_guid``, and which
+    start with p1's bytes and padding and with each layer's marker."""
+    return [
+        gpt_image.Partition(
+            uuid.UUID(int=disk_guid.int + 1),
+            2048,
+            2175,
+            GPT_DEVICE_P1 + GPT_DEVICE_P1_PADDING,
+        ),
+        gpt_image.Partition(
+            uuid.UUID(int=disk_guid.int + 2), 4096, 5119, b"NVX-GPT-LAYER-2"
+        ),
+        gpt_image.Partition(
+            uuid.UUID(int=disk_guid.int + 3), 6144, 7167, b"NVX-GPT-LAYER-3"
+        ),
+    ]
+
+
+def gpt_device_disks() -> GptDeviceDisks:
+    """Return the disks that ``tests/gpt_device.rs`` of ``nvx-rs`` expects."""
+    partitions = _gpt_device_partitions(GPT_DEVICE_DISK_GUID)
+    p1, p2, p3 = _gpt_device_partitions(GPT_DEVICE_SCRATCH_GUID)
+    p4 = gpt_image.Partition(
+        uuid.UUID(int=GPT_DEVICE_SCRATCH_GUID.int + 4), 7168, 7679, b"NVX-GPT-LAYER-4"
+    )
+    moved = gpt_image.Partition(
+        p2.unique_guid, p2.first_lba + 512, p2.last_lba + 512, p2.contents
+    )
+
+    def scratch(*layout: gpt_image.Partition) -> bytes:
+        return gpt_image.gpt_image(GPT_DEVICE_BLOCKS, GPT_DEVICE_SCRATCH_GUID, layout)
+
+    three = scratch(p1, p2, p3)
+    # An MBR whose first partition spans p1 through p2, and whose second is p3.
+    mbr = gpt_image.with_mbr(
+        three,
+        [
+            gpt_image.mbr_record(
+                gpt_image.LINUX_TYPE, p1.first_lba, p2.last_lba - p1.first_lba + 1
+            ),
+            gpt_image.mbr_record(
+                gpt_image.LINUX_TYPE, p3.first_lba, p3.last_lba - p3.first_lba + 1
+            ),
+        ],
+    )
+    return GptDeviceDisks(
+        disk=gpt_image.gpt_image(GPT_DEVICE_BLOCKS, GPT_DEVICE_DISK_GUID, partitions),
+        disk_guid=GPT_DEVICE_DISK_GUID,
+        partitions=tuple(partitions),
+        images={
+            "three.img": three,
+            "two.img": scratch(p1, p2),
+            "four.img": scratch(p1, p2, p3, p4),
+            "moved.img": scratch(p1, moved, p3),
+            "mbr.img": mbr,
+        },
+    )
+
+
+def run_gpt_device(
+    executable: Path,
+    kernel: Path,
+    initrd: Path,
+    backend: str,
+    *,
+    memory_mib: int,
+    timeout: float,
+    log_path: Path,
+) -> None:
+    """Validate crafted GPT disks in the guest through ``nvx::guest::gpt``.
+
+    The guest runs the ignored tests of the test-only ``gpt-device`` program, which
+    the scenario shares with the images, as root: a read-only disk with a crafted GPT,
+    and a writable disk over which the tests write the images, to read tables that
+    the kernel's partitions then differ from."""
+    program = require_file(
+        guest_test_program_path("gpt-device"),
+        "gpt-device guest test program (build it with nvx.py build-guest-tests)",
+    )
+    disks = gpt_device_disks()
+    with tempfile.TemporaryDirectory(prefix="nvx-gpt-device-") as temporary:
+        root = Path(temporary)
+        share = root / "share"
+        share.mkdir()
+        shutil.copyfile(program, share / "gpt-device")
+        for name, image in disks.images.items():
+            (share / name).write_bytes(image)
+        disk = root / "disk.img"
+        disk.write_bytes(disks.disk)
+        scratch = root / "scratch.img"
+        with scratch.open("wb") as file:
+            file.truncate(len(disks.disk))
+        command = workload_boot_command(
+            executable,
+            backend,
+            kernel,
+            initrd,
+            memory_mib,
+            "quiet loglevel=0",
+            mount=f"/mnt/share,{share},ro",
+        )
+        command.extend(
+            (
+                "--microvm-sandbox-block",
+                f"distro:file:{disk},ro",
+                "--microvm-sandbox-block",
+                f"scratch:file:{scratch}",
+            )
+        )
+        run_guest_script(
+            command,
+            _render_script(
+                "gpt-device.sh.in",
+                DISK_GUID=str(disks.disk_guid),
+                PARTITIONS=" ".join(
+                    f"{partition.unique_guid}:{partition.size}"
+                    for partition in disks.partitions
+                ),
+                P1=GPT_DEVICE_P1.hex(),
+            ),
+            GPT_DEVICE_COMPLETION_MARKER,
+            timeout=timeout,
+            log_path=log_path,
+        )
+
+
 def _measure_restore(
     command: Sequence[str],
     *,
@@ -8040,6 +8194,20 @@ def _run_scenarios(
             memory_mib=args.memory_mib,
             timeout=args.timeout,
             log_path=output_dir / "sandbox-blocks.log",
+        )
+    if "gpt-device" in scenarios:
+        report.start(
+            "gpt-device",
+            f"Running microVM GPT device validation on OpenVMM/{args.backend}",
+        )
+        run_gpt_device(
+            executable,
+            kernel,
+            initrd,
+            args.backend,
+            memory_mib=args.memory_mib,
+            timeout=args.timeout,
+            log_path=output_dir / "gpt-device.log",
         )
     if "scratch-snapshot" in scenarios:
         report.start(

@@ -68,6 +68,7 @@ stale build never ships or runs unnoticed.
 | `check-guest-binaries` | Lint and test the Rust guest executables for musl. |
 | `build-guest-binaries` | Build and digest the pinned Rust executables for Linux guests. |
 | `test-guest-binaries` | Run the musl integration tests against prebuilt Rust guest executables. |
+| `build-guest-tests` | Build the test-only Rust programs that microVM scenarios run in a guest. |
 | `build-kernel` | Build the pinned and patched Linux kernel natively. |
 | `build-initramfs` | Build the selected Alpine, Ubuntu, or Azure Linux initramfs. |
 | `build-distro-layer` | Build a deterministic Ubuntu EROFS distro layer. |
@@ -370,6 +371,21 @@ The Linux-only test command validates the nine binaries and build manifest,
 sets `NVX_GUEST_BINARIES`, and runs the musl `guest_tools` integration test
 against that exact directory.
 
+### `build-guest-tests`
+
+```text
+python3 scripts/nvx.py build-guest-tests [--output DIRECTORY]
+```
+
+The Linux-only build command builds the test-only programs that
+[`test-microvm`](#test-microvm) scenarios share into a guest and run there, as
+root, rather than ship in a guest image: `gpt-device`, the `nvx-rs` integration
+test `tests/gpt_device.rs`. It builds each with the `guest` feature for
+`x86_64-unknown-linux-musl`, with the exact `rust-toolchain.toml` pin and
+Cargo's locked mode, in the test profile, whose debug assertions it keeps, but
+without debug information, runs the static-ELF check, and copies the programs to
+`DIRECTORY`, by default `build/guest-tests`, where the scenarios look for them.
+
 See [Setup](setup.md) for host prerequisites.
 
 ### `materialize-kernel-provenance-inputs`
@@ -589,12 +605,19 @@ python3 scripts/nvx.py test-microvm
 
 Runs NVX-owned Linux, SMP, virtio, sandbox, and snapshot correctness scenarios
 against the public OpenVMM CLI. Repeat `--scenario` to select a subset; without
-it, every scenario supported by the selected guest runs, except three that run
+it, every scenario supported by the selected guest runs, except four that run
 only when named. `smp-lapic` repeats `smp` and also asserts that every CPU
 uses the one-shot counting LAPIC. `managed-exec-config` and
 `sandbox-lifecycle` drive the public `sandbox` lifecycle commands (see
 [Run](run.md#managed-lifecycle)) and also require the guest-artifact build's
-Ubuntu layer and scratch template, which packages omit. Alpine remains the
+Ubuntu layer and scratch template, which packages omit. `gpt-device` validates
+crafted GPT disks in the guest through the `nvx-rs` guest library: it attaches
+a read-only disk that holds a GPT and a writable scratch disk, shares the
+test-only `gpt-device` program, which [`build-guest-tests`](#build-guest-tests)
+builds into `build/guest-tests`, with disk images, and runs the program as root,
+which validates the read-only disk and overwrites the scratch disk with tables
+whose kernel partitions are missing, extra, moved, or late, or with an MBR that
+the kernel reads in place of the table. Alpine remains the
 default. Ubuntu and Azure Linux cannot act as sandbox control, so they reject
 the Alpine-control-only `sandbox-blocks` and `scratch-snapshot` scenarios and
 the sandbox-control-dependent `snapshot-tiers`, `managed-exec-config`, and

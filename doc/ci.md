@@ -191,8 +191,9 @@ production kernels leave out. It selects the same-host restore scenarios
 `smp`, `smp-snapshot`, `restore-processors`, `restore-downtime`, and
 `snapshot-tiers`. The jobs skip every other test step, because those boot the
 production kernel, which the `nvx-microvm-guests-{kvm,mshv,whp}` jobs already
-cover: the public managed execution configuration, the Ubuntu and Azure Linux
-guest tests, the Ubuntu sandbox layer and live-share smoke tests, the
+cover: the public managed execution configuration, the guest library
+scenarios, the Ubuntu and Azure Linux guest tests, the Ubuntu sandbox layer
+and live-share smoke tests, the
 caller-owned live-share test, and the `aci_edge_sandboxes` lifecycle test. Any
 RCU stall, soft lockup, or hung task makes the guest's time ABI watcher power
 off with status 194, which fails the run. Every guest those scenarios restore
@@ -294,7 +295,16 @@ all. Ubuntu keys also include the Canonical archive pin, supplemental
 package lock, common guest sources, shared download and guest descriptor
 modules, and converter implementation. Each component is handed to the jobs
 that read it as a workflow artifact of its own, under its build filenames (see
-[Guest artifact handoff](#guest-artifact-handoff)). Each
+[Guest artifact handoff](#guest-artifact-handoff)). Beside them, the
+GitHub-hosted `guest-test-programs` job builds the test-only guest programs
+with `nvx.py build-guest-tests`, and each backend's
+`nvx-microvm-guests-{kvm,mshv,whp}` job runs the guest library scenario
+`gpt-device` with them: as root in an Alpine guest, the `gpt-device` program
+validates a crafted GPT disk through the `nvx-rs` guest library, and rewrites
+a scratch disk so that the kernel's partitions after a reread are missing,
+extra, moved, or late, or come from an MBR that the kernel reads in place of
+the table, all of which the validation must refuse or wait for. Its logs are
+part of the backend's failure logs. Each
 backend also boots the Ubuntu initramfs and runs
 `/sbin/nvx-sandbox-smoke` from the Ubuntu EROFS layer as UID/GID 65534 over a
 fresh ext4 scratch copy, with a 32 MiB `--memory-max` and an 8-process
@@ -490,7 +500,8 @@ GitHub-hosted runners, and `openvmm-changes`, which classifies a push or pull
 request and selects every suite for a full run (see
 [Change classification](#change-classification)). When it finishes, the jobs
 that it selects start: `artifacts`, `distro-artifacts`, and `debug-kernel`
-restore or build the guest artifacts on GitHub-hosted runners (see
+restore or build the guest artifacts, and `guest-test-programs` builds the
+guest test programs, on GitHub-hosted runners (see
 [Guest artifact handoff](#guest-artifact-handoff)), the three OpenVMM binary
 producers restore or build OpenVMM on a KVM, an MSHV, and a WHP runner,
 `build-openvmm-vmm-tests-linux` builds the Linux VMM tests on a KVM runner, and
@@ -500,7 +511,8 @@ Alpine initramfs, and the Linux VMM-test build, and `openvmm-vmm-tests-windows`
 for `artifacts`. Each microVM test and platform job waits for `artifacts`, its
 OpenVMM producer, and the NVX CLI job of its operating system. The microVM
 guest and sandbox jobs and the platform jobs also wait for `distro-artifacts`,
-and the debug-kernel jobs for `debug-kernel`. `Performance regression gate`,
+the microVM guest and sandbox jobs for `guest-test-programs`, and the
+debug-kernel jobs for `debug-kernel`. `Performance regression gate`,
 `Publish development release`, `Persist performance baseline`, and `Required
 status check` wait for the jobs whose results they check. Required handoffs
 between these jobs use same-run workflow artifacts; caches only skip
@@ -706,10 +718,13 @@ each with the
 action, whose `components` input selects what it builds: `artifacts` the
 kernel and the Alpine initramfs, `distro-artifacts` the Ubuntu initramfs, its
 EROFS distro layer, and the sandbox scratch template, together with the Azure
-Linux initramfs, and `debug-kernel` the CI debug kernel. Each job uploads each
-of its components as a one-day workflow artifact of its own. Each job that
-boots or reads guest artifacts downloads, by name and into `build/`, only the
-components that its steps read, and waits only for the jobs that upload them:
+Linux initramfs, and `debug-kernel` the CI debug kernel. Beside them,
+`guest-test-programs` builds the test-only guest programs with
+`nvx.py build-guest-tests`. Each job uploads each of its components as a
+one-day workflow artifact of its own. Each job that boots or reads guest
+artifacts downloads, by name and into the directory of `build/` that holds
+its files, only the components that its steps read, and waits only for the
+jobs that upload them:
 
 | Artifact | Files in `build/` | Producer | Jobs that download it |
 | --- | --- | --- | --- |
@@ -720,14 +735,16 @@ components that its steps read, and waits only for the jobs that upload them:
 | `guest-ubuntu-scratch` | `ubuntu-smoke-scratch.ext4`, the sandbox scratch template | `distro-artifacts` | microVM guest and sandbox jobs |
 | `guest-azurelinux` | `initramfs-azurelinux.cpio.gz` and its `.packages.json` | `distro-artifacts` | microVM guest and sandbox jobs, platform jobs |
 | `guest-debug-kernel` | `vmlinux-debug`, `vmlinux-debug.config`, `vmlinux-debug.provenance.json` | `debug-kernel` | debug-kernel jobs |
+| `guest-test-programs` | `guest-tests/gpt-device` | `guest-test-programs` | microVM guest and sandbox jobs |
 
 The OpenVMM VMM tests boot only the kernel and the Alpine initramfs, and their
 Linux build boots no guest, so it downloads no component. The
 debug-kernel jobs run the Alpine scenarios on the debug kernel and qualify
 their runner, through the doctor's preflight (H3), with the kernel and the
 Alpine initramfs. The microVM default suites boot only those two, and the
-microVM guest and sandbox jobs boot every guest and run sandboxes from the
-Ubuntu distro layer over copies of the scratch template. The platform
+microVM guest and sandbox jobs boot every guest, run sandboxes from the
+Ubuntu distro layer over copies of the scratch template, and run the guest
+test programs in the Alpine guest. The platform
 jobs boot the kernel and the Alpine initramfs to qualify their runner and to
 benchmark, and package every guest image but the scratch template into their
 release. A missing artifact fails its download step, so no job runs without a
@@ -944,8 +961,9 @@ other path selects each suite that takes it as an input:
   of the guest binaries, which `GuestRustBuildConstants.SOURCE_PATTERN`
   matches, so a change to its host side or tests runs the NVX microVM tests
   and the platform jobs but not the VMM tests.
-- `run-guest-artifacts` enables `artifacts`, `distro-artifacts`, and
-  `debug-kernel`, which build the guest artifacts and the CI debug kernel, and
+- `run-guest-artifacts` enables `artifacts`, `distro-artifacts`,
+  `debug-kernel`, and `guest-test-programs`, which build the guest artifacts,
+  the CI debug kernel, and the guest test programs, and
   `run-openvmm-binaries` the three OpenVMM binary producers. Neither has a
   use of its own, so the classifier sets each exactly when a job that uses its
   artifacts runs: the guest artifacts for the OpenVMM VMM tests, the NVX
@@ -954,17 +972,18 @@ other path selects each suite that takes it as an input:
   of each job that uses it. Every input of the VMM tests is also an input of
   the microVM tests, which read the Ubuntu and Azure Linux images of
   `distro-artifacts`, so the three guest artifact jobs share the output. The
-  debug kernel is built with the guest artifacts, as before, because the
-  development release and performance persistence require its build too.
+  debug kernel and the guest test programs are built with the guest
+  artifacts, because the development release and performance persistence
+  require their builds too.
 
 Every CLI module is an input of the microVM tests, and of the platform jobs,
 unless none of that suite's jobs runs it, so a new module selects both until
 the classifier excludes it. `microvm_tests.py` and the modules that only it,
-`nvx.py sandbox`, or `nvx.py test-aci-edge-sandboxes` use, with the
-`microvm_test_scripts/` that it runs in guests and the partition of its
-[shards](#microvm-test-shards), `microvm_shards.json`, are inputs of the
-microVM tests alone, and `performance.py` is an input of the platform jobs
-alone. The
+`nvx.py sandbox`, `nvx.py test-aci-edge-sandboxes`, or
+`nvx.py build-guest-tests` use, with the `microvm_test_scripts/` that it runs
+in guests and the partition of its [shards](#microvm-test-shards),
+`microvm_shards.json`, are inputs of the microVM tests alone, and
+`performance.py` is an input of the platform jobs alone. The
 modules that both kinds of job run, such as `benchmark.py`, which
 `microvm_tests.py` imports, `doctor.py`, which every runner validation runs,
 and `release.py`, whose `verify` command the OpenVMM builds run, select both.
