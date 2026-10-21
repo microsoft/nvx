@@ -23,7 +23,7 @@ import tempfile
 import unittest
 from collections.abc import Generator, Mapping, Sequence
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).parent))
@@ -518,6 +518,65 @@ class GenericDefaultTests(unittest.TestCase):
                 'generic default nvx::Pool<T> = {"resolved_path":{"id":null,"path":"Error"}}'
             ],
         )
+
+    def test_trait_items_record_whether_the_trait_provides_them(self):
+        error = {"resolved_path": {"path": "Error", "id": 9, "args": None}}
+        document = {
+            "root": 0,
+            "index": {
+                "0": {"name": "nvx", "inner": {"module": {"items": [1]}}},
+                "1": {"name": "Sink", "inner": {"trait": {"items": [2, 3, 4, 5, 6]}}},
+                "2": {"name": "write", "inner": {"function": {"has_body": False}}},
+                "3": {"name": "flush", "inner": {"function": {"has_body": True}}},
+                "4": {"name": "LIMIT", "inner": {"assoc_const": {"value": "4"}}},
+                "5": {"name": "Error", "inner": {"assoc_type": {"type": error}}},
+                "6": {"name": "Item", "inner": {"assoc_type": {"type": None}}},
+            },
+            "paths": {"9": {"crate_id": 3, "path": ["std", "io", "error", "Error"]}},
+        }
+        self.assertEqual(
+            gate.trait_item_defaults(document),
+            [
+                'trait constant nvx::Sink::LIMIT is provided = "4"',
+                "trait method nvx::Sink::flush is provided",
+                "trait method nvx::Sink::write is required",
+                "trait type nvx::Sink::Error is provided = "
+                '{"resolved_path":{"args":null,"id":"std::io::error::Error",'
+                '"path":"Error"}}',
+                "trait type nvx::Sink::Item is required",
+            ],
+        )
+
+    def test_a_change_of_a_provided_trait_method_fails_the_check(self):
+        cargo = FakeCargo()
+        provided = [False]
+        generate = cargo.document
+
+        def document(target: str) -> dict[str, object]:
+            result = generate(target)
+            index = cast(dict[str, dict[str, Any]], result["index"])
+            root = index[str(result["root"])]
+            trait, method = len(index), len(index) + 1
+            index[str(trait)] = {
+                "name": "OutputSink",
+                "inner": {"trait": {"items": [method]}},
+            }
+            index[str(method)] = {
+                "name": "write",
+                "inner": {"function": {"has_body": provided[0]}},
+            }
+            root["inner"]["module"]["items"].append(trait)
+            return result
+
+        cargo.document = document
+        with _repository():
+            self.assertEqual(_main(cargo, "--update")[0], 0)
+            self.assertEqual(_main(cargo)[0], 0)
+            provided[0] = True
+            status, stdout, _ = _main(cargo)
+        self.assertEqual(status, 1)
+        self.assertIn("-trait method nvx::OutputSink::write is required\n", stdout)
+        self.assertIn("+trait method nvx::OutputSink::write is provided\n", stdout)
 
     def test_a_default_only_change_fails_the_check(self):
         cargo = FakeCargo()

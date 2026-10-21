@@ -30,7 +30,11 @@ public item, such as
 which records the default type as its rustdoc JSON, with each item ID, which
 changes between builds, replaced by the qualified path of the item. A change
 to a default, or to the type that its name resolves to, then changes the
-snapshot too.
+snapshot too. cargo-public-api also renders a required and a provided trait
+item alike, so the check records, for each item of a public trait, whether the
+trait provides it, as in
+`trait method nvx::host::instance::OutputSink::write is required`, with the
+default value or type of a provided constant or type.
 
 `NAME.txt` holds the items that every target of configuration `NAME` lists. A
 target that lists more, such as an API for Windows handles, gets

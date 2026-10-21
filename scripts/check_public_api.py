@@ -335,25 +335,39 @@ def resolve_ids(value: Any, names: Mapping[str, str]) -> Any:
     return value
 
 
-def generic_defaults(document: Mapping[str, Any]) -> list[str]:
-    """Return a line for each default of a generic parameter of a public item.
-
-    cargo-public-api leaves these defaults out, as in `pub type nvx::Result<T,
-    E>` for `Result<T, E = Error>`, so the check records them from the rustdoc
-    JSON, with each default type as its JSON in which each item ID is replaced
-    by the qualified path of the item: the first public path of an item of the
-    crate, or the path that rustdoc records for any other."""
-    index: Mapping[str, Any] = document["index"]
-    reachable = public_paths(document)
+def item_names(document: Mapping[str, Any]) -> dict[str, str]:
+    """Return the qualified path of each item that the rustdoc JSON names, by
+    ID: the first public path of an item of the crate, or the path that rustdoc
+    records for any other."""
     names = {
         identifier: "::".join(summary["path"])
         for identifier, summary in cast(
             Mapping[str, Any], document.get("paths", {})
         ).items()
     }
-    names.update((identifier, min(paths)) for identifier, paths in reachable.items())
+    names.update(
+        (identifier, min(paths)) for identifier, paths in public_paths(document).items()
+    )
+    return names
+
+
+def as_text(value: Any, names: Mapping[str, str]) -> str:
+    """Return `value`, from the rustdoc JSON, as compact JSON with its item IDs
+    resolved, which change between builds."""
+    return json.dumps(resolve_ids(value, names), sort_keys=True, separators=(",", ":"))
+
+
+def generic_defaults(document: Mapping[str, Any]) -> list[str]:
+    """Return a line for each default of a generic parameter of a public item.
+
+    cargo-public-api leaves these defaults out, as in `pub type nvx::Result<T,
+    E>` for `Result<T, E = Error>`, so the check records them from the rustdoc
+    JSON, with each default type as its JSON in which each item ID is replaced
+    by the qualified path of the item."""
+    index: Mapping[str, Any] = document["index"]
+    names = item_names(document)
     found: set[str] = set()
-    for identifier, paths in reachable.items():
+    for identifier, paths in public_paths(document).items():
         inner: Mapping[str, Any] = index[identifier]["inner"]
         for body in inner.values():
             if not isinstance(body, dict):
@@ -367,10 +381,10 @@ def generic_defaults(document: Mapping[str, Any]) -> list[str]:
                 default: Any = None
                 for key in ("type", "const"):
                     if key in kind and kind[key].get("default") is not None:
-                        default = resolve_ids(kind[key]["default"], names)
+                        default = kind[key]["default"]
                 if default is None:
                     continue
-                text = json.dumps(default, sort_keys=True, separators=(",", ":"))
+                text = as_text(default, names)
                 found.update(
                     f"generic default {path}<{parameter['name']}> = {text}"
                     for path in paths
@@ -378,9 +392,54 @@ def generic_defaults(document: Mapping[str, Any]) -> list[str]:
     return sorted(found)
 
 
+def trait_item_defaults(document: Mapping[str, Any]) -> list[str]:
+    """Return a line for each item of a public trait that says whether the
+    trait provides it: a method with a body, an associated constant with a
+    value, or an associated type with a default.
+
+    cargo-public-api renders the same line for a required and a provided item,
+    but an implementation that leaves out an item stops compiling when the
+    trait no longer provides it."""
+    index: Mapping[str, Any] = document["index"]
+    names = item_names(document)
+    found: set[str] = set()
+    for identifier, paths in public_paths(document).items():
+        trait = index[identifier]["inner"].get("trait")
+        if not isinstance(trait, dict):
+            continue
+        members: list[Any] = cast(dict[str, Any], trait)["items"]
+        for member in members:
+            item = index.get(str(member))
+            if item is None:
+                continue
+            inner: Mapping[str, Any] = item["inner"]
+            if "function" in inner:
+                kind = "method"
+                provided = bool(inner["function"].get("has_body"))
+                default = None
+            elif "assoc_const" in inner:
+                kind = "constant"
+                default = inner["assoc_const"].get("value")
+                provided = default is not None
+            elif "assoc_type" in inner:
+                kind = "type"
+                default = inner["assoc_type"].get("type")
+                provided = default is not None
+            else:
+                continue
+            status = "provided" if provided else "required"
+            if default is not None:
+                status += f" = {as_text(default, names)}"
+            found.update(
+                f"trait {kind} {path}::{item['name']} is {status}" for path in paths
+            )
+    return sorted(found)
+
+
 def listing(configuration: Configuration, target: str) -> str:
     """Return the public API of `configuration` on `target`: the items that
-    cargo-public-api lists, then the defaults of their generic parameters."""
+    cargo-public-api lists, then what it leaves out, the defaults of generic
+    parameters and which trait items their traits provide."""
     items = run(listing_command(configuration, target))
     document = rustdoc_document(target)
     # The rustdoc JSON is the one that cargo-public-api just read only if it
@@ -401,7 +460,7 @@ def listing(configuration: Configuration, target: str) -> str:
             f"the rustdoc JSON for {target} does not match the {configuration.name} "
             f"listing: its modules differ by {sorted(listed ^ reached)}"
         )
-    return items + lines(generic_defaults(document))
+    return items + lines(generic_defaults(document) + trait_item_defaults(document))
 
 
 def check(update: bool) -> tuple[list[Surface], list[str]]:

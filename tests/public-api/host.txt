@@ -2980,3 +2980,6 @@ pub fn nvx::guest_path(&std::path::Path) -> core::option::Option<alloc::string::
 pub fn nvx::resolve_guest_path(&std::path::Path) -> core::option::Option<alloc::string::String>
 pub type nvx::Result<T, E> = core::result::Result<T, E>
 generic default nvx::Result<E> = {"resolved_path":{"args":null,"id":"nvx::Error","path":"Error"}}
+trait method nvx::host::instance::OutputSink::write is required
+trait method nvx::host::platform::Transport::read is required
+trait method nvx::host::platform::Transport::write_all is required
