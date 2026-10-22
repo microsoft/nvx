@@ -32,10 +32,11 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use nix::errno::Errno;
-use nvx::gpt::{Expected, ExpectedPartition, GptError, Guid};
+use nvx::gpt::{Expected, ExpectedPartition, GptError};
 use nvx::guest::gpt::{
     BlockDevice, DeviceError, DeviceOperation, Mismatch, PartitionDevice, ValidatedDisk,
 };
+use nvx::uuid::Uuid;
 
 /// How long a test waits for partitions that must match.
 const MATCH_TIMEOUT: Duration = Duration::from_secs(10);
@@ -268,7 +269,7 @@ fn a_crafted_read_only_disk_validates() {
 fn a_disk_that_differs_from_the_expected_values_fails() {
     let file = File::open(read_only_path()).unwrap();
     let device = BlockDevice::new(&file).unwrap();
-    let other_disk = Expected::new().disk_guid(Guid::from_bytes([0x5A; 16]));
+    let other_disk = Expected::new().disk_guid(Uuid::from_bytes([0x5A; 16]));
     assert!(matches!(
         device.validate(&other_disk, MATCH_TIMEOUT),
         Err(DeviceError::Table(GptError::DiskGuidMismatch { .. }))
