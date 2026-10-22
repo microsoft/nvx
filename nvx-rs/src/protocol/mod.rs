@@ -20,8 +20,9 @@
 //!   devices, of any type, that its `virtio_mmio.device` parameters describe.
 //! - [`root`]: the boot tokens of a layered root, which name its image's format and identity and
 //!   its upper, with the host's renderer and the guest's parser.
-//! - [`share`]: the guest targets that a sandbox's live shares may not take, which the host and
-//!   the guest both refuse.
+//! - [`share`]: the kernel parameters that announce a sandbox's live shares to the guest, with
+//!   the host's writers and the guest's parser, and the guest targets that the shares may not
+//!   take, which the host and the guest both refuse.
 //! - [`nvxs`]: the NVXS session without I/O: validated records, incremental parsing, and the
 //!   state machines of the host's and the guest's roles, which carry application bytes of any
 //!   protocol.

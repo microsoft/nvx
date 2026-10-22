@@ -5,7 +5,8 @@
 //! children of an aggregate, each named by [`aggregate_child_name`], which the guest mounts at
 //! [`AGGREGATE_MOUNT_TARGET`], a directory that only the guest's root can enter, before it binds
 //! each child at its target, as the `nvx_share=` kernel parameters of [`aggregate_share_tokens`]
-//! tell it.
+//! tell it. [`protocol::share`](crate::protocol::share) writes those parameters, and the ones
+//! that OpenVMM appends, and reads them all in the guest.
 //!
 //! A share's access-policy paths are host paths: `--mount-deny` hides a path, `--mount-allow`
 //! exposes a path inside a denied path again, and `--mount-write` makes a path one of the only
@@ -26,22 +27,16 @@ use crate::host::python::fs;
 use crate::host::python::path::{Flavor, PurePath};
 use crate::protocol::share::{self, RESERVED_TARGET_CHARACTERS, Reservation};
 
-pub use crate::protocol::share::{RESERVED_EXACT_MOUNT_TARGETS, RESERVED_MOUNT_TARGETS};
+pub use crate::protocol::share::{
+    AGGREGATE_MOUNT_TARGET, RESERVED_EXACT_MOUNT_TARGETS, RESERVED_MOUNT_TARGETS,
+};
 
 /// The tag of OpenVMM's virtio-fs device.
 pub const MOUNT_TAG: &str = "microvm";
-/// The guest directory at which the guest mounts the aggregate of several shares.
-pub const AGGREGATE_MOUNT_TARGET: &str = "/run/nvx/shares";
 /// The most denied, allowed, and writable paths each that OpenVMM accepts for a share.
 pub const MAX_MOUNT_POLICY_PATHS: usize = 128;
 /// The longest guest target, in UTF-8 bytes.
 pub const MAX_MOUNT_TARGET_BYTES: usize = 4096;
-
-/// The bootstrap tokens that OpenVMM appends to the kernel command line for its share, with the
-/// guest directory, the tag, and the mode.
-const MOUNT_COMMAND_LINE_FRAGMENT: [&str; 3] = [" virtfs_dir=", " virtfs_tag=", " virtfs_mode="];
-/// The token that OpenVMM appends after those of an aggregate.
-const AGGREGATE_COMMAND_LINE_SUFFIX: &str = " virtfs_aggregate=1";
 
 /// The access mode of a share.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -662,14 +657,18 @@ impl SandboxMount {
     /// Returns the bootstrap tokens that OpenVMM appends to the kernel command line for this
     /// share alone: its target, the device tag, and its mode.
     pub fn command_line_fragment(&self) -> String {
-        command_line_fragment(&self.guest_target, self.access)
+        command_line_fragment(&self.guest_target, self.access, false)
     }
 }
 
-/// Returns the bootstrap tokens of a share at `target` with `access`.
-fn command_line_fragment(target: &str, access: MountAccess) -> String {
-    let [directory, tag, mode] = MOUNT_COMMAND_LINE_FRAGMENT;
-    format!("{directory}{target}{tag}{MOUNT_TAG}{mode}{access}")
+/// Returns the bootstrap tokens, each after a space, of a share at `target` with `access`, which
+/// is an aggregate if `aggregate` is.
+fn command_line_fragment(target: &str, access: MountAccess, aggregate: bool) -> String {
+    let read_only = access == MountAccess::ReadOnly;
+    format!(
+        " {}",
+        share::share_tokens(target, MOUNT_TAG, read_only, aggregate)
+    )
 }
 
 /// Returns whether `mounts` share the virtio-fs device as the children of an aggregate: several
@@ -918,10 +917,11 @@ pub fn aggregate_share_tokens(shares: &[(&str, MountAccess, MountKind)]) -> Vec<
         .iter()
         .enumerate()
         .map(|(index, &(target, access, kind))| {
-            let file = if kind == MountKind::File { ",file" } else { "" };
-            format!(
-                "nvx_share={},{target},{access}{file}",
-                aggregate_child_name(index, target)
+            share::child_token(
+                &aggregate_child_name(index, target),
+                target,
+                access == MountAccess::ReadOnly,
+                kind == MountKind::File,
             )
         })
         .collect()
@@ -935,7 +935,7 @@ pub fn aggregate_command_line_fragment(accesses: &[MountAccess]) -> String {
     } else {
         MountAccess::ReadOnly
     };
-    command_line_fragment(AGGREGATE_MOUNT_TARGET, access) + AGGREGATE_COMMAND_LINE_SUFFIX
+    command_line_fragment(AGGREGATE_MOUNT_TARGET, access, true)
 }
 
 /// Returns the bootstrap tokens that OpenVMM appends for `mounts`.

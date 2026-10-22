@@ -6,8 +6,9 @@
 //! control console. This crate holds everything it takes to drive one:
 //!
 //! - [`protocol`]: the codec of the control console, the `NVXS` session that OpenVMM brokers and
-//!   the `NVXC` frames of the guest agent, and the guest targets that a sandbox's live shares may
-//!   not take. It has no dependencies, so the host, the guest, and test doubles share it.
+//!   the `NVXC` frames of the guest agent, and a sandbox's live shares: the kernel parameters that
+//!   announce them, and the guest targets that they may not take. It has no dependencies, so the
+//!   host, the guest, and test doubles share it.
 //! - [`contract`]: the control-contract versions that this crate speaks, and the compatibility of
 //!   NVX releases with them.
 //! - [`net`]: IP networks in CIDR notation and their subtraction, and the forms of a VM's

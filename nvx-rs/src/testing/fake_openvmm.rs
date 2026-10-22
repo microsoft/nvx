@@ -73,6 +73,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::protocol::nvxs::ErrorCode;
+use crate::protocol::share::{self, CHILD_TOKEN};
 use crate::protocol::{
     APP_CANCEL, APP_ERROR, APP_EXEC, APP_EXIT, APP_FEATURES, APP_MAPS, APP_PING, APP_READY,
     APP_STDERR, APP_STDOUT, APP_STOP, APP_STOPPED, BUSY, CAPABILITY_LEN, CWD_FAILED, ExitCategory,
@@ -505,13 +506,13 @@ fn parse(program: &str, arguments: &[String]) -> Result<Options, String> {
             return Err(format!("a sandbox takes no {MAPS_TOKEN}"));
         }
         let (children, mut share_targets) = sandbox_shares(&values)?;
-        // The guest binds each directory child of an aggregate at the target of its
-        // `nvx_share=NAME,TARGET,ACCESS[,file]` token.
-        for share in token_values("nvx_share=") {
-            match share.split(',').collect::<Vec<_>>().as_slice() {
-                [_, target, _] => share_targets.push((*target).to_owned()),
-                [_, _, _, "file"] => {}
-                _ => return Err(format!("invalid nvx_share={share}")),
+        // The guest binds each directory child of an aggregate at the target that its
+        // `nvx_share=` token names, which the guest's own parser reads here too.
+        for value in token_values(CHILD_TOKEN) {
+            let child = share::Child::parse(value.as_bytes())
+                .map_err(|_| format!("invalid {CHILD_TOKEN}{value}"))?;
+            if !child.file {
+                share_targets.push(String::from_utf8_lossy(child.target).into_owned());
             }
         }
         (0, children, share_targets, workload)

@@ -100,7 +100,7 @@ nvx/
 |   `-- build.rs                 Passes the bundle that nvx staged on to dependents
 |-- nvx-rs/                      Rust crate `nvx` for the NVX mechanics
 |   |-- src/
-|   |   |-- protocol/            Control-console codec, NVXS session, and the guest targets that live shares may not take, shared by the host and the guest
+|   |   |-- protocol/            Control-console codec, NVXS session, and live shares' kernel parameters and reserved guest targets, shared by the host and the guest
 |   |   |-- contract.rs          Control-contract versions and release compatibility
 |   |   |-- net/                 CIDR parsing and subtraction, and hostname and guest-network forms
 |   |   |-- host/                Artifacts, launch, network and egress-policy lowering, sessions, VM instances, sandbox stores, the sandbox launch profile, and the `nvx-rs` CLI (feature `cli`)
