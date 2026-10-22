@@ -5,19 +5,21 @@
 //! The scenario attaches two disks of the same size, and shares a directory of disk images, which
 //! these environment variables name:
 //!
-//! - `NVX_GPT_DEVICE_DISK`: the read-only disk, which holds a GPT with p1 and two layers;
+//! - `NVX_GPT_DEVICE_DISK`: the read-only disk, which holds a GPT with a first partition and two
+//!   layers;
 //! - `NVX_GPT_DEVICE_DISK_GUID`: its disk GUID;
 //! - `NVX_GPT_DEVICE_PARTITIONS`: the unique GUID and size in bytes of each of its partitions, in
 //!   the order of their numbers, as `GUID:SIZE` separated by spaces;
-//! - `NVX_GPT_DEVICE_P1`: the bytes of its p1 without the padding after them, in hexadecimal;
+//! - `NVX_GPT_DEVICE_FIRST_PARTITION`: the bytes of its first partition without the padding after
+//!   them, in hexadecimal;
 //! - `NVX_GPT_DEVICE_SCRATCH`: the writable disk, over whose start the tests write the images;
-//! - `NVX_GPT_DEVICE_IMAGES`: the directory of the images: `three.img`, a GPT with p1 and two
-//!   layers, as on the read-only disk; `two.img` and `four.img`, the same without its third
-//!   partition and with a fourth; `moved.img`, the same with its second partition 512 blocks
-//!   later; and `mbr.img`, the same with an MBR in place of its protective MBR, whose first
-//!   partition spans the first two of the GPT and whose second is the third.
+//! - `NVX_GPT_DEVICE_IMAGES`: the directory of the images: `three.img`, a GPT with a first
+//!   partition and two layers, as on the read-only disk; `two.img` and `four.img`, the same
+//!   without its third partition and with a fourth; `moved.img`, the same with its second
+//!   partition 512 blocks later; and `mbr.img`, the same with an MBR in place of its protective
+//!   MBR, whose first partition spans the first two of the GPT and whose second is the third.
 //!
-//! Every disk has 512-byte logical blocks, a p1 of 64 KiB, and layers that start with
+//! Every disk has 512-byte logical blocks, a first partition of 64 KiB, and layers that start with
 //! `NVX-GPT-LAYER-` and their partition number.
 #![cfg(all(target_os = "linux", feature = "guest"))]
 
@@ -47,8 +49,8 @@ const MISMATCH_TIMEOUT: Duration = Duration::from_millis(500);
 /// How long the late-partition test waits before it adds the partition that it removed.
 const LATE: Duration = Duration::from_millis(300);
 
-/// The size of p1 of every disk, in bytes.
-const P1_SIZE: usize = 64 * 1024;
+/// The size of the first partition of every disk, in bytes.
+const FIRST_PARTITION_SIZE: usize = 64 * 1024;
 
 /// The prefix of the first bytes of every layer, before its partition number.
 const LAYER_MARKER: &str = "NVX-GPT-LAYER-";
@@ -225,16 +227,25 @@ fn a_crafted_read_only_disk_validates() {
     let validated = device.validate(&expected(), MATCH_TIMEOUT).unwrap();
     let disk = validated.disk();
     assert_eq!(device.size(), disk.size());
-    assert_eq!(validated.p1().partition(), disk.p1());
+    assert_eq!(
+        validated.first_partition().partition(),
+        disk.first_partition()
+    );
     assert_eq!(validated.lowers().len(), 2);
 
-    // p1 reads as its opaque bytes, without its padding, and only within the bound.
-    let p1 = disk.read_p1(&file, P1_SIZE).unwrap();
-    assert_eq!(p1, decode_hex(&variable("NVX_GPT_DEVICE_P1")));
-    assert!(std::str::from_utf8(&p1).is_err());
+    // The first partition reads as its opaque bytes, without its padding, and only within the
+    // bound.
+    let configuration = disk
+        .read_first_partition(&file, FIRST_PARTITION_SIZE)
+        .unwrap();
+    assert_eq!(
+        configuration,
+        decode_hex(&variable("NVX_GPT_DEVICE_FIRST_PARTITION"))
+    );
+    assert!(std::str::from_utf8(&configuration).is_err());
     assert!(matches!(
-        disk.read_p1(&file, P1_SIZE - 1),
-        Err(GptError::P1TooLarge { .. })
+        disk.read_first_partition(&file, FIRST_PARTITION_SIZE - 1),
+        Err(GptError::FirstPartitionTooLarge { .. })
     ));
 
     // The partitions are the kernel's devices of the disk, and each layer's holds the layer.
@@ -328,13 +339,19 @@ fn late_partitions_are_awaited() {
     let disk = scratch_with("three.img");
     let device = BlockDevice::new(&disk).unwrap();
     let validated = device.validate(&Expected::new(), MATCH_TIMEOUT).unwrap();
-    let p2 = *validated.partitions()[1].partition();
+    let second = *validated.partitions()[1].partition();
     change_partition(&disk, BLKPG_DEL_PARTITION, 2, 0, 0);
     let start = Instant::now();
     let awaited = thread::scope(|scope| {
         let adder = scope.spawn(|| {
             thread::sleep(LATE);
-            change_partition(&disk, BLKPG_ADD_PARTITION, 2, p2.offset(), p2.size());
+            change_partition(
+                &disk,
+                BLKPG_ADD_PARTITION,
+                2,
+                second.offset(),
+                second.size(),
+            );
         });
         let awaited = device.await_partitions(validated.disk(), MATCH_TIMEOUT);
         adder.join().unwrap();
@@ -358,7 +375,7 @@ fn missing_partitions_fail_when_the_timeout_passes() {
     assert!(start.elapsed() >= MISMATCH_TIMEOUT);
     assert_mismatch(awaited, Mismatch::Missing { number: 3 });
 
-    // The table changed after the validation read it: the kernel rereads one without p3.
+    // The table changed after the validation read it: the kernel rereads one without partition 3.
     overwrite(&disk, "two.img");
     device.reread_partitions().unwrap();
     assert_mismatch(
@@ -383,15 +400,15 @@ fn extra_and_moved_partitions_fail() {
 
     overwrite(&disk, "moved.img");
     device.reread_partitions().unwrap();
-    let p2 = table.lowers()[0];
+    let second = table.lowers()[0];
     assert_mismatch(
         device.await_partitions(&table, MISMATCH_TIMEOUT),
         Mismatch::Extent {
             number: 2,
-            start: p2.offset() + 512 * 512,
-            size: p2.size(),
-            expected_start: p2.offset(),
-            expected_size: p2.size(),
+            start: second.offset() + 512 * 512,
+            size: second.size(),
+            expected_start: second.offset(),
+            expected_size: second.size(),
         },
     );
 }
@@ -412,15 +429,15 @@ fn an_mbr_that_the_kernel_reads_instead_fails() {
     ));
     // The kernel reads the MBR's partitions, which differ from the table that was read before.
     device.reread_partitions().unwrap();
-    let (p1, p2) = (table.p1(), table.lowers()[0]);
+    let (first, second) = (table.first_partition(), table.lowers()[0]);
     assert_mismatch(
         device.await_partitions(table, MISMATCH_TIMEOUT),
         Mismatch::Extent {
             number: 1,
-            start: p1.offset(),
-            size: p2.offset() + p2.size() - p1.offset(),
-            expected_start: p1.offset(),
-            expected_size: p1.size(),
+            start: first.offset(),
+            size: second.offset() + second.size() - first.offset(),
+            expected_start: first.offset(),
+            expected_size: first.size(),
         },
     );
 }

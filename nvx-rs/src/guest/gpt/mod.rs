@@ -2,9 +2,9 @@
 //! [`crate::gpt`] reads and checks, validated against the partitions that the kernel created
 //! from it.
 //!
-//! A guest that boots from such a disk, such as one whose first partition, p1, configures an
-//! adapter and whose later partitions hold the read-only layers of its root, first resolves the
-//! disk's block device by its role, checks the device's access mode and size, flushes its cached
+//! A guest that boots from such a disk, such as one whose first partition configures an adapter
+//! and whose later partitions hold the read-only layers of its root, first resolves the disk's
+//! block device by its role, checks the device's access mode and size, flushes its cached
 //! buffers, and opens it. [`BlockDevice::validate`] then:
 //!
 //! 1. reads the disk's protective MBR, primary GPT header, and primary partition entry array
@@ -16,11 +16,12 @@
 //!    match or a deadline passes: the kernel must have one partition for each of the table's, with
 //!    its number, its first byte, and its size, and no other.
 //!
-//! It returns the block devices of the partitions: p1's, whose bytes the caller reads as opaque
-//! configuration with [`Disk::read_p1`], and the layers', which the caller mounts. When the
-//! kernel's partitions differ from the table that the validation read, for example because the
-//! table changed after the read, or because the kernel read an MBR in its place, the validation
-//! fails, so the caller never uses a partition that the table does not describe.
+//! It returns the block devices of the partitions: the first partition's, whose bytes the caller
+//! reads as opaque configuration with [`Disk::read_first_partition`], and the layers', which the
+//! caller mounts. When the kernel's partitions differ from the table that the validation read,
+//! for example because the table changed after the read, or because the kernel read an MBR in its
+//! place, the validation fails, so the caller never uses a partition that the table does not
+//! describe.
 //!
 //! The kernel creates a disk's partitions before its reread returns, but another program, such as
 //! a device manager that probes the disk, may make it drop and create them again at any time. The
@@ -45,8 +46,8 @@
 //! let file = File::open("/dev/vda")?;
 //! let expected = Expected::new().disk_guid("8d2f3a4e-1c5b-4e7a-9f60-2b3c4d5e6f70".parse()?);
 //! let validated = BlockDevice::new(&file)?.validate(&expected, Duration::from_secs(5))?;
-//! let configuration = validated.disk().read_p1(&file, 64 * 1024)?;
-//! println!("p1 holds {} bytes of configuration", configuration.len());
+//! let configuration = validated.disk().read_first_partition(&file, 64 * 1024)?;
+//! println!("the first partition holds {} bytes of configuration", configuration.len());
 //! for layer in validated.lowers() {
 //!     println!("layer {:?} is device {}", layer.name(), layer.device_number());
 //! }
@@ -252,25 +253,25 @@ pub struct ValidatedDisk {
 }
 
 impl ValidatedDisk {
-    /// Returns the disk's partition table, with which the caller reads p1 through
-    /// [`Disk::read_p1`].
+    /// Returns the disk's partition table, with which the caller reads the first partition
+    /// through [`Disk::read_first_partition`].
     pub fn disk(&self) -> &Disk {
         &self.disk
     }
 
-    /// Returns the block device of every partition, p1 first, in the order of their numbers,
-    /// which run from 1 without a gap.
+    /// Returns the block device of every partition, in the order of their numbers, which run
+    /// from 1 without a gap.
     pub fn partitions(&self) -> &[PartitionDevice] {
         &self.partitions
     }
 
-    /// Returns the block device of p1, the partition whose bytes configure the adapter.
-    pub fn p1(&self) -> &PartitionDevice {
+    /// Returns the block device of the first partition, whose bytes configure the adapter.
+    pub fn first_partition(&self) -> &PartitionDevice {
         &self.partitions[0]
     }
 
-    /// Returns the block devices of the partitions after p1, which hold the read-only layers of
-    /// the root: at least one.
+    /// Returns the block devices of the partitions after the first, which hold the read-only
+    /// layers of the root: at least one.
     pub fn lowers(&self) -> &[PartitionDevice] {
         &self.partitions[1..]
     }

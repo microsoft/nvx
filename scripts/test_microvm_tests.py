@@ -8391,7 +8391,10 @@ class MicrovmTests(unittest.TestCase):
             for number, size in ((1, 64 * 1024), (2, 512 * 1024), (3, 512 * 1024))
         )
         self.assertIn(f"NVX_GPT_DEVICE_PARTITIONS='{partitions}'", script)
-        self.assertIn(f"NVX_GPT_DEVICE_P1={microvm_tests.GPT_DEVICE_P1.hex()}", script)
+        self.assertIn(
+            f"NVX_GPT_DEVICE_FIRST_PARTITION={microvm_tests.GPT_DEVICE_FIRST_PARTITION.hex()}",
+            script,
+        )
         self.assertIn("--ignored --test-threads=1", script)
         self.assertTrue(script.endswith("nvx-exit 0\n"))
         self.assertEqual(seen["marker"], microvm_tests.GPT_DEVICE_COMPLETION_MARKER)
@@ -8473,9 +8476,11 @@ class MicrovmTests(unittest.TestCase):
                 for number, (first, last) in enumerate(extents, start=1)
             ]
 
-        p1, p2, p3 = (2048, 2175), (4096, 5119), (6144, 7167)
+        partition1, partition2, partition3 = (2048, 2175), (4096, 5119), (6144, 7167)
         disk_guid = microvm_tests.GPT_DEVICE_DISK_GUID
-        self.assertEqual(entries(disks.disk), layout(disk_guid, p1, p2, p3))
+        self.assertEqual(
+            entries(disks.disk), layout(disk_guid, partition1, partition2, partition3)
+        )
         self.assertEqual(disks.disk[sector + 56 :][:16], disk_guid.bytes_le)
         self.assertEqual(
             mbr(disks.disk), [(0xEE, 1, blocks - 1), (0, 0, 0), (0, 0, 0), (0, 0, 0)]
@@ -8484,27 +8489,43 @@ class MicrovmTests(unittest.TestCase):
             [(p.unique_guid, p.first_lba, p.last_lba) for p in disks.partitions],
             entries(disks.disk),
         )
-        configuration = disks.disk[p1[0] * sector :][: (p1[1] - p1[0] + 1) * sector]
-        self.assertNotEqual(configuration.rstrip(b"\0"), microvm_tests.GPT_DEVICE_P1)
-        self.assertEqual(
-            configuration.rstrip(b"\0 \t\n\r\x0c"), microvm_tests.GPT_DEVICE_P1
+        first_lba, last_lba = partition1
+        configuration = disks.disk[first_lba * sector :][
+            : (last_lba - first_lba + 1) * sector
+        ]
+        self.assertNotEqual(
+            configuration.rstrip(b"\0"), microvm_tests.GPT_DEVICE_FIRST_PARTITION
         )
-        for number, (first, _) in ((2, p2), (3, p3)):
+        self.assertEqual(
+            configuration.rstrip(b"\0 \t\n\r\x0c"),
+            microvm_tests.GPT_DEVICE_FIRST_PARTITION,
+        )
+        for number, (first, _) in ((2, partition2), (3, partition3)):
             marker = f"NVX-GPT-LAYER-{number}".encode()
             self.assertEqual(disks.disk[first * sector :][: len(marker)], marker)
 
         scratch = microvm_tests.GPT_DEVICE_SCRATCH_GUID
         images = disks.images
-        self.assertEqual(entries(images["three.img"]), layout(scratch, p1, p2, p3))
-        self.assertEqual(entries(images["two.img"]), layout(scratch, p1, p2))
         self.assertEqual(
-            entries(images["four.img"]), layout(scratch, p1, p2, p3, (7168, 7679))
+            entries(images["three.img"]),
+            layout(scratch, partition1, partition2, partition3),
         )
         self.assertEqual(
-            entries(images["moved.img"]), layout(scratch, p1, (4608, 5631), p3)
+            entries(images["two.img"]), layout(scratch, partition1, partition2)
+        )
+        self.assertEqual(
+            entries(images["four.img"]),
+            layout(scratch, partition1, partition2, partition3, (7168, 7679)),
+        )
+        self.assertEqual(
+            entries(images["moved.img"]),
+            layout(scratch, partition1, (4608, 5631), partition3),
         )
         # The MBR replaces only the protective MBR, so the GPT behind it remains.
-        self.assertEqual(entries(images["mbr.img"]), layout(scratch, p1, p2, p3))
+        self.assertEqual(
+            entries(images["mbr.img"]),
+            layout(scratch, partition1, partition2, partition3),
+        )
         self.assertEqual(
             mbr(images["mbr.img"]),
             [(0x83, 2048, 3072), (0x83, 6144, 1024), (0, 0, 0), (0, 0, 0)],

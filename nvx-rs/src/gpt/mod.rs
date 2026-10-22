@@ -1,4 +1,4 @@
-//! GUID Partition Table (GPT) disks that hold a layered root: a first partition, p1, whose bytes
+//! GUID Partition Table (GPT) disks that hold a layered root: a first partition whose bytes
 //! configure an adapter, and the read-only filesystem layers of the root in the partitions after
 //! it.
 //!
@@ -17,11 +17,11 @@
 //! - **Entry array:** entries of [`ENTRY_SIZE`] bytes, the only size that Linux reads, at most
 //!   [`MAX_ENTRY_ARRAY_BYTES`] of them in all, and a matching CRC-32.
 //! - **Partitions:** the used entries, those whose type GUID is not nil, come first, with no unused
-//!   entry among them, and number from [`MIN_PARTITIONS`], p1 and at least one layer, through
-//!   [`MAX_PARTITIONS`], the most that Linux creates. Each lies in the usable blocks, shares no
-//!   block with another, and has a unique GUID that is not nil and repeats no other GUID of the
-//!   disk. Linux numbers each partition one more than its entry's index, as [`Partition::number`]
-//!   does.
+//!   entry among them, and number from [`MIN_PARTITIONS`], the first partition and at least one
+//!   layer, through [`MAX_PARTITIONS`], the most that Linux creates. Each lies in the usable
+//!   blocks, shares no block with another, and has a unique GUID that is not nil and repeats no
+//!   other GUID of the disk. Linux numbers each partition one more than its entry's index, as
+//!   [`Partition::number`] does.
 //!
 //! The backup header and entry array are never read: a disk whose primary table is invalid fails
 //! even when its backup is intact. Linux, too, falls back to the backup only when its command
@@ -31,8 +31,8 @@
 //! the entry array, which it allocates only once the header has bounded its size, and computes
 //! positions with checked arithmetic, in the disk's logical blocks. [`Expected`] adds the
 //! identities and sizes that a caller knows, such as the disk GUID that a boot parameter names.
-//! [`Disk::read_p1`] then reads p1 as opaque bytes, up to a bound that the caller sets, which it
-//! neither interprets nor probes as a filesystem.
+//! [`Disk::read_first_partition`] then reads the first partition as opaque bytes, up to a bound
+//! that the caller sets, which it neither interprets nor probes as a filesystem.
 //!
 //! GUIDs are [`Uuid`]s, which GPT stores in the layout that [`Uuid::from_bytes_le`] reads.
 //!
@@ -48,10 +48,10 @@
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! let image = File::open("disk.img")?;
 //! let disk = Disk::read(&image, 512, image.metadata()?.len(), &Expected::new())?;
-//! let configuration = disk.read_p1(&image, 64 * 1024)?;
-//! println!("p1 holds {} bytes of configuration", configuration.len());
+//! let configuration = disk.read_first_partition(&image, 64 * 1024)?;
+//! println!("the first partition holds {} bytes of configuration", configuration.len());
 //! for layer in disk.lowers() {
-//!     println!("p{}: {} bytes at {}", layer.number(), layer.size(), layer.offset());
+//!     println!("partition {}: {} bytes at {}", layer.number(), layer.size(), layer.offset());
 //! }
 //! # Ok(())
 //! # }
@@ -84,7 +84,7 @@ pub const ENTRY_SIZE: u32 = 128;
 /// allocation and the work of its CRC: 8,192 entries. UEFI's default array holds 128.
 pub const MAX_ENTRY_ARRAY_BYTES: u32 = 1024 * 1024;
 
-/// The fewest partitions of a disk: p1 and one layer.
+/// The fewest partitions of a disk: the first partition and one layer.
 pub const MIN_PARTITIONS: usize = 2;
 
 /// The most partitions of a disk: Linux creates partitions 1 through 255 only.
@@ -182,7 +182,7 @@ mod entry {
 pub struct Expected {
     /// The disk's GUID, if the caller expects one.
     disk_guid: Option<Uuid>,
-    /// The partitions, p1 first, if the caller expects them.
+    /// The partitions, in the order of their numbers, if the caller expects them.
     partitions: Option<Vec<ExpectedPartition>>,
 }
 
@@ -198,8 +198,8 @@ impl Expected {
         self
     }
 
-    /// Expects exactly as many partitions as `partitions` holds, p1 first, and each to have the
-    /// unique GUID and size that its expectation sets.
+    /// Expects exactly as many partitions as `partitions` holds, in the order of their numbers,
+    /// and each to have the unique GUID and size that its expectation sets.
     pub fn partitions(mut self, partitions: Vec<ExpectedPartition>) -> Self {
         self.partitions = Some(partitions);
         self
@@ -277,7 +277,7 @@ impl ExpectedPartition {
 }
 
 /// A GPT disk whose protective MBR, primary header, and primary partition entry array
-/// [`Disk::read`] checked, and its partitions: p1 and the layers after it.
+/// [`Disk::read`] checked, and its partitions: the first partition and the layers after it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Disk {
     /// The size of a logical block, in bytes.
@@ -331,44 +331,43 @@ impl Disk {
         self.guid
     }
 
-    /// Returns every partition, p1 first, in the order of their numbers, which run from 1
-    /// without a gap.
+    /// Returns every partition, in the order of their numbers, which run from 1 without a gap.
     pub fn partitions(&self) -> &[Partition] {
         &self.partitions
     }
 
-    /// Returns p1, the partition whose bytes configure the adapter.
-    pub fn p1(&self) -> &Partition {
+    /// Returns the first partition, whose bytes configure the adapter.
+    pub fn first_partition(&self) -> &Partition {
         &self.partitions[0]
     }
 
-    /// Returns the partitions after p1, which hold the read-only layers of the root: at least
-    /// one.
+    /// Returns the partitions after the first, which hold the read-only layers of the root: at
+    /// least one.
     pub fn lowers(&self) -> &[Partition] {
         &self.partitions[1..]
     }
 
-    /// Reads p1 from `source`, the disk that [`Disk::read`] read: every byte of the partition,
-    /// less the trailing NUL bytes and ASCII whitespace (space, tab, line feed, form feed, and
-    /// carriage return), as opaque bytes that need not be UTF-8.
+    /// Reads the first partition from `source`, the disk that [`Disk::read`] read: every byte of
+    /// the partition, less the trailing NUL bytes and ASCII whitespace (space, tab, line feed,
+    /// form feed, and carriage return), as opaque bytes that need not be UTF-8.
     ///
-    /// A p1 larger than `bound` bytes fails before any of it is read, so that no more than
-    /// `bound` bytes are read or allocated.
-    pub fn read_p1<S: ReadAt + ?Sized>(
+    /// A first partition larger than `bound` bytes fails before any of it is read, so that no
+    /// more than `bound` bytes are read or allocated.
+    pub fn read_first_partition<S: ReadAt + ?Sized>(
         &self,
         source: &S,
         bound: usize,
     ) -> Result<Vec<u8>, GptError> {
-        let p1 = self.p1();
-        let length = usize::try_from(p1.size)
+        let partition = self.first_partition();
+        let length = usize::try_from(partition.size)
             .ok()
             .filter(|length| *length <= bound)
-            .ok_or(GptError::P1TooLarge {
-                size: p1.size,
+            .ok_or(GptError::FirstPartitionTooLarge {
+                size: partition.size,
                 bound,
             })?;
         let mut bytes = vec![0; length];
-        source.read_exact_at(p1.offset, &mut bytes)?;
+        source.read_exact_at(partition.offset, &mut bytes)?;
         let end = bytes
             .iter()
             .rposition(|byte| *byte != 0 && !byte.is_ascii_whitespace())
@@ -401,7 +400,7 @@ pub struct Partition {
 
 impl Partition {
     /// Returns the partition's number, as Linux numbers it: one more than its entry's index, so
-    /// p1 is 1, and the first layer 2.
+    /// the first partition is 1, and the first layer 2.
     pub fn number(&self) -> u8 {
         self.number
     }

@@ -23,7 +23,7 @@ chmod 0755 /tmp/nvx-gpt-device || fail 25
 if ! NVX_GPT_DEVICE_DISK=/dev/vda \
     NVX_GPT_DEVICE_DISK_GUID=@DISK_GUID@ \
     NVX_GPT_DEVICE_PARTITIONS='@PARTITIONS@' \
-    NVX_GPT_DEVICE_P1=@P1@ \
+    NVX_GPT_DEVICE_FIRST_PARTITION=@FIRST_PARTITION@ \
     NVX_GPT_DEVICE_SCRATCH=/dev/vdb \
     NVX_GPT_DEVICE_IMAGES=/mnt/share \
     /tmp/nvx-gpt-device --ignored --test-threads=1; then

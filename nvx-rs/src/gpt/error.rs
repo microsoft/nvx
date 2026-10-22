@@ -149,9 +149,9 @@ pub enum GptError {
         /// The partition's size, in bytes.
         found: u64,
     },
-    /// p1 is larger than the caller's bound.
-    P1TooLarge {
-        /// The size of p1, in bytes.
+    /// The first partition is larger than the caller's bound.
+    FirstPartitionTooLarge {
+        /// The size of the first partition, in bytes.
         size: u64,
         /// The caller's bound, in bytes.
         bound: usize,
@@ -250,7 +250,7 @@ impl fmt::Display for GptError {
             Self::PartitionCount(count) => write!(
                 formatter,
                 "the disk has {count} partitions, not {MIN_PARTITIONS} through {MAX_PARTITIONS}: \
-                 p1 and at least one layer"
+                 the first partition and at least one layer"
             ),
             Self::Extent {
                 number,
@@ -295,9 +295,9 @@ impl fmt::Display for GptError {
                 formatter,
                 "partition {number} has {found} bytes, not the expected {expected}"
             ),
-            Self::P1TooLarge { size, bound } => write!(
+            Self::FirstPartitionTooLarge { size, bound } => write!(
                 formatter,
-                "p1 has {size} bytes, more than the bound of {bound}"
+                "the first partition has {size} bytes, more than the bound of {bound}"
             ),
         }
     }

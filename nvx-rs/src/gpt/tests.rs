@@ -101,14 +101,14 @@ struct Spec {
     entry_array_crc: Option<u32>,
     /// The partition entries by index; `None` leaves an entry unused.
     entries: Vec<Option<Entry>>,
-    /// Bytes written at the start of a block, such as p1's contents.
+    /// Bytes written at the start of a block, such as the first partition's contents.
     contents: Vec<(u64, Vec<u8>)>,
 }
 
 impl Spec {
     /// Returns a valid disk of `blocks` blocks of `block_size` bytes, whose `entry_count`
-    /// entries start at LBA 2, as do UEFI's defaults, and with three partitions: p1, one block,
-    /// and two layers of 8 and 16 blocks after it.
+    /// entries start at LBA 2, as do UEFI's defaults, and with three partitions: the first, one
+    /// block, and two layers of 8 and 16 blocks after it.
     fn new(block_size: u32, blocks: u64, entry_count: u32) -> Self {
         let array_blocks = (u64::from(entry_count) * 128).div_ceil(u64::from(block_size));
         let first_usable_lba = 2 + array_blocks;
@@ -250,8 +250,8 @@ impl Spec {
     }
 }
 
-/// Returns [`Spec::standard`]'s disk, for the tests of other modules: p1 in LBA 34, and layers in
-/// LBAs 35 through 42 and 43 through 58, of 512 bytes each.
+/// Returns [`Spec::standard`]'s disk, for the tests of other modules: the first partition in LBA
+/// 34, and layers in LBAs 35 through 42 and 43 through 58, of 512 bytes each.
 #[cfg(all(feature = "guest", target_os = "linux"))]
 pub(crate) fn standard_disk() -> Disk {
     Spec::standard().read().unwrap()
@@ -314,12 +314,12 @@ fn a_disk_reads_with_its_partitions_in_number_order() {
             (3, 43, 58, 43 * 512, 16 * 512),
         ]
     );
-    assert_eq!(disk.p1().number(), 1);
-    assert_eq!(disk.p1().unique_guid(), guid(1));
-    assert_eq!(disk.p1().type_guid(), LINUX_DATA);
+    assert_eq!(disk.first_partition().number(), 1);
+    assert_eq!(disk.first_partition().unique_guid(), guid(1));
+    assert_eq!(disk.first_partition().type_guid(), LINUX_DATA);
     // GPT stores the first three groups of a GUID little-endian.
     assert_eq!(
-        disk.p1().type_guid().to_string(),
+        disk.first_partition().type_guid().to_string(),
         "0fc63daf-8483-4772-8e79-3d69d8477de4"
     );
     let lowers: Vec<_> = disk.lowers().iter().map(Partition::number).collect();
@@ -523,12 +523,12 @@ fn the_entries_are_128_bytes_and_bounded_in_number() {
     // The largest array, 1 MiB in 256 4096-byte blocks, and the smallest, one entry with the
     // others of its block outside the array, which its CRC does not cover.
     let spec = Spec::new(4096, 600, 8192);
-    assert_eq!(spec.read().unwrap().p1().first_lba(), 258);
+    assert_eq!(spec.read().unwrap().first_partition().first_lba(), 258);
     let mut spec = Spec::new(512, 2048, 3);
     spec.contents
         .push((2, [spec.array(), vec![0xFF; 128]].concat()));
     let disk = spec.read().unwrap();
-    assert_eq!(disk.p1().first_lba(), 3);
+    assert_eq!(disk.first_partition().first_lba(), 3);
 }
 
 #[test]
@@ -551,7 +551,7 @@ fn the_entry_array_lies_after_the_header_and_before_the_usable_blocks() {
     spec.first_usable_lba = 35;
     spec.entry(1).first_lba = 59;
     spec.entry(1).last_lba = 59;
-    assert_eq!(spec.read().unwrap().p1().offset(), 59 * 512);
+    assert_eq!(spec.read().unwrap().first_partition().offset(), 59 * 512);
 }
 
 #[test]
@@ -646,9 +646,12 @@ fn the_reader_never_reads_past_the_usable_blocks() {
         reads: RefCell::new(Vec::new()),
     };
     let disk = Disk::read(&source, 512, image.len() as u64, &Expected::new()).unwrap();
-    assert_eq!(disk.read_p1(&source, 512).unwrap(), b"configuration");
+    assert_eq!(
+        disk.read_first_partition(&source, 512).unwrap(),
+        b"configuration"
+    );
     let reads = source.reads.into_inner();
-    // The MBR, the header, the array, and p1, each read once.
+    // The MBR, the header, the array, and the first partition, each read once.
     assert_eq!(
         reads,
         [(0, 512), (512, 512), (1024, 128 * 128), (34 * 512, 512)]
@@ -701,7 +704,7 @@ fn partitions_share_no_block() {
     spec.entry(3).first_lba = 34;
     spec.entry(3).last_lba = 34;
     let disk = spec.read().unwrap();
-    assert_eq!(disk.p1().first_lba(), 100);
+    assert_eq!(disk.first_partition().first_lba(), 100);
     assert_eq!(disk.lowers()[1].first_lba(), 34);
 }
 
@@ -735,7 +738,7 @@ fn used_entries_come_first_without_holes() {
 }
 
 #[test]
-fn a_disk_has_p1_and_one_to_254_layers() {
+fn a_disk_has_a_first_partition_and_one_to_254_layers() {
     let mut spec = Spec::standard();
     spec.entries.clear();
     assert_fails!(spec.read(), GptError::PartitionCount(0));
@@ -781,7 +784,7 @@ fn partition_guids_are_unique_and_not_nil() {
     let mut spec = Spec::standard();
     spec.entry(1).type_guid = guid(0x77);
     let disk = spec.read().unwrap();
-    assert_eq!(disk.p1().type_guid(), guid(0x77));
+    assert_eq!(disk.first_partition().type_guid(), guid(0x77));
     assert_eq!(disk.lowers()[0].type_guid(), LINUX_DATA);
 }
 
@@ -854,9 +857,9 @@ fn expectations_follow_the_format_checks() {
     );
 }
 
-/// Returns the standard disk whose p1, of `blocks` blocks of `block_size` bytes, starts with
-/// `contents`.
-fn disk_with_p1(block_size: u32, blocks: u64, contents: &[u8]) -> (Disk, Vec<u8>) {
+/// Returns the standard disk whose first partition, of `blocks` blocks of `block_size` bytes,
+/// starts with `contents`.
+fn disk_with_first_partition(block_size: u32, blocks: u64, contents: &[u8]) -> (Disk, Vec<u8>) {
     let mut spec = if block_size == 512 {
         Spec::standard()
     } else {
@@ -881,60 +884,84 @@ fn disk_with_p1(block_size: u32, blocks: u64, contents: &[u8]) -> (Disk, Vec<u8>
 }
 
 #[test]
-fn p1_is_its_opaque_bytes_without_trailing_padding() {
+fn the_first_partition_is_its_opaque_bytes_without_trailing_padding() {
     // One sector of configuration, padded with NUL bytes.
-    let (disk, image) = disk_with_p1(512, 1, b"{\"layers\":2}\n");
-    assert_eq!(disk.p1().size(), 512);
+    let (disk, image) = disk_with_first_partition(512, 1, b"{\"layers\":2}\n");
+    assert_eq!(disk.first_partition().size(), 512);
     assert_eq!(
-        disk.read_p1(image.as_slice(), 512).unwrap(),
+        disk.read_first_partition(image.as_slice(), 512).unwrap(),
         b"{\"layers\":2}"
     );
 
     // Bytes that are not UTF-8, with NUL bytes and whitespace inside, are kept.
     let bytes = [0xFF, 0x00, 0xC3, 0x28, b' ', 0x80, b'\t', 0x01];
-    let (disk, image) = disk_with_p1(512, 1, &bytes);
-    assert_eq!(disk.read_p1(image.as_slice(), 512).unwrap(), bytes);
+    let (disk, image) = disk_with_first_partition(512, 1, &bytes);
+    assert_eq!(
+        disk.read_first_partition(image.as_slice(), 512).unwrap(),
+        bytes
+    );
 
     // Trailing NUL bytes and whitespace go, in any order; leading ones stay, as does a
     // vertical tab, which is not ASCII whitespace.
-    let (disk, image) = disk_with_p1(512, 1, b" \tx \t\r\n\x0c\0 \0\n");
-    assert_eq!(disk.read_p1(image.as_slice(), 512).unwrap(), b" \tx");
-    let (disk, image) = disk_with_p1(512, 1, b"x\x0b\0");
-    assert_eq!(disk.read_p1(image.as_slice(), 512).unwrap(), b"x\x0b");
-    let (disk, image) = disk_with_p1(512, 1, b"\0\n \0");
-    assert_eq!(disk.read_p1(image.as_slice(), 512).unwrap(), b"");
+    let (disk, image) = disk_with_first_partition(512, 1, b" \tx \t\r\n\x0c\0 \0\n");
+    assert_eq!(
+        disk.read_first_partition(image.as_slice(), 512).unwrap(),
+        b" \tx"
+    );
+    let (disk, image) = disk_with_first_partition(512, 1, b"x\x0b\0");
+    assert_eq!(
+        disk.read_first_partition(image.as_slice(), 512).unwrap(),
+        b"x\x0b"
+    );
+    let (disk, image) = disk_with_first_partition(512, 1, b"\0\n \0");
+    assert_eq!(
+        disk.read_first_partition(image.as_slice(), 512).unwrap(),
+        b""
+    );
 
-    // A full sector, and p1 across several sectors.
+    // A full sector, and a first partition across several sectors.
     let full = vec![b'a'; 512];
-    let (disk, image) = disk_with_p1(512, 1, &full);
-    assert_eq!(disk.read_p1(image.as_slice(), 512).unwrap(), full);
+    let (disk, image) = disk_with_first_partition(512, 1, &full);
+    assert_eq!(
+        disk.read_first_partition(image.as_slice(), 512).unwrap(),
+        full
+    );
     let long: Vec<u8> = (0..1500).map(|index| (index % 251) as u8 + 1).collect();
-    let (disk, image) = disk_with_p1(512, 3, &long);
-    assert_eq!(disk.read_p1(image.as_slice(), 1536).unwrap(), long);
+    let (disk, image) = disk_with_first_partition(512, 3, &long);
+    assert_eq!(
+        disk.read_first_partition(image.as_slice(), 1536).unwrap(),
+        long
+    );
 
     // One sector of a disk of 4096-byte blocks.
-    let (disk, image) = disk_with_p1(4096, 1, b"config\n");
-    assert_eq!(disk.p1().size(), 4096);
-    assert_eq!(disk.read_p1(image.as_slice(), 4096).unwrap(), b"config");
+    let (disk, image) = disk_with_first_partition(4096, 1, b"config\n");
+    assert_eq!(disk.first_partition().size(), 4096);
+    assert_eq!(
+        disk.read_first_partition(image.as_slice(), 4096).unwrap(),
+        b"config"
+    );
 }
 
 #[test]
-fn p1_over_the_bound_fails_before_it_is_read() {
-    let (disk, image) = disk_with_p1(512, 2, b"x");
+fn a_first_partition_over_the_bound_fails_before_it_is_read() {
+    let (disk, image) = disk_with_first_partition(512, 2, b"x");
     for bound in [0, 1, 1023] {
         assert_fails!(
-            disk.read_p1(image.as_slice(), bound),
-            GptError::P1TooLarge { size: 1024, bound: found } if found == bound
+            disk.read_first_partition(image.as_slice(), bound),
+            GptError::FirstPartitionTooLarge { size: 1024, bound: found } if found == bound
         );
     }
     let source = Recording {
         bytes: &image,
         reads: RefCell::new(Vec::new()),
     };
-    assert!(disk.read_p1(&source, 1023).is_err());
+    assert!(disk.read_first_partition(&source, 1023).is_err());
     assert!(source.reads.borrow().is_empty());
-    assert_eq!(disk.read_p1(&source, 1024).unwrap(), b"x");
-    assert_eq!(disk.read_p1(&source, usize::MAX).unwrap(), b"x");
+    assert_eq!(disk.read_first_partition(&source, 1024).unwrap(), b"x");
+    assert_eq!(
+        disk.read_first_partition(&source, usize::MAX).unwrap(),
+        b"x"
+    );
 }
 
 #[test]
@@ -952,7 +979,7 @@ fn a_short_source_fails_its_read() {
     }
     let disk = Disk::read(image.as_slice(), 512, size, &Expected::new()).unwrap();
     assert_fails!(
-        disk.read_p1(&image[..34 * 512 + 100], 512),
+        disk.read_first_partition(&image[..34 * 512 + 100], 512),
         GptError::Io(error) if error.kind() == io::ErrorKind::UnexpectedEof
     );
 }
@@ -988,7 +1015,10 @@ fn files_read_at_offsets() {
     let mut file = tempfile::tempfile().unwrap();
     file.write_all(&spec.image()).unwrap();
     let disk = Disk::read(&file, 512, 2048 * 512, &Expected::new()).unwrap();
-    assert_eq!(disk.read_p1(&file, 512).unwrap(), b"from a file");
+    assert_eq!(
+        disk.read_first_partition(&file, 512).unwrap(),
+        b"from a file"
+    );
 }
 
 #[test]
@@ -1000,7 +1030,7 @@ fn errors_describe_the_check_and_keep_their_cause() {
     );
     assert_eq!(
         GptError::PartitionCount(256).to_string(),
-        "the disk has 256 partitions, not 2 through 255: p1 and at least one layer"
+        "the disk has 256 partitions, not 2 through 255: the first partition and at least one layer"
     );
     assert_eq!(
         GptError::EntryCount(0).to_string(),

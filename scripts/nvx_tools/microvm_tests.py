@@ -251,15 +251,15 @@ PRIVATE_INGRESS_UDP_REQUEST = b"NVX-PRIVATE-INGRESS-UDP-REQUEST\n"
 PRIVATE_INGRESS_UDP_REPLY = b"NVX-PRIVATE-INGRESS-UDP-REPLY\n"
 SANDBOX_BLOCK_SIZE = 8 * 1024 * 1024
 GPT_DEVICE_COMPLETION_MARKER = b"NVX-GPT-DEVICE-OK"
-# The disks of the gpt-device scenario have 4 MiB of 512-byte blocks: p1, 64 KiB
-# at LBA 2048, and layers of 512 KiB at LBAs 4096 and 6144.
+# The disks of the gpt-device scenario have 4 MiB of 512-byte blocks: a first
+# partition of 64 KiB at LBA 2048, and layers of 512 KiB at LBAs 4096 and 6144.
 GPT_DEVICE_BLOCKS = 8192
 GPT_DEVICE_DISK_GUID = uuid.UUID("6a1f3c2e-8b4d-4e5f-9a7b-1c2d3e4f5a00")
 GPT_DEVICE_SCRATCH_GUID = uuid.UUID("7b2e4d3f-9c5e-4f60-8b8c-2d3e4f5a6b00")
-# p1's bytes, which are not UTF-8 and hold a NUL, and the padding after them,
-# trailing NUL bytes and ASCII whitespace, which reading p1 removes.
-GPT_DEVICE_P1 = b"\xff\xfeNVX p1\x00opaque\x80bytes"
-GPT_DEVICE_P1_PADDING = b" \t\n\r\x0c\x00" * 4
+# The first partition's bytes, which are not UTF-8 and hold a NUL, and the padding
+# after them, trailing NUL bytes and ASCII whitespace, which reading it removes.
+GPT_DEVICE_FIRST_PARTITION = b"\xff\xfeNVX configuration\x00opaque\x80bytes"
+GPT_DEVICE_FIRST_PARTITION_PADDING = b" \t\n\r\x0c\x00" * 4
 SNAPSHOT_CORE_CONTINUED_MARKER = b"NVX-SNAPSHOT-CORE-CONTINUED"
 SNAPSHOT_CORE_COMPLETION_MARKER = b"NVX-SNAPSHOT-CORE-OK"
 CONSOLE_BINARY_MARKER = b"\0\r\n\x7f\xffNVX-CONSOLE-BINARY"
@@ -4696,14 +4696,15 @@ class GptDeviceDisks:
 
 
 def _gpt_device_partitions(disk_guid: uuid.UUID) -> list[gpt_image.Partition]:
-    """Return p1 and two layers, whose unique GUIDs follow ``disk_guid``, and which
-    start with p1's bytes and padding and with each layer's marker."""
+    """Return a first partition and two layers, whose unique GUIDs follow
+    ``disk_guid``, and which start with the first partition's bytes and padding and
+    with each layer's marker."""
     return [
         gpt_image.Partition(
             uuid.UUID(int=disk_guid.int + 1),
             2048,
             2175,
-            GPT_DEVICE_P1 + GPT_DEVICE_P1_PADDING,
+            GPT_DEVICE_FIRST_PARTITION + GPT_DEVICE_FIRST_PARTITION_PADDING,
         ),
         gpt_image.Partition(
             uuid.UUID(int=disk_guid.int + 2), 4096, 5119, b"NVX-GPT-LAYER-2"
@@ -4717,27 +4718,35 @@ def _gpt_device_partitions(disk_guid: uuid.UUID) -> list[gpt_image.Partition]:
 def gpt_device_disks() -> GptDeviceDisks:
     """Return the disks that ``tests/gpt_device.rs`` of ``nvx-rs`` expects."""
     partitions = _gpt_device_partitions(GPT_DEVICE_DISK_GUID)
-    p1, p2, p3 = _gpt_device_partitions(GPT_DEVICE_SCRATCH_GUID)
-    p4 = gpt_image.Partition(
+    partition1, partition2, partition3 = _gpt_device_partitions(GPT_DEVICE_SCRATCH_GUID)
+    partition4 = gpt_image.Partition(
         uuid.UUID(int=GPT_DEVICE_SCRATCH_GUID.int + 4), 7168, 7679, b"NVX-GPT-LAYER-4"
     )
     moved = gpt_image.Partition(
-        p2.unique_guid, p2.first_lba + 512, p2.last_lba + 512, p2.contents
+        partition2.unique_guid,
+        partition2.first_lba + 512,
+        partition2.last_lba + 512,
+        partition2.contents,
     )
 
     def scratch(*layout: gpt_image.Partition) -> bytes:
         return gpt_image.gpt_image(GPT_DEVICE_BLOCKS, GPT_DEVICE_SCRATCH_GUID, layout)
 
-    three = scratch(p1, p2, p3)
-    # An MBR whose first partition spans p1 through p2, and whose second is p3.
+    three = scratch(partition1, partition2, partition3)
+    # An MBR whose first partition spans the GPT's first two, and whose second is
+    # the GPT's third.
     mbr = gpt_image.with_mbr(
         three,
         [
             gpt_image.mbr_record(
-                gpt_image.LINUX_TYPE, p1.first_lba, p2.last_lba - p1.first_lba + 1
+                gpt_image.LINUX_TYPE,
+                partition1.first_lba,
+                partition2.last_lba - partition1.first_lba + 1,
             ),
             gpt_image.mbr_record(
-                gpt_image.LINUX_TYPE, p3.first_lba, p3.last_lba - p3.first_lba + 1
+                gpt_image.LINUX_TYPE,
+                partition3.first_lba,
+                partition3.last_lba - partition3.first_lba + 1,
             ),
         ],
     )
@@ -4747,9 +4756,9 @@ def gpt_device_disks() -> GptDeviceDisks:
         partitions=tuple(partitions),
         images={
             "three.img": three,
-            "two.img": scratch(p1, p2),
-            "four.img": scratch(p1, p2, p3, p4),
-            "moved.img": scratch(p1, moved, p3),
+            "two.img": scratch(partition1, partition2),
+            "four.img": scratch(partition1, partition2, partition3, partition4),
+            "moved.img": scratch(partition1, moved, partition3),
             "mbr.img": mbr,
         },
     )
@@ -4814,7 +4823,7 @@ def run_gpt_device(
                     f"{partition.unique_guid}:{partition.size}"
                     for partition in disks.partitions
                 ),
-                P1=GPT_DEVICE_P1.hex(),
+                FIRST_PARTITION=GPT_DEVICE_FIRST_PARTITION.hex(),
             ),
             GPT_DEVICE_COMPLETION_MARKER,
             timeout=timeout,
