@@ -103,11 +103,12 @@ nvx/
 |   |   |-- protocol/            Control-console codec, NVXS session, and the guest targets that live shares may not take, shared by the host and the guest
 |   |   |-- contract.rs          Control-contract versions and release compatibility
 |   |   |-- net/                 CIDR parsing and subtraction, and hostname and guest-network forms
+|   |   |-- gpt/                 Strict reading of GPT disks whose p1 configures an adapter and whose other partitions hold a root's read-only layers, shared by the host and the guest
 |   |   |-- host/                Artifacts, launch, network and egress-policy lowering, sessions, VM instances, sandbox stores, the sandbox launch profile, and the `nvx-rs` CLI (feature `cli`)
 |   |   |-- testing/             Fake OpenVMM (feature `testing`)
-|   |   |-- guest/               Programs that run in Linux guests, the guest's NVXS connection, the libraries through which any guest init or agent starts a program, collects its children's statuses, settles its executions' cgroups, drives each execution, bind-mounts host mappings below the roots that it names, and assembles and tears down a layered root, and the typed calls through which it runs the time ABI's steps and the reseed (feature `guest`)
+|   |   |-- guest/               Programs that run in Linux guests, the guest's NVXS connection, the libraries through which any guest init or agent starts a program, collects its children's statuses, settles its executions' cgroups, drives each execution, bind-mounts host mappings below the roots that it names, assembles and tears down a layered root, and validates a GPT disk's block device against the kernel's partitions, and the typed calls through which it runs the time ABI's steps and the reseed (feature `guest`)
 |   |   `-- bin/                 nvx-rs CLI, nvx-fake-openvmm test double, and the guest binaries
-|   |-- tests/                   Fake-OpenVMM instance lifecycle, sandbox store, CLI, NVXS session, guest-binary, and hypervisor managed-lifecycle tests, the store's record fixtures, and the golden fixtures that Python recorded
+|   |-- tests/                   Fake-OpenVMM instance lifecycle, sandbox store, CLI, NVXS session, guest-binary, hypervisor managed-lifecycle, and guest GPT device tests, the store's record fixtures, and the golden fixtures that Python recorded
 |   |-- build.rs                 Stages the bundled artifacts (feature `bundled`)
 |   `-- artifacts.json           Release package pinned for the bundled artifacts
 |-- openvmm/                     OpenVMM Git submodule
@@ -134,6 +135,8 @@ nvx/
 |   |   |-- development_release.py Resumable development release publication
 |   |   |-- doctor.py            Time ABI host qualification
 |   |   |-- elf.py               Static-executable check of ELF binaries
+|   |   |-- gpt_image.py         GPT disk images that the gpt-device microVM test attaches
+|   |   |-- guest_test_programs.py Test-only guest programs that microVM tests run in a guest
 |   |   |-- guests.py            Typed guest descriptors
 |   |   |-- host_telemetry.py    Benchmark host provenance and Windows capture storage telemetry
 |   |   |-- host_time_probe.rs   Host TSC probe that doctor builds and runs
