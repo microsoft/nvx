@@ -25,10 +25,11 @@
 //! The kernel creates a disk's partitions before its reread returns, but another program, such as
 //! a device manager that probes the disk, may make it drop and create them again at any time. The
 //! comparison therefore repeats, after pauses that grow from 1 ms to 50 ms, until the deadline,
-//! which also bounds a caller that waits for partitions that the kernel creates late. It reads
-//! each partition's description through one descriptor of the partition's sysfs directory, so
-//! that the description never combines a partition that the kernel dropped with the one that
-//! replaced it.
+//! which also bounds a caller that waits for partitions that the kernel creates late. Each
+//! comparison takes partitions that the kernel held together: it reads each partition's
+//! description through one descriptor of the partition's sysfs directory, then reads the
+//! partitions again, and each partition again through its first descriptor, so that it never
+//! combines partitions, or the attributes of one partition, from before and after a reread.
 //!
 //! The reread needs `CAP_SYS_ADMIN`, and fails while any partition of the disk is open, for
 //! example while a layer is mounted.
@@ -363,17 +364,23 @@ fn compare(disk: &Disk, kernel: &[KernelPartition]) -> Result<Vec<PartitionDevic
 /// Observes the kernel's partitions of a disk with `observe`, and compares them with the
 /// partitions of the disk's table, `disk`, until they match or `timeout` has passed, as
 /// [`BlockDevice::await_partitions`] describes.
+///
+/// An observation of `None` means that the partitions changed while they were read, and counts
+/// as [`Mismatch::Changed`].
 fn wait_for_partitions(
     disk: &Disk,
     timeout: Duration,
-    mut observe: impl FnMut() -> Result<Vec<KernelPartition>, DeviceError>,
+    mut observe: impl FnMut() -> Result<Option<Vec<KernelPartition>>, DeviceError>,
 ) -> Result<Vec<PartitionDevice>, DeviceError> {
     let start = Instant::now();
     let mut pause = FIRST_PAUSE;
     loop {
-        let mismatch = match compare(disk, &observe()?) {
-            Ok(devices) => return Ok(devices),
-            Err(mismatch) => mismatch,
+        let mismatch = match observe()? {
+            Some(kernel) => match compare(disk, &kernel) {
+                Ok(devices) => return Ok(devices),
+                Err(mismatch) => mismatch,
+            },
+            None => Mismatch::Changed,
         };
         let remaining = timeout.saturating_sub(start.elapsed());
         if remaining.is_zero() {
@@ -385,13 +392,22 @@ fn wait_for_partitions(
 }
 
 /// Reads the kernel's partitions of the disk whose sysfs directory is `directory`, in the order
-/// of their numbers.
+/// of their numbers, or returns `None` if they changed while this read them, as
+/// [`confirm_partitions`] describes.
+fn observe_partitions(directory: &Path) -> Result<Option<Vec<KernelPartition>>, DeviceError> {
+    confirm_partitions(directory, read_partitions(directory)?)
+}
+
+/// Reads the kernel's partitions of the disk whose sysfs directory is `directory`, in the order
+/// of their numbers, each with the open directory through which this read it.
 ///
 /// It reads each partition's attributes through one descriptor of the partition's directory, so
 /// that they all describe one partition, even when the kernel drops the partition and creates
 /// another under its name while they're read. A partition that the kernel drops while this reads
 /// it is left out, as if the kernel had dropped it before.
-fn observe_partitions(directory: &Path) -> Result<Vec<KernelPartition>, DeviceError> {
+fn read_partitions(
+    directory: &Path,
+) -> Result<Vec<(SysfsDirectory, KernelPartition)>, DeviceError> {
     let entries =
         fs::read_dir(directory).map_err(|source| DeviceError::sysfs(directory, source))?;
     let mut partitions = Vec::new();
@@ -406,11 +422,45 @@ fn observe_partitions(directory: &Path) -> Result<Vec<KernelPartition>, DeviceEr
             && let Some(subdirectory) = SysfsDirectory::open(entry.path())?
             && let Some(partition) = subdirectory.partition(entry.file_name())?
         {
-            partitions.push(partition);
+            partitions.push((subdirectory, partition));
         }
     }
-    partitions.sort_by_key(|partition| partition.number);
+    partitions.sort_by_key(|(_, partition)| partition.number);
     Ok(partitions)
+}
+
+/// Returns the partitions `first`, which [`read_partitions`] read from the disk whose sysfs
+/// directory is `directory`, if the kernel still holds them, unchanged, and holds no other, or
+/// `None`.
+///
+/// It reads the disk's partitions again, which must have the same descriptions, then reads each
+/// partition of `first` again through the directory that it holds open, which must still describe
+/// it. The kernel never revives a partition that it dropped, even to create another under its
+/// name, so each partition that passes existed from its first reading to its last, throughout the
+/// second reading. A reread drops every partition of the disk before it creates any, so the
+/// partitions that pass all come from one reading of the table, never some from before a reread
+/// and some from after it.
+fn confirm_partitions(
+    directory: &Path,
+    first: Vec<(SysfsDirectory, KernelPartition)>,
+) -> Result<Option<Vec<KernelPartition>>, DeviceError> {
+    let second = read_partitions(directory)?;
+    if !first
+        .iter()
+        .map(|(_, partition)| partition)
+        .eq(second.iter().map(|(_, partition)| partition))
+    {
+        return Ok(None);
+    }
+    drop(second);
+    let mut partitions = Vec::with_capacity(first.len());
+    for (subdirectory, partition) in first {
+        if subdirectory.partition(partition.name.clone())?.as_ref() != Some(&partition) {
+            return Ok(None);
+        }
+        partitions.push(partition);
+    }
+    Ok(Some(partitions))
 }
 
 /// The sysfs directory of a disk or of one of its partitions, open, so that every attribute read

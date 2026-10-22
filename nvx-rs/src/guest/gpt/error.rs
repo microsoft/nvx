@@ -32,8 +32,9 @@ impl fmt::Display for DeviceOperation {
     }
 }
 
-/// The first difference, in the order of the partition numbers, between the partitions that the
-/// kernel created for a disk and the partitions of its table.
+/// How the partitions that the kernel created for a disk differ from the partitions of its table:
+/// the first difference, in the order of the partition numbers, or partitions that changed while
+/// they were read.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Mismatch {
@@ -60,6 +61,9 @@ pub enum Mismatch {
         /// The size of the table's partition, in bytes.
         expected_size: u64,
     },
+    /// The kernel's partitions of the disk changed while they were read, as they do when the
+    /// kernel rereads the partition table, so they could not be compared.
+    Changed,
 }
 
 impl fmt::Display for Mismatch {
@@ -84,6 +88,7 @@ impl fmt::Display for Mismatch {
                 "the kernel's partition {number} has {size} bytes from byte {start}, but the \
                  table's has {expected_size} bytes from byte {expected_start}"
             ),
+            Self::Changed => formatter.write_str("they changed while they were read"),
         }
     }
 }
@@ -115,7 +120,7 @@ pub enum DeviceError {
     },
     /// The disk's partition table is invalid, or does not meet the caller's expected values.
     Table(GptError),
-    /// The kernel's partitions still differed from the table's when the timeout passed.
+    /// The kernel's partitions still did not match the table's when the timeout passed.
     Partitions(Mismatch),
 }
 
@@ -150,7 +155,7 @@ impl fmt::Display for DeviceError {
             Self::Table(error) => write!(formatter, "invalid partition table: {error}"),
             Self::Partitions(mismatch) => write!(
                 formatter,
-                "the kernel's partitions differ from the table's: {mismatch}"
+                "the kernel's partitions do not match the table's: {mismatch}"
             ),
         }
     }

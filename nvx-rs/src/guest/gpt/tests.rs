@@ -1,8 +1,9 @@
 //! Tests of the comparison of a disk's table with the kernel's partitions, of the wait for them to
-//! match, and of the reading of fake sysfs descriptions of a disk.
+//! match, and of the reading and confirmation of fake sysfs descriptions of a disk.
 
 use std::error::Error;
 use std::fs;
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::symlink;
 use std::time::{Duration, Instant};
 
@@ -116,11 +117,11 @@ fn the_wait_returns_once_late_partitions_match() {
     let mut observations = 0;
     let devices = wait_for_partitions(&disk, Duration::from_secs(60), || {
         observations += 1;
-        Ok(match observations {
+        Ok(Some(match observations {
             1 => Vec::new(),
             2 | 3 => all[..2].to_vec(),
             _ => all.clone(),
-        })
+        }))
     })
     .unwrap();
     assert_eq!(observations, 4);
@@ -138,11 +139,11 @@ fn the_wait_fails_with_the_difference_that_remains_at_the_deadline() {
     let mut observations = 0;
     let error = wait_for_partitions(&disk, timeout, || {
         observations += 1;
-        Ok(if observations == 1 {
+        Ok(Some(if observations == 1 {
             all[..2].to_vec()
         } else {
             extra.clone()
-        })
+        }))
     })
     .unwrap_err();
     assert!(
@@ -163,7 +164,7 @@ fn a_zero_timeout_compares_once() {
     let mut observations = 0;
     let error = wait_for_partitions(&disk, Duration::ZERO, || {
         observations += 1;
-        Ok(Vec::new())
+        Ok(Some(Vec::new()))
     })
     .unwrap_err();
     assert!(matches!(
@@ -172,7 +173,27 @@ fn a_zero_timeout_compares_once() {
     ));
     assert_eq!(observations, 1);
     let all = matching(&disk);
-    assert!(wait_for_partitions(&disk, Duration::ZERO, || Ok(all.clone())).is_ok());
+    assert!(wait_for_partitions(&disk, Duration::ZERO, || Ok(Some(all.clone()))).is_ok());
+}
+
+#[test]
+fn partitions_that_change_while_read_are_read_again() {
+    let disk = standard_disk();
+    let all = matching(&disk);
+    let mut observations = 0;
+    let devices = wait_for_partitions(&disk, Duration::from_secs(60), || {
+        observations += 1;
+        Ok((observations > 2).then(|| all.clone()))
+    })
+    .unwrap();
+    assert_eq!(observations, 3);
+    assert_eq!(devices, compare(&disk, &all).unwrap());
+    // Partitions that are still changing at the deadline fail as such.
+    let error = wait_for_partitions(&disk, Duration::ZERO, || Ok(None)).unwrap_err();
+    assert!(
+        matches!(error, DeviceError::Partitions(Mismatch::Changed)),
+        "{error:?}"
+    );
 }
 
 #[test]
@@ -221,14 +242,46 @@ fn partition_directory(disk: &Path, number: u8, start: u64, size: u64) -> PathBu
     directory
 }
 
+/// Replaces the partitions of the disk whose sysfs directory is `disk` with `partitions`, each a
+/// number, a first sector, and a number of sectors, as the kernel does when it rereads the disk's
+/// table: it drops every partition, then creates the table's.
+fn reread(disk: &Path, partitions: &[(u8, u64, u64)]) {
+    for entry in fs::read_dir(disk).unwrap() {
+        let entry = entry.unwrap();
+        if entry.file_name().as_bytes().starts_with(b"vda") {
+            fs::remove_dir_all(entry.path()).unwrap();
+        }
+    }
+    for &(number, start, size) in partitions {
+        partition_directory(disk, number, start, size);
+    }
+}
+
+/// Reads partition `number` of the disk whose sysfs directory is `disk`, as [`read_partitions`]
+/// does, with the open directory through which it read it.
+fn read_partition(disk: &Path, number: u8) -> (SysfsDirectory, KernelPartition) {
+    let name = format!("vda{number}");
+    let directory = SysfsDirectory::open(disk.join(&name)).unwrap().unwrap();
+    let partition = directory.partition(OsString::from(name)).unwrap().unwrap();
+    (directory, partition)
+}
+
+/// Observes the partitions of the disk whose sysfs directory is `disk`, which don't change while
+/// they're read.
+fn observe(disk: &Path) -> Vec<KernelPartition> {
+    observe_partitions(disk)
+        .unwrap()
+        .expect("the partitions changed while they were read")
+}
+
 #[test]
 fn partitions_read_from_their_sysfs_directories_in_number_order() {
     let disk = disk_directory();
-    assert_eq!(observe_partitions(disk.path()).unwrap(), Vec::new());
+    assert_eq!(observe(disk.path()), Vec::new());
     for (number, start, size) in [(3, 43, 16), (1, 34, 1), (2, 35, 8)] {
         partition_directory(disk.path(), number, start, size);
     }
-    let observed = observe_partitions(disk.path()).unwrap();
+    let observed = observe(disk.path());
     assert_eq!(
         observed,
         [
@@ -247,11 +300,7 @@ fn partitions_that_vanish_while_read_are_left_out() {
     for name in ["partition", "start", "size", "dev"] {
         let directory = partition_directory(disk.path(), 2, 35, 8);
         fs::remove_file(directory.join(name)).unwrap();
-        assert_eq!(
-            observe_partitions(disk.path()).unwrap(),
-            [kernel(1, 34 * 512, 512)],
-            "{name}"
-        );
+        assert_eq!(observe(disk.path()), [kernel(1, 34 * 512, 512)], "{name}");
         fs::remove_dir_all(directory).unwrap();
     }
 }
@@ -272,7 +321,7 @@ fn a_partition_that_the_kernel_creates_again_is_never_read_in_parts() {
     assert_eq!(directory.bytes(c"size").unwrap(), None);
     assert_eq!(directory.partition(OsString::from("vda2")).unwrap(), None);
     // A new observation reads the second p2 whole, and it differs from the table.
-    let observed = observe_partitions(disk.path()).unwrap();
+    let observed = observe(disk.path());
     assert_eq!(observed[1], kernel(2, 36 * 512, 8 * 512));
     assert_eq!(
         compare(&standard_disk(), &observed).unwrap_err(),
@@ -284,6 +333,72 @@ fn a_partition_that_the_kernel_creates_again_is_never_read_in_parts() {
             expected_size: 8 * 512,
         }
     );
+}
+
+/// Reads the partitions of the disk whose sysfs directory is `disk` as a reread tears them: p1
+/// from an old table, which moved p2, then p2 and p3 from a new table, which moves p1. Neither
+/// table matches the standard disk's, but the partitions read do.
+fn read_torn(disk: &Path) -> Vec<(SysfsDirectory, KernelPartition)> {
+    // The standard disk's partitions: p1 in LBA 34, p2 in 35 through 42, and p3 in 43 through 58.
+    reread(disk, &[(1, 34, 1), (2, 36, 8), (3, 43, 16)]);
+    let p1 = read_partition(disk, 1);
+    reread(disk, &[(1, 60, 1), (2, 35, 8), (3, 43, 16)]);
+    let torn = vec![p1, read_partition(disk, 2), read_partition(disk, 3)];
+    let partitions: Vec<_> = torn
+        .iter()
+        .map(|(_, partition)| partition.clone())
+        .collect();
+    assert!(compare(&standard_disk(), &partitions).is_ok());
+    torn
+}
+
+#[test]
+fn partitions_from_before_and_after_a_reread_are_never_combined() {
+    let disk = disk_directory();
+    let torn = read_torn(disk.path());
+    assert_eq!(confirm_partitions(disk.path(), torn).unwrap(), None);
+    // The next observation reads the new table's partitions, whose p1 differs from the table's.
+    assert_eq!(
+        compare(&standard_disk(), &observe(disk.path())).unwrap_err(),
+        Mismatch::Extent {
+            number: 1,
+            start: 60 * 512,
+            size: 512,
+            expected_start: 34 * 512,
+            expected_size: 512,
+        }
+    );
+    // A second reading that describes the same partitions as the torn one, as another reading
+    // torn alike would, does not confirm it either, since the old table's p1 no longer exists.
+    let torn = read_torn(disk.path());
+    fs::remove_dir_all(disk.path().join("vda1")).unwrap();
+    partition_directory(disk.path(), 1, 34, 1);
+    assert_eq!(confirm_partitions(disk.path(), torn).unwrap(), None);
+    assert_eq!(observe(disk.path()), matching(&standard_disk()));
+}
+
+#[test]
+fn a_reading_is_confirmed_only_while_the_kernel_keeps_its_partitions() {
+    let table = [(1, 34, 1), (2, 35, 8), (3, 43, 16)];
+    let disk = disk_directory();
+    let confirmed_after = |change: &dyn Fn(&Path)| {
+        reread(disk.path(), &table);
+        let first = read_partitions(disk.path()).unwrap();
+        change(disk.path());
+        confirm_partitions(disk.path(), first).unwrap()
+    };
+    assert_eq!(confirmed_after(&|_| {}), Some(matching(&standard_disk())));
+    // The kernel dropped a partition, created one, or resized one.
+    let dropped = |disk: &Path| fs::remove_dir_all(disk.join("vda3")).unwrap();
+    assert_eq!(confirmed_after(&dropped), None);
+    let created = |disk: &Path| {
+        partition_directory(disk, 4, 59, 1);
+    };
+    assert_eq!(confirmed_after(&created), None);
+    let resized = |disk: &Path| attribute(&disk.join("vda2"), "size", "4\n");
+    assert_eq!(confirmed_after(&resized), None);
+    // The kernel created the same partitions again, which a second reading alone can't tell.
+    assert_eq!(confirmed_after(&|disk| reread(disk, &table)), None);
 }
 
 #[test]
@@ -395,7 +510,7 @@ fn errors_describe_the_failure_and_keep_their_cause() {
     });
     assert_eq!(
         error.to_string(),
-        "the kernel's partitions differ from the table's: the kernel's partition 2 has 4096 \
+        "the kernel's partitions do not match the table's: the kernel's partition 2 has 4096 \
          bytes from byte 18432, but the table's has 4096 bytes from byte 17920"
     );
     assert!(error.source().is_none());
@@ -406,5 +521,9 @@ fn errors_describe_the_failure_and_keep_their_cause() {
     assert_eq!(
         Mismatch::Unexpected { number: 4 }.to_string(),
         "the kernel has a partition 4, which the table lacks"
+    );
+    assert_eq!(
+        DeviceError::Partitions(Mismatch::Changed).to_string(),
+        "the kernel's partitions do not match the table's: they changed while they were read"
     );
 }
