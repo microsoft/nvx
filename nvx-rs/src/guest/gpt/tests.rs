@@ -257,15 +257,6 @@ fn reread(disk: &Path, partitions: &[(u8, u64, u64)]) {
     }
 }
 
-/// Reads partition `number` of the disk whose sysfs directory is `disk`, as [`read_partitions`]
-/// does, with the open directory through which it read it.
-fn read_partition(disk: &Path, number: u8) -> (SysfsDirectory, KernelPartition) {
-    let name = format!("vda{number}");
-    let directory = SysfsDirectory::open(disk.join(&name)).unwrap().unwrap();
-    let partition = directory.partition(OsString::from(name)).unwrap().unwrap();
-    (directory, partition)
-}
-
 /// Observes the partitions of the disk whose sysfs directory is `disk`, which don't change while
 /// they're read.
 fn observe(disk: &Path) -> Vec<KernelPartition> {
@@ -335,18 +326,22 @@ fn a_partition_that_the_kernel_creates_again_is_never_read_in_parts() {
     );
 }
 
-/// Reads the partitions of the disk whose sysfs directory is `disk` as a reread tears them: p1
-/// from an old table, which moved p2, then p2 and p3 from a new table, which moves p1. Neither
-/// table matches the standard disk's, but the partitions read do.
-fn read_torn(disk: &Path) -> Vec<(SysfsDirectory, KernelPartition)> {
+/// Reads the subdirectories of the disk whose sysfs directory is `disk` as a reread tears them: the
+/// disk's other directories, and p1 from an old table, which moved p2, then p2 and p3 from a new
+/// table, which moves p1. Neither table matches the standard disk's, but the partitions read do.
+fn read_torn(disk: &Path) -> Vec<Subdirectory> {
     // The standard disk's partitions: p1 in LBA 34, p2 in 35 through 42, and p3 in 43 through 58.
     reread(disk, &[(1, 34, 1), (2, 36, 8), (3, 43, 16)]);
-    let p1 = read_partition(disk, 1);
-    reread(disk, &[(1, 60, 1), (2, 35, 8), (3, 43, 16)]);
-    let torn = vec![p1, read_partition(disk, 2), read_partition(disk, 3)];
+    let mut torn = Vec::new();
+    for name in list_subdirectories(disk).unwrap() {
+        if name == "vda2" {
+            reread(disk, &[(1, 60, 1), (2, 35, 8), (3, 43, 16)]);
+        }
+        torn.extend(Subdirectory::read(disk, name).unwrap());
+    }
     let partitions: Vec<_> = torn
         .iter()
-        .map(|(_, partition)| partition.clone())
+        .filter_map(|subdirectory| subdirectory.partition.clone())
         .collect();
     assert!(compare(&standard_disk(), &partitions).is_ok());
     torn
@@ -368,8 +363,9 @@ fn partitions_from_before_and_after_a_reread_are_never_combined() {
             expected_size: 512,
         }
     );
-    // A second reading that describes the same partitions as the torn one, as another reading
-    // torn alike would, does not confirm it either, since the old table's p1 no longer exists.
+    // Even when the kernel's partitions come to have the descriptions that the torn reading
+    // read, as those of another table could, the reading isn't confirmed, since the old table's
+    // p1 no longer exists.
     let torn = read_torn(disk.path());
     fs::remove_dir_all(disk.path().join("vda1")).unwrap();
     partition_directory(disk.path(), 1, 34, 1);
@@ -383,22 +379,64 @@ fn a_reading_is_confirmed_only_while_the_kernel_keeps_its_partitions() {
     let disk = disk_directory();
     let confirmed_after = |change: &dyn Fn(&Path)| {
         reread(disk.path(), &table);
-        let first = read_partitions(disk.path()).unwrap();
+        let first = read_subdirectories(disk.path()).unwrap();
         change(disk.path());
         confirm_partitions(disk.path(), first).unwrap()
     };
     assert_eq!(confirmed_after(&|_| {}), Some(matching(&standard_disk())));
-    // The kernel dropped a partition, created one, or resized one.
+    // The kernel dropped a partition, or created one.
     let dropped = |disk: &Path| fs::remove_dir_all(disk.join("vda3")).unwrap();
     assert_eq!(confirmed_after(&dropped), None);
     let created = |disk: &Path| {
         partition_directory(disk, 4, 59, 1);
     };
     assert_eq!(confirmed_after(&created), None);
-    let resized = |disk: &Path| attribute(&disk.join("vda2"), "size", "4\n");
-    assert_eq!(confirmed_after(&resized), None);
-    // The kernel created the same partitions again, which a second reading alone can't tell.
+    // The kernel created the same partitions again, under the same names.
     assert_eq!(confirmed_after(&|disk| reread(disk, &table)), None);
+}
+
+#[test]
+fn a_partition_that_the_kernel_finishes_creating_after_a_reading_is_not_left_out() {
+    let disk = disk_directory();
+    reread(disk.path(), &[(1, 34, 1), (2, 35, 8), (3, 43, 16)]);
+    let attributes = [
+        ("partition", "4\n"),
+        ("start", "59\n"),
+        ("size", "1\n"),
+        ("dev", "254:4\n"),
+    ];
+    // The kernel creates p4's directory, then its attributes, and p4 is a partition once it has
+    // them all.
+    let p4 = disk.path().join("vda4");
+    for created in 0..attributes.len() {
+        fs::create_dir(&p4).unwrap();
+        for (name, value) in &attributes[..created] {
+            attribute(&p4, name, value);
+        }
+        // A reading that the kernel doesn't change is confirmed without p4.
+        assert_eq!(
+            observe(disk.path()),
+            matching(&standard_disk()),
+            "{created}"
+        );
+        // Once the kernel has created the rest of p4's attributes, a reading from before isn't
+        // confirmed, and the next observation reads p4, which the table lacks.
+        let first = read_subdirectories(disk.path()).unwrap();
+        for (name, value) in &attributes[created..] {
+            attribute(&p4, name, value);
+        }
+        assert_eq!(
+            confirm_partitions(disk.path(), first).unwrap(),
+            None,
+            "{created}"
+        );
+        assert_eq!(
+            compare(&standard_disk(), &observe(disk.path())).unwrap_err(),
+            Mismatch::Unexpected { number: 4 },
+            "{created}"
+        );
+        fs::remove_dir_all(&p4).unwrap();
+    }
 }
 
 #[test]

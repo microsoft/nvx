@@ -27,8 +27,8 @@
 //! comparison therefore repeats, after pauses that grow from 1 ms to 50 ms, until the deadline,
 //! which also bounds a caller that waits for partitions that the kernel creates late. Each
 //! comparison takes partitions that the kernel held together: it reads each partition's
-//! description through one descriptor of the partition's sysfs directory, then reads the
-//! partitions again, and each partition again through its first descriptor, so that it never
+//! description through one descriptor of the partition's sysfs directory, then lists the disk's
+//! directories again, and checks each one again through its first descriptor, so that it never
 //! combines partitions, or the attributes of one partition, from before and after a reread.
 //!
 //! The reread needs `CAP_SYS_ADMIN`, and fails while any partition of the disk is open, for
@@ -395,22 +395,57 @@ fn wait_for_partitions(
 /// of their numbers, or returns `None` if they changed while this read them, as
 /// [`confirm_partitions`] describes.
 fn observe_partitions(directory: &Path) -> Result<Option<Vec<KernelPartition>>, DeviceError> {
-    confirm_partitions(directory, read_partitions(directory)?)
+    confirm_partitions(directory, read_subdirectories(directory)?)
 }
 
-/// Reads the kernel's partitions of the disk whose sysfs directory is `directory`, in the order
-/// of their numbers, each with the open directory through which this read it.
-///
-/// It reads each partition's attributes through one descriptor of the partition's directory, so
-/// that they all describe one partition, even when the kernel drops the partition and creates
-/// another under its name while they're read. A partition that the kernel drops while this reads
-/// it is left out, as if the kernel had dropped it before.
-fn read_partitions(
-    directory: &Path,
-) -> Result<Vec<(SysfsDirectory, KernelPartition)>, DeviceError> {
+/// A subdirectory of a disk's sysfs directory, open, with the partition that it described when it
+/// was read.
+struct Subdirectory {
+    /// The subdirectory's name.
+    name: OsString,
+    /// The open subdirectory.
+    directory: SysfsDirectory,
+    /// The partition that the subdirectory described, or `None` if it described none, as the
+    /// disk's other directories do.
+    partition: Option<KernelPartition>,
+}
+
+impl Subdirectory {
+    /// Opens and reads the subdirectory `name` of the disk's sysfs directory `directory`, or
+    /// returns `None` if it doesn't exist.
+    ///
+    /// It reads the partition's attributes through one descriptor of the subdirectory, so that
+    /// they all describe one partition, even when the kernel drops the partition and creates
+    /// another under its name while they're read. A partition that the kernel drops while this
+    /// reads it describes none, as if the kernel had dropped it before.
+    fn read(directory: &Path, name: OsString) -> Result<Option<Self>, DeviceError> {
+        let Some(opened) = SysfsDirectory::open(directory.join(&name))? else {
+            return Ok(None);
+        };
+        let partition = opened.partition(name.clone())?;
+        Ok(Some(Self {
+            name,
+            directory: opened,
+            partition,
+        }))
+    }
+}
+
+/// Opens and reads each subdirectory of the disk's sysfs directory `directory`, in the order of
+/// their names, and leaves out any that the kernel dropped before this opened it.
+fn read_subdirectories(directory: &Path) -> Result<Vec<Subdirectory>, DeviceError> {
+    let mut subdirectories = Vec::new();
+    for name in list_subdirectories(directory)? {
+        subdirectories.extend(Subdirectory::read(directory, name)?);
+    }
+    Ok(subdirectories)
+}
+
+/// Lists the names of the subdirectories of the disk's sysfs directory `directory`, in order.
+fn list_subdirectories(directory: &Path) -> Result<Vec<OsString>, DeviceError> {
     let entries =
         fs::read_dir(directory).map_err(|source| DeviceError::sysfs(directory, source))?;
-    let mut partitions = Vec::new();
+    let mut names = Vec::new();
     for entry in entries {
         let entry = entry.map_err(|source| DeviceError::sysfs(directory, source))?;
         // Each partition has a directory, unlike the disk's attributes and links.
@@ -418,48 +453,58 @@ fn read_partitions(
             .file_type()
             .map_err(|source| DeviceError::sysfs(&entry.path(), source))?
             .is_dir();
-        if is_directory
-            && let Some(subdirectory) = SysfsDirectory::open(entry.path())?
-            && let Some(partition) = subdirectory.partition(entry.file_name())?
-        {
-            partitions.push((subdirectory, partition));
+        if is_directory {
+            names.push(entry.file_name());
         }
     }
-    partitions.sort_by_key(|(_, partition)| partition.number);
-    Ok(partitions)
+    names.sort();
+    Ok(names)
 }
 
-/// Returns the partitions `first`, which [`read_partitions`] read from the disk whose sysfs
-/// directory is `directory`, if the kernel still holds them, unchanged, and holds no other, or
-/// `None`.
+/// Returns the partitions that the subdirectories `first`, which [`read_subdirectories`] read
+/// from the disk's sysfs directory `directory`, described, in the order of their numbers, or
+/// `None` if the kernel's partitions changed while they were read.
 ///
-/// It reads the disk's partitions again, which must have the same descriptions, then reads each
-/// partition of `first` again through the directory that it holds open, which must still describe
-/// it. The kernel never revives a partition that it dropped, even to create another under its
-/// name, so each partition that passes existed from its first reading to its last, throughout the
-/// second reading. A reread drops every partition of the disk before it creates any, so the
-/// partitions that pass all come from one reading of the table, never some from before a reread
-/// and some from after it.
+/// It lists the disk's subdirectories again, which must be those of `first`, then reads each
+/// subdirectory of `first` again through the descriptor that it holds: a partition's `partition`
+/// attribute must give the same number, and another subdirectory must still describe no
+/// partition. The kernel never revives a directory that it dropped, even to create another under
+/// its name, so each partition that passes existed from its first reading to its last, throughout
+/// the second listing, and a partition keeps its number, first byte, and device number while it
+/// exists. A reread drops every partition of the disk before it creates any, so the partitions
+/// that pass all come from one reading of the table, never some from before a reread and some
+/// from after it. The second listing shows that the kernel created no partition under another
+/// name since the first reading, and each other subdirectory, that the kernel did not finish
+/// creating a partition there. Only a program that deletes, adds, or resizes partitions one at a
+/// time could still change them meanwhile, as it can after the comparison anyway.
 fn confirm_partitions(
     directory: &Path,
-    first: Vec<(SysfsDirectory, KernelPartition)>,
+    first: Vec<Subdirectory>,
 ) -> Result<Option<Vec<KernelPartition>>, DeviceError> {
-    let second = read_partitions(directory)?;
-    if !first
+    let names = list_subdirectories(directory)?;
+    if !names
         .iter()
-        .map(|(_, partition)| partition)
-        .eq(second.iter().map(|(_, partition)| partition))
+        .eq(first.iter().map(|subdirectory| &subdirectory.name))
     {
         return Ok(None);
     }
-    drop(second);
-    let mut partitions = Vec::with_capacity(first.len());
-    for (subdirectory, partition) in first {
-        if subdirectory.partition(partition.name.clone())?.as_ref() != Some(&partition) {
+    let mut partitions = Vec::new();
+    for subdirectory in first {
+        let unchanged = match &subdirectory.partition {
+            Some(partition) => {
+                subdirectory.directory.number(c"partition")? == Some(partition.number.into())
+            }
+            None => subdirectory
+                .directory
+                .partition(subdirectory.name)?
+                .is_none(),
+        };
+        if !unchanged {
             return Ok(None);
         }
-        partitions.push(partition);
+        partitions.extend(subdirectory.partition);
     }
+    partitions.sort_by_key(|partition| partition.number);
     Ok(Some(partitions))
 }
 
