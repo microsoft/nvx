@@ -277,6 +277,11 @@ fi
 if [ "$sandbox_mode" = true ]; then
     [ -x /sbin/nvx-init-agent ] ||
         workload_fatal "selected guest cannot act as sandbox control"
+    # A managed sandbox's PID 1 is the managed agent: it assembles the layered
+    # root, serves the control session, and tears the root down after a stop.
+    if [ "$workload_lifecycle" = managed ]; then
+        exec /sbin/nvx-managed-agent --layered-root
+    fi
     exec /sbin/nvx-init-agent
 fi
 case "$workload_lifecycle" in

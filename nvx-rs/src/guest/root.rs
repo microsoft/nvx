@@ -128,7 +128,7 @@ const SCRATCH_DIRECTORY: &str = "scratch";
 const ROOT_DIRECTORY: &str = "rootfs";
 /// The mount point of an aggregate live share, below the runtime directory and outside the root,
 /// which exists once a root has mounted an aggregate.
-const AGGREGATE_DIRECTORY: &str = "shares";
+pub(crate) const AGGREGATE_DIRECTORY: &str = "shares";
 /// The overlay's upper directory, below the scratch.
 const UPPER_DIRECTORY: &str = "upper";
 /// The overlay's work directory, below the scratch.

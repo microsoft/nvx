@@ -10,9 +10,11 @@ import io
 import ipaddress
 import json
 import os
+import platform
 import queue
 import re
 import shutil
+import signal
 import socket
 import subprocess
 import sys
@@ -1102,6 +1104,31 @@ class _FakeSandboxCli:
                 ).encode()
         elif entrypoint == "/bin/sh" and arguments[1].startswith("test ! -e "):
             returncode = int(arguments[1].removeprefix("test ! -e ") in files)
+        elif entrypoint == "/bin/sh" and arguments[1].startswith(
+            "cat /proc/sys/user/max_user_namespaces;"
+        ):
+            if "user-namespaces-available" in self.faults:
+                stdout = b"15511\nstatus=0\n"
+            else:
+                stdout = b"0\nstatus=1\n"
+                stderr = b"unshare: unshare failed: Invalid argument\n"
+        elif entrypoint == "/bin/sh" and arguments[1].startswith('printf "$1" >"$0"'):
+            assert arguments[2] == sandbox_lifecycle_tests.PORT_PROBE
+            probe = re.sub(
+                rb"\\([0-7]{3})",
+                lambda escape: bytes((int(escape[1], 8),)),
+                arguments[3].encode(),
+            )
+            assert probe == sandbox_lifecycle_tests.port_probe()
+            if "port-permission-leaks" in self.faults:
+                stdout = b"status=0\n"
+            else:
+                stdout, stderr = b"status=139\n", b"Segmentation fault\n"
+        elif entrypoint == "/bin/cat" and arguments == ["/proc/self/cgroup"]:
+            if "workload-outside-container-cgroup" in self.faults:
+                stdout = b"0::/\n"
+            else:
+                stdout = b"0::/container\n"
         elif entrypoint == "/bin/cat":
             if arguments[0] in files:
                 stdout = files[arguments[0]]
@@ -1263,6 +1290,9 @@ class PublicSandboxLifecycleTests(unittest.TestCase):
         "exec",
         "exec",
         "exec",
+        "exec",
+        "exec",
+        "exec",
         "deprovision",
         "exec",
         # Stop, and the operations that need a running sandbox.
@@ -1411,6 +1441,11 @@ class PublicSandboxLifecycleTests(unittest.TestCase):
             "duplicate-start": "start returned 0, expected 1",
             "exec-loses-state": "the state-reading request returned status 1",
             "probe-fails": "exec returned 1, expected 0",
+            "workload-outside-container-cgroup": (
+                "the workload's cgroup returned status 0, stdout='0::/\\n'"
+            ),
+            "user-namespaces-available": "a workload could create a user namespace",
+            "port-permission-leaks": "a workload stage held I/O port permission",
             "unbounded-output": "the output limit forwarded 2097152 stdout",
             "short-output": "the output limit forwarded 1015808 stdout",
             "overwrite-report": "exec returned 0, expected 1",
@@ -1479,6 +1514,18 @@ class PublicSandboxLifecycleTests(unittest.TestCase):
         self.assertEqual(separator, b"\n")
         self.assertEqual(len(tail), limit)
         self.assertTrue(tail.endswith(b"noise\nOpenVMM started\n"))
+
+    @unittest.skipUnless(
+        sys.platform == "linux" and platform.machine() == "x86_64",
+        "runs an x86-64 Linux executable",
+    )
+    def test_port_probe_faults_without_io_port_permission(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            probe = Path(temporary) / "nvx-port-probe"
+            probe.write_bytes(sandbox_lifecycle_tests.port_probe())
+            probe.chmod(0o755)
+            result = subprocess.run([str(probe)], check=False)
+        self.assertEqual(result.returncode, -signal.SIGSEGV)
 
     def test_bounded_evidence_keeps_the_end_of_its_data(self):
         bounded = sandbox_lifecycle_tests.bounded_evidence
@@ -9574,13 +9621,19 @@ class MicrovmTests(unittest.TestCase):
         managed_exec.assert_not_called()
         self.assertIn("sandbox-lifecycle", microvm_tests.SANDBOX_CONTROL_SCENARIOS)
 
-    def test_managed_container_launch_prepares_identity_and_static_helper(self):
+    def test_managed_sandbox_starts_the_managed_agent_and_its_static_helper(self):
         root = Path(__file__).resolve().parent.parent
-        bootstrap = (root / "guest" / "common" / "nvx-init-agent").read_text()
+        init = (root / "guest" / "common" / "init").read_text()
         launcher = (root / "guest" / "alpine" / "nvx-container-enter").read_text()
-        self.assertLess(
-            bootstrap.index('>"$runtime/workload-machine-id"'),
-            bootstrap.index("    /sbin/nvx-managed-agent \\"),
+        # The managed agent becomes a managed sandbox's PID 1, and writes the
+        # machine ID that the launcher binds before it serves the session; a
+        # one-shot sandbox keeps the shell agent.
+        self.assertIn(
+            '    if [ "$workload_lifecycle" = managed ]; then\n'
+            "        exec /sbin/nvx-managed-agent --layered-root\n"
+            "    fi\n"
+            "    exec /sbin/nvx-init-agent\n",
+            init,
         )
         self.assertIn(
             "set -- /.nvx-agent/nvx-managed-agent \\\n"

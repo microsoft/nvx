@@ -594,9 +594,10 @@ the roots that its caller names, and `root` bootstraps the guest for a layered
 root through `cgroup`, assembles the root, mounts live shares in it, binding
 the children of an aggregate through `mappings`, and tears it down.
 `nvx-managed-agent` launches, drives, collects, and settles its workloads
-through them, and applies its host mapping table through `mappings`, with its
-mount of the host's export and `/` as the roots, and any other guest init or
-agent can use them too. Any guest init or agent can also run the steps of
+through them, applies its host mapping table through `mappings`, with its mount
+of the host's export and `/` as the roots, and assembles and tears down a
+managed sandbox's layered root with `root`, and any other guest init or agent
+can use them too. Any guest init or agent can also run the steps of
 `nvx-time` and `nvx-reseed` in its own process, through the `nvx::guest::time`
 and `nvx::guest::reseed` calls, on which both programs run.
 
@@ -607,7 +608,7 @@ and `nvx::guest::reseed` calls, on which both programs run.
 | `nvx-reseed [--generation-only] SEED_FILE [PREVIOUS]`, `nvx-reseed --sample` | Reseeds the kernel's random number generator from a seed file and checks its VM generation ID, or prints a random sample |
 | `nvx-exit [CODE]` | Stops the VM with an 8-bit exit code through OpenVMM's control port 0x604 (x86_64) |
 | `nvx-device-io file ...`, `nvx-device-io network ...` | The benchmark helper that measures file and UDP round-trip I/O and prints one JSON line (x86_64) |
-| `nvx-managed-agent CONTROL_TTY ROOTFS HOSTNAME UID GID USER HOME` | Serves the managed control session and supervises sequential workloads; `--exec-config-fd FD -- WORKLOAD ...` is its internal launch helper |
+| `nvx-managed-agent CONTROL_TTY - HOSTNAME UID GID USER HOME`, `nvx-managed-agent --layered-root` | Serves the managed control session and supervises sequential workloads as PID 1, in the guest's own root or, with `--layered-root`, in a managed sandbox's layered root, which it assembles and tears down; `--exec-config-fd FD -- WORKLOAD ...` is its internal launch helper |
 | `nvx-ingress GATEWAY_IPV4` | Announces reachable TCP listeners and settled UDP sockets to the portable-network gateway; `test DIRECTORY` runs synthetic procfs snapshots |
 | `nvx-time [--report-only] COMMAND` | Enforces NVX time ABI v1: runs its conformance checks, repairs the wall clock after a restore, publishes the time state, and runs the discipline and violation-watcher daemon; `test NAME ...` runs its decoder and process test hooks (x86_64) |
 | `nvx-time-probe latency\|warp\|clock ...` | Diagnoses clock-read latency, cross-CPU TSC warp and offset, the clocks, CPUID, clock events, kernel messages, and optionally MSRs (x86_64) |

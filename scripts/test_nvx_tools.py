@@ -12450,24 +12450,27 @@ class SandboxShareAgentTests(unittest.TestCase):
         lines = log.read_text(encoding="utf-8").splitlines() if log.exists() else []
         return result, lines
 
-    def test_agent_mounts_share_after_lifecycle_checks_for_both_lifecycles(self):
+    def test_agent_mounts_shares_after_its_checks_and_runs_only_one_shot(self):
         mount_call = self.source.index("\nmount_live_shares\n")
         self.assertLess(
             self.source.index('fatal "configured workload home is unavailable"'),
             mount_call,
         )
+        # A managed sandbox's PID 1 is the managed agent, which init starts
+        # instead of this agent.
+        self.assertLess(
+            self.source.index('[ "$workload_lifecycle" = one-shot ] ||'), mount_call
+        )
         self.assertLess(
             self.source.index('fatal "unsupported workload lifecycle'), mount_call
         )
         machine_id = self.source.index('>"$runtime/workload-machine-id"')
-        managed_agent = self.source.index("\n    /sbin/nvx-managed-agent \\\n")
         self.assertLess(mount_call, machine_id)
-        self.assertLess(machine_id, managed_agent)
-        self.assertLess(managed_agent, self.source.index("/sbin/nvx-container-launch"))
-        self.assertNotIn("exec /sbin/nvx-managed-agent", self.source)
+        self.assertLess(machine_id, self.source.index("/sbin/nvx-container-launch"))
+        self.assertNotIn("nvx-managed-agent", self.source)
+        self.assertNotIn("NVX-SANDBOX-READY: managed", self.source)
         self.assertEqual(self.source.count('\nteardown "$status"\n'), 1)
-        self.assertEqual(self.source.count('\n    teardown "$status"\n'), 1)
-        self.assertLess(managed_agent, self.source.index('\n    teardown "$status"\n'))
+        self.assertNotIn('\n    teardown "$status"\n', self.source)
 
     def test_agent_teardown_unmounts_share_before_overlay_layers_and_scratch(self):
         result, log = self._run_teardown("teardown 7", shares=("/workspace",))

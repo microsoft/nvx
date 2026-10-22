@@ -563,31 +563,13 @@ case "$workload_home" in /*) ;; *) fatal "configured workload home is invalid" ;
 
 workload_lifecycle=$(cmdline_value nvx_lifecycle || true)
 [ -n "$workload_lifecycle" ] || workload_lifecycle=one-shot
-case "$workload_lifecycle" in
-    one-shot) ;;
-    managed)
-        control_tty=$(cmdline_value nvx_control_tty || true)
-        [ "$control_tty" = hvc2 ] ||
-            fatal "managed lifecycle requires the dedicated control tty"
-        ;;
-    *) fatal "unsupported workload lifecycle: $workload_lifecycle" ;;
-esac
+# A managed sandbox's PID 1 is the managed agent, which init starts instead.
+[ "$workload_lifecycle" = one-shot ] ||
+    fatal "unsupported workload lifecycle: $workload_lifecycle"
 
 mount_live_shares
 workload_machine_id=$(tr -d - </proc/sys/kernel/random/uuid)
 printf '%s\n' "$workload_machine_id" >"$runtime/workload-machine-id"
-
-if [ "$workload_lifecycle" = managed ]; then
-    echo "NVX-SANDBOX-READY: managed layers=$layer_count"
-    # The agent returns after a stop request, so managed sandboxes share the
-    # one-shot teardown instead of powering off with their mounts in place.
-    status=0
-    /sbin/nvx-managed-agent \
-        "/dev/$control_tty" "$rootfs" "$hostname_value" \
-        "$workload_uid" "$workload_gid" "$workload_name" "$workload_home" ||
-        status=$?
-    teardown "$status"
-fi
 
 set -- "$entrypoint"
 # Kernel command-line tokens are deliberately split on spaces.

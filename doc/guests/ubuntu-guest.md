@@ -16,7 +16,7 @@ describes how the pieces fit together and why.
 | Artifact | Used by | Boot supervisor |
 | --- | --- | --- |
 | `initramfs-ubuntu.cpio.gz` | `nvx.py run --guest ubuntu` | The common NVX `/init` inside the Ubuntu initramfs |
-| `ubuntu-distro.erofs` | `nvx.py sandbox --layer distro,...` | The Alpine control initramfs and its init agent |
+| `ubuntu-distro.erofs` | `nvx.py sandbox --layer distro,...` | The Alpine control initramfs: its init agent for a one-shot sandbox, or its managed agent for a managed one |
 
 Alpine remains the default guest of `run` and the only control environment of
 `sandbox`. The sandbox launcher always boots the Alpine initramfs, and the

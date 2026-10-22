@@ -1,13 +1,15 @@
-//! `nvx-managed-agent CONTROL_TTY ROOTFS HOSTNAME UID GID USER HOME`: the managed guest agent,
-//! which serves NVX's authenticated control session on `CONTROL_TTY` and runs one workload at a
-//! time as `UID` and `GID`.
+//! `nvx-managed-agent CONTROL_TTY - HOSTNAME UID GID USER HOME`: the managed guest agent of a
+//! blockless root, which serves NVX's authenticated control session on `CONTROL_TTY` and runs one
+//! workload at a time as `UID` and `GID`.
 //!
-//! With `ROOTFS` `-`, the direct agent runs as PID 1: it applies the host mapping table, launches
-//! each workload in its own cgroup and process group, reaps orphaned processes, and powers the VM
-//! off after `STOP`. Otherwise the sandbox agent launches each workload in `ROOTFS` through the
-//! container helpers, behind their FIFO barrier, and returns to the init agent after `STOP`. Both
-//! keep the C agent's command lines, wire behavior, status and error categories, 1 MiB output and
-//! receive windows, timeout and cancellation behavior, and sealed memfd execution configuration.
+//! This direct agent runs as PID 1: it applies the host mapping table, launches each workload in
+//! its own cgroup and process group, reaps orphaned processes, and powers the VM off after
+//! `STOP`. `nvx-managed-agent --layered-root` is the PID 1 of a managed sandbox's layered root:
+//! it assembles the root, serves the session as the sandbox agent, which launches each workload
+//! in the root through the container helpers, behind their FIFO barrier, and tears the root down
+//! after `STOP`. Both agents keep the C agent's wire behavior, status and error categories, 1 MiB
+//! output and receive windows, timeout and cancellation behavior, and sealed memfd execution
+//! configuration.
 //!
 //! `nvx-managed-agent --exec-config-fd FD -- WORKLOAD...` is the agent's internal execution
 //! helper. The launch runs it once the workload's identity applies, and it applies the sealed
@@ -44,7 +46,7 @@
 //! root and its workloads in `nvx-exec`, which it kills and settles whole through an
 //! [`ExecutionCgroup`](crate::guest::cgroup::ExecutionCgroup), and which each execution kills
 //! when it ends its workload, and the sandbox agent places each launcher in the `container`
-//! cgroup that the init agent prepared, and ends only the workload's process group.
+//! cgroup that the layered root's bootstrap prepared, and ends only the workload's process group.
 //!
 //! Between requests no workload runs, and an agent that is PID 1 collects the status of every
 //! child that ends while it waits for the next one, such as a daemon that `/init` started.
@@ -78,6 +80,8 @@ mod helper;
 mod idle;
 /// Direct and sandbox launch commands.
 mod launch;
+/// The PID 1 of a managed sandbox's layered root.
+mod layered;
 #[cfg(all(test, feature = "host"))]
 /// In-process host/broker/agent integration harness.
 mod loopback;
@@ -146,15 +150,15 @@ pub fn main() -> ExitCode {
     ExitStatus::from(run(&mut system, &sys::args())).into()
 }
 
-/// Dispatches the executable's helper or long-lived agent mode.
+/// Dispatches the executable's helper, layered-root, or direct agent mode.
 fn run(system: &mut impl System, arguments: &[CString]) -> Result<(), CommandError> {
-    if arguments
-        .get(1)
-        .is_some_and(|argument| argument.as_bytes() == b"--exec-config-fd")
-    {
-        return helper::run(system, arguments);
+    match arguments.get(1).map(|argument| argument.as_bytes()) {
+        Some(b"--exec-config-fd") => return helper::run(system, arguments),
+        Some(b"--layered-root") if arguments.len() == 2 => return layered::run(system),
+        _ => {}
     }
-    if arguments.len() != 8 {
+    // The direct agent's second argument stands for the root, which is its own.
+    if arguments.len() != 8 || arguments[2].as_bytes() != b"-" {
         return Err(CommandError::Agent);
     }
     let config = AgentConfig {
@@ -164,7 +168,7 @@ fn run(system: &mut impl System, arguments: &[CString]) -> Result<(), CommandErr
         gid: arguments[5].clone(),
         user: arguments[6].clone(),
         home: arguments[7].clone(),
-        direct: arguments[2].as_bytes() == b"-",
+        direct: true,
     };
     let result = serve(system, &arguments[1], &config);
     finish(system, &config, result)
@@ -211,17 +215,19 @@ fn finish(
     config: &AgentConfig,
     result: Result<(), CommandError>,
 ) -> Result<(), CommandError> {
-    if !config.direct {
-        return result;
+    if config.direct {
+        let _ = exit_vm(system, ExitStatus::from(result) as u8);
     }
-    let Ok(path) = path_c_string(&system.paths().exit) else {
-        return result;
-    };
-    let code = (ExitStatus::from(result) as u8).to_string();
+    result
+}
+
+/// Ends the VM with `status` through `nvx-exit`, which takes the agent's place, or returns why it
+/// could not run.
+fn exit_vm(system: &mut impl System, status: u8) -> Result<(), Errno> {
+    let path = path_c_string(&system.paths().exit)?;
     let arguments = [
         c"nvx-exit".to_owned(),
-        CString::new(code).expect("a decimal status has no NUL"),
+        CString::new(status.to_string()).expect("a decimal status has no NUL"),
     ];
-    let _ = system.exec(&path, &arguments, None);
-    result
+    system.exec(&path, &arguments, None)
 }

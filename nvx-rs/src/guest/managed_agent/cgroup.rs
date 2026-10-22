@@ -16,8 +16,8 @@ const SETTLE_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Returns the agent's cgroups in its mode. The direct agent runs in the hierarchy's root, and its
 /// workloads in `nvx-exec`, which it prepares and settles whole. The sandbox agent runs in
-/// `agent`, and its workloads in `container`, which the init agent prepares.
-fn layout(paths: &Paths, direct: bool) -> Result<Layout, Errno> {
+/// `agent`, and its workloads in `container`, which the layered root's bootstrap prepares.
+pub(super) fn layout(paths: &Paths, direct: bool) -> Result<Layout, Errno> {
     let root = &paths.cgroup_root;
     let layout = if direct {
         Layout::new(root, root.join("nvx-exec"))

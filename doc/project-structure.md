@@ -212,8 +212,9 @@ initramfs builds, plus the Azure Linux variants of the container-entry
 scripts. The nine compiled `/sbin/nvx-*` programs live under `nvx-rs/src/guest`
 and `nvx-rs/src/bin`. `init` controls early boot and then starts an
 initramfs program named by `nvx_exec=`, the Alpine-only `nvx-init-agent`
-sandbox profile, `nvx-managed-agent` for a managed workload, a virtio restore
-probe for benchmark profiling, or the interactive shell. On an interactive
+sandbox profile for a one-shot sandbox, `nvx-managed-agent` for a managed
+workload or a managed sandbox, a virtio restore probe for benchmark profiling,
+or the interactive shell. On an interactive
 boot, `init` prints a stable distribution boot marker for Alpine and Azure
 Linux, and `guest/ubuntu/nvx-bashrc` prints Ubuntu's. `guest/alpine` contains
 the container launch and entry scripts that only the Alpine initramfs installs;
@@ -224,8 +225,10 @@ The sandbox scripts resolve fixed virtio-blk roles through
 sysfs, assemble EROFS lower layers over ext4 scratch, place the workload in its
 cgroup before release, construct its mount/PID/UTS namespaces, enter its
 filesystem root after dropping capabilities, and retain the agent as the outer
-PID 1. In a managed sandbox, the agent supervises `nvx-managed-agent` and
-performs the ordered unmount teardown after a stop request. The remaining
+PID 1. In a managed sandbox, `nvx-managed-agent --layered-root` is that PID 1
+instead: it assembles the same root with the `nvx::guest::root` operations,
+launches each workload through the same container scripts, and performs the
+ordered unmount teardown after a stop request. The remaining
 common helpers handle shutdown, virtio-fs mounting, snapshot preparation, and
 the guest side of the time ABI. The Rust guest binaries provide shutdown,
 managed control, restore repair, device access, ingress announcements, and

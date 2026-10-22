@@ -4,10 +4,11 @@ The scenario runs `nvx.py sandbox` as subprocesses against the real kernel, the
 Alpine control initramfs, the Ubuntu EROFS layer, and ext4 scratch copies. It
 checks identity admission, fail-closed lifecycle transitions, that overlapping
 starts launch one VM, warm-guest state across exec requests and restarts, the
-guest security profile and resource limits, bounded output and outcome reports,
-and that stop, a crash, and deprovision leave no OpenVMM process, control
-endpoint, capability, or runtime record behind while the supplied layer and
-scratch artifacts stay intact.
+guest security profile and resource limits, that the guest keeps its workload
+in its own cgroup, user namespaces unavailable, and I/O port permission from
+the workload, bounded output and outcome reports, and that stop, a crash, and
+deprovision leave no OpenVMM process, control endpoint, capability, or runtime
+record behind while the supplied layer and scratch artifacts stay intact.
 """
 
 from __future__ import annotations
@@ -85,6 +86,64 @@ RUNNING_ENTRIES = frozenset(
 )
 STOPPED_ENTRIES = frozenset({CONFIG, LOCK, LOG, OUTCOME})
 ALREADY_RUNNING = b"sandbox is already running or has stale runtime state"
+# Where the workload writes the I/O port probe, and the status that the guest's
+# shell reports when the kernel kills the probe with SIGSEGV, Linux's signal 11.
+PORT_PROBE = "/tmp/nvx-port-probe"
+PORT_PROBE_FAULT = 128 + 11
+
+
+def port_probe() -> bytes:
+    """Returns a static x86-64 executable that reads port B's status port,
+    0xea, with one `in`, then exits with status 0.
+
+    The guest programs request I/O port permission, which processes inherit,
+    only for themselves. Without it, `in` faults and the kernel kills the
+    probe with SIGSEGV.
+    """
+    code = bytes.fromhex(
+        "66baea00"  # mov dx, 0xea
+        "ec"  # in al, dx
+        "b83c000000"  # mov eax, 60 (exit)
+        "31ff"  # xor edi, edi
+        "0f05"  # syscall
+    )
+    base = 0x400000
+    headers = 64 + 56
+    size = headers + len(code)
+    elf_header = struct.pack(
+        "<4sBBBBB7xHHIQQQIHHHHHH",
+        b"\x7fELF",
+        2,  # 64-bit
+        1,  # little-endian
+        1,  # ELF version 1
+        0,  # System V ABI
+        0,
+        2,  # an executable
+        0x3E,  # x86-64
+        1,
+        base + headers,  # the entry point
+        64,  # the program headers' offset
+        0,  # no section headers
+        0,
+        64,  # the ELF header's size
+        56,  # a program header's size
+        1,  # one program header
+        0,
+        0,
+        0,
+    )
+    program_header = struct.pack(
+        "<IIQQQQQQ",
+        1,  # PT_LOAD
+        5,  # readable and executable
+        0,  # the whole file
+        base,
+        base,
+        size,
+        size,
+        0x1000,
+    )
+    return elf_header + program_header + code
 
 
 def openvmm_processes(marker: str) -> tuple[int, ...]:
@@ -425,6 +484,7 @@ class LifecycleAcceptance:
         self.check_running_transitions(runtime)
         self.check_warm_state()
         self.check_security_profile()
+        self.check_guest_isolation()
         self.check_bounded_results()
         self.check_deprovision_while_running(runtime)
         self.stop(runtime, layer_digest)
@@ -652,6 +712,54 @@ class LifecycleAcceptance:
                 raise RuntimeError(
                     f"the sandbox security probe did not report {marker.decode()}"
                 )
+
+    def check_guest_isolation(self) -> None:
+        # The workload runs in the workload cgroup. It cannot see its sibling,
+        # the agent cgroup: before it assembled the root, the managed agent, as
+        # PID 1, moved itself and the prelude's daemons there, and a user process
+        # that stayed in the cgroup root would have failed this sandbox's start.
+        result = self.exec("/bin/cat", "--arg=/proc/self/cgroup", expected=None)
+        self.require_output(result, b"0::/container\n", "the workload's cgroup")
+
+        # No process in the guest may create a user namespace.
+        result = self.exec(
+            "/bin/sh",
+            "--arg=-c",
+            "--arg=cat /proc/sys/user/max_user_namespaces; "
+            '/usr/bin/unshare --user /bin/true; echo "status=$?"',
+            expected=None,
+        )
+        if (
+            result.returncode != 0
+            or result.stdout != b"0\nstatus=1\n"
+            or b"unshare failed" not in result.stderr
+        ):
+            raise RuntimeError(
+                "a workload could create a user namespace: status "
+                f"{result.returncode}, stdout={bounded_text(result.stdout)!r}, "
+                f"stderr={bounded_text(result.stderr)!r}"
+            )
+
+        # The workload, which the agent's stages started, holds no I/O port
+        # permission, which processes inherit, so the probe's `in` faults.
+        probe = "".join(f"\\{byte:03o}" for byte in port_probe())
+        result = self.exec(
+            "/bin/sh",
+            "--arg=-c",
+            '--arg=printf "$1" >"$0" && chmod 0755 "$0" && { "$0"; echo "status=$?"; }',
+            f"--arg={PORT_PROBE}",
+            f"--arg={probe}",
+            expected=None,
+        )
+        if (
+            result.returncode != 0
+            or result.stdout != f"status={PORT_PROBE_FAULT}\n".encode()
+        ):
+            raise RuntimeError(
+                "a workload stage held I/O port permission: status "
+                f"{result.returncode}, stdout={bounded_text(result.stdout)!r}, "
+                f"stderr={bounded_text(result.stderr)!r}"
+            )
 
     def check_bounded_results(self) -> None:
         # The agent stops forwarding output at its bound, and the outcome

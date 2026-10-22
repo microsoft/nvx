@@ -851,6 +851,36 @@ fn managed_agent_bad_helper_syntax_exits_125() {
     }
 }
 
+#[test]
+fn managed_agent_runs_the_layered_root_only_as_pid_1_and_no_sandbox_form() {
+    // The layered root's PID 1 refuses to run in any other process, before it changes anything.
+    let (status, stdout, stderr) = run("nvx-managed-agent", ["--layered-root"]);
+    assert_eq!(status, Some(125));
+    assert!(stdout.is_empty());
+    assert_eq!(
+        stderr,
+        b"nvx-managed-agent: --layered-root runs only as PID 1\n"
+    );
+    // The direct agent's root is its own, `-`: the retired form that named a sandbox's root, and
+    // the layered root's mode with an argument, are usage errors.
+    for arguments in [
+        &["--layered-root", "-"][..],
+        &[
+            "/dev/null",
+            "/run/nvx/rootfs",
+            "nvx-sandbox",
+            "1000",
+            "1000",
+            "nvx",
+            "/home/nvx",
+        ],
+    ] {
+        let (status, stdout, stderr) = run("nvx-managed-agent", arguments);
+        assert_eq!(status, Some(125), "{arguments:?}");
+        assert!(stdout.is_empty() && stderr.is_empty(), "{arguments:?}");
+    }
+}
+
 /// The header line of the kernel's socket tables, which `nvx-ingress` skips.
 const INGRESS_TABLE_HEADER: &str =
     "  sl  local_address rem_address st tx rx tr tm retr uid timeout inode\n";
