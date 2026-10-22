@@ -34,6 +34,7 @@
 //! | --- | --- | --- |
 //! | `filesystem.readonlyPaths`, `readwritePaths` | mapped at their [`nvx::guest_path`] | n/a |
 //! | `filesystem.deniedPaths` | hidden inside mapped paths | n/a |
+//! | `filesystem.enumeratePaths` | recursive names and metadata, without content access | n/a |
 //! | `network.egress` | default and IPv4 and IPv6 rules applied | n/a |
 //! | `network.ingress.default` | `allow` and `deny` applied; see below | n/a |
 //! | `network.ingress.hostLoopback` | `allow` and `deny` applied, omitted means `deny`; see below | n/a |
@@ -301,6 +302,10 @@ fn egress_rule(rule: &NetworkRule) -> network::EgressRule {
 /// Plans the export of the contract's filesystem section, under the contract's field names.
 fn export_plan(policy: &FilesystemPolicy) -> Result<Option<ExportPlan>> {
     Ok(filesystem::plan(&ExportRequest {
+        enumerate: PathList {
+            name: "filesystem.enumeratePaths",
+            paths: &policy.enumerate_paths,
+        },
         read_only: PathList {
             name: "filesystem.readonlyPaths",
             paths: &policy.readonly_paths,
@@ -441,6 +446,7 @@ impl Backend for OpenVmmBackend {
         capabilities.filesystem.readonly_paths = true;
         capabilities.filesystem.readwrite_paths = true;
         capabilities.filesystem.denied_paths = true;
+        capabilities.filesystem.enumerate_paths = true;
         capabilities.exec.cwd = true;
         capabilities
     }

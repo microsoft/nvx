@@ -10,8 +10,9 @@
 //! exports each such file alone, without its directory, so mapped paths may lie anywhere, on any
 //! volume, except that a whole volume cannot be mapped. A child is read-write only if it holds a
 //! read-write mapping, and OpenVMM then limits writes to its read-write mappings, so the host
-//! enforces each mapping's access, except that of a read-only path inside a read-write mapping,
-//! which only the guest's bind mount keeps read-only. OpenVMM also hides the denied paths.
+//! enforces each mapping's access. Without enumeration, only the guest's bind mount keeps a
+//! read-only path inside a read-write mapping read-only; enumeration exports use explicit
+//! host-enforced access rules instead. OpenVMM also hides the denied paths.
 //!
 //! A policy that would need more children than OpenVMM offers is refused rather than served
 //! through the directories of its files, which would grant more than the files. Records of
@@ -92,6 +93,43 @@ pub struct ExportChild {
     /// Canonical paths to which OpenVMM limits the guest's writes; empty if the guest may modify
     /// everything that it can reach in a writable child.
     pub write: Vec<PathBuf>,
+    /// Explicit host-enforced access to each mapping when this child includes
+    /// enumeration-only paths. Older state has no such rules.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub access_rules: Vec<PathAccessRule>,
+}
+
+/// Access to a host mapping, ordered from most to least restrictive.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum PathAccess {
+    /// Directory entries and ordinary metadata, without content access.
+    Enumerate,
+    /// Content reads and execution, without modifications.
+    ReadOnly,
+    /// Content access and modifications.
+    ReadWrite,
+}
+
+impl PathAccess {
+    /// Spelling of this access mode in an OpenVMM mount-access option.
+    fn option(self) -> &'static str {
+        match self {
+            Self::Enumerate => "enum",
+            Self::ReadOnly => "ro",
+            Self::ReadWrite => "rw",
+        }
+    }
+}
+
+/// One canonical host mapping's access within an exported child.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PathAccessRule {
+    /// Canonical host path of the mapping.
+    pub path: PathBuf,
+    /// Access granted to this path and its descendants.
+    pub access: PathAccess,
 }
 
 /// Device and file index of a host object, which survive renames.
@@ -205,6 +243,8 @@ pub struct PathList<'a> {
 /// them.
 #[derive(Debug, Clone, Copy)]
 pub struct ExportRequest<'a> {
+    /// Host paths whose names and metadata, but not contents, the guest may read.
+    pub enumerate: PathList<'a>,
     /// Host paths that the guest reads.
     pub read_only: PathList<'a>,
     /// Host paths that the guest reads and writes.
@@ -227,7 +267,12 @@ pub struct ExportRequest<'a> {
 pub fn plan(request: &ExportRequest<'_>) -> Result<Option<ExportPlan>> {
     let unsupported = |message: String| Err(Error::unsupported(message));
     let mut mapped: Vec<Mapped> = Vec::new();
-    for (list, read_only) in [(request.read_only, true), (request.read_write, false)] {
+    for (list, access) in [
+        (request.enumerate, PathAccess::Enumerate),
+        (request.read_only, PathAccess::ReadOnly),
+        (request.read_write, PathAccess::ReadWrite),
+    ] {
+        let read_only = access != PathAccess::ReadWrite;
         let field = list.name;
         for path in list.paths {
             let canonical = canonicalize(path).map_err(|error| {
@@ -268,13 +313,17 @@ pub fn plan(request: &ExportRequest<'_>) -> Result<Option<ExportPlan>> {
             }
             match mapped.iter_mut().find(|other| other.canonical == canonical) {
                 // The same object listed twice keeps its most restrictive access.
-                Some(other) => other.read_only |= read_only,
+                Some(other) => {
+                    other.read_only |= read_only;
+                    other.access = other.access.min(access);
+                }
                 None => mapped.push(Mapped {
                     given: path.clone(),
                     canonical,
                     target,
                     read_only,
                     directory: metadata.is_dir(),
+                    access,
                 }),
             }
         }
@@ -287,17 +336,29 @@ pub fn plan(request: &ExportRequest<'_>) -> Result<Option<ExportPlan>> {
             "the openvmm backend maps at most {MAX_HOST_MAPPINGS} paths into one sandbox"
         ));
     }
+    let roots = export_roots(&mapped)?;
+    let explicit_roots = roots
+        .iter()
+        .filter(|root| {
+            mapped.iter().any(|entry| {
+                entry.access == PathAccess::Enumerate && entry.canonical.starts_with(root)
+            })
+        })
+        .collect::<Vec<_>>();
     // A Windows host opens files case-insensitively, while the guest lets a file have several
     // names, so a read-only file inside a read-write directory stays writable under another
     // spelling of its name.
     if cfg!(windows)
         && let Some((file, directory)) = mapped.iter().find_map(|file| {
-            (file.read_only && !file.directory)
+            (file.read_only && file.access != PathAccess::Enumerate && !file.directory)
                 .then(|| {
                     mapped.iter().find(|directory| {
                         directory.directory
                             && !directory.read_only
                             && file.canonical.starts_with(&directory.canonical)
+                            && !explicit_roots
+                                .iter()
+                                .any(|root| directory.canonical.starts_with(root))
                     })
                 })
                 .flatten()
@@ -312,7 +373,6 @@ pub fn plan(request: &ExportRequest<'_>) -> Result<Option<ExportPlan>> {
         ));
     }
 
-    let roots = export_roots(&mapped)?;
     if roots.len() > MAX_CHILDREN {
         // Exporting directories for some of the files would grant more than the files.
         return unsupported(format!(
@@ -367,6 +427,29 @@ pub fn plan(request: &ExportRequest<'_>) -> Result<Option<ExportPlan>> {
         check_root(&root)?;
         policy_bytes += check_policy_paths(&root, &child_denied, "hide")?;
         policy_bytes += check_policy_paths(&root, &write, "make writable")?;
+        let mut access_rules = if inside
+            .iter()
+            .any(|entry| entry.access == PathAccess::Enumerate)
+        {
+            inside
+                .iter()
+                .map(|entry| PathAccessRule {
+                    path: entry.canonical.clone(),
+                    access: entry.access,
+                })
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
+        access_rules.sort_by(|left, right| left.path.cmp(&right.path));
+        policy_bytes += check_policy_paths(
+            &root,
+            &access_rules
+                .iter()
+                .map(|rule| rule.path.clone())
+                .collect::<Vec<_>>(),
+            "apply explicit access to",
+        )?;
         let denied_identities = child_denied
             .iter()
             .map(|path| movable(path).then(|| identity(path)).transpose())
@@ -380,11 +463,12 @@ pub fn plan(request: &ExportRequest<'_>) -> Result<Option<ExportPlan>> {
             denied_identities,
             allowed: Vec::new(),
             write,
+            access_rules,
         });
     }
     if policy_bytes > MAX_AGGREGATE_POLICY_BYTES {
         return unsupported(format!(
-            "the paths that OpenVMM is to hide or make writable exceed its \
+            "the filesystem policy paths that OpenVMM is to enforce exceed its \
              {MAX_AGGREGATE_POLICY_BYTES}-byte limit"
         ));
     }
@@ -637,6 +721,16 @@ impl ExportPlan {
                 add("--mount-write", path);
             }
         }
+        for child in &self.children {
+            for rule in &child.access_rules {
+                arguments.push("--mount-access".to_owned());
+                arguments.push(format!(
+                    "{},{}",
+                    rule.access.option(),
+                    display_path(&rule.path)
+                ));
+            }
+        }
         arguments
     }
 }
@@ -779,6 +873,8 @@ struct Mapped {
     read_only: bool,
     /// Whether the mapped host object is a directory rather than a regular file.
     directory: bool,
+    /// Host-enforced access mode of this mapping.
+    access: PathAccess,
 }
 
 /// Returns whether the guest path `path` is `directory` or one of its descendants, comparing
@@ -864,10 +960,138 @@ mod tests {
     use super::*;
     use crate::ErrorKind;
 
+    #[test]
+    fn enumeration_emits_complete_access_rules_and_keeps_denies_hidden() {
+        let directory = root();
+        let base = directory.path();
+        fs::create_dir_all(base.join("tools/bin/out")).unwrap();
+        fs::create_dir_all(base.join("tools/private")).unwrap();
+        let mapping = plan(&FilesystemPolicy {
+            enumerate_paths: vec![base.join("tools")],
+            readonly_paths: vec![base.join("tools/bin")],
+            readwrite_paths: vec![base.join("tools/bin/out")],
+            denied_paths: vec![base.join("tools/private")],
+        })
+        .unwrap()
+        .unwrap();
+        let child = &mapping.children[0];
+        assert!(child.writable);
+        assert_eq!(child.denied, [canonical(&base.join("tools/private"))]);
+        assert_eq!(
+            child
+                .access_rules
+                .iter()
+                .map(|rule| rule.access)
+                .collect::<Vec<_>>(),
+            [
+                PathAccess::Enumerate,
+                PathAccess::ReadOnly,
+                PathAccess::ReadWrite
+            ]
+        );
+        assert_eq!(
+            option_values(&mapping.openvmm_arguments(), "--mount-access"),
+            [
+                format!("enum,{}", display_path(&canonical(&base.join("tools")))),
+                format!("ro,{}", display_path(&canonical(&base.join("tools/bin")))),
+                format!(
+                    "rw,{}",
+                    display_path(&canonical(&base.join("tools/bin/out")))
+                ),
+            ]
+        );
+        assert_eq!(
+            mapping
+                .binds
+                .iter()
+                .map(|bind| bind.read_only)
+                .collect::<Vec<_>>(),
+            [true, true, false]
+        );
+        mapping.verify().unwrap();
+    }
+
+    #[test]
+    fn duplicate_mapping_keeps_enumeration_instead_of_content_access() {
+        let directory = root();
+        let path = directory.path().join("tools");
+        let mapping = plan(&FilesystemPolicy {
+            enumerate_paths: vec![path.clone()],
+            readonly_paths: vec![path.clone()],
+            readwrite_paths: vec![path],
+            ..FilesystemPolicy::default()
+        })
+        .unwrap()
+        .unwrap();
+        assert!(!mapping.children[0].writable);
+        assert_eq!(mapping.children[0].access_rules.len(), 1);
+        assert_eq!(
+            mapping.children[0].access_rules[0].access,
+            PathAccess::Enumerate
+        );
+        assert!(mapping.binds[0].read_only);
+    }
+
+    #[test]
+    fn enumeration_inside_a_writable_mapping_carries_nested_exceptions_and_identity() {
+        let directory = root();
+        let base = directory.path();
+        let selected = base.join("work/src/selected.txt");
+        fs::write(&selected, b"selected").unwrap();
+        let mapping = plan(&FilesystemPolicy {
+            enumerate_paths: vec![base.join("work/src")],
+            readonly_paths: vec![selected.clone()],
+            readwrite_paths: vec![base.join("work")],
+            ..FilesystemPolicy::default()
+        })
+        .unwrap()
+        .unwrap();
+        let rules = &mapping.children[0].access_rules;
+        assert_eq!(
+            rules.iter().map(|rule| rule.access).collect::<Vec<_>>(),
+            [
+                PathAccess::ReadWrite,
+                PathAccess::Enumerate,
+                PathAccess::ReadOnly
+            ]
+        );
+        assert!(
+            mapping
+                .binds
+                .iter()
+                .skip(1)
+                .all(|bind| bind.identity.is_some())
+        );
+        fs::rename(&selected, base.join("work/src/moved.txt")).unwrap();
+        fs::write(&selected, b"decoy").unwrap();
+        assert!(mapping.verify().is_err());
+    }
+
+    #[test]
+    fn explicit_access_rules_obey_the_runtime_path_count_limit() {
+        let directory = root();
+        let base = directory.path().join("tools");
+        let mut readonly_paths = Vec::new();
+        for index in 0..128 {
+            let path = base.join(format!("item-{index:03}"));
+            fs::write(&path, b"item").unwrap();
+            readonly_paths.push(path);
+        }
+        let error = plan(&FilesystemPolicy {
+            enumerate_paths: vec![base],
+            readonly_paths,
+            ..FilesystemPolicy::default()
+        })
+        .unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::Unsupported);
+        assert!(error.message().contains("128"));
+    }
+
     /// The lists of a filesystem policy as callers hold them, under the names that messages give
     /// them.
     #[derive(Debug, Default)]
     struct FilesystemPolicy {
+        enumerate_paths: Vec<PathBuf>,
         readonly_paths: Vec<PathBuf>,
         readwrite_paths: Vec<PathBuf>,
         denied_paths: Vec<PathBuf>,
@@ -875,6 +1099,10 @@ mod tests {
 
     fn plan(policy: &FilesystemPolicy) -> Result<Option<ExportPlan>> {
         super::plan(&ExportRequest {
+            enumerate: PathList {
+                name: "filesystem.enumeratePaths",
+                paths: &policy.enumerate_paths,
+            },
             read_only: PathList {
                 name: "filesystem.readonlyPaths",
                 paths: &policy.readonly_paths,
@@ -1052,6 +1280,7 @@ mod tests {
             readonly_paths: vec![reports.clone()],
             readwrite_paths: vec![alpha.clone()],
             denied_paths: vec![alpha.join("secret"), reports.join("secret")],
+            ..FilesystemPolicy::default()
         };
         let mapping = plan(&policy).unwrap().unwrap();
         let children: Vec<(PathBuf, bool, Vec<PathBuf>)> = mapping
@@ -1120,6 +1349,7 @@ mod tests {
                 base.join("work/private"),
                 base.join("work/src/secret"),
             ],
+            ..FilesystemPolicy::default()
         };
         let mapping = plan(&policy).unwrap().unwrap();
         let work = canonical(&base.join("work"));
@@ -1326,6 +1556,7 @@ mod tests {
                 base.join("work/out"),
                 base.join("elsewhere"),
             ],
+            ..FilesystemPolicy::default()
         };
         let mapping = plan(&policy).unwrap().unwrap();
         let denied: Vec<Vec<PathBuf>> = mapping
@@ -1483,6 +1714,7 @@ mod tests {
             readonly_paths: vec![base.join("my files/notes one.txt")],
             readwrite_paths: vec![base.join("work/out")],
             denied_paths: vec![base.join("work/out/My Secrets")],
+            ..FilesystemPolicy::default()
         };
         let mapping = plan(&spaced).unwrap().unwrap();
         let arguments = mapping.openvmm_arguments();
@@ -1569,6 +1801,7 @@ mod tests {
             readonly_paths: vec![base.join("work/src")],
             readwrite_paths: vec![base.join("work")],
             denied_paths: vec![base.join("work/src/secret")],
+            ..FilesystemPolicy::default()
         };
         let mapping = plan(&policy).unwrap().unwrap();
         assert!(

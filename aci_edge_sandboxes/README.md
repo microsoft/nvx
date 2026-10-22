@@ -297,7 +297,7 @@ requires a local image's digest when it is registered. `--image-ref` requires a 
 `--registry-auth-file PATH` selects its credentials file and `--pull-timeout-ms` sets its pull
 deadline. `--hypervisor`, `--cpu-profile auto|host`,
 `--memory-mib`, and `--guest-debug` adjust the setup. The repeatable `--readonly`,
-`--readwrite`, and `--denied` options map host paths, and `--egress allow|deny` with the
+`--readwrite`, `--enumerate`, and `--denied` options map host paths, and `--egress allow|deny` with the
 repeatable `--egress-allow` and `--egress-deny` options, each taking `CIDR` or
 `CIDR:tcp|udp:PORT`, attach a network. `--network-proxy URL` routes the guest's traffic through
 a host proxy, and `--host-loopback allow|deny` with the repeatable
@@ -684,6 +684,7 @@ terminate the VM when the caller exits.
 | --- | --- | --- |
 | `filesystem.readonlyPaths`, `readwritePaths` | mapped into the guest; see [Host paths](#host-paths) | n/a |
 | `filesystem.deniedPaths` | hidden inside mapped paths | n/a |
+| `filesystem.enumeratePaths` | recursive names and metadata, without content reads or modifications | n/a |
 | `network.egress.default` | applied (`allow` or `deny`) | n/a |
 | `network.egress.allow`, `deny` | applied; see [Network rules](#network-rules) | n/a |
 | `network.ingress.default` | applied (`allow` or `deny`); see [Network rules](#network-rules) | n/a |
@@ -769,6 +770,23 @@ schema allows only an array. `ExecRequest::with_env` adds an entry,
 
 ### Host paths
 
+`filesystem.enumeratePaths` grants recursive directory listing and ordinary
+metadata queries, not file-content reads, execution, extended-attribute contents,
+or modifications. Check `capabilities.filesystem.enumeratePaths` before using
+it with an agent. Each export containing an enumeration mapping uses explicit
+host-enforced access rules: the most specific mapping determines access, and
+the same path in several lists keeps the most restrictive mode
+(`enumeratePaths`, then `readonlyPaths`, then `readwritePaths`). A nested
+read-only or read-write mapping can therefore expose selected content inside
+an enumeration-only tree, and an enumeration-only child restricts a broader
+grant. Existing policies without enumeration retain their current behavior.
+
+NVX keeps denied entries absent from directory listings and inaccessible;
+unlike Windows ProcessContainer, enumeration does not reveal denied names or
+their metadata. A denied path containing a mapping remains an invalid policy.
+Enumeration requires the matching OpenVMM runtime; an older executable rejects
+the new mount-access options rather than running without enforcement.
+
 Mapped host paths appear in the guest the way MXC's WSLc backend maps them: a
 Windows path `C:\work\src` appears at `/mnt/c/work/src`, and an absolute Linux
 path appears at the same path. Host paths may contain commas, as MXC's
@@ -813,7 +831,8 @@ translation, for example to turn a host working directory into a
   contain a mapped path, and a denied path that does not exist yet must not
   lie inside a mapped path, because nothing could hide it once a workload
   creates it. On Windows hosts, which open files case-insensitively, a
-  read-only file inside a read-write directory is refused. Mapping over the
+  read-only file inside a read-write directory is refused unless that export
+  uses the explicit access policy required by an enumeration mapping. Mapping over the
   guest's own system directories (`/usr`, `/etc`, and so on) is refused.
   Violations are reported as `policy_validation`.
 - A sandbox maps at most 4096 paths through at most 256 children. A policy

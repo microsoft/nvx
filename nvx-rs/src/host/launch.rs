@@ -478,6 +478,7 @@ mod tests {
                 denied_identities: vec![None],
                 allowed: Vec::new(),
                 write: Vec::new(),
+                access_rules: Vec::new(),
             }],
             binds: vec![Bind {
                 child: 0,
@@ -554,6 +555,7 @@ mod tests {
                 denied,
                 allowed: Vec::new(),
                 write: Vec::new(),
+                access_rules: Vec::new(),
             }],
             binds: Vec::new(),
         });

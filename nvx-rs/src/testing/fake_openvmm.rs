@@ -354,12 +354,13 @@ fn program_name() -> String {
 
 /// Parses the OpenVMM command line plus fake controls, rejecting unsupported combinations.
 fn parse(program: &str, arguments: &[String]) -> Result<Options, String> {
-    const VALUED: [&str; 28] = [
+    const VALUED: [&str; 29] = [
         "--mount-aggregate",
         "--mount-child",
         "--mount-deny",
         "--mount-allow",
         "--mount-write",
+        "--mount-access",
         "--mount",
         "--mount-owner",
         "--network-egress-allow",
@@ -553,6 +554,20 @@ fn parse(program: &str, arguments: &[String]) -> Result<Options, String> {
                     .any(|root| root.is_dir() && path.starts_with(root))
             {
                 return Err(format!("invalid {option} {}", path.display()));
+            }
+        }
+        for value in values.get("--mount-access").into_iter().flatten() {
+            let (mode, path) = value
+                .split_once(',')
+                .ok_or_else(|| format!("invalid --mount-access {value}"))?;
+            let path = Path::new(path);
+            if !["enum", "ro", "rw"].contains(&mode)
+                || !path.exists()
+                || !children
+                    .iter()
+                    .any(|root| path == root || (root.is_dir() && path.starts_with(root)))
+            {
+                return Err(format!("invalid --mount-access {value}"));
             }
         }
     }

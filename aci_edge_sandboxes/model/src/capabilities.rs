@@ -118,6 +118,9 @@ pub struct SpecCapabilities {
 #[serde(rename_all = "camelCase")]
 #[non_exhaustive]
 pub struct FilesystemCapabilities {
+    /// Honors `filesystem.enumeratePaths` without granting content reads.
+    #[serde(default)]
+    pub enumerate_paths: bool,
     /// Honors `filesystem.readonlyPaths`.
     pub readonly_paths: bool,
     /// Honors `filesystem.readwritePaths`.
@@ -146,5 +149,17 @@ mod tests {
             serde_json::from_value::<Capabilities>(payload).unwrap(),
             capabilities
         );
+    }
+
+    #[test]
+    fn an_older_agent_does_not_advertise_enumeration() {
+        let capabilities = Capabilities::new("older");
+        let mut payload = serde_json::to_value(&capabilities).unwrap();
+        payload["filesystem"]
+            .as_object_mut()
+            .unwrap()
+            .remove("enumeratePaths");
+        let decoded: Capabilities = serde_json::from_value(payload).unwrap();
+        assert!(!decoded.filesystem.enumerate_paths);
     }
 }

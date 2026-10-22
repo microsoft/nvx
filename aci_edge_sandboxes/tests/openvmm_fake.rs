@@ -1496,6 +1496,7 @@ fn filesystem_and_network_policies_reach_openvmm() {
             readonly_paths: vec![base.join("work").join("src")],
             readwrite_paths: vec![base.join("work").join("out")],
             denied_paths: vec![base.join("work").join("src").join("secret")],
+            ..FilesystemPolicy::default()
         })
         .with_network(NetworkPolicy {
             egress: EgressPolicy::new(Access::Deny)
@@ -1596,6 +1597,43 @@ fn filesystem_and_network_policies_reach_openvmm() {
 }
 
 #[test]
+fn enumeration_policy_reaches_openvmm_and_survives_reconnection() {
+    let fixture = Fixture::new();
+    let nvx = fixture.nvx();
+    let root = fixture.directory.path().join("catalog");
+    fs::create_dir_all(root.join("secret")).unwrap();
+    fs::write(root.join("selected"), b"readable").unwrap();
+    let request = ProvisionRequest::new().with_filesystem(FilesystemPolicy {
+        enumerate_paths: vec![root.clone()],
+        readonly_paths: vec![root.join("selected")],
+        denied_paths: vec![root.join("secret")],
+        ..FilesystemPolicy::default()
+    });
+    assert!(nvx.capabilities().filesystem.enumerate_paths);
+    let sandbox = nvx.provision(&request).unwrap().sandbox_id;
+    for client in [nvx, fixture.nvx()] {
+        client.start(&sandbox).unwrap();
+        let arguments = fixture.launch_arguments(&sandbox);
+        let access = arguments
+            .windows(2)
+            .filter(|pair| pair[0] == "--mount-access")
+            .map(|pair| pair[1].as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(access.len(), 2);
+        assert!(access[0].starts_with("enum,"));
+        assert!(access[1].starts_with("ro,"));
+        assert!(arguments.windows(2).any(|pair| pair[0] == "--mount-deny"));
+        let state = state_json(&fixture, &sandbox, "sandbox.json");
+        assert_eq!(
+            state["filesystem"]["children"][0]["accessRules"][0]["access"],
+            "enumerate"
+        );
+        client.stop(&sandbox).unwrap();
+    }
+    fixture.nvx().deprovision(&sandbox).unwrap();
+}
+
+#[test]
 fn mapped_files_are_exported_without_their_directories() {
     let fixture = Fixture::new();
     let nvx = fixture.nvx();
@@ -1612,10 +1650,12 @@ fn mapped_files_are_exported_without_their_directories() {
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(path, contents).unwrap();
     }
+
     let request = ProvisionRequest::new().with_filesystem(FilesystemPolicy {
         readonly_paths: vec![base.join("config/settings.json")],
         readwrite_paths: vec![base.join("results/output.txt")],
         denied_paths: Vec::new(),
+        ..FilesystemPolicy::default()
     });
     let sandbox_id = nvx.provision(&request).unwrap().sandbox_id;
     nvx.start(&sandbox_id).unwrap();
@@ -1687,6 +1727,7 @@ fn mapped_files_are_not_working_directories() {
         readonly_paths: vec![work.join("notes.txt")],
         readwrite_paths: vec![work.join("out")],
         denied_paths: Vec::new(),
+        ..FilesystemPolicy::default()
     });
     let sandbox_id = nvx.provision(&request).unwrap().sandbox_id;
     nvx.start(&sandbox_id).unwrap();
@@ -1743,6 +1784,7 @@ fn unrelated_directories_are_exported_side_by_side() {
         readonly_paths: vec![base.join("tools")],
         readwrite_paths: vec![base.join("projects/app"), base.join("build-output")],
         denied_paths: Vec::new(),
+        ..FilesystemPolicy::default()
     });
     let sandbox_id = nvx.provision(&request).unwrap().sandbox_id;
     nvx.start(&sandbox_id).unwrap();
@@ -1802,6 +1844,7 @@ fn host_paths_with_commas_are_exported_exactly() {
         readonly_paths: vec![reports.clone()],
         readwrite_paths: vec![alpha.clone()],
         denied_paths: vec![alpha.join("secret"), reports.join("secret")],
+        ..FilesystemPolicy::default()
     });
     let sandbox_id = nvx.provision(&request).unwrap().sandbox_id;
     nvx.start(&sandbox_id).unwrap();
@@ -1884,6 +1927,7 @@ fn large_mapping_tables_reach_the_guest_in_several_records() {
         readonly_paths: names.iter().map(|name| work.join(name)).collect(),
         readwrite_paths: vec![work.clone()],
         denied_paths: Vec::new(),
+        ..FilesystemPolicy::default()
     });
     let sandbox_id = nvx.provision(&request).unwrap().sandbox_id;
     nvx.start(&sandbox_id).unwrap();

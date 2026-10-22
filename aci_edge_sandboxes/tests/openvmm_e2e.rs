@@ -128,6 +128,7 @@ fn host_paths_are_mapped_into_the_guest() {
     for directory in ["src/secret", "out", "other"] {
         fs::create_dir_all(work.join(directory)).unwrap();
     }
+
     fs::write(work.join("src").join("a.txt"), "source").unwrap();
     fs::write(work.join("src").join("secret").join("key"), "hidden").unwrap();
     fs::write(work.join("config.json"), "{}").unwrap();
@@ -140,6 +141,7 @@ fn host_paths_are_mapped_into_the_guest() {
         ],
         readwrite_paths: vec![work.join("out")],
         denied_paths: vec![work.join("src").join("secret")],
+        ..FilesystemPolicy::default()
     });
     let (nvx, backend) = client("filesystem");
     let sandbox = started(&nvx, &backend, &request);
@@ -217,6 +219,58 @@ fn host_paths_are_mapped_into_the_guest() {
     );
 }
 
+#[test]
+#[ignore = "requires a hypervisor and NVX guest artifacts; run scripts/nvx.py test-aci-edge-sandboxes"]
+fn enumeration_lists_recursively_without_contents_and_keeps_denied_entries_hidden() {
+    let host = tempfile::tempdir().unwrap();
+    let root = host.path().join("catalog");
+    for name in ["nested/deep", "readable", "output", "secret"] {
+        fs::create_dir_all(root.join(name)).unwrap();
+    }
+    for (path, data) in [
+        ("visible", "not-readable"),
+        ("nested/deep/item", "not-readable"),
+        ("readable/item", "readable"),
+        ("secret/key", "hidden"),
+    ] {
+        fs::write(root.join(path), data).unwrap();
+    }
+    let request = ProvisionRequest::new().with_filesystem(FilesystemPolicy {
+        enumerate_paths: vec![root.clone()],
+        readonly_paths: vec![root.join("readable")],
+        readwrite_paths: vec![root.join("output")],
+        denied_paths: vec![root.join("secret")],
+    });
+    let (nvx, backend) = client("enum");
+    let sandbox = started(&nvx, &backend, &request);
+    let guest = guest_path(&root).unwrap();
+    let result = run(
+        &nvx,
+        id(&sandbox),
+        script(
+            r#"set -eu
+           [ -f "$1/visible" ]
+           ls "$1/nested/deep" | grep -qx item
+           [ "$(cat "$1/readable/item")" = readable ]
+           printf written > "$1/output/result"
+           if cat "$1/visible"; then exit 11; fi
+           if cat "$1/nested/deep/item"; then exit 12; fi
+           if touch "$1/created"; then exit 13; fi
+           if ls "$1" | grep -qx secret; then exit 14; fi
+           [ ! -e "$1/secret" ]
+           echo enumeration-ok"#,
+            &[guest],
+        ),
+    );
+    assert!(result.outcome.success(), "{result:?}");
+    assert_eq!(result.stdout, b"enumeration-ok\n");
+    assert_eq!(
+        fs::read_to_string(root.join("output/result")).unwrap(),
+        "written"
+    );
+    assert!(!root.join("created").exists());
+}
+
 /// A directory on another volume than the temporary directory, if the host has one: the one
 /// that `ACI_EDGE_SANDBOXES_E2E_SECOND_VOLUME` names, or the runner's temporary directory, which
 /// lies on another volume on GitHub's Windows runners. Tests create their files below it.
@@ -260,6 +314,7 @@ fn unrelated_directories_keep_their_own_access() {
         readonly_paths: vec![base.join("tools")],
         readwrite_paths: vec![base.join("projects/app"), base.join("build-output")],
         denied_paths: Vec::new(),
+        ..FilesystemPolicy::default()
     });
     let (nvx, backend) = client("volumes");
     let sandbox = started(&nvx, &backend, &request);
@@ -309,6 +364,7 @@ fn mapped_files_hide_their_siblings_and_names_may_hold_spaces() {
         readonly_paths: vec![work.join("notes one.txt")],
         readwrite_paths: vec![work.join("log file.txt"), work.join("data")],
         denied_paths: vec![work.join("data").join("My Secrets")],
+        ..FilesystemPolicy::default()
     });
     let (nvx, backend) = client("files");
     let sandbox = started(&nvx, &backend, &request);
@@ -377,6 +433,7 @@ fn single_files_are_granted_without_their_directories() {
         readonly_paths: vec![base.join("config/settings.json")],
         readwrite_paths: vec![base.join("results/output.txt")],
         denied_paths: Vec::new(),
+        ..FilesystemPolicy::default()
     });
     let (nvx, backend) = client("grants");
     let sandbox = started(&nvx, &backend, &request);
@@ -465,6 +522,7 @@ fn host_paths_with_commas_keep_their_access() {
         readonly_paths: vec![reports.clone()],
         readwrite_paths: vec![alpha.clone()],
         denied_paths: vec![alpha.join("secret"), reports.join("secret")],
+        ..FilesystemPolicy::default()
     });
     let (nvx, backend) = client("commas");
     let sandbox = started(&nvx, &backend, &request);
@@ -538,6 +596,7 @@ fn many_mappings_are_mounted() {
         readonly_paths,
         readwrite_paths,
         denied_paths: Vec::new(),
+        ..FilesystemPolicy::default()
     });
     let (nvx, backend) = client("many");
     let sandbox = started(&nvx, &backend, &request);
@@ -567,6 +626,7 @@ fn directories_on_another_volume_are_mapped() {
         readonly_paths: vec![primary.path().to_path_buf()],
         readwrite_paths: vec![secondary.path().to_path_buf()],
         denied_paths: Vec::new(),
+        ..FilesystemPolicy::default()
     });
     let (nvx, backend) = client("volume");
     let sandbox = started(&nvx, &backend, &request);

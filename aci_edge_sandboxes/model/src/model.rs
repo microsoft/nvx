@@ -162,6 +162,10 @@ impl ForwardProtocol {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct FilesystemPolicy {
+    /// Host paths whose names and metadata may be queried recursively, without
+    /// reading contents or modifying them. Denied entries stay hidden.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub enumerate_paths: Vec<PathBuf>,
     /// Host paths exposed read-only.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub readonly_paths: Vec<PathBuf>,
@@ -177,6 +181,7 @@ impl FilesystemPolicy {
     /// Returns whether the policy requests no mappings at all.
     pub fn is_empty(&self) -> bool {
         self.readonly_paths.is_empty()
+            && self.enumerate_paths.is_empty()
             && self.readwrite_paths.is_empty()
             && self.denied_paths.is_empty()
     }
@@ -836,6 +841,22 @@ mod tests {
         let request: ProvisionRequest =
             serde_json::from_str(r#"{ "microvm": { "provision": {} } }"#).unwrap();
         assert_eq!(request, ProvisionRequest::new());
+    }
+
+    #[test]
+    fn enumeration_only_policy_is_nonempty_and_round_trips() {
+        let json = serde_json::json!({
+            "filesystem": { "enumeratePaths": ["C:\\catalog"] }
+        });
+        let request: ProvisionRequest = serde_json::from_value(json.clone()).unwrap();
+        assert!(!request.filesystem.as_ref().unwrap().is_empty());
+        assert_eq!(serde_json::to_value(&request).unwrap(), json);
+        assert!(
+            serde_json::from_str::<FilesystemPolicy>("{}")
+                .unwrap()
+                .enumerate_paths
+                .is_empty()
+        );
     }
 
     #[test]

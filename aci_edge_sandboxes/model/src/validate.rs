@@ -151,6 +151,7 @@ pub fn provision_capabilities(
             supported.readonly_paths,
             supported.readwrite_paths,
             supported.denied_paths,
+            supported.enumerate_paths,
         ]) {
             if !paths.is_empty() && !honored {
                 return Err(Error::policy_validation(format!(
@@ -352,11 +353,12 @@ pub fn exec_capabilities(request: &ExecRequest, capabilities: &Capabilities) -> 
     Ok(())
 }
 
-fn filesystem_fields(filesystem: &FilesystemPolicy) -> [(&[std::path::PathBuf], &'static str); 3] {
+fn filesystem_fields(filesystem: &FilesystemPolicy) -> [(&[std::path::PathBuf], &'static str); 4] {
     [
         (&filesystem.readonly_paths, "filesystem.readonlyPaths"),
         (&filesystem.readwrite_paths, "filesystem.readwritePaths"),
         (&filesystem.denied_paths, "filesystem.deniedPaths"),
+        (&filesystem.enumerate_paths, "filesystem.enumeratePaths"),
     ]
 }
 
@@ -480,6 +482,26 @@ mod tests {
             .with_filesystem(FilesystemPolicy::default())
             .with_network(NetworkPolicy::deny_all());
         capabilities_of(&empty_filesystem, &capabilities).unwrap();
+    }
+
+    #[test]
+    fn enumeration_needs_an_explicit_capability_and_absolute_paths() {
+        let request = request().with_filesystem(FilesystemPolicy {
+            enumerate_paths: vec![absolute("catalog")],
+            ..FilesystemPolicy::default()
+        });
+        structure(&request).unwrap();
+        let mut supported = capabilities();
+        let error = capabilities_of(&request, &supported).unwrap_err();
+        assert_eq!(error.code(), ErrorCode::PolicyValidation);
+        assert!(error.message().contains("filesystem.enumeratePaths"));
+        supported.filesystem.enumerate_paths = true;
+        capabilities_of(&request, &supported).unwrap();
+        let relative = ProvisionRequest::new().with_filesystem(FilesystemPolicy {
+            enumerate_paths: vec!["relative".into()],
+            ..FilesystemPolicy::default()
+        });
+        assert_eq!(code(structure(&relative)), ErrorCode::MalformedRequest);
     }
 
     #[test]

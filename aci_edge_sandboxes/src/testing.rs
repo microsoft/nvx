@@ -107,6 +107,7 @@ impl MockBackend {
         filesystem.readonly_paths = true;
         filesystem.readwrite_paths = true;
         filesystem.denied_paths = true;
+        filesystem.enumerate_paths = true;
         capabilities
     }
 

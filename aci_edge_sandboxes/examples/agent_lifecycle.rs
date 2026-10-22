@@ -89,6 +89,7 @@ fn run() -> Result<(), String> {
             "--state-root" => root = Some(value()?),
             "--hypervisor" => hypervisor = Some(value()?.parse::<Hypervisor>().map_err(describe)?),
             "--readonly" => filesystem.readonly_paths.push(value()?.into()),
+            "--enumerate" => filesystem.enumerate_paths.push(value()?.into()),
             "--readwrite" => filesystem.readwrite_paths.push(value()?.into()),
             "--denied" => filesystem.denied_paths.push(value()?.into()),
             "--egress" => egress = Some(parse_access(&option, &value()?)?),

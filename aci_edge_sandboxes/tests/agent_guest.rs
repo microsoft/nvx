@@ -1543,6 +1543,7 @@ fn host_paths_follow_the_filesystem_policy() {
         ],
         readwrite_paths: vec![out.clone()],
         denied_paths: vec![src.join("secret")],
+        ..FilesystemPolicy::default()
     });
     let backend = backend(state.path());
     let client = AciEdgeSandbox::from_shared(backend.clone());
@@ -1938,6 +1939,7 @@ fn replaced_host_objects_inside_a_writable_mapping_fail_the_next_start() {
         readonly_paths: vec![frozen.clone()],
         readwrite_paths: vec![out.clone()],
         denied_paths: vec![secret.clone()],
+        ..FilesystemPolicy::default()
     });
     let backend = backend(state.path());
     let client = AciEdgeSandbox::from_shared(backend.clone());
