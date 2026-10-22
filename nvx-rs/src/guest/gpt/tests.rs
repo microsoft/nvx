@@ -155,8 +155,17 @@ fn the_wait_fails_with_the_difference_that_remains_at_the_deadline() {
         "{error:?}"
     );
     assert!(start.elapsed() >= timeout);
-    // Pauses of 1, 2, 4, ... ms, then 50 ms: no busy wait, and more than one observation.
-    assert!((3..=20).contains(&observations), "{observations}");
+    // Pauses of at least 1, 2, then 4 ms each: no busy wait, and more than one observation.
+    let mut most = 1;
+    let mut paused = Duration::ZERO;
+    let mut pause = FIRST_PAUSE;
+    while paused < timeout {
+        most += 1;
+        paused += pause;
+        pause = (pause * 2).min(LONGEST_PAUSE);
+    }
+    assert_eq!(most, 53);
+    assert!((3..=most).contains(&observations), "{observations}");
 }
 
 #[test]

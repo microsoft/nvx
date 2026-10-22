@@ -217,6 +217,19 @@ fn assert_mismatch(result: Result<ValidatedDisk, DeviceError>, expected: Mismatc
     }
 }
 
+/// Asserts that `result` failed because the kernel refused to reread the table of a disk with an
+/// open partition.
+#[track_caller]
+fn assert_busy<T: std::fmt::Debug>(result: Result<T, DeviceError>) {
+    match result {
+        Err(DeviceError::Device {
+            operation: DeviceOperation::RereadPartitions,
+            source,
+        }) => assert_eq!(source.raw_os_error(), Some(Errno::EBUSY as i32)),
+        other => panic!("expected EBUSY from the reread, found {other:?}"),
+    }
+}
+
 #[test]
 #[ignore = "runs as root in the gpt-device scenario of nvx.py test-microvm"]
 fn a_crafted_read_only_disk_validates() {
@@ -268,7 +281,9 @@ fn a_crafted_read_only_disk_validates() {
         let number = layer.partition().number();
         assert_eq!(marker, format!("{LAYER_MARKER}{number}").as_bytes());
     }
-    // Nothing that the validation opened stays open: the disk validates again.
+    // Nothing that the validation opened stays open: the kernel rereads the table, and the disk
+    // validates again.
+    device.reread_partitions().unwrap();
     assert_eq!(
         device.validate(&expected(), MATCH_TIMEOUT).unwrap(),
         validated
@@ -319,18 +334,21 @@ fn only_a_whole_disk_validates() {
 #[test]
 #[ignore = "runs as root in the gpt-device scenario of nvx.py test-microvm"]
 fn a_written_disk_validates_once_its_partitions_are_reread() {
-    let disk = scratch_with("three.img");
-    let validated = BlockDevice::new(&disk)
-        .unwrap()
-        .validate(&Expected::new(), MATCH_TIMEOUT)
-        .unwrap();
+    let disk = scratch_with("two.img");
+    let device = BlockDevice::new(&disk).unwrap();
+    device.reread_partitions().unwrap();
+    // The kernel's partitions are those of the table before, so the validation rereads it.
+    overwrite(&disk, "three.img");
+    let validated = device.validate(&Expected::new(), MATCH_TIMEOUT).unwrap();
     assert_eq!(validated.partitions().len(), 3);
-    // A device that is open for reading only validates too.
+    // A device that is open for reading only rereads the table and validates too.
     let reader = File::open(scratch_path()).unwrap();
-    let again = BlockDevice::new(&reader)
-        .unwrap()
-        .validate(&Expected::new(), MATCH_TIMEOUT);
-    assert_eq!(again.unwrap(), validated);
+    let reading = BlockDevice::new(&reader).unwrap();
+    reading.reread_partitions().unwrap();
+    assert_eq!(
+        reading.validate(&Expected::new(), MATCH_TIMEOUT).unwrap(),
+        validated
+    );
 }
 
 #[test]
@@ -444,18 +462,25 @@ fn an_mbr_that_the_kernel_reads_instead_fails() {
 
 #[test]
 #[ignore = "runs as root in the gpt-device scenario of nvx.py test-microvm"]
-fn the_reread_fails_while_a_partition_is_open() {
+fn an_open_partition_fails_only_a_validation_that_rereads() {
     let disk = scratch_with("three.img");
     let device = BlockDevice::new(&disk).unwrap();
     let validated = device.validate(&Expected::new(), MATCH_TIMEOUT).unwrap();
     let layer = open_partition(&validated.lowers()[0]);
-    match device.validate(&Expected::new(), MATCH_TIMEOUT) {
-        Err(DeviceError::Device {
-            operation: DeviceOperation::RereadPartitions,
-            source,
-        }) => assert_eq!(source.raw_os_error(), Some(Errno::EBUSY as i32)),
-        other => panic!("{other:?}"),
-    }
+    // The kernel's partitions still match the table, so the disk validates without the reread,
+    // which fails while a partition is open.
+    assert_eq!(
+        device.validate(&Expected::new(), MATCH_TIMEOUT).unwrap(),
+        validated
+    );
+    assert_busy(device.reread_partitions());
+    // Once the table differs, the validation needs the reread.
+    overwrite(&disk, "moved.img");
+    assert_busy(device.validate(&Expected::new(), MATCH_TIMEOUT));
     drop(layer);
-    device.validate(&Expected::new(), MATCH_TIMEOUT).unwrap();
+    let moved = device.validate(&Expected::new(), MATCH_TIMEOUT).unwrap();
+    assert_eq!(
+        moved.lowers()[0].partition().offset(),
+        validated.lowers()[0].partition().offset() + 512 * 512
+    );
 }

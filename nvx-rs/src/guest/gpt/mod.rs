@@ -10,22 +10,24 @@
 //! 1. reads the disk's protective MBR, primary GPT header, and primary partition entry array
 //!    through the device, at its logical block size and size, and checks them and the caller's
 //!    [`Expected`] values, as [`Disk::read`] describes;
-//! 2. asks the kernel to reread the disk's partition table, which drops the disk's partitions and
-//!    creates them again from what the device holds;
-//! 3. compares the kernel's partitions, as sysfs describes them, with the table's, until they
-//!    match or a deadline passes: the kernel must have one partition for each of the table's, with
-//!    its number, its first byte, and its size, and no other.
+//! 2. compares the kernel's partitions, as sysfs describes them, with the table's: the kernel
+//!    must have one partition for each of the table's, with its number, its first byte, and its
+//!    size, and no other. The kernel created its partitions from the disk's table when it found
+//!    the disk, so they usually match, and the validation ends there;
+//! 3. only when they differ, asks the kernel to reread the disk's partition table, which drops
+//!    the disk's partitions and creates them again from what the device holds, and compares them
+//!    again, until they match or a deadline passes.
 //!
 //! It returns the block devices of the partitions: the first partition's, whose bytes the caller
 //! reads as opaque configuration with [`Disk::read_first_partition`], and the layers', which the
-//! caller mounts. When the kernel's partitions differ from the table that the validation read,
-//! for example because the table changed after the read, or because the kernel read an MBR in its
-//! place, the validation fails, so the caller never uses a partition that the table does not
-//! describe.
+//! caller mounts. When the kernel's partitions still differ from the table that the validation
+//! read after the reread, for example because the table changed after the read, or because the
+//! kernel read an MBR in its place, the validation fails, so the caller never uses a partition
+//! that the table does not describe.
 //!
 //! The kernel creates a disk's partitions before its reread returns, but another program, such as
 //! a device manager that probes the disk, may make it drop and create them again at any time. The
-//! comparison therefore repeats, after pauses that grow from 1 ms to 50 ms, until the deadline,
+//! comparison therefore repeats, after pauses that grow from 1 ms to 4 ms, until the deadline,
 //! which also bounds a caller that waits for partitions that the kernel creates late. Each
 //! comparison takes partitions that the kernel held together: it reads each partition's
 //! description through one descriptor of the partition's sysfs directory, then lists the disk's
@@ -33,7 +35,8 @@
 //! combines partitions, or the attributes of one partition, from before and after a reread.
 //!
 //! The reread needs `CAP_SYS_ADMIN`, and fails while any partition of the disk is open, for
-//! example while a layer is mounted.
+//! example while a layer is mounted. The validation of a disk whose partitions already match its
+//! table needs neither.
 //!
 //! ```no_run
 //! use std::fs::File;
@@ -79,8 +82,10 @@ use crate::gpt::{Disk, Expected, Partition};
 /// The first pause between two comparisons of the kernel's partitions with a table.
 const FIRST_PAUSE: Duration = Duration::from_millis(1);
 
-/// The longest pause between two comparisons of the kernel's partitions with a table.
-const LONGEST_PAUSE: Duration = Duration::from_millis(50);
+/// The longest pause between two comparisons of the kernel's partitions with a table, and so about
+/// the longest that a wait takes to see partitions that match once the kernel has created them. A
+/// comparison of a few partitions takes well under a millisecond, so the wait stays cheap.
+const LONGEST_PAUSE: Duration = Duration::from_millis(4);
 
 /// A device number: the major and minor numbers that name a device to the kernel.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -213,8 +218,8 @@ impl<'a> BlockDevice<'a> {
     /// difference that remains once `timeout` has passed.
     ///
     /// It compares the partitions once, then again after each pause, which grows from 1 ms to
-    /// 50 ms, until they match or the timeout passes. Unlike [`BlockDevice::validate`], it does
-    /// not ask the kernel to reread the table.
+    /// 4 ms, until they match or the timeout passes. It never asks the kernel to reread the
+    /// table, as [`BlockDevice::validate`] does when the partitions differ.
     pub fn await_partitions(
         &self,
         disk: &Disk,
@@ -229,14 +234,19 @@ impl<'a> BlockDevice<'a> {
     }
 
     /// Validates the disk, as the module describes: reads and checks its partition table, which
-    /// must also meet `expected`, asks the kernel to reread it, and waits until the kernel's
-    /// partitions match it, for at most `timeout`.
+    /// must also meet `expected`, and compares the kernel's partitions with it. Only when they
+    /// differ does it ask the kernel to reread the table, and wait until the partitions match it,
+    /// for at most `timeout`.
     pub fn validate(
         &self,
         expected: &Expected,
         timeout: Duration,
     ) -> Result<ValidatedDisk, DeviceError> {
         let disk = self.read_disk(expected)?;
+        match self.await_partitions(&disk, Duration::ZERO) {
+            Err(DeviceError::Partitions(_)) => {}
+            compared => return compared,
+        }
         self.reread_partitions()?;
         self.await_partitions(&disk, timeout)
     }
