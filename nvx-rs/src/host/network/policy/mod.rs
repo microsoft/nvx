@@ -1,16 +1,17 @@
 //! Egress policy files, which `nvx.py run` and `nvx.py sandbox` accept with
 //! `--network-egress-policy-file`, and their compilation into OpenVMM's native rules.
 //!
-//! This is a faithful port of the former `scripts/nvx_tools/egress_policy.py`, which it replaced
-//! (microsoft/nvx#359): it accepts the same documents, compiles them to the same rules, and fails
-//! with the same messages.
+//! The compiler replaced the former `scripts/nvx_tools/egress_policy.py` (microsoft/nvx#359): it
+//! compiles the policies that it compiled to the same rules, but reads policy files as strict JSON
+//! (microsoft/nvx#729).
 //!
 //! # Format
 //!
-//! A policy is a JSON object of at most [`MAX_POLICY_FILE_SIZE`] bytes of UTF-8, without a
-//! byte-order mark, whose only fields are `allow` and `deny`, each an array of rules. A field may
-//! appear only once in an object, and an integer may have at most 64 digits. Each rule has one of
-//! two forms:
+//! A policy is at most [`MAX_POLICY_FILE_SIZE`] bytes of UTF-8 JSON, as RFC 8259 defines it,
+//! without a byte-order mark: `NaN`, `Infinity`, and numbers beyond the range of a double are not
+//! JSON, a field may appear only once in an object, and arrays and objects nest at most
+//! [`MAX_JSON_DEPTH`] deep. Its root is an object whose only fields are `allow` and `deny`, each an
+//! array of rules. Each rule has one of two forms:
 //!
 //! - The MXC form, `{"to": [PEER, ...], "ports": [PORT, ...]}`, whose fields are both optional:
 //!   - each `PEER` is `{"cidr": CIDR, "except": [CIDR, ...]}`, a destination network without
@@ -23,9 +24,10 @@
 //! - The legacy flat form, `{"cidr": CIDR, "except": [CIDR, ...], "protocol": PROTOCOL, "port":
 //!   FIRST, "endPort": LAST}`, which needs `cidr`, and `protocol` with `port`.
 //!
-//! `any` selects every protocol, or with a port both TCP and UDP. A `CIDR` is an IPv4 or IPv6
-//! network as Python's `ipaddress.ip_interface` reads it: host bits are cleared, IPv4 netmasks
-//! such as `/255.255.0.0` are accepted, and IPv6 scopes are refused.
+//! `any` selects every protocol, or with a port both TCP and UDP. A port is an integer, written
+//! without a fraction or an exponent. A `CIDR` is an IPv4 or IPv6 network as Python's
+//! `ipaddress.ip_interface` reads it: host bits are cleared, IPv4 netmasks such as `/255.255.0.0`
+//! are accepted, and IPv6 scopes are refused.
 //!
 //! # Compilation
 //!
@@ -36,15 +38,15 @@
 //! adjacent port ranges merge. OpenVMM applies deny rules before allow rules, so each action is
 //! compiled on its own.
 //!
-//! # Fidelity
+//! # Errors
 //!
-//! Messages are Python's, byte for byte, with two representation choices: a string that Python
-//! would hold with an unpaired surrogate, which JSON escapes such as `\ud800` and paths that are
-//! not Unicode produce, shows each surrogate as `\udXXX`, which is how Python prints it, and
-//! paths show as `str(pathlib.Path(path))`. Python's decoder raises `RecursionError` for documents
-//! nested more deeply than its stack allows; this reader has no such limit, so those documents
-//! fail validation like any other invalid policy.
+//! A refusal names the field that breaks the format by its path, such as `allow[0].to[1].cidr`,
+//! or the file, and says why, quoting values as Rust's `{:?}` does, as in
+//! `allow[0].ports[0] has duplicate field "port"` or
+//! `egress policy file policy.json is not valid JSON: expected value at line 1 column 1`. Paths
+//! show as [`Path::display`] shows them.
 
+mod json;
 #[cfg(test)]
 mod tests;
 
@@ -53,13 +55,12 @@ use std::io::Read;
 use std::path::Path;
 
 use serde::Serialize;
+use serde_json::{Map, Value};
 
-use super::address::Family;
+use self::json::ReadError;
+use super::address::{Family, Interval, Network};
 use super::lowering::{self, PortValue, Rule, RuleProtocol, Selector, invalid};
 use crate::error::{Error, Result};
-use crate::host::python::json::{self, Document, Hooks, Node, NodeId, ReadError};
-use crate::host::python::path::python_path;
-use crate::host::python::text::PyText;
 
 /// Largest number of native rules that one action, allow or deny, compiles to: the number of
 /// rules of each action that OpenVMM accepts, [`MAX_RULES`](super::MAX_RULES).
@@ -68,8 +69,9 @@ pub const MAX_RULES_PER_ACTION: usize = super::MAX_RULES;
 /// Largest egress policy file, in bytes: 1 MiB.
 pub const MAX_POLICY_FILE_SIZE: usize = 1024 * 1024;
 
-/// Longest integer, in digits without its sign, that a policy file may hold.
-const MAX_JSON_INTEGER_DIGITS: usize = 64;
+/// Deepest nesting of arrays and objects in a policy file, the root included. A policy needs six:
+/// the root, an action, a rule, its `to`, a destination, and its `except`.
+pub const MAX_JSON_DEPTH: usize = 32;
 
 /// The native OpenVMM rules of an egress policy.
 ///
@@ -87,33 +89,31 @@ pub struct CompiledEgressPolicy {
 /// Compiles the egress policy file at `path`, as `compile_policy_file` of the former
 /// `egress_policy.py` did for `nvx.py`.
 ///
-/// Messages name the file as `str(pathlib.Path(path))`, which drops empty and `.` components and,
-/// on Windows, writes `\` for `/`, and the file opened is that normalized path, as in Python.
+/// Messages name the file as [`Path::display`] shows `path`.
 ///
 /// # Errors
 ///
 /// [`ErrorKind::Io`](crate::ErrorKind::Io) when the file cannot be read; otherwise
 /// [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported) when the file exceeds
-/// [`MAX_POLICY_FILE_SIZE`], is not UTF-8 JSON that Python reads, or holds an invalid policy;
-/// see [`compile_policy_bytes`].
+/// [`MAX_POLICY_FILE_SIZE`], is not UTF-8 JSON of the format, or holds an invalid policy; see
+/// [`compile_policy_bytes`].
 pub fn compile_policy_file(path: &Path) -> Result<CompiledEgressPolicy> {
-    let path = python_path(path);
     let unreadable = |error: std::io::Error| {
         Error::io(format!(
             "failed to read egress policy file: {}",
-            path.display
+            path.display()
         ))
         .with_source(error)
     };
     // Reading one byte more than the limit detects oversized files whatever their metadata say.
     let mut data = Vec::new();
-    File::open(&path.native)
+    File::open(path)
         .and_then(|file| {
             file.take(MAX_POLICY_FILE_SIZE as u64 + 1)
                 .read_to_end(&mut data)
         })
         .map_err(unreadable)?;
-    compile_contents(&data, &path.display)
+    compile_policy_bytes(&data, path)
 }
 
 /// Compiles `data`, the contents of the egress policy file at `path`, which messages name as
@@ -121,75 +121,61 @@ pub fn compile_policy_file(path: &Path) -> Result<CompiledEgressPolicy> {
 ///
 /// # Errors
 ///
-/// [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported) with Python's message:
+/// [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported) when the file:
 ///
-/// - `egress policy file exceeds 1048576-byte limit: PATH`;
-/// - `failed to read egress policy file: PATH` for data that is not UTF-8, or not JSON that
-///   Python's `json.loads` reads;
-/// - `duplicate JSON property: NAME` and `JSON integer exceeds 64-digit limit`; or
-/// - an error of [`compile_policy`].
+/// - exceeds [`MAX_POLICY_FILE_SIZE`]: `egress policy file exceeds 1048576-byte limit: PATH`;
+/// - is not UTF-8: `egress policy file PATH is not UTF-8: REASON`;
+/// - is not JSON: `egress policy file PATH is not valid JSON: REASON`, where `serde_json` gives
+///   the reason and its position;
+/// - nests arrays and objects more than [`MAX_JSON_DEPTH`] deep: `egress policy file PATH nests
+///   arrays and objects more than 32 deep at line LINE column COLUMN`;
+/// - repeats a field in an object: `OBJECT has duplicate field "NAME"`, where `OBJECT` is the
+///   path of the object, or `egress policy` for the root; or
+/// - holds an invalid policy: see [`compile_policy`].
 pub fn compile_policy_bytes(data: &[u8], path: &Path) -> Result<CompiledEgressPolicy> {
-    compile_contents(data, &python_path(path).display)
-}
-
-/// Compiles the contents of the policy file that messages name `path`.
-fn compile_contents(data: &[u8], path: &str) -> Result<CompiledEgressPolicy> {
+    let path = path.display();
     if data.len() > MAX_POLICY_FILE_SIZE {
         return Err(invalid(format!(
             "egress policy file exceeds {MAX_POLICY_FILE_SIZE}-byte limit: {path}"
         )));
     }
-    let unreadable = || invalid(format!("failed to read egress policy file: {path}"));
-    let text = std::str::from_utf8(data).map_err(|_| unreadable())?;
-    let document = json::read(text, &mut StrictJson).map_err(|error| match error {
-        ReadError::Syntax { .. } => unreadable(),
-        ReadError::Hook(error) => error,
+    let text = std::str::from_utf8(data)
+        .map_err(|error| invalid(format!("egress policy file {path} is not UTF-8: {error}")))?;
+    let value = json::read(text).map_err(|error| {
+        invalid(match error {
+            ReadError::Syntax(error) => {
+                format!("egress policy file {path} is not valid JSON: {error}")
+            }
+            ReadError::TooDeep { line, column } => format!(
+                "egress policy file {path} nests arrays and objects more than {MAX_JSON_DEPTH} \
+                 deep at line {line} column {column}"
+            ),
+            ReadError::Repeated { object, field } => {
+                format!("{object} has duplicate field {field:?}")
+            }
+        })
     })?;
-    compile_document(&document)
+    compile_policy(&value)
 }
 
 /// Compiles an egress policy that has already been parsed, as `compile_policy` in `nvx.py` does.
 ///
-/// A parsed value cannot repeat a field, and its integers have no length limit: those checks
-/// belong to the file format, which [`compile_policy_bytes`] reads.
+/// A parsed value cannot repeat a field, and its nesting has no limit: those checks belong to the
+/// file format, which [`compile_policy_bytes`] reads.
 ///
 /// # Errors
 ///
-/// [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported) with Python's message, such as
-/// `allow[0].to[1].cidr is not a valid IPv4 or IPv6 CIDR: 10.0.0.256/8` or `deny emits at most
-/// 256 native rules`.
-pub fn compile_policy(value: &serde_json::Value) -> Result<CompiledEgressPolicy> {
-    compile_document(&Document::from_value(value))
-}
-
-/// The checks of `nvx.py`'s policy reader: `strict_json_object` refuses repeated fields, and
-/// `_bounded_json_integer` integers of more than 64 digits.
-struct StrictJson;
-
-impl Hooks for StrictJson {
-    type Error = Error;
-
-    fn object(&mut self, members: &[(PyText, NodeId)]) -> Result<()> {
-        let mut seen = std::collections::HashSet::with_capacity(members.len());
-        for (name, _) in members {
-            if !seen.insert(name) {
-                return Err(invalid(format!(
-                    "duplicate JSON property: {}",
-                    name.render()
-                )));
-            }
-        }
-        Ok(())
-    }
-
-    fn integer(&mut self, literal: &str) -> Result<()> {
-        if literal.trim_start_matches('-').len() > MAX_JSON_INTEGER_DIGITS {
-            return Err(invalid(format!(
-                "JSON integer exceeds {MAX_JSON_INTEGER_DIGITS}-digit limit"
-            )));
-        }
-        Ok(())
-    }
+/// [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported) with a message that names the field
+/// path and says why, such as `allow[0].to[1].cidr is not a valid IPv4 or IPv6 CIDR:
+/// "10.0.0.256/8"`, or that an action needs too many native rules, as in `deny emits at most 256
+/// native rules`.
+pub fn compile_policy(value: &Value) -> Result<CompiledEgressPolicy> {
+    let root = object(value, "egress policy")?;
+    root.check_fields(ROOT_FIELDS, "egress policy")?;
+    Ok(CompiledEgressPolicy {
+        allow: compile_category(root.get("allow"), "allow")?,
+        deny: compile_category(root.get("deny"), "deny")?,
+    })
 }
 
 /// Field names of a policy.
@@ -203,140 +189,106 @@ const PORT_FIELDS: &[&str] = &["protocol", "port", "endPort"];
 /// Field names of a legacy flat rule.
 const LEGACY_RULE_FIELDS: &[&str] = &["cidr", "except", "protocol", "port", "endPort"];
 
-/// A JSON object of a policy document.
+/// A JSON object of a policy.
 struct Object<'a> {
-    /// The document that holds the object.
-    document: &'a Document,
-    /// The object's members, whose names are distinct.
-    members: &'a [(PyText, NodeId)],
+    /// The object's fields.
+    fields: &'a Map<String, Value>,
 }
 
 impl<'a> Object<'a> {
     /// Returns the value of the field `name`, if the object has it.
-    fn get(&self, name: &str) -> Option<NodeId> {
-        self.members
-            .iter()
-            .find(|(field, _)| field.as_bytes() == name.as_bytes())
-            .map(|&(_, value)| value)
+    fn get(&self, name: &str) -> Option<&'a Value> {
+        self.fields.get(name)
     }
 
-    /// Returns whether the object has the field `name`.
-    fn has(&self, name: &str) -> bool {
-        self.get(name).is_some()
+    /// Returns whether the object has any of `names`.
+    fn has_any(&self, names: &[&str]) -> bool {
+        names.iter().any(|name| self.fields.contains_key(*name))
     }
 
-    /// Fails if the object has a field other than `fields`, naming the first unknown field in
+    /// Fails if the object has a field other than `names`, naming the first unknown field in
     /// code-point order, as `sorted(set(rule) - FIELDS)[0]` does.
-    fn check_fields(&self, fields: &[&str], description: &str) -> Result<()> {
+    fn check_fields(&self, names: &[&str], description: &str) -> Result<()> {
         let unknown = self
-            .members
-            .iter()
-            .map(|(name, _)| name)
-            .filter(|name| {
-                !fields
-                    .iter()
-                    .any(|field| name.as_bytes() == field.as_bytes())
-            })
+            .fields
+            .keys()
+            .filter(|name| !names.contains(&name.as_str()))
             .min();
         match unknown {
-            Some(name) => Err(invalid(format!(
-                "{description} has unknown field '{}'",
-                name.render()
-            ))),
+            Some(name) => Err(invalid(format!("{description} has unknown field {name:?}"))),
             None => Ok(()),
         }
     }
-
-    /// Returns whether the object has any of `fields`.
-    fn has_any(&self, fields: &[&str]) -> bool {
-        fields.iter().any(|field| self.has(field))
-    }
-
-    /// Returns the node of `id` in the object's document.
-    fn node(&self, id: NodeId) -> &'a Node {
-        self.document.node(id)
-    }
 }
 
-/// Returns the object at `id`, as `_object` does.
-fn object<'a>(document: &'a Document, id: NodeId, description: &str) -> Result<Object<'a>> {
-    match document.node(id) {
-        Node::Object(members) => Ok(Object { document, members }),
+/// Returns the object `value`, as `_object` does.
+fn object<'a>(value: &'a Value, description: &str) -> Result<Object<'a>> {
+    match value {
+        Value::Object(fields) => Ok(Object { fields }),
         _ => Err(invalid(format!("{description} must be an object"))),
     }
 }
 
-/// Returns the elements of the array at `id`, as `_array` does.
-fn array<'a>(document: &'a Document, id: NodeId, description: &str) -> Result<&'a [NodeId]> {
-    match document.node(id) {
-        Node::Array(elements) => Ok(elements),
+/// Returns the elements of the array `value`, as `_array` does.
+fn array<'a>(value: &'a Value, description: &str) -> Result<&'a [Value]> {
+    match value {
+        Value::Array(elements) => Ok(elements),
         _ => Err(invalid(format!("{description} must be an array"))),
     }
 }
 
 /// Returns the value of a field that should be a port number.
-fn port_value(node: &Node) -> PortValue {
-    match node {
-        // Integers longer than an `i128` are out of range either way.
-        Node::Integer(literal) => PortValue::Integer(literal.parse().unwrap_or_else(|_| {
-            if literal.starts_with('-') {
-                i128::MIN
-            } else {
-                i128::MAX
-            }
-        })),
+fn port_value(value: &Value) -> PortValue {
+    let Value::Number(number) = value else {
+        return PortValue::Other;
+    };
+    if let Some(port) = number.as_u64() {
+        return PortValue::Integer(port.into());
+    }
+    if let Some(port) = number.as_i64() {
+        return PortValue::Integer(port.into());
+    }
+    // `serde_json` reads an integer beyond 64 bits as a double, which is out of range either way,
+    // as it reads a number with a fraction or an exponent, or `-0`, which are not integers.
+    const BEYOND_64_BITS: f64 = 9_223_372_036_854_775_808.0;
+    match number.as_f64() {
+        Some(double) if double >= BEYOND_64_BITS => PortValue::Integer(i128::MAX),
+        Some(double) if double <= -BEYOND_64_BITS => PortValue::Integer(i128::MIN),
         _ => PortValue::Other,
     }
 }
 
-/// Returns the protocol of the field at `id`, as the policy reader checks it.
-fn protocol(document: &Document, id: NodeId, description: &str) -> Result<RuleProtocol> {
-    match document.node(id) {
-        Node::String(text) => RuleProtocol::parse(text),
-        _ => None,
-    }
-    .ok_or_else(|| {
+/// Returns the protocol of the field `value`, as the policy reader checks it.
+fn protocol(value: &Value, description: &str) -> Result<RuleProtocol> {
+    value.as_str().and_then(RuleProtocol::parse).ok_or_else(|| {
         invalid(format!(
             "{description}.protocol must be tcp, udp, icmp, or any"
         ))
     })
 }
 
-/// Compiles a policy document, as `compile_policy` does.
-fn compile_document(document: &Document) -> Result<CompiledEgressPolicy> {
-    let root = object(document, document.root(), "egress policy")?;
-    root.check_fields(ROOT_FIELDS, "egress policy")?;
-    Ok(CompiledEgressPolicy {
-        allow: compile_category(document, root.get("allow"), "allow")?,
-        deny: compile_category(document, root.get("deny"), "deny")?,
-    })
-}
-
 /// Compiles the rules of one action, which a policy without the field does not have, as
 /// `_compile_category` does: every rule is checked before any is lowered.
-fn compile_category(
-    document: &Document,
-    id: Option<NodeId>,
-    category: &str,
-) -> Result<Vec<String>> {
-    let elements = match id {
-        Some(id) => array(document, id, category)?,
+fn compile_category(value: Option<&Value>, category: &str) -> Result<Vec<String>> {
+    lowering::lower(&parse_category(value, category)?, category)
+}
+
+/// Parses the rules of one action, which a policy without the field does not have.
+fn parse_category(value: Option<&Value>, category: &str) -> Result<Vec<Rule>> {
+    let elements = match value {
+        Some(value) => array(value, category)?,
         None => &[],
     };
     let mut rules = Vec::new();
-    for (index, &element) in elements.iter().enumerate() {
-        rules.extend(parse_rule(
-            document,
-            element,
-            &format!("{category}[{index}]"),
-        )?);
+    for (index, element) in elements.iter().enumerate() {
+        rules.extend(parse_rule(element, &format!("{category}[{index}]"))?);
     }
-    lowering::lower(&rules, category)
+    Ok(rules)
 }
 
 /// Parses a rule of either form, as `_parse_rule` does.
-fn parse_rule(document: &Document, id: NodeId, description: &str) -> Result<Vec<Rule>> {
-    let rule = object(document, id, description)?;
+fn parse_rule(value: &Value, description: &str) -> Result<Vec<Rule>> {
+    let rule = object(value, description)?;
     if rule.has_any(LEGACY_RULE_FIELDS) {
         if rule.has_any(MXC_RULE_FIELDS) {
             return Err(invalid(format!(
@@ -350,45 +302,35 @@ fn parse_rule(document: &Document, id: NodeId, description: &str) -> Result<Vec<
 
 /// Parses a destination network and its exceptions, the required `cidr` and optional `except`
 /// fields of `description`, as the rest of `_parse_peer` does.
-fn parse_peer_fields(
-    object: &Object<'_>,
-    description: &str,
-) -> Result<(Family, Vec<(u128, u128)>)> {
+fn parse_peer_fields(object: &Object<'_>, description: &str) -> Result<(Family, Vec<Interval>)> {
     let Some(cidr) = object.get("cidr") else {
         return Err(invalid(format!("{description}.cidr is required")));
     };
-    let parent = parse_network(object.node(cidr), &format!("{description}.cidr"))?;
+    let parent = parse_network(cidr, &format!("{description}.cidr"))?;
     let exceptions = match object.get("except") {
-        Some(except) => array(object.document, except, &format!("{description}.except"))?,
+        Some(except) => array(except, &format!("{description}.except"))?,
         None => &[],
     };
     lowering::destination(
         parent,
-        exceptions.iter().enumerate().map(|(index, &exception)| {
-            parse_network(
-                object.node(exception),
-                &format!("{description}.except[{index}]"),
-            )
+        exceptions.iter().enumerate().map(|(index, exception)| {
+            parse_network(exception, &format!("{description}.except[{index}]"))
         }),
         description,
     )
 }
 
 /// Parses the CIDR value of a field, as `_network` does.
-fn parse_network(node: &Node, description: &str) -> Result<super::address::Network> {
-    match node {
-        Node::String(text) => lowering::network(text, description),
+fn parse_network(value: &Value, description: &str) -> Result<Network> {
+    match value {
+        Value::String(text) => lowering::network(text, description),
         _ => Err(lowering::not_a_cidr_string(description)),
     }
 }
 
 /// Parses a destination of an MXC rule, as `_parse_peer` does.
-fn parse_peer(
-    document: &Document,
-    id: NodeId,
-    description: &str,
-) -> Result<(Family, Vec<(u128, u128)>)> {
-    let peer = object(document, id, description)?;
+fn parse_peer(value: &Value, description: &str) -> Result<(Family, Vec<Interval>)> {
+    let peer = object(value, description)?;
     peer.check_fields(PEER_FIELDS, description)?;
     parse_peer_fields(&peer, description)
 }
@@ -408,29 +350,28 @@ fn parse_legacy_rule(rule: &Object<'_>, description: &str) -> Result<Vec<Rule>> 
         }
         return Ok(lowering::combine(destinations, None));
     };
-    let protocol = self::protocol(rule.document, protocol, description)?;
+    let protocol = self::protocol(protocol, description)?;
     let selectors = lowering::port_selectors(
         protocol,
-        port.map(|port| port_value(rule.node(port))),
-        end_port.map(|end_port| port_value(rule.node(end_port))),
+        port.map(port_value),
+        end_port.map(port_value),
         description,
     )?;
     Ok(lowering::combine(destinations, Some(selectors)))
 }
 
 /// Parses a port selector of an MXC rule, as `_parse_mxc_port` does.
-fn parse_mxc_port(document: &Document, id: NodeId, description: &str) -> Result<Vec<Selector>> {
-    let port = object(document, id, description)?;
+fn parse_mxc_port(value: &Value, description: &str) -> Result<Vec<Selector>> {
+    let port = object(value, description)?;
     port.check_fields(PORT_FIELDS, description)?;
     let protocol = match port.get("protocol") {
-        Some(protocol) => self::protocol(document, protocol, description)?,
+        Some(protocol) => self::protocol(protocol, description)?,
         None => RuleProtocol::Any,
     };
     lowering::port_selectors(
         protocol,
-        port.get("port").map(|value| port_value(port.node(value))),
-        port.get("endPort")
-            .map(|value| port_value(port.node(value))),
+        port.get("port").map(port_value),
+        port.get("endPort").map(port_value),
         description,
     )
 }
@@ -441,19 +382,15 @@ fn parse_mxc_rule(rule: &Object<'_>, description: &str) -> Result<Vec<Rule>> {
     let mut destinations = None;
     if let Some(to) = rule.get("to") {
         let description = format!("{description}.to");
-        let peers = array(rule.document, to, &description)?;
+        let peers = array(to, &description)?;
         if peers.is_empty() {
             return Err(invalid(format!(
                 "{description} must contain at least one destination"
             )));
         }
         let mut parsed = Vec::with_capacity(peers.len());
-        for (index, &peer) in peers.iter().enumerate() {
-            parsed.push(parse_peer(
-                rule.document,
-                peer,
-                &format!("{description}[{index}]"),
-            )?);
+        for (index, peer) in peers.iter().enumerate() {
+            parsed.push(parse_peer(peer, &format!("{description}[{index}]"))?);
         }
         // A native rule names one family, so the peers of each family form their own
         // destination set.
@@ -462,19 +399,15 @@ fn parse_mxc_rule(rule: &Object<'_>, description: &str) -> Result<Vec<Rule>> {
     let mut selectors = None;
     if let Some(ports) = rule.get("ports") {
         let description = format!("{description}.ports");
-        let ports = array(rule.document, ports, &description)?;
+        let ports = array(ports, &description)?;
         if ports.is_empty() {
             return Err(invalid(format!(
                 "{description} must contain at least one selector"
             )));
         }
         let mut parsed = Vec::new();
-        for (index, &port) in ports.iter().enumerate() {
-            parsed.extend(parse_mxc_port(
-                rule.document,
-                port,
-                &format!("{description}[{index}]"),
-            )?);
+        for (index, port) in ports.iter().enumerate() {
+            parsed.extend(parse_mxc_port(port, &format!("{description}[{index}]"))?);
         }
         selectors = Some(parsed);
     }

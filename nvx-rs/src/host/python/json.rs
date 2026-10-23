@@ -26,23 +26,17 @@
 //! # Why not `serde_json`
 //!
 //! Delegated commands keep Python's messages, which depend on the documents that the reader
-//! accepts. The egress policy reader of `nvx.py`, for example, reports every document that
-//! `json.loads` refuses as `failed to read egress policy file: PATH`, and any other invalid
-//! document with the message of the first check that it fails. A reader that refuses more
-//! documents, or reads a value with another type, changes those messages, and `serde_json` does
-//! both, whatever its visitor:
+//! accepts. A reader that refuses more documents, or reads a value with another type, changes
+//! those messages, and `serde_json` does both, whatever its visitor:
 //!
 //! - it refuses `NaN`, `Infinity`, numbers beyond the range of a float, unpaired surrogates, and,
-//!   by default, documents nested 128 levels deep, so a policy with `"port": NaN` would fail to
-//!   read instead of reporting that the port must be an integer; and
+//!   by default, documents nested 128 levels deep; and
 //! - it reads `-0` and integers beyond 64 bits as floats, and refuses integers beyond the range of
-//!   a float, so `"port": -0` would report that the port must be an integer instead of between 1
-//!   and 65535, and no integer of more than 64 digits would reach the policy's 64-digit limit.
+//!   a float.
 //!
 //! Its `arbitrary_precision` feature keeps numbers as written, but not the rest, and it would
-//! change `serde_json::Number` for every crate built with `nvx`. Valid policies hold none of
-//! these values, so only messages are at stake; the parity fixture,
-//! `tests/fixtures/egress-policy.json`, pins them.
+//! change `serde_json::Number` for every crate built with `nvx`. The egress policy compiler, whose
+//! example this was, reads its files as strict JSON with `serde_json` since microsoft/nvx#729.
 //!
 //! Other messages show the `JSONDecodeError` itself. `nvx.py sandbox`, for example, reports a
 //! distro manifest that `json.loads` refuses with the error's message and position, as in
@@ -107,53 +101,6 @@ impl Document {
             .rev()
             .find(|(member, _)| member.as_bytes() == name.as_bytes())
             .map(|&(_, value)| self.node(value))
-    }
-
-    /// Returns the document that Python's decoder reads from the JSON text of `value`.
-    ///
-    /// A number with a fraction or an exponent is a float, and any other an integer, as in that
-    /// text. The value has no repeated field to check, but its integers keep any length.
-    pub(crate) fn from_value(value: &serde_json::Value) -> Self {
-        use serde_json::Value;
-
-        let mut nodes = vec![Node::Null];
-        // Each value and the index reserved for it, which its container already holds.
-        let mut pending = vec![(value, 0)];
-        while let Some((value, id)) = pending.pop() {
-            let mut reserve = |value| {
-                nodes.push(Node::Null);
-                let id = nodes.len() - 1;
-                pending.push((value, id));
-                id
-            };
-            let node = match value {
-                Value::Null => Node::Null,
-                Value::Bool(value) => Node::Bool(*value),
-                Value::Number(number) => {
-                    // `serde_json` writes integers as digits, and other numbers with a fraction
-                    // or an exponent, also with its `arbitrary_precision` feature.
-                    let literal = number.to_string();
-                    if literal
-                        .bytes()
-                        .all(|byte| byte.is_ascii_digit() || byte == b'-')
-                    {
-                        Node::Integer(literal.into())
-                    } else {
-                        Node::Float(number.as_f64().unwrap_or(f64::NAN))
-                    }
-                }
-                Value::String(text) => Node::String(PyText::from(text.as_str())),
-                Value::Array(elements) => Node::Array(elements.iter().map(&mut reserve).collect()),
-                Value::Object(members) => Node::Object(
-                    members
-                        .iter()
-                        .map(|(name, value)| (PyText::from(name.as_str()), reserve(value)))
-                        .collect(),
-                ),
-            };
-            nodes[id] = node;
-        }
-        Self { nodes, root: 0 }
     }
 }
 

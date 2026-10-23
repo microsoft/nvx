@@ -1,16 +1,11 @@
-//! Paths as Python's `pathlib` and `os.path` hold, print, and open them.
-//!
-//! Python messages name files by `str(path)` for a `pathlib.Path`, which normalizes the path it
-//! was given: it drops empty and `.` components, and on Windows turns `/` into `\` and gives UNC
-//! shares a root. Python also opens that string, not the one it was given, so `config.json/`
-//! opens `config.json`. [`python_path`] reproduces both for this host's flavor of paths, for any
-//! host path, Unicode or not.
+//! Paths as Python's `pathlib` and `os.path` hold and print them.
 //!
 //! A [`PurePath`] holds a Unicode path of either [`Flavor`], as `PurePosixPath` or
 //! `PureWindowsPath` does, with its parts, parents, joins, and case-insensitive comparison on
-//! Windows. [`Flavor`] has the `os.path` operations of `posixpath` and `ntpath` that the ports
-//! use, `splitroot`, `join`, `isabs`, and `split`, and [`windows_normpath`] is `ntpath.normpath`.
-//! One parser serves both: [`python_path`] and [`PurePath`] read paths alike.
+//! Windows. `str(path)` normalizes the path that it was given: it drops empty and `.` components,
+//! and on Windows turns `/` into `\` and gives UNC shares a root. [`Flavor`] has the `os.path`
+//! operations of `posixpath` and `ntpath` that the ports use, `splitroot`, `join`, `isabs`, and
+//! `split`, and [`windows_normpath`] is `ntpath.normpath`.
 //!
 //! Windows paths follow CPython 3.14 on Windows, whose `ntpath.splitroot` and `ntpath.normpath`
 //! are C functions that index UTF-16 code units: a character outside the Basic Multilingual Plane
@@ -18,63 +13,15 @@
 //! hosts, indexes code points instead, which differs only for such a character.
 
 use std::fmt;
-use std::path::{Path, PathBuf};
-
-/// A path as a `pathlib.Path` of this host holds it.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct PythonPath {
-    /// `str(path)` as Python prints it to a UTF-8 stream, which escapes surrogates as `\udXXX`.
-    pub(crate) display: String,
-    /// The path that Python opens: `os.fspath(path)`.
-    pub(crate) native: PathBuf,
-}
-
-/// Returns `path` as Python's `pathlib.Path(path)` prints and opens it.
-///
-/// On Unix, Python decodes bytes that are not UTF-8 into surrogates and prints each as `\udcXX`;
-/// on Windows, unpaired surrogates print as `\udXXX`.
-pub(crate) fn python_path(path: &Path) -> PythonPath {
-    #[cfg(windows)]
-    {
-        use std::ffi::OsString;
-        use std::os::windows::ffi::{OsStrExt, OsStringExt};
-
-        let units: Vec<u16> = path.as_os_str().encode_wide().collect();
-        let normalized = windows_str(&units);
-        PythonPath {
-            display: render_utf16(&normalized),
-            native: PathBuf::from(OsString::from_wide(&normalized)),
-        }
-    }
-    #[cfg(unix)]
-    {
-        use std::ffi::OsStr;
-        use std::os::unix::ffi::OsStrExt;
-
-        let normalized = posix_str(path.as_os_str().as_bytes());
-        PythonPath {
-            display: render_surrogateescape(&normalized),
-            native: PathBuf::from(OsStr::from_bytes(&normalized)),
-        }
-    }
-    #[cfg(not(any(unix, windows)))]
-    {
-        let normalized = posix_str(path.to_string_lossy().as_bytes());
-        let display = String::from_utf8_lossy(&normalized).into_owned();
-        PythonPath {
-            native: PathBuf::from(&display),
-            display,
-        }
-    }
-}
+use std::path::Path;
 
 /// Returns `str(PurePosixPath(path))` for a path given as bytes, which Python sees as the
 /// characters that they decode to.
 ///
 /// One leading `/`, or three or more, are a root of `/`, and exactly two are a root of `//`;
 /// empty and `.` components are dropped, and an empty result is `.`.
-#[cfg(any(not(windows), test))]
-pub(crate) fn posix_str(path: &[u8]) -> Vec<u8> {
+#[cfg(test)]
+fn posix_str(path: &[u8]) -> Vec<u8> {
     let (root, tail) = parse_posix(path);
     format_posix(root, &tail)
 }
@@ -86,8 +33,8 @@ pub(crate) fn posix_str(path: &[u8]) -> Vec<u8> {
 /// (`\\server\share`, `\\?\UNC\server\share`), or a device (`\\.\device`, `\\?\device`); UNC
 /// shares gain a root; empty and `.` components are dropped; a relative path whose first
 /// component looks like a drive gains a `.\` prefix; and an empty result is `.`.
-#[cfg(any(windows, test))]
-pub(crate) fn windows_str(path: &[u16]) -> Vec<u16> {
+#[cfg(test)]
+fn windows_str(path: &[u16]) -> Vec<u16> {
     let (drive, root, tail) = parse_windows(path);
     format_windows(&drive, &root, &tail)
 }
@@ -246,32 +193,6 @@ fn windows_skip_root(path: &[u16]) -> (usize, usize) {
     } else {
         (0, 0)
     }
-}
-
-/// Returns UTF-16 code units as Python prints them to a UTF-8 stream: unpaired surrogates as
-/// `\udXXX`.
-#[cfg(any(windows, test))]
-fn render_utf16(units: &[u16]) -> String {
-    char::decode_utf16(units.iter().copied())
-        .map(|unit| match unit {
-            Ok(character) => character.to_string(),
-            Err(error) => format!("\\u{:04x}", error.unpaired_surrogate()),
-        })
-        .collect()
-}
-
-/// Returns bytes as Python prints the string that it decodes them to with the `surrogateescape`
-/// error handler: valid UTF-8 as is, and each other byte as `\udcXX`.
-#[cfg(any(unix, test))]
-fn render_surrogateescape(bytes: &[u8]) -> String {
-    let mut rendered = String::with_capacity(bytes.len());
-    for chunk in bytes.utf8_chunks() {
-        rendered.push_str(chunk.valid());
-        for byte in chunk.invalid() {
-            rendered.push_str(&format!("\\udc{byte:02x}"));
-        }
-    }
-    rendered
 }
 
 /// Returns the string of bytes that come from a Unicode path cut at ASCII separators.
@@ -777,6 +698,55 @@ mod tests {
             ("é:x", "é:x", "é:x"),
             (".\\.\\", ".\\.\\", "."),
             ("a /b", "a /b", "a \\b"),
+            // The paths that the retired egress policy fixture recorded.
+            (".", ".", "."),
+            ("a", "a", "a"),
+            ("a/", "a", "a"),
+            ("./a", "a", "a"),
+            ("a/../b", "a/../b", "a\\..\\b"),
+            ("///a/b", "/a/b", "\\\\\\a\\b"),
+            ("a\\b", "a\\b", "a\\b"),
+            ("c:", "c:", "c:"),
+            ("c:a", "c:a", "c:a"),
+            ("/a", "/a", "\\a"),
+            ("\\a", "\\a", "\\a"),
+            ("\\\\server", "\\\\server", "\\\\server"),
+            (
+                "\\\\server\\share\\x",
+                "\\\\server\\share\\x",
+                "\\\\server\\share\\x",
+            ),
+            (
+                "//server/share/x/",
+                "//server/share/x",
+                "\\\\server\\share\\x",
+            ),
+            ("\\\\?\\c:\\x", "\\\\?\\c:\\x", "\\\\?\\c:\\x"),
+            (
+                "\\\\?\\UNC\\server\\share\\x",
+                "\\\\?\\UNC\\server\\share\\x",
+                "\\\\?\\UNC\\server\\share\\x",
+            ),
+            ("\\\\?.\\x\\y", "\\\\?.\\x\\y", "\\\\?.\\x\\y"),
+            ("c:foo/./bar", "c:foo/bar", "c:foo\\bar"),
+            ("1:x", "1:x", "1:x"),
+            ("::x", "::x", "::x"),
+            ("a:b:c", "a:b:c", "a:b:c"),
+            ("//?/UNC/a", "//?/UNC/a", "\\\\?\\UNC\\a"),
+            ("//?/UNC/a/b/c", "//?/UNC/a/b/c", "\\\\?\\UNC\\a\\b\\c"),
+            ("\\\\?\\", "\\\\?\\", "\\\\?\\"),
+            ("\\\\.\\", "\\\\.\\", "\\\\.\\"),
+            ("\\\\?\\x", "\\\\?\\x", "\\\\?\\x"),
+            ("a/.", "a", "a"),
+            ("x\\.\\y", "x\\.\\y", "x\\y"),
+            (
+                "\\\\a\\b\\c\\d\\e",
+                "\\\\a\\b\\c\\d\\e",
+                "\\\\a\\b\\c\\d\\e",
+            ),
+            (" a ", " a ", " a "),
+            ("dir/é.json", "dir/é.json", "dir\\é.json"),
+            ("policy.json", "policy.json", "policy.json"),
             // On Windows, a character beyond the Basic Multilingual Plane is two code units, so
             // the colon after it makes no drive, and a NUL before a colon makes one.
             ("\u{1F600}:x", "\u{1F600}:x", "\u{1F600}:x"),
@@ -788,32 +758,6 @@ mod tests {
             assert_eq!(pure_posix(path).as_str(), expected_posix, "{path:?}");
             assert_eq!(pure_windows(path).as_str(), expected_windows, "{path:?}");
         }
-    }
-
-    #[test]
-    fn unprintable_paths_render_as_python_prints_them() {
-        assert_eq!(
-            render_surrogateescape(b"a\xffb\xe2\x82"),
-            "a\\udcffb\\udce2\\udc82"
-        );
-        assert_eq!(render_surrogateescape("é".as_bytes()), "é");
-        assert_eq!(render_utf16(&[0x61, 0xD800, 0x62]), "a\\ud800b");
-        assert_eq!(render_utf16(&[0xD83D, 0xDE00]), "\u{1F600}");
-    }
-
-    #[test]
-    fn hosts_open_the_normalized_path() {
-        let path = python_path(Path::new("a//b/./policy.json/"));
-        if cfg!(windows) {
-            assert_eq!(path.display, "a\\b\\policy.json");
-        } else {
-            assert_eq!(path.display, "a/b/policy.json");
-        }
-        assert_eq!(path.native, PathBuf::from(&path.display));
-        assert_eq!(
-            path.display,
-            PurePath::native("a//b/./policy.json/").as_str()
-        );
     }
 
     #[test]

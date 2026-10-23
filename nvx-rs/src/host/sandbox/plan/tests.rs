@@ -1611,7 +1611,7 @@ fn persisted_plans_that_break_the_form_or_the_checks_are_refused() {
     );
     refused(
         &|value| value["network"]["allow"]["rules"][0]["to"][0]["cidr"] = json!("example.com"),
-        "egress.allow[0].to[0].cidr is not a valid IPv4 or IPv6 CIDR: example.com",
+        "egress.allow[0].to[0].cidr is not a valid IPv4 or IPv6 CIDR: \"example.com\"",
     );
     refused(
         &|value| value["network"]["hostLoopback"] = json!("outbound"),

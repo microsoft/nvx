@@ -25,7 +25,6 @@ use std::rc::Rc;
 use super::address::{self, Family, InterfaceError, Interval, Network};
 use super::policy::MAX_RULES_PER_ACTION;
 use crate::error::{Error, Result};
-use crate::host::python::text::PyText;
 
 /// A protocol that a native rule can select.
 ///
@@ -66,12 +65,12 @@ pub(crate) enum RuleProtocol {
 
 impl RuleProtocol {
     /// Parses one of `tcp`, `udp`, `icmp`, and `any`, which must be lowercase.
-    pub(crate) fn parse(text: &PyText) -> Option<Self> {
-        match text.as_bytes() {
-            b"tcp" => Some(Self::Tcp),
-            b"udp" => Some(Self::Udp),
-            b"icmp" => Some(Self::Icmp),
-            b"any" => Some(Self::Any),
+    pub(crate) fn parse(text: &str) -> Option<Self> {
+        match text {
+            "tcp" => Some(Self::Tcp),
+            "udp" => Some(Self::Udp),
+            "icmp" => Some(Self::Icmp),
+            "any" => Some(Self::Any),
             _ => None,
         }
     }
@@ -138,15 +137,14 @@ pub(crate) fn invalid(message: impl Into<String>) -> Error {
 
 /// Parses the CIDR `value` of the field `description`, as `_network` does: the network of an
 /// IPv4 or IPv6 interface without an IPv6 scope.
-pub(crate) fn network(value: &PyText, description: &str) -> Result<Network> {
+pub(crate) fn network(value: &str, description: &str) -> Result<Network> {
     address::parse_interface(value).map_err(|error| {
-        let value = value.render();
         invalid(match error {
             InterfaceError::Invalid => {
-                format!("{description} is not a valid IPv4 or IPv6 CIDR: {value}")
+                format!("{description} is not a valid IPv4 or IPv6 CIDR: {value:?}")
             }
             InterfaceError::Scoped => {
-                format!("{description} must not name an IPv6 scope: {value}")
+                format!("{description} must not name an IPv6 scope: {value:?}")
             }
         })
     })
@@ -307,13 +305,20 @@ fn too_many_rules(category: &str) -> Error {
 /// Lowers the rules of the action `category` into native rules, in the order in which the
 /// compiler sorts them, as `_compile_category` does once it has parsed them.
 pub(crate) fn lower(rules: &[Rule], category: &str) -> Result<Vec<String>> {
+    lower_within(rules, category, MAX_RULES_PER_ACTION)
+}
+
+/// Lowers the rules of the action `category` as [`lower`] does, but fails once they need more
+/// than `limit` native rules rather than [`MAX_RULES_PER_ACTION`]: tests lift the limit to learn
+/// how many native rules an action needs.
+pub(crate) fn lower_within(rules: &[Rule], category: &str, limit: usize) -> Result<Vec<String>> {
     // A native rule matches only its own family, so each family is lowered on its own, within
     // the action's shared limit.
     let mut lowered: Vec<NativeRule> = Vec::new();
     for family in Family::ALL {
         let family_rules: Vec<&Rule> = rules.iter().filter(|rule| rule.family == family).collect();
         if !family_rules.is_empty() {
-            let budget = MAX_RULES_PER_ACTION - lowered.len();
+            let budget = limit - lowered.len();
             let family_lowered = lower_family(&family_rules, family, category, budget)?;
             lowered.extend(family_lowered);
         }

@@ -118,15 +118,17 @@ fields.
 
 `nvx::host::network::policy` compiles the egress policy files that
 `nvx.py run` and `nvx.py sandbox` take with `--network-egress-policy-file`
-([format](../doc/run.md#run-openvmm-directly)). It is a faithful port of the
-former `scripts/nvx_tools/egress_policy.py`, which it replaced when `nvx.py`
-delegated to `nvx-rs`: it accepts the same files, compiles them to the same
-rules, and fails with the same messages.
+([format](../doc/run.md#run-openvmm-directly)). It replaced the former
+`scripts/nvx_tools/egress_policy.py` when `nvx.py` delegated to `nvx-rs`, and
+compiles the policies that it compiled to the same rules, but reads policy
+files as strict JSON
+([microsoft/nvx#729](https://github.com/microsoft/nvx/issues/729)).
 
-- A policy is at most 1 MiB of UTF-8 JSON whose root has only `allow` and
-  `deny` arrays. JSON is read as Python's `json.loads` reads it, so `NaN` and
-  `Infinity` are numbers, while a repeated field and an integer of more than 64
-  digits are errors.
+- A policy is at most 1 MiB of UTF-8 JSON, as RFC 8259 defines it, whose root
+  has only `allow` and `deny` arrays: `NaN`, `Infinity`, numbers beyond the
+  range of a double, a repeated field, and arrays and objects nested more than
+  32 deep are errors. A port is an integer, written without a fraction or an
+  exponent.
 - Rules take the MXC form, with optional `to` destinations (`cidr` and
   `except`) and `ports` selectors (`protocol`, `port`, and `endPort`), or the
   legacy flat form (`cidr`, `except`, `protocol`, `port`, and `endPort`).
@@ -144,7 +146,7 @@ rules, and fails with the same messages.
 `openvmm_arguments` lowers `NetworkPolicy` rules, and so `aci_edge_sandboxes`
 policies, the same way: an `EgressRule` is a policy file's MXC rule, its
 messages name `EgressRules::name` where a file's name `allow` or `deny`, such
-as `network.egress.allow[0].to[1].cidr is not a valid IPv4 or IPv6 CIDR: x`,
+as `network.egress.allow[0].to[1].cidr is not a valid IPv4 or IPv6 CIDR: "x"`,
 and the checks that only `NetworkPolicy` has, such as the host-loopback ones,
 stay in `openvmm_arguments`. `nvx-rs sandbox` reads the rules that a policy
 file compiles to, like those of `--network-egress-allow` and
@@ -152,19 +154,29 @@ file compiles to, like those of `--network-egress-allow` and
 and lowers them again with the rest of its policy, which renders compiled rules
 unchanged.
 
-Messages match Python's byte for byte, but two cases have no Rust equivalent. A
-string that Python would hold with an unpaired surrogate, such as one decoded
-from a `\ud800` escape or a path that is not Unicode, shows the surrogate as
-`\udXXX`, which is how Python prints it, and paths show as
-`str(pathlib.Path(path))` does. Python's decoder raises `RecursionError` for a
-document nested more deeply than its stack allows; this reader has no such
-limit, so those documents fail as invalid policies instead.
+A message names the field that breaks the format by its path, or the file, and
+says why, quoting values as Rust does, as in
+`allow[0].ports[0] has duplicate field "port"` or
+`egress policy file policy.json is not valid JSON: expected value at line 1
+column 1`. Messages name files as they were given.
 
-[`tests/fixtures/egress-policy.json`](tests/fixtures/egress-policy.json) holds
-the Python compiler's outcomes for every policy that its tests compiled,
-hand-written edge cases, and a seeded random corpus, which the tests replay
-without Python; `NVX_EGRESS_POLICY_FIXTURE` points the tests at another corpus
-in the same format. See [Python parity](#python-parity).
+The tests take their expectations from the format, rather than from what the
+Python compiler did, which a fixture recorded until
+[microsoft/nvx#729](https://github.com/microsoft/nvx/issues/729) retired it. A
+reference model of policies, written from the format that
+[`doc/run.md`](../doc/run.md#run-openvmm-directly) documents, decides which
+packets the rules of an action match, and which packets the native rules that
+it lowers to match. Properties then hold for the policies that a `proptest` port
+of the generator of the fixture's random corpus draws, and for networks at the
+ends of each family's addresses: each action lowers to canonical native rules,
+none redundant, that match exactly what the model matches, at one point of every
+cell that the boundaries of the networks and port ranges delimit; an action is
+refused exactly when it needs more than 256 native rules; the order of the
+rules, repeated rules, and networks split into their halves change no lowering;
+`allow` and `deny` lower independently; and policy files, their values, and
+`NetworkPolicy` rules compile alike and deterministically, or fail with an
+error. A test of each rule of the format's grammar checks the field path, or the
+file, that each refusal names, a fragment of its reason, and its error code.
 
 ## Distro bindings
 
@@ -321,9 +333,9 @@ except in a dry run, which launches nothing.
 
 ## Python parity
 
-`nvx::host::network::policy`, `nvx::host::sandbox`, and the guest lookups of
-`nvx::host::artifacts` replaced Python code that `nvx.py` ran, so they keep its
-contract byte for byte: its limits, option semantics, outputs, and messages.
+`nvx::host::sandbox` and the guest lookups of `nvx::host::artifacts` replaced
+Python code that `nvx.py` ran, so they keep its contract byte for byte: its
+limits, option semantics, outputs, and messages.
 They check values as Python does: whitespace is what `str.isspace` accepts,
 integers are what `int` reads, UUIDs what `uuid.UUID` reads, and JSON what
 `json.loads` reads, failing with its messages; host paths are normalized as
@@ -339,10 +351,10 @@ refuse them.
 `tests/fixtures` holds what the Python code did with fixed inputs and seeded
 random corpora: `python.json` for the Python semantics, `sandbox.json` and
 `sandbox_options.json` for the launch profile and the sandbox options, for
-POSIX and Windows paths alike, `egress-policy.json` for the policy compiler,
-and `cli.json` for `nvx.py sandbox` and `nvx.py run` as commands; see
-[Golden scenarios](#golden-scenarios). `scripts/nvx_rs_fixtures.py` recorded
-them with CPython 3.14, except the scenarios of `nvx.py run`, and generated
+POSIX and Windows paths alike, and `cli.json` for `nvx.py sandbox` and
+`nvx.py run` as commands; see [Golden scenarios](#golden-scenarios).
+`scripts/nvx_rs_fixtures.py` recorded them with CPython 3.14, except the
+scenarios of `nvx.py run`, and generated
 the Unicode tables of `src/host/python/unicode.rs`, until `nvx.py` delegated to
 `nvx-rs` and [microsoft/nvx#359](https://github.com/microsoft/nvx/issues/359)
 retired the script with the Python code that it recorded;
@@ -1052,7 +1064,9 @@ accepts or refuses OpenVMM's vectors and cases of the `NVXS` session as they
 say, and, on Linux, the guest's listener announcements match
 `tests/vectors/nvxl-v1.txt`. Property tests check that records round-trip, and
 that the `NVXS` record parser and the host's and the guest's `EXEC` and `MAPS`
-decoders return, never panic, on arbitrary bytes. The NVXS test drives the
+decoders return, never panic, on arbitrary bytes; those of the egress policy
+compiler compare it with a reference model of the format
+([Egress policy files](#egress-policy-files)). The NVXS test drives the
 host's and the guest's roles of the session and their connections through a
 broker that relays records as OpenVMM's does, with messages of an application
 framing of its own that span records. The store test crashes orchestrator

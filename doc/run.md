@@ -289,8 +289,11 @@ ICMPv6 for IPv6 destinations, and `any` matches every protocol. A `port` in
 that port but not ICMP. Optional inclusive `endPort` requires `port` and cannot
 be below it.
 
-Duplicate JSON properties, unknown fields, and explicit `null` protocol values
-are rejected. Policy files are limited to 1 MiB of UTF-8 input. The previous
+Policy files are at most 1 MiB of UTF-8 JSON, as RFC 8259 defines it: `NaN`,
+`Infinity`, numbers beyond the range of a double, duplicate properties, and
+arrays and objects nested more than 32 deep are rejected, as are unknown
+fields and explicit `null` protocol values. A rejection names the field path,
+such as `allow[0].ports[0].endPort`, or the file, and the reason. The previous
 flat `cidr`/`except`/`protocol`/`port` rule form remains accepted for
 compatibility, with an IPv4 or IPv6 `cidr`, but new policy files should use the
 MXC shape.

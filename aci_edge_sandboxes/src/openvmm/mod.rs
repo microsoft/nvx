@@ -985,7 +985,7 @@ mod tests {
         assert_eq!(error.code(), ErrorCode::PolicyValidation);
         assert_eq!(
             error.message(),
-            "network.egress.deny[1].to[0].cidr must not name an IPv6 scope: fe80::1%eth0/64"
+            "network.egress.deny[1].to[0].cidr must not name an IPv6 scope: \"fe80::1%eth0/64\""
         );
         let mut crowded = NetworkRule::to("192.0.2.0/24");
         crowded.ports = (0..257)

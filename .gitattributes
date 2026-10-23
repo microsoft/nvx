@@ -30,7 +30,6 @@ nvx-rs/** text=auto eol=lf
 # parity).
 nvx-rs/src/host/python/unicode.rs linguist-generated=true
 nvx-rs/tests/fixtures/cli.json linguist-generated=true
-nvx-rs/tests/fixtures/egress-policy.json linguist-generated=true
 nvx-rs/tests/fixtures/python.json linguist-generated=true
 nvx-rs/tests/fixtures/sandbox.json linguist-generated=true
 nvx-rs/tests/fixtures/sandbox_options.json linguist-generated=true

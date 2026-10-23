@@ -77,24 +77,10 @@ class Family:
     filters: tuple[str, ...]
 
 
-_POLICY_TESTS = "host::network::policy::tests::"
-
 FAMILIES = (
     Family("python-semantics", "Python semantics", ("host::python::golden::",)),
     Family(
         "launch-profile", "Launch profile and options", ("host::sandbox::golden::",)
-    ),
-    Family(
-        "egress-policies",
-        "Egress policies",
-        tuple(
-            _POLICY_TESTS + name
-            for name in (
-                "every_fixture_case_compiles_as_python_compiled_it",
-                "unreadable_files_fail_as_in_python",
-                "paths_print_as_pathlib_prints_them",
-            )
-        ),
     ),
     Family(
         "cli-scenarios", "CLI scenarios", ("nvx_rs_reproduces_the_recorded_scenarios",)

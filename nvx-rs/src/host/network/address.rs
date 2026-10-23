@@ -11,8 +11,6 @@
 use std::fmt;
 use std::net::Ipv4Addr;
 
-use crate::host::python::text::PyText;
-
 /// Address family of a [`Network`].
 ///
 /// IPv4 orders before IPv6, as Python's IP versions 4 and 6 do.
@@ -175,7 +173,7 @@ pub(crate) enum InterfaceError {
 
 /// Parses `text` as Python's `ipaddress.ip_interface` does and returns its network, whose host
 /// bits are clear.
-pub(crate) fn parse_interface(text: &PyText) -> Result<Network, InterfaceError> {
+pub(crate) fn parse_interface(text: &str) -> Result<Network, InterfaceError> {
     let text = text.as_bytes();
     // `ip_interface` tries IPv4 first, and no string is both.
     if let Some(network) = parse_ipv4_interface(text) {
@@ -540,7 +538,7 @@ mod tests {
     use super::*;
 
     fn network(text: &str) -> Result<String, InterfaceError> {
-        parse_interface(&PyText::from(text)).map(|network| network.to_string())
+        parse_interface(text).map(|network| network.to_string())
     }
 
     #[test]
@@ -719,7 +717,7 @@ mod tests {
 
     #[test]
     fn containment_is_family_aware() {
-        let parse = |text: &str| parse_interface(&PyText::from(text)).unwrap();
+        let parse = |text: &str| parse_interface(text).unwrap();
         assert!(parse("10.0.0.0/8").contains(parse("10.1.0.0/16")));
         assert!(!parse("10.0.0.0/8").contains(parse("11.0.0.0/16")));
         assert!(!parse("::/96").contains(parse("0.0.0.0/0")));

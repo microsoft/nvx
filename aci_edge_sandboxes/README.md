@@ -1187,8 +1187,8 @@ and so are the error codes, but these change:
     between 1 and 65535`;
   - `...to[0]: the destination is not a network` and `...to[0].except: an
     exception is not a network within the destination` became
-    `...to[0].cidr is not a valid IPv4 or IPv6 CIDR: VALUE`,
-    `...to[0].cidr must not name an IPv6 scope: VALUE`, and
+    `...to[0].cidr is not a valid IPv4 or IPv6 CIDR: "VALUE"`,
+    `...to[0].cidr must not name an IPv6 scope: "VALUE"`, and
     `...to[0].except[1] must be contained in NETWORK`; and
   - `network.egress.allow expands to 300 OpenVMM rules; the openvmm backend
     accepts at most 256`, and the rule-level `expands to more than 256 OpenVMM
