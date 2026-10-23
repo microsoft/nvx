@@ -8,11 +8,13 @@
   [Upstream status](#upstream-status).
 - Mapped fork tip: `a0556d7d85ce1fff89f5b45a98f15c5c79cbb6fb`, position 157. The graph, PR
   summary, and commit mapping below cover positions 001-157 and the fixups at positions
-  334-337.
-- NVX's pinned OpenVMM revision: `79a501b63fcd2f150e94928d0ceba79cd2fe96c4`, the head of the
-  `feature/microvm/dev` and `feature/microvm/release/v2.3` branches of microsoft/openvmm, 180
-  commits past the mapped tip on the same first-parent chain. Positions 158-333 are not yet
-  assigned to PRs; see [Commits after the mapped tip](#commits-after-the-mapped-tip).
+  334-338.
+- NVX's pinned OpenVMM revision: `8a0d945edca13b301a5152f225702057337b2a56`, position 338,
+  which microsoft/openvmm#4734 proposes for `feature/microvm/dev`. It is one commit on
+  `79a501b63`, the head of the `feature/microvm/dev` and `feature/microvm/release/v2.3`
+  branches of microsoft/openvmm, and 181 commits past the mapped tip on the same first-parent
+  chain. Positions 158-333 are not yet assigned to PRs; see
+  [Commits after the mapped tip](#commits-after-the-mapped-tip).
 - Upstream main: `22c0485be597f87a76771e1db03eaa823a685ffc` (2026-10-22), the fork base.
 
 ## Upstream status
@@ -174,7 +176,7 @@ flowchart TB
     subgraph Independent["Parallel foundation PRs in upstream review"]
         direction LR
         P01["PR01<br/>Build/test infrastructure<br/>U - 7 commits, 6 in review"]
-        P02["PR02<br/>Mesh + sparse_mmap<br/>U - 3 commits, 2 in review"]
+        P02["PR02<br/>Mesh + sparse_mmap<br/>U - 4 commits, 2 in review"]
         P03["PR03<br/>PAL on Unix<br/>U - 3 commits, 3 in review"]
         P04["PR04<br/>PAL/PAL async on Windows<br/>U - 5 commits, 5 in review"]
         P05["PR05<br/>Hypervisor fixes<br/>U - 3 commits + split tip, 3 in review"]
@@ -299,7 +301,8 @@ The physical branch is one first-parent chain:
   -> a0556d7d8 (mapped tip)
   -> unassigned [158-333]
   -> PR10 fixup [334] -> PR05/PR20/unassigned split [335]
-  -> PR14 fixup [336] -> PR09 fixup [337] -> 79a501b63 (NVX pin)
+  -> PR14 fixup [336] -> PR09 fixup [337]
+  -> PR02 fixup [338] -> 8a0d945ed (NVX pin)
 ```
 
 For upstream review, PR01-PR08 and PR14 can be rebased independently onto current upstream main,
@@ -313,15 +316,16 @@ and PR25, and split position 153 between PR18 and PR23 before submission. Fold p
 PR18's position 104 and position 155 into PR25's position 146. Fold the v2.3 rebase's fixups into
 the commits that [Rebase conflicts and fixups](#rebase-conflicts-and-fixups) names: position 334
 into PR10, position 336 into PR14, position 337 into PR09, and position 335 into PR05, the PR20
-fixup at position 151, and the unassigned positions 163 and 197. PR27 can be prepared once PR22
-lands; its generic confinement commit can be submitted independently if preferred.
+fixup at position 151, and the unassigned positions 163 and 197. Fold position 338 into PR02's
+position 010, which microsoft/openvmm#4558 carries. PR27 can be prepared once PR22 lands; its
+generic confinement commit can be submitted independently if preferred.
 
 ## Commits after the mapped tip
 
-The NVX pin extends the chain past position 157 without merges. Of the 180 later commits,
-positions 158-333 are not yet classified or assigned to PRs, and positions 334-337 are the
-fixups of the `feature/microvm/release/v2.3` rebase. This table groups them by topic in chain
-order; ranges are inclusive, as in the [PR summary](#pr-summary).
+The NVX pin extends the chain past position 157 without merges. Of the 181 later commits,
+positions 158-333 are not yet classified or assigned to PRs, positions 334-337 are the fixups
+of the `feature/microvm/release/v2.3` rebase, and position 338 is a PR02 fixup. This table
+groups them by topic in chain order; ranges are inclusive, as in the [PR summary](#pr-summary).
 
 | Positions | Commit range | Count | Topic |
 | ---: | --- | ---: | --- |
@@ -356,6 +360,7 @@ order; ranges are inclusive, as in the [PR summary](#pr-summary).
 | 332 | `ebb4b5d33` | 1 | The management RPC selects the microVM CPU profile |
 | 333 | `fcb4ea1c6` | 1 | Petri and the VMM tests fall back to the host CPU profile where `auto`'s is unsupported |
 | 334-337 | `9bc90f55f..79a501b63` | 4 | Fixups of the `feature/microvm/release/v2.3` rebase; see [Rebase conflicts and fixups](#rebase-conflicts-and-fixups) |
+| 338 | `8a0d945ed` | 1 | Windows mapped-file flushes mark every page of a writable view modified and write the range in one ascending pass, so NTFS no longer zero-fills ranges that are then written again (microsoft/openvmm#4734); fold into 010 |
 
 Some of these commits change mapped work rather than add to it. Positions 246-250 remove the
 legacy microVM clock paths and change files that PR10 and PR17 also change. Position 252 makes
@@ -370,7 +375,7 @@ as whole physical commits here but should be folded into their target commits be
 | PR | Class | Topic | Actual positions | Actual commit range(s) | Count | Recommended direct dependency |
 | --- | --- | --- | ---: | --- | ---: | --- |
 | PR01 | U | Build and test infrastructure | 001-007 | `a685f1048..bca9e93f5` | 7 | Current upstream |
-| PR02 | U | Host primitives: mesh and sparse_mmap | 008-010 | `8d72321f5..a95f8ef33` | 3 | Current upstream |
+| PR02 | U | Host primitives: mesh and sparse_mmap | 008-010; 338 (fixup) | `8d72321f5..a95f8ef33`; `8a0d945ed` | 4 | Current upstream |
 | PR03 | U | Host primitives: PAL on Unix | 011-013 | `30a39563d..c3330847c` | 3 | Current upstream |
 | PR04 | U | Host primitives: PAL and PAL async on Windows | 014-018 | `f2270e72b..8dfac4835` | 5 | Current upstream |
 | PR05 | U | Hypervisor backend fixes | 019-021; 335 (split) | `40d5bd66f..050a6904d`; `d2e83bdfd` (split) | 3 + split | Current upstream |
@@ -402,7 +407,7 @@ as whole physical commits here but should be folded into their target commits be
 
 Positions 152 and 153 intentionally appear under two PRs because their commits must be split when
 forming submission branches. Positions 154 and 155 are fixups that should be folded into positions
-104 and 146, respectively. Tip positions 151-155 and the fixups at positions 334-337 are listed
+104 and 146, respectively. Tip positions 151-155 and the fixups at positions 334-338 are listed
 under their destination PRs rather than in numerical order, and position 335 appears under both
 PRs that it changes. The counts distinguish whole commits from selected split hunks.
 Struck-through entries landed upstream before the fork base. The `microvm/v2.2` and
@@ -428,11 +433,12 @@ Partial upstream overlap is called out without striking the remaining fork work,
 </details>
 
 <details>
-<summary><strong>PR02 - Host primitives: mesh and sparse_mmap (U)</strong> - 3 commits</summary>
+<summary><strong>PR02 - Host primitives: mesh and sparse_mmap (U)</strong> - 4 commits</summary>
 
 - 008 `8d72321f5` - mesh_protobuf: clone type-erased messages and expose encoded length (**partly landed upstream**: microsoft/openvmm#4556, merged as `96647c331`, derives `Clone`; this commit now adds only `ProtobufAny::value_len` and a clone check)
 - 009 `15a895dd8` - sparse_mmap: add private copy-on-write file views (**open upstream**: microsoft/openvmm#4557)
 - 010 `a95f8ef33` - sparse_mmap: flush file-backed ranges with bounded concurrency (**open upstream**: microsoft/openvmm#4558)
+- 338 `8a0d945ed` - sparse_mmap: flush writable file views whole, in one ascending pass (**fold into 010**; proposed for `feature/microvm/dev` in microsoft/openvmm#4734)
 
 </details>
 

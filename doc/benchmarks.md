@@ -704,8 +704,11 @@ and the raw samples show how the rates change within a flush.
 Snapshot generation is bounded by the write throughput of the benchmark's
 temporary directory, because capture flushes guest RAM through a backing file
 created there. The Windows backing file stays dense so restore keeps the
-captured pages cached; NTFS therefore zero-fills the unwritten range below the
-guest's top-of-RAM pages, and a 128 MiB guest writes about 150 MiB per capture.
+captured pages cached. Because NTFS zero-fills a dense file below any write
+past its valid data length, OpenVMM first marks every guest RAM page modified
+and then flushes the range with one ascending write sequence, so a 128 MiB
+guest writes at most 128 MiB per capture and the flush lasts about that size
+divided by the scratch volume's write throughput.
 The Windows CI runners' 128 GiB Premium SSD system disk also holds the runner
 work tree, caches, and builds. Under load it alternates between its burst limit
 of about 173 MB/s and its baseline of about 102 MB/s in blocks of tens of
