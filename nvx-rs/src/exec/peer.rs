@@ -492,8 +492,8 @@ impl Peer {
             .input
             .queue
             .len()
-            .min(self.limits.chunk())
-            .min(buffer.len());
+            .min(self.limits.chunk()
+            .min(buffer.len()));
         let length = self.input.credit.sendable(wanted);
         if length > 0 {
             credit::take(&mut self.input.queue, buffer, length);
@@ -656,9 +656,7 @@ impl Peer {
             None if self.detached || self.gave_up => {
                 let mut outcome = Outcome::new(None);
                 for stream in Stream::ALL {
-                    if !self.outputs[stream.index()].ended {
-                        outcome = outcome.with_truncated(stream);
-                    }
+                    outcome = outcome.with_truncated(stream);
                 }
                 outcome
             }

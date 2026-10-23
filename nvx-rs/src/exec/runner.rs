@@ -361,7 +361,7 @@ impl Runner {
     pub fn output(&mut self, stream: Stream, bytes: &[u8]) -> usize {
         let chunk = self.limits.chunk();
         let output = &mut self.outputs[stream.index()];
-        if output.closed || self.gave_up {
+        if output.closed || output.gave_up {
             return 0;
         }
         if output.discarding {
@@ -423,7 +423,7 @@ impl Runner {
 
     /// Hands the runner the close of the workload's input other than by its
     /// [request](Request::CloseInput): the workload closed it, or the adapter did as the workload
-    /// ended. The runner drops the pending input, and tells the peer, unless the peer ended the
+    /// ended. The runner drops the pending input, and tells the peer unless the peer ended the
     /// input.
     pub fn input_closed(&mut self) {
         self.close_input();

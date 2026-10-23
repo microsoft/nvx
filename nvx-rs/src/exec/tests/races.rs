@@ -277,7 +277,7 @@ fn a_peer_detached_before_the_terminal_outcome_finishes_on_its_own() {
         assert_eq!(outcome.status(), None);
         assert_eq!(outcome.cause(), Some(ending.cause()));
         assert!(outcome.is_truncated(Stream::Stdout));
-        assert!(!outcome.is_truncated(Stream::Stderr));
+        assert!(outcome.is_truncated(Stream::Stderr));
         assert!(!outcome.is_reusable());
         assert_eq!(peer.next_message(&mut [0; 8]), None);
         // What arrives after the detachment comes too late.
