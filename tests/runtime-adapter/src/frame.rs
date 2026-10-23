@@ -76,41 +76,37 @@ impl Message {
 
 /// Kind of a [`Message`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
 enum Kind {
     /// [`Message::Ping`].
-    Ping,
+    Ping = 1,
     /// [`Message::Pong`].
-    Pong,
+    Pong = 2,
     /// [`Message::Echo`].
-    Echo,
+    Echo = 3,
     /// [`Message::Stop`].
-    Stop,
+    Stop = 4,
     /// [`Message::Stopped`].
-    Stopped,
+    Stopped = 5,
 }
 
 impl Kind {
+    const ALL: [Self; 5] = [
+        Self::Ping,
+        Self::Pong,
+        Self::Echo,
+        Self::Stop,
+        Self::Stopped,
+    ];
+
     /// Returns the kind with `code`, if the framing defines one.
     fn from_code(code: u8) -> Option<Self> {
-        match code {
-            1 => Some(Self::Ping),
-            2 => Some(Self::Pong),
-            3 => Some(Self::Echo),
-            4 => Some(Self::Stop),
-            5 => Some(Self::Stopped),
-            _ => None,
-        }
+        Self::ALL.into_iter().find(|kind| kind.code() == code)
     }
 
     /// Returns the kind's code, the last byte of a header.
     fn code(self) -> u8 {
-        match self {
-            Self::Ping => 1,
-            Self::Pong => 2,
-            Self::Echo => 3,
-            Self::Stop => 4,
-            Self::Stopped => 5,
-        }
+        self as u8
     }
 
     /// Returns the most bytes of a body of this kind.
