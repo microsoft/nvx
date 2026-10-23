@@ -257,7 +257,7 @@ class TestModuleTests(unittest.TestCase):
             "src/guest/managed_agent/loopback.rs",
             "src/host/network/policy/tests.rs",
             "src/host/python/golden.rs",
-            "src/host/sandbox/golden.rs",
+            "src/host/sandbox/specification.rs",
             "src/host/test_support.rs",
         ):
             self.assertIn(module, modules)

@@ -337,9 +337,8 @@ surrogates: paths print as Python prints them, and the filesystem queries
 refuse them.
 
 `tests/fixtures` holds what the Python code did with fixed inputs and seeded
-random corpora: `python.json` for the Python semantics, `sandbox.json` and
-`sandbox_options.json` for the launch profile and the sandbox options, for
-POSIX and Windows paths alike, `egress-policy.json` for the policy compiler,
+random corpora: `python.json` for the Python semantics,
+`egress-policy.json` for the policy compiler,
 and `cli.json` for `nvx.py sandbox` and `nvx.py run` as commands; see
 [Golden scenarios](#golden-scenarios). `scripts/nvx_rs_fixtures.py` recorded
 them with CPython 3.14, except the scenarios of `nvx.py run`, and generated
@@ -1102,25 +1101,11 @@ sequences, and paths on the host's own filesystem. The CLI tests check that
 `sandbox` records the preceding mount while `run` forwards absolute policy paths
 independently of option order, for OpenVMM to attribute by containment.
 
-During the transition tracked by microsoft/nvx#730, all six golden tests remain
-unchanged beside these tests. This temporary table maps every semantic section of
-the two fixtures to its replacement; generator metadata and the simulated working
-directories are not input contracts.
-
-| Fixture | Section | Specification tests |
-| --- | --- | --- |
-| `sandbox.json` | `identities` | `workload_identity_grammar`, `non_root_workload_identities_round_trip` |
-| `sandbox.json` | `layers` | `layer_values_are_role_path_uuid`, `canonical_layer_uuids_reach_the_guest` |
-| `sandbox.json` | `mount_values` | `mount_value_grammar` |
-| `sandbox.json` | `mount_targets` | `mount_targets_are_canonical_and_byte_bounded`, `reserved_mount_targets_are_refused` |
-| `sandbox.json` | `child_names` | `aggregate_child_name_known_answer`, `aggregate_child_names_follow_the_restore_contract` |
-| `sandbox.json` | `mounts` | `shares_follow_the_openvmm_and_guest_contracts`, `host_paths_become_absolute`, `windows_drive_relative_and_unc_paths`, and the access-policy tables in `mount::tests` |
-| `sandbox.json` | `launches` | `launch_arguments_follow_the_openvmm_contract`, `launch_settings_follow_the_guest_contract`, `kernel_command_line_stays_within_1024_bytes`, `reserved_kernel_tokens_are_always_refused` |
-| `sandbox_options.json` | `run_share_targets` | `run_share_targets_are_disjoint`, `run_share_targets_bind_from_an_aggregate` |
-| `sandbox_options.json` | `sandbox_mounts` | `policy_paths_attach_to_their_shares`, `policy_paths_need_a_preceding_mount_only_with_several_shares`, `policy_option_sequences_record_the_preceding_mount`, `aggregate_policy_paths_must_be_absolute` |
-| `sandbox_options.json` | `environments` | `exec_environment_limits` |
-| `sandbox_options.json` | `environment_files` | `environment_files_hold_a_json_array_of_strings` |
-| `sandbox_options.json` | `distro_manifests` | `distro_manifest_binds_the_layer`, `systemd_entrypoints_and_images_are_refused_independently` |
+These tests replace the former sandbox launch-profile and option corpora
+([microsoft/nvx#730](https://github.com/microsoft/nvx/issues/730)). The
+behavior-preserving prerequisite PR kept a temporary section-by-section mapping
+beside the six golden tests before their retirement. No generated Python corpus
+is needed to run the sandbox specification tests.
 
 The current sandbox policy refuses both systemd entrypoints unconditionally and
 refuses a manifest that lists `systemd`, independently of the selected entrypoint.

@@ -462,8 +462,6 @@ fn require_pure_file(path: &PurePath, description: &str, code: ErrorCode) -> Res
 }
 
 #[cfg(test)]
-mod golden;
-#[cfg(test)]
 mod specification;
 #[cfg(test)]
 mod tests;

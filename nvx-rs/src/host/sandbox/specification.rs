@@ -244,6 +244,118 @@ fn launch_arguments_follow_the_openvmm_contract() {
 }
 
 #[test]
+fn accepted_launch_shapes_keep_their_arguments_and_kernel_tokens() {
+    let base = "nvx_sandbox=1 \
+        nvx_layer=distro,0xd0003000,erofs:11111111-1111-1111-1111-111111111111 \
+        nvx_scratch=0xd0006000,ext4 nvx_entrypoint=/bin/sh nvx_hostname=nvx-sandbox";
+    let workspace = "0-c52ddf65534b7b46035084358ab7902b";
+    let cache = "1-2a93e82e011c66d5c7dbd25da5f2e6c1";
+    let file = "0-3ddd35a70a0d7386a5451cd0d5dc3c39";
+    let cases = [
+        (862, Vec::new(), String::new(), Vec::new()),
+        (
+            806,
+            vec![(
+                "/workspace",
+                "/host",
+                MountAccess::ReadWrite,
+                MountKind::Directory,
+            )],
+            String::new(),
+            vec![
+                "--mount".to_owned(),
+                format!("/workspace,{},rw", host_text("/host")),
+            ],
+        ),
+        (
+            664,
+            vec![
+                (
+                    "/workspace",
+                    "/host",
+                    MountAccess::ReadWrite,
+                    MountKind::Directory,
+                ),
+                (
+                    "/srv/cache",
+                    "/cache",
+                    MountAccess::ReadOnly,
+                    MountKind::Directory,
+                ),
+            ],
+            format!(" nvx_share={workspace},/workspace,rw nvx_share={cache},/srv/cache,ro"),
+            vec![
+                "--mount-aggregate".to_owned(),
+                "/run/nvx/shares".to_owned(),
+                "--mount-child".to_owned(),
+                format!("{workspace},{},rw", host_text("/host")),
+                "--mount-child".to_owned(),
+                format!("{cache},{},ro", host_text("/cache")),
+            ],
+        ),
+        (
+            706,
+            vec![(
+                "/etc/app/settings.json",
+                "/settings.json",
+                MountAccess::ReadOnly,
+                MountKind::File,
+            )],
+            format!(" nvx_share={file},/etc/app/settings.json,ro,file"),
+            vec![
+                "--mount-aggregate".to_owned(),
+                "/run/nvx/shares".to_owned(),
+                "--mount-child".to_owned(),
+                format!("{file},{},ro,file", host_text("/settings.json")),
+            ],
+        ),
+    ];
+    for (padding, shares, suffix, tail) in cases {
+        let launch = SandboxLaunch::new(
+            vec![SandboxLayer::new(
+                LayerRole::Distro,
+                "layer.erofs",
+                "11111111-1111-1111-1111-111111111111",
+            )],
+            "scratch.ext4",
+            SandboxSettings::default(),
+        )
+        .unwrap()
+        .with_export((!shares.is_empty()).then(|| exported(&shares)))
+        .unwrap();
+        let mut expected = [
+            "--machine",
+            "microvm",
+            "--microvm-sandbox-block",
+            "distro:file:layer.erofs,ro",
+            "--microvm-sandbox-block",
+            "scratch:file:scratch.ext4",
+            "--microvm-workload-identity",
+            "65534:65534",
+        ]
+        .map(str::to_owned)
+        .to_vec();
+        expected.extend(tail);
+        assert_eq!(
+            launch.plan().one_shot_openvmm_arguments().unwrap(),
+            expected
+        );
+        assert_eq!(
+            launch
+                .plan()
+                .one_shot_kernel_command_line(&"x".repeat(padding))
+                .unwrap(),
+            format!("{} {base}{suffix}", "x".repeat(padding)),
+        );
+        refused(
+            launch
+                .plan()
+                .one_shot_kernel_command_line(&"x".repeat(padding + 1)),
+        );
+    }
+}
+
+#[test]
 fn shares_follow_the_openvmm_and_guest_contracts() {
     for (access, mode) in [
         (MountAccess::ReadOnly, "ro"),
