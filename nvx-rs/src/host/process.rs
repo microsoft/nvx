@@ -227,8 +227,8 @@ impl Process {
         self.wait(Instant::now())
     }
 
-    /// Ends the process at once, unless it has exited: with `SIGKILL` on Linux, and on Windows
-    /// by terminating it with the status 1. It does not wait for the exit; see
+    /// Ends the process at once, unless it has exited or is exiting: with `SIGKILL` on Linux, and
+    /// on Windows by terminating it with the status 1. It does not wait for the exit; see
     /// [`wait`](Self::wait).
     ///
     /// Fails with [`io::ErrorKind::Unsupported`] with [`WaitMethod::Polling`], whose host cannot

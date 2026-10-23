@@ -134,6 +134,21 @@ fn has_exited(process: &OwnedHandle) -> io::Result<bool> {
     }
 }
 
+/// Returns the outcome of a termination that Windows refused with `error` through a handle with
+/// terminate access: success if the process is exiting or has exited, and `error` otherwise.
+///
+/// Windows refuses to terminate a process whose exit has begun, through a termination or its own
+/// exit, with `ERROR_ACCESS_DENIED`, which a handle that has terminate access gets only then. It
+/// signals the process only once the process's last thread has exited, so a check of the handle
+/// may not show the exit yet.
+fn refused_termination(error: io::Error) -> io::Result<()> {
+    if error.raw_os_error() == Some(ERROR_ACCESS_DENIED as i32) {
+        Ok(())
+    } else {
+        Err(error)
+    }
+}
+
 /// Opens a process, returning `None` if it does not exist or belongs to another user.
 ///
 /// OpenVMM always runs as the calling user, so a process that denies access cannot be the
@@ -199,23 +214,47 @@ impl ProcessHandle {
 
     /// Terminates the process with status 1, unless it has exited, and fails if this user may
     /// not terminate process `pid`.
+    ///
+    /// A process that is exiting already needs no ending either. Windows refuses to terminate it,
+    /// as [`refused_termination`] describes, before it signals the process's exit.
     pub(crate) fn kill(&self, pid: u32) -> io::Result<()> {
-        let result = if self.terminate {
-            // SAFETY: the handle has terminate access.
-            let terminated = unsafe { TerminateProcess(raw(&self.process), 1) } != 0;
-            if terminated {
-                Ok(())
-            } else {
-                Err(io::Error::last_os_error())
-            }
-        } else {
-            Err(io::Error::new(
-                io::ErrorKind::PermissionDenied,
-                format!("this user may not terminate process {pid}"),
-            ))
-        };
-        super::unless_exited(result, || has_exited(&self.process))
+        end_process(
+            self.terminate,
+            pid,
+            || {
+                // SAFETY: `end_process` terminates only through a handle with terminate access.
+                if unsafe { TerminateProcess(raw(&self.process), 1) } != 0 {
+                    Ok(())
+                } else {
+                    Err(io::Error::last_os_error())
+                }
+            },
+            || has_exited(&self.process),
+        )
     }
+}
+
+/// Returns the outcome of ending process `pid`, as [`ProcessHandle::kill`] does through a handle
+/// that has terminate access if `terminate`: `terminate_process` terminates the process, and
+/// `exited` checks the handle without waiting.
+///
+/// A termination that Windows refuses because the process is exiting succeeds, as
+/// [`refused_termination`] describes, and so does any failure once `exited` shows the exit.
+fn end_process(
+    terminate: bool,
+    pid: u32,
+    terminate_process: impl FnOnce() -> io::Result<()>,
+    exited: impl FnOnce() -> io::Result<bool>,
+) -> io::Result<()> {
+    let result = if terminate {
+        terminate_process().or_else(refused_termination)
+    } else {
+        Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!("this user may not terminate process {pid}"),
+        ))
+    };
+    super::unless_exited(result, exited)
 }
 
 /// Opens the process `pid` if it still runs with the creation time `start_time`, and returns
@@ -347,10 +386,10 @@ impl LaunchedProcess {
     pub(crate) fn request_termination(&self) -> io::Result<()> {
         // SAFETY: CreateProcessW returned the handle with full access.
         if unsafe { TerminateProcess(raw(&self.process), 1) } == 0 {
-            let error = io::Error::last_os_error();
-            // A process that already exited cannot be terminated; Python ignores that too.
-            if self.wait_timeout(Duration::ZERO)?.is_none() {
-                return Err(error);
+            // A process that is exiting or exited cannot be terminated; Python ignores that too.
+            let refused = refused_termination(io::Error::last_os_error());
+            if refused.is_err() && self.wait_timeout(Duration::ZERO)?.is_none() {
+                return refused;
             }
         }
         Ok(())
@@ -1415,6 +1454,45 @@ mod tests {
         let mut units = command_line(OsStr::new(program), &arguments).unwrap();
         assert_eq!(units.pop(), Some(0));
         String::from_utf16(&units).unwrap()
+    }
+
+    #[test]
+    fn a_process_that_is_exiting_counts_as_killed_before_its_exit_shows() {
+        let denied = || Err(io::Error::from_raw_os_error(ERROR_ACCESS_DENIED as i32));
+        let invalid = || Err(io::Error::from_raw_os_error(ERROR_INVALID_PARAMETER as i32));
+        // Windows refused to terminate a process whose exit began, which the handle does not
+        // show yet.
+        end_process(true, 7, denied, || Ok(false)).unwrap();
+        // Other failures stand until the exit shows.
+        let failure = end_process(true, 7, invalid, || Ok(false)).unwrap_err();
+        assert_eq!(failure.raw_os_error(), Some(ERROR_INVALID_PARAMETER as i32));
+        end_process(true, 7, invalid, || Ok(true)).unwrap();
+        // Without terminate access, nothing is terminated, and only a shown exit succeeds.
+        let refused = end_process(false, 7, || panic!("terminated"), || Ok(false)).unwrap_err();
+        assert_eq!(refused.kind(), io::ErrorKind::PermissionDenied);
+        end_process(false, 7, || panic!("terminated"), || Ok(true)).unwrap();
+    }
+
+    #[test]
+    fn windows_refuses_to_terminate_a_process_that_exited_with_access_denied() {
+        let mut child = std::process::Command::new("ping")
+            .args(["-n", "60", "127.0.0.1"])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        let start_time = process_start_time(pid).unwrap().unwrap();
+        let process = open_process(pid, start_time).unwrap().unwrap();
+        assert!(process.terminate);
+        child.kill().unwrap();
+        child.wait().unwrap();
+        // SAFETY: the handle has terminate access.
+        let terminated = unsafe { TerminateProcess(raw(&process.process), 1) } != 0;
+        let error = io::Error::last_os_error();
+        assert!(!terminated);
+        assert_eq!(error.raw_os_error(), Some(ERROR_ACCESS_DENIED as i32));
+        process.kill(pid).unwrap();
     }
 
     #[test]
