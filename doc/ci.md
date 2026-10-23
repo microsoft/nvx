@@ -1691,7 +1691,7 @@ family alone, every test but each family, and every test outside the families.
 | --- | --- |
 | Python semantics | `host::python::golden::` |
 | Launch profile and options | `host::sandbox::golden::` |
-| Egress policies | `every_fixture_case_compiles_as_python_compiled_it`, `unreadable_files_fail_as_in_python`, and `paths_print_as_pathlib_prints_them`, in `host::network::policy::tests` |
+| Egress policies | The tests of `host::network::policy::tests` that read its fixture: `every_fixture_case_compiles_as_python_compiled_it`, `unreadable_files_fail_as_in_python`, `paths_print_as_pathlib_prints_them`, `compiled_rules_read_back_as_native_rules_lower_to_themselves`, and `every_fixture_case_has_the_properties_that_replace_the_fixture` |
 | CLI scenarios | `nvx_rs_reproduces_the_recorded_scenarios`, in `tests/cli.rs` |
 
 One build serves every selection, so every report instruments the same lines

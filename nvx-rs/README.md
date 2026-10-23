@@ -166,6 +166,25 @@ hand-written edge cases, and a seeded random corpus, which the tests replay
 without Python; `NVX_EGRESS_POLICY_FIXTURE` points the tests at another corpus
 in the same format. See [Python parity](#python-parity).
 
+Tests whose expectations come from the format rather than from recorded
+outcomes check the compiler too, and are to replace the fixture
+([microsoft/nvx#729](https://github.com/microsoft/nvx/issues/729)). A reference
+model of policies, written from the format that
+[`doc/run.md`](../doc/run.md#run-openvmm-directly) documents, decides which
+packets the rules of an action match, and which packets the native rules that
+it lowers to match. Properties then hold for the policies that a `proptest` port
+of the generator of the fixture's random corpus draws, for networks at the ends
+of each family's addresses, and for the fixture's inputs: each action lowers to
+canonical native rules, none redundant, that match exactly what the model
+matches, at one point of every cell that the boundaries of the networks and port
+ranges delimit; an action is refused exactly when it needs more than 256 native
+rules; the order of the rules, repeated rules, and networks split into their
+halves change no lowering; `allow` and `deny` lower independently; and policy
+files, their values, and `NetworkPolicy` rules compile alike and
+deterministically, or fail with an error. A test of each rule of the format's
+grammar checks the field path, or the file, that each refusal names, a fragment
+of its reason, and its error code.
+
 ## Distro bindings
 
 Three separate checks guard the distro layer of a sandbox, and only explicit
@@ -1052,7 +1071,9 @@ accepts or refuses OpenVMM's vectors and cases of the `NVXS` session as they
 say, and, on Linux, the guest's listener announcements match
 `tests/vectors/nvxl-v1.txt`. Property tests check that records round-trip, and
 that the `NVXS` record parser and the host's and the guest's `EXEC` and `MAPS`
-decoders return, never panic, on arbitrary bytes. The NVXS test drives the
+decoders return, never panic, on arbitrary bytes; those of the egress policy
+compiler compare it with a reference model of the format
+([Egress policy files](#egress-policy-files)). The NVXS test drives the
 host's and the guest's roles of the session and their connections through a
 broker that relays records as OpenVMM's does, with messages of an application
 framing of its own that span records. The store test crashes orchestrator
