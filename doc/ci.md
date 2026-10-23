@@ -111,6 +111,10 @@ it once, and the first snapshot a second time to prove that a restore leaves it
 reusable. `restore-processors` captures one boot-online CPU with capacity 8 and
 probes the CPUs that each restore target activated. After the 1/2/4/8-CPU
 restores, it restores the same snapshot once without `--restore-processors`.
+`platform-restore-processors` does the same for a platform snapshot of
+capacity 4, with the requested counts up to 4: its capture boots with
+`maxcpus=1` and sandbox blocks, each restore must also report the platform
+repair, and OpenVMM must refuse the counts 0, 3, and 8 before the guest runs.
 After the warp probe, every `smp-snapshot` and `restore-processors` restore
 runs `/sbin/nvx-time status`, which waits for the restore's deferred checks;
 it must exit 0 with a passing `NVX-TIME-ABI ... phase=restore` line that

@@ -118,6 +118,7 @@ MICROVM_TEST_SCENARIOS = (
     "managed-lifecycle",
     "managed-exec-config",
     "network-snapshot",
+    "platform-restore-processors",
     "private-network-ingress",
     "restore-downtime",
     "restore-memory",
@@ -139,6 +140,7 @@ UBUNTU_UNSUPPORTED_SCENARIOS = frozenset(("console-snapshot",))
 SANDBOX_CONTROL_SCENARIOS = frozenset(
     (
         "managed-exec-config",
+        "platform-restore-processors",
         "sandbox-blocks",
         "sandbox-lifecycle",
         "sandbox-proxy-only",
@@ -297,6 +299,21 @@ BOOT_MARKER = b"NVX-GUEST-BOOT-OK:"
 GUEST_BOOT_COMPLETION_MARKER = b"NVX-GUEST-BOOT-CHECK-OK"
 GUEST_IDENTITY_COMPLETION_MARKER = b"NVX-GUEST-IDENTITY-OK"
 RESTORE_PROCESSORS_FAILURE_MARKER = b"NVX-RESTORE-PROCESSORS-FAIL"
+# A platform snapshot opts into restore-time vCPU activation as an untiered one
+# does, by capturing its capacity booted with maxcpus=. A capacity of 4 leaves
+# a supported count, 8, above it.
+PLATFORM_RESTORE_PROCESSORS_CAPACITY = 4
+PLATFORM_RESTORE_PROCESSORS_BOOT_ONLINE = 1
+# The restore-online counts that OpenVMM refuses before the guest runs, and
+# why: counts that a microVM does not support, and a supported count above the
+# capacity. The snapshot's restore preparation checks them before the
+# command-line validation, which would refuse the unsupported counts too.
+PLATFORM_RESTORE_PROCESSORS_REJECTED = (
+    (0, b"restore-online VP count 0 is not supported"),
+    (3, b"restore-online VP count 3 is not supported"),
+    (8, b"restore-online VP count 8 exceeds VP capacity 4"),
+)
+PLATFORM_POST_RESTORE_MARKER = b"NVX-POST-RESTORE-OK: tier=platform"
 # Records the time ABI rates and restore clock report of each restore. These
 # records are written before the restored VPs run, so they never split a guest
 # console line; targets that log while the guest runs, such as virt_kvm's
@@ -5043,6 +5060,137 @@ def run_restore_processors(
                 )
 
 
+def run_platform_restore_processors(
+    executable: Path,
+    kernel: Path,
+    initrd: Path,
+    backend: str,
+    processor_counts: list[int],
+    *,
+    memory_mib: int,
+    timeout: float,
+    output_dir: Path,
+) -> None:
+    """Bring a different vCPU prefix online in each clone of one platform
+    snapshot.
+
+    The platform capture boots its capacity with ``maxcpus=1``, its only
+    caller token. Each restore of a requested count up to the capacity, and
+    one without a target, runs the platform repair and the checks of
+    ``restore-processors``. OpenVMM refuses unsupported and over-capacity
+    counts before the guest runs.
+    """
+    capacity = PLATFORM_RESTORE_PROCESSORS_CAPACITY
+    boot_online = PLATFORM_RESTORE_PROCESSORS_BOOT_ONLINE
+    script = _read_script("restore-processors.sh") + post_restore_checks()
+    environment = _restore_environment()
+    environment["OPENVMM_LOG"] = TIME_ABI_RESTORE_LOG_FILTER
+    environment[SNAPSHOT_PROFILE_ENV] = "1"
+    with tempfile.TemporaryDirectory(
+        prefix="nvx-platform-restore-processors-"
+    ) as temporary:
+        root = Path(temporary)
+        snapshot_path = root / "snapshot"
+        layer = root / "distro.erofs"
+        capture_scratch = root / "capture-scratch.raw"
+        _write_pattern(layer, 1024 * 1024, 0x3C)
+        _write_pattern(capture_scratch, 1024 * 1024, 0xA5)
+        boot_command = workload_boot_command(
+            executable,
+            backend,
+            kernel,
+            initrd,
+            memory_mib,
+            f"maxcpus={boot_online}",
+            processors=capacity,
+        )
+        capture_snapshot(
+            [
+                *boot_command,
+                "--snapshot-destination",
+                str(snapshot_path),
+                "--snapshot-tier",
+                "platform",
+                "--microvm-sandbox-block",
+                _block_arg("distro", layer, read_only=True),
+                "--microvm-sandbox-block",
+                _block_arg("scratch", capture_scratch, read_only=False),
+            ],
+            snapshot_path,
+            timeout=timeout,
+            processors=boot_online,
+            post_restore_script=script,
+            log_path=output_dir / "platform-restore-processors-capture.log",
+        )
+        fingerprint = _scratch_snapshot_fingerprint(snapshot_path)
+
+        def restore_command(target: int | None, name: str) -> list[str]:
+            # Each clone gets its own fresh scratch of the captured geometry.
+            scratch = root / f"restore-scratch-{name}.raw"
+            _write_pattern(scratch, 1024 * 1024, 0x5A)
+            command = snapshot_restore_command(
+                executable,
+                backend,
+                snapshot_path,
+                processors=capacity,
+                restore_processors=target,
+            )
+            command.extend(
+                (
+                    "--microvm-sandbox-block",
+                    _block_arg("distro", layer, read_only=True),
+                    "--microvm-sandbox-block",
+                    _block_arg("scratch", scratch, read_only=False),
+                )
+            )
+            return command
+
+        # An untargeted restore keeps the captured boot-online prefix.
+        targets: list[int | None] = [
+            *(count for count in dict.fromkeys(processor_counts) if count <= capacity),
+            None,
+        ]
+        for target in targets:
+            name = "untargeted" if target is None else str(target)
+            online = boot_online if target is None else target
+            context = f"platform {_restore_label(target)}"
+            command = restore_command(target, name)
+            output = _measure_restore(
+                command,
+                context=context,
+                environment=environment,
+                timeout=timeout,
+                log_path=output_dir / f"platform-restore-processors-{name}.log",
+                failure_marker=RESTORE_PROCESSORS_FAILURE_MARKER,
+            )
+            if not contains_output_line(output, PLATFORM_POST_RESTORE_MARKER):
+                raise RuntimeError(f"{context} did not run the platform repair")
+            marker = f"NVX-RESTORE-PROCESSORS-OK count={online}".encode()
+            if not contains_output_line(output, marker):
+                raise RuntimeError(f"{context} did not report {marker.decode()!r}")
+            _check_restore_warp(output, processors=online, context=context)
+            _check_restore_status(output, command, processors=online, context=context)
+            _check_restore_vp_bindings(
+                output,
+                backend,
+                target=target,
+                capacity=capacity,
+            )
+            if _scratch_snapshot_fingerprint(snapshot_path) != fingerprint:
+                raise RuntimeError(f"{context} modified snapshot artifacts")
+
+        for target, reason in PLATFORM_RESTORE_PROCESSORS_REJECTED:
+            _expect_process_failure(
+                restore_command(target, f"rejected-{target}"),
+                output_dir / f"platform-restore-processors-rejected-{target}.log",
+                timeout,
+                reason,
+                forbidden_markers=(RESTORE_MARKER,),
+            )
+        if _scratch_snapshot_fingerprint(snapshot_path) != fingerprint:
+            raise RuntimeError("a refused platform restore modified snapshot artifacts")
+
+
 def run_restore_downtime(
     executable: Path,
     kernel: Path,
@@ -8092,6 +8240,27 @@ def _run_scenarios(
             processors=args.processors,
         )
         run_restore_processors(
+            executable,
+            kernel,
+            initrd,
+            args.backend,
+            args.processors,
+            memory_mib=args.memory_mib,
+            timeout=args.timeout,
+            output_dir=output_dir,
+        )
+    if "platform-restore-processors" in scenarios:
+        report.start(
+            "platform-restore-processors",
+            "Running microVM platform-snapshot restore-processor correctness on "
+            f"OpenVMM/{args.backend}",
+            processors=[
+                count
+                for count in args.processors
+                if count <= PLATFORM_RESTORE_PROCESSORS_CAPACITY
+            ],
+        )
+        run_platform_restore_processors(
             executable,
             kernel,
             initrd,

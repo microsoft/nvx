@@ -235,17 +235,20 @@ def _restore_processors_measure(
     *,
     mshv_prefix: bool = True,
     warp_offset_ns: int = 40,
+    capacity: int = 8,
+    prefix: bytes = b"",
 ) -> MagicMock:
     def measure(command: list[str], **kwargs: object) -> None:
         target = _restore_target(command)
         online = 1 if target is None else target
-        vp_count = 8
+        vp_count = capacity
         if mshv_prefix and backend == "mshv" and target is not None:
             vp_count = target
         log_path = cast(Path, kwargs["log_path"])
         log_path.parent.mkdir(parents=True, exist_ok=True)
         log_path.write_bytes(
-            f"NVX-RESTORE-PROCESSORS-OK count={online}\r\n".encode()
+            prefix
+            + f"NVX-RESTORE-PROCESSORS-OK count={online}\r\n".encode()
             + _warp_probe_output(online, offset_ns=warp_offset_ns)
             # The snapshot's guest booted with one online CPU.
             + _restore_status_output(backend, online, boot_cpus=1)
@@ -9409,6 +9412,187 @@ class MicrovmTests(unittest.TestCase):
         )
         self.assertIs(raised.exception.__cause__, failure)
 
+    def _run_platform_restore_processors(
+        self,
+        backend: str,
+        processor_counts: list[int],
+        output_dir: Path,
+        measure_once: MagicMock,
+        *,
+        fingerprints: list[tuple[str, str, str, str | None]] | None = None,
+    ) -> tuple[MagicMock, MagicMock, MagicMock]:
+        fingerprint = ("manifest", "state", "memory", None)
+        with (
+            patch.object(
+                microvm_tests,
+                "workload_boot_command",
+                return_value=["openvmm", "boot"],
+            ) as workload_boot_command,
+            patch.object(microvm_tests, "capture_snapshot") as capture_snapshot,
+            patch.object(microvm_tests, "measure_once", measure_once),
+            patch.object(
+                microvm_tests,
+                "_scratch_snapshot_fingerprint",
+                side_effect=fingerprints or itertools.repeat(fingerprint),
+            ),
+            patch.object(microvm_tests, "_expect_process_failure") as expect_failure,
+        ):
+            microvm_tests.run_platform_restore_processors(
+                Path("openvmm"),
+                Path("vmlinux"),
+                Path("initrd"),
+                backend,
+                processor_counts,
+                memory_mib=128,
+                timeout=60,
+                output_dir=output_dir,
+            )
+        return workload_boot_command, capture_snapshot, expect_failure
+
+    def test_platform_restore_processors_activate_each_target_of_one_capture(self):
+        def blocks(command: list[str]) -> list[str]:
+            return [
+                command[index + 1]
+                for index, argument in enumerate(command)
+                if argument == "--microvm-sandbox-block"
+            ]
+
+        with tempfile.TemporaryDirectory() as temporary:
+            output_dir = Path(temporary) / "logs"
+            measure_once = _restore_processors_measure(
+                "mshv",
+                capacity=4,
+                prefix=microvm_tests.PLATFORM_POST_RESTORE_MARKER + b"\r\n",
+            )
+            workload_boot_command, capture_snapshot, expect_failure = (
+                self._run_platform_restore_processors(
+                    "mshv", [1, 2, 4, 8], output_dir, measure_once
+                )
+            )
+            logs = sorted(path.name for path in output_dir.iterdir())
+
+        self.assertIn(
+            "platform-restore-processors", microvm_tests.MICROVM_TEST_SCENARIOS
+        )
+        self.assertIn(
+            "platform-restore-processors", microvm_tests.SANDBOX_CONTROL_SCENARIOS
+        )
+        self.assertEqual(workload_boot_command.call_args.kwargs["processors"], 4)
+        # A platform command line carries no tenant configuration, so the
+        # boot-online count is the capture's only caller token.
+        self.assertEqual(workload_boot_command.call_args.args[5], "maxcpus=1")
+        capture = capture_snapshot.call_args.args[0]
+        self.assertEqual(capture[capture.index("--snapshot-tier") + 1], "platform")
+        capture_blocks = blocks(capture)
+        self.assertEqual(len(capture_blocks), 2)
+        self.assertRegex(capture_blocks[0], r"^distro:file:.+,ro$")
+        self.assertRegex(capture_blocks[1], r"^scratch:file:.+(?<!,ro)$")
+        self.assertEqual(capture_snapshot.call_args.kwargs["processors"], 1)
+        self.assertEqual(
+            capture_snapshot.call_args.kwargs["post_restore_script"],
+            microvm_tests._read_script("restore-processors.sh")
+            + time_abi.warp_probe_script()
+            + time_abi.status_script(),
+        )
+        # Counts above the capacity of 4 are not restore targets.
+        self.assertEqual(
+            [_restore_target(entry.args[0]) for entry in measure_once.call_args_list],
+            [1, 2, 4, None],
+        )
+        restore_scratches: list[str] = []
+        for entry in measure_once.call_args_list:
+            command = entry.args[0]
+            self.assertEqual(command[command.index("--processors") + 1], "4")
+            restore_blocks = blocks(command)
+            self.assertEqual(restore_blocks[0], capture_blocks[0])
+            self.assertRegex(restore_blocks[1], r"^scratch:file:.+(?<!,ro)$")
+            restore_scratches.append(restore_blocks[1])
+            self.assertEqual(entry.kwargs["marker"], benchmark.RESTORE_MARKER)
+            self.assertTrue(entry.kwargs["guest_exit_prequeued"])
+            self.assertEqual(
+                entry.kwargs["environment"][benchmark.SNAPSHOT_PROFILE_ENV], "1"
+            )
+        self.assertNotIn(capture_blocks[1], restore_scratches)
+        self.assertEqual(len(set(restore_scratches)), len(restore_scratches))
+        self.assertEqual(
+            [
+                (_restore_target(entry.args[0]), entry.args[3])
+                for entry in expect_failure.call_args_list
+            ],
+            [
+                (0, b"restore-online VP count 0 is not supported"),
+                (3, b"restore-online VP count 3 is not supported"),
+                (8, b"restore-online VP count 8 exceeds VP capacity 4"),
+            ],
+        )
+        for entry in expect_failure.call_args_list:
+            self.assertEqual(
+                entry.kwargs["forbidden_markers"], (benchmark.RESTORE_MARKER,)
+            )
+        self.assertEqual(
+            logs,
+            [
+                "platform-restore-processors-1.log",
+                "platform-restore-processors-2.log",
+                "platform-restore-processors-4.log",
+                "platform-restore-processors-untargeted.log",
+            ],
+        )
+
+    def test_platform_restore_processors_require_the_platform_repair(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            with self.assertRaisesRegex(
+                RuntimeError,
+                r"^platform restore target 2 did not run the platform repair$",
+            ):
+                self._run_platform_restore_processors(
+                    "kvm",
+                    [2],
+                    Path(temporary),
+                    _restore_processors_measure("kvm", capacity=4),
+                )
+
+    def test_platform_restore_processors_check_the_mshv_prefix(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            with self.assertRaisesRegex(
+                RuntimeError,
+                r"restore target 2 bound VPs \[0, 1, 2, 3\] on mshv; "
+                r"expected exactly VPs 0\.\.1 of capacity 4",
+            ):
+                self._run_platform_restore_processors(
+                    "mshv",
+                    [2],
+                    Path(temporary),
+                    _restore_processors_measure(
+                        "mshv",
+                        mshv_prefix=False,
+                        capacity=4,
+                        prefix=microvm_tests.PLATFORM_POST_RESTORE_MARKER + b"\r\n",
+                    ),
+                )
+
+    def test_platform_restore_processors_keep_the_snapshot_intact(self):
+        original = ("manifest", "state", "memory", None)
+        changed = ("manifest", "state", "changed", None)
+        with tempfile.TemporaryDirectory() as temporary:
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "^a refused platform restore modified snapshot artifacts$",
+            ):
+                self._run_platform_restore_processors(
+                    "whp",
+                    [1],
+                    Path(temporary),
+                    _restore_processors_measure(
+                        "whp",
+                        capacity=4,
+                        prefix=microvm_tests.PLATFORM_POST_RESTORE_MARKER + b"\r\n",
+                    ),
+                    # The capture, the restore of 1, the untargeted restore,
+                    # and the refused restores.
+                    fingerprints=[original, original, original, changed],
+                )
+
     def test_restore_downtime_shares_one_window_and_waits_for_the_restore_marker(
         self,
     ):
@@ -10419,6 +10603,8 @@ class MicrovmTests(unittest.TestCase):
                     "--scenario",
                     "restore-processors",
                     "--scenario",
+                    "platform-restore-processors",
+                    "--scenario",
                     "time-abi-conformance",
                     "--processors",
                     "2",
@@ -10432,10 +10618,13 @@ class MicrovmTests(unittest.TestCase):
                 patch.object(microvm_tests, "require_file", side_effect=require),
                 patch.object(microvm_tests, "run_smp_snapshot") as smp_snapshot,
                 patch.object(microvm_tests, "run_restore_processors") as processors,
+                patch.object(
+                    microvm_tests, "run_platform_restore_processors"
+                ) as platform_processors,
                 patch.object(microvm_tests, "run_time_abi_conformance") as conformance,
             ):
                 self.assertEqual(microvm_tests.run(args), 0)
-        for run in (smp_snapshot, processors):
+        for run in (smp_snapshot, processors, platform_processors):
             run.assert_called_once()
             self.assertEqual(run.call_args.args[4], [2, 4])
             self.assertEqual(run.call_args.kwargs["output_dir"], output_dir)
@@ -10578,7 +10767,11 @@ class MicrovmTests(unittest.TestCase):
         for scenario in scenarios:
             if scenario in ("console-exit", "smp", "smp-lapic"):
                 expected.extend((scenario, [processors]) for processors in (2, 1))
-            elif scenario in ("smp-snapshot", "restore-processors"):
+            elif scenario in (
+                "smp-snapshot",
+                "restore-processors",
+                "platform-restore-processors",
+            ):
                 expected.append((scenario, [2, 1]))
             elif scenario == "time-abi-conformance":
                 expected.append((scenario, [2]))
