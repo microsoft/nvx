@@ -1692,7 +1692,9 @@ family alone, every test but each family, and every test outside the families.
 | Python semantics | `host::python::golden::` |
 | Launch profile and options | `host::sandbox::golden::` |
 | Egress policies | `every_fixture_case_compiles_as_python_compiled_it`, `unreadable_files_fail_as_in_python`, and `paths_print_as_pathlib_prints_them`, in `host::network::policy::tests` |
-| CLI scenarios | `nvx_rs_reproduces_the_recorded_scenarios`, in `tests/cli.rs` |
+
+The family of the CLI, the scenarios that `tests/cli.rs` replayed, retired
+with them in [microsoft/nvx#728](https://github.com/microsoft/nvx/issues/728).
 
 One build serves every selection, so every report instruments the same lines
 and branches, and the script fails before it measures when a family's test
