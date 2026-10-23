@@ -6,6 +6,7 @@ use std::os::windows::fs::OpenOptionsExt;
 use std::os::windows::io::{AsHandle, AsRawHandle, FromRawHandle, OwnedHandle, RawHandle};
 use std::path::Path;
 use std::sync::{Mutex, MutexGuard, PoisonError};
+use std::thread;
 use std::time::{Duration, Instant};
 use std::{mem, ptr};
 
@@ -134,6 +135,20 @@ fn has_exited(process: &OwnedHandle) -> io::Result<bool> {
     }
 }
 
+/// Returns how a wait with `left` before its deadline goes on: the whole milliseconds, rounded
+/// down, for which it waits for the process, never `INFINITE`, and, when there are none, the
+/// remainder below a millisecond that it sleeps before it checks the process a last time.
+fn wait_step(left: Duration) -> (u32, Duration) {
+    let milliseconds =
+        u32::try_from(left.as_millis()).map_or(INFINITE - 1, |value| value.min(INFINITE - 1));
+    let sleep = if milliseconds == 0 {
+        left
+    } else {
+        Duration::ZERO
+    };
+    (milliseconds, sleep)
+}
+
 /// Opens a process, returning `None` if it does not exist or belongs to another user.
 ///
 /// OpenVMM always runs as the calling user, so a process that denies access cannot be the
@@ -180,17 +195,25 @@ impl ProcessHandle {
     }
 
     /// Waits until the process exits or `deadline` passes, and returns whether it exited.
+    ///
+    /// `WaitForSingleObject` waits for whole milliseconds, which the system timer rounds up to
+    /// its ticks of up to about 16 ms, so a remainder below a millisecond is slept rather than
+    /// rounded up to a millisecond, before a last check, as [`wait_step`] describes. The sleep
+    /// takes about the remainder where `thread::sleep` has a high-resolution timer, as on Windows
+    /// 10 version 1803 and later, and up to a tick otherwise, and never ends before the deadline.
     pub(crate) fn wait(&self, deadline: Instant) -> io::Result<Option<bool>> {
         loop {
-            let left = deadline.saturating_duration_since(Instant::now());
-            // Round up, so that a wait shorter than a millisecond does not spin, and never wait
-            // for INFINITE.
-            let milliseconds = u32::try_from(left.as_nanos().div_ceil(1_000_000))
-                .map_or(INFINITE - 1, |value| value.min(INFINITE - 1));
+            let (milliseconds, sleep) =
+                wait_step(deadline.saturating_duration_since(Instant::now()));
+            if !sleep.is_zero() {
+                thread::sleep(sleep);
+            }
             // SAFETY: the handle has synchronize access.
             match unsafe { WaitForSingleObject(raw(&self.process), milliseconds) } {
                 WAIT_OBJECT_0 => return Ok(Some(true)),
-                WAIT_TIMEOUT if Instant::now() >= deadline => return Ok(Some(false)),
+                WAIT_TIMEOUT if milliseconds == 0 || Instant::now() >= deadline => {
+                    return Ok(Some(false));
+                }
                 WAIT_TIMEOUT => {}
                 _ => return Err(io::Error::last_os_error()),
             }
@@ -1415,6 +1438,46 @@ mod tests {
         let mut units = command_line(OsStr::new(program), &arguments).unwrap();
         assert_eq!(units.pop(), Some(0));
         String::from_utf16(&units).unwrap()
+    }
+
+    #[test]
+    fn a_wait_sleeps_a_remainder_below_a_millisecond_instead_of_waiting_a_tick() {
+        assert_eq!(wait_step(Duration::ZERO), (0, Duration::ZERO));
+        for remainder in [Duration::from_micros(300), Duration::from_micros(999)] {
+            assert_eq!(wait_step(remainder), (0, remainder));
+        }
+        assert_eq!(wait_step(Duration::from_micros(1_999)), (1, Duration::ZERO));
+        let infinite = Duration::from_millis(u64::from(INFINITE));
+        assert_eq!(wait_step(infinite), (INFINITE - 1, Duration::ZERO));
+        assert_eq!(wait_step(Duration::MAX), (INFINITE - 1, Duration::ZERO));
+    }
+
+    #[test]
+    fn a_wait_with_less_than_a_millisecond_left_ends_at_its_deadline() {
+        let mut child = std::process::Command::new("ping")
+            .args(["-n", "60", "127.0.0.1"])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        let start_time = process_start_time(pid).unwrap().unwrap();
+        let process = open_process(pid, start_time).unwrap().unwrap();
+        let started = Instant::now();
+        let mut waits = Vec::new();
+        for _ in 0..20 {
+            let deadline = Instant::now() + Duration::from_micros(300);
+            waits.push((process.wait(deadline), Instant::now() >= deadline));
+        }
+        let elapsed = started.elapsed();
+        child.kill().unwrap();
+        child.wait().unwrap();
+        for (wait, ended_after_deadline) in waits {
+            assert_eq!(wait.unwrap(), Some(false));
+            assert!(ended_after_deadline);
+        }
+        assert!(elapsed < Duration::from_secs(1), "{elapsed:?}");
+        assert!(process.wait(Instant::now()).unwrap().unwrap());
     }
 
     #[test]
