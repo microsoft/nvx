@@ -192,9 +192,9 @@ fn assert_capability(state: &Path) {
 }
 
 /// A configuration of a managed sandbox, and what its lifecycle shows of it.
-pub(crate) struct Configuration {
+struct Configuration {
     /// The name of the case.
-    pub(crate) name: &'static str,
+    name: &'static str,
     /// The hosts on which it runs.
     hosts: Hosts,
     /// The `--state-dir` of the sandbox, with placeholders.
@@ -260,7 +260,7 @@ fn exported(options: Options, children: &[&str]) -> Options {
 }
 
 /// Returns the configurations of every kind of sandbox.
-pub(crate) fn configurations() -> Vec<Configuration> {
+fn configurations() -> Vec<Configuration> {
     let workdir = |directory: &'static str| -> (Vec<&'static str>, &'static str) {
         (
             vec!["--entrypoint", "/bin/pwd", "--cwd", directory],
@@ -634,9 +634,9 @@ fn lifecycles_of_every_configuration() {
 }
 
 /// A workload that `exec` runs in a running sandbox, and how it ends.
-pub(crate) struct Execution {
+struct Execution {
     /// The name of the case.
-    pub(crate) name: &'static str,
+    name: &'static str,
     /// The files that the case writes below the root first, with their contents.
     files: Vec<(&'static str, Content)>,
     /// The options of `exec` after `--state-dir`, with placeholders.
@@ -671,7 +671,7 @@ fn execution(name: &'static str, options: &[&str], status: i32, stdout: &str) ->
 }
 
 /// Returns the executions that `exec` runs, or refuses.
-pub(crate) fn executions() -> Vec<Execution> {
+fn executions() -> Vec<Execution> {
     let environment_file = |name, text| {
         let mut case = execution(
             name,
@@ -1253,10 +1253,10 @@ fn concurrent_starts(root: &Root) {
 }
 
 /// A refusal of a lifecycle operation: its name, and the steps that lead to it and check it.
-pub(crate) type Refusal = (&'static str, fn(&Root));
+type Refusal = (&'static str, fn(&Root));
 
 /// The refusals of the lifecycle operations.
-pub(crate) const REFUSALS: [Refusal; 10] = [
+const REFUSALS: [Refusal; 10] = [
     ("operations without a sandbox", operations_without_a_sandbox),
     (
         "refusals of a running sandbox",

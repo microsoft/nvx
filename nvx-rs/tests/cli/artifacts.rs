@@ -9,9 +9,9 @@ use serde_json::{Value, json};
 use crate::harness::{LINE_END, Root};
 
 /// A root whose artifacts `artifacts` lists.
-pub(crate) struct Listing {
+struct Listing {
     /// The name of the case.
-    pub(crate) name: &'static str,
+    name: &'static str,
     /// The variables that the case sets, with placeholders.
     environment: &'static [(&'static str, &'static str)],
     /// The OpenVMM that `artifacts` prints, with placeholders.
@@ -20,7 +20,7 @@ pub(crate) struct Listing {
 
 /// The roots whose artifacts `artifacts` lists: a checkout, and one whose OpenVMM `NVX_OPENVMM`
 /// overrides, which it does not check, since the variable may name an OpenVMM that does not exist.
-pub(crate) const LISTINGS: [Listing; 2] = [
+const LISTINGS: [Listing; 2] = [
     Listing {
         name: "checkout",
         environment: &[],

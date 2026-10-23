@@ -163,7 +163,7 @@ impl Root {
     }
 
     /// Returns a fresh, empty root.
-    pub(crate) fn empty() -> Self {
+    fn empty() -> Self {
         let directory = tempfile::Builder::new()
             .prefix("nvx-cli-")
             .tempdir()

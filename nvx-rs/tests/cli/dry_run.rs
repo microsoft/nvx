@@ -25,9 +25,9 @@ const COMMAS: [(&str, Content); 3] = [
 ];
 
 /// A dry run, and the OpenVMM command that it prints.
-pub(crate) struct DryRun {
+struct DryRun {
     /// The name of the case.
-    pub(crate) name: &'static str,
+    name: &'static str,
     /// The hosts on which it runs.
     hosts: Hosts,
     /// The files that the case writes below the root first, with their contents.
@@ -116,7 +116,7 @@ fn mount_child(index: usize, target: &str, host: &str, mode: &str) -> String {
 }
 
 /// Returns the dry runs of `nvx-rs sandbox run`.
-pub(crate) fn sandbox_dry_runs() -> Vec<DryRun> {
+fn sandbox_dry_runs() -> Vec<DryRun> {
     let network = || {
         one_shot()
             .with("--net", ["10.0.0.2/24"])
@@ -319,7 +319,7 @@ pub(crate) fn sandbox_dry_runs() -> Vec<DryRun> {
 }
 
 /// Returns the dry runs of `nvx-rs run`.
-pub(crate) fn run_dry_runs() -> Vec<DryRun> {
+fn run_dry_runs() -> Vec<DryRun> {
     let ubuntu = ("build/initramfs-ubuntu.cpio.gz", Content::Text("ubuntu\n"));
     let azure = (
         "build/initramfs-azurelinux.cpio.gz",

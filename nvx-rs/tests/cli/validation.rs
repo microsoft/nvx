@@ -30,9 +30,9 @@ const PACKAGELESS_MANIFEST: Content = Content::Text(
 const INITRAMFS: Content = Content::Text("initramfs\n");
 
 /// A command line that fails a check before it changes anything.
-pub(crate) struct Refusal {
+struct Refusal {
     /// The name of the case.
-    pub(crate) name: &'static str,
+    name: &'static str,
     /// The hosts that refuse it.
     hosts: Hosts,
     /// The files that the case writes below the root first, with their contents.
@@ -131,7 +131,7 @@ fn shares(count: usize) -> Vec<String> {
 }
 
 /// Returns the refusals of `nvx-rs sandbox`.
-pub(crate) fn sandbox_refusals() -> Vec<Refusal> {
+fn sandbox_refusals() -> Vec<Refusal> {
     let network_outside =
         &["network policy options are only valid for sandbox run or provision"][..];
     let exec_options = &["managed execution options", "sandbox exec"][..];
@@ -668,7 +668,7 @@ pub(crate) fn sandbox_refusals() -> Vec<Refusal> {
 }
 
 /// Returns the refusals of `nvx-rs run`.
-pub(crate) fn run_refusals() -> Vec<Refusal> {
+fn run_refusals() -> Vec<Refusal> {
     let targets = "with several shares, or a shared file";
     let budget = &["--mount", "--cmdline", "1024"][..];
     let two_shares = |cmdline: &str| {
