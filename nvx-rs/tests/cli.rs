@@ -2736,7 +2736,7 @@ usage: nvx.py sandbox [-h] [--layer ROLE,PATH,EROFS_UUID] [--scratch SCRATCH]
                       [--dry-run]
                       [{run,provision,start,exec,stop,deprovision}]
 nvx.py sandbox: error[argument-invalid]: argument --workload-user: --workload-user UID must be \
-between 1 and 4294967295
+between 1 and 4294967294
 ";
 
 #[test]

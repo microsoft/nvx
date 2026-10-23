@@ -2271,12 +2271,12 @@ class NvxRsTests(unittest.TestCase):
             nvx_rs.reported_error(
                 "usage: nvx.py sandbox [-h]\r\nnvx.py sandbox: error[argument-invalid]: "
                 "argument --workload-user: --workload-user UID must be between 1 and "
-                "4294967295\r\n"
+                "4294967294\r\n"
             ),
             nvx_rs.ReportedError(
                 "argument-invalid",
                 "argument --workload-user: --workload-user UID must be between 1 and "
-                "4294967295",
+                "4294967294",
             ),
         )
         for stderr in (
