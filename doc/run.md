@@ -531,7 +531,9 @@ complete while the restored vCPU remains stopped. With
 the source must have captured a canonical `maxcpus` boot-online prefix, and the
 guest onlines exactly the requested prefix before readiness and host input
 release. Targets are limited to 1, 2, 4, or 8 and cannot be below the captured
-boot-online count or above capacity. Legacy snapshots reject the option. The
+boot-online count or above capacity. Platform snapshots opt in the same way, so
+each clone of one platform capture can bring its own prefix online. Legacy
+snapshots reject the option. The
 peer must accept and read while startup is in progress; Windows flush
 completion waits for the named-pipe peer to consume the frame. Failure to
 write the complete event aborts and tears down the restore.
