@@ -1,7 +1,8 @@
 //! The configurations of every format that a build of `nvx-rs` or `nvx.py` wrote, from the
-//! hand-written `config.json` files of `tests/fixtures/state/`: `start` reads formats 1 and 7,
-//! which this build writes, and refuses the others, and the configurations that `nvx.py` wrote,
-//! without bindings, before it launches OpenVMM.
+//! hand-written `config.json` files of `tests/fixtures/state/`: `start` reads format 7, which this
+//! build writes, with shares or without, and format 1, which earlier builds wrote for a sandbox
+//! without shares, and refuses the others, and the configurations that `nvx.py` wrote, without
+//! bindings, before it launches OpenVMM.
 //!
 //! A fixture names the paths of a root as `{root/RELATIVE}`, the hypervisor that a provision
 //! records on this host as `{hypervisor}`, and the bindings of the root's distro layer and scratch
@@ -35,8 +36,25 @@ enum Start {
     Refused(&'static [&'static str]),
 }
 
+/// Returns the options with which a start launches OpenVMM for the sandbox of `format-1.json` and
+/// `format-7-without-shares.json`, a reader without shares, from those of the minimal sandbox.
+fn reader(options: Options) -> Options {
+    options
+        .with("--microvm-workload-identity", ["2000:2000"])
+        .with("--memory", ["320M"])
+        .sandbox_kernel(
+            "quiet",
+            &[
+                WORKLOAD[0],
+                "nvx_hostname=reader",
+                "nvx_memory_max=134217728",
+                "nvx_pids_max=33",
+            ],
+        )
+}
+
 /// The configurations of every format, as fixtures, and what a start does with each.
-fn formats() -> [(&'static str, &'static str, Start); 9] {
+fn formats() -> [(&'static str, &'static str, Start); 10] {
     let unsupported = &[
         "sandbox configuration has an unsupported format",
         "{root/state/config.json}",
@@ -46,20 +64,7 @@ fn formats() -> [(&'static str, &'static str, Start); 9] {
             "format 1",
             include_str!("../fixtures/state/format-1.json"),
             Start::Runs {
-                openvmm: |options| {
-                    options
-                        .with("--microvm-workload-identity", ["2000:2000"])
-                        .with("--memory", ["320M"])
-                        .sandbox_kernel(
-                            "quiet",
-                            &[
-                                WORKLOAD[0],
-                                "nvx_hostname=reader",
-                                "nvx_memory_max=134217728",
-                                "nvx_pids_max=33",
-                            ],
-                        )
-                },
+                openvmm: reader,
                 maps: None,
                 exec: (&["--entrypoint", "/bin/echo", "--arg", "one"], "one\n"),
             },
@@ -112,6 +117,15 @@ fn formats() -> [(&'static str, &'static str, Start); 9] {
                     },
                 ])),
                 exec: (&["--entrypoint", "/bin/pwd", "--cwd", "/data"], "/data\n"),
+            },
+        ),
+        (
+            "format 7 without shares",
+            include_str!("../fixtures/state/format-7-without-shares.json"),
+            Start::Runs {
+                openvmm: reader,
+                maps: None,
+                exec: (&["--entrypoint", "/bin/echo", "--arg", "seven"], "seven\n"),
             },
         ),
         // Formats 2 to 6 recorded shares as they were requested, which no start reads any more:

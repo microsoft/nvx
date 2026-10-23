@@ -571,7 +571,7 @@ earlier `nvx-rs` provisioned, which has no bindings or no typed network:
 
 | File | Contents |
 | --- | --- |
-| `config.json` | The provisioned sandbox, in format 1 without shares and in format 7 with the export plan of its shares under `export`, with the binding of its distro layer under `distro_binding`, that of its scratch image under `scratch_binding`, and its network under `network`, `null` for none, written as `json.dumps(value, indent=2, sort_keys=True)` writes it, with mode 0600, through a temporary file |
+| `config.json` | The provisioned sandbox, in format 7, with the export plan of its shares under `export`, `null` for none, the binding of its distro layer under `distro_binding`, that of its scratch image under `scratch_binding`, and its network under `network`, `null` for none, written as `json.dumps(value, indent=2, sort_keys=True)` writes it, with mode 0600, through a temporary file. `start` also reads the format 1 that earlier builds wrote for a sandbox without shares, with `mount` `null` and no `export` |
 | `sandbox.lock` | The store's lock, which serializes the lifecycle transitions |
 | `launch.json` | The store's journal of a start in progress, or of one that was interrupted |
 | `runtime.json` | The store's runtime record of the running VM, in its format 4: the OpenVMM process, by its ID, its start time, and the host's boot, its control endpoint, `STATE/control.sock` or `//./pipe/openvmm-microvm-HEX` on Windows, and the [runtime identity](#runtime-identity) of its start |

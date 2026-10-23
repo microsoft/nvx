@@ -1,5 +1,6 @@
-//! The CLI's own record in a state directory, `config.json` in formats 1 and 7, and the JSON
-//! reading and writing of the former `sandbox_lifecycle.py`.
+//! The CLI's own record in a state directory, `config.json`, which `provision` writes in format 7
+//! and `start` also reads in format 1, and the JSON reading and writing of the former
+//! `sandbox_lifecycle.py`.
 //!
 //! - [`write_json`] writes `json.dumps(value, indent=2, sort_keys=True) + "\n"` as
 //!   `Path.write_text` does, with the `\n`s turned into `os.linesep`, into a temporary file of
@@ -7,11 +8,12 @@
 //! - [`read_json`] reads a file as `json.loads(path.read_text(encoding="utf-8"))` does, and
 //!   accepts only an object whose version field equals, as `==` compares, one of the given
 //!   versions.
-//! - [`serialize_launch`] writes a provisioned launch, in format 1 without shares and in format 7
-//!   with the export plan of its shares, and [`deserialize_launch`] reads it back with the
-//!   conversions, defaults, and checks of `_deserialize_launch`. Formats 2 to 6 recorded the shares
-//!   as they were requested; `start` no longer reads them, and such a sandbox is provisioned
-//!   again.
+//! - [`serialize_launch`] writes a provisioned launch in format 7, with the export plan of its
+//!   shares under `export`, `null` without shares, and [`deserialize_launch`] reads it back with
+//!   the conversions, defaults, and checks of `_deserialize_launch`. It also reads format 1, which
+//!   earlier builds wrote for a sandbox without shares, with `mount` `null` and no `export`.
+//!   Formats 2 to 6 recorded the shares as they were requested; `start` no longer reads them, and
+//!   such a sandbox is provisioned again.
 //! - Every configuration also records the [`DistroBinding`] of the sandbox's distro layer, under
 //!   `distro_binding` in its serde form, which [`deserialize_binding`] reads back for `start` to
 //!   check. `nvx.py` never wrote one, and `start` refuses a configuration without one. The
@@ -46,10 +48,11 @@ use crate::host::sandbox::layer::{LayerRole, SandboxLayer};
 use crate::host::sandbox::scratch::ScratchBinding;
 use crate::host::sandbox::{SandboxLaunch, SandboxNetwork, SandboxSettings};
 
-/// The configuration of a sandbox without shares, whose `mount` is `null`.
+/// The configuration that earlier builds wrote for a sandbox without shares, whose `mount` is
+/// `null`, which `start` still reads.
 pub(crate) const CONFIG_FORMAT: u64 = 1;
-/// The configuration of a sandbox with shares, which records their export plan under `export`,
-/// in its serde form.
+/// The configuration that `provision` writes, which records the export plan of the sandbox's
+/// shares under `export`, in its serde form, or `null` for a sandbox without shares.
 pub(crate) const EXPORT_CONFIG_FORMAT: u64 = 7;
 /// Every configuration format that `start` reads.
 pub(crate) const CONFIG_FORMATS: [u64; 2] = [CONFIG_FORMAT, EXPORT_CONFIG_FORMAT];
@@ -235,15 +238,6 @@ pub(crate) fn read_json(
     Ok(document)
 }
 
-/// Returns the format of the configuration of a sandbox with `export`, the export plan of its
-/// shares, if any.
-pub(crate) fn config_format(export: Option<&ExportPlan>) -> u64 {
-    match export {
-        Some(_) => EXPORT_CONFIG_FORMAT,
-        None => CONFIG_FORMAT,
-    }
-}
-
 /// Returns `path.resolve()` as text.
 fn resolved(path: &std::path::Path) -> Result<String> {
     let text = crate::host::cli::sandbox::path_string(path)?;
@@ -324,7 +318,6 @@ pub(crate) fn serialize_launch(
     scratch: &RecordedScratch,
     config: &ProvisionConfig<'_>,
 ) -> Result<Value> {
-    let format = config_format(launch.export());
     // The distro layer is the one layer that a launch holds.
     let layer = &distro.layer;
     let layers = vec![dict([
@@ -343,7 +336,7 @@ pub(crate) fn serialize_launch(
         None => Value::Null,
     };
     let mut value = dict([
-        ("format", Value::from(format)),
+        ("format", Value::from(EXPORT_CONFIG_FORMAT)),
         ("layers", Value::List(layers)),
         ("scratch", Value::from(scratch.path.as_str())),
         ("hostname", Value::from(settings.hostname.as_str())),
@@ -371,24 +364,20 @@ pub(crate) fn serialize_launch(
         .and_then(python_value)
         .ok_or_else(|| Exit::error(ErrorCode::Other, "cannot record the scratch binding"))?;
     members.insert(SCRATCH_BINDING.to_owned(), binding);
-    match launch.export() {
-        Some(export) => {
-            let export = serde_json::to_value(export)
-                .ok()
-                .as_ref()
-                .and_then(python_value)
-                .ok_or_else(|| {
-                    Exit::error(
-                        ErrorCode::Other,
-                        "cannot record the export plan of the shares",
-                    )
-                })?;
-            members.insert(EXPORT.to_owned(), export);
-        }
-        None => {
-            members.insert("mount".to_owned(), Value::Null);
-        }
-    }
+    let export = match launch.export() {
+        Some(export) => serde_json::to_value(export)
+            .ok()
+            .as_ref()
+            .and_then(python_value)
+            .ok_or_else(|| {
+                Exit::error(
+                    ErrorCode::Other,
+                    "cannot record the export plan of the shares",
+                )
+            })?,
+        None => Value::Null,
+    };
+    members.insert(EXPORT.to_owned(), export);
     Ok(value)
 }
 
@@ -567,24 +556,49 @@ fn iterate(document: &Document, id: NodeId) -> std::result::Result<Vec<Option<No
     }
 }
 
-/// Reads the export plan of the shares that a configuration records under `export`, in its serde
-/// form, or `None` for a configuration without shares, whose `mount` is `null` or missing.
+/// The shares that a configuration records.
+struct RecordedShares {
+    /// Whether it records them under `export`, as format 7 does.
+    exported: bool,
+    /// Whether it records any.
+    any: bool,
+    /// Their export plan, if it records one.
+    plan: Option<ExportPlan>,
+}
+
+/// Reads the shares that a configuration records: in format 7, the export plan under `export`, in
+/// its serde form, or `null` for a sandbox without shares, and in format 1, none, with `mount`
+/// `null` or missing.
 ///
 /// A configuration with a share under `mount`, which only formats that `start` no longer reads
 /// recorded, reads as one with shares but no plan, which [`deserialize_launch`] refuses.
 fn deserialize_export(
     document: &Document,
     root: NodeId,
-) -> std::result::Result<(bool, Option<ExportPlan>), Malformed> {
+) -> std::result::Result<RecordedShares, Malformed> {
     if let Some(export) = member(document, root, EXPORT) {
-        let export = json_value(document, export, MAX_EXPORT_DEPTH)
-            .and_then(|value| serde_json::from_value(value).ok())
-            .ok_or(Malformed::Malformed)?;
-        return Ok((true, Some(export)));
+        let plan = if matches!(document.node(export), Node::Null) {
+            None
+        } else {
+            Some(
+                json_value(document, export, MAX_EXPORT_DEPTH)
+                    .and_then(|value| serde_json::from_value(value).ok())
+                    .ok_or(Malformed::Malformed)?,
+            )
+        };
+        return Ok(RecordedShares {
+            exported: true,
+            any: plan.is_some(),
+            plan,
+        });
     }
-    let shares = member(document, root, "mount")
+    let any = member(document, root, "mount")
         .is_some_and(|mount| !matches!(document.node(mount), Node::Null));
-    Ok((shares, None))
+    Ok(RecordedShares {
+        exported: false,
+        any,
+        plan: None,
+    })
 }
 
 /// Reads the launch that a configuration records, as `_deserialize_launch` does, and checks it
@@ -592,12 +606,13 @@ fn deserialize_export(
 ///
 /// A missing field, or a value of the wrong type, fails as `sandbox configuration is malformed`,
 /// as does a layer whose role is not `distro` or an export plan that is not of its serde form. A
-/// configuration whose format is not the one that its shares need fails as `sandbox configuration
-/// format does not match its mounts`. The export plan must then pass the checks of
+/// configuration whose format is not the one that its shares need, format 7 for one that records
+/// `export` and format 1 for one that does not, fails as `sandbox configuration format does not
+/// match its mounts`. The export plan must then pass the checks of
 /// [`SandboxLaunch::with_export`], and the launch those of [`SandboxLaunch::validated`], which
 /// checks again the host objects that the plan recorded.
 pub(crate) fn deserialize_launch(document: &Document) -> Result<SandboxLaunch> {
-    let (launch, shares, export) = (|| -> std::result::Result<_, Malformed> {
+    let (launch, shares) = (|| -> std::result::Result<_, Malformed> {
         let root = document.root();
         let layers_value = member(document, root, "layers").ok_or(Malformed::Malformed)?;
         let mut layers = Vec::new();
@@ -632,7 +647,7 @@ pub(crate) fn deserialize_launch(document: &Document) -> Result<SandboxLaunch> {
         };
         let memory_max = limit("memory_max")?;
         let pids_max = limit("pids_max")?;
-        let (shares, export) = deserialize_export(document, root)?;
+        let shares = deserialize_export(document, root)?;
         let launch = SandboxLaunch::new(
             layers,
             &scratch,
@@ -644,19 +659,19 @@ pub(crate) fn deserialize_launch(document: &Document) -> Result<SandboxLaunch> {
                 ..SandboxSettings::default()
             },
         )?;
-        Ok((launch, shares, export))
+        Ok((launch, shares))
     })()
     .map_err(|error| match error {
         Malformed::Malformed => malformed(),
         Malformed::Exit(exit) => exit,
     })?;
     let format = member(document, document.root(), "format");
-    let expected = if shares {
+    let expected = if shares.exported {
         EXPORT_CONFIG_FORMAT
     } else {
         CONFIG_FORMAT
     };
-    if (shares && export.is_none())
+    if (shares.any && shares.plan.is_none())
         || !format.is_some_and(|format| equals_int(document, format, expected))
     {
         return Err(Exit::error(
@@ -664,7 +679,7 @@ pub(crate) fn deserialize_launch(document: &Document) -> Result<SandboxLaunch> {
             "sandbox configuration format does not match its mounts",
         ));
     }
-    let launch = launch.with_export(export)?;
+    let launch = launch.with_export(shares.plan)?;
     launch.validated()?;
     Ok(launch)
 }

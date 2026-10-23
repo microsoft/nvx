@@ -7,9 +7,9 @@
 //!
 //! ```text
 //! <state>/
-//!   config.json          the launch that provision records, in format 1 without shares and in
-//!                        format 7 with the export plan of its shares, with the bindings of its
-//!                        distro layer and of its scratch image, and its network
+//!   config.json          the launch that provision records, in format 7, with the export plan of
+//!                        its shares or `null` without shares, the bindings of its distro layer
+//!                        and of its scratch image, and its network
 //!   sandbox.lock         the store's lock, which serializes the lifecycle transitions
 //!   launch.json          the store's journal of a start in progress, or of an interrupted one
 //!   runtime.json         the store's runtime record of the running VM, in its format 4

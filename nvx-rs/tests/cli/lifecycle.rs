@@ -65,18 +65,18 @@ pub(crate) fn provision(state: &str, options: &[&str]) -> Vec<String> {
     sandbox("provision", state, &all)
 }
 
-/// Returns the configuration that provision records for the minimal sandbox, in format 1, with
+/// Returns the configuration that provision records for the minimal sandbox, in format 7, with
 /// placeholders, and without the bindings of its images, which [`assert_bindings`] checks.
 pub(crate) fn minimal_config() -> Value {
     json!({
         "cmdline": "",
-        "format": 1,
+        "export": null,
+        "format": 7,
         "hostname": "nvx-sandbox",
         "hypervisor": HYPERVISOR,
         "layers": [{"path": "{root/distro.erofs}", "role": "distro", "uuid": UUID}],
         "memory_max": null,
         "memory_mib": 256,
-        "mount": null,
         "network": null,
         "pids_max": null,
         "scratch": "{root/scratch.ext4}",
@@ -85,14 +85,10 @@ pub(crate) fn minimal_config() -> Value {
     })
 }
 
-/// Returns the configuration of a sandbox with shares, whose export plan is `export`: in format 7,
-/// with the plan in place of `mount`.
+/// Returns the configuration of a sandbox with shares, whose export plan is `export`.
 pub(crate) fn shared_config(export: Value) -> Value {
     let mut config = minimal_config();
-    config["format"] = json!(7);
-    let members = config.as_object_mut().unwrap();
-    members.remove("mount");
-    members.insert("export".to_owned(), export);
+    config["export"] = export;
     config
 }
 
@@ -1069,28 +1065,40 @@ fn start_without_openvmm(root: &Root) {
 }
 
 /// A start refuses a configuration of a format that it does not read, one that is not an object,
-/// and one without the fields of its format, before it launches OpenVMM.
+/// one without the fields of its format, and one whose format is not that of its shares, before it
+/// launches OpenVMM.
 fn malformed_configuration(root: &Root) {
     root.nvx_rs(&provision("{root/state}", &[]))
         .assert_silent_success();
+    // Format 7 records the shares under `export`, `null` for none, and format 1 records no
+    // `export`.
+    let config = json(&root.below("state/config.json"));
+    let mut without_export = config.clone();
+    without_export.as_object_mut().unwrap().remove("export");
+    let mut format_1_with_export = config;
+    format_1_with_export["format"] = json!(1);
+    let unsupported = &["unsupported format", "{root/state/config.json}"][..];
+    let mismatched = &["format does not match its mounts"][..];
     for (text, code, fragments) in [
         (
-            r#"{"format": 8}"#,
+            r#"{"format": 8}"#.to_owned(),
             "format-unsupported",
-            &["unsupported format", "{root/state/config.json}"][..],
+            unsupported,
         ),
+        ("[]".to_owned(), "format-unsupported", unsupported),
         (
-            "[]",
-            "format-unsupported",
-            &["unsupported format", "{root/state/config.json}"][..],
-        ),
-        (
-            r#"{"format": 1}"#,
+            r#"{"format": 1}"#.to_owned(),
             "io",
             &["sandbox configuration is malformed"][..],
         ),
+        (without_export.to_string(), "format-unsupported", mismatched),
+        (
+            format_1_with_export.to_string(),
+            "format-unsupported",
+            mismatched,
+        ),
     ] {
-        root.write("state/config.json", text);
+        root.write("state/config.json", &text);
         let before = root.snapshot();
         let outcome = operate(root, "start", "state", &[]);
         assert_refused(root, &outcome, code, fragments);
