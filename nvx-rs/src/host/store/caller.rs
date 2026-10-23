@@ -38,12 +38,20 @@ use crate::error::{Error, Result};
 ///
 /// Names are compared without regard to ASCII case, as Windows and macOS file systems compare
 /// them.
+///
+/// A caller that captures the guest console in the store's console log,
+/// [`CONSOLE_NAME`](super::CONSOLE_NAME), may also declare that it keeps the console of every
+/// launch there, with [`keeping_console`](Self::keeping_console): a launch through a lifecycle
+/// lock then leaves the log for the caller to append to, rather than removing it with the rest of
+/// the previous launch's output. Removal removes it either way.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CallerFiles {
     /// The configuration record, whose presence means that the sandbox is provisioned.
     config: Option<String>,
     /// The caller's other files.
     others: Vec<String>,
+    /// Whether the caller keeps the guest console of every launch in the store's console log.
+    keeps_console: bool,
 }
 
 impl CallerFiles {
@@ -76,6 +84,19 @@ impl CallerFiles {
         self.check(&name)?;
         self.others.push(name);
         Ok(self)
+    }
+
+    /// Declares that the caller keeps the guest console of every launch in the store's console
+    /// log, which launches then leave in place, as the [type](Self) describes.
+    pub fn keeping_console(mut self) -> Self {
+        self.keeps_console = true;
+        self
+    }
+
+    /// Returns whether the caller keeps the guest console of every launch, as
+    /// [`keeping_console`](Self::keeping_console) declares.
+    pub fn keeps_console(&self) -> bool {
+        self.keeps_console
     }
 
     /// Returns the name of the caller's configuration record, if it keeps one.

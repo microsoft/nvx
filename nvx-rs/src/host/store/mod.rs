@@ -10,7 +10,8 @@
 //!   control.capability     the launch capability of its VM
 //!   control.sock           the control endpoint of its VM, on Linux
 //!   openvmm.log            the VMM's output, claimed by the launch that created it
-//!   console.log            the guest console of the latest launch, if the caller captures it
+//!   console.log            the guest console of the latest launch, or of every launch, if the
+//!                          caller captures it
 //!   outcome.json           the VMM's outcome report of the latest launch
 //!   .tmpXXXXXX             the outcome report while the VMM writes it, which it then publishes
 //!   ...                    the caller's configuration record and other files, which it declares
@@ -633,8 +634,9 @@ impl LockedStore {
     /// It stores the capability, replaces the log of the previous launch with a fresh one, which
     /// it claims, removes the outcome report, console log, and control socket of the previous
     /// launch, and any outcome report that its VMM staged without publishing it, chooses a control
-    /// endpoint, and writes the journal's marker. Nothing is spawned yet: the caller spawns the
-    /// VMM with [`Launch::take_log`].
+    /// endpoint, and writes the journal's marker. It keeps the console log of a caller that keeps
+    /// the console of every launch, as [`CallerFiles::keeping_console`] declares. Nothing is
+    /// spawned yet: the caller spawns the VMM with [`Launch::take_log`].
     ///
     /// Fails if the sandbox's VM runs, or a launch was interrupted and is not recovered yet, and
     /// with [`ErrorKind::Unsupported`] for an all-zero capability
@@ -663,8 +665,11 @@ impl LockedStore {
             )));
         }
         let socket = self.socket_path();
-        for path in [&socket, &self.outcome_path(), &self.console_path()] {
+        for path in [&socket, &self.outcome_path()] {
             remove_if_present(path)?;
+        }
+        if !self.files.keeps_console() {
+            remove_if_present(&self.console_path())?;
         }
         self.remove_report_staging()?;
         let endpoint = platform::control_endpoint(&socket)
