@@ -82,9 +82,6 @@ _POLICY_TESTS = "host::network::policy::tests::"
 FAMILIES = (
     Family("python-semantics", "Python semantics", ("host::python::golden::",)),
     Family(
-        "launch-profile", "Launch profile and options", ("host::sandbox::golden::",)
-    ),
-    Family(
         "egress-policies",
         "Egress policies",
         tuple(

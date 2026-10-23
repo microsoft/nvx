@@ -39,6 +39,7 @@ use std::io::{self, Read};
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 use super::layer::SandboxLayer;
@@ -46,11 +47,8 @@ use super::mount::os_error;
 use super::refused;
 use crate::error::{Error, Result};
 use crate::host::artifacts::DISTRO_MANIFEST_SUFFIX;
-use crate::host::python::builtins::repr;
 use crate::host::python::fs;
-use crate::host::python::json::{self, Loads, Node, ReadError};
-use crate::host::python::path::{Flavor, PurePath};
-use crate::host::python::text::decode_utf8;
+use crate::host::python::path::PurePath;
 use crate::host::seal::{self, FileKind, FileSeal};
 
 /// The revision of NVX's distro policy, which refuses a distro layer whose manifest lists the
@@ -441,56 +439,35 @@ pub(crate) fn verify_with(layer: &SandboxLayer, access: Access<'_>) -> Result<Di
     let invalid = |detail: String| refused(format!("invalid sandbox distro manifest: {detail}"));
     let (bytes, manifest_seal) =
         read_sealed(&manifest, access).map_err(|failure| match failure {
-            Failure::Io(error) => invalid(fs::os_error_message(&error, Some(manifest.as_str()))),
+            Failure::Io(error) => invalid(format!("{:?}: {error}", manifest.as_path())),
             Failure::Changed(field) => changed_while_verified(&manifest, field),
         })?;
-    // `read_text` decodes strictly, outside the errors that become this message, and reads with
-    // universal newlines.
-    let text = decode_utf8(&bytes)
-        .map_err(refused)?
-        .replace("\r\n", "\n")
-        .replace('\r', "\n");
-    let document = match json::read(&text, &mut Loads) {
-        Ok(document) => document,
-        Err(ReadError::Syntax { message, offset }) => {
-            return Err(invalid(json::syntax_error(&text, message, offset)));
-        }
-        Err(ReadError::Hook(error)) => return Err(refused(error.message(&text))),
-    };
-    let root = document.root();
-    if !matches!(document.node(root), Node::Object(_)) {
+    let document: Value =
+        serde_json::from_slice(&bytes).map_err(|error| invalid(error.to_string()))?;
+    if !document.is_object() {
         return Err(invalid("expected a JSON object".to_owned()));
     }
     let mismatch = || refused("sandbox distro manifest does not match its artifact");
-    if !document.get(root, "format").is_some_and(equals_one) {
+    if document.get("format").and_then(Value::as_u64) != Some(1) {
         return Err(mismatch());
     }
-    if !document
-        .get(root, "artifact")
-        .is_some_and(|artifact| string_equals(artifact, path.name()))
-    {
+    if document.get("artifact").and_then(Value::as_str) != Some(path.name()) {
         return Err(mismatch());
     }
     let (digest, image) = hash_sealed(path, access, &layer_description(layer))?;
-    if !document
-        .get(root, "artifact_sha256")
-        .is_some_and(|value| string_equals(value, &digest))
-    {
+    if document.get("artifact_sha256").and_then(Value::as_str) != Some(digest.as_str()) {
         return Err(mismatch());
     }
     let invalid_packages = || refused("sandbox distro manifest has invalid package metadata");
-    let Some(Node::Array(packages)) = document.get(root, "packages") else {
+    let Some(packages) = document.get("packages").and_then(Value::as_array) else {
         return Err(invalid_packages());
     };
     let mut systemd = false;
-    for &package in packages {
-        if !matches!(document.node(package), Node::Object(_)) {
-            return Err(invalid_packages());
-        }
-        let Some(Node::String(name)) = document.get(package, "name") else {
+    for package in packages {
+        let Some(name) = package.get("name").and_then(Value::as_str) else {
             return Err(invalid_packages());
         };
-        systemd |= name.as_bytes() == b"systemd";
+        systemd |= name == "systemd";
     }
     if systemd {
         return Err(refused(
@@ -528,17 +505,13 @@ fn layer_description(layer: &SandboxLayer) -> String {
 
 /// Returns the path of the manifest of the layer at `path`: `LAYER.manifest.json` beside it.
 ///
-/// Fails as `Path.with_name` raises `ValueError` for a path without a name.
+/// Fails for a layer path without a file name.
 fn manifest_path(path: &PurePath) -> Result<PurePath> {
     path.with_name(&format!("{}{DISTRO_MANIFEST_SUFFIX}", path.name()))
         .ok_or_else(|| {
-            let class = match path.flavor() {
-                Flavor::Posix => "PosixPath",
-                Flavor::Windows => "WindowsPath",
-            };
             refused(format!(
-                "{class}({}) has an empty name",
-                repr(&path.as_str().replace('\\', "/"))
+                "sandbox distro layer path has no file name: {:?}",
+                path.as_path()
             ))
         })
 }
@@ -654,22 +627,6 @@ fn hash_sealed(
         .map(|byte| format!("{byte:02x}"))
         .collect();
     Ok((digest, before))
-}
-
-/// Returns whether a JSON value equals Python's `1`: the integer, a float of that value, or
-/// `true`.
-fn equals_one(value: &Node) -> bool {
-    match value {
-        Node::Integer(literal) => literal.as_ref() == "1",
-        Node::Float(float) => *float == 1.0,
-        Node::Bool(boolean) => *boolean,
-        _ => false,
-    }
-}
-
-/// Returns whether a JSON value is the string `text`.
-fn string_equals(value: &Node, text: &str) -> bool {
-    matches!(value, Node::String(string) if string.as_bytes() == text.as_bytes())
 }
 
 #[cfg(all(test, any(target_os = "linux", windows)))]

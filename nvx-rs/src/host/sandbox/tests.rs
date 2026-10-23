@@ -1,4 +1,4 @@
-//! The launch-profile tests of `scripts/test_nvx_tools.py`, ported.
+//! Launch-profile contracts and validation order.
 
 use std::fs;
 use std::path::PathBuf;
@@ -137,8 +137,8 @@ fn launch_contract_builds_agent_command_line() {
             args: vec!["--serve".to_owned()],
             hostname: "example".to_owned(),
             workload_identity: (1000, 1001),
-            memory_max: Some(Int::from(268_435_456_u32)),
-            pids_max: Some(Int::from(64_u32)),
+            memory_max: Some(268_435_456),
+            pids_max: Some(64),
         },
     )
     .unwrap();
@@ -229,7 +229,7 @@ fn launch_contract_rejects_duplicates_and_reserved_tokens() {
 }
 
 #[test]
-fn launch_settings_are_checked_in_python_order() {
+fn launch_settings_are_checked_in_order() {
     let settings = |change: fn(&mut SandboxSettings)| {
         let mut settings = SandboxSettings::default();
         change(&mut settings);
@@ -260,16 +260,16 @@ fn launch_settings_are_checked_in_python_order() {
         };
         assert_eq!(
             message(SandboxLaunch::new(vec![distro()], "s.ext4", settings)),
-            "sandbox entrypoint must be an absolute path without spaces or quotes"
+            "sandbox entrypoint must be an absolute path without whitespace, control characters, or quotes"
         );
     }
     assert_eq!(
         settings(|settings| settings.args = vec![String::new()]),
-        "sandbox arguments must be nonempty and contain no spaces or quotes"
+        "sandbox arguments must be nonempty and contain no whitespace, control characters, or quotes"
     );
     assert_eq!(
         settings(|settings| settings.args = vec!["a\u{3000}b".to_owned()]),
-        "sandbox arguments must be nonempty and contain no spaces or quotes"
+        "sandbox arguments must be nonempty and contain no whitespace, control characters, or quotes"
     );
     for hostname in ["", "-a", "a-", "A", "a.b", "a\n"] {
         let launch = SandboxLaunch::new(
@@ -291,11 +291,11 @@ fn launch_settings_are_checked_in_python_order() {
         "sandbox workload identity must be a non-root UID:GID"
     );
     assert_eq!(
-        settings(|settings| settings.memory_max = Some(Int::zero())),
+        settings(|settings| settings.memory_max = Some(0)),
         "--memory-max must be positive"
     );
     assert_eq!(
-        settings(|settings| settings.pids_max = Some(Int::from(-1_i64))),
+        settings(|settings| settings.pids_max = Some(0)),
         "--pids-max must be positive"
     );
 }
@@ -307,25 +307,19 @@ fn launch_rejects_limits_the_guest_cgroup_cannot_store() {
         change(&mut settings);
         message(SandboxLaunch::new(vec![distro()], "s.ext4", settings))
     };
+    assert_eq!(parse_decimal::<u64>("18446744073709551616"), None);
     assert_eq!(
-        settings(|settings| {
-            settings.memory_max = Some(Int::parse("18446744073709551616").unwrap())
-        }),
-        "--memory-max must be at most 18446744073709551615"
-    );
-    assert_eq!(
-        settings(|settings| settings.pids_max = Some(Int::from(4_194_304_u32))),
+        settings(|settings| settings.pids_max = Some(4_194_304)),
         "--pids-max must be at most 4194303"
     );
 }
 
 #[test]
-fn workload_identities_parse_as_python_int() {
+fn workload_identities_are_ascii_decimal() {
     assert_eq!(parse_workload_identity("1000:1001").unwrap(), (1000, 1001));
-    assert_eq!(
-        parse_workload_identity(" +1_000 :\u{ff11}\u{ff10}").unwrap(),
-        (1000, 10)
-    );
+    for value in [" +1000:10", "+1000:10", "1_000:10", "1000:\u{ff11}\u{ff10}"] {
+        assert!(parse_workload_identity(value).is_err(), "{value:?}");
+    }
     assert_eq!(
         parse_workload_identity("4294967295:1").unwrap(),
         (u32::MAX, 1)
@@ -340,10 +334,7 @@ fn workload_identities_parse_as_python_int() {
             "4294967296:1",
             "--workload-user UID must be between 1 and 4294967295",
         ),
-        (
-            "-1:1",
-            "--workload-user UID must be between 1 and 4294967295",
-        ),
+        ("-1:1", "--workload-user must contain numeric UID and GID"),
         (
             "1:0",
             "--workload-user GID must be between 1 and 4294967295",
@@ -358,7 +349,7 @@ fn workload_identities_parse_as_python_int() {
     let digits = format!("{}:1", "1".repeat(4301));
     assert_eq!(
         message(parse_workload_identity(&digits)),
-        "--workload-user must contain numeric UID and GID"
+        "--workload-user UID must be between 1 and 4294967295"
     );
 }
 
@@ -729,7 +720,7 @@ fn launch_contract_attaches_a_file_as_an_aggregate_child() {
     }
     assert_eq!(
         message(MountKind::from_name("socket")),
-        "unsupported sandbox mount kind 'socket'; choose directory or file"
+        "unsupported sandbox mount kind \"socket\"; choose directory or file"
     );
     // The runtime replaces /etc/machine-id with a file, and binds its time state over
     // /run/nvx/time, so nothing at or below them may be shared.

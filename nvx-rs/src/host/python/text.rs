@@ -7,13 +7,14 @@
 //! [`PyText::render`] shows them the way Python prints them.
 //!
 //! Python's UTF-8 codec refuses what Rust's would, with messages of its own:
-//! [`PyText::encode_utf8`] and [`decode_utf8`] give them.
+//! The test-only `PyText::encode_utf8` oracle and CLI-only `decode_utf8` give them.
 
 use std::fmt;
 
 /// Returns `bytes` as a string, or the message of the `UnicodeDecodeError` with which Python's
 /// UTF-8 codec refuses them, such as `'utf-8' codec can't decode byte 0xff in position 0: invalid
 /// start byte`.
+#[cfg(any(test, feature = "cli"))]
 pub(crate) fn decode_utf8(bytes: &[u8]) -> Result<&str, String> {
     std::str::from_utf8(bytes).map_err(|error| {
         let start = error.valid_up_to();
@@ -66,6 +67,7 @@ impl PyText {
     /// Returns the string as `str.encode('utf-8')` encodes it, or the message of the
     /// `UnicodeEncodeError` with which Python refuses its first run of surrogates, such as
     /// `'utf-8' codec can't encode character '\ud800' in position 2: surrogates not allowed`.
+    #[cfg(test)]
     pub(crate) fn encode_utf8(&self) -> Result<&str, String> {
         if let Some(text) = self.as_str() {
             return Ok(text);

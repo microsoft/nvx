@@ -10,13 +10,13 @@
 //! - it keeps a `\ud800` escape without its pair as an unpaired surrogate; and
 //! - it hands each object's members, duplicates included, to `object_pairs_hook` when the object
 //!   closes, and each integer to `parse_int` when it reads the integer, so the errors that these
-//!   hooks raise surface in document order. [`Hooks`] are their equivalents, and [`Loads`] are
-//!   those of `json.loads` without arguments.
+//!   hooks raise surface in document order. [`Hooks`] are their equivalents; the CLI's `Loads`
+//!   uses those of `json.loads` without arguments.
 //!
 //! [`read`] ports the C scanner of CPython 3.14, `scan_once_unicode` and the functions that it
 //! calls in `Modules/_json.c`, with the checks of `JSONDecoder.decode` around it, so a document
 //! that it refuses fails with the message and at the position of the `JSONDecodeError` that
-//! Python raises, which [`syntax_error`] formats as Python does.
+//! Python raises, which the test-only `syntax_error` oracle formats as Python does.
 //!
 //! The reader keeps values in an arena and never recurses, so it reads documents nested to any
 //! depth. Python's decoder recurses and raises `RecursionError` at a depth that depends on the
@@ -25,7 +25,7 @@
 //!
 //! # Why not `serde_json`
 //!
-//! Delegated commands keep Python's messages, which depend on the documents that the reader
+//! The remaining Python-parity readers keep messages that depend on the documents that the reader
 //! accepts. The egress policy reader of `nvx.py`, for example, reports every document that
 //! `json.loads` refuses as `failed to read egress policy file: PATH`, and any other invalid
 //! document with the message of the first check that it fails. A reader that refuses more
@@ -44,12 +44,7 @@
 //! these values, so only messages are at stake; the parity fixture,
 //! `tests/fixtures/egress-policy.json`, pins them.
 //!
-//! Other messages show the `JSONDecodeError` itself. `nvx.py sandbox`, for example, reports a
-//! distro manifest that `json.loads` refuses with the error's message and position, as in
-//! `invalid sandbox distro manifest: Expecting value: line 1 column 1 (char 0)`. `serde_json` words
-//! its errors otherwise, and reports some at other positions, such as an unterminated string at its
-//! end rather than its opening quote, so those messages need [`read`]'s port of Python's scanner.
-
+#[cfg(any(test, feature = "cli"))]
 use super::builtins::{Int, IntError};
 use super::text::PyText;
 
@@ -98,6 +93,7 @@ impl Document {
 
     /// Returns `value.get(name)` for the `dict` that Python builds from the object at `id`, in
     /// which the last of repeated names wins, or `None` if the value at `id` is not an object.
+    #[cfg(test)]
     pub(crate) fn get(&self, id: NodeId, name: &str) -> Option<&Node> {
         let Node::Object(members) = self.node(id) else {
             return None;
@@ -178,8 +174,10 @@ pub(crate) trait Hooks {
 
 /// The hooks of `json.loads` without arguments: `int`, the default `parse_int`, refuses an
 /// integer of more than 4300 digits with a `ValueError` that [`IntError::message`] gives.
+#[cfg(any(test, feature = "cli"))]
 pub(crate) struct Loads;
 
+#[cfg(any(test, feature = "cli"))]
 impl Hooks for Loads {
     type Error = IntError;
 
@@ -206,6 +204,7 @@ pub(crate) enum ReadError<E> {
 /// Returns `str()` of the `JSONDecodeError` that Python raises with `message` at byte `offset`
 /// of `text`: the message, the line and column of the position, and the position itself, in
 /// characters, such as `Expecting value: line 1 column 2 (char 1)`.
+#[cfg(test)]
 pub(crate) fn syntax_error(text: &str, message: &str, offset: usize) -> String {
     let before = &text[..offset];
     let position = before.chars().count();

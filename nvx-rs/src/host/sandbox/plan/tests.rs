@@ -13,7 +13,6 @@ use crate::host::network::{
     Access, Destination, EgressRule, ForwardProtocol, HostLoopback, LoopbackForward, NetworkProxy,
     Protocol, ProxyScheme,
 };
-use crate::host::python::builtins::Int;
 use crate::host::sandbox::distro::DistroBinding;
 use crate::host::sandbox::mount::{boot_shares, export_command_line_fragment};
 use crate::host::sandbox::tests::{deny, exported, host, host_text};
@@ -140,8 +139,8 @@ fn every_format_and_upper_plans_and_renders() {
         args: vec!["--serve".to_owned()],
         hostname: "example".to_owned(),
         workload_identity: (1000, 1001),
-        memory_max: Some(Int::from(268_435_456_u32)),
-        pids_max: Some(Int::from(64_u32)),
+        memory_max: Some(268_435_456),
+        pids_max: Some(64),
     };
     let distro = "nvx_layer=distro,0xd0003000";
     let cases = [
@@ -406,27 +405,27 @@ fn plans_check_their_settings_as_launches_do() {
         (
             (|settings: &mut SandboxSettings| settings.entrypoint = "bin/sh".to_owned())
                 as fn(&mut SandboxSettings),
-            "sandbox entrypoint must be an absolute path without spaces or quotes",
+            "sandbox entrypoint must be an absolute path without whitespace, control characters, or quotes",
         ),
         (
             |settings| settings.args = vec![String::new()],
-            "sandbox arguments must be nonempty and contain no spaces or quotes",
+            "sandbox arguments must be nonempty and contain no whitespace, control characters, or quotes",
         ),
         (
             |settings| settings.entrypoint = "/opt/app\"".to_owned(),
-            "sandbox entrypoint must be an absolute path without spaces or quotes",
+            "sandbox entrypoint must be an absolute path without whitespace, control characters, or quotes",
         ),
         (
             |settings| settings.args = vec!["say\"hi".to_owned()],
-            "sandbox arguments must be nonempty and contain no spaces or quotes",
+            "sandbox arguments must be nonempty and contain no whitespace, control characters, or quotes",
         ),
         (
             |settings| settings.entrypoint = "/bin/\u{e0}--".to_owned(),
-            "sandbox entrypoint must be an absolute path without spaces or quotes",
+            "sandbox entrypoint must be an absolute path without whitespace, control characters, or quotes",
         ),
         (
             |settings| settings.args = vec!["voil\u{e0}--".to_owned()],
-            "sandbox arguments must be nonempty and contain no spaces or quotes",
+            "sandbox arguments must be nonempty and contain no whitespace, control characters, or quotes",
         ),
         (
             |settings| settings.hostname = "Invalid".to_owned(),
@@ -437,7 +436,7 @@ fn plans_check_their_settings_as_launches_do() {
             "sandbox workload identity must be a non-root UID:GID",
         ),
         (
-            |settings| settings.memory_max = Some(Int::zero()),
+            |settings| settings.memory_max = Some(0),
             "--memory-max must be positive",
         ),
     ] {
@@ -993,7 +992,7 @@ fn launches_plan_their_distro_layer_over_their_scratch_image() {
         assert_eq!(error.kind(), ErrorKind::Unsupported);
         assert_eq!(
             error.to_string(),
-            format!("distro layer UUID is invalid: '{invalid}'")
+            format!("distro layer UUID is invalid: {invalid:?}")
         );
     }
 }
@@ -1033,7 +1032,7 @@ fn launches_plan_the_image_that_the_binding_of_their_distro_layer_records() {
     let invalid: DistroBinding = serde_json::from_value(recorded).unwrap();
     assert_eq!(
         message(launch.bound_plan(&invalid)),
-        "the distro binding names the identity '11111111-1111-1111-1111-11111111111A', which is \
+        "the distro binding names the identity \"11111111-1111-1111-1111-11111111111A\", which is \
          not a UUID in its canonical text"
     );
 }
@@ -1047,8 +1046,8 @@ fn persisted() -> (SandboxPlan, Value) {
         args: vec!["--serve".to_owned()],
         hostname: "example".to_owned(),
         workload_identity: (1000, 1001),
-        memory_max: Some(Int::parse("18446744073709551615").unwrap()),
-        pids_max: Some(Int::from(4_194_303_u32)),
+        memory_max: Some(u64::MAX),
+        pids_max: Some(4_194_303),
     };
     let mut export = exported(&[
         (
@@ -1531,7 +1530,7 @@ fn persisted_plans_that_break_the_form_or_the_checks_are_refused() {
         refused(
             &|value| value["distro"]["identity"] = json!(identity),
             &format!(
-                "the distro identity of the sandbox plan, '{identity}', is not a UUID in its \
+                "the distro identity of the sandbox plan, {identity:?}, is not a UUID in its \
                  canonical text"
             ),
         );
@@ -1553,7 +1552,7 @@ fn persisted_plans_that_break_the_form_or_the_checks_are_refused() {
     // What the plan and its shares check, reading checks too.
     refused(
         &|value| value["settings"]["memoryMax"] = json!("18446744073709551616"),
-        "--memory-max must be at most 18446744073709551615",
+        "is not a positive integer in decimal text",
     );
     refused(
         &|value| value["settings"]["pidsMax"] = json!("4194304"),
@@ -1565,7 +1564,7 @@ fn persisted_plans_that_break_the_form_or_the_checks_are_refused() {
     );
     refused(
         &|value| value["settings"]["entrypoint"] = json!("bin/sh"),
-        "sandbox entrypoint must be an absolute path without spaces or quotes",
+        "sandbox entrypoint must be an absolute path without whitespace, control characters, or quotes",
     );
     refused(
         &|value| value["export"]["binds"][1]["target"] = json!("/workspace/settings.json"),
@@ -1606,7 +1605,7 @@ fn persisted_plans_that_break_the_form_or_the_checks_are_refused() {
     );
     refused(
         &|value| value["network"]["guestNetwork"] = json!("10.0.0.1/24"),
-        "guest network '10.0.0.1/24' must be an IPv4 address with a /1 to /30 prefix that is not \
+        "guest network \"10.0.0.1/24\" must be an IPv4 address with a /1 to /30 prefix that is not \
          its network's network, broadcast, or gateway (first) address",
     );
     refused(
@@ -1788,7 +1787,7 @@ fn networks_check_their_guest_network_and_their_policy() {
         assert_eq!(
             error.to_string(),
             format!(
-                "guest network '{guest_network}' must be an IPv4 address with a /1 to /30 prefix \
+                "guest network {guest_network:?} must be an IPv4 address with a /1 to /30 prefix \
                  that is not its network's network, broadcast, or gateway (first) address"
             )
         );

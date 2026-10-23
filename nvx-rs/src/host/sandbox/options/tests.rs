@@ -3,11 +3,14 @@
 use std::fs;
 use std::path::Path;
 
+use proptest::prelude::*;
+use serde_json::json;
 use sha2::{Digest, Sha256};
 
 use super::*;
 use crate::ErrorKind;
 use crate::host::python::fs::resolve;
+use crate::host::python::path::PurePath;
 use crate::host::sandbox::layer::LayerRole;
 use crate::host::sandbox::mount::{aggregate_child_name, plan_mounts, validate_mounts};
 use crate::host::sandbox::{SandboxLayer, SandboxSettings};
@@ -105,6 +108,263 @@ fn distro_sha256() -> String {
 }
 
 #[test]
+fn exec_environment_limits() {
+    for entries in [
+        Vec::new(),
+        vec!["EMPTY=".to_owned(), "EQUALS=a=b".to_owned()],
+        (0..256).map(|index| format!("K{index}=value")).collect(),
+        vec![format!("K={}", "x".repeat(4094))],
+        vec![format!("K={}", "\u{e9}".repeat(2047))],
+    ] {
+        validate_exec_environment(&entries).unwrap();
+    }
+    for entries in [
+        vec!["".to_owned()],
+        vec!["NO_EQUALS".to_owned()],
+        vec!["=no-name".to_owned()],
+        vec!["K=a\0b".to_owned()],
+        vec!["K\0=value".to_owned()],
+        vec!["K=first".to_owned(), "K=second".to_owned()],
+        (0..257).map(|index| format!("K{index}=value")).collect(),
+        vec![format!("K={}", "x".repeat(4095))],
+        vec![format!("K={}", "\u{e9}".repeat(2048))],
+    ] {
+        assert_eq!(
+            validate_exec_environment(&entries).unwrap_err().kind(),
+            ErrorKind::Unsupported,
+        );
+    }
+}
+
+#[test]
+fn environment_files_hold_a_json_array_of_strings() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("environment.json");
+    let path = path.to_str().unwrap();
+    for (text, entries) in [
+        ("[]", vec![]),
+        (r#"["K=V","EMPTY="]"#, vec!["K=V", "EMPTY="]),
+        (r#"["K=a=b","ESCAPED=\u0061"]"#, vec!["K=a=b", "ESCAPED=a"]),
+    ] {
+        fs::write(path, text).unwrap();
+        assert_eq!(exec_environment_from_file(path).unwrap(), entries);
+    }
+    for text in [
+        "",
+        "null",
+        "{}",
+        r#""K=V""#,
+        "[1]",
+        "[true]",
+        "[null]",
+        "[[]]",
+        "[{}]",
+        r#"["=V"]"#,
+        r#"["K"]"#,
+        r#"["K=\u0000"]"#,
+        r#"["K=a","K=b"]"#,
+        r#"["K=V",]"#,
+        r#"["K=V"] trailing"#,
+    ] {
+        fs::write(path, text).unwrap();
+        assert_eq!(
+            exec_environment_from_file(path).unwrap_err().kind(),
+            ErrorKind::Unsupported,
+            "{text}",
+        );
+    }
+    fs::write(path, b"[\xff]").unwrap();
+    assert_eq!(
+        exec_environment_from_file(path).unwrap_err().kind(),
+        ErrorKind::Unsupported,
+    );
+    let exact = format!("[]{}", " ".repeat(MAX_ENVIRONMENT_FILE_BYTES - 2));
+    fs::write(path, &exact).unwrap();
+    assert_eq!(
+        exec_environment_from_file(path).unwrap(),
+        Vec::<String>::new()
+    );
+    fs::write(path, format!("{exact} ")).unwrap();
+    assert_eq!(
+        exec_environment_from_file(path).unwrap_err().kind(),
+        ErrorKind::Unsupported,
+    );
+    fs::remove_file(path).unwrap();
+    assert_eq!(
+        exec_environment_from_file(path).unwrap_err().kind(),
+        ErrorKind::Unsupported,
+    );
+}
+
+#[test]
+fn distro_manifest_binds_the_layer() {
+    let layer = Layer::new();
+    let launch = layer.launch("/bin/sh");
+    let valid = json!({
+        "format": 1,
+        "artifact": "distro.erofs",
+        "artifact_sha256": distro_sha256(),
+        "packages": [{"name": "bash"}, {"name": "coreutils"}],
+    });
+    layer.manifest(&valid.to_string());
+    let binding = validate_sandbox_systemd_policy(&launch).unwrap();
+    assert_eq!(binding.identity(), "11111111-1111-1111-1111-111111111111");
+    assert_eq!(binding.format(), super::super::DistroFormat::Erofs);
+    assert!(binding.manifest().is_some());
+    binding
+        .check(
+            launch.distro(),
+            super::super::distro::DISTRO_POLICY_REVISION,
+        )
+        .unwrap();
+    for (field, value) in [
+        ("format", json!(2)),
+        ("format", json!("1")),
+        ("artifact", json!("other.erofs")),
+        ("artifact_sha256", json!("0".repeat(64))),
+        ("packages", json!(null)),
+        ("packages", json!([1])),
+        ("packages", json!([{}])),
+        ("packages", json!([{"name": 1}])),
+        ("packages", json!([{"name": "systemd"}, 1])),
+    ] {
+        let mut manifest = valid.clone();
+        manifest[field] = value;
+        layer.manifest(&manifest.to_string());
+        assert_eq!(
+            validate_sandbox_systemd_policy(&launch).unwrap_err().kind(),
+            ErrorKind::Unsupported,
+            "{field}: {manifest}",
+        );
+    }
+    for field in ["format", "artifact", "artifact_sha256", "packages"] {
+        let mut manifest = valid.clone();
+        manifest.as_object_mut().unwrap().remove(field);
+        layer.manifest(&manifest.to_string());
+        assert_eq!(
+            validate_sandbox_systemd_policy(&launch).unwrap_err().kind(),
+            ErrorKind::Unsupported,
+        );
+    }
+    layer.manifest(&valid.to_string());
+    fs::write(layer.path("distro.erofs"), b"changed distro").unwrap();
+    assert_eq!(
+        validate_sandbox_systemd_policy(&launch).unwrap_err().kind(),
+        ErrorKind::Unsupported,
+    );
+}
+
+#[test]
+fn systemd_entrypoints_and_images_are_refused_independently() {
+    let layer = Layer::new();
+    for packages in [json!([]), json!([{"name": "systemd"}])] {
+        layer.manifest(
+            &json!({
+                "format": 1,
+                "artifact": "distro.erofs",
+                "artifact_sha256": distro_sha256(),
+                "packages": packages,
+            })
+            .to_string(),
+        );
+        for entrypoint in ["/usr/lib/systemd/systemd", "/lib/systemd/systemd"] {
+            assert_eq!(
+                validate_sandbox_systemd_policy(&layer.launch(entrypoint))
+                    .unwrap_err()
+                    .kind(),
+                ErrorKind::Unsupported,
+            );
+        }
+        let result = validate_sandbox_systemd_policy(&layer.launch("/sbin/init"));
+        assert_eq!(result.is_ok(), packages.as_array().unwrap().is_empty());
+    }
+}
+
+#[test]
+fn policy_paths_need_a_preceding_mount_only_with_several_shares() {
+    let first = "/first,host-first,rw".to_owned();
+    let second = "/second,host-second,rw".to_owned();
+    let option = |preceding_mount| PolicyPathOption {
+        kind: PolicyKind::Denied,
+        preceding_mount,
+        path: "secret".to_owned(),
+    };
+    let mounts = sandbox_mounts(std::slice::from_ref(&first), &[option(None)], None).unwrap();
+    assert_eq!(mounts[0].policy().denied, ["secret"]);
+    for policy in [option(None), option(Some(2))] {
+        assert_eq!(
+            sandbox_mounts(&[first.clone(), second.clone()], &[policy], None)
+                .unwrap_err()
+                .kind(),
+            ErrorKind::Unsupported,
+        );
+    }
+    assert_eq!(
+        sandbox_mounts(&[], &[option(None)], None)
+            .unwrap_err()
+            .kind(),
+        ErrorKind::Unsupported,
+    );
+}
+
+proptest! {
+    #[test]
+    fn policy_paths_attach_to_their_shares(
+        events in prop::collection::vec((any::<bool>(), 0_u8..3), 0..60),
+    ) {
+        let mut mounts = Vec::new();
+        let mut options = Vec::new();
+        let mut expected = Vec::new();
+        for (sequence, (next_mount, kind)) in std::iter::once((true, 0)).chain(events).enumerate() {
+            if next_mount || mounts.is_empty() {
+                let index = mounts.len();
+                mounts.push(format!("/share-{index},host-{index},rw"));
+                expected.push(MountPolicy::default());
+                options.push(PolicyPathOption {
+                    kind: PolicyKind::Denied,
+                    preceding_mount: Some(index),
+                    path: "hidden".to_owned(),
+                });
+                expected[index].denied.push("hidden".to_owned());
+            }
+            let index = mounts.len() - 1;
+            let path = format!("hidden/path-{sequence}");
+            let (kind, paths) = match kind {
+                0 => (PolicyKind::Denied, &mut expected[index].denied),
+                1 => (PolicyKind::Allowed, &mut expected[index].allowed),
+                _ => (PolicyKind::Writable, &mut expected[index].writable),
+            };
+            paths.push(path.clone());
+            options.push(PolicyPathOption { kind, preceding_mount: Some(index), path });
+        }
+        let actual = sandbox_mounts(&mounts, &options, None).unwrap();
+        prop_assert_eq!(actual.len(), expected.len());
+        for (index, (mount, policy)) in actual.iter().zip(expected).enumerate() {
+            prop_assert_eq!(mount.guest_target(), format!("/share-{index}"));
+            prop_assert_eq!(mount.policy(), &policy);
+            prop_assert_eq!(mount.owner(), MountOwner::Vmm);
+            prop_assert_eq!(mount.kind(), MountKind::Directory);
+        }
+    }
+
+    #[test]
+    fn run_share_targets_are_disjoint(suffix in "[a-z]{1,20}") {
+        let first = format!("/first-{suffix}");
+        let second = format!("/second-{suffix}");
+        validate_run_share_targets(&[&first, &second]).unwrap();
+        for targets in [
+            vec![first.as_str(), first.as_str()],
+            vec![first.as_str(), "/run/nvx/shares"],
+        ] {
+            prop_assert!(validate_run_share_targets(&targets).is_err());
+        }
+        let child = format!("{first}/child");
+        prop_assert!(validate_run_share_targets(&[&first, &child]).is_err());
+        prop_assert!(validate_run_share_targets(&[&child, &first]).is_err());
+    }
+}
+
+#[test]
 fn sandbox_allows_non_systemd_sbin_init() {
     let layer = Layer::new();
     validate_sandbox_systemd_policy(&layer.launch("/sbin/init")).unwrap();
@@ -167,24 +427,16 @@ fn sandbox_rejects_systemd_from_bound_distro_metadata() {
         )),
         "systemd images are unsupported by the sandbox security profile"
     );
-    // Python compares the format numerically, so 1.0 and true are 1.
-    for format in ["1", "1.0", "true"] {
-        let binding = manifest(
-            format,
-            "\"distro.erofs\"",
-            &sha256,
-            "[{\"name\": \"bash\"}]",
-        )
-        .unwrap();
-        // The binding seals the manifest that the verification read.
-        let sealed = crate::host::seal::FileSeal::of(
-            &fs::File::open(layer.path("distro.erofs.manifest.json")).unwrap(),
-        )
-        .unwrap();
-        assert_eq!(binding.manifest(), Some(&sealed));
-    }
+    let binding = manifest("1", "\"distro.erofs\"", &sha256, "[{\"name\": \"bash\"}]").unwrap();
+    let sealed = crate::host::seal::FileSeal::of(
+        &fs::File::open(layer.path("distro.erofs.manifest.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(binding.manifest(), Some(&sealed));
     for (format, artifact, sha256) in [
         ("\"1\"", "\"distro.erofs\"", sha256.as_str()),
+        ("1.0", "\"distro.erofs\"", &sha256),
+        ("true", "\"distro.erofs\"", &sha256),
         ("2", "\"distro.erofs\"", &sha256),
         ("1", "\"other.erofs\"", &sha256),
         ("1", "\"distro.erofs\"", "\"0\""),
@@ -212,18 +464,35 @@ fn sandbox_rejects_systemd_from_bound_distro_metadata() {
         "invalid sandbox distro manifest: expected a JSON object"
     );
     layer.manifest("{\r\n\"format\": }");
-    assert_eq!(
-        message(validate_sandbox_systemd_policy(&layer.launch("/sbin/init"))),
-        "invalid sandbox distro manifest: Expecting value: line 2 column 11 (char 12)"
-    );
+    let error = message(validate_sandbox_systemd_policy(&layer.launch("/sbin/init")));
+    assert!(error.starts_with("invalid sandbox distro manifest: "));
+    assert!(error.contains("line 2 column 11"), "{error}");
     fs::write(layer.path("distro.erofs.manifest.json"), b"{\xff}").unwrap();
-    assert_eq!(
-        message(validate_sandbox_systemd_policy(&layer.launch("/sbin/init"))),
-        "'utf-8' codec can't decode byte 0xff in position 1: invalid start byte"
+    let error = message(validate_sandbox_systemd_policy(&layer.launch("/sbin/init")));
+    assert!(
+        error.starts_with("invalid sandbox distro manifest: "),
+        "{error}"
     );
     // A layer without a manifest passes.
     fs::remove_file(layer.path("distro.erofs.manifest.json")).unwrap();
     validate_sandbox_systemd_policy(&layer.launch("/sbin/init")).unwrap();
+}
+
+#[test]
+fn distro_manifests_are_strict_json() {
+    let layer = Layer::new();
+    let digest = distro_sha256();
+    for extra in ["NaN", "Infinity", "-Infinity", r#""\ud800""#, r#""\udc00""#] {
+        layer.manifest(&format!(
+            r#"{{"format":1,"artifact":"distro.erofs","artifact_sha256":"{digest}","packages":[],"extra":{extra}}}"#
+        ));
+        let error = message(validate_sandbox_systemd_policy(&layer.launch("/bin/sh")));
+        assert!(
+            error.starts_with("invalid sandbox distro manifest: "),
+            "{error}"
+        );
+        assert!(error.contains("line "), "{error}");
+    }
 }
 
 #[test]
@@ -325,11 +594,9 @@ fn sandbox_environment_file_is_bounded_before_state_access() {
     );
     // A file of the limit is read, and its spaces are no JSON value.
     fs::write(&file, vec![b' '; MAX_ENVIRONMENT_FILE_BYTES]).unwrap();
-    let path = PurePath::native(file.to_str().unwrap());
-    assert_eq!(
-        message(exec_environment_from_file(file.to_str().unwrap())),
-        format!("failed to read managed execution environment: {path}")
-    );
+    let error = message(exec_environment_from_file(file.to_str().unwrap()));
+    assert!(error.starts_with(&format!("invalid managed execution environment {file:?}: ")));
+    assert!(error.contains("EOF"), "{error}");
 }
 
 #[test]
@@ -380,45 +647,37 @@ fn sandbox_environment_file_entries_are_validated_before_state_access() {
         read(r#"["A=1", "B=\u00e9"]"#).unwrap(),
         ["A=1".to_owned(), "B=\u{e9}".to_owned()]
     );
-    let not_strings =
-        "managed execution environment file must contain a JSON array of KEY=VALUE strings";
-    for text in ["{}", "\"A=1\"", "[1]", "[NaN]", "[[\"A=1\"]]"] {
-        assert_eq!(message(read(text)), not_strings, "{text}");
-    }
-    let path = PurePath::native(file.to_str().unwrap());
-    let unreadable = format!("failed to read managed execution environment: {path}");
-    for text in ["", "[", "[\"A=1\",]", "\u{feff}[]", "[\"a\tb\"]"] {
-        assert_eq!(message(read(text)), unreadable, "{text:?}");
+    let prefix = format!("invalid managed execution environment {file:?}: ");
+    for text in [
+        "{}",
+        "\"A=1\"",
+        "[1]",
+        "[NaN]",
+        "[[\"A=1\"]]",
+        "",
+        "[",
+        "[\"A=1\",]",
+        "\u{feff}[]",
+        "[\"a\tb\"]",
+        r#"["A=1", "B=\ud800"]"#,
+        r#"["B=\udc00\ud800x"]"#,
+        &format!("[{}]", "1".repeat(4301)),
+    ] {
+        let error = message(read(text));
+        assert!(error.starts_with(&prefix), "{text:?}: {error}");
+        assert!(error.contains("line "), "{error}");
     }
     fs::write(&file, b"[\"\xff\"]").unwrap();
-    assert_eq!(
-        message(exec_environment_from_file(file.to_str().unwrap())),
-        unreadable
-    );
-    // Python refuses to encode unpaired surrogates, after it accepted them in the file.
-    assert_eq!(
-        message(read(r#"["A=1", "B=\ud800"]"#)),
-        "'utf-8' codec can't encode character '\\ud800' in position 2: surrogates not allowed"
-    );
-    assert_eq!(
-        message(read(r#"["B=\udc00\ud800x"]"#)),
-        "'utf-8' codec can't encode characters in position 2-3: surrogates not allowed"
-    );
-    // `int` refuses an integer of more than 4300 digits.
-    assert_eq!(
-        message(read(&format!("[{}]", "1".repeat(4301)))),
-        "Exceeds the limit (4300 digits) for integer string conversion: value has 4301 digits; \
-         use sys.set_int_max_str_digits() to increase the limit"
-    );
-    assert_eq!(
-        message(exec_environment_from_file(
-            directory.path().join("missing.json").to_str().unwrap()
-        )),
-        format!(
-            "failed to read managed execution environment: {}",
-            PurePath::native(directory.path().join("missing.json").to_str().unwrap())
-        )
-    );
+    let error = message(exec_environment_from_file(file.to_str().unwrap()));
+    assert!(error.starts_with(&prefix), "{error}");
+    let missing = directory.path().join("missing.json");
+    let error = message(exec_environment_from_file(missing.to_str().unwrap()));
+    let cause = error
+        .strip_prefix(&format!(
+            "failed to read managed execution environment {missing:?}: "
+        ))
+        .unwrap();
+    assert!(!cause.is_empty());
 }
 
 #[test]
@@ -992,7 +1251,7 @@ fn sandbox_mounts_take_the_kind_of_each_host_path() {
         }
     };
     let parsed = sandbox_mounts_with(
-        Flavor::Posix,
+        Flavor::NATIVE,
         &mounts,
         &[],
         Some(MountOwner::Caller),
@@ -1032,10 +1291,9 @@ fn run_share_targets_bind_from_an_aggregate() {
         assert_eq!(
             message(validate_run_share_targets(&[target, "/b"])),
             format!(
-                "invalid --mount target {}: with several shares, or a shared file, each target \
+                "invalid --mount target {target:?}: with several shares, or a shared file, each target \
                  must be an absolute non-root path without empty, dot, or parent components, \
-                 whitespace, '\\', '=', or ','",
-                repr(target)
+                 whitespace, control characters, quotes, '\\', '=', or ','",
             )
         );
     }

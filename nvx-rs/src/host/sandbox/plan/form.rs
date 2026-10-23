@@ -9,8 +9,7 @@ use crate::host::network::{
     Access, Destination, EgressRule, EgressRules, ForwardProtocol, HostLoopback, LoopbackForward,
     NetworkPolicy, NetworkProxy, PortSelector, Protocol, ProxyScheme,
 };
-use crate::host::python::builtins::{Int, repr};
-use crate::host::sandbox::SandboxSettings;
+use crate::host::sandbox::{SandboxSettings, parse_decimal};
 use crate::protocol::root::{ImageFormat, RootImage};
 use crate::uuid::Uuid;
 
@@ -296,9 +295,8 @@ impl TryFrom<PlanForm> for SandboxPlan {
             .map(|text| {
                 Uuid::parse(&text).ok_or_else(|| {
                     format!(
-                        "the distro identity of the sandbox plan, {}, is not a UUID in its \
+                        "the distro identity of the sandbox plan, {text:?}, is not a UUID in its \
                          canonical text",
-                        repr(&text)
                     )
                 })
             })
@@ -517,24 +515,23 @@ impl TryFrom<SettingsForm> for SandboxSettings {
     /// Reads settings whose limits are positive integers in decimal text, without a sign or
     /// leading zeros.
     fn try_from(form: SettingsForm) -> Result<Self, Self::Error> {
-        let limit = |name: &str, text: Option<String>| {
+        fn limit<T: std::str::FromStr>(
+            name: &str,
+            text: Option<String>,
+        ) -> Result<Option<T>, String> {
             text.map(|text| {
-                let decimal = !text.starts_with('0')
-                    && !text.is_empty()
-                    && text.bytes().all(|byte| byte.is_ascii_digit());
-                decimal
-                    .then(|| Int::parse(&text).ok())
+                (!text.starts_with('0'))
+                    .then(|| parse_decimal(&text))
                     .flatten()
                     .ok_or_else(|| {
                         format!(
-                            "the {name} of the sandbox plan, {}, is not a positive integer in \
+                            "the {name} of the sandbox plan, {text:?}, is not a positive integer in \
                              decimal text",
-                            repr(&text)
                         )
                     })
             })
             .transpose()
-        };
+        }
         let IdentityForm { uid, gid } = form.workload_identity;
         Ok(Self {
             entrypoint: form.entrypoint,

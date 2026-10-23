@@ -27,13 +27,12 @@ use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
 
-use super::refused;
+use super::{has_kernel_separator, refused};
 use crate::error::{Error, Result};
 use crate::host::filesystem::{
     self, ExportPlan, ExportRequest, GUEST_EXPORT, Mapping, Owner, PathList, ReservedTargets,
     Target, within,
 };
-use crate::host::python::builtins::{is_space, repr};
 use crate::host::python::fs;
 use crate::host::python::path::{Flavor, PurePath};
 use crate::protocol::share::{self, RESERVED_TARGET_CHARACTERS, Reservation};
@@ -175,8 +174,7 @@ fn setting_from_name<T: Copy>(
         .ok_or_else(|| {
             let [first, second] = values.map(as_str);
             refused(format!(
-                "unsupported sandbox mount {setting} {}; choose {first} or {second}",
-                repr(name)
+                "unsupported sandbox mount {setting} {name:?}; choose {first} or {second}",
             ))
         })
 }
@@ -273,21 +271,21 @@ pub fn parse_mount_value(value: &str) -> Result<(String, String, MountAccess)> {
         "rw" => MountAccess::ReadWrite,
         _ => {
             return Err(refused(format!(
-                "unsupported --mount mode {}; choose ro or rw (if HOST_PATH contains commas, end \
+                "unsupported --mount mode {access:?}; choose ro or rw (if HOST_PATH contains commas, end \
                  the value with ,ro or ,rw)",
-                repr(access)
             )));
         }
     };
     Ok((target.to_owned(), host_path.to_owned(), access))
 }
 
-/// Returns whether `target` holds a character that no guest target may: Python whitespace, or
-/// one of the [`RESERVED_TARGET_CHARACTERS`], NUL, `\`, `=`, and `,`.
+/// Returns whether `target` cannot stay one kernel token or holds one of the
+/// [`RESERVED_TARGET_CHARACTERS`], NUL, `\`, `=`, and `,`.
 pub(crate) fn has_forbidden_character(target: &str) -> bool {
-    target
-        .chars()
-        .any(|character| is_space(character) || RESERVED_TARGET_CHARACTERS.contains(character))
+    has_kernel_separator(target)
+        || target
+            .chars()
+            .any(|character| RESERVED_TARGET_CHARACTERS.contains(character))
 }
 
 /// Returns whether a guest target has an empty, `.`, or `..` component after its leading slash.
@@ -300,7 +298,8 @@ pub(crate) fn has_irregular_component(target: &str) -> bool {
 
 /// Checks a live share's guest target inside the sandbox container rootfs: an absolute non-root
 /// path of at most [`MAX_MOUNT_TARGET_BYTES`] bytes, without empty, dot, or parent components,
-/// whitespace, `\`, `=`, or `,`, and outside the [`RESERVED_MOUNT_TARGETS`] trees and the
+/// whitespace, control characters, quotes, `\`, `=`, or `,`, and outside the
+/// [`RESERVED_MOUNT_TARGETS`] trees and the
 /// [`RESERVED_EXACT_MOUNT_TARGETS`].
 ///
 /// Fails with [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported).
@@ -312,9 +311,8 @@ pub fn validate_mount_target(target: &str) -> Result<()> {
         || has_irregular_component(target)
     {
         return Err(refused(format!(
-            "invalid sandbox mount target {}: expected an absolute non-root path without empty, \
-             dot, or parent components, whitespace, '\\', '=', or ','",
-            repr(target)
+            "invalid sandbox mount target {target:?}: expected an absolute non-root path without empty, \
+             dot, or parent components, whitespace, control characters, quotes, '\\', '=', or ','",
         )));
     }
     match share::reservation(target.as_bytes()) {
@@ -362,9 +360,12 @@ pub fn mount_kind(host_path: &Path) -> MountKind {
     }
 }
 
-/// Returns the error for an `OSError` that an operation on `path` raised.
+/// Returns a native I/O error with its path, when available.
 pub(crate) fn os_error(error: &io::Error, path: Option<&str>) -> Error {
-    Error::io(fs::os_error_message(error, path))
+    Error::io(match path {
+        Some(path) => format!("{path:?}: {error}"),
+        None => error.to_string(),
+    })
 }
 
 /// A live virtio-fs share mounted inside the sandbox container rootfs.
@@ -471,14 +472,13 @@ impl SandboxMount {
         )
     }
 
-    /// Checks a share's fields in the order in which Python's `__post_init__` checks them.
+    /// Checks the target, host path, kind, and access policy, in that order.
     fn checked(self) -> Result<Self> {
         validate_mount_target(&self.guest_target)?;
         let raw_path = self.host_path.as_str();
         if raw_path.contains('\0') {
             return Err(refused(format!(
-                "sandbox mount host path contains a NUL character: {}",
-                repr(raw_path)
+                "sandbox mount host path contains a NUL character: {raw_path:?}",
             )));
         }
         if self.host_path.parts().iter().any(|part| part == "..") {
@@ -623,7 +623,7 @@ impl SandboxMount {
     /// symbolic-link component of the path that was requested.
     ///
     /// Fails with [`ErrorKind::Io`](crate::ErrorKind::Io) if a relative host path meets an
-    /// unreadable current directory.
+    /// unreadable current directory, or Windows cannot qualify a drive-relative path.
     pub fn absolute(&self) -> Result<Self> {
         self.absolute_with(&fs::cwd)
     }
@@ -635,7 +635,7 @@ impl SandboxMount {
         }
         let directory = cwd().map_err(|error| os_error(&error, None))?;
         Self::checked(Self {
-            host_path: directory.join(self.host_path.as_str()),
+            host_path: absolute_host_path(&directory, self.host_path.as_str())?,
             ..self.clone()
         })
     }
@@ -657,7 +657,7 @@ impl SandboxMount {
     ) -> Result<Vec<(PolicyKind, Vec<String>)>> {
         let host_path = self.absolute_with(cwd)?.host_path;
         let flavor = host_path.flavor();
-        Ok(POLICY_KINDS
+        POLICY_KINDS
             .iter()
             .map(|&kind| {
                 let paths = self
@@ -666,16 +666,33 @@ impl SandboxMount {
                     .iter()
                     .map(|path| {
                         if PurePath::new(flavor, path).is_absolute() {
-                            path.clone()
+                            Ok(path.clone())
                         } else {
-                            host_path.join(path).as_str().to_owned()
+                            absolute_host_path(&host_path, path)
+                                .map(|path| path.as_str().to_owned())
                         }
                     })
-                    .collect();
-                (kind, paths)
+                    .collect::<Result<Vec<_>>>()?;
+                Ok((kind, paths))
             })
-            .collect())
+            .collect()
     }
+}
+
+/// Joins a host path without resolving links. A different drive's relative path on Windows
+/// needs the OS's per-drive current directory, which joining to this drive cannot supply.
+fn absolute_host_path(directory: &PurePath, path: &str) -> Result<PurePath> {
+    let joined = directory.join(path);
+    #[cfg(windows)]
+    if !joined.is_absolute() {
+        let absolute = std::path::absolute(joined.as_path())
+            .map_err(|error| os_error(&error, Some(joined.as_str())))?;
+        let text = absolute
+            .to_str()
+            .ok_or_else(|| refused("absolute sandbox mount path is not valid Unicode"))?;
+        return Ok(PurePath::native(text));
+    }
+    Ok(joined)
 }
 
 /// Returns the bootstrap tokens of a share at `target` with `access`.

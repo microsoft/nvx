@@ -72,17 +72,17 @@ fn mount_parser_rejects_malformed_specifications() {
         ("/workspace,,rw", "--mount host path is empty".to_owned()),
         (
             "/workspace,host,rx",
-            format!("unsupported --mount mode 'rx'; {modes}"),
+            format!("unsupported --mount mode \"rx\"; {modes}"),
         ),
         // With more than one comma, the value must end in the mode, which the error suggests for
         // a host path that contains commas.
         (
             "/workspace,host,rw,extra",
-            format!("unsupported --mount mode 'extra'; {modes}"),
+            format!("unsupported --mount mode \"extra\"; {modes}"),
         ),
         (
             "/workspace,alpha,beta",
-            format!("unsupported --mount mode 'beta'; {modes}"),
+            format!("unsupported --mount mode \"beta\"; {modes}"),
         ),
     ] {
         assert_eq!(message(parse(value, MountPolicy::default())), expected);
@@ -96,7 +96,7 @@ fn mount_parser_rejects_malformed_specifications() {
             MountOwner::Vmm,
             MountKind::Directory,
         )),
-        "sandbox mount host path contains a NUL character: 'a\\x00b'"
+        "sandbox mount host path contains a NUL character: \"a\\0b\""
     );
     assert_eq!(
         message(parse("/workspace,link/../share", MountPolicy::default())),
@@ -249,11 +249,11 @@ fn mount_owner_defaults_to_vmm_and_forwards_caller() {
     assert_eq!(boot.fragment, vmm.fragment);
     assert_eq!(
         message(MountOwner::from_name("root")),
-        "unsupported sandbox mount owner 'root'; choose vmm or caller"
+        "unsupported sandbox mount owner \"root\"; choose vmm or caller"
     );
     assert_eq!(
         message(MountAccess::from_name("rx")),
-        "unsupported sandbox mount mode 'rx'; choose ro or rw"
+        "unsupported sandbox mount mode \"rx\"; choose ro or rw"
     );
 }
 
@@ -395,9 +395,8 @@ fn mount_absolute_path_keeps_symbolic_link_components() {
     assert_eq!(absolute.host_path(), expected.as_path());
     assert!(absolute.host_path.parts().iter().any(|part| part == "link"));
     assert_eq!(absolute.absolute().unwrap(), absolute);
-    let fixed = PurePath::new(Flavor::Posix, "/fixture/cwd");
-    let relative = SandboxMount::parse_in(
-        Flavor::Posix,
+    let fixed = PurePath::native(&host_text("/fixture/cwd"));
+    let relative = SandboxMount::parse(
         "/workspace,link/share,rw",
         MountPolicy::default(),
         MountOwner::Vmm,
@@ -405,7 +404,7 @@ fn mount_absolute_path_keeps_symbolic_link_components() {
     )
     .unwrap();
     let joined = relative.absolute_with(&|| Ok(fixed.clone())).unwrap();
-    assert_eq!(joined.host_path.as_str(), "/fixture/cwd/link/share");
+    assert_eq!(joined.host_path.as_path(), host("/fixture/cwd/link/share"));
     for (policy, expected) in [
         (
             policy(&["logs", "logs"], &[], &[]),
@@ -483,9 +482,8 @@ fn mount_target_validation_rejects_unsafe_and_reserved_targets() {
         assert_eq!(
             message(validate_mount_target(target)),
             format!(
-                "invalid sandbox mount target {}: expected an absolute non-root path without \
-                 empty, dot, or parent components, whitespace, '\\', '=', or ','",
-                repr(target)
+                "invalid sandbox mount target {target:?}: expected an absolute non-root path without \
+                 empty, dot, or parent components, whitespace, control characters, quotes, '\\', '=', or ','",
             )
         );
     }

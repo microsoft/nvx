@@ -615,7 +615,10 @@ fn staging_checking_and_preparing_a_launch_read_no_content() {
     let (kind, message) = failure(distro::verify_with(launch.distro(), METADATA_ONLY));
     assert_eq!(kind, ErrorKind::Unsupported);
     assert!(
-        message.starts_with("invalid sandbox distro manifest: ["),
+        message.starts_with(&format!(
+            "invalid sandbox distro manifest: {:?}: ",
+            staged.path("distro.erofs.manifest.json")
+        )),
         "{message}"
     );
     // ...and with reads allowed, binds the layer as the staging caller did.

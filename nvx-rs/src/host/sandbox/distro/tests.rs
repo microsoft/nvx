@@ -241,8 +241,10 @@ fn the_staged_check_reads_no_content() {
     let (kind, message) = failure(verify_with(&layer, METADATA_ONLY));
     assert_eq!(kind, ErrorKind::Unsupported);
     assert!(
-        message.starts_with("invalid sandbox distro manifest: [")
-            && message.ends_with(&format!(": {}", repr(&shown(&staged.manifest())))),
+        message.starts_with(&format!(
+            "invalid sandbox distro manifest: {:?}: ",
+            staged.manifest()
+        )),
         "{message}"
     );
     // ...and then the whole layer, which it fails to hash.
@@ -261,8 +263,7 @@ fn the_staged_check_reads_no_content() {
     let (kind, message) = failure(verify_with(&layer, access));
     assert_eq!(kind, ErrorKind::Io);
     assert!(
-        message.starts_with('[')
-            && message.ends_with(&format!(": {}", repr(&shown(&staged.image())))),
+        message.starts_with(&format!("{:?}: ", shown(&staged.image()))),
         "{message}"
     );
     // With reads allowed, it hashes the layer and binds it, as the check found it.
@@ -699,7 +700,7 @@ fn a_manifest_path_whose_lookup_fails_is_no_absent_manifest_for_a_binding() {
     ] {
         assert_eq!(kind, ErrorKind::Io, "{message}");
         assert!(
-            message.ends_with(&format!(": {}", repr(&shown(&staged.manifest())))),
+            message.starts_with(&format!("{:?}: ", shown(&staged.manifest()))),
             "{message}"
         );
     }

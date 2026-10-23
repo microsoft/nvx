@@ -759,7 +759,13 @@ hard-link a read-only file into `nvx-writable`, and sees only `nvx-allowed`,
 which stays readable, in `nvx-denied`. The share's other directories and files
 must be writable by every identity, so that only OpenVMM can refuse a write.
 
-The layer UUID is the EROFS superblock UUID, not a content digest. The command
+The layer UUID is the EROFS superblock UUID, not a content digest. Give it in
+canonical lowercase hyphenated form; braces, a `urn:uuid:` prefix, uppercase,
+and unhyphenated UUIDs are refused. Workload UID/GID and resource limits use
+ASCII decimal digits only, without signs, whitespace, underscores, or Unicode
+digits. Each UID/GID is in `1..4294967295`, memory in
+`1..18446744073709551615` bytes, and the process limit in `1..4194303`
+(the guest adds init's process). The command
 validates the files before launch, orders roles independently of option order,
 attaches layers read-only, and reserves the writable slot for scratch.
 Conversion and scratch formatting stay off the start path. The Ubuntu
@@ -768,12 +774,25 @@ policy, creates `/nonexistent` for UID/GID 65534, and invokes `mkfs.erofs`.
 Systemd entrypoints are explicitly unsupported and do not relax the non-root,
 drop-all-capabilities sandbox policy.
 
+The distro manifest beside the layer is strict UTF-8 JSON. Its `format` is the
+integer `1` (not `true` or `1.0`); non-finite numbers and unpaired surrogate
+escapes are refused even in unused fields. The artifact name, SHA-256 digest,
+and package metadata still bind it to the layer.
+
 This is the cold-filesystem bootstrap described in
 [the sandbox design](design/4.1-guest-filesystem-and-image-model.md#411-layered-sandbox-root), not the final
 production agent. It accepts no environment variables or secrets and does not
 expose sandbox snapshot capture or restore, the configuration region, or runtime RPC.
-Arguments are individual kernel-command-line tokens and therefore cannot
-contain whitespace. The workload enters private mount/PID/UTS namespaces with
+Entrypoints, arguments, and guest share targets are individual kernel-command-line
+tokens and therefore cannot contain whitespace, control characters, double
+quotes, or any UTF-8 byte that Linux treats as whitespace, including `0xa0`.
+Sandbox `--cmdline` uses Linux's quote and separator rules, and refuses reserved
+names even when quoted or written with hyphens instead of underscores. Validation
+uses the same trimmed text that is rendered and also checks the guest bootstrap's
+whitespace-only view, so reserved settings inside quoted values cannot override
+the generated settings. It also
+refuses a `--` or unclosed quote that hides the generated root tokens.
+The workload enters private mount/PID/UTS namespaces with
 a private `/dev`, an agent-owned cgroup, no capabilities, and `no_new_privs`.
 It always runs as the fixed non-root `UID:GID` selected at VM creation
 (`65534:65534` by default). The guest verifies that exactly one matching user,

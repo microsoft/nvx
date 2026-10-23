@@ -12,7 +12,7 @@
 //! - [`resolve`]: `Path.resolve()`, which follows `os.path.realpath`: it resolves symbolic links
 //!   component by component on POSIX, keeping the components that do not exist, and asks Windows
 //!   for the final path of the longest existing prefix, dropping the `\\?\` prefix again.
-//! - [`os_error_message`]: the text of an `OSError`.
+//! - `os_error_message`: the CLI's text of an `OSError`.
 //!
 //! Paths must be valid Unicode: a link target or working directory that is not is an error,
 //! where Python would decode it into surrogates.
@@ -20,6 +20,7 @@
 use std::io;
 use std::path::Path;
 
+#[cfg(any(test, feature = "cli"))]
 use super::builtins::repr;
 use super::not_unicode;
 use super::path::PurePath;
@@ -99,6 +100,7 @@ pub(crate) fn resolve(path: &PurePath) -> io::Result<PurePath> {
 /// Returns `str(error)` for an `OSError` that an operation on `filename` raised: `[Errno N]
 /// text: 'filename'` on POSIX, and `[WinError N] text: 'filename'` on Windows, with the text
 /// that the system gives for the error.
+#[cfg(any(test, feature = "cli"))]
 pub(crate) fn os_error_message(error: &io::Error, filename: Option<&str>) -> String {
     let Some(code) = error.raw_os_error() else {
         return error.to_string();

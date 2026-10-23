@@ -18,7 +18,7 @@ on:
       tests:
         description: >-
           Arguments of the test binaries that select the tests, such as
-          host::sandbox::golden:: or --skip NAME (default: every test)
+          host::sandbox:: or --skip NAME (default: every test)
         required: false
         default: ""
         type: string
