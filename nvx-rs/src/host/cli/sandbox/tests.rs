@@ -2,9 +2,44 @@
 
 use std::fs;
 
+use proptest::prelude::*;
+
 use super::*;
 use crate::host::python::fs::resolve;
 use crate::host::sandbox::layer::LayerRole;
+
+proptest! {
+    #[test]
+    fn policy_option_sequences_record_the_preceding_mount(
+        events in prop::collection::vec((any::<bool>(), 0_u8..3), 0..60),
+    ) {
+        let mut arguments = Vec::new();
+        let mut expected = Vec::new();
+        let mut mounts = 0_usize;
+        for (index, (new_mount, kind)) in events.into_iter().enumerate() {
+            if new_mount {
+                arguments.extend(["--mount".to_owned(), format!("/share-{mounts},host-{mounts},rw")]);
+                mounts += 1;
+            }
+            let (kind, option) = match kind {
+                0 => (PolicyKind::Denied, "--mount-deny"),
+                1 => (PolicyKind::Allowed, "--mount-allow"),
+                _ => (PolicyKind::Writable, "--mount-write"),
+            };
+            let path = format!("path-{index}");
+            arguments.extend([option.to_owned(), path.clone()]);
+            expected.push(PolicyPathOption {
+                kind,
+                preceding_mount: mounts.checked_sub(1),
+                path,
+            });
+        }
+        let (options, unrecognized) = parse(&arguments, "nvx-rs").unwrap();
+        prop_assert!(unrecognized.is_empty());
+        prop_assert_eq!(options.mounts.len(), mounts);
+        prop_assert_eq!(options.policy_paths, expected);
+    }
+}
 
 #[test]
 fn run_checks_again_that_its_shares_do_not_overlap() {

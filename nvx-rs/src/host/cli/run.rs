@@ -434,6 +434,9 @@ pub(super) fn run(root: Option<&str>, options: Options) -> Result {
     Err(Exit::Status(status))
 }
 
+#[cfg(test)]
+mod specification;
+
 /// Appends the shares of `options`, their policy paths and owner, the network options with the
 /// egress `rules`, and the outcome report to `command`, as `command_run` does, and returns the
 /// kernel command line: the one of `--cmdline`, and on the cold boot of an aggregate, the
