@@ -971,6 +971,23 @@ class CliTests(unittest.TestCase):
         self.assertEqual(args.memory_mib, 512)
         self.assertIs(args.handler, nvx.command_benchmark)
 
+    def test_benchmark_exposes_platform_restore_vcpu_matrix(self):
+        args = nvx.parse_args(
+            [
+                "benchmark",
+                "--suite",
+                "platform-snapshot-restore-vcpu",
+                "--processors",
+                "8",
+                "--output-dir",
+                "results",
+            ]
+        )
+
+        self.assertEqual(args.suite, "platform-snapshot-restore-vcpu")
+        self.assertIn(args.suite, benchmark.WORKLOAD_SUITES)
+        self.assertIs(args.handler, nvx.command_benchmark)
+
     def test_benchmark_exposes_snapshot_profile_matrix(self):
         args = nvx.parse_args(
             [
@@ -23300,6 +23317,174 @@ class BenchmarkTests(unittest.TestCase):
                 Path("initrd"),
                 "kvm",
             )
+
+    def test_platform_restore_vcpu_suite_restores_one_platform_capture(self):
+        args = argparse.Namespace(
+            processors=8,
+            memory_mib=512,
+            warmups=1,
+            runs=5,
+            timeout=40.0,
+            teardown_mode="guest-exit",
+            snapshot_profile=True,
+        )
+        result = cast(
+            benchmark.BenchmarkResult,
+            {
+                "samples_ms": [10.0, 12.0],
+                "peak_rss_samples_bytes": [1024, 2048],
+                "profile": {
+                    "schema_version": 1,
+                    "raw_samples": [],
+                    "phases": {
+                        "restore.guest_repair_gate": {
+                            "exclusive": False,
+                            "source": "openvmm",
+                            "samples_ms": [2.0],
+                            "p50_ms": 2.0,
+                            "p95_ms": 2.0,
+                            "min_ms": 2.0,
+                            "max_ms": 2.0,
+                        }
+                    },
+                },
+            },
+        )
+
+        def blocks(command: list[str]) -> list[str]:
+            return [
+                command[index + 1]
+                for index, argument in enumerate(command)
+                if argument == "--microvm-sandbox-block"
+            ]
+
+        prefix = ("taskset", "-c", "2")
+        with (
+            patch.object(benchmark, "capture_snapshot") as capture,
+            patch.object(benchmark, "benchmark", return_value=result) as run,
+            patch("sys.stdout", new_callable=io.StringIO) as output,
+        ):
+            benchmark.benchmark_platform_snapshot_restore_vcpu_workload(
+                args,
+                Path("openvmm"),
+                Path("vmlinux"),
+                Path("initrd"),
+                "mshv",
+                command_prefix=prefix,
+            )
+
+        capture.assert_called_once()
+        self.assertEqual(capture.call_args.kwargs["timeout"], args.timeout)
+        self.assertEqual(capture.call_args.kwargs["processors"], 1)
+        # The restored guest waits for the host after the marker instead of
+        # running a prequeued exit, so its peak RSS can be sampled.
+        self.assertNotEqual(capture.call_args.kwargs["teardown_mode"], "guest-exit")
+        capture_command = capture.call_args.args[0]
+        self.assertEqual(tuple(capture_command[:3]), prefix)
+        self.assertEqual(
+            capture_command[capture_command.index("--processors") + 1], "8"
+        )
+        # The platform command line takes no tenant tokens, such as quiet or
+        # the pre-banner capture's shellsnap.
+        self.assertEqual(
+            capture_command[capture_command.index("--cmdline") + 1], "maxcpus=1"
+        )
+        self.assertEqual(
+            capture_command[capture_command.index("--snapshot-tier") + 1], "platform"
+        )
+        capture_blocks = blocks(capture_command)
+        self.assertEqual(len(capture_blocks), 2)
+        self.assertRegex(capture_blocks[0], r"^distro:file:.+,ro$")
+        self.assertRegex(capture_blocks[1], r"^scratch:file:.+(?<!,ro)$")
+        self.assertEqual(run.call_count, 4)
+        targets: list[int] = []
+        for invocation in run.call_args_list:
+            command = invocation.args[0]
+            self.assertEqual(tuple(command[:3]), prefix)
+            self.assertEqual(command[command.index("--processors") + 1], "8")
+            self.assertEqual(blocks(command), capture_blocks)
+            self.assertEqual(invocation.kwargs["timeout"], args.timeout)
+            self.assertEqual(invocation.kwargs["marker"], benchmark.RESTORE_MARKER)
+            self.assertTrue(invocation.kwargs["marker_must_be_line"])
+            self.assertEqual(invocation.kwargs["teardown_mode"], "guest-exit")
+            self.assertFalse(invocation.kwargs.get("guest_exit_prequeued", False))
+            self.assertTrue(invocation.kwargs["snapshot_profile"])
+            targets.append(int(command[command.index("--restore-processors") + 1]))
+        self.assertEqual(targets, [1, 2, 4, 8])
+        self.assertIn("platform snapshot restore vCPU activation", output.getvalue())
+        self.assertIn("restore-online 8 vCPU", output.getvalue())
+        self.assertIn(
+            "platform-snapshot-restore-vcpu/mshv/capacity-8/online-1 lifecycle phases:",
+            output.getvalue(),
+        )
+
+        args.teardown_mode = "host-terminate"
+        with (
+            patch.object(benchmark, "capture_snapshot"),
+            patch.object(benchmark, "benchmark", return_value=result) as run,
+            patch("sys.stdout", new_callable=io.StringIO),
+        ):
+            benchmark.benchmark_platform_snapshot_restore_vcpu_workload(
+                args,
+                Path("openvmm"),
+                Path("vmlinux"),
+                Path("initrd"),
+                "kvm",
+            )
+        self.assertTrue(
+            all(
+                entry.kwargs["teardown_mode"] == "host-terminate"
+                for entry in run.call_args_list
+            )
+        )
+
+        args.processors = 4
+        with self.assertRaisesRegex(ValueError, "requires --processors 8"):
+            benchmark.benchmark_platform_snapshot_restore_vcpu_workload(
+                args,
+                Path("openvmm"),
+                Path("vmlinux"),
+                Path("initrd"),
+                "kvm",
+            )
+
+    def test_platform_restore_vcpu_metadata_records_the_targets(self):
+        args = nvx.parse_args(
+            [
+                "benchmark",
+                "--suite",
+                "platform-snapshot-restore-vcpu",
+                "--backend",
+                "kvm",
+                "--processors",
+                "8",
+            ]
+        )
+        benchmark.apply_benchmark_suite_defaults(args)
+        with (
+            tempfile.TemporaryDirectory() as temporary,
+            patch.object(
+                benchmark,
+                "benchmark_host_provenance",
+                return_value={"machine_name": "host"},
+            ),
+            patch.object(benchmark, "sha256_file", return_value="0" * 64),
+            patch.object(benchmark, "_git_revision", return_value="revision"),
+            patch.object(benchmark, "_git_status", return_value=[]),
+        ):
+            path = benchmark.write_benchmark_metadata(
+                args,
+                Path(temporary),
+                Path("openvmm"),
+                Path("vmlinux"),
+                Path("initramfs.cpio.gz"),
+                "kvm",
+            )
+            document = json.loads(path.read_text(encoding="utf-8"))
+
+        self.assertEqual(document["suite"], "platform-snapshot-restore-vcpu")
+        self.assertEqual(document["processors"], 8)
+        self.assertEqual(document["restore_processor_targets"], [1, 2, 4, 8])
 
     def test_benchmark_preserves_exact_process_wall_samples(self):
         samples = [

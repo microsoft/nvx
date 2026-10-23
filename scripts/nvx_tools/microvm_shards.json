@@ -46,6 +46,7 @@
         "lifecycle": 1.7,
         "managed-lifecycle": 4.2,
         "network-snapshot": 17.0,
+        "platform-restore-processors": 16.0,
         "private-network-ingress": 31.3,
         "restore-downtime": 69.2,
         "restore-memory": 4.1,
@@ -63,31 +64,31 @@
       },
       "shards": [
         {
-          "seconds": 228.8,
+          "seconds": 237.2,
           "scenarios": [
             "console-snapshot",
             "cpu-profile-fallback",
+            "directional-network-policy",
             "endpoint-policy-snapshot",
             "filesystem-comma-paths",
             "filesystem-snapshot",
             "network-snapshot",
+            "platform-restore-processors",
             "restore-downtime",
             "restore-memory",
             "restore-processors",
             "scratch-snapshot",
             "smp-snapshot",
-            "snapshot-core",
             "snapshot-tiers",
             "time-abi-conformance"
           ]
         },
         {
-          "seconds": 228.9,
+          "seconds": 236.5,
           "scenarios": [
             "command-line-limit",
             "console-exit",
             "denied-filesystem-paths",
-            "directional-network-policy",
             "filesystem-owner",
             "filesystem-policy",
             "filesystem-shares",
@@ -103,6 +104,7 @@
             "private-network-ingress",
             "sandbox-blocks",
             "smp",
+            "snapshot-core",
             "structured-outcome",
             "virtio-net",
             "workload-identity"
@@ -134,6 +136,7 @@
         "lifecycle": 1.6,
         "managed-lifecycle": 4.3,
         "network-snapshot": 16.8,
+        "platform-restore-processors": 16.0,
         "private-network-ingress": 31.6,
         "restore-downtime": 71.0,
         "restore-memory": 4.0,
@@ -151,14 +154,15 @@
       },
       "shards": [
         {
-          "seconds": 208.0,
+          "seconds": 216.1,
           "scenarios": [
             "console-snapshot",
             "cpu-profile-fallback",
             "directional-network-policy",
-            "endpoint-policy-snapshot",
+            "filesystem-shares",
             "filesystem-snapshot",
             "network-snapshot",
+            "platform-restore-processors",
             "restore-downtime",
             "restore-memory",
             "restore-processors",
@@ -170,15 +174,15 @@
           ]
         },
         {
-          "seconds": 208.0,
+          "seconds": 215.9,
           "scenarios": [
             "command-line-limit",
             "console-exit",
             "denied-filesystem-paths",
+            "endpoint-policy-snapshot",
             "filesystem-comma-paths",
             "filesystem-owner",
             "filesystem-policy",
-            "filesystem-shares",
             "guest-boot",
             "guest-identity",
             "host-loopback-policy",
@@ -222,6 +226,7 @@
         "lifecycle": 2.1,
         "managed-lifecycle": 17.8,
         "network-snapshot": 17.6,
+        "platform-restore-processors": 16.0,
         "private-network-ingress": 17.4,
         "restore-downtime": 84.7,
         "restore-memory": 12.5,
@@ -239,14 +244,15 @@
       },
       "shards": [
         {
-          "seconds": 300.4,
+          "seconds": 308.8,
           "scenarios": [
             "console-snapshot",
             "cpu-profile-fallback",
-            "endpoint-policy-snapshot",
+            "filesystem-policy",
             "filesystem-snapshot",
             "host-loopback-policy",
             "network-snapshot",
+            "platform-restore-processors",
             "restore-downtime",
             "restore-memory",
             "restore-processors",
@@ -258,15 +264,15 @@
           ]
         },
         {
-          "seconds": 301.1,
+          "seconds": 308.7,
           "scenarios": [
             "command-line-limit",
             "console-exit",
             "denied-filesystem-paths",
             "directional-network-policy",
+            "endpoint-policy-snapshot",
             "filesystem-comma-paths",
             "filesystem-owner",
-            "filesystem-policy",
             "filesystem-shares",
             "guest-boot",
             "guest-identity",

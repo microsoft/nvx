@@ -767,7 +767,8 @@ and `sandbox-proxy-only` drive the public `sandbox` lifecycle commands (see
 Ubuntu layer and scratch template, which packages omit. Alpine remains the
 default. Ubuntu and Azure Linux cannot act as sandbox control, so they reject
 the Alpine-control-only `sandbox-blocks` and `scratch-snapshot` scenarios and
-the sandbox-control-dependent `snapshot-tiers`, `managed-exec-config`,
+the sandbox-control-dependent `snapshot-tiers`, `platform-restore-processors`,
+`managed-exec-config`,
 `sandbox-lifecycle`, and `sandbox-proxy-only` scenarios. Ubuntu also rejects
 the Alpine-prompt-specific `console-snapshot` scenario. `--debug-kernel` boots
 the CI debug kernel, `build/vmlinux-debug`, whose soft-lockup and hung-task
@@ -834,7 +835,8 @@ characters, and otherwise `null`. A `scenario` record also has the
 `scenario`, the `guest`, `backend`, and `kernel`, and its `processors`: the
 `--processors` counts that the execution covers, such as `[4]` for `smp` on 4
 vCPUs, the largest count for `time-abi-conformance`, all of them for
-`smp-snapshot` and `restore-processors`, or `null` for a scenario that doesn't
+`smp-snapshot` and `restore-processors`, those up to 4 for
+`platform-restore-processors`, or `null` for a scenario that doesn't
 take them. A failed run ends with the failed scenario's record and the
 `teardown`; a run that is killed keeps every record that it completed and has
 no `teardown`.
@@ -1379,7 +1381,7 @@ python3 scripts/nvx.py benchmark [OPTIONS]
 
 | Option | Default | Description |
 | --- | --- | --- |
-| `--suite {boot,snapshot,restore,e2e,phase2,snapshot-profile,all,cold-start,device-io,device-restore-profile,network-snapshot,performance,shell-snapshot,shell-snapshot-restore,snapshot-restore-memory,snapshot-restore-vcpu,virtfs}` | `boot` | Select an acceptance, diagnostic, or workload suite. |
+| `--suite {boot,snapshot,restore,e2e,phase2,snapshot-profile,all,cold-start,device-io,device-restore-profile,network-snapshot,performance,platform-snapshot-restore-vcpu,shell-snapshot,shell-snapshot-restore,snapshot-restore-memory,snapshot-restore-vcpu,virtfs}` | `boot` | Select an acceptance, diagnostic, or workload suite. |
 | `--backend {whp,kvm,mshv,both}` | `both` on Windows; `kvm` elsewhere | Select the hypervisor backend. |
 | `--platform NAME` | inferred OS/backend | Record the host-typed performance series. |
 | `--openvmm-dir PATH` | `openvmm/` | Select the OpenVMM repository. |

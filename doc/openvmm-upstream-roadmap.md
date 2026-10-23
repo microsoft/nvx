@@ -8,11 +8,13 @@
   [Upstream status](#upstream-status).
 - Mapped fork tip: `a0556d7d85ce1fff89f5b45a98f15c5c79cbb6fb`, position 157. The graph, PR
   summary, and commit mapping below cover positions 001-157 and the fixups at positions
-  334-337.
-- NVX's pinned OpenVMM revision: `79a501b63fcd2f150e94928d0ceba79cd2fe96c4`, the head of the
-  `feature/microvm/dev` and `feature/microvm/release/v2.3` branches of microsoft/openvmm, 180
-  commits past the mapped tip on the same first-parent chain. Positions 158-333 are not yet
-  assigned to PRs; see [Commits after the mapped tip](#commits-after-the-mapped-tip).
+  334-340.
+- NVX's pinned OpenVMM revision: `2b681564dd63483f2f9c9f9bba3b98a4c00e9680`, position 340.
+  Positions 338-340, which are proposed for `feature/microvm/dev`, are three commits on
+  `79a501b63`, the head of the `feature/microvm/dev` and `feature/microvm/release/v2.3`
+  branches of microsoft/openvmm, and the pin is 183 commits past the mapped tip on the same
+  first-parent chain. Positions 158-333 are not yet assigned to PRs; see
+  [Commits after the mapped tip](#commits-after-the-mapped-tip).
 - Upstream main: `22c0485be597f87a76771e1db03eaa823a685ffc` (2026-10-22), the fork base.
 
 ## Upstream status
@@ -174,7 +176,7 @@ flowchart TB
     subgraph Independent["Parallel foundation PRs in upstream review"]
         direction LR
         P01["PR01<br/>Build/test infrastructure<br/>U - 7 commits, 6 in review"]
-        P02["PR02<br/>Mesh + sparse_mmap<br/>U - 3 commits, 2 in review"]
+        P02["PR02<br/>Mesh + sparse_mmap<br/>U - 4 commits, 2 in review"]
         P03["PR03<br/>PAL on Unix<br/>U - 3 commits, 3 in review"]
         P04["PR04<br/>PAL/PAL async on Windows<br/>U - 5 commits, 5 in review"]
         P05["PR05<br/>Hypervisor fixes<br/>U - 3 commits + split tip, 3 in review"]
@@ -200,10 +202,10 @@ flowchart TB
         P17["PR17<br/>Capture + authoritative restore<br/>P - 11 commits"]
         P18["PR18<br/>Host attachments<br/>P - 11 commits + split tip"]
         P19["PR19<br/>Block roles + tiers<br/>N/P - 3 commits"]
-        P20["PR20<br/>Restore activation<br/>P - 8 commits + split tip"]
+        P20["PR20<br/>Restore activation<br/>P - 9 commits + split tip"]
         P21["PR21<br/>Network egress policy<br/>P/N - 6 commits"]
         P22["PR22<br/>Filesystem deny policy<br/>P - 2 commits"]
-        P23["PR23<br/>Authenticated control console<br/>N - 9 commits + split tip"]
+        P23["PR23<br/>Authenticated control console<br/>N - 10 commits + split tip"]
         P24["PR24<br/>Managed workload/reporting<br/>N - 5 commits"]
         P25["PR25<br/>Management plane<br/>P - 3 commits + split tip"]
         P26["PR26<br/>Profiling benchmark<br/>U - 1 commit"]
@@ -299,7 +301,9 @@ The physical branch is one first-parent chain:
   -> a0556d7d8 (mapped tip)
   -> unassigned [158-333]
   -> PR10 fixup [334] -> PR05/PR20/unassigned split [335]
-  -> PR14 fixup [336] -> PR09 fixup [337] -> 79a501b63 (NVX pin)
+  -> PR14 fixup [336] -> PR09 fixup [337]
+  -> PR02 fixup [338] -> PR20 fixup [339] -> PR23 fixup [340]
+  -> 2b681564d (NVX pin)
 ```
 
 For upstream review, PR01-PR08 and PR14 can be rebased independently onto current upstream main,
@@ -313,15 +317,18 @@ and PR25, and split position 153 between PR18 and PR23 before submission. Fold p
 PR18's position 104 and position 155 into PR25's position 146. Fold the v2.3 rebase's fixups into
 the commits that [Rebase conflicts and fixups](#rebase-conflicts-and-fixups) names: position 334
 into PR10, position 336 into PR14, position 337 into PR09, and position 335 into PR05, the PR20
-fixup at position 151, and the unassigned positions 163 and 197. PR27 can be prepared once PR22
-lands; its generic confinement commit can be submitted independently if preferred.
+fixup at position 151, and the unassigned positions 163 and 197. Fold position 338 into PR02's
+position 010, which microsoft/openvmm#4558 carries. PR27 can be prepared once PR22 lands; its
+generic confinement commit can be submitted independently if preferred. Fold position 339 into
+PR20's position 120 and position 340 into PR23's position 136.
 
 ## Commits after the mapped tip
 
-The NVX pin extends the chain past position 157 without merges. Of the 180 later commits,
-positions 158-333 are not yet classified or assigned to PRs, and positions 334-337 are the
-fixups of the `feature/microvm/release/v2.3` rebase. This table groups them by topic in chain
-order; ranges are inclusive, as in the [PR summary](#pr-summary).
+The NVX pin extends the chain past position 157 without merges. Of the 183 later commits,
+positions 158-333 are not yet classified or assigned to PRs, positions 334-337 are the fixups
+of the `feature/microvm/release/v2.3` rebase, position 338 is a PR02 fixup, and positions 339
+and 340 are PR20 and PR23 fixups. This table groups them by topic in chain order; ranges are
+inclusive, as in the [PR summary](#pr-summary).
 
 | Positions | Commit range | Count | Topic |
 | ---: | --- | ---: | --- |
@@ -356,6 +363,9 @@ order; ranges are inclusive, as in the [PR summary](#pr-summary).
 | 332 | `ebb4b5d33` | 1 | The management RPC selects the microVM CPU profile |
 | 333 | `fcb4ea1c6` | 1 | Petri and the VMM tests fall back to the host CPU profile where `auto`'s is unsupported |
 | 334-337 | `9bc90f55f..79a501b63` | 4 | Fixups of the `feature/microvm/release/v2.3` rebase; see [Rebase conflicts and fixups](#rebase-conflicts-and-fixups) |
+| 338 | `8a0d945ed` | 1 | Windows mapped-file flushes mark every page of a writable view modified and write the range in one ascending pass, so NTFS no longer zero-fills ranges that are then written again (microsoft/openvmm#4734); fold into 010 |
+| 339 | `2f51e8bab` | 1 | Platform snapshots opt into restore-time vCPU activation with one canonical `maxcpus=` token, so each clone of a platform capture can bring its own VP prefix online; fold into 120 |
+| 340 | `2b681564d` | 1 | The control-console authentication timeout counts only while the broker reads host input, so a gated restore no longer detaches a host that authenticated at launch; fold into 136 |
 
 Some of these commits change mapped work rather than add to it. Positions 246-250 remove the
 legacy microVM clock paths and change files that PR10 and PR17 also change. Position 252 makes
@@ -370,7 +380,7 @@ as whole physical commits here but should be folded into their target commits be
 | PR | Class | Topic | Actual positions | Actual commit range(s) | Count | Recommended direct dependency |
 | --- | --- | --- | ---: | --- | ---: | --- |
 | PR01 | U | Build and test infrastructure | 001-007 | `a685f1048..bca9e93f5` | 7 | Current upstream |
-| PR02 | U | Host primitives: mesh and sparse_mmap | 008-010 | `8d72321f5..a95f8ef33` | 3 | Current upstream |
+| PR02 | U | Host primitives: mesh and sparse_mmap | 008-010; 338 (fixup) | `8d72321f5..a95f8ef33`; `8a0d945ed` | 4 | Current upstream |
 | PR03 | U | Host primitives: PAL on Unix | 011-013 | `30a39563d..c3330847c` | 3 | Current upstream |
 | PR04 | U | Host primitives: PAL and PAL async on Windows | 014-018 | `f2270e72b..8dfac4835` | 5 | Current upstream |
 | PR05 | U | Hypervisor backend fixes | 019-021; 335 (split) | `40d5bd66f..050a6904d`; `d2e83bdfd` (split) | 3 + split | Current upstream |
@@ -388,10 +398,10 @@ as whole physical commits here but should be folded into their target commits be
 | PR17 | P | microVM snapshot capture and authoritative restore | 093-103 | `693d64ca8..d0cb54c9d` | 11 | PR16 |
 | PR18 | P | microVM host attachments and device persistence | 104-113; 153 (split); 154 (fixup) | `9611571b9..b7816551d`; `9638a8f42` (split); `e1586485a` | 11 + split | PR17 |
 | PR19 | N/P | Sandbox block roles and snapshot tiers | 114-116 | `cec1a5510..59cb42a01` | 3 | PR18 |
-| PR20 | P | Restore-time processor and memory activation | 117-123; 151-152; 335 (split) | `9f2d6eeee..764d668d1`; `73a324390..9be096e1b`; `d2e83bdfd` (split) | 8 + split | PR19 |
+| PR20 | P | Restore-time processor and memory activation | 117-123; 151-152; 335 (split); 339 (fixup) | `9f2d6eeee..764d668d1`; `73a324390..9be096e1b`; `d2e83bdfd` (split); `2f51e8bab` | 9 + split | PR19 |
 | PR21 | P/N | Network egress policy | 124-129 | `44ec6b08d..b6e8dc870` | 6 | PR20; core can start after PR07 + PR08 + PR13 |
 | PR22 | P | Filesystem deny policy | 130-131 | `07eb316dc..7894a3b50` | 2 | PR21 |
-| PR23 | N | Authenticated control console | 132-140; 153 (split) | `2d649d42c..ed9d48548`; `9638a8f42` (split) | 9 + split | PR22; protocol/broker can start after PR03 + PR04 + PR13 |
+| PR23 | N | Authenticated control console | 132-140; 153 (split); 340 (fixup) | `2d649d42c..ed9d48548`; `9638a8f42` (split); `2b681564d` | 10 + split | PR22; protocol/broker can start after PR03 + PR04 + PR13 |
 | PR24 | N | Managed workload and outcome reporting | 141-145 | `ddaa1810b..ad0b68265` | 5 | PR23 |
 | PR25 | P | Management plane | 146-147; 152 (split); 155 (fixup) | `941f8f720..a1820db81`; `9be096e1b` (split); `e9f23af5d` | 3 + split | PR24 |
 | PR26 | U | Profiling benchmark | 148 | `d90539d5a` | 1 | PR25 in the current stack |
@@ -402,7 +412,7 @@ as whole physical commits here but should be folded into their target commits be
 
 Positions 152 and 153 intentionally appear under two PRs because their commits must be split when
 forming submission branches. Positions 154 and 155 are fixups that should be folded into positions
-104 and 146, respectively. Tip positions 151-155 and the fixups at positions 334-337 are listed
+104 and 146, respectively. Tip positions 151-155 and the fixups at positions 334-340 are listed
 under their destination PRs rather than in numerical order, and position 335 appears under both
 PRs that it changes. The counts distinguish whole commits from selected split hunks.
 Struck-through entries landed upstream before the fork base. The `microvm/v2.2` and
@@ -428,11 +438,12 @@ Partial upstream overlap is called out without striking the remaining fork work,
 </details>
 
 <details>
-<summary><strong>PR02 - Host primitives: mesh and sparse_mmap (U)</strong> - 3 commits</summary>
+<summary><strong>PR02 - Host primitives: mesh and sparse_mmap (U)</strong> - 4 commits</summary>
 
 - 008 `8d72321f5` - mesh_protobuf: clone type-erased messages and expose encoded length (**partly landed upstream**: microsoft/openvmm#4556, merged as `96647c331`, derives `Clone`; this commit now adds only `ProtobufAny::value_len` and a clone check)
 - 009 `15a895dd8` - sparse_mmap: add private copy-on-write file views (**open upstream**: microsoft/openvmm#4557)
 - 010 `a95f8ef33` - sparse_mmap: flush file-backed ranges with bounded concurrency (**open upstream**: microsoft/openvmm#4558)
+- 338 `8a0d945ed` - sparse_mmap: flush writable file views whole, in one ascending pass (**fold into 010**; proposed for `feature/microvm/dev` in microsoft/openvmm#4734)
 
 </details>
 
@@ -673,7 +684,7 @@ that upstream lacks.
 </details>
 
 <details>
-<summary><strong>PR20 - Restore-time processor and memory activation (P)</strong> - 8 commits + split tip</summary>
+<summary><strong>PR20 - Restore-time processor and memory activation (P)</strong> - 9 commits + split tip</summary>
 
 - 117 `9f2d6eeee` - chipset: expose a stable generation ID and restore entropy on portb
 - 118 `310b3e8f5` - openvmm: gate external input until post-restore repair completes
@@ -685,6 +696,7 @@ that upstream lacks.
 - 151 `73a324390` - virt_mshv: synchronize restored TSCs only on created VPs
 - 152 `9be096e1b` - openvmm_core: instantiate only the requested VP prefix on MSHV restore (**split with PR25**: worker and backend changes belong in PR20; the gRPC reference hunk belongs in PR25)
 - 335 `d2e83bdfd` - virt_mshv: adapt the microVM partition to partition scrub (**split fixup with PR05**: the hunk for position 151 belongs in PR20)
+- 339 `2f51e8bab` - microVM: let platform snapshots opt into restore-time vCPU activation (**fold into 120**)
 
 </details>
 
@@ -709,7 +721,7 @@ that upstream lacks.
 </details>
 
 <details>
-<summary><strong>PR23 - Authenticated control console (N)</strong> - 9 commits + split tip</summary>
+<summary><strong>PR23 - Authenticated control console (N)</strong> - 10 commits + split tip</summary>
 
 - 132 `2d649d42c` - serial_core: expose local peer identity and active-peer eviction
 - 133 `cba534b9d` - serial_socket: report Unix and named-pipe peer identities
@@ -721,6 +733,7 @@ that upstream lacks.
 - 139 `6c1043d08` - openvmm_helpers: record the control console in the microVM machine contract
 - 140 `ed9d48548` - openvmm_entry: add authenticated microVM control-console endpoints
 - 153 `9638a8f42` - Restore listener endpoint rebinding (**split with PR18**: authenticated control-listener portions belong in PR23; boot-listener and shared attachment-contract portions belong in PR18)
+- 340 `2b681564d` - virtio_console: time host authentication only while host input is read (**fold into 136**)
 
 </details>
 
