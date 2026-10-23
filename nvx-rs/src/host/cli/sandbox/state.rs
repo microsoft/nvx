@@ -349,8 +349,8 @@ pub(crate) fn serialize_launch(
         ("hostname", Value::from(settings.hostname.as_str())),
         ("workload_uid", Value::from(uid)),
         ("workload_gid", Value::from(gid)),
-        ("memory_max", Value::from(settings.memory_max.clone())),
-        ("pids_max", Value::from(settings.pids_max.clone())),
+        ("memory_max", Value::from(settings.memory_max)),
+        ("pids_max", Value::from(settings.pids_max)),
         ("hypervisor", Value::from(config.hypervisor)),
         ("memory_mib", Value::from(config.memory_mib.clone())),
         (NETWORK, network),
@@ -623,15 +623,23 @@ pub(crate) fn deserialize_launch(document: &Document) -> Result<SandboxLaunch> {
         let workload_identity = (identity("workload_uid")?, identity("workload_gid")?);
         let scratch = text_member(document, root, "scratch")?;
         let hostname = text_member(document, root, "hostname")?;
-        let limit = |name| -> std::result::Result<Option<Int>, Malformed> {
+        let limit = |name| -> std::result::Result<Option<u64>, Malformed> {
             let value = member(document, root, name).ok_or(Malformed::Malformed)?;
             if matches!(document.node(value), Node::Null) {
                 return Ok(None);
             }
-            integer(document, value).map(Some)
+            let Node::Integer(literal) = document.node(value) else {
+                return Err(Malformed::Malformed);
+            };
+            super::parse_decimal(literal)
+                .map(Some)
+                .ok_or(Malformed::Malformed)
         };
         let memory_max = limit("memory_max")?;
-        let pids_max = limit("pids_max")?;
+        let pids_max = limit("pids_max")?
+            .map(u32::try_from)
+            .transpose()
+            .map_err(|_| Malformed::Malformed)?;
         let (shares, export) = deserialize_export(document, root)?;
         let launch = SandboxLaunch::new(
             layers,

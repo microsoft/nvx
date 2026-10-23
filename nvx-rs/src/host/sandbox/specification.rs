@@ -410,8 +410,8 @@ fn launch_settings_follow_the_guest_contract() {
         args: vec!["first".to_owned(), "--second=value".to_owned()],
         hostname: "workload-1".to_owned(),
         workload_identity: (1000, 1001),
-        memory_max: Some(Int::from(u64::MAX)),
-        pids_max: Some(Int::from(4_194_303_u32)),
+        memory_max: Some(u64::MAX),
+        pids_max: Some(4_194_303),
     };
     assert_eq!(
         launch(settings).plan().kernel_command_line("").unwrap(),
@@ -427,8 +427,8 @@ fn launch_settings_follow_the_guest_contract() {
             vec![SandboxLayer::new(LayerRole::Distro, "distro.erofs", UUID)],
             "scratch.ext4",
             SandboxSettings {
-                memory_max: Some(Int::from(memory)),
-                pids_max: Some(Int::from(pids)),
+                memory_max: Some(u64::from(memory)),
+                pids_max: Some(pids),
                 ..SandboxSettings::default()
             },
         ));

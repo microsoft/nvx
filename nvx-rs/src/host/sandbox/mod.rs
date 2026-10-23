@@ -37,10 +37,9 @@
 //!   meanwhile: the OpenVMM arguments that name them, and the descriptors that the VMM inherits;
 //!   [`prepared`] explains the handoff on each host.
 //!
-//! Values are checked as Python checked them: whitespace is what `str.isspace` accepts,
-//! integers are what `int` reads ([`Int`]), UUIDs are what `uuid.UUID` reads, host paths are
-//! normalized as `pathlib` normalizes them, with backslashes on Windows, and messages quote
-//! values with Python's `repr`.
+//! Workload IDs and resource limits are ASCII decimal integers in their documented ranges.
+//! Layer UUIDs use their canonical lowercase hyphenated text, and resource limits use native
+//! unsigned Rust integers. Host paths use the host's native flavor.
 //!
 //! # Errors
 //!
@@ -69,18 +68,15 @@ pub use self::plan::{
 pub use self::prepared::PreparedLaunch;
 use crate::error::{Error, ErrorCode, Result};
 use crate::host::filesystem::ExportPlan;
-pub use crate::host::python::builtins::{Int, IntError};
-use crate::host::python::builtins::{is_space, repr};
+use crate::host::python::builtins::is_space;
 use crate::host::python::fs;
 use crate::host::python::path::{Flavor, PurePath};
 use crate::net::is_valid_hostname;
 use crate::protocol::root::RootImage;
 use crate::uuid::Uuid;
 
-/// The largest value the guest cgroup v2 `memory.max` parser can store.
-const MEMORY_MAX_LIMIT: u64 = u64::MAX;
 /// The guest adds one for its init process; Linux rejects `pids.max` at or above 4,194,305.
-const PIDS_MAX_LIMIT: u32 = 4_194_303;
+pub(crate) const PIDS_MAX_LIMIT: u32 = 4_194_303;
 
 /// The size of the x86 kernel command line, including its NUL.
 pub const KERNEL_COMMAND_LINE_MAX_SIZE: usize = 2048;
@@ -104,25 +100,37 @@ pub(crate) fn refused(message: impl Into<String>) -> Error {
 
 /// Parses a `--workload-user` value, `UID:GID`, with both IDs between 1 and 4294967295.
 ///
-/// Each ID is read as Python's `int` reads it, so a sign, underscores between digits, Unicode
-/// decimal digits, and surrounding whitespace are accepted. Fails with
+/// Each ID contains only ASCII decimal digits, without a sign or whitespace. Fails with
 /// [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported).
 pub fn parse_workload_identity(value: &str) -> Result<(u32, u32)> {
     let fields: Vec<&str> = value.split(':').collect();
     let [uid, gid] = fields[..] else {
         return Err(refused("--workload-user must be UID:GID"));
     };
-    let (Ok(uid), Ok(gid)) = (Int::parse(uid), Int::parse(gid)) else {
+    if [uid, gid]
+        .iter()
+        .any(|field| field.is_empty() || !field.bytes().all(|byte| byte.is_ascii_digit()))
+    {
         return Err(refused("--workload-user must contain numeric UID and GID"));
+    }
+    let id = |value: &str, name: &str| {
+        parse_decimal::<u32>(value)
+            .filter(|&id| id != 0)
+            .ok_or_else(|| {
+                refused(format!(
+                    "--workload-user {name} must be between 1 and 4294967295"
+                ))
+            })
     };
-    let id = |value: &Int, name: &str| {
-        value.to_u32().filter(|&id| id != 0).ok_or_else(|| {
-            refused(format!(
-                "--workload-user {name} must be between 1 and 4294967295"
-            ))
-        })
-    };
-    Ok((id(&uid, "UID")?, id(&gid, "GID")?))
+    Ok((id(uid, "UID")?, id(gid, "GID")?))
+}
+
+/// Parses nonempty ASCII decimal digits into a native integer, refusing signs and whitespace.
+pub(crate) fn parse_decimal<T: std::str::FromStr>(value: &str) -> Option<T> {
+    if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    value.parse().ok()
 }
 
 /// Checks that `path` is a regular file, following links, as `require_file` of `nvx.py` does.
@@ -198,10 +206,10 @@ pub struct SandboxSettings {
     /// The workload's UID and GID, neither of them root's.
     pub workload_identity: (u32, u32),
     /// The workload's memory limit in bytes, `memory.max` of its cgroup, if positive.
-    pub memory_max: Option<Int>,
+    pub memory_max: Option<u64>,
     /// The most processes that the workload may run, if positive; the guest's own init counts
     /// too, so its `pids.max` is one more.
-    pub pids_max: Option<Int>,
+    pub pids_max: Option<u32>,
 }
 
 impl Default for SandboxSettings {
@@ -258,22 +266,17 @@ fn validate_settings(settings: &SandboxSettings) -> Result<()> {
             "sandbox workload identity must be a non-root UID:GID",
         ));
     }
-    for (name, value) in [("memory-max", memory_max), ("pids-max", pids_max)] {
-        if value.as_ref().is_some_and(|value| !value.is_positive()) {
+    for (name, value) in [
+        ("memory-max", *memory_max),
+        ("pids-max", pids_max.map(u64::from)),
+    ] {
+        if value == Some(0) {
             return Err(refused(format!("--{name} must be positive")));
         }
     }
-    if memory_max
-        .as_ref()
-        .is_some_and(|value| value.to_u64().is_none())
-    {
-        return Err(refused(format!(
-            "--memory-max must be at most {MEMORY_MAX_LIMIT}"
-        )));
-    }
     if pids_max
         .as_ref()
-        .is_some_and(|value| value.to_u32().is_none_or(|value| value > PIDS_MAX_LIMIT))
+        .is_some_and(|&value| value > PIDS_MAX_LIMIT)
     {
         return Err(refused(format!(
             "--pids-max must be at most {PIDS_MAX_LIMIT}"
@@ -346,9 +349,9 @@ impl SandboxLaunch {
         };
         let Some(uuid) = Uuid::parse(distro.uuid()) else {
             return Err(refused(format!(
-                "{} layer UUID is invalid: {}",
+                "{} layer UUID is invalid: {:?}",
                 distro.role(),
-                repr(distro.uuid())
+                distro.uuid()
             )));
         };
         let image = match distro.format() {

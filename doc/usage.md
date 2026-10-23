@@ -1295,15 +1295,15 @@ wins over a value that `nvx-rs` would refuse, even when that value comes first.
 | Option | Default | Description |
 | --- | --- | --- |
 | `{run,provision,start,exec,stop,deprovision}` | `run` | Select a one-shot run or a managed lifecycle operation. |
-| `--layer ROLE,PATH,EROFS_UUID` | required for `run` and `provision` | Attach the `distro` EROFS layer. Only `distro` is accepted. |
+| `--layer ROLE,PATH,EROFS_UUID` | required for `run` and `provision` | Attach the `distro` EROFS layer. Only `distro` is accepted. The UUID must be lowercase hexadecimal in canonical hyphenated form; braces, prefixes, uppercase, and unhyphenated forms are refused. |
 | `--scratch PATH` | required for `run` and `provision` | Attach a preformatted ext4 scratch image as the writable overlay. |
 | `--state-dir PATH` | required for managed operations | Select persistent sandbox state. One-shot `run` rejects this option. |
 | `--entrypoint PATH` | `/bin/sh` | Select an absolute workload entrypoint without whitespace. |
 | `--arg VALUE` | none | Append one whitespace-free entrypoint argument. Repeat to pass multiple arguments. |
 | `--hostname NAME` | `nvx-sandbox` | Set the workload UTS hostname. |
-| `--workload-user UID:GID` | `65534:65534` | Select the fixed non-root workload identity for `run` or `provision`. |
-| `--memory-max BYTES` | none | Set the workload cgroup memory limit. |
-| `--pids-max COUNT` | none | Set the workload cgroup process limit. |
+| `--workload-user UID:GID` | `65534:65534` | Select the fixed non-root workload identity for `run` or `provision`. Both IDs must be ASCII decimal integers from 1 to 4294967295, without signs, whitespace, or underscores. |
+| `--memory-max BYTES` | none | Set the workload cgroup memory limit to an ASCII decimal integer from 1 to 18446744073709551615, without signs, whitespace, or underscores. |
+| `--pids-max COUNT` | none | Set the workload cgroup process limit to an ASCII decimal integer from 1 to 4194303, without signs, whitespace, or underscores. The guest adds one process for init. |
 | `--memory-mib MIB` | `256` | Set guest memory in MiB. |
 | `--timeout SECONDS` | `60` | Set the timeout for each managed control request and its response in `start`, `exec`, and `stop`, and the longest time that `provision`, `start`, `stop`, and `deprovision` wait for another lifecycle transition of the sandbox. It must be finite and greater than 0. |
 | `--exec-timeout-ms MILLISECONDS` | `0` | Set the managed `exec` guest workload timeout in the unsigned 32-bit range `0..4294967295`; zero disables the workload deadline. This is separate from the finite host `--timeout` control deadline. |

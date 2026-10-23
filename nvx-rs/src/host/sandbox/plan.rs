@@ -714,7 +714,7 @@ impl SandboxPlan {
             tokens.push(format!("nvx_memory_max={memory_max}"));
         }
         if let Some(pids_max) = &settings.pids_max {
-            tokens.push(format!("nvx_pids_max={}", pids_max.plus_one()));
+            tokens.push(format!("nvx_pids_max={}", pids_max + 1));
         }
         let BootShares {
             tokens: shares,

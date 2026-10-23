@@ -6,9 +6,8 @@ use std::path::Path;
 use super::distro::DistroFormat;
 use super::refused;
 use crate::error::Result;
-use crate::host::python::builtins::repr;
 use crate::host::python::path::{Flavor, PurePath};
-use crate::host::python::uuid::parse_uuid;
+use crate::uuid::Uuid;
 
 /// The role of a read-only layer of `nvx.py sandbox`.
 ///
@@ -102,9 +101,8 @@ impl SandboxLayer {
     /// Parses a `--layer` value, `ROLE,PATH,EROFS_UUID`, whose role is one of the
     /// [`LAYER_ROLES`].
     ///
-    /// The UUID may take any form that Python's `uuid.UUID` accepts, such as braces, a
-    /// `urn:uuid:` prefix, no hyphens, or uppercase digits, and is kept in its lowercase
-    /// hyphenated form. Fails with [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported).
+    /// The UUID must be canonical: lowercase hexadecimal digits in hyphenated groups of
+    /// 8, 4, 4, 4, and 12. Fails with [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported).
     pub fn parse(value: &str) -> Result<Self> {
         Self::parse_in(Flavor::NATIVE, value)
     }
@@ -118,21 +116,17 @@ impl SandboxLayer {
         let Some(role) = LayerRole::from_name(role) else {
             let choices: Vec<&str> = LAYER_ROLES.iter().map(|role| role.as_str()).collect();
             return Err(refused(format!(
-                "unsupported layer role {}; choose {}",
-                repr(role),
+                "unsupported layer role {role:?}; choose {}",
                 choices.join(", ")
             )));
         };
         if path.is_empty() {
             return Err(refused(format!("{role} layer path is empty")));
         }
-        let Some(uuid) = parse_uuid(uuid) else {
-            return Err(refused(format!(
-                "{role} layer UUID is invalid: {}",
-                repr(uuid)
-            )));
+        let Some(uuid) = Uuid::parse(uuid) else {
+            return Err(refused(format!("{role} layer UUID is invalid: {uuid:?}")));
         };
-        Ok(Self::new_in(flavor, role, path, uuid))
+        Ok(Self::new_in(flavor, role, path, uuid.to_string()))
     }
 
     /// Returns the layer's role.
@@ -171,51 +165,45 @@ mod tests {
     }
 
     #[test]
-    fn layers_parse_with_python_uuids() {
-        let layer = SandboxLayer::parse_in(
-            Flavor::Posix,
-            "distro,layers//distro.erofs,{22222222-2222-2222-2222-22222222222A}",
-        )
-        .unwrap();
+    fn layers_require_canonical_uuids() {
+        let layer =
+            SandboxLayer::parse("distro,layers//distro.erofs,22222222-2222-2222-2222-22222222222a")
+                .unwrap();
         assert_eq!(layer.role(), LayerRole::Distro);
-        assert_eq!(layer.pure_path().as_str(), "layers/distro.erofs");
+        assert_eq!(layer.path(), Path::new("layers").join("distro.erofs"));
         assert_eq!(layer.uuid(), "22222222-2222-2222-2222-22222222222a");
-        let layer = SandboxLayer::parse_in(
-            Flavor::Windows,
-            "distro,C:/l/d.erofs,urn:uuid:11111111111111111111111111111111",
-        )
-        .unwrap();
-        assert_eq!(layer.pure_path().as_str(), "C:\\l\\d.erofs");
-        assert_eq!(layer.uuid(), "11111111-1111-1111-1111-111111111111");
+        for uuid in [
+            "{22222222-2222-2222-2222-22222222222a}",
+            "urn:uuid:22222222-2222-2222-2222-22222222222a",
+            "2222222222222222222222222222222a",
+            "22222222-2222-2222-2222-22222222222A",
+        ] {
+            assert!(SandboxLayer::parse(&format!("distro,layer.erofs,{uuid}")).is_err());
+        }
     }
 
     #[test]
     fn layers_keep_the_format_of_their_image() {
-        let erofs = SandboxLayer::new_in(
-            Flavor::Posix,
+        let erofs = SandboxLayer::new(
             LayerRole::Distro,
             "l//d.erofs",
             "22222222-2222-2222-2222-222222222222",
         );
         assert_eq!(erofs.format(), DistroFormat::Erofs);
-        let gpt = SandboxLayer::gpt_in(
-            Flavor::Posix,
+        let gpt = SandboxLayer::gpt(
             LayerRole::Distro,
             "l//d.img",
             "22222222-2222-2222-2222-222222222222",
         );
         assert_eq!(gpt.format(), DistroFormat::Gpt);
-        assert_eq!(gpt.pure_path().as_str(), "l/d.img");
+        assert_eq!(gpt.path(), Path::new("l").join("d.img"));
         assert_eq!(gpt.uuid(), erofs.uuid());
         assert_eq!(gpt.role(), LayerRole::Distro);
         // `--layer` names EROFS layers.
         assert_eq!(
-            SandboxLayer::parse_in(
-                Flavor::Posix,
-                "distro,l/d.erofs,22222222-2222-2222-2222-222222222222"
-            )
-            .unwrap()
-            .format(),
+            SandboxLayer::parse("distro,l/d.erofs,22222222-2222-2222-2222-222222222222")
+                .unwrap()
+                .format(),
             DistroFormat::Erofs
         );
     }
@@ -228,13 +216,13 @@ mod tests {
                 message(&format!(
                     "{role},layer.erofs,22222222-2222-2222-2222-222222222222"
                 )),
-                format!("unsupported layer role '{role}'; choose distro")
+                format!("unsupported layer role {role:?}; choose distro")
             );
             assert_eq!(LayerRole::from_name(role), None, "{role}");
         }
         assert_eq!(
             message("distro,layer.erofs,not-a-uuid"),
-            "distro layer UUID is invalid: 'not-a-uuid'"
+            "distro layer UUID is invalid: \"not-a-uuid\""
         );
         assert_eq!(message("distro,,1"), "distro layer path is empty");
         for value in ["distro", "distro,a", "distro,a,b,c"] {

@@ -8,6 +8,43 @@ use super::*;
 use crate::host::python::fs::resolve;
 use crate::host::sandbox::layer::LayerRole;
 
+#[test]
+fn resource_limits_are_bounded_ascii_decimal() {
+    for (option, value) in [
+        ("--memory-max", "1"),
+        ("--memory-max", "18446744073709551615"),
+        ("--pids-max", "1"),
+        ("--pids-max", "4194303"),
+    ] {
+        let arguments = [option.to_owned(), value.to_owned()];
+        let (options, _) = parse(&arguments, "nvx-rs").unwrap();
+        let actual = if option == "--memory-max" {
+            options.memory_max
+        } else {
+            options.pids_max.map(u64::from)
+        };
+        assert_eq!(actual, Some(value.parse::<u64>().unwrap()));
+    }
+    for option in ["--memory-max", "--pids-max"] {
+        for value in [
+            "0",
+            "-1",
+            "+1",
+            " 1",
+            "1 ",
+            "1_000",
+            "\u{661}",
+            "",
+            "1.0",
+            "18446744073709551616",
+        ] {
+            let arguments = [option.to_owned(), value.to_owned()];
+            assert!(parse(&arguments, "nvx-rs").is_err(), "{option} {value:?}");
+        }
+    }
+    assert!(parse(&["--pids-max".to_owned(), "4194304".to_owned()], "nvx-rs").is_err());
+}
+
 proptest! {
     #[test]
     fn policy_option_sequences_record_the_preceding_mount(

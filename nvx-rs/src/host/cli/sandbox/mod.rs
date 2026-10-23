@@ -46,9 +46,9 @@ use crate::host::sandbox::options::{
 use crate::host::sandbox::plan::guest_gateway;
 use crate::host::sandbox::scratch::{CLAIM_RELEASE_WAIT, ScratchBinding};
 use crate::host::sandbox::{
-    DEFAULT_ENTRYPOINT, DEFAULT_HOSTNAME, DEFAULT_WORKLOAD_IDENTITY, PreparedLaunch, SandboxLaunch,
-    SandboxLayer, SandboxNetwork, SandboxPlan, SandboxSettings, parse_workload_identity,
-    require_artifact,
+    DEFAULT_ENTRYPOINT, DEFAULT_HOSTNAME, DEFAULT_WORKLOAD_IDENTITY, PIDS_MAX_LIMIT,
+    PreparedLaunch, SandboxLaunch, SandboxLayer, SandboxNetwork, SandboxPlan, SandboxSettings,
+    parse_decimal, parse_workload_identity, require_artifact,
 };
 use crate::host::store::RuntimeIdentity;
 use crate::host::supervisor::Inherited;
@@ -251,9 +251,9 @@ pub(crate) struct Options {
     /// `--workload-user`.
     pub(crate) workload_user: (u32, u32),
     /// `--memory-max`.
-    pub(crate) memory_max: Option<Int>,
+    pub(crate) memory_max: Option<u64>,
     /// `--pids-max`.
-    pub(crate) pids_max: Option<Int>,
+    pub(crate) pids_max: Option<u32>,
     /// `--memory-mib`, 256 by default.
     pub(crate) memory_mib: Int,
     /// `--timeout` in seconds, 60 by default.
@@ -346,8 +346,29 @@ impl Receiver for Options {
                 self.workload_user =
                     parse_workload_identity(&text()).map_err(|error| error.message().to_owned())?;
             }
-            "--memory-max" => self.memory_max = Some(integer(&text())?),
-            "--pids-max" => self.pids_max = Some(integer(&text())?),
+            "--memory-max" => {
+                self.memory_max = Some(
+                    parse_decimal::<u64>(&text())
+                        .filter(|&value| value != 0)
+                        .ok_or_else(|| {
+                            format!(
+                                "expected an ASCII decimal integer between 1 and {}",
+                                u64::MAX
+                            )
+                        })?,
+                );
+            }
+            "--pids-max" => {
+                self.pids_max = Some(
+                    parse_decimal::<u32>(&text())
+                        .filter(|&value| value != 0 && value <= PIDS_MAX_LIMIT)
+                        .ok_or_else(|| {
+                            format!(
+                                "expected an ASCII decimal integer between 1 and {PIDS_MAX_LIMIT}"
+                            )
+                        })?,
+                );
+            }
             "--memory-mib" => self.memory_mib = integer(&text())?,
             "--timeout" => {
                 let timeout =
@@ -601,8 +622,8 @@ pub(super) fn run(root: Option<&str>, options: Options) -> Result {
             args: options.args.clone(),
             hostname: options.hostname.clone(),
             workload_identity: options.workload_user,
-            memory_max: options.memory_max.clone(),
-            pids_max: options.pids_max.clone(),
+            memory_max: options.memory_max,
+            pids_max: options.pids_max,
         };
         let launch = SandboxLaunch::new(
             options.layers.clone(),

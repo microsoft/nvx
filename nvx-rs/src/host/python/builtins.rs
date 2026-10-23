@@ -108,7 +108,7 @@ pub(crate) fn repr(text: &str) -> String {
 
 /// Why `int(text)` refuses `text`.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum IntError {
+pub(crate) enum IntError {
     /// The text is not an integer literal.
     Invalid,
     /// The literal has this many decimal digits, more than `int` converts (4300).
@@ -117,7 +117,7 @@ pub enum IntError {
 
 impl IntError {
     /// Returns the message of the `ValueError` with which `int(text)` refuses `text`.
-    pub fn message(&self, text: &str) -> String {
+    pub(crate) fn message(&self, text: &str) -> String {
         match self {
             Self::Invalid => {
                 // `%.200R` keeps the first 200 characters of the representation.
@@ -142,7 +142,7 @@ pub(crate) fn too_many_digits_message(digits: usize) -> String {
 ///
 /// [`Display`](fmt::Display) gives its decimal form, as `str()` does.
 #[derive(Clone, PartialEq, Eq, Hash)]
-pub struct Int {
+pub(crate) struct Int {
     /// Whether the integer is below zero; zero is never negative.
     negative: bool,
     /// The decimal digits of the magnitude, without leading zeros: `"0"` for zero.
@@ -151,7 +151,7 @@ pub struct Int {
 
 impl Int {
     /// Zero.
-    pub fn zero() -> Self {
+    pub(crate) fn zero() -> Self {
         Self {
             negative: false,
             digits: "0".to_owned(),
@@ -163,7 +163,7 @@ impl Int {
     /// Python first maps Unicode whitespace to spaces and Unicode decimal digits to ASCII
     /// digits, and refuses any other character outside ASCII. It then accepts surrounding ASCII
     /// whitespace, a sign, leading zeros, and single underscores between digits.
-    pub fn parse(text: &str) -> Result<Self, IntError> {
+    pub(crate) fn parse(text: &str) -> Result<Self, IntError> {
         let (negative, digits) = parse_digits(text, 10)?;
         Ok(Self::from_digits(negative, &digits))
     }
@@ -186,44 +186,19 @@ impl Int {
         }
     }
 
-    /// Returns whether the integer is below zero.
-    pub fn is_negative(&self) -> bool {
-        self.negative
-    }
-
-    /// Returns whether the integer is above zero.
-    pub fn is_positive(&self) -> bool {
-        !self.negative && self.digits != "0"
-    }
-
     /// Returns the integer as a `u32`, if it is one.
-    pub fn to_u32(&self) -> Option<u32> {
+    #[cfg(any(test, feature = "cli"))]
+    pub(crate) fn to_u32(&self) -> Option<u32> {
         self.to_u64().and_then(|value| u32::try_from(value).ok())
     }
 
     /// Returns the integer as a `u64`, if it is one.
-    pub fn to_u64(&self) -> Option<u64> {
+    #[cfg(any(test, feature = "cli"))]
+    pub(crate) fn to_u64(&self) -> Option<u64> {
         if self.negative {
             return None;
         }
         self.digits.parse().ok()
-    }
-
-    /// Returns the integer plus one.
-    #[must_use]
-    pub fn plus_one(&self) -> Self {
-        if self.negative {
-            // -n + 1 = -(n - 1), and -1 + 1 = 0.
-            let magnitude = decrement(&self.digits);
-            return Self {
-                negative: magnitude != "0",
-                digits: magnitude,
-            };
-        }
-        Self {
-            negative: false,
-            digits: increment(&self.digits),
-        }
     }
 }
 
@@ -286,40 +261,6 @@ impl fmt::Display for Int {
 impl fmt::Debug for Int {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         fmt::Display::fmt(self, formatter)
-    }
-}
-
-/// Adds one to a decimal magnitude.
-fn increment(digits: &str) -> String {
-    let mut bytes = digits.as_bytes().to_vec();
-    for byte in bytes.iter_mut().rev() {
-        if *byte == b'9' {
-            *byte = b'0';
-        } else {
-            *byte += 1;
-            return bytes.into_iter().map(char::from).collect();
-        }
-    }
-    std::iter::once('1')
-        .chain(bytes.into_iter().map(char::from))
-        .collect()
-}
-
-/// Subtracts one from a positive decimal magnitude.
-fn decrement(digits: &str) -> String {
-    let mut bytes = digits.as_bytes().to_vec();
-    for byte in bytes.iter_mut().rev() {
-        if *byte == b'0' {
-            *byte = b'9';
-        } else {
-            *byte -= 1;
-            break;
-        }
-    }
-    let text: String = bytes.into_iter().map(char::from).collect();
-    match text.trim_start_matches('0') {
-        "" => "0".to_owned(),
-        trimmed => trimmed.to_owned(),
     }
 }
 
@@ -535,22 +476,14 @@ mod tests {
     }
 
     #[test]
-    fn integers_compare_and_increment_at_any_size() {
+    fn integers_compare_and_convert_at_any_size() {
         let parse = |text: &str| Int::parse(text).unwrap();
-        assert_eq!(
-            parse("99999999999999999999").plus_one().to_string(),
-            "100000000000000000000"
-        );
-        assert_eq!(parse("-1").plus_one(), Int::zero());
-        assert_eq!(parse("-10").plus_one().to_string(), "-9");
         assert_eq!(parse("4294967295").to_u32(), Some(u32::MAX));
         assert_eq!(parse("4294967296").to_u32(), None);
         assert_eq!(parse("-1").to_u64(), None);
         assert!(parse("-3") < parse("-2"));
         assert!(parse("-2") < Int::zero());
         assert!(parse("10") > parse("9"));
-        assert!(!Int::zero().is_positive());
-        assert!(!Int::zero().is_negative());
         assert_eq!(Int::from(-7_i64).to_string(), "-7");
     }
 

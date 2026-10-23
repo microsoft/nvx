@@ -759,7 +759,13 @@ hard-link a read-only file into `nvx-writable`, and sees only `nvx-allowed`,
 which stays readable, in `nvx-denied`. The share's other directories and files
 must be writable by every identity, so that only OpenVMM can refuse a write.
 
-The layer UUID is the EROFS superblock UUID, not a content digest. The command
+The layer UUID is the EROFS superblock UUID, not a content digest. Give it in
+canonical lowercase hyphenated form; braces, a `urn:uuid:` prefix, uppercase,
+and unhyphenated UUIDs are refused. Workload UID/GID and resource limits use
+ASCII decimal digits only, without signs, whitespace, underscores, or Unicode
+digits. Each UID/GID is in `1..4294967295`, memory in
+`1..18446744073709551615` bytes, and the process limit in `1..4194303`
+(the guest adds init's process). The command
 validates the files before launch, orders roles independently of option order,
 attaches layers read-only, and reserves the writable slot for scratch.
 Conversion and scratch formatting stay off the start path. The Ubuntu

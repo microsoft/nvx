@@ -15,7 +15,6 @@
 //!   state files.
 //! - [`path`]: `str(pathlib.Path(...))`, which Python messages show, the path that Python opens
 //!   for it, and the pure paths of `pathlib` with the `os.path` operations that they use.
-//! - [`uuid`]: the UUIDs that `uuid.UUID` reads.
 //! - [`fs`]: the filesystem queries of `os`, `os.path`, and `pathlib.Path`, among them
 //!   `Path.resolve()` and the file identities of `os.stat` and `os.lstat`.
 //! - [`shell`]: `subprocess.list2cmdline` and `shlex.join`, with which `nvx.py` prints the
@@ -43,6 +42,7 @@ pub(crate) mod path;
 pub(crate) mod shell;
 pub(crate) mod text;
 pub(crate) mod unicode;
+#[cfg(test)]
 pub(crate) mod uuid;
 #[cfg(feature = "cli")]
 pub(crate) mod value;
