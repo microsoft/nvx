@@ -1070,7 +1070,10 @@ refuse a command line before anything changes, dry runs, one-shot runs, the
 lifecycles of sandboxes of every configuration, their executions, the refusals
 of lifecycle operations, configurations of every format, from the hand-written
 `config.json` files of `tests/fixtures/state/`, `egress compile`, and
-`artifacts`. The CLI test also replays the [golden scenarios](#golden-scenarios)
+`artifacts`. `tests/fixtures/run-help.txt` holds the help of `nvx-rs run`,
+which `nvx.py run` prints too, since it parses the options of `nvx-rs run`
+before it runs it: a test of each program checks its help against it.
+The CLI test also replays the [golden scenarios](#golden-scenarios)
 and checks the guest-feature requirement and, on Linux, Ctrl-C. The
 [conformance vectors](tests/vectors/README.md) of the wire formats cover both
 sides of every record, frame, and payload: the codec decodes each vector of

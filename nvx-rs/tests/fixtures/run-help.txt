@@ -1,0 +1,83 @@
+usage: nvx-rs run [-h] [--guest {alpine,ubuntu,azurelinux}]
+                  [--hypervisor {auto,whp,kvm,mshv}] [--machine {microvm}]
+                  [--memory-mib MEMORY_MIB]
+                  [--memory-capacity-mib MEMORY_CAPACITY_MIB]
+                  [--processors {1,2,4,8}] [--cpu-profile ID]
+                  [--mount GUEST_TARGET,HOST_PATH[,ro|rw]]
+                  [--mount-deny MOUNT_DENY] [--mount-allow HOST_PATH]
+                  [--mount-write HOST_PATH] [--mount-owner {vmm,caller}]
+                  [--net IPV4/PREFIX] [--network-profile {portable}]
+                  [--network-egress {allow,deny}]
+                  [--network-ingress {allow,deny}]
+                  [--network-egress-allow CIDR[:PROTOCOL[:PORT[-PORT]]]]
+                  [--network-egress-deny CIDR[:PROTOCOL[:PORT[-PORT]]]]
+                  [--network-egress-policy-file PATH]
+                  [--host-loopback {allow,deny}]
+                  [--network-proxy IPV4:TCP-PORT]
+                  [--host-loopback-forward HOST_LOOPBACK_FORWARD]
+                  [--outcome-report OUTCOME_REPORT] [--cmdline CMDLINE]
+                  [--restore-snapshot RESTORE_SNAPSHOT]
+                  [--restore-processors {1,2,4,8}]
+                  [--restore-memory-mib RESTORE_MEMORY_MIB]
+                  [--restore-ready-path RESTORE_READY_PATH] [--dry-run]
+
+options:
+  -h, --help            show this help message and exit
+  --guest {alpine,ubuntu,azurelinux}
+  --hypervisor {auto,whp,kvm,mshv}
+  --machine {microvm}
+  --memory-mib MEMORY_MIB
+                        guest RAM in MiB (default by --guest: alpine 128,
+                        ubuntu 512, azurelinux 512)
+  --memory-capacity-mib MEMORY_CAPACITY_MIB
+  --processors {1,2,4,8}
+  --cpu-profile ID      OpenVMM CPU profile: auto (OpenVMM's default) for the
+                        built-in profile of the host's CPU, a built-in profile
+                        ID, or host to derive a development profile from this
+                        host (doc/usage.md)
+  --mount GUEST_TARGET,HOST_PATH[,ro|rw]
+                        live-share a host directory, or a single regular host
+                        file without its directory; the mode follows the last
+                        comma, so HOST_PATH may contain commas when the mode
+                        is given; repeat for more shares, each with its own
+                        guest target and mode, as children of one virtio-fs
+                        device
+  --mount-deny MOUNT_DENY
+  --mount-allow HOST_PATH
+                        expose one existing path inside a --mount-deny path
+                        again
+  --mount-write HOST_PATH
+                        make one existing path one of the only writable parts
+                        of a read-write --mount
+  --mount-owner {vmm,caller}
+                        host identity of the share's file operations: vmm
+                        (default) or caller, with guest root squashed to the
+                        owner of the shared directory or file (Linux only)
+  --net IPV4/PREFIX
+  --network-profile {portable}
+  --network-egress {allow,deny}
+  --network-ingress {allow,deny}
+  --network-egress-allow CIDR[:PROTOCOL[:PORT[-PORT]]]
+                        allow guest egress to an IPv4 or IPv6 CIDR, optionally
+                        only for PROTOCOL tcp, udp, or icmp, and for tcp or
+                        udp only on PORT or on the inclusive range PORT-PORT;
+                        repeat to add rules
+  --network-egress-deny CIDR[:PROTOCOL[:PORT[-PORT]]]
+                        deny guest egress to an IPv4 or IPv6 CIDR, optionally
+                        only for PROTOCOL tcp, udp, or icmp, and for tcp or
+                        udp only on PORT or on the inclusive range PORT-PORT;
+                        repeat to add rules
+  --network-egress-policy-file PATH
+                        load bounded MXC-shaped IPv4 and IPv6 egress rules
+                        from JSON
+  --host-loopback {allow,deny}
+  --network-proxy IPV4:TCP-PORT
+  --host-loopback-forward HOST_LOOPBACK_FORWARD
+  --outcome-report OUTCOME_REPORT
+                        write a bounded local JSON outcome report
+  --cmdline CMDLINE
+  --restore-snapshot RESTORE_SNAPSHOT
+  --restore-processors {1,2,4,8}
+  --restore-memory-mib RESTORE_MEMORY_MIB
+  --restore-ready-path RESTORE_READY_PATH
+  --dry-run

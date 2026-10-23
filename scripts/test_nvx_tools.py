@@ -820,28 +820,14 @@ class CliTests(unittest.TestCase):
                 self.assertIn(f"{name} {default}", help_text)
                 self.assertIn(f"{default} for {labels[name]}", row)
 
-    def test_run_help_and_memory_defaults_are_those_that_nvx_rs_replays(self):
-        # nvx.py run runs nvx-rs run, whose golden scenarios replay the help
-        # and the dry runs that nvx.py run recorded, so they pin its help and
-        # the default memory of each guest, which guests.py also gives
-        # test-microvm, to those of nvx-rs.
-        fixture = json.loads(
-            (nvx_rs.DIRECTORY / "tests" / "fixtures" / "cli.json").read_text(
-                encoding="utf-8"
-            )
-        )
-        section = "windows" if os.name == "nt" else "posix"
-        scenarios = {
-            cast(str, scenario["name"]): cast(
-                list[dict[str, object]], scenario["steps"]
-            )[0]
-            for scenario in cast(list[dict[str, object]], fixture[section])
-        }
-
-        def recorded(name: str) -> str:
-            stdout = cast(str, scenarios[f"run, {name}"]["stdout"])
-            return stdout.replace("\r\n", "\n")
-
+    def test_run_help_is_the_help_of_nvx_rs_run(self):
+        # nvx.py run parses the options of nvx-rs run before it runs it, so it
+        # prints the help that the scenario tests of nvx-rs pin in
+        # run-help.txt, which gives the default memory of each guest that
+        # guests.py also gives test-microvm.
+        help_of_nvx_rs = (
+            nvx_rs.DIRECTORY / "tests" / "fixtures" / "run-help.txt"
+        ).read_text(encoding="utf-8")
         stdout = io.StringIO()
         with (
             patch.dict(os.environ, {"COLUMNS": "80", "NO_COLOR": "1"}),
@@ -850,22 +836,17 @@ class CliTests(unittest.TestCase):
             self.assertRaises(SystemExit),
         ):
             nvx.parse_args(["run", "--help"])
-        expected = recorded("usage: help").replace("nvx-rs run", "nvx.py run", 1)
+        expected = help_of_nvx_rs.replace("nvx-rs run", "nvx.py run", 1)
         if sys.version_info >= (3, 14):
             self.assertEqual(stdout.getvalue(), expected)
         else:
             # Older releases of argparse wrap some of the help differently.
             self.assertEqual(stdout.getvalue().split(), expected.split())
-        labels = {
-            "alpine": "Alpine",
-            "ubuntu": "Ubuntu",
-            "azurelinux": "Azure Linux",
-        }
+        help_text = " ".join(help_of_nvx_rs.split())
         for name in guests.GUEST_NAMES:
             default = guests.guest_descriptor(name).default_memory_mib
             with self.subTest(guest=name):
-                command = recorded(f"dry run: {labels[name]} default")
-                self.assertIn(f" --memory {default}M ", command)
+                self.assertIn(f"{name} {default}", help_text)
 
     def test_benchmark_exposes_device_restore_profile(self):
         args = nvx.parse_args(

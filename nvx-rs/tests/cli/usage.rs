@@ -1,6 +1,10 @@
 //! The usage errors of the parsers of `nvx-rs sandbox` and `nvx-rs run`, and their help.
 
-use crate::harness::{LAYER, Root, SCRATCH};
+use crate::harness::{LAYER, LINE_END, Root, SCRATCH};
+
+/// The help of `nvx-rs run`, which `nvx.py run` prints too, since it parses the options of
+/// `nvx-rs run` before it runs it: a test of `nvx.py` checks its help against this one.
+const RUN_HELP: &str = include_str!("../fixtures/run-help.txt");
 
 /// A command line that a parser of `nvx-rs` refuses.
 pub(crate) struct UsageError {
@@ -510,7 +514,7 @@ fn help_prints_the_usage_and_the_options_and_exits_0() {
         let help = outcome.stdout();
         assert!(help.starts_with(case.usage), "{}: {help}", case.name);
         assert!(
-            help.contains("\n  -h, --help ") && help.ends_with(crate::harness::LINE_END),
+            help.contains("\n  -h, --help ") && help.ends_with(LINE_END),
             "{}: {help}",
             case.name
         );
@@ -522,4 +526,11 @@ fn help_prints_the_usage_and_the_options_and_exits_0() {
             );
         }
     }
+}
+
+#[test]
+fn run_prints_the_help_of_nvx_py_run() {
+    let outcome = Root::new().nvx_rs(&["run", "--help"]);
+    outcome.assert_success();
+    assert_eq!(outcome.stdout(), RUN_HELP.replace('\n', LINE_END));
 }

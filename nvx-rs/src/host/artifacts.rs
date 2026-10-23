@@ -453,8 +453,8 @@ impl Guest {
 
     /// Returns the RAM, in MiB, with which `nvx.py run` boots the guest without `--memory-mib`:
     /// the `default_memory_mib` of its descriptor in `scripts/nvx_tools/guests.py`, which
-    /// `nvx.py test-microvm` also uses, and which a test of `nvx.py` pins to the golden scenarios
-    /// of `nvx-rs run`.
+    /// `nvx.py test-microvm` also uses, and which a test of `nvx.py` pins to the help of
+    /// `nvx-rs run` in `tests/fixtures/run-help.txt`.
     pub const fn default_memory_mib(self) -> u32 {
         match self {
             Self::Alpine => 128,
