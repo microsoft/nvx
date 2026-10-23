@@ -1,9 +1,8 @@
 //! The sandbox launch profile: a microVM that runs one workload in a container over a read-only
 //! distro image and a writable upper, with live virtio-fs shares.
 //!
-//! This is the profile of `nvx.py sandbox`, ported from the launch profile that
-//! `scripts/nvx_tools/sandbox.py` held until microsoft/nvx#359, with its limits, option
-//! semantics, OpenVMM arguments, kernel command line, and messages:
+//! This is the profile of `nvx.py sandbox`: its documented limits, option semantics, OpenVMM
+//! arguments, and guest kernel tokens, with native Rust input validation and diagnostics:
 //!
 //! - [`plan`]: the typed, persistable [`SandboxPlan`] of a cold layered launch: one read-only
 //!   `distro` block device, an EROFS filesystem or a GPT disk with the identity that the guest
@@ -68,10 +67,10 @@ pub use self::plan::{
 pub use self::prepared::PreparedLaunch;
 use crate::error::{Error, ErrorCode, Result};
 use crate::host::filesystem::ExportPlan;
-use crate::host::python::builtins::is_space;
 use crate::host::python::fs;
 use crate::host::python::path::{Flavor, PurePath};
 use crate::net::is_valid_hostname;
+use crate::protocol::cmdline;
 use crate::protocol::root::RootImage;
 use crate::uuid::Uuid;
 
@@ -131,6 +130,17 @@ pub(crate) fn parse_decimal<T: std::str::FromStr>(value: &str) -> Option<T> {
         return None;
     }
     value.parse().ok()
+}
+
+/// Returns whether a value cannot stay one unquoted kernel token: whitespace, a control
+/// character, a quote, or a UTF-8 byte that Linux treats as whitespace.
+pub(crate) fn has_kernel_separator(value: &str) -> bool {
+    value
+        .chars()
+        .any(|character| character.is_whitespace() || character.is_control())
+        || value
+            .bytes()
+            .any(|byte| byte == b'"' || cmdline::is_space(byte))
 }
 
 /// Checks that `path` is a regular file, following links, as `require_file` of `nvx.py` does.
@@ -239,21 +249,17 @@ fn validate_settings(settings: &SandboxSettings) -> Result<()> {
         memory_max,
         pids_max,
     } = settings;
-    let has_invalid_chars =
-        |text: &str| text.contains('"') || text.bytes().any(|byte| byte == 0xa0);
-    if !entrypoint.starts_with('/')
-        || entrypoint.chars().any(is_space)
-        || has_invalid_chars(entrypoint)
-    {
+    if !entrypoint.starts_with('/') || has_kernel_separator(entrypoint) {
         return Err(refused(
-            "sandbox entrypoint must be an absolute path without spaces or quotes",
+            "sandbox entrypoint must be an absolute path without whitespace, control characters, or quotes",
         ));
     }
-    if args.iter().any(|argument| {
-        argument.is_empty() || argument.chars().any(is_space) || has_invalid_chars(argument)
-    }) {
+    if args
+        .iter()
+        .any(|argument| argument.is_empty() || has_kernel_separator(argument))
+    {
         return Err(refused(
-            "sandbox arguments must be nonempty and contain no spaces or quotes",
+            "sandbox arguments must be nonempty and contain no whitespace, control characters, or quotes",
         ));
     }
     if !is_valid_hostname(hostname) {

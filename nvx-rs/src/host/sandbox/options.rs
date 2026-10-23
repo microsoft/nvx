@@ -1,5 +1,4 @@
-//! The checks that `nvx.py sandbox` and `nvx.py run` apply to their options, ported from
-//! `scripts/nvx.py` with their order and messages:
+//! The contracts that `nvx.py sandbox` and `nvx.py run` apply to their options:
 //!
 //! - [`SandboxOptions::check`]: the checks of `command_sandbox` before it builds the launch: the
 //!   operations that each option is valid for, the options that need others, and the managed exec
@@ -323,7 +322,7 @@ pub fn validate_run_share_targets(targets: &[&str]) -> Result<()> {
             return Err(refused(format!(
                 "invalid --mount target {target:?}: with several shares, or a shared file, each target \
                  must be an absolute non-root path without empty, dot, or parent components, \
-                 whitespace, '\\', '=', or ','",
+                 whitespace, control characters, quotes, '\\', '=', or ','",
             )));
         }
         for other in std::iter::once(&AGGREGATE_MOUNT_TARGET).chain(&targets[..index]) {

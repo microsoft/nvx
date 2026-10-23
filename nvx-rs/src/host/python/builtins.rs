@@ -1,22 +1,27 @@
 //! Python's built-in string and integer operations.
 //!
-//! - [`is_space`], [`split`], and [`strip`]: `str.isspace`, `str.split()`, and `str.strip()`.
+//! - `is_space`: `str.isspace` for the CLI; test-only `split` and `strip` retain their oracles.
 //!   Python's whitespace includes the ASCII separators U+001C through U+001F, which Rust's
 //!   [`char::is_whitespace`] does not.
 //! - [`repr`]: `repr` of a `str`, with which messages quote values.
-//! - [`Int`]: a Python `int` of any size, from `int(text)`, with its acceptance of signs,
+//! - `Int`: a CLI-only Python `int` of any size, from `int(text)`, with its acceptance of signs,
 //!   underscores, Unicode decimal digits, and surrounding whitespace, and its limit of
-//!   [`MAX_INT_DIGITS`] decimal digits.
+//!   `MAX_INT_DIGITS` decimal digits.
 
+#[cfg(any(test, feature = "cli"))]
 use std::cmp::Ordering;
-use std::fmt::{self, Write as _};
+#[cfg(any(test, feature = "cli"))]
+use std::fmt;
+use std::fmt::Write as _;
 
 use super::unicode;
 
 /// The most decimal digits that `int(text)` converts: `sys.get_int_max_str_digits()`.
+#[cfg(any(test, feature = "cli"))]
 pub(crate) const MAX_INT_DIGITS: usize = 4300;
 
 /// Returns whether Python's `str.isspace` holds for `character`.
+#[cfg(any(test, feature = "cli"))]
 pub(crate) fn is_space(character: char) -> bool {
     matches!(
         u32::from(character),
@@ -47,6 +52,7 @@ pub(crate) fn is_printable(character: char) -> bool {
 }
 
 /// Returns the value of a Unicode decimal digit, of category Nd, as `int` reads it.
+#[cfg(any(test, feature = "cli"))]
 pub(crate) fn decimal_value(character: char) -> Option<u32> {
     let code = u32::from(character);
     let starts = unicode::DECIMAL_STARTS;
@@ -57,11 +63,13 @@ pub(crate) fn decimal_value(character: char) -> Option<u32> {
 }
 
 /// Splits `text` at runs of Python whitespace and drops empty fields, as `str.split()` does.
+#[cfg(test)]
 pub(crate) fn split(text: &str) -> impl Iterator<Item = &str> {
     text.split(is_space).filter(|field| !field.is_empty())
 }
 
 /// Strips Python whitespace from both ends of `text`, as `str.strip()` does.
+#[cfg(test)]
 pub(crate) fn strip(text: &str) -> &str {
     text.trim_matches(is_space)
 }
@@ -108,6 +116,7 @@ pub(crate) fn repr(text: &str) -> String {
 
 /// Why `int(text)` refuses `text`.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg(any(test, feature = "cli"))]
 pub(crate) enum IntError {
     /// The text is not an integer literal.
     Invalid,
@@ -115,6 +124,7 @@ pub(crate) enum IntError {
     TooManyDigits(usize),
 }
 
+#[cfg(any(test, feature = "cli"))]
 impl IntError {
     /// Returns the message of the `ValueError` with which `int(text)` refuses `text`.
     pub(crate) fn message(&self, text: &str) -> String {
@@ -131,6 +141,7 @@ impl IntError {
 
 /// Returns the message of the `ValueError` that refuses a decimal literal of `digits` digits,
 /// more than [`MAX_INT_DIGITS`].
+#[cfg(any(test, feature = "cli"))]
 pub(crate) fn too_many_digits_message(digits: usize) -> String {
     format!(
         "Exceeds the limit ({MAX_INT_DIGITS} digits) for integer string conversion: value has \
@@ -142,6 +153,7 @@ pub(crate) fn too_many_digits_message(digits: usize) -> String {
 ///
 /// [`Display`](fmt::Display) gives its decimal form, as `str()` does.
 #[derive(Clone, PartialEq, Eq, Hash)]
+#[cfg(any(test, feature = "cli"))]
 pub(crate) struct Int {
     /// Whether the integer is below zero; zero is never negative.
     negative: bool,
@@ -149,6 +161,7 @@ pub(crate) struct Int {
     digits: String,
 }
 
+#[cfg(any(test, feature = "cli"))]
 impl Int {
     /// Zero.
     pub(crate) fn zero() -> Self {
@@ -187,13 +200,11 @@ impl Int {
     }
 
     /// Returns the integer as a `u32`, if it is one.
-    #[cfg(any(test, feature = "cli"))]
     pub(crate) fn to_u32(&self) -> Option<u32> {
         self.to_u64().and_then(|value| u32::try_from(value).ok())
     }
 
     /// Returns the integer as a `u64`, if it is one.
-    #[cfg(any(test, feature = "cli"))]
     pub(crate) fn to_u64(&self) -> Option<u64> {
         if self.negative {
             return None;
@@ -202,6 +213,7 @@ impl Int {
     }
 }
 
+#[cfg(any(test, feature = "cli"))]
 impl From<u64> for Int {
     fn from(value: u64) -> Self {
         Self {
@@ -211,12 +223,14 @@ impl From<u64> for Int {
     }
 }
 
+#[cfg(any(test, feature = "cli"))]
 impl From<u32> for Int {
     fn from(value: u32) -> Self {
         Self::from(u64::from(value))
     }
 }
 
+#[cfg(any(test, feature = "cli"))]
 impl From<i64> for Int {
     fn from(value: i64) -> Self {
         Self {
@@ -226,12 +240,14 @@ impl From<i64> for Int {
     }
 }
 
+#[cfg(any(test, feature = "cli"))]
 impl PartialOrd for Int {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
     }
 }
 
+#[cfg(any(test, feature = "cli"))]
 impl Ord for Int {
     fn cmp(&self, other: &Self) -> Ordering {
         let magnitude = || {
@@ -249,6 +265,7 @@ impl Ord for Int {
     }
 }
 
+#[cfg(any(test, feature = "cli"))]
 impl fmt::Display for Int {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         if self.negative {
@@ -258,6 +275,7 @@ impl fmt::Display for Int {
     }
 }
 
+#[cfg(any(test, feature = "cli"))]
 impl fmt::Debug for Int {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         fmt::Display::fmt(self, formatter)
@@ -267,6 +285,7 @@ impl fmt::Debug for Int {
 /// Parses `text` as `int(text, base)` does for base 10 or 16, returning its sign and its digit
 /// values, most significant first and with any leading zeros. See [`Int::parse`]; base 16 also
 /// accepts a `0x` prefix, which a single underscore may follow.
+#[cfg(any(test, feature = "cli"))]
 pub(crate) fn parse_digits(text: &str, base: u32) -> Result<(bool, Vec<u8>), IntError> {
     let mut ascii = Vec::with_capacity(text.len());
     for character in text.chars() {

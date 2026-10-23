@@ -7,6 +7,7 @@
 /// The first code point of each run of ten decimal digits, of category Nd, which `int`
 /// reads as the digits zero to nine.
 #[rustfmt::skip]
+#[cfg(any(test, feature = "cli"))]
 pub(crate) const DECIMAL_STARTS: &[u32] = &[
     0x00030, 0x00660, 0x006F0, 0x007C0, 0x00966, 0x009E6, 0x00A66, 0x00AE6,
     0x00B66, 0x00BE6, 0x00C66, 0x00CE6, 0x00D66, 0x00DE6, 0x00E50, 0x00ED0,

@@ -783,8 +783,16 @@ This is the cold-filesystem bootstrap described in
 [the sandbox design](design/4.1-guest-filesystem-and-image-model.md#411-layered-sandbox-root), not the final
 production agent. It accepts no environment variables or secrets and does not
 expose sandbox snapshot capture or restore, the configuration region, or runtime RPC.
-Arguments are individual kernel-command-line tokens and therefore cannot
-contain whitespace. The workload enters private mount/PID/UTS namespaces with
+Entrypoints, arguments, and guest share targets are individual kernel-command-line
+tokens and therefore cannot contain whitespace, control characters, double
+quotes, or any UTF-8 byte that Linux treats as whitespace, including `0xa0`.
+Sandbox `--cmdline` uses Linux's quote and separator rules, and refuses reserved
+names even when quoted or written with hyphens instead of underscores. Validation
+uses the same trimmed text that is rendered and also checks the guest bootstrap's
+whitespace-only view, so reserved settings inside quoted values cannot override
+the generated settings. It also
+refuses a `--` or unclosed quote that hides the generated root tokens.
+The workload enters private mount/PID/UTS namespaces with
 a private `/dev`, an agent-owned cgroup, no capabilities, and `no_new_privs`.
 It always runs as the fixed non-root `UID:GID` selected at VM creation
 (`65534:65534` by default). The guest verifies that exactly one matching user,

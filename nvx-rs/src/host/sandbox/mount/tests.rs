@@ -395,9 +395,8 @@ fn mount_absolute_path_keeps_symbolic_link_components() {
     assert_eq!(absolute.host_path(), expected.as_path());
     assert!(absolute.host_path.parts().iter().any(|part| part == "link"));
     assert_eq!(absolute.absolute().unwrap(), absolute);
-    let fixed = PurePath::new(Flavor::Posix, "/fixture/cwd");
-    let relative = SandboxMount::parse_in(
-        Flavor::Posix,
+    let fixed = PurePath::native(&host_text("/fixture/cwd"));
+    let relative = SandboxMount::parse(
         "/workspace,link/share,rw",
         MountPolicy::default(),
         MountOwner::Vmm,
@@ -405,7 +404,7 @@ fn mount_absolute_path_keeps_symbolic_link_components() {
     )
     .unwrap();
     let joined = relative.absolute_with(&|| Ok(fixed.clone())).unwrap();
-    assert_eq!(joined.host_path.as_str(), "/fixture/cwd/link/share");
+    assert_eq!(joined.host_path.as_path(), host("/fixture/cwd/link/share"));
     for (policy, expected) in [
         (
             policy(&["logs", "logs"], &[], &[]),
@@ -484,7 +483,7 @@ fn mount_target_validation_rejects_unsafe_and_reserved_targets() {
             message(validate_mount_target(target)),
             format!(
                 "invalid sandbox mount target {target:?}: expected an absolute non-root path without \
-                 empty, dot, or parent components, whitespace, '\\', '=', or ','",
+                 empty, dot, or parent components, whitespace, control characters, quotes, '\\', '=', or ','",
             )
         );
     }

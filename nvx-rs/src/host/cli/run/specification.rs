@@ -4,6 +4,22 @@ use proptest::prelude::*;
 
 use super::*;
 
+#[test]
+fn single_share_targets_must_remain_one_kernel_token() {
+    let directory = tempfile::tempdir().unwrap();
+    for separator in ['\0', '\t', '\n', ' ', '"', '\u{a0}', '\u{120}'] {
+        let options = Options {
+            mounts: vec![format!(
+                "/workspace/a{separator}b,{}",
+                directory.path().display()
+            )],
+            ..Options::default()
+        };
+        let rules = options.network.egress_rules().unwrap();
+        assert!(extend_shares_and_network(&mut Vec::new(), &options, &rules).is_err());
+    }
+}
+
 proptest! {
     #[test]
     fn policy_paths_attach_to_their_shares(

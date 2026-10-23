@@ -405,27 +405,27 @@ fn plans_check_their_settings_as_launches_do() {
         (
             (|settings: &mut SandboxSettings| settings.entrypoint = "bin/sh".to_owned())
                 as fn(&mut SandboxSettings),
-            "sandbox entrypoint must be an absolute path without spaces or quotes",
+            "sandbox entrypoint must be an absolute path without whitespace, control characters, or quotes",
         ),
         (
             |settings| settings.args = vec![String::new()],
-            "sandbox arguments must be nonempty and contain no spaces or quotes",
+            "sandbox arguments must be nonempty and contain no whitespace, control characters, or quotes",
         ),
         (
             |settings| settings.entrypoint = "/opt/app\"".to_owned(),
-            "sandbox entrypoint must be an absolute path without spaces or quotes",
+            "sandbox entrypoint must be an absolute path without whitespace, control characters, or quotes",
         ),
         (
             |settings| settings.args = vec!["say\"hi".to_owned()],
-            "sandbox arguments must be nonempty and contain no spaces or quotes",
+            "sandbox arguments must be nonempty and contain no whitespace, control characters, or quotes",
         ),
         (
             |settings| settings.entrypoint = "/bin/\u{e0}--".to_owned(),
-            "sandbox entrypoint must be an absolute path without spaces or quotes",
+            "sandbox entrypoint must be an absolute path without whitespace, control characters, or quotes",
         ),
         (
             |settings| settings.args = vec!["voil\u{e0}--".to_owned()],
-            "sandbox arguments must be nonempty and contain no spaces or quotes",
+            "sandbox arguments must be nonempty and contain no whitespace, control characters, or quotes",
         ),
         (
             |settings| settings.hostname = "Invalid".to_owned(),
@@ -1564,7 +1564,7 @@ fn persisted_plans_that_break_the_form_or_the_checks_are_refused() {
     );
     refused(
         &|value| value["settings"]["entrypoint"] = json!("bin/sh"),
-        "sandbox entrypoint must be an absolute path without spaces or quotes",
+        "sandbox entrypoint must be an absolute path without whitespace, control characters, or quotes",
     );
     refused(
         &|value| value["export"]["binds"][1]["target"] = json!("/workspace/settings.json"),

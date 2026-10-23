@@ -481,6 +481,88 @@ fn windows_drive_relative_and_unc_paths() {
     }
 }
 
+#[test]
+fn kernel_token_values_refuse_separators() {
+    for separator in [
+        '\0', '\t', '\n', '\u{b}', '\u{c}', '\r', ' ', '"', '\u{a0}', '\u{120}', '\u{3000}',
+        '\u{1c}',
+    ] {
+        for settings in [
+            SandboxSettings {
+                entrypoint: format!("/bin/a{separator}b"),
+                ..SandboxSettings::default()
+            },
+            SandboxSettings {
+                args: vec![format!("a{separator}b")],
+                ..SandboxSettings::default()
+            },
+        ] {
+            refused(SandboxLaunch::new(
+                vec![SandboxLayer::new(LayerRole::Distro, "distro.erofs", UUID)],
+                "scratch.ext4",
+                settings,
+            ));
+        }
+        refused(validate_mount_target(&format!("/workspace/a{separator}b")));
+    }
+}
+
+#[test]
+fn caller_parameters_follow_linux_and_guest_rules() {
+    let launch = launch(SandboxSettings {
+        entrypoint: "/bin/workload".to_owned(),
+        memory_max: Some(268_435_456),
+        pids_max: Some(64),
+        ..SandboxSettings::default()
+    });
+    let adapter = SandboxPlan::adapter(
+        SandboxDistro::new("distro.erofs", RootImage::erofs(Uuid::parse(UUID))),
+        SandboxUpper::RAM,
+    );
+    for user in [
+        r#""nvx_layer=other""#,
+        r#""virtfs_dir=/other""#,
+        "nvx-layer=other",
+        "virtfs-dir=/other",
+        "quiet\u{120}nvx_layer=other",
+        "quiet\u{a0}virtfs_dir=/other",
+        "\u{2003}nvx_layer=other",
+        "\u{2003}virtfs_dir=/other",
+        r#"a="nvx_layer=other virtfs_dir=/other""#,
+        r#"extra="ignored virtfs_dir=/other ignored""#,
+        "--",
+        "quiet -- ignored",
+        "value=\"unterminated",
+    ] {
+        refused(launch.plan().kernel_command_line(user));
+        refused(launch.plan().one_shot_kernel_command_line(user));
+        refused(adapter.kernel_command_line(user));
+    }
+    for user in [
+        "\u{2003}nvx_entrypoint=/bin/other",
+        r#"extra="ignored nvx_entrypoint=/bin/other ignored""#,
+        r#"extra="ignored nvx_memory_max=max ignored""#,
+        r#"extra="ignored nvx_pids_max=0 ignored""#,
+    ] {
+        refused(launch.plan().kernel_command_line(user));
+        refused(launch.plan().one_shot_kernel_command_line(user));
+    }
+    for user in [
+        r#"a="b c" d"#,
+        r#"a="ordinary=value other=value""#,
+        r#""ordinary=value with spaces""#,
+    ] {
+        for command_line in [
+            launch.plan().kernel_command_line(user).unwrap(),
+            launch.plan().one_shot_kernel_command_line(user).unwrap(),
+            adapter.kernel_command_line(user).unwrap(),
+        ] {
+            assert!(command_line.starts_with(&format!("{user} ")));
+        }
+    }
+    assert!(adapter.kernel_command_line("nvx_custom=adapter").is_ok());
+}
+
 proptest! {
     #[test]
     fn non_root_workload_identities_round_trip(uid in 1..=u32::MAX, gid in 1..=u32::MAX) {
@@ -616,11 +698,26 @@ proptest! {
     fn reserved_kernel_tokens_are_always_refused(
         name in "[a-z][a-z0-9_]{0,24}",
         value in "[a-z0-9]{0,24}",
-        separator in prop::sample::select(vec![" ", "\t", "\n", "\r", "\u{b}", "\u{c}"]),
+        separator in prop::sample::select(vec![" ", "\t", "\n", "\r", "\u{b}", "\u{c}", "\u{a0}", "\u{120}"]),
+        quoted in any::<bool>(),
+        nested in any::<bool>(),
+        leading_unicode in any::<bool>(),
     ) {
         let launch = launch(SandboxSettings::default());
-        for prefix in ["nvx_", "virtfs_"] {
-            let user = format!("quiet{separator}{prefix}{name}={value}");
+        for prefix in ["nvx_", "virtfs_", "nvx-", "virtfs-"] {
+            let token = format!("{prefix}{name}={value}");
+            let token = if nested {
+                format!("extra=\"ignored {token} ignored\"")
+            } else if quoted {
+                format!("\"{token}\"")
+            } else {
+                token
+            };
+            let user = if leading_unicode {
+                format!("\u{2003}{token}")
+            } else {
+                format!("quiet{separator}{token}")
+            };
             refused(launch.plan().kernel_command_line(&user));
             refused(launch.plan().one_shot_kernel_command_line(&user));
         }

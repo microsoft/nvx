@@ -38,7 +38,7 @@ use crate::host::sandbox::mount::{
     require_mount_owner_supported,
 };
 use crate::host::sandbox::options::validate_run_share_targets;
-use crate::host::sandbox::{SANDBOX_COMMAND_LINE_MAX_SIZE, require_artifact};
+use crate::host::sandbox::{SANDBOX_COMMAND_LINE_MAX_SIZE, has_kernel_separator, require_artifact};
 
 /// The usage and help of the parser, without the hidden `--cold-boot-guidance`.
 const SYNTAX: Syntax = Syntax {
@@ -455,6 +455,14 @@ fn extend_shares_and_network(
     match shares.as_slice() {
         [] => {}
         [(target, host_path, access)] if !aggregate => {
+            if has_kernel_separator(target) {
+                return Err(Exit::error(
+                    ErrorCode::Unsupported,
+                    format!(
+                        "--mount target {target:?} must be one kernel token without whitespace, control characters, or quotes"
+                    ),
+                ));
+            }
             push(
                 command,
                 "--mount",

@@ -27,13 +27,12 @@ use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
 
-use super::refused;
+use super::{has_kernel_separator, refused};
 use crate::error::{Error, Result};
 use crate::host::filesystem::{
     self, ExportPlan, ExportRequest, GUEST_EXPORT, Mapping, Owner, PathList, ReservedTargets,
     Target, within,
 };
-use crate::host::python::builtins::is_space;
 use crate::host::python::fs;
 use crate::host::python::path::{Flavor, PurePath};
 use crate::protocol::share::{self, RESERVED_TARGET_CHARACTERS, Reservation};
@@ -280,12 +279,13 @@ pub fn parse_mount_value(value: &str) -> Result<(String, String, MountAccess)> {
     Ok((target.to_owned(), host_path.to_owned(), access))
 }
 
-/// Returns whether `target` holds a character that no guest target may: Python whitespace, or
-/// one of the [`RESERVED_TARGET_CHARACTERS`], NUL, `\`, `=`, and `,`.
+/// Returns whether `target` cannot stay one kernel token or holds one of the
+/// [`RESERVED_TARGET_CHARACTERS`], NUL, `\`, `=`, and `,`.
 pub(crate) fn has_forbidden_character(target: &str) -> bool {
-    target
-        .chars()
-        .any(|character| is_space(character) || RESERVED_TARGET_CHARACTERS.contains(character))
+    has_kernel_separator(target)
+        || target
+            .chars()
+            .any(|character| RESERVED_TARGET_CHARACTERS.contains(character))
 }
 
 /// Returns whether a guest target has an empty, `.`, or `..` component after its leading slash.
@@ -298,7 +298,8 @@ pub(crate) fn has_irregular_component(target: &str) -> bool {
 
 /// Checks a live share's guest target inside the sandbox container rootfs: an absolute non-root
 /// path of at most [`MAX_MOUNT_TARGET_BYTES`] bytes, without empty, dot, or parent components,
-/// whitespace, `\`, `=`, or `,`, and outside the [`RESERVED_MOUNT_TARGETS`] trees and the
+/// whitespace, control characters, quotes, `\`, `=`, or `,`, and outside the
+/// [`RESERVED_MOUNT_TARGETS`] trees and the
 /// [`RESERVED_EXACT_MOUNT_TARGETS`].
 ///
 /// Fails with [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported).
@@ -311,7 +312,7 @@ pub fn validate_mount_target(target: &str) -> Result<()> {
     {
         return Err(refused(format!(
             "invalid sandbox mount target {target:?}: expected an absolute non-root path without empty, \
-             dot, or parent components, whitespace, '\\', '=', or ','",
+             dot, or parent components, whitespace, control characters, quotes, '\\', '=', or ','",
         )));
     }
     match share::reservation(target.as_bytes()) {
@@ -471,7 +472,7 @@ impl SandboxMount {
         )
     }
 
-    /// Checks a share's fields in the order in which Python's `__post_init__` checks them.
+    /// Checks the target, host path, kind, and access policy, in that order.
     fn checked(self) -> Result<Self> {
         validate_mount_target(&self.guest_target)?;
         let raw_path = self.host_path.as_str();

@@ -344,6 +344,23 @@ strings, at most 1 MiB before parsing; each `KEY=VALUE` entry still obeys the
 formatting and retain native JSON/I/O error details rather than Python's
 `repr`, codec errors, or `json.loads` messages.
 
+The remaining Python integer/codec compatibility helpers are built only for
+the CLI and their historical tests, not for the default host library. The
+quality action checks the default host library with warnings denied as well
+as the all-feature and feature-free builds.
+
+Entrypoints, workload arguments, and guest mount targets must each remain one
+unquoted kernel token: no whitespace, control characters, double quotes, or
+UTF-8 byte that Linux treats as whitespace (including `0xa0`). Caller-supplied
+sandbox command lines use Linux's parameter splitting, including quoted values
+and hyphen/underscore name equivalence. The exact trimmed text is validated
+before rendering, and the guest bootstrap's whitespace-only token view is
+checked too. Reserved `nvx_*` and `virtfs_*` names cannot be hidden inside
+quoted values or behind leading Unicode whitespace; a `--` or unclosed quote
+that hides the appended root tokens is refused. Adapter plans reserve only
+their root and OpenVMM share parameters, as before. Host-path checks and
+filesystem properties run only on the host's native path flavor.
+
 ## Python parity
 
 `nvx::host::network::policy` and the guest lookups of
@@ -1104,8 +1121,8 @@ python3 ../scripts/nvx.py test-guest-binaries \
 
 The
 [`check-nvx-rs`](../.github/actions/check-nvx-rs/action.yml) action runs
-rustfmt, Clippy with warnings denied for every feature and for the library
-without default features, the tests, a build and the tests of the library
+rustfmt, Clippy with warnings denied for all features and for the library
+with and without default features, the tests, a build and the tests of the library
 without default features, a synthetic-release `bundled` test, rustdoc with
 warnings denied, the minimum supported Rust version (1.89), and a macOS check.
 On Linux, it also lints, builds, and tests the guest binaries through `nvx.py`.

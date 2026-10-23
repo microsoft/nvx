@@ -118,13 +118,12 @@ use super::{
 use crate::error::{ErrorCode, Result};
 use crate::host::filesystem::{ExportPlan, ReservedTargets};
 use crate::host::network::{self, NetworkPolicy};
-use crate::host::python::builtins::{split, strip};
 use crate::host::python::path::{Flavor, PurePath};
-use crate::protocol::HostMap;
 use crate::protocol::root::{
     DISTRO_MMIO_BASE, ImageFormat, LAYER_TOKEN, RAM_UPPER_TOKEN, RootImage, RootLayout, RootUpper,
     SCRATCH_MMIO_BASE, SCRATCH_TOKEN,
 };
+use crate::protocol::{HostMap, cmdline};
 use crate::uuid::Uuid;
 
 /// The version of the serde form of [`SandboxPlan`] that this build writes and reads.
@@ -636,14 +635,17 @@ impl SandboxPlan {
     }
 
     /// Returns the kernel command line of the plan as the managed lifecycle boots it:
-    /// `user_command_line`, stripped of Python whitespace, then `nvx_sandbox=1`, the boot tokens
+    /// `user_command_line`, trimmed, then `nvx_sandbox=1`, the boot tokens
     /// of the root's image and upper, `nvx_entrypoint=`, `nvx_hostname=`, a `nvx_arg=` token for
     /// each argument, `nvx_memory_max=` and `nvx_pids_max=` when set, and with shares the
     /// `nvx_maps=` token that announces the number of mappings of
     /// [`mapping_table`](Self::mapping_table).
     ///
     /// The user's command line may hold no NUL and no `nvx_*` or `virtfs_*` token, which the
-    /// profile and OpenVMM own. The command line, the bootstrap tokens that OpenVMM appends for
+    /// profile and OpenVMM own. Parameters are read as Linux reads them, including double
+    /// quotes and the equivalence of hyphens and underscores in names, and as the guest's
+    /// whitespace-only bootstrap reads them. A `--` or unclosed quote
+    /// that hides the appended root tokens is refused. The command line, the bootstrap tokens that OpenVMM appends for
     /// the shares, and a NUL must fit in [`SANDBOX_COMMAND_LINE_MAX_SIZE`] bytes. The guest must
     /// then read the plan's root from the command line: one that [`RootLayout::parse`] refuses
     /// fails too, as when the user's command line adds a virtio-mmio device at the scratch base
@@ -677,27 +679,25 @@ impl SandboxPlan {
         user_command_line: &str,
         delivery: Delivery,
     ) -> Result<String> {
+        let user_command_line = user_command_line.trim();
         if user_command_line.contains('\0') {
             return Err(refused("kernel command line contains an embedded NUL"));
         }
         let Some(settings) = &self.settings else {
             return self.adapter_command_line(user_command_line);
         };
-        for token in split(user_command_line) {
-            let name = token.split('=').next().unwrap_or(token);
-            if token.starts_with("nvx_") {
+        for parameter in requested_parameters(user_command_line) {
+            let name = String::from_utf8_lossy(parameter.name);
+            if parameter.name.starts_with(b"nvx_") || parameter.name.starts_with(b"nvx-") {
                 return Err(refused(format!("{name} is owned by the sandbox profile")));
             }
-            if token.starts_with("virtfs_") {
+            if parameter.name.starts_with(b"virtfs_") || parameter.name.starts_with(b"virtfs-") {
                 return Err(refused(format!(
                     "{name} is owned by the sandbox --mount option"
                 )));
             }
         }
-        let mut tokens = vec![
-            strip(user_command_line).to_owned(),
-            "nvx_sandbox=1".to_owned(),
-        ];
+        let mut tokens = vec![user_command_line.to_owned(), "nvx_sandbox=1".to_owned()];
         tokens.extend(self.layout().tokens());
         tokens.extend([
             format!("nvx_entrypoint={}", settings.entrypoint),
@@ -743,22 +743,26 @@ impl SandboxPlan {
                 "sandbox kernel command line conflicts with the boot tokens of its root: {error}"
             ))
         })?;
-        debug_assert_eq!(layout, Some(self.layout()));
+        if layout != Some(self.layout()) || !self.root_is_visible(&command_line) {
+            return Err(refused(
+                "sandbox kernel command line hides the boot tokens of its root",
+            ));
+        }
         Ok(command_line)
     }
 
     /// Implements [`kernel_command_line`](Self::kernel_command_line) for an adapter's plan.
     fn adapter_command_line(&self, user_command_line: &str) -> Result<String> {
-        for token in split(user_command_line) {
-            let name = token.split('=').next().unwrap_or(token);
-            if is_root_parameter(name) {
+        for parameter in requested_parameters(user_command_line) {
+            let name = String::from_utf8_lossy(parameter.name);
+            if is_root_parameter(parameter) {
                 return Err(refused(format!("{name} is owned by the plan's root")));
             }
-            if token.starts_with("virtfs_") {
+            if parameter.name.starts_with(b"virtfs_") || parameter.name.starts_with(b"virtfs-") {
                 return Err(refused(format!("{name} is owned by OpenVMM's shares")));
             }
         }
-        let mut tokens = vec![strip(user_command_line).to_owned()];
+        let mut tokens = vec![user_command_line.to_owned()];
         tokens.extend(self.layout().tokens());
         tokens.retain(|token| !token.is_empty());
         let command_line = tokens.join(" ");
@@ -773,17 +777,53 @@ impl SandboxPlan {
                  its root: {error}"
             ))
         })?;
-        debug_assert_eq!(layout, Some(self.layout()));
+        if layout != Some(self.layout()) || !self.root_is_visible(&command_line) {
+            return Err(refused(
+                "the kernel command line of an adapter's plan hides the boot tokens of its root",
+            ));
+        }
         Ok(command_line)
+    }
+
+    /// Checks that Linux can still see every generated root parameter after the user's text.
+    fn root_is_visible(&self, command_line: &str) -> bool {
+        cmdline::parameters(command_line.as_bytes())
+            .filter(|&parameter| is_root_parameter(parameter))
+            .count()
+            == self.layout().tokens().len()
     }
 }
 
-/// Returns whether `name` is that of a kernel parameter of the boot tokens of a plan's root, which
+/// Returns both readers' views: Linux honors quotes, but the guest's shell bootstrap splits
+/// expanded command-line text on IFS whitespace without interpreting its quote characters.
+fn requested_parameters(command_line: &str) -> impl Iterator<Item = cmdline::Parameter<'_>> {
+    let guest = command_line
+        .split([' ', '\t', '\n'])
+        .filter(|token| !token.is_empty())
+        .map(|token| {
+            let (name, value) = match token.split_once('=') {
+                Some((name, value)) => (name, Some(value.as_bytes())),
+                None => (token, None),
+            };
+            cmdline::Parameter {
+                name: name.as_bytes(),
+                value,
+            }
+        });
+    cmdline::parameters(command_line.as_bytes()).chain(guest)
+}
+
+/// Returns whether `parameter` names one of the boot tokens of a plan's root, which
 /// [`RootLayout::tokens`] renders: `nvx_layer`, `nvx_scratch`, or `nvx_overlay_upper`.
-fn is_root_parameter(name: &str) -> bool {
+fn is_root_parameter(parameter: cmdline::Parameter<'_>) -> bool {
     [LAYER_TOKEN, SCRATCH_TOKEN, RAM_UPPER_TOKEN]
         .iter()
-        .any(|token| token.split('=').next() == Some(name))
+        .any(|token| {
+            token
+                .split('=')
+                .next()
+                .is_some_and(|name| parameter.is_named(name))
+        })
 }
 
 /// Returns the image that a distro binding records: the staged format, and the identity that the

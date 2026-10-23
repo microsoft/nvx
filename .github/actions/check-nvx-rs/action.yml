@@ -49,6 +49,8 @@ runs:
         set -euo pipefail
         cargo "+${{ steps.toolchains.outputs.toolchain }}" clippy --locked --all-targets --all-features \
           -- -D warnings
+        cargo "+${{ steps.toolchains.outputs.toolchain }}" clippy --locked --lib \
+          -- -D warnings
         cargo "+${{ steps.toolchains.outputs.toolchain }}" clippy --locked --lib --no-default-features \
           -- -D warnings
 
