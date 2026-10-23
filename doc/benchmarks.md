@@ -139,6 +139,24 @@ guest resume behavior:
 python3 scripts/nvx.py benchmark --suite snapshot-restore-vcpu --backend mshv --processors 8 --memory-mib 128 --warmups 1 --runs 5 --snapshot-profile --skip-build --output-dir data/runs/restore-vcpu-mshv-capacity-8
 ```
 
+Measure the same activation from one platform snapshot, the clone tier that
+a fleet restores with a different size each time:
+
+```console
+python3 scripts/nvx.py benchmark --suite platform-snapshot-restore-vcpu --backend kvm --processors 8 --memory-mib 512 --warmups 1 --runs 5 --skip-build --output-dir data/runs/platform-restore-vcpu-kvm
+```
+
+A platform command line carries no tenant configuration, so the suite cannot
+use the pre-banner capture: the capture boots with `maxcpus=1` as its only
+command-line option, a distro layer, and a scratch disk, and the guest captures
+from its shell with `--snapshot-tier platform`. Each restore reattaches the
+blocks and reaches its marker after the guest finishes the platform repair,
+which brings the target prefix online, refreshes the clone's identity, and
+acknowledges the restore gate. Its latency is therefore comparable between
+targets and backends, not with `snapshot-restore-vcpu`. `--snapshot-profile`
+adds the lifecycle phases of each target, and the results stay out of the
+performance CSVs.
+
 Measure restore-time memory activation from one immutable 512 MiB snapshot
 with 2 GiB of ABI-reserved capacity:
 
@@ -260,6 +278,7 @@ python3 scripts/nvx.py performance collect --platform linux-kvm-baremetal --comm
 | Shell snapshot | `benchmark --suite shell-snapshot` | Compares cold boot with lifecycle-aligned snapshot restore at 128, 256, and 512 MiB. |
 | Shell snapshot restore | `benchmark --suite shell-snapshot-restore` | Captures an unmeasured lifecycle-aligned snapshot and measures only restore latency for the selected memory sizes. |
 | Restore-time vCPU activation | `benchmark --suite snapshot-restore-vcpu --processors 8` | Restores one boot-online-1, capacity-8 snapshot at online targets 1/2/4/8 and reports latency plus peak RSS. |
+| Platform restore-time vCPU activation | `benchmark --suite platform-snapshot-restore-vcpu --processors 8` | Restores one boot-online-1, capacity-8 platform snapshot at online targets 1/2/4/8, through the platform repair, and reports latency plus peak RSS. |
 | Network snapshot | `benchmark --suite network-snapshot` | Compares a network-ready cold boot with snapshot restore and verifies gateway connectivity. |
 | Snapshot lifecycle profile | `benchmark --suite snapshot-profile` | Retains raw capture and restore phase records and summarizes 128/256/512/1024 MiB warm/cold restores. |
 | Virtio device restore profile | `benchmark --suite device-restore-profile` | Verifies active and driver-unbound deferred restore for console, network, and virtio-fs; emits standalone diagnostic JSON and raw logs. |

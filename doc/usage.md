@@ -1321,7 +1321,7 @@ python3 scripts/nvx.py benchmark [OPTIONS]
 
 | Option | Default | Description |
 | --- | --- | --- |
-| `--suite {boot,snapshot,restore,e2e,phase2,snapshot-profile,all,cold-start,device-io,device-restore-profile,network-snapshot,performance,shell-snapshot,shell-snapshot-restore,snapshot-restore-memory,snapshot-restore-vcpu,virtfs}` | `boot` | Select an acceptance, diagnostic, or workload suite. |
+| `--suite {boot,snapshot,restore,e2e,phase2,snapshot-profile,all,cold-start,device-io,device-restore-profile,network-snapshot,performance,platform-snapshot-restore-vcpu,shell-snapshot,shell-snapshot-restore,snapshot-restore-memory,snapshot-restore-vcpu,virtfs}` | `boot` | Select an acceptance, diagnostic, or workload suite. |
 | `--backend {whp,kvm,mshv,both}` | `both` on Windows; `kvm` elsewhere | Select the hypervisor backend. |
 | `--platform NAME` | inferred OS/backend | Record the host-typed performance series. |
 | `--openvmm-dir PATH` | `openvmm/` | Select the OpenVMM repository. |

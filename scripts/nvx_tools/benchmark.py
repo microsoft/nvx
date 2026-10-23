@@ -81,6 +81,7 @@ WORKLOAD_SUITES = frozenset(
         "shell-snapshot-restore",
         "snapshot-restore-memory",
         "snapshot-restore-vcpu",
+        "platform-snapshot-restore-vcpu",
         "network-snapshot",
         "device-restore-profile",
         "performance",
@@ -125,6 +126,8 @@ SNAPSHOT_FILENAMES = ("manifest.bin", "state.bin", "memory.bin")
 SHELL_SNAPSHOT_MEMORY_MIB = (128, 256, 512)
 SNAPSHOT_PROFILE_MEMORY_MIB = (*SHELL_SNAPSHOT_MEMORY_MIB, 1024)
 RESTORE_VCPU_TARGETS = (1, 2, 4, 8)
+# The size of the distro layer and scratch disk of a platform snapshot.
+PLATFORM_SNAPSHOT_BLOCK_BYTES = 1024 * 1024
 RESTORE_MEMORY_BASE_MIB = 512
 RESTORE_MEMORY_TARGETS_MIB = (512, 1024, 2048)
 RESTORE_MEMORY_MARKER_PATTERN = re.compile(
@@ -4273,6 +4276,121 @@ def benchmark_snapshot_restore_vcpu_workload(
             print()
 
 
+def benchmark_platform_snapshot_restore_vcpu_workload(
+    args: argparse.Namespace,
+    executable: Path,
+    kernel: Path,
+    initrd: Path,
+    backend: str,
+    *,
+    command_prefix: Sequence[str] = (),
+    windows_cpus: set[int] | None = None,
+) -> None:
+    """Restore one platform snapshot at each online vCPU target.
+
+    The capture boots the capacity with ``maxcpus=1``, the only caller token
+    that a platform command line may carry, and sandbox blocks. Each restore
+    reattaches the blocks and runs until the guest finishes the platform
+    repair, which brings the target's vCPU prefix online.
+    """
+    if args.processors != 8:
+        raise ValueError("platform-snapshot-restore-vcpu requires --processors 8")
+    snapshot_profile = bool(getattr(args, "snapshot_profile", False))
+
+    print(
+        "platform snapshot restore vCPU activation, "
+        f"median of {args.runs} runs, capacity 8, boot-online 1"
+    )
+    print(f'marker : "{RESTORE_MARKER.decode()}"')
+    print(f"kernel : {kernel}")
+    print(f"initrd : {initrd}")
+    print()
+    with tempfile.TemporaryDirectory(
+        prefix="openvmm-platform-vcpu-restore-"
+    ) as temporary:
+        root = Path(temporary)
+        snapshot_path = root / "snapshot"
+        layer = root / "distro.erofs"
+        scratch = root / "scratch.raw"
+        layer.write_bytes(b"\x3c" * PLATFORM_SNAPSHOT_BLOCK_BYTES)
+        scratch.write_bytes(b"\xa5" * PLATFORM_SNAPSHOT_BLOCK_BYTES)
+        # The guest never mounts the scratch of a platform capture, so every
+        # restore can reattach the same one.
+        sandbox_blocks = (
+            "--microvm-sandbox-block",
+            f"distro:file:{layer},ro",
+            "--microvm-sandbox-block",
+            f"scratch:file:{scratch}",
+        )
+        capture_command = workload_boot_command(
+            executable,
+            backend,
+            kernel,
+            initrd,
+            args.memory_mib,
+            "maxcpus=1",
+            processors=args.processors,
+            command_prefix=command_prefix,
+        )
+        # A sandbox guest's console is a virtio console, which can deliver the
+        # restore marker after a prequeued exit has started OpenVMM's teardown,
+        # too late for its peak RSS. The restored guest therefore waits at its
+        # shell, and each sample ends it after the marker with --teardown-mode.
+        capture_snapshot(
+            [
+                *capture_command,
+                "--snapshot-destination",
+                str(snapshot_path),
+                "--snapshot-tier",
+                "platform",
+                *sandbox_blocks,
+            ],
+            snapshot_path,
+            timeout=args.timeout,
+            windows_cpus=windows_cpus,
+            processors=1,
+            teardown_mode="host-terminate",
+        )
+
+        for target in RESTORE_VCPU_TARGETS:
+            restored = benchmark(
+                [
+                    *command_prefix,
+                    *snapshot_restore_command(
+                        executable,
+                        backend,
+                        snapshot_path,
+                        processors=args.processors,
+                        restore_processors=target,
+                    ),
+                    *sandbox_blocks,
+                ],
+                warmups=args.warmups,
+                runs=args.runs,
+                timeout=args.timeout,
+                marker=RESTORE_MARKER,
+                marker_must_be_line=True,
+                windows_cpus=windows_cpus,
+                teardown_mode=args.teardown_mode,
+                snapshot_profile=snapshot_profile,
+            )
+            print(f"== restore-online {target} vCPU ==")
+            print(
+                _format_shell_snapshot_line("snapshot restore", restored["samples_ms"])
+            )
+            print(
+                f"  OpenVMM peak RSS    : {format_rss_summary(restored['peak_rss_samples_bytes'])}"
+            )
+            restore_profile = restored.get("profile")
+            if restore_profile is not None:
+                print_lifecycle_profile_summary(
+                    f"platform-snapshot-restore-vcpu/{backend}/"
+                    f"capacity-{args.processors}/online-{target}",
+                    restore_profile,
+                )
+            print()
+
+
 def benchmark_network_snapshot_workload(
     args: argparse.Namespace,
     executable: Path,
@@ -4506,7 +4624,7 @@ def write_benchmark_metadata(
         "processors": processors,
         "restore_processor_targets": (
             list(RESTORE_VCPU_TARGETS)
-            if args.suite == "snapshot-restore-vcpu"
+            if args.suite in {"snapshot-restore-vcpu", "platform-snapshot-restore-vcpu"}
             else None
         ),
         "restore_memory_base_mib": (
@@ -4654,6 +4772,8 @@ def run_workload_benchmarks(
             (output_dir / "acceptance.json").unlink(missing_ok=True)
         if args.suite == "snapshot-restore-vcpu":
             (output_dir / "snapshot-restore-vcpu.log").unlink(missing_ok=True)
+        if args.suite == "platform-snapshot-restore-vcpu":
+            (output_dir / "platform-snapshot-restore-vcpu.log").unlink(missing_ok=True)
         if args.suite == "snapshot-restore-memory":
             (output_dir / "snapshot-restore-memory.log").unlink(missing_ok=True)
         metadata_path = write_benchmark_metadata(
@@ -4755,6 +4875,18 @@ def run_workload_benchmarks(
         "snapshot-restore-vcpu": (
             "snapshot-restore-vcpu.log",
             lambda: benchmark_snapshot_restore_vcpu_workload(
+                args,
+                executable,
+                kernel,
+                initrd,
+                backend,
+                command_prefix=command_prefix,
+                windows_cpus=windows_cpus,
+            ),
+        ),
+        "platform-snapshot-restore-vcpu": (
+            "platform-snapshot-restore-vcpu.log",
+            lambda: benchmark_platform_snapshot_restore_vcpu_workload(
                 args,
                 executable,
                 kernel,
