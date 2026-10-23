@@ -623,7 +623,7 @@ impl SandboxMount {
     /// symbolic-link component of the path that was requested.
     ///
     /// Fails with [`ErrorKind::Io`](crate::ErrorKind::Io) if a relative host path meets an
-    /// unreadable current directory.
+    /// unreadable current directory, or Windows cannot qualify a drive-relative path.
     pub fn absolute(&self) -> Result<Self> {
         self.absolute_with(&fs::cwd)
     }
@@ -635,7 +635,7 @@ impl SandboxMount {
         }
         let directory = cwd().map_err(|error| os_error(&error, None))?;
         Self::checked(Self {
-            host_path: directory.join(self.host_path.as_str()),
+            host_path: absolute_host_path(&directory, self.host_path.as_str())?,
             ..self.clone()
         })
     }
@@ -657,7 +657,7 @@ impl SandboxMount {
     ) -> Result<Vec<(PolicyKind, Vec<String>)>> {
         let host_path = self.absolute_with(cwd)?.host_path;
         let flavor = host_path.flavor();
-        Ok(POLICY_KINDS
+        POLICY_KINDS
             .iter()
             .map(|&kind| {
                 let paths = self
@@ -666,16 +666,33 @@ impl SandboxMount {
                     .iter()
                     .map(|path| {
                         if PurePath::new(flavor, path).is_absolute() {
-                            path.clone()
+                            Ok(path.clone())
                         } else {
-                            host_path.join(path).as_str().to_owned()
+                            absolute_host_path(&host_path, path)
+                                .map(|path| path.as_str().to_owned())
                         }
                     })
-                    .collect();
-                (kind, paths)
+                    .collect::<Result<Vec<_>>>()?;
+                Ok((kind, paths))
             })
-            .collect())
+            .collect()
     }
+}
+
+/// Joins a host path without resolving links. A different drive's relative path on Windows
+/// needs the OS's per-drive current directory, which joining to this drive cannot supply.
+fn absolute_host_path(directory: &PurePath, path: &str) -> Result<PurePath> {
+    let joined = directory.join(path);
+    #[cfg(windows)]
+    if !joined.is_absolute() {
+        let absolute = std::path::absolute(joined.as_path())
+            .map_err(|error| os_error(&error, Some(joined.as_str())))?;
+        let text = absolute
+            .to_str()
+            .ok_or_else(|| refused("absolute sandbox mount path is not valid Unicode"))?;
+        return Ok(PurePath::native(text));
+    }
+    Ok(joined)
 }
 
 /// Returns the bootstrap tokens of a share at `target` with `access`.

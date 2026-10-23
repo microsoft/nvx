@@ -450,8 +450,23 @@ fn launch_settings_follow_the_guest_contract() {
 fn windows_drive_relative_and_unc_paths() {
     let cwd = std::env::current_dir().unwrap();
     let drive = cwd.to_str().unwrap().split(':').next().unwrap();
+    let other_drive = if drive.eq_ignore_ascii_case("Z") {
+        "Y"
+    } else {
+        "Z"
+    };
+    let other_relative = format!("{other_drive}:share");
+    let drive_only = format!("{other_drive}:");
     for (value, expected) in [
         (format!("{drive}:share"), cwd.join("share")),
+        (
+            other_relative.clone(),
+            std::path::absolute(&other_relative).unwrap(),
+        ),
+        (
+            drive_only.clone(),
+            std::path::absolute(&drive_only).unwrap(),
+        ),
         (
             r"\share".to_owned(),
             PathBuf::from(format!(r"{drive}:\share")),
@@ -479,6 +494,37 @@ fn windows_drive_relative_and_unc_paths() {
         assert_eq!(mount.host_path(), expected);
         assert!(mount.host_path().is_absolute());
     }
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_drive_relative_policy_paths_become_absolute() {
+    let cwd = std::env::current_dir().unwrap();
+    let drive = cwd.to_str().unwrap().split(':').next().unwrap();
+    let other_drive = if drive.eq_ignore_ascii_case("Z") {
+        "Y"
+    } else {
+        "Z"
+    };
+    let relative = format!("{other_drive}:secret");
+    let mount = SandboxMount::new(
+        "/workspace",
+        cwd.to_str().unwrap(),
+        MountAccess::ReadOnly,
+        MountPolicy {
+            denied: vec![relative.clone()],
+            ..MountPolicy::default()
+        },
+        MountOwner::Vmm,
+        MountKind::Directory,
+    )
+    .unwrap();
+    let paths = mount.absolute_policy_paths().unwrap();
+    assert_eq!(
+        Path::new(&paths[0].1[0]),
+        std::path::absolute(relative).unwrap()
+    );
+    assert!(Path::new(&paths[0].1[0]).is_absolute());
 }
 
 #[test]
