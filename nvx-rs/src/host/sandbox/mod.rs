@@ -46,8 +46,8 @@
 //! A request that the profile refuses fails with
 //! [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported), and a missing image with
 //! [`ErrorKind::Unavailable`](crate::ErrorKind::Unavailable). A host query that fails
-//! is [`ErrorKind::Io`](crate::ErrorKind::Io), with Python's form of the system's error, such as
-//! `[Errno 13] Permission denied: '/path'`.
+//! is [`ErrorKind::Io`](crate::ErrorKind::Io), with the native I/O error and, where available,
+//! the path quoted with Rust's debug formatting.
 
 pub mod distro;
 pub mod layer;

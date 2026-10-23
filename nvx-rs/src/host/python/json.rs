@@ -98,6 +98,7 @@ impl Document {
 
     /// Returns `value.get(name)` for the `dict` that Python builds from the object at `id`, in
     /// which the last of repeated names wins, or `None` if the value at `id` is not an object.
+    #[cfg(test)]
     pub(crate) fn get(&self, id: NodeId, name: &str) -> Option<&Node> {
         let Node::Object(members) = self.node(id) else {
             return None;
@@ -206,6 +207,7 @@ pub(crate) enum ReadError<E> {
 /// Returns `str()` of the `JSONDecodeError` that Python raises with `message` at byte `offset`
 /// of `text`: the message, the line and column of the position, and the position itself, in
 /// characters, such as `Expecting value: line 1 column 2 (char 1)`.
+#[cfg(test)]
 pub(crate) fn syntax_error(text: &str, message: &str, offset: usize) -> String {
     let before = &text[..offset];
     let position = before.chars().count();

@@ -33,7 +33,7 @@ use crate::host::filesystem::{
     self, ExportPlan, ExportRequest, GUEST_EXPORT, Mapping, Owner, PathList, ReservedTargets,
     Target, within,
 };
-use crate::host::python::builtins::{is_space, repr};
+use crate::host::python::builtins::is_space;
 use crate::host::python::fs;
 use crate::host::python::path::{Flavor, PurePath};
 use crate::protocol::share::{self, RESERVED_TARGET_CHARACTERS, Reservation};
@@ -175,8 +175,7 @@ fn setting_from_name<T: Copy>(
         .ok_or_else(|| {
             let [first, second] = values.map(as_str);
             refused(format!(
-                "unsupported sandbox mount {setting} {}; choose {first} or {second}",
-                repr(name)
+                "unsupported sandbox mount {setting} {name:?}; choose {first} or {second}",
             ))
         })
 }
@@ -273,9 +272,8 @@ pub fn parse_mount_value(value: &str) -> Result<(String, String, MountAccess)> {
         "rw" => MountAccess::ReadWrite,
         _ => {
             return Err(refused(format!(
-                "unsupported --mount mode {}; choose ro or rw (if HOST_PATH contains commas, end \
+                "unsupported --mount mode {access:?}; choose ro or rw (if HOST_PATH contains commas, end \
                  the value with ,ro or ,rw)",
-                repr(access)
             )));
         }
     };
@@ -312,9 +310,8 @@ pub fn validate_mount_target(target: &str) -> Result<()> {
         || has_irregular_component(target)
     {
         return Err(refused(format!(
-            "invalid sandbox mount target {}: expected an absolute non-root path without empty, \
+            "invalid sandbox mount target {target:?}: expected an absolute non-root path without empty, \
              dot, or parent components, whitespace, '\\', '=', or ','",
-            repr(target)
         )));
     }
     match share::reservation(target.as_bytes()) {
@@ -362,9 +359,12 @@ pub fn mount_kind(host_path: &Path) -> MountKind {
     }
 }
 
-/// Returns the error for an `OSError` that an operation on `path` raised.
+/// Returns a native I/O error with its path, when available.
 pub(crate) fn os_error(error: &io::Error, path: Option<&str>) -> Error {
-    Error::io(fs::os_error_message(error, path))
+    Error::io(match path {
+        Some(path) => format!("{path:?}: {error}"),
+        None => error.to_string(),
+    })
 }
 
 /// A live virtio-fs share mounted inside the sandbox container rootfs.
@@ -477,8 +477,7 @@ impl SandboxMount {
         let raw_path = self.host_path.as_str();
         if raw_path.contains('\0') {
             return Err(refused(format!(
-                "sandbox mount host path contains a NUL character: {}",
-                repr(raw_path)
+                "sandbox mount host path contains a NUL character: {raw_path:?}",
             )));
         }
         if self.host_path.parts().iter().any(|part| part == "..") {

@@ -118,7 +118,7 @@ use super::{
 use crate::error::{ErrorCode, Result};
 use crate::host::filesystem::{ExportPlan, ReservedTargets};
 use crate::host::network::{self, NetworkPolicy};
-use crate::host::python::builtins::{repr, split, strip};
+use crate::host::python::builtins::{split, strip};
 use crate::host::python::path::{Flavor, PurePath};
 use crate::protocol::HostMap;
 use crate::protocol::root::{
@@ -344,14 +344,13 @@ impl SandboxNetwork {
 /// [`crate::net::guest_gateway`] finds it.
 ///
 /// Fails with [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported) for any other value, as
-/// `guest network '10.0.0.1/24' must be an IPv4 address with a /1 to /30 prefix that is not its
+/// `guest network "10.0.0.1/24" must be an IPv4 address with a /1 to /30 prefix that is not its
 /// network's network, broadcast, or gateway (first) address`.
 pub(crate) fn guest_gateway(guest_network: &str) -> Result<Ipv4Addr> {
     crate::net::guest_gateway(guest_network).ok_or_else(|| {
         refused(format!(
-            "guest network {} must be an IPv4 address with a /1 to /30 prefix that is not its \
+            "guest network {guest_network:?} must be an IPv4 address with a /1 to /30 prefix that is not its \
              network's network, broadcast, or gateway (first) address",
-            repr(guest_network)
         ))
     })
 }
@@ -801,8 +800,7 @@ pub(crate) fn bound_image(binding: &DistroBinding) -> Result<RootImage> {
 pub(crate) fn image_of(format: DistroFormat, identity: &str) -> Result<RootImage> {
     let identity = Uuid::parse(identity).ok_or_else(|| {
         refused(format!(
-            "the distro binding names the identity {}, which is not a UUID in its canonical text",
-            repr(identity)
+            "the distro binding names the identity {identity:?}, which is not a UUID in its canonical text",
         ))
     })?;
     Ok(match format {

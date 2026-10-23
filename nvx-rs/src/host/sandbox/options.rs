@@ -17,6 +17,7 @@
 use std::fmt;
 use std::fs::File;
 use std::io::Read;
+use std::path::Path;
 
 use super::distro::DistroBinding;
 use super::mount::{
@@ -25,10 +26,7 @@ use super::mount::{
 };
 use super::{SandboxLaunch, refused};
 use crate::error::Result;
-use crate::host::python::builtins::repr;
-use crate::host::python::json::{self, Loads, Node, ReadError};
-use crate::host::python::path::{Flavor, PurePath};
-use crate::host::python::text::PyText;
+use crate::host::python::path::Flavor;
 
 /// The entrypoints of systemd, which the sandbox security profile does not run.
 pub const SYSTEMD_ENTRYPOINTS: [&str; 2] = ["/usr/lib/systemd/systemd", "/lib/systemd/systemd"];
@@ -323,10 +321,9 @@ pub fn validate_run_share_targets(targets: &[&str]) -> Result<()> {
             || has_irregular_component(target)
         {
             return Err(refused(format!(
-                "invalid --mount target {}: with several shares, or a shared file, each target \
+                "invalid --mount target {target:?}: with several shares, or a shared file, each target \
                  must be an absolute non-root path without empty, dot, or parent components, \
                  whitespace, '\\', '=', or ','",
-                repr(target)
             )));
         }
         for other in std::iter::once(&AGGREGATE_MOUNT_TARGET).chain(&targets[..index]) {
@@ -372,15 +369,6 @@ pub fn validate_sandbox_systemd_policy(launch: &SandboxLaunch) -> Result<DistroB
 ///
 /// Fails with [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported).
 pub fn validate_exec_environment(entries: &[String]) -> Result<()> {
-    let entries: Vec<PyText> = entries
-        .iter()
-        .map(|entry| PyText::from(entry.as_str()))
-        .collect();
-    validate_entries(&entries)
-}
-
-/// Implements [`validate_exec_environment`] for strings that may hold surrogates.
-fn validate_entries(entries: &[PyText]) -> Result<()> {
     if entries.len() > MAX_EXEC_ENVIRONMENT {
         return Err(refused(format!(
             "managed exec environment exceeds {MAX_EXEC_ENVIRONMENT} entries"
@@ -388,12 +376,9 @@ fn validate_entries(entries: &[PyText]) -> Result<()> {
     }
     let mut names = std::collections::HashSet::new();
     for entry in entries {
-        // Python encodes the entry, which fails at its first run of surrogates, before it
-        // checks it.
-        let entry = entry.encode_utf8().map_err(refused)?;
         let (name, separator) = match entry.split_once('=') {
             Some((name, _)) => (name, true),
-            None => (entry, false),
+            None => (entry.as_str(), false),
         };
         if !separator
             || name.is_empty()
@@ -405,7 +390,7 @@ fn validate_entries(entries: &[PyText]) -> Result<()> {
                  {MAX_EXEC_ENVIRONMENT_BYTES} bytes"
             )));
         }
-        if !names.insert(name.to_owned()) {
+        if !names.insert(name) {
             return Err(refused(format!(
                 "managed exec environment contains duplicate key: {name}"
             )));
@@ -418,54 +403,34 @@ fn validate_entries(entries: &[PyText]) -> Result<()> {
 /// strings of at most [`MAX_ENVIRONMENT_FILE_BYTES`] bytes, which must then pass
 /// [`validate_exec_environment`].
 ///
-/// The file is read as `json.loads` reads it, so Python's extensions to JSON are accepted, and
-/// `\u` escapes of unpaired surrogates fail as Python fails to encode them. Fails with
-/// [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported), naming the file as `pathlib`
-/// normalizes it when it cannot be read or decoded.
+/// The file must be strict UTF-8 JSON; non-finite numbers and unpaired surrogate escapes are
+/// refused. Fails with [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported), naming the
+/// file and the native I/O or JSON error when it cannot be read or decoded.
 pub fn exec_environment_from_file(path: &str) -> Result<Vec<String>> {
-    let path = PurePath::native(path);
-    let unreadable = || {
-        refused(format!(
-            "failed to read managed execution environment: {path}"
-        ))
-    };
+    let path = Path::new(path);
     let mut data = Vec::new();
-    File::open(path.as_path())
+    File::open(path)
         .and_then(|file| {
             file.take(MAX_ENVIRONMENT_FILE_BYTES as u64 + 1)
                 .read_to_end(&mut data)
         })
-        .map_err(|_| unreadable())?;
+        .map_err(|error| {
+            refused(format!(
+                "failed to read managed execution environment {path:?}: {error}"
+            ))
+        })?;
     if data.len() > MAX_ENVIRONMENT_FILE_BYTES {
         return Err(refused(format!(
             "managed execution environment file exceeds {MAX_ENVIRONMENT_FILE_BYTES}-byte limit"
         )));
     }
-    let text = std::str::from_utf8(&data).map_err(|_| unreadable())?;
-    let document = match json::read(text, &mut Loads) {
-        Ok(document) => document,
-        Err(ReadError::Syntax { .. }) => return Err(unreadable()),
-        // `int` raises a `ValueError` that is not a decoding error.
-        Err(ReadError::Hook(error)) => return Err(refused(error.message(text))),
-    };
-    let not_strings = || {
-        refused("managed execution environment file must contain a JSON array of KEY=VALUE strings")
-    };
-    let Node::Array(values) = document.node(document.root()) else {
-        return Err(not_strings());
-    };
-    let entries = values
-        .iter()
-        .map(|&index| match document.node(index) {
-            Node::String(string) => Ok(string.clone()),
-            _ => Err(not_strings()),
-        })
-        .collect::<Result<Vec<_>>>()?;
-    validate_entries(&entries)?;
-    Ok(entries
-        .iter()
-        .map(|entry| entry.as_str().unwrap_or_default().to_owned())
-        .collect())
+    let entries: Vec<String> = serde_json::from_slice(&data).map_err(|error| {
+        refused(format!(
+            "invalid managed execution environment {path:?}: {error}"
+        ))
+    })?;
+    validate_exec_environment(&entries)?;
+    Ok(entries)
 }
 
 #[cfg(test)]

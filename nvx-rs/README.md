@@ -335,6 +335,15 @@ still encode these limits as canonical positive decimal strings, and CLI sandbox
 configuration records use JSON integers, so valid existing records keep their
 wire format. See [Sandbox specification tests](#sandbox-specification-tests).
 
+Managed exec environment files and distro manifests are strict UTF-8 JSON,
+read with `serde_json`; non-finite numbers and unpaired surrogate escapes are
+refused, including in otherwise unused manifest fields. The manifest `format`
+is the integer `1`, not `true` or `1.0`. Environment files contain an array of
+strings, at most 1 MiB before parsing; each `KEY=VALUE` entry still obeys the
+256-entry and 4096-byte limits. Diagnostics quote values with Rust debug
+formatting and retain native JSON/I/O error details rather than Python's
+`repr`, codec errors, or `json.loads` messages.
+
 ## Python parity
 
 `nvx::host::network::policy` and the guest lookups of

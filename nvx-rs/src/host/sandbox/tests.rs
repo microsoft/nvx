@@ -720,7 +720,7 @@ fn launch_contract_attaches_a_file_as_an_aggregate_child() {
     }
     assert_eq!(
         message(MountKind::from_name("socket")),
-        "unsupported sandbox mount kind 'socket'; choose directory or file"
+        "unsupported sandbox mount kind \"socket\"; choose directory or file"
     );
     // The runtime replaces /etc/machine-id with a file, and binds its time state over
     // /run/nvx/time, so nothing at or below them may be shared.

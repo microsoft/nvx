@@ -1032,7 +1032,7 @@ fn launches_plan_the_image_that_the_binding_of_their_distro_layer_records() {
     let invalid: DistroBinding = serde_json::from_value(recorded).unwrap();
     assert_eq!(
         message(launch.bound_plan(&invalid)),
-        "the distro binding names the identity '11111111-1111-1111-1111-11111111111A', which is \
+        "the distro binding names the identity \"11111111-1111-1111-1111-11111111111A\", which is \
          not a UUID in its canonical text"
     );
 }
@@ -1605,7 +1605,7 @@ fn persisted_plans_that_break_the_form_or_the_checks_are_refused() {
     );
     refused(
         &|value| value["network"]["guestNetwork"] = json!("10.0.0.1/24"),
-        "guest network '10.0.0.1/24' must be an IPv4 address with a /1 to /30 prefix that is not \
+        "guest network \"10.0.0.1/24\" must be an IPv4 address with a /1 to /30 prefix that is not \
          its network's network, broadcast, or gateway (first) address",
     );
     refused(
@@ -1787,7 +1787,7 @@ fn networks_check_their_guest_network_and_their_policy() {
         assert_eq!(
             error.to_string(),
             format!(
-                "guest network '{guest_network}' must be an IPv4 address with a /1 to /30 prefix \
+                "guest network {guest_network:?} must be an IPv4 address with a /1 to /30 prefix \
                  that is not its network's network, broadcast, or gateway (first) address"
             )
         );

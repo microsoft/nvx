@@ -975,12 +975,12 @@ fn a_distro_manifest_path_whose_lookup_fails_refuses_provision_and_start() {
         eprintln!("skipped: this host does not let the test create a symbolic link");
         return;
     }
-    let quoted = format!("'{}'", manifest.to_str().unwrap().replace('\\', "\\\\"));
     let failed = |output: &Output| {
         let stderr = text(&output.stderr);
         assert_eq!(output.status.code(), Some(1), "{stderr}");
         assert!(
-            stderr.starts_with("error[io]: [") && stderr.ends_with(&format!(": {quoted}\n")),
+            stderr.starts_with(&format!("error[io]: {manifest:?}: "))
+                && stderr.contains("(os error "),
             "{stderr}"
         );
     };
@@ -1811,7 +1811,7 @@ const REFUSED_NETWORKS: [(&[&str], &str); 27] = [
     // The guest network and the rules are read as OpenVMM reads them.
     (
         &["-", "--net", "10.0.0.1/24", "--network-profile", "portable"],
-        "guest network '10.0.0.1/24' must be an IPv4 address with a /1 to /30 prefix that is not \
+        "guest network \"10.0.0.1/24\" must be an IPv4 address with a /1 to /30 prefix that is not \
          its network's network, broadcast, or gateway (first) address",
     ),
     (
