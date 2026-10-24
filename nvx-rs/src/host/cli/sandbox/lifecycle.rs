@@ -76,7 +76,7 @@ use crate::host::sandbox::distro::DISTRO_POLICY_REVISION;
 use crate::host::sandbox::scratch::CLAIM_RELEASE_WAIT;
 use crate::host::sandbox::{PreparedLaunch, SandboxLaunch, require_file};
 use crate::host::store::{
-    IdentityPart, LockedStore, OUTCOME_NAME, RUNTIME_NAME, Recovery, SandboxStore,
+    IdentityPart, LaunchId, LockedStore, OUTCOME_NAME, RUNTIME_NAME, Recovery, SandboxStore,
 };
 use crate::host::supervisor::{self, Launched, Reattached, StopOutcome, Vmm, VmmCommand};
 use crate::protocol::{CAPABILITY_LEN, GuestFeatures};
@@ -600,7 +600,8 @@ fn start_locked(
     ];
     let directory = std::env::current_dir().map_err(Exit::from_os_error)?;
     let mut command = Vec::new();
-    let mut starting = supervisor::launch(locked, &runtime, &capability, |endpoint| {
+    let launch = LaunchId::generate().map_err(error_with_cause)?;
+    let mut starting = supervisor::launch(locked, &launch, &runtime, &capability, |endpoint| {
         command = head;
         command.push(format!("listen={endpoint}"));
         command.extend(tail);

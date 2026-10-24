@@ -360,7 +360,12 @@ impl Index {
 /// [`CLONE_BINDING_NAME`](crate::host::store::CLONE_BINDING_NAME), beside the sandbox's launch
 /// journal, before any VMM of the clone is spawned. It returns the lease with the sandbox's lock,
 /// under which the caller launches the clone, and holds no lock of the store for the VM's
-/// lifetime. A lease never expires: it lasts until [`Store::release`] ends it, which it does only
+/// lifetime. The lease reserves one launch of the clone, [`Lease::launch`], which only that lock
+/// begins, with
+/// [`LockedStore::begin_launch`](crate::host::store::LockedStore::begin_launch), and the sandbox
+/// launches nothing else while the lease lasts; [the supervisor](crate::host::supervisor#clones)
+/// describes the launch of a clone, its crashes, and the order of the locks that it takes. A lease
+/// never expires: it lasts until [`Store::release`] ends it, which it does only
 /// once the sandbox records no VM and no launch, and so once its VM has exited, as its store
 /// verifies through the VM's recorded process, also after a reattach. A caller that reads a
 /// generation's payload, as a restore does, holds a lease of it.
@@ -423,6 +428,19 @@ pub struct Store {
     dir: PathBuf,
     /// The store's identity.
     id: StoreId,
+}
+
+#[cfg(test)]
+impl Store {
+    /// Publishes a generation of a template, whose fixed time contract names a host and boot of
+    /// its own, for the tests of other modules, and returns it.
+    pub(crate) fn publish_for_tests(&self) -> Generation {
+        tests::publish(
+            self,
+            &super::test_support::ManifestSpec::template(),
+            tests::storage(1),
+        )
+    }
 }
 
 impl Store {

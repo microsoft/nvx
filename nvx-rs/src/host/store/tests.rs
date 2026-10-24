@@ -511,7 +511,9 @@ fn the_store_is_private_to_the_current_user() {
     assert_eq!(SandboxStore::open(store.dir()).unwrap(), store);
     assert_eq!(SandboxStore::create(store.dir()).unwrap(), store);
     let mut locked = store.lock(None).unwrap();
-    let launch = locked.begin_launch(&runtime(), &CAPABILITY).unwrap();
+    let launch = locked
+        .begin_launch(&LaunchId::generate().unwrap(), &runtime(), &CAPABILITY)
+        .unwrap();
     drop(launch);
     for name in [LOCK_NAME, JOURNAL_NAME, CAPABILITY_NAME, LOG_NAME] {
         assert_eq!(mode(&store.path(name)), 0o600, "{name}");
@@ -597,7 +599,9 @@ fn the_store_is_private_to_the_current_user() {
     assert_eq!(SandboxStore::open(store.dir()).unwrap(), store);
     assert_eq!(SandboxStore::create(store.dir()).unwrap(), store);
     let mut locked = store.lock(None).unwrap();
-    let launch = locked.begin_launch(&runtime(), &CAPABILITY).unwrap();
+    let launch = locked
+        .begin_launch(&LaunchId::generate().unwrap(), &runtime(), &CAPABILITY)
+        .unwrap();
     drop(launch);
     let problem = |name: &str| {
         let file = fs::File::open(store.path(name)).unwrap();
@@ -641,7 +645,9 @@ fn a_caller_that_keeps_the_console_keeps_it_across_launches() {
     let (console, outcome) = (locked.console_path(), locked.outcome_path());
     fs::write(&console, b"earlier launches\n").unwrap();
     fs::write(&outcome, b"{}").unwrap();
-    let launch = locked.begin_launch(&runtime(), &CAPABILITY).unwrap();
+    let launch = locked
+        .begin_launch(&LaunchId::generate().unwrap(), &runtime(), &CAPABILITY)
+        .unwrap();
     // The launch leaves the console of the earlier launches for the caller to append to, and
     // removes the previous launch's outcome report, as for any caller.
     assert_eq!(fs::read(&console).unwrap(), b"earlier launches\n");
@@ -693,7 +699,9 @@ fn a_launch_writes_its_marker_before_its_vmm_runs() {
     // Held open, the previous log keeps its inode, which the fresh log cannot then reuse.
     let previous = fs::File::open(store.log_path()).unwrap();
     let mut locked = store.lock(None).unwrap();
-    let mut launch = locked.begin_launch(&runtime(), &CAPABILITY).unwrap();
+    let mut launch = locked
+        .begin_launch(&LaunchId::generate().unwrap(), &runtime(), &CAPABILITY)
+        .unwrap();
     let journal = store.journal().unwrap().unwrap();
     assert_eq!(&journal, launch.journal());
     assert_eq!(journal.state(), LaunchState::Prepared);
@@ -729,7 +737,9 @@ fn a_launch_writes_its_marker_before_its_vmm_runs() {
 
     // A second launch waits until the first is recovered.
     drop(launch);
-    let error = locked.begin_launch(&runtime(), &CAPABILITY).unwrap_err();
+    let error = locked
+        .begin_launch(&LaunchId::generate().unwrap(), &runtime(), &CAPABILITY)
+        .unwrap_err();
     assert!(
         error.message().contains("must be recovered first"),
         "{error}"
@@ -748,14 +758,18 @@ fn launches_check_their_inputs() {
     let (_directory, store) = store();
     let mut locked = store.lock(None).unwrap();
     let error = locked
-        .begin_launch(&runtime(), &[0; CAPABILITY_LEN])
+        .begin_launch(
+            &LaunchId::generate().unwrap(),
+            &runtime(),
+            &[0; CAPABILITY_LEN],
+        )
         .unwrap_err();
     assert_eq!(error.kind(), ErrorKind::Unsupported);
     let mut invalid = runtime();
     invalid.control_contract = String::new();
     assert_eq!(
         locked
-            .begin_launch(&invalid, &CAPABILITY)
+            .begin_launch(&LaunchId::generate().unwrap(), &invalid, &CAPABILITY)
             .unwrap_err()
             .kind(),
         ErrorKind::Unsupported
@@ -770,11 +784,15 @@ fn launches_check_their_inputs() {
 fn an_abandoned_launch_that_spawned_nothing_has_exited() {
     let (_directory, store) = store();
     let mut locked = store.lock(None).unwrap();
-    let launch = locked.begin_launch(&runtime(), &CAPABILITY).unwrap();
+    let launch = locked
+        .begin_launch(&LaunchId::generate().unwrap(), &runtime(), &CAPABILITY)
+        .unwrap();
     // A launch commits only once it records its VMM.
     let error = launch.commit().unwrap_err();
     assert!(error.message().contains("before it records"), "{error}");
-    let error = locked.begin_launch(&runtime(), &CAPABILITY).unwrap_err();
+    let error = locked
+        .begin_launch(&LaunchId::generate().unwrap(), &runtime(), &CAPABILITY)
+        .unwrap_err();
     assert!(
         error.message().contains("must be recovered first"),
         "{error}"
@@ -782,7 +800,9 @@ fn an_abandoned_launch_that_spawned_nothing_has_exited() {
     // A process that a concurrent test spawned may still hold the log that the launch closed,
     // until it executes its program, and a later recovery then ends the launch.
     assert!(released(|| locked.recover().unwrap() == Recovery::Exited));
-    let launch = locked.begin_launch(&runtime(), &CAPABILITY).unwrap();
+    let launch = locked
+        .begin_launch(&LaunchId::generate().unwrap(), &runtime(), &CAPABILITY)
+        .unwrap();
     match launch.abandon().unwrap() {
         Recovery::Exited => {}
         Recovery::Indeterminate(_) => {
@@ -798,7 +818,9 @@ fn an_abandoned_launch_that_spawned_nothing_has_exited() {
 fn a_recorded_vmm_that_cannot_be_held_has_exited_once_its_log_is_released() {
     let (_directory, store) = store();
     let mut locked = store.lock(None).unwrap();
-    let mut launch = locked.begin_launch(&runtime(), &CAPABILITY).unwrap();
+    let mut launch = locked
+        .begin_launch(&LaunchId::generate().unwrap(), &runtime(), &CAPABILITY)
+        .unwrap();
     let log = launch.take_log().unwrap();
     let reference = ProcessRef {
         boot: BootId::current().unwrap(),
@@ -835,7 +857,9 @@ fn a_recorded_vmm_that_cannot_be_held_has_exited_once_its_log_is_released() {
 fn a_journal_that_its_runtime_record_supersedes_is_removed() {
     let (_directory, store) = store();
     let mut locked = store.lock(None).unwrap();
-    let launch = locked.begin_launch(&runtime(), &CAPABILITY).unwrap();
+    let launch = locked
+        .begin_launch(&LaunchId::generate().unwrap(), &runtime(), &CAPABILITY)
+        .unwrap();
     let journal = launch.journal().spawned(reference(1));
     drop(launch);
     // The launch wrote its runtime record and crashed before it removed its journal.
@@ -858,12 +882,18 @@ fn a_journal_that_its_runtime_record_supersedes_is_removed() {
     assert!(error.message().contains("names launch"), "{error}");
     // A runtime record keeps a launch from beginning until it is cleared.
     fs::remove_file(store.path(JOURNAL_NAME)).unwrap();
-    let error = locked.begin_launch(&runtime(), &CAPABILITY).unwrap_err();
+    let error = locked
+        .begin_launch(&LaunchId::generate().unwrap(), &runtime(), &CAPABILITY)
+        .unwrap_err();
     assert!(error.message().contains("already running"), "{error}");
     locked.clear_runtime().unwrap();
     assert!(store.runtime().unwrap().is_none());
     assert!(!store.capability_path().exists());
-    drop(locked.begin_launch(&runtime(), &CAPABILITY).unwrap());
+    drop(
+        locked
+            .begin_launch(&LaunchId::generate().unwrap(), &runtime(), &CAPABILITY)
+            .unwrap(),
+    );
 }
 
 #[test]
@@ -879,7 +909,9 @@ fn report_staging_files_go_once_nothing_of_their_launch_runs() {
     fs::write(&staging, b"{").unwrap();
     let mut locked = store.lock(None).unwrap();
     // A launch begins without the staging file of an earlier one.
-    let mut launch = locked.begin_launch(&runtime(), &CAPABILITY).unwrap();
+    let mut launch = locked
+        .begin_launch(&LaunchId::generate().unwrap(), &runtime(), &CAPABILITY)
+        .unwrap();
     assert!(!staging.exists());
     // While a process of the launch may still hold its log, as its VMM does, the file stays.
     let log = launch.take_log().unwrap();
@@ -896,7 +928,9 @@ fn report_staging_files_go_once_nothing_of_their_launch_runs() {
     assert!(released(|| locked.recover().unwrap() == Recovery::Exited));
     assert!(!staging.exists());
     // An abandoned launch removes it, and so does clearing the runtime of a VM that exited.
-    let launch = locked.begin_launch(&runtime(), &CAPABILITY).unwrap();
+    let launch = locked
+        .begin_launch(&LaunchId::generate().unwrap(), &runtime(), &CAPABILITY)
+        .unwrap();
     fs::write(&staging, b"{").unwrap();
     match launch.abandon().unwrap() {
         Recovery::Exited => {}

@@ -1,17 +1,23 @@
 //! Tests of leases, clone bindings, tombstones, and retirement, by one process, and by
-//! transactions in processes of their own, which [`transaction_role`] runs.
+//! transactions in processes of their own, which [`transaction_role`] runs; and of the crashes of
+//! a clone's orchestrator, which [`clone_role`] runs, with a [`vmm_role`] as the clone's VMM.
 
 use std::cell::{Cell, RefCell};
+use std::convert::Infallible;
 use std::env;
+use std::ffi::OsString;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use std::thread;
 use std::time::Duration;
 
 use serde_json::{Value, json};
 
 use super::*;
+use crate::host::process::{Process, ProcessRef};
 use crate::host::store::files::write_private;
-use crate::host::store::{FORMAT, RUNTIME_NAME, Recovery, RuntimeIdentity};
+use crate::host::store::{FORMAT, LaunchState, RUNTIME_NAME, Recovery, RuntimeIdentity};
+use crate::host::supervisor::{self, Reattached, StopOutcome, VmmCommand};
 use crate::host::template::eligibility::MAX_DOWNTIME_NS;
 use crate::host::template::store::tests::{
     link_dir, link_file, publish, publish_with, remove, storage, store as new_store, unlink_dir,
@@ -42,6 +48,30 @@ const ROLE_SANDBOX: &str = "NVX_TEMPLATE_LEASE_TEST_SANDBOX";
 const READY: &str = "nvx-template-lease-test-ready";
 /// The start of the line in which [`transaction_role`] prints how its transaction ended.
 const OUTCOME: &str = "nvx-template-lease-test-outcome ";
+/// The step after which [`clone_role`] crashes: `after-record`, `after-binding`, or `acquired`, of
+/// its acquisition; `before-spawn`, `after-spawn`, `after-identity`, or `committed`, of its
+/// clone's launch; or `releasing`, of a release.
+const ROLE_CRASH: &str = "NVX_TEMPLATE_LEASE_TEST_CRASH";
+/// The working directory of the VMM that [`clone_role`] launches.
+const ROLE_VMM: &str = "NVX_TEMPLATE_LEASE_TEST_VMM";
+/// The start of the line in which [`clone_role`] prints the reference of the VMM that it spawned,
+/// as JSON.
+const REFERENCE: &str = "nvx-template-lease-test-vmm ";
+/// The start of the line that [`clone_role`] prints as it crashes, before the step after which it
+/// crashes.
+const CRASHED: &str = "nvx-template-lease-test-crashed ";
+/// File whose presence in its working directory marks a [`vmm_role`]. Without it, the role
+/// returns at once, as it does when `cargo test -- --ignored` runs it.
+const VMM_MARKER: &str = "vmm-role";
+/// File whose appearance in its working directory ends a [`vmm_role`].
+const EXIT_MARKER: &str = "exit";
+/// The capability of the VMMs of these tests' clones.
+const CAPABILITY: [u8; CAPABILITY_LEN] = [7; CAPABILITY_LEN];
+/// Longest wait for a VMM that is expected to exit, for a sandbox's lock, or for a reattach to
+/// become determinate.
+const TIMEOUT: Duration = Duration::from_secs(60);
+/// Longest life of a [`vmm_role`] that nothing ends, so that a failed test leaves no process.
+const VMM_LIFETIME: Duration = Duration::from_secs(180);
 
 /// Returns the files that these tests' callers keep in their sandboxes.
 fn files() -> CallerFiles {
@@ -139,6 +169,28 @@ fn ids(leases: &[Lease]) -> String {
     ids.join(" ")
 }
 
+/// Returns the arguments that run only the role `name` of this test executable, on libtest's main
+/// thread, so that libtest prints the role's name before the role's own output.
+fn role(name: &str) -> Vec<OsString> {
+    [
+        "--exact",
+        &format!("host::template::store::leases::tests::{name}"),
+        "--ignored",
+        "--nocapture",
+        "--test-threads=1",
+    ]
+    .map(OsString::from)
+    .to_vec()
+}
+
+/// Returns the error with which `locked` refuses to begin the launch `launch`.
+fn launch_refusal(locked: &mut LockedStore, launch: &LaunchId) -> Error {
+    match locked.begin_launch(launch, &runtime(), &CAPABILITY) {
+        Ok(_) => panic!("the launch {launch} began"),
+        Err(error) => error,
+    }
+}
+
 #[test]
 fn leases_bind_clones_to_the_generations_that_they_restore() {
     let (directory, store) = new_store();
@@ -229,7 +281,11 @@ fn acquisitions_refuse_what_they_cannot_lease_and_lease_nothing() {
     let mut locked = SandboxStore::lock_existing(&sandbox, &files(), None).unwrap();
     drop(
         locked
-            .begin_launch(&runtime(), &[7; CAPABILITY_LEN])
+            .begin_launch(
+                &LaunchId::generate().unwrap(),
+                &runtime(),
+                &[7; CAPABILITY_LEN],
+            )
             .unwrap(),
     );
     drop(locked);
@@ -268,7 +324,7 @@ fn releases_end_leases_once_their_clones_have_exited() {
     drop(
         acquired
             .locked
-            .begin_launch(&runtime(), &[7; CAPABILITY_LEN])
+            .begin_launch(lease.launch(), &runtime(), &[7; CAPABILITY_LEN])
             .unwrap(),
     );
     let error = store.release(&mut acquired.locked).unwrap_err();
@@ -301,6 +357,79 @@ fn releases_end_leases_once_their_clones_have_exited() {
     assert_eq!(error.kind(), ErrorKind::Other, "{error}");
     assert_eq!(binding(&sandbox), Some(again.clone()));
     assert_eq!(store.leases(generation).unwrap(), [again]);
+}
+
+#[test]
+fn a_lease_allows_one_launch_of_its_clone_under_the_lock_that_acquired_it() {
+    let (directory, store) = new_store();
+    let published = publish(&store, &ManifestSpec::template(), storage(1));
+    let sandbox = provision(directory.path(), "sandbox");
+    let mut acquired = store
+        .acquire(
+            published.generation(),
+            &sandbox,
+            &files(),
+            &after(&published, 1),
+            None,
+        )
+        .unwrap();
+    let reserved = acquired.lease.launch().clone();
+    let once =
+        format!("whose launch {reserved} begins once, under the lock that acquired the lease");
+    // No launch but the reserved one.
+    let other = LaunchId::generate().unwrap();
+    let error = launch_refusal(&mut acquired.locked, &other);
+    assert_eq!(error.code(), ErrorCode::SandboxLeased, "{error}");
+    assert!(
+        error.message().ends_with(&format!(
+            "which reserves the launch {reserved}, not {other}"
+        )),
+        "{error}"
+    );
+    // The reserved launch, which its journal names, once.
+    drop(
+        acquired
+            .locked
+            .begin_launch(&reserved, &runtime(), &CAPABILITY)
+            .unwrap(),
+    );
+    assert_eq!(
+        acquired.locked.journal().unwrap().unwrap().launch(),
+        &reserved
+    );
+    assert_eq!(acquired.locked.recover().unwrap(), Recovery::Exited);
+    for launch in [&reserved, &other] {
+        let error = launch_refusal(&mut acquired.locked, launch);
+        assert_eq!(error.code(), ErrorCode::SandboxLeased, "{error}");
+    }
+    let error = launch_refusal(&mut acquired.locked, &reserved);
+    assert!(error.message().ends_with(&once), "{error}");
+    // Once a release ends the lease, the sandbox launches as any launch.
+    assert_eq!(
+        store.release(&mut acquired.locked).unwrap(),
+        Some(acquired.lease.clone())
+    );
+    drop(
+        acquired
+            .locked
+            .begin_launch(&other, &runtime(), &CAPABILITY)
+            .unwrap(),
+    );
+    assert_eq!(acquired.locked.recover().unwrap(), Recovery::Exited);
+    drop(acquired);
+    // The launch of a lease whose acquisition's lock is gone, as a crash leaves it, begins under
+    // no other lock.
+    let lease = leased(&store, &published, &sandbox);
+    let mut locked = SandboxStore::lock_existing(&sandbox, &files(), None).unwrap();
+    let error = launch_refusal(&mut locked, lease.launch());
+    assert_eq!(error.code(), ErrorCode::SandboxLeased, "{error}");
+    assert!(
+        error.message().ends_with(&format!(
+            "whose launch {} begins once, under the lock that acquired the lease",
+            lease.launch()
+        )),
+        "{error}"
+    );
 }
 
 #[test]
@@ -1073,6 +1202,7 @@ fn records_keep_their_json_form() {
         "generation": generation.get().get(),
         "key": published.key().to_string(),
         "sandbox": sandbox.to_str().unwrap(),
+        "launch": lease.launch().as_str(),
     });
     let record = store
         .dir()
@@ -1141,7 +1271,7 @@ fn malformed_records_and_foreign_entries_fail_clearly() {
     let error = store.leases(generation).unwrap_err();
     assert_eq!(error.code(), ErrorCode::FormatUnsupported, "{error}");
     // Records that are not leases.
-    let malformed: [(Change, &str); 5] = [
+    let malformed: [(Change, &str); 7] = [
         (
             |value| value["generation"] = json!(0),
             "it leases store generation 0",
@@ -1154,6 +1284,17 @@ fn malformed_records_and_foreign_entries_fail_clearly() {
         (
             |value| value["lease"] = json!("00"),
             "its identity is invalid",
+        ),
+        (
+            |value| value["launch"] = json!("00"),
+            "its launch is invalid",
+        ),
+        // A lease reserves its clone's launch.
+        (
+            |value| {
+                value.as_object_mut().unwrap().remove("launch");
+            },
+            "is malformed",
         ),
         (|value| value["extra"] = json!(1), "is malformed"),
     ];
@@ -1297,13 +1438,7 @@ impl Transaction {
     ) -> Self {
         let mut command = Command::new(env::current_exe().unwrap());
         command
-            .args([
-                "--exact",
-                "host::template::store::leases::tests::transaction_role",
-                "--ignored",
-                "--nocapture",
-                "--test-threads=1",
-            ])
+            .args(role("transaction_role"))
             .env(ROLE_STORE, store)
             .env(ROLE_ACTION, action)
             .env(ROLE_GENERATION, generation.to_string())
@@ -1563,6 +1698,470 @@ fn a_retirement_that_races_acquisitions_and_releases_in_other_processes_waits_fo
     assert_eq!(store.index().unwrap().get(generation), None);
     assert!(store.leases(generation).unwrap().is_empty());
     assert!(store.tombstones().unwrap().is_empty());
+}
+
+/// A clone's orchestrator in a process of its own, which [`run_clone_role`] runs: it leases the
+/// store generation [`ROLE_GENERATION`] of the store in [`ROLE_STORE`] to the sandbox in
+/// [`ROLE_SANDBOX`], and launches the clone with a [`vmm_role`] in [`ROLE_VMM`] as its VMM, or it
+/// releases the sandbox's lease; and it exits without unwinding after the step that [`ROLE_CRASH`]
+/// names, as a crash would, once it has printed the reference of the VMM that it spawned, if any.
+#[test]
+#[ignore = "a clone's orchestrator that the lease tests run in a process of its own"]
+fn clone_role() {
+    let (Some(dir), Ok(generation), Some(sandbox), Ok(step), Some(vmm)) = (
+        env::var_os(ROLE_STORE),
+        env::var(ROLE_GENERATION),
+        env::var_os(ROLE_SANDBOX).map(PathBuf::from),
+        env::var(ROLE_CRASH),
+        env::var_os(ROLE_VMM).map(PathBuf::from),
+    ) else {
+        return;
+    };
+    let store = Store::open(dir).unwrap();
+    let generation = StoreGeneration::new(generation.parse().unwrap());
+    // The step's transaction crashes as it makes its write in `target` durable.
+    let target = match step.as_str() {
+        "after-record" => Some(store.dir().join(LEASES_NAME)),
+        "after-binding" | "releasing" => Some(sandbox.clone()),
+        _ => None,
+    };
+    let sync = |dir: &Path| -> Result<()> {
+        if target.as_deref() == Some(dir) {
+            crash(&step);
+        }
+        sync_dir(dir)
+    };
+    if step == "releasing" {
+        let mut locked = SandboxStore::lock_existing(&sandbox, &files(), None).unwrap();
+        store.release_with(&mut locked, &sync).unwrap();
+        panic!("the release did not make the removal of its binding durable");
+    }
+    let now = after(store.index().unwrap().get(generation).unwrap(), 1);
+    let mut acquired = store
+        .acquire_with(generation, sandbox.clone(), &files(), &now, None, &sync)
+        .unwrap();
+    let reserved = acquired.lease.launch().clone();
+    let command = |_: &str| -> Result<VmmCommand<'static>> {
+        Ok(VmmCommand::new(
+            env::current_exe().unwrap(),
+            role("vmm_role"),
+            &vmm,
+        ))
+    };
+    match step.as_str() {
+        "acquired" => crash(&step),
+        "before-spawn" => {
+            let _ = supervisor::launch(
+                &mut acquired.locked,
+                &reserved,
+                &runtime(),
+                &CAPABILITY,
+                |_| crash(&step),
+            );
+        }
+        "after-spawn" => {
+            // The steps of `supervisor::launch`, up to the spawn.
+            let mut launch = acquired
+                .locked
+                .begin_launch(&reserved, &runtime(), &CAPABILITY)
+                .unwrap();
+            let command = command(launch.endpoint()).unwrap();
+            let log = launch.take_log().unwrap();
+            let launched = supervisor::spawn(&command, &CAPABILITY, log).unwrap();
+            print_reference(launched.process().unwrap().reference());
+            crash(&step);
+        }
+        "after-identity" => {
+            let starting = supervisor::launch(
+                &mut acquired.locked,
+                &reserved,
+                &runtime(),
+                &CAPABILITY,
+                command,
+            )
+            .unwrap();
+            print_reference(starting.process().reference());
+            crash(&step);
+        }
+        "committed" => {
+            let starting = supervisor::launch(
+                &mut acquired.locked,
+                &reserved,
+                &runtime(),
+                &CAPABILITY,
+                command,
+            )
+            .unwrap();
+            let running = starting.commit().unwrap();
+            print_reference(running.record().process());
+            crash(&step);
+        }
+        _ => {}
+    }
+    panic!("the clone's orchestrator did not crash after {step}");
+}
+
+/// The VMM of a clone of [`clone_role`]: reads its capability as OpenVMM does, then runs until a
+/// file named [`EXIT_MARKER`] appears in its working directory, which [`VMM_MARKER`] marks, or for
+/// [`VMM_LIFETIME`] at most.
+#[test]
+#[ignore = "a VMM that the lease tests run in a process of its own"]
+fn vmm_role() {
+    let directory = env::current_dir().unwrap();
+    if !directory.join(VMM_MARKER).exists() {
+        return;
+    }
+    let mut capability = [0; CAPABILITY_LEN];
+    std::io::stdin().read_exact(&mut capability).unwrap();
+    assert_eq!(capability, CAPABILITY);
+    let started = Instant::now();
+    while !directory.join(EXIT_MARKER).exists() && started.elapsed() < VMM_LIFETIME {
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
+/// Prints `reference` as JSON, on a line of its own, after [`REFERENCE`].
+fn print_reference(reference: &ProcessRef) {
+    println!("\n{REFERENCE}{}", serde_json::to_string(reference).unwrap());
+}
+
+/// Ends this process at once, once it has printed that it crashes after `step`, without unwinding
+/// or running destructors, as a crash would.
+fn crash(step: &str) -> ! {
+    println!("\n{CRASHED}{step}");
+    std::io::stdout().flush().unwrap();
+    std::process::exit(0)
+}
+
+/// Runs [`clone_role`] for the generation `generation` of `store`, the sandbox in `sandbox`, and a
+/// VMM in `vmm`, until it crashes after `step`, and returns the reference of the VMM that it
+/// spawned, if it spawned one.
+fn run_clone_role(
+    step: &str,
+    store: &Store,
+    generation: StoreGeneration,
+    sandbox: &Path,
+    vmm: &Path,
+) -> Option<ProcessRef> {
+    let output = Command::new(env::current_exe().unwrap())
+        .args(role("clone_role"))
+        .env(ROLE_STORE, store.dir())
+        .env(ROLE_GENERATION, generation.to_string())
+        .env(ROLE_SANDBOX, sandbox)
+        .env(ROLE_CRASH, step)
+        .env(ROLE_VMM, vmm)
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let crashed = format!("{CRASHED}{step}");
+    assert!(
+        output.status.success() && stdout.lines().any(|line| line == crashed),
+        "{}: {stdout}{}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
+    stdout
+        .lines()
+        .find_map(|line| line.strip_prefix(REFERENCE))
+        .map(|reference| serde_json::from_str(reference).unwrap())
+}
+
+/// The working directory of a [`vmm_role`], which it marks. Dropping it ends the VMM, and waits
+/// for it to exit, so that a failed test leaves no process behind.
+struct VmmDir {
+    /// The reference of the VMM, once the test knows it.
+    reference: Option<ProcessRef>,
+    /// The directory, which is removed after the VMM exits.
+    dir: tempfile::TempDir,
+}
+
+impl VmmDir {
+    /// Creates the directory, and marks it.
+    fn new() -> Self {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join(VMM_MARKER), b"").unwrap();
+        Self {
+            reference: None,
+            dir,
+        }
+    }
+
+    /// Returns the path of the directory.
+    fn path(&self) -> &Path {
+        self.dir.path()
+    }
+
+    /// Asks the VMM to exit.
+    fn end(&self) {
+        fs::write(self.path().join(EXIT_MARKER), b"").unwrap();
+    }
+}
+
+impl Drop for VmmDir {
+    fn drop(&mut self) {
+        let _ = fs::write(self.path().join(EXIT_MARKER), b"");
+        if let Some(reference) = &self.reference
+            && let Ok(Some(process)) = Process::open(reference)
+            && !process.wait(Instant::now() + TIMEOUT).unwrap_or(false)
+        {
+            let _ = process.kill();
+            let _ = process.wait(Instant::now() + TIMEOUT);
+        }
+    }
+}
+
+/// A clone whose orchestrator, [`clone_role`], crashed after a step of the clone's launch, in a
+/// fresh temporary directory: its VMM's working directory, its template store and sandbox, and
+/// the lease that the sandbox holds.
+struct Crashed {
+    /// The working directory of the clone's VMM, which ends the VMM as it drops, before the rest.
+    vmm: VmmDir,
+    /// The template store.
+    store: Store,
+    /// The sandbox's directory.
+    sandbox: PathBuf,
+    /// The lease that the sandbox holds.
+    lease: Lease,
+    /// The temporary directory of the store and the sandbox.
+    _directory: tempfile::TempDir,
+}
+
+impl Crashed {
+    /// Publishes a generation in a new store, and leases it to a new sandbox, whose clone
+    /// [`clone_role`] launches until it crashes after `step`.
+    fn after(step: &str) -> Self {
+        let (directory, store) = new_store();
+        let published = publish(&store, &ManifestSpec::template(), storage(1));
+        let sandbox = provision(directory.path(), "sandbox");
+        let mut vmm = VmmDir::new();
+        vmm.reference = run_clone_role(step, &store, published.generation(), &sandbox, vmm.path());
+        let lease = binding(&sandbox).expect("the crash kept the clone's lease");
+        Self {
+            vmm,
+            store,
+            sandbox,
+            lease,
+            _directory: directory,
+        }
+    }
+
+    /// Takes the lock of the clone's sandbox, as its restarted orchestrator does.
+    fn lock(&self) -> LockedStore {
+        SandboxStore::lock_existing(&self.sandbox, &files(), Some(Instant::now() + TIMEOUT))
+            .unwrap()
+    }
+
+    /// Checks that the store refuses to release the lease of the sandbox of `locked`, whose VM
+    /// may still run, and that the sandbox keeps it.
+    fn refuses_release(&self, locked: &mut LockedStore) {
+        let error = self.store.release(locked).unwrap_err();
+        assert_eq!(error.code(), ErrorCode::SandboxRunning, "{error}");
+        assert_eq!(binding(&self.sandbox), Some(self.lease.clone()));
+    }
+
+    /// Checks that the store releases the lease of the sandbox of `locked`, and that the lease is
+    /// gone.
+    fn releases(&self, locked: &mut LockedStore) {
+        assert_eq!(
+            self.store.release(locked).unwrap(),
+            Some(self.lease.clone())
+        );
+        assert_eq!(binding(&self.sandbox), None);
+        assert!(
+            self.store
+                .leases(self.lease.generation())
+                .unwrap()
+                .is_empty()
+        );
+    }
+}
+
+/// Reattaches to the VM of the sandbox of `locked` until the result is determinate, as a caller
+/// retries an indeterminate reattach, and returns it.
+///
+/// On Windows, a scanner that briefly opens the log of a launch can keep its claim held for a
+/// moment.
+fn reattach_until_determinate(locked: &mut LockedStore) -> Reattached {
+    let deadline = Instant::now() + TIMEOUT;
+    loop {
+        match supervisor::reattach(locked, &runtime()).unwrap() {
+            Reattached::Indeterminate(reason) if Instant::now() < deadline => {
+                eprintln!("reattach is indeterminate: {reason}");
+                thread::sleep(Duration::from_millis(100));
+            }
+            reattached => return reattached,
+        }
+    }
+}
+
+#[test]
+fn a_crash_during_an_acquisition_leaves_no_lease_or_one_that_launches_nothing() {
+    let (directory, store) = new_store();
+    let published = publish(&store, &ManifestSpec::template(), storage(1));
+    let generation = published.generation();
+    // No VMM runs: the orchestrator crashes before any launch.
+    let vmm = directory.path();
+    // After the record, before the binding: the sandbox holds no lease, and leases the generation
+    // again, while the record, which no binding names, keeps the generation.
+    let unbound = provision(directory.path(), "unbound");
+    assert_eq!(
+        run_clone_role("after-record", &store, generation, &unbound, vmm),
+        None
+    );
+    assert_eq!(binding(&unbound), None);
+    let [orphan]: [Lease; 1] = store.leases(generation).unwrap().try_into().unwrap();
+    assert_eq!(orphan.sandbox(), unbound);
+    let mut leases = vec![leased(&store, &published, &unbound)];
+    // After the binding, before or after the acquisition returned: the sandbox holds the lease,
+    // whose launch no later lock begins, and which a release ends. Another acquisition then
+    // reserves another launch.
+    for step in ["after-binding", "acquired"] {
+        let sandbox = provision(directory.path(), step);
+        assert_eq!(
+            run_clone_role(step, &store, generation, &sandbox, vmm),
+            None
+        );
+        let lease = binding(&sandbox).unwrap();
+        assert!(store.leases(generation).unwrap().contains(&lease), "{step}");
+        let mut locked = SandboxStore::lock_existing(&sandbox, &files(), None).unwrap();
+        let error = launch_refusal(&mut locked, lease.launch());
+        assert_eq!(error.code(), ErrorCode::SandboxLeased, "{step}: {error}");
+        assert_eq!(store.release(&mut locked).unwrap(), Some(lease.clone()));
+        drop(locked);
+        let again = leased(&store, &published, &sandbox);
+        assert_ne!(again.launch(), lease.launch());
+        leases.push(again);
+    }
+    // A retirement removes the record that no binding names, and waits for the leases.
+    leases.sort_by_key(Lease::id);
+    assert_eq!(
+        store.retire(generation, None).unwrap(),
+        Retirement::Draining(leases.clone())
+    );
+    assert_eq!(store.leases(generation).unwrap(), leases);
+}
+
+#[test]
+fn a_clone_that_crashes_before_its_spawn_keeps_its_lease_until_its_launch_ends() {
+    let crashed = Crashed::after("before-spawn");
+    assert_eq!(crashed.vmm.reference, None);
+    let mut locked = crashed.lock();
+    // The journal names the launch that the lease reserved, which spawned nothing.
+    let journal = locked.journal().unwrap().unwrap();
+    assert_eq!(journal.launch(), crashed.lease.launch());
+    assert_eq!(journal.state(), LaunchState::Prepared);
+    crashed.refuses_release(&mut locked);
+    match reattach_until_determinate(&mut locked) {
+        Reattached::Exited {
+            record: None,
+            recovery: Recovery::Exited,
+        } => {}
+        other => panic!("unexpected reattach: {other:?}"),
+    }
+    crashed.releases(&mut locked);
+}
+
+#[test]
+fn a_clone_that_crashes_after_its_spawn_keeps_its_lease_until_its_unrecorded_vmm_exits() {
+    let crashed = Crashed::after("after-spawn");
+    let reference = crashed.vmm.reference.clone().unwrap();
+    let process = Process::open(&reference).unwrap().unwrap();
+    let mut locked = crashed.lock();
+    assert_eq!(
+        locked.journal().unwrap().unwrap().state(),
+        LaunchState::Prepared
+    );
+    // Reattach can neither prove that the VMM, which no record names, exited, nor verify it: it
+    // signals nothing, and the lease stays.
+    let Reattached::Indeterminate(_) = supervisor::reattach(&mut locked, &runtime()).unwrap()
+    else {
+        panic!("reattach ended a launch whose VMM runs unverified");
+    };
+    assert!(!process.has_exited().unwrap());
+    crashed.refuses_release(&mut locked);
+    // Once the VMM exits, the claim that it released proves it.
+    crashed.vmm.end();
+    assert!(process.wait(Instant::now() + TIMEOUT).unwrap());
+    match reattach_until_determinate(&mut locked) {
+        Reattached::Exited {
+            record: None,
+            recovery: Recovery::Exited,
+        } => {}
+        other => panic!("unexpected reattach: {other:?}"),
+    }
+    crashed.releases(&mut locked);
+}
+
+#[test]
+fn a_clone_that_crashes_after_recording_its_vmm_keeps_its_lease_until_reattach_ends_it() {
+    let crashed = Crashed::after("after-identity");
+    let reference = crashed.vmm.reference.clone().unwrap();
+    let process = Process::open(&reference).unwrap().unwrap();
+    let mut locked = crashed.lock();
+    let journal = locked.journal().unwrap().unwrap();
+    assert_eq!(journal.launch(), crashed.lease.launch());
+    assert_eq!(journal.state(), LaunchState::Spawned);
+    assert_eq!(journal.process(), Some(&reference));
+    crashed.refuses_release(&mut locked);
+    // The launch never committed, so reattach ends its VMM through its verified reference.
+    match supervisor::reattach(&mut locked, &runtime()).unwrap() {
+        Reattached::Exited {
+            record: None,
+            recovery: Recovery::Terminated(terminated),
+        } => assert_eq!(terminated, reference),
+        other => panic!("unexpected reattach: {other:?}"),
+    }
+    assert!(process.wait(Instant::now() + TIMEOUT).unwrap());
+    crashed.releases(&mut locked);
+}
+
+#[test]
+fn a_committed_clone_keeps_its_lease_through_a_crash_until_its_vm_stops() {
+    let crashed = Crashed::after("committed");
+    let reference = crashed.vmm.reference.clone().unwrap();
+    let mut locked = crashed.lock();
+    crashed.refuses_release(&mut locked);
+    // The restarted orchestrator holds the clone's VM again, and its lease lasts while it runs.
+    let Reattached::Live(running) = supervisor::reattach(&mut locked, &runtime()).unwrap() else {
+        panic!("the committed clone was not reattached");
+    };
+    assert_eq!(running.record().launch(), crashed.lease.launch());
+    assert_eq!(running.record().process(), &reference);
+    crashed.refuses_release(&mut locked);
+    let stopped = running
+        .stop(
+            &mut locked,
+            Instant::now() + TIMEOUT,
+            None,
+            |_running, _deadline| {
+                crashed.vmm.end();
+                Ok::<(), Infallible>(())
+            },
+        )
+        .unwrap();
+    assert_eq!(stopped.outcome, StopOutcome::Graceful);
+    crashed.releases(&mut locked);
+}
+
+#[test]
+fn a_crash_during_a_release_leaves_a_record_that_a_retirement_removes() {
+    let (directory, store) = new_store();
+    let published = publish(&store, &ManifestSpec::template(), storage(1));
+    let generation = published.generation();
+    let sandbox = provision(directory.path(), "sandbox");
+    let lease = leased(&store, &published, &sandbox);
+    assert_eq!(
+        run_clone_role("releasing", &store, generation, &sandbox, directory.path()),
+        None
+    );
+    // The binding went first: the sandbox holds no lease, while the record, which no binding
+    // names, keeps the generation until a retirement removes it.
+    assert_eq!(binding(&sandbox), None);
+    assert_eq!(store.leases(generation).unwrap(), [lease]);
+    assert_eq!(release(&store, &sandbox).unwrap(), None);
+    assert_eq!(store.retire(generation, None).unwrap(), Retirement::Retired);
+    assert!(store.leases(generation).unwrap().is_empty());
 }
 
 /// Tests of the records that a Windows file system without POSIX deletion keeps under their names

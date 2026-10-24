@@ -36,15 +36,20 @@ fn is_hex_id(text: &str) -> bool {
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
-/// Identity of one launch: 32 lowercase hexadecimal digits, the 16 random bytes that the store
-/// draws for every launch, and which its journal and runtime record share.
+/// Identity of one launch: 32 lowercase hexadecimal digits, the 16 random bytes that
+/// [`generate`](Self::generate) draws for every launch, and which its journal and runtime record
+/// share.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
 pub struct LaunchId(String);
 
 impl LaunchId {
-    /// Draws a fresh launch identity.
-    pub(super) fn generate() -> Result<Self> {
+    /// Draws a fresh launch identity, which a caller reserves for one launch before it begins it
+    /// with [`LockedStore::begin_launch`](super::LockedStore::begin_launch), or
+    /// [`supervisor::launch`](crate::host::supervisor::launch), and never uses for another. A
+    /// clone's lease reserves one, as
+    /// [`template::Store::acquire`](crate::host::template::Store::acquire) draws it.
+    pub fn generate() -> Result<Self> {
         let mut bytes = [0u8; LAUNCH_ID_BYTES];
         getrandom::fill(&mut bytes)
             .map_err(|error| Error::other("cannot draw a launch identity").with_source(error))?;

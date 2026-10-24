@@ -10,10 +10,13 @@
 //!
 //! # Launches
 //!
-//! [`launch`] runs the store's launch steps under the sandbox's lock:
+//! [`launch`] runs the store's launch steps under the sandbox's lock, as a launch whose identity
+//! the caller reserved beforehand, with [`LaunchId::generate`], or through a clone's lease, as
+//! [Clones](#clones) describes:
 //!
-//! 1. [`LockedStore::begin_launch`] writes the journal's marker, and the caller's `command` builds
-//!    the VMM's [`VmmCommand`] with the control endpoint that the launch chose.
+//! 1. [`LockedStore::begin_launch`] writes the journal's marker, which names the launch, and the
+//!    caller's `command` builds the VMM's [`VmmCommand`] with the control endpoint that the
+//!    launch chose.
 //! 2. [`spawn`] starts the VMM with the launch's claimed log as its standard output and error, and
 //!    [`Launch::record_process`] records its identity right after.
 //! 3. The caller checks, through its own transport, that the VMM serves its control endpoint, and
@@ -27,7 +30,7 @@
 //! use std::time::{Duration, Instant};
 //!
 //! use nvx::host::launch::LaunchSpec;
-//! use nvx::host::store::{RuntimeIdentity, SandboxStore};
+//! use nvx::host::store::{LaunchId, RuntimeIdentity, SandboxStore};
 //! use nvx::host::supervisor::{self, Reattached, StopOutcome, Vmm, VmmCommand};
 //! use nvx::protocol::CAPABILITY_LEN;
 //!
@@ -51,7 +54,8 @@
 //!         }
 //!         Reattached::Indeterminate(reason) => return Err(nvx::Error::other(reason)),
 //!     }
-//!     let starting = supervisor::launch(&mut locked, runtime, capability, |endpoint| {
+//!     let launch = LaunchId::generate()?;
+//!     let starting = supervisor::launch(&mut locked, &launch, runtime, capability, |endpoint| {
 //!         let arguments = spec.openvmm_arguments(endpoint, &store.outcome_path())?;
 //!         Ok(VmmCommand::new(&spec.openvmm, arguments, store.dir()))
 //!     })?;
@@ -95,6 +99,60 @@
 //! that it has not released, a [`Process`] that matched its recorded reference, or, during the
 //! recovery of a launch that did not record its VMM, the process that recovery verified to be that
 //! VMM. It never signals a process that reuses a recorded ID.
+//!
+//! # Clones
+//!
+//! A clone restores a generation of a template that it leases from a
+//! [template store](crate::host::template::Store), and its lease reserves its launch:
+//!
+//! 1. [`Store::acquire`](crate::host::template::Store::acquire) leases the generation, and writes
+//!    the lease's record in the store and the clone binding in the sandbox, durably, with the
+//!    identity of the launch that the lease reserves,
+//!    [`Lease::launch`](crate::host::template::Lease::launch), before any VMM of the clone
+//!    exists. It returns the sandbox's lock.
+//! 2. Under that lock, the caller claims the clone's scratch image, if it has one, as
+//!    [`ScratchBinding::check`](crate::host::sandbox::scratch::ScratchBinding::check) does, and
+//!    runs [`launch`] as the reserved launch, which [`LockedStore::begin_launch`] requires of a
+//!    sandbox that holds a lease, and begins once, under that lock alone, whatever its outcome.
+//! 3. Once the clone's VM has exited, as a stop, a termination, or a reattach verifies,
+//!    [`Store::release`](crate::host::template::Store::release) ends the lease, under the
+//!    sandbox's lock, taken through the lease's path,
+//!    [`Lease::sandbox`](crate::host::template::Lease::sandbox), as the acquisition took it.
+//!
+//! ## The lock order
+//!
+//! These steps, and every other transition of a template store or a sandbox, take their locks in
+//! one order: the template store's lock, then the sandbox's
+//! [lifecycle lock](super::store#lifecycle-locks), which guards its clone binding and its launch
+//! journal, then the scratch image's claim. None waits for a lock while it holds a later one: an
+//! acquisition releases the store's lock before it returns; a release, a launch, a stop, a
+//! reattach, and a removal of the sandbox take no lock of the store; and a retirement takes no
+//! lock of a sandbox. No lock lasts for a VM's lifetime: the caller releases the sandbox's lock
+//! once the launch commits or ends, and the scratch image's claim belongs to the VMM, which holds
+//! it until it exits.
+//!
+//! ## Crashes
+//!
+//! A crash at any step leaves records from which a later transition, under the same locks, decides
+//! what becomes of the lease, which a release ends only once the sandbox records no VM and no
+//! launch:
+//!
+//! - After the acquisition, the binding reserves a launch that never began, and that no later lock
+//!   begins: a release ends the lease at once, and another acquisition, which checks the
+//!   generation's eligibility again, reserves another launch.
+//! - After the launch's journal, before or after the spawn, [`reattach`] ends the launch, as
+//!   [`LockedStore::recover`] does, and the lease lasts until it has: a launch that cannot be
+//!   ended yet is [`Reattached::Indeterminate`], and keeps it.
+//! - After the commit, the runtime record names the VM, which [`reattach`] holds again: the lease
+//!   lasts as long as the VM runs, until a stop or a termination verifies its exit.
+//! - During a release, the binding goes first, durably, and leaves the record of the lease, which
+//!   a retirement removes.
+//!
+//! The evidence of the VM's exit decides each outcome. A record of an earlier boot, or of a process
+//! ID that another process now has, names a VM that has exited: reattach clears it, and the lease
+//! may be released. A VM that cannot be examined is indeterminate, and keeps its records, and so
+//! the lease. A forced teardown that fails, or that does not end the VM, keeps its runtime record,
+//! and the lease.
 
 mod child;
 #[cfg(test)]
@@ -107,14 +165,16 @@ pub use self::child::{Inherited, Launched, VmmCommand, spawn};
 use super::launch::timeout_problem;
 use super::process::{Process, ProcessRef};
 use super::store::{
-    IdentityCheck, IdentityPart, Launch, LaunchJournal, LockedStore, Recovery, RuntimeIdentity,
-    RuntimeRecord, SandboxStore,
+    IdentityCheck, IdentityPart, Launch, LaunchId, LaunchJournal, LockedStore, Recovery,
+    RuntimeIdentity, RuntimeRecord, SandboxStore,
 };
 use crate::error::{Error, Result};
 use crate::protocol::CAPABILITY_LEN;
 
-/// Launches a VMM in the sandbox of `locked`, through the store's launch journal, under the
-/// runtime identity `runtime`, with `capability` on its standard input.
+/// Launches a VMM in the sandbox of `locked`, through the store's launch journal, as the launch
+/// `reserved`, which the caller reserved with [`LaunchId::generate`], or which the sandbox's lease
+/// reserves, [`Lease::launch`](crate::host::template::Lease::launch), under the runtime identity
+/// `runtime`, with `capability` on its standard input.
 ///
 /// It begins the launch with [`LockedStore::begin_launch`], asks `command` for the VMM's command,
 /// given the control endpoint that the launch chose, [`spawn`]s the VMM with the launch's claimed
@@ -126,15 +186,18 @@ use crate::protocol::CAPABILITY_LEN;
 /// identity it could not record through its handle, and returns the step's error. A launch that
 /// cannot be ended then, because its VMM did not exit, keeps its journal for
 /// [`LockedStore::recover`], and the error says so. Fails as [`LockedStore::begin_launch`] does if
-/// the sandbox's VM runs, or an interrupted launch has not been recovered.
+/// the sandbox's VM runs, an interrupted launch has not been recovered, or the sandbox holds a
+/// lease that does not let this lock begin `reserved`: one that reserves another launch, or that
+/// another lock acquired, or whose launch has begun.
 pub fn launch<'s, 'h>(
     locked: &'s mut LockedStore,
+    reserved: &LaunchId,
     runtime: &RuntimeIdentity,
     capability: &[u8; CAPABILITY_LEN],
     command: impl FnOnce(&str) -> Result<VmmCommand<'h>>,
 ) -> Result<Starting<'s>> {
     let store = SandboxStore::clone(locked);
-    let mut launch = locked.begin_launch(runtime, capability)?;
+    let mut launch = locked.begin_launch(reserved, runtime, capability)?;
     let command = match command(launch.endpoint()) {
         Ok(command) => command,
         Err(error) => return Err(abandon_after(launch, error)),
@@ -380,8 +443,8 @@ impl Vmm {
     ///
     /// The result says whether the VMM exited without the forced step, the forced step ended it,
     /// or it still runs; see [`StopOutcome`]. Once the VMM has exited, the stop clears the runtime
-    /// record of its launch, as [`LockedStore::clear_runtime`] does, unless the record names
-    /// another launch by then. A VMM that still runs keeps its record.
+    /// record of its launch, as [`LockedStore::clear_runtime`] does, unless the record is another
+    /// VM's by then. A VMM that still runs keeps its record.
     ///
     /// `locked` must be the locked store of the VM's sandbox. Fails with
     /// [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported) if `forced` is zero or longer
@@ -433,9 +496,20 @@ impl Vmm {
     /// determined, or when it cannot be terminated, as on Linux hosts without pidfds, which cannot
     /// hold it.
     pub fn terminate(&self, locked: &mut LockedStore, bound: Duration) -> Result<StopOutcome> {
+        self.terminate_with(locked, bound, &self.process)
+    }
+
+    /// Ends the VM as [`terminate`](Self::terminate) does, through `process`: its VMM, or, in
+    /// tests, a stand-in for it.
+    fn terminate_with(
+        &self,
+        locked: &mut LockedStore,
+        bound: Duration,
+        process: &impl Stoppable,
+    ) -> Result<StopOutcome> {
         self.check_store(locked)?;
         check_bound(bound, "the termination")?;
-        let outcome = terminate_process(&self.process, self.record.process().pid, bound)?;
+        let outcome = terminate_process(process, self.record.process().pid, bound)?;
         self.clear_if_exited(locked, outcome)?;
         Ok(outcome)
     }
@@ -453,12 +527,13 @@ impl Vmm {
     }
 
     /// Clears the runtime record of the VM's launch from `locked` once its VMM has exited, which
-    /// `outcome` tells, unless the record names another launch by then.
+    /// `outcome` tells, unless the record is another VM's by then: another launch's, or that of
+    /// another VMM under a launch identity that its caller used again.
     fn clear_if_exited(&self, locked: &mut LockedStore, outcome: StopOutcome) -> Result<()> {
         if outcome != StopOutcome::TimedOut
             && locked
                 .runtime()?
-                .is_some_and(|record| record.launch() == self.record.launch())
+                .is_some_and(|record| record == self.record)
         {
             locked.clear_runtime()?;
         }

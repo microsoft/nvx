@@ -49,10 +49,13 @@
 //!
 //! # Launches
 //!
-//! A launch holds the sandbox's lock throughout:
+//! A launch holds the sandbox's lock throughout, under an identity that the caller reserved
+//! before it began, with [`LaunchId::generate`], a fresh one for each launch, or that a clone's
+//! lease reserved, which records it durably before any VMM of the clone exists, for the one
+//! launch of the clone that the lease allows:
 //!
 //! 1. [`LockedStore::begin_launch`] stores the capability, creates a fresh log and claims it, and
-//!    writes the journal's marker, before anything is spawned.
+//!    writes the journal's marker, which names the launch, before anything is spawned.
 //! 2. The caller spawns the VMM with [`Launch::take_log`] as its standard output and error, and
 //!    [`Launch::record_process`] records the VMM's [`ProcessRef`] right after the spawn.
 //! 3. Once the VM is ready, [`Launch::commit`] replaces the journal with the runtime record. A
@@ -65,7 +68,7 @@
 //! use std::time::{Duration, Instant};
 //!
 //! use nvx::host::launch::LaunchSpec;
-//! use nvx::host::store::{RuntimeIdentity, SandboxStore};
+//! use nvx::host::store::{LaunchId, RuntimeIdentity, SandboxStore};
 //! use nvx::host::supervisor::{self, VmmCommand};
 //! use nvx::protocol::CAPABILITY_LEN;
 //!
@@ -77,7 +80,7 @@
 //!     let store = SandboxStore::create("/var/lib/example/sandbox")?;
 //!     let mut locked = store.lock(Some(Instant::now() + Duration::from_secs(10)))?;
 //!     locked.recover()?;
-//!     let mut launch = locked.begin_launch(runtime, capability)?;
+//!     let mut launch = locked.begin_launch(&LaunchId::generate()?, runtime, capability)?;
 //!     let arguments = spec.openvmm_arguments(launch.endpoint(), &store.outcome_path())?;
 //!     let command = VmmCommand::new(&spec.openvmm, arguments, store.dir());
 //!     let log = launch.take_log()?;
@@ -94,7 +97,7 @@
 //! transition of the sandbox overlaps it, not even through the same guard:
 //!
 //! ```compile_fail
-//! # use nvx::host::store::{RuntimeIdentity, SandboxStore};
+//! # use nvx::host::store::{LaunchId, RuntimeIdentity, SandboxStore};
 //! # use nvx::protocol::CAPABILITY_LEN;
 //! # fn overlap(
 //! #     store: &SandboxStore,
@@ -102,7 +105,7 @@
 //! #     capability: &[u8; CAPABILITY_LEN],
 //! # ) -> nvx::Result<()> {
 //! let mut locked = store.lock(None)?;
-//! let launch = locked.begin_launch(runtime, capability)?;
+//! let launch = locked.begin_launch(&LaunchId::generate()?, runtime, capability)?;
 //! locked.recover()?; // `locked` is still borrowed by `launch`.
 //! launch.commit()?;
 //! # Ok(())
@@ -243,6 +246,7 @@ use super::filesystem::FileIdentity;
 use super::platform;
 use super::process::{BootId, Process, ProcessRef};
 use super::supervisor::Launched;
+use super::template::Lease;
 use crate::error::{Error, ErrorCode, ErrorKind, Result};
 use crate::protocol::CAPABILITY_LEN;
 
@@ -620,6 +624,9 @@ pub struct LockedStore {
     files: CallerFiles,
     /// Whether this holder removed its lock file, after which the path may name another's.
     lock_removed: bool,
+    /// The launch of the sandbox's clone that the lease acquired under this lock reserves, until
+    /// [`begin_launch`](Self::begin_launch) begins it, or a release ends the lease.
+    reserved: Option<LaunchId>,
 }
 
 impl Deref for LockedStore {
@@ -639,7 +646,15 @@ impl LockedStore {
             lock,
             files,
             lock_removed: false,
+            reserved: None,
         }
+    }
+
+    /// Lets [`begin_launch`](Self::begin_launch) begin `launch`, once, as the launch of the
+    /// sandbox's clone that the lease acquired under this lock reserves, or, given `None`, no
+    /// launch of a clone, once a release ends the lease.
+    pub(crate) fn reserve(&mut self, launch: Option<LaunchId>) {
+        self.reserved = launch;
     }
 
     /// Returns the caller's files that the lock knows: those that a [lifecycle
@@ -648,20 +663,27 @@ impl LockedStore {
         &self.files
     }
 
-    /// Begins a launch of the runtime `runtime`, whose VMM receives `capability`.
+    /// Begins the launch `launch`, which the caller reserved with [`LaunchId::generate`], of the
+    /// runtime `runtime`, whose VMM receives `capability`.
     ///
     /// It stores the capability, replaces the log of the previous launch with a fresh one, which
     /// it claims, removes the outcome report, console log, and control socket of the previous
     /// launch, and any outcome report that its VMM staged without publishing it, chooses a control
-    /// endpoint, and writes the journal's marker. It keeps the console log of a caller that keeps
-    /// the console of every launch, as [`CallerFiles::keeping_console`] declares. Nothing is
-    /// spawned yet: the caller spawns the VMM with [`Launch::take_log`].
+    /// endpoint, and writes the journal's marker, which names the launch. It keeps the console log
+    /// of a caller that keeps the console of every launch, as [`CallerFiles::keeping_console`]
+    /// declares. Nothing is spawned yet: the caller spawns the VMM with [`Launch::take_log`].
     ///
     /// Fails if the sandbox's VM runs, or a launch was interrupted and is not recovered yet, and
-    /// with [`ErrorKind::Unsupported`] for an all-zero capability
-    /// or an invalid runtime identity.
+    /// with [`ErrorKind::Unsupported`] for an all-zero capability or an invalid runtime identity.
+    /// A sandbox whose clone holds a lease of a template's generation, which its
+    /// [clone binding](CLONE_BINDING_NAME) records, launches once, as the launch that the lease
+    /// reserves, under the lock that acquired the lease, as
+    /// [`template::Store::acquire`](crate::host::template::Store::acquire) returns it: any other
+    /// launch, and any launch under another lock or after that one began, fails with
+    /// [`ErrorCode::SandboxLeased`] until a release ends the lease.
     pub fn begin_launch(
         &mut self,
+        launch: &LaunchId,
         runtime: &RuntimeIdentity,
         capability: &[u8; CAPABILITY_LEN],
     ) -> Result<Launch<'_>> {
@@ -683,6 +705,26 @@ impl LockedStore {
                 self.dir.display()
             )));
         }
+        if let Some(lease) = Lease::of(self)?
+            && (lease.launch() != launch || self.reserved.as_ref() != Some(launch))
+        {
+            let reservation = if lease.launch() == launch {
+                format!("whose launch {launch} begins once, under the lock that acquired the lease")
+            } else {
+                format!("which reserves the launch {}, not {launch}", lease.launch())
+            };
+            return Err(Error::new(
+                ErrorCode::SandboxLeased,
+                format!(
+                    "the sandbox in {} holds the lease {} of the generation {} of the template \
+                     store {}, {reservation}",
+                    self.dir.display(),
+                    lease.id(),
+                    lease.generation(),
+                    lease.store()
+                ),
+            ));
+        }
         let socket = self.socket_path();
         for path in [&socket, &self.outcome_path()] {
             remove_if_present(path)?;
@@ -695,12 +737,13 @@ impl LockedStore {
             .map_err(|error| Error::io("cannot choose a control endpoint").with_source(error))?;
         let (log, claim) = self.create_log()?;
         files::write_private(&self.capability_path(), capability)?;
-        let journal =
-            LaunchJournal::prepared(LaunchId::generate()?, endpoint, runtime.clone(), claim);
+        let journal = LaunchJournal::prepared(launch.clone(), endpoint, runtime.clone(), claim);
         if let Err(error) = record::write(&self.path(JOURNAL_NAME), &journal) {
             let _ = remove_if_present(&self.capability_path());
             return Err(error);
         }
+        // A lease reserves one launch, which has begun.
+        self.reserved = None;
         Ok(Launch {
             locked: self,
             journal,

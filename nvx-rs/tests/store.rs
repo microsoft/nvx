@@ -22,8 +22,8 @@ use nvx::ErrorKind;
 use nvx::host::platform;
 use nvx::host::process::{BootId, Process, ProcessRef};
 use nvx::host::store::{
-    ArtifactIdentity, IdentityCheck, IdentityPart, JOURNAL_NAME, Launch, LaunchState, LockedStore,
-    RUNTIME_NAME, Recovery, RuntimeIdentity, SandboxStore,
+    ArtifactIdentity, IdentityCheck, IdentityPart, JOURNAL_NAME, Launch, LaunchId, LaunchState,
+    LockedStore, RUNTIME_NAME, Recovery, RuntimeIdentity, SandboxStore,
 };
 use nvx::host::supervisor::{self, Launched, VmmCommand};
 use nvx::protocol::CAPABILITY_LEN;
@@ -285,7 +285,9 @@ fn orchestrator_role() {
     // another working directory, and that recovery examines, is the same.
     assert!(store.dir().is_absolute());
     let mut locked = store.lock(None).unwrap();
-    let mut launch = locked.begin_launch(&runtime(), &CAPABILITY).unwrap();
+    let mut launch = locked
+        .begin_launch(&LaunchId::generate().unwrap(), &runtime(), &CAPABILITY)
+        .unwrap();
     if crash == "before-spawn" {
         crash_now();
     }
@@ -345,7 +347,9 @@ fn restrictive_umask_role() {
     // The second launch opens the lock file again and replaces the first launch's files.
     for _ in 0..2 {
         let mut locked = store.lock(None).unwrap();
-        let launch = locked.begin_launch(&runtime(), &CAPABILITY).unwrap();
+        let launch = locked
+            .begin_launch(&LaunchId::generate().unwrap(), &runtime(), &CAPABILITY)
+            .unwrap();
         assert_eq!(store.journal().unwrap().as_ref(), Some(launch.journal()));
         assert_eq!(store.read_capability().unwrap(), CAPABILITY);
         for path in [
@@ -448,7 +452,9 @@ fn recovery_never_signals_a_process_that_the_journal_does_not_name() {
     let _spawns = serialized();
     let (_directory, store) = store();
     let mut locked = store.lock(None).unwrap();
-    let mut launch = locked.begin_launch(&runtime(), &CAPABILITY).unwrap();
+    let mut launch = locked
+        .begin_launch(&LaunchId::generate().unwrap(), &runtime(), &CAPABILITY)
+        .unwrap();
     let vmm = Vmm(Some(spawn_vmm(&mut launch, &store)));
     let recorded = launch
         .record_process(vmm.0.as_ref().unwrap())
@@ -492,7 +498,9 @@ fn a_committed_launch_names_its_vm_for_another_build() {
     let _spawns = serialized();
     let (_directory, store) = store();
     let mut locked = store.lock(None).unwrap();
-    let mut launch = locked.begin_launch(&runtime(), &CAPABILITY).unwrap();
+    let mut launch = locked
+        .begin_launch(&LaunchId::generate().unwrap(), &runtime(), &CAPABILITY)
+        .unwrap();
     let endpoint = launch.endpoint().to_owned();
     let vmm = Vmm(Some(spawn_vmm(&mut launch, &store)));
     let process = launch.record_process(vmm.0.as_ref().unwrap()).unwrap();
@@ -535,7 +543,9 @@ fn an_abandoned_launch_ends_its_recorded_vmm() {
     let _spawns = serialized();
     let (_directory, store) = store();
     let mut locked = store.lock(None).unwrap();
-    let mut launch = locked.begin_launch(&runtime(), &CAPABILITY).unwrap();
+    let mut launch = locked
+        .begin_launch(&LaunchId::generate().unwrap(), &runtime(), &CAPABILITY)
+        .unwrap();
     let mut vmm = Vmm(Some(spawn_vmm(&mut launch, &store)));
     let held = launch.record_process(vmm.0.as_ref().unwrap()).unwrap();
     let process = held.reference().clone();
@@ -576,7 +586,9 @@ fn an_endpoint_served_without_the_claimed_log_is_not_signaled() {
     // A VM of another sandbox serves an endpoint.
     let (_other_directory, other) = store();
     let mut other_locked = other.lock(None).unwrap();
-    let mut other_launch = other_locked.begin_launch(&runtime(), &CAPABILITY).unwrap();
+    let mut other_launch = other_locked
+        .begin_launch(&LaunchId::generate().unwrap(), &runtime(), &CAPABILITY)
+        .unwrap();
     let served = other_launch.endpoint().to_owned();
     let fake = Vmm(Some(spawn_fake(&mut other_launch, &other, 0)));
     let fake_process = other_launch
@@ -743,7 +755,9 @@ fn unsupported_and_corrupt_records_fail_clearly() {
         assert!(error.message().contains(expected), "{name}: {error}");
         // Nothing reads past the record or rewrites it: a launch and a recovery fail the same
         // way, and the record stays as it was.
-        let launch = locked.begin_launch(&runtime(), &CAPABILITY).map(drop);
+        let launch = locked
+            .begin_launch(&LaunchId::generate().unwrap(), &runtime(), &CAPABILITY)
+            .map(drop);
         assert!(launch.unwrap_err().message().contains(expected), "{name}");
         if as_name == JOURNAL_NAME {
             assert!(

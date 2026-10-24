@@ -34,7 +34,7 @@ use nvx::host::process::{BootId, Process, ProcessRef, WaitMethod};
 #[cfg(windows)]
 use nvx::host::store::FORMAT;
 use nvx::host::store::{
-    ArtifactIdentity, IdentityPart, LaunchState, LockedStore, RUNTIME_NAME, Recovery,
+    ArtifactIdentity, IdentityPart, LaunchId, LaunchState, LockedStore, RUNTIME_NAME, Recovery,
     RuntimeIdentity, SandboxStore,
 };
 use nvx::host::supervisor::{self, Inherited, Launched, Reattached, StopOutcome, Vmm, VmmCommand};
@@ -210,12 +210,20 @@ fn orchestrator_fixture() {
     };
     match step.as_str() {
         "before-spawn" => {
-            let _ = supervisor::launch(&mut locked, &runtime(), &CAPABILITY, |_| crash());
+            let _ = supervisor::launch(
+                &mut locked,
+                &LaunchId::generate().unwrap(),
+                &runtime(),
+                &CAPABILITY,
+                |_| crash(),
+            );
             unreachable!("the orchestrator crashed before its spawn");
         }
         "after-spawn" => {
             // The steps of `supervisor::launch`, up to the spawn.
-            let mut launch = locked.begin_launch(&runtime(), &CAPABILITY).unwrap();
+            let mut launch = locked
+                .begin_launch(&LaunchId::generate().unwrap(), &runtime(), &CAPABILITY)
+                .unwrap();
             let command = command(launch.endpoint()).unwrap();
             let log = launch.take_log().unwrap();
             let launched = supervisor::spawn(&command, &CAPABILITY, log).unwrap();
@@ -223,14 +231,26 @@ fn orchestrator_fixture() {
             crash();
         }
         "after-identity" => {
-            let starting =
-                supervisor::launch(&mut locked, &runtime(), &CAPABILITY, command).unwrap();
+            let starting = supervisor::launch(
+                &mut locked,
+                &LaunchId::generate().unwrap(),
+                &runtime(),
+                &CAPABILITY,
+                command,
+            )
+            .unwrap();
             print_reference(starting.process().reference());
             crash();
         }
         "committed" => {
-            let starting =
-                supervisor::launch(&mut locked, &runtime(), &CAPABILITY, command).unwrap();
+            let starting = supervisor::launch(
+                &mut locked,
+                &LaunchId::generate().unwrap(),
+                &runtime(),
+                &CAPABILITY,
+                command,
+            )
+            .unwrap();
             let vmm = starting.commit().unwrap();
             drop(locked);
             print_reference(vmm.record().process());
@@ -333,10 +353,16 @@ fn spawn_vmm(directory: &Path, breakaway: bool) -> Launched {
 /// Launches a VMM fixture in `vmm` through the supervisor in `locked`, under [`runtime`], and
 /// commits the launch, as an orchestrator does once the VMM serves its control endpoint.
 fn launch_vmm(locked: &mut LockedStore, vmm: &mut VmmDirectory) -> Vmm {
-    let starting = supervisor::launch(locked, &runtime(), &CAPABILITY, |endpoint| {
-        assert!(!endpoint.is_empty());
-        Ok(vmm_command(vmm.path(), false))
-    })
+    let starting = supervisor::launch(
+        locked,
+        &LaunchId::generate().unwrap(),
+        &runtime(),
+        &CAPABILITY,
+        |endpoint| {
+            assert!(!endpoint.is_empty());
+            Ok(vmm_command(vmm.path(), false))
+        },
+    )
     .unwrap();
     vmm.record(starting.process().reference());
     // The launch recorded its VMM before it returned.

@@ -154,8 +154,8 @@ pub enum ErrorCode {
     /// `template-tombstoned`: a tombstone quarantines the template's generation, which takes no
     /// new clones, while the clones that lease it keep their leases.
     TemplateTombstoned,
-    /// `sandbox-leased`: the sandbox holds a lease of a template's generation already, which a
-    /// release ends once its VM has exited.
+    /// `sandbox-leased`: the sandbox holds a lease of a template's generation, which allows no
+    /// other lease, and one launch of its clone, until a release ends it once its VM has exited.
     SandboxLeased,
 }
 

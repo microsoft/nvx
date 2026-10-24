@@ -68,8 +68,8 @@ use super::process::KILL_TIMEOUT;
 use super::report::{self, Report};
 use super::session::{self, ControlSession, ExecEvent, SessionError};
 use super::store::{
-    CallerFiles, IdentityPart, LockedStore, OUTCOME_NAME, Recovery, RemovalError, RuntimeIdentity,
-    RuntimeRecord, SOCKET_NAME, SandboxStore,
+    CallerFiles, IdentityPart, LaunchId, LockedStore, OUTCOME_NAME, Recovery, RemovalError,
+    RuntimeIdentity, RuntimeRecord, SOCKET_NAME, SandboxStore,
 };
 use super::supervisor::{self, Reattached, Starting, StopOutcome, Vmm, VmmCommand};
 use crate::error::{Error, ErrorCode, ErrorKind, Result};
@@ -706,14 +706,21 @@ impl LockedInstance {
         let endpoint = control_endpoint(&instance.store.socket_path())?;
         spec.fit_process_command_line(&spec.openvmm_arguments(&endpoint, &report)?, 0)?;
         let capability = generate_capability()?;
+        let launch = LaunchId::generate()?;
         let started = Instant::now();
-        let starting = supervisor::launch(&mut self.locked, runtime, &capability, |endpoint| {
-            let arguments = spec.openvmm_arguments(endpoint, &report)?;
-            spec.fit_process_command_line(&arguments, 0)?;
-            let mut command = VmmCommand::new(&spec.openvmm, arguments, instance.dir());
-            command.breakaway_from_job = spec.breakaway_from_job;
-            Ok(command)
-        })?;
+        let starting = supervisor::launch(
+            &mut self.locked,
+            &launch,
+            runtime,
+            &capability,
+            |endpoint| {
+                let arguments = spec.openvmm_arguments(endpoint, &report)?;
+                spec.fit_process_command_line(&arguments, 0)?;
+                let mut command = VmmCommand::new(&spec.openvmm, arguments, instance.dir());
+                command.breakaway_from_job = spec.breakaway_from_job;
+                Ok(command)
+            },
+        )?;
         let (pid, start_time) = {
             let reference = starting.process().reference();
             (reference.pid, reference.start_time)

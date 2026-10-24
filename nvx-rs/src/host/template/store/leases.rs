@@ -25,7 +25,7 @@ use crate::error::{Error, ErrorCode, ErrorKind, Result};
 use crate::host::filesystem;
 use crate::host::platform::{self, parse_hex_id};
 use crate::host::store::files::{remove_if_present, sync_dir};
-use crate::host::store::{CLONE_BINDING_NAME, CallerFiles, LockedStore, SandboxStore};
+use crate::host::store::{CLONE_BINDING_NAME, CallerFiles, LaunchId, LockedStore, SandboxStore};
 use crate::host::template::eligibility::HostTime;
 use crate::host::template::files::was_removed;
 use crate::host::template::key::KeyIdentity;
@@ -118,7 +118,7 @@ impl FromStr for LeaseId {
 }
 
 /// A lease of a generation of a template, which keeps the generation in its store for the clone
-/// of one sandbox, whose VM restores it.
+/// of one sandbox, whose VM restores it, and reserves the clone's launch.
 ///
 /// The store keeps the record of each lease that it granted, and the sandbox keeps the same
 /// record as its clone binding, [`CLONE_BINDING_NAME`], beside its launch journal. A lease names
@@ -126,7 +126,9 @@ impl FromStr for LeaseId {
 /// of a link, or of a directory that a `..` component passes through, hides the sandbox from a
 /// [retirement](Store::retire). A sandbox that holds a lease must not move, and goes only through
 /// its store's [removal](LockedStore::remove), which makes the binding's absence durable before
-/// the sandbox goes.
+/// the sandbox goes. The lease allows one launch of the clone, as the identity that it reserves,
+/// [`launch`](Self::launch), under the lock that acquired it, and no other launch of the sandbox
+/// until a release ends it, as [`LockedStore::begin_launch`] requires.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Lease {
     /// The lease's identity.
@@ -140,6 +142,8 @@ pub struct Lease {
     /// The directory of the sandbox that holds the lease, as an absolute path with its links
     /// resolved, which is valid Unicode.
     sandbox: PathBuf,
+    /// The launch of the clone that the lease reserves.
+    launch: LaunchId,
 }
 
 impl Lease {
@@ -180,6 +184,14 @@ impl Lease {
         &self.sandbox
     }
 
+    /// Returns the launch of the clone that the lease reserves: the identity under which the
+    /// caller launches the clone, with [`supervisor::launch`](crate::host::supervisor::launch),
+    /// once, under the lock that acquired the lease, and the only launch of the sandbox that
+    /// [`LockedStore::begin_launch`] begins while the sandbox holds the lease.
+    pub fn launch(&self) -> &LaunchId {
+        &self.launch
+    }
+
     /// Returns the reference by which the activation record of the clone names the template that
     /// it restores: the leased generation's store generation, and its key's identity.
     pub fn template(&self) -> TemplateReference {
@@ -195,8 +207,10 @@ impl Lease {
 pub struct Acquired {
     /// The lease.
     pub lease: Lease,
-    /// The lock of the sandbox, which names it by the lease's path, under which the caller launches
-    /// its clone. Dropping it releases the lock, and keeps the lease.
+    /// The lock of the sandbox, which names it by the lease's path, the only one under which the
+    /// caller launches its clone, as the launch that the lease reserves. Dropping it releases the
+    /// lock, and keeps the lease, whose launch no later lock begins: a release ends the lease, and
+    /// another acquisition reserves another launch.
     pub locked: LockedStore,
 }
 
@@ -250,8 +264,9 @@ impl Store {
     /// that keeps its generation in the store. It resolves the links of the sandbox's path before
     /// it takes the sandbox's lock, and the lease, the binding, and the lock that it returns all
     /// name the sandbox by that path, as [`Lease::sandbox`] returns it, which no later change of a
-    /// link redirects to another directory. It returns the lease, with the sandbox's lock, under
-    /// which the caller launches the clone, and releases the store's lock.
+    /// link redirects to another directory. It returns the lease, with the sandbox's lock, the only
+    /// one under which the caller launches the clone, once, as the launch that the lease reserves,
+    /// [`Lease::launch`], and releases the store's lock.
     ///
     /// Fails, and leases nothing:
     ///
@@ -344,7 +359,7 @@ impl Store {
                 });
             }
         };
-        let locked = match SandboxStore::lock_existing(&resolved, files, deadline) {
+        let mut locked = match SandboxStore::lock_existing(&resolved, files, deadline) {
             Ok(locked) => locked,
             Err(error) if error.kind() == ErrorKind::NotFound => {
                 return Err(not_provisioned().with_source(error));
@@ -394,6 +409,7 @@ impl Store {
             generation,
             key: indexed.key,
             sandbox: locked.dir().to_owned(),
+            launch: LaunchId::generate()?,
         };
         let record = LeaseRecord::new(&lease);
         self.create_records_dir(LEASES_NAME, LEASES_WHAT, sync)?;
@@ -416,6 +432,7 @@ impl Store {
             return Err(error);
         }
         drop(lock);
+        locked.reserve(Some(lease.launch.clone()));
         Ok(Acquired { lease, locked })
     }
 
@@ -470,6 +487,7 @@ impl Store {
         }
         let recorded = self.check_records_dir(LEASES_NAME, LEASES_WHAT)?;
         unbind(locked.dir(), sync)?;
+        locked.reserve(None);
         if recorded {
             remove_lease_record(&self.lease_path(lease.id))?;
         }
@@ -1023,6 +1041,8 @@ struct LeaseRecord {
     key: String,
     /// The directory of the sandbox that holds the lease, as an absolute path.
     sandbox: String,
+    /// The launch of the clone that the lease reserves.
+    launch: String,
 }
 
 impl LeaseRecord {
@@ -1035,6 +1055,7 @@ impl LeaseRecord {
             generation: lease.generation.get().get(),
             key: lease.key.to_string(),
             sandbox: lease.sandbox.to_string_lossy().into_owned(),
+            launch: lease.launch.to_string(),
         }
     }
 
@@ -1060,6 +1081,8 @@ impl LeaseRecord {
                 .ok_or("it leases store generation 0, which no generation has")?,
             key: self.key.parse().map_err(|error| field("key", error))?,
             sandbox,
+            launch: LaunchId::try_from(self.launch)
+                .map_err(|problem| format!("its launch is invalid: {problem}"))?,
         })
     }
 }

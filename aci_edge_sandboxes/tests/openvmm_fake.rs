@@ -17,7 +17,9 @@ use std::time::{Duration, Instant};
 use aci_edge_sandboxes::nvx::ErrorCode as NvxCode;
 use aci_edge_sandboxes::nvx::Hypervisor;
 use aci_edge_sandboxes::nvx::host::platform;
-use aci_edge_sandboxes::nvx::host::store::{ArtifactIdentity, RuntimeIdentity, SandboxStore};
+use aci_edge_sandboxes::nvx::host::store::{
+    ArtifactIdentity, LaunchId, RuntimeIdentity, SandboxStore,
+};
 use aci_edge_sandboxes::nvx::host::supervisor::{self, Launched, VmmCommand};
 use aci_edge_sandboxes::nvx::protocol::CAPABILITY_LEN;
 use aci_edge_sandboxes::openvmm::OpenVmmConfig;
@@ -1181,7 +1183,11 @@ fn interrupted_starts_before_an_endpoint_recover_or_retain_the_child() {
         let store = SandboxStore::open(&dir).unwrap();
         let mut locked = store.lock(None).unwrap();
         let mut launch = locked
-            .begin_launch(&runtime_with('1'), &CAPABILITY)
+            .begin_launch(
+                &LaunchId::generate().unwrap(),
+                &runtime_with('1'),
+                &CAPABILITY,
+            )
             .unwrap();
         let listen = arguments
             .iter()
@@ -1254,7 +1260,11 @@ fn unrecorded_launches_end_once_their_log_is_released() {
     let store = SandboxStore::open(&dir).unwrap();
     let mut locked = store.lock(None).unwrap();
     let mut launch = locked
-        .begin_launch(&runtime_with('1'), &CAPABILITY)
+        .begin_launch(
+            &LaunchId::generate().unwrap(),
+            &runtime_with('1'),
+            &CAPABILITY,
+        )
         .unwrap();
     let log = launch.take_log().unwrap();
     drop(launch);
