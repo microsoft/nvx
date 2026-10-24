@@ -531,7 +531,9 @@ mod reference_tests {
 
 #[cfg(all(test, target_os = "linux"))]
 mod tests {
+    use std::ffi::OsStr;
     use std::fs;
+    use std::os::unix::ffi::OsStrExt;
     use std::process::{Child, Command, Stdio};
 
     use super::*;
@@ -570,6 +572,37 @@ mod tests {
         assert!(start_time("Z", Err(io::Error::other("unreadable"))).is_err());
         assert!(platform::start_time_from_stat(7, "7 (vmm) S 1 2", unasked).is_err());
         assert!(platform::start_time_from_stat(7, "garbage", unasked).is_err());
+    }
+
+    #[test]
+    fn a_process_with_a_non_utf8_command_name_can_be_examined() {
+        // The kernel keeps 15 bytes of the executable's name as the command name, so this name
+        // ends in the first byte of a two-byte character.
+        let name = OsStr::from_bytes(b"aaaaaaaaaaaaaa\xc3\xa9");
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(name);
+        let sleep = Command::new("which").arg("sleep").output().unwrap().stdout;
+        let sleep = OsStr::from_bytes(sleep.trim_ascii());
+        fs::copy(sleep, &path).unwrap();
+        let mut child = Reaped(
+            Command::new(&path)
+                .arg("60")
+                .stdin(Stdio::null())
+                .spawn()
+                .unwrap(),
+        );
+        let pid = child.0.id();
+        // The command name is not valid UTF-8, so the stat line cannot be read as text.
+        let raw = fs::read(format!("/proc/{pid}/stat")).unwrap();
+        assert!(String::from_utf8(raw).is_err());
+        let start_time = platform::process_start_time(pid).unwrap().unwrap();
+        assert!(platform::open_process(pid, start_time).unwrap().is_some());
+        assert!(
+            platform::open_process(pid, start_time + 1)
+                .unwrap()
+                .is_none()
+        );
+        child.0.kill().unwrap();
     }
 
     /// Kills and reaps a child process when dropped, even when a test fails.
