@@ -48,6 +48,7 @@ use std::net::{
 };
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Mutex, PoisonError};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -172,6 +173,12 @@ const PORTS: (u16, u16) = (49152, 65535);
 /// ports per protocol, in blocks, and gives consecutive ports to consecutive binds of port 0, so
 /// the host draws each port independently.
 const PORT_ATTEMPTS: usize = 16;
+/// The ports that the host's sides of the scenarios hold, each from its draw until its scenario
+/// ends, and for good if the scenario fails, since one of its VMs might then still run. Scenarios
+/// run at the same time, and OpenVMM binds the ports of a listener of the guest and of a forward
+/// only once it runs, and again for the scenario's VM once the positive control's ended, so no
+/// other scenario may draw them in between.
+static HELD_PORTS: Mutex<BTreeSet<u16>> = Mutex::new(BTreeSet::new());
 /// The URL that the probes request through a proxy. Its host's name is reserved, so that no
 /// resolver knows it, and only a proxy answers the request.
 const PROXY_TARGET: &str = "http://runtime-adapter.invalid/probe";
@@ -456,6 +463,7 @@ impl Probe {
 /// The host's side of a scenario's network, which the test binds before the launch, so that the
 /// network can name its ports: the test proxy, as NVX's proxy-only scenario has it, the sockets
 /// of the probes' destinations, and the ports at which the host reaches a listener of the guest.
+/// It holds its ports in [`HELD_PORTS`] until it drops.
 struct Host {
     /// The test proxy's listener on host IPv4 loopback, which the guest reaches at the same port of
     /// its gateway.
@@ -475,13 +483,15 @@ impl Host {
     /// probes' sockets too: a UDP socket on host IPv4 loopback, a listener at the host's own
     /// address, if it has one, and a listener on host IPv6 loopback, if it has that; a listener at
     /// another port of host IPv4 loopback; and draws the ports of a listener of the guest and of a
-    /// forward.
+    /// forward. It draws no port that another host's side holds, and holds its own.
     fn bind() -> Self {
+        // The host's sides draw their ports one at a time, past those that the others hold.
+        let mut held = HELD_PORTS.lock().unwrap_or_else(PoisonError::into_inner);
         let address = host_address();
         let ipv6 = TcpListener::bind((Ipv6Addr::LOCALHOST, 0)).is_ok();
-        let other = draw(|port| TcpListener::bind((Ipv4Addr::LOCALHOST, port)));
+        let other = draw(&held, |port| TcpListener::bind((Ipv4Addr::LOCALHOST, port)));
         let other_port = other.local_addr().unwrap().port();
-        let (proxy, probes) = draw(|port| {
+        let (proxy, probes) = draw(&held, |port| {
             let proxy = TcpListener::bind((Ipv4Addr::LOCALHOST, port))?;
             let gateway = IpAddr::V4(GATEWAY);
             let mut probes = vec![Probe {
@@ -548,14 +558,29 @@ impl Host {
             }
             Ok(port)
         };
-        let listener = draw(|port| free(port, &[proxy_port, other_port]));
-        let forward = draw(|port| free(port, &[proxy_port, other_port, listener]));
-        Self {
+        let listener = draw(&held, |port| free(port, &[proxy_port, other_port]));
+        let forward = draw(&held, |port| {
+            free(port, &[proxy_port, other_port, listener])
+        });
+        let host = Self {
             proxy,
             probes,
             listener,
             forward,
-        }
+        };
+        held.extend(host.ports());
+        host
+    }
+
+    /// Returns the ports that the host's side holds: the test proxy's, which the probes share, the
+    /// other port of host loopback, and the ports of a listener of the guest and of a forward.
+    fn ports(&self) -> [u16; 4] {
+        [
+            self.proxy_port(),
+            self.port(Destination::GatewayPort),
+            self.listener,
+            self.forward,
+        ]
     }
 
     /// Returns the test proxy's port.
@@ -593,15 +618,33 @@ impl Host {
     }
 }
 
+impl Drop for Host {
+    /// Releases the host's ports once its scenario ended, which confirmed that its VMs ended. A
+    /// scenario that fails keeps them, since one of its VMs might still run, and bind them.
+    fn drop(&mut self) {
+        if thread::panicking() {
+            return;
+        }
+        let mut held = HELD_PORTS.lock().unwrap_or_else(PoisonError::into_inner);
+        for port in self.ports() {
+            held.remove(&port);
+        }
+    }
+}
+
 /// Returns what `bind` makes of a port that the host draws from [`PORTS`], independently each
-/// time, until it succeeds, at most [`PORT_ATTEMPTS`] times.
-fn draw<T>(mut bind: impl FnMut(u16) -> io::Result<T>) -> T {
+/// time, past the ports that `held` names, until it succeeds, at most [`PORT_ATTEMPTS`] times.
+fn draw<T>(held: &BTreeSet<u16>, mut bind: impl FnMut(u16) -> io::Result<T>) -> T {
     let (first, last) = PORTS;
     let random = RandomState::new();
     let mut refused = Vec::new();
     for attempt in 0..PORT_ATTEMPTS {
         let offset = random.hash_one(attempt) % u64::from(last - first + 1);
         let port = first + u16::try_from(offset).unwrap();
+        if held.contains(&port) {
+            refused.push(format!("{port}: another scenario holds it"));
+            continue;
+        }
         match bind(port) {
             Ok(bound) => return bound,
             Err(error) => refused.push(format!("{port}: {error}")),

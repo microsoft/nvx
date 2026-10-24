@@ -1662,7 +1662,10 @@ address. It also draws the port of a listener of the guest, which no socket
 holds for TCP or UDP, on every host address or on loopback alone, as OpenVMM
 needs to publish the listener on host loopback, and the port of a forward. It
 draws each port at random from the dynamic range, since Windows excludes ports
-per protocol, in blocks.
+per protocol, in blocks. Scenarios run at the same time, so each holds the
+ports that it drew until it ends, or for good if it fails, and draws none that
+another holds: OpenVMM binds the ports of a listener and of a forward only once
+it runs, and again for the scenario's VM after the positive control's.
 
 Each VM with a network first has its guest's network devices checked, of which
 OpenVMM attaches none for a network that lets nothing through, and otherwise
