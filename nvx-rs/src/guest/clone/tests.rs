@@ -663,6 +663,24 @@ fn a_held_suppression_that_a_failed_preparation_cannot_restore_is_a_release_erro
 }
 
 #[test]
+fn a_port_permission_that_the_thread_may_hold_outranks_a_failed_restore() {
+    let calls = Calls::default();
+    let mut system = FakeSystem::new(&calls);
+    system.preparation = Preparation::PortRelease(Errno::ENOMEM, true);
+    system.restoration_fails = true;
+    let error = prepare(fence(&calls), system).unwrap_err();
+    assert_eq!(error.stage(), CaptureStage::CaptureChecks);
+    assert!(
+        matches!(error.cause(), CaptureCause::Time(TimeError::PortRelease(_))),
+        "{error:?}"
+    );
+    // The barrier still tried to restore the detectors' settings.
+    let mut expected = preparation_calls();
+    expected.extend([Call::Open, Call::CancelCapture]);
+    assert_eq!(calls.take(), expected);
+}
+
+#[test]
 fn cancel_and_drop_open_the_fence_then_restore_the_detectors() {
     let calls = Calls::default();
     prepared(&calls, FakeSystem::new(&calls)).cancel().unwrap();

@@ -197,8 +197,8 @@ impl<F: AdmissionFence> CapturePreparation<F> {
     /// the fence again, and leaves the detectors' settings as they were: when it suppressed some
     /// already, it restores their settings, and a failure to restore them is a
     /// [`CaptureStage::Release`] error. One after which the calling thread may still hold some of
-    /// the permission for the time ABI's ports fails with [`TimeError::PortRelease`], after which
-    /// the thread must start neither a thread nor a process, which would inherit it.
+    /// the permission for the time ABI's ports fails with [`TimeError::PortRelease`] instead,
+    /// after which the thread must start neither a thread nor a process, which would inherit it.
     pub fn prepare(self) -> Result<CaptureBarrier<F>, CaptureError> {
         let system = LiveSystem {
             paths: Paths::default(),
@@ -223,10 +223,14 @@ impl<F: AdmissionFence> CapturePreparation<F> {
             .map_err(|cause| CaptureError::new(CaptureStage::Mounts, cause))?;
         if let Err(error) = barrier.system.pre_capture() {
             // The barrier restores a suppression that the time ABI holds after a failure, as
-            // after a preparation that succeeded, and reports a failure to restore it.
+            // after a preparation that succeeded, and reports a failure to restore it, unless the
+            // thread may still hold some of the permission for the ports, which takes precedence.
             if error.holds_suppression() {
                 barrier.suppressed = true;
-                barrier.release()?;
+                let released = barrier.release();
+                if !matches!(error, PreCaptureError::PortRelease { .. }) {
+                    released?;
+                }
             }
             return Err(match error {
                 PreCaptureError::BootChecks(error) => {
