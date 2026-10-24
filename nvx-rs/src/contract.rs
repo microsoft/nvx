@@ -25,8 +25,9 @@
 //! A release declares the microVM ABI version, the control session version, and the control
 //! contract revision of its artifacts in its `SOURCE-MANIFEST.json`.
 //!
-//! No runtime identity records the versions of the contracts through which OpenVMM restores a
-//! snapshot:
+//! The compatibility key of a template, `nvx::host::template::TemplateKey`, holds the boot and
+//! control versions, and the versions of the contracts through which a template's clones are
+//! restored, which no runtime identity records:
 //!
 //! - [`SNAPSHOT_FORMAT_VERSION`] is the version of OpenVMM's snapshot format: the manifest of a
 //!   capture, and the artifacts that it describes. It changes with the version of OpenVMM's
@@ -39,7 +40,10 @@
 //!   restored guest, and that the guest decodes. It changes with the packet's layout or meaning.
 //!
 //! Each of these four must match the pinned OpenVMM's, which the ignored test
-//! `tests/openvmm_vectors.rs` checks in the jobs that check out the OpenVMM submodule.
+//! `tests/openvmm_vectors.rs` checks in the jobs that check out the OpenVMM submodule. The key
+//! also holds the version of the activation contract,
+//! [`activation::VERSION`](crate::activation::VERSION), through which each clone receives the
+//! settings of its own launch.
 //!
 //! The build script includes this file to check bundled artifacts, so it must not depend on the
 //! rest of the crate.

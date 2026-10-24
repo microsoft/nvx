@@ -20,6 +20,8 @@ scripts/setup/tool-versions.conf text eol=lf
 # of its commit only if they are checked out unchanged: check nvx-rs out with LF line endings on
 # every platform, whatever core.autocrlf says.
 nvx-rs/** text=auto eol=lf
+# OpenVMM wrote these template manifests: they are bytes, never text.
+nvx-rs/tests/fixtures/template/**/manifest.bin binary
 
 .github/workflows/*.lock.yml linguist-generated=true
 # Recorded from the Python code that nvx-rs replaced, by scripts/nvx_rs_fixtures.py
