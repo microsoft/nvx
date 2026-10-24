@@ -1309,7 +1309,9 @@ and refuses, and template mode: a command line in which the kernel finds no
 platform tier boots cold, whatever else it holds, and one with it boots a
 template's VM if it holds the tier's tokens alone, between any of the kernel's
 whitespace, and is refused otherwise, for a parameter outside the allowlist at
-its start, in its middle, or at its end, for a double quote, and for `--`. In
+its start, in its middle, or at its end, or within a platform token's value,
+after a vertical tab or the byte 0xa0, which the kernel takes for whitespace
+and a split at ASCII whitespace does not, for a double quote, and for `--`. In
 the guest-only configuration, the unit tests of `worker::probes`
 cover what the probes read: the mount table with its escapes, the kernel's
 records of a process, `os-release`, and the guest's memory, and the probes and

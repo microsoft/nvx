@@ -384,6 +384,21 @@ mod tests {
             boot(b"nvx_snapshot_tier=platform \xff=\x01\n"),
             Err(CommandLineError::Token(b"\xff=\x01".to_vec()))
         );
+        // The kernel's whitespace includes the vertical tab and the byte 0xa0, with which the
+        // no-break space ends in UTF-8. A split at ASCII whitespace, as OpenVMM's checks of a
+        // platform snapshot's command line make, keeps either within a token, but to the kernel,
+        // what follows either in a platform token's value is a parameter of its own.
+        for separator in ["\u{0b}", "\u{a0}"] {
+            let command_line = format!(
+                "{} virtnet_dns=10.0.2.3{separator}quiet\n",
+                TEMPLATE.trim_end()
+            );
+            assert_eq!(
+                boot(command_line.as_bytes()),
+                Err(CommandLineError::Token(b"quiet".to_vec())),
+                "{command_line:?}"
+            );
+        }
         assert_eq!(
             CommandLineError::Token(b"\xff=\x01".to_vec()).to_string(),
             "the kernel command line names the platform snapshot tier, but holds `\\xff=\\x01`, \
@@ -429,6 +444,7 @@ mod tests {
             format!("{template} -- quiet\n"),
             format!("{template} -- nvx_sandbox=1\n"),
             format!("{template}\t--\t\n"),
+            format!("{template}\u{0b}--\u{0b}quiet\n"),
             format!("{PLATFORM_TIER} -- {template}\n"),
         ] {
             assert_eq!(
