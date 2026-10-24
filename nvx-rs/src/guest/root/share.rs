@@ -7,7 +7,7 @@ use std::fmt;
 use std::fs;
 use std::io;
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 use super::{
@@ -258,9 +258,11 @@ impl Root {
     /// The device is mounted with `access`, `nosuid`, and `nodev` at `hostfs/root` in the runtime
     /// directory, outside the root, where the workload cannot list the export's children: below
     /// `hostfs`, a directory that the root creates with mode 0700, whatever the umask, so that only
-    /// root may enter it, unless a directory is there already, which keeps its mode. Neither may be
-    /// a symbolic link. The tag is checked first, as a live share's is; nothing is created or
-    /// mounted for a refused one.
+    /// root may enter it. A `hostfs` that is there already, such as one that an earlier root left,
+    /// must be as private: owned by the process's effective user, root in a guest, with no
+    /// permission for its group or others. Another is refused, and keeps its owner and mode.
+    /// Neither `hostfs` nor `hostfs/root` may be a symbolic link. The tag is checked first, as a
+    /// live share's is; nothing is created or mounted for a refused one.
     ///
     /// The mount belongs to the root, which unmounts it when it is torn down, after the live
     /// shares and mappings, those mapped from the export included. The returned [`SourceRoot`]
@@ -567,8 +569,9 @@ fn open_mount_point(path: &Path) -> Result<FileDescriptor, Errno> {
 }
 
 /// Creates the directory `path` with [`HOSTFS_DIRECTORY_MODE`], whatever the umask, unless a
-/// directory, and not a symbolic link, is there already, which keeps its mode. It is created with
-/// no permission beyond that mode at any time.
+/// directory, and not a symbolic link, is there already, which must be private to the process's
+/// effective user, as [`check_private`] requires; another is refused, and stays unchanged. It is
+/// created with no permission beyond that mode at any time.
 fn create_private_directory(path: &Path) -> io::Result<()> {
     match fs::DirBuilder::new()
         .mode(HOSTFS_DIRECTORY_MODE)
@@ -577,14 +580,34 @@ fn create_private_directory(path: &Path) -> io::Result<()> {
         // The umask may have withheld some of the mode's permissions.
         Ok(()) => fs::set_permissions(path, fs::Permissions::from_mode(HOSTFS_DIRECTORY_MODE)),
         Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
-            if fs::symlink_metadata(path)?.is_dir() {
-                Ok(())
-            } else {
-                Err(Errno::ENOTDIR.into())
+            let metadata = fs::symlink_metadata(path)?;
+            if !metadata.is_dir() {
+                return Err(Errno::ENOTDIR.into());
             }
+            check_private(
+                metadata.uid(),
+                metadata.mode(),
+                nix::unistd::geteuid().as_raw(),
+            )
         }
         Err(error) => Err(error),
     }
+}
+
+/// Refuses a directory that the user `owner` owns with `mode` unless it is private to `user`:
+/// unless `user` owns it, and it grants its group and others no permission.
+fn check_private(owner: u32, mode: u32, user: u32) -> io::Result<()> {
+    if owner == user && mode & (Mode::S_IRWXG | Mode::S_IRWXO).bits() == 0 {
+        return Ok(());
+    }
+    Err(io::Error::new(
+        io::ErrorKind::PermissionDenied,
+        format!(
+            "the directory there already is not private to user {user}: user {owner} owns it \
+             with mode {:04o}",
+            mode & 0o7777
+        ),
+    ))
 }
 
 /// Returns `error` as the error of a teardown's failed unmount: the call's own for a failed
@@ -751,9 +774,14 @@ mod tests {
             let mode = |path: &Path| fs::metadata(path).unwrap().permissions().mode() & 0o7777;
             sys::with_thread_umask(umask, || create_private_directory(&hostfs)).unwrap();
             assert_eq!(mode(&hostfs), HOSTFS_DIRECTORY_MODE, "{umask:o}");
-            // A directory that is there already keeps its mode.
-            fs::set_permissions(&hostfs, fs::Permissions::from_mode(0o750)).unwrap();
+            // A private directory that is there already, such as this one, serves as it is.
             sys::with_thread_umask(umask, || create_private_directory(&hostfs)).unwrap();
+            assert_eq!(mode(&hostfs), HOSTFS_DIRECTORY_MODE, "{umask:o}");
+            // One that its group or others may enter is refused, and keeps its mode.
+            fs::set_permissions(&hostfs, fs::Permissions::from_mode(0o750)).unwrap();
+            let error =
+                sys::with_thread_umask(umask, || create_private_directory(&hostfs)).unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::PermissionDenied, "{umask:o}");
             assert_eq!(mode(&hostfs), 0o750, "{umask:o}");
         }
         // Anything else there is refused, a symbolic link to a directory included.
@@ -770,6 +798,32 @@ mod tests {
                 "{path:?}"
             );
         }
+    }
+
+    #[test]
+    fn a_directory_is_private_to_its_owner_when_its_group_and_others_have_no_permission() {
+        // The owner's permissions, the file type, and the set-ID and sticky bits grant no one
+        // else access.
+        for mode in [0o700, 0o500, 0o000, 0o40700, 0o2700, 0o1700] {
+            check_private(0, mode, 0).unwrap();
+            check_private(1000, mode, 1000).unwrap();
+        }
+        for mode in [0o710, 0o701, 0o750, 0o705, 0o755, 0o777, 0o40711] {
+            let error = check_private(0, mode, 0).unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::PermissionDenied, "{mode:o}");
+        }
+        assert_eq!(
+            check_private(0, 0o40750, 0).unwrap_err().to_string(),
+            "the directory there already is not private to user 0: user 0 owns it with mode 0750"
+        );
+        // Another user's directory is refused, however private.
+        let error = check_private(1000, 0o40700, 0).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        assert_eq!(
+            error.to_string(),
+            "the directory there already is not private to user 0: user 1000 owns it with mode \
+             0700"
+        );
     }
 
     #[test]
