@@ -2,6 +2,7 @@
 # pyright: reportPrivateUsage=false
 
 import io
+import json
 import os
 import re
 import sys
@@ -9,7 +10,7 @@ import tarfile
 import tempfile
 import unittest
 import zipfile
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from unittest.mock import call, patch
 
@@ -17,7 +18,73 @@ sys.path.insert(0, str(Path(__file__).parent))
 import publish_development_release  # noqa: E402
 from nvx_tools import development_release  # noqa: E402
 from nvx_tools.build_constants import BuildConstants  # noqa: E402
-from nvx_tools.common import ScriptError  # noqa: E402
+from nvx_tools.common import ScriptError, sha256_file  # noqa: E402
+
+
+class _FakeReleaseCli:
+    """Model publication's GitHub CLI calls and fail the first upload lookup."""
+
+    def __init__(self) -> None:
+        self.tag: str | None = None
+        self.target = ""
+        self.draft = False
+        self.prerelease = False
+        self.assets: list[dict[str, object]] = []
+        self.verbs: list[str] = []
+        self.upload_failed = False
+
+    def __call__(
+        self,
+        args: Sequence[str],
+        *,
+        timeout_seconds: float,
+    ) -> development_release._GitHubCommandResult:
+        del timeout_seconds
+        verb = args[1]
+        self.verbs.append(verb)
+        not_found = development_release._GitHubCommandResult(
+            1,
+            "",
+            "release not found\n",
+            0.1,
+        )
+        stdout = ""
+        if verb == "view":
+            if self.tag is None:
+                return not_found
+            stdout = json.dumps(
+                {
+                    "tagName": self.tag,
+                    "targetCommitish": self.target,
+                    "isDraft": self.draft,
+                    "isPrerelease": self.prerelease,
+                    "assets": self.assets,
+                }
+            )
+        elif verb == "create":
+            self.tag = args[2]
+            self.target = args[args.index("--target") + 1]
+            self.draft = "--draft" in args
+            self.prerelease = "--prerelease" in args
+        elif verb == "upload":
+            if not self.upload_failed:
+                self.upload_failed = True
+                return not_found
+            path = Path(args[3])
+            self.assets.append(
+                {
+                    "name": path.name,
+                    "size": path.stat().st_size,
+                    "digest": f"sha256:{sha256_file(path)}",
+                    "state": "uploaded",
+                }
+            )
+        elif verb == "edit":
+            self.draft = "--draft=false" not in args
+            self.prerelease = "--prerelease" in args
+        else:
+            raise AssertionError(f"unexpected gh release command: {verb}")
+        return development_release._GitHubCommandResult(0, stdout, "", 0.1)
 
 
 class DevelopmentReleaseTests(unittest.TestCase):
@@ -155,6 +222,276 @@ class DevelopmentReleaseTests(unittest.TestCase):
 
         self.assertEqual(run.call_count, 3)
         self.assertEqual(sleep.call_args_list, [call(10), call(20)])
+
+    def test_release_not_found_upload_failure_retries_while_draft_exists(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            local = self._package(Path(temporary), "nvx-linux.tar.gz", b"package")
+            empty = self._release("v1", "a" * 40, [])
+            complete = self._release(
+                "v1",
+                "a" * 40,
+                [self._remote_asset(local)],
+            )
+            stdout = io.StringIO()
+            with (
+                patch.object(
+                    development_release,
+                    "_query_development_release",
+                    side_effect=[empty, empty, complete],
+                ),
+                patch.object(
+                    development_release,
+                    "_run_gh",
+                    side_effect=[
+                        self._result(1, stderr="release not found\n"),
+                        self._result(),
+                    ],
+                ) as run,
+                patch.object(development_release.time, "sleep") as sleep,
+                patch("sys.stdout", stdout),
+            ):
+                development_release._upload_expected_asset(
+                    "example/nvx",
+                    "v1",
+                    local,
+                    attempts=3,
+                    timeout_seconds=180,
+                    retry_backoff_seconds=10,
+                )
+
+        self.assertEqual(
+            [tuple(item.args[0])[:2] for item in run.call_args_list],
+            [("release", "upload"), ("release", "upload")],
+        )
+        self.assertEqual(
+            [item.kwargs["timeout_seconds"] for item in run.call_args_list],
+            [180, 180],
+        )
+        sleep.assert_called_once_with(10)
+        self.assertIn("retrying in 10s: release not found", stdout.getvalue())
+
+    def test_release_not_found_upload_failure_exhausts_bounded_attempts(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            local = self._package(Path(temporary), "nvx-linux.tar.gz", b"package")
+            empty = self._release("v1", "a" * 40, [])
+            not_found = self._result(1, stderr="release not found\n")
+            with (
+                patch.object(
+                    development_release,
+                    "_query_development_release",
+                    side_effect=[empty, empty, empty, empty],
+                ),
+                patch.object(
+                    development_release,
+                    "_run_gh",
+                    side_effect=[not_found, not_found, not_found],
+                ) as run,
+                patch.object(development_release.time, "sleep") as sleep,
+                patch("sys.stdout", io.StringIO()),
+                self.assertRaisesRegex(
+                    development_release.ScriptError,
+                    "after 3 attempts: release not found",
+                ),
+            ):
+                development_release._upload_expected_asset(
+                    "example/nvx",
+                    "v1",
+                    local,
+                    attempts=3,
+                    timeout_seconds=180,
+                    retry_backoff_seconds=10,
+                )
+
+        self.assertEqual(run.call_count, 3)
+        self.assertEqual(sleep.call_args_list, [call(10), call(20)])
+
+    def test_release_not_found_upload_failure_stops_when_release_disappears(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            local = self._package(Path(temporary), "nvx-linux.tar.gz", b"package")
+            empty = self._release("v1", "a" * 40, [])
+            with (
+                patch.object(
+                    development_release,
+                    "_query_development_release",
+                    side_effect=[empty, None],
+                ),
+                patch.object(
+                    development_release,
+                    "_run_gh",
+                    return_value=self._result(1, stderr="release not found\n"),
+                ) as run,
+                patch.object(development_release.time, "sleep") as sleep,
+                patch("sys.stdout", io.StringIO()),
+                self.assertRaisesRegex(
+                    development_release.ScriptError,
+                    "development release v1 disappeared",
+                ),
+            ):
+                development_release._upload_expected_asset(
+                    "example/nvx",
+                    "v1",
+                    local,
+                    attempts=3,
+                    timeout_seconds=180,
+                    retry_backoff_seconds=10,
+                )
+
+        run.assert_called_once()
+        sleep.assert_not_called()
+
+    def test_release_not_found_upload_failure_stops_when_release_was_published(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            local = self._package(Path(temporary), "nvx-linux.tar.gz", b"package")
+            empty = self._release("v1", "a" * 40, [])
+            published = self._release("v1", "a" * 40, [], draft=False)
+            with (
+                patch.object(
+                    development_release,
+                    "_query_development_release",
+                    side_effect=[empty, published],
+                ),
+                patch.object(
+                    development_release,
+                    "_run_gh",
+                    return_value=self._result(1, stderr="release not found\n"),
+                ) as run,
+                patch.object(development_release.time, "sleep") as sleep,
+                patch("sys.stdout", io.StringIO()),
+                self.assertRaisesRegex(
+                    development_release.ScriptError,
+                    "release v1 was published before",
+                ),
+            ):
+                development_release._upload_expected_asset(
+                    "example/nvx",
+                    "v1",
+                    local,
+                    attempts=3,
+                    timeout_seconds=180,
+                    retry_backoff_seconds=10,
+                )
+
+        run.assert_called_once()
+        sleep.assert_not_called()
+
+    def test_permanent_upload_failure_is_not_retried(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            local = self._package(Path(temporary), "nvx-linux.tar.gz", b"package")
+            empty = self._release("v1", "a" * 40, [])
+            with (
+                patch.object(
+                    development_release,
+                    "_query_development_release",
+                    side_effect=[empty, empty],
+                ),
+                patch.object(
+                    development_release,
+                    "_run_gh",
+                    return_value=self._result(
+                        1,
+                        stderr="HTTP 403: Resource not accessible by integration",
+                    ),
+                ) as run,
+                patch.object(development_release.time, "sleep") as sleep,
+                patch("sys.stdout", io.StringIO()),
+                self.assertRaisesRegex(
+                    development_release.ScriptError,
+                    "uploading release asset nvx-linux.tar.gz exited 1",
+                ),
+            ):
+                development_release._upload_expected_asset(
+                    "example/nvx",
+                    "v1",
+                    local,
+                    attempts=3,
+                    timeout_seconds=180,
+                    retry_backoff_seconds=10,
+                )
+
+        run.assert_called_once()
+        sleep.assert_not_called()
+
+    def test_release_lookup_failure_matches_only_bare_not_found(self):
+        for output in ("release not found", "release not found\n", "Release not found"):
+            with self.subTest(output=output):
+                self.assertTrue(
+                    development_release._is_release_lookup_failure(
+                        self._result(1, stderr=output)
+                    )
+                )
+
+        non_matches = (
+            self._result(124, stderr="release not found", timed_out=True),
+            self._result(1, stderr="HTTP 404: Not Found"),
+            self._result(
+                1,
+                stderr="HTTP 403: Resource not accessible by integration",
+            ),
+            self._result(1, stderr="release not found: v1"),
+            self._result(1),
+        )
+        for result in non_matches:
+            with self.subTest(result=result):
+                self.assertFalse(development_release._is_release_lookup_failure(result))
+
+    def test_publication_recovers_from_release_not_found_upload(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            packages = publish_development_release.release_packages(
+                Path(temporary),
+                "1.2.3",
+            )
+            for platform, package in packages.items():
+                package.write_bytes(platform.encode("ascii"))
+            fake = _FakeReleaseCli()
+            stdout = io.StringIO()
+            with (
+                patch.object(development_release, "_run_gh", fake),
+                patch.object(development_release.time, "sleep") as sleep,
+                patch("sys.stdout", stdout),
+            ):
+                development_release.publish_development_release(
+                    "example/nvx",
+                    "a" * 40,
+                    "1.2.3",
+                    tuple(packages.values()),
+                )
+
+        self.assertEqual(
+            fake.verbs,
+            [
+                "view",
+                "create",
+                "view",
+                "view",
+                "upload",
+                "view",
+                "upload",
+                "view",
+                "view",
+                "upload",
+                "view",
+                "view",
+                "upload",
+                "view",
+                "view",
+                "edit",
+                "view",
+            ],
+        )
+        self.assertFalse(fake.draft)
+        self.assertTrue(fake.prerelease)
+        self.assertEqual(
+            {asset["name"] for asset in fake.assets},
+            {package.name for package in packages.values()},
+        )
+        self.assertEqual(len(fake.assets), 3)
+        sleep.assert_called_once_with(10)
+        output = stdout.getvalue()
+        self.assertIn("retrying in 10s: release not found", output)
+        self.assertIn(
+            "published development prerelease v1.2.3-dev.aaaaaaaaaaaa",
+            output,
+        )
 
     def test_partial_draft_resumes_without_reuploading_valid_asset(self):
         with tempfile.TemporaryDirectory() as temporary:
