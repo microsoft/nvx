@@ -44,7 +44,9 @@
 //! use std::io;
 //!
 //! use nvx::guest::clone::{AdmissionFence, CapturePreparation, Captured, Devices};
+//! use nvx::guest::reseed::{self, Seed};
 //! use nvx::guest::root::Device;
+//! use nvx::guest::time::{RestoreFinish, TimeAbi};
 //! use nvx::protocol::root::{DISTRO_MMIO_BASE, SCRATCH_MMIO_BASE};
 //!
 //! /// The agent's admission of executions, which it checks before it starts one.
@@ -74,10 +76,15 @@
 //! match barrier.capture()? {
 //!     Captured::Continued => println!("the VM continued without a restore"),
 //!     Captured::Restored(restored) => {
-//!         // A clone continues here: it repairs the restore, and opens the fence once repair
-//!         // acknowledged it.
+//!         // A clone continues here, with its wall clock repaired. It finishes the restore, and
+//!         // acknowledges it if the restore needs that, before its fence opens.
+//!         reseed::reseed(&Seed::read(restored.entropy_path())?)?;
 //!         let (restore, fence) = restored.into_parts();
-//!         println!("restored to {}", restore.generation_id());
+//!         let mut finish = RestoreFinish::new();
+//!         if restore.acknowledgement_required() {
+//!             finish = finish.acknowledge();
+//!         }
+//!         TimeAbi::new().restore_finish(finish)?;
 //!         fence.open();
 //!     }
 //! }
