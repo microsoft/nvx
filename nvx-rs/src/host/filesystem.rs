@@ -1970,7 +1970,7 @@ fn depth(path: &str) -> usize {
 /// name, among other things. A path that resolves to itself again names the same object; one that
 /// only the verbatim prefix keeps, such as that of a directory whose name ends in a period, would
 /// name another object, or none, so it is refused.
-fn canonicalize(path: &Path) -> std::io::Result<PathBuf> {
+pub(crate) fn canonicalize(path: &Path) -> std::io::Result<PathBuf> {
     let canonical = fs::canonicalize(path)?;
     let Some(stripped) = strip_verbatim(&canonical) else {
         return Err(std::io::Error::new(

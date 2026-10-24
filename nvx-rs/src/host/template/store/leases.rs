@@ -22,6 +22,7 @@ use super::{
 };
 use crate::activation::{Identity, StoreGeneration, TemplateReference};
 use crate::error::{Error, ErrorCode, ErrorKind, Result};
+use crate::host::filesystem;
 use crate::host::platform::{self, parse_hex_id};
 use crate::host::store::files::{remove_if_present, sync_dir};
 use crate::host::store::{CLONE_BINDING_NAME, CallerFiles, LockedStore, SandboxStore};
@@ -121,8 +122,9 @@ impl FromStr for LeaseId {
 ///
 /// The store keeps the record of each lease that it granted, and the sandbox keeps the same
 /// record as its clone binding, [`CLONE_BINDING_NAME`], beside its launch journal. A lease names
-/// its sandbox by the absolute path of its directory, so a sandbox that holds a lease must not
-/// move.
+/// its sandbox by the path of its directory with its links resolved, so that no removal or change
+/// of a link, or of a directory that a `..` component passes through, hides the sandbox from a
+/// [retirement](Store::retire), and a sandbox that holds a lease must not move.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Lease {
     /// The lease's identity.
@@ -133,8 +135,8 @@ pub struct Lease {
     generation: StoreGeneration,
     /// The identity of the leased generation's key.
     key: KeyIdentity,
-    /// The directory of the sandbox that holds the lease, as an absolute path, which is valid
-    /// Unicode.
+    /// The directory of the sandbox that holds the lease, as an absolute path with its links
+    /// resolved, which is valid Unicode.
     sandbox: PathBuf,
 }
 
@@ -169,7 +171,8 @@ impl Lease {
         self.key
     }
 
-    /// Returns the directory of the sandbox that holds the lease, as an absolute path.
+    /// Returns the directory of the sandbox that holds the lease, as an absolute path with its
+    /// links resolved, which may differ from the path through which the sandbox was leased.
     pub fn sandbox(&self) -> &Path {
         &self.sandbox
     }
@@ -189,8 +192,8 @@ impl Lease {
 pub struct Acquired {
     /// The lease.
     pub lease: Lease,
-    /// The lock of the sandbox, under which the caller launches its clone. Dropping it releases
-    /// the lock, and keeps the lease.
+    /// The lock of the sandbox, which names it by the lease's path, under which the caller launches
+    /// its clone. Dropping it releases the lock, and keeps the lease.
     pub locked: LockedStore,
 }
 
@@ -241,8 +244,11 @@ impl Store {
     /// and no launch, and holds no lease; and it writes the lease's record in the store, and then
     /// the same record as the sandbox's clone binding, beside its launch journal, each durable
     /// before the next step, so that no binding outlasts, through a crash of the host, the record
-    /// that keeps its generation in the store. It returns the lease, with the sandbox's lock,
-    /// under which the caller launches the clone, and releases the store's lock.
+    /// that keeps its generation in the store. It resolves the links of the sandbox's path before
+    /// it takes the sandbox's lock, and the lease, the binding, and the lock that it returns all
+    /// name the sandbox by that path, as [`Lease::sandbox`] returns it, which no later change of a
+    /// link redirects to another directory. It returns the lease, with the sandbox's lock, under
+    /// which the caller launches the clone, and releases the store's lock.
     ///
     /// Fails, and leases nothing:
     ///
@@ -254,8 +260,9 @@ impl Store {
     /// - with [`ErrorCode::SandboxRunning`] if the sandbox records a VM, or a launch, which may
     ///   still run;
     /// - with [`ErrorCode::SandboxLeased`] if the sandbox holds a lease already;
-    /// - with [`ErrorKind::Unsupported`] if the sandbox's path is not valid Unicode, which its
-    ///   record cannot hold;
+    /// - with [`ErrorKind::Unsupported`] if the sandbox's path, with its links resolved, is not
+    ///   valid Unicode, which its record cannot hold, or, on Windows, is a network path, or one
+    ///   that names the directory only in its verbatim form;
     /// - with [`ErrorKind::TimedOut`] if the deadline passes before it takes the store's lock, and
     ///   as [`SandboxStore::lock_existing`] fails before it takes the sandbox's.
     ///
@@ -315,7 +322,26 @@ impl Store {
                 format!("no sandbox is provisioned in {}", sandbox.display()),
             )
         };
-        let locked = match SandboxStore::lock_existing(&sandbox, files, deadline) {
+        // The lease, the binding, and the lock name the sandbox by its path with its links
+        // resolved, which no later change of a link redirects to another directory.
+        let resolved = match filesystem::canonicalize(&sandbox) {
+            Ok(resolved) => resolved,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                return Err(not_provisioned().with_source(error));
+            }
+            Err(error) => {
+                let message = format!(
+                    "cannot resolve the path of the sandbox in {}",
+                    sandbox.display()
+                );
+                return Err(if error.kind() == io::ErrorKind::Unsupported {
+                    Error::unsupported(message).with_source(error)
+                } else {
+                    store_error(message)(error)
+                });
+            }
+        };
+        let locked = match SandboxStore::lock_existing(&resolved, files, deadline) {
             Ok(locked) => locked,
             Err(error) if error.kind() == ErrorKind::NotFound => {
                 return Err(not_provisioned().with_source(error));

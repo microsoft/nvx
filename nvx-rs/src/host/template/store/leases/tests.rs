@@ -48,13 +48,14 @@ fn files() -> CallerFiles {
     CallerFiles::new(CONFIG).unwrap()
 }
 
-/// Provisions the sandbox `name` in `parent`, and returns its directory.
+/// Provisions the sandbox `name` in `parent`, and returns its directory, with its links resolved,
+/// as a lease names it.
 fn provision(parent: &Path, name: &str) -> PathBuf {
     let dir = parent.join(name);
     let locked = SandboxStore::lock_for_provision(&dir, &files(), None).unwrap();
     fs::write(dir.join(CONFIG), b"{}").unwrap();
     drop(locked);
-    dir
+    filesystem::canonicalize(&dir).unwrap()
 }
 
 /// Returns the time of the host that captured `generation`, during the boot of the capture,
@@ -718,23 +719,26 @@ fn a_retirement_makes_each_step_durable_before_the_next() {
 #[test]
 fn a_retirement_makes_the_absence_of_a_binding_durable_before_it_removes_its_record() {
     let (directory, store) = new_store();
+    let root = filesystem::canonicalize(directory.path()).unwrap();
     let first = publish(&store, &ManifestSpec::template(), storage(1));
     let second = publish(&store, &ManifestSpec::template(), storage(2));
     let third = publish(&store, &ManifestSpec::template(), storage(3));
     let fourth = publish(&store, &ManifestSpec::template(), storage(4));
-    let released = provision(directory.path(), "released");
-    let removed = provision(directory.path(), "removed");
-    let reprovisioned = provision(directory.path(), "reprovisioned");
-    // A sandbox whose parent the path names through a link.
-    let sandboxes = directory.path().join("sandboxes");
+    let released = provision(&root, "released");
+    let removed = provision(&root, "removed");
+    let reprovisioned = provision(&root, "reprovisioned");
+    let sandboxes = root.join("sandboxes");
     fs::create_dir(&sandboxes).unwrap();
-    let linked = directory.path().join("linked");
-    link_dir(&sandboxes, &linked);
-    let removed_through_link = provision(&linked, "removed");
+    let removed_through_link = provision(&sandboxes, "removed");
     let released_lease = leased(&store, &first, &released);
     let removed_lease = leased(&store, &second, &removed);
     let linked_lease = leased(&store, &third, &removed_through_link);
     let reprovisioned_lease = leased(&store, &fourth, &reprovisioned);
+    // The directory that holds a sandbox moves, and a link at its path names it, so the path that
+    // names the sandbox's lease runs through the link.
+    let moved = root.join("moved");
+    fs::rename(&sandboxes, &moved).unwrap();
+    link_dir(&moved, &sandboxes);
     // A release that removed its binding, but did not make that durable, and removals of
     // sandboxes, one of which is provisioned again at its path.
     fs::remove_file(released.join(CLONE_BINDING_NAME)).unwrap();
@@ -742,7 +746,7 @@ fn a_retirement_makes_the_absence_of_a_binding_durable_before_it_removes_its_rec
         let locked = SandboxStore::lock_existing(sandbox, &files(), None).unwrap();
         assert!(locked.remove().unwrap().is_none());
     }
-    assert_eq!(provision(directory.path(), "reprovisioned"), reprovisioned);
+    assert_eq!(provision(&root, "reprovisioned"), reprovisioned);
     let record = |lease: &Lease| {
         store
             .dir()
@@ -772,14 +776,14 @@ fn a_retirement_makes_the_absence_of_a_binding_durable_before_it_removes_its_rec
         (
             &first,
             &released_lease,
-            vec![released.as_path(), directory.path()],
+            vec![released.as_path(), root.as_path()],
         ),
-        (&second, &removed_lease, vec![directory.path()]),
-        (&third, &linked_lease, vec![linked.as_path()]),
+        (&second, &removed_lease, vec![root.as_path()]),
+        (&third, &linked_lease, vec![sandboxes.as_path()]),
         (
             &fourth,
             &reprovisioned_lease,
-            vec![reprovisioned.as_path(), directory.path()],
+            vec![reprovisioned.as_path(), root.as_path()],
         ),
     ] {
         let path = record(lease);
@@ -806,11 +810,16 @@ fn a_retirement_makes_the_absence_of_a_binding_durable_before_it_removes_its_rec
     }
     // A link to nothing hides the directory that held a sandbox, so the record stays.
     let fifth = publish(&store, &ManifestSpec::template(), storage(5));
-    let dangling = provision(&linked, "dangling");
+    let parked = root.join("parked");
+    fs::create_dir(&parked).unwrap();
+    let dangling = provision(&parked, "dangling");
     let dangling_lease = leased(&store, &fifth, &dangling);
     let locked = SandboxStore::lock_existing(&dangling, &files(), None).unwrap();
     assert!(locked.remove().unwrap().is_none());
-    fs::remove_dir(&sandboxes).unwrap();
+    let away = root.join("away");
+    fs::rename(&parked, &away).unwrap();
+    link_dir(&away, &parked);
+    fs::remove_dir(&away).unwrap();
     let error = store.retire(fifth.generation(), None).unwrap_err();
     assert_eq!(error.kind(), ErrorKind::Io, "{error}");
     assert!(
@@ -819,6 +828,102 @@ fn a_retirement_makes_the_absence_of_a_binding_durable_before_it_removes_its_rec
     );
     assert!(record(&dangling_lease).exists());
     assert!(store.snapshot_dir(&fifth).is_ok());
+}
+
+#[test]
+fn a_lease_names_its_sandbox_by_its_path_with_its_links_resolved() {
+    let (directory, store) = new_store();
+    let root = filesystem::canonicalize(directory.path()).unwrap();
+    let first = publish(&store, &ManifestSpec::template(), storage(1));
+    let second = publish(&store, &ManifestSpec::template(), storage(2));
+    let sandboxes = root.join("sandboxes");
+    fs::create_dir(&sandboxes).unwrap();
+    let parent = provision(&sandboxes, "parent");
+    let linked = provision(&sandboxes, "linked");
+    // Paths through a directory that a `..` component passes through, and through a link, both of
+    // which go while the clones run.
+    let helper = root.join("helper");
+    fs::create_dir(&helper).unwrap();
+    let link = root.join("link");
+    link_dir(&sandboxes, &link);
+    let mut leases = Vec::new();
+    for (generation, sandbox, path) in [
+        (
+            &first,
+            &parent,
+            helper.join("..").join("sandboxes").join("parent"),
+        ),
+        (&second, &linked, link.join("linked")),
+    ] {
+        let acquired = store
+            .acquire(
+                generation.generation(),
+                &path,
+                &files(),
+                &after(generation, 1),
+                None,
+            )
+            .unwrap();
+        assert_eq!(acquired.lease.sandbox(), sandbox);
+        assert_eq!(acquired.locked.dir(), sandbox);
+        drop(acquired.locked);
+        assert_eq!(binding(sandbox), Some(acquired.lease.clone()));
+        leases.push(acquired.lease);
+    }
+    fs::remove_dir(&helper).unwrap();
+    unlink_dir(&link);
+    // A retirement still finds both bindings, and keeps the generations.
+    for (generation, lease) in [&first, &second].into_iter().zip(leases) {
+        assert_eq!(
+            store.retire(generation.generation(), None).unwrap(),
+            Retirement::Draining(vec![lease])
+        );
+    }
+}
+
+#[test]
+fn an_acquisition_binds_the_sandbox_that_it_resolved_whatever_its_path_names_meanwhile() {
+    let (directory, store) = new_store();
+    let root = filesystem::canonicalize(directory.path()).unwrap();
+    let published = publish(&store, &ManifestSpec::template(), storage(1));
+    let (first, second) = (root.join("first"), root.join("second"));
+    fs::create_dir(&first).unwrap();
+    fs::create_dir(&second).unwrap();
+    let leased_sandbox = provision(&first, "sandbox");
+    let other = provision(&second, "sandbox");
+    let link = root.join("link");
+    link_dir(&first, &link);
+    // The link names the other sandbox's directory once the acquisition has resolved its path, as
+    // it makes the lease's record durable.
+    let retargeted = Cell::new(false);
+    let retarget = |dir: &Path| -> Result<()> {
+        if dir == store.dir().join(LEASES_NAME) && !retargeted.replace(true) {
+            unlink_dir(&link);
+            link_dir(&second, &link);
+        }
+        Ok(())
+    };
+    let acquired = store
+        .acquire_with(
+            published.generation(),
+            link.join("sandbox"),
+            &files(),
+            &after(&published, 1),
+            None,
+            &retarget,
+        )
+        .unwrap();
+    assert!(retargeted.get());
+    // The binding, and the lock, are those of the sandbox that the lease names.
+    assert_eq!(acquired.lease.sandbox(), leased_sandbox);
+    assert_eq!(acquired.locked.dir(), leased_sandbox);
+    drop(acquired.locked);
+    assert_eq!(binding(&leased_sandbox), Some(acquired.lease.clone()));
+    assert_eq!(binding(&other), None);
+    assert_eq!(
+        store.retire(published.generation(), None).unwrap(),
+        Retirement::Draining(vec![acquired.lease])
+    );
 }
 
 #[test]
