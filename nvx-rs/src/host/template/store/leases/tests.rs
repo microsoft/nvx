@@ -14,7 +14,7 @@ use crate::host::store::files::write_private;
 use crate::host::store::{FORMAT, RUNTIME_NAME, Recovery, RuntimeIdentity};
 use crate::host::template::eligibility::MAX_DOWNTIME_NS;
 use crate::host::template::store::tests::{
-    link_dir, publish, publish_with, remove, storage, store as new_store, unlink_dir,
+    link_dir, link_file, publish, publish_with, remove, storage, store as new_store, unlink_dir,
 };
 use crate::host::template::test_support::{ManifestSpec, artifact, network_class};
 use crate::protocol::CAPABILITY_LEN;
@@ -571,8 +571,10 @@ fn acquisitions_make_their_records_durable_before_their_bindings_and_both_before
         *synced.borrow(),
         [
             // The first makes the entry of the directory of the leases durable, which no
-            // acquisition of this process did before, ahead of any record in it.
+            // acquisition of this process did before, ahead of any record in it, and then the
+            // store's own entry.
             (store.dir().to_owned(), 0, 0),
+            (store.dir().parent().unwrap().to_owned(), 0, 0),
             // Each makes its record durable before its binding, and its binding before it
             // returns.
             (leases_dir.clone(), 1, 0),
@@ -698,8 +700,10 @@ fn a_retirement_makes_each_step_durable_before_the_next() {
     assert_eq!(
         *synced.borrow(),
         [
-            // The new directory of the tombstones, before the tombstone in it.
+            // The new directory of the tombstones, and the store's own entry, before the
+            // tombstone in it.
             (store.dir().to_owned(), false, true, true),
+            (store.dir().parent().unwrap().to_owned(), false, true, true),
             // The tombstone, before anything goes.
             (tombstones.clone(), true, true, true),
             // The payload's removal, before the index changes.
@@ -717,8 +721,10 @@ fn a_retirement_makes_the_absence_of_a_binding_durable_before_it_removes_its_rec
     let first = publish(&store, &ManifestSpec::template(), storage(1));
     let second = publish(&store, &ManifestSpec::template(), storage(2));
     let third = publish(&store, &ManifestSpec::template(), storage(3));
+    let fourth = publish(&store, &ManifestSpec::template(), storage(4));
     let released = provision(directory.path(), "released");
     let removed = provision(directory.path(), "removed");
+    let reprovisioned = provision(directory.path(), "reprovisioned");
     // A sandbox whose parent the path names through a link.
     let sandboxes = directory.path().join("sandboxes");
     fs::create_dir(&sandboxes).unwrap();
@@ -728,13 +734,15 @@ fn a_retirement_makes_the_absence_of_a_binding_durable_before_it_removes_its_rec
     let released_lease = leased(&store, &first, &released);
     let removed_lease = leased(&store, &second, &removed);
     let linked_lease = leased(&store, &third, &removed_through_link);
+    let reprovisioned_lease = leased(&store, &fourth, &reprovisioned);
     // A release that removed its binding, but did not make that durable, and removals of
-    // sandboxes.
+    // sandboxes, one of which is provisioned again at its path.
     fs::remove_file(released.join(CLONE_BINDING_NAME)).unwrap();
-    for sandbox in [&removed, &removed_through_link] {
+    for sandbox in [&removed, &removed_through_link, &reprovisioned] {
         let locked = SandboxStore::lock_existing(sandbox, &files(), None).unwrap();
         assert!(locked.remove().unwrap().is_none());
     }
+    assert_eq!(provision(directory.path(), "reprovisioned"), reprovisioned);
     let record = |lease: &Lease| {
         store
             .dir()
@@ -756,12 +764,23 @@ fn a_retirement_makes_the_absence_of_a_binding_durable_before_it_removes_its_rec
     assert_eq!(error.message(), "the disk failed");
     assert!(record(&released_lease).exists());
     assert!(store.snapshot_dir(&first).is_ok());
-    // A record goes once the binding's absence is durable, in the sandbox's directory, or in the
-    // nearest of its ancestors that remains, through the links that its path names.
-    for (generation, lease, dir) in [
-        (&first, &released_lease, released.as_path()),
-        (&second, &removed_lease, directory.path()),
-        (&third, &linked_lease, linked.as_path()),
+    // A record goes once the binding's absence is durable: in the sandbox's directory, if it is
+    // one, and in the directory that holds its entry, the nearest of its ancestors that remains,
+    // through the links that its path names. The directory of a sandbox that was provisioned
+    // again never held the binding, which went with the directory that its entry named before.
+    for (generation, lease, dirs) in [
+        (
+            &first,
+            &released_lease,
+            vec![released.as_path(), directory.path()],
+        ),
+        (&second, &removed_lease, vec![directory.path()]),
+        (&third, &linked_lease, vec![linked.as_path()]),
+        (
+            &fourth,
+            &reprovisioned_lease,
+            vec![reprovisioned.as_path(), directory.path()],
+        ),
     ] {
         let path = record(lease);
         let synced = RefCell::new(Vec::new());
@@ -777,31 +796,29 @@ fn a_retirement_makes_the_absence_of_a_binding_durable_before_it_removes_its_rec
                 .unwrap(),
             Retirement::Retired
         );
-        assert_eq!(
-            *synced.borrow(),
-            [
-                (store.dir().join(TOMBSTONES_NAME), true),
-                (dir.to_owned(), true),
-                (store.dir().join(GENERATIONS_NAME), false),
-                (store.dir().to_owned(), false),
-            ]
-        );
+        let mut expected = vec![(store.dir().join(TOMBSTONES_NAME), true)];
+        expected.extend(dirs.into_iter().map(|dir| (dir.to_owned(), true)));
+        expected.extend([
+            (store.dir().join(GENERATIONS_NAME), false),
+            (store.dir().to_owned(), false),
+        ]);
+        assert_eq!(*synced.borrow(), expected);
     }
     // A link to nothing hides the directory that held a sandbox, so the record stays.
-    let fourth = publish(&store, &ManifestSpec::template(), storage(4));
+    let fifth = publish(&store, &ManifestSpec::template(), storage(5));
     let dangling = provision(&linked, "dangling");
-    let dangling_lease = leased(&store, &fourth, &dangling);
+    let dangling_lease = leased(&store, &fifth, &dangling);
     let locked = SandboxStore::lock_existing(&dangling, &files(), None).unwrap();
     assert!(locked.remove().unwrap().is_none());
     fs::remove_dir(&sandboxes).unwrap();
-    let error = store.retire(fourth.generation(), None).unwrap_err();
+    let error = store.retire(fifth.generation(), None).unwrap_err();
     assert_eq!(error.kind(), ErrorKind::Io, "{error}");
     assert!(
         error.message().contains("cannot find the directory"),
         "{error}"
     );
     assert!(record(&dangling_lease).exists());
-    assert!(store.snapshot_dir(&fourth).is_ok());
+    assert!(store.snapshot_dir(&fifth).is_ok());
 }
 
 #[test]
@@ -830,6 +847,54 @@ fn a_retirement_that_finds_its_generation_unindexed_makes_the_index_durable_firs
         Retirement::Retired
     );
     assert_eq!(*synced.borrow(), [(store.dir().to_owned(), true)]);
+    assert!(!tombstone.exists());
+}
+
+#[test]
+fn a_retirement_keeps_a_tombstone_that_is_not_the_stores() {
+    let (directory, store) = new_store();
+    let published = publish(&store, &ManifestSpec::template(), storage(1));
+    let generation = published.generation();
+    // A retirement that a crash interrupted once it had written the index leaves the tombstone,
+    // which retiring the generation again removes only once it has checked it.
+    store.tombstone(generation, None).unwrap();
+    fs::remove_dir_all(store.payload_dir(generation)).unwrap();
+    remove(&store, generation);
+    let tombstone = store
+        .dir()
+        .join(TOMBSTONES_NAME)
+        .join(format!("{generation}.json"));
+    let valid = json_of(&tombstone);
+    let foreign: [(Change, ErrorCode); 2] = [
+        (
+            |value| value["store"] = json!("0".repeat(32)),
+            ErrorCode::Io,
+        ),
+        (
+            |value| value["format"] = json!(2),
+            ErrorCode::FormatUnsupported,
+        ),
+    ];
+    for (change, code) in foreign {
+        let mut value = valid.clone();
+        change(&mut value);
+        fs::write(&tombstone, value.to_string()).unwrap();
+        let error = store.retire(generation, None).unwrap_err();
+        assert_eq!(error.code(), code, "{error}");
+        assert_eq!(json_of(&tombstone), value);
+    }
+    // Nor does it remove a link in place of the tombstone.
+    fs::write(&tombstone, valid.to_string()).unwrap();
+    let moved = directory.path().join("tombstone.json");
+    fs::rename(&tombstone, &moved).unwrap();
+    if link_file(&moved, &tombstone) {
+        let error = store.retire(generation, None).unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::Io, "{error}");
+        assert!(fs::symlink_metadata(&tombstone).unwrap().is_symlink());
+        fs::remove_file(&tombstone).unwrap();
+    }
+    fs::rename(&moved, &tombstone).unwrap();
+    assert_eq!(store.retire(generation, None).unwrap(), Retirement::Retired);
     assert!(!tombstone.exists());
 }
 
@@ -979,23 +1044,37 @@ fn malformed_records_and_foreign_entries_fail_clearly() {
     }
     assert!(store.tombstones().unwrap().is_empty());
     fs::remove_file(&notes).unwrap();
-    // A tombstone of another store, and entries that are not tombstones.
+    // A tombstone of another store, or of another format, which neither an acquisition nor a
+    // listing or a selection takes for a quarantine, and entries that are not tombstones.
     store.tombstone(generation, None).unwrap();
     let tombstones = store.dir().join(TOMBSTONES_NAME);
-    let tombstone = json!({
-        "format": 1,
-        "store": "0".repeat(32),
-        "generation": generation.get().get(),
-    });
-    fs::write(
-        tombstones.join(format!("{generation}.json")),
-        tombstone.to_string(),
-    )
-    .unwrap();
+    let tombstone = tombstones.join(format!("{generation}.json"));
+    let valid_tombstone = json_of(&tombstone);
     let other = provision(directory.path(), "other");
-    let error = refusal(&store, generation, &other, &after(&published, 1));
-    assert_eq!(error.code(), ErrorCode::Io, "{error}");
-    assert!(error.message().contains("is malformed"), "{error}");
+    let foreign_tombstones: [(Change, ErrorCode); 2] = [
+        (
+            |value| value["store"] = json!("0".repeat(32)),
+            ErrorCode::Io,
+        ),
+        (
+            |value| value["format"] = json!(2),
+            ErrorCode::FormatUnsupported,
+        ),
+    ];
+    for (change, code) in foreign_tombstones {
+        let mut value = valid_tombstone.clone();
+        change(&mut value);
+        fs::write(&tombstone, value.to_string()).unwrap();
+        for error in [
+            refusal(&store, generation, &other, &after(&published, 1)),
+            store.tombstones().unwrap_err(),
+            store
+                .select(published.key(), &after(&published, 1))
+                .unwrap_err(),
+        ] {
+            assert_eq!(error.code(), code, "{error}");
+        }
+    }
     fs::write(tombstones.join("+1.json"), b"").unwrap();
     for error in [
         store.tombstones().unwrap_err(),
@@ -1335,4 +1414,100 @@ fn a_retirement_that_races_acquisitions_and_releases_in_other_processes_waits_fo
     assert_eq!(store.index().unwrap().get(generation), None);
     assert!(store.leases(generation).unwrap().is_empty());
     assert!(store.tombstones().unwrap().is_empty());
+}
+
+/// Tests of the records that a Windows file system without POSIX deletion keeps under their names
+/// while other handles hold them, after a transaction in another process removed them.
+#[cfg(windows)]
+#[allow(unsafe_code)]
+mod windows {
+    use std::os::windows::fs::OpenOptionsExt;
+    use std::os::windows::io::AsRawHandle;
+
+    use windows_sys::Win32::Foundation::HANDLE;
+    use windows_sys::Win32::Storage::FileSystem::{
+        DELETE, FILE_DISPOSITION_INFO, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+        FileDispositionInfo, SetFileInformationByHandle,
+    };
+
+    use super::*;
+
+    /// Deletes the file `path` as a file system without POSIX deletion deletes a file that other
+    /// handles hold: its name stays, and opening it fails, until the last handle closes, of which
+    /// the returned one is the last unless others hold the file.
+    fn delete_pending(path: &Path) -> fs::File {
+        let file = fs::OpenOptions::new()
+            .access_mode(DELETE)
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+            .open(path)
+            .unwrap();
+        let disposition = FILE_DISPOSITION_INFO { DeleteFile: true };
+        // SAFETY: the handle is open, and the information is a FILE_DISPOSITION_INFO of its size.
+        let set = unsafe {
+            SetFileInformationByHandle(
+                file.as_raw_handle() as HANDLE,
+                FileDispositionInfo,
+                (&raw const disposition).cast(),
+                size_of::<FILE_DISPOSITION_INFO>() as u32,
+            )
+        };
+        assert_ne!(set, 0, "{}", io::Error::last_os_error());
+        file
+    }
+
+    #[test]
+    fn records_that_another_transaction_removes_are_gone_for_their_readers() {
+        let (directory, store) = new_store();
+        let published = publish(&store, &ManifestSpec::template(), storage(1));
+        let generation = published.generation();
+        let sandbox = provision(directory.path(), "sandbox");
+        let lease = leased(&store, &published, &sandbox);
+        let record = store
+            .dir()
+            .join(LEASES_NAME)
+            .join(format!("{}.json", lease.id()));
+        // A release in another process removed the binding, and is removing the record, which a
+        // scanner, say, holds open.
+        let held_binding = delete_pending(&sandbox.join(CLONE_BINDING_NAME));
+        let held_record = delete_pending(&record);
+        assert_eq!(binding(&sandbox), None);
+        assert!(store.leases(generation).unwrap().is_empty());
+        // A tombstone that a retirement removes, likewise.
+        let other = publish(&store, &ManifestSpec::template(), storage(2));
+        store.tombstone(other.generation(), None).unwrap();
+        let tombstone = store
+            .dir()
+            .join(TOMBSTONES_NAME)
+            .join(format!("{}.json", other.generation()));
+        let held_tombstone = delete_pending(&tombstone);
+        assert!(store.tombstones().unwrap().is_empty());
+        assert_eq!(
+            store.select(other.key(), &after(&other, 1)).unwrap(),
+            Some(other.clone())
+        );
+        // A retirement finds no lease of the generation.
+        assert_eq!(store.retire(generation, None).unwrap(), Retirement::Retired);
+        drop((held_binding, held_record, held_tombstone));
+        assert!(!record.exists());
+        assert!(!tombstone.exists());
+    }
+
+    #[test]
+    fn a_release_whose_record_another_transaction_removes_ends_its_lease() {
+        let (directory, store) = new_store();
+        let published = publish(&store, &ManifestSpec::template(), storage(1));
+        let generation = published.generation();
+        let sandbox = provision(directory.path(), "sandbox");
+        let lease = leased(&store, &published, &sandbox);
+        let record = store
+            .dir()
+            .join(LEASES_NAME)
+            .join(format!("{}.json", lease.id()));
+        // A retirement in another process is removing the record, as the release does.
+        let held_record = delete_pending(&record);
+        assert_eq!(release(&store, &sandbox).unwrap(), Some(lease));
+        assert_eq!(binding(&sandbox), None);
+        drop(held_record);
+        assert!(store.leases(generation).unwrap().is_empty());
+    }
 }

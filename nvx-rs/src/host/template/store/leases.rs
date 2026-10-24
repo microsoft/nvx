@@ -26,6 +26,7 @@ use crate::host::platform::{self, parse_hex_id};
 use crate::host::store::files::{remove_if_present, sync_dir};
 use crate::host::store::{CLONE_BINDING_NAME, CallerFiles, LockedStore, SandboxStore};
 use crate::host::template::eligibility::HostTime;
+use crate::host::template::files::was_removed;
 use crate::host::template::key::KeyIdentity;
 
 /// Name of the directory of the records of the leases that a store granted.
@@ -39,9 +40,9 @@ type SyncDir<'a> = &'a dyn Fn(&Path) -> Result<()>;
 
 /// The directories of leases and tombstones whose entries in their stores this process made
 /// durable, by the directory and the identity of the store, and the name of the directory. A store
-/// creates each once, and never removes it, so one sync of the store's directory, once a process
-/// sees one, keeps its entry durable, even if the process that created it did not finish its own
-/// sync.
+/// creates each once, and never removes it, so one sync of the store's directory, and of its
+/// parent, once a process sees one, keeps its entry, and the store's, durable, even if the
+/// process that created them did not finish its own syncs.
 static DURABLE_RECORD_DIRS: Mutex<Vec<DurableRecordDir>> = Mutex::new(Vec::new());
 
 /// An entry of [`DURABLE_RECORD_DIRS`]: the directory and the identity of a store, and the name
@@ -427,7 +428,7 @@ impl Store {
         let recorded = self.check_records_dir(LEASES_NAME, LEASES_WHAT)?;
         unbind(locked.dir(), sync)?;
         if recorded {
-            remove_if_present(&self.lease_path(lease.id))?;
+            remove_lease_record(&self.lease_path(lease.id))?;
         }
         Ok(Some(lease))
     }
@@ -470,12 +471,22 @@ impl Store {
 
     /// Returns the store generations that tombstones quarantine, in order.
     ///
-    /// Fails with [`ErrorCode::ForeignFiles`] if the directory of the tombstones holds entries
-    /// that are not the store's.
+    /// Each tombstone is read and checked, as an acquisition checks it: a tombstone that cannot be
+    /// read, or is malformed, fails with [`ErrorKind::Io`], and one of another format with
+    /// [`ErrorCode::FormatUnsupported`], rather than quarantining its generation. Fails with
+    /// [`ErrorCode::ForeignFiles`] if the directory of the tombstones holds entries that are not
+    /// the store's.
     pub fn tombstones(&self) -> Result<Vec<StoreGeneration>> {
-        let mut tombstoned = self
+        let mut tombstoned = Vec::new();
+        for generation in self
             .records(TOMBSTONES_NAME, TOMBSTONES_WHAT, tombstone_name)?
-            .records;
+            .records
+        {
+            // A retirement may remove the tombstone after the listing.
+            if self.read_tombstone(generation)? {
+                tombstoned.push(generation);
+            }
+        }
         tombstoned.sort();
         Ok(tombstoned)
     }
@@ -488,8 +499,9 @@ impl Store {
     /// leases whose sandboxes no longer hold them: a sandbox that is gone, that holds no clone
     /// binding, or one of another lease, as an interrupted release, or a removal of the sandbox,
     /// leaves it. It makes the binding's absence durable first, by syncing the sandbox's
-    /// directory, or the nearest of its ancestors that remains, through the links that the
-    /// sandbox's path names, as a release that a crash or a failed sync interrupted may not have.
+    /// directory, if it is one, and the directory that holds the sandbox's entry, the nearest of
+    /// its ancestors that remains, through the links that the sandbox's path names, as a release
+    /// that a crash or a failed sync interrupted, or a removal of the sandbox, may not have.
     /// If any lease remains, the generation keeps its
     /// payload and its entry in the index, and the retirement returns [`Retirement::Draining`]
     /// with the leases, whose clones [release](Self::release) them; a later retirement deletes it.
@@ -554,8 +566,10 @@ impl Store {
             } else {
                 // A release may have removed the binding without making that durable yet, so the
                 // binding's absence must be durable before its record goes.
-                sync(binding_dir(&lease.sandbox)?)?;
-                remove_if_present(&self.lease_path(id))?;
+                for dir in binding_dirs(&lease.sandbox)? {
+                    sync(dir)?;
+                }
+                remove_lease_record(&self.lease_path(id))?;
             }
         }
         if !live.is_empty() {
@@ -598,8 +612,11 @@ impl Store {
 
     /// Creates the store's directory `name`, which `what` names, private to the current user,
     /// unless it exists, under the store's lock, and makes its entry in the store durable with
-    /// `sync`: it syncs the store's directory once it creates the directory, and once it finds
-    /// one that this process has not synced yet, whose creation may not have finished its sync.
+    /// `sync`, and the store's own entry in its parent: it syncs the store's directory, and then
+    /// the store's parent, once it creates the directory, and once it finds one that this process
+    /// has not synced yet, whose creation, or the store's, may not have finished its sync. A
+    /// binding then never names a record of a store whose own entry a crash of the host could
+    /// lose.
     fn create_records_dir(&self, name: &'static str, what: &str, sync: SyncDir<'_>) -> Result<()> {
         let key = (self.dir.clone(), self.id, name);
         if !self.check_records_dir(name, what)? {
@@ -613,6 +630,9 @@ impl Store {
             return Ok(());
         }
         sync(&self.dir)?;
+        if let Some(parent) = self.dir.parent() {
+            sync(parent)?;
+        }
         let mut durable = durable_record_dirs();
         if !durable.contains(&key) {
             durable.push(key);
@@ -701,6 +721,13 @@ impl Store {
         if !self.check_records_dir(TOMBSTONES_NAME, TOMBSTONES_WHAT)? {
             return Ok(false);
         }
+        self.read_tombstone(generation)
+    }
+
+    /// Reads the tombstone of the generation `generation`, in the directory of the tombstones,
+    /// which exists, and returns whether it exists: a tombstone that cannot be read, is malformed,
+    /// or is of another format fails.
+    fn read_tombstone(&self, generation: StoreGeneration) -> Result<bool> {
         let path = self.tombstone_path(generation);
         let Some(record) =
             read_record::<TombstoneRecord>(&path, TOMBSTONE_DESCRIPTION, MAX_LEASE_RECORD_LEN)?
@@ -739,9 +766,10 @@ impl Store {
     }
 
     /// Removes the tombstone of the generation `generation`, if it has one, under the store's
-    /// lock.
+    /// lock, once it has read and checked it: a tombstone that is not the store's tombstone of
+    /// that generation, or that is of another format, fails, and is kept.
     fn remove_tombstone(&self, generation: StoreGeneration) -> Result<()> {
-        if self.check_records_dir(TOMBSTONES_NAME, TOMBSTONES_WHAT)? {
+        if self.is_tombstoned(generation)? {
             remove_if_present(&self.tombstone_path(generation))?;
         }
         Ok(())
@@ -792,16 +820,19 @@ fn is_bound(lease: &Lease) -> Result<bool> {
         .is_some_and(|binding| binding.id == lease.id && binding.store == lease.store))
 }
 
-/// Returns the directory whose entries changed last as the clone binding of the sandbox in
-/// `sandbox` went: the sandbox's own directory, if it remains one, and otherwise the nearest of
-/// its ancestors that is a directory, following the links that its path names, as the removal of
-/// the sandbox followed them, where the sandbox's entry went.
+/// Returns the directories whose entries changed as the clone binding of the sandbox in `sandbox`
+/// went: the sandbox's own directory, if it is one, and the directory that holds the sandbox's
+/// entry, the nearest of its ancestors that is a directory, following the links that its path
+/// names, as the removal of the sandbox followed them. A sandbox that was removed, and provisioned
+/// again at its path, is a new directory, whose entries never held the binding: the binding went
+/// with the directory that the entry of the sandbox named before.
 ///
 /// Fails for an ancestor that cannot be examined, or that is a link to nothing, whose target, the
 /// directory that held the sandbox, cannot be known.
-fn binding_dir(sandbox: &Path) -> Result<&Path> {
+fn binding_dirs(sandbox: &Path) -> Result<Vec<&Path>> {
+    let mut dirs = Vec::with_capacity(2);
     if fs::symlink_metadata(sandbox).is_ok_and(|metadata| metadata.is_dir()) {
-        return Ok(sandbox);
+        dirs.push(sandbox);
     }
     for ancestor in sandbox.ancestors().skip(1) {
         let unknown = |error: io::Error| {
@@ -813,7 +844,10 @@ fn binding_dir(sandbox: &Path) -> Result<&Path> {
             .with_source(error)
         };
         match fs::metadata(ancestor) {
-            Ok(metadata) if metadata.is_dir() => return Ok(ancestor),
+            Ok(metadata) if metadata.is_dir() => {
+                dirs.push(ancestor);
+                return Ok(dirs);
+            }
             // A file replaced the directory, in the entries of its parent.
             Ok(_) => {}
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
@@ -842,6 +876,18 @@ fn bind(dir: &Path, record: &LeaseRecord, sync: SyncDir<'_>) -> Result<()> {
 fn unbind(dir: &Path, sync: SyncDir<'_>) -> Result<()> {
     remove_if_present(&dir.join(CLONE_BINDING_NAME))?;
     sync(dir)
+}
+
+/// Removes the record of a lease at `path`, if it exists, which a release and a retirement, in
+/// other processes, may both remove at once: a record that another removal removed as this tried,
+/// as [`was_removed`] tells, is gone already.
+fn remove_lease_record(path: &Path) -> Result<()> {
+    match fs::remove_file(path) {
+        Err(error) if error.kind() != io::ErrorKind::NotFound && !was_removed(path, &error) => Err(
+            store_error(format!("cannot remove {}", path.display()))(error),
+        ),
+        _ => Ok(()),
+    }
 }
 
 /// Returns `error`, which ended an acquisition of the lease `id` whose binding the sandbox in

@@ -17,7 +17,7 @@ use std::time::{Duration, Instant, SystemTime};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
-use super::files::{open_regular, read_at_most};
+use super::files::{open_regular, read_at_most, was_removed};
 use super::key::{ClassIdentity, KeyIdentity, TemplateKey};
 use super::manifest::{HostClock, TimeContract};
 use crate::activation::StoreGeneration;
@@ -813,7 +813,8 @@ fn take_lock(dir: &Path, deadline: Option<Instant>) -> Result<File> {
 }
 
 /// Reads the private regular file at `path`, the store's `description`, of at most `limit` bytes,
-/// or returns `None` if it does not exist.
+/// or returns `None` if it does not exist, or was removed as this opened it, as [`was_removed`]
+/// tells, which a transaction in another process may do.
 ///
 /// The file is opened without following a link, or on Windows any other reparse point, at its
 /// own name, and refused unless it is a regular file, before anything is read from it. A file
@@ -824,7 +825,9 @@ fn read_private(path: &Path, description: &str, limit: u64) -> Result<Option<Vec
     let failed = || store_error(format!("cannot read the {description} {}", path.display()));
     let file = match open_regular(path) {
         Ok(file) => file,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) if error.kind() == io::ErrorKind::NotFound || was_removed(path, &error) => {
+            return Ok(None);
+        }
         Err(error) => return Err(failed()(error)),
     };
     if let Some(problem) = platform::private_file_problem(&file).map_err(failed())? {
