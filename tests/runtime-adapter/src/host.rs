@@ -37,7 +37,7 @@ use crate::root::{MapFailure, Ready, RootConfig, RootFailure, RootReply, encode_
 
 mod executions;
 
-pub use executions::{Executions, ExecutionsError};
+pub use executions::{Executions, ExecutionsError, MAX_OUTPUT_FRAMES};
 
 /// A failure of a [`Client`].
 #[derive(Debug)]

@@ -699,8 +699,10 @@ answer the wrong request.
   working directory, and one of an ID that the driver started already, fail
   before anything is sent, and leave the client usable: the guest would end its
   session on either. So do a start that says that the host sends the program's
-  input, and one beyond `exec::MAX_EXECUTIONS`, 8, executions that the driver
-  started and that have not finished, as the guest runs no more at once;
+  input, one whose output windows count bytes, or more than
+  `host::MAX_OUTPUT_FRAMES`, 32, frames, one beyond `exec::MAX_EXECUTIONS`, 8,
+  executions, as the guest runs no more at once, and any once the driver ran:
+  a driver runs one batch, whose executions it starts before it runs them;
 - `run` carries the guest's messages to each execution's
   `exec::HostExecution`, and theirs to the guest, until every execution
   finished. One thread runs them all: each receive waits at most until the
@@ -718,9 +720,14 @@ Even a guest that reads can hold a send while the host does not read: the
 session's broker passes the guest's credit for the host's records on only
 behind the guest's own records, and takes no more of the host's records than
 that credit allows. So the driver sends little before it reads: no program's
-input, which one thread could not send while it reads the programs' output, and
-the starts of at most 8 executions that have not finished, whose answers wait
-for the run, as no program's output flows before the run's credit does.
+input, which one thread could not send while it reads the programs' output; the
+starts of at most 8 executions, whose answers wait for the run, as no program's
+output flows before the run's credit does; and, in the run, besides a
+cancellation for each execution, at most a credit for each message that it
+reads, of output windows of at most 32 frames, so that the guest's messages
+ahead of its own credit stay few. The guest may still send messages about the
+executions of a run that gave up on one or failed, so a later batch takes an
+attachment of its own, as each command of the host program does.
 
 The guest ends its session on a second start of the same key, even in a later
 epoch of the session, so the keys of a driver's executions must be new to the
@@ -1209,9 +1216,9 @@ Windows. They cover:
   byte-exact, with its outcome, and one whose launch the guest refuses, whose
   records carry their messages whole or split; the starts that the guest would
   not decode, a second start of an ID, a start whose input the host would
-  send, and a start beyond 8 executions that have not finished, of which the
-  driver sends nothing, with a client that stays usable, and the places of the
-  executions that finished, which another start takes; a message about an
+  send, starts whose output windows count bytes or more than 32 frames, a
+  start beyond 8 executions, and a start once the driver ran, of which the
+  driver sends nothing, with a client that stays usable; a message about an
   execution that it did not start, about none, whose body does not decode, or
   that breaks the engine's rules, and the end of the stream, each of which ends
   the run; a timeout that fires while the guest says nothing, after which the
