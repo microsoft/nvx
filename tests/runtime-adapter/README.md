@@ -36,9 +36,9 @@ Each configuration enables one side of `nvx`:
 
 | Configuration | Cargo options | `nvx` features | Modules | Binary |
 | --- | --- | --- | --- | --- |
-| Protocol-only | none | none | `frame`, `root`, `probe`, `exec` | none |
-| Host-only | `--features host` | `host` | `frame`, `root`, `probe`, `exec`, `host`, `runtime`, `initramfs`, `layered`, `hook` | `runtime-adapter-host` |
-| Guest-only | `--features guest --target x86_64-unknown-linux-musl` | `guest` | `frame`, `root`, `probe`, `exec`, `guest`, `worker` | `runtime-adapter-guest`, a static executable |
+| Protocol-only | none | none | `frame`, `root`, `probe`, `exec`, `template` | none |
+| Host-only | `--features host` | `host` | `frame`, `root`, `probe`, `exec`, `template`, `host`, `runtime`, `initramfs`, `layered`, `hook` | `runtime-adapter-host` |
+| Guest-only | `--features guest --target x86_64-unknown-linux-musl` | `guest` | `frame`, `root`, `probe`, `exec`, `template`, `guest`, `worker` | `runtime-adapter-guest`, a static executable |
 
 ## Framing
 
@@ -664,6 +664,90 @@ or with 1 after a diagnostic on standard error; and
 from inside the root, and which reports what the execution sees and may do;
 see [Probes](#probes).
 
+### Template mode
+
+A template's VM captures a snapshot of its guest before the guest assembles any
+root, so that every clone that a restore of the snapshot starts attaches a root
+of its own. The host opens no application session with it, and waits for no
+`Ready`: a committed capture ends the VM. Its kernel command line has
+`nvx_sandbox=1`, so NVX's `/init` runs the time ABI's boot step, then hands the
+VM to the guest agent's PID 1 of a layered root, which starts the worker, as in
+every VM with a layered root. OpenVMM adds `nvx_snapshot_tier=platform` to the
+kernel command line of a VM that captures a platform snapshot.
+
+On x86_64, whose time ABI a capture needs, the worker reads the kernel command
+line before anything else, with `template::boot`, which splits it as the kernel
+does, with `nvx::protocol::cmdline::parameters`. A command line in which the
+kernel finds no parameter `nvx_snapshot_tier=platform` boots cold: the worker
+goes on as above, whatever else the command line holds. With it, the VM is a
+template's, whose snapshot holds the platform's invariant configuration alone,
+which every clone shares. So the worker accepts only the parameters of the
+platform tier's allowlist, `template::is_platform_token`, which OpenVMM's
+capture of a platform snapshot allows too, byte for byte:
+
+- `earlycon=xe9`, `console=hvc0`, `console=hvc1`, `reboot=t`, `panic=-1`,
+  `nvx_sandbox=1`, `nvx_config=0xd0010000,65536`,
+  `nvx_snapshot_tier=platform`, and `nvx_control_tty=hvc2`;
+- `nr_cpus=`, `virtio_mmio.device=`, `virtnet_ip=`, `virtnet_mask=`,
+  `virtnet_gw=`, `virtnet_dns=`, `virtnet_ip6=`, and `virtnet_gw6=`, with any
+  value that the host chooses.
+
+It refuses any other parameter, and a double quote, which the kernel drops from
+a parameter, or `--`, after which the kernel hands the rest of the command line
+to init, though init may still read it from `/proc/cmdline`: OpenVMM refuses
+both in the command line of a VM with a control console. Otherwise, the worker,
+through `worker::capture::capture_on_terminal`:
+
+1. opens the control tty, in raw mode, as the worker of a VM that boots cold
+   does;
+2. attaches the control session with `nvx::guest::nvxs::GuestConnection::attach`,
+   and waits until the tty has sent the attachment, so that the snapshot holds
+   the guest attached. It reads nothing from the session before the capture,
+   and serves no application session;
+3. prepares the guest for the capture with
+   `nvx::guest::clone::CapturePreparation`, which closes the worker's fence of
+   workload admission, checks that nothing is mounted from the `distro` or the
+   scratch block device, at the MMIO windows from which the worker assembles a
+   root, from an overlay, or from OpenVMM's host filesystem device, whose tag
+   is `microvm`, then waits for the time ABI's boot checks, runs its capture
+   checks, and suppresses the stall detectors;
+4. requests the capture with `CaptureBarrier::capture`, with the platform
+   tier's request, which keeps no scratch.
+
+Closing the worker's fence, `worker::capture::Admission`, acquires it: a close
+fails while the fence is closed, whoever closed it, and leaves it closed. The
+worker of a template's VM admits no execution before the capture, nor, in a
+clone, before repair acknowledged the restore. The worker returns from the
+capture only once the capture ended without a snapshot, or failed, or in a
+clone, which a restore of the snapshot started. It does not repair a clone yet:
+the clone ends with its fence still closed and its stall detectors still
+suppressed. The worker, and with it the VM, ends with one of these statuses,
+after a diagnostic on standard error:
+
+| Status | When |
+| --- | --- |
+| 1 | The control tty cannot be opened or put in raw mode, or the attachment cannot be sent |
+| 20 | The kernel command line names the platform tier, but holds another parameter, a double quote, or `--`, or the worker cannot read it |
+| 21 | The fence of workload admission cannot be closed |
+| 22 | Something is mounted from the template's devices or from an overlay, or the mount table cannot be checked |
+| 23 | The time ABI's boot checks did not complete |
+| 24 | The time ABI's capture checks failed |
+| 25 | The stall detectors cannot be suppressed |
+| 26 | The VM generation ID cannot be read |
+| 27 | The capture request failed, which leaves the fence closed |
+| 28 | The stall detectors' settings cannot be restored once the capture ended without a snapshot |
+| 29 | A stage of the capture failed that this build of the worker does not know |
+| 30 | The capture ended without a snapshot, as without a destination, or once OpenVMM rejected it, and the template continued |
+| 31 | A restore of the template's snapshot started this VM, a clone, which the worker does not repair yet |
+
+The statuses from 21 to 29 are `template::CAPTURE_STATUS_BASE` plus the number
+of the stage that failed, in the order in which
+`nvx::guest::clone::CaptureStage` declares the stages. A stage whose failure
+may leave the worker some of the permission for the time ABI's ports fails with
+the time ABI's port error, and the worker then starts no thread or process
+before it ends. A violation of the time ABI in enforcing mode stops the VM with
+the time ABI's own status, from 193 to 195, instead.
+
 ## Host program
 
 `host::Client` is the host program's client of the guest agent. It runs over
@@ -1211,7 +1295,7 @@ independent adapter's does:
   guest binary is a static executable: it has no program interpreter, needs no
   shared library, and keeps its stack non-executable.
 
-The unit tests of `frame`, `root`, `probe`, and `exec` run in every
+The unit tests of `frame`, `root`, `probe`, `exec`, and `template` run in every
 configuration. They cover each kind's encoding, messages in pieces of any size,
 a message of each kind split at every byte, the headers that the framing refuses
 before their body arrives, and the root configurations, readinesses, parts of
@@ -1219,7 +1303,14 @@ mapping tables, failures, probes, facts, and messages of executions that decode,
 and those that don't, and the host's side of an execution, which still sends the
 cancellation of one that it gives up on in the step that ends it, without grace
 or settlement time, and which cancels one whose stream outgrows the 16 MiB that
-it keeps. In the guest-only configuration, the unit tests of `worker::probes`
+it keeps. Those of `template` check the platform tier's allowlist, token by
+token, against the tokens that OpenVMM's capture of a platform snapshot allows
+and refuses, and template mode: a command line in which the kernel finds no
+platform tier boots cold, whatever else it holds, and one with it boots a
+template's VM if it holds the tier's tokens alone, between any of the kernel's
+whitespace, and is refused otherwise, for a parameter outside the allowlist at
+its start, in its middle, or at its end, for a double quote, and for `--`. In
+the guest-only configuration, the unit tests of `worker::probes`
 cover what the probes read: the mount table with its escapes, the kernel's
 records of a process, `os-release`, and the guest's memory, and the probes and
 arguments that the worker refuses. Those of
@@ -1234,7 +1325,12 @@ with a real-time signal, and check that PID 1 takes both stops and goes on
 until it collects the worker's status.
 Those of `worker::entries` cover the names of capabilities, the fields of a
 process's status, the outcomes of attempts, the entry's refusals, and the
-probe's arguments.
+probe's arguments. Those of `worker::capture` check that closing the worker's
+fence acquires it, the status of each stage of a capture, which no other
+outcome of the worker shares, a template's devices, and that the worker
+attaches its session, and the stream sent the attachment, before the capture
+runs, without reading anything of the session, and that no capture runs once
+the attachment cannot be written or sent.
 
 `tests/guest_session.rs` checks, in the guest-only configuration, that the
 guest agent serves the control session with the adapter's own framing. A test

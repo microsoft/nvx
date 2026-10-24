@@ -5,8 +5,9 @@
 //! Each configuration enables one side of `nvx`:
 //!
 //! - protocol-only, without features: the control protocol, the contract versions, and the other
-//!   items that `nvx` has without features, with the adapter's own [`frame`]s, and the bodies of
-//!   its messages about a layered [`root`], its [`probe`]s, and [`exec`]utions;
+//!   items that `nvx` has without features, with the adapter's own [`frame`]s, the bodies of its
+//!   messages about a layered [`root`], its [`probe`]s, and [`exec`]utions, and the kernel command
+//!   line and statuses of its [`template`] mode;
 //! - host-only, with the `host` feature: the host API too, and the host program, in the `host`,
 //!   `runtime`, `initramfs`, `layered`, and `hook` modules and the `runtime-adapter-host` binary;
 //! - guest-only, with the `guest` feature: the guest API too, and the guest agent, in the `guest`
@@ -42,6 +43,10 @@
 //! never blocks. The executions enter the root with the publication of listeners that the root
 //! configuration names, and the host gives them the URL of the network's proxy, if any, in their
 //! environment.
+//!
+//! A VM whose kernel command line names the platform snapshot tier is a template's, which the
+//! worker captures before it assembles any root, so that every clone of the snapshot attaches a
+//! root of its own, in [`template`] mode.
 
 pub mod exec;
 pub mod frame;
@@ -59,6 +64,7 @@ pub mod probe;
 pub mod root;
 #[cfg(feature = "host")]
 pub mod runtime;
+pub mod template;
 #[cfg(all(feature = "guest", target_os = "linux"))]
 pub mod worker;
 

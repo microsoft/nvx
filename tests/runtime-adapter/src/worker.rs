@@ -56,6 +56,11 @@
 //! may close only the broker's end, the worker drops its executions, and writes what it queued,
 //! as once the host stopped it.
 //!
+//! In a template's VM, whose kernel command line names the platform snapshot tier, the worker
+//! assembles no root: on x86_64, the guest agent reads the kernel command line before anything
+//! else with `crate::template::boot`, and the worker captures the VM instead, as the `capture`
+//! module describes.
+//!
 //! # The mapping table and the start
 //!
 //! The root configuration announces how many mappings the host's mapping table holds, and the host
@@ -190,6 +195,8 @@
 //!   in all for those programs to end and those cgroups to empty, removing each cgroup that
 //!   emptied once it collected the statuses of those programs.
 
+#[cfg(target_arch = "x86_64")]
+pub mod capture;
 mod connection;
 pub mod entries;
 mod executions;
