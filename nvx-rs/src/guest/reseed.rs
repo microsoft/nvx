@@ -412,7 +412,7 @@ fn print_random_sample(out: &mut dyn Write, err: &mut dyn Write) -> Result<(), C
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::cell::RefCell;
     use std::fs;
 
@@ -433,6 +433,12 @@ mod tests {
     /// holds them.
     pub(super) fn observe_drop(seed: &Seed) {
         DROPPED.with_borrow_mut(|dropped| dropped.push(*seed.0));
+    }
+
+    /// Returns the bytes of each seed that the test's thread dropped since the last call, in
+    /// order, as their drops left them.
+    pub(crate) fn take_dropped() -> Vec<[u8; Seed::LENGTH]> {
+        DROPPED.take()
     }
 
     struct Fixture {
