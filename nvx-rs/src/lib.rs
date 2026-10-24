@@ -12,8 +12,9 @@
 //!   record of the settings that its activation applies, which a clone restored from a template
 //!   reads in place of its captured configuration, and what Ready reports about the activation.
 //!   It needs no features, so the host, the guest, and every adapter's framing share it.
-//! - [`contract`]: the control-contract versions that this crate speaks, and the compatibility of
-//!   NVX releases with them.
+//! - [`contract`]: the control-contract versions that this crate speaks and the compatibility of
+//!   NVX releases with them, and the versions of the contracts through which OpenVMM restores a
+//!   snapshot.
 //! - [`exec`]: the credit and stdio engine of an execution, which the side that runs a workload
 //!   and the side that requested it share with any adapter, whatever its framing: the state of
 //!   each stream, the credit that bounds the bytes in flight, the order of each stream's data and

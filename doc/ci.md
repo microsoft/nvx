@@ -542,7 +542,9 @@ for the curl shim test and the `nvx-rs` build. Each job first builds the
 microVM test and platform jobs of its operating system, as described above.
 Each also runs the ignored `nvx-rs` test `tests/openvmm_vectors.rs`, which
 compares the submodule's control-session protocol vectors with the copies that
-the protocol tests read in the `nvx-rs` job, which cannot check out OpenVMM;
+the protocol tests read in the `nvx-rs` job, which cannot check out OpenVMM,
+and the versions of OpenVMM's snapshot format, saved-state schema, time ABI,
+and restore packet with those of `nvx::contract`;
 see [OpenVMM's vectors](../nvx-rs/tests/vectors/README.md#openvmms-vectors).
 Fork pull requests lack the OpenVMM deploy key, so the CLI jobs run, like the
 hypervisor jobs, only for pushes, full runs, and same-repository pull requests.

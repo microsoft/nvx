@@ -26,8 +26,14 @@ pub(crate) const GENERATION_ID_SIZE: usize = 16;
 
 /// The magic number that starts every restore packet.
 const PACKET_MAGIC: [u8; 3] = *b"OVR";
-/// The restore-packet version of time ABI version one.
-const PACKET_VERSION: u8 = 4;
+/// The restore-packet version of time ABI version one,
+/// [`RESTORE_PACKET_VERSION`](crate::contract::RESTORE_PACKET_VERSION), which a template's
+/// compatibility key records.
+const PACKET_VERSION: u8 = {
+    let version = crate::contract::RESTORE_PACKET_VERSION;
+    assert!(version <= u8::MAX as u64);
+    version as u8
+};
 /// Restore flag indicating that the downtime came from the host's UTC clock.
 const PACKET_DOWNTIME_UTC: u8 = 0x01;
 /// Restore flag indicating that memory ranges follow.

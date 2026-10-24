@@ -25,6 +25,22 @@
 //! A release declares the microVM ABI version, the control session version, and the control
 //! contract revision of its artifacts in its `SOURCE-MANIFEST.json`.
 //!
+//! No runtime identity records the versions of the contracts through which OpenVMM restores a
+//! snapshot:
+//!
+//! - [`SNAPSHOT_FORMAT_VERSION`] is the version of OpenVMM's snapshot format: the manifest of a
+//!   capture, and the artifacts that it describes. It changes with the version of OpenVMM's
+//!   snapshot manifest, which refuses a snapshot of any other.
+//! - [`DEVICE_STATE_SCHEMA_VERSION`] is the version of the schema of the saved state of a
+//!   snapshot's devices, which OpenVMM records in its manifest. It changes with it.
+//! - [`TIME_ABI_VERSION`] is the version of the time ABI: the guest's clocks and timers, and their
+//!   repair after a restore. It changes with the time ABI version of OpenVMM's time contract.
+//! - [`RESTORE_PACKET_VERSION`] is the version of the restore packet that OpenVMM gives a
+//!   restored guest, and that the guest decodes. It changes with the packet's layout or meaning.
+//!
+//! Each of these four must match the pinned OpenVMM's, which the ignored test
+//! `tests/openvmm_vectors.rs` checks in the jobs that check out the OpenVMM submodule.
+//!
 //! The build script includes this file to check bundled artifacts, so it must not depend on the
 //! rest of the crate.
 
@@ -40,6 +56,21 @@ pub const BOOT_CONTRACT_VERSION: u64 = 3;
 pub const CONTROL_SESSION_PROTOCOL_VERSION: u64 = 1;
 /// Control contract revision this crate speaks.
 pub const CONTROL_CONTRACT_REVISION: &str = "nvx-microvm-v2-control-v2";
+/// Version of OpenVMM's snapshot format that this crate reads: the manifest of a capture, and the
+/// artifacts that it describes. It must match `MANIFEST_VERSION` in OpenVMM's
+/// `openvmm/openvmm_helpers/src/snapshot.rs`.
+pub const SNAPSHOT_FORMAT_VERSION: u64 = 6;
+/// Version of the schema of a snapshot's saved device state that this crate reads. It must match
+/// `SAVED_STATE_SCHEMA_VERSION` in OpenVMM's `openvmm/openvmm_helpers/src/snapshot/format.rs`.
+pub const DEVICE_STATE_SCHEMA_VERSION: u64 = 1;
+/// Version of the time ABI that this crate speaks: the guest's clocks and timers, and their repair
+/// after a restore. It must match `TIME_ABI_VERSION` in OpenVMM's
+/// `vmm_core/virt/src/time_abi/mod.rs`.
+pub const TIME_ABI_VERSION: u64 = 1;
+/// Version of the restore packet that OpenVMM gives a restored guest, and that this crate's guest
+/// decodes. It must match `RESTORE_PACKET_VERSION` in OpenVMM's
+/// `vm/devices/chipset_resources/src/microvm_time.rs`.
+pub const RESTORE_PACKET_VERSION: u64 = 4;
 
 /// Returns whether the `openvmm` section of an NVX `SOURCE-MANIFEST.json` declares this contract.
 #[cfg(feature = "host")]

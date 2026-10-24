@@ -71,8 +71,11 @@ The tests cannot call OpenVMM's broker: OpenVMM's workspace needs a later Rust
 release than `nvx`'s minimum, and the `nvx-rs` job cannot check out the OpenVMM
 submodule, whose deploy key fork pull requests lack. They read the copies
 instead, and the ignored test `tests/openvmm_vectors.rs` compares the copies
-with the submodule's files. The NVX CLI jobs, which check out the submodule,
-run it, and so does an OpenVMM pin promotion, from the repository's root:
+with the submodule's files. It also checks that the versions of OpenVMM's
+snapshot format, saved-state schema, time ABI, and restore packet in
+`nvx::contract` are the submodule's. The NVX CLI jobs, which check out the
+submodule, run it, and so does an OpenVMM pin promotion, from the repository's
+root:
 
 ```bash
 cargo test --locked --manifest-path nvx-rs/Cargo.toml --no-default-features \

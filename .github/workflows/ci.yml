@@ -162,7 +162,8 @@ jobs:
 
       # nvx-rs's protocol tests read copies of OpenVMM's control-session
       # protocol vectors, because the nvx-rs job cannot check out OpenVMM.
-      # This job can, so it compares the copies with the submodule's files.
+      # This job can, so it compares the copies with the submodule's files,
+      # and nvx::contract's versions of OpenVMM's contracts with OpenVMM's.
       - name: Compare OpenVMM's protocol vectors
         shell: bash
         run: >-
