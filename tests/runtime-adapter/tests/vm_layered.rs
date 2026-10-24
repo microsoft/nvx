@@ -6,7 +6,8 @@
 //! images of a [`Root`], launches a VM with it, and checks what it [`Expect`]s: a root that the
 //! guest assembles, which the scenario probes, or runs executions in through the host program's
 //! `exec`, and the stop tears down, the stage of the root that fails, or a launch that the host
-//! program refuses before it spawns the VM, since the scenario changed what it staged. A new
+//! program refuses before it spawns the VM, since the scenario changed what it staged. A root may
+//! give the VM a [`Network`], which the launch reads from a file that the scenario writes. A new
 //! scenario is a new row, with its own checks, through the probes of the worker or executions.
 //!
 //! The tests boot VMs, so they are ignored. Besides what the `common` module lists, they read its
@@ -142,6 +143,10 @@ const EPERM: i32 = 1;
 const EINVAL: i32 = 22;
 /// The number of executions that meet only while all of them run.
 const MEETING: usize = 4;
+/// The URL of the proxy of the scenarios' proxy-only [`Network`] as the guest sees it, at the
+/// gateway of the guest's network, `10.0.0.2/24`: the proxy at port 3128 of host loopback, which
+/// no execution reaches.
+const PROXY_URL: &str = "http://10.0.0.1:3128";
 /// A script that starts a descendant that leads a session of its own and holds the script's
 /// output: the descendant prints its process ID, which is its session's ID, then moves its output
 /// to the script's, which ends the command substitution that reads the ID. The script prints
@@ -198,6 +203,48 @@ enum Upper {
     Ram,
 }
 
+/// The network of a scenario's launch, which the launch reads from a file that the test writes,
+/// in the serde form of a plan's network: the guest at `10.0.0.2/24`, with egress denied.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Network {
+    /// A proxy-only network, whose one way out is the proxy at port 3128 of host loopback, with
+    /// the scheme `http`, which the guest reaches at its gateway, at [`PROXY_URL`].
+    Proxy,
+    /// Ingress allowed, so that OpenVMM publishes the guest's listeners to the host's private
+    /// networks.
+    Ingress,
+}
+
+impl Network {
+    /// Returns the network's serde form.
+    fn form(self) -> Value {
+        let mut form = json!({
+            "guestNetwork": "10.0.0.2/24",
+            "egress": "deny",
+            "allow": {"name": "egress.allow", "rules": []},
+            "deny": {"name": "egress.deny", "rules": []},
+            "ingress": "deny",
+            "hostLoopback": "deny",
+            "hostLoopbackForwards": [],
+            "proxy": null,
+        });
+        match self {
+            Self::Proxy => form["proxy"] = json!({"port": 3128, "scheme": "http"}),
+            Self::Ingress => form["ingress"] = json!("allow"),
+        }
+        form
+    }
+
+    /// Returns whether OpenVMM publishes the guest's listeners through the network, as the root
+    /// configuration says.
+    fn listeners(self) -> Listeners {
+        match self {
+            Self::Proxy => Listeners::Unpublished,
+            Self::Ingress => Listeners::Published,
+        }
+    }
+}
+
 /// The layered root of a scenario's launch.
 #[derive(Clone, Copy, Debug)]
 struct Root {
@@ -222,6 +269,8 @@ struct Root {
     workload: Option<(u32, u32)>,
     /// The host paths that the launch shares with the root.
     table: Table,
+    /// The VM's network, as the launch reads it, if any.
+    network: Option<Network>,
 }
 
 /// The root of the scenarios unless they say otherwise: NVX's EROFS image, with its own identity,
@@ -237,6 +286,7 @@ const ROOT: Root = Root {
     first_partition_bound: None,
     workload: None,
     table: Table::None,
+    network: None,
 };
 
 /// The root of the scenarios of a GPT disk unless they say otherwise: the disk, with its own GUID,
@@ -299,10 +349,11 @@ impl Root {
         options
     }
 
-    /// Returns the launch's options of the root, with the image `distro`, and the `scratch` image
-    /// for a root over a scratch: its [images](Self::images), an upper in RAM for a root that is
-    /// not over a scratch, and the options of the root configuration that the root names.
-    fn options(&self, distro: &Distro, scratch: &Path) -> Vec<OsString> {
+    /// Returns the launch's options of the root, with the image `distro`, the `scratch` image for a
+    /// root over a scratch, and the file `network` of the network of a root with one: its
+    /// [images](Self::images), an upper in RAM for a root that is not over a scratch, the options
+    /// of the root configuration that the root names, and the network's file.
+    fn options(&self, distro: &Distro, scratch: &Path, network: &Path) -> Vec<OsString> {
         let mut options = self.images(distro, scratch);
         if self.upper == Upper::Ram {
             options.extend(["--upper".into(), "ram".into()]);
@@ -321,6 +372,9 @@ impl Root {
         }
         if let Some((uid, gid)) = self.workload {
             options.extend(["--workload-identity".into(), format!("{uid}:{gid}").into()]);
+        }
+        if self.network.is_some() {
+            options.extend(["--network".into(), network.into()]);
         }
         options
     }
@@ -836,6 +890,20 @@ scenarios! {
             "cannot enter the root as the workload identity 4242:4242: ",
         ),
     };
+    /// Executions in a proxy-only network, which publishes no listener: each finds the proxy's URL
+    /// in its environment, after its own entries, unless it names its own proxy settings, and root
+    /// may hold the capabilities that bind privileged ports and open raw sockets.
+    executions_take_the_settings_of_a_proxy_only_network: Scenario {
+        root: Root { network: Some(Network::Proxy), ..ROOT },
+        expect: Expect::Ready(check_proxy_settings),
+    };
+    /// Executions in a network that publishes the guest's listeners: the guest refuses root the
+    /// capabilities that could forge a listener announcement at stage 0, but not the others, and
+    /// an execution's environment, without a proxy, is exactly its start's.
+    published_listeners_refuse_binding_and_raw_sockets: Scenario {
+        root: Root { network: Some(Network::Ingress), ..ROOT },
+        expect: Expect::Ready(check_published_listeners),
+    };
 }
 
 /// Runs the scenario `name`, `scenario`.
@@ -851,7 +919,11 @@ fn run(name: &str, scenario: Scenario) {
     let distro = root.distro(&fixtures, &sandbox.root);
     let images = root.images(&distro, &scratch);
     let images = images.iter().map(OsString::as_os_str).collect::<Vec<_>>();
-    let mut options = root.options(&distro, &scratch);
+    let network = sandbox.root.join("network.json");
+    if let Some(form) = root.network.map(Network::form) {
+        fs::write(&network, form.to_string()).unwrap();
+    }
+    let mut options = root.options(&distro, &scratch, &network);
     if root.table != Table::None {
         write_sources(&sandbox.root);
         options.extend(root.table.options(&sandbox.root));
@@ -990,9 +1062,10 @@ fn assert_failed(printed: &Printed, stage: RootStage, problem: &str) {
 
 /// Checks what the launch recorded in the sandbox's store: a VM with the layered `root` of the
 /// image `distro`, over `scratch` or RAM, the image of the identity that the launch expects, the
-/// bindings that the store stages for the images, which the launch checked, the boot tokens of its
-/// plan alone, after the launch's own, and the root configuration that the host sent, with
-/// unpublished listeners, since the VM has no network, whether or not the guest accepted it, which
+/// bindings that the store stages for the images, which the launch checked, the network, if any, as
+/// the scenario's file gave it, the boot tokens of its plan alone, after the launch's own, and the
+/// root configuration that the host sent, with listeners published as OpenVMM publishes them
+/// through the network, and unpublished without one, whether or not the guest accepted it, which
 /// it returns.
 fn check_record(sandbox: &Sandbox, root: &Root, distro: &Distro, scratch: &Path) -> RootConfig {
     let read = |name: &str| -> Value {
@@ -1015,6 +1088,10 @@ fn check_record(sandbox: &Sandbox, root: &Root, distro: &Distro, scratch: &Path)
     assert_eq!(plan["distro"]["format"], distro.format);
     assert_eq!(plan["distro"]["identity"], distro.identity.as_str());
     assert_eq!(plan["settings"], Value::Null);
+    assert_eq!(
+        plan["network"],
+        root.network.map_or(Value::Null, Network::form)
+    );
     let path = |value: &Value| PathBuf::from(value.as_str().unwrap());
     assert_eq!(path(&plan["distro"]["path"]), distro.path);
     let upper = match root.upper {
@@ -1053,7 +1130,10 @@ fn check_record(sandbox: &Sandbox, root: &Root, distro: &Distro, scratch: &Path)
         scratch_journal: root.journal,
         mapping_count: root.table.mapping_count(),
         workload_identity: root.workload,
-        listeners: Some(Listeners::Unpublished),
+        listeners: Some(
+            root.network
+                .map_or(Listeners::Unpublished, Network::listeners),
+        ),
         ..RootConfig::default()
     };
     let sent = String::from_utf8(config.encode()).unwrap();
@@ -2372,4 +2452,61 @@ fn check_workload_executions(vm: &mut Vm<'_>) {
     assert_ran(&printed, 1, 0, &nobody_facts, "");
     assert_ran(&printed, 2, 0, "ONLY=this\n", "");
     assert_refused(&printed, 3, EINVAL);
+}
+
+/// Checks the VM of the `executions_take_the_settings_of_a_proxy_only_network` scenario, whose
+/// network's proxy the guest reaches at [`PROXY_URL`].
+fn check_proxy_settings(vm: &mut Vm<'_>) {
+    assert_eq!(vm.config.listeners, Some(Listeners::Unpublished));
+    let nobody = ids(NOBODY);
+    let own = "HTTPS_PROXY=http://proxy.example:8080";
+    let executions = [
+        execution(
+            &["--identity", &nobody, "--env", "FIRST=1"],
+            &["/usr/bin/env"],
+        ),
+        execution(&["--identity", &nobody, "--env", own], &["/usr/bin/env"]),
+        execution(
+            &["--identity", "0:0", "--capabilities", "10,13"],
+            &["/bin/sh", "-c", IDENTITY_SCRIPT],
+        ),
+    ];
+    let printed = vm.exec(&executions);
+    let proxies = ["http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY"]
+        .map(|variable| format!("{variable}={PROXY_URL}\n"))
+        .concat();
+    assert_ran(&printed, 1, 0, &format!("FIRST=1\n{proxies}"), "");
+    assert_ran(&printed, 2, 0, &format!("{own}\n"), "");
+    // `CAP_NET_BIND_SERVICE` and `CAP_NET_RAW`, numbers 10 and 13, in each set.
+    let facts = identity_facts(0, 0, "0", 1 << 10 | 1 << 13);
+    assert_ran(&printed, 3, 0, &facts, "");
+}
+
+/// Checks the VM of the `published_listeners_refuse_binding_and_raw_sockets` scenario, whose
+/// network publishes the guest's listeners.
+fn check_published_listeners(vm: &mut Vm<'_>) {
+    assert_eq!(vm.config.listeners, Some(Listeners::Published));
+    let executions = [
+        execution(
+            &["--identity", "0:0", "--capabilities", "10"],
+            &["/bin/true"],
+        ),
+        execution(
+            &["--identity", "0:0", "--capabilities", "13"],
+            &["/bin/true"],
+        ),
+        execution(
+            &["--identity", "0:0", "--capabilities", "0"],
+            &["/bin/sh", "-c", IDENTITY_SCRIPT],
+        ),
+        execution(
+            &["--identity", &ids(NOBODY), "--env", "ONLY=this"],
+            &["/usr/bin/env"],
+        ),
+    ];
+    let printed = vm.exec(&executions);
+    assert_refused(&printed, 1, EPERM);
+    assert_refused(&printed, 2, EPERM);
+    assert_ran(&printed, 3, 0, &identity_facts(0, 0, "0", 1), "");
+    assert_ran(&printed, 4, 0, "ONLY=this\n", "");
 }

@@ -1007,12 +1007,13 @@ The guest's executions follow the network:
   `CAP_NET_BIND_SERVICE` and `CAP_NET_RAW`, with which an execution could bind
   the privileged port from which the announcer sends, or forge its datagrams,
   at stage 0 with `EPERM`.
-- The host gives an execution the URL of a proxy-only network's proxy in its
-  environment, with `layered::with_proxy`, since NVX gives an execution no
-  proxy settings, and its environment is exactly its start's: in each of
-  `layered::PROXY_VARIABLES`, `http_proxy`, `https_proxy`, `HTTP_PROXY`, and
-  `HTTPS_PROXY`, after the start's own entries. A start that names any of
-  them keeps its own proxy settings.
+- `runtime-adapter-host exec` gives each of its executions the URL of a
+  proxy-only network's proxy in its environment, from the plan that the
+  launch's record keeps, with `layered::with_proxy`, since NVX gives an
+  execution no proxy settings, and its environment is exactly its start's: in
+  each of `layered::PROXY_VARIABLES`, `http_proxy`, `https_proxy`,
+  `HTTP_PROXY`, and `HTTPS_PROXY`, after the start's own entries. A start that
+  names any of them keeps its own proxy settings.
 
 ### The step hook
 
@@ -1140,7 +1141,10 @@ the directory that `NVX_ARTIFACTS_DIR` names, and the guest agent's build from
   GID, with the supplementary groups GIDs and the capabilities numbered N, such
   as 0 for `CAP_CHOWN`, if given, and the guest checks its account, unless
   `--numeric` says that the IDs have none. It starts in the root's directory
-  DIR, or `/`, with exactly the environment of its `--env` entries. It runs for
+  DIR, or `/`, with exactly the environment of its `--env` entries, then, if
+  the VM's [network](#networks) has a proxy, the proxy's URL as the guest sees
+  it in `http_proxy`, `https_proxy`, `HTTP_PROXY`, and `HTTPS_PROXY`, unless
+  the entries name any of them. It runs for
   at most a minute, with 16 KiB chunks and the credit of 4 of them for its
   input and 8 for its output, which its standard output and error share. The
   command keeps at most 16 MiB of each stream, and cancels an execution whose
@@ -1602,11 +1606,14 @@ stages its images, then launches them, and is a row of the table that its
 | `executions_run_in_the_root` | The image over the scratch, without a workload identity, in which `exec` runs executions that name their identities | Over one session, four executions as `nobody` that meet only while all of them run, beside one as root that writes more than a MiB to its standard output and a little to its standard error, each byte-exact, ending on its own with 0, and reusable. Over a later session, with new keys: a program that leaves a descendant in a session of its own, which the program's end, as PID 1 of its namespace, ends, so that no output is lost; `nobody`'s IDs and groups, with empty permitted, effective, and bounding sets; root with `CAP_CHOWN` alone in each of them; exactly the start's environment; the start's working directory; the entry's default hostname, `nvx-sandbox`, and PID 1; and a start without an identity, and one with `CAP_SYS_ADMIN`, which the guest refuses at stage 0 with `EINVAL` and `EPERM`, fenced and without output |
 | `executions_run_as_the_workload_identity` | The image over the scratch, with the workload identity of `nobody` | Executions that name no identity, which run as `nobody`, without capabilities, with exactly the start's environment, and a start that names an identity, which the guest refuses at stage 0 with `EINVAL` |
 | `accountless_workload_identity_fails_its_stage` | The image over the scratch, with a workload identity whose account the image lacks | The identity stage's failure once the guest assembled the root, which the launch reports, and a VM that ends with 16, which unmounted the scratch |
+| `executions_take_the_settings_of_a_proxy_only_network` | The image over the scratch, in a proxy-only network of a guest at `10.0.0.2/24`, whose proxy listens at port 3128 of host loopback | A root configuration whose listeners are unpublished; executions that find the proxy's URL, `http://10.0.0.1:3128`, in `http_proxy`, `https_proxy`, `HTTP_PROXY`, and `HTTPS_PROXY`, after their own entries, but one that names `HTTPS_PROXY` itself, which keeps exactly its own environment; and root with `CAP_NET_BIND_SERVICE` and `CAP_NET_RAW`, which hold them |
+| `published_listeners_refuse_binding_and_raw_sockets` | The image over the scratch, in a network of a guest at `10.0.0.2/24` with ingress allowed, through which OpenVMM publishes the guest's listeners | A root configuration whose listeners are published; root with `CAP_NET_BIND_SERVICE`, and with `CAP_NET_RAW`, which the guest refuses at stage 0 with `EPERM`, fenced and without output, and with `CAP_CHOWN`, which holds it; and an execution with exactly its start's environment, without a proxy |
 
 A row names the root, the image, the GPT disk's top-layer variant, the
 identity that the launch expects of the image, the upper, the runtime
 directory, the overlay mode, the scratch's journal policy, the bound of the
-first partition, the sandbox's workload identity, and the host paths that the
+first partition, the sandbox's workload identity, the VM's network, which the
+launch reads from a file that the scenario writes, and the host paths that the
 launch shares, and what the scenario expects: a root that the guest assembles,
 with a check that probes it or runs executions in it, a teardown that fails
 after a check, the stage that fails, with its problem, a mapping of the table

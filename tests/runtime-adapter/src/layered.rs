@@ -43,9 +43,9 @@
 //! listeners are published, as OpenVMM publishes them: to the host's private networks with
 //! ingress allowed, or on host loopback with host-loopback access allowed. The executions enter
 //! the root with that publication, which refuses `CAP_NET_BIND_SERVICE` and `CAP_NET_RAW` while
-//! listeners are published, since either could forge an announcement. The host gives an
-//! execution the URL of a proxy-only network's proxy, as the guest sees it, in its environment,
-//! with [`with_proxy`].
+//! listeners are published, since either could forge an announcement. The host program's `exec`
+//! gives each execution the URL of a proxy-only network's proxy, as the guest sees it, in its
+//! environment, with [`with_proxy`], from the plan that [`LaunchRecord::read_plan`] reads back.
 //!
 //! The host records what it launched in the sandbox's store, beside NVX's runtime records, as a
 //! [`LaunchRecord`], with the bindings that the launch checked, and the plan, which keeps the

@@ -91,14 +91,17 @@
 //!   ID GID, with the supplementary groups GIDs and the capabilities numbered N, such as 0 for
 //!   `CAP_CHOWN`, if given, and the guest checks its account, unless `--numeric` says that the IDs
 //!   have none. It starts in the root's directory DIR, or `/`, with exactly the environment of its
-//!   `--env` entries. It runs for at most a minute, with 16 KiB chunks and the credit of 4 of them
-//!   for its input and 8 for its output, which its standard output and error share. The command
-//!   keeps at most 16 MiB of each stream, and cancels an execution whose stream would exceed them;
-//!   see `runtime_adapter::exec::MAX_CAPTURE`. Execution N, from 1, has the key `(B + N, E)`: E is
-//!   the epoch of the command's attachment, and B the first 8 bytes of the broker instance's ID, as
-//!   a little-endian number. The guest refuses a key that it heard of before, and the epochs of a
-//!   broker instance only advance, while a broker restored from a snapshot has a new instance ID,
-//!   so no command repeats the key of another's execution.
+//!   `--env` entries, then, if the VM's network has a proxy, the proxy's URL as the guest sees it
+//!   in `http_proxy`, `https_proxy`, `HTTP_PROXY`, and `HTTPS_PROXY`, unless the entries name any
+//!   of them; see `runtime_adapter::layered::with_proxy`. It runs for at most a minute, with 16 KiB
+//!   chunks and the credit of 4 of them for its input and 8 for its output, which its standard
+//!   output and error share. The command keeps at most 16 MiB of each stream, and cancels an
+//!   execution whose stream would exceed them; see `runtime_adapter::exec::MAX_CAPTURE`. Execution
+//!   N, from 1, has the key `(B + N, E)`: E is the epoch of the command's attachment, and B the
+//!   first 8 bytes of the broker instance's ID, as a little-endian number. The guest refuses a key
+//!   that it heard of before, and the epochs of a broker instance only advance, while a broker
+//!   restored from a snapshot has a new instance ID, so no command repeats the key of another's
+//!   execution.
 //!
 //! Each command but `stage` takes NVX's artifacts from the directory that `NVX_ARTIFACTS_DIR`
 //! names, a repository checkout or an extracted release, and the VM's runtime identity from NVX's
@@ -178,7 +181,9 @@ use runtime_adapter::frame::{MAX_BODY, Message};
 use runtime_adapter::hook::{Step, StepHook};
 use runtime_adapter::host::{self, Client, ClientError, Executions, OrderError};
 use runtime_adapter::initramfs;
-use runtime_adapter::layered::{LaunchRecord, LayeredLaunch, Share, Shares, Staged, read_network};
+use runtime_adapter::layered::{
+    LaunchRecord, LayeredLaunch, Share, Shares, Staged, read_network, with_proxy,
+};
 use runtime_adapter::probe::{Probe, ProbeReply, escape};
 use runtime_adapter::root::{JournalPolicy, OverlayMode, RootFailure};
 use runtime_adapter::runtime::Runtime;
@@ -1285,6 +1290,9 @@ fn exec(store: &Path, guest_build: &str, executions: &[Execution]) -> Result<Exi
         Ok(vmm) => vmm,
         Err(status) => return Ok(status),
     };
+    // Each execution finds the URL of the proxy of the VM's network, if any, in its environment,
+    // from the plan that the launch recorded.
+    let plan = LaunchRecord::read_plan(store.dir()).map_err(|error| describe(&error))?;
     let deadline = Instant::now() + SESSION_TIMEOUT;
     let capability = store.read_capability().map_err(|error| describe(&error))?;
     let mut client = connect(&vmm, &capability, deadline)?;
@@ -1296,8 +1304,12 @@ fn exec(store: &Path, guest_build: &str, executions: &[Execution]) -> Result<Exi
     let mut ids = Vec::new();
     for (number, execution) in (1..).zip(executions) {
         let key = Key::new(base.wrapping_add(number), identity.epoch);
+        let start = match &plan {
+            Some(plan) => with_proxy(execution.start(key), plan),
+            None => execution.start(key),
+        };
         running
-            .start(&mut client, execution.start(key), exec_timers(), deadline)
+            .start(&mut client, start, exec_timers(), deadline)
             .map_err(|error| format!("cannot start execution {number}: {}", describe(&error)))?;
         ids.push(key.id());
     }
