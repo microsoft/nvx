@@ -520,7 +520,7 @@ pub enum RootStage {
     /// Receiving and checking the root configuration.
     Configuration,
     /// Reading the boot layout of the root from the kernel command line, and checking that the
-    /// guest can assemble it, and the hostname of the executions there.
+    /// guest can assemble it.
     Layout,
     /// Bootstrapping the guest for the root: its cgroups, and user namespaces.
     Bootstrap,

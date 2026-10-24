@@ -21,11 +21,11 @@
 //! 1. It opens the tty and attaches the session.
 //! 2. It receives the host's root configuration, a [`RootConfig`], and checks it.
 //! 3. It reads the boot layout of the root from the kernel command line with
-//!    `nvx::protocol::root::RootLayout::parse`, the executions' hostname, and the host export, if
-//!    the command line names one, with `nvx::protocol::export::HostExport::parse`, then bootstraps
-//!    the guest, assembles the root, and mounts the export out of the root. If the configuration
-//!    names a workload identity for the whole sandbox, it then checks the identity's account in the
-//!    assembled root, in existing-account mode, through `nvx::guest::entry`.
+//!    `nvx::protocol::root::RootLayout::parse`, and the host export, if the command line names one,
+//!    with `nvx::protocol::export::HostExport::parse`, then bootstraps the guest, assembles the
+//!    root, and mounts the export out of the root. If the configuration names a workload identity
+//!    for the whole sandbox, it then checks the identity's account in the assembled root, in
+//!    existing-account mode, through `nvx::guest::entry`.
 //! 4. It answers `Ready`, with the guest agent's build, [`GUEST_BUILD`], or `RootFailed` with the
 //!    stage that failed, and then ends.
 //! 5. It applies the host's mapping table beneath the root, from the export, in the parts that
@@ -46,11 +46,8 @@
 //! configures a scratch for a root over RAM, bounds a first partition for an EROFS image, or
 //! announces mappings while the kernel command line names no host export, from which they come,
 //! and a command line whose tokens of the export break their rules. An export that fails to mount
-//! fails the assembly. The executions' hostname is the value of the kernel command line's first
-//! `nvx_hostname=` parameter, which NVX's sandbox plans configure, and which NVX's init agent reads
-//! too, or `nvx-sandbox`, `nvx::guest::entry::DEFAULT_HOSTNAME`, without one, or with an empty one.
-//! A hostname of more than 64 bytes fails the layout stage. A workload identity whose account the
-//! assembled root lacks fails the identity stage.
+//! fails the assembly. A workload identity whose account the assembled root lacks fails the
+//! identity stage.
 //!
 //! The worker, and with it the VM, ends with 0 once the host stopped it, after a teardown that
 //! succeeded, with the stage's [exit status](RootStage::exit_status) once a stage failed, from 11
@@ -127,23 +124,23 @@
 //!   at stage 0, with `EAGAIN`, `ENOMEM`, the `errno` of the refusal, or that of the preparation
 //!   or the spawn.
 //! - Each program enters the assembled root through `nvx::guest::entry`, as an [`Entrance`]
-//!   describes it: in new mount, PID, and UTS namespaces, with the root moved over `/`, the
-//!   configured hostname, the image's own machine ID, and no time status, so that the entry binds
-//!   nothing into the root, and with published listeners, the entry's default. It runs as the
-//!   identity that exactly one source names: the sandbox's workload identity, which the root
+//!   describes it: in new mount, PID, and UTS namespaces, with the root moved over `/`, the entry's
+//!   default hostname, `nvx-sandbox`, the image's own machine ID, and no time status, so that the
+//!   entry binds nothing into the root, and with published listeners, the entry's default. It runs
+//!   as the identity that exactly one source names: the sandbox's workload identity, which the root
 //!   configuration names, with no supplementary groups or capabilities, or, in a sandbox without
 //!   one, the identity that its start names, with its supplementary groups, its capabilities, and
 //!   its account mode. A start that names an identity in a sandbox with a workload identity, or
 //!   none in a sandbox without one, is refused with `EINVAL`. Before the worker prepares the
-//!   execution's cgroup, the entry checks the identity, and reads its account in
-//!   existing-account mode: it refuses with `EPERM` a capability outside its allowlist, any
-//!   capability of a user ID other than 0, and `CAP_NET_BIND_SERVICE` and `CAP_NET_RAW` while
-//!   listeners are published, with `ENOENT` an identity without the user ID's passwd entry or
-//!   the group ID's group entry, with the error of an account database or a root that it cannot
-//!   read, and with `EINVAL` otherwise. The program starts in the working directory of its start,
-//!   or in the root's `/`, with exactly the environment of its start, and leads a session of its
-//!   own, without a controlling terminal, and the process group that the session creates. As PID
-//!   1 of its PID namespace, its end ends every process of the namespace.
+//!   execution's cgroup, the entry checks the identity, and reads its account in existing-account
+//!   mode: it refuses with `EPERM` a capability outside its allowlist, any capability of a user ID
+//!   other than 0, and `CAP_NET_BIND_SERVICE` and `CAP_NET_RAW` while listeners are published, with
+//!   `ENOENT` an identity without the user ID's passwd entry or the group ID's group entry, with
+//!   the error of an account database or a root that it cannot read, and with `EINVAL` otherwise.
+//!   The program starts in the working directory of its start, or in the root's `/`, with exactly
+//!   the environment of its start, and leads a session of its own, without a controlling terminal,
+//!   and the process group that the session creates. As PID 1 of its PID namespace, its end ends
+//!   every process of the namespace.
 //! - Each execution runs in a cgroup of its own below the workload cgroup, `execution-N`, where N
 //!   counts the cgroups that the worker prepared. The worker prepares it with
 //!   `nvx::guest::cgroup::ExecutionCgroup::prepare`, and the program joins it as it spawns,
@@ -266,10 +263,6 @@ pub const MAX_HISTORY: usize = 1024;
 /// The kernel command line, from which the worker reads the boot layout of the root.
 const COMMAND_LINE: &str = "/proc/cmdline";
 
-/// The kernel command line's parameter that names the executions' hostname, as NVX's init agent
-/// reads it.
-const HOSTNAME_PARAMETER: &[u8] = b"nvx_hostname=";
-
 /// How one execution enters the assembled root: the inputs of its `nvx::guest::entry::Entry` that
 /// the worker chooses. The entry keeps its defaults for the rest: new mount, PID, and UTS
 /// namespaces, with the root moved over `/`, the image's own machine ID and no time status, which
@@ -279,7 +272,7 @@ const HOSTNAME_PARAMETER: &[u8] = b"nvx_hostname=";
 pub struct Entrance {
     /// The identity: the sandbox's workload identity, or the one that the execution's start names.
     pub identity: Identity,
-    /// The hostname that the kernel command line configures.
+    /// The hostname, the sandbox's: the entry's default.
     pub hostname: Vec<u8>,
 }
 
@@ -610,19 +603,19 @@ fn serve_root<S: Read + Write + AsFd>(
     })
 }
 
-/// Checks the root configuration `body`, reads the boot layout of the root, the executions'
-/// hostname, and the host export, bootstraps the guest, assembles the root, mounts the export out
-/// of it, if the kernel command line names one, and checks the account of the sandbox's workload
-/// identity there, if the configuration names one, through `operations`. Returns the configuration,
-/// with the sandbox in which the executions run, or the failure of the stage that failed: the
-/// export's mount ends the assembly.
+/// Checks the root configuration `body`, reads the boot layout of the root and the host export,
+/// bootstraps the guest, assembles the root, mounts the export out of it, if the kernel command
+/// line names one, and checks the account of the sandbox's workload identity there, if the
+/// configuration names one, through `operations`. Returns the configuration, with the sandbox in
+/// which the executions run, or the failure of the stage that failed: the export's mount ends the
+/// assembly.
 fn assemble(
     operations: &mut dyn RootOperations,
     body: &[u8],
 ) -> Result<(RootConfig, Sandbox), RootFailure> {
     let config = RootConfig::decode(body)
         .map_err(|error| RootFailure::new(RootStage::Configuration, error.problem()))?;
-    let (layout, export, hostname) = layout(operations, &config)
+    let (layout, export) = layout(operations, &config)
         .map_err(|problem| RootFailure::new(RootStage::Layout, problem))?;
     operations
         .bootstrap(&config)
@@ -635,10 +628,11 @@ fn assemble(
             .mount_export(export)
             .map_err(|problem| RootFailure::new(RootStage::Assembly, problem))?;
     }
-    if let Some((uid, gid)) = config.workload_identity {
+    let sandbox = Sandbox::new(config.workload_identity);
+    if let Some((uid, gid)) = sandbox.identity {
         let entrance = Entrance {
             identity: Identity::new(uid, gid),
-            hostname: hostname.clone(),
+            hostname: sandbox.hostname.clone(),
         };
         operations.prepare(&entrance).map_err(|error| {
             RootFailure::new(
@@ -647,22 +641,18 @@ fn assemble(
             )
         })?;
     }
-    let sandbox = Sandbox {
-        hostname,
-        identity: config.workload_identity,
-    };
     Ok((config, sandbox))
 }
 
-/// Reads the boot layout of the root, the executions' hostname, and the host export, if any, from
-/// the kernel command line, through `operations`, and checks that the worker assembles them as
-/// `config` configures it: an EROFS image or a GPT disk, over an ext4 scratch, or over RAM if
-/// `config` configures no scratch, with a bound of the first partition for a GPT disk alone, and
-/// with a host export, the source of the mapping table, if `config` announces mappings.
+/// Reads the boot layout of the root, and the host export, if any, from the kernel command line,
+/// through `operations`, and checks that the worker assembles them as `config` configures it: an
+/// EROFS image or a GPT disk, over an ext4 scratch, or over RAM if `config` configures no scratch,
+/// with a bound of the first partition for a GPT disk alone, and with a host export, the source of
+/// the mapping table, if `config` announces mappings.
 fn layout(
     operations: &mut dyn RootOperations,
     config: &RootConfig,
-) -> Result<(RootLayout, Option<HostExport>, Vec<u8>), String> {
+) -> Result<(RootLayout, Option<HostExport>), String> {
     let command_line = operations.command_line()?;
     let layout = RootLayout::parse(&command_line)
         .map_err(|error| format!("the kernel command line has invalid boot tokens: {error}"))?
@@ -693,29 +683,7 @@ fn layout(
              line names no host export to map from"
         ));
     }
-    Ok((layout, export, hostname(&command_line)?))
-}
-
-/// Returns the hostname that the kernel command line `command_line` configures, as NVX's init
-/// agent reads it: the value of its first `nvx_hostname=` parameter, or
-/// [`DEFAULT_HOSTNAME`](entry::DEFAULT_HOSTNAME) if it has none, or an empty one. A hostname of
-/// more than [`MAX_HOSTNAME_BYTES`](entry::MAX_HOSTNAME_BYTES), or with a NUL, is refused.
-fn hostname(command_line: &[u8]) -> Result<Vec<u8>, String> {
-    let named = command_line
-        .split(u8::is_ascii_whitespace)
-        .find_map(|parameter| parameter.strip_prefix(HOSTNAME_PARAMETER));
-    match named {
-        None | Some([]) => Ok(entry::DEFAULT_HOSTNAME.as_bytes().to_vec()),
-        Some(hostname) if hostname.len() > entry::MAX_HOSTNAME_BYTES || hostname.contains(&0) => {
-            Err(format!(
-                "the kernel command line names a hostname that is longer than {} bytes, or \
-                 holds a NUL: {:?}",
-                entry::MAX_HOSTNAME_BYTES,
-                String::from_utf8_lossy(hostname)
-            ))
-        }
-        Some(hostname) => Ok(hostname.to_vec()),
-    }
+    Ok((layout, export))
 }
 
 /// Runs the probe `body` through `operations`, and returns the worker's answer: a report of what

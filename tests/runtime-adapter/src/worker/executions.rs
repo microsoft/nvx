@@ -92,11 +92,23 @@ pub(super) struct Executions {
 /// [`Entrance`] shares.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct Sandbox {
-    /// The executions' hostname, which the kernel command line configures.
+    /// The executions' hostname.
     pub(super) hostname: Vec<u8>,
     /// The sandbox's workload identity, its user ID and group ID, if the root configuration
     /// names one, as which every execution runs.
     pub(super) identity: Option<(u32, u32)>,
+}
+
+impl Sandbox {
+    /// Returns the sandbox whose workload identity is `identity`, if it has one. Its executions
+    /// take the entry's default hostname, [`DEFAULT_HOSTNAME`](entry::DEFAULT_HOSTNAME), as
+    /// nothing configures another: this is the one place that names their hostname.
+    pub(super) fn new(identity: Option<(u32, u32)>) -> Self {
+        Self {
+            hostname: entry::DEFAULT_HOSTNAME.as_bytes().to_vec(),
+            identity,
+        }
+    }
 }
 
 /// One of the worker's executions: the binding of its runner to its program, and either the
@@ -127,10 +139,7 @@ impl Executions {
             reaped: None,
             cleared: None,
             cgroups: None,
-            sandbox: Sandbox {
-                hostname: entry::DEFAULT_HOSTNAME.as_bytes().to_vec(),
-                identity: None,
-            },
+            sandbox: Sandbox::new(None),
             prepared: 0,
             fenced: Vec::new(),
             turn: 0,

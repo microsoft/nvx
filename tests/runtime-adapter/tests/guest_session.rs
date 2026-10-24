@@ -14,13 +14,12 @@
 //! that it mounts, the mapping table that it applies in order, in parts, which outlives a reset, a
 //! table of zero mappings, which does no work, the parts that it refuses, a mapping that fails and
 //! latches the root, the start of the sandbox, and the executions and starts that it refuses out of
-//! order, each stage that fails, the hostname that the kernel command line configures, the account
-//! check of a sandbox's workload identity, the requests that it serves once the root is ready, its
-//! stop, the messages that it refuses, and a broker that closes only its end of the stream, which
-//! still receives the worker's replies. The binary's PID 1 of a layered root, and its worker, run
-//! on a pseudo-terminal too, on the test's host, whose kernel command line names no layered root,
-//! where PID 1 also collects the statuses that real-time signals leave, whatever the names of its
-//! children.
+//! order, each stage that fails, the account check of a sandbox's workload identity, the requests
+//! that it serves once the root is ready, its stop, the messages that it refuses, and a broker that
+//! closes only its end of the stream, which still receives the worker's replies. The binary's PID 1
+//! of a layered root, and its worker, run on a pseudo-terminal too, on the test's host, whose
+//! kernel command line names no layered root, where PID 1 also collects the statuses that real-time
+//! signals leave, whatever the names of its children.
 //!
 //! The worker's executions run behind the test broker too, whose host side drives the engine's
 //! peers: the tests cover several executions at once, byte-exact, a stalled sink and a full
@@ -1552,14 +1551,6 @@ fn exported(config: &RootConfig) -> Vec<Call> {
     ]
 }
 
-/// Returns the kernel command line of `layout` that names the executions' hostname `hostname`.
-fn naming_hostname(layout: &RootLayout, hostname: &str) -> String {
-    format!(
-        "console=hvc0 nvx_sandbox=1 {} nvx_hostname={hostname}",
-        layout.tokens().join(" ")
-    )
-}
-
 /// Returns the probe that `text` names.
 fn probe(text: &str) -> Probe {
     Probe::parse(text).unwrap()
@@ -1688,7 +1679,6 @@ fn the_worker_reports_the_stage_that_failed_and_ends_with_its_status() {
         workload_identity: Some((4242, 4242)),
         ..RootConfig::default()
     };
-    let long = naming_hostname(&layout(), &"h".repeat(65));
     let cases = [
         (
             "a configuration of another version",
@@ -1799,14 +1789,6 @@ fn the_worker_reports_the_stage_that_failed_and_ends_with_its_status() {
             read(),
         ),
         (
-            "a hostname longer than 64 bytes",
-            FakeRoot::reading(long.as_bytes()),
-            config.encode(),
-            RootStage::Layout,
-            "the kernel command line names a hostname that is longer than 64 bytes",
-            read(),
-        ),
-        (
             "a bootstrap that failed",
             FakeRoot::failing(Operation::Bootstrap, "failed to create the agent's cgroup"),
             config.encode(),
@@ -1896,10 +1878,8 @@ fn entrances(root: &FakeRoot) -> Vec<Entrance> {
 
 #[test]
 fn the_worker_checks_the_account_of_the_sandbox_s_workload_identity_in_the_assembled_root() {
-    // The kernel command line names the executions' hostname, which the check's entry takes
-    // too, as every execution's does.
-    let root = FakeRoot::reading(naming_hostname(&layout(), "example").as_bytes());
-    let (mut broker, working) = start_worker(root);
+    // The check's entry takes the default hostname, as every execution's does.
+    let (mut broker, working) = start_worker(FakeRoot::booting(&layout()));
     broker.attach(FIRST);
     let config = sandbox();
     let messages = [Message::RootConfig(config.encode()), Message::Stop];
@@ -1907,10 +1887,7 @@ fn the_worker_checks_the_account_of_the_sandbox_s_workload_identity_in_the_assem
     assert_eq!(replies, [ready(), Message::Stopped]);
     let (root, worked) = joined(working);
     assert_eq!(worked.unwrap(), Worked::Stopped);
-    let checked = Entrance {
-        identity: entry::Identity::new(WORKLOAD.0, WORKLOAD.1),
-        hostname: b"example".to_vec(),
-    };
+    let checked = entrance(entry::Identity::new(WORKLOAD.0, WORKLOAD.1));
     let expected = [
         Call::CommandLine,
         Call::Bootstrap(config.clone()),
@@ -1919,29 +1896,6 @@ fn the_worker_checks_the_account_of_the_sandbox_s_workload_identity_in_the_assem
         Call::Teardown,
     ];
     assert_eq!(root.calls, expected);
-
-    // An empty hostname is the default one, and only the first names it.
-    for (command_line, hostname) in [
-        (naming_hostname(&layout(), ""), entry::DEFAULT_HOSTNAME),
-        (
-            format!(
-                "{} nvx_hostname=second",
-                naming_hostname(&layout(), "first")
-            ),
-            "first",
-        ),
-    ] {
-        let mut host = Host::configured(FakeRoot::reading(command_line.as_bytes()), &sandbox());
-        host.start(start_of(1, shell("exit 0")), Vec::new());
-        host.run_until(|host| host.outcome(1).is_some());
-        let (root, worked) = host.stop();
-        assert_eq!(worked.unwrap(), Worked::Stopped);
-        let entrance = Entrance {
-            identity: entry::Identity::new(WORKLOAD.0, WORKLOAD.1),
-            hostname: hostname.as_bytes().to_vec(),
-        };
-        assert_eq!(entrances(&root), [entrance.clone(), entrance], "{hostname}");
-    }
 }
 
 #[test]
@@ -3648,9 +3602,8 @@ fn an_execution_runs_in_its_working_directory_with_exactly_its_environment() {
 fn an_execution_enters_the_root_as_the_identity_that_its_start_names() {
     // In a sandbox without a workload identity, each start names an identity, with its
     // supplementary groups, its capabilities, and its account mode, which the worker prepares an
-    // entry with, and the hostname that the kernel command line configures.
-    let root = FakeRoot::reading(naming_hostname(&layout(), "example").as_bytes());
-    let mut host = Host::configured(root, &RootConfig::default());
+    // entry with, and the default hostname.
+    let mut host = Host::configured(FakeRoot::booting(&layout()), &RootConfig::default());
     let bit = |capability: Capability| 1 << capability.number();
     let identities = [
         exec::Identity {
@@ -3687,10 +3640,7 @@ fn an_execution_enters_the_root_as_the_identity_that_its_start_names() {
         entry::Identity::new(WORKLOAD.0, WORKLOAD.1).groups([50, WORKLOAD.1]),
         entry::Identity::new(4242, 4243).account(entry::AccountMode::Numeric),
     ]
-    .map(|identity| Entrance {
-        identity,
-        hostname: b"example".to_vec(),
-    });
+    .map(entrance);
     assert_eq!(entrances(&root), expected);
 }
 
