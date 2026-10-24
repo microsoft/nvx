@@ -76,8 +76,8 @@
 //! - holds no `\`, `=`, or `,`;
 //! - is not where a container runtime mounts or binds in the root, as
 //!   [`protocol::share`](crate::protocol::share) lists them for the host and the guest: `/proc`,
-//!   `/sys`, `/dev`, `/.nvx-agent`, `/etc/machine-id`, `/run/nvx/time`, or below them, nor `/etc`,
-//!   `/run`, or `/run/nvx`, below which it mounts;
+//!   `/sys`, `/dev`, `/.nvx-agent`, `/etc/machine-id`, `/etc/resolv.conf`, `/run/nvx/time`, or
+//!   below them, nor `/etc`, `/run`, or `/run/nvx`, below which it mounts;
 //! - and is not another share's or mapping's target, nor inside one, nor holds one.
 //!
 //! The root's [`Mapper`] then attaches the shares beneath the overlay's descriptor, as

@@ -364,8 +364,8 @@ impl Reserved {
 
     /// Returns the targets that NVX's container runtime reserves in a container root, which
     /// [`protocol::share`](crate::protocol::share) lists for the host and the guest: the trees
-    /// `/proc`, `/sys`, `/dev`, `/.nvx-agent`, `/etc/machine-id`, and `/run/nvx/time`, and the
-    /// paths `/etc`, `/run`, and `/run/nvx`.
+    /// `/proc`, `/sys`, `/dev`, `/.nvx-agent`, `/etc/machine-id`, `/etc/resolv.conf`, and
+    /// `/run/nvx/time`, and the paths `/etc`, `/run`, and `/run/nvx`.
     pub fn container_root() -> Self {
         Self::new(RESERVED_MOUNT_TARGETS, RESERVED_EXACT_MOUNT_TARGETS)
             .expect("the container runtime's reserved targets are canonical")

@@ -731,11 +731,14 @@ fn launch_contract_attaches_a_file_as_an_aggregate_child() {
         message(MountKind::from_name("socket")),
         "unsupported sandbox mount kind 'socket'; choose directory or file"
     );
-    // The runtime replaces /etc/machine-id with a file, and binds its time state over
-    // /run/nvx/time, so nothing at or below them may be shared.
+    // The runtime replaces /etc/machine-id with a file, binds the guest's resolver file over
+    // /etc/resolv.conf, and binds its time state over /run/nvx/time, so nothing at or below them
+    // may be shared.
     for target in [
         "/etc/machine-id",
         "/etc/machine-id/child",
+        "/etc/resolv.conf",
+        "/etc/resolv.conf/child",
         "/run/nvx/time",
         "/run/nvx/time/state",
     ] {

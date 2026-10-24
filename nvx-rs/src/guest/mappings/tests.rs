@@ -511,6 +511,7 @@ fn reserved_targets_and_their_ancestors_are_refused() {
         "/.nvx-agent/tool",
         "/etc",
         "/etc/machine-id",
+        "/etc/resolv.conf",
         "/run",
         "/run/nvx",
         "/run/nvx/time/x",
@@ -524,6 +525,7 @@ fn reserved_targets_and_their_ancestors_are_refused() {
     for target in [
         "/etc/app",
         "/etc/machine-ids",
+        "/etc/resolvconf",
         "/procs",
         "/run/app",
         "/workspace",
