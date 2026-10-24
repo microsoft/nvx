@@ -103,7 +103,7 @@ nvx/
 |-- nvx-rs/                      Rust crate `nvx` for the NVX mechanics
 |   |-- src/
 |   |   |-- protocol/            Control-console codec, NVXS session, and the guest targets that live shares may not take, shared by the host and the guest
-|   |   |-- activation/          The activation record of a layered root, its canonical encoding, and what Ready reports about it, shared by the host, the guest, and every adapter's framing
+|   |   |-- activation/          The activation record of a layered root, its canonical encoding and configuration identity, and what Ready reports about it, shared by the host, the guest, and every adapter's framing
 |   |   |-- contract.rs          Control-contract versions and release compatibility
 |   |   |-- net/                 CIDR parsing and subtraction, and hostname and guest-network forms
 |   |   |-- gpt/                 Strict reading of GPT disks whose first partition configures an adapter and whose other partitions hold a root's read-only layers, shared by the host and the guest
