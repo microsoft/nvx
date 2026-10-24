@@ -10,9 +10,10 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use super::caller::{is_report_staging, is_store_temporary};
+use super::files::sync_dir;
 use super::{
-    CallerFiles, FILE_NAMES, JOURNAL_NAME, LOCK_NAME, LockedStore, RUNTIME_NAME, Races,
-    SandboxStore, Taken, absolute, pause, transition_in_progress,
+    CLONE_BINDING_NAME, CallerFiles, FILE_NAMES, JOURNAL_NAME, LOCK_NAME, LockedStore,
+    RUNTIME_NAME, Races, SandboxStore, Taken, absolute, pause, transition_in_progress,
 };
 use crate::error::{Error, ErrorCode, ErrorKind, Result};
 use crate::host::platform;
@@ -238,14 +239,18 @@ impl LockedStore {
     /// The removal refuses, and removes nothing, while the store records a VM or a launch: the
     /// caller reattaches to the VM and stops it, or recovers the launch, first, as
     /// [`supervisor::reattach`](crate::host::supervisor::reattach) does. It then removes the
-    /// store's files but its lock, the caller's files, its configuration record last, so that an
-    /// interrupted removal leaves a provisioned sandbox, which can be removed again, and the
-    /// temporary files that the store owns. It refuses the entries that are neither the store's
-    /// nor the caller's, which it names in the order in which the directory lists them, and keeps
-    /// them and the directory; the lock file goes as the lock is released, since the configuration
-    /// record is gone. Otherwise it removes its lock file while it still holds the lock, so that a
-    /// transition that waited for the lock finds the sandbox gone rather than halfway removed, and
-    /// then the directory, as long as the path still names it.
+    /// sandbox's [clone binding](CLONE_BINDING_NAME), if it holds one, and makes the binding's
+    /// absence durable before anything else goes, so that no crash after the removal of the
+    /// directory, or of one of its ancestors, brings back a binding whose lease a retirement may
+    /// have ended. It then removes the store's files but its lock, the caller's files, its
+    /// configuration record last, so that an interrupted removal leaves a provisioned sandbox,
+    /// which can be removed again, and the temporary files that the store owns. It refuses the
+    /// entries that are neither the store's nor the caller's, which it names in the order in which
+    /// the directory lists them, and keeps them and the directory; the lock file goes as the lock
+    /// is released, since the configuration record is gone. Otherwise it removes its lock file
+    /// while it still holds the lock, so that a transition that waited for the lock finds the
+    /// sandbox gone rather than halfway removed, and then the directory, as long as the path still
+    /// names it.
     ///
     /// Lock files of other transitions, and on NFS other removed files that handles still hold,
     /// can keep the emptied directory, and are not refused: NFS renames a removed file that is
@@ -258,15 +263,19 @@ impl LockedStore {
     /// [`wait`](Lingering::wait) removes the directory once it empties. It returns `None` once the
     /// directory is gone, whoever removed it.
     pub fn remove(self) -> std::result::Result<Option<Lingering>, RemovalError> {
-        self.remove_contents()?;
+        self.remove_contents(&sync_dir)?;
         self.remove_directory()
     }
 
     /// Empties the directory but for lingering files, its own lock file included, as
     /// [`remove`](Self::remove) does first: it refuses without the caller's configuration record
-    /// and while the store records a VM or a launch, removes the store's files and the caller's,
-    /// and the temporary files that the store owns, and refuses any other entry.
-    fn remove_contents(&self) -> std::result::Result<(), RemovalError> {
+    /// and while the store records a VM or a launch, removes the clone binding, and makes its
+    /// absence durable with `sync`, removes the store's files and the caller's, and the temporary
+    /// files that the store owns, and refuses any other entry.
+    fn remove_contents(
+        &self,
+        sync: &dyn Fn(&Path) -> Result<()>,
+    ) -> std::result::Result<(), RemovalError> {
         if self.files.config().is_none() {
             return Err(RemovalError::Undeclared);
         }
@@ -278,6 +287,14 @@ impl LockedStore {
                 Err(error) => return Err(RemovalError::Io { path, error }),
             }
         }
+        // The binding's absence, after this removal or after a release that a crash interrupted
+        // before its sync, is durable while the directory, which keeps the sandbox provisioned,
+        // remains.
+        remove_entry(self.path(CLONE_BINDING_NAME))?;
+        sync(self.dir()).map_err(|error| RemovalError::Io {
+            path: self.dir().to_owned(),
+            error: io::Error::other(error),
+        })?;
         let owned: Vec<PathBuf> = FILE_NAMES
             .into_iter()
             .filter(|&name| name != LOCK_NAME)

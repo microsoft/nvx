@@ -377,11 +377,12 @@ impl Index {
 /// a crash of the host too, even when a sandbox and the store are on different filesystems: an
 /// acquisition makes the record of a lease durable before it writes the clone binding, and the
 /// binding before it returns, and a release, or a retirement that finds a binding gone, makes the
-/// binding's absence durable before it removes the record, so that no binding outlasts the record
-/// that keeps its generation; a retirement makes the tombstone durable before it deletes
-/// anything, and each deletion before the next. On Windows, which has no portable way to flush a
-/// directory, a rename or a removal is as durable as the filesystem makes it, as OpenVMM's
-/// publication of a snapshot assumes.
+/// binding's absence durable before it removes the record, as a
+/// [removal](crate::host::store#removal) of a sandbox does before the sandbox goes, so that no
+/// binding outlasts the record that keeps its generation; a retirement makes the tombstone durable
+/// before it deletes anything, and each deletion before the next. On Windows, which has no
+/// portable way to flush a directory, a rename or a removal is as durable as the filesystem makes
+/// it, as OpenVMM's publication of a snapshot assumes.
 ///
 /// # Privacy
 ///

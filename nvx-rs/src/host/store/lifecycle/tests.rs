@@ -1,6 +1,7 @@
 //! Tests of the lifecycle locks, their release, and the removal of a store, by threads of one
 //! process, and by transitions in processes of their own, which [`transition_role`] runs.
 
+use std::cell::RefCell;
 use std::env;
 use std::io::{BufRead, BufReader, Read};
 use std::process::{Child, ChildStdout, Command, Stdio};
@@ -319,6 +320,7 @@ fn a_removal_removes_the_store_the_callers_files_and_the_directory() {
         CONSOLE_NAME,
         CAPABILITY_NAME,
         SOCKET_NAME,
+        CLONE_BINDING_NAME,
         BOOT,
         ".runtime.json.12345.tmp",
         ".sandbox.lock.7.tmp",
@@ -389,16 +391,71 @@ fn a_removal_is_refused_while_a_vm_or_a_launch_is_recorded() {
         let (_directory, dir) = sandbox();
         fs::write(dir.join(name), b"{}").unwrap();
         fs::write(dir.join(LOG_NAME), b"log").unwrap();
+        fs::write(dir.join(CLONE_BINDING_NAME), b"{}").unwrap();
         assert!(
             matches!(remove(&dir), Err(RemovalError::Launched)),
             "{name}"
         );
-        // Nothing was removed, and the provisioned sandbox keeps its lock file.
+        // Nothing was removed, not even the clone binding of the VM that may run, and the
+        // provisioned sandbox keeps its lock file.
         assert_eq!(
             entries_of(&dir),
-            sorted(&[CONFIG, LOCK_NAME, LOG_NAME, name])
+            sorted(&[CLONE_BINDING_NAME, CONFIG, LOCK_NAME, LOG_NAME, name])
         );
     }
+}
+
+#[test]
+fn a_removal_makes_the_absence_of_the_clone_binding_durable_before_it_removes_anything_else() {
+    let (_directory, dir) = sandbox();
+    for name in [CLONE_BINDING_NAME, LOG_NAME, BOOT] {
+        fs::write(dir.join(name), b"{}").unwrap();
+    }
+    let locked = SandboxStore::lock_existing(&dir, &files(), None).unwrap();
+    let synced = RefCell::new(Vec::new());
+    locked
+        .remove_contents(&|synced_dir: &Path| {
+            synced
+                .borrow_mut()
+                .push((synced_dir.to_owned(), entries_of(synced_dir)));
+            Ok(())
+        })
+        .unwrap();
+    // A crash after the sync, even once the directory or one of its ancestors is gone, cannot
+    // bring the binding back, and one before the configuration record goes leaves a provisioned
+    // sandbox, whose removal can be retried.
+    assert_eq!(
+        synced.into_inner(),
+        [(
+            locked.dir().to_owned(),
+            sorted(&[BOOT, CONFIG, LOCK_NAME, LOG_NAME])
+        )]
+    );
+    assert_eq!(entries_of(&dir), sorted(&[LOCK_NAME]));
+    assert!(locked.remove_directory().unwrap().is_none());
+    assert!(!dir.exists());
+}
+
+#[test]
+fn a_removal_that_cannot_make_the_absence_of_the_clone_binding_durable_keeps_the_sandbox() {
+    let (_directory, dir) = sandbox();
+    for name in [CLONE_BINDING_NAME, LOG_NAME] {
+        fs::write(dir.join(name), b"{}").unwrap();
+    }
+    let locked = SandboxStore::lock_existing(&dir, &files(), None).unwrap();
+    let error = locked
+        .remove_contents(&|_: &Path| Err(Error::io("the sync failed")))
+        .unwrap_err();
+    assert!(
+        matches!(&error, RemovalError::Io { path, .. } if path == locked.dir()),
+        "{error}"
+    );
+    assert_eq!(Error::from(error).kind(), ErrorKind::Io);
+    drop(locked);
+    // Only the binding went, so the sandbox is still provisioned, and its removal can be retried.
+    assert_eq!(entries_of(&dir), sorted(&[CONFIG, LOCK_NAME, LOG_NAME]));
+    assert!(remove(&dir).unwrap().is_none());
+    assert!(!dir.exists());
 }
 
 #[test]
@@ -501,7 +558,7 @@ fn a_removal_that_another_finishes_succeeds_and_keeps_what_replaced_the_director
     };
     let (_directory, dir) = sandbox();
     let locked = SandboxStore::lock_existing(&dir, &files(), None).unwrap();
-    locked.remove_contents().unwrap();
+    locked.remove_contents(&sync_dir).unwrap();
     let lingering = locked
         .remove_directory_after(|| removed_by_another(&dir))
         .unwrap();
@@ -510,7 +567,7 @@ fn a_removal_that_another_finishes_succeeds_and_keeps_what_replaced_the_director
     // A directory that replaces it then stays, even an empty one.
     let (_directory, dir) = sandbox();
     let locked = SandboxStore::lock_existing(&dir, &files(), None).unwrap();
-    locked.remove_contents().unwrap();
+    locked.remove_contents(&sync_dir).unwrap();
     let lingering = locked
         .remove_directory_after(|| {
             removed_by_another(&dir);

@@ -193,13 +193,15 @@
 //!
 //! [`LockedStore::remove`] removes a sandbox that no VMM can run in: it refuses while the store
 //! records a VM or a launch, which the caller reattaches to, or recovers, first. It removes the
-//! store's files and the caller's, the configuration record last, and the temporary files that the
-//! store owns: those that an interrupted replacement of one of its files leaves,
-//! `.NAME.NUMBER.tmp`, and the VMM's [report staging file](#the-report-staging-file). It then
-//! refuses entries that are neither the store's nor the caller's, naming them, and keeps the
-//! directory, or removes its lock file while it still holds the lock, and then the directory. A
-//! removal needs the caller's configuration record, whose absence tells the transitions that wait
-//! through it that the sandbox is gone: a lock taken without one refuses it.
+//! sandbox's [clone binding](CLONE_BINDING_NAME) first, and makes its absence durable before
+//! anything else goes. It then removes the store's files and the caller's, the configuration
+//! record last, and the temporary files that the store owns: those that an interrupted
+//! replacement of one of its files leaves, `.NAME.NUMBER.tmp`, and the VMM's
+//! [report staging file](#the-report-staging-file). It then refuses entries that are neither the
+//! store's nor the caller's, naming them, and keeps the directory, or removes its lock file while
+//! it still holds the lock, and then the directory. A removal needs the caller's configuration
+//! record, whose absence tells the transitions that wait through it that the sandbox is gone: a
+//! lock taken without one refuses it.
 //!
 //! Files that are still open can keep the emptied directory for a while: NFS renames a removed
 //! file that is still open, such as the lock file of a waiting transition, to `.nfs*`, Windows
@@ -269,7 +271,8 @@ pub const OUTCOME_NAME: &str = "outcome.json";
 /// Name of the binding of the sandbox's clone to the generation of a template that it leases,
 /// which [`template::Store::acquire`](crate::host::template::Store::acquire) writes, durably,
 /// before the clone's launch, and [`template::Store::release`](crate::host::template::Store::release)
-/// removes once its VM has exited. A [removal](self#removal) of the sandbox removes it too.
+/// removes once its VM has exited. A [removal](self#removal) of the sandbox removes it first, and
+/// makes its absence durable before the sandbox goes.
 pub const CLONE_BINDING_NAME: &str = "clone.json";
 /// Every file that the store keeps in a sandbox's directory. Replacing a record leaves a
 /// temporary file named `.NAME.NUMBER.tmp` beside it only if the replacement was interrupted, and

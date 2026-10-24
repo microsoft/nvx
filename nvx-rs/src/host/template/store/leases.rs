@@ -124,7 +124,9 @@ impl FromStr for LeaseId {
 /// record as its clone binding, [`CLONE_BINDING_NAME`], beside its launch journal. A lease names
 /// its sandbox by the path of its directory with its links resolved, so that no removal or change
 /// of a link, or of a directory that a `..` component passes through, hides the sandbox from a
-/// [retirement](Store::retire), and a sandbox that holds a lease must not move.
+/// [retirement](Store::retire). A sandbox that holds a lease must not move, and goes only through
+/// its store's [removal](LockedStore::remove), which makes the binding's absence durable before
+/// the sandbox goes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Lease {
     /// The lease's identity.
@@ -542,16 +544,18 @@ impl Store {
     /// leaves it. It makes the binding's absence durable first, by syncing the sandbox's
     /// directory, if it is one, and the directory that holds the sandbox's entry, the nearest of
     /// its ancestors that remains, through the links that the sandbox's path names, as a release
-    /// that a crash or a failed sync interrupted, or a removal of the sandbox, may not have.
-    /// If any lease remains, the generation keeps its
-    /// payload and its entry in the index, and the retirement returns [`Retirement::Draining`]
-    /// with the leases, whose clones [release](Self::release) them; a later retirement deletes it.
-    /// Otherwise it removes the generation's payload, then its entry in the index, and then its
-    /// tombstone, each durable before the next, as the tombstone is before the payload goes, so
-    /// that a retirement that a crash interrupts, even one of the host, leaves a tombstoned
-    /// generation, which retiring it again deletes, and returns [`Retirement::Retired`]. A
-    /// generation that the store indexed once, and no longer indexes, is retired already. Its
-    /// store generation is never assigned again.
+    /// that a crash or a failed sync interrupted may not have. A [removal](LockedStore::remove) of
+    /// the sandbox made it durable before the sandbox went; for a sandbox that went otherwise,
+    /// these syncs make it durable only while the directories that held the sandbox remain. If
+    /// any lease remains, the generation keeps its payload and its entry in the index, and the
+    /// retirement returns [`Retirement::Draining`] with the leases, whose clones
+    /// [release](Self::release) them; a later retirement deletes it. Otherwise it removes the
+    /// generation's payload, then its entry in the index, and then its tombstone, each durable
+    /// before the next, as the tombstone is before the payload goes, so that a retirement that a
+    /// crash interrupts, even one of the host, leaves a tombstoned generation, which retiring it
+    /// again deletes, and returns [`Retirement::Retired`]. A generation that the store indexed
+    /// once, and no longer indexes, is retired already. Its store generation is never assigned
+    /// again.
     ///
     /// It also removes the temporary files that interrupted replacements of the records of leases
     /// and tombstones left, since the store writes those only under its lock.
