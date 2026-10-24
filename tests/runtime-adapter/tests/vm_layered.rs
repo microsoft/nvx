@@ -7,8 +7,12 @@
 //! guest assembles, which the scenario probes, or runs executions in through the host program's
 //! `exec`, and the stop tears down, the stage of the root that fails, or a launch that the host
 //! program refuses before it spawns the VM, since the scenario changed what it staged. A root may
-//! give the VM a [`Network`], which the launch reads from a file that the scenario writes. A new
-//! scenario is a new row, with its own checks, through the probes of the worker or executions.
+//! give the VM a [`Network`], which the launch reads from a file that the scenario writes, and
+//! which names the ports of the [`Host`] side that the test binds first: a test proxy, and the
+//! sockets of the destinations that an execution probes, as NVX's proxy-only scenario probes its
+//! network. A scenario whose network stops traffic first boots a VM of an open network over the
+//! same host's side, the positive control; see [`Expect::Controlled`]. A new scenario is a new
+//! row, with its own checks, through the probes of the worker or executions.
 //!
 //! The tests boot VMs, so they are ignored. Besides what the `common` module lists, they read its
 //! fixtures, those of NVX's own layered scenarios, from NVX's artifacts in `NVX_ARTIFACTS_DIR`.
@@ -37,9 +41,15 @@ mod common;
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, File};
+use std::hash::{BuildHasher, RandomState};
 use std::io::{self, Read, Seek, SeekFrom, Write};
+use std::net::{
+    IpAddr, Ipv4Addr, Ipv6Addr, Shutdown, SocketAddr, TcpListener, TcpStream, UdpSocket,
+};
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::thread;
+use std::time::{Duration, Instant};
 
 use nvx::exec::{Key, Limits, Timers, Window};
 use nvx::gpt::{Disk, Expected, ExpectedPartition};
@@ -146,10 +156,45 @@ const EPERM: i32 = 1;
 const EINVAL: i32 = 22;
 /// The number of executions that meet only while all of them run.
 const MEETING: usize = 4;
-/// The URL of the proxy of the scenarios' proxy-only [`Network`] as the guest sees it, at the
-/// gateway of the guest's network, `10.0.0.2/24`: the proxy at port 3128 of host loopback, which
-/// no execution reaches.
-const PROXY_URL: &str = "http://10.0.0.1:3128";
+/// The guest's address and prefix in the scenarios' networks, in a range reserved for
+/// documentation, which no host's own address shares, so that the guest reaches the host's address
+/// through its gateway.
+const GUEST_NETWORK: &str = "192.0.2.2/24";
+/// The gateway of the scenarios' networks, the first address of the guest's, at which the guest
+/// reaches host IPv4 loopback.
+const GATEWAY: Ipv4Addr = Ipv4Addr::new(192, 0, 2, 1);
+/// The gateway's IPv6 address, at which the guest reaches host IPv6 loopback: OpenVMM's portable
+/// profile embeds the guest network's IPv4 addresses in `fd00::/96`.
+const GATEWAY_IPV6: Ipv6Addr = Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0xc000, 0x0201);
+/// The first and the last of the ports that the host draws for its sockets: the dynamic range.
+const PORTS: (u16, u16) = (49152, 65535);
+/// The number of ports that the host draws for a socket before it gives up. Windows excludes
+/// ports per protocol, in blocks, and gives consecutive ports to consecutive binds of port 0, so
+/// the host draws each port independently.
+const PORT_ATTEMPTS: usize = 16;
+/// The URL that the probes request through a proxy. Its host's name is reserved, so that no
+/// resolver knows it, and only a proxy answers the request.
+const PROXY_TARGET: &str = "http://runtime-adapter.invalid/probe";
+/// What the test proxy answers each request with.
+const PROXY_RESPONSE: &str = "RUNTIME-ADAPTER-PROXY";
+/// The longest request head that the test proxy reads, in bytes.
+const REQUEST_LIMIT: usize = 4096;
+/// How long the host waits at a socket for a probe's traffic, which the guest sent before its
+/// execution ended, where the network lets the traffic through.
+const ARRIVAL: Duration = Duration::from_secs(10);
+/// How long the host waits at a socket for a probe's traffic where the network must not let it
+/// through.
+const NEGATIVE_OBSERVATION: Duration = Duration::from_millis(250);
+/// The line with which a listener of the guest greets its client.
+const GREETING: &str = "RUNTIME-ADAPTER-GUEST";
+/// The line with which the host answers the greeting.
+const ANSWER: &str = "RUNTIME-ADAPTER-HOST";
+/// How long, in seconds, a listener of the guest waits for the host where the network publishes
+/// it.
+const LISTENING: u32 = 30;
+/// How long, in seconds, a listener of the guest waits for the host where the network must not
+/// publish it, all of which the host spends trying to reach it.
+const UNPUBLISHED_LISTENING: u32 = 5;
 /// A script that starts a descendant that leads a session of its own and holds the script's
 /// output: the descendant prints its process ID, which is its session's ID, then moves its output
 /// to the script's, which ends the command substitution that reads the ID. The script prints
@@ -164,6 +209,31 @@ const IDENTITY_SCRIPT: &str = "id -u; id -g; id -G; \
     while read -r key value; do \
     case $key in CapPrm:|CapEff:|CapBnd:) echo \"$key $value\";; esac; \
     done </proc/self/status";
+/// A script that prints the number of the guest's network devices besides loopback, as
+/// `/sys/class/net` lists them, `devices N`, then how OpenVMM asked NVX's `/init` to publish the
+/// guest's listeners on the kernel command line, `ingress MODE`, if it did.
+const DEVICE_SCRIPT: &str = "echo \"devices $(ls /sys/class/net | grep -cvx lo)\"; \
+    sed -n 's/.* virtnet_ingress=\\([^ ]*\\).*/ingress \\1/p' /proc/cmdline";
+/// A script that requests its first argument, [`PROXY_TARGET`], through the proxy that its
+/// environment names to `wget` in `http_proxy`, and prints `proxy STATUS RESPONSE`, then tries each
+/// destination that its other arguments name, as `PROTOCOL NAME ADDRESS PORT`, with `nc`, which
+/// sends a UDP probe's name as its datagram, and prints `NAME STATUS`. Over TCP, the status is 0
+/// once the connection opened, and 1 once it failed; a UDP sender cannot see a lost datagram.
+const PROBE_SCRIPT: &str = "response=$(wget -T 5 -qO- \"$1\" 2>&1); \
+    echo \"proxy $? $response\"; shift; \
+    while [ \"$#\" -ge 4 ]; do \
+    case $1 in \
+    tcp) nc -z -w 2 \"$3\" \"$4\" </dev/null >/dev/null 2>&1 ;; \
+    udp) printf '%s\\n' \"$2\" | nc -u -w 1 \"$3\" \"$4\" >/dev/null 2>&1 ;; \
+    *) exit 2 ;; \
+    esac; \
+    echo \"$2 $?\"; shift 4; \
+    done";
+/// A script that listens at the guest's TCP port `$1` for one client, for at most `$2` seconds,
+/// greets it with the line `$3`, prints what it sends until it closes its side, then prints
+/// `listener STATUS`: 0 once the client closed, and 124 once the time ran out without one.
+const LISTENER_SCRIPT: &str =
+    "printf '%s\\n' \"$3\" | timeout \"$2\" nc -l -p \"$1\"; echo \"listener $?\"";
 
 /// The image of a scenario's root.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -207,22 +277,44 @@ enum Upper {
 }
 
 /// The network of a scenario's launch, which the launch reads from a file that the test writes,
-/// in the serde form of a plan's network: the guest at `10.0.0.2/24`, with egress denied.
+/// in the serde form of a plan's network: the guest at [`GUEST_NETWORK`], with egress denied and
+/// no host-loopback access unless the network says otherwise. A network names the ports of the
+/// [`Host`] side that the test binds before the launch.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Network {
-    /// A proxy-only network, whose one way out is the proxy at port 3128 of host loopback, with
-    /// the scheme `http`, which the guest reaches at its gateway, at [`PROXY_URL`].
+    /// A proxy-only network, whose one way out is the test proxy on host loopback, with the scheme
+    /// `http`, which the guest reaches at the same port of its gateway, at [`Host::proxy_url`].
     Proxy,
     /// Ingress allowed, so that OpenVMM publishes the guest's listeners to the host's private
     /// networks.
     Ingress,
+    /// Egress allowed, and host-loopback access in both directions: the guest reaches the test
+    /// proxy and every probe's destination, and OpenVMM publishes its listeners on host loopback.
+    /// It is the positive control of the networks that stop traffic; see [`Expect::Controlled`].
+    Open,
+    /// Everything denied, without a proxy, which attaches no network device.
+    Deny,
+    /// Egress denied but for one rule, which allows TCP to the gateway at the port of
+    /// [`Destination::GatewayPort`], with outbound host-loopback access, so that the guest
+    /// reaches that service of host loopback alone.
+    AllowRule,
+    /// Egress allowed, with outbound host-loopback access: the guest reaches host loopback, and
+    /// the host none of the guest's listeners.
+    Outbound,
+    /// Host-loopback access in both directions, with egress denied: the host reaches the guest's
+    /// listeners on host loopback, at their ports, and the guest reaches nothing, since its own
+    /// connections follow the egress policy.
+    HostLoopback,
+    /// Host-loopback access in both directions, with egress denied, and a forward from the port
+    /// [`Host::forward`] of host loopback to the guest's port [`Host::listener`].
+    Forward,
 }
 
 impl Network {
-    /// Returns the network's serde form.
-    fn form(self) -> Value {
+    /// Returns the network's serde form, which names the ports of the `host`.
+    fn form(self, host: &Host) -> Value {
         let mut form = json!({
-            "guestNetwork": "10.0.0.2/24",
+            "guestNetwork": GUEST_NETWORK,
             "egress": "deny",
             "allow": {"name": "egress.allow", "rules": []},
             "deny": {"name": "egress.deny", "rules": []},
@@ -232,8 +324,34 @@ impl Network {
             "proxy": null,
         });
         match self {
-            Self::Proxy => form["proxy"] = json!({"port": 3128, "scheme": "http"}),
+            Self::Proxy => form["proxy"] = json!({"port": host.proxy_port(), "scheme": "http"}),
             Self::Ingress => form["ingress"] = json!("allow"),
+            Self::Open => {
+                form["egress"] = json!("allow");
+                form["hostLoopback"] = json!("allow");
+            }
+            Self::Deny => {}
+            Self::AllowRule => {
+                let port = host.port(Destination::GatewayPort);
+                form["allow"]["rules"] = json!([{
+                    "to": [{"cidr": format!("{GATEWAY}/32"), "except": []}],
+                    "ports": [{"protocol": "tcp", "port": port, "endPort": null}],
+                }]);
+                form["hostLoopback"] = json!("outbound");
+            }
+            Self::Outbound => {
+                form["egress"] = json!("allow");
+                form["hostLoopback"] = json!("outbound");
+            }
+            Self::HostLoopback => form["hostLoopback"] = json!("allow"),
+            Self::Forward => {
+                form["hostLoopback"] = json!("allow");
+                form["hostLoopbackForwards"] = json!([{
+                    "protocol": "tcp",
+                    "hostPort": host.forward,
+                    "guestPort": host.listener,
+                }]);
+            }
         }
         form
     }
@@ -242,10 +360,264 @@ impl Network {
     /// configuration says.
     fn listeners(self) -> Listeners {
         match self {
-            Self::Proxy => Listeners::Unpublished,
-            Self::Ingress => Listeners::Published,
+            Self::Ingress | Self::Open | Self::HostLoopback | Self::Forward => Listeners::Published,
+            Self::Proxy | Self::Deny | Self::AllowRule | Self::Outbound => Listeners::Unpublished,
         }
     }
+
+    /// Returns how OpenVMM asks NVX's `/init` to publish the guest's listeners on the kernel
+    /// command line, `virtnet_ingress=MODE`, if it does: to the host's private networks, `allow`,
+    /// or on host loopback alone, `host-loopback`.
+    fn ingress(self) -> Option<&'static str> {
+        match self {
+            Self::Ingress => Some("allow"),
+            Self::Open | Self::HostLoopback | Self::Forward => Some("host-loopback"),
+            Self::Proxy | Self::Deny | Self::AllowRule | Self::Outbound => None,
+        }
+    }
+
+    /// Returns whether the network lets the guest reach the test proxy, and the destinations of
+    /// the probes that it lets the guest reach.
+    fn reaches(self) -> (bool, &'static [Destination]) {
+        match self {
+            Self::Open | Self::Outbound => (true, &Destination::ALL),
+            Self::Proxy => (true, &[]),
+            Self::AllowRule => (false, &[Destination::GatewayPort]),
+            Self::Ingress | Self::Deny | Self::HostLoopback | Self::Forward => (false, &[]),
+        }
+    }
+}
+
+/// The destination of a probe besides the proxy: a socket of the host, which the guest reaches
+/// at its gateway, or at the host's own address.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Destination {
+    /// Another port of host IPv4 loopback than the proxy's, over TCP.
+    GatewayPort,
+    /// The proxy's port of host IPv4 loopback, over UDP.
+    GatewayUdp,
+    /// The proxy's port at the host's own address, over TCP, if the host has one.
+    HostAddress,
+    /// The proxy's port of host IPv6 loopback, at the gateway's IPv6 address, over TCP, if the
+    /// host has IPv6 loopback.
+    GatewayIpv6,
+}
+
+impl Destination {
+    /// Every destination.
+    const ALL: [Self; 4] = [
+        Self::GatewayPort,
+        Self::GatewayUdp,
+        Self::HostAddress,
+        Self::GatewayIpv6,
+    ];
+
+    /// Returns the destination's name, which the probe prints.
+    fn name(self) -> &'static str {
+        match self {
+            Self::GatewayPort => "gateway-port",
+            Self::GatewayUdp => "gateway-udp",
+            Self::HostAddress => "host-address",
+            Self::GatewayIpv6 => "gateway-ipv6",
+        }
+    }
+}
+
+/// The socket of the host at which a probe's traffic arrives if the network lets it through.
+enum HostSocket {
+    /// A TCP listener, at which a connection arrives.
+    Tcp(TcpListener),
+    /// A UDP socket, at which a datagram arrives.
+    Udp(UdpSocket),
+}
+
+/// A probe of a scenario's network: a destination, and the host's socket there.
+struct Probe {
+    /// The destination.
+    destination: Destination,
+    /// The address at which the guest reaches the destination.
+    address: IpAddr,
+    /// The destination's port.
+    port: u16,
+    /// The host's socket.
+    socket: HostSocket,
+}
+
+impl Probe {
+    /// Returns the probe's protocol, as the probe script names it.
+    fn protocol(&self) -> &'static str {
+        match self.socket {
+            HostSocket::Tcp(_) => "tcp",
+            HostSocket::Udp(_) => "udp",
+        }
+    }
+}
+
+/// The host's side of a scenario's network, which the test binds before the launch, so that the
+/// network can name its ports: the test proxy, as NVX's proxy-only scenario has it, the sockets
+/// of the probes' destinations, and the ports at which the host reaches a listener of the guest.
+struct Host {
+    /// The test proxy's listener on host IPv4 loopback, which the guest reaches at the same port of
+    /// its gateway.
+    proxy: TcpListener,
+    /// The probes, in the order of [`Destination::ALL`], without those that the host lacks.
+    probes: Vec<Probe>,
+    /// A port that no socket holds for TCP or UDP, on every host address or loopback alone, at
+    /// which a listener of the guest listens, and OpenVMM publishes it on host loopback.
+    listener: u16,
+    /// A free port of host IPv4 loopback, which a [`Network::Forward`] forwards to the guest's
+    /// port [`Self::listener`].
+    forward: u16,
+}
+
+impl Host {
+    /// Binds the test proxy's listener on host IPv4 loopback, at a port at which it binds the
+    /// probes' sockets too: a UDP socket on host IPv4 loopback, a listener at the host's own
+    /// address, if it has one, and a listener on host IPv6 loopback, if it has that; a listener at
+    /// another port of host IPv4 loopback; and draws the ports of a listener of the guest and of a
+    /// forward.
+    fn bind() -> Self {
+        let address = host_address();
+        let ipv6 = TcpListener::bind((Ipv6Addr::LOCALHOST, 0)).is_ok();
+        let other = draw(|port| TcpListener::bind((Ipv4Addr::LOCALHOST, port)));
+        let other_port = other.local_addr().unwrap().port();
+        let (proxy, probes) = draw(|port| {
+            let proxy = TcpListener::bind((Ipv4Addr::LOCALHOST, port))?;
+            let gateway = IpAddr::V4(GATEWAY);
+            let mut probes = vec![Probe {
+                destination: Destination::GatewayUdp,
+                address: gateway,
+                port,
+                socket: HostSocket::Udp(UdpSocket::bind((Ipv4Addr::LOCALHOST, port))?),
+            }];
+            if let Some(address) = address {
+                probes.push(Probe {
+                    destination: Destination::HostAddress,
+                    address,
+                    port,
+                    socket: HostSocket::Tcp(TcpListener::bind((address, port))?),
+                });
+            }
+            if ipv6 {
+                probes.push(Probe {
+                    destination: Destination::GatewayIpv6,
+                    address: IpAddr::V6(GATEWAY_IPV6),
+                    port,
+                    socket: HostSocket::Tcp(TcpListener::bind((Ipv6Addr::LOCALHOST, port))?),
+                });
+            }
+            Ok((proxy, probes))
+        });
+        let proxy_port = proxy.local_addr().unwrap().port();
+        let mut probes = probes;
+        probes.insert(
+            0,
+            Probe {
+                destination: Destination::GatewayPort,
+                address: IpAddr::V4(GATEWAY),
+                port: other_port,
+                socket: HostSocket::Tcp(other),
+            },
+        );
+        // OpenVMM publishes a listener of the guest at the same port of host IPv4 and IPv6
+        // loopback, for TCP and UDP, after it checks, on Windows, every host address of each
+        // family there, and binds a forward's port on host IPv4 loopback. Windows lets a socket
+        // bind every host address beside one that binds loopback alone, and the reverse, so a port
+        // is free only where both bind, for each transport and family, and none of the host's own
+        // sockets takes it.
+        let mut addresses = vec![
+            IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+        ];
+        if ipv6 {
+            addresses.extend([
+                IpAddr::V6(Ipv6Addr::UNSPECIFIED),
+                IpAddr::V6(Ipv6Addr::LOCALHOST),
+            ]);
+        }
+        let free = |port: u16, taken: &[u16]| -> io::Result<u16> {
+            if taken.contains(&port) {
+                return Err(io::Error::new(
+                    io::ErrorKind::AddrInUse,
+                    "a socket of the host's side takes it",
+                ));
+            }
+            for &address in &addresses {
+                TcpListener::bind((address, port))?;
+                UdpSocket::bind((address, port))?;
+            }
+            Ok(port)
+        };
+        let listener = draw(|port| free(port, &[proxy_port, other_port]));
+        let forward = draw(|port| free(port, &[proxy_port, other_port, listener]));
+        Self {
+            proxy,
+            probes,
+            listener,
+            forward,
+        }
+    }
+
+    /// Returns the test proxy's port.
+    fn proxy_port(&self) -> u16 {
+        self.proxy.local_addr().unwrap().port()
+    }
+
+    /// Returns the URL of the test proxy as the guest sees it, at its gateway.
+    fn proxy_url(&self) -> String {
+        format!("http://{GATEWAY}:{}", self.proxy_port())
+    }
+
+    /// Returns the port of the probe of `destination`, which the host always has.
+    fn port(&self, destination: Destination) -> u16 {
+        self.probes
+            .iter()
+            .find(|probe| probe.destination == destination)
+            .map(|probe| probe.port)
+            .unwrap()
+    }
+
+    /// Discards the connections and datagrams that are left at the host's sockets once a VM
+    /// ended, so that the checks of the next VM see its own traffic alone.
+    fn drain(&self) {
+        while accepted(&self.proxy, Duration::ZERO) {}
+        for probe in &self.probes {
+            match &probe.socket {
+                HostSocket::Tcp(listener) => while accepted(listener, Duration::ZERO) {},
+                HostSocket::Udp(socket) => {
+                    socket.set_nonblocking(true).unwrap();
+                    while socket.recv(&mut [0; 4096]).is_ok() {}
+                }
+            }
+        }
+    }
+}
+
+/// Returns what `bind` makes of a port that the host draws from [`PORTS`], independently each
+/// time, until it succeeds, at most [`PORT_ATTEMPTS`] times.
+fn draw<T>(mut bind: impl FnMut(u16) -> io::Result<T>) -> T {
+    let (first, last) = PORTS;
+    let random = RandomState::new();
+    let mut refused = Vec::new();
+    for attempt in 0..PORT_ATTEMPTS {
+        let offset = random.hash_one(attempt) % u64::from(last - first + 1);
+        let port = first + u16::try_from(offset).unwrap();
+        match bind(port) {
+            Ok(bound) => return bound,
+            Err(error) => refused.push(format!("{port}: {error}")),
+        }
+    }
+    panic!("no port drawn from {first} to {last} was free: {refused:?}")
+}
+
+/// Returns the host's own address on its default IPv4 route, if it has one.
+fn host_address() -> Option<IpAddr> {
+    let route = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).ok()?;
+    // Connecting a UDP socket sends nothing: it selects the source address of the route to an
+    // address reserved for documentation.
+    route.connect((Ipv4Addr::new(198, 51, 100, 1), 9)).ok()?;
+    let address = route.local_addr().ok()?.ip();
+    (!address.is_loopback() && !address.is_unspecified()).then_some(address)
 }
 
 /// The layered root of a scenario's launch.
@@ -386,6 +758,15 @@ impl Root {
     fn overlay_mode(&self) -> OverlayMode {
         self.overlay.unwrap_or(OverlayMode::TrustedLowers)
     }
+
+    /// Returns the serde form of the root's network, which names the ports of the `host`, or
+    /// `null` without a network.
+    fn network_form(&self, host: Option<&Host>) -> Value {
+        match (self.network, host) {
+            (Some(network), Some(host)) => network.form(host),
+            _ => Value::Null,
+        }
+    }
 }
 
 /// Returns a UUID other than `identity`, which differs in its last digit.
@@ -485,6 +866,12 @@ enum Expect {
     /// The guest assembles the root, the check probes the VM, and the stop tears the root down,
     /// which leaves a scratch unmounted.
     Ready(fn(&mut Vm<'_>)),
+    /// As `Ready`, after the positive control of the scenario's network, as in NVX's proxy-only
+    /// scenario: first a VM of an [`Network::Open`] network over the same host's side, in which
+    /// every probe's traffic arrives at its socket, and the host reaches a listener of the guest at
+    /// the guest's port of host loopback, which shows that the probes and the listener work, so
+    /// that what does not arrive in the scenario's network shows its policy.
+    Controlled(fn(&mut Vm<'_>)),
     /// The guest assembles the root, the check keeps it busy, and the stop reports the teardown
     /// that failed with this problem, which leaves a scratch mounted when the VM ends.
     TeardownFails(fn(&mut Vm<'_>), &'static str),
@@ -569,6 +956,8 @@ struct Vm<'a> {
     root: Root,
     /// The root configuration that the launch sent.
     config: RootConfig,
+    /// The host's side of the VM's network, if it has one.
+    host: Option<&'a Host>,
 }
 
 impl Vm<'_> {
@@ -908,11 +1297,70 @@ scenarios! {
         root: Root { network: Some(Network::Ingress), ..ROOT },
         expect: Expect::Ready(check_published_listeners),
     };
+    /// A network that denies everything, without a proxy, which attaches no network device: an
+    /// execution reaches neither the test proxy nor any probe's destination.
+    a_denied_network_lets_no_probe_through: Scenario {
+        root: Root { network: Some(Network::Deny), ..ROOT },
+        expect: Expect::Controlled(check_probes),
+    };
+    /// Egress denied but for an allow rule, TCP to a port of host loopback at the gateway, with
+    /// outbound host-loopback access: an execution reaches that port alone.
+    an_allow_rule_lets_only_its_destination_through: Scenario {
+        root: Root { network: Some(Network::AllowRule), ..ROOT },
+        expect: Expect::Controlled(check_probes),
+    };
+    /// A proxy-only network: an execution reaches the test proxy through the URL in its
+    /// environment, and none of the probes' destinations, which never arrive.
+    a_proxy_only_network_lets_only_its_proxy_through: Scenario {
+        root: Root { network: Some(Network::Proxy), ..ROOT },
+        expect: Expect::Controlled(check_probes),
+    };
+    /// Outbound host-loopback access, with egress allowed: an execution reaches host loopback,
+    /// but the host does not reach the guest's listener, which OpenVMM does not publish.
+    outbound_host_loopback_publishes_no_listener: Scenario {
+        root: Root { network: Some(Network::Outbound), ..ROOT },
+        expect: Expect::Controlled(check_host_loopback),
+    };
+    /// Host-loopback access allowed, with egress denied: the host reaches the guest's listener at
+    /// the guest's port of host loopback, while an execution reaches nothing.
+    allowed_host_loopback_publishes_the_listeners: Scenario {
+        root: Root { network: Some(Network::HostLoopback), ..ROOT },
+        expect: Expect::Controlled(check_host_loopback),
+    };
+    /// A forward of a port of host loopback to a guest port: the host reaches the guest's listener
+    /// through it.
+    a_forward_reaches_its_guest_port: Scenario {
+        root: Root { network: Some(Network::Forward), ..ROOT },
+        expect: Expect::Ready(check_forward),
+    };
 }
 
-/// Runs the scenario `name`, `scenario`.
+/// Runs the scenario `name`, `scenario`, after the positive control that it expects, if any, over
+/// the same host's side of its network.
 fn run(name: &str, scenario: Scenario) {
     let fixtures = Fixtures::find();
+    let host = scenario.root.network.map(|_| Host::bind());
+    if matches!(scenario.expect, Expect::Controlled(_)) {
+        let host = host.as_ref().expect("a controlled scenario has a network");
+        let control = Scenario {
+            root: Root {
+                network: Some(Network::Open),
+                ..ROOT
+            },
+            expect: Expect::Ready(check_host_loopback),
+        };
+        // The control's sandbox has the scenario's name, so that the paths in it, such as a
+        // Linux control socket's, are no longer than the scenario's own. It is gone before the
+        // scenario's begins.
+        run_vm(name, &fixtures, control, Some(host));
+        host.drain();
+    }
+    run_vm(name, &fixtures, scenario, host.as_ref());
+}
+
+/// Runs the VM of the scenario `name`, `scenario`, from the `fixtures`, with the `host` side of its
+/// network, if it has one.
+fn run_vm(name: &str, fixtures: &Fixtures, scenario: Scenario, host: Option<&Host>) {
     let mut sandbox = Sandbox::new(name);
     let root = scenario.root;
     let scratch = sandbox.root.join("scratch.ext4");
@@ -920,11 +1368,12 @@ fn run(name: &str, scenario: Scenario) {
     if over_scratch {
         fs::copy(&fixtures.scratch, &scratch).unwrap();
     }
-    let distro = root.distro(&fixtures, &sandbox.root);
+    let distro = root.distro(fixtures, &sandbox.root);
     let images = root.images(&distro, &scratch);
     let images = images.iter().map(OsString::as_os_str).collect::<Vec<_>>();
     let network = sandbox.root.join("network.json");
-    if let Some(form) = root.network.map(Network::form) {
+    if root.network.is_some() {
+        let form = root.network_form(host);
         fs::write(&network, form.to_string()).unwrap();
     }
     let mut options = root.options(&distro, &scratch, &network);
@@ -937,7 +1386,7 @@ fn run(name: &str, scenario: Scenario) {
         if change != Change::Unstaged {
             sandbox.run("stage", &images, 0);
         }
-        change.make(&distro, &scratch, &fixtures);
+        change.make(&distro, &scratch, fixtures);
         let refused = sandbox.launch(&options, FAILED);
         assert!(refused.is_empty(), "{refused:?}");
         let stderr = sandbox.stderr();
@@ -956,7 +1405,7 @@ fn run(name: &str, scenario: Scenario) {
             assert_eq!(launched["stopped"], "graceful");
             // The launch recorded what it launched, with the root configuration that it sent, which
             // the guest refused, or accepted before a later stage failed.
-            check_record(&sandbox, &root, &distro, &scratch);
+            check_record(&sandbox, &root, &distro, &scratch, host);
             // The launch ended: no runtime record names the VM.
             assert_eq!(sandbox.record(), None);
             assert!(
@@ -979,7 +1428,7 @@ fn run(name: &str, scenario: Scenario) {
             assert_eq!(launched["stopped"], "graceful", "{launched:?}");
             assert_eq!(launched["outcome"], "success 0", "{launched:?}");
             assert_eq!(launched["teardown"], "complete", "{launched:?}");
-            check_record(&sandbox, &root, &distro, &scratch);
+            check_record(&sandbox, &root, &distro, &scratch, host);
             assert_eq!(sandbox.record(), None);
             assert!(
                 !(over_scratch && needs_recovery(&scratch)),
@@ -997,7 +1446,7 @@ fn run(name: &str, scenario: Scenario) {
             check_sources(&sandbox.root, false);
             return;
         }
-        Expect::Ready(check) => (check, None),
+        Expect::Ready(check) | Expect::Controlled(check) => (check, None),
         Expect::TeardownFails(check, problem) => (check, Some(problem)),
         Expect::Refused(..) => (check_root as fn(&mut Vm<'_>), None),
     };
@@ -1009,7 +1458,7 @@ fn run(name: &str, scenario: Scenario) {
     assert_eq!(launched["table"], "applied");
     assert_eq!(launched["mapped"], root.table.mapping_count().to_string());
     assert_eq!(launched["sandbox"], "started");
-    let config = check_record(&sandbox, &root, &distro, &scratch);
+    let config = check_record(&sandbox, &root, &distro, &scratch, host);
     let vmm = sandbox
         .vmm()
         .expect("the VM runs after its launcher exited");
@@ -1019,7 +1468,11 @@ fn run(name: &str, scenario: Scenario) {
         runtime: root.runtime.unwrap_or(DEFAULT_RUNTIME),
         root,
         config,
+        host,
     };
+    if let Some(network) = root.network {
+        check_device(&mut vm, network);
+    }
     check(&mut vm);
 
     let status = if failure.is_some() { ROOT_FAILED } else { 0 };
@@ -1067,11 +1520,17 @@ fn assert_failed(printed: &Printed, stage: RootStage, problem: &str) {
 /// Checks what the launch recorded in the sandbox's store: a VM with the layered `root` of the
 /// image `distro`, over `scratch` or RAM, the image of the identity that the launch expects, the
 /// bindings that the store stages for the images, which the launch checked, the network, if any, as
-/// the scenario's file gave it, the boot tokens of its plan alone, after the launch's own, and the
-/// root configuration that the host sent, with listeners published as OpenVMM publishes them
-/// through the network, and unpublished without one, whether or not the guest accepted it, which
-/// it returns.
-fn check_record(sandbox: &Sandbox, root: &Root, distro: &Distro, scratch: &Path) -> RootConfig {
+/// the scenario's file gave it, with the ports of the `host`, the boot tokens of its plan alone,
+/// after the launch's own, and the root configuration that the host sent, with listeners published
+/// as OpenVMM publishes them through the network, and unpublished without one, whether or not the
+/// guest accepted it, which it returns.
+fn check_record(
+    sandbox: &Sandbox,
+    root: &Root,
+    distro: &Distro,
+    scratch: &Path,
+    host: Option<&Host>,
+) -> RootConfig {
     let read = |name: &str| -> Value {
         serde_json::from_str(&fs::read_to_string(sandbox.store.join(name)).unwrap()).unwrap()
     };
@@ -1092,10 +1551,7 @@ fn check_record(sandbox: &Sandbox, root: &Root, distro: &Distro, scratch: &Path)
     assert_eq!(plan["distro"]["format"], distro.format);
     assert_eq!(plan["distro"]["identity"], distro.identity.as_str());
     assert_eq!(plan["settings"], Value::Null);
-    assert_eq!(
-        plan["network"],
-        root.network.map_or(Value::Null, Network::form)
-    );
+    assert_eq!(plan["network"], root.network_form(host));
     let path = |value: &Value| PathBuf::from(value.as_str().unwrap());
     assert_eq!(path(&plan["distro"]["path"]), distro.path);
     let upper = match root.upper {
@@ -2459,9 +2915,13 @@ fn check_workload_executions(vm: &mut Vm<'_>) {
 }
 
 /// Checks the VM of the `executions_take_the_settings_of_a_proxy_only_network` scenario, whose
-/// network's proxy the guest reaches at [`PROXY_URL`].
+/// network's proxy the guest reaches at [`Host::proxy_url`].
 fn check_proxy_settings(vm: &mut Vm<'_>) {
     assert_eq!(vm.config.listeners, Some(Listeners::Unpublished));
+    let proxy_url = vm
+        .host
+        .expect("the network has the host's side")
+        .proxy_url();
     let nobody = ids(NOBODY);
     let own = "HTTPS_PROXY=http://proxy.example:8080";
     let executions = [
@@ -2477,7 +2937,7 @@ fn check_proxy_settings(vm: &mut Vm<'_>) {
     ];
     let printed = vm.exec(&executions);
     let proxies = ["http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY"]
-        .map(|variable| format!("{variable}={PROXY_URL}\n"))
+        .map(|variable| format!("{variable}={proxy_url}\n"))
         .concat();
     assert_ran(&printed, 1, 0, &format!("FIRST=1\n{proxies}"), "");
     assert_ran(&printed, 2, 0, &format!("{own}\n"), "");
@@ -2573,4 +3033,365 @@ fn check_published_listeners(vm: &mut Vm<'_>) {
     assert_refused(&printed, 2, EPERM);
     assert_ran(&printed, 3, 0, &identity_facts(0, 0, "0", 1), "");
     assert_ran(&printed, 4, 0, "ONLY=this\n", "");
+}
+
+/// Checks the network device of a VM with `network`, and the publication of its listeners, before
+/// the scenario's own checks: OpenVMM attaches no device for a network that lets nothing through,
+/// and otherwise one, which NVX's `/init` configured, and asks `/init` on the kernel command line
+/// to publish the guest's listeners exactly where the root configuration says that they are
+/// published.
+fn check_device(vm: &mut Vm<'_>, network: Network) {
+    let printed = vm.exec(&[execution(
+        &["--identity", &ids(NOBODY)],
+        &["/bin/sh", "-c", DEVICE_SCRIPT],
+    )]);
+    let devices = usize::from(network != Network::Deny);
+    let ingress = network
+        .ingress()
+        .map_or_else(String::new, |mode| format!("ingress {mode}\n"));
+    assert_ran(&printed, 1, 0, &format!("devices {devices}\n{ingress}"), "");
+    assert_eq!(
+        vm.config.listeners == Some(Listeners::Published),
+        network.ingress().is_some(),
+        "{network:?}"
+    );
+}
+
+/// Checks what an execution reaches through the VM's network, as NVX's proxy-only scenario probes
+/// its network, and as [`Network::reaches`] expects: the execution requests [`PROXY_TARGET`]
+/// through the test proxy, which the host serves meanwhile, then tries each probe's destination;
+/// then the host checks what arrived at its sockets.
+fn check_probes(vm: &mut Vm<'_>) {
+    let network = vm.root.network.expect("the scenario has a network");
+    let host = vm.host.expect("the network has the host's side");
+    let (proxy_reached, reached) = network.reaches();
+    let mut options = vec!["--identity".to_owned(), ids(NOBODY)];
+    // An execution finds the URL of a proxy-only network's proxy in its environment; in the other
+    // networks, it names the test proxy itself, at the same port of its gateway.
+    if network != Network::Proxy {
+        options.extend([
+            "--env".to_owned(),
+            format!("http_proxy={}", host.proxy_url()),
+        ]);
+    }
+    let mut command = ["/bin/sh", "-c", PROBE_SCRIPT, "probe", PROXY_TARGET]
+        .map(str::to_owned)
+        .to_vec();
+    for probe in &host.probes {
+        command.extend([
+            probe.protocol().to_owned(),
+            probe.destination.name().to_owned(),
+            probe.address.to_string(),
+            probe.port.to_string(),
+        ]);
+    }
+    let options = options.iter().map(String::as_str).collect::<Vec<_>>();
+    let command = command.iter().map(String::as_str).collect::<Vec<_>>();
+    let stop = AtomicBool::new(false);
+    let (printed, requests) = thread::scope(|scope| {
+        let proxy = scope.spawn(|| serve_proxy(&host.proxy, &stop));
+        let printed = {
+            let _stop = Stop(&stop);
+            vm.exec(&[execution(&options, &command)])
+        };
+        (printed, proxy.join().unwrap())
+    });
+    let facts =
+        ["launch", "status", "cause", "truncated", "stderr"].map(|key| fact(&printed, 1, key));
+    assert_eq!(
+        facts,
+        ["started", "exit 0", "none", "none", ""],
+        "{printed:?}"
+    );
+    let stdout = unescaped(fact(&printed, 1, "stdout"));
+    let mut lines = stdout.lines();
+    let proxy = lines.next().unwrap_or_default();
+    if proxy_reached {
+        assert_eq!(proxy, format!("proxy 0 {PROXY_RESPONSE}"), "{network:?}");
+    } else {
+        // wget exits with 1 when it cannot reach the proxy, and with another status when it cannot
+        // run.
+        assert!(proxy.starts_with("proxy 1 "), "{network:?}: {proxy:?}");
+    }
+    let reported = lines.collect::<Vec<_>>();
+    assert_eq!(reported.len(), host.probes.len(), "{network:?}: {stdout:?}");
+    for (probe, line) in host.probes.iter().zip(reported) {
+        let name = probe.destination.name();
+        // nc exits with 1 when it cannot connect, and with another status when it cannot run. A
+        // UDP sender cannot see a lost datagram, and may see an unrelated error, so only the host
+        // tells whether a datagram arrived.
+        let statuses: &[&str] = match (&probe.socket, reached.contains(&probe.destination)) {
+            (HostSocket::Udp(_), _) => &["0", "1"],
+            (HostSocket::Tcp(_), true) => &["0"],
+            (HostSocket::Tcp(_), false) => &["1"],
+        };
+        let status = line
+            .strip_prefix(name)
+            .and_then(|rest| rest.strip_prefix(' '));
+        assert!(
+            status.is_some_and(|status| statuses.contains(&status)),
+            "{network:?}: the {name} probe reported {line:?}"
+        );
+    }
+    // The test proxy received the guest's one request, for its target, where the network lets the
+    // guest reach it, and none otherwise.
+    assert_eq!(
+        requests.len(),
+        usize::from(proxy_reached),
+        "{network:?}: {requests:?}"
+    );
+    let request_line = format!("GET {PROXY_TARGET} HTTP/1.");
+    assert!(
+        requests
+            .iter()
+            .all(|request| request.starts_with(&request_line)),
+        "{requests:?}"
+    );
+    // Each probe's traffic arrived at its host socket where the network lets it through, and none
+    // did otherwise.
+    for probe in &host.probes {
+        let name = probe.destination.name();
+        let reaches = reached.contains(&probe.destination);
+        let wait = if reaches {
+            ARRIVAL
+        } else {
+            NEGATIVE_OBSERVATION
+        };
+        match (arrival(&probe.socket, wait), &probe.socket) {
+            (None, _) => assert!(
+                !reaches,
+                "{network:?}: the {name} probe did not arrive at port {}",
+                probe.port
+            ),
+            (Some(datagram), HostSocket::Udp(_)) => {
+                assert!(
+                    reaches,
+                    "{network:?}: the {name} probe arrived: {datagram:?}"
+                );
+                assert_eq!(datagram, format!("{name}\n").as_bytes());
+            }
+            (Some(_), HostSocket::Tcp(_)) => assert!(
+                reaches,
+                "{network:?}: the {name} probe arrived at port {}",
+                probe.port
+            ),
+        }
+    }
+}
+
+/// Checks what an execution reaches through the VM's network, as [`check_probes`] does, then
+/// whether the host reaches a listener of the guest at the guest's port of host loopback: where
+/// OpenVMM publishes the guest's listeners there, with host-loopback access in both directions, as
+/// [`check_device`] found it, and nowhere else, such as with outbound host-loopback access alone.
+fn check_host_loopback(vm: &mut Vm<'_>) {
+    check_probes(vm);
+    let network = vm.root.network.expect("the scenario has a network");
+    let port = vm.host.expect("the network has the host's side").listener;
+    let published = network.ingress() == Some("host-loopback");
+    check_guest_listener(vm, SocketAddr::from((Ipv4Addr::LOCALHOST, port)), published);
+}
+
+/// Checks the VM of the `a_forward_reaches_its_guest_port` scenario: the host reaches a listener
+/// of the guest through the forward's port of host loopback.
+fn check_forward(vm: &mut Vm<'_>) {
+    let port = vm.host.expect("the network has the host's side").forward;
+    check_guest_listener(vm, SocketAddr::from((Ipv4Addr::LOCALHOST, port)), true);
+}
+
+/// Runs a listener of the guest at the guest's port [`Host::listener`] while the host tries to
+/// reach it through `address`, until the listener's execution ends, and checks that the host
+/// reached it, and exchanged a line each way with it, if `reached`, or else that the host never
+/// did, while the listener waited all of its time.
+fn check_guest_listener(vm: &mut Vm<'_>, address: SocketAddr, reached: bool) {
+    let host = vm.host.expect("the network has the host's side");
+    let port = host.listener.to_string();
+    let seconds = if reached {
+        LISTENING
+    } else {
+        UNPUBLISHED_LISTENING
+    };
+    let seconds = seconds.to_string();
+    let listener = execution(
+        &["--identity", &ids(NOBODY)],
+        &[
+            "/bin/sh",
+            "-c",
+            LISTENER_SCRIPT,
+            "listener",
+            &port,
+            &seconds,
+            GREETING,
+        ],
+    );
+    let stop = AtomicBool::new(false);
+    let (printed, exchanged) = thread::scope(|scope| {
+        let client = scope.spawn(|| reach_guest(address, &stop));
+        let printed = {
+            let _stop = Stop(&stop);
+            vm.exec(&[listener])
+        };
+        (printed, client.join().unwrap())
+    });
+    assert_eq!(exchanged, reached, "{address}: {printed:?}");
+    let stdout = if reached {
+        format!("{ANSWER}\nlistener 0\n")
+    } else {
+        "listener 124\n".to_owned()
+    };
+    assert_ran(&printed, 1, 0, &stdout, "");
+}
+
+/// Tries to exchange a line each way with a listener of the guest through `address`, until it did,
+/// or until `stop`, and returns whether it did: it reads the listener's greeting, answers it,
+/// closes its side, and reads to the end. A connection that ends without the greeting, as
+/// OpenVMM's do while the guest does not listen yet, is retried.
+fn reach_guest(address: SocketAddr, stop: &AtomicBool) -> bool {
+    while !stop.load(Ordering::SeqCst) {
+        if let Ok(mut stream) = TcpStream::connect_timeout(&address, Duration::from_secs(1)) {
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let mut greeting = Vec::new();
+            let mut byte = [0];
+            while !greeting.ends_with(b"\n") && matches!(stream.read(&mut byte), Ok(1)) {
+                greeting.push(byte[0]);
+            }
+            if greeting == format!("{GREETING}\n").as_bytes() {
+                stream.write_all(format!("{ANSWER}\n").as_bytes()).unwrap();
+                stream.shutdown(Shutdown::Write).unwrap();
+                let mut rest = Vec::new();
+                stream.read_to_end(&mut rest).unwrap();
+                assert!(rest.is_empty(), "the guest's listener then sent {rest:?}");
+                return true;
+            }
+            assert!(
+                greeting.is_empty(),
+                "the guest's listener greeted the host with {greeting:?}"
+            );
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    false
+}
+
+/// Serves the test proxy's `listener` until `stop`: answers each request with [`PROXY_RESPONSE`],
+/// and returns the request line of each.
+fn serve_proxy(listener: &TcpListener, stop: &AtomicBool) -> Vec<String> {
+    listener.set_nonblocking(true).unwrap();
+    let response = format!(
+        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{PROXY_RESPONSE}",
+        PROXY_RESPONSE.len()
+    );
+    let mut requests = Vec::new();
+    while !stop.load(Ordering::SeqCst) {
+        match listener.accept() {
+            Ok((mut connection, _)) => {
+                connection.set_nonblocking(false).unwrap();
+                connection.set_read_timeout(Some(ARRIVAL)).unwrap();
+                let head = read_head(&mut connection);
+                let line = head
+                    .split(|&byte| byte == b'\r' || byte == b'\n')
+                    .next()
+                    .unwrap_or_default();
+                requests.push(String::from_utf8_lossy(line).into_owned());
+                connection.write_all(response.as_bytes()).unwrap();
+            }
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                thread::sleep(Duration::from_millis(10));
+            }
+            Err(error) => panic!("the test proxy failed: {error}"),
+        }
+    }
+    requests
+}
+
+/// Reads the head of an HTTP request from `connection`, of at most [`REQUEST_LIMIT`] bytes.
+fn read_head(connection: &mut TcpStream) -> Vec<u8> {
+    let mut head = Vec::new();
+    let mut chunk = [0; 1024];
+    while !head.windows(4).any(|window| window == b"\r\n\r\n") {
+        let length = connection.read(&mut chunk).unwrap();
+        if length == 0 {
+            break;
+        }
+        head.extend_from_slice(&chunk[..length]);
+        assert!(
+            head.len() <= REQUEST_LIMIT,
+            "a request's head exceeds {REQUEST_LIMIT} bytes"
+        );
+    }
+    head
+}
+
+/// Returns what arrived at the host's `socket` within `wait`: a connection, which carries nothing
+/// that a probe checks, or a datagram.
+fn arrival(socket: &HostSocket, wait: Duration) -> Option<Vec<u8>> {
+    match socket {
+        HostSocket::Tcp(listener) => accepted(listener, wait).then(Vec::new),
+        HostSocket::Udp(socket) => {
+            socket.set_nonblocking(false).unwrap();
+            socket.set_read_timeout(Some(wait)).unwrap();
+            let mut datagram = [0; 4096];
+            match socket.recv(&mut datagram) {
+                Ok(length) => Some(datagram[..length].to_vec()),
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                    ) =>
+                {
+                    None
+                }
+                Err(error) => panic!("a probe's socket failed: {error}"),
+            }
+        }
+    }
+}
+
+/// Returns whether a connection arrived at the host's `listener` within `wait`, or at once for no
+/// wait, which it accepts and closes.
+fn accepted(listener: &TcpListener, wait: Duration) -> bool {
+    listener.set_nonblocking(true).unwrap();
+    let deadline = Instant::now() + wait;
+    loop {
+        match listener.accept() {
+            Ok(_) => return true,
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
+            Err(error) => panic!("a listener of the host failed: {error}"),
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
+/// Sets its flag once it drops, so that a thread that waits for the flag ends even when the check
+/// that the thread serves panics.
+struct Stop<'a>(&'a AtomicBool);
+
+impl Drop for Stop<'_> {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
+}
+
+/// Returns `text`, as the host program prints a value, with its escapes undone: `\\`, `\n`, and
+/// `\r`.
+fn unescaped(text: &str) -> String {
+    let mut unescaped = String::with_capacity(text.len());
+    let mut characters = text.chars();
+    while let Some(character) = characters.next() {
+        if character != '\\' {
+            unescaped.push(character);
+            continue;
+        }
+        match characters.next() {
+            Some('\\') => unescaped.push('\\'),
+            Some('n') => unescaped.push('\n'),
+            Some('r') => unescaped.push('\r'),
+            other => panic!("{text:?} holds the escape {other:?}"),
+        }
+    }
+    unescaped
 }

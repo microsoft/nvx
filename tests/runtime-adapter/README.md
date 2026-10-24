@@ -1015,6 +1015,10 @@ The guest's executions follow the network:
   `HTTP_PROXY`, and `HTTPS_PROXY`, after the start's own entries. A start that
   names any of them keeps its own proxy settings.
 
+In VMs, the [layered scenarios](#layered-scenarios) check what each kind of
+network lets the guest's executions reach, and whether the host reaches the
+guest's listeners, through publication or a forward.
+
 ### The step hook
 
 For tests, `launch` takes a step hook, `hook::StepHook`, from the variable
@@ -1606,8 +1610,14 @@ stages its images, then launches them, and is a row of the table that its
 | `executions_run_in_the_root` | The image over the scratch, without a workload identity, in which `exec` runs executions that name their identities | Over one session, four executions as `nobody` that meet only while all of them run, beside one as root that writes more than a MiB to its standard output and a little to its standard error, each byte-exact, ending on its own with 0, and reusable. Over a later session, with new keys: a program that leaves a descendant in a session of its own, which the program's end, as PID 1 of its namespace, ends, so that no output is lost; `nobody`'s IDs and groups, with empty permitted, effective, and bounding sets; root with `CAP_CHOWN` alone in each of them; exactly the start's environment; the start's working directory; the entry's default hostname, `nvx-sandbox`, and PID 1; and a start without an identity, and one with `CAP_SYS_ADMIN`, which the guest refuses at stage 0 with `EINVAL` and `EPERM`, fenced and without output |
 | `executions_run_as_the_workload_identity` | The image over the scratch, with the workload identity of `nobody` | Executions that name no identity, which run as `nobody`, without capabilities, with exactly the start's environment, and a start that names an identity, which the guest refuses at stage 0 with `EINVAL` |
 | `accountless_workload_identity_fails_its_stage` | The image over the scratch, with a workload identity whose account the image lacks | The identity stage's failure once the guest assembled the root, which the launch reports, and a VM that ends with 16, which unmounted the scratch |
-| `executions_take_the_settings_of_a_proxy_only_network` | The image over the scratch, in a proxy-only network of a guest at `10.0.0.2/24`, whose proxy listens at port 3128 of host loopback | A root configuration whose listeners are unpublished; executions that find the proxy's URL, `http://10.0.0.1:3128`, in `http_proxy`, `https_proxy`, `HTTP_PROXY`, and `HTTPS_PROXY`, after their own entries, but one that names `HTTPS_PROXY` itself, which keeps exactly its own environment; root with `CAP_NET_BIND_SERVICE` and `CAP_NET_RAW`, which hold them; and, on Linux, a batch with a start that the framing carries alone but not with the proxy's URL, which `exec` refuses before it attaches, running none of its executions |
-| `published_listeners_refuse_binding_and_raw_sockets` | The image over the scratch, in a network of a guest at `10.0.0.2/24` with ingress allowed, through which OpenVMM publishes the guest's listeners | A root configuration whose listeners are published; root with `CAP_NET_BIND_SERVICE`, and with `CAP_NET_RAW`, which the guest refuses at stage 0 with `EPERM`, fenced and without output, and with `CAP_CHOWN`, which holds it; and an execution with exactly its start's environment, without a proxy |
+| `executions_take_the_settings_of_a_proxy_only_network` | The image over the scratch, in a proxy-only network, whose proxy is the test proxy on host loopback | A root configuration whose listeners are unpublished; executions that find the proxy's URL, `http://192.0.2.1:PORT`, at the test proxy's port, in `http_proxy`, `https_proxy`, `HTTP_PROXY`, and `HTTPS_PROXY`, after their own entries, but one that names `HTTPS_PROXY` itself, which keeps exactly its own environment; root with `CAP_NET_BIND_SERVICE` and `CAP_NET_RAW`, which hold them; and, on Linux, a batch with a start that the framing carries alone but not with the proxy's URL, which `exec` refuses before it attaches, running none of its executions |
+| `published_listeners_refuse_binding_and_raw_sockets` | The image over the scratch, in a network with ingress allowed, through which OpenVMM publishes the guest's listeners | A root configuration whose listeners are published; root with `CAP_NET_BIND_SERVICE`, and with `CAP_NET_RAW`, which the guest refuses at stage 0 with `EPERM`, fenced and without output, and with `CAP_CHOWN`, which holds it; and an execution with exactly its start's environment, without a proxy |
+| `a_denied_network_lets_no_probe_through` | The image over the scratch, in a network that denies everything, without a proxy | After the positive control, no network device, and an execution that reaches neither the proxy nor any destination, none of whose traffic arrives |
+| `an_allow_rule_lets_only_its_destination_through` | The image over the scratch, in a network that denies egress but for one rule, TCP to the gateway at the port of a service of host loopback, with outbound host-loopback access | After the positive control, an execution that reaches that service alone: not the proxy, nor the proxy's port over UDP, the host's own address, or host IPv6 loopback |
+| `a_proxy_only_network_lets_only_its_proxy_through` | The image over the scratch, in a proxy-only network, whose proxy is the test proxy | After the positive control, an execution that reaches the test proxy through the URL in its environment, and none of the destinations, whose traffic never arrives |
+| `outbound_host_loopback_publishes_no_listener` | The image over the scratch, in a network with egress allowed and outbound host-loopback access | After the positive control, an execution that reaches the proxy and every destination, and a listener of the guest that the host never reaches at the guest's port of host loopback while it listens, since OpenVMM does not publish it |
+| `allowed_host_loopback_publishes_the_listeners` | The image over the scratch, in a network with host-loopback access in both directions, and egress denied | After the positive control, an execution that reaches neither the proxy nor any destination, since egress governs the guest's own connections, and a listener of the guest that the host reaches at the guest's port of host loopback, and exchanges a line each way with |
+| `a_forward_reaches_its_guest_port` | The image over the scratch, in that network, with a forward of a port of host loopback to a guest port | A listener of the guest at that port, which the host reaches through the forward, and exchanges a line each way with |
 
 A row names the root, the image, the GPT disk's top-layer variant, the
 identity that the launch expects of the image, the upper, the runtime
@@ -1638,6 +1648,42 @@ children `0`, `1`, and `2`. Once the `map` probe ran, the sources hold what
 the scenario wrote, and the file `written` in `dir/inner` and in `out` alone;
 the scenarios of a failed mapping and of refused shares leave the sources as
 the scenario wrote them.
+
+The scenarios with a network give the guest the address `192.0.2.2/24`, in a
+range reserved for documentation, which no host's own address shares, so that
+the guest reaches the host's address through its gateway, `192.0.2.1`. Before
+the launch, the test binds the host's side of the network, whose ports the
+network names: a test proxy on host IPv4 loopback, which the guest reaches at
+the same port of its gateway, and the sockets of the probes' destinations,
+another port of host loopback over TCP, the proxy's port over UDP, and the
+proxy's port over TCP at the host's own address, if it has one, and on host
+IPv6 loopback, if it has that, which the guest reaches at its gateway's IPv6
+address. It also draws the port of a listener of the guest, which no socket
+holds for TCP or UDP, on every host address or on loopback alone, as OpenVMM
+needs to publish the listener on host loopback, and the port of a forward. It
+draws each port at random from the dynamic range, since Windows excludes ports
+per protocol, in blocks.
+
+Each VM with a network first has its guest's network devices checked, of which
+OpenVMM attaches none for a network that lets nothing through, and otherwise
+one, which `/init` configures, and that OpenVMM asks `/init` on the kernel
+command line to publish the guest's listeners exactly where the root
+configuration says that they are published. Then, as NVX's proxy-only scenario
+does, an execution requests a URL through the test proxy with `wget`, while the
+host serves the proxy, and tries each destination with `nc`, and the host
+checks what arrived at each of its sockets. A listener of the guest, `nc` in
+the image, greets the host, which tries to reach it until the listener's
+execution ends.
+
+A scenario whose network stops traffic begins, as NVX's proxy-only scenario
+does, with the positive control: a VM of an open network, with egress allowed
+and host-loopback access in both directions, over the same host's side. There
+the execution reaches the test proxy, which it names itself, and every
+destination, whose traffic arrives at the host's socket, and the host reaches
+a listener of the guest at the guest's port of host loopback. Once that VM
+ended, the host discards what is left at its sockets, and the scenario's own VM
+runs the same checks, so that what does not arrive there shows the network's
+policy, not a broken probe.
 
 The scenarios use the fixtures of NVX's own layered scenarios, from NVX's
 artifacts: the Ubuntu EROFS image, `ubuntu-distro.erofs`, its manifest, which
