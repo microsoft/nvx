@@ -41,9 +41,12 @@ use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use nvx::exec::{Key, Limits, Timers, Window};
 use nvx::gpt::{Disk, Expected, ExpectedPartition};
 use nvx::uuid::Uuid;
 use runtime_adapter::GUEST_BUILD;
+use runtime_adapter::exec::Start;
+use runtime_adapter::frame::MAX_BODY;
 use runtime_adapter::layered::{RECORD_NAME, STAGED_NAME};
 use runtime_adapter::root::{
     DEFAULT_RUNTIME, JournalPolicy, Listeners, OverlayMode, RootConfig, RootStage,
@@ -892,7 +895,8 @@ scenarios! {
     };
     /// Executions in a proxy-only network, which publishes no listener: each finds the proxy's URL
     /// in its environment, after its own entries, unless it names its own proxy settings, and root
-    /// may hold the capabilities that bind privileged ports and open raw sockets.
+    /// may hold the capabilities that bind privileged ports and open raw sockets. On Linux, `exec`
+    /// refuses before it attaches a batch with a start that the proxy's URL takes past the framing.
     executions_take_the_settings_of_a_proxy_only_network: Scenario {
         root: Root { network: Some(Network::Proxy), ..ROOT },
         expect: Expect::Ready(check_proxy_settings),
@@ -2480,6 +2484,66 @@ fn check_proxy_settings(vm: &mut Vm<'_>) {
     // `CAP_NET_BIND_SERVICE` and `CAP_NET_RAW`, numbers 10 and 13, in each set.
     let facts = identity_facts(0, 0, "0", 1 << 10 | 1 << 13);
     assert_ran(&printed, 3, 0, &facts, "");
+    // Only Linux's command lines carry a start as long as the framing allows.
+    if cfg!(target_os = "linux") {
+        check_unframed_batch(vm);
+    }
+}
+
+/// Checks, in the VM of a proxy-only network, that `exec` refuses before it attaches a batch with
+/// a start that the framing carries alone, but not with the proxy's variables: none of the batch's
+/// executions runs, not even the first, which would leave a marker, and the VM still runs the next
+/// command's.
+fn check_unframed_batch(vm: &mut Vm<'_>) {
+    let marker = "/tmp/unframed-batch";
+    let first = execution(&["--identity", "0:0"], &["/bin/touch", marker]);
+    // The second start's environment fills it up to the framing's limit, in entries that Linux
+    // takes as arguments, of at most 128 KiB each. An entry takes its length, a `u32`, too.
+    let names = ["PAD0=", "PAD1=", "PAD2="];
+    let fill = MAX_BODY
+        - unframed_start_length(&[])
+        - names.map(|name| 4 + name.len()).iter().sum::<usize>();
+    let padding = (0..names.len())
+        .map(|index| {
+            let share = fill / names.len() + usize::from(index < fill % names.len());
+            format!("{}{}", names[index], "x".repeat(share))
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(unframed_start_length(&padding), MAX_BODY);
+    let mut options = vec!["--identity".to_owned(), "0:0".to_owned()];
+    for entry in &padding {
+        options.extend(["--env".to_owned(), entry.clone()]);
+    }
+    options.extend(["--".to_owned(), "/bin/true".to_owned()]);
+    let batch = [first, vec![";".to_owned()], options].concat();
+    let batch = batch.iter().map(OsStr::new).collect::<Vec<_>>();
+    let refused = vm.sandbox.run("exec", &batch, FAILED);
+    assert_eq!(refused["reattached"], "live");
+    assert!(
+        !refused.keys().any(|key| key.starts_with("exec.")),
+        "{refused:?}"
+    );
+    let stderr = vm.sandbox.stderr();
+    let problem =
+        "execution 2, with the proxy of the VM's network: the start of an execution is too long";
+    assert!(stderr.contains(problem), "{stderr}");
+    let printed = vm.exec(&[execution(
+        &["--identity", "0:0"],
+        &["/bin/sh", "-c", &format!("test ! -e {marker}")],
+    )]);
+    assert_ran(&printed, 1, 0, "", "");
+}
+
+/// Returns the length of the encoded start that `exec` makes, before the proxy's variables, of an
+/// execution as root of `/bin/true` with the environment `environment`: a key, the limits, and the
+/// timers each have the same size whatever their values.
+fn unframed_start_length(environment: &[String]) -> usize {
+    let limits = Limits::new(1, Window::frames(1), Window::frames(1)).unwrap();
+    let timers = Timers::new(Duration::from_secs(1), Duration::from_secs(1));
+    let mut start = Start::new(Key::new(0, 0), limits, timers, ["/bin/true"])
+        .with_environment(environment.iter().map(String::as_str));
+    start.identity = Some(runtime_adapter::exec::Identity::new(0, 0));
+    start.encode().len()
 }
 
 /// Checks the VM of the `published_listeners_refuse_binding_and_raw_sockets` scenario, whose

@@ -93,15 +93,16 @@
 //!   have none. It starts in the root's directory DIR, or `/`, with exactly the environment of its
 //!   `--env` entries, then, if the VM's network has a proxy, the proxy's URL as the guest sees it
 //!   in `http_proxy`, `https_proxy`, `HTTP_PROXY`, and `HTTPS_PROXY`, unless the entries name any
-//!   of them; see `runtime_adapter::layered::with_proxy`. It runs for at most a minute, with 16 KiB
-//!   chunks and the credit of 4 of them for its input and 8 for its output, which its standard
-//!   output and error share. The command keeps at most 16 MiB of each stream, and cancels an
-//!   execution whose stream would exceed them; see `runtime_adapter::exec::MAX_CAPTURE`. Execution
-//!   N, from 1, has the key `(B + N, E)`: E is the epoch of the command's attachment, and B the
-//!   first 8 bytes of the broker instance's ID, as a little-endian number. The guest refuses a key
-//!   that it heard of before, and the epochs of a broker instance only advance, while a broker
-//!   restored from a snapshot has a new instance ID, so no command repeats the key of another's
-//!   execution.
+//!   of them; see `runtime_adapter::layered::with_proxy`. Before it attaches, the command checks
+//!   that the framing still carries each start with the proxy's URL, and runs none of the
+//!   executions if one no longer fits. It runs for at most a minute, with 16 KiB chunks and the
+//!   credit of 4 of them for its input and 8 for its output, which its standard output and error
+//!   share. The command keeps at most 16 MiB of each stream, and cancels an execution whose stream
+//!   would exceed them; see `runtime_adapter::exec::MAX_CAPTURE`. Execution N, from 1, has the key
+//!   `(B + N, E)`: E is the epoch of the command's attachment, and B the first 8 bytes of the
+//!   broker instance's ID, as a little-endian number. The guest refuses a key that it heard of
+//!   before, and the epochs of a broker instance only advance, while a broker restored from a
+//!   snapshot has a new instance ID, so no command repeats the key of another's execution.
 //!
 //! Each command but `stage` takes NVX's artifacts from the directory that `NVX_ARTIFACTS_DIR`
 //! names, a repository checkout or an extracted release, and the VM's runtime identity from NVX's
@@ -346,6 +347,17 @@ impl Execution {
         start.working_directory = self.working_directory.clone().map(String::into_bytes);
         start
     }
+}
+
+/// Checks that the guest takes `start`: that it decodes it, as it decodes an execution's start,
+/// and that the framing carries it. The guest ends its session on a start that it cannot decode.
+fn check_start(start: &Start) -> Result<(), String> {
+    let encoded = start.encode();
+    Start::decode(&encoded).map_err(|error| error.problem().to_owned())?;
+    Message::ExecStart(encoded)
+        .encode()
+        .map_err(|error| format!("the start of an execution is too long: {error}"))?;
+    Ok(())
 }
 
 /// Returns the limits of an execution of `exec`: chunks of [`EXEC_CHUNK`] bytes, and frame-counted
@@ -823,11 +835,7 @@ fn parse_exec(
         // one that breaks the rules of the encoding, as a relative working directory or an
         // environment entry without a name does, or that the framing does not carry, before it
         // attaches.
-        let encoded = execution.start(Key::new(0, 0)).encode();
-        Start::decode(&encoded).map_err(|error| error.problem().to_owned())?;
-        Message::ExecStart(encoded)
-            .encode()
-            .map_err(|error| format!("the start of an execution is too long: {error}"))?;
+        check_start(&execution.start(Key::new(0, 0)))?;
         executions.push(execution);
         if !more {
             break;
@@ -1291,8 +1299,23 @@ fn exec(store: &Path, guest_build: &str, executions: &[Execution]) -> Result<Exi
         Err(status) => return Ok(status),
     };
     // Each execution finds the URL of the proxy of the VM's network, if any, in its environment,
-    // from the plan that the launch recorded.
+    // from the plan that the launch recorded. The proxy's variables lengthen a start, so the
+    // command checks every start again before it attaches, rather than fail once it sent the
+    // starts before it. A start takes its key once the command attached, and a key's encoding has
+    // the same size whatever its value.
     let plan = LaunchRecord::read_plan(store.dir()).map_err(|error| describe(&error))?;
+    let mut starts = Vec::with_capacity(executions.len());
+    for (number, execution) in (1..).zip(executions) {
+        let start = execution.start(Key::new(0, 0));
+        let start = match &plan {
+            Some(plan) => with_proxy(start, plan),
+            None => start,
+        };
+        check_start(&start).map_err(|problem| {
+            format!("execution {number}, with the proxy of the VM's network: {problem}")
+        })?;
+        starts.push(start);
+    }
     let deadline = Instant::now() + SESSION_TIMEOUT;
     let capability = store.read_capability().map_err(|error| describe(&error))?;
     let mut client = connect(&vmm, &capability, deadline)?;
@@ -1302,12 +1325,9 @@ fn exec(store: &Path, guest_build: &str, executions: &[Execution]) -> Result<Exi
     let base = u64::from_le_bytes(base.try_into().expect("an instance ID has 16 bytes"));
     let mut running = Executions::new();
     let mut ids = Vec::new();
-    for (number, execution) in (1..).zip(executions) {
+    for (number, mut start) in (1..).zip(starts) {
         let key = Key::new(base.wrapping_add(number), identity.epoch);
-        let start = match &plan {
-            Some(plan) => with_proxy(execution.start(key), plan),
-            None => execution.start(key),
-        };
+        start.key = key;
         running
             .start(&mut client, start, exec_timers(), deadline)
             .map_err(|error| format!("cannot start execution {number}: {}", describe(&error)))?;
