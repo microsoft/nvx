@@ -13,7 +13,7 @@ use super::kernel::{Call, FakeKernel, Operation, Paths, super_options};
 use super::*;
 use crate::gpt::ExpectedPartition;
 use crate::guest::cgroup::Layout;
-use crate::guest::mappings::{Access, SourceRoot};
+use crate::guest::mappings::{Access, Mapping, SourceRoot};
 use crate::guest::sys::MountAttributes;
 
 /// The base address of the distro device's MMIO window.
@@ -956,6 +956,39 @@ fn a_runtime_directory_where_a_file_system_is_mounted_is_refused() {
     let error = guest.assemble(&guest.assembly()).unwrap_err();
     assert!(
         matches!(error.error(), Error::Occupied { path } if *path == shares),
+        "{error:?}"
+    );
+    assert_eq!(guest.kernel.mounts().len(), mounts);
+
+    // So does a host export whose unmount alone failed, which is mounted outside the overlay too.
+    let guest = Guest::new();
+    let mut root = guest.assemble(&guest.assembly()).unwrap();
+    drop(root.mount_export("microvm", Access::ReadOnly).unwrap());
+    let mount_point = guest.path("run/nvx/hostfs/root");
+    guest
+        .kernel
+        .fail(Operation::Unmount, mount_point.clone(), Errno::EBUSY);
+    let error = root.teardown().unwrap_err();
+    let failed: Vec<(&Mount, &Path)> = error
+        .failures()
+        .iter()
+        .map(|failure| (failure.mount(), failure.path()))
+        .collect();
+    let mount = Mount::Export {
+        tag: "microvm".into(),
+    };
+    assert_eq!(failed, [(&mount, mount_point.as_path())]);
+    assert_eq!(
+        error.to_string(),
+        format!(
+            "failed to unmount the host export microvm: {}",
+            os_error(Errno::EBUSY)
+        )
+    );
+    let mounts = guest.kernel.mounts().len();
+    let error = guest.assemble(&guest.assembly()).unwrap_err();
+    assert!(
+        matches!(error.error(), Error::Occupied { path } if *path == mount_point),
         "{error:?}"
     );
     assert_eq!(guest.kernel.mounts().len(), mounts);
@@ -3015,6 +3048,285 @@ fn mappings_apply_beneath_the_overlay_in_order_and_go_first_at_the_teardown() {
             guest.text("run/nvx/layers/distro"),
             guest.text("run/nvx/scratch"),
         ]
+    );
+}
+
+#[test]
+fn a_root_in_run_nvx_mounts_the_host_export_where_its_boot_token_names_it() {
+    assert_eq!(
+        Path::new("/run/nvx").join(EXPORT_DIRECTORY),
+        Path::new(crate::protocol::export::EXPORT_DIRECTORY)
+    );
+    assert_eq!(
+        Path::new(EXPORT_DIRECTORY).parent(),
+        Some(Path::new(HOSTFS_DIRECTORY))
+    );
+}
+
+#[test]
+fn the_host_export_is_mounted_out_of_the_root_and_unmounted_after_its_mappings() {
+    let restricted = MountFlags::MS_NOSUID | MountFlags::MS_NODEV;
+    for (access, flags) in [
+        (Access::ReadOnly, restricted | MountFlags::MS_RDONLY),
+        (Access::ReadWrite, restricted),
+    ] {
+        let guest = Guest::new();
+        let mut root = guest.assemble(&guest.assembly()).unwrap();
+        let assembled = guest.kernel.calls().len();
+        let source = root.mount_export("microvm", access).unwrap();
+        // The export's device alone is mounted, restricted, out of the root, below a directory
+        // that only root may enter.
+        let mount_point = guest.path("run/nvx/hostfs/root");
+        assert_eq!(
+            guest.kernel.calls()[assembled..],
+            [mount_call(
+                Some("microvm"),
+                &guest.text("run/nvx/hostfs/root"),
+                Some("virtiofs"),
+                flags,
+                None,
+            )]
+        );
+        assert!(mount_point.is_dir());
+        let mode = fs::metadata(guest.path("run/nvx/hostfs")).unwrap().mode() & 0o7777;
+        assert_eq!(mode, 0o700, "{access:?}");
+        assert_eq!(
+            fs::read_dir(guest.path("run/nvx/rootfs")).unwrap().count(),
+            0
+        );
+        assert!(!root.is_latched());
+
+        // Its root is the source of the caller's mappings: a directory child, `0`, and a file
+        // child, `1`, of the aggregate.
+        fs::create_dir_all(mount_point.join("0/src")).unwrap();
+        fs::write(mount_point.join("1"), b"notes").unwrap();
+        let mapped = guest.kernel.calls().len();
+        root.map(
+            &source,
+            &[
+                Mapping::new("0/src", "/workspace", Access::ReadWrite).unwrap(),
+                Mapping::new("1", "/home/user/notes", Access::ReadOnly).unwrap(),
+            ],
+        )
+        .unwrap();
+        let mut expected = attach_calls(
+            &mount_point.join("0/src"),
+            &guest.path("run/nvx/rootfs/workspace"),
+            Access::ReadWrite,
+        );
+        expected.extend(attach_calls(
+            &mount_point.join("1"),
+            &guest.path("run/nvx/rootfs/home/user/notes"),
+            Access::ReadOnly,
+        ));
+        assert_eq!(guest.kernel.calls()[mapped..], expected);
+        assert_eq!(targets(&root), ["/workspace", "/home/user/notes"]);
+
+        // A root mounts one export, since every export is mounted at the same place; refusing
+        // another latches nothing.
+        let mounts = guest.kernel.mounts().len();
+        let error = root.mount_export("other", access).unwrap_err();
+        assert!(
+            matches!(error, Error::Share(ShareRefusal::SecondExport)),
+            "{error:?}"
+        );
+        assert_eq!(error.to_string(), "the root has a host export already");
+        assert_eq!(guest.kernel.mounts().len(), mounts);
+        assert!(!root.is_latched());
+
+        // An aggregate live share, mounted later, is unmounted before the export.
+        export(&guest, &[("a", ShareKind::Directory)]);
+        let rw = Access::ReadWrite;
+        root.mount_aggregate(
+            "all",
+            rw,
+            &[child("a", "/data/a", rw, ShareKind::Directory)],
+        )
+        .unwrap();
+
+        // The teardown unmounts the live shares and mappings, those from the export included,
+        // then the aggregate and the export, the later first, then the assembly's mounts.
+        drop(source);
+        root.teardown().unwrap();
+        assert_eq!(
+            guest.kernel.unmounts(),
+            [
+                guest.text("run/nvx/rootfs/data/a"),
+                guest.text("run/nvx/rootfs/home/user/notes"),
+                guest.text("run/nvx/rootfs/workspace"),
+                guest.text("run/nvx/shares"),
+                guest.text("run/nvx/hostfs/root"),
+                guest.text("run/nvx/rootfs"),
+                guest.text("run/nvx/layers/distro"),
+                guest.text("run/nvx/scratch"),
+            ]
+        );
+    }
+}
+
+#[test]
+fn a_refused_tag_creates_and_mounts_nothing_and_a_failed_export_latches_the_root() {
+    let guest = Guest::new();
+    let mut root = guest.assemble(&guest.assembly()).unwrap();
+    let calls = guest.kernel.calls();
+    for tag in ["", "a b", "a.b", "a/b", "a,b", "a=b", "micro\u{e9}vm"] {
+        let error = root.mount_export(tag, Access::ReadOnly).unwrap_err();
+        assert!(
+            matches!(&error, Error::Share(ShareRefusal::Tag(refused)) if refused == tag),
+            "{error:?}"
+        );
+        assert_eq!(
+            error.to_string(),
+            format!("live share tag is invalid: {tag}")
+        );
+    }
+    assert_eq!(guest.kernel.calls(), calls);
+    assert!(!guest.path("run/nvx/hostfs").exists());
+    // The refusals of requests latch nothing.
+    assert!(!root.is_latched());
+
+    // A device that fails to mount latches the root, and leaves nothing to unmount.
+    let mount_point = guest.path("run/nvx/hostfs/root");
+    guest
+        .kernel
+        .fail(Operation::Mount, mount_point.clone(), Errno::ENODEV);
+    let error = root.mount_export("microvm", Access::ReadOnly).unwrap_err();
+    assert!(
+        matches!(
+            &error,
+            Error::Mount { mount: Mount::Export { tag }, error }
+                if tag == "microvm" && error.raw_os_error() == Some(Errno::ENODEV as i32)
+        ),
+        "{error:?}"
+    );
+    assert_eq!(
+        error.to_string(),
+        format!(
+            "failed to mount the host export microvm: {}",
+            os_error(Errno::ENODEV)
+        )
+    );
+    assert!(root.is_latched());
+
+    // A latched root refuses the export, as it refuses every share and mapping.
+    guest.kernel.restore(Operation::Mount, &mount_point);
+    let mounts = guest.kernel.mounts().len();
+    let error = root.mount_export("microvm", Access::ReadOnly).unwrap_err();
+    assert!(
+        matches!(
+            &error,
+            Error::Mapping { mount: Mount::Export { tag }, error: MappingError::Latched }
+                if tag == "microvm"
+        ),
+        "{error:?}"
+    );
+    assert_eq!(
+        error.to_string(),
+        "failed to mount the host export microvm: an earlier mapping failed"
+    );
+    assert_eq!(guest.kernel.mounts().len(), mounts);
+    root.teardown().unwrap();
+    assert_eq!(
+        guest.kernel.unmounts(),
+        [
+            guest.text("run/nvx/rootfs"),
+            guest.text("run/nvx/layers/distro"),
+            guest.text("run/nvx/scratch"),
+        ]
+    );
+}
+
+#[test]
+fn the_host_export_is_mounted_through_no_symbolic_link() {
+    for link in ["run/nvx/hostfs", "run/nvx/hostfs/root"] {
+        let guest = Guest::new();
+        let mut root = guest.assemble(&guest.assembly()).unwrap();
+        fs::create_dir(guest.path("elsewhere")).unwrap();
+        let parent = guest.path(link).parent().unwrap().to_owned();
+        if !parent.exists() {
+            // A private `hostfs`, as an earlier root leaves it.
+            fs::create_dir(&parent).unwrap();
+            fs::set_permissions(&parent, fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        std::os::unix::fs::symlink(guest.path("elsewhere"), guest.path(link)).unwrap();
+        let mounts = guest.kernel.mounts().len();
+        let error = root.mount_export("microvm", Access::ReadOnly).unwrap_err();
+        assert!(
+            matches!(
+                &error,
+                Error::MountPoint { path, error }
+                    if *path == guest.path(link)
+                        && error.raw_os_error() == Some(Errno::ENOTDIR as i32)
+            ),
+            "{link}: {error:?}"
+        );
+        assert_eq!(guest.kernel.mounts().len(), mounts, "{link}");
+        assert_eq!(
+            fs::read_dir(guest.path("elsewhere")).unwrap().count(),
+            0,
+            "{link}"
+        );
+        assert!(root.is_latched(), "{link}");
+        root.teardown().unwrap();
+    }
+}
+
+#[test]
+fn a_hostfs_directory_that_is_there_already_must_be_private() {
+    // One that its group or others may enter is refused, keeps its mode, and latches the root.
+    let user = nix::unistd::geteuid().as_raw();
+    for mode in [0o750, 0o705, 0o711] {
+        let guest = Guest::new();
+        let mut root = guest.assemble(&guest.assembly()).unwrap();
+        let hostfs = guest.path("run/nvx/hostfs");
+        fs::create_dir(&hostfs).unwrap();
+        fs::set_permissions(&hostfs, fs::Permissions::from_mode(mode)).unwrap();
+        let mounts = guest.kernel.mounts().len();
+        let error = root.mount_export("microvm", Access::ReadOnly).unwrap_err();
+        assert!(
+            matches!(
+                &error,
+                Error::MountPoint { path, error }
+                    if *path == hostfs && error.kind() == io::ErrorKind::PermissionDenied
+            ),
+            "{mode:o}: {error:?}"
+        );
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "failed to prepare {}: the directory there already is not private to user \
+                 {user}: user {user} owns it with mode {mode:04o}",
+                hostfs.display()
+            )
+        );
+        assert_eq!(guest.kernel.mounts().len(), mounts, "{mode:o}");
+        assert!(!guest.path("run/nvx/hostfs/root").exists(), "{mode:o}");
+        assert_eq!(fs::metadata(&hostfs).unwrap().mode() & 0o7777, mode);
+        assert!(root.is_latched(), "{mode:o}");
+        root.teardown().unwrap();
+    }
+
+    // One that only its owner, the process's effective user, may enter serves, such as the one
+    // that an earlier root left in the runtime directory.
+    let guest = Guest::new();
+    let mut root = guest.assemble(&guest.assembly()).unwrap();
+    drop(root.mount_export("microvm", Access::ReadOnly).unwrap());
+    root.teardown().unwrap();
+    let mut root = guest.assemble(&guest.assembly()).unwrap();
+    drop(root.mount_export("microvm", Access::ReadWrite).unwrap());
+    let mode = fs::metadata(guest.path("run/nvx/hostfs")).unwrap().mode() & 0o7777;
+    assert_eq!(mode, 0o700);
+    assert!(!root.is_latched());
+    root.teardown().unwrap();
+    let unmounts = [
+        guest.text("run/nvx/hostfs/root"),
+        guest.text("run/nvx/rootfs"),
+        guest.text("run/nvx/layers/distro"),
+        guest.text("run/nvx/scratch"),
+    ];
+    assert_eq!(
+        guest.kernel.unmounts(),
+        [unmounts.clone(), unmounts].concat()
     );
 }
 

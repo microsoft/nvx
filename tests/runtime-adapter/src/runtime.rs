@@ -11,19 +11,16 @@
 //! The VMs boot a copy of NVX's initramfs that holds the guest agent; see [`crate::initramfs`].
 //! Its identity names both: NVX's initramfs and the guest agent's build,
 //! `sha256:DIGEST+runtime-adapter-guest/BUILD`. The guest agent has no install metadata of its
-//! own, so the caller names its build, which is this crate's version, [`GUEST_BUILD`], unless the
-//! caller ships another. A host program that ships another build of the guest agent runs another
-//! runtime, so it finds the VMs of this one mismatched.
+//! own, so the caller names its build, which is this crate's version,
+//! [`GUEST_BUILD`](crate::GUEST_BUILD), unless the caller ships another. A host program that
+//! ships another build of the guest agent runs another runtime, so it finds the VMs of this one
+//! mismatched.
 
 use std::path::Path;
 
 use nvx::Result;
 use nvx::host::artifacts::{ArtifactDir, Artifacts};
 use nvx::host::store::{ArtifactIdentity, RuntimeIdentity};
-
-/// The guest agent's build that a host program ships unless it names another: this crate's
-/// version.
-pub const GUEST_BUILD: &str = env!("CARGO_PKG_VERSION");
 
 /// NVX's artifacts, and the runtime identity of the adapter's VMs that boot them with the guest
 /// agent.
