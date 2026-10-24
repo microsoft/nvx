@@ -8,10 +8,12 @@
 //! call waits for a child that it did not start. `nvx-time` runs those steps through the same
 //! calls, and the rest of the ABI itself.
 //!
-//! ```no_run
-//! use std::path::PathBuf;
+//! A restore hands over its fresh entropy in the [`CaptureRequest`]'s mode: the file mode, which
+//! `nvx-time capture` keeps, writes it to a file, and the in-memory mode returns it as the
+//! [`Restore`]'s owned [`Seed`](crate::guest::reseed::Seed), and writes no file:
 //!
-//! use nvx::guest::reseed::{self, Seed};
+//! ```no_run
+//! use nvx::guest::reseed;
 //! use nvx::guest::time::{CaptureOutcome, CaptureRequest, RestoreFinish, ScratchPolicy, TimeAbi};
 //!
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -21,11 +23,13 @@
 //! // The caller supervises the process `daemon`.
 //!
 //! // A snapshot's capture, after `nvx-time pre-capture`.
-//! let entropy = PathBuf::from("/run/nvx/restore-entropy");
-//! let request = CaptureRequest::new(ScratchPolicy::Fresh, abi.generation_id()?, entropy.clone());
-//! if let CaptureOutcome::Restored(restore) = abi.capture(request)? {
-//!     // A clone of the snapshot continues here, with its wall clock repaired.
-//!     reseed::reseed(&Seed::read(&entropy)?)?;
+//! let request = CaptureRequest::in_memory(ScratchPolicy::Fresh, abi.generation_id()?);
+//! if let CaptureOutcome::Restored(mut restore) = abi.capture(request)? {
+//!     // A clone of the snapshot continues here, with its wall clock repaired. The seed zeroes
+//!     // its bytes when it is dropped, after the reseed.
+//!     if let Some(seed) = restore.take_seed() {
+//!         reseed::reseed(&seed)?;
+//!     }
 //!     let mut finish = RestoreFinish::new();
 //!     if restore.acknowledgement_required() {
 //!         finish = finish.acknowledge();

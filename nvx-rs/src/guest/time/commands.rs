@@ -215,6 +215,31 @@ fn parse_capture_request(text: &[u8]) -> Option<u8> {
         .map(|request| request as u8)
 }
 
+/// Reads the request of `capture 0|1 GENERATION_ID ENTROPY_FILE [--finish]`, in the file mode,
+/// in which the restore's entropy goes to `ENTROPY_FILE`, or returns `None` for an invalid
+/// command line.
+fn capture_request(arguments: &[&[u8]]) -> Option<CaptureRequest> {
+    let (request, previous_id, entropy_path, finish) = match arguments {
+        [request, id, path] => (request, id, path, false),
+        [request, id, path, b"--finish"] => (request, id, path, true),
+        _ => return None,
+    };
+    let scratch = match parse_capture_request(request)? {
+        0 => ScratchPolicy::Fresh,
+        _ => ScratchPolicy::Paired,
+    };
+    let previous_id = decoders::parse_hex::<GENERATION_ID_SIZE>(previous_id)?;
+    if entropy_path.contains(&0) {
+        return None;
+    }
+    let request = CaptureRequest::new(
+        scratch,
+        GenerationId::from_bytes(previous_id),
+        PathBuf::from(OsStr::from_bytes(entropy_path)),
+    );
+    Some(if finish { request.finish() } else { request })
+}
+
 /// Requests a capture, and repairs a restore, which it prints: `0` when the VM continued, or
 /// `1` or `2`, for a restore that it left unfinished or finished, then the restore packet's
 /// flags, online VP count, range count, and new generation ID, and each range's start and
@@ -226,28 +251,9 @@ fn cmd_capture(
     err: &mut dyn Write,
 ) -> Result<(), CommandError> {
     const LINE: &[u8] = b"usage: nvx-time capture 0|1 GENERATION_ID ENTROPY_FILE [--finish]\n";
-    let (request, previous_id, entropy_path, finish) = match arguments {
-        [request, id, path] => (request, id, path, false),
-        [request, id, path, b"--finish"] => (request, id, path, true),
-        _ => return usage(err, LINE),
-    };
-    let scratch = match parse_capture_request(request) {
-        Some(0) => ScratchPolicy::Fresh,
-        Some(_) => ScratchPolicy::Paired,
-        None => return usage(err, LINE),
-    };
-    let Some(previous_id) = decoders::parse_hex::<GENERATION_ID_SIZE>(previous_id) else {
+    let Some(request) = capture_request(arguments) else {
         return usage(err, LINE);
     };
-    if entropy_path.contains(&0) {
-        return usage(err, LINE);
-    }
-    let request = CaptureRequest::new(
-        scratch,
-        GenerationId::from_bytes(previous_id),
-        PathBuf::from(OsStr::from_bytes(entropy_path)),
-    );
-    let request = if finish { request.finish() } else { request };
     let restore = match abi.capture(request) {
         Ok(CaptureOutcome::Continued) => {
             let _ = out.write_all(b"0\n");
@@ -422,6 +428,33 @@ mod tests {
             (b"999999999999999999999999999999999999", None),
         ] {
             assert_eq!(parse_capture_request(text), expected, "{text:?}");
+        }
+    }
+
+    #[test]
+    fn capture_keeps_the_file_mode_and_its_entropy_file() {
+        let id = b"000102030405060708090a0b0c0d0e0f";
+        let previous = GenerationId::from_bytes(std::array::from_fn(|index| index as u8));
+        let path = b"/run/nvx/restore-entropy";
+        let file = |scratch| {
+            CaptureRequest::new(scratch, previous, PathBuf::from("/run/nvx/restore-entropy"))
+        };
+        assert_eq!(
+            capture_request(&[b"0", id, path]),
+            Some(file(ScratchPolicy::Fresh))
+        );
+        assert_eq!(
+            capture_request(&[b"1", id, path, b"--finish"]),
+            Some(file(ScratchPolicy::Paired).finish())
+        );
+        for arguments in [
+            &[b"0".as_slice(), id, path, b"--fin"][..],
+            &[b"2", id, path],
+            &[b"0", &id[1..], path],
+            &[b"0", id, b"restore\0entropy"],
+            &[b"0", id],
+        ] {
+            assert_eq!(capture_request(arguments), None, "{arguments:?}");
         }
     }
 }

@@ -2,10 +2,17 @@
 //! init or agent, and `nvx-reseed`, the program that does it from a seed file.
 //!
 //! A restore of a snapshot hands each clone 64 bytes of fresh entropy, which start with the
-//! clone's new VM generation ID, and which the time ABI's capture writes to a seed file.
-//! [`Seed::read`] reads such a file, and [`reseed`] adds a seed to the kernel's entropy pool
-//! with full credit and reseeds its CRNG, so that the clones of one snapshot draw different
-//! random numbers. Neither call prints anything or starts a process.
+//! clone's new VM generation ID: a [`Seed`]. The time ABI's capture returns it in its in-memory
+//! mode, or writes it to a seed file in its file mode, from which [`Seed::read`] reads it.
+//! [`reseed`] adds a seed to the kernel's entropy pool with full credit and reseeds its CRNG, so
+//! that the clones of one snapshot draw different random numbers. Neither call prints anything
+//! or starts a process.
+//!
+//! A seed keeps its bytes in one allocation, which moving the seed leaves in place, and
+//! overwrites them with zeros, with volatile writes, when it is dropped. It can't be cloned, and
+//! formats none of its bytes: only its generation ID leaves it, and [`reseed`] hands the rest to
+//! the kernel. A caller of the file mode reads and checks the seed, then drops it once it
+//! reseeded:
 //!
 //! ```no_run
 //! use nvx::guest::GenerationId;
@@ -53,22 +60,43 @@ const USAGE: &[u8] =
 
 /// A restore's fresh entropy: 64 bytes that start with the restored VM's new generation ID.
 ///
-/// Its `Debug` form shows only the generation ID.
-pub struct Seed([u8; Seed::LENGTH]);
+/// The seed keeps its bytes in one heap allocation for its whole life, so that no move of the
+/// seed copies them, and overwrites them with zeros, with volatile writes, when it is dropped.
+/// It is neither `Clone` nor `Copy`, and formats none of its bytes: its `Debug` form is
+/// `Seed { .. }`. Only its generation ID leaves it, through
+/// [`generation_id`](Self::generation_id), and [`reseed`] hands the rest to the kernel.
+pub struct Seed(Box<[u8; Seed::LENGTH]>);
 
 impl Seed {
     /// The seed's length in bytes.
     pub const LENGTH: usize = 64;
 
-    /// Returns the seed whose bytes are `bytes`.
-    pub const fn from_bytes(bytes: [u8; Self::LENGTH]) -> Self {
-        Self(bytes)
+    /// Returns the seed whose bytes are `bytes`. The call zeroes its own copy of `bytes`; the
+    /// caller zeroes any copy that it keeps.
+    pub fn from_bytes(mut bytes: [u8; Self::LENGTH]) -> Self {
+        let seed = Self::copy_from(&bytes);
+        sys::zeroize(&mut bytes);
+        seed
+    }
+
+    /// Returns the seed whose bytes are a copy of `bytes`, which go straight into its
+    /// allocation.
+    pub(crate) fn copy_from(bytes: &[u8; Self::LENGTH]) -> Self {
+        let mut seed = Self::zeroed();
+        seed.0.copy_from_slice(bytes);
+        seed
+    }
+
+    /// Returns a seed of zeros, whose allocation a read then fills.
+    fn zeroed() -> Self {
+        Self(Box::new([0; Self::LENGTH]))
     }
 
     /// Reads the seed from the file at `path`, which must hold at least [`Seed::LENGTH`] bytes,
-    /// of which it reads the first. A read that a signal interrupts fails, with an error of kind
-    /// [`io::ErrorKind::Interrupted`], and a file that is too short fails with an error of kind
-    /// [`io::ErrorKind::UnexpectedEof`].
+    /// of which it reads the first, straight into the seed's allocation. A read that a signal
+    /// interrupts fails, with an error of kind [`io::ErrorKind::Interrupted`], and a file that
+    /// is too short fails with an error of kind [`io::ErrorKind::UnexpectedEof`]; either way, the
+    /// bytes that were read are zeroed.
     pub fn read(path: impl AsRef<Path>) -> Result<Self, ReseedError> {
         let path = path.as_ref();
         let Ok(path) = CString::new(path.as_os_str().as_bytes()) else {
@@ -86,15 +114,29 @@ impl Seed {
         id.copy_from_slice(&self.0[..GenerationId::LENGTH]);
         GenerationId::from_bytes(id)
     }
+
+    /// Returns the seed's bytes, which the crate reads only to hand them on: the time ABI's
+    /// capture, in its file mode, writes a restore's to the entropy file.
+    #[cfg(target_arch = "x86_64")]
+    pub(crate) fn bytes(&self) -> &[u8; Self::LENGTH] {
+        &self.0
+    }
+}
+
+impl Drop for Seed {
+    /// Overwrites the seed's bytes with zeros, with volatile writes, before its allocation is
+    /// freed.
+    fn drop(&mut self) {
+        sys::zeroize(self.0.as_mut_slice());
+        #[cfg(test)]
+        tests::observe_drop(self);
+    }
 }
 
 impl fmt::Debug for Seed {
-    /// Writes the generation ID, and none of the entropy that follows it.
+    /// Writes `Seed { .. }`, and none of the seed's bytes.
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("Seed")
-            .field("generation_id", &self.generation_id())
-            .finish_non_exhaustive()
+        formatter.debug_struct("Seed").finish_non_exhaustive()
     }
 }
 
@@ -163,8 +205,8 @@ impl std::error::Error for ReseedError {
     }
 }
 
-/// Reads the first [`Seed::LENGTH`] bytes of the file at `path`, without retrying after
-/// `EINTR`.
+/// Reads the first [`Seed::LENGTH`] bytes of the file at `path` into a seed's allocation,
+/// without retrying after `EINTR`. A failed read drops the seed, which zeroes what it read.
 fn read_seed(path: &CStr) -> Result<Seed, ReseedError> {
     let owned = || PathBuf::from(OsStr::from_bytes(path.to_bytes()));
     let descriptor = sys::open(
@@ -176,10 +218,10 @@ fn read_seed(path: &CStr) -> Result<Seed, ReseedError> {
         path: owned(),
         source: errno.into(),
     })?;
-    let mut bytes = [0; Seed::LENGTH];
+    let mut seed = Seed::zeroed();
     let mut offset = 0;
-    while offset < bytes.len() {
-        let source = match descriptor.read(&mut bytes[offset..]) {
+    while offset < Seed::LENGTH {
+        let source = match descriptor.read(&mut seed.0[offset..]) {
             Ok(0) => io::ErrorKind::UnexpectedEof.into(),
             Ok(count) => {
                 offset += count;
@@ -192,7 +234,7 @@ fn read_seed(path: &CStr) -> Result<Seed, ReseedError> {
             source,
         });
     }
-    Ok(Seed(bytes))
+    Ok(seed)
 }
 
 /// Adds `seed` to the entropy pool through `random`, which stands for `/dev/random`, and reseeds
@@ -371,6 +413,7 @@ fn print_random_sample(out: &mut dyn Write, err: &mut dyn Write) -> Result<(), C
 
 #[cfg(test)]
 mod tests {
+    use std::cell::RefCell;
     use std::fs;
 
     use super::*;
@@ -379,6 +422,18 @@ mod tests {
 
     /// A seed whose bytes count up from 0, so its generation ID is 000102...0f.
     const GENERATION_ID: &str = "000102030405060708090a0b0c0d0e0f";
+
+    thread_local! {
+        /// The bytes of each seed that the test's thread dropped, as its drop left them just
+        /// before its allocation was freed.
+        static DROPPED: RefCell<Vec<[u8; Seed::LENGTH]>> = const { RefCell::new(Vec::new()) };
+    }
+
+    /// Records the bytes of `seed`, which its drop has overwritten, while its allocation still
+    /// holds them.
+    pub(super) fn observe_drop(seed: &Seed) {
+        DROPPED.with_borrow_mut(|dropped| dropped.push(*seed.0));
+    }
 
     struct Fixture {
         directory: tempfile::TempDir,
@@ -588,7 +643,7 @@ mod tests {
     }
 
     #[test]
-    fn a_seed_reads_the_first_bytes_of_its_file_and_shows_only_its_generation_id() {
+    fn a_seed_reads_the_first_bytes_of_its_file_and_formats_none_of_them() {
         let fixture = Fixture::new();
         let long = fixture.directory.path().join("long");
         let bytes: Vec<u8> = (0..=Seed::LENGTH as u8).map(|byte| byte ^ 0xa5).collect();
@@ -597,16 +652,35 @@ mod tests {
         assert_eq!(seed.0[..], bytes[..Seed::LENGTH]);
         let id = seed.generation_id();
         assert_eq!(id.to_bytes()[..], bytes[..GenerationId::LENGTH]);
-        assert_eq!(
-            format!("{seed:?}"),
-            format!("Seed {{ generation_id: {id:?}, .. }}")
-        );
-        let from_bytes = Seed::from_bytes(seed.0);
+        assert_eq!(format!("{seed:?}"), "Seed { .. }");
+        assert_eq!(format!("{seed:#?}"), "Seed { .. }");
+        let from_bytes = Seed::from_bytes(*seed.0);
         assert_eq!(
             Seed::read(fixture.path("seed")).unwrap().generation_id(),
             GenerationId::from_bytes(std::array::from_fn(|index| index as u8))
         );
+        assert_eq!(from_bytes.0, seed.0);
         assert_eq!(from_bytes.generation_id(), id);
+    }
+
+    #[test]
+    fn a_seed_moves_without_its_bytes_and_zeroes_them_when_dropped() {
+        let fixture = Fixture::new();
+        let seed = Seed::from_bytes([0xa5; Seed::LENGTH]);
+        let bytes = seed.0.as_ptr();
+        // A move, such as into a restore and out of it again, moves only the allocation's address.
+        let seed = std::hint::black_box(seed);
+        assert_eq!(seed.0.as_ptr(), bytes);
+        let read = Seed::read(fixture.path("seed")).unwrap();
+        DROPPED.take();
+        drop((seed, read));
+        assert_eq!(DROPPED.take(), [[0; Seed::LENGTH]; 2]);
+
+        // A read that fails drops the seed that it was filling.
+        let short = fixture.directory.path().join("short");
+        fs::write(&short, [0xa5; Seed::LENGTH - 1]).unwrap();
+        Seed::read(&short).unwrap_err();
+        assert_eq!(DROPPED.take(), [[0; Seed::LENGTH]]);
     }
 
     #[test]

@@ -9,7 +9,7 @@ use super::{Errno, FileDescriptor};
 /// Number of bytes that `nvx-reseed` adds to the entropy pool.
 const SEED_BYTES: usize = 64;
 
-/// C layout required by `RNDADDENTROPY`.
+/// C layout required by `RNDADDENTROPY`, whose copy of the seed it zeroes when it is dropped.
 #[repr(C)]
 struct SeedPayload {
     /// Number of entropy bits credited to the payload.
@@ -18,6 +18,13 @@ struct SeedPayload {
     buf_size: c_int,
     /// Seed bytes added to the kernel pool.
     bytes: [u8; SEED_BYTES],
+}
+
+impl Drop for SeedPayload {
+    /// Overwrites the payload's copy of the seed with zeros, with volatile writes.
+    fn drop(&mut self) {
+        super::zeroize(&mut self.bytes);
+    }
 }
 
 nix::ioctl_read_bad!(
@@ -79,18 +86,20 @@ pub(crate) fn console_pending(descriptor: &FileDescriptor) -> Result<c_int, Errn
 
 /// Adds a 64-byte seed with full entropy credit and asks Linux to reseed the CRNG.
 ///
-/// The payload owns the exact C layout consumed synchronously by `RNDADDENTROPY`.
-/// `RNDRESEEDCRNG` takes no argument. If either request fails, the error of the failing request
-/// is returned exactly as the C `||` expression did.
+/// The payload owns the exact C layout consumed synchronously by `RNDADDENTROPY`, and a copy of
+/// the seed, which it zeroes when the call returns. `RNDRESEEDCRNG` takes no argument. If either
+/// request fails, the error of the failing request is returned exactly as the C `||` expression
+/// did.
 pub(crate) fn reseed_random(
     descriptor: &FileDescriptor,
     seed: &[u8; SEED_BYTES],
 ) -> Result<(), Errno> {
-    let payload = SeedPayload {
+    let mut payload = SeedPayload {
         entropy_count: (SEED_BYTES * 8) as c_int,
         buf_size: SEED_BYTES as c_int,
-        bytes: *seed,
+        bytes: [0; SEED_BYTES],
     };
+    payload.bytes.copy_from_slice(seed);
     // SAFETY: `payload` has the kernel ABI's layout and outlives this synchronous ioctl.
     unsafe { rnd_add_entropy(descriptor.raw(), &raw const payload) }?;
     // SAFETY: `RNDRESEEDCRNG` reads no argument.
@@ -148,6 +157,22 @@ mod tests {
         assert_eq!(add_entropy as u32, ioc(1, 0x03, 2 * 4));
         assert_eq!(nix::request_code_none!(b'R', 0x07) as u32, ioc(0, 0x07, 0));
         assert_eq!(size_of::<SeedPayload>(), 8 + SEED_BYTES);
+    }
+
+    #[test]
+    fn a_seed_payload_zeroes_its_copy_of_the_seed_when_dropped() {
+        let mut payload = std::mem::ManuallyDrop::new(SeedPayload {
+            entropy_count: 512,
+            buf_size: 64,
+            bytes: [0xa5; SEED_BYTES],
+        });
+        // SAFETY: the payload is dropped once, and owns no resource, so its memory still holds a
+        // valid payload, which the test reads, once its destructor ran.
+        unsafe { std::mem::ManuallyDrop::drop(&mut payload) };
+        assert_eq!(
+            (payload.entropy_count, payload.buf_size, payload.bytes),
+            (512, 64, [0; SEED_BYTES])
+        );
     }
 
     #[test]

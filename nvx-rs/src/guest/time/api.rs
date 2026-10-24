@@ -1,6 +1,6 @@
 //! The time ABI's typed calls, through which a guest init or agent runs its steps in process.
 
-use std::ffi::{CStr, CString};
+use std::ffi::CString;
 use std::fmt::{self, Display};
 use std::io;
 use std::os::unix::ffi::OsStrExt;
@@ -9,9 +9,7 @@ use std::path::PathBuf;
 use super::checks::{self, Checks};
 use super::cpu_mask::CpuMask;
 use super::daemon;
-use super::decoders::{
-    self, GENERATION_ID_SIZE, PACKET_HEADER_SIZE, PacketError, PacketHeader, RestorePacket,
-};
+use super::decoders::{self, PACKET_HEADER_SIZE, PacketError, PacketHeader, RestorePacket};
 use super::events::{CheckId, ViolationCode};
 use super::state::{
     CheckState, CheckStatus, Discontinuity, DowntimeSource, SampleRejection, TimeState,
@@ -24,6 +22,7 @@ use super::system::{
 };
 use super::{NSEC_PER_USEC, Phase};
 use crate::guest::GenerationId;
+use crate::guest::reseed::Seed;
 use crate::guest::sys::{
     self, Errno, FileDescriptor, ForkResult, OpenFlags, Port, PortAccess, PortError, kernel,
 };
@@ -132,14 +131,18 @@ impl TimeAbi {
 
     /// Requests a capture through the snapshot port, preparation step 5, and, in a VM that a
     /// snapshot restored, repairs the restore: reads and validates the restore packet, steps and
-    /// slews the wall clock, writes the packet's fresh entropy to the request's entropy file,
-    /// and records the restore, repair steps 1 to 3.
+    /// slews the wall clock, hands over the packet's fresh entropy, and records the restore,
+    /// repair steps 1 to 3.
     ///
-    /// The call creates, or truncates, the entropy file before it requests the capture, and
-    /// removes it again when the VM continues without a restore. A capture that succeeds ends
-    /// the VM process that requested it, in which the call does not return. With
-    /// [`CaptureRequest::finish`], [`Restore::finished`] tells whether the call finished the
-    /// restore, and how it reports a failed handoff of repair step 7.
+    /// The request's mode selects how the entropy is handed over. In the file mode of
+    /// [`CaptureRequest::new`], the call creates, or truncates, the entropy file before it
+    /// requests the capture, writes the entropy to it, and removes it again when the VM
+    /// continues without a restore. In the in-memory mode of [`CaptureRequest::in_memory`], it
+    /// writes no file: the [`Restore`] holds the entropy, as an owned [`Seed`], until
+    /// [`Restore::take_seed`] hands it over. A capture that succeeds ends the VM process that
+    /// requested it, in which the call does not return. With [`CaptureRequest::finish`],
+    /// [`Restore::finished`] tells whether the call finished the restore, and how it reports a
+    /// failed handoff of repair step 7.
     pub fn capture(&self, request: CaptureRequest) -> Result<CaptureOutcome, TimeError> {
         released(capture(&self.runtime(), request))
     }
@@ -279,29 +282,58 @@ impl ScratchPolicy {
     }
 }
 
-/// A capture request of [`TimeAbi::capture`].
+/// A capture request of [`TimeAbi::capture`], in one of two modes, which differ in how a restore
+/// hands over the fresh entropy of its restore packet: the file mode of [`new`](Self::new),
+/// which writes it to a file, as `nvx-time capture` does, and the in-memory mode of
+/// [`in_memory`](Self::in_memory), which writes no file, and returns it as the [`Restore`]'s
+/// owned [`Seed`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CaptureRequest {
     /// The snapshot's scratch policy.
     scratch: ScratchPolicy,
     /// The VM generation ID before the capture, which a restore must replace.
     generation_id: GenerationId,
-    /// The file to which a restore writes its fresh entropy.
-    entropy_path: PathBuf,
+    /// How a restore hands over its fresh entropy.
+    entropy: EntropyMode,
     /// Whether to finish a restore that has nothing to activate.
     finish: bool,
 }
 
+/// How a restore hands over the fresh entropy of its restore packet: the mode of a
+/// [`CaptureRequest`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum EntropyMode {
+    /// The file mode: the restore writes the entropy to the file at this path, which only its
+    /// owner may read and write.
+    File(PathBuf),
+    /// The in-memory mode: the restore returns the entropy, as its owned seed.
+    InMemory,
+}
+
 impl CaptureRequest {
-    /// Describes a capture with the `scratch` policy, by the VM process whose generation ID,
-    /// from [`TimeAbi::generation_id`], is `generation_id`. A restore writes the 64 bytes of
-    /// fresh entropy of its restore packet, which start with the new generation ID, to a file
-    /// at `entropy_path` that only its owner may read and write.
+    /// Describes a capture in the file mode, with the `scratch` policy, by the VM process whose
+    /// generation ID, from [`TimeAbi::generation_id`], is `generation_id`. A restore writes the
+    /// 64 bytes of fresh entropy of its restore packet, which start with the new generation ID,
+    /// to a file at `entropy_path` that only its owner may read and write.
     pub fn new(scratch: ScratchPolicy, generation_id: GenerationId, entropy_path: PathBuf) -> Self {
         Self {
             scratch,
             generation_id,
-            entropy_path,
+            entropy: EntropyMode::File(entropy_path),
+            finish: false,
+        }
+    }
+
+    /// Describes a capture in the in-memory mode, with the `scratch` policy, by the VM process
+    /// whose generation ID, from [`TimeAbi::generation_id`], is `generation_id`. A restore
+    /// writes no file: its [`Restore`] holds the 64 bytes of fresh entropy of its restore
+    /// packet, which start with the new generation ID, as an owned [`Seed`], which
+    /// [`Restore::take_seed`] hands over.
+    pub fn in_memory(scratch: ScratchPolicy, generation_id: GenerationId) -> Self {
+        Self {
+            scratch,
+            generation_id,
+            entropy: EntropyMode::InMemory,
             finish: false,
         }
     }
@@ -319,17 +351,22 @@ impl CaptureRequest {
 }
 
 /// How a capture request ended, in the VM process in which it returned.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Debug)]
 pub enum CaptureOutcome {
     /// The VM continued without a restore: no snapshot was taken, or the restore packet was of
-    /// the recorded generation. The entropy file is removed.
+    /// the recorded generation. The entropy file of the file mode is removed.
     Continued,
-    /// A snapshot restored the VM, and the call repaired its time and wrote its entropy.
+    /// A snapshot restored the VM, and the call repaired its time and handed over its entropy:
+    /// to the entropy file in the file mode, and to the restore's seed in the in-memory mode.
     Restored(Restore),
 }
 
 /// A restore that a capture request repaired, as its restore packet describes it.
-#[derive(Clone, Debug, PartialEq, Eq)]
+///
+/// In the in-memory mode, it also holds the restore's fresh entropy, as an owned [`Seed`], until
+/// [`take_seed`](Self::take_seed) hands it over, so it is neither `Clone` nor comparable: the
+/// seed has one owner.
+#[derive(Debug)]
 pub struct Restore {
     /// The packet's flags.
     flags: u8,
@@ -341,6 +378,8 @@ pub struct Restore {
     memory_ranges: Vec<MemoryRange>,
     /// Whether the call finished the restore.
     finished: bool,
+    /// The restore's fresh entropy, in the in-memory mode, until the caller takes it.
+    seed: Option<Seed>,
 }
 
 impl Restore {
@@ -378,9 +417,20 @@ impl Restore {
         &self.memory_ranges
     }
 
-    /// Returns the new VM generation ID, with which the entropy file starts.
+    /// Returns the new VM generation ID, with which the restore's fresh entropy starts.
     pub fn generation_id(&self) -> GenerationId {
         self.generation_id
+    }
+
+    /// Takes the restore's fresh entropy: 64 bytes that start with the new VM generation ID,
+    /// which a capture in the in-memory mode of [`CaptureRequest::in_memory`] returns instead of
+    /// writing them to a file, or `None` in the file mode, or once the seed was taken.
+    ///
+    /// The seed moves to the caller without a copy of its bytes, which it zeroes when it is
+    /// dropped, so the caller drops it once it reseeded the kernel's random number generator
+    /// with it, through [`reseed`](crate::guest::reseed::reseed).
+    pub fn take_seed(&mut self) -> Option<Seed> {
+        self.seed.take()
     }
 
     /// Returns the restore packet's flags, which `nvx-time capture` prints.
@@ -415,8 +465,8 @@ impl MemoryRange {
     }
 }
 
-/// The flags with which a capture creates the entropy file: write-only, created or truncated,
-/// and never through a symbolic link.
+/// The flags with which a capture in the file mode creates the entropy file: write-only, created
+/// or truncated, and never through a symbolic link.
 const ENTROPY_FLAGS: OpenFlags = OpenFlags::O_WRONLY
     .union(OpenFlags::O_CREAT)
     .union(OpenFlags::O_TRUNC)
@@ -428,14 +478,20 @@ fn capture(runtime: &Runtime<'_>, request: CaptureRequest) -> Result<CaptureOutc
     let CaptureRequest {
         scratch,
         generation_id,
-        entropy_path,
+        entropy,
         finish,
     } = request;
-    let Ok(path) = CString::new(entropy_path.as_os_str().as_bytes()) else {
-        return Err(TimeError::EntropyFile {
-            path: entropy_path,
-            source: io::ErrorKind::InvalidInput.into(),
-        });
+    let path = match entropy {
+        EntropyMode::File(entropy_path) => {
+            let Ok(path) = CString::new(entropy_path.as_os_str().as_bytes()) else {
+                return Err(TimeError::EntropyFile {
+                    path: entropy_path,
+                    source: io::ErrorKind::InvalidInput.into(),
+                });
+            };
+            Some((path, entropy_path))
+        }
+        EntropyMode::InMemory => None,
     };
     if state_load().is_err() {
         return Err(TimeError::StateUnavailable);
@@ -445,16 +501,22 @@ fn capture(runtime: &Runtime<'_>, request: CaptureRequest) -> Result<CaptureOutc
     // the entropy file opens, so that a guest without the permission fails first.
     let ports = runtime.open_ports()?;
     let daemon_pid = if finish { checks::daemon_pid() } else { None };
-    let entropy_file = sys::open(&path, ENTROPY_FLAGS, PRIVATE_FILE_MODE).map_err(|error| {
-        TimeError::EntropyFile {
-            path: entropy_path,
-            source: error.into(),
-        }
-    })?;
+    let entropy = match path {
+        Some((path, entropy_path)) => match sys::open(&path, ENTROPY_FLAGS, PRIVATE_FILE_MODE) {
+            Ok(file) => EntropySink::File { path, file },
+            Err(error) => {
+                return Err(TimeError::EntropyFile {
+                    path: entropy_path,
+                    source: error.into(),
+                });
+            }
+        },
+        None => EntropySink::Seed,
+    };
     let _lock = match system::lock_portb() {
         Ok(lock) => lock,
         Err(error) => {
-            discard_entropy(entropy_file, &path);
+            entropy.discard();
             return Err(TimeError::PortLock(error.into()));
         }
     };
@@ -464,13 +526,12 @@ fn capture(runtime: &Runtime<'_>, request: CaptureRequest) -> Result<CaptureOutc
         .then(|| read_packet(&ports, runtime.generation()));
     drop(ports);
     let Some(read) = read else {
-        discard_entropy(entropy_file, &path);
+        entropy.discard();
         return Ok(CaptureOutcome::Continued);
     };
     let target = RepairTarget {
         previous_id: generation_id,
-        entropy_path: &path,
-        entropy_file,
+        entropy,
         finish,
         daemon_pid,
     };
@@ -484,10 +545,39 @@ pub(crate) fn load_generation(runtime: &Runtime<'_>) {
     }
 }
 
-/// Closes and removes the restored entropy file, of a capture that restored no packet.
-fn discard_entropy(file: FileDescriptor, path: &CStr) {
-    let _ = file.close();
-    let _ = sys::unlink(path);
+/// Where a capture hands over a restore's fresh entropy, in its request's mode.
+enum EntropySink {
+    /// The file mode's entropy file, which the capture created.
+    File {
+        /// The file's path.
+        path: CString,
+        /// The created file.
+        file: FileDescriptor,
+    },
+    /// The in-memory mode's seed, which the restore returns.
+    Seed,
+}
+
+impl EntropySink {
+    /// Closes and removes the file mode's entropy file, of a capture that restored no packet.
+    fn discard(self) {
+        if let Self::File { path, file } = self {
+            let _ = file.close();
+            let _ = sys::unlink(&path);
+        }
+    }
+
+    /// Hands over `entropy`, a restore's: writes it to the entropy file and drops it, which
+    /// zeroes it, or returns it, as the restore's seed. A failure to write or close the file is
+    /// reported with the file's path.
+    fn deliver(self, entropy: Seed) -> Result<Option<Seed>, Vec<u8>> {
+        match self {
+            Self::File { path, file } => {
+                system::write_entropy(file, &path, entropy.bytes()).map(|()| None)
+            }
+            Self::Seed => Ok(Some(entropy)),
+        }
+    }
 }
 
 /// What repair step 2's port reads returned, which repair validates once their transaction
@@ -531,21 +621,18 @@ fn read_packet(ports: &PortAccess<'_>, recorded: u32) -> PacketRead {
     }
     let mut body = vec![0_u8; header.body_size()];
     portb_read(ports, Port::PortbData, &mut body);
-    PacketRead::Packet {
-        t0,
-        t1,
-        packet: RestorePacket::parse(header, &body),
-    }
+    let packet = RestorePacket::parse(header, &body);
+    // The packet owns its entropy now, in the seed's allocation.
+    sys::zeroize(&mut body);
+    PacketRead::Packet { t0, t1, packet }
 }
 
 /// What a restore transaction writes, and where.
-struct RepairTarget<'a> {
+struct RepairTarget {
     /// The VM generation ID before the snapshot, which the packet must replace.
     previous_id: GenerationId,
-    /// The path of the restored entropy file.
-    entropy_path: &'a CStr,
-    /// The restored entropy file.
-    entropy_file: FileDescriptor,
+    /// Where the restore's fresh entropy goes.
+    entropy: EntropySink,
     /// Whether to hand repair steps 6 and 7 to the daemon.
     finish: bool,
     /// The daemon that would run step 7.
@@ -553,11 +640,11 @@ struct RepairTarget<'a> {
 }
 
 /// Repair steps 2 and 3, once the port transaction that read the packet ended: validates it,
-/// steps and slews the clock, and records the restore.
+/// steps and slews the clock, hands over its entropy, and records the restore.
 fn repair_restore(
     runtime: &Runtime<'_>,
     read: PacketRead,
-    target: RepairTarget<'_>,
+    target: RepairTarget,
     start_ns: i64,
 ) -> Result<CaptureOutcome, TimeError> {
     let (t0, t1, packet) = match read {
@@ -569,7 +656,7 @@ fn repair_restore(
             ));
         }
         PacketRead::Stale => {
-            discard_entropy(target.entropy_file, target.entropy_path);
+            target.entropy.discard();
             return Ok(CaptureOutcome::Continued);
         }
         PacketRead::Generation(generation) => {
@@ -587,8 +674,13 @@ fn repair_restore(
     };
     let packet = packet
         .map_err(|error| repair_failed(runtime, ViolationCode::RepairPacket, error.to_string()))?;
-    let header = packet.header;
-    if packet.generation_id() == target.previous_id.to_bytes() {
+    let RestorePacket {
+        header,
+        ranges,
+        entropy,
+    } = packet;
+    let generation_id = entropy.generation_id();
+    if generation_id == target.previous_id {
         return Err(repair_failed(
             runtime,
             ViolationCode::RepairGeneration,
@@ -641,11 +733,10 @@ fn repair_restore(
         && header.online_vp_count == 0
         && header.range_count == 0
         && !header.memory_target();
-    if let Err(detail) =
-        system::write_entropy(target.entropy_file, target.entropy_path, &packet.entropy)
-    {
-        return Err(repair_failed(runtime, ViolationCode::RepairPacket, detail));
-    }
+    let seed = match target.entropy.deliver(entropy) {
+        Ok(seed) => seed,
+        Err(detail) => return Err(repair_failed(runtime, ViolationCode::RepairPacket, detail)),
+    };
     if let Err(error) = state_apply(|state| {
         apply_repair(
             state,
@@ -674,18 +765,16 @@ fn repair_restore(
     let finished = daemon.is_some_and(|daemon| {
         daemon::finish_restore(runtime, daemon, header.acknowledgement_required(), start_ns)
     });
-    let mut generation_id = [0_u8; GENERATION_ID_SIZE];
-    generation_id.copy_from_slice(packet.generation_id());
     Ok(CaptureOutcome::Restored(Restore {
         flags: header.flags,
         online_vp_count: header.online_vp_count,
-        generation_id: GenerationId::from_bytes(generation_id),
-        memory_ranges: packet
-            .ranges
+        generation_id,
+        memory_ranges: ranges
             .iter()
             .map(|&(start, length)| MemoryRange { start, length })
             .collect(),
         finished,
+        seed,
     }))
 }
 
@@ -1024,6 +1113,9 @@ impl std::error::Error for TimeError {
 #[cfg(test)]
 mod tests {
     use std::ffi::OsStr;
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::Path;
 
     use super::*;
     use crate::guest::time::system::tests::FakeOps;
@@ -1207,6 +1299,7 @@ mod tests {
             generation_id: GenerationId::from_bytes([7; GenerationId::LENGTH]),
             memory_ranges: vec![range],
             finished: false,
+            seed: None,
         };
         assert!(restore.acknowledgement_required() && restore.memory_target());
         assert!(!restore.finished());
@@ -1255,5 +1348,186 @@ mod tests {
         assert_eq!(finish.new_cpus, set);
         assert_eq!(RestoreFinish::new(), RestoreFinish::default());
         assert!(TimeAbi::report_only().is_report_only());
+    }
+
+    #[test]
+    fn capture_requests_select_how_a_restore_hands_over_its_entropy() {
+        let id = GenerationId::from_bytes([1; GenerationId::LENGTH]);
+        let path = PathBuf::from("/run/nvx/restore-entropy");
+        let file = CaptureRequest::new(ScratchPolicy::Paired, id, path.clone());
+        assert_eq!(file.entropy, EntropyMode::File(path));
+        let in_memory = CaptureRequest::in_memory(ScratchPolicy::Paired, id);
+        assert_eq!(
+            (in_memory.scratch, in_memory.generation_id, in_memory.finish),
+            (ScratchPolicy::Paired, id, false)
+        );
+        assert_eq!(in_memory.entropy, EntropyMode::InMemory);
+        let finishing = in_memory.clone().finish();
+        assert_eq!(
+            (finishing.entropy, finishing.finish),
+            (EntropyMode::InMemory, true)
+        );
+        assert_ne!(file, in_memory);
+    }
+
+    #[test]
+    fn a_restore_hands_over_its_seed_once_and_formats_none_of_it() {
+        let seed = Seed::from_bytes([7; Seed::LENGTH]);
+        let mut restore = Restore {
+            flags: 0,
+            online_vp_count: 0,
+            generation_id: seed.generation_id(),
+            memory_ranges: Vec::new(),
+            finished: false,
+            seed: Some(seed),
+        };
+        let text = format!("{restore:?}");
+        assert!(text.ends_with(", seed: Some(Seed { .. }) }"), "{text}");
+        let seed = restore.take_seed().unwrap();
+        assert_eq!(seed.generation_id(), restore.generation_id());
+        assert_eq!(*seed.bytes(), [7; Seed::LENGTH]);
+        assert!(restore.take_seed().is_none());
+        assert!(format!("{restore:?}").ends_with(", seed: None }"));
+    }
+
+    #[test]
+    fn the_file_mode_writes_the_entropy_and_the_in_memory_mode_returns_it() {
+        let entropy: [u8; Seed::LENGTH] = std::array::from_fn(|index| index as u8 ^ 0x5a);
+        let directory = tempfile::tempdir().unwrap();
+        let file_path = directory.path().join("restore-entropy");
+        let path = sys::path_c_string(&file_path).unwrap();
+        let open = || sys::open(&path, ENTROPY_FLAGS, PRIVATE_FILE_MODE).unwrap();
+        let sink = EntropySink::File {
+            path: path.clone(),
+            file: open(),
+        };
+        assert!(sink.deliver(Seed::from_bytes(entropy)).unwrap().is_none());
+        assert_eq!(fs::read(&file_path).unwrap(), entropy);
+        let mode = fs::metadata(&file_path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o7777, 0o600);
+        // The in-memory mode returns the seed, and writes nothing.
+        let seed = EntropySink::Seed.deliver(Seed::from_bytes(entropy));
+        assert_eq!(seed.unwrap().map(|seed| *seed.bytes()), Some(entropy));
+        EntropySink::Seed.discard();
+        assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 1);
+        // A capture that continues removes the file mode's file.
+        let file = open();
+        EntropySink::File { path, file }.discard();
+        assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 0);
+    }
+
+    /// Returns the port input with which a restore answers a capture: port B's status, then a
+    /// packet of `generation`, which carries `entropy` and nothing to activate, in four-byte
+    /// reads.
+    fn restore_input(generation: u32, entropy: &[u8; Seed::LENGTH]) -> Vec<u32> {
+        let mut packet = [0_u8; PACKET_HEADER_SIZE + Seed::LENGTH];
+        packet[..4].copy_from_slice(b"OVR\x04");
+        packet[8..12].copy_from_slice(&generation.to_le_bytes());
+        let utc_ns = clock_ns(sys::Clock::Realtime).unsigned_abs();
+        packet[24..32].copy_from_slice(&utc_ns.to_le_bytes());
+        packet[PACKET_HEADER_SIZE..].copy_from_slice(entropy);
+        let words = packet
+            .chunks(size_of::<u32>())
+            .map(|word| u32::from_ne_bytes(word.try_into().unwrap()));
+        std::iter::once(u32::from(PORTB_PACKET_AVAILABLE))
+            .chain(words)
+            .collect()
+    }
+
+    /// Returns whether a file below `directory` holds `secret`, as bytes or in hexadecimal.
+    fn holds(directory: &Path, secret: &[u8]) -> bool {
+        let hex = decoders::format_hex(secret);
+        fs::read_dir(directory).unwrap().any(|entry| {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                return holds(&path, secret);
+            }
+            let contents = fs::read(&path).unwrap();
+            contents.windows(secret.len()).any(|bytes| bytes == secret)
+                || contents
+                    .windows(hex.len())
+                    .any(|text| text == hex.as_bytes())
+        })
+    }
+
+    /// Captures through the fakes, in the in-memory mode and then in the file mode, a restore,
+    /// then a VM that continues, on a tmpfs at `/run` in a mount namespace of the process's own.
+    fn capture_in_each_mode() {
+        sys::enter_private_mount_namespace().unwrap();
+        let _run = sys::TmpfsMount::mount(c"nvx-test", c"/run", c"mode=0755").unwrap();
+        system::make_runtime_directories();
+        state_store(&TimeState::default()).unwrap();
+        let previous = GenerationId::from_bytes([1; GenerationId::LENGTH]);
+        let entropy: [u8; Seed::LENGTH] = std::array::from_fn(|index| index as u8 + 2);
+        let secret = &entropy[GenerationId::LENGTH..];
+        let path = Path::new("/run/nvx/restore-entropy");
+        // Returns the capture's outcome, and what it wrote to the kernel log and the console.
+        let capture_with = |input: Vec<u32>, request| {
+            let ops = FakeOps::new(input);
+            let outcome = capture(&Runtime::new(&ops, true), request).unwrap();
+            let mut logged = ops.kernel_log.lock().unwrap().clone();
+            logged.extend_from_slice(&ops.console.lock().unwrap());
+            (outcome, logged)
+        };
+
+        // The in-memory mode returns the entropy as the restore's seed, and writes no file.
+        let request = CaptureRequest::in_memory(ScratchPolicy::Fresh, previous);
+        let (CaptureOutcome::Restored(mut restore), logged) =
+            capture_with(restore_input(1, &entropy), request)
+        else {
+            panic!("the in-memory capture restored nothing");
+        };
+        assert_eq!(logged, b"");
+        let id = restore.generation_id().to_bytes();
+        assert_eq!(id[..], entropy[..GenerationId::LENGTH]);
+        assert_eq!(restore.take_seed().map(|seed| *seed.bytes()), Some(entropy));
+        assert!(!path.exists() && !holds(Path::new("/run"), secret));
+        let request = CaptureRequest::in_memory(ScratchPolicy::Fresh, previous);
+        let (outcome, _) = capture_with(vec![0], request);
+        assert!(matches!(outcome, CaptureOutcome::Continued), "{outcome:?}");
+
+        // The file mode, which the tools keep, writes the entropy to a file that only its owner
+        // may read and write, and the restore holds no seed.
+        let request = CaptureRequest::new(ScratchPolicy::Paired, previous, path.to_owned());
+        let (CaptureOutcome::Restored(mut restore), logged) =
+            capture_with(restore_input(2, &entropy), request)
+        else {
+            panic!("the file mode's capture restored nothing");
+        };
+        assert_eq!(logged, b"");
+        assert!(restore.take_seed().is_none());
+        assert_eq!(fs::read(path).unwrap(), entropy);
+        let mode = fs::metadata(path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o7777, 0o600);
+        // A VM that continues has the file removed.
+        let request = CaptureRequest::new(ScratchPolicy::Fresh, previous, path.to_owned());
+        let (outcome, _) = capture_with(vec![0], request);
+        assert!(matches!(outcome, CaptureOutcome::Continued), "{outcome:?}");
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn privileged_captures_hand_over_the_entropy_in_their_mode() {
+        if crate::guest::managed_agent::isolate_process_test(
+            "NVX_TIME_CAPTURE_PRIVILEGED_TEST_CHILD",
+            "guest::time::api::tests::privileged_captures_hand_over_the_entropy_in_their_mode",
+        ) {
+            return;
+        }
+        if !sys::holds_capability(sys::CAP_SYS_ADMIN).unwrap() {
+            return;
+        }
+        // A capture keeps its state, its locks, and the file mode's entropy file in `/run/nvx`,
+        // so a child of the harness's process makes the calls alone in a mount namespace of its
+        // own, which only a process with one thread may enter.
+        match sys::fork_isolated_test().unwrap() {
+            ForkResult::Child => {
+                let outcome = std::panic::catch_unwind(capture_in_each_mode);
+                sys::exit_immediately(u8::from(outcome.is_err()));
+            }
+            ForkResult::Parent(child) => {
+                assert_eq!(sys::wait(child), Some(sys::ChildStatus::Exited(0)));
+            }
+        }
     }
 }
