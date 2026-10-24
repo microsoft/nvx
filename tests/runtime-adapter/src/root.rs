@@ -7,8 +7,8 @@
 //! the rest that the root needs, which only the adapter defines, after the host attaches: the
 //! runtime directory, the cgroups, their resource values, the sizes that the block devices must
 //! have, how long the guest waits for them, the most bytes that the first partition of a GPT disk
-//! may hold, how the guest assembles the overlay over the upper, and how many mappings the host's
-//! mapping table holds.
+//! may hold, how the guest assembles the overlay over the upper, how many mappings the host's
+//! mapping table holds, and the workload identity of the whole sandbox, if it has one.
 //!
 //! A root configuration is UTF-8 text: one `NAME=VALUE` line per field, each ended by a newline,
 //! in any order, and each at most once. Numbers are decimal, without a sign or leading zeros:
@@ -29,12 +29,17 @@
 //! | `overlay-mode` | The overlay's [mode](OverlayMode): `trusted-lowers`, the guest's default, or `untrusted-lowers` | no |
 //! | `scratch-journal` | Whether an ext4 scratch may have a journal, a [`JournalPolicy`]: `allowed`, the guest's default, or `forbidden` | no |
 //! | `mapping-count` | The number of mappings of the host's mapping table, at most [`MAX_HOST_MAPPINGS`] | no |
+//! | `workload-uid` | The user ID of the sandbox's workload identity, as which every execution runs | with `workload-gid` |
+//! | `workload-gid` | The group ID of the sandbox's workload identity | with `workload-uid` |
 //!
 //! The paths are absolute and canonical guest paths: not `/`, without an empty, `.`, or `..`
 //! component, or a trailing `/`. The runtime directory holds no `,`, `:`, `\`, or `=`, which the
 //! overlay's options reserve, and the two cgroups have the same parent. The optional numbers are
-//! positive. [`RootConfig::decode`] refuses every other configuration, which the guest reports as
-//! a failure of [`RootStage::Configuration`].
+//! positive. A workload identity has both IDs, each below 4,294,967,295, which the kernel reads
+//! as "unchanged", and no supplementary groups or capabilities; the guest checks its account in
+//! the assembled root, a failure of [`RootStage::Identity`], and an execution then names no
+//! identity of its own. [`RootConfig::decode`] refuses every other configuration, which the guest
+//! reports as a failure of [`RootStage::Configuration`].
 //!
 //! A [`RootFailure`] is a stage's code, one byte, then the problem as UTF-8 text.
 //!
@@ -120,8 +125,12 @@ const OVERLAY_MODE: &str = "overlay-mode";
 const SCRATCH_JOURNAL: &str = "scratch-journal";
 /// See [`VERSION`].
 const MAPPING_COUNT: &str = "mapping-count";
+/// See [`VERSION`].
+const WORKLOAD_UID: &str = "workload-uid";
+/// See [`VERSION`].
+const WORKLOAD_GID: &str = "workload-gid";
 /// Every field, in the order in which [`RootConfig::encode`] writes them.
-const FIELDS: [&str; 14] = [
+const FIELDS: [&str; 16] = [
     VERSION,
     RUNTIME,
     AGENT_CGROUP,
@@ -136,6 +145,8 @@ const FIELDS: [&str; 14] = [
     OVERLAY_MODE,
     SCRATCH_JOURNAL,
     MAPPING_COUNT,
+    WORKLOAD_UID,
+    WORKLOAD_GID,
 ];
 
 /// The overlay mode that a configuration names, which the guest's assembly applies: the
@@ -230,6 +241,9 @@ pub struct RootConfig {
     /// The number of mappings of the host's mapping table, at most [`MAX_HOST_MAPPINGS`], or 0
     /// for none.
     pub mapping_count: u32,
+    /// The workload identity of the whole sandbox, its user ID and group ID, if it has one: every
+    /// execution runs as it, and names no identity of its own.
+    pub workload_identity: Option<(u32, u32)>,
 }
 
 impl Default for RootConfig {
@@ -237,7 +251,7 @@ impl Default for RootConfig {
     /// [`DEFAULT_WORKLOAD_CGROUP`], [`DEFAULT_DEVICE_TIMEOUT`], [`DEFAULT_AGENT_MEMORY_LOW`],
     /// [`DEFAULT_WORKLOAD_MEMORY_MAX`], and [`DEFAULT_WORKLOAD_PIDS_MAX`], with no sizes, the
     /// guest's default bound of the first partition, overlay mode, and journal policy, and no
-    /// mapping.
+    /// mapping or workload identity.
     fn default() -> Self {
         Self {
             runtime: DEFAULT_RUNTIME.to_owned(),
@@ -253,6 +267,7 @@ impl Default for RootConfig {
             overlay_mode: None,
             scratch_journal: None,
             mapping_count: 0,
+            workload_identity: None,
         }
     }
 }
@@ -296,6 +311,12 @@ impl RootConfig {
         );
         if self.mapping_count > 0 {
             fields.push((MAPPING_COUNT, self.mapping_count.to_string()));
+        }
+        if let Some((uid, gid)) = self.workload_identity {
+            fields.extend([
+                (WORKLOAD_UID, uid.to_string()),
+                (WORKLOAD_GID, gid.to_string()),
+            ]);
         }
         fields
     }
@@ -412,6 +433,26 @@ impl RootConfig {
                 "announces {mapping_count} mappings, more than {MAX_HOST_MAPPINGS}"
             )));
         }
+        let id = |name: &str| -> Result<Option<u32>, BodyError> {
+            let Some(value) = number(name)? else {
+                return Ok(None);
+            };
+            match u32::try_from(value) {
+                Ok(id) if id < u32::MAX => Ok(Some(id)),
+                _ => Err(refused(format!(
+                    "has a {name} above 4294967294, which no identity has: {value}"
+                ))),
+            }
+        };
+        let workload_identity = match (id(WORKLOAD_UID)?, id(WORKLOAD_GID)?) {
+            (Some(uid), Some(gid)) => Some((uid, gid)),
+            (None, None) => None,
+            _ => {
+                return Err(refused(format!(
+                    "names a workload identity without both {WORKLOAD_UID} and {WORKLOAD_GID}"
+                )));
+            }
+        };
         Ok(Self {
             runtime,
             agent_cgroup,
@@ -427,6 +468,7 @@ impl RootConfig {
             scratch_journal,
             // The count is at most `MAX_HOST_MAPPINGS`, so it fits a `u32`.
             mapping_count: mapping_count as u32,
+            workload_identity,
         })
     }
 }
@@ -478,7 +520,7 @@ pub enum RootStage {
     /// Receiving and checking the root configuration.
     Configuration,
     /// Reading the boot layout of the root from the kernel command line, and checking that the
-    /// guest can assemble it.
+    /// guest can assemble it, and the hostname of the executions there.
     Layout,
     /// Bootstrapping the guest for the root: its cgroups, and user namespaces.
     Bootstrap,
@@ -486,19 +528,24 @@ pub enum RootStage {
     Assembly,
     /// Tearing the root down.
     Teardown,
+    /// Checking the account of the sandbox's workload identity in the assembled root, in
+    /// existing-account mode, once the root is assembled.
+    Identity,
 }
 
 impl RootStage {
-    /// Every stage, in order.
-    pub const ALL: [Self; 5] = [
+    /// Every stage, in the order of their codes.
+    pub const ALL: [Self; 6] = [
         Self::Configuration,
         Self::Layout,
         Self::Bootstrap,
         Self::Assembly,
         Self::Teardown,
+        Self::Identity,
     ];
 
-    /// Returns the stage's code in a [`RootFailure`]'s body: its position, from 1.
+    /// Returns the stage's code in a [`RootFailure`]'s body: its position in [`ALL`](Self::ALL),
+    /// from 1.
     pub const fn code(self) -> u8 {
         match self {
             Self::Configuration => 1,
@@ -506,6 +553,7 @@ impl RootStage {
             Self::Bootstrap => 3,
             Self::Assembly => 4,
             Self::Teardown => 5,
+            Self::Identity => 6,
         }
     }
 
@@ -514,8 +562,8 @@ impl RootStage {
         Self::ALL.into_iter().find(|stage| stage.code() == code)
     }
 
-    /// Returns the stage's name: `configuration`, `layout`, `bootstrap`, `assembly`, or
-    /// `teardown`.
+    /// Returns the stage's name: `configuration`, `layout`, `bootstrap`, `assembly`,
+    /// `teardown`, or `identity`.
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Configuration => "configuration",
@@ -523,6 +571,7 @@ impl RootStage {
             Self::Bootstrap => "bootstrap",
             Self::Assembly => "assembly",
             Self::Teardown => "teardown",
+            Self::Identity => "identity",
         }
     }
 
@@ -532,8 +581,8 @@ impl RootStage {
     }
 
     /// Returns the status with which the guest's worker, and with it the VM, ends once this stage
-    /// failed: [`FAILURE_STATUS_BASE`] plus its code, from 11 for the configuration to 15 for
-    /// the teardown.
+    /// failed: [`FAILURE_STATUS_BASE`] plus its code, from 11 for the configuration to 16 for
+    /// the identity.
     pub const fn exit_status(self) -> u8 {
         FAILURE_STATUS_BASE + self.code()
     }
@@ -834,6 +883,7 @@ mod tests {
             overlay_mode: Some(OverlayMode::UntrustedLowers),
             scratch_journal: Some(JournalPolicy::Forbidden),
             mapping_count: 3,
+            workload_identity: Some((1000, 100)),
             ..RootConfig::default()
         }
     }
@@ -855,7 +905,9 @@ mod tests {
              first-partition-bound=4096\n\
              overlay-mode=untrusted-lowers\n\
              scratch-journal=forbidden\n\
-             mapping-count=3\n"
+             mapping-count=3\n\
+             workload-uid=1000\n\
+             workload-gid=100\n"
         );
         // Without a mapping, the configuration names no count.
         let unmapped = String::from_utf8(RootConfig::default().encode()).unwrap();
@@ -873,7 +925,11 @@ mod tests {
             workload_pids_max: None,
             ..RootConfig::default()
         };
-        for config in [full(), minimal, RootConfig::default()] {
+        let largest = RootConfig {
+            workload_identity: Some((u32::MAX - 1, u32::MAX - 1)),
+            ..RootConfig::default()
+        };
+        for config in [full(), minimal, largest, RootConfig::default()] {
             assert_eq!(RootConfig::decode(&config.encode()), Ok(config));
         }
         // The fields may come in any order.
@@ -1058,6 +1114,30 @@ mod tests {
                 format!("{base}mapping-count=18446744073709551615\n").into_bytes(),
                 "announces 18446744073709551615 mappings, more than 4096",
             ),
+            (
+                format!("{base}workload-uid=0\nworkload-gid=1000\n").into_bytes(),
+                "has a workload-uid that is not a positive decimal number: \"0\"",
+            ),
+            (
+                format!("{base}workload-uid=1000\nworkload-gid=0\n").into_bytes(),
+                "has a workload-gid that is not a positive decimal number: \"0\"",
+            ),
+            (
+                format!("{base}workload-uid=4294967295\nworkload-gid=1000\n").into_bytes(),
+                "has a workload-uid above 4294967294, which no identity has: 4294967295",
+            ),
+            (
+                format!("{base}workload-uid=1000\nworkload-gid=4294967296\n").into_bytes(),
+                "has a workload-gid above 4294967294",
+            ),
+            (
+                format!("{base}workload-uid=1000\n").into_bytes(),
+                "names a workload identity without both workload-uid and workload-gid",
+            ),
+            (
+                format!("{base}workload-gid=1000\n").into_bytes(),
+                "names a workload identity without both workload-uid and workload-gid",
+            ),
         ];
         for (body, problem) in cases {
             let error = RootConfig::decode(&body).unwrap_err();
@@ -1095,6 +1175,7 @@ mod tests {
             (RootStage::Bootstrap, 3, "bootstrap", 13),
             (RootStage::Assembly, 4, "assembly", 14),
             (RootStage::Teardown, 5, "teardown", 15),
+            (RootStage::Identity, 6, "identity", 16),
         ];
         for (stage, code, name, status) in expected {
             assert_eq!(stage.code(), code);
@@ -1104,8 +1185,9 @@ mod tests {
             assert_eq!(RootStage::from_name(name), Some(stage));
             assert_eq!(stage.exit_status(), status);
         }
+        assert_eq!(RootStage::ALL.map(RootStage::code), [1, 2, 3, 4, 5, 6]);
         assert_eq!(RootStage::from_code(0), None);
-        assert_eq!(RootStage::from_code(6), None);
+        assert_eq!(RootStage::from_code(7), None);
         assert_eq!(RootStage::from_name("mapping"), None);
     }
 
@@ -1131,7 +1213,7 @@ mod tests {
         for (body, problem) in [
             (&b""[..], "names no stage"),
             (b"\x00problem", "unknown stage 0"),
-            (b"\x06problem", "unknown stage 6"),
+            (b"\x07problem", "unknown stage 7"),
             (b"\x01\xffproblem", "not UTF-8 text"),
         ] {
             let error = RootFailure::decode(body).unwrap_err();

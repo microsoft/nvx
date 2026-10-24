@@ -33,6 +33,19 @@
 //! each argument's length, a `u32`, and its bytes. The first argument is the program's path, and
 //! no argument holds a NUL byte.
 //!
+//! The start ends with how the program enters the guest's root:
+//!
+//! - whether it names the program's [`Identity`], 0 or 1, and if it does, the user ID and the
+//!   group ID, each a `u32`, the [`AccountMode`], 0 for an existing account or 1 for numeric IDs,
+//!   the capabilities, a `u64` whose bit N stands for the capability numbered N, then the
+//!   supplementary groups: their count, a `u16`, then each group, a `u32`;
+//! - whether it names the program's working directory, 0 or 1, and if it does, the directory's
+//!   length, a `u32`, and its bytes: an absolute path without a NUL byte. Otherwise the program
+//!   starts in the root's `/`;
+//! - the program's whole environment: the count of its entries, a `u16`, then each entry's
+//!   length, a `u32`, and its bytes, `NAME=VALUE`, with a name that is not empty, and without a
+//!   NUL byte.
+//!
 //! An outcome, after the key, holds the program's status: 0 for none, 1 for an exit, or 2 for a
 //! signal, then the exit's code or the signal's number, an `i32`, or 0; the cause, or 0 for none;
 //! whether the launch failed, 0 or 1, then its stage, a `u32`, and its `errno`, an `i32`, or 0 for
@@ -82,11 +95,20 @@ pub struct Start {
     pub input: bool,
     /// The program's path, which is also its first argument, then its other arguments.
     pub arguments: Vec<Vec<u8>>,
+    /// The identity as which the program runs, if the start names one. Exactly one source names
+    /// it: the start, or the workload identity of the guest's whole sandbox.
+    pub identity: Option<Identity>,
+    /// The program's working directory, an absolute path in the guest's root, if the program
+    /// does not start in the root's `/`.
+    pub working_directory: Option<Vec<u8>>,
+    /// The program's whole environment, as `NAME=VALUE` entries.
+    pub environment: Vec<Vec<u8>>,
 }
 
 impl Start {
     /// Returns the start of the execution `key`, with `limits` and the guest's `timers`, of the
-    /// program that `arguments` names, without standard input.
+    /// program that `arguments` names, without standard input, without an identity, in the
+    /// root's `/`, and with an empty environment.
     pub fn new<A: Into<Vec<u8>>>(
         key: Key,
         limits: Limits,
@@ -99,12 +121,36 @@ impl Start {
             timers,
             input: false,
             arguments: arguments.into_iter().map(Into::into).collect(),
+            identity: None,
+            working_directory: None,
+            environment: Vec::new(),
         }
     }
 
     /// Makes the host send the program's standard input.
     pub fn with_input(mut self) -> Self {
         self.input = true;
+        self
+    }
+
+    /// Names the identity as which the program runs.
+    pub fn with_identity(mut self, identity: Identity) -> Self {
+        self.identity = Some(identity);
+        self
+    }
+
+    /// Names the program's working directory.
+    pub fn with_working_directory(mut self, directory: impl Into<Vec<u8>>) -> Self {
+        self.working_directory = Some(directory.into());
+        self
+    }
+
+    /// Gives the program the environment of the `NAME=VALUE` entries `environment`.
+    pub fn with_environment<E: Into<Vec<u8>>>(
+        mut self,
+        environment: impl IntoIterator<Item = E>,
+    ) -> Self {
+        self.environment = environment.into_iter().map(Into::into).collect();
         self
     }
 
@@ -129,18 +175,44 @@ impl Start {
         put_u64(&mut body, timeout.map_or(0, milliseconds));
         body.push(u8::from(self.input));
         // A start with more arguments than `u16` counts exceeds the framing's limit too.
-        let count = u16::try_from(self.arguments.len()).unwrap_or(u16::MAX);
-        body.extend_from_slice(&count.to_le_bytes());
+        put_count(&mut body, self.arguments.len());
         for argument in &self.arguments {
-            put_u32(&mut body, u32::try_from(argument.len()).unwrap_or(u32::MAX));
-            body.extend_from_slice(argument);
+            put_bytes(&mut body, argument);
+        }
+        match &self.identity {
+            None => body.push(0),
+            Some(identity) => {
+                body.push(1);
+                put_u32(&mut body, identity.uid);
+                put_u32(&mut body, identity.gid);
+                body.push(identity.account.code());
+                put_u64(&mut body, identity.capabilities);
+                put_count(&mut body, identity.groups.len());
+                for group in &identity.groups {
+                    put_u32(&mut body, *group);
+                }
+            }
+        }
+        match &self.working_directory {
+            None => body.push(0),
+            Some(directory) => {
+                body.push(1);
+                put_bytes(&mut body, directory);
+            }
+        }
+        put_count(&mut body, self.environment.len());
+        for entry in &self.environment {
+            put_bytes(&mut body, entry);
         }
         body
     }
 
     /// Decodes the body of an `ExecStart`, and checks it: its limits, of which none is empty and
-    /// whose chunk is at most [`MAX_CHUNK`] bytes, its flags, and its arguments, of which there is
-    /// at least one, the program's path, which is not empty, and none of which holds a NUL byte.
+    /// whose chunk is at most [`MAX_CHUNK`] bytes, its flags, its arguments, of which there is
+    /// at least one, the program's path, which is not empty, and none of which holds a NUL byte,
+    /// its identity's account mode, its working directory, which is absolute and holds no NUL
+    /// byte, and its environment, whose entries are `NAME=VALUE`, with a name that is not empty,
+    /// and hold no NUL byte.
     ///
     /// Fails with a [`BodyError`] that names the first problem.
     pub fn decode(body: &[u8]) -> Result<Self, BodyError> {
@@ -159,12 +231,63 @@ impl Start {
         let count = reader.u16()?;
         let mut arguments = Vec::with_capacity(usize::from(count).min(body.len()));
         for _ in 0..count {
-            let length = reader.u32()?;
-            let argument = reader.bytes(usize::try_from(length).unwrap_or(usize::MAX))?;
+            let argument = reader.counted()?;
             if argument.contains(&0) {
                 return Err(refused("has an argument with a NUL byte".to_owned()));
             }
             arguments.push(argument.to_vec());
+        }
+        let identity = if flag(reader.u8()?).map_err(refused)? {
+            let uid = reader.u32()?;
+            let gid = reader.u32()?;
+            let account = AccountMode::from_code(reader.u8()?).map_err(refused)?;
+            let capabilities = reader.u64()?;
+            let count = reader.u16()?;
+            let mut groups = Vec::with_capacity(usize::from(count).min(body.len()));
+            for _ in 0..count {
+                groups.push(reader.u32()?);
+            }
+            Some(Identity {
+                uid,
+                gid,
+                groups,
+                capabilities,
+                account,
+            })
+        } else {
+            None
+        };
+        let working_directory = if flag(reader.u8()?).map_err(refused)? {
+            let directory = reader.counted()?;
+            if directory.first() != Some(&b'/') {
+                return Err(refused(
+                    "names a working directory that is not absolute".to_owned(),
+                ));
+            }
+            if directory.contains(&0) {
+                return Err(refused(
+                    "has a working directory with a NUL byte".to_owned(),
+                ));
+            }
+            Some(directory.to_vec())
+        } else {
+            None
+        };
+        let count = reader.u16()?;
+        let mut environment = Vec::with_capacity(usize::from(count).min(body.len()));
+        for _ in 0..count {
+            let entry = reader.counted()?;
+            if entry.contains(&0) {
+                return Err(refused(
+                    "has an environment entry with a NUL byte".to_owned(),
+                ));
+            }
+            if entry.iter().position(|&byte| byte == b'=').unwrap_or(0) == 0 {
+                return Err(refused(
+                    "has an environment entry that is not NAME=VALUE".to_owned(),
+                ));
+            }
+            environment.push(entry.to_vec());
         }
         reader.finish()?;
         if chunk > MAX_CHUNK {
@@ -196,7 +319,71 @@ impl Start {
             timers,
             input: with_input,
             arguments,
+            identity,
+            working_directory,
+            environment,
         })
+    }
+}
+
+/// The identity as which an execution's program runs, which a start names unless the guest's
+/// sandbox has a workload identity: its IDs, its capabilities, and how the guest checks its
+/// account, as the guest's entry into its root takes them.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Identity {
+    /// The user ID.
+    pub uid: u32,
+    /// The group ID.
+    pub gid: u32,
+    /// The supplementary groups.
+    pub groups: Vec<u32>,
+    /// The capabilities, which only user ID 0 may hold: bit N for the capability numbered N.
+    pub capabilities: u64,
+    /// How the guest checks the identity's account.
+    pub account: AccountMode,
+}
+
+impl Identity {
+    /// Returns the identity of user ID `uid` and group ID `gid`, without supplementary groups or
+    /// capabilities, whose account the guest checks in [existing](AccountMode::Existing) mode.
+    pub fn new(uid: u32, gid: u32) -> Self {
+        Self {
+            uid,
+            gid,
+            groups: Vec::new(),
+            capabilities: 0,
+            account: AccountMode::Existing,
+        }
+    }
+}
+
+/// How the guest checks the account of an execution's [`Identity`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum AccountMode {
+    /// The root's `/etc/passwd` holds exactly one entry for the user ID, whose primary group is
+    /// the group ID, which the root's `/etc/group` holds.
+    #[default]
+    Existing,
+    /// The IDs are used as given, without an account.
+    Numeric,
+}
+
+impl AccountMode {
+    /// Returns the mode's code in a start: 0 for an existing account, 1 for numeric IDs.
+    fn code(self) -> u8 {
+        match self {
+            Self::Existing => 0,
+            Self::Numeric => 1,
+        }
+    }
+
+    /// Returns the mode that `code` encodes, or the problem.
+    fn from_code(code: u8) -> Result<Self, String> {
+        match code {
+            0 => Ok(Self::Existing),
+            1 => Ok(Self::Numeric),
+            _ => Err(format!("names the unknown account mode {code}")),
+        }
     }
 }
 
@@ -416,6 +603,12 @@ impl<'a> Reader<'a> {
         let (taken, rest) = self.rest.split_at(length);
         self.rest = rest;
         Ok(taken)
+    }
+
+    /// Takes the next bytes, after their length, a `u32`.
+    fn counted(&mut self) -> Result<&'a [u8], BodyError> {
+        let length = self.u32()?;
+        self.bytes(usize::try_from(length).unwrap_or(usize::MAX))
     }
 
     /// Takes the next `N` bytes.
@@ -753,6 +946,19 @@ fn put_u32(body: &mut Vec<u8>, value: u32) {
 /// Appends `value` to `body`.
 fn put_u64(body: &mut Vec<u8>, value: u64) {
     body.extend_from_slice(&value.to_le_bytes());
+}
+
+/// Appends the count `count` of a start's items to `body`, as a `u16`. A start with more items
+/// than a `u16` counts exceeds the framing's limit too.
+fn put_count(body: &mut Vec<u8>, count: usize) {
+    let count = u16::try_from(count).unwrap_or(u16::MAX);
+    body.extend_from_slice(&count.to_le_bytes());
+}
+
+/// Appends `bytes` to `body`, after their length, a `u32`.
+fn put_bytes(body: &mut Vec<u8>, bytes: &[u8]) {
+    put_u32(body, u32::try_from(bytes.len()).unwrap_or(u32::MAX));
+    body.extend_from_slice(bytes);
 }
 
 #[cfg(test)]
