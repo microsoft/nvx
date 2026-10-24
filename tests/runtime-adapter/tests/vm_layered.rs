@@ -812,7 +812,7 @@ scenarios! {
     /// executions that meet only while all of them run; a descendant in a session of its own,
     /// which holds its program's output, and which the end of its program ends; a user other than
     /// root, and root with an allowed capability alone; a working directory, an exact
-    /// environment, and the configured hostname, each as PID 1 of its namespaces. The guest
+    /// environment, and the default hostname, each as PID 1 of its namespaces. The guest
     /// refuses a start without an identity, and one with a capability outside the entry's
     /// allowlist, at stage 0.
     executions_run_in_the_root: Scenario {
@@ -2301,7 +2301,7 @@ fn check_executions(vm: &mut Vm<'_>) {
     // 3. root with `CAP_CHOWN` alone, in its permitted, effective, and bounding sets;
     // 4. exactly the environment that the start names;
     // 5. the working directory that the start names;
-    // 6. the configured hostname, as PID 1 of the execution's namespaces;
+    // 6. the entry's default hostname, `nvx-sandbox`, as PID 1 of the execution's namespaces;
     // 7. no identity, in a sandbox without a workload identity, which the guest refuses;
     // 8. a capability outside the entry's allowlist, `CAP_SYS_ADMIN`, which the entry refuses.
     let executions = [
