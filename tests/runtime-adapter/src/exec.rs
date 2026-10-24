@@ -73,6 +73,10 @@ pub const KEY_LEN: usize = 16;
 /// longest body holds after the key and the stream.
 pub const MAX_CHUNK: u32 = (MAX_BODY - KEY_LEN - 1) as u32;
 
+/// The most executions that the guest's worker runs at once, beyond which the host's driver
+/// starts none while those that it started have not finished.
+pub const MAX_EXECUTIONS: usize = 8;
+
 /// The code of a cause that the framing does not know, which no side decodes.
 const UNKNOWN_CAUSE: u8 = 0xff;
 

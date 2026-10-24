@@ -698,7 +698,9 @@ answer the wrong request.
   as the guest decodes it. A start that does not, such as one with a relative
   working directory, and one of an ID that the driver started already, fail
   before anything is sent, and leave the client usable: the guest would end its
-  session on either;
+  session on either. So do a start that says that the host sends the program's
+  input, and one beyond `exec::MAX_EXECUTIONS`, 8, executions that the driver
+  started and that have not finished, as the guest runs no more at once;
 - `run` carries the guest's messages to each execution's
   `exec::HostExecution`, and theirs to the guest, until every execution
   finished. One thread runs them all: each receive waits at most until the
@@ -710,9 +712,15 @@ answer the wrong request.
   usable, or in a send. Each send waits, as the client's do, until the
   transport takes the message or the run's deadline passes, and no timer fires
   meanwhile, so a guest that stops reading the session holds the run until its
-  deadline, when the send's timeout ends the client. The adapter's guest agent
-  keeps reading the session while its own messages wait, until more than 4 MiB
-  of them do.
+  deadline, when the send's timeout ends the client.
+
+Even a guest that reads can hold a send while the host does not read: the
+session's broker passes the guest's credit for the host's records on only
+behind the guest's own records, and takes no more of the host's records than
+that credit allows. So the driver sends little before it reads: no program's
+input, which one thread could not send while it reads the programs' output, and
+the starts of at most 8 executions that have not finished, whose answers wait
+for the run, as no program's output flows before the run's credit does.
 
 The guest ends its session on a second start of the same key, even in a later
 epoch of the session, so the keys of a driver's executions must be new to the
@@ -1044,7 +1052,8 @@ the directory that `NVX_ARTIFACTS_DIR` names, and the guest agent's build from
 - `exec STORE EXECUTION [; EXECUTION]...` reattaches and attaches as
   `reattach` does, then runs each EXECUTION in the VM's layered root, all at
   once, over that one session, through `host::Executions`, and prints their
-  outputs and outcomes once every one finished. An EXECUTION,
+  outputs and outcomes once every one finished. It runs at most 8 executions,
+  as many as the guest runs at once. An EXECUTION,
   `[--identity UID:GID [--groups GID,...] [--capabilities N,...] [--numeric]] [--cwd DIR] [--env NAME=VALUE]... -- PROGRAM [ARG]...`,
   runs PROGRAM with its ARGs, up to a lone `;`, which a shell takes quoted, as
   `find -exec` takes them, without standard input. Without `--identity`, it
@@ -1199,14 +1208,16 @@ Windows. They cover:
   executions at once, one with more output than its credit holds, each
   byte-exact, with its outcome, and one whose launch the guest refuses, whose
   records carry their messages whole or split; the starts that the guest would
-  not decode, and a second start of an ID, of which the driver sends nothing,
-  with a client that stays usable; a message about an execution that it did
-  not start, about none, whose body does not decode, or that breaks the
-  engine's rules, and the end of the stream, each of which ends the run; a
-  timeout that fires while the guest says nothing, after which the execution
-  is cancelled, then fenced; and a run whose deadline passes first, in a
-  receive, which leaves the client usable, or in a send that waits for a guest
-  that stopped reading, which ends it.
+  not decode, a second start of an ID, a start whose input the host would
+  send, and a start beyond 8 executions that have not finished, of which the
+  driver sends nothing, with a client that stays usable, and the places of the
+  executions that finished, which another start takes; a message about an
+  execution that it did not start, about none, whose body does not decode, or
+  that breaks the engine's rules, and the end of the stream, each of which ends
+  the run; a timeout that fires while the guest says nothing, after which the
+  execution is cancelled, then fenced; and a run whose deadline passes first,
+  in a receive, which leaves the client usable, or in a send that waits for a
+  guest that stopped reading, which ends it.
 
 Through a relay between its test broker and a pseudo-terminal,
 `tests/guest_session.rs` also checks that `guest::serve_terminal` and

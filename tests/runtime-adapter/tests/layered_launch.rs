@@ -4,8 +4,8 @@
 //! inside the directories that the adapter authorizes, attaches it, and verifies it before the
 //! launch, composes OpenVMM's arguments without NVX's managed lifecycle, records what it launches,
 //! with the bindings that it checked, and refuses options that do not make a command, shares that
-//! it cannot export before it touches the store, and executions whose starts the guest would not
-//! take. The tests need no hypervisor.
+//! it cannot export before it touches the store, executions whose starts the guest would not take,
+//! and more executions than the guest runs at once. The tests need no hypervisor.
 #![cfg(feature = "host")]
 
 use std::ffi::OsString;
@@ -26,6 +26,7 @@ use nvx::protocol::root::{ImageFormat, RootImage, RootLayout, RootUpper};
 use nvx::protocol::{HostMap, MAX_HOST_MAPPINGS};
 use nvx::uuid::Uuid;
 use nvx::{ErrorCode, ErrorKind, Hypervisor};
+use runtime_adapter::exec::MAX_EXECUTIONS;
 use runtime_adapter::hook::STEP_HOOK;
 use runtime_adapter::layered::{
     Bindings, LaunchRecord, LayeredLaunch, RECORD_NAME, SANDBOX_TOKEN, STAGED_NAME, Share, Shares,
@@ -1291,7 +1292,8 @@ fn the_host_program_refuses_options_that_do_not_make_a_command() {
     ]);
     // Each execution of `exec` has options of its own, before `--` and its program, and its
     // arguments end at a lone `;`. The program refuses a start that the guest would not decode,
-    // on which the guest would end its session, before it attaches.
+    // on which the guest would end its session, and more executions than the guest runs at once,
+    // before it attaches.
     let program = ["--", "/bin/true"];
     let exec = |options: &[&'static str]| [&["exec", "store"], options, &program[..]].concat();
     commands.extend([
@@ -1350,6 +1352,14 @@ fn the_host_program_refuses_options_that_do_not_make_a_command() {
             ]
             .concat(),
             "--groups needs --identity",
+        ),
+        (
+            [
+                vec!["exec", "store"],
+                vec![program.to_vec(); MAX_EXECUTIONS + 1].join(&";"),
+            ]
+            .concat(),
+            "exec runs at most",
         ),
     ]);
     for (arguments, problem) in commands {

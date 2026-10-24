@@ -75,7 +75,8 @@
 //! - `runtime-adapter-host exec STORE EXECUTION [; EXECUTION]...` reattaches and attaches as
 //!   `reattach` does, then runs each EXECUTION in the VM's layered root, all at once, over that
 //!   one session, through `runtime_adapter::host::Executions`, and prints their outputs and
-//!   outcomes once every one finished. An EXECUTION, `[--identity UID:GID [--groups GID,...]
+//!   outcomes once every one finished. It runs at most 8 executions, as many as the guest runs at
+//!   once; see `runtime_adapter::exec::MAX_EXECUTIONS`. An EXECUTION, `[--identity UID:GID [--groups GID,...]
 //!   [--capabilities N,...] [--numeric]] [--cwd DIR] [--env NAME=VALUE]... -- PROGRAM [ARG]...`,
 //!   runs PROGRAM with its ARGs, up to a lone `;`, as `find -exec` takes them, without standard
 //!   input. Without `--identity`, it names no identity, and runs as the sandbox's workload
@@ -810,6 +811,14 @@ fn parse_exec(
             break;
         }
     }
+    // The driver runs no more executions at once than the guest does.
+    if executions.len() > exec::MAX_EXECUTIONS {
+        return Err(format!(
+            "exec runs at most {} executions, not {}",
+            exec::MAX_EXECUTIONS,
+            executions.len()
+        ));
+    }
     Ok(Command::Exec {
         store,
         guest_build: guest_build.unwrap_or_else(|| GUEST_BUILD.to_owned()),
@@ -1264,13 +1273,7 @@ fn exec(store: &Path, guest_build: &str, executions: &[Execution]) -> Result<Exi
     for (number, execution) in (1..).zip(executions) {
         let key = Key::new(base.wrapping_add(number), identity.epoch);
         running
-            .start(
-                &mut client,
-                execution.start(key),
-                exec_timers(),
-                Vec::new(),
-                deadline,
-            )
+            .start(&mut client, execution.start(key), exec_timers(), deadline)
             .map_err(|error| format!("cannot start execution {number}: {}", describe(&error)))?;
         ids.push(key.id());
     }

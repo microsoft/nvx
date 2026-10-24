@@ -9,7 +9,7 @@ use nvx::exec::{Key, Timers, Violation};
 use nvx::host::nvxs::HostConnectionError;
 
 use super::{Client, ClientError};
-use crate::exec::{GuestMessage, HostExecution, Start, name};
+use crate::exec::{GuestMessage, HostExecution, MAX_EXECUTIONS, Start, name};
 use crate::frame::{BodyError, Message};
 
 /// A failure of [`Executions`].
@@ -22,6 +22,12 @@ pub enum ExecutionsError {
     Start(BodyError),
     /// A start of an execution whose ID the driver started already, which it did not send.
     Duplicate(u64),
+    /// A start that says that the host sends the program's input, which the driver does not
+    /// send, and so did not send the start.
+    Input,
+    /// A start beyond [`MAX_EXECUTIONS`] executions that the driver started and that have not
+    /// finished, which it did not send.
+    Full,
     /// The guest sent a message about an execution whose body does not decode.
     Body(BodyError),
     /// The guest sent a message of this kind, which is about no execution.
@@ -40,6 +46,11 @@ impl fmt::Display for ExecutionsError {
             Self::Client(error) => error.fmt(formatter),
             Self::Start(error) => write!(formatter, "the host refuses to send the start: {error}"),
             Self::Duplicate(id) => write!(formatter, "the host starts execution {id} twice"),
+            Self::Input => formatter.write_str("the host sends no execution's input"),
+            Self::Full => write!(
+                formatter,
+                "the host runs {MAX_EXECUTIONS} executions that have not finished already"
+            ),
             Self::Body(error) => error.fmt(formatter),
             Self::Unexpected(kind) => write!(
                 formatter,
@@ -66,7 +77,12 @@ impl std::error::Error for ExecutionsError {
             Self::Client(error) => Some(error),
             Self::Start(error) | Self::Body(error) => Some(error),
             Self::Violation(_, violation) => Some(violation),
-            Self::Duplicate(_) | Self::Unexpected(_) | Self::Unknown(_) | Self::TimedOut => None,
+            Self::Duplicate(_)
+            | Self::Input
+            | Self::Full
+            | Self::Unexpected(_)
+            | Self::Unknown(_)
+            | Self::TimedOut => None,
         }
     }
 }
@@ -86,10 +102,17 @@ impl From<ClientError> for ExecutionsError {
 /// One thread runs them all: each receive waits at most until the earliest timer of the
 /// executions, which so fires in time whatever the guest sends, and the guest's messages about one
 /// execution never wait for another's. Each send waits, as the client's do, until the transport
-/// takes the message or the run's deadline passes, and no timer fires meanwhile: a guest that
-/// stops reading the session holds the run until its deadline, when the run fails, and the send's
-/// timeout ends the client. The adapter's guest agent keeps reading the session while its own
-/// messages wait, until more than 4 MiB of them do, as its worker describes.
+/// takes the message or the run's deadline passes, and no timer fires meanwhile, so a guest that
+/// stops reading the session holds the run until its deadline, when the send's timeout ends the
+/// client.
+///
+/// Even a guest that reads can hold a send while the host does not read: the session's broker
+/// passes the guest's credit for the host's records on only behind the guest's own records, and
+/// takes no more of the host's records than that credit allows. So the driver sends little before
+/// it reads: no program's input, which one thread could not send while it reads the programs'
+/// output, and the starts of at most [`MAX_EXECUTIONS`] executions that have not finished, as
+/// many as the guest runs at once, whose answers wait for the run, as no program's output flows
+/// before the run's credit does.
 ///
 /// The guest ends its session on a second start of the same key, even in a later epoch of the
 /// session, so the keys of the executions must differ from those of every execution that the guest
@@ -106,29 +129,40 @@ impl Executions {
         Self::default()
     }
 
-    /// Starts the execution of `start` over `client`, whose peer runs with `timers`, and whose
-    /// source hands over `input` if the start says that the host sends the program's input: sends
-    /// the start by `deadline`. The timeout of `timers` runs from then.
+    /// Starts the execution of `start` over `client`, whose peer runs with `timers`: sends the
+    /// start by `deadline`. The timeout of `timers` runs from then.
     ///
     /// A start of an ID that the driver started already, or whose encoding does not decode, as
     /// one with a relative working directory or an environment entry without a name, fails
     /// before anything is sent, and leaves the client usable, as a message that the framing
-    /// refuses does: the guest would end its session on either.
+    /// refuses does: the guest would end its session on either. So does a start that says that
+    /// the host sends the program's input, and one beyond [`MAX_EXECUTIONS`] executions that have
+    /// not finished, which the driver does not send, as [`Executions`] describes.
     pub fn start(
         &mut self,
         client: &mut Client,
         start: Start,
         timers: Timers,
-        input: Vec<u8>,
         deadline: Instant,
     ) -> Result<(), ExecutionsError> {
         let id = start.key.id();
         if self.executions.contains_key(&id) {
             return Err(ExecutionsError::Duplicate(id));
         }
+        if start.input {
+            return Err(ExecutionsError::Input);
+        }
+        let running = self
+            .executions
+            .values()
+            .filter(|execution| execution.outcome().is_none())
+            .count();
+        if running >= MAX_EXECUTIONS {
+            return Err(ExecutionsError::Full);
+        }
         let body = start.encode();
         Start::decode(&body).map_err(ExecutionsError::Start)?;
-        let execution = HostExecution::new(start, timers, input, Instant::now());
+        let execution = HostExecution::new(start, timers, Vec::new(), Instant::now());
         client.send(&Message::ExecStart(body), Some(deadline))?;
         self.executions.insert(id, execution);
         Ok(())

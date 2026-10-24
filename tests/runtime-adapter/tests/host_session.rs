@@ -36,7 +36,7 @@ use nvx::protocol::{
     OUTER_MAX_PAYLOAD, OUTER_MIN_RECEIVE_WINDOW,
 };
 use runtime_adapter::GUEST_BUILD;
-use runtime_adapter::exec::{GuestMessage, HostMessage, Start};
+use runtime_adapter::exec::{GuestMessage, HostMessage, MAX_EXECUTIONS, Start};
 use runtime_adapter::frame::{Decoder, FrameError, HEADER_LEN, MAX_BODY, MAX_TEXT_BODY, Message};
 use runtime_adapter::host::{
     self, Client, ClientError, Executions, ExecutionsError, MapReply, OrderError,
@@ -2000,7 +2000,7 @@ fn run(
         let mut executions = Executions::new();
         for start in starts {
             let timers = start.timers;
-            executions.start(client, start, timers, Vec::new(), deadline)?;
+            executions.start(client, start, timers, deadline)?;
         }
         executions.run(client, deadline)?;
         Ok(executions)
@@ -2066,7 +2066,7 @@ fn the_driver_runs_executions_at_once_and_collects_their_output_and_outcomes() {
 }
 
 #[test]
-fn the_driver_refuses_starts_that_the_guest_would_not_take_and_sends_nothing() {
+fn the_driver_refuses_starts_before_it_sends_them() {
     let (mut broker, mut client) = attached(FIRST, usize::MAX);
     let mut executions = Executions::new();
     // The guest ends its session on a start that it cannot decode.
@@ -2076,30 +2076,61 @@ fn the_driver_refuses_starts_that_the_guest_would_not_take_and_sends_nothing() {
         Start::new(Key::new(1, 1), limits(), timers(), [""]),
     ];
     for start in undecodable {
-        let refused =
-            executions.start(&mut client, start.clone(), timers(), Vec::new(), deadline());
+        let refused = executions.start(&mut client, start.clone(), timers(), deadline());
         assert!(
             matches!(refused, Err(ExecutionsError::Start(_))),
             "{start:?}: {refused:?}"
         );
     }
-    // A second start of an ID.
-    executions
-        .start(&mut client, start_of(1), timers(), Vec::new(), deadline())
-        .unwrap();
-    let refused = executions.start(&mut client, start_of(1), timers(), Vec::new(), deadline());
+    // A start whose input the host would send while it reads the guest's output.
+    let refused = executions.start(&mut client, start_of(1).with_input(), timers(), deadline());
+    assert!(
+        matches!(refused, Err(ExecutionsError::Input)),
+        "{refused:?}"
+    );
+    // A second start of an ID, and a start beyond the executions that the guest runs at once.
+    let most = u64::try_from(MAX_EXECUTIONS).unwrap();
+    for id in 1..=most {
+        executions
+            .start(&mut client, start_of(id), timers(), deadline())
+            .unwrap();
+    }
+    let refused = executions.start(&mut client, start_of(1), timers(), deadline());
     assert!(
         matches!(refused, Err(ExecutionsError::Duplicate(1))),
         "{refused:?}"
     );
-    // The guest received the one start alone, and the client stays usable.
-    assert_eq!(
-        broker.messages(1),
-        [HostMessage::Start(start_of(1)).encode()]
-    );
+    let refused = executions.start(&mut client, start_of(most + 1), timers(), deadline());
+    assert!(matches!(refused, Err(ExecutionsError::Full)), "{refused:?}");
+    // The guest received those starts alone, and the client stays usable.
+    let starts = (1..=most)
+        .map(|id| HostMessage::Start(start_of(id)).encode())
+        .collect::<Vec<_>>();
+    assert_eq!(broker.messages(MAX_EXECUTIONS), starts);
     let pinging = spawn(client, |client| client.ping(deadline()));
     assert_eq!(broker.answer(OUTER_MAX_PAYLOAD), Message::Ping);
     joined(pinging).1.unwrap();
+
+    // The executions that finished leave their places: once the guest refused as many launches,
+    // the driver starts another execution.
+    let (mut broker, client) = attached(FIRST, usize::MAX);
+    let starts = (1..=most).map(start_of).collect::<Vec<_>>();
+    let running = run(client, starts.clone(), deadline());
+    let refused = Workload {
+        launch: Err(LaunchFailure::new(0, 11)),
+        output: [Vec::new(), Vec::new()],
+        status: Status::Exited(0),
+    };
+    let played = play(&mut broker, MAX_EXECUTIONS, OUTER_MAX_PAYLOAD, |_| {
+        refused.clone()
+    });
+    assert_eq!(played, starts);
+    let (mut client, executions) = joined(running);
+    let mut executions = executions.unwrap();
+    assert!(executions.is_finished());
+    executions
+        .start(&mut client, start_of(most + 1), timers(), deadline())
+        .unwrap();
 }
 
 #[test]
@@ -2214,16 +2245,23 @@ fn the_driver_fires_the_timers_of_its_executions_while_the_guest_says_nothing() 
 fn the_driver_s_sends_wait_for_a_guest_that_stops_reading_until_the_deadline_of_its_run() {
     // The guest takes the start, then stops reading, and the host's stream holds 16 bytes, so the
     // driver's next send, the credit of the output's pool, waits for the transport until the
-    // run's deadline, whose timeout ends the client.
+    // run's deadline, whose timeout ends the client. The run's deadline counts from the start's
+    // send, which the guest took.
     let (mut broker, client) = attach_over(connect_bounded(FIRST, usize::MAX, 16));
-    let started = Instant::now();
-    let running = run(client, vec![start_of(1)], started + SHORT);
+    let running = spawn(client, |client| {
+        let mut executions = Executions::new();
+        executions.start(client, start_of(1), timers(), deadline())?;
+        let started = Instant::now();
+        let ran = executions.run(client, started + SHORT);
+        Ok::<_, ExecutionsError>((started.elapsed(), ran))
+    });
     assert_eq!(
         broker.messages(1),
         [HostMessage::Start(start_of(1)).encode()]
     );
-    let (mut client, ran) = joined(running);
-    assert!(started.elapsed() >= SHORT);
+    let (mut client, result) = joined(running);
+    let (elapsed, ran) = result.unwrap();
+    assert!(elapsed >= SHORT, "{elapsed:?}");
     assert!(
         matches!(ran, Err(ExecutionsError::TimedOut)),
         "{:?}",
