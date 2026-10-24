@@ -1,5 +1,6 @@
 //! The kernel command line as Linux reads it: the parameters into which the kernel splits it, and
-//! the virtio-mmio devices that its `virtio_mmio.device` parameters describe.
+//! the virtio-mmio devices that its `virtio_mmio.device` parameters describe; and the guest's DNS
+//! server, which OpenVMM names in it.
 //!
 //! A reader that splits a command line by rules of its own may find parameters that the kernel
 //! never sees, or miss ones that it applies: the kernel splits at more bytes than ASCII
@@ -14,13 +15,30 @@
 //!   virtio-mmio driver's `vm_cmdline_set` reads it, for a device of any type, and
 //!   [`virtio_mmio_devices`] reads those of every such parameter of a command line.
 //!
+//! The kernel leaves OpenVMM's `virtnet_dns=` token to the guest, which reads it from the whole
+//! command line, as OpenVMM checks it:
+//!
+//! - [`dns_server`] reads the DNS server that the token names, strictly, as OpenVMM renders and
+//!   reads it: at most one token, with one IPv4 or IPv6 address.
+//! - [`write_resolver`] writes the resolver file that names that server, as NVX's init writes the
+//!   initramfs's `/etc/resolv.conf` from the token.
+//!
 //! Like the rest of [`protocol`](super), it needs nothing outside the standard library, so the
 //! host, the guest, and test doubles share it.
 
+use std::io;
 use std::iter::FusedIterator;
+use std::net::IpAddr;
+
+use super::{ProtocolError, violation};
 
 /// The name of the kernel parameter that adds a virtio-mmio device.
 pub const VIRTIO_MMIO_DEVICE: &str = "virtio_mmio.device";
+
+/// Prefix of the token through which OpenVMM names the guest's DNS server, `virtnet_dns=`: one of
+/// the gateway's addresses, IPv4 or IPv6, which it adds to a microVM's command line when the
+/// network policy lets the guest reach the gateway's DNS service.
+pub const DNS_TOKEN: &str = "virtnet_dns=";
 
 /// Returns whether the kernel takes `byte` for whitespace, as its `isspace` does: the space, tab,
 /// newline, vertical tab, form feed, carriage return, and Latin-1's no-break space, 0xa0.
@@ -210,6 +228,52 @@ pub fn virtio_mmio_devices(command_line: &[u8]) -> impl Iterator<Item = VirtioMm
     parameters(command_line)
         .filter(|parameter| parameter.is_named(VIRTIO_MMIO_DEVICE))
         .filter_map(|parameter| parameter.value.and_then(VirtioMmioDevice::parse))
+}
+
+/// Returns the DNS server that the `virtnet_dns=` token of `command_line`, such as the guest's
+/// `/proc/cmdline`, names, or `None` if no token names one.
+///
+/// The reader takes the command line's tokens as OpenVMM takes them when it checks the token:
+/// split at ASCII whitespace, spaces, tabs, newlines, form feeds, and carriage returns, without
+/// quoting, and up to the end of the command line, past a `--` too. It reads each token that
+/// starts with `virtnet_dns=`, and accepts it only as OpenVMM renders it: at most one token, whose
+/// value is one IPv4 or IPv6 address in its canonical text, as Rust's [`IpAddr`] writes it, such
+/// as `10.0.0.1` or `fd00::a00:1`. Like OpenVMM's own reader, it refuses with a [`ProtocolError`]
+/// a repeated token, an empty value, a list of addresses, and another spelling of an address,
+/// such as `010.0.0.1`, `fd00:0::a00:1`, or `FD00::A00:1`. OpenVMM also checks, before the guest
+/// boots, that the address is one of the gateway's, which the guest leaves to it.
+pub fn dns_server(command_line: &[u8]) -> Result<Option<IpAddr>, ProtocolError> {
+    let mut server = None;
+    for token in command_line.split(u8::is_ascii_whitespace) {
+        let Some(value) = token.strip_prefix(DNS_TOKEN.as_bytes()) else {
+            continue;
+        };
+        if server.is_some() {
+            return Err(violation("the virtnet_dns kernel parameter is repeated"));
+        }
+        let address = std::str::from_utf8(value).ok().and_then(|text| {
+            text.parse::<IpAddr>()
+                .ok()
+                .filter(|address| address.to_string() == text)
+        });
+        let Some(address) = address else {
+            return Err(violation(format!(
+                "the virtnet_dns kernel parameter must name one IPv4 or IPv6 address as OpenVMM \
+                 renders it, not '{}'",
+                value.escape_ascii()
+            )));
+        };
+        server = Some(address);
+    }
+    Ok(server)
+}
+
+/// Writes to `writer` a resolver file, in the format of `/etc/resolv.conf`, that names `server` as
+/// the guest's one DNS server: `nameserver ADDRESS` and a newline, with the address in its
+/// canonical text, which [`dns_server`] reads, as NVX's init writes the initramfs's
+/// `/etc/resolv.conf` from the `virtnet_dns=` token.
+pub fn write_resolver(mut writer: impl io::Write, server: IpAddr) -> io::Result<()> {
+    writer.write_all(format!("nameserver {server}\n").as_bytes())
 }
 
 /// Reads an integer conversion of the kernel's `sscanf` at the start of `text`, `%i` with `base`
