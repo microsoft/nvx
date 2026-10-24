@@ -13,7 +13,7 @@ use nvx::protocol::nvxs::Identity;
 
 use crate::frame::{BodyError, Decoder, FrameError, Message};
 use crate::probe::{Facts, Probe, ProbeReply};
-use crate::root::{RootConfig, RootFailure, RootReply};
+use crate::root::{Ready, RootConfig, RootFailure, RootReply};
 
 /// A failure of a [`Client`].
 #[derive(Debug)]
@@ -180,7 +180,9 @@ impl Client {
                         message @ (Message::Ping
                         | Message::Stop
                         | Message::RootConfig(_)
-                        | Message::Probe(_)),
+                        | Message::Probe(_)
+                        | Message::Maps(_)
+                        | Message::Start),
                     ) => {
                         return Err(self.fail(ClientError::Unexpected(message.kind())));
                     }
@@ -223,8 +225,8 @@ impl Client {
     }
 
     /// Sends the root configuration `config` of a VM with a layered root, and waits until
-    /// `deadline` for the guest agent's answer: `RootReady` once it assembled the root, or
-    /// `RootFailed` with the stage that failed, after which the guest ends.
+    /// `deadline` for the guest agent's answer: `Ready`, with the guest agent's build, once it
+    /// assembled the root, or `RootFailed` with the stage that failed, after which the guest ends.
     ///
     /// A configuration whose encoding is longer than
     /// [`MAX_TEXT_BODY`](crate::frame::MAX_TEXT_BODY) bytes fails before anything is sent, and the
@@ -236,7 +238,7 @@ impl Client {
     ) -> Result<RootReply, ClientError> {
         let request = Message::RootConfig(config.encode());
         match self.request(&request, deadline)? {
-            Message::RootReady => Ok(RootReply::Ready),
+            Message::Ready(body) => self.decoded(Ready::decode(&body).map(RootReply::Ready)),
             Message::RootFailed(body) => {
                 self.decoded(RootFailure::decode(&body).map(RootReply::Failed))
             }

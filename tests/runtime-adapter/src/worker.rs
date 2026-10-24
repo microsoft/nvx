@@ -22,7 +22,8 @@
 //! 2. It receives the host's root configuration, a [`RootConfig`], and checks it.
 //! 3. It reads the boot layout of the root from the kernel command line with
 //!    `nvx::protocol::root::RootLayout::parse`, then bootstraps the guest and assembles the root.
-//! 4. It answers `RootReady`, or `RootFailed` with the stage that failed, and then ends.
+//! 4. It answers `Ready`, with the guest agent's build, [`GUEST_BUILD`], or `RootFailed` with the
+//!    stage that failed, and then ends.
 //! 5. It serves `Ping`, `Echo`, and `Probe`, whose probes the [`probes`], [`mapping`], and
 //!    [`entries`] modules run, and runs the host's executions. It runs a probe only while it runs
 //!    no execution, and otherwise answers it with `ProbeFailed` and [`EXECUTING`].
@@ -137,12 +138,14 @@ use nvx::protocol::root::{
     DISTRO_MMIO_BASE, ImageFormat, RootLayout, RootUpper, SCRATCH_MMIO_BASE,
 };
 
+use crate::GUEST_BUILD;
 use crate::exec::HostMessage;
 use crate::frame::{MAX_BODY, MAX_TEXT_BODY, Message, truncated};
 use crate::guest::{self, ServeError, Step};
 use crate::probe::{Facts, Probe};
 use crate::root::{
-    DEFAULT_FIRST_PARTITION_BOUND, JournalPolicy, OverlayMode, RootConfig, RootFailure, RootStage,
+    DEFAULT_FIRST_PARTITION_BOUND, JournalPolicy, OverlayMode, Ready, RootConfig, RootFailure,
+    RootStage,
 };
 use connection::{Connection, Received};
 use executions::Executions;
@@ -357,14 +360,17 @@ fn wait<S: Read + Write + AsFd>(
 }
 
 /// Handles `message` before the root is ready: a root configuration, whose root it assembles
-/// through `operations`, or a `Stop`.
+/// through `operations`, and which it answers with its readiness, or a `Stop`.
 fn configure_root(
     operations: &mut dyn RootOperations,
     message: Message,
 ) -> Result<Step<Worked>, ServeError> {
     match message {
         Message::RootConfig(body) => Ok(match assemble(operations, &body) {
-            Ok(()) => Step::Continue(vec![Message::RootReady]),
+            Ok(()) => {
+                let ready = Ready::new(GUEST_BUILD).expect("this crate's version is a build");
+                Step::Continue(vec![Message::Ready(ready.encode())])
+            }
             Err(failure) => Step::End(
                 vec![Message::RootFailed(failure.encode())],
                 Worked::Failed(failure),

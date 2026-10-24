@@ -47,13 +47,18 @@ length, a little-endian `u32`, then the message's kind:
 | 3 | `Echo`: bytes that the guest sends back in an `Echo` of its own | at most 256 KiB, what four of the session's largest records carry |
 | 4 | `Stop`: asks the guest to stop serving | none |
 | 5 | `Stopped`: the guest's confirmation of `Stop`, its last message | none |
-| 6 | `RootConfig`: the host's [root configuration](#root-configurations) of a layered root, which the guest answers with `RootReady` or `RootFailed` | the configuration, at most 4 KiB |
-| 7 | `RootReady`: the guest assembled the root | none |
+| 6 | `RootConfig`: the host's [root configuration](#root-configurations) of a layered root, which the guest answers with `Ready` or `RootFailed` | the configuration, at most 4 KiB |
+| 7 | `Ready`: the guest assembled the root | the guest agent's [build](#ready-mapping-tables-and-start), at most 4 KiB |
 | 8 | `RootFailed`: a stage of the root failed: the guest's answer to `RootConfig`, or its report of a failed teardown before it confirms a `Stop` | the stage, then the problem, at most 4 KiB |
 | 9 | `Probe`: asks the guest to run a [probe](#probes) on its root | the probe, at most 4 KiB |
 | 10 | `Report`: the guest's answer to `Probe`: the facts that the probe found | at most 256 KiB |
 | 11 | `ProbeFailed`: the guest's answer to a `Probe` that it does not know, or that failed | the problem, at most 4 KiB |
 | 12 to 21 | The messages of an [execution](#executions) | at most 256 KiB for a start, input, or output, and 64 bytes for the others |
+| 22 | `Maps`: a part of the host's [mapping table](#ready-mapping-tables-and-start), which the guest applies beneath the root, in order, and answers with `Mapped` or `MapFailed` | a `MAPS` payload of `nvx::protocol`, at most 256 KiB |
+| 23 | `Mapped`: the guest applied the part's mappings | none |
+| 24 | `MapFailed`: the guest refused the part, or failed to apply one of its mappings | how many mappings it applied, then the problem, at most 4 KiB |
+| 25 | `Start`: asks the guest to start the sandbox's workloads once it applied the mapping table, which it confirms with `Started` | none |
+| 26 | `Started`: the guest's confirmation of `Start` | none |
 
 The session keeps no message boundaries, so a message may span several of its
 records, and one record may end a message and start the next. `Decoder`
@@ -62,9 +67,9 @@ the body, and holds at most one partial message. A malformed message ends the
 stream, because the framing cannot find the next message after it.
 
 The framing carries each body as bytes, within its kind's limit. The bodies of
-kinds 6 and 8 to 21 have encodings of their own, which the `root`, `probe`, and
-`exec` modules write and read. A body that does not decode leaves the stream
-intact, at the start of the next message. The guest answers a root
+kinds 6 to 22 and 24 have encodings of their own, which the `root`, `probe`,
+and `exec` modules write and read. A body that does not decode leaves the
+stream intact, at the start of the next message. The guest answers a root
 configuration that does not decode with `RootFailed`, as a configuration that
 it refuses, and a probe with `ProbeFailed`, while a message about an execution
 that does not decode ends the worker's session, as one that breaks the
@@ -96,6 +101,7 @@ zeros:
 | `first-partition-bound` | The most bytes that the first partition of a GPT disk may hold | no |
 | `overlay-mode` | The overlay's mode: `trusted-lowers` or `untrusted-lowers` | no |
 | `scratch-journal` | Whether an ext4 scratch may have a journal: `allowed` or `forbidden` | no |
+| `mapping-count` | The number of mappings of the host's [mapping table](#ready-mapping-tables-and-start), at most 4,096 | no |
 
 The paths are absolute and canonical guest paths of at most 4,095 bytes,
 without a NUL or a newline: not `/`, and without an empty, `.`, or `..`
@@ -105,15 +111,16 @@ whose parent is not `/`. The optional numbers are positive. Without an
 overlay mode or a journal policy, the guest takes the defaults of
 `nvx::guest::root`: an overlay that trusts its lowers, and a scratch that may
 have a journal. Without a bound of the first partition, the guest bounds it at
-`root::DEFAULT_FIRST_PARTITION_BOUND`, 64 KiB. The host program and the guest
-agent ship together, so the guest refuses every other configuration, one with
-an unknown field included, rather than ignore what it does not know.
+`root::DEFAULT_FIRST_PARTITION_BOUND`, 64 KiB. Without a mapping count, the
+host's mapping table has no mapping. The host program and the guest agent ship
+together, so the guest refuses every other configuration, one with an unknown
+field included, rather than ignore what it does not know.
 `RootConfig::default()` holds the values that the host program sends unless its
 caller names others: the runtime directory `/run/runtime-adapter`, the cgroups
 `/sys/fs/cgroup/agent` and `/sys/fs/cgroup/workload`, a wait of 30 seconds, an
 agent's `memory.low` of 16 MiB, as NVX's own guest reserves, and a workload's
 `memory.max` of 128 MiB and `pids.max` of 128, with neither a bound of the
-first partition, an overlay mode, nor a journal policy.
+first partition, an overlay mode, nor a journal policy, and no mapping.
 
 A stage of the root that fails is a `root::RootFailure`: the stage's code, one
 byte, then the problem, as UTF-8 text. The guest's worker, and with it the VM,
@@ -126,6 +133,37 @@ then ends with the stage's status:
 | 3 | `bootstrap` | Bootstrapping the guest for the root: its cgroups and their resource values | 13 |
 | 4 | `assembly` | Assembling the root, such as from an image of another identity than the boot tokens expect | 14 |
 | 5 | `teardown` | Tearing the root down, such as while a process holds it open | 15 |
+
+### Ready, mapping tables, and Start
+
+`Ready`, the guest's answer to a root configuration once it assembled the
+root, carries its readiness, `root::Ready`: the length of the guest agent's
+build, one byte, then the build, 1 to 255 printable ASCII characters without a
+space. The guest agent's build is the crate's version, `GUEST_BUILD`, which is
+also the build that the host program ships unless it names another; see
+[The runtime identity](#the-runtime-identity).
+
+The host's mapping table, of as many mappings as the root configuration
+announces, travels in parts, each in a `Maps`, whose body is a `MAPS` payload
+of `nvx::protocol`, as its `encode_maps_payloads` writes it: the index in the
+table of the part's first mapping, then the number of its mappings, each a
+little-endian `u32`, then each mapping: its flags, a little-endian `u16` that
+is 1 for a read-only mapping and 0 otherwise, then the lengths of its source
+and its target, each a little-endian `u16`, then the source, a path relative
+to the guest's mount of the host's export, and the target, an absolute path
+in the root. `root::encode_maps` splits a table into parts of at most 256 KiB,
+and an empty table into none. `root::decode_maps` reads a part with
+`nvx::protocol::decode_guest_maps_payload`, which takes the paths as bytes, as
+Linux does, and refuses what that decoder refuses, a part without a mapping,
+and a part that would end the table past 4,096 mappings.
+
+`Mapped` answers a part whose mappings the guest applied, and `MapFailed` one
+that it refused, or one of whose mappings it failed to apply. The body of
+`MapFailed`, `root::MapFailure`, holds how many of the table's mappings the
+guest applied, in order, a little-endian `u32`, which is the index in the
+table of the mapping that failed, then the problem, as UTF-8 text. `Start`
+asks the guest to start the sandbox's workloads once it applied the table,
+and `Started` confirms it. `Mapped`, `Start`, and `Started` have no body.
 
 ### Probes
 
@@ -293,9 +331,10 @@ control session, through `nvx::guest::nvxs`. It attaches, then:
   `Probe` with `ProbeFailed`, since the VM has no layered root to probe, and
   answers `Stop` with `Stopped`, then returns.
 
-A failure of the session, a malformed message, a root configuration or an
-execution, which only the worker of a VM with a layered root accepts, and a
-message that only the guest sends end serving with an error.
+A failure of the session, a malformed message, a message about a layered root,
+such as its configuration, or about an execution, which the guest agent of a
+VM without a layered root does not accept, and a message that only the guest
+sends end serving with an error.
 
 `runtime-adapter-guest serve` runs the guest agent on its standard input and
 output, which connect to the guest's end of the session, such as a control
@@ -356,8 +395,8 @@ then:
    cgroups with `nvx::guest::root::bootstrap`, which moves the guest's
    processes into the agent's cgroup, and assembles the root with
    `nvx::guest::root::assemble`;
-4. answers `RootReady`, or `RootFailed` with the stage that failed, and then
-   ends;
+4. answers `Ready`, with the guest agent's build, or `RootFailed` with the
+   stage that failed, and then ends;
 5. serves `Ping`, `Echo`, and `Probe`, though it refuses a probe while it runs
    executions, and runs the host's [executions](#the-workers-executions);
 6. on `Stop`, drops its executions, which ends their programs, tears the root
@@ -487,7 +526,8 @@ transport to the session's host endpoint, such as the one that
   an `Echo` of the same bytes, and `Stopped`. `stop` also returns the failure
   of a layered root's teardown, which the guest reports before it confirms;
 - `configure_root` sends a root configuration, and returns how the guest
-  answered: `RootReady`, or the stage of the root that failed;
+  answered: `Ready`, with the guest agent's build, or the stage of the root
+  that failed;
 - `probe` sends a probe, and returns the facts that it found, or the problem.
 
 Besides the session's own buffers, the client holds at most the rest of one of
@@ -681,10 +721,11 @@ independent adapter's does:
   shared library, and keeps its stack non-executable.
 
 The unit tests of `frame`, `root`, `probe`, and `exec` run in every
-configuration. They cover each kind's encoding, messages in pieces of any size
-and split at every byte, the headers that the framing refuses before their body
-arrives, and the root configurations, failures, probes, facts, and messages of
-executions that decode, and those that don't. In the guest-only configuration,
+configuration. They cover each kind's encoding, messages in pieces of any size,
+a message of each kind split at every byte, the headers that the framing
+refuses before their body arrives, and the root configurations, readinesses,
+parts of mapping tables, failures, probes, facts, and messages of executions
+that decode, and those that don't. In the guest-only configuration,
 the unit tests of `worker::probes` cover what the probes read: the mount table
 with its escapes, the kernel's records of a process, `os-release`, and the
 guest's memory, and the probes and arguments that the worker refuses. Those of
@@ -711,8 +752,8 @@ instance, streams that end at and inside a record, and the records and
 messages that the guest agent refuses: sequence, epoch, and instance errors,
 stale and identity-less resets, record lengths, bootstrap identity, ERROR
 payloads, and malformed headers. It also checks that the guest agent of a VM
-without a layered root answers probes with a failure, and refuses root
-configurations and executions.
+without a layered root answers probes with a failure, and refuses the messages
+about a layered root, such as its configuration, and executions.
 
 `tests/host_session.rs` checks, in the host-only configuration, that the host
 program's client attaches to the control session and exchanges the adapter's
@@ -742,9 +783,9 @@ Windows. They cover:
 - the answers that its requests check, and a request whose answer arrives too
   late;
 - a layered root: the configuration that the client sends, the guest's
-  answers, ready or the stage that failed, probes and their facts, a stop
-  that learns that the teardown failed, and answers whose bodies do not
-  decode, which end the client.
+  answers, ready with the guest agent's build or the stage that failed, probes
+  and their facts, a stop that learns that the teardown failed, and answers
+  whose bodies do not decode, which end the client.
 
 Through a relay between its test broker and a pseudo-terminal,
 `tests/guest_session.rs` also checks that `guest::serve_terminal` and

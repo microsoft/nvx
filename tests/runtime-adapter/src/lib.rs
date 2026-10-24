@@ -78,6 +78,11 @@ pub const GUEST_ENTRIES_COMMAND: &str = "entries";
 /// the execution sees and may do; see `worker::entries`.
 pub const GUEST_INSIDE_COMMAND: &str = "inside";
 
+/// The guest agent's build: this crate's version. The guest agent reports it once it assembled a
+/// layered root, in its [`Ready`](root::Ready), and a host program ships it unless the host names
+/// another build.
+pub const GUEST_BUILD: &str = env!("CARGO_PKG_VERSION");
+
 /// Describes the runtime contract that this build speaks: the control contract revision, and the
 /// versions of the microVM ABI, the NVXS records, and the NVXC frames.
 pub fn contract() -> String {

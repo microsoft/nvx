@@ -51,17 +51,20 @@ use nvx::exec::{
     Cause, Key, LaunchFailure, Limits, Outcome, Peer, Pool, Status, Stream, Timers, Window, peer,
 };
 use nvx::guest::nvxs::GuestConnectionError;
-use nvx::protocol::OUTER_MAX_PAYLOAD;
 use nvx::protocol::nvxs::{
     ErrorCode, Identity, Record, RecordError, RecordParser, RecordType, SessionError, encode_record,
 };
 use nvx::protocol::root::{RootImage, RootLayout, RootUpper};
+use nvx::protocol::{HostMap, OUTER_MAX_PAYLOAD};
 use nvx::uuid::Uuid;
+use runtime_adapter::GUEST_BUILD;
 use runtime_adapter::exec::{GuestMessage, HostMessage, MAX_CHUNK, Start};
 use runtime_adapter::frame::{Decoder, FrameError, HEADER_LEN, MAX_BODY, Message};
 use runtime_adapter::guest::{self, NO_ROOT, RECEIVE_WINDOW, ServeError, Served};
 use runtime_adapter::probe::{Facts, Probe};
-use runtime_adapter::root::{JournalPolicy, OverlayMode, RootConfig, RootFailure, RootStage};
+use runtime_adapter::root::{
+    JournalPolicy, MapFailure, OverlayMode, Ready, RootConfig, RootFailure, RootStage, encode_maps,
+};
 use runtime_adapter::worker::{self, MAX_EXECUTIONS, RootOperations, Worked};
 
 /// Identity of the broker's first epoch.
@@ -727,7 +730,7 @@ fn the_guest_agent_refuses_messages_that_its_framing_does_not_allow() {
     };
     let cases = [
         (header([0; 4], 0), FrameError::Kind(0)),
-        (header([0; 4], 22), FrameError::Kind(22)),
+        (header([0; 4], 27), FrameError::Kind(27)),
         (
             header(too_long, 3),
             FrameError::Length {
@@ -746,17 +749,23 @@ fn the_guest_agent_refuses_messages_that_its_framing_does_not_allow() {
         assert!(failed, "{message:?}: {error:?}");
     }
 
-    // The guest agent answers requests, and refuses the messages that only it sends, the
-    // configuration of a layered root, which its VM does not have, and executions, which only
-    // the worker of a layered root runs.
+    // The guest agent answers requests, and refuses the messages that only it sends, and those
+    // about a layered root, which its VM does not have: its configuration, a part of its mapping
+    // table, and the start of its workloads, and executions, which only the worker of a layered
+    // root runs.
     let refused_messages = [
         Message::Pong,
         Message::Stopped,
-        Message::RootReady,
+        ready(),
         Message::RootFailed(vec![1]),
         Message::Report(Vec::new()),
         Message::ProbeFailed(Vec::new()),
+        Message::Mapped,
+        Message::MapFailed(MapFailure::new(0, "refused").encode()),
+        Message::Started,
         Message::RootConfig(RootConfig::default().encode()),
+        Message::Maps(maps_part()),
+        Message::Start,
         Message::ExecStart(Vec::new()),
         Message::ExecCredit(Vec::new()),
         Message::ExecTerminal(Vec::new()),
@@ -956,13 +965,13 @@ fn the_guest_binary_serves_the_session_on_its_standard_streams() {
     // The host sends a malformed message.
     let (mut broker, child) = start_binary();
     broker.attach(FIRST);
-    broker.send_data(&[0, 0, 0, 0, 22], OUTER_MAX_PAYLOAD);
+    broker.send_data(&[0, 0, 0, 0, 27], OUTER_MAX_PAYLOAD);
     let output = child.finished();
     assert_eq!(output.status.code(), Some(1), "{output:?}");
     let diagnostic = String::from_utf8_lossy(&output.stderr);
     assert_eq!(
         diagnostic,
-        "runtime-adapter-guest: unknown message kind 22\n"
+        "runtime-adapter-guest: unknown message kind 27\n"
     );
 }
 
@@ -1235,6 +1244,22 @@ fn configuration() -> Message {
     Message::RootConfig(RootConfig::default().encode())
 }
 
+/// Returns the worker's answer to a root configuration once it assembled the root: its
+/// readiness, with the guest agent's build.
+fn ready() -> Message {
+    Message::Ready(Ready::new(GUEST_BUILD).unwrap().encode())
+}
+
+/// Returns the body of a part of a mapping table, of one mapping.
+fn maps_part() -> Vec<u8> {
+    let table = [HostMap {
+        source: "dir".to_owned(),
+        target: "/srv/dir".to_owned(),
+        read_only: true,
+    }];
+    encode_maps(&table).unwrap().remove(0)
+}
+
 /// Returns the probe that `text` names.
 fn probe(text: &str) -> Probe {
     Probe::parse(text).unwrap()
@@ -1245,7 +1270,7 @@ fn the_worker_assembles_the_root_serves_it_and_tears_it_down_on_stop() {
     let (mut broker, working) = start_worker(FakeRoot::booting(&layout()));
     broker.attach(FIRST);
     let replies = broker.exchange(&[configuration()], OUTER_MAX_PAYLOAD, 1);
-    assert_eq!(replies, [Message::RootReady]);
+    assert_eq!(replies, [ready()]);
 
     // It serves pings, echoes, and probes, in records of several sizes.
     let messages = [Message::Ping, longest(), Message::Probe(b"mounts".to_vec())];
@@ -1309,7 +1334,7 @@ fn the_worker_assembles_an_image_over_ram_in_the_overlay_mode_of_its_configurati
     broker.attach(FIRST);
     let messages = [Message::RootConfig(config.encode()), Message::Stop];
     let replies = broker.exchange(&messages, OUTER_MAX_PAYLOAD, 2);
-    assert_eq!(replies, [Message::RootReady, Message::Stopped]);
+    assert_eq!(replies, [ready(), Message::Stopped]);
     let (root, worked) = joined(working);
     assert_eq!(worked.unwrap(), Worked::Stopped);
     let expected = [
@@ -1335,7 +1360,7 @@ fn the_worker_assembles_a_gpt_disk_with_the_first_partition_bound_of_its_configu
     broker.attach(FIRST);
     let messages = [Message::RootConfig(config.encode()), Message::Stop];
     let replies = broker.exchange(&messages, OUTER_MAX_PAYLOAD, 2);
-    assert_eq!(replies, [Message::RootReady, Message::Stopped]);
+    assert_eq!(replies, [ready(), Message::Stopped]);
     let (root, worked) = joined(working);
     assert_eq!(worked.unwrap(), Worked::Stopped);
     let expected = [
@@ -1487,7 +1512,7 @@ fn the_worker_reports_a_teardown_that_failed_before_it_confirms_the_stop() {
     let replies = broker.exchange(&[configuration(), Message::Stop], OUTER_MAX_PAYLOAD, 3);
     let failure = RootFailure::new(RootStage::Teardown, problem);
     let expected = [
-        Message::RootReady,
+        ready(),
         Message::RootFailed(failure.encode()),
         Message::Stopped,
     ];
@@ -1515,9 +1540,14 @@ fn the_worker_accepts_only_its_configuration_or_a_stop_before_its_root() {
         Message::Ping,
         Message::Echo(b"early".to_vec()),
         Message::Probe(b"mounts".to_vec()),
+        Message::Maps(maps_part()),
+        Message::Start,
         Message::Pong,
-        Message::RootReady,
+        ready(),
         Message::Report(Vec::new()),
+        Message::Mapped,
+        Message::MapFailed(MapFailure::new(0, "refused").encode()),
+        Message::Started,
     ];
     for message in refused {
         let (mut broker, working) = start_worker(FakeRoot::booting(&layout()));
@@ -1535,7 +1565,7 @@ fn the_worker_accepts_only_its_configuration_or_a_stop_before_its_root() {
     let (mut broker, working) = start_worker(FakeRoot::booting(&layout()));
     broker.attach(FIRST);
     let replies = broker.exchange(&[configuration()], OUTER_MAX_PAYLOAD, 1);
-    assert_eq!(replies, [Message::RootReady]);
+    assert_eq!(replies, [ready()]);
     broker.send_data(&configuration().encode().unwrap(), OUTER_MAX_PAYLOAD);
     let (root, worked) = joined(working);
     let failed = matches!(&worked, Err(ServeError::Unexpected(6)));
@@ -1546,7 +1576,7 @@ fn the_worker_accepts_only_its_configuration_or_a_stop_before_its_root() {
     let (mut broker, working) = start_worker(FakeRoot::booting(&layout()));
     broker.attach(FIRST);
     let replies = broker.exchange(&[configuration()], OUTER_MAX_PAYLOAD, 1);
-    assert_eq!(replies, [Message::RootReady]);
+    assert_eq!(replies, [ready()]);
     broker.close();
     let (root, worked) = joined(working);
     let worked = worked.unwrap();
@@ -1563,7 +1593,7 @@ fn a_broker_that_closes_only_its_end_of_the_stream_receives_what_the_worker_queu
     let (mut broker, working) = start_worker(root);
     broker.attach(FIRST);
     let replies = broker.exchange(&[configuration()], OUTER_MAX_PAYLOAD, 1);
-    assert_eq!(replies, [Message::RootReady]);
+    assert_eq!(replies, [ready()]);
     let messages = [Message::Probe(b"mounts".to_vec()), Message::Ping];
     let mut replies = broker.send_data(&encode(&messages), OUTER_MAX_PAYLOAD);
     broker.close();
@@ -2104,7 +2134,7 @@ impl Host {
     fn ready(mut broker: Broker, working: Working) -> Self {
         broker.attach(FIRST);
         let replies = broker.exchange(&[configuration()], OUTER_MAX_PAYLOAD, 1);
-        assert_eq!(replies, [Message::RootReady]);
+        assert_eq!(replies, [ready()]);
         Self {
             broker,
             working: Some(working),
@@ -2705,7 +2735,7 @@ fn an_execution_that_starts_with_the_root_counts_its_timeout_from_its_own_start(
     };
     host.send(&[configuration(), HostMessage::Start(start).encode()]);
     host.run_until(|host| host.outcome(1).is_some());
-    assert_eq!(host.replies, [Message::RootReady]);
+    assert_eq!(host.replies, [ready()]);
     check_lossless(&host, 1, Status::Exited(0));
     let (_, worked) = host.stop();
     assert_eq!(worked.unwrap(), Worked::Stopped);
