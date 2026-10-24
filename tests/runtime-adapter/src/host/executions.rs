@@ -5,12 +5,18 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::time::Instant;
 
-use nvx::exec::{Key, Timers, Violation};
+use nvx::exec::{Key, Timers, Unit, Violation};
 use nvx::host::nvxs::HostConnectionError;
 
 use super::{Client, ClientError};
 use crate::exec::{GuestMessage, HostExecution, MAX_EXECUTIONS, Start, name};
 use crate::frame::{BodyError, Message};
+
+/// The most frames of each output pool of an execution of [`Executions`], whose output windows
+/// count frames: then the credits that the driver sends for the messages that the guest of
+/// [`MAX_EXECUTIONS`] executions may send ahead of its own credit fit the guest's receive window,
+/// `nvx::protocol::OUTER_MIN_RECEIVE_WINDOW`, several times over.
+pub const MAX_OUTPUT_FRAMES: u32 = 32;
 
 /// A failure of [`Executions`].
 #[derive(Debug)]
@@ -25,9 +31,13 @@ pub enum ExecutionsError {
     /// A start that says that the host sends the program's input, which the driver does not
     /// send, and so did not send the start.
     Input,
-    /// A start beyond [`MAX_EXECUTIONS`] executions that the driver started and that have not
-    /// finished, which it did not send.
+    /// A start whose output windows count bytes, or more than [`MAX_OUTPUT_FRAMES`] frames,
+    /// which the driver did not send.
+    Window,
+    /// A start beyond [`MAX_EXECUTIONS`] executions of the driver, which it did not send.
     Full,
+    /// A start once the driver ran its executions, which it did not send.
+    Ran,
     /// The guest sent a message about an execution whose body does not decode.
     Body(BodyError),
     /// The guest sent a message of this kind, which is about no execution.
@@ -47,10 +57,17 @@ impl fmt::Display for ExecutionsError {
             Self::Start(error) => write!(formatter, "the host refuses to send the start: {error}"),
             Self::Duplicate(id) => write!(formatter, "the host starts execution {id} twice"),
             Self::Input => formatter.write_str("the host sends no execution's input"),
+            Self::Window => write!(
+                formatter,
+                "the host takes output windows of at most {MAX_OUTPUT_FRAMES} frames"
+            ),
             Self::Full => write!(
                 formatter,
-                "the host runs {MAX_EXECUTIONS} executions that have not finished already"
+                "the host runs at most {MAX_EXECUTIONS} executions at once"
             ),
+            Self::Ran => {
+                formatter.write_str("the host starts no execution once it ran its executions")
+            }
             Self::Body(error) => error.fmt(formatter),
             Self::Unexpected(kind) => write!(
                 formatter,
@@ -79,7 +96,9 @@ impl std::error::Error for ExecutionsError {
             Self::Violation(_, violation) => Some(violation),
             Self::Duplicate(_)
             | Self::Input
+            | Self::Window
             | Self::Full
+            | Self::Ran
             | Self::Unexpected(_)
             | Self::Unknown(_)
             | Self::TimedOut => None,
@@ -99,6 +118,10 @@ impl From<ClientError> for ExecutionsError {
 ///
 /// [`start`](Self::start) sends the start of an execution, and [`run`](Self::run) carries the
 /// guest's messages to the executions, and theirs to the guest, until every execution finished.
+/// A driver runs one batch: it starts every execution before it runs them, and none after. The
+/// guest may still send messages about the executions of a run that gave up on one or failed, so
+/// a later batch takes an attachment of its own, as each command of the host program does.
+///
 /// One thread runs them all: each receive waits at most until the earliest timer of the
 /// executions, which so fires in time whatever the guest sends, and the guest's messages about one
 /// execution never wait for another's. Each send waits, as the client's do, until the transport
@@ -110,9 +133,11 @@ impl From<ClientError> for ExecutionsError {
 /// passes the guest's credit for the host's records on only behind the guest's own records, and
 /// takes no more of the host's records than that credit allows. So the driver sends little before
 /// it reads: no program's input, which one thread could not send while it reads the programs'
-/// output, and the starts of at most [`MAX_EXECUTIONS`] executions that have not finished, as
-/// many as the guest runs at once, whose answers wait for the run, as no program's output flows
-/// before the run's credit does.
+/// output; the starts of at most [`MAX_EXECUTIONS`] executions, as many as the guest runs at once,
+/// whose answers wait for the run, as no program's output flows before the run's credit does;
+/// and, in the run, besides a cancellation for each execution, at most a credit for each message
+/// that it reads, of output windows of at most [`MAX_OUTPUT_FRAMES`] frames, so that the guest's
+/// messages ahead of its own credit stay few.
 ///
 /// The guest ends its session on a second start of the same key, even in a later epoch of the
 /// session, so the keys of the executions must differ from those of every execution that the guest
@@ -121,6 +146,8 @@ impl From<ClientError> for ExecutionsError {
 pub struct Executions {
     /// The host's side of each execution, by ID.
     executions: BTreeMap<u64, HostExecution>,
+    /// Whether the driver ran its executions.
+    ran: bool,
 }
 
 impl Executions {
@@ -132,12 +159,13 @@ impl Executions {
     /// Starts the execution of `start` over `client`, whose peer runs with `timers`: sends the
     /// start by `deadline`. The timeout of `timers` runs from then.
     ///
-    /// A start of an ID that the driver started already, or whose encoding does not decode, as
-    /// one with a relative working directory or an environment entry without a name, fails
-    /// before anything is sent, and leaves the client usable, as a message that the framing
-    /// refuses does: the guest would end its session on either. So does a start that says that
-    /// the host sends the program's input, and one beyond [`MAX_EXECUTIONS`] executions that have
-    /// not finished, which the driver does not send, as [`Executions`] describes.
+    /// These starts fail before anything is sent, and leave the client usable, as a message that
+    /// the framing refuses does: one of an ID that the driver started already, or whose encoding
+    /// does not decode, as one with a relative working directory or an environment entry without
+    /// a name, on either of which the guest would end its session; and, as [`Executions`]
+    /// describes, one that says that the host sends the program's input, one whose output windows
+    /// count bytes or more than [`MAX_OUTPUT_FRAMES`] frames, one beyond [`MAX_EXECUTIONS`]
+    /// executions, and any once the driver ran.
     pub fn start(
         &mut self,
         client: &mut Client,
@@ -145,6 +173,9 @@ impl Executions {
         timers: Timers,
         deadline: Instant,
     ) -> Result<(), ExecutionsError> {
+        if self.ran {
+            return Err(ExecutionsError::Ran);
+        }
         let id = start.key.id();
         if self.executions.contains_key(&id) {
             return Err(ExecutionsError::Duplicate(id));
@@ -152,12 +183,11 @@ impl Executions {
         if start.input {
             return Err(ExecutionsError::Input);
         }
-        let running = self
-            .executions
-            .values()
-            .filter(|execution| execution.outcome().is_none())
-            .count();
-        if running >= MAX_EXECUTIONS {
+        let output = start.limits.output();
+        if !matches!(output.unit(), Unit::Frames) || output.size() > MAX_OUTPUT_FRAMES {
+            return Err(ExecutionsError::Window);
+        }
+        if self.executions.len() >= MAX_EXECUTIONS {
             return Err(ExecutionsError::Full);
         }
         let body = start.encode();
@@ -173,6 +203,7 @@ impl Executions {
     /// `deadline` passed first: in a receive, which leaves the client usable, or in a send, which
     /// ends it.
     pub fn run(&mut self, client: &mut Client, deadline: Instant) -> Result<(), ExecutionsError> {
+        self.ran = true;
         loop {
             let now = Instant::now();
             for execution in self.executions.values_mut() {

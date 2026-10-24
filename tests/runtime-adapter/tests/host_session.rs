@@ -33,7 +33,7 @@ use nvx::protocol::{
 };
 use runtime_adapter::exec::{GuestMessage, HostMessage, MAX_EXECUTIONS, Start};
 use runtime_adapter::frame::{Decoder, FrameError, HEADER_LEN, MAX_BODY, MAX_TEXT_BODY, Message};
-use runtime_adapter::host::{Client, ClientError, Executions, ExecutionsError};
+use runtime_adapter::host::{Client, ClientError, Executions, ExecutionsError, MAX_OUTPUT_FRAMES};
 use runtime_adapter::probe::{Facts, Probe, ProbeReply};
 use runtime_adapter::root::{RootConfig, RootFailure, RootReply, RootStage};
 
@@ -1665,17 +1665,35 @@ fn the_driver_refuses_starts_before_it_sends_them() {
             "{start:?}: {refused:?}"
         );
     }
-    // A start whose input the host would send while it reads the guest's output.
+    // A start whose input the host would send while it reads the guest's output, and starts whose
+    // output windows would let the guest send many messages ahead of its credit for the host's.
     let refused = executions.start(&mut client, start_of(1).with_input(), timers(), deadline());
     assert!(
         matches!(refused, Err(ExecutionsError::Input)),
         "{refused:?}"
     );
-    // A second start of an ID, and a start beyond the executions that the guest runs at once.
+    let program = ["/bin/program"];
+    for output in [
+        Window::bytes(64 * 1024),
+        Window::frames(MAX_OUTPUT_FRAMES + 1),
+    ] {
+        let limits = Limits::new(CHUNK, Window::frames(4), output).unwrap();
+        let start = Start::new(Key::new(1, 1), limits, timers(), program);
+        let refused = executions.start(&mut client, start, timers(), deadline());
+        assert!(
+            matches!(refused, Err(ExecutionsError::Window)),
+            "{output:?}: {refused:?}"
+        );
+    }
+    // A second start of an ID, and a start beyond the executions that the guest runs at once,
+    // after starts of which one has the widest output windows that the driver takes.
     let most = u64::try_from(MAX_EXECUTIONS).unwrap();
-    for id in 1..=most {
+    let mut starts = (1..=most).map(start_of).collect::<Vec<_>>();
+    let widest = Limits::new(CHUNK, Window::frames(4), Window::frames(MAX_OUTPUT_FRAMES)).unwrap();
+    starts[0] = Start::new(Key::new(1, 1), widest, timers(), program);
+    for start in &starts {
         executions
-            .start(&mut client, start_of(id), timers(), deadline())
+            .start(&mut client, start.clone(), timers(), deadline())
             .unwrap();
     }
     let refused = executions.start(&mut client, start_of(1), timers(), deadline());
@@ -1686,34 +1704,30 @@ fn the_driver_refuses_starts_before_it_sends_them() {
     let refused = executions.start(&mut client, start_of(most + 1), timers(), deadline());
     assert!(matches!(refused, Err(ExecutionsError::Full)), "{refused:?}");
     // The guest received those starts alone, and the client stays usable.
-    let starts = (1..=most)
-        .map(|id| HostMessage::Start(start_of(id)).encode())
+    let sent = starts
+        .into_iter()
+        .map(|start| HostMessage::Start(start).encode())
         .collect::<Vec<_>>();
-    assert_eq!(broker.messages(MAX_EXECUTIONS), starts);
+    assert_eq!(broker.messages(MAX_EXECUTIONS), sent);
     let pinging = spawn(client, |client| client.ping(deadline()));
     assert_eq!(broker.answer(OUTER_MAX_PAYLOAD), Message::Ping);
     joined(pinging).1.unwrap();
 
-    // The executions that finished leave their places: once the guest refused as many launches,
-    // the driver starts another execution.
+    // A driver runs one batch: once it ran, it starts nothing more.
     let (mut broker, client) = attached(FIRST, usize::MAX);
-    let starts = (1..=most).map(start_of).collect::<Vec<_>>();
-    let running = run(client, starts.clone(), deadline());
+    let running = run(client, vec![start_of(1)], deadline());
     let refused = Workload {
         launch: Err(LaunchFailure::new(0, 11)),
         output: [Vec::new(), Vec::new()],
         status: Status::Exited(0),
     };
-    let played = play(&mut broker, MAX_EXECUTIONS, OUTER_MAX_PAYLOAD, |_| {
-        refused.clone()
-    });
-    assert_eq!(played, starts);
+    let played = play(&mut broker, 1, OUTER_MAX_PAYLOAD, |_| refused.clone());
+    assert_eq!(played, [start_of(1)]);
     let (mut client, executions) = joined(running);
     let mut executions = executions.unwrap();
     assert!(executions.is_finished());
-    executions
-        .start(&mut client, start_of(most + 1), timers(), deadline())
-        .unwrap();
+    let refused = executions.start(&mut client, start_of(2), timers(), deadline());
+    assert!(matches!(refused, Err(ExecutionsError::Ran)), "{refused:?}");
 }
 
 #[test]

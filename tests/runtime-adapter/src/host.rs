@@ -18,7 +18,7 @@ use crate::root::{RootConfig, RootFailure, RootReply};
 
 mod executions;
 
-pub use executions::{Executions, ExecutionsError};
+pub use executions::{Executions, ExecutionsError, MAX_OUTPUT_FRAMES};
 
 /// A failure of a [`Client`].
 #[derive(Debug)]
