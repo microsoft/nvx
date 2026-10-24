@@ -153,7 +153,7 @@ fn require_existing(path: &Path, description: &str, code: ErrorCode) -> Result<(
 
 /// Refuses a disk path that OpenVMM's `--microvm-sandbox-block` value could not hold: one with
 /// a comma or semicolon. The message shows `path` as `shown`.
-fn reject_disk_path(path: &PurePath, shown: &str) -> Result<()> {
+pub(crate) fn reject_disk_path(path: &PurePath, shown: &str) -> Result<()> {
     if path.as_str().contains([',', ';']) {
         return Err(refused(format!(
             "disk paths containing commas or semicolons are unsupported: {shown}"
@@ -171,7 +171,7 @@ const CONTAINER_EXTENSIONS: [&str; 4] = ["vhd", "vhdx", "vmgs", "iso"];
 /// as a raw image: if the name of `path` has an extension of [`CONTAINER_EXTENSIONS`]. The
 /// extension is the text after the name's last dot, unless that dot starts the name, and compares
 /// case-sensitively, as OpenVMM reads and compares it.
-fn reject_container_path(path: &PurePath, shown: &str) -> Result<()> {
+pub(crate) fn reject_container_path(path: &PurePath, shown: &str) -> Result<()> {
     let extension = match path.name().rsplit_once('.') {
         Some((stem, extension)) if !stem.is_empty() => extension,
         _ => "",

@@ -52,6 +52,7 @@ mod eligibility;
 mod files;
 mod key;
 mod manifest;
+mod plan;
 mod store;
 #[cfg(test)]
 mod test_support;
@@ -62,6 +63,7 @@ pub use self::key::{CaptureClass, ClassIdentity, Invariants, KeyIdentity, Templa
 pub use self::manifest::{
     BlockGeometry, HostClock, MANIFEST_NAME, MAX_MANIFEST_LEN, TemplateManifest, TimeContract,
 };
+pub use self::plan::{MEMORY_BLOCK_SIZE, SCRATCH_NAME, TemplatePlan, TemplateResources};
 pub use self::store::{
     Acquired, GENERATIONS_NAME, Generation, INDEX_LOCK_NAME, INDEX_NAME, Index, KEY_NAME,
     LEASES_NAME, Lease, LeaseId, MAX_GENERATIONS, Retirement, SNAPSHOT_NAME, STORE_FORMAT,

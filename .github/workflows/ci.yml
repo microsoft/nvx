@@ -160,10 +160,11 @@ jobs:
       - name: Validate NVX CLI
         uses: ./.github/actions/validate-nvx
 
-      # nvx-rs's protocol tests read copies of OpenVMM's control-session
-      # protocol vectors, because the nvx-rs job cannot check out OpenVMM.
-      # This job can, so it compares the copies with the submodule's files,
-      # and nvx::contract's versions of OpenVMM's contracts with OpenVMM's.
+      # nvx-rs's protocol and template tests read copies of OpenVMM's
+      # control-session protocol vectors and of the lines of its platform
+      # allowlist, because the nvx-rs job cannot check out OpenVMM. This job
+      # can, so it compares the copies with the submodule's files, and
+      # nvx::contract's versions of OpenVMM's contracts with OpenVMM's.
       - name: Compare OpenVMM's protocol vectors
         shell: bash
         run: >-

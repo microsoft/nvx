@@ -220,6 +220,11 @@ impl SandboxDistro {
         self.path.as_path()
     }
 
+    /// Returns the image's path, as `pathlib` normalizes it.
+    pub(crate) fn pure_path(&self) -> &PurePath {
+        &self.path
+    }
+
     /// Returns the image's format and expected identity.
     pub fn image(&self) -> RootImage {
         self.image

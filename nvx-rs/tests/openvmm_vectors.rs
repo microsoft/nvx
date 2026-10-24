@@ -1,10 +1,11 @@
 //! Compares what `nvx-rs` copies from OpenVMM with the OpenVMM submodule: the control-session
-//! protocol vectors in `tests/vectors/openvmm/`, and the versions of OpenVMM's contracts in
-//! `nvx::contract`.
+//! protocol vectors and the excerpts of OpenVMM's sources in `tests/vectors/openvmm/`, and the
+//! versions of OpenVMM's contracts in `nvx::contract`.
 //!
-//! The protocol's tests read the copies, because the `nvx-rs` job cannot check out the submodule,
-//! whose deploy key fork pull requests lack. This test is ignored by default: the NVX CLI jobs,
-//! which check out the submodule, run it, and so does an OpenVMM pin promotion.
+//! The protocol's tests read the copies, and the unit tests of `nvx::host::template` compile the
+//! excerpts, because the `nvx-rs` job cannot check out the submodule, whose deploy key fork pull
+//! requests lack. This test is ignored by default: the NVX CLI jobs, which check out the
+//! submodule, run it, and so does an OpenVMM pin promotion.
 
 use std::fs;
 use std::path::Path;
@@ -16,6 +17,19 @@ use nvx::contract;
 const FILES: [&str; 2] = [
     "control_session_protocol_cases.txt",
     "control_session_protocol_vectors.txt",
+];
+
+/// The excerpts of OpenVMM's sources that `tests/vectors/openvmm/` copies: for each, its file
+/// there, and the file of the OpenVMM submodule whose lines it copies, unchanged.
+const EXCERPTS: [(&str, &str); 2] = [
+    (
+        "microvm_control_tty_command_line.rs",
+        "openvmm/openvmm_defs/src/microvm.rs",
+    ),
+    (
+        "platform_command_line_token_is_invariant.rs",
+        "openvmm/openvmm_helpers/src/snapshot/microvm.rs",
+    ),
 ];
 
 /// The versions of `nvx::contract` that are OpenVMM's: for each, the file of the OpenVMM
@@ -55,7 +69,12 @@ fn the_copies_match_the_submodules_files() {
         .map(|entry| entry.unwrap().file_name().into_string().unwrap())
         .collect();
     copied.sort();
-    assert_eq!(copied, FILES, "tests/vectors/openvmm/ holds other files");
+    let mut expected: Vec<&str> = FILES
+        .into_iter()
+        .chain(EXCERPTS.map(|(excerpt, _)| excerpt))
+        .collect();
+    expected.sort_unstable();
+    assert_eq!(copied, expected, "tests/vectors/openvmm/ holds other files");
     for file in FILES {
         let original = fs::read(originals.join(file)).unwrap_or_else(|error| {
             panic!(
@@ -68,6 +87,30 @@ fn the_copies_match_the_submodules_files() {
             copy == original,
             "tests/vectors/openvmm/{file} differs from the OpenVMM submodule's: copy the \
              submodule's unchanged, and record its commit in tests/vectors/README.md"
+        );
+    }
+}
+
+#[test]
+#[ignore = "needs the OpenVMM submodule, which the NVX CLI jobs check out"]
+fn the_excerpts_are_lines_of_the_submodules_files() {
+    let crate_root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    for (excerpt, file) in EXCERPTS {
+        let source =
+            fs::read_to_string(crate_root.join("../openvmm").join(file)).unwrap_or_else(|error| {
+                panic!(
+                    "cannot read {file} of the OpenVMM submodule, which `scripts/nvx.py init` \
+                     checks out: {error}"
+                )
+            });
+        let copy =
+            fs::read_to_string(crate_root.join("tests/vectors/openvmm").join(excerpt)).unwrap();
+        // Whole lines: the excerpt starts at the start of a line, and ends with its newline.
+        assert!(
+            copy.ends_with('\n') && format!("\n{source}").contains(&format!("\n{copy}")),
+            "tests/vectors/openvmm/{excerpt} is not a run of whole lines of {file} of the OpenVMM \
+             submodule: copy the submodule's lines unchanged, record its commit in \
+             tests/vectors/README.md, and update the tests that they fail"
         );
     }
 }
