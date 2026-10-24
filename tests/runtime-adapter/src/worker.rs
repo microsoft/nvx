@@ -114,22 +114,40 @@
 //!   session abandons every execution: the worker drops it, and it runs until it ends, detached
 //!   from the host, which receives nothing more about it.
 //! - The worker admits at most [`MAX_EXECUTIONS`] executions at once, abandoned ones included,
-//!   and those whose programs' statuses it has not collected, and none that would hold more than
-//!   [`MAX_EXECUTION_MEMORY`] bytes. It refuses a start beyond those, or one whose program it
-//!   cannot spawn, with a terminal record whose launch failed at stage 0, with `EAGAIN`,
-//!   `ENOMEM`, or the spawn's `errno`.
+//!   and those that keep their places once they ended, as the items below describe, and none
+//!   that would hold more than [`MAX_EXECUTION_MEMORY`] bytes. It refuses a start beyond those,
+//!   or one whose cgroup it cannot prepare, or whose program it cannot spawn, with a terminal
+//!   record whose launch failed at stage 0, with `EAGAIN`, `ENOMEM`, or the `errno` of the
+//!   preparation or the spawn.
 //! - Each program runs in the worker's root and working directories, with its environment, and
-//!   leads a process group of its own, which its execution kills as a whole.
-//! - The worker collects the status of every program itself, without waiting for it, and learns
-//!   that a program ended from a pidfd of its own. Before it collects the status, it kills what
-//!   is left of the program's process group, as NVX's settlement through a cgroup kills what is
-//!   left in the cgroup: until then, the program, a zombie, keeps its process ID, which is the
-//!   group's, from any other process. So a descendant that stayed in the group neither outlives
-//!   the program nor holds its output open. The program runs without a cgroup, though, so nothing
-//!   proves that a descendant that left the group is gone, and each outcome is fenced: once the
-//!   program ended, a stream that such a process may still hold has the settlement time and the
-//!   grace to close, after which the runner gives up on it, while a stream that no process holds
-//!   any more loses nothing, however slowly the host takes it.
+//!   leads a process group of its own.
+//! - Each execution runs in a cgroup of its own below the workload cgroup, `execution-N`, where N
+//!   counts the cgroups that the worker prepared. The worker prepares it with
+//!   `nvx::guest::cgroup::ExecutionCgroup::prepare`, and the program joins it as it spawns,
+//!   before it runs, so that its descendants start in it, however they leave its process group or
+//!   session. The execution settles through that cgroup alone, which leaves the other executions
+//!   running: once the program ended, as its status, which the execution collects itself,
+//!   tells, the execution kills what is left in the cgroup, and settles once the cgroup is empty.
+//!   So no descendant outlives the program or holds its output open, and an execution whose
+//!   program ends on its own loses nothing, however slowly the host takes its output, and is
+//!   reusable.
+//! - An execution keeps its place among [`MAX_EXECUTIONS`] until its cgroup is empty and the
+//!   worker removed it, which the worker does once the runner returned the terminal outcome of an
+//!   execution that settled. One that did not settle, whose outcome is fenced, keeps its place
+//!   and its cgroup until the host stops the worker.
+//! - Without cgroups, as where the in-process tests cannot create them, the [root's
+//!   operations](RootOperations::cgroups) name none, and the program's process group stands in
+//!   for its cgroup: its execution kills the group as a whole. The worker collects the status of
+//!   every program itself then, without waiting for it, and learns that a program ended from a
+//!   pidfd of its own. Before it collects the status, it kills what is left of the program's
+//!   process group, as the settlement through a cgroup kills what is left in the cgroup: until
+//!   then, the program, a zombie, keeps its process ID, which is the group's, from any other
+//!   process. So a descendant that stayed in the group neither outlives the program nor holds its
+//!   output open. Nothing proves that a descendant that left the group is gone, though, so each
+//!   outcome is fenced: once the program ended, a stream that such a process may still hold has
+//!   the settlement time and the grace to close, after which the runner gives up on it, while a
+//!   stream that no process holds any more loses nothing, however slowly the host takes it. Such
+//!   an execution keeps its place until the worker collected its program's status.
 //! - Before it hands an execution the host's cancellation, the worker gives the execution a turn,
 //!   as the loop does, which collects the status of a program that ended, and reports the
 //!   program's end to the runner. So the end of a program that ended before its timeout while the
@@ -138,11 +156,13 @@
 //!   timeout's instant.
 //! - The worker forgets an execution once its runner returned the terminal outcome, which may
 //!   come before the program's end, as once the runner gave up on a program that a kill did not
-//!   end in time: forgetting it kills the program and its process group again, and the worker
-//!   collects the program's status once it ended. On a stop, or once its session ended
-//!   otherwise, the worker drops every execution, which kills the process group of each program
-//!   whose status it has not collected, and waits up to a second in all for those programs to
-//!   end.
+//!   end in time: forgetting it kills the program, and what is left in its cgroup or its process
+//!   group, again, and the worker collects the program's status once it ended. On a stop, or
+//!   once its session ended otherwise, the worker drops every execution, which kills the program
+//!   of each one that has not ended, with what is left in its cgroup or its process group, and
+//!   what is left in the cgroups of the executions that did not settle, and waits up to a second
+//!   in all for those programs to end and those cgroups to empty, removing each cgroup that
+//!   emptied.
 
 mod connection;
 pub mod entries;
@@ -200,7 +220,9 @@ pub const SESSION_STATUS: u8 = 1;
 pub const EXECUTING: &str = "the worker runs executions, and probes nothing until they end";
 
 /// The most executions that the worker runs at once, those that the host abandoned included, and
-/// those whose programs the worker forgot before it collected their statuses.
+/// those that ended but keep their places: with cgroups, those whose cgroups the worker has not
+/// removed, as those of the executions that did not settle, and without them, those whose
+/// programs the worker forgot before it collected their statuses.
 pub const MAX_EXECUTIONS: usize = 8;
 
 /// The most bytes that one execution may hold in the worker: what its runner holds, a chunk of
@@ -241,6 +263,12 @@ pub trait RootOperations {
     ///
     /// Fails with a [`MapError`] that counts the mappings before the one that failed.
     fn map(&mut self, mappings: &[Mapping]) -> Result<(), MapError>;
+
+    /// Returns the cgroups in which the worker runs its executions once the root is ready: the
+    /// layout that the bootstrap prepared, below whose workload cgroup each execution gets a
+    /// cgroup of its own. Without them, as in tests that cannot create cgroups, each program runs
+    /// in a process group alone.
+    fn cgroups(&self) -> Option<Layout>;
 
     /// Runs `probe` on the assembled root, and returns what it found.
     fn probe(&mut self, probe: &Probe) -> Result<Facts, String>;
@@ -337,7 +365,7 @@ pub fn work<S: Read + Write + AsFd>(
                     message,
                 )?,
                 None => {
-                    let (step, ready) = configure_root(operations, message)?;
+                    let (step, ready) = configure_root(operations, &mut executions, message)?;
                     order = ready;
                     step
                 }
@@ -436,15 +464,18 @@ fn wait<S: Read + Write + AsFd>(
 }
 
 /// Handles `message` before the root is ready: a root configuration, whose root it assembles
-/// through `operations`, and which it answers with its readiness, or a `Stop`. Returns the step,
-/// with the worker's order once the root is ready.
+/// through `operations`, after which `executions` run in the cgroups that the operations prepared,
+/// and which it answers with its readiness, or a `Stop`. Returns the step, with the worker's order
+/// once the root is ready.
 fn configure_root(
     operations: &mut dyn RootOperations,
+    executions: &mut Executions,
     message: Message,
 ) -> Result<(Step<Worked>, Option<Order>), ServeError> {
     match message {
         Message::RootConfig(body) => Ok(match assemble(operations, &body) {
             Ok(config) => {
+                executions.run_in(operations.cgroups());
                 let ready = Ready::new(GUEST_BUILD).expect("this crate's version is a build");
                 let step = Step::Continue(vec![Message::Ready(ready.encode())]);
                 (step, Some(Order::new(config.mapping_count)))
@@ -748,6 +779,13 @@ impl RootOperations for LibraryRoot {
                 })?;
         }
         Ok(())
+    }
+
+    /// Returns the cgroups that the bootstrap prepared: those of the root configuration.
+    fn cgroups(&self) -> Option<Layout> {
+        self.bootstrap
+            .as_ref()
+            .map(|bootstrap| bootstrap.layout().clone())
     }
 
     /// Runs one of the [`probes`], of the [`mapping`] probes, which inspect the root's mappings
