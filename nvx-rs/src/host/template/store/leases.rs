@@ -172,7 +172,8 @@ impl Lease {
     }
 
     /// Returns the directory of the sandbox that holds the lease, as an absolute path with its
-    /// links resolved, which may differ from the path through which the sandbox was leased.
+    /// links resolved, which may differ from the path through which the sandbox was leased, and
+    /// through which a [release](Store::release) takes the sandbox's lock.
     pub fn sandbox(&self) -> &Path {
         &self.sandbox
     }
@@ -429,7 +430,13 @@ impl Store {
     /// [retirement](Self::retire) removes, and never a binding without its record. It takes no
     /// lock of the store.
     ///
-    /// Fails with [`ErrorKind::Other`] if the sandbox holds a lease of another store.
+    /// The caller takes the sandbox's lock through the lease's path, as [`Lease::sandbox`]
+    /// returns it, and as [`acquire`](Self::acquire) takes it, which has no links: a link in the
+    /// path of the lock could change as the release runs, and make it remove another sandbox's
+    /// binding, whose lock it does not hold.
+    ///
+    /// Fails with [`ErrorKind::Other`] if the sandbox holds a lease of another store, or if the
+    /// lock does not name the sandbox by its lease's path, and then removes nothing.
     pub fn release(&self, locked: &mut LockedStore) -> Result<Option<Lease>> {
         self.release_with(locked, &sync_dir)
     }
@@ -449,6 +456,14 @@ impl Store {
                 locked.dir().display(),
                 lease.store,
                 self.id
+            )));
+        }
+        if locked.dir() != lease.sandbox {
+            return Err(Error::other(format!(
+                "the lock of the sandbox in {} does not name it by the path of its lease, {}, \
+                 through which a release takes it",
+                locked.dir().display(),
+                lease.sandbox.display()
             )));
         }
         let recorded = self.check_records_dir(LEASES_NAME, LEASES_WHAT)?;

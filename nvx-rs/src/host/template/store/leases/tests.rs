@@ -927,6 +927,50 @@ fn an_acquisition_binds_the_sandbox_that_it_resolved_whatever_its_path_names_mea
 }
 
 #[test]
+fn a_release_takes_the_lock_of_its_sandbox_through_the_path_of_its_lease() {
+    let (directory, store) = new_store();
+    let root = filesystem::canonicalize(directory.path()).unwrap();
+    let published = publish(&store, &ManifestSpec::template(), storage(1));
+    let generation = published.generation();
+    let (first, second) = (root.join("first"), root.join("second"));
+    fs::create_dir(&first).unwrap();
+    fs::create_dir(&second).unwrap();
+    let leased_sandbox = provision(&first, "sandbox");
+    let other = provision(&second, "sandbox");
+    let lease = leased(&store, &published, &leased_sandbox);
+    let other_lease = leased(&store, &published, &other);
+    let mut both = vec![lease.clone(), other_lease.clone()];
+    both.sort_by_key(Lease::id);
+    let link = root.join("link");
+    link_dir(&first, &link);
+    // A lock taken through a link refuses a release, which removes nothing, also once the link
+    // names another sandbox, whose lease a release would otherwise end without its lock.
+    let mut locked = SandboxStore::lock_existing(link.join("sandbox"), &files(), None).unwrap();
+    for retargeted in [false, true] {
+        if retargeted {
+            unlink_dir(&link);
+            link_dir(&second, &link);
+        }
+        let error = store.release(&mut locked).unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::Other, "{error}");
+        assert!(
+            error
+                .message()
+                .contains("does not name it by the path of its lease"),
+            "{error}"
+        );
+        assert_eq!(binding(&leased_sandbox), Some(lease.clone()));
+        assert_eq!(binding(&other), Some(other_lease.clone()));
+        assert_eq!(store.leases(generation).unwrap(), both);
+    }
+    drop(locked);
+    // A lock taken through the lease's path ends it.
+    assert_eq!(release(&store, lease.sandbox()).unwrap(), Some(lease));
+    assert_eq!(binding(&leased_sandbox), None);
+    assert_eq!(store.leases(generation).unwrap(), [other_lease]);
+}
+
+#[test]
 fn a_retirement_that_finds_its_generation_unindexed_makes_the_index_durable_first() {
     let (_directory, store) = new_store();
     let published = publish(&store, &ManifestSpec::template(), storage(1));
