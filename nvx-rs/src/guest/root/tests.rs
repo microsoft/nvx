@@ -3242,7 +3242,12 @@ fn the_host_export_is_mounted_through_no_symbolic_link() {
         let guest = Guest::new();
         let mut root = guest.assemble(&guest.assembly()).unwrap();
         fs::create_dir(guest.path("elsewhere")).unwrap();
-        fs::create_dir_all(guest.path(link).parent().unwrap()).unwrap();
+        let parent = guest.path(link).parent().unwrap().to_owned();
+        if !parent.exists() {
+            // A private `hostfs`, as an earlier root leaves it.
+            fs::create_dir(&parent).unwrap();
+            fs::set_permissions(&parent, fs::Permissions::from_mode(0o700)).unwrap();
+        }
         std::os::unix::fs::symlink(guest.path("elsewhere"), guest.path(link)).unwrap();
         let mounts = guest.kernel.mounts().len();
         let error = root.mount_export("microvm", Access::ReadOnly).unwrap_err();
@@ -3264,16 +3269,65 @@ fn the_host_export_is_mounted_through_no_symbolic_link() {
         assert!(root.is_latched(), "{link}");
         root.teardown().unwrap();
     }
+}
 
-    // A directory that is there already keeps its mode.
+#[test]
+fn a_hostfs_directory_that_is_there_already_must_be_private() {
+    // One that its group or others may enter is refused, keeps its mode, and latches the root.
+    let user = nix::unistd::geteuid().as_raw();
+    for mode in [0o750, 0o705, 0o711] {
+        let guest = Guest::new();
+        let mut root = guest.assemble(&guest.assembly()).unwrap();
+        let hostfs = guest.path("run/nvx/hostfs");
+        fs::create_dir(&hostfs).unwrap();
+        fs::set_permissions(&hostfs, fs::Permissions::from_mode(mode)).unwrap();
+        let mounts = guest.kernel.mounts().len();
+        let error = root.mount_export("microvm", Access::ReadOnly).unwrap_err();
+        assert!(
+            matches!(
+                &error,
+                Error::MountPoint { path, error }
+                    if *path == hostfs && error.kind() == io::ErrorKind::PermissionDenied
+            ),
+            "{mode:o}: {error:?}"
+        );
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "failed to prepare {}: the directory there already is not private to user \
+                 {user}: user {user} owns it with mode {mode:04o}",
+                hostfs.display()
+            )
+        );
+        assert_eq!(guest.kernel.mounts().len(), mounts, "{mode:o}");
+        assert!(!guest.path("run/nvx/hostfs/root").exists(), "{mode:o}");
+        assert_eq!(fs::metadata(&hostfs).unwrap().mode() & 0o7777, mode);
+        assert!(root.is_latched(), "{mode:o}");
+        root.teardown().unwrap();
+    }
+
+    // One that only its owner, the process's effective user, may enter serves, such as the one
+    // that an earlier root left in the runtime directory.
     let guest = Guest::new();
     let mut root = guest.assemble(&guest.assembly()).unwrap();
-    let hostfs = guest.path("run/nvx/hostfs");
-    fs::create_dir(&hostfs).unwrap();
-    fs::set_permissions(&hostfs, fs::Permissions::from_mode(0o750)).unwrap();
     drop(root.mount_export("microvm", Access::ReadOnly).unwrap());
-    assert_eq!(fs::metadata(&hostfs).unwrap().mode() & 0o7777, 0o750);
     root.teardown().unwrap();
+    let mut root = guest.assemble(&guest.assembly()).unwrap();
+    drop(root.mount_export("microvm", Access::ReadWrite).unwrap());
+    let mode = fs::metadata(guest.path("run/nvx/hostfs")).unwrap().mode() & 0o7777;
+    assert_eq!(mode, 0o700);
+    assert!(!root.is_latched());
+    root.teardown().unwrap();
+    let unmounts = [
+        guest.text("run/nvx/hostfs/root"),
+        guest.text("run/nvx/rootfs"),
+        guest.text("run/nvx/layers/distro"),
+        guest.text("run/nvx/scratch"),
+    ];
+    assert_eq!(
+        guest.kernel.unmounts(),
+        [unmounts.clone(), unmounts].concat()
+    );
 }
 
 #[test]
