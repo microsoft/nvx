@@ -378,21 +378,40 @@ pub fn create_private_dir(path: &Path) -> io::Result<()> {
 /// changed: others could have placed records in it, or still hold its files open, which a change
 /// of its mode would not revoke.
 pub(crate) fn create_store_dir(path: &Path) -> io::Result<Option<String>> {
-    match DirBuilder::new().mode(STORE_DIR_MODE).create(path) {
+    create_dir_of_mode(path, STORE_DIR_MODE)?;
+    check_store_dir(path)
+}
+
+/// Creates the directory `path` with mode 0700, or checks that an existing one is private to the
+/// current user, as [`check_owner_only_dir`] does, and returns why it is not, if it is not.
+///
+/// A new directory takes the setgid bit of its parent, and loses the bits that the umask clears,
+/// even the current user's permission to read it, so its mode is set again. An existing directory
+/// is never changed: others could have placed files in it, or still hold them open, which a
+/// change of its mode would not revoke.
+pub(crate) fn create_owner_only_dir(path: &Path) -> io::Result<Option<String>> {
+    create_dir_of_mode(path, PRIVATE_DIR_MODE)?;
+    check_owner_only_dir(path)
+}
+
+/// Creates the directory `path`, whose parent must exist, with exactly the mode `mode`, unless it
+/// exists already, which leaves it as it is.
+fn create_dir_of_mode(path: &Path, mode: u32) -> io::Result<()> {
+    match DirBuilder::new().mode(mode).create(path) {
         Ok(()) => {
             if let Some(directory) = open_plain_dir(path)? {
                 // A descriptor that only locates the directory cannot change its mode itself, but
                 // its link in /proc names exactly the directory that it opened.
                 fs::set_permissions(
                     Path::new("/proc/self/fd").join(directory.as_raw_fd().to_string()),
-                    Permissions::from_mode(STORE_DIR_MODE),
+                    Permissions::from_mode(mode),
                 )?;
             }
+            Ok(())
         }
-        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
-        Err(error) => return Err(error),
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => Ok(()),
+        Err(error) => Err(error),
     }
-    check_store_dir(path)
 }
 
 /// Returns why the directory `path` cannot hold a sandbox store, if it cannot: unless it is
@@ -410,11 +429,40 @@ pub(crate) fn check_store_dir(path: &Path) -> io::Result<Option<String>> {
     ))
 }
 
+/// Returns why the directory `path` is not private to the current user, if it is not: unless it
+/// is a directory, not a link to one, that belongs to the user and grants no one else any access,
+/// which [`create_owner_only_dir`] makes it.
+pub(crate) fn check_owner_only_dir(path: &Path) -> io::Result<Option<String>> {
+    let Some(directory) = open_plain_dir(path)? else {
+        return Ok(Some("is not a plain directory".to_owned()));
+    };
+    let metadata = directory.metadata()?;
+    Ok(owner_only_problem(
+        metadata.uid(),
+        metadata.mode(),
+        sys::effective_ids().0,
+    ))
+}
+
 /// Returns why a directory of a sandbox store, which the user `uid` owns with the mode `mode`, is
 /// not private to the user `euid`, if it is not: it must belong to that user, grant no access to
 /// anyone else, and have mode 0700, which OpenVMM requires of the directory of its control
 /// socket.
 pub(crate) fn store_dir_problem(uid: u32, mode: u32, euid: u32) -> Option<String> {
+    let mode = mode & PERMISSION_BITS;
+    owner_only_problem(uid, mode, euid).or_else(|| {
+        (mode != STORE_DIR_MODE).then(|| {
+            format!(
+                "has mode {mode:03o}, not the mode 700 that the directory of a control socket \
+                 must have"
+            )
+        })
+    })
+}
+
+/// Returns why a directory that the user `uid` owns with the mode `mode` is not private to the
+/// user `euid`, if it is not: it must belong to that user, and grant no access to anyone else.
+pub(crate) fn owner_only_problem(uid: u32, mode: u32, euid: u32) -> Option<String> {
     let mode = mode & PERMISSION_BITS;
     if uid != euid {
         Some(format!(
@@ -422,10 +470,6 @@ pub(crate) fn store_dir_problem(uid: u32, mode: u32, euid: u32) -> Option<String
         ))
     } else if mode & GROUP_AND_OTHER_BITS != 0 {
         Some(format!("is accessible to other users (mode {mode:03o})"))
-    } else if mode != STORE_DIR_MODE {
-        Some(format!(
-            "has mode {mode:03o}, not the mode 700 that the directory of a control socket must have"
-        ))
     } else {
         None
     }

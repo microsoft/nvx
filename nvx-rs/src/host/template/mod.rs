@@ -1,5 +1,6 @@
-//! Templates: captures of a microVM from which independent clones are restored, and the metadata
-//! that decides which clones a template can serve, and on which hosts.
+//! Templates: captures of a microVM from which independent clones are restored, the metadata
+//! that decides which clones a template can serve, and on which hosts, and the store that keeps
+//! them.
 //!
 //! A template is a snapshot that OpenVMM captured at its platform tier, after it consumed the
 //! invariant configuration of a microVM alone, for clones: a VM booted with a placeholder
@@ -15,6 +16,10 @@
 //!   contract, and refuses one that is not a template's.
 //! - [`TemplateKey::new`] derives the key of a template from its class and its manifest, after it
 //!   checks that the capture made the machine that its class requested.
+//! - [`Store`] holds the generations of templates that a host published, apart from every
+//!   sandbox's store: their payloads, which never change, and the versioned [`Index`] of them,
+//!   which names each by its [`StoreGeneration`](crate::activation::StoreGeneration), at a
+//!   location that the adapter chooses.
 //!
 //! # Canonical encoding
 //!
@@ -36,8 +41,10 @@
 //! `tests/vectors/template-key-v1.txt` fix version 1 of a key's encoding.
 
 mod canonical;
+mod files;
 mod key;
 mod manifest;
+mod store;
 #[cfg(test)]
 mod test_support;
 mod wire;
@@ -45,4 +52,8 @@ mod wire;
 pub use self::key::{CaptureClass, ClassIdentity, Invariants, KeyIdentity, TemplateKey};
 pub use self::manifest::{
     BlockGeometry, HostClock, MANIFEST_NAME, MAX_MANIFEST_LEN, TemplateManifest, TimeContract,
+};
+pub use self::store::{
+    GENERATIONS_NAME, Generation, INDEX_LOCK_NAME, INDEX_NAME, Index, KEY_NAME, MAX_GENERATIONS,
+    SNAPSHOT_NAME, STORE_FORMAT, STORE_RECORD_NAME, StorageGeneration, Store, StoreId,
 };

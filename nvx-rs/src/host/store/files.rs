@@ -1,4 +1,7 @@
 //! The private files of the store: their creation, atomic replacement, reading, and removal.
+//!
+//! The template store, [`template::Store`](crate::host::template::Store), keeps its own records
+//! with the same lock files, atomic replacements, and removals.
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
@@ -65,7 +68,7 @@ pub(super) fn create_new(path: &Path) -> io::Result<File> {
 /// may have cleared even the current user's permission to write it, whether this or another call
 /// created it, so a lock file of the current user that the user can open for writing no more is
 /// given its mode again.
-pub(super) fn open_lock(path: &Path) -> io::Result<File> {
+pub(crate) fn open_lock(path: &Path) -> io::Result<File> {
     let open = || {
         let mut options = private_options();
         options.read(cfg!(windows)).create(true).truncate(false);
@@ -133,7 +136,7 @@ pub(super) fn open_lock(path: &Path) -> io::Result<File> {
 /// The contents go to a fresh temporary file beside `path`, which is flushed to disk and then
 /// renamed over it, so a reader sees the old contents or the new ones, and a crash leaves at most
 /// the temporary file.
-pub(super) fn write_private(path: &Path, contents: &[u8]) -> Result<()> {
+pub(crate) fn write_private(path: &Path, contents: &[u8]) -> Result<()> {
     let mut suffix = [0u8; 8];
     getrandom::fill(&mut suffix)
         .map_err(|error| Error::other("cannot name a temporary file").with_source(error))?;
@@ -198,7 +201,7 @@ pub(super) fn read_private(path: &Path, description: &str) -> Result<Option<Vec<
 }
 
 /// Removes the file at `path` if it exists.
-pub(super) fn remove_if_present(path: &Path) -> Result<()> {
+pub(crate) fn remove_if_present(path: &Path) -> Result<()> {
     match fs::remove_file(path) {
         Err(error) if error.kind() != io::ErrorKind::NotFound => {
             Err(io_error(format!("cannot remove {}", path.display()))(error))

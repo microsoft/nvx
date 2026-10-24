@@ -211,7 +211,7 @@
 //! only while the path still names it, which it checks before each attempt.
 
 mod caller;
-mod files;
+pub(crate) mod files;
 mod identity;
 mod lifecycle;
 mod record;

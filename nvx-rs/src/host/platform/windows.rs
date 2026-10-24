@@ -1000,6 +1000,21 @@ pub(crate) fn check_store_dir(path: &Path) -> io::Result<Option<String>> {
     store_dir_problem(path, &CurrentUser::get()?)
 }
 
+/// Creates the directory `path` private to the current user, or checks that an existing one is,
+/// as [`create_store_dir`] does for the directory of a sandbox store.
+pub(crate) fn create_owner_only_dir(path: &Path) -> io::Result<Option<String>> {
+    create_store_dir(path)
+}
+
+/// Returns why the directory `path` is not private to the current user, if it is not, as
+/// [`check_store_dir`] does for the directory of a sandbox store: unless it is a directory, not a
+/// link or any other reparse point, that belongs to the user, or to SYSTEM or the Administrators
+/// group, whose access control list allows no one else, and passes entries on to the files
+/// created in it.
+pub(crate) fn check_owner_only_dir(path: &Path) -> io::Result<Option<String>> {
+    check_store_dir(path)
+}
+
 /// Returns why the directory `path` cannot hold a sandbox store of `user`, if it cannot.
 fn store_dir_problem(path: &Path, user: &CurrentUser) -> io::Result<Option<String>> {
     let directory = OpenOptions::new()

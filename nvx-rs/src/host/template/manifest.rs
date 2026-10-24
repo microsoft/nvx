@@ -7,18 +7,17 @@
 //! it as authoritative, and so does a template's [compatibility key](super::TemplateKey), which
 //! projects its machine. [`TemplateManifest`] describes what the reader refuses.
 
-use std::fs::{File, OpenOptions};
-use std::io::{self, Read};
+use std::io;
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::path::Path;
 use std::time::{Duration, SystemTime};
 
 use sha2::{Digest, Sha256};
 
+use super::files;
 use super::wire::{Field, Message, WireError};
 use crate::contract;
 use crate::error::{Error, ErrorCode, Result};
-use crate::host::filesystem;
 use crate::host::process::BootId;
 use crate::hypervisor::Hypervisor;
 
@@ -135,7 +134,7 @@ impl HostClock {
     }
 
     /// Parses the spelling of a clock in a manifest.
-    fn parse(text: &str) -> Option<Self> {
+    pub(super) fn parse(text: &str) -> Option<Self> {
         match text {
             "linux-boottime" => Some(Self::LinuxBoottime),
             "windows-interrupt-time" => Some(Self::WindowsInterruptTime),
@@ -707,13 +706,15 @@ impl TemplateManifest {
     pub fn read(snapshot: &Path) -> Result<Self> {
         let path = snapshot.join(MANIFEST_NAME);
         let description = format!("the snapshot manifest {}", path.display());
-        let bytes = read_bounded(&path).map_err(|error| {
-            let code = match error.kind() {
-                io::ErrorKind::NotFound => ErrorCode::NotFound,
-                _ => ErrorCode::Io,
-            };
-            Error::new(code, format!("cannot read {description}")).with_source(error)
-        })?;
+        let bytes = files::open_regular(&path)
+            .and_then(|file| files::read_at_most(file, MAX_MANIFEST_LEN, "a manifest"))
+            .map_err(|error| {
+                let code = match error.kind() {
+                    io::ErrorKind::NotFound => ErrorCode::NotFound,
+                    _ => ErrorCode::Io,
+                };
+                Error::new(code, format!("cannot read {description}")).with_source(error)
+            })?;
         Self::parse_described(&bytes, &description)
     }
 
@@ -834,62 +835,6 @@ impl TemplateManifest {
             machine,
         })
     }
-}
-
-/// Opens the file at `path` without following a link, or on Windows any other reparse point, and
-/// reads it whole, if it is a regular file of at most [`MAX_MANIFEST_LEN`] bytes.
-fn read_bounded(path: &Path) -> io::Result<Vec<u8>> {
-    let not_regular = || io::Error::other("it is a link, or not a regular file");
-    let mut options = OpenOptions::new();
-    options.read(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-
-        // A FIFO is refused below, before anything is read from it, so the open must not wait for
-        // a writer.
-        options
-            .custom_flags((nix::fcntl::OFlag::O_NOFOLLOW | nix::fcntl::OFlag::O_NONBLOCK).bits());
-    }
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::OpenOptionsExt;
-
-        /// `FILE_FLAG_OPEN_REPARSE_POINT`, which opens a link as itself.
-        const OPEN_REPARSE_POINT: u32 = 0x0020_0000;
-        options.custom_flags(OPEN_REPARSE_POINT);
-    }
-    let file = match options.open(path) {
-        Ok(file) => file,
-        // `O_NOFOLLOW` refuses a link, and an open that does not wait refuses a socket.
-        #[cfg(unix)]
-        Err(error)
-            if [nix::errno::Errno::ELOOP, nix::errno::Errno::ENXIO]
-                .into_iter()
-                .any(|errno| error.raw_os_error() == Some(errno as i32)) =>
-        {
-            return Err(not_regular());
-        }
-        Err(error) => return Err(error),
-    };
-    let metadata = file.metadata()?;
-    if !metadata.file_type().is_file() || filesystem::is_reparse_point(&metadata) {
-        return Err(not_regular());
-    }
-    read_at_most(file, MAX_MANIFEST_LEN)
-}
-
-/// Reads `file` to its end, failing if it holds more than `limit` bytes, without reading more
-/// than one byte past the limit.
-fn read_at_most(file: File, limit: u64) -> io::Result<Vec<u8>> {
-    let mut bytes = Vec::new();
-    file.take(limit + 1).read_to_end(&mut bytes)?;
-    if bytes.len() as u64 > limit {
-        return Err(io::Error::other(format!(
-            "it holds more than the {limit} bytes that a manifest may hold"
-        )));
-    }
-    Ok(bytes)
 }
 
 /// Why a manifest is refused: one of another format, or one that is not a template's.

@@ -102,6 +102,16 @@ pub(crate) fn check_store_dir(_path: &Path) -> io::Result<Option<String>> {
     Err(unsupported())
 }
 
+/// Fails: this host cannot check who may access a directory.
+pub(crate) fn create_owner_only_dir(_path: &Path) -> io::Result<Option<String>> {
+    Err(unsupported())
+}
+
+/// Fails: this host cannot check who may access a directory.
+pub(crate) fn check_owner_only_dir(_path: &Path) -> io::Result<Option<String>> {
+    Err(unsupported())
+}
+
 pub(crate) fn private_file_problem(_file: &File) -> io::Result<Option<String>> {
     Err(unsupported())
 }

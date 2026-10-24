@@ -22,7 +22,8 @@
 //! - [`template`] holds the metadata of templates, captures from which clones are restored: the
 //!   compatibility key of a template, [`TemplateKey`](template::TemplateKey), which it derives
 //!   from the [`CaptureClass`](template::CaptureClass) of the capture and the capture's
-//!   [`TemplateManifest`](template::TemplateManifest).
+//!   [`TemplateManifest`](template::TemplateManifest), and the [`Store`](template::Store) of the
+//!   generations of templates that a host published.
 //! - [`session`] speaks NVX's control protocol, `NVXC`, over [`nvxs`], which runs the host's role
 //!   of the NVXS session for it and for any other application protocol, over a platform
 //!   transport. [`platform`] holds the primitives of Linux and Windows hosts. Other hosts compile
