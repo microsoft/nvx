@@ -103,6 +103,14 @@ const EPERM: i32 = 1;
 const EINVAL: i32 = 22;
 /// The number of executions that meet only while all of them run.
 const MEETING: usize = 4;
+/// A script that starts a descendant that leads a session of its own and holds the script's
+/// output: the descendant prints its process ID, which is its session's ID, then moves its output
+/// to the script's, which ends the command substitution that reads the ID. The script prints
+/// `started` once `/proc` shows that the descendant leads its session.
+const DESCENDANT_SCRIPT: &str = "exec 3>&1; \
+    descendant=$(setsid sh -c 'echo $$; exec sleep 600 >&3 3>&-' &); \
+    read -r pid comm state parent group session rest </proc/$descendant/stat; \
+    [ -n \"$descendant\" ] && [ \"$session\" = \"$descendant\" ] && echo started";
 /// A script that prints its process's user ID, group ID, and groups, and its permitted,
 /// effective, and bounding capability sets, which the shell reads itself.
 const IDENTITY_SCRIPT: &str = "id -u; id -g; id -G; \
@@ -1910,7 +1918,7 @@ fn check_executions(vm: &mut Vm<'_>) {
     assert_ran(&printed, MEETING + 1, 0, &output, &lines(1, 1000));
 
     // In a later session, whose keys are new to the guest:
-    // 1. a descendant in a session of its own, which holds its program's output, and which the
+    // 1. a descendant that leads a session of its own, and holds its program's output, which the
     //    end of its program, PID 1 of its namespace, ends, so that the execution loses no byte;
     // 2. a user other than root, without capabilities, in existing-account mode;
     // 3. root with `CAP_CHOWN` alone, in its permitted, effective, and bounding sets;
@@ -1922,7 +1930,7 @@ fn check_executions(vm: &mut Vm<'_>) {
     let executions = [
         execution(
             &["--identity", "0:0"],
-            &["/bin/sh", "-c", "setsid sleep 600 & echo started"],
+            &["/bin/sh", "-c", DESCENDANT_SCRIPT],
         ),
         execution(
             &["--identity", &nobody],

@@ -41,24 +41,25 @@
 //!   text of a probe: its name, then its arguments, each after one space; see
 //!   `runtime_adapter::probe` and `runtime_adapter::worker::probes`.
 //! - `runtime-adapter-host exec STORE EXECUTION [; EXECUTION]...` reattaches and attaches as
-//!   `reattach` does, then runs each EXECUTION in the VM's layered root, all at once, over that
-//!   one session, through `runtime_adapter::host::Executions`, and prints their outputs and
-//!   outcomes once every one finished. It runs at most 8 executions, as many as the guest runs at
-//!   once; see `runtime_adapter::exec::MAX_EXECUTIONS`. An EXECUTION, `[--identity UID:GID [--groups GID,...]
+//!   `reattach` does, then runs each EXECUTION in the VM's layered root, all at once, over that one
+//!   session, through `runtime_adapter::host::Executions`, and prints their outputs and outcomes
+//!   once every one finished. It runs at most 8 executions, as many as the guest runs at once; see
+//!   `runtime_adapter::exec::MAX_EXECUTIONS`. An EXECUTION, `[--identity UID:GID [--groups GID,...]
 //!   [--capabilities N,...] [--numeric]] [--cwd DIR] [--env NAME=VALUE]... -- PROGRAM [ARG]...`,
 //!   runs PROGRAM with its ARGs, up to a lone `;`, as `find -exec` takes them, without standard
 //!   input. Without `--identity`, it names no identity, and runs as the sandbox's workload
-//!   identity, which the guest otherwise refuses; with it, it runs as the user ID UID and the
-//!   group ID GID, with the supplementary groups GIDs and the capabilities numbered N, such as 0
-//!   for `CAP_CHOWN`, if given, and the guest checks its account, unless `--numeric` says that
-//!   the IDs have none. It starts in the root's directory DIR, or `/`, with exactly the
-//!   environment of its `--env` entries. It runs for at most a minute, with 16 KiB chunks and the
-//!   credit of 4 of them for its input and 8 for its output, which its standard output and error
-//!   share. Execution N, from 1, has the key `(B + N, E)`: E is the epoch of the command's
-//!   attachment, and B the first 8 bytes of the broker instance's ID, as a little-endian number.
-//!   The guest refuses a key that it heard of before, and the epochs of a broker instance only
-//!   advance, while a broker restored from a snapshot has a new instance ID, so no command
-//!   repeats the key of another's execution.
+//!   identity, which the guest otherwise refuses; with it, it runs as the user ID UID and the group
+//!   ID GID, with the supplementary groups GIDs and the capabilities numbered N, such as 0 for
+//!   `CAP_CHOWN`, if given, and the guest checks its account, unless `--numeric` says that the IDs
+//!   have none. It starts in the root's directory DIR, or `/`, with exactly the environment of its
+//!   `--env` entries. It runs for at most a minute, with 16 KiB chunks and the credit of 4 of them
+//!   for its input and 8 for its output, which its standard output and error share. The command
+//!   keeps at most 16 MiB of each stream, and cancels an execution whose stream would exceed them;
+//!   see `runtime_adapter::exec::MAX_CAPTURE`. Execution N, from 1, has the key `(B + N, E)`: E is
+//!   the epoch of the command's attachment, and B the first 8 bytes of the broker instance's ID, as
+//!   a little-endian number. The guest refuses a key that it heard of before, and the epochs of a
+//!   broker instance only advance, while a broker restored from a snapshot has a new instance ID,
+//!   so no command repeats the key of another's execution.
 //!
 //! Each command takes NVX's artifacts from the directory that `NVX_ARTIFACTS_DIR` names, a
 //! repository checkout or an extracted release, and the VM's runtime identity from NVX's identity
