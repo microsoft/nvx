@@ -548,7 +548,10 @@ credit that it needs, never keeps the others' output from the host.
   is empty and the worker removed it, which the worker does once the runner
   returned the terminal outcome of an execution that settled. One that did not
   settle, whose outcome is fenced, keeps its place and its cgroup until the
-  host stops the worker.
+  host stops the worker, as does a start whose program the worker spawned, but
+  whose execution it could not have: until the worker collected the status of
+  such a program, the program may still join the cgroup, so that a removal
+  could hide it once it ended.
 - Without cgroups, as where the in-process tests cannot create them, the
   root's operations name none, and the program's process group stands in for
   its cgroup: its execution kills the group as a whole. The worker collects the
@@ -580,7 +583,8 @@ credit that it needs, never keeps the others' output from the host.
   program of each one that has not ended, with what is left in its cgroup or
   its process group, and what is left in the cgroups of the executions that did
   not settle, and waits up to a second in all for those programs to end and
-  those cgroups to empty, removing each cgroup that emptied.
+  those cgroups to empty, removing each cgroup that emptied once it collected
+  the statuses of those programs.
 
 The worker's `entries` probe runs two more commands of the guest agent:
 `runtime-adapter-guest entries ROOT CGROUP`, its helper, which runs the probe's

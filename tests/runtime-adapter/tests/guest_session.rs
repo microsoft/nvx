@@ -3295,8 +3295,9 @@ fn an_execution_s_settlement_ends_a_descendant_that_left_its_process_group() {
 }
 
 /// A process with a child that it never waits for, so that the child, once it ended, stays a
-/// zombie, and occupies its cgroup, until the process ends. The test kills the process when it
-/// drops, which leaves the child to the system's collector of orphans.
+/// zombie, and occupies its cgroup, until the process ends. Both run in a process group that the
+/// process leads, which the test kills when it drops, so that neither outlives a test that fails;
+/// the system's collector of orphans then collects the child's status.
 struct Holder {
     /// The process.
     process: Child,
@@ -3311,6 +3312,7 @@ impl Holder {
             .args(["-c", "sleep 600 & echo $!; exec sleep 600"])
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
+            .process_group(0)
             .spawn()
             .unwrap();
         let mut line = String::new();
@@ -3324,7 +3326,9 @@ impl Holder {
 
 impl Drop for Holder {
     fn drop(&mut self) {
-        let _ = self.process.kill();
+        // Until its status is collected, the process keeps its ID, which is the group's.
+        let group = Pid::from_raw(i32::try_from(self.process.id()).unwrap());
+        let _ = signal::killpg(group, Signal::SIGKILL);
         let _ = self.process.wait();
     }
 }

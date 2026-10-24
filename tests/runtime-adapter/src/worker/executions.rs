@@ -262,8 +262,11 @@ impl Executions {
     /// cgroups emptied, so that the worker collects the programs' statuses and removes the
     /// cgroups, those of the executions that did not settle included, whose processes it ends
     /// too, at most [`REAP_WAIT`] after it first dropped every execution: a later call, as once
-    /// the executions drop after a stop, waits no longer. Without cgroups, the worker ended the
-    /// process groups of the other programs when it collected their statuses.
+    /// the executions drop after a stop, waits no longer. It removes the cgroups once it
+    /// collected the status of every program that it forgot: until then, such a program may
+    /// still join its cgroup, as its launch may not have reported, and a removal could hide it
+    /// once it ended. Without cgroups, the worker ended the process groups of the other programs
+    /// when it collected their statuses.
     pub(super) fn clear(&mut self) {
         let runs = std::mem::take(&mut self.attached)
             .into_values()
@@ -293,7 +296,9 @@ impl Executions {
         loop {
             let now = Instant::now();
             self.reap(now);
-            self.fenced.retain(|cgroup| !removed(cgroup));
+            if self.reaping.is_empty() {
+                self.fenced.retain(|cgroup| !removed(cgroup));
+            }
             if (self.reaping.is_empty() && self.fenced.is_empty()) || now >= deadline {
                 return;
             }
@@ -466,14 +471,17 @@ impl Executions {
 
     /// Starts the program of `start`: with cgroups, in a cgroup of its own that the worker
     /// prepares below the workload cgroup, and otherwise with the worker's own handle of the
-    /// program. The worker removes the cgroup of a program that did not start, unless a program
-    /// that started holds it, as once its execution could not be had, which keeps its place.
+    /// program. The worker removes the cgroup of a program that it could not spawn. One that it
+    /// spawned, but whose execution could not be had, may still join the cgroup until the worker
+    /// collected its status, so that a removal could hide it once it ended: its cgroup keeps its
+    /// place, as that of an execution that did not settle.
     fn launch(
         &mut self,
         start: &Start,
     ) -> io::Result<(Execution, Option<Child>, Option<ExecutionCgroup>)> {
         let Some(cgroups) = &self.cgroups else {
-            let (execution, program) = spawn(start, None, &mut self.reaping)?;
+            let (execution, program) =
+                spawn(start, None, &mut self.reaping).map_err(|unstarted| unstarted.error)?;
             return Ok((execution, program, None));
         };
         self.prepared += 1;
@@ -481,8 +489,8 @@ impl Executions {
         let cgroup = ExecutionCgroup::prepare(cgroups, Some(&name), &[])?;
         match spawn(start, Some(&cgroup), &mut self.reaping) {
             Ok((execution, program)) => Ok((execution, program, Some(cgroup))),
-            Err(error) => {
-                if cgroup.remove().is_err() {
+            Err(Unstarted { error, spawned }) => {
+                if spawned || cgroup.remove().is_err() {
                     self.fenced.push(cgroup);
                 }
                 Err(error)
@@ -623,23 +631,42 @@ impl Run {
     }
 }
 
+/// Why the worker could not start a program.
+struct Unstarted {
+    /// The error.
+    error: io::Error,
+    /// Whether the worker spawned the program before the error.
+    spawned: bool,
+}
+
+impl From<io::Error> for Unstarted {
+    /// Returns the failure of a program that the worker did not spawn.
+    fn from(error: io::Error) -> Self {
+        Self {
+            error,
+            spawned: false,
+        }
+    }
+}
+
 /// Spawns the program of `start` with pipes, in a process group of its own, and in `cgroup`, if
 /// any, and returns its execution. In a cgroup, the execution settles through the cgroup, and
 /// collects the program's status itself. Otherwise, it leaves the status to the worker, and comes
 /// with the worker's own handle of the program. If the program started, but the execution or the
 /// handle could not be had, the program ends, with its process group or the processes of its
 /// cgroup, and the program's ID goes to `reaping`, so that the worker collects its status once it
-/// ended, without waiting for it.
+/// ended, without waiting for it; the failure then tells that the worker spawned the program.
 fn spawn(
     start: &Start,
     cgroup: Option<&ExecutionCgroup>,
     reaping: &mut Vec<u32>,
-) -> io::Result<(Execution, Option<Child>)> {
+) -> Result<(Execution, Option<Child>), Unstarted> {
     let arguments = start
         .arguments
         .iter()
         .map(|argument| CString::new(argument.as_slice()))
-        .collect::<Result<Vec<_>, _>>()?;
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(io::Error::from)?;
     let program = arguments.first().cloned().unwrap_or_default();
     let (pipes, ends) = Pipes::new(start.input)?;
     let stdin = match ends.stdin {
@@ -660,19 +687,27 @@ fn spawn(
         Some(cgroup) => Options::new().cgroup(cgroup, Scope::Execution),
         None => Options::new().process_group().caller_reaps(),
     };
-    let execution = Execution::new(spawned, pipes, options).inspect_err(|error| {
-        // The execution ended the program, and the program's status is still the worker's,
-        // unless `ESRCH` tells that it is gone already.
-        if error.raw_os_error() != Some(Errno::ESRCH as i32) {
-            reaping.push(id);
-        }
-    })?;
+    let unstarted = |error| Unstarted {
+        error,
+        spawned: true,
+    };
+    let execution = Execution::new(spawned, pipes, options)
+        .inspect_err(|error| {
+            // The execution ended the program, and the program's status is still the worker's,
+            // unless `ESRCH` tells that it is gone already.
+            if error.raw_os_error() != Some(Errno::ESRCH as i32) {
+                reaping.push(id);
+            }
+        })
+        .map_err(unstarted)?;
     if cgroup.is_some() {
         return Ok((execution, None));
     }
     // Nothing collected the program's status, so its ID still names it. Dropping the execution
     // after a failure ends the program and its process group.
-    let program = Child::with_pidfd(id).inspect_err(|_| reaping.push(id))?;
+    let program = Child::with_pidfd(id)
+        .inspect_err(|_| reaping.push(id))
+        .map_err(unstarted)?;
     Ok((execution, Some(program)))
 }
 
