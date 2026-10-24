@@ -33,7 +33,7 @@ Each configuration enables one side of `nvx`:
 | Configuration | Cargo options | `nvx` features | Modules | Binary |
 | --- | --- | --- | --- | --- |
 | Protocol-only | none | none | `frame`, `root`, `probe`, `exec` | none |
-| Host-only | `--features host` | `host` | `frame`, `root`, `probe`, `exec`, `host`, `runtime`, `initramfs`, `layered` | `runtime-adapter-host` |
+| Host-only | `--features host` | `host` | `frame`, `root`, `probe`, `exec`, `host`, `runtime`, `initramfs`, `layered`, `hook` | `runtime-adapter-host` |
 | Guest-only | `--features guest --target x86_64-unknown-linux-musl` | `guest` | `frame`, `root`, `probe`, `exec`, `guest`, `worker` | `runtime-adapter-guest`, a static executable |
 
 ## Framing
@@ -660,6 +660,33 @@ files keep anything else from taking while they are open, and OpenVMM inherits
 the scratch image's claim. The launch holds the checked files until the guest
 has assembled the root, or until it has torn down a launch that failed.
 
+### The step hook
+
+For tests, `launch` takes a step hook, `hook::StepHook`, from the variable
+`RUNTIME_ADAPTER_STEP_HOOK`, which pauses the launch at a named step, so that a
+test can act between two steps, or exits the launch there without unwinding,
+as a crash would end it:
+
+- `STEP:pause:PATH` creates the file PATH, which holds the step's name, and
+  waits until the file is gone, then goes on: the launch leaves the time that
+  it waited out of its deadline, so that a test may pause it for as long as it
+  needs;
+- `STEP:exit` exits at once with status 5: the launch ends nothing that it
+  started, such as the VMM, and the system releases what it holds, such as its
+  descriptors or handles, and their locks.
+
+The steps of a launch, in order, are:
+
+| Step | Where the launch is |
+| --- | --- |
+| `checked` | It has checked the bindings of its images, and holds the checked files, which claim the scratch image, but has begun nothing in the store, and spawned nothing. A launch without a layered root reaches it too. |
+| `spawned` | The VMM runs, and the launch's journal records it, but the launch has not connected to the VM. |
+| `ready` | The guest has assembled the layered root, and the launch has released the checked files. |
+| `commit` | The guest agent has answered, and the launch is about to commit: its journal still records the VMM, which no runtime record names yet. |
+
+A value that names no step or action is a usage error. Without the variable,
+the hook does nothing.
+
 ### Commands
 
 Each command of `runtime-adapter-host` but `stage` takes NVX's artifacts from
@@ -739,7 +766,8 @@ which the outcome report records apart from the root's). Values escape `\`, newl
 carriage returns as `\\`, `\n`, and `\r`. The commands exit with 0 once they
 did what they were asked, with 3 when they find the VM mismatched, with 4 when
 the guest reported that a stage of the root failed, and the VM ended with the
-stage's status and a complete teardown, and with 1, after a diagnostic on
+stage's status and a complete teardown, with 5 when the
+[step hook](#the-step-hook) ended a launch, and with 1, after a diagnostic on
 standard error, when they fail. Without arguments, the program reports the
 contract that it was built against.
 
@@ -947,6 +975,33 @@ Windows:
   fails, which leaves them, and a staging that replaces them;
 - the command lines that the host program refuses, each with status 2.
 
+`tests/step_hook.rs` checks, in the host-only configuration, on Linux and
+Windows, the [step hook](#the-step-hook): the values of
+`RUNTIME_ADAPTER_STEP_HOOK` that set it, with each step and action, a path with
+colons, and those that set none, which the host program refuses with status
+2; and a pause, which does nothing, and pauses for no time, at another step,
+creates its file with its step's name at its own, waits until the file is
+gone, and says how long it paused, and which a file that is there already
+fails.
+
+`tests/vm_steps.rs` checks the step hook on a real hypervisor, in the
+host-only configuration, with NVX's Ubuntu EROFS image over a copy of the
+scratch template:
+
+- a launch paused at `checked`, while files of zeros, which the guest could
+  neither assemble nor mount, try to replace the image and the scratch image
+  at their paths: on Linux, they replace them, and the guest still assembles
+  the checked originals, and writes nothing to the replacements; on Windows,
+  the checked files keep the replacements from the paths, and keep the images
+  from being deleted or the image from being opened for writing, until the
+  guest is ready, after which the images can be renamed again;
+- a launch that the hook ends at `checked`, with status 5, which leaves nothing
+  of a launch in the store, and whose exit released the scratch image's claim,
+  since the next launch takes it;
+- a launch paused at each step in turn, at which the store holds what the step
+  says, and the scratch image's claim is held at `checked`, and which then
+  goes on, and is stopped.
+
 `tests/vm_restart.rs` checks the restart of an orchestrator, on a real
 hypervisor, in the host-only configuration:
 
@@ -1047,9 +1102,10 @@ layer before any mount: `noload` is not permission to ignore required recovery.
 
 ### Running the VM tests
 
-The VM tests, `tests/vm_restart.rs` and `tests/vm_layered.rs`, share their
-sandboxes and the fixtures of their layered roots through `tests/common`. A
-test that fails ends the VM that it left running, and keeps the sandbox's
+The VM tests, `tests/vm_restart.rs`, `tests/vm_steps.rs`, and
+`tests/vm_layered.rs`, share their sandboxes and the fixtures of their layered
+roots through `tests/common`. A test that fails ends the VM that it left
+running, and the host program that it left paused, and keeps the sandbox's
 directory, whose path it prints, unless it can confirm that the VM ended. The
 tests boot VMs, so they are ignored. They read the hypervisor from
 `NVX_HYPERVISOR`, through `nvx::Hypervisor::from_env_or_default`, NVX's
