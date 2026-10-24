@@ -29,9 +29,10 @@
 //! The host program also launches VMs with a layered root, of an image over an upper, which it
 //! plans with NVX's typed plan, in the `layered` module. In those, the guest agent's PID 1 starts
 //! a worker, in the `worker` module, which assembles the root through `nvx::guest::root` outside
-//! PID 1, as the host's root configuration of the [`root`] module asks, and runs the [`probe`]s
-//! with which the host checks the root. The worker also runs several [`exec`]utions at once
-//! through NVX's execution engine and its guest binding, from one loop that never blocks.
+//! PID 1, as the host's root configuration of the [`root`] module asks, applies the host's mapping
+//! table from the host export, and runs the [`probe`]s with which the host checks the root. Once
+//! the host started the sandbox, the worker also runs several [`exec`]utions at once through NVX's
+//! execution engine and its guest binding, from one loop that never blocks.
 
 pub mod exec;
 pub mod frame;

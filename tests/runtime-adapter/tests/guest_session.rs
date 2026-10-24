@@ -10,12 +10,16 @@
 //! the guest agent on a tty, which it puts in raw mode, as it serves a VM's control tty.
 //!
 //! The worker of a layered root runs its session with fake root operations, which record the
-//! worker's calls and fail as a test asks: the tests cover the order of its stages, each stage
-//! that fails, the requests that it serves once the root is ready, its stop, the messages that it
-//! refuses, and a broker that closes only its end of the stream, which still receives the
-//! worker's replies. The binary's PID 1 of a layered root, and its worker, run on a pseudo-terminal
-//! too, on the test's host, whose kernel command line names no layered root, where PID 1 also
-//! collects the statuses that real-time signals leave, whatever the names of its children.
+//! worker's calls and fail as a test asks: the tests cover the order of its stages, the host
+//! export that it mounts, the mapping table that it applies in order, in parts, which outlives a
+//! reset, a table of zero mappings, which does no work, the parts that it refuses, a mapping that
+//! fails and latches the root, the start of the sandbox, and the executions and starts that it
+//! refuses out of order, each stage that fails, the requests that it serves once the root is
+//! ready, its stop, the messages that it refuses, and a broker that closes only its end of the
+//! stream, which still receives the worker's replies. The binary's PID 1 of a layered root, and
+//! its worker, run on a pseudo-terminal too, on the test's host, whose kernel command line names
+//! no layered root, where PID 1 also collects the statuses that real-time signals leave, whatever
+//! the names of its children.
 //!
 //! The worker's executions run behind the test broker too, whose host side drives the engine's
 //! peers: the tests cover several executions at once, byte-exact, a stalled sink and a full
@@ -50,12 +54,16 @@ use nix::unistd::Pid;
 use nvx::exec::{
     Cause, Key, LaunchFailure, Limits, Outcome, Peer, Pool, Status, Stream, Timers, Window, peer,
 };
+use nvx::guest::mappings::{Access, Mapping};
 use nvx::guest::nvxs::GuestConnectionError;
+use nvx::protocol::export::{EXPORT_DIRECTORY, ExportMode, HostExport};
 use nvx::protocol::nvxs::{
     ErrorCode, Identity, Record, RecordError, RecordParser, RecordType, SessionError, encode_record,
 };
 use nvx::protocol::root::{RootImage, RootLayout, RootUpper};
-use nvx::protocol::{HostMap, OUTER_MAX_PAYLOAD};
+use nvx::protocol::{
+    HostMap, MAP_ENTRY_HEADER_LEN, MAPS_HEADER_LEN, OUTER_MAX_PAYLOAD, encode_maps_payloads,
+};
 use nvx::uuid::Uuid;
 use runtime_adapter::GUEST_BUILD;
 use runtime_adapter::exec::{GuestMessage, HostMessage, MAX_CHUNK, Start};
@@ -65,7 +73,7 @@ use runtime_adapter::probe::{Facts, Probe};
 use runtime_adapter::root::{
     JournalPolicy, MapFailure, OverlayMode, Ready, RootConfig, RootFailure, RootStage, encode_maps,
 };
-use runtime_adapter::worker::{self, MAX_EXECUTIONS, RootOperations, Worked};
+use runtime_adapter::worker::{self, MAX_EXECUTIONS, MapError, RootOperations, Worked};
 
 /// Identity of the broker's first epoch.
 const FIRST: Identity = Identity {
@@ -1085,6 +1093,8 @@ enum Operation {
     Bootstrap,
     /// The assembly.
     Assemble,
+    /// The host export's mount.
+    MountExport,
     /// A probe.
     Probe,
     /// The teardown.
@@ -1100,6 +1110,10 @@ enum Call {
     Bootstrap(RootConfig),
     /// The assembly ran with the configuration and the layout.
     Assemble(RootConfig, RootLayout),
+    /// The host export was mounted.
+    MountExport(HostExport),
+    /// The mappings were applied, in order.
+    Map(Vec<Mapping>),
     /// The probe ran.
     Probe(Probe),
     /// The teardown ran.
@@ -1113,6 +1127,12 @@ struct FakeRoot {
     command_line: Vec<u8>,
     /// The operation that fails, and its problem, if any.
     failing: Option<(Operation, &'static str)>,
+    /// The target of the mapping that the operations refuse, after those before it, and the
+    /// problem, if any.
+    refusing: Option<(PathBuf, &'static str)>,
+    /// Whether the operations refused a mapping, after which they refuse every mapping, as a
+    /// latched root does.
+    latched: bool,
     /// How long the assembly takes.
     assembly: Duration,
     /// The gate that each probe waits on, once it recorded its call, until the test opens it, if
@@ -1129,11 +1149,26 @@ impl FakeRoot {
         Self::reading(command_line.as_bytes())
     }
 
+    /// Returns operations whose kernel command line names `layout` and the host export `export`,
+    /// as OpenVMM appends its tokens.
+    fn exporting(layout: &RootLayout, export: &HostExport) -> Self {
+        let command_line = format!(
+            "console=hvc0 nvx_sandbox=1 {} virtfs_dir={EXPORT_DIRECTORY} virtfs_tag={} \
+             virtfs_mode={} virtfs_aggregate=1",
+            layout.tokens().join(" "),
+            export.tag,
+            export.mode,
+        );
+        Self::reading(command_line.as_bytes())
+    }
+
     /// Returns operations whose kernel command line is `command_line`.
     fn reading(command_line: &[u8]) -> Self {
         Self {
             command_line: command_line.to_vec(),
             failing: None,
+            refusing: None,
+            latched: false,
             assembly: Duration::ZERO,
             gate: None,
             calls: Vec::new(),
@@ -1147,6 +1182,13 @@ impl FakeRoot {
             failing: Some((operation, problem)),
             ..Self::booting(&layout())
         }
+    }
+
+    /// Makes the operations refuse the mapping at `target` with `problem`, once they applied the
+    /// mappings before it, and refuse every mapping after it.
+    fn refusing(mut self, target: &str, problem: &'static str) -> Self {
+        self.refusing = Some((PathBuf::from(target), problem));
+        self
     }
 
     /// Makes the assembly take `assembly`.
@@ -1188,6 +1230,37 @@ impl RootOperations for FakeRoot {
         self.calls.push(Call::Assemble(config.clone(), *layout));
         thread::sleep(self.assembly);
         self.result(Operation::Assemble)
+    }
+
+    fn mount_export(&mut self, export: &HostExport) -> Result<(), String> {
+        self.calls.push(Call::MountExport(export.clone()));
+        self.result(Operation::MountExport)
+    }
+
+    fn map(&mut self, mappings: &[Mapping]) -> Result<(), MapError> {
+        self.calls.push(Call::Map(mappings.to_vec()));
+        if self.latched {
+            return Err(MapError {
+                applied: 0,
+                problem: "the root is latched".to_owned(),
+            });
+        }
+        let Some((target, problem)) = &self.refusing else {
+            return Ok(());
+        };
+        let refused = mappings
+            .iter()
+            .position(|mapping| Path::new("/").join(mapping.target()) == *target);
+        match refused {
+            Some(applied) => {
+                self.latched = true;
+                Err(MapError {
+                    applied,
+                    problem: (*problem).to_owned(),
+                })
+            }
+            None => Ok(()),
+        }
     }
 
     fn probe(&mut self, probe: &Probe) -> Result<Facts, String> {
@@ -1258,6 +1331,74 @@ fn maps_part() -> Vec<u8> {
         read_only: true,
     }];
     encode_maps(&table).unwrap().remove(0)
+}
+
+/// Returns the host export that the tests' kernel command lines name: a read-write export.
+fn export() -> HostExport {
+    HostExport {
+        tag: "hostfs".to_owned(),
+        mode: ExportMode::ReadWrite,
+    }
+}
+
+/// Returns the default root configuration, which announces `count` mappings.
+fn announcing(count: u32) -> RootConfig {
+    RootConfig {
+        mapping_count: count,
+        ..RootConfig::default()
+    }
+}
+
+/// Returns a mapping table of `count` mappings: the export's entry `NNN` at `/srv/table/NNN`, for
+/// each index NNN, read-only for the even ones.
+fn table(count: usize) -> Vec<HostMap> {
+    (0..count)
+        .map(|index| HostMap {
+            source: format!("{index:03}"),
+            target: format!("/srv/table/{index:03}"),
+            read_only: index % 2 == 0,
+        })
+        .collect()
+}
+
+/// Returns the bodies of the parts that carry `table`, a [`table`] of up to 1000 mappings, in
+/// order, each of at most `per_part` mappings, as `nvx::protocol::encode_maps_payloads` splits it.
+fn parts(table: &[HostMap], per_part: usize) -> Vec<Vec<u8>> {
+    // The table's mappings have paths of the same lengths.
+    let entry = MAP_ENTRY_HEADER_LEN + table[0].source.len() + table[0].target.len();
+    encode_maps_payloads(table, MAPS_HEADER_LEN + per_part * entry).unwrap()
+}
+
+/// Returns the mappings that the worker applies for `maps`, entries of a mapping table.
+fn mappings(maps: &[HostMap]) -> Vec<Mapping> {
+    maps.iter()
+        .map(|map| {
+            let access = if map.read_only {
+                Access::ReadOnly
+            } else {
+                Access::ReadWrite
+            };
+            Mapping::new(&map.source, &map.target, access).unwrap()
+        })
+        .collect()
+}
+
+/// Returns the worker's `MapFailed`, once it applied `applied` of the table's mappings, with
+/// `problem`.
+fn map_failed(applied: u32, problem: &str) -> Message {
+    Message::MapFailed(MapFailure::new(applied, problem).encode())
+}
+
+/// Returns the calls of a [`FakeRoot`] of the exporting kind until the worker answered `Ready` to
+/// `config`: it read the kernel command line, bootstrapped the guest, assembled the root, and
+/// mounted the host export.
+fn exported(config: &RootConfig) -> Vec<Call> {
+    vec![
+        Call::CommandLine,
+        Call::Bootstrap(config.clone()),
+        Call::Assemble(config.clone(), layout()),
+        Call::MountExport(export()),
+    ]
 }
 
 /// Returns the probe that `text` names.
@@ -1381,6 +1522,9 @@ fn the_worker_reports_the_stage_that_failed_and_ends_with_its_status() {
         upper: RootUpper::Ram,
         ..layout()
     };
+    // The boot tokens of the layout that the worker assembles, after which a command line may name
+    // more.
+    let tokens = format!("console=hvc0 nvx_sandbox=1 {}", layout().tokens().join(" "));
     let cases = [
         (
             "a configuration of another version",
@@ -1464,6 +1608,33 @@ fn the_worker_reports_the_stage_that_failed_and_ends_with_its_status() {
             read(),
         ),
         (
+            "an incomplete host export",
+            FakeRoot::reading(format!("{tokens} virtfs_tag=hostfs").as_bytes()),
+            config.encode(),
+            RootStage::Layout,
+            "the kernel command line has invalid tokens of the host export: the host export is \
+             incomplete",
+            read(),
+        ),
+        (
+            "the token of a live share",
+            FakeRoot::reading(format!("{tokens} nvx_share=0:/srv/share:ro").as_bytes()),
+            config.encode(),
+            RootStage::Layout,
+            "the kernel command line has invalid tokens of the host export: the nvx_share kernel \
+             parameter binds a live share",
+            read(),
+        ),
+        (
+            "mappings without a host export",
+            FakeRoot::booting(&layout()),
+            announcing(2).encode(),
+            RootStage::Layout,
+            "the root configuration announces 2 mappings, but the kernel command line names no \
+             host export to map from",
+            read(),
+        ),
+        (
             "a bootstrap that failed",
             FakeRoot::failing(Operation::Bootstrap, "failed to create the agent's cgroup"),
             config.encode(),
@@ -1482,6 +1653,20 @@ fn the_worker_reports_the_stage_that_failed_and_ends_with_its_status() {
                 vec![Call::Assemble(config.clone(), layout())],
             ]
             .concat(),
+        ),
+        (
+            "a host export that failed to mount",
+            FakeRoot {
+                failing: Some((
+                    Operation::MountExport,
+                    "failed to mount the host export hostfs: No such device (os error 19)",
+                )),
+                ..FakeRoot::exporting(&layout(), &export())
+            },
+            config.encode(),
+            RootStage::Assembly,
+            "failed to mount the host export hostfs",
+            exported(&config),
         ),
     ];
     for (name, root, body, stage, problem, calls) in cases {
@@ -1607,6 +1792,296 @@ fn a_broker_that_closes_only_its_end_of_the_stream_receives_what_the_worker_queu
     let (_, worked) = joined(working);
     let worked = worked.unwrap();
     assert_eq!((&worked, worked.status()), (&Worked::Closed, 1));
+}
+
+#[test]
+fn the_worker_mounts_the_export_applies_the_mapping_table_in_order_and_starts_the_sandbox() {
+    // A table of five mappings, in three parts. The host reattaches after the first, which resets
+    // the session: the worker's order outlives the reset, as its root does.
+    let table = table(5);
+    let parts = parts(&table, 2);
+    assert_eq!(parts.len(), 3);
+    let config = announcing(5);
+    let (mut broker, working) = start_worker(FakeRoot::exporting(&layout(), &export()));
+    broker.attach(FIRST);
+    let messages = [
+        Message::RootConfig(config.encode()),
+        Message::Maps(parts[0].clone()),
+    ];
+    let replies = broker.exchange(&messages, OUTER_MAX_PAYLOAD, 2);
+    assert_eq!(replies, [ready(), Message::Mapped]);
+    broker.settle();
+    broker.reset(Identity { epoch: 2, ..FIRST });
+    let messages = [
+        Message::Maps(parts[1].clone()),
+        Message::Maps(parts[2].clone()),
+        Message::Start,
+        Message::Ping,
+    ];
+    let replies = broker.exchange(&messages, OUTER_MAX_PAYLOAD, 4);
+    let expected = [
+        Message::Mapped,
+        Message::Mapped,
+        Message::Started,
+        Message::Pong,
+    ];
+    assert_eq!(replies, expected);
+
+    // Once the sandbox started, the worker serves on, and tears the root down on a stop.
+    let messages = [Message::Probe(b"mounts".to_vec()), Message::Stop];
+    let replies = broker.exchange(&messages, OUTER_MAX_PAYLOAD, 2);
+    let report = Message::Report(found(&probe("mounts")).encode());
+    assert_eq!(replies, [report, Message::Stopped]);
+    let (root, worked) = joined(working);
+    assert_eq!(worked.unwrap(), Worked::Stopped);
+    let mut expected = exported(&config);
+    expected.extend([
+        Call::Map(mappings(&table[..2])),
+        Call::Map(mappings(&table[2..4])),
+        Call::Map(mappings(&table[4..])),
+        Call::Probe(probe("mounts")),
+        Call::Teardown,
+    ]);
+    assert_eq!(root.calls, expected);
+}
+
+#[test]
+fn a_table_of_zero_mappings_does_no_work() {
+    // The worker maps nothing, and the host starts the sandbox at once, whether or not the kernel
+    // command line names a host export, which the worker mounts all the same.
+    let config = RootConfig::default();
+    let cases = [
+        (FakeRoot::booting(&layout()), None),
+        (FakeRoot::exporting(&layout(), &export()), Some(export())),
+    ];
+    for (root, mounted) in cases {
+        let (mut broker, working) = start_worker(root);
+        broker.attach(FIRST);
+        let messages = [configuration(), Message::Start, Message::Stop];
+        let replies = broker.exchange(&messages, OUTER_MAX_PAYLOAD, 3);
+        let expected = [ready(), Message::Started, Message::Stopped];
+        assert_eq!(replies, expected, "{mounted:?}");
+        let (root, worked) = joined(working);
+        assert_eq!(worked.unwrap(), Worked::Stopped, "{mounted:?}");
+        let mut expected = vec![
+            Call::CommandLine,
+            Call::Bootstrap(config.clone()),
+            Call::Assemble(config.clone(), layout()),
+        ];
+        expected.extend(mounted.map(Call::MountExport));
+        expected.push(Call::Teardown);
+        assert_eq!(root.calls, expected);
+    }
+}
+
+#[test]
+fn a_failed_mapping_latches_the_root_and_holds_the_sandbox_back() {
+    // The root refuses the table's fourth mapping, in its second part, once it applied the three
+    // before it, and latches. The worker answers with their count, then refuses the third part
+    // without applying it, and still serves the host, which tears the VM down.
+    let table = table(5);
+    let parts = parts(&table, 2);
+    let problem = "failed to mount the mapping at /srv/table/003: the target is reserved";
+    let refusing = || FakeRoot::exporting(&layout(), &export()).refusing("/srv/table/003", problem);
+    let config = announcing(5);
+    let (mut broker, working) = start_worker(refusing());
+    broker.attach(FIRST);
+    let mut messages = vec![Message::RootConfig(config.encode())];
+    messages.extend(parts.iter().cloned().map(Message::Maps));
+    messages.extend([Message::Ping, Message::Stop]);
+    let replies = broker.exchange(&messages, OUTER_MAX_PAYLOAD, 6);
+    let expected = [
+        ready(),
+        Message::Mapped,
+        map_failed(3, problem),
+        map_failed(3, "the mapping table failed before this part"),
+        Message::Pong,
+        Message::Stopped,
+    ];
+    assert_eq!(replies, expected);
+    let (root, worked) = joined(working);
+    assert_eq!(worked.unwrap(), Worked::Stopped);
+    assert!(root.latched);
+    let mut expected = exported(&config);
+    expected.extend([
+        Call::Map(mappings(&table[..2])),
+        Call::Map(mappings(&table[2..4])),
+        Call::Teardown,
+    ]);
+    assert_eq!(root.calls, expected);
+
+    // Nor does the worker start the sandbox then: the start ends its session, and the worker
+    // leaves the root to its operations.
+    let (mut broker, working) = start_worker(refusing());
+    broker.attach(FIRST);
+    let messages = [
+        Message::RootConfig(config.encode()),
+        Message::Maps(parts[0].clone()),
+        Message::Maps(parts[1].clone()),
+    ];
+    let replies = broker.exchange(&messages, OUTER_MAX_PAYLOAD, 3);
+    assert_eq!(replies[2], map_failed(3, problem));
+    broker.send_data(&Message::Start.encode().unwrap(), OUTER_MAX_PAYLOAD);
+    let (root, worked) = joined(working);
+    assert!(
+        matches!(worked, Err(ServeError::Unexpected(25))),
+        "{worked:?}"
+    );
+    assert!(!root.calls.contains(&Call::Teardown), "{:?}", root.calls);
+}
+
+#[test]
+fn the_worker_refuses_parts_that_do_not_continue_the_table() {
+    // The worker refuses such a part as a whole, at the mapping that it expects next, without
+    // applying any of the part's mappings, and the start then.
+    let table = table(4);
+    let parts = parts(&table, 2);
+    let maps = |index: usize| Message::Maps(parts[index].clone());
+    let cases = [
+        (
+            "a part that skips mappings",
+            4,
+            vec![maps(1)],
+            0,
+            "a part of the mapping table starts at its mapping 2, but the worker expects its \
+             mapping 0 next",
+        ),
+        (
+            "a part that repeats mappings",
+            4,
+            vec![maps(0), maps(0)],
+            2,
+            "a part of the mapping table starts at its mapping 0, but the worker expects its \
+             mapping 2 next",
+        ),
+        (
+            "a part past the mappings that the configuration announced",
+            3,
+            vec![maps(0), maps(1)],
+            2,
+            "a part of the mapping table ends it at 4 mappings, past the 3 that the root \
+             configuration announced",
+        ),
+        (
+            "a part when the configuration announced no mapping",
+            0,
+            vec![maps(0)],
+            0,
+            "a part of the mapping table ends it at 2 mappings, past the 0 that the root \
+             configuration announced",
+        ),
+        (
+            "a part that does not decode",
+            4,
+            vec![Message::Maps(vec![0; 3])],
+            0,
+            "a part of the mapping table does not decode: ",
+        ),
+        (
+            "a part without a mapping",
+            4,
+            vec![Message::Maps(vec![0; MAPS_HEADER_LEN])],
+            0,
+            "a part of the mapping table holds no mapping",
+        ),
+    ];
+    for (name, announced, messages, applied, problem) in cases {
+        let config = announcing(announced);
+        let (mut broker, working) = start_worker(FakeRoot::exporting(&layout(), &export()));
+        broker.attach(FIRST);
+        let configuration = [Message::RootConfig(config.encode())];
+        let replies = broker.exchange(&configuration, OUTER_MAX_PAYLOAD, 1);
+        assert_eq!(replies, [ready()], "{name}");
+        let replies = broker.exchange(&messages, OUTER_MAX_PAYLOAD, messages.len());
+        let (refused, mapped) = replies.split_last().unwrap();
+        assert!(
+            mapped.iter().all(|reply| *reply == Message::Mapped),
+            "{name}: {replies:?}"
+        );
+        let Message::MapFailed(body) = refused else {
+            panic!("{name}: {replies:?}");
+        };
+        let failure = MapFailure::decode(body).unwrap();
+        assert_eq!(failure.applied(), applied, "{name}: {failure}");
+        assert!(failure.problem().starts_with(problem), "{name}: {failure}");
+        broker.send_data(&Message::Start.encode().unwrap(), OUTER_MAX_PAYLOAD);
+        let (root, worked) = joined(working);
+        assert!(
+            matches!(worked, Err(ServeError::Unexpected(25))),
+            "{name}: {worked:?}"
+        );
+        // The first part is the only one that the worker applies before it refuses one.
+        let mut expected = exported(&config);
+        expected.extend(mapped.iter().map(|_| Call::Map(mappings(&table[..2]))));
+        assert_eq!(root.calls, expected, "{name}");
+    }
+}
+
+#[test]
+fn the_worker_refuses_executions_and_the_start_out_of_order() {
+    // Each refused message ends the session once the worker answered those before it, and the
+    // worker leaves the root to its operations.
+    let table = table(4);
+    let parts = parts(&table, 2);
+    let maps = |index: usize| Message::Maps(parts[index].clone());
+    let execution = HostMessage::Start(start_of(1, shell("exit 0"))).encode();
+    let credit = HostMessage::Credit(Key::new(1, 1), Pool::Output, 1).encode();
+    let cases = [
+        ("an execution before the table", vec![], execution.clone()),
+        ("credit of an execution before the table", vec![], credit),
+        (
+            "an execution once part of the table is applied",
+            vec![maps(0)],
+            execution.clone(),
+        ),
+        (
+            "an execution once the table is applied, before the start",
+            vec![maps(0), maps(1)],
+            execution,
+        ),
+        ("a start before the table", vec![], Message::Start),
+        (
+            "a start once part of the table is applied",
+            vec![maps(0)],
+            Message::Start,
+        ),
+        (
+            "a second start",
+            vec![maps(0), maps(1), Message::Start],
+            Message::Start,
+        ),
+        (
+            "a part of the table once the sandbox started",
+            vec![maps(0), maps(1), Message::Start],
+            maps(1),
+        ),
+    ];
+    for (name, before, refused) in cases {
+        let (mut broker, working) = start_worker(FakeRoot::exporting(&layout(), &export()));
+        broker.attach(FIRST);
+        let mut messages = vec![Message::RootConfig(announcing(4).encode())];
+        messages.extend(before);
+        let replies = broker.exchange(&messages, OUTER_MAX_PAYLOAD, messages.len());
+        let expected = messages
+            .iter()
+            .map(|message| match message {
+                Message::RootConfig(_) => ready(),
+                Message::Maps(_) => Message::Mapped,
+                _ => Message::Started,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(replies, expected, "{name}");
+        broker.send_data(&refused.encode().unwrap(), OUTER_MAX_PAYLOAD);
+        let (root, worked) = joined(working);
+        let failed =
+            matches!(&worked, Err(ServeError::Unexpected(kind)) if *kind == refused.kind());
+        assert!(failed, "{name}: {worked:?}");
+        assert!(
+            !root.calls.contains(&Call::Teardown),
+            "{name}: {:?}",
+            root.calls
+        );
+    }
 }
 
 /// Starts the guest binary with `arguments`, its standard input closed and its output piped.
@@ -2130,11 +2605,11 @@ impl Host {
     }
 
     /// Attaches the session of the worker that runs in `working` in the first epoch, has it
-    /// assemble its root, and returns the host.
+    /// assemble its root, starts the sandbox, of no mapping, and returns the host.
     fn ready(mut broker: Broker, working: Working) -> Self {
         broker.attach(FIRST);
-        let replies = broker.exchange(&[configuration()], OUTER_MAX_PAYLOAD, 1);
-        assert_eq!(replies, [ready()]);
+        let replies = broker.exchange(&[configuration(), Message::Start], OUTER_MAX_PAYLOAD, 2);
+        assert_eq!(replies, [ready(), Message::Started]);
         Self {
             broker,
             working: Some(working),
@@ -2712,9 +3187,10 @@ fn the_worker_collects_the_status_of_a_program_that_a_real_time_signal_ended() {
 
 #[test]
 fn an_execution_that_starts_with_the_root_counts_its_timeout_from_its_own_start() {
-    // The start comes in the same payload as the root's configuration, whose assembly takes
-    // longer than the execution's timeout. The timeout counts from the start's own instant, so
-    // the program, which ends well before it, ends on its own.
+    // The execution's start comes in the same payload as the root's configuration and the
+    // sandbox's start, and the root's assembly takes longer than the execution's timeout. The
+    // timeout counts from the execution's own instant, so the program, which ends well before it,
+    // ends on its own.
     let root = FakeRoot::booting(&layout()).assembling_for(Duration::from_secs(2));
     let (mut broker, working) = start_worker(root);
     broker.attach(FIRST);
@@ -2733,9 +3209,13 @@ fn an_execution_that_starts_with_the_root_counts_its_timeout_from_its_own_start(
         replies: Vec::new(),
         stopping: false,
     };
-    host.send(&[configuration(), HostMessage::Start(start).encode()]);
+    host.send(&[
+        configuration(),
+        Message::Start,
+        HostMessage::Start(start).encode(),
+    ]);
     host.run_until(|host| host.outcome(1).is_some());
-    assert_eq!(host.replies, [ready()]);
+    assert_eq!(host.replies, [ready(), Message::Started]);
     check_lossless(&host, 1, Status::Exited(0));
     let (_, worked) = host.stop();
     assert_eq!(worked.unwrap(), Worked::Stopped);

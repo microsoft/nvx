@@ -129,9 +129,9 @@ then ends with the stage's status:
 | Code | Stage | What failed | Status |
 | --- | --- | --- | --- |
 | 1 | `configuration` | Receiving and checking the root configuration | 11 |
-| 2 | `layout` | Reading the boot layout of the root from the kernel command line, and checking that the worker assembles it | 12 |
+| 2 | `layout` | Reading the boot layout of the root and the host export from the kernel command line, and checking that the worker assembles them, with an export if the configuration announces mappings | 12 |
 | 3 | `bootstrap` | Bootstrapping the guest for the root: its cgroups and their resource values | 13 |
-| 4 | `assembly` | Assembling the root, such as from an image of another identity than the boot tokens expect | 14 |
+| 4 | `assembly` | Assembling the root, such as from an image of another identity than the boot tokens expect, and mounting the host export that the kernel command line names | 14 |
 | 5 | `teardown` | Tearing the root down, such as while a process holds it open | 15 |
 
 ### Ready, mapping tables, and Start
@@ -163,7 +163,10 @@ that it refused, or one of whose mappings it failed to apply. The body of
 guest applied, in order, a little-endian `u32`, which is the index in the
 table of the mapping that failed, then the problem, as UTF-8 text. `Start`
 asks the guest to start the sandbox's workloads once it applied the table,
-and `Started` confirms it. `Mapped`, `Start`, and `Started` have no body.
+and `Started` confirms it. `Mapped`, `Start`, and `Started` have no body. The
+guest's worker takes the table and the start in the order that
+[The mapping table and the start](#the-mapping-table-and-the-start)
+describes.
 
 ### Probes
 
@@ -391,15 +394,23 @@ then:
 1. attaches the session;
 2. receives the host's root configuration, and checks it;
 3. reads the boot layout of the root from the kernel command line, with
-   `nvx::protocol::root::RootLayout::parse`, then bootstraps the guest's
-   cgroups with `nvx::guest::root::bootstrap`, which moves the guest's
-   processes into the agent's cgroup, and assembles the root with
-   `nvx::guest::root::assemble`;
+   `nvx::protocol::root::RootLayout::parse`, and the host export, if the
+   command line names one, with `nvx::protocol::export::HostExport::parse`,
+   then bootstraps the guest's cgroups with `nvx::guest::root::bootstrap`,
+   which moves the guest's processes into the agent's cgroup, assembles the
+   root with `nvx::guest::root::assemble`, and mounts the export out of the
+   root with `Root::mount_export`;
 4. answers `Ready`, with the guest agent's build, or `RootFailed` with the
    stage that failed, and then ends;
-5. serves `Ping`, `Echo`, and `Probe`, though it refuses a probe while it runs
-   executions, and runs the host's [executions](#the-workers-executions);
-6. on `Stop`, drops its executions, which ends their programs, tears the root
+5. applies the host's [mapping table](#the-mapping-table-and-the-start)
+   beneath the root, from the export, in the parts that the host sends, and
+   answers each part with `Mapped` or `MapFailed`;
+6. on `Start`, once it applied every mapping that the configuration
+   announced, starts the sandbox, which it confirms with `Started`;
+7. serves `Ping`, `Echo`, and `Probe`, though it refuses a probe while it runs
+   executions, and, once the sandbox started, runs the host's
+   [executions](#the-workers-executions);
+8. on `Stop`, drops its executions, which ends their programs, tears the root
    down, reports a teardown that failed with `RootFailed`, confirms the stop
    with `Stopped`, and ends.
 
@@ -408,23 +419,61 @@ Before the root configuration, the worker accepts only the configuration, or a
 layers of a GPT disk, whose first partition holds at most the bound of the
 configuration, over an ext4 scratch or a tmpfs in RAM, in the overlay mode of
 the configuration. At the layout stage, it refuses a configuration that
-configures a scratch for an upper in RAM, or bounds a first partition for an
-EROFS image. It ends with 0 once the host stopped it, after a teardown that
-succeeded, with the stage's status, from 11 to 15, once a stage failed, and
-with 1 once its session failed or the broker closed the tty, each but the first
-after a diagnostic on standard error. Once the broker closed the stream at a
-record boundary, which may close only the broker's end, the worker drops its
-executions, and writes what it queued, as once the host stopped it. Before it
-exits, it closes what its probes hold, then unmounts a root that it still
-holds, as `nvx::guest::root::Root` does when it drops, ignoring failures. A
-teardown that failed leaves the root mounted until the VM ends. The worker runs
-the root's operations through `worker::RootOperations`, so that tests run it
+configures a scratch for an upper in RAM, bounds a first partition for an
+EROFS image, or announces mappings while the kernel command line names no
+host export, from which they come, and a command line whose tokens of the
+export break their rules, as `HostExport::parse` checks them. An export that
+fails to mount fails the assembly. It ends with 0 once the host stopped it,
+after a teardown that succeeded, with the stage's status, from 11 to 15, once
+a stage failed, and with 1 once its session failed or the broker closed the
+tty, each but the first after a diagnostic on standard error. Once the broker
+closed the stream at a record boundary, which may close only the broker's end,
+the worker drops its executions, and writes what it queued, as once the host
+stopped it. Before it exits, it closes what its probes hold and the host
+export's root, then unmounts a root that it still holds, as
+`nvx::guest::root::Root` does when it drops, ignoring failures. A teardown
+that failed leaves the root mounted until the VM ends. The worker runs the
+root's operations through `worker::RootOperations`, so that tests run it
 against a fake root.
+
+#### The mapping table and the start
+
+The root configuration announces how many mappings the host's mapping table
+holds, and the host sends the table once the root is ready, in parts, each in
+a `Maps`, in order. The worker applies each part's mappings beneath the root,
+in order, from the host export, with `nvx::guest::root::Root::map`, and
+answers the part with `Mapped`, or with `MapFailed` and how many of the
+table's mappings it applied:
+
+- It refuses a part as a whole, at the mapping that it expects next, if the
+  part does not decode, or does not continue the table: if its first mapping
+  is not the one that the worker expects next, or its last is past the count
+  that the configuration announced.
+- A mapping that the root refuses or fails to apply latches the root, which
+  keeps the mappings before it, so that the count is that mapping's index in
+  the table.
+- Once it answered `MapFailed`, the worker refuses every later part, with
+  `MapFailed`, and the start: it starts no workload on a partial table, and
+  the host tears the VM down.
+
+A table of zero mappings does no work: the host sends no part, and the worker
+maps nothing, though it mounts the export if the command line names one.
+
+`Start` starts the sandbox once the worker applied every mapping that the
+configuration announced, and none failed, which the worker confirms with
+`Started`. Only then does it run the host's executions, and it takes no part
+of the table any more. A message about an execution before the start, a
+`Start` before every announced mapping is applied, once the table failed, or
+once the sandbox started, and a `Maps` once the sandbox started end the
+worker's session with an error, as a message that it does not take in its
+state does. The worker serves pings, echoes, probes, and the stop before the
+start and after it. Its order outlives a reset of the session, as its root
+does.
 
 #### The worker's executions
 
-Once the root is ready, the worker runs several executions at once, each
-through NVX's execution engine and its guest binding, with the limits and
+Once the host started the sandbox, the worker runs several executions at once,
+each through NVX's execution engine and its guest binding, with the limits and
 timers of its start, such as frame-counted credit and one output pool that
 standard output and error share, which the adapter's tests use. One loop that
 never blocks serves the session and every execution: it takes the host's
@@ -796,7 +845,15 @@ byte value, and that `init` fails at once on a path that is no tty.
 test broker: a root that the worker assembles, probes, and tears down on a
 stop, across a reset of the session; an image over RAM, in the overlay mode of
 the configuration; a GPT disk, with the configuration's bound of the first
-partition; the failure of each stage, which the worker reports before it ends
+partition; the host export that it mounts, the mapping table that it applies
+in order, in parts, across a reset of the session, and the start; a table of
+zero mappings, which does no work, with or without an export; the parts that
+do not continue the table, which it refuses as a whole, and a mapping that
+the root refuses, which latches the root, after either of which it refuses
+the later parts and the start; the executions and starts that it refuses out
+of order, before the start and after it; the failure of each stage, the tokens
+of a host export that break their rules, mappings without an export, and an
+export that fails to mount among them, which the worker reports before it ends
 with the stage's status, without the operations of the later stages; a teardown
 that fails; before the root, the configuration and the `Stop` that it accepts,
 and the messages that it refuses; a second configuration and a broker that
@@ -820,8 +877,8 @@ the binary exited, so that none of them outlives the test or holds its output
 open, which tests check too.
 
 `tests/guest_session.rs` also runs the worker's executions behind its test
-broker, whose host side drives the engine's peers, with frame-counted credit
-and one output pool:
+broker, whose host side starts the sandbox, then drives the engine's peers,
+with frame-counted credit and one output pool:
 
 - three executions at once, each byte-exact: standard output beyond a MiB, 1.5
   MiB of input through `cat`, and both streams of a program that fails;
@@ -855,9 +912,9 @@ and one output pool:
   once the worker collected such a program's status leaves no process of its
   group running;
 - a program that a real-time signal ends, whose status the worker collects;
-- an execution whose start comes in the payload of the root's configuration,
-  whose timeout counts from its own start, however long the root's assembly
-  takes;
+- an execution whose start comes in the payload of the root's configuration
+  and the sandbox's start, whose timeout counts from its own start, however
+  long the root's assembly takes;
 - executions on a tty in raw mode.
 
 A test of the worker's executions that fails before it stops the worker, even
