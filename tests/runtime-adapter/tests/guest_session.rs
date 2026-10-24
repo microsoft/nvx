@@ -22,12 +22,16 @@
 //! stream to the host, which stall only what waits on them, executions that take turns at the
 //! stream, timeouts, cancellations, and stops, the starts, messages, and probes that the worker
 //! refuses, generations and resets, the descendants that a program leaves in its process group,
-//! and executions on a tty.
+//! and executions on a tty. Where the tests can create cgroups, each fake root gives the worker a
+//! workload cgroup of the test's own, below which the executions run in cgroups of their own, and
+//! settle: the tests then also cover a descendant that leaves its program's process group, which
+//! the settlement ends, and an execution that does not settle, which keeps its place until the
+//! host stops the worker. Elsewhere, the programs run in process groups alone.
 #![cfg(all(feature = "guest", target_os = "linux"))]
 
 use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, Read, Write};
+use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::Shutdown;
 use std::os::fd::OwnedFd;
 use std::os::unix::fs::OpenOptionsExt;
@@ -35,9 +39,9 @@ use std::os::unix::net::UnixStream;
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::{Arc, OnceLock};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -50,6 +54,7 @@ use nix::unistd::Pid;
 use nvx::exec::{
     Cause, Key, LaunchFailure, Limits, Outcome, Peer, Pool, Status, Stream, Timers, Window, peer,
 };
+use nvx::guest::cgroup::Layout;
 use nvx::guest::nvxs::GuestConnectionError;
 use nvx::protocol::OUTER_MAX_PAYLOAD;
 use nvx::protocol::nvxs::{
@@ -1111,6 +1116,9 @@ struct FakeRoot {
     gate: Option<Receiver<()>>,
     /// The worker's calls, in order.
     calls: Vec<Call>,
+    /// The workload cgroup of the test's own, below which the worker runs its executions in
+    /// cgroups of their own, where the test can create cgroups.
+    workload: Option<Workload>,
 }
 
 impl FakeRoot {
@@ -1120,14 +1128,18 @@ impl FakeRoot {
         Self::reading(command_line.as_bytes())
     }
 
-    /// Returns operations whose kernel command line is `command_line`.
+    /// Returns operations whose kernel command line is `command_line`, with a workload cgroup of
+    /// the test's own where the test can create cgroups.
     fn reading(command_line: &[u8]) -> Self {
+        let workload =
+            cgroups().then(|| Workload::new().expect("the test creates a workload cgroup"));
         Self {
             command_line: command_line.to_vec(),
             failing: None,
             assembly: Duration::ZERO,
             gate: None,
             calls: Vec::new(),
+            workload,
         }
     }
 
@@ -1181,6 +1193,10 @@ impl RootOperations for FakeRoot {
         self.result(Operation::Assemble)
     }
 
+    fn cgroups(&self) -> Option<Layout> {
+        self.workload.as_ref().map(|workload| workload.0.clone())
+    }
+
     fn probe(&mut self, probe: &Probe) -> Result<Facts, String> {
         self.calls.push(Call::Probe(probe.clone()));
         if let Some(gate) = &self.gate {
@@ -1203,6 +1219,66 @@ fn found(probe: &Probe) -> Facts {
     facts.push("name", probe.name());
     facts.push("arguments", probe.arguments().join(" "));
     facts
+}
+
+/// Returns whether the tests can create cgroups, as where they run as root in a cgroup v2
+/// hierarchy with the `pids` controller. Each fake root then has a [`Workload`] cgroup of its
+/// own, below which the worker runs its executions in cgroups, and otherwise none, so that the
+/// worker runs each program in a process group alone.
+fn cgroups() -> bool {
+    static CGROUPS: OnceLock<bool> = OnceLock::new();
+    *CGROUPS.get_or_init(|| Workload::new().is_some())
+}
+
+/// A workload cgroup of a test's own, in the real hierarchy, which it removes, with whatever is
+/// left in it, when it drops.
+#[derive(Debug)]
+struct Workload(Layout);
+
+impl Workload {
+    /// Creates a new workload cgroup below the root of the hierarchy at `/sys/fs/cgroup`, with the
+    /// test's own cgroup as the agent's, or returns `None` where the test cannot create one, or
+    /// the hierarchy lacks the `pids` controller, which the cgroups of executions need.
+    fn new() -> Option<Self> {
+        static CREATED: AtomicU64 = AtomicU64::new(0);
+        let root = Path::new("/sys/fs/cgroup");
+        let controllers = fs::read_to_string(root.join("cgroup.controllers")).ok()?;
+        if !controllers
+            .split_whitespace()
+            .any(|controller| controller == "pids")
+        {
+            return None;
+        }
+        let own = fs::read_to_string("/proc/self/cgroup").ok()?;
+        let own = own.lines().find_map(|line| line.strip_prefix("0::"))?;
+        let agent = root.join(own.trim_start_matches('/'));
+        let number = CREATED.fetch_add(1, Ordering::Relaxed);
+        let name = format!("runtime-adapter-test-{}-{number}", std::process::id());
+        let layout = Layout::new(agent, root.join(name)).ok()?;
+        fs::create_dir(layout.workload()).ok()?;
+        Some(Self(layout))
+    }
+}
+
+impl Drop for Workload {
+    /// Ends whatever is left in the workload cgroup, waits until it is empty, then removes the
+    /// cgroups of the executions, and the workload cgroup.
+    fn drop(&mut self) {
+        let workload = self.0.workload();
+        let _ = fs::write(workload.join("cgroup.kill"), b"1");
+        let deadline = Instant::now() + TIMEOUT;
+        while fs::read(workload.join("pids.current")).is_ok_and(|count| count != b"0\n")
+            && Instant::now() < deadline
+        {
+            thread::sleep(Duration::from_millis(10));
+        }
+        for entry in fs::read_dir(workload).into_iter().flatten().flatten() {
+            if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+                let _ = fs::remove_dir(entry.path());
+            }
+        }
+        let _ = fs::remove_dir(workload);
+    }
 }
 
 /// Returns a layout that the worker assembles: an EROFS image, with the identity that the guest
@@ -2226,8 +2302,9 @@ impl Drop for Host {
     }
 }
 
-/// Checks that the execution `id` ended on its own with `status`, losing no byte, and fenced, as
-/// nothing proves that the descendants of a program without a cgroup are gone.
+/// Checks that the execution `id` ended on its own with `status`, losing no byte, and settled if
+/// its program ran in a cgroup of its own, where the tests can create cgroups: otherwise it is
+/// fenced, as nothing proves that the descendants of a program without a cgroup are gone.
 fn check_lossless(host: &Host, id: u64, status: Status) {
     let outcome = host.outcome(id).unwrap();
     assert_eq!(outcome.status(), Some(status), "{id}");
@@ -2236,7 +2313,7 @@ fn check_lossless(host: &Host, id: u64, status: Status) {
     for stream in Stream::ALL {
         assert!(!outcome.is_truncated(stream), "{id}: {stream:?}");
     }
-    assert!(!outcome.is_reusable(), "{id}");
+    assert_eq!(outcome.is_reusable(), cgroups(), "{id}");
     let peer = &host.executions[&id].peer;
     assert!(peer.high_water() <= peer.memory_bound(), "{id}");
 }
@@ -2663,9 +2740,182 @@ fn the_worker_ends_what_is_left_of_the_process_group_of_a_program_that_ended() {
     host.run_until(|host| host.executions[&2].output[0].ends_with(b"\n"));
     let second = host.executions[&2].group();
     reaped(second);
-    let (_, worked) = host.stop();
+    // The fake root lives until the check, as its workload cgroup, if any, ends what is left in it
+    // once it drops.
+    let (_root, worked) = host.stop();
     assert_eq!(worked.unwrap(), Worked::Stopped);
     gone(second);
+}
+
+/// Returns the program's process ID, or that of another process, from the line `line` of the
+/// standard output of the execution `id`, and the directory of the program's cgroup from the next
+/// line, which `/proc/self/cgroup` gave.
+fn process_and_cgroup(host: &Host, id: u64, line: usize) -> (u32, PathBuf) {
+    let output = String::from_utf8(host.executions[&id].output[0].clone()).unwrap();
+    let mut lines = output.lines().skip(line);
+    let process = lines.next().unwrap().parse().unwrap();
+    let cgroup = lines.next().unwrap().strip_prefix("0::/").unwrap();
+    (process, Path::new("/sys/fs/cgroup").join(cgroup))
+}
+
+#[test]
+fn an_execution_s_settlement_ends_a_descendant_that_left_its_process_group() {
+    // Only an execution's cgroup reaches a descendant in a session of its own.
+    if !cgroups() {
+        return;
+    }
+    // The program starts a descendant in a session of its own, which holds the program's output
+    // open once it wrote its process ID, and prints the descendant's process ID and its own
+    // cgroup, then ends. The execution's settlement kills the descendant, so that the output ends
+    // at once, losing nothing, and the execution settles.
+    let mut host = Host::new();
+    let script = "exec 3>&1; \
+                  descendant=$(setsid sh -c 'echo $$; exec sleep 60 >&3 3>&-' &); \
+                  echo \"$descendant\"; cat /proc/self/cgroup; exit 3";
+    let started = Instant::now();
+    host.start(start_of(1, shell(script)), Vec::new());
+    host.run_until(|host| host.outcome(1).is_some());
+    assert!(started.elapsed() < SETTLEMENT, "{:?}", started.elapsed());
+    check_lossless(&host, 1, Status::Exited(3));
+    let (descendant, cgroup) = process_and_cgroup(&host, 1, 0);
+    reaped(descendant);
+    // The worker removed the execution's cgroup before it sent the outcome, which freed the
+    // execution's place: it runs its limit of executions at once again.
+    assert!(!cgroup.exists(), "{}", cgroup.display());
+    let most = u64::try_from(MAX_EXECUTIONS).unwrap();
+    for id in 2..=most + 1 {
+        host.start(start_of(id, shell("exec sleep 60")), Vec::new());
+    }
+    host.run_until(|host| (2..=most + 1).all(|id| host.executions[&id].peer.has_started()));
+    let (_, worked) = host.stop();
+    assert_eq!(worked.unwrap(), Worked::Stopped);
+}
+
+/// A process with a child that it never waits for, so that the child, once it ended, stays a
+/// zombie, and occupies its cgroup, until the process ends. Both run in a process group that the
+/// process leads, which the test kills when it drops, so that neither outlives a test that fails;
+/// the system's collector of orphans then collects the child's status.
+struct Holder {
+    /// The process.
+    process: Child,
+    /// The process ID of its child.
+    child: u32,
+}
+
+impl Holder {
+    /// Starts the process and its child.
+    fn new() -> Self {
+        let mut process = Command::new("/bin/sh")
+            .args(["-c", "sleep 600 & echo $!; exec sleep 600"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let mut line = String::new();
+        BufReader::new(process.stdout.take().unwrap())
+            .read_line(&mut line)
+            .unwrap();
+        let child = line.trim().parse().unwrap();
+        Self { process, child }
+    }
+}
+
+impl Drop for Holder {
+    fn drop(&mut self) {
+        // Until its status is collected, the process keeps its ID, which is the group's.
+        let group = Pid::from_raw(i32::try_from(self.process.id()).unwrap());
+        let _ = signal::killpg(group, Signal::SIGKILL);
+        let _ = self.process.wait();
+    }
+}
+
+#[test]
+fn an_execution_that_does_not_settle_keeps_its_place_until_the_host_stops_the_worker() {
+    // A zombie whose parent is outside the cgroup keeps a cgroup occupied, which needs cgroups.
+    if !cgroups() {
+        return;
+    }
+    // The program prints its process ID and its cgroup, and waits until the test signals it,
+    // once the test moved a holder's child into the cgroup. The settlement kills the child, which
+    // stays a zombie, so that the execution does not settle within its settlement time.
+    let holder = Holder::new();
+    let mut host = Host::new();
+    let waiting = "trap 'exit 0' USR1; echo $$; cat /proc/self/cgroup; \
+                   while :; do sleep 0.01; done";
+    let settlement = Duration::from_secs(1);
+    let start = Start::new(
+        Key::new(1, 1),
+        shared_limits(),
+        Timers::new(GRACE, settlement),
+        shell(waiting),
+    );
+    host.start(start, Vec::new());
+    host.run_until(|host| {
+        let output = &host.executions[&1].output[0];
+        output.iter().filter(|&&byte| byte == b'\n').count() == 2
+    });
+    let (program, cgroup) = process_and_cgroup(&host, 1, 0);
+    fs::write(cgroup.join("cgroup.procs"), holder.child.to_string()).unwrap();
+    let program = Pid::from_raw(i32::try_from(program).unwrap());
+    signal::kill(program, Signal::SIGUSR1).unwrap();
+    host.run_until(|host| host.outcome(1).is_some());
+    let outcome = host.outcome(1).unwrap();
+    assert_eq!(outcome.status(), Some(Status::Exited(0)));
+    assert_eq!(outcome.cause(), None);
+    for stream in Stream::ALL {
+        assert!(!outcome.is_truncated(stream), "{stream:?}");
+    }
+    assert!(!outcome.is_reusable());
+    assert!(cgroup.exists(), "{}", cgroup.display());
+
+    // The execution keeps its place: the worker runs one execution fewer than its limit, and
+    // refuses the next start. It still does once the cgroup is empty, after the holder ended.
+    let most = u64::try_from(MAX_EXECUTIONS).unwrap();
+    fill_but_one(&mut host, 2);
+    drop(holder);
+    let deadline = Instant::now() + TIMEOUT;
+    while fs::read(cgroup.join("pids.current")).unwrap() != b"0\n" {
+        assert!(Instant::now() < deadline, "the cgroup stays occupied");
+        thread::sleep(Duration::from_millis(10));
+    }
+    fill_but_one(&mut host, 2 + most);
+
+    // The stop ends the executions, and removes every cgroup, the fenced one's included. The fake
+    // root lives until the check, as its workload cgroup removes what is left in it once it drops.
+    let (_root, worked) = host.stop();
+    assert_eq!(worked.unwrap(), Worked::Stopped);
+    assert!(!cgroup.exists(), "{}", cgroup.display());
+}
+
+/// Starts one execution fewer than the worker's limit, from the ID `first` on, while another
+/// execution keeps its place: checks that they run, and that the worker refuses the next start,
+/// then cancels them, and checks that they settled.
+fn fill_but_one(host: &mut Host, first: u64) {
+    let most = u64::try_from(MAX_EXECUTIONS).unwrap();
+    let ids = first..first + most - 1;
+    for id in ids.clone() {
+        host.start(start_of(id, shell("exec sleep 60")), Vec::new());
+    }
+    host.run_until(|host| {
+        ids.clone()
+            .all(|id| host.executions[&id].peer.has_started())
+    });
+    let refused = ids.end;
+    host.start(start_of(refused, shell("exit 0")), Vec::new());
+    host.run_until(|host| host.outcome(refused).is_some());
+    let again = LaunchFailure::new(0, Errno::EAGAIN as i32);
+    assert_eq!(host.outcome(refused).unwrap().launch_failure(), Some(again));
+    let now = Instant::now();
+    for id in ids.clone() {
+        host.execution(id).peer.cancel(now);
+    }
+    host.run_until(|host| ids.clone().all(|id| host.outcome(id).is_some()));
+    for id in ids {
+        let outcome = host.outcome(id).unwrap();
+        assert_eq!(outcome.cause(), Some(Cause::Cancelled), "{id}");
+        assert!(outcome.is_reusable(), "{id}");
+    }
 }
 
 #[test]
