@@ -1,11 +1,12 @@
 //! What the VM tests share: the sandbox of a test, in which they run the host program's commands,
-//! and the environment that they read.
+//! the fixtures of its layered roots, and the environment that they read.
 //!
 //! The tests read:
 //!
 //! - `NVX_HYPERVISOR`: the hypervisor, through `nvx::Hypervisor::from_env_or_default`;
 //! - `NVX_ARTIFACTS_DIR`: NVX's artifacts, a repository checkout or an extracted release, with
-//!   the install metadata from which NVX gives their runtime identity;
+//!   the install metadata from which NVX gives their runtime identity, and the [`Fixtures`] of
+//!   the layered roots;
 //! - `RUNTIME_ADAPTER_GUEST`: the guest agent, a static `x86_64-unknown-linux-musl` build of
 //!   `runtime-adapter-guest`.
 // Each test crate uses its own part of this module.
@@ -24,12 +25,17 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use nvx::Hypervisor;
+use nvx::host::artifacts::{ArtifactDir, Artifacts, Guest};
 use nvx::host::process::Process;
-use nvx::host::store::{RuntimeRecord, SandboxStore};
+use nvx::host::store::{LOG_NAME, RuntimeRecord, SandboxStore};
 use nvx::host::supervisor::{self, Reattached, StopOutcome};
+use runtime_adapter::layered::RECORD_NAME;
+use serde_json::Value;
 
 /// The variable that names the guest agent.
 pub(crate) const GUEST_AGENT: &str = "RUNTIME_ADAPTER_GUEST";
+/// The scratch template among NVX's artifacts.
+pub(crate) const SCRATCH_TEMPLATE: &str = "ubuntu-smoke-scratch.ext4";
 /// The longest that a command of the host program may take.
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(180);
 /// How much of the end of the VMM's log a failure shows.
@@ -37,6 +43,53 @@ const LOG_TAIL: usize = 8192;
 
 /// The `KEY=VALUE` lines that a command of the host program printed.
 pub(crate) type Printed = BTreeMap<String, String>;
+
+/// The fixtures of the layered roots, those of NVX's own layered scenarios, among NVX's artifacts:
+///
+/// - the Ubuntu EROFS image, `ubuntu-distro.erofs`, and its manifest, which holds its UUID;
+/// - the scratch template, [`SCRATCH_TEMPLATE`], an empty ext4 file system that NVX's CI makes
+///   with the guest artifacts, of which each test boots a copy.
+pub(crate) struct Fixtures {
+    /// NVX's Ubuntu EROFS image.
+    pub(crate) distro: PathBuf,
+    /// The image's UUID, from its manifest.
+    pub(crate) identity: String,
+    /// The scratch template.
+    pub(crate) scratch: PathBuf,
+}
+
+impl Fixtures {
+    /// Finds the fixtures among NVX's artifacts in `NVX_ARTIFACTS_DIR`.
+    pub(crate) fn find() -> Self {
+        let directory = env::var_os(Artifacts::ENV_DIR)
+            .unwrap_or_else(|| panic!("{} must name NVX's artifacts", Artifacts::ENV_DIR));
+        let artifacts = ArtifactDir::from_dir(directory).unwrap();
+        let distro = artifacts.distro_layer(Guest::Ubuntu).unwrap();
+        let manifest = artifacts.distro_manifest(Guest::Ubuntu).unwrap();
+        let scratch = artifacts.artifact(SCRATCH_TEMPLATE);
+        for (path, fixture) in [
+            (&distro, "the Ubuntu EROFS image"),
+            (&manifest, "the manifest of the Ubuntu EROFS image"),
+            (
+                &scratch,
+                "the scratch template, an empty ext4 file system, which `mkfs.ext4` makes",
+            ),
+        ] {
+            assert!(path.is_file(), "{fixture} is missing: {}", path.display());
+        }
+        let manifest: Value = serde_json::from_str(&fs::read_to_string(&manifest).unwrap())
+            .expect("the manifest is JSON");
+        let identity = manifest["uuid"]
+            .as_str()
+            .expect("the manifest holds the image's UUID")
+            .to_owned();
+        Self {
+            distro,
+            identity,
+            scratch,
+        }
+    }
+}
 
 /// A sandbox of a test: a directory of its own, which holds the sandbox's store, the output of
 /// each command of the host program that the test runs, and any file that the test makes for its
@@ -52,6 +105,8 @@ pub(crate) struct Sandbox {
     pub(crate) store: PathBuf,
     /// The number of commands that the test ran.
     commands: usize,
+    /// The output files of the last command that the test ran, without their extensions.
+    output: Option<PathBuf>,
 }
 
 impl Sandbox {
@@ -72,6 +127,7 @@ impl Sandbox {
             store: root.join("store"),
             root,
             commands: 0,
+            output: None,
         }
     }
 
@@ -105,6 +161,7 @@ impl Sandbox {
     pub(crate) fn run(&mut self, command: &str, options: &[&OsStr], status: i32) -> Printed {
         self.commands += 1;
         let output = self.root.join(format!("{}-{command}", self.commands));
+        self.output = Some(output.clone());
         let (stdout, stderr) = (output.with_extension("out"), output.with_extension("err"));
         // Files, rather than pipes, take the output, so that nothing waits for a VMM that might
         // hold them.
@@ -159,8 +216,31 @@ impl Sandbox {
             "\nstdout:\n{}\nstderr:\n{}\nthe end of the VMM's log:\n{}",
             read(output.with_extension("out")),
             read(output.with_extension("err")),
-            read(self.store.join(nvx::host::store::LOG_NAME)),
+            read(self.store.join(LOG_NAME)),
         )
+    }
+
+    /// Returns what the last command that the test ran wrote to its standard error.
+    pub(crate) fn stderr(&self) -> String {
+        let output = self.output.as_ref().expect("the test ran a command");
+        fs::read_to_string(output.with_extension("err")).unwrap()
+    }
+
+    /// Checks that no launch of the sandbox got as far as spawning a VMM: its store holds no
+    /// runtime record, no launch journal, no VMM's log, and no record of a launch of the host
+    /// program, which a launch writes just before it spawns the VMM.
+    pub(crate) fn assert_unlaunched(&self) {
+        let store = SandboxStore::open(&self.store).unwrap();
+        assert_eq!(
+            store.runtime().unwrap(),
+            None,
+            "a runtime record names a VM"
+        );
+        assert!(store.journal().unwrap().is_none(), "a launch was begun");
+        for name in [LOG_NAME, RECORD_NAME] {
+            let path = self.store.join(name);
+            assert!(!path.exists(), "{} exists", path.display());
+        }
     }
 
     /// Returns the sandbox's runtime record, if it has one.
