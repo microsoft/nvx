@@ -1,7 +1,7 @@
 //! The host program plans a VM with a layered root with NVX's typed plan, composes OpenVMM's
 //! arguments as NVX's sandbox start does, records what it launches, and refuses layered options
-//! that do not make a root, and executions whose starts the guest would not take. The tests need
-//! no hypervisor.
+//! that do not make a root, executions whose starts the guest would not take, and more executions
+//! than the guest runs at once. The tests need no hypervisor.
 #![cfg(feature = "host")]
 
 use std::ffi::OsString;
@@ -13,6 +13,7 @@ use nvx::Hypervisor;
 use nvx::host::sandbox::SandboxPlan;
 use nvx::protocol::root::{RootImage, RootLayout, RootUpper};
 use nvx::uuid::Uuid;
+use runtime_adapter::exec::MAX_EXECUTIONS;
 use runtime_adapter::layered::{LaunchRecord, LayeredLaunch, RECORD_NAME};
 use runtime_adapter::root::RootConfig;
 use serde_json::{Value, json};
@@ -323,7 +324,8 @@ fn the_host_program_refuses_options_that_do_not_make_a_command() {
     ]);
     // Each execution of `exec` has options of its own, before `--` and its program, and its
     // arguments end at a lone `;`. The program refuses a start that the guest would not decode,
-    // on which the guest would end its session, before it attaches.
+    // on which the guest would end its session, and more executions than the guest runs at once,
+    // before it attaches.
     let program = ["--", "/bin/true"];
     let exec = |options: &[&'static str]| [&["exec", "store"], options, &program[..]].concat();
     commands.extend([
@@ -382,6 +384,14 @@ fn the_host_program_refuses_options_that_do_not_make_a_command() {
             ]
             .concat(),
             "--groups needs --identity",
+        ),
+        (
+            [
+                vec!["exec", "store"],
+                vec![program.to_vec(); MAX_EXECUTIONS + 1].join(&";"),
+            ]
+            .concat(),
+            "exec runs at most",
         ),
     ]);
     for (arguments, problem) in commands {
