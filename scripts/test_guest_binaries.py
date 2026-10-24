@@ -520,7 +520,7 @@ class GuestBinaryBuildTests(unittest.TestCase):
                 (
                     "directory in the checkout",
                     crate / "tests" / "fixtures",
-                    "source identity omits.*nvx-rs/tests/fixtures/cli.json",
+                    "source identity omits.*nvx-rs/tests/fixtures/egress-policy.json",
                 ),
                 (
                     "file outside the checkout",

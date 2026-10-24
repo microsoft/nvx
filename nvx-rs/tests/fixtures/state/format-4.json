@@ -1,0 +1,38 @@
+{
+  "cmdline": "",
+  "distro_binding": "{distro_binding}",
+  "format": 4,
+  "hostname": "nvx-sandbox",
+  "hypervisor": "{hypervisor}",
+  "layers": [
+    {
+      "path": "{root/distro.erofs}",
+      "role": "distro",
+      "uuid": "11111111-1111-1111-1111-111111111111"
+    }
+  ],
+  "memory_max": null,
+  "memory_mib": 256,
+  "mounts": [
+    {
+      "access": "ro",
+      "denied_paths": [],
+      "guest_target": "/data",
+      "host_path": "{root/share}",
+      "owner": "vmm"
+    },
+    {
+      "access": "rw",
+      "denied_paths": [],
+      "guest_target": "/other",
+      "host_path": "{root/share2}",
+      "owner": "vmm"
+    }
+  ],
+  "network": null,
+  "pids_max": null,
+  "scratch": "{root/scratch.ext4}",
+  "scratch_binding": "{scratch_binding}",
+  "workload_gid": 65534,
+  "workload_uid": 65534
+}

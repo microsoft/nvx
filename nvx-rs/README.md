@@ -54,9 +54,11 @@ nvx-rs/
 │   │                the typed calls through which it runs the time ABI's steps and the reseed
 │   └── bin/         nvx-rs, nvx-fake-openvmm, and the guest binaries
 ├── tests/           fake-OpenVMM, CLI, NVXS session, process-supervision, checked-handoff, store,
-│                    and guest-binary tests, the store's record fixtures, the golden fixtures that
-│                    Python recorded for the ports of its code, in fixtures/, and the conformance
-│                    vectors of the wire formats, in vectors/
+│                    and guest-binary tests, the CLI's scenario tests and their harness, in cli/,
+│                    the store's record fixtures, the hand-written sandbox configurations of every
+│                    format, and the golden fixtures that Python recorded for the ports of its
+│                    code, in fixtures/, and the conformance vectors of the wire formats, in
+│                    vectors/
 ├── build.rs         bundled-release staging
 └── artifacts.json   the NVX release that the `bundled` feature stages
 ```
@@ -339,18 +341,16 @@ refuse them.
 `tests/fixtures` holds what the Python code did with fixed inputs and seeded
 random corpora: `python.json` for the Python semantics, `sandbox.json` and
 `sandbox_options.json` for the launch profile and the sandbox options, for
-POSIX and Windows paths alike, `egress-policy.json` for the policy compiler,
-and `cli.json` for `nvx.py sandbox` and `nvx.py run` as commands; see
-[Golden scenarios](#golden-scenarios). `scripts/nvx_rs_fixtures.py` recorded
-them with CPython 3.14, except the scenarios of `nvx.py run`, and generated
-the Unicode tables of `src/host/python/unicode.rs`, until `nvx.py` delegated to
-`nvx-rs` and [microsoft/nvx#359](https://github.com/microsoft/nvx/issues/359)
-retired the script with the Python code that it recorded;
-`scripts/nvx_rs_run_fixtures.py` recorded those of `nvx.py run`, until
-[microsoft/nvx#638](https://github.com/microsoft/nvx/issues/638) retired it in
-turn. The golden tests compare the ports with these records and need no
-Python. The records are now the reference of that behavior: a deliberate change
-of behavior updates the records that it changes by hand, in the same change.
+POSIX and Windows paths alike, and `egress-policy.json` for the policy
+compiler. `scripts/nvx_rs_fixtures.py` recorded them with CPython 3.14, and
+generated the Unicode tables of `src/host/python/unicode.rs`, until `nvx.py`
+delegated to `nvx-rs` and
+[microsoft/nvx#359](https://github.com/microsoft/nvx/issues/359) retired the
+script with the Python code that it recorded. The golden tests compare the
+ports with these records and need no Python. The records are now the reference
+of that behavior: a deliberate change of behavior updates the records that it
+changes by hand, in the same change. The commands themselves have
+[scenario tests](#scenario-tests).
 
 ## The nvx-rs CLI
 
@@ -571,7 +571,7 @@ earlier `nvx-rs` provisioned, which has no bindings or no typed network:
 
 | File | Contents |
 | --- | --- |
-| `config.json` | The provisioned sandbox, in format 1 without shares and in format 7 with the export plan of its shares under `export`, with the binding of its distro layer under `distro_binding`, that of its scratch image under `scratch_binding`, and its network under `network`, `null` for none, written as `json.dumps(value, indent=2, sort_keys=True)` writes it, with mode 0600, through a temporary file |
+| `config.json` | The provisioned sandbox, in format 7, with the export plan of its shares under `export`, `null` for none, the binding of its distro layer under `distro_binding`, that of its scratch image under `scratch_binding`, and its network under `network`, `null` for none, written as `json.dumps(value, indent=2, sort_keys=True)` writes it, with mode 0600, through a temporary file. `start` also reads the format 1 that earlier builds wrote for a sandbox without shares, with `mount` `null` and no `export` |
 | `sandbox.lock` | The store's lock, which serializes the lifecycle transitions |
 | `launch.json` | The store's journal of a start in progress, or of one that was interrupted |
 | `runtime.json` | The store's runtime record of the running VM, in its format 4: the OpenVMM process, by its ID, its start time, and the host's boot, its control endpoint, `STATE/control.sock` or `//./pipe/openvmm-microvm-HEX` on Windows, and the [runtime identity](#runtime-identity) of its start |
@@ -744,7 +744,7 @@ name and holds them until it exits, after `fake_block_delay_ms=MS` if asked,
 and records what each held in `fake-openvmm-TOKEN-blocks.json` next to the
 kernel. A managed `start` also reads the root's
 [runtime identity](#runtime-identity), so a test root holds build provenance,
-as the roots of the golden scenarios do.
+as the roots of the CLI tests do.
 
 ```bash
 cd nvx-rs
@@ -754,54 +754,34 @@ NVX_OPENVMM=target/debug/nvx-fake-openvmm \
   --scratch SCRATCH --entrypoint /bin/echo --arg hello
 ```
 
-### Golden scenarios
+### Scenario tests
 
-`tests/fixtures/cli.json` holds scenarios that the fixture script recorded from
-the Python implementation of `nvx.py sandbox`, run as a command with the root's
-OpenVMM a copy of `nvx-fake-openvmm`, and from the Python functions behind
-`egress compile` and `artifacts`: the option and usage errors, dry runs,
-one-shot runs, the lifecycles of sandboxes in every configuration format, and
-the refusals of the lifecycle operations. Each step records the exit status,
-standard output and error, and the state files, with the root, process IDs, and
-random identifiers as placeholders, and the devices, file IDs, and times of the
-distro and scratch bindings, which `config.json` has recorded since the
-recording, and on Linux the descriptor numbers of `/proc/self/fd/N`, with
-which launches have named their checked files since then, as well; on
-Windows, launches have named them by their final paths, `\\?\` and the path,
-since then.
-Their kernel command lines name the image format of the distro layer, which
-the launch profile has rendered since the recording too, and their network
-options render through the typed policy, which `config.json` records under
-`network`: the scenarios whose options OpenVMM refused, or that combined a
-proxy with other access, now show the planner's refusals or valid policies.
-The configurations of sandboxes with shares have since held the shares' export
-plan, in format 7, and a policy path outside the host directory of a sandbox's
-only share now fails before OpenVMM starts.
-Its `posix` and `windows` sections were
-recorded on each kind of host, where the script also played every scenario with
-`nvx-rs`, and each lifecycle with the Python implementation and `nvx-rs` taking
-turns both ways, and found no difference. `tests/cli.rs` replays the section of
-its host with `nvx-rs`, without Python; since `nvx.py sandbox` runs `nvx-rs`,
-these scenarios are its reference. Their state files have since followed the
-sandbox store: its lock file, its runtime record, the log that each start
-replaces, and the build provenance in the root from which `start` reads the
-runtime identity. Their errors have since carried the
-[error codes](#error-codes), as `error[CODE]: MESSAGE` and
-`PROG: error[CODE]: MESSAGE`, which were added to the records by hand.
+The scenario tests of `tests/cli/` run `nvx-rs` with `nvx-fake-openvmm` as
+OpenVMM, in a fresh artifact root for each case, and check from tables of cases
+what callers rely on: exit statuses; errors, by their [codes](#error-codes) and
+by stable fragments of their messages, such as option names, values, and paths;
+the entries of state directories, their records, parsed, and their POSIX modes;
+and the arguments that OpenVMM receives, which the fake OpenVMM records, and
+into which the `>> ` line of a run splits back, with `CommandLineToArgvW` on
+Windows and a shell-word splitter on POSIX, as a property test checks for
+arbitrary kernel command lines too. The tables cover usage errors and help, the
+checks that refuse a command line before anything changes, dry runs, one-shot
+runs, the lifecycles of sandboxes of every configuration, their executions, the
+refusals of lifecycle operations, configurations of every format, from the
+hand-written `config.json` files of `tests/fixtures/state/`, `egress compile`,
+and `artifacts`. `tests/fixtures/run-help.txt` holds the help of `nvx-rs run`,
+which `nvx.py run` prints too, since it parses the options of `nvx-rs run`
+before it runs it: a test of each program checks its help against it.
 
-The scenarios whose names start with `run, ` come from the Python
-implementation of `nvx.py run`, which `scripts/nvx_rs_run_fixtures.py`
-recorded the same way, without the CPU-profile guidance, which depends on the
-host's CPU: the usage errors and help of its parser, the refusals of its
-checks, dry runs of every guest, of cold boots and restores, of shares, shared
-files, and their policy paths and owners, of the network options and egress
-policy files, of CPU profiles and outcome reports, and of the 1024-byte budget
-of the kernel command line, and runs of the fake OpenVMM, also without the
-artifacts that they need. The script recorded the section of each kind of host
-there, played its run scenarios with `nvx-rs run`, and found no difference,
-before [microsoft/nvx#638](https://github.com/microsoft/nvx/issues/638) retired
-it with the Python implementation of `nvx.py run`; since `nvx.py run` runs
-`nvx-rs`, these scenarios are its reference too.
+They replaced the scenarios that `scripts/nvx_rs_fixtures.py` and
+`scripts/nvx_rs_run_fixtures.py` recorded from the Python implementations of
+`nvx.py sandbox` and `nvx.py run`, which the CLI test replayed byte for byte
+until [microsoft/nvx#728](https://github.com/microsoft/nvx/issues/728) retired
+them, once every recorded scenario, and every regression that
+[microsoft/nvx#722](https://github.com/microsoft/nvx/issues/722) traces, mapped
+to the scenario tests, which reached every line and branch of production code
+that the replay reached, and caught every mutant of the CLI that the replay
+caught.
 
 ## Features
 
@@ -1042,8 +1022,8 @@ NVX_BUNDLE=skip cargo test --all-features   # unit, conformance-vector, property
 ```
 
 The tests need no hypervisor. The fake-OpenVMM test drives `Instance` end to end
-against `nvx-fake-openvmm`, and the CLI test replays the
-[golden scenarios](#golden-scenarios) and checks the guest-feature
+against `nvx-fake-openvmm`. The CLI test runs the
+[scenario tests](#scenario-tests) of `nvx-rs`, and checks the guest-feature
 requirement and, on Linux, Ctrl-C. The
 [conformance vectors](tests/vectors/README.md) of the wire formats cover both
 sides of every record, frame, and payload: the codec decodes each vector of

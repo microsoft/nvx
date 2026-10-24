@@ -22,14 +22,11 @@ scripts/setup/tool-versions.conf text eol=lf
 nvx-rs/** text=auto eol=lf
 
 .github/workflows/*.lock.yml linguist-generated=true
-# Recorded from the Python code that nvx-rs replaced, by scripts/nvx_rs_fixtures.py
-# and, for the scenarios of nvx.py run in cli.json, scripts/nvx_rs_run_fixtures.py,
-# which microsoft/nvx#359 and microsoft/nvx#638 retired with that code, so nothing
-# regenerates them: they are the reference of that behavior, and a deliberate change
-# of behavior updates them by hand, in the same change (nvx-rs/README.md, Python
-# parity).
+# Recorded from the Python code that nvx-rs replaced, by scripts/nvx_rs_fixtures.py,
+# which microsoft/nvx#359 retired with that code, so nothing regenerates them: they
+# are the reference of that behavior, and a deliberate change of behavior updates them
+# by hand, in the same change (nvx-rs/README.md, Python parity).
 nvx-rs/src/host/python/unicode.rs linguist-generated=true
-nvx-rs/tests/fixtures/cli.json linguist-generated=true
 nvx-rs/tests/fixtures/egress-policy.json linguist-generated=true
 nvx-rs/tests/fixtures/python.json linguist-generated=true
 nvx-rs/tests/fixtures/sandbox.json linguist-generated=true

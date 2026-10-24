@@ -96,9 +96,6 @@ FAMILIES = (
             )
         ),
     ),
-    Family(
-        "cli-scenarios", "CLI scenarios", ("nvx_rs_reproduces_the_recorded_scenarios",)
-    ),
 )
 
 

@@ -1,0 +1,70 @@
+{
+  "cmdline": "",
+  "distro_binding": "{distro_binding}",
+  "format": 1,
+  "hostname": "nvx-sandbox",
+  "hypervisor": "{hypervisor}",
+  "layers": [
+    {
+      "path": "{root/distro.erofs}",
+      "role": "distro",
+      "uuid": "11111111-1111-1111-1111-111111111111"
+    }
+  ],
+  "memory_max": null,
+  "memory_mib": 256,
+  "mount": null,
+  "network": {
+    "allow": {
+      "name": "--network-egress-allow",
+      "rules": [
+        {
+          "ports": [
+            {
+              "endPort": 8443,
+              "port": 8080,
+              "protocol": "tcp"
+            }
+          ],
+          "to": [
+            {
+              "cidr": "192.0.2.0/24",
+              "except": []
+            }
+          ]
+        }
+      ]
+    },
+    "deny": {
+      "name": "--network-egress-deny",
+      "rules": [
+        {
+          "ports": [],
+          "to": [
+            {
+              "cidr": "198.51.100.0/24",
+              "except": []
+            }
+          ]
+        }
+      ]
+    },
+    "egress": "deny",
+    "guestNetwork": "10.0.0.2/24",
+    "hostLoopback": "allow",
+    "hostLoopbackForwards": [
+      {
+        "guestPort": 8080,
+        "hostPort": 18080,
+        "protocol": "tcp"
+      }
+    ],
+    "ingress": "allow",
+    "proxy": null
+  },
+  "pids_max": null,
+  "scratch": "{root/scratch.ext4}",
+  "scratch_binding": "{scratch_binding}",
+  "workload_gid": 65534,
+  "workload_uid": 65534
+}

@@ -1,0 +1,65 @@
+{
+  "cmdline": "",
+  "distro_binding": "{distro_binding}",
+  "export": {
+    "binds": [
+      {
+        "child": 0,
+        "readOnly": false,
+        "source": "",
+        "target": "/data"
+      },
+      {
+        "child": 1,
+        "readOnly": true,
+        "source": "",
+        "target": "/etc/single.txt"
+      }
+    ],
+    "children": [
+      {
+        "allowed": [
+          "{root/share/hidden/shown}"
+        ],
+        "denied": [
+          "{root/share/hidden}"
+        ],
+        "deniedIdentities": [
+          null
+        ],
+        "root": "{root/share}",
+        "writable": true,
+        "write": [
+          "{root/share/writable}"
+        ]
+      },
+      {
+        "allowed": [],
+        "denied": [],
+        "deniedIdentities": [],
+        "file": true,
+        "root": "{root/single.txt}",
+        "writable": false,
+        "write": []
+      }
+    ]
+  },
+  "format": 7,
+  "hostname": "nvx-sandbox",
+  "hypervisor": "{hypervisor}",
+  "layers": [
+    {
+      "path": "{root/distro.erofs}",
+      "role": "distro",
+      "uuid": "11111111-1111-1111-1111-111111111111"
+    }
+  ],
+  "memory_max": null,
+  "memory_mib": 256,
+  "network": null,
+  "pids_max": null,
+  "scratch": "{root/scratch.ext4}",
+  "scratch_binding": "{scratch_binding}",
+  "workload_gid": 65534,
+  "workload_uid": 65534
+}
