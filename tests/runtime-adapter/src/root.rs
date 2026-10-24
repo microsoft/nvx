@@ -8,7 +8,8 @@
 //! runtime directory, the cgroups, their resource values, the sizes that the block devices must
 //! have, how long the guest waits for them, the most bytes that the first partition of a GPT disk
 //! may hold, how the guest assembles the overlay over the upper, how many mappings the host's
-//! mapping table holds, and the workload identity of the whole sandbox, if it has one.
+//! mapping table holds, the workload identity of the whole sandbox, if it has one, and whether the
+//! sandbox's listeners are published.
 //!
 //! A root configuration is UTF-8 text: one `NAME=VALUE` line per field, each ended by a newline,
 //! in any order, and each at most once. Numbers are decimal, without a sign or leading zeros:
@@ -31,6 +32,7 @@
 //! | `mapping-count` | The number of mappings of the host's mapping table, at most [`MAX_HOST_MAPPINGS`] | no |
 //! | `workload-uid` | The user ID of the sandbox's workload identity, as which every execution runs | with `workload-gid` |
 //! | `workload-gid` | The group ID of the sandbox's workload identity | with `workload-uid` |
+//! | `listeners` | Whether the sandbox's listeners are published, [`Listeners`]: `published`, the guest's default, or `unpublished` | no |
 //!
 //! The paths are absolute and canonical guest paths: not `/`, without an empty, `.`, or `..`
 //! component, or a trailing `/`. The runtime directory holds no `,`, `:`, `\`, or `=`, which the
@@ -38,7 +40,10 @@
 //! positive. A workload identity has both IDs, each below 4,294,967,295, which the kernel reads
 //! as "unchanged", and no supplementary groups or capabilities; the guest checks its account in
 //! the assembled root, a failure of [`RootStage::Identity`], and an execution then names no
-//! identity of its own. [`RootConfig::decode`] refuses every other configuration, which the guest
+//! identity of its own. While the sandbox's listeners are published, through private-network
+//! ingress or host loopback, the guest refuses an execution `CAP_NET_BIND_SERVICE` and
+//! `CAP_NET_RAW`, with which it could forge the announcements of its listeners.
+//! [`RootConfig::decode`] refuses every other configuration, which the guest
 //! reports as a failure of [`RootStage::Configuration`].
 //!
 //! A [`RootFailure`] is a stage's code, one byte, then the problem as UTF-8 text.
@@ -129,8 +134,10 @@ const MAPPING_COUNT: &str = "mapping-count";
 const WORKLOAD_UID: &str = "workload-uid";
 /// See [`VERSION`].
 const WORKLOAD_GID: &str = "workload-gid";
+/// See [`VERSION`].
+const LISTENERS: &str = "listeners";
 /// Every field, in the order in which [`RootConfig::encode`] writes them.
-const FIELDS: [&str; 16] = [
+const FIELDS: [&str; 17] = [
     VERSION,
     RUNTIME,
     AGENT_CGROUP,
@@ -147,6 +154,7 @@ const FIELDS: [&str; 16] = [
     MAPPING_COUNT,
     WORKLOAD_UID,
     WORKLOAD_GID,
+    LISTENERS,
 ];
 
 /// The overlay mode that a configuration names, which the guest's assembly applies: the
@@ -207,6 +215,45 @@ impl JournalPolicy {
     }
 }
 
+/// Whether a sandbox's listeners are published, which a configuration names: the
+/// `nvx::guest::entry::Publication` of the same name, with which the guest's executions enter the
+/// root.
+///
+/// The host publishes them through its network: NVX's `/init` starts an announcer of the guest's
+/// listeners, and OpenVMM publishes what it announces, to the host's private networks with ingress
+/// allowed, or on host loopback with host-loopback access allowed. An execution that may bind a
+/// privileged port, as `CAP_NET_BIND_SERVICE` allows, or open a raw socket, as `CAP_NET_RAW`
+/// allows, could forge those announcements, so the entry refuses both while listeners are
+/// published.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Listeners {
+    /// `published`: the guest's listeners are published, and executions enter without
+    /// `CAP_NET_BIND_SERVICE` and `CAP_NET_RAW`.
+    Published,
+    /// `unpublished`: no listener is published.
+    Unpublished,
+}
+
+impl Listeners {
+    /// Every publication.
+    pub const ALL: [Self; 2] = [Self::Published, Self::Unpublished];
+
+    /// Returns the publication's name in a configuration.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Published => "published",
+            Self::Unpublished => "unpublished",
+        }
+    }
+
+    /// Returns the publication named `name`, if any.
+    pub fn from_name(name: &str) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|listeners| listeners.as_str() == name)
+    }
+}
+
 /// The host's configuration of a guest's layered root: everything that the root needs besides its
 /// boot tokens, as the [module documentation](self) lists it.
 ///
@@ -244,14 +291,17 @@ pub struct RootConfig {
     /// The workload identity of the whole sandbox, its user ID and group ID, if it has one: every
     /// execution runs as it, and names no identity of its own.
     pub workload_identity: Option<(u32, u32)>,
+    /// Whether the sandbox's listeners are published, unless the guest's default,
+    /// [`Listeners::Published`], with which every execution enters the root.
+    pub listeners: Option<Listeners>,
 }
 
 impl Default for RootConfig {
     /// Returns the configuration of the defaults: [`DEFAULT_RUNTIME`], [`DEFAULT_AGENT_CGROUP`],
     /// [`DEFAULT_WORKLOAD_CGROUP`], [`DEFAULT_DEVICE_TIMEOUT`], [`DEFAULT_AGENT_MEMORY_LOW`],
     /// [`DEFAULT_WORKLOAD_MEMORY_MAX`], and [`DEFAULT_WORKLOAD_PIDS_MAX`], with no sizes, the
-    /// guest's default bound of the first partition, overlay mode, and journal policy, and no
-    /// mapping or workload identity.
+    /// guest's default bound of the first partition, overlay mode, and journal policy, no mapping
+    /// or workload identity, and the guest's default publication of listeners.
     fn default() -> Self {
         Self {
             runtime: DEFAULT_RUNTIME.to_owned(),
@@ -268,6 +318,7 @@ impl Default for RootConfig {
             scratch_journal: None,
             mapping_count: 0,
             workload_identity: None,
+            listeners: None,
         }
     }
 }
@@ -317,6 +368,9 @@ impl RootConfig {
                 (WORKLOAD_UID, uid.to_string()),
                 (WORKLOAD_GID, gid.to_string()),
             ]);
+        }
+        if let Some(listeners) = self.listeners {
+            fields.push((LISTENERS, listeners.as_str().to_owned()));
         }
         fields
     }
@@ -453,6 +507,10 @@ impl RootConfig {
                 )));
             }
         };
+        let listeners = values
+            .get(LISTENERS)
+            .map(|text| Listeners::from_name(text).ok_or_else(|| unknown(LISTENERS, text)))
+            .transpose()?;
         Ok(Self {
             runtime,
             agent_cgroup,
@@ -469,6 +527,7 @@ impl RootConfig {
             // The count is at most `MAX_HOST_MAPPINGS`, so it fits a `u32`.
             mapping_count: mapping_count as u32,
             workload_identity,
+            listeners,
         })
     }
 }
@@ -884,6 +943,7 @@ mod tests {
             scratch_journal: Some(JournalPolicy::Forbidden),
             mapping_count: 3,
             workload_identity: Some((1000, 100)),
+            listeners: Some(Listeners::Unpublished),
             ..RootConfig::default()
         }
     }
@@ -907,17 +967,21 @@ mod tests {
              scratch-journal=forbidden\n\
              mapping-count=3\n\
              workload-uid=1000\n\
-             workload-gid=100\n"
+             workload-gid=100\n\
+             listeners=unpublished\n"
         );
         // Without a mapping, the configuration names no count.
         let unmapped = String::from_utf8(RootConfig::default().encode()).unwrap();
         assert!(!unmapped.contains("mapping-count"), "{unmapped}");
-        // Each mode and policy has its own name.
+        // Each mode, policy, and publication has its own name.
         for mode in OverlayMode::ALL {
             assert_eq!(OverlayMode::from_name(mode.as_str()), Some(mode));
         }
         for policy in JournalPolicy::ALL {
             assert_eq!(JournalPolicy::from_name(policy.as_str()), Some(policy));
+        }
+        for listeners in Listeners::ALL {
+            assert_eq!(Listeners::from_name(listeners.as_str()), Some(listeners));
         }
         let minimal = RootConfig {
             agent_memory_low: None,
@@ -929,7 +993,11 @@ mod tests {
             workload_identity: Some((u32::MAX - 1, u32::MAX - 1)),
             ..RootConfig::default()
         };
-        for config in [full(), minimal, largest, RootConfig::default()] {
+        let published = RootConfig {
+            listeners: Some(Listeners::Published),
+            ..RootConfig::default()
+        };
+        for config in [full(), minimal, largest, published, RootConfig::default()] {
             assert_eq!(RootConfig::decode(&config.encode()), Ok(config));
         }
         // The fields may come in any order.
@@ -1137,6 +1205,14 @@ mod tests {
             (
                 format!("{base}workload-gid=1000\n").into_bytes(),
                 "names a workload identity without both workload-uid and workload-gid",
+            ),
+            (
+                format!("{base}listeners=Published\n").into_bytes(),
+                "names the unknown listeners \"Published\"",
+            ),
+            (
+                format!("{base}listeners=published\nlisteners=unpublished\n").into_bytes(),
+                "repeats the field listeners",
             ),
         ];
         for (body, problem) in cases {

@@ -20,7 +20,7 @@ use nix::sys::signal::{self, Signal};
 use nix::sys::wait::{self, WaitPidFlag, WaitStatus};
 use nvx::exec::{Key, LaunchFailure, Runner, Settlement, Stream, Violation, runner};
 use nvx::guest::cgroup::{ExecutionCgroup, Layout, Scope};
-use nvx::guest::entry::{self, AccountError, Capabilities, Capability, Prepared};
+use nvx::guest::entry::{self, AccountError, Capabilities, Capability, Prepared, Publication};
 use nvx::guest::exec::binding::{Binding, Event};
 use nvx::guest::exec::{Execution, Options, Pipes, Source};
 use nvx::guest::process::Child;
@@ -97,16 +97,20 @@ pub(super) struct Sandbox {
     /// The sandbox's workload identity, its user ID and group ID, if the root configuration
     /// names one, as which every execution runs.
     pub(super) identity: Option<(u32, u32)>,
+    /// Whether the sandbox's listeners are published, as the root configuration says.
+    pub(super) publication: Publication,
 }
 
 impl Sandbox {
-    /// Returns the sandbox whose workload identity is `identity`, if it has one. Its executions
-    /// take the entry's default hostname, [`DEFAULT_HOSTNAME`](entry::DEFAULT_HOSTNAME), as
-    /// nothing configures another: this is the one place that names their hostname.
-    pub(super) fn new(identity: Option<(u32, u32)>) -> Self {
+    /// Returns the sandbox whose workload identity is `identity`, if it has one, and whose
+    /// listeners are published as `publication` says. Its executions take the entry's default
+    /// hostname, [`DEFAULT_HOSTNAME`](entry::DEFAULT_HOSTNAME), as nothing configures another:
+    /// this is the one place that names their hostname.
+    pub(super) fn new(identity: Option<(u32, u32)>, publication: Publication) -> Self {
         Self {
             hostname: entry::DEFAULT_HOSTNAME.as_bytes().to_vec(),
             identity,
+            publication,
         }
     }
 }
@@ -128,9 +132,9 @@ struct Run {
 }
 
 impl Executions {
-    /// Returns no executions, which run in process groups alone, with the default hostname and
-    /// without a workload identity, until [`run_in`](Self::run_in) names their cgroups and their
-    /// sandbox.
+    /// Returns no executions, which run in process groups alone, with the default hostname,
+    /// without a workload identity, and with published listeners, until
+    /// [`run_in`](Self::run_in) names their cgroups and their sandbox.
     pub(super) fn new() -> Self {
         Self {
             attached: BTreeMap::new(),
@@ -139,7 +143,7 @@ impl Executions {
             reaped: None,
             cleared: None,
             cgroups: None,
-            sandbox: Sandbox::new(None),
+            sandbox: Sandbox::new(None, Publication::Published),
             prepared: 0,
             fenced: Vec::new(),
             turn: 0,
@@ -548,10 +552,11 @@ impl Executions {
         }
     }
 
-    /// Returns how the program of `start` enters the root: with the sandbox's hostname, as the
-    /// identity that exactly one source names, the sandbox's workload identity, if it has one, or
-    /// otherwise the identity that the start names. A start that names an identity in a sandbox
-    /// with a workload identity, or none in a sandbox without one, is `EINVAL`.
+    /// Returns how the program of `start` enters the root: with the sandbox's hostname and its
+    /// publication of listeners, as the identity that exactly one source names, the sandbox's
+    /// workload identity, if it has one, or otherwise the identity that the start names. A start
+    /// that names an identity in a sandbox with a workload identity, or none in a sandbox without
+    /// one, is `EINVAL`.
     fn entrance(&self, start: &Start) -> io::Result<Entrance> {
         let identity = match (self.sandbox.identity, &start.identity) {
             (Some((uid, gid)), None) => entry::Identity::new(uid, gid),
@@ -561,6 +566,7 @@ impl Executions {
         Ok(Entrance {
             identity,
             hostname: self.sandbox.hostname.clone(),
+            publication: self.sandbox.publication,
         })
     }
 

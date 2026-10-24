@@ -44,7 +44,9 @@ use nvx::gpt::{Disk, Expected, ExpectedPartition};
 use nvx::uuid::Uuid;
 use runtime_adapter::GUEST_BUILD;
 use runtime_adapter::layered::{RECORD_NAME, STAGED_NAME};
-use runtime_adapter::root::{DEFAULT_RUNTIME, JournalPolicy, OverlayMode, RootConfig, RootStage};
+use runtime_adapter::root::{
+    DEFAULT_RUNTIME, JournalPolicy, Listeners, OverlayMode, RootConfig, RootStage,
+};
 use serde_json::{Value, json};
 
 use common::{Fixtures, Printed, Sandbox};
@@ -989,8 +991,9 @@ fn assert_failed(printed: &Printed, stage: RootStage, problem: &str) {
 /// Checks what the launch recorded in the sandbox's store: a VM with the layered `root` of the
 /// image `distro`, over `scratch` or RAM, the image of the identity that the launch expects, the
 /// bindings that the store stages for the images, which the launch checked, the boot tokens of its
-/// plan alone, after the launch's own, and the root configuration that the host sent, whether or
-/// not the guest accepted it, which it returns.
+/// plan alone, after the launch's own, and the root configuration that the host sent, with
+/// unpublished listeners, since the VM has no network, whether or not the guest accepted it, which
+/// it returns.
 fn check_record(sandbox: &Sandbox, root: &Root, distro: &Distro, scratch: &Path) -> RootConfig {
     let read = |name: &str| -> Value {
         serde_json::from_str(&fs::read_to_string(sandbox.store.join(name)).unwrap()).unwrap()
@@ -1050,6 +1053,7 @@ fn check_record(sandbox: &Sandbox, root: &Root, distro: &Distro, scratch: &Path)
         scratch_journal: root.journal,
         mapping_count: root.table.mapping_count(),
         workload_identity: root.workload,
+        listeners: Some(Listeners::Unpublished),
         ..RootConfig::default()
     };
     let sent = String::from_utf8(config.encode()).unwrap();

@@ -6,7 +6,9 @@
 //! records what it launches, with the bindings that it checked, and refuses options that do not
 //! make a command, networks that the plan refuses before it launches anything, shares that it
 //! cannot export before it touches the store, executions whose starts the guest would not take, and
-//! more executions than the guest runs at once. The tests need no hypervisor.
+//! more executions than the guest runs at once. The root configuration says whether the network
+//! publishes the guest's listeners, and executions find the URL of the network's proxy in their
+//! environment, from the plan that the record keeps. The tests need no hypervisor.
 #![cfg(feature = "host")]
 
 use std::ffi::OsString;
@@ -18,23 +20,24 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::time::{Duration, Instant};
 
+use nvx::exec::{Key, Limits, Timers, Window};
 use nvx::host::artifacts::Artifacts;
 use nvx::host::filesystem::GUEST_EXPORT;
 use nvx::host::network;
-use nvx::host::sandbox::SandboxPlan;
 use nvx::host::sandbox::distro::DistroFormat;
 use nvx::host::sandbox::scratch::CLAIM_RELEASE_WAIT;
+use nvx::host::sandbox::{SandboxNetwork, SandboxPlan};
 use nvx::protocol::root::{ImageFormat, RootImage, RootLayout, RootUpper};
 use nvx::protocol::{HostMap, MAX_HOST_MAPPINGS};
 use nvx::uuid::Uuid;
 use nvx::{ErrorCode, ErrorKind, Hypervisor};
-use runtime_adapter::exec::MAX_EXECUTIONS;
+use runtime_adapter::exec::{MAX_EXECUTIONS, Start};
 use runtime_adapter::hook::STEP_HOOK;
 use runtime_adapter::layered::{
-    Bindings, LaunchRecord, LayeredLaunch, RECORD_NAME, SANDBOX_TOKEN, STAGED_NAME, Share, Shares,
-    Staged, read_network,
+    Bindings, LaunchRecord, LayeredLaunch, PROXY_VARIABLES, RECORD_NAME, SANDBOX_TOKEN,
+    STAGED_NAME, Share, Shares, Staged, read_network, with_proxy,
 };
-use runtime_adapter::root::RootConfig;
+use runtime_adapter::root::{Listeners, RootConfig};
 use serde_json::{Value, json};
 
 /// The SHA-256 digest of 1 KiB of zeros, the content of the tests' images with a manifest.
@@ -245,6 +248,7 @@ fn a_layered_launch_plans_its_blocks_and_boot_tokens_with_the_adapters_plan() {
     let config = RootConfig {
         distro_sectors: Some(3),
         scratch_sectors: Some(8),
+        listeners: Some(Listeners::Unpublished),
         ..RootConfig::default()
     };
     assert_eq!(launch.config, config);
@@ -386,6 +390,7 @@ fn a_layered_launch_passes_what_the_guest_checks_as_it_is() {
     .unwrap();
     let config = RootConfig {
         runtime: "run/relative".to_owned(),
+        listeners: Some(Listeners::Unpublished),
         ..RootConfig::default()
     };
     assert_eq!(launch.config, config);
@@ -1327,8 +1332,7 @@ fn a_launch_renders_each_element_of_its_network_through_the_plan() {
         let path = directory.join(format!("{name}.json"));
         fs::write(&path, form.to_string()).unwrap();
         let network = read_network(&path).unwrap();
-        let mut launch = without.clone();
-        launch.plan = launch.plan.with_network(Some(network.clone()));
+        let launch = without.clone().with_network(Some(network.clone()));
         // NVX's lowering renders the network, as it does for NVX's own sandbox profile, and the
         // plan puts it after the block devices, before the launch's own options.
         assert_eq!(
@@ -1343,14 +1347,30 @@ fn a_launch_renders_each_element_of_its_network_through_the_plan() {
             .chain(options.iter().cloned())
             .collect::<Vec<_>>();
         assert_eq!(arguments(&launch), expected, "{name}");
+        assert_eq!(launch.plan.network(), Some(&network), "{name}");
         assert_eq!(launch.plan.proxy_url().as_deref(), proxy_url, "{name}");
         // The network adds no boot token: OpenVMM appends the guest's network settings itself.
         assert_eq!(
             launch.kernel_command_line().unwrap(),
             without.kernel_command_line().unwrap()
         );
+        // The root configuration says whether OpenVMM publishes the guest's listeners: with
+        // ingress allowed, or with host-loopback access allowed, which forwards need, but not
+        // with outbound host-loopback access alone, nor through a proxy.
+        let published = ["ingress", "host-loopback-allowed", "forwards"].contains(&name);
+        let listeners = if published {
+            Listeners::Published
+        } else {
+            Listeners::Unpublished
+        };
+        let config = RootConfig {
+            listeners: Some(listeners),
+            ..without.config.clone()
+        };
+        assert_eq!(launch.config, config, "{name}");
 
-        // The record keeps the network in the plan, as the file gave it.
+        // The record keeps the network in the plan, as the file gave it, and the root
+        // configuration that says whether the listeners are published.
         let record = LaunchRecord {
             kernel_command_line: "nvx_sandbox=1",
             layered: Some(&launch),
@@ -1360,8 +1380,15 @@ fn a_launch_renders_each_element_of_its_network_through_the_plan() {
         let plan: SandboxPlan = serde_json::from_value(json["plan"].clone()).unwrap();
         assert_eq!(plan, launch.plan, "{name}");
         assert_eq!(plan.proxy_url().as_deref(), proxy_url, "{name}");
+        let line = format!("\nlisteners={}\n", listeners.as_str());
+        let encoded = json["rootConfiguration"].as_str().unwrap();
+        assert!(encoded.ends_with(&line), "{name}: {encoded:?}");
+
+        // Taking the network away leaves the launch as it was without one.
+        assert_eq!(launch.with_network(None), without, "{name}");
     }
-    // Without a network, the record says so.
+    // Without a network, the record says so, and nothing publishes the guest's listeners.
+    assert_eq!(without.config.listeners, Some(Listeners::Unpublished));
     let record = LaunchRecord {
         kernel_command_line: "nvx_sandbox=1",
         layered: Some(&without),
@@ -1552,6 +1579,159 @@ fn a_launch_reads_only_the_networks_that_the_plan_takes() {
         );
         let cause = std::error::Error::source(&error).unwrap().to_string();
         assert!(cause.contains(&problem), "{problem}: {cause}");
+    }
+}
+
+/// Returns the start of an execution of `/usr/bin/env` with the environment of the `NAME=VALUE`
+/// entries `environment`.
+fn printing<E: Into<Vec<u8>>>(environment: impl IntoIterator<Item = E>) -> Start {
+    let limits = Limits::new(16 * 1024, Window::frames(4), Window::frames(8)).unwrap();
+    let timers = Timers::new(Duration::from_secs(1), Duration::from_secs(5));
+    Start::new(Key::new(1, 2), limits, timers, ["/usr/bin/env"]).with_environment(environment)
+}
+
+/// Returns the network of a guest at `10.0.0.2/24` whose one way out is a proxy at port 3128 of
+/// host loopback, with the scheme `scheme`, which the test `directory` reads from a file.
+fn proxy_only(directory: &Path, scheme: Value) -> SandboxNetwork {
+    let form = network_with(|network| {
+        network["egress"] = json!("deny");
+        network["proxy"] = json!({"port": 3128, "scheme": scheme});
+    });
+    let path = directory.join("proxy.json");
+    fs::write(&path, form.to_string()).unwrap();
+    read_network(&path).unwrap()
+}
+
+#[test]
+fn an_execution_finds_the_url_of_its_network_s_proxy_in_its_environment() {
+    let directory = directory("layered-proxy");
+    let distro = image(directory.join("distro.erofs"), 512);
+    let without = LayeredLaunch::new(&distro, ImageFormat::Erofs, identity(), None, None).unwrap();
+    let own = ["PATH=/usr/bin:/bin", "EMPTY=", "TWICE=a=b"];
+
+    // Each variable holds the URL of the proxy as the guest sees it, at its gateway, after the
+    // start's own entries, which the start carries to the guest as its own.
+    for (scheme, url) in [
+        (Value::Null, "10.0.0.1:3128"),
+        (json!("http"), "http://10.0.0.1:3128"),
+        (json!("https"), "https://10.0.0.1:3128"),
+    ] {
+        let launch = without
+            .clone()
+            .with_network(Some(proxy_only(&directory, scheme)));
+        let given = with_proxy(printing(own), &launch.plan);
+        let proxies = PROXY_VARIABLES.map(|variable| format!("{variable}={url}"));
+        let expected = own.into_iter().map(str::to_owned).chain(proxies);
+        assert_eq!(given, printing(expected), "{url}");
+        assert_eq!(Start::decode(&given.encode()), Ok(given), "{url}");
+    }
+    assert_eq!(
+        PROXY_VARIABLES,
+        ["http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY"]
+    );
+
+    // A start whose caller chose its own proxy settings keeps them, even if they name only one of
+    // the variables, since a client that reads another would not find the caller's.
+    let launch = without
+        .clone()
+        .with_network(Some(proxy_only(&directory, json!("http"))));
+    for variable in PROXY_VARIABLES {
+        let chosen = [
+            format!("{variable}=http://proxy.example:8080"),
+            "A=1".to_owned(),
+        ];
+        let start = printing(chosen.clone());
+        assert_eq!(
+            with_proxy(start, &launch.plan),
+            printing(chosen),
+            "{variable}"
+        );
+    }
+    // A name that only starts or ends like one of them is not one.
+    let similar = ["http_proxy_port=1", "no_proxy=*", "XHTTP_PROXY=x"];
+    let given = with_proxy(printing(similar), &launch.plan);
+    assert_eq!(
+        given.environment.len(),
+        similar.len() + PROXY_VARIABLES.len()
+    );
+
+    // Without a proxy, an execution's environment is its start's, whatever the network.
+    let path = directory.join("open.json");
+    fs::write(&path, open_network().to_string()).unwrap();
+    let open = without
+        .clone()
+        .with_network(Some(read_network(&path).unwrap()));
+    for launch in [&without, &open] {
+        assert_eq!(with_proxy(printing(own), &launch.plan), printing(own));
+    }
+}
+
+#[test]
+fn the_record_of_a_launch_gives_back_its_plan() {
+    let directory = directory("layered-record-plan");
+    let distro = image(directory.join("distro.erofs"), 512);
+    let scratch = image(directory.join("scratch.ext4"), 512);
+    let empty = directory.join("store");
+    fs::create_dir_all(&empty).unwrap();
+    let error = LaunchRecord::read_plan(&empty).unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::Io, "{error}");
+
+    // The plan of a layered root, with its network, from which the host gives executions the
+    // URL of the network's proxy.
+    let launch = LayeredLaunch::new(
+        &distro,
+        ImageFormat::Erofs,
+        identity(),
+        Some(&scratch),
+        None,
+    )
+    .unwrap()
+    .with_network(Some(proxy_only(&directory, json!("http"))));
+    let record = LaunchRecord {
+        kernel_command_line: "nvx_sandbox=1",
+        layered: Some(&launch),
+    };
+    record.write(&directory).unwrap();
+    let plan = LaunchRecord::read_plan(&directory).unwrap().unwrap();
+    assert_eq!(plan, launch.plan);
+    let given = with_proxy(printing(["A=1"]), &plan);
+    assert_eq!(
+        given.environment.last(),
+        Some(&b"HTTPS_PROXY=http://10.0.0.1:3128".to_vec())
+    );
+    // A VM without a layered root has no plan.
+    let blockless = LaunchRecord {
+        kernel_command_line: "hostname=nvx-sandbox",
+        layered: None,
+    };
+    blockless.write(&directory).unwrap();
+    assert_eq!(LaunchRecord::read_plan(&directory).unwrap(), None);
+
+    // A record that is not one of this format's, or whose plan is not a plan, is unavailable.
+    let mut json = record.to_json().unwrap();
+    let mut cases = vec![("{".to_owned(), "EOF while parsing")];
+    json["format"] = json!(1);
+    cases.push((json.to_string(), "the record is not in format 2"));
+    json["format"] = json!(2);
+    json.as_object_mut().unwrap().remove("plan");
+    cases.push((json.to_string(), "the record has no plan"));
+    json["plan"] = json!({"distro": 1});
+    cases.push((json.to_string(), ""));
+    cases.push(("[2]".to_owned(), "the record is not in format 2"));
+    for (contents, cause) in cases {
+        fs::write(directory.join(RECORD_NAME), &contents).unwrap();
+        let error = LaunchRecord::read_plan(&directory).unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::Unavailable, "{contents}: {error}");
+        let path = directory.join(RECORD_NAME);
+        assert_eq!(
+            error.message(),
+            format!(
+                "cannot read the plan of the launch record {}",
+                path.display()
+            )
+        );
+        let source = std::error::Error::source(&error).unwrap().to_string();
+        assert!(source.contains(cause), "{contents}: {source}");
     }
 }
 

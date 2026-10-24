@@ -39,7 +39,9 @@
 //! the root is of the build that it ships, sends the table, then starts the sandbox, and tears down
 //! a VM whose order failed. Once the host started the sandbox, the worker also runs several
 //! [`exec`]utions at once through NVX's execution engine and its guest binding, from one loop that
-//! never blocks.
+//! never blocks. The executions enter the root with the publication of listeners that the root
+//! configuration names, and the host gives them the URL of the network's proxy, if any, in their
+//! environment.
 
 pub mod exec;
 pub mod frame;

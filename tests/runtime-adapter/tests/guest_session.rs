@@ -26,17 +26,18 @@
 //! at once, byte-exact, a stalled sink and a full stream to the host, which stall only what waits
 //! on them, executions that take turns at the stream, timeouts, cancellations, and stops, the
 //! starts, messages, and probes that the worker refuses, generations and resets, the descendants
-//! that a program leaves in its process group, and executions on a tty. The fake root prepares
-//! each execution's entry, as the worker describes it, in a directory of the tests' own that holds
-//! account databases, and then spawns the program without entering a root, which needs
-//! privileges, in the tests' own root and identity: the tests cover the identity that exactly one
-//! source names, the sandbox's or the start's, the entry's inputs, a program's working directory
-//! and environment, and the starts that the worker refuses for their identities. Where the tests
-//! can create cgroups, each fake root gives the worker a workload cgroup of the test's own, below
-//! which the executions run in cgroups of their own, and settle: the tests then also cover a
-//! descendant that leaves its program's process group, which the settlement ends, and an execution
-//! that does not settle, which keeps its place until the host stops the worker. Elsewhere, the
-//! programs run in process groups alone.
+//! that a program leaves in its process group, and executions on a tty. The fake root prepares each
+//! execution's entry, as the worker describes it, in a directory of the tests' own that holds
+//! account databases, and then spawns the program without entering a root, which needs privileges,
+//! in the tests' own root and identity: the tests cover the identity that exactly one source names,
+//! the sandbox's or the start's, the entry's inputs, the publication of listeners that the root
+//! configuration names, which refuses the capabilities that could forge a listener announcement
+//! while listeners are published, a program's working directory and environment, and the starts
+//! that the worker refuses for their identities. Where the tests can create cgroups, each fake root
+//! gives the worker a workload cgroup of the test's own, below which the executions run in cgroups
+//! of their own, and settle: the tests then also cover a descendant that leaves its program's
+//! process group, which the settlement ends, and an execution that does not settle, which keeps its
+//! place until the host stops the worker. Elsewhere, the programs run in process groups alone.
 #![cfg(all(feature = "guest", target_os = "linux"))]
 
 use std::collections::BTreeMap;
@@ -63,7 +64,7 @@ use nix::sys::wait::{self, Id, WaitPidFlag, WaitStatus};
 use nix::unistd::Pid;
 use nvx::exec::{Cause, Key, LaunchFailure, Limits, Outcome, Pool, Status, Stream, Timers, Window};
 use nvx::guest::cgroup::Layout;
-use nvx::guest::entry::{self, Capabilities, Capability, Prepared};
+use nvx::guest::entry::{self, Capabilities, Capability, Prepared, Publication};
 use nvx::guest::mappings::{Access, Mapping};
 use nvx::guest::nvxs::GuestConnectionError;
 use nvx::guest::spawn::{self, Spawned};
@@ -84,7 +85,8 @@ use runtime_adapter::frame::{Decoder, FrameError, HEADER_LEN, MAX_BODY, Message}
 use runtime_adapter::guest::{self, NO_ROOT, RECEIVE_WINDOW, ServeError, Served};
 use runtime_adapter::probe::{Facts, Probe};
 use runtime_adapter::root::{
-    JournalPolicy, MapFailure, OverlayMode, Ready, RootConfig, RootFailure, RootStage, encode_maps,
+    JournalPolicy, Listeners, MapFailure, OverlayMode, Ready, RootConfig, RootFailure, RootStage,
+    encode_maps,
 };
 use runtime_adapter::worker::{
     self, Entrance, EntryOperations, MAX_EXECUTIONS, MapError, RootOperations, Worked,
@@ -1857,11 +1859,13 @@ fn the_worker_reports_the_stage_that_failed_and_ends_with_its_status() {
     }
 }
 
-/// Returns the entrance of an execution as `identity`, with the default hostname.
+/// Returns the entrance of an execution as `identity`, with the default hostname and published
+/// listeners, as a configuration that names no publication has them.
 fn entrance(identity: entry::Identity) -> Entrance {
     Entrance {
         identity,
         hostname: entry::DEFAULT_HOSTNAME.as_bytes().to_vec(),
+        publication: Publication::Published,
     }
 }
 
@@ -3581,6 +3585,81 @@ fn an_execution_enters_the_root_as_the_identity_that_its_start_names() {
     ]
     .map(entrance);
     assert_eq!(entrances(&root), expected);
+}
+
+#[test]
+fn an_execution_enters_the_root_with_the_publication_of_listeners_that_its_configuration_names() {
+    // Listeners are published unless the configuration names them unpublished. While they are,
+    // the entry refuses at stage 0 the capabilities that could forge a listener announcement,
+    // binding a privileged port and opening a raw socket, which it allows otherwise, as it allows
+    // the other capabilities of its allowlist either way.
+    let capabilities = [
+        Capability::NET_BIND_SERVICE,
+        Capability::NET_RAW,
+        Capability::CHOWN,
+    ];
+    for (listeners, publication) in [
+        (None, Publication::Published),
+        (Some(Listeners::Published), Publication::Published),
+        (Some(Listeners::Unpublished), Publication::Unpublished),
+    ] {
+        let config = RootConfig {
+            listeners,
+            ..RootConfig::default()
+        };
+        let mut host = Host::configured(FakeRoot::booting(&layout()), &config);
+        for (id, capability) in (1..).zip(capabilities) {
+            let identity = exec::Identity {
+                capabilities: 1 << capability.number(),
+                ..exec::Identity::new(0, 0)
+            };
+            host.start(
+                start_of(id, shell("exit 0")).with_identity(identity),
+                Vec::new(),
+            );
+        }
+        host.run_until(|host| (1..=3).all(|id| host.outcome(id).is_some()));
+        for (id, capability) in (1..).zip(capabilities) {
+            if publication == Publication::Published && capability != Capability::CHOWN {
+                let failure = LaunchFailure::new(0, Errno::EPERM as i32);
+                let outcome = host.outcome(id).unwrap();
+                assert_eq!(
+                    outcome.launch_failure(),
+                    Some(failure),
+                    "{listeners:?}: {capability}"
+                );
+            } else {
+                check_lossless(&host, id, Status::Exited(0));
+            }
+        }
+        let (root, worked) = host.stop();
+        assert_eq!(worked.unwrap(), Worked::Stopped);
+        let expected = capabilities.map(|capability| Entrance {
+            publication,
+            ..entrance(
+                entry::Identity::new(0, 0).capabilities(Capabilities::EMPTY.with(capability)),
+            )
+        });
+        assert_eq!(entrances(&root), expected, "{listeners:?}");
+    }
+
+    // The check of a sandbox's workload identity enters with the configuration's publication, as
+    // each execution does.
+    let config = RootConfig {
+        listeners: Some(Listeners::Unpublished),
+        ..sandbox()
+    };
+    let mut host = Host::configured(FakeRoot::booting(&layout()), &config);
+    host.start(start_of(1, shell("exit 0")), Vec::new());
+    host.run_until(|host| host.outcome(1).is_some());
+    check_lossless(&host, 1, Status::Exited(0));
+    let (root, worked) = host.stop();
+    assert_eq!(worked.unwrap(), Worked::Stopped);
+    let workload = Entrance {
+        publication: Publication::Unpublished,
+        ..entrance(entry::Identity::new(WORKLOAD.0, WORKLOAD.1))
+    };
+    assert_eq!(entrances(&root), [workload.clone(), workload]);
 }
 
 #[test]

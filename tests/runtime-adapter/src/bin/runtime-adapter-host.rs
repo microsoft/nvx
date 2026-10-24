@@ -37,12 +37,14 @@
 //!   address and the policy that OpenVMM enforces there, in the serde form of a plan's network,
 //!   which the launch reads before anything else, so that it refuses a network that the plan
 //!   refuses before it needs NVX's artifacts or the store, and puts on the adapter's plan, which
-//!   renders it; see `runtime_adapter::layered::read_network`. Before it spawns the VM, the launch
-//!   checks the bindings that STORE stages for the image and the scratch image, from their metadata
-//!   alone, and fails if STORE stages none for either, or one no longer holds, as for an image that
-//!   changed after it was staged. It hands OpenVMM the files that the checks opened, which it holds
-//!   until the guest has assembled the root, or until it has torn down a launch that failed, and
-//!   records the plan, with its network, and the bindings.
+//!   renders it; see `runtime_adapter::layered::read_network`. The root configuration says whether
+//!   the guest's listeners are published through the network, as OpenVMM publishes them, and
+//!   unpublished without one; see `runtime_adapter::layered::LayeredLaunch::with_network`. Before
+//!   it spawns the VM, the launch checks the bindings that STORE stages for the image and the
+//!   scratch image, from their metadata alone, and fails if STORE stages none for either, or one no
+//!   longer holds, as for an image that changed after it was staged. It hands OpenVMM the files
+//!   that the checks opened, which it holds until the guest has assembled the root, or until it has
+//!   torn down a launch that failed, and records the plan, with its network, and the bindings.
 //!
 //!   SHARES, `--share HOST:TARGET[:ro]... [--deny PATH]... [--reserved TARGET]...
 //!   [--share-root DIR]...`, shares each host directory or regular file HOST with the root, at the
@@ -920,8 +922,7 @@ fn launch(
             if let Some(export) = layered.shares.plan()? {
                 launch.share(export)?;
             }
-            launch.plan = launch.plan.with_network(network);
-            Ok(launch)
+            Ok(launch.with_network(network))
         })
         .transpose()
         .map_err(|error| describe(&error))?;

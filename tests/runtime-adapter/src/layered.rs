@@ -32,11 +32,20 @@
 //!
 //! A launch may give the VM a network: a `SandboxNetwork`, the guest's address and the policy that
 //! OpenVMM enforces there, which [`read_network`] reads from a file in the serde form of a plan's
-//! network, and which the launch puts on the plan with `SandboxPlan::with_network`. The plan
-//! renders its OpenVMM arguments through NVX's one lowering of a policy,
-//! `nvx::host::network::openvmm_arguments`, as it renders those of NVX's sandbox profile. OpenVMM
-//! appends the guest's network settings to the kernel command line itself, and NVX's `/init`
-//! configures the network device from them before it hands the VM to the guest agent.
+//! network, and which [`LayeredLaunch::with_network`] puts on the plan. The plan renders its
+//! OpenVMM arguments through NVX's one lowering of a policy, `nvx::host::network::openvmm_arguments`,
+//! as it renders those of NVX's sandbox profile. OpenVMM appends the guest's network settings to
+//! the kernel command line itself, and NVX's `/init` configures the network device and its
+//! addresses from them, and starts the announcer of the guest's listeners if OpenVMM publishes
+//! them, before it hands the VM to the guest agent, which leaves all three to `/init`.
+//!
+//! The guest's executions follow the network. The root configuration says whether the guest's
+//! listeners are published, as OpenVMM publishes them: to the host's private networks with
+//! ingress allowed, or on host loopback with host-loopback access allowed. The executions enter
+//! the root with that publication, which refuses `CAP_NET_BIND_SERVICE` and `CAP_NET_RAW` while
+//! listeners are published, since either could forge an announcement. The host gives an
+//! execution the URL of a proxy-only network's proxy, as the guest sees it, in its environment,
+//! with [`with_proxy`].
 //!
 //! The host records what it launched in the sandbox's store, beside NVX's runtime records, as a
 //! [`LaunchRecord`], with the bindings that the launch checked, and the plan, which keeps the
@@ -53,6 +62,7 @@ use nvx::host::filesystem::{
     self, ExportPlan, ExportRequest, Mapping, PathList, ReservedTargets, Target,
 };
 use nvx::host::launch::DEFAULT_MEMORY_MIB;
+use nvx::host::network::{Access, HostLoopback};
 use nvx::host::sandbox::distro::{DISTRO_POLICY_REVISION, DistroBinding};
 use nvx::host::sandbox::scratch::{CLAIM_RELEASE_WAIT, ScratchBinding};
 use nvx::host::sandbox::{
@@ -65,7 +75,8 @@ use nvx::uuid::Uuid;
 use nvx::{Error, Hypervisor, Result};
 use serde_json::{Value, json};
 
-use crate::root::{RootConfig, encode_maps, path_problem};
+use crate::exec::Start;
+use crate::root::{Listeners, RootConfig, encode_maps, path_problem};
 
 /// The name of the record of a launch in the sandbox's store.
 pub const RECORD_NAME: &str = "runtime-adapter.json";
@@ -79,6 +90,9 @@ pub const STAGED_FORMAT: u64 = 1;
 /// adapter's initramfs replaces with the guest agent; see [`crate::initramfs`]. An adapter's plan
 /// renders none of the parameters of NVX's sandbox profile, so the launch passes it as its own.
 pub const SANDBOX_TOKEN: &str = "nvx_sandbox=1";
+/// The environment variables that hold the URL of a network's proxy for an execution, as
+/// [`with_proxy`] sets them: those of HTTP clients, in lowercase and in uppercase.
+pub const PROXY_VARIABLES: [&str; 4] = ["http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY"];
 /// The size of a sector of a block device, in bytes.
 const SECTOR_SIZE: u64 = 512;
 
@@ -105,12 +119,13 @@ pub struct LayeredLaunch {
 impl LayeredLaunch {
     /// Returns the launch of the image at `distro`, in `format`, of which the guest expects the
     /// identity `identity`, over the ext4 scratch image at `scratch`, or over RAM without one,
-    /// without bindings, without shares, and without a network, which `SandboxPlan::with_network`
-    /// puts on the plan.
+    /// without bindings, without shares, and without a network, which
+    /// [`with_network`](Self::with_network) puts on the plan.
     ///
     /// The root configuration takes its defaults, with the runtime directory `runtime` instead, if
-    /// any, as it is, so that the guest checks it, and with the size of each image, if it is a
-    /// whole number of sectors, which the guest checks against its block device.
+    /// any, as it is, so that the guest checks it, with the size of each image, if it is a whole
+    /// number of sectors, which the guest checks against its block device, and with the guest's
+    /// listeners unpublished, as they are without a network.
     ///
     /// Fails with [`ErrorKind::Unsupported`](nvx::ErrorKind::Unsupported) if a path is not
     /// Unicode, and otherwise as `SandboxPlan::validated` does, such as for an image that is not a
@@ -131,6 +146,7 @@ impl LayeredLaunch {
                 .map(sectors)
                 .transpose()?
                 .flatten(),
+            listeners: Some(listeners(None)),
             ..RootConfig::default()
         };
         if let Some(runtime) = runtime {
@@ -167,6 +183,17 @@ impl LayeredLaunch {
         self.export
             .as_ref()
             .map_or_else(Vec::new, ExportPlan::guest_table)
+    }
+
+    /// Returns the launch with `network` on its plan, with `SandboxPlan::with_network`, or without
+    /// a network, and with a root configuration that says whether the guest's listeners are
+    /// published through it: as OpenVMM publishes them, with ingress allowed, to the host's
+    /// private networks, or with host-loopback access allowed, on host loopback.
+    #[must_use]
+    pub fn with_network(mut self, network: Option<SandboxNetwork>) -> Self {
+        self.config.listeners = Some(listeners(network.as_ref()));
+        self.plan = self.plan.with_network(network);
+        self
     }
 
     /// Returns the VM's kernel command line: [`SANDBOX_TOKEN`], then the boot tokens of the
@@ -460,8 +487,8 @@ fn authorize(roots: &[PathBuf], path: &Path) -> Result<()> {
 }
 
 /// Reads the network of a launch from the file at `path`: one `SandboxNetwork`, in the serde form
-/// of a plan's network, as NVX's plan persists it, which `SandboxPlan::with_network` puts on the
-/// adapter's plan. Without a network, a launch has no network device.
+/// of a plan's network, as NVX's plan persists it, which [`LayeredLaunch::with_network`] puts on
+/// the adapter's plan. Without a network, a launch has no network device.
 ///
 /// The form requires every member and refuses any other, and reading it checks the network as
 /// `SandboxNetwork::new` does: the guest's address must leave a gateway, and the policy must lower
@@ -478,6 +505,44 @@ pub fn read_network(path: &Path) -> Result<SandboxNetwork> {
     serde_json::from_slice(&bytes).map_err(|error| {
         Error::unsupported(format!("the network {} is refused", path.display())).with_source(error)
     })
+}
+
+/// Returns whether the guest's listeners are published through `network`, or without one, as
+/// OpenVMM publishes them: with ingress allowed, to the host's private networks, or with
+/// host-loopback access allowed, on host loopback. OpenVMM tells NVX's `/init` so on the kernel
+/// command line, and `/init` then starts the announcer of the guest's listeners.
+fn listeners(network: Option<&SandboxNetwork>) -> Listeners {
+    let published = network.is_some_and(|network| {
+        let policy = network.policy();
+        policy.ingress == Access::Allow || policy.host_loopback == HostLoopback::Allow
+    });
+    if published {
+        Listeners::Published
+    } else {
+        Listeners::Unpublished
+    }
+}
+
+/// Returns `start` with the URL of the proxy of `plan`'s network, as the guest sees it,
+/// `SandboxPlan::proxy_url`, in each of the [`PROXY_VARIABLES`], after the start's own entries:
+/// NVX gives an execution no proxy settings, and an execution's environment is exactly its
+/// start's. A start of a plan without a proxy, or that names any of those variables, whose caller
+/// chose its own proxy settings, is returned as it is.
+pub fn with_proxy(mut start: Start, plan: &SandboxPlan) -> Start {
+    let Some(url) = plan.proxy_url() else {
+        return start;
+    };
+    let named = start.environment.iter().any(|entry| {
+        let name = entry.split(|byte| *byte == b'=').next().unwrap_or_default();
+        PROXY_VARIABLES
+            .iter()
+            .any(|variable| name == variable.as_bytes())
+    });
+    if !named {
+        let entries = PROXY_VARIABLES.map(|variable| format!("{variable}={url}").into_bytes());
+        start.environment.extend(entries);
+    }
+    start
 }
 
 /// Returns the adapter's plan of the image at `distro`, in `format`, of which the guest expects
@@ -802,7 +867,7 @@ fn members<'a, const N: usize>(value: &'a Value, names: [&str; N]) -> Option<[&'
         .ok()
 }
 
-/// Returns the error of a record of staged images that is invalid, which `problem` says.
+/// Returns the error of a record in the sandbox's store that is invalid, which `problem` says.
 fn invalid(problem: &str) -> Error {
     Error::unavailable(format!("the record {problem}"))
 }
@@ -828,12 +893,13 @@ fn write_record(path: &Path, record: &Value) -> Result<()> {
 ///
 /// The `mode` is `layered`, or `blockless` for a VM without a layered root, whose `plan`,
 /// `bindings`, and `rootConfiguration` are `null`. The `plan` is the persisted form of the VM's
-/// `SandboxPlan`, whose `network` keeps the VM's network, in the form that [`read_network`]
-/// reads, or `null` without one. The `bindings` are those that the launch checked, which the store
-/// stages for the plan's images, as [`Staged::bindings`] finds them, in the serde forms of NVX's
-/// `DistroBinding` and `ScratchBinding`; the scratch image's is `null` for an upper in RAM, which
-/// has no scratch image. The `rootConfiguration` is the encoding of the root configuration that
-/// the host sends, as it sends it, whether or not the guest accepts it.
+/// `SandboxPlan`, which [`read_plan`](Self::read_plan) reads back, whose `network` keeps the VM's
+/// network, in the form that [`read_network`] reads, or `null` without one. The `bindings` are
+/// those that the launch checked, which the store stages for the plan's images, as
+/// [`Staged::bindings`] finds them, in the serde forms of NVX's `DistroBinding` and
+/// `ScratchBinding`; the scratch image's is `null` for an upper in RAM, which has no scratch image.
+/// The `rootConfiguration` is the encoding of the root configuration that the host sends, as it
+/// sends it, whether or not the guest accepts it.
 #[derive(Clone, Copy, Debug)]
 pub struct LaunchRecord<'a> {
     /// The VM's kernel command line.
@@ -879,5 +945,37 @@ impl LaunchRecord<'_> {
     /// [`ErrorKind::Io`](nvx::ErrorKind::Io) if the record cannot be written.
     pub fn write(&self, directory: &Path) -> Result<()> {
         write_record(&directory.join(RECORD_NAME), &self.to_json()?)
+    }
+
+    /// Reads the plan of the launch that `directory`, the sandbox's store, records: the plan of
+    /// the VM's layered root, with its network, or `None` for a VM without one.
+    ///
+    /// Fails with [`ErrorKind::Io`](nvx::ErrorKind::Io) if the record cannot be read, as when the
+    /// store holds none, and with [`ErrorKind::Unavailable`](nvx::ErrorKind::Unavailable) if it
+    /// is not JSON, is not in format [`RECORD_FORMAT`], or has no plan in a plan's serde form.
+    pub fn read_plan(directory: &Path) -> Result<Option<SandboxPlan>> {
+        let path = directory.join(RECORD_NAME);
+        let text = fs::read_to_string(&path).map_err(|error| {
+            Error::io(format!("cannot read {}", path.display())).with_source(error)
+        })?;
+        let unreadable = || {
+            Error::unavailable(format!(
+                "cannot read the plan of the launch record {}",
+                path.display()
+            ))
+        };
+        let value = serde_json::from_str::<Value>(&text)
+            .map_err(|error| unreadable().with_source(error))?;
+        if value.get("format").and_then(Value::as_u64) != Some(RECORD_FORMAT) {
+            let problem = format!("is not in format {RECORD_FORMAT}");
+            return Err(unreadable().with_source(invalid(&problem)));
+        }
+        match value.get("plan") {
+            None => Err(unreadable().with_source(invalid("has no plan"))),
+            Some(Value::Null) => Ok(None),
+            Some(plan) => serde_json::from_value(plan.clone())
+                .map(Some)
+                .map_err(|error| unreadable().with_source(error)),
+        }
     }
 }

@@ -126,21 +126,24 @@
 //! - Each program enters the assembled root through `nvx::guest::entry`, as an [`Entrance`]
 //!   describes it: in new mount, PID, and UTS namespaces, with the root moved over `/`, the entry's
 //!   default hostname, `nvx-sandbox`, the image's own machine ID, and no time status, so that the
-//!   entry binds nothing into the root, and with published listeners, the entry's default. It runs
-//!   as the identity that exactly one source names: the sandbox's workload identity, which the root
-//!   configuration names, with no supplementary groups or capabilities, or, in a sandbox without
-//!   one, the identity that its start names, with its supplementary groups, its capabilities, and
-//!   its account mode. A start that names an identity in a sandbox with a workload identity, or
-//!   none in a sandbox without one, is refused with `EINVAL`. Before the worker prepares the
-//!   execution's cgroup, the entry checks the identity, and reads its account in existing-account
-//!   mode: it refuses with `EPERM` a capability outside its allowlist, any capability of a user ID
-//!   other than 0, and `CAP_NET_BIND_SERVICE` and `CAP_NET_RAW` while listeners are published, with
-//!   `ENOENT` an identity without the user ID's passwd entry or the group ID's group entry, with
-//!   the error of an account database or a root that it cannot read, and with `EINVAL` otherwise.
-//!   The program starts in the working directory of its start, or in the root's `/`, with exactly
-//!   the environment of its start, and leads a session of its own, without a controlling terminal,
-//!   and the process group that the session creates. As PID 1 of its PID namespace, its end ends
-//!   every process of the namespace.
+//!   entry binds nothing into the root, and with the publication of listeners that the root
+//!   configuration names, published unless it names them unpublished, as the entry's default is. It
+//!   runs as the identity that exactly one source names: the sandbox's workload identity, which the
+//!   root configuration names, with no supplementary groups or capabilities, or, in a sandbox
+//!   without one, the identity that its start names, with its supplementary groups, its
+//!   capabilities, and its account mode. A start that names an identity in a sandbox with a
+//!   workload identity, or none in a sandbox without one, is refused with `EINVAL`. Before the
+//!   worker prepares the execution's cgroup, the entry checks the identity, and reads its account
+//!   in existing-account mode: it refuses with `EPERM` a capability outside its allowlist, any
+//!   capability of a user ID other than 0, and `CAP_NET_BIND_SERVICE` and `CAP_NET_RAW` while
+//!   listeners are published, with `ENOENT` an identity without the user ID's passwd entry or the
+//!   group ID's group entry, with the error of an account database or a root that it cannot read,
+//!   and with `EINVAL` otherwise. The program starts in the working directory of its start, or in
+//!   the root's `/`, with exactly the environment of its start, and leads a session of its own,
+//!   without a controlling terminal, and the process group that the session creates. As PID 1 of
+//!   its PID namespace, its end ends every process of the namespace. The guest's network device,
+//!   its addresses, and the announcer of its listeners stay with NVX's `/init`, which configures
+//!   them before PID 1 starts.
 //! - Each execution runs in a cgroup of its own below the workload cgroup, `execution-N`, where N
 //!   counts the cgroups that the worker prepared. The worker prepares it with
 //!   `nvx::guest::cgroup::ExecutionCgroup::prepare`, and the program joins it as it spawns,
@@ -211,7 +214,7 @@ use nix::sys::wait::{self, Id, WaitPidFlag, WaitStatus};
 use nix::unistd::Pid;
 use nvx::gpt::Expected;
 use nvx::guest::cgroup::Layout;
-use nvx::guest::entry::{self, Entry, Identity, Prepared};
+use nvx::guest::entry::{self, Entry, Identity, Prepared, Publication};
 use nvx::guest::mappings::{Mapping, SourceRoot};
 use nvx::guest::nvxs::GuestConnectionError;
 use nvx::guest::process::Child;
@@ -230,8 +233,8 @@ use crate::frame::{MAX_BODY, MAX_TEXT_BODY, Message, truncated};
 use crate::guest::{self, ServeError, Step};
 use crate::probe::{Facts, Probe};
 use crate::root::{
-    DEFAULT_FIRST_PARTITION_BOUND, JournalPolicy, OverlayMode, Ready, RootConfig, RootFailure,
-    RootStage,
+    DEFAULT_FIRST_PARTITION_BOUND, JournalPolicy, Listeners, OverlayMode, Ready, RootConfig,
+    RootFailure, RootStage,
 };
 use connection::{Connection, Received};
 use executions::{Executions, Sandbox};
@@ -267,20 +270,24 @@ const COMMAND_LINE: &str = "/proc/cmdline";
 /// How one execution enters the assembled root: the inputs of its `nvx::guest::entry::Entry` that
 /// the worker chooses. The entry keeps its defaults for the rest: new mount, PID, and UTS
 /// namespaces, with the root moved over `/`, the image's own machine ID and no time status, which
-/// leave `Entry::bind_runtime` nothing to bind, published listeners, which refuse
-/// `CAP_NET_BIND_SERVICE` and `CAP_NET_RAW`, and every device node.
+/// leave `Entry::bind_runtime` nothing to bind, and every device node.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Entrance {
     /// The identity: the sandbox's workload identity, or the one that the execution's start names.
     pub identity: Identity,
     /// The hostname, the sandbox's: the entry's default.
     pub hostname: Vec<u8>,
+    /// Whether the sandbox's listeners are published, as the root configuration says, which
+    /// refuses `CAP_NET_BIND_SERVICE` and `CAP_NET_RAW` while they are.
+    pub publication: Publication,
 }
 
 impl Entrance {
     /// Returns the entry into the root at `root`.
     pub fn entry(&self, root: impl Into<PathBuf>) -> Entry {
-        Entry::new(root, self.identity.clone()).hostname(self.hostname.clone())
+        Entry::new(root, self.identity.clone())
+            .hostname(self.hostname.clone())
+            .publication(self.publication)
     }
 }
 
@@ -608,8 +615,8 @@ fn serve_root<S: Read + Write + AsFd>(
 /// bootstraps the guest, assembles the root, mounts the export out of it, if the kernel command
 /// line names one, and checks the account of the sandbox's workload identity there, if the
 /// configuration names one, through `operations`. Returns the configuration, with the sandbox in
-/// which the executions run, or the failure of the stage that failed: the export's mount ends the
-/// assembly.
+/// which the executions run, with the publication of listeners that the configuration names, or
+/// the failure of the stage that failed: the export's mount ends the assembly.
 fn assemble(
     operations: &mut dyn RootOperations,
     body: &[u8],
@@ -629,11 +636,16 @@ fn assemble(
             .mount_export(export)
             .map_err(|problem| RootFailure::new(RootStage::Assembly, problem))?;
     }
-    let sandbox = Sandbox::new(config.workload_identity);
+    let publication = match config.listeners {
+        Some(Listeners::Published) | None => Publication::Published,
+        Some(Listeners::Unpublished) => Publication::Unpublished,
+    };
+    let sandbox = Sandbox::new(config.workload_identity, publication);
     if let Some((uid, gid)) = sandbox.identity {
         let entrance = Entrance {
             identity: Identity::new(uid, gid),
             hostname: sandbox.hostname.clone(),
+            publication: sandbox.publication,
         };
         operations.prepare(&entrance).map_err(|error| {
             RootFailure::new(
