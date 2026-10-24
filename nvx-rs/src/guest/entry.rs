@@ -40,9 +40,10 @@
 //! root's teardown detaches no busy mount, so a caller that tears the root down in the namespace
 //! where it bound them removes them first. A caller whose root is torn down after it ends, such
 //! as an agent that an init outlives, may instead bind them in a mount namespace of its own,
-//! which ends with it, and drop them. A bind that a rename moved while the walk ran, and that
-//! the attach failed to detach, fails the call, and stays mounted wherever it went, as
-//! [`mappings::bind`] describes.
+//! which ends with it, and drop them. A bind that fails has the call remove the binds that it
+//! made before it, and an [`Error::Rollback`] names any of them that stays mounted. A bind that a
+//! rename moved while the walk ran, and that the attach failed to detach, fails the call, and
+//! stays mounted wherever it went, as [`mappings::bind`] describes.
 //!
 //! # The execution
 //!
@@ -754,7 +755,7 @@ impl Entry {
     /// The binds last as long as the caller's mount namespace, unless [`RuntimeBinds::remove`]
     /// removes them, as a caller that tears the root down in that namespace does first. If a bind
     /// fails, the call removes the binds that it made before it, in reverse order, and returns
-    /// the failure.
+    /// the failure, or, if any of them stays mounted, an [`Error::Rollback`] that names them too.
     ///
     /// Each call binds again, over the earlier binds, so an adapter calls it once, before its
     /// first execution. It needs the privilege to mount, and Linux 6.8 or later.
@@ -778,9 +779,14 @@ impl Entry {
         let mut binds = Vec::new();
         if let Err(error) = self.bind_each(kernel, &root, &mut binds) {
             // The caller cannot remove the binds before the failure, which a teardown in this
-            // namespace would trip over.
-            let _ = mappings::unbind_with(kernel, &root, &binds);
-            return Err(error);
+            // namespace would trip over, so it learns of any that stays.
+            return Err(match mappings::unbind_with(kernel, &root, &binds) {
+                Ok(()) => error,
+                Err(teardown) => Error::Rollback {
+                    error: Box::new(error),
+                    teardown,
+                },
+            });
         }
         Ok(RuntimeBinds {
             root: Some(root),
@@ -1108,6 +1114,16 @@ pub enum Error {
     /// it is missing or not a regular file, the target cannot hold it, or the caller cannot
     /// mount.
     Resolver(MappingError),
+    /// [`Entry::bind_runtime`] failed to make a bind, and to remove some of the binds that it made
+    /// before it, which stay mounted, so that a teardown of the root in the caller's mount
+    /// namespace fails.
+    Rollback {
+        /// Why the bind failed: an [`Error::MachineId`], [`Error::TimeStatus`], or
+        /// [`Error::Resolver`].
+        error: Box<Error>,
+        /// The binds made before it that stay mounted.
+        teardown: TeardownError,
+    },
 }
 
 impl fmt::Display for Error {
@@ -1133,6 +1149,10 @@ impl fmt::Display for Error {
             Self::MachineId(error) => write!(formatter, "cannot bind the machine ID: {error}"),
             Self::TimeStatus(error) => write!(formatter, "cannot bind the time status: {error}"),
             Self::Resolver(error) => write!(formatter, "cannot bind the resolver file: {error}"),
+            Self::Rollback { error, teardown } => write!(
+                formatter,
+                "{error}; the binds made before it stay mounted: {teardown}"
+            ),
         }
     }
 }
@@ -1143,6 +1163,7 @@ impl std::error::Error for Error {
             Self::Root(error) => Some(error),
             Self::MachineId(error) | Self::TimeStatus(error) | Self::Resolver(error) => Some(error),
             Self::Account(error) => Some(error),
+            Self::Rollback { error, .. } => Some(error.as_ref()),
             _ => None,
         }
     }

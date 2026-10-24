@@ -712,6 +712,51 @@ fn a_failed_runtime_bind_removes_the_binds_before_it() {
 }
 
 #[test]
+fn a_failed_runtime_bind_names_the_binds_before_it_that_stay() {
+    // A missing resolver file, after the machine ID and the time status, whose bind is busy.
+    let fixture = RuntimeFixture::new();
+    let points = fixture.points();
+    fixture
+        .kernel
+        .fail(Operation::Unmount, &points[1], Errno::EBUSY);
+    let error = fixture
+        .entry()
+        .resolver(fixture.sources.join("missing"))
+        .bind_runtime_with(&mut fixture.kernel.clone())
+        .unwrap_err();
+    let Error::Rollback {
+        error: failure,
+        teardown,
+    } = &error
+    else {
+        panic!("{error:?}");
+    };
+    assert!(
+        matches!(
+            failure.as_ref(),
+            Error::Resolver(MappingError::System { step: Step::Source, error: code })
+                if *code == Errno::ENOENT as i32
+        ),
+        "{failure:?}"
+    );
+    let stayed: Vec<&Path> = teardown
+        .failures()
+        .iter()
+        .map(|stayed| stayed.target())
+        .collect();
+    assert_eq!(stayed, [Path::new("/run/nvx/time")]);
+    assert_eq!(
+        error.to_string(),
+        format!("{failure}; the binds made before it stay mounted: {teardown}")
+    );
+    assert!(std::error::Error::source(&error).is_some());
+    // The rollback attempts each bind, so the machine ID's is removed all the same.
+    assert_eq!(fixture.kernel.unmounts(), fixture.removals(&points[..2]));
+    assert!(fixture.kernel.mount_at(&points[1]).is_some());
+    assert!(fixture.kernel.mount_at(&points[0]).is_none());
+}
+
+#[test]
 fn a_runtime_bind_that_stays_is_reported() {
     let fixture = RuntimeFixture::new();
     let binds = fixture
