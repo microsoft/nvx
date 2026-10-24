@@ -77,6 +77,10 @@ pub const MAX_CHUNK: u32 = (MAX_BODY - KEY_LEN - 1) as u32;
 /// starts none while those that it started have not finished.
 pub const MAX_EXECUTIONS: usize = 8;
 
+/// The most bytes of each output stream of an execution that a [`HostExecution`] keeps: it
+/// cancels an execution whose stream would exceed them, so that its host holds no more.
+pub const MAX_CAPTURE: usize = 16 * 1024 * 1024;
+
 /// The code of a cause that the framing does not know, which no side decodes.
 const UNKNOWN_CAUSE: u8 = 0xff;
 
@@ -585,6 +589,10 @@ impl<'a> GuestMessage<'a> {
 /// it arrives, unless its caller stalls it, and a source that hands over the program's input, if
 /// the start says that the host sends it, then ends it.
 ///
+/// The sink keeps at most [`MAX_CAPTURE`] bytes of each stream. Once more of a stream arrives, the
+/// host's side cancels the execution, and its peer discards the rest once the grace ends, so that
+/// the outcome marks the stream truncated, with the cause [`Cause::Cancelled`].
+///
 /// Its caller sends the execution's [`Start`], hands it each of the guest's messages about the
 /// execution with [`deliver`](Self::deliver), and sends the frames that [`serve`](Self::serve)
 /// returns, until the peer [finished](Self::outcome). The host program's driver,
@@ -607,6 +615,8 @@ pub struct HostExecution {
     ended: bool,
     /// The peer's events, in order.
     events: Vec<peer::Event>,
+    /// Whether a stream outgrew [`MAX_CAPTURE`], so that the host's side cancelled the execution.
+    overflowed: bool,
 }
 
 impl HostExecution {
@@ -623,6 +633,7 @@ impl HostExecution {
             sent: 0,
             ended: false,
             events: Vec::new(),
+            overflowed: false,
         }
     }
 
@@ -648,7 +659,7 @@ impl HostExecution {
         self.stalled = stalled;
     }
 
-    /// Returns the bytes of `stream` that the sink took.
+    /// Returns the bytes of `stream` that the sink took, at most [`MAX_CAPTURE`].
     pub fn output(&self, stream: Stream) -> &[u8] {
         &self.output[position(stream)]
     }
@@ -695,13 +706,22 @@ impl HostExecution {
         }
         if !self.stalled {
             for stream in Stream::ALL {
+                let output = &mut self.output[position(stream)];
                 loop {
                     let pending = self.peer.pending_output(stream);
                     if pending.is_empty() {
                         break;
                     }
-                    let length = pending.len();
-                    self.output[position(stream)].extend_from_slice(pending);
+                    let room = MAX_CAPTURE - output.len();
+                    if room == 0 {
+                        if !self.overflowed {
+                            self.overflowed = true;
+                            self.peer.cancel(now);
+                        }
+                        break;
+                    }
+                    let length = pending.len().min(room);
+                    output.extend_from_slice(&pending[..length]);
                     self.peer.consumed(stream, length);
                 }
             }

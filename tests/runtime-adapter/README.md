@@ -316,8 +316,12 @@ for more, and a source that hands over the program's input, if the start says
 that the host sends it, then ends it. Its caller sends the start, hands it each
 of the guest's messages about the execution with `deliver`, and sends the
 messages that `serve` returns, until the peer finished, serving it again once
-its `deadline`, the peer's next timer, passes. The host program's
-[driver](#host-program) and the tests of the worker run it.
+its `deadline`, the peer's next timer, passes. The sink keeps at most
+`exec::MAX_CAPTURE`, 16 MiB, of each stream: once more of a stream arrives, the
+host's side cancels the execution, and its peer discards the rest once the grace
+ends, so that the outcome marks the stream truncated, with the cause
+`cancelled`. The host program's [driver](#host-program) and the tests of the
+worker run it.
 
 ### Root-profile entries
 
@@ -1071,7 +1075,9 @@ the directory that `NVX_ARTIFACTS_DIR` names, and the guest agent's build from
   `--numeric` says that the IDs have none. It starts in the root's directory
   DIR, or `/`, with exactly the environment of its `--env` entries. It runs for
   at most a minute, with 16 KiB chunks and the credit of 4 of them for its
-  input and 8 for its output, which its standard output and error share.
+  input and 8 for its output, which its standard output and error share. The
+  command keeps at most 16 MiB of each stream, and cancels an execution whose
+  stream would exceed them.
   Execution N, from 1, has the key `(B + N, E)`: E is the epoch of the
   command's attachment, and B the first 8 bytes of the broker instance's ID, as
   a little-endian number. The guest refuses a key that it heard of before, and
@@ -1137,10 +1143,11 @@ before their body arrives, and the root configurations, readinesses, parts of
 mapping tables, failures, probes, facts, and messages of executions that decode,
 and those that don't, and the host's side of an execution, which still sends the
 cancellation of one that it gives up on in the step that ends it, without grace
-or settlement time. In the guest-only configuration, the unit tests of
-`worker::probes` cover what the probes read: the mount table with its escapes,
-the kernel's records of a process, `os-release`, and the guest's memory, and the
-probes and arguments that the worker refuses. Those of
+or settlement time, and which cancels one whose stream outgrows the 16 MiB that
+it keeps. In the guest-only configuration, the unit tests of `worker::probes`
+cover what the probes read: the mount table with its escapes, the kernel's
+records of a process, `os-release`, and the guest's memory, and the probes and
+arguments that the worker refuses. Those of
 `worker::executions`, which spawn each program without entering a root, as a
 fake root does, hand an execution the host's cancellation once its
 timeout's instant passed, after its program ended before it, as a worker that
