@@ -22,11 +22,12 @@ stages and plans with NVX's typed plan for an adapter's own guest, whose staged
 bindings a launch checks before it hands OpenVMM the checked files, and which
 the guest agent's worker assembles through `nvx::guest::root`, in a process of
 its own rather than PID 1, as the host program's root configuration asks. The
-host program may share host directories and files with the root, which it
-exports with NVX's `filesystem::plan`, and which the worker maps beneath the
-root from the host's mapping table, before the host starts the sandbox. The host
-program then checks the root from inside the VM with the worker's probes, and
-runs executions in it, several at once over one session, in a
+plan also holds the VM's [network](#networks), if any. The host program may
+share host directories and files with the root, which it exports with NVX's
+`filesystem::plan`, and which the worker maps beneath the root from the host's
+mapping table, before the host starts the sandbox. The host program then checks
+the root from inside the VM with the worker's probes, and runs executions in
+it, several at once over one session, in a
 [table of scenarios](#layered-scenarios), to which each new check adds a row.
 
 ## Configurations
@@ -860,15 +861,15 @@ tokens of the root alone: the image's, such as
 `nvx_layer=distro,0xd0003000,erofs:UUID`, and the upper's, such as
 `nvx_scratch=0xd0006000,ext4`. OpenVMM's arguments are the plan's, which
 attach the [checked files](#the-checked-handoff) of the image and the scratch
-as block devices, then those of the export of the launch's
-[shares](#shares), if any, then the VM in one process, NVX's default memory,
-the kernel, the initramfs, that command line, no virtio console, the control
-console with the launch capability on standard input, and the outcome report.
-They name no workload identity, and no managed lifecycle: OpenVMM only checks
-the arguments of the managed lifecycle and labels its outcome report with it,
-and only NVX's init agent reads its boot token. A VM without a layered root
-keeps the managed lifecycle, with which NVX's `/init` starts the managed agent,
-which the guest agent replaces.
+as block devices, and the VM's [network](#networks), if any, then those of the
+export of the launch's [shares](#shares), if any, then the VM in one process,
+NVX's default memory, the kernel, the initramfs, that command line, no virtio
+console, the control console with the launch capability on standard input,
+and the outcome report. They name no workload identity, and no managed
+lifecycle: OpenVMM only checks the arguments of the managed lifecycle and
+labels its outcome report with it, and only NVX's init agent reads its boot
+token. A VM without a layered root keeps the managed lifecycle, with which
+NVX's `/init` starts the managed agent, which the guest agent replaces.
 
 The boot tokens carry only what NVX's boot contract defines. The launch sends
 the rest in the [root configuration](#root-configurations), once it attaches:
@@ -889,11 +890,12 @@ runtime records, in `runtime-adapter.json`, before it spawns the VMM:
 
 `mode` is `layered`, or `blockless` for a VM without a layered root, whose
 `plan`, `bindings`, and `rootConfiguration` are `null`. `plan` is the persisted
-form of the VM's `SandboxPlan`. `bindings` holds the bindings that the launch
-checked, which the store [stages](#staged-images) for the launch's images: the
-image's, and the scratch image's, `null` for an upper in RAM.
-`rootConfiguration` is the root configuration that the launch sends, whether
-or not the guest accepts it.
+form of the VM's `SandboxPlan`, whose `network` keeps the VM's
+[network](#networks), or is `null` without one. `bindings` holds the bindings
+that the launch checked, which the store [stages](#staged-images) for the
+launch's images: the image's, and the scratch image's, `null` for an upper in
+RAM. `rootConfiguration` is the root configuration that the launch sends,
+whether or not the guest accepts it.
 
 ### The checked handoff
 
@@ -950,6 +952,42 @@ planned. Once the guest is ready, the launch sends the table,
 `LayeredLaunch::table`, in the [host's order](#the-hosts-order): each mapping
 before those inside its target.
 
+### Networks
+
+A layered launch may give the VM a network: an
+`nvx::host::sandbox::SandboxNetwork`, the guest's address and the policy that
+OpenVMM enforces there. `layered::read_network` reads it from a file, in the
+serde form of a plan's network, as NVX's plan persists it, such as:
+
+```json
+{"guestNetwork": "10.0.0.2/24", "egress": "deny",
+ "allow": {"name": "egress.allow",
+           "rules": [{"to": [{"cidr": "192.0.2.0/24", "except": []}],
+                      "ports": [{"protocol": "tcp", "port": 443, "endPort": null}]}]},
+ "deny": {"name": "egress.deny", "rules": []},
+ "ingress": "deny", "hostLoopback": "deny", "hostLoopbackForwards": [],
+ "proxy": null}
+```
+
+The form requires every member and refuses any other. Reading it checks the
+network as the plan does: the guest's address must leave a gateway, and the
+policy must lower to OpenVMM's arguments. A launch reads its network before
+anything else, so it refuses one that the plan refuses before it needs NVX's
+artifacts or creates the store.
+
+The launch puts the network on the adapter's plan, with
+`SandboxPlan::with_network`, which renders it after the block devices, through
+NVX's one lowering of a policy, `nvx::host::network::openvmm_arguments`: the
+portable profile at the guest's address, the defaults of egress and ingress,
+the host-loopback access, the egress rules, lowered into OpenVMM's native
+ones, the host-loopback forwards, and the proxy of a proxy-only network, which
+the guest reaches at its gateway, at the URL that `SandboxPlan::proxy_url`
+gives. A policy that lets nothing through attaches no network device. OpenVMM
+appends the guest's network settings to the kernel command line, from which
+NVX's `/init` configures the network device before it hands the VM to the
+guest agent. The launch's [record](#layered-roots) keeps the network in its
+plan.
+
 ### The step hook
 
 For tests, `launch` takes a step hook, `hook::StepHook`, from the variable
@@ -1003,7 +1041,7 @@ the directory that `NVX_ARTIFACTS_DIR` names, and the guest agent's build from
   ends its VM.
 
   LAYERED,
-  `--distro FORMAT:PATH --distro-identity UUID --upper (scratch:PATH | ram) [--runtime-dir DIR] [--overlay-mode MODE] [--scratch-journal POLICY] [--first-partition-bound BYTES] [--workload-identity UID:GID] [SHARES]`,
+  `--distro FORMAT:PATH --distro-identity UUID --upper (scratch:PATH | ram) [--runtime-dir DIR] [--overlay-mode MODE] [--scratch-journal POLICY] [--first-partition-bound BYTES] [--workload-identity UID:GID] [--network FILE] [SHARES]`,
   gives the VM a [layered root](#layered-roots). Its image is the file PATH, an
   EROFS file system, `erofs`, or a GPT disk, `gpt`, of which the guest expects
   the identity UUID: the file system's UUID, or the disk's GUID. Its upper is
@@ -1015,11 +1053,14 @@ the directory that `NVX_ARTIFACTS_DIR` names, and the guest agent's build from
   takes, with the guest's defaults unless given. A workload identity, the user
   ID UID and the group ID GID, two numbers from 1 to 4294967294, is the identity
   as which every execution of the sandbox runs: the guest checks its account in
-  the assembled root, without which the root's `identity` stage fails. Before it
-  spawns the VM, the launch checks the bindings that STORE stages for the image
-  and the scratch image, and fails if STORE stages none for either, or one no
-  longer holds, as [the checked handoff](#the-checked-handoff) describes. It
-  records the bindings that it checked.
+  the assembled root, without which the root's `identity` stage fails. The VM
+  has the [network](#networks) that FILE holds, if given, which the launch
+  reads before anything else: one that the plan refuses fails the launch before
+  it needs NVX's artifacts or creates the store. Before it spawns the VM, the
+  launch checks the bindings that STORE stages for the image and the scratch
+  image, and fails if STORE stages none for either, or one no longer holds, as
+  [the checked handoff](#the-checked-handoff) describes. It records the
+  bindings that it checked.
 
   SHARES,
   `--share HOST:TARGET[:ro]... [--deny PATH]... [--reserved TARGET]... [--share-root DIR]...`,
@@ -1409,11 +1450,19 @@ Windows:
   canonical guest paths, targets that take or cover the adapter's or the
   container root's reserved targets, a read-only share inside a read-write
   one, and a hidden path that does not exist inside a share;
+- the networks that a launch reads: the OpenVMM arguments of each element of a
+  policy, which NVX's lowering renders after the plan's block devices, a policy
+  that lets nothing through, which attaches no network device, the proxy's
+  URL, and the record, which keeps the network as the file gave it; and the
+  files that it refuses, each for the plan's reason;
 - `runtime-adapter-host stage`, which records the staged images, a staging that
   fails, which leaves them, and a staging that replaces them;
 - `runtime-adapter-host launch` with shares that it cannot export, which it
   refuses with status 1 before it creates the store, with artifacts that boot
   nothing;
+- `runtime-adapter-host launch --network`, which refuses a network that the
+  plan refuses, or that it cannot read, with status 1 before it needs NVX's
+  artifacts or creates the store, and passes one that the plan takes;
 - the command lines that the host program refuses, each with status 2, those of
   `exec` and of `--workload-identity` included.
 

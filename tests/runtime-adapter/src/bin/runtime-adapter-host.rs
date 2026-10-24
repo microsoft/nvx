@@ -21,23 +21,28 @@
 //!
 //!   LAYERED, `--distro FORMAT:PATH --distro-identity UUID --upper (scratch:PATH | ram)
 //!   [--runtime-dir DIR] [--overlay-mode MODE] [--scratch-journal POLICY]
-//!   [--first-partition-bound BYTES] [--workload-identity UID:GID] [SHARES]`, gives the VM a
-//!   layered root, which the guest agent's worker assembles; see `runtime_adapter::layered` and
-//!   `runtime_adapter::worker`. Its image is the raw file PATH, an EROFS filesystem, `erofs`, or a
-//!   GPT disk, `gpt`, of which the guest expects the identity UUID: the file system's UUID, or the
-//!   disk's GUID. Its upper is the ext4 scratch image PATH, or RAM. The guest assembles the root
-//!   below its runtime directory DIR, `/run/runtime-adapter` by default, in the overlay mode MODE,
-//!   `trusted-lowers` or `untrusted-lowers`, checks a scratch's journal against the policy POLICY,
-//!   `allowed` or `forbidden`, and refuses a first partition of a GPT disk larger than BYTES, with
-//!   the guest's defaults, `trusted-lowers`, `allowed`, and 64 KiB, unless given. A workload
-//!   identity, the user ID UID and the group ID GID, two numbers from 1 to 4294967294, is the
-//!   identity as which every execution of the sandbox runs: the guest checks its account in the
-//!   assembled root, without which the root's `identity` stage fails. Before it spawns the VM, the
-//!   launch checks the bindings that STORE stages for the image and the scratch image, from their
-//!   metadata alone, and fails if STORE stages none for either, or one no longer holds, as for an
-//!   image that changed after it was staged. It hands OpenVMM the files that the checks opened,
-//!   which it holds until the guest has assembled the root, or until it has torn down a launch that
-//!   failed, and records the bindings.
+//!   [--first-partition-bound BYTES] [--workload-identity UID:GID] [--network FILE] [SHARES]`,
+//!   gives the VM a layered root, which the guest agent's worker assembles; see
+//!   `runtime_adapter::layered` and `runtime_adapter::worker`. Its image is the raw file PATH, an
+//!   EROFS filesystem, `erofs`, or a GPT disk, `gpt`, of which the guest expects the identity UUID:
+//!   the file system's UUID, or the disk's GUID. Its upper is the ext4 scratch image PATH, or RAM.
+//!   The guest assembles the root below its runtime directory DIR, `/run/runtime-adapter` by
+//!   default, in the overlay mode MODE, `trusted-lowers` or `untrusted-lowers`, checks a scratch's
+//!   journal against the policy POLICY, `allowed` or `forbidden`, and refuses a first partition of
+//!   a GPT disk larger than BYTES, with the guest's defaults, `trusted-lowers`, `allowed`, and 64
+//!   KiB, unless given. A workload identity, the user ID UID and the group ID GID, two numbers from
+//!   1 to 4294967294, is the identity as which every execution of the sandbox runs: the guest
+//!   checks its account in the assembled root, without which the root's `identity` stage fails. The
+//!   VM has a network if FILE names one: an `nvx::host::sandbox::SandboxNetwork`, the guest's
+//!   address and the policy that OpenVMM enforces there, in the serde form of a plan's network,
+//!   which the launch reads before anything else, so that it refuses a network that the plan
+//!   refuses before it needs NVX's artifacts or the store, and puts on the adapter's plan, which
+//!   renders it; see `runtime_adapter::layered::read_network`. Before it spawns the VM, the launch
+//!   checks the bindings that STORE stages for the image and the scratch image, from their metadata
+//!   alone, and fails if STORE stages none for either, or one no longer holds, as for an image that
+//!   changed after it was staged. It hands OpenVMM the files that the checks opened, which it holds
+//!   until the guest has assembled the root, or until it has torn down a launch that failed, and
+//!   records the plan, with its network, and the bindings.
 //!
 //!   SHARES, `--share HOST:TARGET[:ro]... [--deny PATH]... [--reserved TARGET]...
 //!   [--share-root DIR]...`, shares each host directory or regular file HOST with the root, at the
@@ -171,7 +176,7 @@ use runtime_adapter::frame::{MAX_BODY, Message};
 use runtime_adapter::hook::{Step, StepHook};
 use runtime_adapter::host::{self, Client, ClientError, Executions, OrderError};
 use runtime_adapter::initramfs;
-use runtime_adapter::layered::{LaunchRecord, LayeredLaunch, Share, Shares, Staged};
+use runtime_adapter::layered::{LaunchRecord, LayeredLaunch, Share, Shares, Staged, read_network};
 use runtime_adapter::probe::{Probe, ProbeReply, escape};
 use runtime_adapter::root::{JournalPolicy, OverlayMode, RootFailure};
 use runtime_adapter::runtime::Runtime;
@@ -224,7 +229,7 @@ const USAGE: &str = concat!(
     " --upper (scratch:PATH | ram) [--runtime-dir DIR]\n",
     "            [--overlay-mode MODE] [--scratch-journal POLICY]",
     " [--first-partition-bound BYTES]\n",
-    "            [--workload-identity UID:GID]\n",
+    "            [--workload-identity UID:GID] [--network FILE]\n",
     "            [--share HOST:TARGET[:ro]... [--deny PATH]... [--reserved TARGET]...",
     " [--share-root DIR]...]]\n",
     "       runtime-adapter-host (reattach | stop) STORE [--guest-build BUILD]\n",
@@ -376,6 +381,8 @@ struct Layered {
     workload_identity: Option<(u32, u32)>,
     /// The host paths that the launch shares with the root.
     shares: Shares,
+    /// The file of the VM's network, if it has one.
+    network: Option<PathBuf>,
 }
 
 /// The options of a command.
@@ -405,6 +412,8 @@ struct Options {
     workload_identity: Option<(u32, u32)>,
     /// `--share`, `--deny`, `--reserved`, and `--share-root`, in order.
     shares: Shares,
+    /// `--network`.
+    network: Option<PathBuf>,
 }
 
 fn main() -> ExitCode {
@@ -556,6 +565,7 @@ fn parse(arguments: Vec<OsString>) -> Result<Command, String> {
                         first_partition_bound: options.first_partition_bound,
                         workload_identity: options.workload_identity,
                         shares: options.shares,
+                        network: options.network,
                     }))
                 }
                 (None, Some(_), _) => {
@@ -573,6 +583,7 @@ fn parse(arguments: Vec<OsString>) -> Result<Command, String> {
                         ),
                         ("--workload-identity", options.workload_identity.is_some()),
                         ("--share", !options.shares.shares.is_empty()),
+                        ("--network", options.network.is_some()),
                     ];
                     if let Some((option, _)) = layered.iter().find(|(_, given)| *given) {
                         return Err(format!("{option} needs --distro"));
@@ -701,6 +712,9 @@ fn parse_option(
         ("launch", "--deny") => options.shares.denied.push(PathBuf::from(value)),
         ("launch", "--reserved") => options.shares.reserved.push(text(value)?),
         ("launch", "--share-root") => options.shares.roots.push(PathBuf::from(value)),
+        ("launch", "--network") if options.network.is_none() => {
+            options.network = Some(PathBuf::from(value));
+        }
         (_, "--guest-build") if name != "stage" && options.guest_build.is_none() => {
             options.guest_build = Some(text(value)?);
         }
@@ -873,6 +887,13 @@ fn launch(
     layered: Option<&Layered>,
     hook: Option<&StepHook>,
 ) -> Result<ExitCode, String> {
+    // A network that the plan refuses fails the launch before it needs NVX's artifacts or the
+    // store.
+    let network = layered
+        .and_then(|layered| layered.network.as_deref())
+        .map(read_network)
+        .transpose()
+        .map_err(|error| describe(&error))?;
     let hypervisor = match hypervisor {
         Some(hypervisor) => hypervisor,
         None => Hypervisor::from_env_or_default().map_err(|error| describe(&error))?,
@@ -899,6 +920,7 @@ fn launch(
             if let Some(export) = layered.shares.plan()? {
                 launch.share(export)?;
             }
+            launch.plan = launch.plan.with_network(network);
             Ok(launch)
         })
         .transpose()
