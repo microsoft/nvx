@@ -41,10 +41,11 @@
 //!   server, if any, the [`Publication`] of the workload's listeners, and the endpoint of its
 //!   proxy, if any, which holds no credentials;
 //! - the [`WorkloadView`]: the hostname, the [`MachineIdMode`], the image's own machine ID or one
-//!   that the guest generates, and the [`WorkloadIdentity`], if any: a nonzero UID and GID, whose
-//!   account the image must hold, without supplementary groups or capabilities, in which every
-//!   execution runs, as each execution of a layered sandbox runs today. An adapter whose
-//!   executions name their own identity, as CRI containers do, leaves it out;
+//!   that the guest generates, and the [`WorkloadIdentity`], if any: a UID and a GID, neither 0
+//!   nor `u32::MAX`, whose account the image must hold, without supplementary groups or
+//!   capabilities, in which every execution runs, as each execution of a layered sandbox runs
+//!   today. An adapter whose executions name their own identity, as CRI containers do, leaves it
+//!   out;
 //! - the root's settings: the [`OverlayMode`], the [`Journal`] policy of a scratch upper, and the
 //!   bound of a GPT disk's first partition;
 //! - the [`ExpectedResources`]: the CPU count and the memory size that the guest must have, as a
@@ -67,9 +68,10 @@
 //! [`MAX_RECORD_BYTES`].
 //!
 //! [`Configuration::check`] also refuses an export without mappings, mappings without an export,
-//! a workload identity whose UID or GID is 0, a hostname with a NUL, a proxy endpoint with
-//! anything other than visible ASCII characters or with an `@`, which would start credentials,
-//! and a zero CPU count, memory size, or bound of a GPT disk's first partition.
+//! a workload identity whose UID or GID is 0, or `u32::MAX`, which the kernel reads as an
+//! unchanged ID, a hostname with a NUL, a proxy endpoint with anything other than visible ASCII
+//! characters or with an `@`, which would start credentials, and a zero CPU count, memory size,
+//! or bound of a GPT disk's first partition.
 //!
 //! ```
 //! use nvx::activation::{
@@ -434,13 +436,13 @@ pub enum MachineIdMode {
     Generated,
 }
 
-/// The identity in which every execution of a workload runs: a nonzero UID and GID, whose account
-/// the image must hold, without supplementary groups or capabilities.
+/// The identity in which every execution of a workload runs: a UID and a GID, neither 0 nor
+/// `u32::MAX`, whose account the image must hold, without supplementary groups or capabilities.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct WorkloadIdentity {
-    /// The user ID: not 0.
+    /// The user ID: neither 0 nor `u32::MAX`.
     pub uid: u32,
-    /// The group ID: not 0.
+    /// The group ID: neither 0 nor `u32::MAX`.
     pub gid: u32,
 }
 
@@ -498,8 +500,8 @@ impl Configuration {
     /// without an export, and more than [`MAX_MAPPINGS`] mappings; a proxy endpoint that is empty
     /// or longer than [`MAX_PROXY_ENDPOINT_BYTES`], or holds a byte other than a visible ASCII
     /// character, or an `@`; a hostname that is empty or longer than [`MAX_HOSTNAME_BYTES`], or
-    /// holds a NUL; a workload identity whose UID or GID is 0; and a CPU count or memory size of
-    /// 0.
+    /// holds a NUL; a workload identity whose UID or GID is 0 or `u32::MAX`; and a CPU count or
+    /// memory size of 0.
     pub fn check(&self) -> Result<(), ActivationError> {
         if let Image::Gpt {
             first_partition_bound: 0,
@@ -528,8 +530,9 @@ impl Configuration {
         if hostname.is_empty() || hostname.len() > MAX_HOSTNAME_BYTES || hostname.contains(&0) {
             return Err(ActivationError::Hostname);
         }
+        // The kernel reads `u32::MAX` as an unchanged ID, which the guest's entry refuses.
         if let Some(WorkloadIdentity { uid, gid }) = self.workload.identity
-            && (uid == 0 || gid == 0)
+            && [uid, gid].into_iter().any(|id| id == 0 || id == u32::MAX)
         {
             return Err(ActivationError::WorkloadIdentity);
         }
@@ -613,7 +616,8 @@ pub enum ActivationError {
     ProxyEndpoint,
     /// The hostname is empty, longer than [`MAX_HOSTNAME_BYTES`], or holds a NUL.
     Hostname,
-    /// The workload identity's UID or GID is 0.
+    /// The workload identity's UID or GID is 0, or `u32::MAX`, which the kernel reads as an
+    /// unchanged ID.
     WorkloadIdentity,
     /// The expected CPU count is 0.
     Cpus,
@@ -643,7 +647,7 @@ impl fmt::Display for ActivationError {
                 "the hostname is not 1 to {MAX_HOSTNAME_BYTES} bytes without a NUL"
             ),
             Self::WorkloadIdentity => {
-                formatter.write_str("the workload identity's UID or GID is 0")
+                formatter.write_str("the workload identity's UID or GID is 0 or 4294967295")
             }
             Self::Cpus => formatter.write_str("the expected CPU count is 0"),
             Self::Memory => formatter.write_str("the expected memory size is 0"),

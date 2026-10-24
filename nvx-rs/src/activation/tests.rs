@@ -63,8 +63,8 @@ fn maximal() -> Configuration {
             hostname: vec![0xff; MAX_HOSTNAME_BYTES],
             machine_id: MachineIdMode::Generated,
             identity: Some(WorkloadIdentity {
-                uid: u32::MAX,
-                gid: u32::MAX,
+                uid: u32::MAX - 1,
+                gid: u32::MAX - 1,
             }),
         },
         resources: ExpectedResources {
@@ -243,14 +243,27 @@ fn proxy_endpoints_are_admitted_up_to_the_limit_without_credentials() {
 }
 
 #[test]
-fn a_zero_uid_or_gid_is_refused() {
-    for (uid, gid) in [(1, 1), (1000, 1001), (65534, 65534), (u32::MAX, u32::MAX)] {
+fn a_uid_or_gid_of_0_or_u32_max_is_refused() {
+    for (uid, gid) in [
+        (1, 1),
+        (1000, 1001),
+        (65534, 65534),
+        (u32::MAX - 1, u32::MAX - 1),
+    ] {
         let identity = WorkloadIdentity { uid, gid };
         let record =
             admit(|configuration| configuration.workload.identity = Some(identity)).unwrap();
         assert_eq!(record.configuration().workload.identity, Some(identity));
     }
-    for (uid, gid) in [(0, 0), (0, 1000), (1000, 0)] {
+    for (uid, gid) in [
+        (0, 1000),
+        (1000, 0),
+        (u32::MAX, 1000),
+        (1000, u32::MAX),
+        (0, 0),
+        (u32::MAX, u32::MAX),
+        (0, u32::MAX),
+    ] {
         assert_eq!(
             admit(|configuration| {
                 configuration.workload.identity = Some(WorkloadIdentity { uid, gid });
@@ -355,7 +368,7 @@ fn errors_name_the_limits_that_they_break() {
         ),
         (
             ActivationError::WorkloadIdentity,
-            "the workload identity's UID or GID is 0",
+            "the workload identity's UID or GID is 0 or 4294967295",
         ),
         (ActivationError::Cpus, "the expected CPU count is 0"),
         (ActivationError::Memory, "the expected memory size is 0"),
