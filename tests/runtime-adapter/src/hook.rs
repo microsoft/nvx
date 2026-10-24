@@ -36,18 +36,21 @@ const PAUSE_POLL: Duration = Duration::from_millis(10);
 /// then, and before what it does next.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Step {
-    /// `checked`: the launch has checked the bindings of its images, and holds the checked files,
-    /// which claim the scratch image, but has begun nothing in the sandbox's store, and has spawned
-    /// nothing. A launch without a layered root, which checks nothing, reaches it too.
+    /// `checked`: the launch has checked the bindings of its images, and the export of its shares,
+    /// if any, and holds the checked files, which claim the scratch image, but has begun nothing
+    /// in the sandbox's store, and has spawned nothing. A launch without a layered root, which
+    /// checks nothing, reaches it too.
     Checked,
     /// `spawned`: the VMM runs, and the launch's journal records it, but the launch has not
     /// connected to the VM.
     Spawned,
-    /// `ready`: the guest has assembled the layered root, and the launch has released the checked
-    /// files. A launch without a layered root never reaches it.
+    /// `ready`: the guest agent, of the build that the host ships, has assembled the layered root,
+    /// and the launch has released the checked files, but has sent neither the mapping table nor
+    /// `Start`. A launch without a layered root never reaches it.
     Ready,
-    /// `commit`: the guest agent has answered, and the launch is about to commit, so its journal
-    /// still records the VMM, which no runtime record names yet.
+    /// `commit`: the guest has started the sandbox, if the VM has a layered root, the guest agent
+    /// has answered, and the launch is about to commit, so its journal still records the VMM,
+    /// which no runtime record names yet.
     Commit,
 }
 

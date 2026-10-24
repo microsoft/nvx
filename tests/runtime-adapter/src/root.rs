@@ -433,7 +433,7 @@ impl RootConfig {
 
 /// Describes why `path` is not an absolute and canonical guest path, if it is not: the rest of a
 /// sentence whose subject names the path.
-fn path_problem(path: &str) -> Option<&'static str> {
+pub(crate) fn path_problem(path: &str) -> Option<&'static str> {
     if path.len() > MAX_PATH_BYTES {
         return Some("is longer than 4095 bytes");
     }

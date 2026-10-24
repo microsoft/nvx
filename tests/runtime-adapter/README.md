@@ -22,7 +22,10 @@ stages and plans with NVX's typed plan for an adapter's own guest, whose
 staged bindings a launch checks before it hands OpenVMM the checked files, and
 which the guest agent's worker assembles through `nvx::guest::root`, in a
 process of its own rather than PID 1, as the host program's root configuration
-asks. The host program then checks the root from inside the VM with the
+asks. The host program may share host directories and files with the root,
+which it exports with NVX's `filesystem::plan`, and which the worker maps
+beneath the root from the host's mapping table, before the host starts the
+sandbox. The host program then checks the root from inside the VM with the
 worker's probes, in a [table of scenarios](#layered-scenarios), to which each
 new check adds a row.
 
@@ -144,7 +147,8 @@ root, carries its readiness, `root::Ready`: the length of the guest agent's
 build, one byte, then the build, 1 to 255 printable ASCII characters without a
 space. The guest agent's build is the crate's version, `GUEST_BUILD`, which is
 also the build that the host program ships unless it names another; see
-[The runtime identity](#the-runtime-identity).
+[The runtime identity](#the-runtime-identity). The host sends a guest agent of
+another build nothing more; see [The host's order](#the-hosts-order).
 
 The host's mapping table, of as many mappings as the root configuration
 announces, travels in parts, each in a `Maps`, whose body is a `MAPS` payload
@@ -580,6 +584,10 @@ transport to the session's host endpoint, such as the one that
 - `configure_root` sends a root configuration, and returns how the guest
   answered: `Ready`, with the guest agent's build, or the stage of the root
   that failed;
+- `map` sends a part of the host's mapping table, and returns how the guest
+  answered: `Mapped`, or `MapFailed`, with how many of the table's mappings it
+  applied and the problem; `start` sends `Start`, and checks that the guest
+  answers `Started`;
 - `probe` sends a probe, and returns the facts that it found, or the problem.
 
 Besides the session's own buffers, the client holds at most the rest of one of
@@ -593,6 +601,30 @@ sends end the client, and its later calls fail. A receive that times out
 doesn't: it keeps what arrived. A request ends the client on any failure after
 the framing accepted it, a timeout included, because an answer that arrived
 later would answer the wrong request.
+
+### The host's order
+
+A VM with a layered root is ready for workloads once its guest assembled the
+root, and applied the host's mapping table. The `host` module runs that order
+over a client in two steps, between which the host program releases the files
+that it handed OpenVMM, and its [step hook](#the-step-hook) may pause it:
+
+1. `host::ready` sends the root configuration, which announces how many
+   mappings the table holds, and waits for `Ready`, whose build must be the
+   one that the host ships. The host sends a guest agent of another build
+   nothing more, since it cannot tell what that build would do with it.
+2. `host::start_sandbox` sends the table in the parts that `root::encode_maps`
+   splits it into, each once the guest applied the one before, then `Start`,
+   and waits for `Started`. A table of no mapping sends no part.
+
+A part that the guest fails ends the order: the host sends no more of the
+table, nor `Start`, so the guest starts no workload on a partial table, and
+sends `Stop`, which tears the root down, mappings first, as NVX's managed
+lifecycle stops a guest whose mappings failed. The order fails with an
+`host::OrderError`: the stage of the root that failed, another build, the
+mapping that failed with how the stop ended, a table that does not encode,
+which fails before anything is sent, or a failure of the client. The host
+program [tears the VM down](#commands) after any of them.
 
 ## VMs
 
@@ -693,8 +725,9 @@ tokens of the root alone: the image's, such as
 `nvx_layer=distro,0xd0003000,erofs:UUID`, and the upper's, such as
 `nvx_scratch=0xd0006000,ext4`. OpenVMM's arguments are the plan's, which
 attach the [checked files](#the-checked-handoff) of the image and the scratch
-as block devices, then the VM in one process, NVX's default memory, the
-kernel, the initramfs, that command line, no virtio console, the control
+as block devices, then those of the export of the launch's
+[shares](#shares), if any, then the VM in one process, NVX's default memory,
+the kernel, the initramfs, that command line, no virtio console, the control
 console with the launch capability on standard input, and the outcome report.
 They name no workload identity, and no managed lifecycle: OpenVMM only checks
 the arguments of the managed lifecycle and labels its outcome report with it,
@@ -706,8 +739,9 @@ The boot tokens carry only what NVX's boot contract defines. The launch sends
 the rest in the [root configuration](#root-configurations), once it attaches:
 the defaults, with the runtime directory that the caller names, as it is, so
 that the guest checks it, the size of each image in sectors, if it is a whole
-number of them, which the guest checks against its block device, and the
-overlay mode and the scratch's journal policy that the caller names, if any.
+number of them, which the guest checks against its block device, the overlay
+mode and the scratch's journal policy that the caller names, if any, and the
+number of the mappings of the export's table, if the launch shares anything.
 
 The launch records what it launched in the sandbox's store, beside NVX's
 runtime records, in `runtime-adapter.json`, before it spawns the VMM:
@@ -749,6 +783,38 @@ files keep anything else from taking while they are open, and OpenVMM inherits
 the scratch image's claim. The launch holds the checked files until the guest
 has assembled the root, or until it has torn down a launch that failed.
 
+### Shares
+
+A launch may share host directories and regular files with the root, as
+`layered::Shares`: each `layered::Share` at an absolute guest path in the root,
+read-only or read-write. `Shares::plan` plans their export with NVX's
+`nvx::host::filesystem::plan`, through an `ExportRequest` of a mapping for each
+share at its target, the host paths that it hides inside the shares, and the
+guest targets that the root keeps: those of NVX's container root,
+`ReservedTargets::CONTAINER_ROOT`, and the trees that the adapter keeps for
+itself. Each share must lie inside a host directory that the adapter
+authorizes, once links are resolved: `Shares::plan` refuses one outside them
+before it plans, and checks the export's directories and files, which the
+planner resolves anew, again. The planner refuses what it cannot export, such
+as a target that takes or covers a reserved tree, or a read-only share inside
+a read-write one, which the host could not keep read-only, and a hidden
+path that does not exist inside a share, which nothing would hide once a
+workload creates it.
+
+`LayeredLaunch::share` attaches the export to the launch, and announces its
+table, of at most 4,096 mappings, in the root configuration. NVX's adapter plan
+holds no export, so the launch attaches it itself: OpenVMM's arguments export
+the shares through OpenVMM's aggregate virtio-fs device, as
+`ExportPlan::openvmm_arguments` renders them, and OpenVMM appends the boot
+tokens with which the guest mounts the export, out of the root. Before it
+spawns the VM, `LayeredLaunch::prepare` checks the export with
+`ExportPlan::verify`: the host still keeps its read-only mappings read-only,
+and its directories and files, and the paths that the guest could move inside
+the parts that it may write, still name what they named when the export was
+planned. Once the guest is ready, the launch sends the table,
+`LayeredLaunch::table`, in the [host's order](#the-hosts-order): each mapping
+before those inside its target.
+
 ### The step hook
 
 For tests, `launch` takes a step hook, `hook::StepHook`, from the variable
@@ -768,10 +834,10 @@ The steps of a launch, in order, are:
 
 | Step | Where the launch is |
 | --- | --- |
-| `checked` | It has checked the bindings of its images, and holds the checked files, which claim the scratch image, but has begun nothing in the store, and spawned nothing. A launch without a layered root reaches it too. |
+| `checked` | It has checked the bindings of its images, and the export of its shares, if any, and holds the checked files, which claim the scratch image, but has begun nothing in the store, and spawned nothing. A launch without a layered root reaches it too. |
 | `spawned` | The VMM runs, and the launch's journal records it, but the launch has not connected to the VM. |
-| `ready` | The guest has assembled the layered root, and the launch has released the checked files. |
-| `commit` | The guest agent has answered, and the launch is about to commit: its journal still records the VMM, which no runtime record names yet. |
+| `ready` | The guest agent, of the build that the host ships, has assembled the layered root, and the launch has released the checked files, but has sent neither the mapping table nor `Start`. |
+| `commit` | The guest has started the sandbox, if the VM has a layered root, the guest agent has answered, and the launch is about to commit: its journal still records the VMM, which no runtime record names yet. |
 
 A value that names no step or action is a usage error. Without the variable,
 the hook does nothing.
@@ -802,7 +868,7 @@ the directory that `NVX_ARTIFACTS_DIR` names, and the guest agent's build from
   ends its VM.
 
   LAYERED,
-  `--distro FORMAT:PATH --distro-identity UUID --upper (scratch:PATH | ram) [--runtime-dir DIR] [--overlay-mode MODE] [--scratch-journal POLICY] [--first-partition-bound BYTES]`,
+  `--distro FORMAT:PATH --distro-identity UUID --upper (scratch:PATH | ram) [--runtime-dir DIR] [--overlay-mode MODE] [--scratch-journal POLICY] [--first-partition-bound BYTES] [SHARES]`,
   gives the VM a [layered root](#layered-roots). Its image is the file PATH, an
   EROFS file system, `erofs`, or a GPT disk, `gpt`, of which the guest expects
   the identity UUID: the file system's UUID, or the disk's GUID. Its upper is
@@ -815,11 +881,30 @@ the directory that `NVX_ARTIFACTS_DIR` names, and the guest agent's build from
   launch checks the bindings that STORE stages for the image and the scratch
   image, and fails if STORE stages none for either, or one no longer holds, as
   [the checked handoff](#the-checked-handoff) describes. It records the
-  bindings that it checked. Once attached, the launch sends the root
-  configuration, and exchanges the `Ping` and the `Echo` once the guest
-  assembled the root. If the guest reports that a stage of the root failed
-  instead, the launch waits for the VM to end, abandons the launch, and checks
-  that the VM ended with the stage's status.
+  bindings that it checked.
+
+  SHARES,
+  `--share HOST:TARGET[:ro]... [--deny PATH]... [--reserved TARGET]... [--share-root DIR]...`,
+  shares each host directory or regular file HOST with the root, at the
+  absolute guest path TARGET, which starts at the last `:/`, read-only with
+  `:ro`, as [Shares](#shares) describes. Each HOST must lie inside a host
+  directory DIR that the adapter authorizes, the export hides each host path
+  PATH inside the shares, and no TARGET may take or cover a guest tree that the
+  container root keeps, or a tree TARGET that the adapter keeps. The launch
+  refuses shares that it cannot export before it touches STORE, and checks the
+  export before it spawns the VM.
+
+  Once attached, the launch follows the [host's order](#the-hosts-order): it
+  sends the root configuration, checks that the guest agent that assembled the
+  root is of the build that the host program ships, sends the mapping table,
+  then `Start`, and exchanges the `Ping` and the `Echo` once the guest started
+  the sandbox. A guest agent of another build gets nothing more, and the launch
+  fails, which ends the VM. If the guest reports that a stage of the root
+  failed instead, the launch waits for the VM to end, abandons the launch, and
+  checks that the VM ended with the stage's status. If the guest fails a
+  mapping, the launch sends no more of the table, nor `Start`, stops the guest,
+  which tears down the root, waits for the VM to end, abandons the launch, and
+  checks that the VM ended with a success and a complete teardown.
 - `reattach STORE` takes the sandbox's lock, and reattaches to its VM, which
   another process launched, and which it holds, although the VM is not its
   child, through its verified process identity. It reads the capability from
@@ -846,8 +931,12 @@ runtime identity in which a mismatched VM differs), `pid` (the VMM's process
 ID), `instance` and `epoch` (the identity of the session that they attached
 to), `root` (`ready` or `failed`: how the guest answered the root
 configuration, or `failed` when a stop finds that the root's teardown failed),
-`stage` and `problem` (the stage of the root that failed, such as `assembly`,
-and the problem), `PROBE.KEY` (the fact KEY that the probe named PROBE found),
+`build` (the build of the guest agent that assembled the root), `stage` and
+`problem` (the stage of the root that failed, such as `assembly`, and the
+problem, or the problem of a mapping that failed), `table` (`applied` or
+`failed`: how the guest took the mapping table), `mapped` (how many of the
+table's mappings the guest applied), `sandbox` (`started` once the guest
+started the sandbox), `PROBE.KEY` (the fact KEY that the probe named PROBE found),
 `stopped` (`graceful`, `forced`, or `timed-out`), `outcome` (such as
 `success 0`, or `guest-exit 14` once the assembly failed), and `teardown`
 (`complete` or `incomplete`: whether the VMM's teardown of the VM completed,
@@ -856,9 +945,11 @@ carriage returns as `\\`, `\n`, and `\r`. The commands exit with 0 once they
 did what they were asked, with 3 when they find the VM mismatched, with 4 when
 the guest reported that a stage of the root failed, and the VM ended with the
 stage's status and a complete teardown, with 5 when the
-[step hook](#the-step-hook) ended a launch, and with 1, after a diagnostic on
-standard error, when they fail. Without arguments, the program reports the
-contract that it was built against.
+[step hook](#the-step-hook) ended a launch, with 6 when the guest failed a
+mapping of the table, and the VM stopped gracefully, with a success and a
+complete teardown, and with 1, after a diagnostic on standard error, when they
+fail. Without arguments, the program reports the contract that it was built
+against.
 
 ## Tests
 
@@ -942,7 +1033,18 @@ Windows. They cover:
 - a layered root: the configuration that the client sends, the guest's
   answers, ready with the guest agent's build or the stage that failed, probes
   and their facts, a stop that learns that the teardown failed, and answers
-  whose bodies do not decode, which end the client.
+  whose bodies do not decode, which end the client;
+- the host's order: the root configuration that announces the table, the
+  guest's readiness, then each part of a table of no mapping, of one, and of
+  several parts, once the guest applied the one before, then `Start`, also in
+  records of 7 bytes; a guest agent of another build, and a root that failed,
+  after which the host sends nothing more; a table that does not encode, of
+  which the host sends nothing; a mapping that the guest fails at the first, a
+  middle, or the last part, after which the host sends no more of the table,
+  nor `Start`, but `Stop`, and learns how the stop ended, with or without a
+  teardown that failed, or as the session ends; and `Maps` or `Start` answered
+  with another kind, or failures whose bodies do not decode, which end the
+  client.
 
 Through a relay between its test broker and a pseudo-terminal,
 `tests/guest_session.rs` also checks that `guest::serve_terminal` and
@@ -1069,8 +1171,24 @@ Windows:
   reader refuses;
 - the record of a launch, with the bindings that it checked, over a scratch
   image and over RAM, and of a VM without a layered root;
+- shares: their text, `HOST:TARGET[:ro]`; the export of a table of shares
+  inside an authorized directory, which maps each at its target, parents
+  first, hides a denied path, and narrows the writes of a read-only directory
+  to the read-write share inside it; the root configuration that announces the
+  table, OpenVMM's arguments that attach the export, a launch that shares
+  nothing, the export that the launch verifies before it prepares anything,
+  and a table that the guest would refuse;
+- the shares that a launch refuses: outside the authorized directories, also
+  through a link on Linux, without any, with an authorized directory that is
+  not one, or a share that is not accessible; reserved trees that are not
+  canonical guest paths, targets that take or cover the adapter's or the
+  container root's reserved targets, a read-only share inside a read-write
+  one, and a hidden path that does not exist inside a share;
 - `runtime-adapter-host stage`, which records the staged images, a staging that
   fails, which leaves them, and a staging that replaces them;
+- `runtime-adapter-host launch` with shares that it cannot export, which it
+  refuses with status 1 before it creates the store, with artifacts that boot
+  nothing;
 - the command lines that the host program refuses, each with status 2.
 
 `tests/step_hook.rs` checks, in the host-only configuration, on Linux and
@@ -1105,7 +1223,8 @@ hypervisor, in the host-only configuration:
 
 - `runtime-adapter-host stage` stages NVX's Ubuntu EROFS image over a copy of
   the scratch template, and `runtime-adapter-host launch` launches a VM with
-  them as its layered root, and exits;
+  them as its layered root, whose guest agent, of the build that the host
+  program ships, starts the sandbox, and exits;
 - another process's `reattach` holds the VM, which is not its child, and
   attaches a new session, in a later epoch of the same broker instance;
 - a third process's `stop` stops the VM: gracefully, with a successful outcome,
@@ -1114,16 +1233,22 @@ hypervisor, in the host-only configuration:
 In another test, a host program that ships another build of the guest agent
 finds the VM mismatched in its initramfs, and signals nothing: the VM runs on,
 under the same runtime record, until the host program of the right runtime
-stops it.
+stops it. In a third, a launch of a host program that ships another build than
+the one that it boots finds that build in the guest's readiness, sends it
+neither the mapping table nor `Start`, and fails, which ends the VM, whose
+scratch image the next launch claims.
 
 ### Layered scenarios
 
 `tests/vm_layered.rs` launches VMs with a layered root on a real hypervisor, in
 the host-only configuration, through the host program's commands, and checks
 that the guest's worker, outside PID 1, assembles the root, or reports the
-stage that failed, and that the VM still ends cleanly. Each scenario stages
-its images, then launches them, and is a row of the table that its
-`scenarios!` macro declares, and an ignored test of its own:
+stage that failed, and that the VM still ends cleanly. A launch whose guest
+assembled the root also follows the host's order: the guest agent is of the
+build that the host program ships, applies the empty mapping table, and starts
+the sandbox. Each scenario stages its images, then launches them, and is a row
+of the table that its `scenarios!` macro declares, and an ignored test of its
+own:
 
 | Scenario | Root | Expects |
 | --- | --- | --- |

@@ -21,6 +21,15 @@
 //! Everything else that the root needs goes in one root configuration, a [`RootConfig`], which the
 //! host sends once it attaches.
 //!
+//! A launch may also share host directories and files with the root, as [`Shares`]: each at an
+//! absolute guest path in the root, read-only or read-write, inside the host directories that the
+//! adapter authorizes, with host paths hidden inside them, and never at the guest targets that the
+//! root keeps for itself. NVX's `filesystem::plan` plans their export, an `ExportPlan`, which the
+//! launch attaches itself, since an adapter's plan holds none: OpenVMM exports the shares through
+//! its aggregate virtio-fs device, and appends the boot tokens with which the guest mounts the
+//! export, out of the root. The root configuration announces how many mappings the export's table
+//! holds, which the host sends once the guest is ready; see [`LayeredLaunch::table`].
+//!
 //! The host records what it launched in the sandbox's store, beside NVX's runtime records, as a
 //! [`LaunchRecord`], with the bindings that the launch checked.
 
@@ -31,18 +40,22 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use nvx::host::artifacts::absolute;
+use nvx::host::filesystem::{
+    self, ExportPlan, ExportRequest, Mapping, PathList, ReservedTargets, Target,
+};
 use nvx::host::launch::DEFAULT_MEMORY_MIB;
 use nvx::host::sandbox::distro::{DISTRO_POLICY_REVISION, DistroBinding};
 use nvx::host::sandbox::scratch::{CLAIM_RELEASE_WAIT, ScratchBinding};
 use nvx::host::sandbox::{
     LayerRole, PreparedLaunch, SandboxDistro, SandboxLayer, SandboxPlan, SandboxUpper,
 };
+use nvx::protocol::HostMap;
 use nvx::protocol::root::{ImageFormat, RootImage};
 use nvx::uuid::Uuid;
 use nvx::{Error, Hypervisor, Result};
 use serde_json::{Value, json};
 
-use crate::root::RootConfig;
+use crate::root::{RootConfig, encode_maps, path_problem};
 
 /// The name of the record of a launch in the sandbox's store.
 pub const RECORD_NAME: &str = "runtime-adapter.json";
@@ -60,8 +73,9 @@ pub const SANDBOX_TOKEN: &str = "nvx_sandbox=1";
 const SECTOR_SIZE: u64 = 512;
 
 /// A VM with a layered root: the plan of its image, its upper, and their boot tokens, the root
-/// configuration that the host sends its guest agent, and the bindings that the sandbox's store
-/// stages for its images, which the launch checks.
+/// configuration that the host sends its guest agent, the bindings that the sandbox's store
+/// stages for its images, which the launch checks, and the export of the host paths that it
+/// shares with the root, if any.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LayeredLaunch {
     /// The adapter's plan of the VM's block devices and of the boot tokens of its root.
@@ -72,12 +86,15 @@ pub struct LayeredLaunch {
     /// [`Staged::bindings`] finds them, which [`prepare`](Self::prepare) checks, and the launch
     /// records.
     pub bindings: Bindings,
+    /// The export of the host paths that the launch shares with the root, which
+    /// [`share`](Self::share) sets, or `None` if it shares none.
+    pub export: Option<ExportPlan>,
 }
 
 impl LayeredLaunch {
     /// Returns the launch of the image at `distro`, in `format`, of which the guest expects the
     /// identity `identity`, over the ext4 scratch image at `scratch`, or over RAM without one,
-    /// without bindings.
+    /// without bindings, and without shares.
     ///
     /// The root configuration takes its defaults, with the runtime directory `runtime` instead, if
     /// any, as it is, so that the guest checks it, and with the size of each image, if it is a
@@ -111,7 +128,33 @@ impl LayeredLaunch {
             plan,
             config,
             bindings: Bindings::default(),
+            export: None,
         })
+    }
+
+    /// Shares the host paths of `export`, which [`Shares::plan`] plans, with the root: the launch
+    /// attaches the export, and the root configuration announces how many mappings its table holds,
+    /// which the host sends once the guest is ready; see [`table`](Self::table).
+    ///
+    /// Fails with [`ErrorKind::Unsupported`](nvx::ErrorKind::Unsupported) for an export whose
+    /// table the host cannot send, as `encode_maps` refuses it: one of more mappings than the
+    /// guest takes, or with a source or a target that the guest refuses.
+    pub fn share(&mut self, export: ExportPlan) -> Result<()> {
+        let table = export.guest_table();
+        encode_maps(&table).map_err(|error| Error::unsupported(error.to_string()))?;
+        self.config.mapping_count = u32::try_from(table.len())
+            .map_err(|_| Error::unsupported(format!("the export maps {} paths", table.len())))?;
+        self.export = Some(export);
+        Ok(())
+    }
+
+    /// Returns the mapping table of the launch's export, in the order in which the guest applies
+    /// it, which `ExportPlan::guest_table` gives: each mapping before those inside its target. A
+    /// launch that shares nothing has an empty table.
+    pub fn table(&self) -> Vec<HostMap> {
+        self.export
+            .as_ref()
+            .map_or_else(Vec::new, ExportPlan::guest_table)
     }
 
     /// Returns the VM's kernel command line: [`SANDBOX_TOKEN`], then the boot tokens of the
@@ -123,9 +166,13 @@ impl LayeredLaunch {
     }
 
     /// Checks the [bindings](Self::bindings) of the plan's images from their metadata alone, and
-    /// prepares the launch of the files that the checks opened, as NVX's `PreparedLaunch`.
+    /// the [export](Self::export) of the launch's shares, if any, and prepares the launch of the
+    /// files that the checks opened, as NVX's `PreparedLaunch`.
     ///
-    /// NVX's `DistroBinding::check` checks the image against its binding, under the distro policy
+    /// NVX's `ExportPlan::verify` checks that the host still keeps the export's read-only mappings
+    /// read-only, and that its directories and files, and the mapped and hidden paths that the
+    /// guest could move, still name what they named when the export was planned. NVX's
+    /// `DistroBinding::check` checks the image against its binding, under the distro policy
     /// that this build accepts, and `ScratchBinding::check` checks the scratch image of an upper
     /// on scratch against its own, and claims it for this sandbox, waiting `CLAIM_RELEASE_WAIT`
     /// for a claim that should be free. Neither reads the images. The prepared launch renders the
@@ -145,8 +192,12 @@ impl LayeredLaunch {
     /// changed or was replaced after it was staged, and a missing image; with
     /// [`ErrorKind::TimedOut`](nvx::ErrorKind::TimedOut), and the code
     /// [`ErrorCode::ScratchClaimed`](nvx::ErrorCode::ScratchClaimed), for a scratch image that
-    /// another launch still claims; and otherwise as the checks and `PreparedLaunch::new` fail.
+    /// another launch still claims; and otherwise as `ExportPlan::verify`, the checks, and
+    /// `PreparedLaunch::new` fail.
     pub fn prepare(&self) -> Result<PreparedLaunch> {
+        if let Some(export) = &self.export {
+            export.verify()?;
+        }
         let distro = self.plan.distro();
         let binding = self
             .bindings
@@ -176,11 +227,13 @@ impl LayeredLaunch {
 
     /// Returns OpenVMM's arguments for the VM of `prepared`, the launch that
     /// [`prepare`](Self::prepare) prepared: its arguments, which attach the checked files as the
-    /// plan's block devices, then the VM in one process on `hypervisor`, NVX's default memory, the
-    /// kernel at `kernel`, the initramfs at `initramfs`, its kernel command line, which is the
-    /// [launch's](Self::kernel_command_line), no virtio console, the control console listening on
-    /// `endpoint` with the launch capability on standard input, and the outcome report at
-    /// `report`.
+    /// plan's block devices, those of the [export](Self::export) of the launch's shares, if any,
+    /// which `ExportPlan::openvmm_arguments` renders, then the VM in one process on `hypervisor`,
+    /// NVX's default memory, the kernel at `kernel`, the initramfs at `initramfs`, its kernel
+    /// command line, which is the [launch's](Self::kernel_command_line), no virtio console, the
+    /// control console listening on `endpoint` with the launch capability on standard input, and
+    /// the outcome report at `report`. OpenVMM appends the boot tokens with which the guest mounts
+    /// the export to the kernel command line.
     ///
     /// Unlike those of NVX's sandbox start, they name no workload identity, which the adapter's
     /// plan does not hold, and no managed lifecycle: OpenVMM only checks the arguments of the
@@ -198,9 +251,15 @@ impl LayeredLaunch {
         report: &Path,
     ) -> Vec<OsString> {
         debug_assert_eq!(prepared.plan(), &self.plan, "the launch prepared its plan");
+        let export = self
+            .export
+            .as_ref()
+            .map(ExportPlan::openvmm_arguments)
+            .unwrap_or_default();
         let mut arguments = prepared
             .openvmm_arguments()
             .iter()
+            .chain(&export)
             .map(OsString::from)
             .collect::<Vec<_>>();
         let memory = format!("{DEFAULT_MEMORY_MIB}M");
@@ -229,6 +288,161 @@ impl LayeredLaunch {
         arguments.extend(options.map(OsStr::to_os_string));
         arguments
     }
+}
+
+/// A host directory or regular file that a launch shares with the root, at a guest path.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Share {
+    /// The host path.
+    pub host: PathBuf,
+    /// The absolute guest path in the root at which the guest maps it.
+    pub target: String,
+    /// Whether the guest may only read it.
+    pub read_only: bool,
+}
+
+impl Share {
+    /// Reads a share from the text of the host program's `--share`: `HOST:TARGET`, or
+    /// `HOST:TARGET:ro` for a read-only share. The guest path TARGET starts at the last `:/`, so
+    /// that the host path HOST may hold colons, as a Windows path does after its drive.
+    ///
+    /// Returns `None` for text without a host path, or without a guest path that starts with `/`.
+    pub fn parse(text: &str) -> Option<Self> {
+        let (rest, read_only) = match text.strip_suffix(":ro") {
+            Some(rest) => (rest, true),
+            None => (text, false),
+        };
+        let (host, target) = rest.rsplit_once(":/")?;
+        (!host.is_empty()).then(|| Self {
+            host: PathBuf::from(host),
+            target: format!("/{target}"),
+            read_only,
+        })
+    }
+}
+
+/// The host paths that a launch shares with the root, as the host program's options give them:
+/// the shares, the host paths hidden inside them, the guest trees that the adapter keeps for
+/// itself, and the host directories that the adapter authorizes.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Shares {
+    /// The shares, in order: `--share`.
+    pub shares: Vec<Share>,
+    /// Host paths that the export hides inside the shares: `--deny`.
+    pub denied: Vec<PathBuf>,
+    /// Absolute guest paths of the trees that the adapter keeps for itself, beside those that the
+    /// container root keeps: `--reserved`.
+    pub reserved: Vec<String>,
+    /// The host directories that the adapter authorizes, inside which each share must lie:
+    /// `--share-root`.
+    pub roots: Vec<PathBuf>,
+}
+
+impl Shares {
+    /// Plans the export of the shares with NVX's `filesystem::plan`, or returns `None` without
+    /// shares.
+    ///
+    /// Each share must lie inside one of the [`roots`](Self::roots) once links are resolved, which
+    /// this checks before it plans, and again of the directories and files that the plan exports,
+    /// which `filesystem::plan` resolves anew. The plan maps each share at its target, read-only or
+    /// read-write, hides the [`denied`](Self::denied) paths inside the shares, and refuses targets
+    /// that the container root keeps, `ReservedTargets::CONTAINER_ROOT`, or that would take or
+    /// cover one of the [`reserved`](Self::reserved) trees.
+    ///
+    /// Fails with [`ErrorKind::Unsupported`](nvx::ErrorKind::Unsupported) for a reserved tree that
+    /// is not an absolute and canonical guest path, a root that is not an accessible directory, a
+    /// share that is not accessible or lies outside every root, and as `filesystem::plan` refuses
+    /// the request, as for a target that the root keeps, or a read-only share inside a read-write
+    /// one.
+    pub fn plan(&self) -> Result<Option<ExportPlan>> {
+        for target in &self.reserved {
+            if let Some(problem) = path_problem(target) {
+                return Err(Error::unsupported(format!(
+                    "--reserved entry {target:?} {problem}"
+                )));
+            }
+        }
+        if self.shares.is_empty() {
+            return Ok(None);
+        }
+        let roots = self
+            .roots
+            .iter()
+            .map(|root| {
+                let canonical = resolve("--share-root", root)?;
+                if !canonical.is_dir() {
+                    return Err(Error::unsupported(format!(
+                        "--share-root entry {} is not a directory",
+                        root.display()
+                    )));
+                }
+                Ok(canonical)
+            })
+            .collect::<Result<Vec<_>>>()?;
+        for share in &self.shares {
+            authorize(&roots, &share.host)?;
+        }
+        let mappings = self
+            .shares
+            .iter()
+            .map(|share| Mapping {
+                name: "--share",
+                path: &share.host,
+                target: Target::Guest(&share.target),
+                read_only: share.read_only,
+            })
+            .collect::<Vec<_>>();
+        let container = ReservedTargets::CONTAINER_ROOT;
+        let trees = container
+            .trees
+            .iter()
+            .copied()
+            .chain(self.reserved.iter().map(String::as_str))
+            .collect::<Vec<_>>();
+        let mut request = ExportRequest::new(
+            &mappings,
+            ReservedTargets {
+                trees: &trees,
+                exact: container.exact,
+            },
+        );
+        request.denied = PathList {
+            name: "--deny",
+            paths: &self.denied,
+        };
+        let export = filesystem::plan(&request)?;
+        for child in export.iter().flat_map(|export| &export.children) {
+            authorize(&roots, &child.root)?;
+        }
+        Ok(export)
+    }
+}
+
+/// Resolves the links of `path`, an entry of the option `name`, with `fs::canonicalize`.
+///
+/// Fails with [`ErrorKind::Unsupported`](nvx::ErrorKind::Unsupported) for a path that does not
+/// resolve, as `filesystem::plan` does.
+fn resolve(name: &str, path: &Path) -> Result<PathBuf> {
+    fs::canonicalize(path).map_err(|error| {
+        Error::unsupported(format!("{name} entry {} is not accessible", path.display()))
+            .with_source(error)
+    })
+}
+
+/// Checks that the share at `path` lies inside one of `roots`, the authorized host directories,
+/// resolved as [`resolve`] resolves it.
+///
+/// Fails with [`ErrorKind::Unsupported`](nvx::ErrorKind::Unsupported) for a share that does not
+/// resolve, or lies outside every root.
+fn authorize(roots: &[PathBuf], path: &Path) -> Result<()> {
+    let canonical = resolve("--share", path)?;
+    if roots.iter().any(|root| canonical.starts_with(root)) {
+        return Ok(());
+    }
+    Err(Error::unsupported(format!(
+        "--share entry {} lies outside the host directories that --share-root authorizes",
+        path.display()
+    )))
 }
 
 /// Returns the adapter's plan of the image at `distro`, in `format`, of which the guest expects

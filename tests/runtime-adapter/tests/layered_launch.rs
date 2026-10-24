@@ -1,8 +1,10 @@
 //! The host program stages the images of a layered root, plans a VM with a layered root with NVX's
 //! typed plan for an adapter's own guest, checks the staged bindings of its images and hands
-//! OpenVMM the checked files, composes OpenVMM's arguments without NVX's managed lifecycle,
-//! records what it launches, with the bindings that it checked, and refuses options that do not
-//! make a command. The tests need no hypervisor.
+//! OpenVMM the checked files, plans the export of the host paths that it shares with the root
+//! inside the directories that the adapter authorizes, attaches it, and verifies it before the
+//! launch, composes OpenVMM's arguments without NVX's managed lifecycle, records what it launches,
+//! with the bindings that it checked, and refuses options that do not make a command, and shares
+//! that it cannot export before it touches the store. The tests need no hypervisor.
 #![cfg(feature = "host")]
 
 use std::ffi::OsString;
@@ -14,14 +16,19 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
 
+use nvx::host::artifacts::Artifacts;
+use nvx::host::filesystem::GUEST_EXPORT;
 use nvx::host::sandbox::SandboxPlan;
 use nvx::host::sandbox::distro::DistroFormat;
 use nvx::host::sandbox::scratch::CLAIM_RELEASE_WAIT;
 use nvx::protocol::root::{ImageFormat, RootImage, RootLayout, RootUpper};
+use nvx::protocol::{HostMap, MAX_HOST_MAPPINGS};
 use nvx::uuid::Uuid;
 use nvx::{ErrorCode, ErrorKind, Hypervisor};
+use runtime_adapter::hook::STEP_HOOK;
 use runtime_adapter::layered::{
-    Bindings, LaunchRecord, LayeredLaunch, RECORD_NAME, SANDBOX_TOKEN, STAGED_NAME, Staged,
+    Bindings, LaunchRecord, LayeredLaunch, RECORD_NAME, SANDBOX_TOKEN, STAGED_NAME, Share, Shares,
+    Staged,
 };
 use runtime_adapter::root::RootConfig;
 use serde_json::{Value, json};
@@ -110,6 +117,62 @@ fn replace(path: &Path) {
     let copy = path.with_extension("copy");
     fs::copy(path, &copy).unwrap();
     fs::rename(&copy, path).unwrap();
+}
+
+/// Returns the share of the host path `host` at the guest path `target`.
+fn share(host: &Path, target: &str, read_only: bool) -> Share {
+    Share {
+        host: host.to_owned(),
+        target: target.to_owned(),
+        read_only,
+    }
+}
+
+/// Lays out the host sources of the tests' shares in `directory`, and returns the directory that
+/// holds them, `sources`: the directory `dir`, with the file `marker`, the file `secret`, and the
+/// directory `inner`, the file `file.txt`, and the directory `out`, with the directory `sub`.
+fn sources(directory: &Path) -> PathBuf {
+    let sources = directory.join("sources");
+    fs::create_dir_all(sources.join("dir").join("inner")).unwrap();
+    fs::write(sources.join("dir").join("marker"), "marker").unwrap();
+    fs::write(sources.join("dir").join("secret"), "secret").unwrap();
+    fs::write(sources.join("file.txt"), "file").unwrap();
+    fs::create_dir_all(sources.join("out").join("sub")).unwrap();
+    sources
+}
+
+/// Returns the tests' shares of `sources`, which [`sources`] lays out, below `/srv/maps`: `dir`
+/// read-only, `dir/inner` read-write inside it, `file.txt` read-only, and `out` read-write, with
+/// `dir/secret` hidden, `/opt/adapter` reserved for the adapter, and `sources` authorized.
+fn shares(sources: &Path) -> Shares {
+    let dir = sources.join("dir");
+    Shares {
+        shares: vec![
+            share(&dir, "/srv/maps/dir", true),
+            share(&dir.join("inner"), "/srv/maps/dir/inner", false),
+            share(&sources.join("file.txt"), "/srv/maps/file.txt", true),
+            share(&sources.join("out"), "/srv/maps/out", false),
+        ],
+        denied: vec![dir.join("secret")],
+        reserved: vec!["/opt/adapter".to_owned()],
+        roots: vec![sources.to_owned()],
+    }
+}
+
+/// Returns the canonical path of `path`, as an export plan names it: without the verbatim prefix
+/// that Windows gives it.
+fn canonical(path: &Path) -> PathBuf {
+    let canonical = fs::canonicalize(path).unwrap();
+    let text = canonical.to_str().unwrap();
+    PathBuf::from(text.strip_prefix(r"\\?\").unwrap_or(text))
+}
+
+/// Checks that `result` failed with [`ErrorKind::Unsupported`] and a description that holds
+/// `problem`.
+fn assert_refused<T: std::fmt::Debug>(result: nvx::Result<T>, problem: &str) {
+    let error = result.unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::Unsupported, "{error}");
+    assert!(error.to_string().contains(problem), "{problem}: {error}");
 }
 
 #[test]
@@ -645,6 +708,346 @@ fn a_launch_records_what_it_launched() {
 }
 
 #[test]
+fn shares_read_their_host_path_their_target_and_their_access() {
+    let shares = [
+        ("/data:/srv/data", "/data", "/srv/data", false),
+        ("/data:/srv/data:ro", "/data", "/srv/data", true),
+        (r"C:\data:/srv/data", r"C:\data", "/srv/data", false),
+        ("C:/data:/srv/data:ro", "C:/data", "/srv/data", true),
+        // The guest path starts at the last `:/`, and may hold other colons.
+        ("/a:/b:/srv/c:d", "/a:/b", "/srv/c:d", false),
+        // The planner refuses the guest's root.
+        ("/data:/", "/data", "/", false),
+    ];
+    for (text, host, target, read_only) in shares {
+        let expected = share(Path::new(host), target, read_only);
+        assert_eq!(Share::parse(text), Some(expected), "{text:?}");
+    }
+    // Text without a host path, or without a guest path that starts with `/`.
+    for text in ["/data", ":/srv/data", ":/srv/data:ro", "/data:srv/data", ""] {
+        assert_eq!(Share::parse(text), None, "{text:?}");
+    }
+}
+
+#[test]
+fn a_launch_shares_host_paths_inside_the_authorized_directories() {
+    let directory = directory("layered-shares");
+    let sources = sources(&directory);
+    let export = shares(&sources).plan().unwrap().unwrap();
+
+    // The guest maps each share at its target, each before the mappings inside its target, from
+    // the export's directories and files, the outermost shares, in order.
+    let mapping = |source: &str, target: &str, read_only| HostMap {
+        source: source.to_owned(),
+        target: target.to_owned(),
+        read_only,
+    };
+    let table = [
+        mapping("0", "/srv/maps/dir", true),
+        mapping("1", "/srv/maps/file.txt", true),
+        mapping("2", "/srv/maps/out", false),
+        mapping("0/inner", "/srv/maps/dir/inner", false),
+    ];
+    assert_eq!(export.guest_table(), table);
+    let dir = sources.join("dir");
+    let children = export
+        .children
+        .iter()
+        .map(|child| (child.root.clone(), child.file, child.writable))
+        .collect::<Vec<_>>();
+    let expected = [
+        (canonical(&dir), false, true),
+        (canonical(&sources.join("file.txt")), true, false),
+        (canonical(&sources.join("out")), false, true),
+    ];
+    assert_eq!(children, expected);
+    // OpenVMM hides the denied path, and lets the guest write only `dir/inner` in `dir`.
+    assert_eq!(export.children[0].denied, [canonical(&dir.join("secret"))]);
+    assert_eq!(export.children[0].write, [canonical(&dir.join("inner"))]);
+
+    // A target may lie below a path that the container root creates, though not at it.
+    let mut below = shares(&sources);
+    below.shares[2].target = "/etc/app/file.txt".to_owned();
+    assert!(below.plan().unwrap().is_some());
+
+    // The launch announces the table in its root configuration, and attaches the export after
+    // the image.
+    let distro = image(directory.join("distro.erofs"), 3 * 512);
+    let mut launch = staged_launch(&distro, None);
+    launch.share(export.clone()).unwrap();
+    assert_eq!(launch.export.as_ref(), Some(&export));
+    assert_eq!(launch.config.mapping_count, 4);
+    assert_eq!(launch.table(), table);
+    let config = String::from_utf8(launch.config.encode()).unwrap();
+    assert!(config.contains("\nmapping-count=4\n"), "{config}");
+    let prepared = launch.prepare().unwrap();
+    let arguments = launch.openvmm_arguments(
+        &prepared,
+        Hypervisor::Kvm,
+        &directory.join("vmlinux"),
+        &directory.join("initramfs"),
+        "/run/control.sock",
+        &directory.join("outcome.json"),
+    );
+    let exported = export
+        .openvmm_arguments()
+        .into_iter()
+        .map(OsString::from)
+        .collect::<Vec<_>>();
+    assert_eq!(exported[..2], ["--mount-aggregate", GUEST_EXPORT]);
+    assert_eq!(arguments[4..4 + exported.len()], exported[..]);
+    assert_eq!(arguments[4 + exported.len()], "--single-process");
+    drop(prepared);
+
+    // A launch that shares nothing announces no table, and attaches no export.
+    let nothing = Shares {
+        roots: vec![sources.clone()],
+        ..Shares::default()
+    };
+    assert_eq!(nothing.plan().unwrap(), None);
+    let plain = staged_launch(&distro, None);
+    assert!(plain.table().is_empty());
+    assert_eq!(plain.config.mapping_count, 0);
+
+    // The launch verifies the export before it prepares anything: a directory that replaced a
+    // shared file would grant all of itself.
+    fs::remove_file(sources.join("file.txt")).unwrap();
+    fs::create_dir(sources.join("file.txt")).unwrap();
+    let error = launch.prepare().unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::Other, "{error}");
+    assert!(
+        error
+            .to_string()
+            .contains("no longer names the host object"),
+        "{error}"
+    );
+
+    // A table that the guest would refuse fails before the launch announces it.
+    let mut launch = staged_launch(&distro, None);
+    let mut too_many = export;
+    too_many.binds = vec![too_many.binds[0].clone(); MAX_HOST_MAPPINGS + 1];
+    assert_refused(launch.share(too_many), "the mapping table does not encode");
+    assert_eq!(launch.export, None);
+    assert_eq!(launch.config.mapping_count, 0);
+}
+
+#[test]
+fn a_launch_refuses_shares_that_it_cannot_export() {
+    let directory = directory("layered-share-refusals");
+    let sources = sources(&directory);
+    let outside = directory.join("outside");
+    fs::create_dir_all(&outside).unwrap();
+    let (dir, file, out) = (
+        sources.join("dir"),
+        sources.join("file.txt"),
+        sources.join("out"),
+    );
+    let refused = |change: &dyn Fn(&mut Shares), problem: &str| {
+        let mut request = shares(&sources);
+        change(&mut request);
+        assert_refused(request.plan(), problem);
+    };
+    let unauthorized = |path: &Path| {
+        format!(
+            "--share entry {} lies outside the host directories that --share-root authorizes",
+            path.display()
+        )
+    };
+
+    // Each share must lie inside a directory that the adapter authorizes.
+    refused(
+        &|request| request.shares.push(share(&outside, "/srv/outside", false)),
+        &unauthorized(&outside),
+    );
+    refused(
+        &|request| request.roots = vec![dir.clone()],
+        &unauthorized(&file),
+    );
+    refused(&|request| request.roots.clear(), &unauthorized(&dir));
+    let missing = directory.join("missing");
+    refused(
+        &|request| request.roots.push(missing.clone()),
+        &format!("--share-root entry {} is not accessible", missing.display()),
+    );
+    refused(
+        &|request| request.roots = vec![file.clone()],
+        &format!("--share-root entry {} is not a directory", file.display()),
+    );
+    refused(
+        &|request| request.shares.push(share(&missing, "/srv/missing", true)),
+        &format!("--share entry {} is not accessible", missing.display()),
+    );
+
+    // The adapter's reserved trees are absolute and canonical guest paths, which no target takes
+    // or covers, as no target takes or covers those of the container root.
+    for (reserved, problem) in [
+        ("opt", "is not absolute"),
+        ("/", "is not canonical, or is the root"),
+        ("/opt/", "is not canonical, or is the root"),
+    ] {
+        refused(
+            &|request| request.reserved.push(reserved.to_owned()),
+            &format!("--reserved entry {reserved:?} {problem}"),
+        );
+    }
+    for (target, reserved) in [
+        ("/opt/adapter/dir", "/opt/adapter"),
+        ("/opt", "/opt/adapter"),
+        ("/proc/dir", "/proc"),
+        ("/etc", "/etc"),
+        ("/run/nvx", "/run/nvx"),
+    ] {
+        refused(
+            &|request| request.shares[0].target = target.to_owned(),
+            &format!(
+                "--share entry {} has the guest target {target}, which would cover the guest's \
+                 {reserved}",
+                dir.display()
+            ),
+        );
+    }
+
+    // A read-only share inside a read-write one, which the host could not keep read-only (#552).
+    let sub = out.join("sub");
+    refused(
+        &|request| request.shares.push(share(&sub, "/srv/maps/out/sub", true)),
+        &format!(
+            "--share entry {} lies inside the --share entry {}, where the host cannot keep it \
+             read-only",
+            sub.display(),
+            out.display()
+        ),
+    );
+    // A denied path that a workload could create inside a share, which nothing would hide.
+    let unborn = dir.join("unborn");
+    refused(
+        &|request| request.denied.push(unborn.clone()),
+        &format!("--deny entry {} does not exist", unborn.display()),
+    );
+
+    // A link inside an authorized directory to one outside it.
+    #[cfg(unix)]
+    {
+        let link = sources.join("link");
+        std::os::unix::fs::symlink(&outside, &link).unwrap();
+        refused(
+            &|request| request.shares.push(share(&link, "/srv/link", false)),
+            &unauthorized(&link),
+        );
+    }
+}
+
+#[test]
+fn the_host_program_refuses_shares_before_it_touches_the_store() {
+    let directory = directory("layered-share-command");
+    // NVX's artifacts in a release's layout, which the launch takes, but which boot nothing.
+    let artifacts = directory.join("artifacts");
+    let openvmm = if cfg!(windows) {
+        "bin/openvmm.exe"
+    } else {
+        "bin/openvmm"
+    };
+    let mut sums = String::new();
+    for name in [openvmm, "guest/vmlinux", "guest/initramfs.cpio.gz"] {
+        let path = artifacts.join(name);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, name).unwrap();
+        sums.push_str(&format!("{}  {name}\n", "0".repeat(64)));
+    }
+    fs::write(artifacts.join("SHA256SUMS"), sums).unwrap();
+    let manifest = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../SOURCE-MANIFEST.json");
+    fs::copy(manifest, artifacts.join("SOURCE-MANIFEST.json")).unwrap();
+
+    let sources = sources(&directory);
+    let outside = directory.join("outside");
+    fs::create_dir_all(&outside).unwrap();
+    let distro = image(directory.join("distro.erofs"), 1024);
+    let store = directory.join("store");
+    let shared = |path: &Path, access: &str| {
+        let mut value = path.as_os_str().to_owned();
+        value.push(access);
+        value
+    };
+    let root = sources.as_os_str().to_owned();
+    let (dir, out) = (sources.join("dir"), sources.join("out"));
+    let cases: [(Vec<OsString>, String); 4] = [
+        (
+            vec![
+                "--share".into(),
+                shared(&outside, ":/srv/outside"),
+                "--share-root".into(),
+                root.clone(),
+            ],
+            format!(
+                "--share entry {} lies outside the host directories that --share-root authorizes",
+                outside.display()
+            ),
+        ),
+        (
+            vec![
+                "--share".into(),
+                shared(&dir, ":/opt/adapter/dir:ro"),
+                "--reserved".into(),
+                "/opt/adapter".into(),
+                "--share-root".into(),
+                root.clone(),
+            ],
+            "which would cover the guest's /opt/adapter".to_owned(),
+        ),
+        (
+            vec![
+                "--share".into(),
+                shared(&out, ":/srv/out"),
+                "--share".into(),
+                shared(&out.join("sub"), ":/srv/out/sub:ro"),
+                "--share-root".into(),
+                root.clone(),
+            ],
+            "where the host cannot keep it read-only".to_owned(),
+        ),
+        (
+            vec![
+                "--share".into(),
+                shared(&dir, ":/srv/dir"),
+                "--reserved".into(),
+                "opt".into(),
+                "--share-root".into(),
+                root,
+            ],
+            "--reserved entry \"opt\" is not absolute".to_owned(),
+        ),
+    ];
+    for (options, problem) in cases {
+        let mut image = OsString::from("erofs:");
+        image.push(&distro);
+        let output = Command::new(env!("CARGO_BIN_EXE_runtime-adapter-host"))
+            .arg("launch")
+            .arg(&store)
+            .arg("--guest-agent")
+            .arg(directory.join("agent"))
+            .args(["--hypervisor", if cfg!(windows) { "whp" } else { "kvm" }])
+            .arg("--distro")
+            .arg(image)
+            .args([
+                "--distro-identity",
+                &identity().to_string(),
+                "--upper",
+                "ram",
+            ])
+            .args(&options)
+            .env(Artifacts::ENV_DIR, &artifacts)
+            .env_remove(STEP_HOOK)
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(1), "{options:?}: {output:?}");
+        assert!(output.stdout.is_empty(), "{options:?}: {output:?}");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains(&problem), "{options:?}: {stderr}");
+        assert!(!store.exists(), "{options:?}");
+    }
+}
+
+#[test]
 fn the_host_program_stages_images_in_the_store() {
     let directory = directory("layered-stage-command");
     let distro = image(directory.join("distro.erofs"), 1024);
@@ -696,7 +1099,7 @@ fn the_host_program_stages_images_in_the_store() {
 fn the_host_program_refuses_options_that_do_not_make_a_command() {
     let launch = ["launch", "store", "--guest-agent", "agent"];
     let uuid = "0a490905-41be-ed5f-984e-63eb7e5e20b1";
-    let cases: [(&[&str], &str); 24] = [
+    let cases: [(&[&str], &str); 30] = [
         (
             &["--distro", "erofs:image", "--upper", "ram"],
             "--distro needs --distro-identity",
@@ -787,13 +1190,26 @@ fn the_host_program_refuses_options_that_do_not_make_a_command() {
         (&["mounts"], "unexpected argument \"mounts\" of launch"),
         (&["--hypervisor", "qemu"], "qemu"),
         (&["--distro"], "\"--distro\" needs a value"),
+        (&["--share", "a:/b"], "--share needs --distro"),
+        (&["--deny", "secret"], "--deny needs --share"),
+        (&["--reserved", "/opt/adapter"], "--reserved needs --share"),
+        (&["--share-root", "sources"], "--share-root needs --share"),
+        (
+            &["--share", "a"],
+            "--share takes HOST:TARGET or HOST:TARGET:ro, with an absolute guest path TARGET, \
+             not \"a\"",
+        ),
+        (
+            &["--share", ":/b:ro"],
+            "--share takes HOST:TARGET or HOST:TARGET:ro",
+        ),
     ];
     let mut commands = cases
         .iter()
         .map(|(options, problem)| ([&launch[..], options].concat(), *problem))
         .collect::<Vec<_>>();
     let stage = ["stage", "store", "--distro", "erofs:image"];
-    let stage_cases: [(&[&str], &str); 7] = [
+    let stage_cases: [(&[&str], &str); 9] = [
         (&[], "stage needs --distro-identity"),
         (
             &["--distro-identity", uuid, "--upper", "ram"],
@@ -814,6 +1230,14 @@ fn the_host_program_refuses_options_that_do_not_make_a_command() {
         (
             &["--guest-build", "build"],
             "unexpected option \"--guest-build\" of stage",
+        ),
+        (
+            &["--share", "a:/b"],
+            "unexpected option \"--share\" of stage",
+        ),
+        (
+            &["--share-root", "sources"],
+            "unexpected option \"--share-root\" of stage",
         ),
         (&["image"], "unexpected argument \"image\" of stage"),
     ];
@@ -842,6 +1266,10 @@ fn the_host_program_refuses_options_that_do_not_make_a_command() {
         (
             vec!["reattach", "store", "--distro", "erofs:image"],
             "unexpected option \"--distro\" of reattach",
+        ),
+        (
+            vec!["reattach", "store", "--share", "a:/b"],
+            "unexpected option \"--share\" of reattach",
         ),
     ]);
     for (arguments, problem) in commands {

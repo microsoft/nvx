@@ -7,8 +7,10 @@
 //! messages that span records and records that share messages, partial records, record lengths,
 //! ERROR payloads, sequence and identity errors, resets and disconnects in the middle of a message,
 //! timeouts, sends that fail, the answers that requests check, the bounded buffer of the adapter's
-//! decoder, and the requests of a layered root: its configuration, its probes, and a stop whose
-//! teardown failed.
+//! decoder, the requests of a layered root: its configuration, its probes, and a stop whose
+//! teardown failed, and the host's order of a layered root: the guest agent's readiness and build,
+//! the mapping table in parts, and `Start`, and each failure of the order, after which the host
+//! sends nothing more, or stops the guest.
 #![cfg(feature = "host")]
 
 use std::collections::VecDeque;
@@ -23,13 +25,16 @@ use nvx::protocol::nvxs::{
     ErrorCode, Identity, Record, RecordError, RecordParser, RecordType, SessionError, encode_record,
 };
 use nvx::protocol::{
-    CAPABILITY_LEN, HostMap, OUTER_HEADER_LEN, OUTER_MAX_PAYLOAD, OUTER_MIN_RECEIVE_WINDOW,
+    CAPABILITY_LEN, HostMap, MAX_HOST_MAPPINGS, MAX_MAP_PATH_BYTES, OUTER_HEADER_LEN,
+    OUTER_MAX_PAYLOAD, OUTER_MIN_RECEIVE_WINDOW,
 };
 use runtime_adapter::GUEST_BUILD;
 use runtime_adapter::frame::{Decoder, FrameError, HEADER_LEN, MAX_BODY, MAX_TEXT_BODY, Message};
-use runtime_adapter::host::{Client, ClientError};
+use runtime_adapter::host::{self, Client, ClientError, MapReply, OrderError};
 use runtime_adapter::probe::{Facts, Probe, ProbeReply};
-use runtime_adapter::root::{Ready, RootConfig, RootFailure, RootReply, RootStage, encode_maps};
+use runtime_adapter::root::{
+    MapFailure, Ready, RootConfig, RootFailure, RootReply, RootStage, decode_maps, encode_maps,
+};
 
 /// Launch capability that the test broker accepts.
 const CAPABILITY: [u8; CAPABILITY_LEN] = [0xa5; CAPABILITY_LEN];
@@ -304,6 +309,20 @@ impl Broker {
         message
     }
 
+    /// Takes the host's next message, which must be `expected`, and answers it with `reply`.
+    fn expect(&mut self, expected: Message, reply: &Message) {
+        assert_eq!(self.messages(1), [expected]);
+        self.send_data(&reply.encode().unwrap(), OUTER_MAX_PAYLOAD);
+    }
+
+    /// Checks that the host sends nothing for a while, as when it waits for an answer.
+    fn assert_quiet(&self) {
+        let mut byte = [0];
+        let read = self.from_host.read(&mut byte, Some(SHORT));
+        let quiet = matches!(&read, Err(error) if error.kind() == io::ErrorKind::TimedOut);
+        assert!(quiet, "the host sent more: {read:?}");
+    }
+
     /// Serves the host as the guest agent does until it answered `Stop`: it answers the messages
     /// that each of the host's records completes, together, in DATA records of at most `size`
     /// bytes. Returns the host's messages.
@@ -447,12 +466,15 @@ fn with_length(record_type: RecordType, identity: Identity, sequence: u64, lengt
     bytes
 }
 
-/// Returns the guest agent's answer to `message`.
+/// Returns the guest agent's answer to `message`, in a guest whose root and mappings succeed.
 fn answer(message: &Message) -> Message {
     match message {
         Message::Ping => Message::Pong,
         Message::Echo(body) => Message::Echo(body.clone()),
         Message::Stop => Message::Stopped,
+        Message::RootConfig(_) => ready_message(),
+        Message::Maps(_) => Message::Mapped,
+        Message::Start => Message::Started,
         message => panic!("the host sent {message:?}, which only the guest sends"),
     }
 }
@@ -493,12 +515,60 @@ fn ready_message() -> Message {
 
 /// Returns the body of a part of a mapping table, of one mapping.
 fn maps_part() -> Vec<u8> {
-    let table = [HostMap {
-        source: "dir".to_owned(),
-        target: "/srv/dir".to_owned(),
-        read_only: true,
-    }];
-    encode_maps(&table).unwrap().remove(0)
+    encode_maps(&[mapping("dir", "/srv/dir", true)])
+        .unwrap()
+        .remove(0)
+}
+
+/// Returns a mapping of the host's mapping table.
+fn mapping(source: &str, target: &str, read_only: bool) -> HostMap {
+    HostMap {
+        source: source.to_owned(),
+        target: target.to_owned(),
+        read_only,
+    }
+}
+
+/// Returns a mapping table of long paths, which travels in several parts.
+fn long_table() -> Vec<HostMap> {
+    let long = "p".repeat(MAX_MAP_PATH_BYTES - 6);
+    (0..100)
+        .map(|index| {
+            let source = format!("{index:03}/{long}");
+            mapping(&source, &format!("/{source}"), index % 3 == 0)
+        })
+        .collect()
+}
+
+/// Returns the root configuration that announces the mappings of `table`.
+fn announcing(table: &[HostMap]) -> RootConfig {
+    RootConfig {
+        mapping_count: u32::try_from(table.len()).unwrap(),
+        ..RootConfig::default()
+    }
+}
+
+/// Runs the host's order with `client` in a thread, for the mapping table `table`: `ready`, with
+/// the guest agent's build that the host program ships, then `start_sandbox`. The thread returns
+/// the client with the guest's readiness, or how the order failed.
+fn order(client: Client, table: Vec<HostMap>) -> JoinHandle<(Client, Result<Ready, OrderError>)> {
+    spawn(client, move |client| {
+        let ready = host::ready(client, &announcing(&table), GUEST_BUILD, deadline())?;
+        host::start_sandbox(client, &table, deadline())?;
+        Ok(ready)
+    })
+}
+
+/// Checks that the host sent nothing more once its order ended: the host's stream ends at a record
+/// boundary once its client, which `ordering` returns, drops. Returns how the order ended.
+fn ended(
+    mut broker: Broker,
+    ordering: JoinHandle<(Client, Result<Ready, OrderError>)>,
+) -> OrderError {
+    let (client, ordered) = joined(ordering);
+    drop(client);
+    assert!(broker.read().is_none(), "the host sent more");
+    ordered.unwrap_err()
 }
 
 /// Checks that a failure ended `client`: every later call fails.
@@ -1182,9 +1252,11 @@ fn requests_check_their_answers_and_end_the_client_when_they_fail() {
         client.probe(&probe, deadline()).map(drop)
     };
     let stop: Request = |client| client.stop(deadline()).map(drop);
+    let map: Request = |client| client.map(&maps_part(), deadline()).map(drop);
+    let start: Request = |client| client.start(deadline());
     let teardown = RootFailure::new(RootStage::Teardown, "busy").encode();
     // Each request, and answers that don't answer it.
-    let cases: [(&str, Request, Vec<Message>, Kinds); 11] = [
+    let cases: [(&str, Request, Vec<Message>, Kinds); 16] = [
         (
             "Ping answered with Stopped",
             |client| client.ping(deadline()),
@@ -1253,6 +1325,36 @@ fn requests_check_their_answers_and_end_the_client_when_they_fail() {
             probe,
             vec![ready_message()],
             Some((9, 7)),
+        ),
+        (
+            "a part of the mapping table answered with Pong",
+            map,
+            vec![Message::Pong],
+            Some((22, 2)),
+        ),
+        (
+            "a part of the mapping table answered with Started",
+            map,
+            vec![Message::Started],
+            Some((22, 26)),
+        ),
+        (
+            "a part of the mapping table answered with Ready",
+            map,
+            vec![ready_message()],
+            Some((22, 7)),
+        ),
+        (
+            "Start answered with Mapped",
+            start,
+            vec![Message::Mapped],
+            Some((25, 23)),
+        ),
+        (
+            "Start answered with a mapping's failure",
+            start,
+            vec![Message::MapFailed(MapFailure::new(0, "late").encode())],
+            Some((25, 24)),
         ),
     ];
     for (name, request, replies, kinds) in cases {
@@ -1378,7 +1480,8 @@ fn answers_whose_bodies_do_not_decode_end_the_client() {
         client.probe(&probe, deadline()).map(drop)
     };
     let stop: Request = |client| client.stop(deadline()).map(drop);
-    let cases: [(&str, Request, Message, &str); 9] = [
+    let map: Request = |client| client.map(&maps_part(), deadline()).map(drop);
+    let cases: [(&str, Request, Message, &str); 11] = [
         (
             "a readiness without a build",
             configure,
@@ -1433,6 +1536,18 @@ fn answers_whose_bodies_do_not_decode_end_the_client() {
             Message::RootFailed(vec![5, 0xff]),
             "is not UTF-8 text",
         ),
+        (
+            "a mapping's failure that ends before its count does",
+            map,
+            Message::MapFailed(vec![1, 0, 0]),
+            "a failure of the mapping table ends early",
+        ),
+        (
+            "a mapping's failure that is not UTF-8 text",
+            map,
+            Message::MapFailed(vec![0, 0, 0, 0, 0xff]),
+            "a failure of the mapping table is not UTF-8 text",
+        ),
     ];
     for (name, request, reply, problem) in cases {
         let (mut broker, client) = attached(FIRST, usize::MAX);
@@ -1447,4 +1562,245 @@ fn answers_whose_bodies_do_not_decode_end_the_client() {
         assert!(failed, "{name}: {result:?}");
         assert_ended(&mut client);
     }
+}
+
+#[test]
+fn the_host_orders_a_layered_root_ready_then_its_table_in_parts_then_start() {
+    let long = long_table();
+    assert!(encode_maps(&long).unwrap().len() >= 3);
+    // Tables of no mapping, which sends no part, of one, of several in one part, and of several
+    // parts.
+    let tables = [
+        Vec::new(),
+        vec![mapping("0", "/srv/dir", true)],
+        vec![
+            mapping("0", "/srv/dir", true),
+            mapping("1", "/srv/file.txt", true),
+            mapping("0/inner", "/srv/dir/inner", false),
+        ],
+        long,
+    ];
+    for table in tables {
+        let count = table.len();
+        let parts = encode_maps(&table).unwrap();
+        let (mut broker, client) = attached(FIRST, usize::MAX);
+        let ordering = order(client, table.clone());
+        // The root configuration announces the table, and the host waits for the guest's
+        // readiness.
+        let config = Message::RootConfig(announcing(&table).encode());
+        assert_eq!(broker.messages(1), [config], "{count} mappings");
+        broker.assert_quiet();
+        broker.send_data(&ready_message().encode().unwrap(), OUTER_MAX_PAYLOAD);
+        // Then each part of the table, once the guest applied the one before, then `Start`.
+        for part in parts {
+            assert_eq!(
+                broker.messages(1),
+                [Message::Maps(part)],
+                "{count} mappings"
+            );
+            broker.assert_quiet();
+            broker.send_data(&Message::Mapped.encode().unwrap(), OUTER_MAX_PAYLOAD);
+        }
+        broker.expect(Message::Start, &Message::Started);
+        let (client, ordered) = joined(ordering);
+        assert_eq!(ordered.unwrap(), ready(), "{count} mappings");
+
+        // The client stays usable.
+        let pinging = spawn(client, |client| client.ping(deadline()));
+        assert_eq!(broker.answer(OUTER_MAX_PAYLOAD), Message::Ping);
+        joined(pinging).1.unwrap();
+    }
+
+    // The client returns how the guest took a part of the table.
+    let (mut broker, client) = attached(FIRST, usize::MAX);
+    let applying = spawn(client, |client| client.map(&maps_part(), deadline()));
+    broker.expect(Message::Maps(maps_part()), &Message::Mapped);
+    let (client, mapped) = joined(applying);
+    assert_eq!(mapped.unwrap(), MapReply::Mapped);
+    let applying = spawn(client, |client| client.map(&maps_part(), deadline()));
+    let failure = MapFailure::new(0, "the target /srv/dir is not a directory");
+    broker.expect(
+        Message::Maps(maps_part()),
+        &Message::MapFailed(failure.encode()),
+    );
+    assert_eq!(joined(applying).1.unwrap(), MapReply::Failed(failure));
+
+    // The whole order, a `Ping`, and a stop, in records of 7 bytes each way.
+    let table = vec![
+        mapping("0", "/srv/dir", true),
+        mapping("0/inner", "/srv/dir/inner", false),
+    ];
+    let (mut broker, transport) = connect(FIRST, 7);
+    let serving = thread::spawn(move || {
+        broker.attach();
+        let served = broker.serve(7);
+        assert!(broker.read().is_none());
+        served
+    });
+    let mut client = Client::attach(transport, &CAPABILITY, deadline()).unwrap();
+    let readiness = host::ready(&mut client, &announcing(&table), GUEST_BUILD, deadline()).unwrap();
+    assert_eq!(readiness.build(), GUEST_BUILD);
+    host::start_sandbox(&mut client, &table, deadline()).unwrap();
+    client.ping(deadline()).unwrap();
+    assert_eq!(client.stop(deadline()).unwrap(), None);
+    drop(client);
+    let mut expected = vec![Message::RootConfig(announcing(&table).encode())];
+    expected.extend(encode_maps(&table).unwrap().into_iter().map(Message::Maps));
+    expected.extend([Message::Start, Message::Ping, Message::Stop]);
+    assert_eq!(joined(serving), expected);
+}
+
+#[test]
+fn the_host_sends_nothing_more_to_a_guest_agent_of_another_build_or_whose_root_failed() {
+    let table = vec![mapping("0", "/srv/dir", true)];
+    let config = || Message::RootConfig(announcing(&table).encode());
+
+    // A guest agent of another build assembled the root: the host sends it neither the table nor
+    // `Start`.
+    let (mut broker, client) = attached(FIRST, usize::MAX);
+    let ordering = order(client, table.clone());
+    let another = Ready::new("another-build").unwrap();
+    broker.expect(config(), &Message::Ready(another.encode()));
+    let error = ended(broker, ordering);
+    let other = matches!(
+        &error,
+        OrderError::Build { reported, expected }
+            if reported == "another-build" && expected == GUEST_BUILD
+    );
+    assert!(other, "{error:?}");
+    assert_eq!(
+        error.to_string(),
+        format!("the guest agent is of build another-build, not of the host's build {GUEST_BUILD}")
+    );
+
+    // The guest reports that a stage of the root failed, after which it ends.
+    for stage in RootStage::ALL {
+        let failure = RootFailure::new(stage, format!("the {stage} failed"));
+        let (mut broker, client) = attached(FIRST, usize::MAX);
+        let ordering = order(client, table.clone());
+        broker.expect(config(), &Message::RootFailed(failure.encode()));
+        let error = ended(broker, ordering);
+        let failed = matches!(&error, OrderError::Root(reported) if *reported == failure);
+        assert!(failed, "{stage}: {error:?}");
+        assert_eq!(error.to_string(), failure.to_string());
+    }
+
+    // The client failed, as when the guest agent answers the root configuration with another
+    // kind.
+    let (mut broker, client) = attached(FIRST, usize::MAX);
+    let ordering = order(client, table.clone());
+    broker.expect(config(), &Message::Pong);
+    let error = ended(broker, ordering);
+    let failed = matches!(
+        error,
+        OrderError::Client(ClientError::Reply {
+            request: 6,
+            reply: 2
+        })
+    );
+    assert!(failed, "{error:?}");
+
+    // A table that does not encode fails before the host sends any of it, and the client stays
+    // usable.
+    let (mut broker, client) = attached(FIRST, usize::MAX);
+    let too_many = vec![mapping("a", "/a", false); MAX_HOST_MAPPINGS + 1];
+    let starting = spawn(client, move |client| {
+        host::start_sandbox(client, &too_many, deadline())
+    });
+    let (client, started) = joined(starting);
+    let refused = matches!(
+        &started,
+        Err(OrderError::Table(error))
+            if error.problem().starts_with("the mapping table does not encode")
+    );
+    assert!(refused, "{started:?}");
+    let pinging = spawn(client, |client| client.ping(deadline()));
+    assert_eq!(broker.answer(OUTER_MAX_PAYLOAD), Message::Ping);
+    joined(pinging).1.unwrap();
+}
+
+#[test]
+fn a_mapping_that_the_guest_fails_ends_the_table_and_the_host_stops_the_guest() {
+    let table = long_table();
+    let parts = encode_maps(&table).unwrap();
+    let config = Message::RootConfig(announcing(&table).encode());
+    let teardown = RootFailure::new(RootStage::Teardown, "failed to unmount /srv/000: busy");
+    // The guest fails the first, a middle, or the last part, then confirms the stop, after a
+    // teardown that succeeded or failed.
+    let cases = [
+        (0, None),
+        (parts.len() / 2, None),
+        (parts.len() - 1, None),
+        (parts.len() / 2, Some(teardown)),
+    ];
+    for (failing, teardown) in cases {
+        let (mut broker, client) = attached(FIRST, usize::MAX);
+        let ordering = order(client, table.clone());
+        broker.expect(config.clone(), &ready_message());
+        for part in &parts[..failing] {
+            broker.expect(Message::Maps(part.clone()), &Message::Mapped);
+        }
+        // The guest applied the mappings before the failing part.
+        let applied = decode_maps(&parts[failing]).unwrap().first;
+        let failure = MapFailure::new(applied, "the target is not a directory");
+        broker.expect(
+            Message::Maps(parts[failing].clone()),
+            &Message::MapFailed(failure.encode()),
+        );
+        // The host sends no more of the table, nor `Start`, but asks the guest to stop.
+        assert_eq!(broker.messages(1), [Message::Stop], "part {failing}");
+        let mut replies = Vec::new();
+        replies.extend(
+            teardown
+                .iter()
+                .map(|teardown| Message::RootFailed(teardown.encode())),
+        );
+        replies.push(Message::Stopped);
+        broker.send_data(&encode(&replies), OUTER_MAX_PAYLOAD);
+        let error = ended(broker, ordering);
+        let mut description = failure.to_string();
+        if let Some(teardown) = &teardown {
+            description = format!("{description}; then {teardown}");
+        }
+        assert_eq!(error.to_string(), description);
+        let OrderError::Mapping {
+            failure: found,
+            stop,
+        } = &error
+        else {
+            panic!("part {failing}: {error:?}");
+        };
+        assert_eq!(*found, failure, "part {failing}");
+        assert!(matches!(stop, Ok(found) if *found == teardown), "{stop:?}");
+    }
+
+    // A guest agent that does not confirm the stop, as when its session ends, fails the stop,
+    // which the failure reports.
+    let (mut broker, client) = attached(FIRST, usize::MAX);
+    let ordering = order(client, table.clone());
+    broker.expect(config, &ready_message());
+    let failure = MapFailure::new(0, "the target is not a directory");
+    broker.expect(
+        Message::Maps(parts[0].clone()),
+        &Message::MapFailed(failure.encode()),
+    );
+    assert_eq!(broker.messages(1), [Message::Stop]);
+    broker.close();
+    let error = ended(broker, ordering);
+    let OrderError::Mapping {
+        failure: found,
+        stop,
+    } = &error
+    else {
+        panic!("{error:?}");
+    };
+    assert_eq!(*found, failure);
+    assert!(matches!(stop, Err(ClientError::Session(_))), "{stop:?}");
+    let description = error.to_string();
+    assert!(
+        description.starts_with(&format!(
+            "{failure}; the guest agent did not confirm the stop: "
+        )),
+        "{description}"
+    );
 }

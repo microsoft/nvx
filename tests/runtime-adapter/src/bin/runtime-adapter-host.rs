@@ -21,12 +21,12 @@
 //!
 //!   LAYERED, `--distro FORMAT:PATH --distro-identity UUID --upper (scratch:PATH | ram)
 //!   [--runtime-dir DIR] [--overlay-mode MODE] [--scratch-journal POLICY]
-//!   [--first-partition-bound BYTES]`, gives the VM a layered root, which the guest agent's worker
-//!   assembles; see `runtime_adapter::layered` and `runtime_adapter::worker`. Its image is the raw
-//!   file PATH, an EROFS filesystem, `erofs`, or a GPT disk, `gpt`, of which the guest expects the
-//!   identity UUID: the file system's UUID, or the disk's GUID. Its upper is the ext4 scratch
-//!   image PATH, or RAM. The guest assembles the root below its runtime directory DIR,
-//!   `/run/runtime-adapter` by default, in the overlay mode MODE, `trusted-lowers` or
+//!   [--first-partition-bound BYTES] [SHARES]`, gives the VM a layered root, which the guest
+//!   agent's worker assembles; see `runtime_adapter::layered` and `runtime_adapter::worker`. Its
+//!   image is the raw file PATH, an EROFS filesystem, `erofs`, or a GPT disk, `gpt`, of which the
+//!   guest expects the identity UUID: the file system's UUID, or the disk's GUID. Its upper is the
+//!   ext4 scratch image PATH, or RAM. The guest assembles the root below its runtime directory
+//!   DIR, `/run/runtime-adapter` by default, in the overlay mode MODE, `trusted-lowers` or
 //!   `untrusted-lowers`, checks a scratch's journal against the policy POLICY, `allowed` or
 //!   `forbidden`, and refuses a first partition of a GPT disk larger than BYTES, with the guest's
 //!   defaults, `trusted-lowers`, `allowed`, and 64 KiB, unless given. Before it spawns the VM, the
@@ -34,10 +34,30 @@
 //!   metadata alone, and fails if STORE stages none for either, or one no longer holds, as for an
 //!   image that changed after it was staged. It hands OpenVMM the files that the checks opened,
 //!   which it holds until the guest has assembled the root, or until it has torn down a launch
-//!   that failed, and records the bindings. Once attached, the launch sends the root
-//!   configuration, and exchanges the `Ping` and the `Echo` once the guest assembled the root. If
-//!   the guest reports that a stage of the root failed instead, the launch waits for the VM to
-//!   end, abandons it, and checks that the VM ended with the stage's status.
+//!   that failed, and records the bindings.
+//!
+//!   SHARES, `--share HOST:TARGET[:ro]... [--deny PATH]... [--reserved TARGET]...
+//!   [--share-root DIR]...`, shares each host directory or regular file HOST with the root, at the
+//!   absolute guest path TARGET, read-only with `:ro`, and read-write otherwise. The guest path
+//!   starts at the last `:/`. Each HOST must lie inside a host directory DIR, which the adapter
+//!   authorizes, once links are resolved: the launch refuses one outside them before it plans the
+//!   export, with NVX's `filesystem::plan`. The export hides each host path PATH inside the
+//!   shares, and no TARGET may take or cover a guest tree that the container root keeps, or a tree
+//!   TARGET that `--reserved` keeps for the adapter. The launch refuses a request that
+//!   `filesystem::plan` refuses, such as one with a read-only share inside a read-write one,
+//!   before it spawns the VM, and checks the export with `ExportPlan::verify` before it spawns it.
+//!   OpenVMM exports the shares; see `runtime_adapter::layered::Shares`.
+//!
+//!   Once attached, the launch follows the host's order; see `runtime_adapter::host`. It sends the
+//!   root configuration, which announces how many mappings the export's table holds, and waits for
+//!   the guest agent's `Ready`, then checks that the guest agent is of the build that the host
+//!   ships, sends the mapping table, in order, then `Start`, and exchanges the `Ping` and the
+//!   `Echo` once the guest started the sandbox. A guest agent of another build gets nothing more,
+//!   and the launch fails, which terminates the VM. If the guest reports that a stage of the root
+//!   failed instead, the launch waits for the VM to end, abandons it, and checks that the VM ended
+//!   with the stage's status. If the guest fails a mapping, the launch sends no more of the table,
+//!   nor `Start`, asks the guest agent to stop, which tears down the root, waits for the VM to
+//!   end, abandons it, and checks that the VM ended with success and a complete teardown.
 //! - `runtime-adapter-host reattach STORE` reattaches to the VM of STORE, which an earlier process
 //!   launched and which it holds although it is not its child, attaches a new session to it, in
 //!   the session's next epoch, and exchanges a `Ping`, leaving the VM running.
@@ -66,8 +86,12 @@
 //!   that the command attached to;
 //! - `root`: how the guest answered the root configuration: `ready` or `failed`, or `failed`
 //!   once a stop finds that the root's teardown failed;
+//! - `build`: the build of the guest agent that assembled the root;
 //! - `stage` and `problem`: the stage of the root that failed, such as `assembly`, and the
-//!   problem;
+//!   problem, or the problem of a mapping that failed;
+//! - `table`: how the guest took the mapping table: `applied` or `failed`;
+//! - `mapped`: how many of the table's mappings the guest applied;
+//! - `sandbox`: `started` once the guest started the sandbox;
 //! - `PROBE.KEY`: the fact KEY that the probe named PROBE found;
 //! - `stopped`: how the stop ended: `graceful`, `forced`, or `timed-out`;
 //! - `outcome`: the category and status code of the VM's outcome report, such as `success 0`;
@@ -81,9 +105,11 @@
 //!
 //! They exit with 0 once they did what they were asked, with 3 when reattach finds the VM
 //! mismatched, with 4 when the guest reported that a stage of the root failed, and the VM ended
-//! with the stage's status and a complete teardown, with 5 when the step hook ends a launch, and
-//! with 1, after a diagnostic on standard error, when they fail. Anything else is a usage error,
-//! with status 2, as is a value of `RUNTIME_ADAPTER_STEP_HOOK` that sets no step hook.
+//! with the stage's status and a complete teardown, with 5 when the step hook ends a launch, with
+//! 6 when the guest failed a mapping of the table, and the VM stopped gracefully, with success and
+//! a complete teardown, and with 1, after a diagnostic on standard error, when they fail. Anything
+//! else is a usage error, with status 2, as is a value of `RUNTIME_ADAPTER_STEP_HOOK` that sets no
+//! step hook.
 
 use std::env;
 use std::error::Error;
@@ -106,11 +132,11 @@ use nvx::{ErrorKind, Hypervisor};
 use runtime_adapter::GUEST_BUILD;
 use runtime_adapter::frame::MAX_BODY;
 use runtime_adapter::hook::{Step, StepHook};
-use runtime_adapter::host::Client;
+use runtime_adapter::host::{self, Client, ClientError, OrderError};
 use runtime_adapter::initramfs;
-use runtime_adapter::layered::{LaunchRecord, LayeredLaunch, Staged};
+use runtime_adapter::layered::{LaunchRecord, LayeredLaunch, Share, Shares, Staged};
 use runtime_adapter::probe::{Probe, ProbeReply, escape};
-use runtime_adapter::root::{JournalPolicy, OverlayMode, RootFailure, RootReply};
+use runtime_adapter::root::{JournalPolicy, OverlayMode, RootFailure};
 use runtime_adapter::runtime::Runtime;
 
 /// How long a command waits for the sandbox's lock.
@@ -133,6 +159,9 @@ const MISMATCHED: u8 = 3;
 /// The exit status of a command whose guest reported that a stage of the root failed, once the VM
 /// ended with the stage's status.
 const ROOT_FAILED: u8 = 4;
+/// The exit status of a launch whose guest failed a mapping of the table, once the VM stopped
+/// gracefully, with success and a complete teardown.
+const TABLE_FAILED: u8 = 6;
 /// The command lines that the program accepts.
 const USAGE: &str = concat!(
     "usage: runtime-adapter-host\n",
@@ -143,7 +172,9 @@ const USAGE: &str = concat!(
     "           [--distro FORMAT:PATH --distro-identity UUID",
     " --upper (scratch:PATH | ram) [--runtime-dir DIR]\n",
     "            [--overlay-mode MODE] [--scratch-journal POLICY]",
-    " [--first-partition-bound BYTES]]\n",
+    " [--first-partition-bound BYTES]\n",
+    "            [--share HOST:TARGET[:ro]... [--deny PATH]... [--reserved TARGET]...",
+    " [--share-root DIR]...]]\n",
     "       runtime-adapter-host (reattach | stop) STORE [--guest-build BUILD]\n",
     "       runtime-adapter-host probe STORE PROBE... [--guest-build BUILD]",
 );
@@ -176,7 +207,7 @@ enum Command {
         /// The guest agent's build.
         guest_build: String,
         /// The VM's layered root, if it has one.
-        layered: Option<Layered>,
+        layered: Option<Box<Layered>>,
         /// The step hook, for tests, if `RUNTIME_ADAPTER_STEP_HOOK` sets one.
         hook: Option<StepHook>,
     },
@@ -218,6 +249,8 @@ struct Layered {
     scratch_journal: Option<JournalPolicy>,
     /// The most bytes that the first partition of a GPT disk may hold, unless the guest's default.
     first_partition_bound: Option<u64>,
+    /// The host paths that the launch shares with the root.
+    shares: Shares,
 }
 
 /// The options of a command.
@@ -243,6 +276,8 @@ struct Options {
     scratch_journal: Option<JournalPolicy>,
     /// `--first-partition-bound`.
     first_partition_bound: Option<u64>,
+    /// `--share`, `--deny`, `--reserved`, and `--share-root`, in order.
+    shares: Shares,
 }
 
 fn main() -> ExitCode {
@@ -281,7 +316,7 @@ fn main() -> ExitCode {
             &guest_agent,
             hypervisor,
             &guest_build,
-            layered.as_ref(),
+            layered.as_deref(),
             hook.as_ref(),
         ),
         Command::Reattach {
@@ -350,6 +385,17 @@ fn parse(arguments: Vec<OsString>) -> Result<Command, String> {
             }
         }
         "launch" => {
+            let shares = &options.shares;
+            let share_options = [
+                ("--deny", !shares.denied.is_empty()),
+                ("--reserved", !shares.reserved.is_empty()),
+                ("--share-root", !shares.roots.is_empty()),
+            ];
+            if shares.shares.is_empty()
+                && let Some((option, _)) = share_options.iter().find(|(_, given)| *given)
+            {
+                return Err(format!("{option} needs --share"));
+            }
             let layered = match (options.distro, options.identity, options.upper) {
                 (Some(_), None, _) => return Err("--distro needs --distro-identity".to_owned()),
                 (Some(_), Some(_), None) => return Err("--distro needs --upper".to_owned()),
@@ -361,16 +407,19 @@ fn parse(arguments: Vec<OsString>) -> Result<Command, String> {
                 {
                     return Err("--first-partition-bound needs --distro gpt:PATH".to_owned());
                 }
-                (Some((format, distro)), Some(identity), Some(scratch)) => Some(Layered {
-                    distro,
-                    format,
-                    identity,
-                    scratch,
-                    runtime: options.runtime,
-                    overlay_mode: options.overlay_mode,
-                    scratch_journal: options.scratch_journal,
-                    first_partition_bound: options.first_partition_bound,
-                }),
+                (Some((format, distro)), Some(identity), Some(scratch)) => {
+                    Some(Box::new(Layered {
+                        distro,
+                        format,
+                        identity,
+                        scratch,
+                        runtime: options.runtime,
+                        overlay_mode: options.overlay_mode,
+                        scratch_journal: options.scratch_journal,
+                        first_partition_bound: options.first_partition_bound,
+                        shares: options.shares,
+                    }))
+                }
                 (None, Some(_), _) => {
                     return Err("--distro-identity needs --distro".to_owned());
                 }
@@ -384,6 +433,7 @@ fn parse(arguments: Vec<OsString>) -> Result<Command, String> {
                             "--first-partition-bound",
                             options.first_partition_bound.is_some(),
                         ),
+                        ("--share", !options.shares.shares.is_empty()),
                     ];
                     if let Some((option, _)) = layered.iter().find(|(_, given)| *given) {
                         return Err(format!("{option} needs --distro"));
@@ -488,6 +538,19 @@ fn parse_option(
                 format!("--first-partition-bound takes a positive number of bytes, not {value:?}")
             })?);
         }
+        ("launch", "--share") => {
+            let value = text(value)?;
+            let share = Share::parse(&value).ok_or_else(|| {
+                format!(
+                    "--share takes HOST:TARGET or HOST:TARGET:ro, with an absolute guest path \
+                     TARGET, not {value:?}"
+                )
+            })?;
+            options.shares.shares.push(share);
+        }
+        ("launch", "--deny") => options.shares.denied.push(PathBuf::from(value)),
+        ("launch", "--reserved") => options.shares.reserved.push(text(value)?),
+        ("launch", "--share-root") => options.shares.roots.push(PathBuf::from(value)),
         (_, "--guest-build") if name != "stage" && options.guest_build.is_none() => {
             options.guest_build = Some(text(value)?);
         }
@@ -551,6 +614,10 @@ fn launch(
             launch.config.overlay_mode = layered.overlay_mode;
             launch.config.scratch_journal = layered.scratch_journal;
             launch.config.first_partition_bound = layered.first_partition_bound;
+            // The launch refuses shares that it cannot export before it touches the store.
+            if let Some(export) = layered.shares.plan()? {
+                launch.share(export)?;
+            }
             Ok(launch)
         })
         .transpose()
@@ -639,27 +706,56 @@ fn launch(
     .map_err(|error| failed(format!("cannot connect to the VM: {}", describe(&error))))?;
     let mut client = attach(transport, &capability, deadline).map_err(failed)?;
     if let Some(layered) = &layered {
-        let reply = client
-            .configure_root(&layered.config, deadline)
-            .map_err(|error| {
-                failed(format!(
-                    "the guest agent did not answer the root configuration: {}",
-                    describe(&error)
-                ))
-            })?;
-        match reply {
-            RootReply::Ready(_) => {
+        match host::ready(&mut client, &layered.config, guest_build, deadline) {
+            Ok(ready) => {
                 println!("root=ready");
+                println!("build={}", escape(ready.build()));
                 // The guest has assembled the root, so OpenVMM holds the images: the checked files
                 // can go, which releases their guards, while OpenVMM keeps the scratch image's
                 // claim.
                 drop(prepared);
                 deadline += step(hook, Step::Ready)?;
             }
-            RootReply::Failed(failure) => {
+            Err(OrderError::Root(failure)) => {
                 print_failure(&failure);
                 drop(client);
                 return launch_failed(starting, &store, &failure).map_err(failed);
+            }
+            // The host sends a guest agent of another build nothing more, and the VM ends once
+            // `starting` drops.
+            Err(OrderError::Build { reported, expected }) => {
+                println!("root=ready");
+                println!("build={}", escape(&reported));
+                return Err(failed(format!(
+                    "the guest agent is of build {reported}, not of the host's build {expected}"
+                )));
+            }
+            Err(error) => {
+                return Err(failed(format!(
+                    "the guest agent did not answer the root configuration: {}",
+                    describe(&error)
+                )));
+            }
+        }
+        let table = layered.table();
+        match host::start_sandbox(&mut client, &table, deadline) {
+            Ok(()) => {
+                println!("table=applied");
+                println!("mapped={}", table.len());
+                println!("sandbox=started");
+            }
+            Err(OrderError::Mapping { failure, stop }) => {
+                println!("table=failed");
+                println!("mapped={}", failure.applied());
+                println!("problem={}", escape(failure.problem()));
+                drop(client);
+                return table_failed(starting, &store, stop).map_err(failed);
+            }
+            Err(error) => {
+                return Err(failed(format!(
+                    "the guest agent did not start the sandbox: {}",
+                    describe(&error)
+                )));
             }
         }
     }
@@ -707,6 +803,42 @@ fn launch_failed(
     }
     check_outcome(store, "guest-exit", failure.stage().exit_status().into())?;
     Ok(ExitCode::from(ROOT_FAILED))
+}
+
+/// Ends the launch `starting` of the sandbox `store`, whose guest failed a mapping of the table,
+/// and which the host asked to stop, as `stop` tells how the stop ended: once the guest agent
+/// confirmed the stop, it waits for the VM to exit, then abandons the launch, which terminates a
+/// VM that still runs, and checks that the VM stopped gracefully, with success and a complete
+/// teardown. A guest agent that did not confirm the stop, or reported that the root's teardown
+/// failed, fails the launch.
+fn table_failed(
+    starting: Starting<'_>,
+    store: &SandboxStore,
+    stop: Result<Option<RootFailure>, ClientError>,
+) -> Result<ExitCode, String> {
+    let exited = match &stop {
+        Ok(_) => starting
+            .process()
+            .wait(Instant::now() + STOP_TIMEOUT)
+            .map_err(|error| format!("cannot wait for the VM to exit: {error}"))?,
+        Err(_) => false,
+    };
+    starting.abandon().map_err(|error| describe(&error))?;
+    println!("stopped={}", if exited { "graceful" } else { "forced" });
+    let failure = stop.map_err(|error| {
+        format!(
+            "the guest agent did not confirm the stop: {}",
+            describe(&error)
+        )
+    })?;
+    if !exited {
+        return Err("the VM did not exit once the guest agent confirmed the stop".to_owned());
+    }
+    if let Some(failure) = failure {
+        return Err(format!("once the mapping table failed, {failure}"));
+    }
+    check_outcome(store, "success", 0)?;
+    Ok(ExitCode::from(TABLE_FAILED))
 }
 
 /// Prints the root's `failure`.
