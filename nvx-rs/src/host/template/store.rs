@@ -1,6 +1,7 @@
-//! The store of templates, [`Store`]: its directory, its records, and the namespaces of its
-//! generations.
+//! The store of templates, [`Store`]: its directory, its records, the namespaces of its
+//! generations, and their leases, tombstones, and retirement.
 
+mod leases;
 #[cfg(test)]
 mod tests;
 
@@ -24,6 +25,8 @@ use crate::error::{Error, ErrorCode, ErrorKind, Result};
 use crate::host::platform::{self, parse_hex_id};
 use crate::host::process::BootId;
 use crate::host::store::files::{open_lock, write_private};
+
+pub use self::leases::{Acquired, LEASES_NAME, Lease, LeaseId, Retirement, TOMBSTONES_NAME};
 
 /// Version of the store's records: its identity record and its index.
 pub const STORE_FORMAT: u32 = 1;
@@ -297,6 +300,10 @@ impl Index {
 ///     <G>/                 the payload of the store generation G
 ///       key.bin            the canonical encoding of its compatibility key
 ///       snapshot/          its snapshot, as OpenVMM published it
+///   leases/                the records of the leases that the store granted
+///     <L>.json             the record of the lease L
+///   tombstones/            the tombstones of the generations that take no new leases
+///     <G>.json             the tombstone of the store generation G
 /// ```
 ///
 /// # Identity
@@ -313,10 +320,12 @@ impl Index {
 /// of its key and of its capture class, its storage generation, and what its manifest records of
 /// the capture itself, its creation time, its time contract, and the lengths of its artifacts.
 /// The payload of a generation never changes once the index lists it: the canonical encoding of
-/// its key, which [`Store::read_key`] reads, and its snapshot. Only the index changes, as
-/// generations are published and removed.
+/// its key, which [`Store::read_key`] reads, and its snapshot. The index changes as generations
+/// are published and retired, and the records of leases and tombstones as clones lease
+/// generations, and as generations are quarantined and retired.
 ///
-/// The store's records, its identity record and its index, are JSON in format [`STORE_FORMAT`].
+/// The store's records, its identity record, its index, and the records of its leases and
+/// tombstones, are JSON in format [`STORE_FORMAT`].
 /// A record in any other format fails with a message that names its format, and is neither read
 /// nor migrated: a store of another format is replaced by a new one, whose templates are captured
 /// again. Records are replaced atomically: written to a temporary file beside them, flushed to
@@ -339,6 +348,40 @@ impl Index {
 ///   generation share it.
 /// - The VM generation ID is 16 random bytes that each VM process draws, which tell the clones of
 ///   one generation apart. Their guests read it, and the store records none.
+///
+/// # Leases, tombstones, and retirement
+///
+/// A clone that restores a generation leases it first, so that the generation stays in the store
+/// until the clone's VM has exited. [`Store::select`] selects the generation of a key from which
+/// a clone restores: the latest that is neither quarantined nor ineligible at the host's time,
+/// as [`Generation::eligibility`] decides it. [`Store::acquire`] leases a generation in one
+/// transaction, under the store's lock and then the sandbox's: it checks the generation's
+/// eligibility, and writes the record of the lease in the store and the clone binding,
+/// [`CLONE_BINDING_NAME`](crate::host::store::CLONE_BINDING_NAME), beside the sandbox's launch
+/// journal, before any VMM of the clone is spawned. It returns the lease with the sandbox's lock,
+/// under which the caller launches the clone, and holds no lock of the store for the VM's
+/// lifetime. A lease never expires: it lasts until [`Store::release`] ends it, which it does only
+/// once the sandbox records no VM and no launch, and so once its VM has exited, as its store
+/// verifies through the VM's recorded process, also after a reattach. A caller that reads a
+/// generation's payload, as a restore does, holds a lease of it.
+///
+/// A tombstone, which [`Store::tombstone`] writes, quarantines a generation: it takes no new
+/// lease, and selection skips it, while the leases that it granted keep working.
+/// [`Store::retire`] tombstones a generation, and deletes it once its leases have drained: its
+/// payload, then its entry in the index, and then its tombstone, so that an interrupted
+/// retirement leaves a quarantined generation, which retiring it again deletes. A release, or a
+/// removal of a sandbox, that is interrupted leaves the record of a lease that no clone binding
+/// names, which a retirement removes.
+///
+/// These transactions make each step durable before the next, so that their order holds through
+/// a crash of the host too, even when a sandbox and the store are on different filesystems: an
+/// acquisition makes the record of a lease durable before it writes the clone binding, and the
+/// binding before it returns, and a release, or a retirement that finds a binding gone, makes the
+/// binding's absence durable before it removes the record, so that no binding outlasts the record
+/// that keeps its generation; a retirement makes the tombstone durable before it deletes
+/// anything, and each deletion before the next. On Windows, which has no portable way to flush a
+/// directory, a rename or a removal is as durable as the filesystem makes it, as OpenVMM's
+/// publication of a snapshot assumes.
 ///
 /// # Privacy
 ///

@@ -98,3 +98,62 @@ pub(crate) fn parse_hex_id(digits: &str) -> Option<[u8; 16]> {
     }
     Some(id)
 }
+
+/// Parses the identity of a host as OpenVMM reads it: 32 hexadecimal digits, in either case,
+/// between optional braces and surrounding whitespace, ignoring dashes, as in `/etc/machine-id`
+/// and the Windows machine GUID.
+#[cfg(any(target_os = "linux", windows))]
+fn parse_host_id(text: &str) -> Option<[u8; 16]> {
+    let digits: String = text
+        .trim()
+        .trim_start_matches('{')
+        .trim_end_matches('}')
+        .chars()
+        .filter(|&character| character != '-')
+        .collect();
+    parse_hex_id(&digits)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(any(target_os = "linux", windows))]
+    #[test]
+    fn host_identities_are_read_as_openvmm_reads_them() {
+        let id = [
+            0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef, 0x01, 0x23, 0x45, 0x67, 0x89, 0xab,
+            0xcd, 0xef,
+        ];
+        for text in [
+            "0123456789abcdef0123456789ABCDEF\n",
+            "01234567-89ab-cdef-0123-456789abcdef",
+            "{01234567-89AB-CDEF-0123-456789ABCDEF}",
+            " 0123456789abcdef0123456789abcdef ",
+        ] {
+            assert_eq!(parse_host_id(text), Some(id), "{text:?}");
+        }
+        for text in [
+            "0123",
+            "0123456789abcdef0123456789abcdeg",
+            "0123456789abcdef0123456789abcdef00",
+            "",
+        ] {
+            assert_eq!(parse_host_id(text), None, "{text:?}");
+        }
+    }
+
+    #[cfg(any(target_os = "linux", windows))]
+    #[test]
+    fn the_hosts_identity_and_monotonic_time_are_read() {
+        let first = monotonic_ns().unwrap();
+        assert!(monotonic_ns().unwrap() >= first);
+        match host_id() {
+            Ok(id) => assert_eq!(host_id().unwrap(), id),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                eprintln!("skipped: this host has no machine identity: {error}");
+            }
+            Err(error) => panic!("{error}"),
+        }
+    }
+}

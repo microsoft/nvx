@@ -34,7 +34,7 @@
 //!   network and filesystem policies, the host's NVXS connection, control sessions, process and
 //!   platform primitives, the supervision of VM instances: starting, reattaching, executing
 //!   workloads, and stopping, the store of a sandbox's runtime records and launch journal, and the
-//!   manifests, compatibility keys, and store of templates.
+//!   manifests, compatibility keys, store, and leases of templates.
 //! - `testing` (feature `testing`): a fake OpenVMM that serves the control console without
 //!   running a VM.
 //! - `guest` (feature `guest`, Linux): the programs that run in NVX guests, such as

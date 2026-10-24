@@ -277,6 +277,35 @@ pub(crate) fn boot_id() -> io::Result<[u8; 16]> {
     })
 }
 
+/// The file of the host's machine ID.
+const MACHINE_ID_PATH: &str = "/etc/machine-id";
+
+/// Returns the identity of this host, as OpenVMM records it in a capture's time contract: its
+/// machine ID, from [`MACHINE_ID_PATH`], as 16 bytes in the order in which it is written.
+pub(crate) fn host_id() -> io::Result<[u8; 16]> {
+    let text = fs::read_to_string(MACHINE_ID_PATH)?;
+    super::parse_host_id(&text).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("{MACHINE_ID_PATH} has an unexpected format"),
+        )
+    })
+}
+
+/// Returns the host's monotonic time, as OpenVMM measures the downtime of a capture within one
+/// boot: `CLOCK_BOOTTIME`, in nanoseconds, which counts the time that the host was suspended.
+pub(crate) fn monotonic_ns() -> io::Result<u64> {
+    /// Nanoseconds in a second.
+    const NANOS_PER_SECOND: u64 = 1_000_000_000;
+    let time = nix::time::clock_gettime(nix::time::ClockId::CLOCK_BOOTTIME)?;
+    u64::try_from(time.tv_sec())
+        .ok()
+        .and_then(|seconds| seconds.checked_mul(NANOS_PER_SECOND))
+        .zip(u64::try_from(time.tv_nsec()).ok())
+        .and_then(|(seconds, nanos)| seconds.checked_add(nanos))
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "CLOCK_BOOTTIME is out of range"))
+}
+
 /// Starts the command in a new session so it outlives the caller and its terminal, with the
 /// descriptors `inherit` under their numbers in the caller, and no other descriptor of the caller
 /// beyond the standard streams that the command sets up.

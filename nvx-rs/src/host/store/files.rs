@@ -1,7 +1,8 @@
-//! The private files of the store: their creation, atomic replacement, reading, and removal.
+//! The private files of the store: their creation, atomic replacement, reading, and removal, and
+//! the syncs of their directories.
 //!
 //! The template store, [`template::Store`](crate::host::template::Store), keeps its own records
-//! with the same lock files, atomic replacements, and removals.
+//! with the same lock files, atomic replacements, removals, and syncs.
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
@@ -198,6 +199,30 @@ pub(super) fn read_private(path: &Path, description: &str) -> Result<Option<Vec<
     let mut contents = Vec::new();
     file.read_to_end(&mut contents).map_err(failed())?;
     Ok(Some(contents))
+}
+
+/// Makes the changes to the entries of the directory `dir` so far durable, such as files that
+/// were renamed into it or removed from it: a crash that keeps a later change keeps them too, even
+/// one on another filesystem.
+///
+/// On Unix, it syncs the directory. Windows has no portable way to flush a directory, so there a
+/// rename or a removal is as durable as the filesystem makes it, as OpenVMM's publication of a
+/// snapshot assumes.
+pub(crate) fn sync_dir(dir: &Path) -> Result<()> {
+    #[cfg(unix)]
+    {
+        File::open(dir)
+            .and_then(|directory| directory.sync_all())
+            .map_err(io_error(format!(
+                "cannot sync the directory {}",
+                dir.display()
+            )))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = dir;
+        Ok(())
+    }
 }
 
 /// Removes the file at `path` if it exists.

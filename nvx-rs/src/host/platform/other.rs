@@ -73,6 +73,16 @@ pub(crate) fn boot_id() -> io::Result<[u8; 16]> {
     Err(unsupported())
 }
 
+/// Fails: this host has no host identity that NVX reads.
+pub(crate) fn host_id() -> io::Result<[u8; 16]> {
+    Err(unsupported())
+}
+
+/// Fails: this host has no monotonic clock that NVX reads.
+pub(crate) fn monotonic_ns() -> io::Result<u64> {
+    Err(unsupported())
+}
+
 /// Fails: this host cannot export host paths.
 pub fn file_identity(_path: &Path) -> io::Result<(u64, u64)> {
     Err(unsupported())

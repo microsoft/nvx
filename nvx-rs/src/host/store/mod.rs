@@ -14,6 +14,7 @@
 //!                          caller captures it
 //!   outcome.json           the VMM's outcome report of the latest launch
 //!   .tmpXXXXXX             the outcome report while the VMM writes it, which it then publishes
+//!   clone.json             the binding of a clone to the generation of a template that it leases
 //!   ...                    the caller's configuration record and other files, which it declares
 //! ```
 //!
@@ -265,11 +266,16 @@ pub const LOG_NAME: &str = "openvmm.log";
 pub const CONSOLE_NAME: &str = "console.log";
 /// Name of the VMM's outcome report.
 pub const OUTCOME_NAME: &str = "outcome.json";
+/// Name of the binding of the sandbox's clone to the generation of a template that it leases,
+/// which [`template::Store::acquire`](crate::host::template::Store::acquire) writes, durably,
+/// before the clone's launch, and [`template::Store::release`](crate::host::template::Store::release)
+/// removes once its VM has exited. A [removal](self#removal) of the sandbox removes it too.
+pub const CLONE_BINDING_NAME: &str = "clone.json";
 /// Every file that the store keeps in a sandbox's directory. Replacing a record leaves a
 /// temporary file named `.NAME.NUMBER.tmp` beside it only if the replacement was interrupted, and
 /// a VMM that is killed while it writes its outcome report leaves the file in which it stages it;
 /// see [the report staging file](self#the-report-staging-file).
-pub const FILE_NAMES: [&str; 8] = [
+pub const FILE_NAMES: [&str; 9] = [
     LOCK_NAME,
     JOURNAL_NAME,
     RUNTIME_NAME,
@@ -278,6 +284,7 @@ pub const FILE_NAMES: [&str; 8] = [
     LOG_NAME,
     CONSOLE_NAME,
     OUTCOME_NAME,
+    CLONE_BINDING_NAME,
 ];
 
 /// Interval at which a lock that another holder has is tried again: the sandbox's lock, by a
@@ -462,6 +469,12 @@ impl SandboxStore {
     /// Returns the path of the Linux control socket.
     pub fn socket_path(&self) -> PathBuf {
         self.path(SOCKET_NAME)
+    }
+
+    /// Returns the path of the binding of the sandbox's clone to the generation of a template that
+    /// it leases, [`CLONE_BINDING_NAME`].
+    pub fn binding_path(&self) -> PathBuf {
+        self.path(CLONE_BINDING_NAME)
     }
 
     /// Reads the runtime record, which names the sandbox's VM from the commit of its launch until

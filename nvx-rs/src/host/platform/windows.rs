@@ -46,7 +46,9 @@ use windows_sys::Win32::System::LibraryLoader::{
     GetProcAddress, LOAD_LIBRARY_SEARCH_SYSTEM32, LoadLibraryExW,
 };
 use windows_sys::Win32::System::Pipes::{GetNamedPipeServerProcessId, WaitNamedPipeW};
-use windows_sys::Win32::System::Registry::{HKEY_LOCAL_MACHINE, RRF_RT_REG_DWORD, RegGetValueW};
+use windows_sys::Win32::System::Registry::{
+    HKEY_LOCAL_MACHINE, RRF_RT_REG_DWORD, RRF_RT_REG_SZ, RegGetValueW,
+};
 #[cfg(feature = "cli")]
 use windows_sys::Win32::System::Threading::GetExitCodeProcess;
 use windows_sys::Win32::System::Threading::{
@@ -59,6 +61,7 @@ use windows_sys::Win32::System::Threading::{
     STARTF_USESTDHANDLES, STARTUPINFOEXW, TerminateProcess, UpdateProcThreadAttribute,
     WaitForSingleObject,
 };
+use windows_sys::Win32::System::WindowsProgramming::QueryInterruptTimePrecise;
 
 use super::Transport;
 use crate::host::supervisor::Inherited;
@@ -346,6 +349,65 @@ pub(crate) fn boot_id() -> io::Result<[u8; 16]> {
 /// The registry key of the boot counter, under `HKEY_LOCAL_MACHINE`.
 const BOOT_ID_KEY: &str =
     r"SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management\PrefetchParameters";
+
+/// The registry key of the machine GUID, under `HKEY_LOCAL_MACHINE`.
+const MACHINE_GUID_KEY: &str = r"SOFTWARE\Microsoft\Cryptography";
+
+/// Returns the identity of this host, as OpenVMM records it in a capture's time contract: the
+/// machine GUID that Windows keeps in the registry value `MachineGuid` of [`MACHINE_GUID_KEY`], as
+/// 16 bytes in the order of its text.
+pub(crate) fn host_id() -> io::Result<[u8; 16]> {
+    let key = wide(MACHINE_GUID_KEY);
+    let name = wide("MachineGuid");
+    let mut value = [0u16; 64];
+    let mut size = mem::size_of_val(&value) as u32;
+    // SAFETY: the names are NUL-terminated, the type flag admits only a REG_SZ, and the output
+    // buffer holds `size` bytes.
+    let status = unsafe {
+        RegGetValueW(
+            HKEY_LOCAL_MACHINE,
+            key.as_ptr(),
+            name.as_ptr(),
+            RRF_RT_REG_SZ,
+            ptr::null_mut(),
+            value.as_mut_ptr().cast(),
+            &mut size,
+        )
+    };
+    if status != ERROR_SUCCESS {
+        let error = io::Error::from_raw_os_error(status as i32);
+        return Err(io::Error::new(
+            error.kind(),
+            format!(
+                "cannot read the registry value HKLM\\{MACHINE_GUID_KEY}\\MachineGuid: {error}"
+            ),
+        ));
+    }
+    let units = &value[..(size as usize / 2).min(value.len())];
+    let end = units
+        .iter()
+        .position(|&unit| unit == 0)
+        .unwrap_or(units.len());
+    super::parse_host_id(&String::from_utf16_lossy(&units[..end])).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "the registry value HKLM\\{MACHINE_GUID_KEY}\\MachineGuid has an unexpected format"
+            ),
+        )
+    })
+}
+
+/// Returns the host's monotonic time, as OpenVMM measures the downtime of a capture within one
+/// boot: the interrupt time, which counts the time that the host was asleep, in nanoseconds.
+pub(crate) fn monotonic_ns() -> io::Result<u64> {
+    let mut intervals = 0u64;
+    // SAFETY: the output pointer is valid.
+    unsafe { QueryInterruptTimePrecise(&mut intervals) };
+    intervals
+        .checked_mul(100)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "the interrupt time overflows"))
+}
 
 /// An OpenVMM process launched by this caller, held through its process handle.
 pub(crate) struct LaunchedProcess {

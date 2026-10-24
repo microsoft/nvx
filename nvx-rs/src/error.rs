@@ -134,8 +134,9 @@ pub enum ErrorCode {
     /// this build does not read, such as the state of a sandbox that another build provisioned or
     /// started.
     FormatUnsupported,
-    /// `foreign-files`: the sandbox's state directory holds files that NVX does not own, which a
-    /// removal keeps.
+    /// `foreign-files`: a directory of NVX's state, such as a sandbox's state directory or a
+    /// template store, holds files that NVX does not own, which the message names, and which NVX
+    /// keeps.
     ForeignFiles,
     /// `outcome-report-exists`: a file exists at the path of the outcome report to write.
     OutcomeReportExists,
@@ -146,6 +147,16 @@ pub enum ErrorCode {
     ExecRefused,
     /// `endpoint-closed`: OpenVMM closed the control endpoint, as it does when the VM shuts down.
     EndpointClosed,
+    /// `template-ineligible`: the restore window of a template's generation, which the time
+    /// contract of its capture sets, excludes the host's time, so no clone may restore it now: its
+    /// capture is too old, or the host's clock is behind the capture's.
+    TemplateIneligible,
+    /// `template-tombstoned`: a tombstone quarantines the template's generation, which takes no
+    /// new clones, while the clones that lease it keep their leases.
+    TemplateTombstoned,
+    /// `sandbox-leased`: the sandbox holds a lease of a template's generation already, which a
+    /// release ends once its VM has exited.
+    SandboxLeased,
 }
 
 impl ErrorCode {
@@ -178,6 +189,9 @@ impl ErrorCode {
         Self::ScratchClaimed,
         Self::ExecRefused,
         Self::EndpointClosed,
+        Self::TemplateIneligible,
+        Self::TemplateTombstoned,
+        Self::SandboxLeased,
     ];
 
     /// Returns the stable spelling of this code.
@@ -210,15 +224,20 @@ impl ErrorCode {
             Self::ScratchClaimed => "scratch-claimed",
             Self::ExecRefused => "exec-refused",
             Self::EndpointClosed => "endpoint-closed",
+            Self::TemplateIneligible => "template-ineligible",
+            Self::TemplateTombstoned => "template-tombstoned",
+            Self::SandboxLeased => "sandbox-leased",
         }
     }
 
     /// Returns the kind of the errors that have this code.
     pub const fn kind(self) -> ErrorKind {
         match self {
-            Self::Unavailable | Self::ArtifactMissing | Self::GuestFeaturesMissing => {
-                ErrorKind::Unavailable
-            }
+            Self::Unavailable
+            | Self::ArtifactMissing
+            | Self::GuestFeaturesMissing
+            | Self::TemplateIneligible
+            | Self::TemplateTombstoned => ErrorKind::Unavailable,
             Self::Unsupported
             | Self::ArgumentUnrecognized
             | Self::ArgumentMissing
@@ -235,7 +254,8 @@ impl ErrorCode {
             | Self::RuntimeMismatch
             | Self::VmmIndeterminate
             | Self::ForeignFiles
-            | Self::OutcomeReportExists => ErrorKind::Other,
+            | Self::OutcomeReportExists
+            | Self::SandboxLeased => ErrorKind::Other,
         }
     }
 }

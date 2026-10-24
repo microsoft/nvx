@@ -98,6 +98,9 @@ each code for callers of the `nvx` library.
 | `foreign-files` | 1 | `deprovision` found files that NVX does not own in the state directory, which the message names, and kept them with the directory. |
 | `outcome-report-exists` | 1 | A file exists at the `--outcome-report` path. |
 | `scratch-claimed` | 1 | Another sandbox claims the scratch image. |
+| `sandbox-leased` | 1 | The sandbox holds a lease of a template's generation already, which a release ends once its VM has exited. |
+| `template-ineligible` | 1 | The restore window of a template's generation, which the time contract of its capture sets, excludes the host's time, so no clone may restore it now. |
+| `template-tombstoned` | 1 | A tombstone quarantines the template's generation, which takes no new clones. |
 | `exited` | 1 | OpenVMM exited, as when a start fails, whose message names the category and status of OpenVMM's outcome report when it has one. |
 | `exec-refused` | 1 | The guest agent refused the workload, as for a working directory that it cannot use. |
 | `endpoint-closed` | 1 | OpenVMM closed the control endpoint, as it does when the VM shuts down. |

@@ -16,26 +16,26 @@ use crate::host::template::test_support::{ManifestSpec, class};
 type Change = fn(&mut Value);
 
 /// Creates a store in a fresh temporary directory, and returns the directory and the store.
-fn store() -> (tempfile::TempDir, Store) {
+pub(super) fn store() -> (tempfile::TempDir, Store) {
     let directory = tempfile::tempdir().unwrap();
     let store = Store::create(directory.path().join("templates")).unwrap();
     (directory, store)
 }
 
 /// Returns the storage generation whose bytes are all `byte`, which must not be 0.
-fn storage(byte: u8) -> StorageGeneration {
+pub(super) fn storage(byte: u8) -> StorageGeneration {
     StorageGeneration::from_bytes([byte; ID_LEN]).unwrap()
 }
 
 /// Creates the directory `path` private to the current user, as the store creates its own.
-fn private_dir(path: &Path) {
+pub(super) fn private_dir(path: &Path) {
     assert_eq!(platform::create_owner_only_dir(path).unwrap(), None);
 }
 
 /// Publishes a capture of `class` with the storage generation `storage`, whose manifest `spec`
 /// encodes, as a publication does, under the store's lock: its snapshot at the place of the next
 /// store generation, its key beside it, and then the index, which lists it.
-fn publish_with(
+pub(super) fn publish_with(
     store: &Store,
     class: &CaptureClass,
     spec: &ManifestSpec,
@@ -69,13 +69,17 @@ fn publish_with(
 }
 
 /// Publishes a capture of the class of [`ManifestSpec::template`], as [`publish_with`] does.
-fn publish(store: &Store, spec: &ManifestSpec, storage: StorageGeneration) -> Generation {
+pub(super) fn publish(
+    store: &Store,
+    spec: &ManifestSpec,
+    storage: StorageGeneration,
+) -> Generation {
     publish_with(store, &class(), spec, storage)
 }
 
 /// Removes the generation of store generation `generation` from the index of `store`, under its
 /// lock, as a retirement does.
-fn remove(store: &Store, generation: StoreGeneration) {
+pub(super) fn remove(store: &Store, generation: StoreGeneration) {
     let _lock = take_lock(store.dir(), None).unwrap();
     let mut index = store.index().unwrap();
     index
@@ -102,7 +106,7 @@ fn sorted_entries(dir: &Path) -> Vec<String> {
 }
 
 /// Returns the message of the cause of `error`.
-fn cause(error: &Error) -> String {
+pub(super) fn cause(error: &Error) -> String {
     std::error::Error::source(error)
         .map(ToString::to_string)
         .unwrap_or_default()
@@ -110,7 +114,7 @@ fn cause(error: &Error) -> String {
 
 /// Links `link` to the directory `target`: a symbolic link on Unix, and a junction on Windows,
 /// which any user may create.
-fn link_dir(target: &Path, link: &Path) {
+pub(super) fn link_dir(target: &Path, link: &Path) {
     #[cfg(unix)]
     std::os::unix::fs::symlink(target, link).unwrap();
     #[cfg(windows)]
@@ -133,7 +137,7 @@ fn link_dir(target: &Path, link: &Path) {
 
 /// Links `link` to the file `target` with a symbolic link, and returns whether it could: Windows
 /// lets only Developer Mode or a privilege create one.
-fn link_file(target: &Path, link: &Path) -> bool {
+pub(super) fn link_file(target: &Path, link: &Path) -> bool {
     #[cfg(unix)]
     let linked = std::os::unix::fs::symlink(target, link);
     #[cfg(windows)]
@@ -145,7 +149,7 @@ fn link_file(target: &Path, link: &Path) -> bool {
 }
 
 /// Removes the link `link` to a directory, which leaves its target as it is.
-fn unlink_dir(link: &Path) {
+pub(super) fn unlink_dir(link: &Path) {
     #[cfg(unix)]
     fs::remove_file(link).unwrap();
     #[cfg(windows)]

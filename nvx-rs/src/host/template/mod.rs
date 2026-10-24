@@ -20,6 +20,13 @@
 //!   sandbox's store: their payloads, which never change, and the versioned [`Index`] of them,
 //!   which names each by its [`StoreGeneration`](crate::activation::StoreGeneration), at a
 //!   location that the adapter chooses.
+//! - [`TimeContract::eligibility`] decides whether a clone may restore a capture at a host's
+//!   time, [`HostTime`], by the restore window of its time contract, apart from its
+//!   compatibility.
+//! - [`Store::acquire`] leases an eligible generation to a clone, with a binding in the clone's
+//!   sandbox, until [`Store::release`] ends the lease once the clone's VM has exited. A tombstone
+//!   quarantines a generation, which takes no new lease, and [`Store::retire`] deletes it once its
+//!   leases have drained.
 //!
 //! # Canonical encoding
 //!
@@ -41,6 +48,7 @@
 //! `tests/vectors/template-key-v1.txt` fix version 1 of a key's encoding.
 
 mod canonical;
+mod eligibility;
 mod files;
 mod key;
 mod manifest;
@@ -49,11 +57,13 @@ mod store;
 mod test_support;
 mod wire;
 
+pub use self::eligibility::{Downtime, DowntimeSource, Eligibility, HostTime, MAX_DOWNTIME_NS};
 pub use self::key::{CaptureClass, ClassIdentity, Invariants, KeyIdentity, TemplateKey};
 pub use self::manifest::{
     BlockGeometry, HostClock, MANIFEST_NAME, MAX_MANIFEST_LEN, TemplateManifest, TimeContract,
 };
 pub use self::store::{
-    GENERATIONS_NAME, Generation, INDEX_LOCK_NAME, INDEX_NAME, Index, KEY_NAME, MAX_GENERATIONS,
-    SNAPSHOT_NAME, STORE_FORMAT, STORE_RECORD_NAME, StorageGeneration, Store, StoreId,
+    Acquired, GENERATIONS_NAME, Generation, INDEX_LOCK_NAME, INDEX_NAME, Index, KEY_NAME,
+    LEASES_NAME, Lease, LeaseId, MAX_GENERATIONS, Retirement, SNAPSHOT_NAME, STORE_FORMAT,
+    STORE_RECORD_NAME, StorageGeneration, Store, StoreId, TOMBSTONES_NAME,
 };
