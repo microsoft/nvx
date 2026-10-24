@@ -103,6 +103,7 @@ use nvx::protocol::CAPABILITY_LEN;
 use nvx::protocol::root::ImageFormat;
 use nvx::uuid::Uuid;
 use nvx::{ErrorKind, Hypervisor};
+use runtime_adapter::GUEST_BUILD;
 use runtime_adapter::frame::MAX_BODY;
 use runtime_adapter::hook::{Step, StepHook};
 use runtime_adapter::host::Client;
@@ -110,7 +111,7 @@ use runtime_adapter::initramfs;
 use runtime_adapter::layered::{LaunchRecord, LayeredLaunch, Staged};
 use runtime_adapter::probe::{Probe, ProbeReply, escape};
 use runtime_adapter::root::{JournalPolicy, OverlayMode, RootFailure, RootReply};
-use runtime_adapter::runtime::{GUEST_BUILD, Runtime};
+use runtime_adapter::runtime::Runtime;
 
 /// How long a command waits for the sandbox's lock.
 const LOCK_TIMEOUT: Duration = Duration::from_secs(10);
@@ -647,7 +648,7 @@ fn launch(
                 ))
             })?;
         match reply {
-            RootReply::Ready => {
+            RootReply::Ready(_) => {
                 println!("root=ready");
                 // The guest has assembled the root, so OpenVMM holds the images: the checked files
                 // can go, which releases their guards, while OpenVMM keeps the scratch image's
