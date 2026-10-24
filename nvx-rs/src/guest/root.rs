@@ -1,5 +1,6 @@
 //! Operations that bootstrap a guest for a layered root, assemble the root, mount live shares and
-//! mappings in it, and tear it down, for a guest init or agent, whether or not it is PID 1.
+//! mappings in it, and the host export from which mappings come, and tear it down, for a guest
+//! init or agent, whether or not it is PID 1.
 //!
 //! - [`bootstrap`] prepares the guest once: it creates the agent's and the workload's sibling
 //!   cgroups of a [`Layout`](super::cgroup::Layout), moves every process of their parent into the
@@ -16,12 +17,14 @@
 //!   mounted: the first partition's bytes, the [`Lower`] layers, the [`UpperKind`], and the
 //!   [`OverlayMode`].
 //! - [`Root::mount_share`] and [`Root::mount_aggregate`] mount the VMM's live shares at targets in
-//!   the root, and [`Root::map`] applies a caller's host mappings there, through the root's
-//!   [`Mapper`], as [live shares and mappings](#live-shares-and-mappings) describes.
+//!   the root, [`Root::mount_export`] mounts the host export out of the root, and [`Root::map`]
+//!   applies a caller's host mappings in the root, from the export or another source, through the
+//!   root's [`Mapper`], as [live shares and mappings](#live-shares-and-mappings) describes.
 //! - [`Root::teardown`] unmounts, in order, the live shares and mappings in reverse order, the
-//!   mount of an aggregate live share, the overlay, the layers from the top down, and the upper.
-//!   It attempts each, whatever failed before, and reports every unmount that failed. A root
-//!   that is dropped tears down the same way, but ignores failures.
+//!   mounts of an aggregate live share and of the host export, the later first, the overlay, the
+//!   layers from the top down, and the upper. It attempts each, whatever failed before, and
+//!   reports every unmount that failed. A root that is dropped tears down the same way, but
+//!   ignores failures.
 //!
 //! A failure is an [`Error`] that names what failed. The operations need the guest's root user,
 //! in the guest's initial mount and cgroup namespaces. They never collect a child's status,
@@ -40,19 +43,21 @@
 //! - `rootfs`, the overlay, which is the root;
 //! - `shares`, an aggregate live share, whose root lists every child, out of the workload's
 //!   reach;
+//! - `hostfs/root`, the host export, whose root lists every exported host directory and file, out
+//!   of the workload's reach, in `hostfs`, which only root may enter;
 //! - and `staging`, where a live share is mounted, out of the workload's reach, before it moves
 //!   to its target.
 //!
 //! A root mounts and unmounts by these paths, so they must lead to the same directories whatever
 //! the root has mounted. An assembly refuses a runtime directory whose path is not canonical, as
 //! a live share's target must be, or leads through a symbolic link, and a root mounts nothing
-//! where `layers` or the mount point is a symbolic link, since a `..` component or a link could
-//! lead through a directory that one of the root's mounts hides later. A root also holds the
-//! exclusive lock of its runtime directory, from the start of its assembly until it is torn down:
-//! an assembly refuses a runtime directory that another root holds, in this process or another,
-//! and one where a file system, or a bind mount of a directory, is mounted already at any of these
-//! mount points but `staging`, whether or not the new root mounts there, such as an upper of
-//! either kind, or a layer of either image, that a failed teardown left; a live share refuses a
+//! where `layers`, `hostfs`, or the mount point is a symbolic link, since a `..` component or a
+//! link could lead through a directory that one of the root's mounts hides later. A root also
+//! holds the exclusive lock of its runtime directory, from the start of its assembly until it is
+//! torn down: an assembly refuses a runtime directory that another root holds, in this process or
+//! another, and one where a file system, or a bind mount of a directory, is mounted already at any
+//! of these mount points but `staging`, whether or not the new root mounts there, such as an upper
+//! of either kind, or a layer of either image, that a failed teardown left; a live share refuses a
 //! `staging` where one is mounted already. The lock is advisory: it keeps out the roots of these
 //! operations, not other mounts.
 //!
@@ -93,11 +98,19 @@
 //! [`Root::map`] applies a caller's host [`Mapping`](super::mappings::Mapping)s beneath the
 //! overlay the same way, from the caller's [`SourceRoot`](super::mappings::SourceRoot).
 //!
+//! The host export is the device of an aggregate whose children the root never binds itself:
+//! they are the sources of the caller's mappings, such as the mapping table of NVX's managed
+//! lifecycle, whose boot tokens [`protocol::export`](crate::protocol::export) reads.
+//! [`Root::mount_export`] mounts it at `hostfs/root`, out of the root, with the access of its
+//! [`ExportMode`](crate::protocol::export::ExportMode), `nosuid`, and `nodev`, and returns its
+//! root, the [`SourceRoot`](super::mappings::SourceRoot) from which [`Root::map`] applies the
+//! caller's mappings. A root has one export at most.
+//!
 //! The mounts are made in the caller's mount namespace, which must be recursively private, as a
-//! guest's initial namespace is. A share, a child, or a mapping that fails once the root has
-//! checked its request latches the root: the root refuses every later share and mapping, so that
-//! its caller starts no workload on a partial set, and the mounts before it stay until the
-//! teardown, which unmounts them first.
+//! guest's initial namespace is. A share, a child, the export, or a mapping that fails once the
+//! root has checked its request latches the root: the root refuses every later share, export, and
+//! mapping, so that its caller starts no workload on a partial set, and the mounts before it stay
+//! until the teardown, which unmounts them first.
 //!
 //! ```no_run
 //! use std::path::Path;
@@ -105,8 +118,9 @@
 //!
 //! use nvx::gpt::Expected;
 //! use nvx::guest::cgroup::Layout;
-//! use nvx::guest::mappings::Access;
+//! use nvx::guest::mappings::{Access, Mapping};
 //! use nvx::guest::root::{self, Assembly, Device, Image, OverlayMode, Resources, Upper};
+//! use nvx::protocol::export::HostExport;
 //! use nvx::protocol::root::DISTRO_MMIO_BASE;
 //!
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -131,6 +145,12 @@
 //! let layers = root.lowers().len();
 //! println!("the first partition holds {} bytes over {layers} layers", configuration.len());
 //! root.mount_share("workspace", Path::new("/workspace"), Access::ReadWrite)?;
+//! // The host export that the kernel command line names, if any, is the source of host mappings.
+//! if let Some(export) = HostExport::parse(&std::fs::read("/proc/cmdline")?)? {
+//!     let source = root.mount_export(&export.tag, export.mode.into())?;
+//!     root.map(&source, &[Mapping::new("0/src", "/src", Access::ReadOnly)?])?;
+//!     // Dropping the export's root here lets the teardown unmount the export.
+//! }
 //! // Run the workload in `bootstrap.workload()`, in the root at `root.path()`; then:
 //! root.teardown()?;
 //! # Ok(())
@@ -177,6 +197,15 @@ const ROOT_DIRECTORY: &str = "rootfs";
 /// The mount point of an aggregate live share, below the runtime directory and outside the root,
 /// which exists once a root has mounted an aggregate.
 const AGGREGATE_DIRECTORY: &str = "shares";
+/// The directory of the host export's mount point, below the runtime directory and outside the
+/// root, which only root may enter, and which exists once a root has mounted an export.
+const HOSTFS_DIRECTORY: &str = "hostfs";
+/// The mount point of the host export, below the runtime directory: `root` in
+/// [`HOSTFS_DIRECTORY`], which exists once a root has mounted an export.
+const EXPORT_DIRECTORY: &str = "hostfs/root";
+/// The mode of the [`HOSTFS_DIRECTORY`] that a root creates, whatever the process's umask, as
+/// NVX's shell init creates it under `umask 077`: only root may enter it.
+const HOSTFS_DIRECTORY_MODE: u32 = 0o700;
 /// The mount point of a live share before it moves to its target, below the runtime directory
 /// and outside the root, which exists once a root has mounted a share.
 const STAGING_DIRECTORY: &str = "staging";
@@ -420,9 +449,10 @@ impl OverlayMode {
 ///    `tmpfs`, and of the root, `rootfs`, a component at a time, and refuses a component that
 ///    exists as anything but a directory, a symbolic link included; takes the runtime directory's
 ///    exclusive lock, which the root holds from then on, and refuses the runtime directory if
-///    another root holds it, or if one of these, the other upper's, any entry of `layers`, or
-///    `shares`, where a root mounts an aggregate live share, is a mount point already, whether of
-///    a file system or of a bind mount of a directory;
+///    another root holds it, or if one of these, the other upper's, any entry of `layers`,
+///    `shares`, where a root mounts an aggregate live share, or `hostfs/root`, where it mounts the
+///    host export, is a mount point already, whether of a file system or of a bind mount of a
+///    directory;
 /// 4. finds the distro device, polling for it every 50 ms until `timeout` passes, checks that it
 ///    is read-only and, if the caller expects a size, of that size, and flushes its buffers;
 /// 5. for an EROFS image, checks the expected UUID, if any, in its superblock, and reads nothing
@@ -536,7 +566,7 @@ impl Lower {
 }
 
 /// The handle of an assembled layered root, which owns its mounts, those of the assembly and
-/// those of its live shares and mappings, and reports what the assembly mounted.
+/// those of its live shares, host export, and mappings, and reports what the assembly mounted.
 ///
 /// [`teardown`](Self::teardown) unmounts them and reports each failure. Dropping the root
 /// unmounts them the same way, and ignores failures. Until then, the root holds the lock of its
@@ -560,15 +590,17 @@ pub struct Root {
     overlay_mode: OverlayMode,
     /// The bytes of a GPT disk's first partition, without their trailing padding.
     first_partition: Option<Vec<u8>>,
-    /// The mounts of live shares that the root unmounts by path, and their mount points, in mount
-    /// order: an aggregate's, and a share's that stays at `staging` because its unmount failed.
+    /// The mounts of live shares and of the host export that the root unmounts by path, and their
+    /// mount points, in mount order: an aggregate's, the export's, and a share's that stays at
+    /// `staging` because its unmount failed.
     shares: Vec<(Mount, PathBuf)>,
     /// The mapper of the live shares and mappings in the root, once the root has mounted one.
     mapper: Option<Mapper>,
     /// What each of the mapper's mappings mounts, in the mapper's order, then what the one that
     /// a rename moved and that the mapper failed to detach mounts, if any.
     mapped: Vec<Mount>,
-    /// Whether a share or a mapping failed, after which the root refuses every later one.
+    /// Whether a share, the export, or a mapping failed, after which the root refuses every later
+    /// one.
     latched: bool,
     /// The exclusive lock of the runtime directory, from the start of the assembly; dropping the
     /// root releases it after the unmounts.
@@ -586,8 +618,8 @@ impl Root {
         &self.runtime
     }
 
-    /// Returns whether a live share or a mapping failed, after which the root refuses every later
-    /// one, so that its caller starts no workload in it.
+    /// Returns whether a live share, the host export, or a mapping failed, after which the root
+    /// refuses every later one, so that its caller starts no workload in it.
     pub fn is_latched(&self) -> bool {
         self.latched
     }
@@ -619,11 +651,13 @@ impl Root {
 
     /// Unmounts the root's mounts, in order: a live share or a mapping that a rename moved and
     /// that its mapper failed to detach, which the mapper detaches, the live shares and mappings
-    /// in reverse order, the mount of an aggregate live share, the overlay, the layers from the
-    /// top down, and the upper.
+    /// in reverse order, the mounts of an aggregate live share and of the host export, the later
+    /// first, the overlay, the layers from the top down, and the upper.
     ///
     /// Each unmount is attempted, whatever failed before, without detaching a busy mount but the
     /// moved one, and every one that failed is reported, with the mount that it leaves in place.
+    /// A [`SourceRoot`](super::mappings::SourceRoot) of the export that the caller still holds
+    /// keeps the export busy.
     pub fn teardown(mut self) -> Result<(), TeardownError> {
         self.unmount()
     }
@@ -667,13 +701,13 @@ impl Root {
         for point in &points {
             self.check_unoccupied(point, false)?;
         }
-        // A root whose teardown failed may have left mounted an upper of the other kind, or an
-        // aggregate share, which this root mounts only later.
+        // A root whose teardown failed may have left mounted an upper of the other kind, an
+        // aggregate share, or the host export, which this root mounts only later.
         let other_upper = match assembly.upper.kind() {
             UpperKind::Scratch => TMPFS_DIRECTORY,
             UpperKind::Tmpfs => SCRATCH_DIRECTORY,
         };
-        for point in [other_upper, AGGREGATE_DIRECTORY] {
+        for point in [other_upper, AGGREGATE_DIRECTORY, EXPORT_DIRECTORY] {
             self.check_unoccupied(&runtime.join(point), true)?;
         }
         // Or a layer of either image, at any mount point below `layers`: an EROFS image's, or a
@@ -1243,6 +1277,11 @@ pub enum Mount {
         /// The aggregate's virtio-fs tag.
         tag: String,
     },
+    /// The host export, at `hostfs/root` in the runtime directory.
+    Export {
+        /// The export's virtio-fs tag.
+        tag: String,
+    },
     /// A child of an aggregate live share, bound at its target in the root.
     Child {
         /// The child's name in the aggregate.
@@ -1269,6 +1308,7 @@ impl fmt::Display for Mount {
                 write!(formatter, "the live share {tag} at {}", target.display())
             }
             Self::Aggregate { tag } => write!(formatter, "the aggregate live share {tag}"),
+            Self::Export { tag } => write!(formatter, "the host export {tag}"),
             Self::Child { name, target } => {
                 write!(
                     formatter,
@@ -1461,14 +1501,14 @@ pub enum Error {
     /// A live share, a child of an aggregate live share, or a mapping was refused or failed to
     /// attach at its target in the root, once the root had checked its request; nothing of it
     /// stays mounted, unless the error is a moved mapping that stays mounted. The root refuses
-    /// every later share and mapping, with [`MappingError::Latched`].
+    /// every later share, export, and mapping, with [`MappingError::Latched`].
     Mapping {
         /// The mount that was refused or failed.
         mount: Mount,
         /// Why.
         error: MappingError,
     },
-    /// A live share was refused before anything was mounted for it.
+    /// A live share, or the host export, was refused before anything was mounted for it.
     Share(ShareRefusal),
 }
 
