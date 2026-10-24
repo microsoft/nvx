@@ -7,6 +7,7 @@ use std::fs;
 use std::io;
 use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use super::mounts::{self, DeviceNumber};
@@ -82,12 +83,30 @@ impl Calls {
 }
 
 /// A fence that records when it closes and opens, and that fails to close with an error that a
-/// test chooses.
+/// test chooses, or while it is closed, whichever of its handles closed it.
 struct FakeFence {
     /// The log.
     calls: Calls,
     /// The error number with which the fence fails to close, if any.
     failure: Option<Errno>,
+    /// Whether the fence is closed, which its handles share.
+    closed: Arc<AtomicBool>,
+}
+
+impl FakeFence {
+    /// Returns another handle of the fence, which shares its state and its log.
+    fn handle(&self) -> Self {
+        Self {
+            calls: self.calls.clone(),
+            failure: None,
+            closed: Arc::clone(&self.closed),
+        }
+    }
+
+    /// Returns whether the fence is closed.
+    fn is_closed(&self) -> bool {
+        self.closed.load(Ordering::SeqCst)
+    }
 }
 
 impl AdmissionFence for FakeFence {
@@ -95,11 +114,18 @@ impl AdmissionFence for FakeFence {
         if let Some(errno) = self.failure {
             return Err(errno.into());
         }
+        if self.closed.swap(true, Ordering::SeqCst) {
+            return Err(Errno::EBUSY.into());
+        }
         self.calls.push(Call::Close);
         Ok(())
     }
 
     fn open(&mut self) {
+        assert!(
+            self.closed.swap(false, Ordering::SeqCst),
+            "the fence opened while open"
+        );
         self.calls.push(Call::Open);
     }
 }
@@ -301,11 +327,12 @@ fn devices() -> Devices {
     }
 }
 
-/// Returns a fence that records its calls in `calls`, and closes.
+/// Returns an open fence that records its calls in `calls`.
 fn fence(calls: &Calls) -> FakeFence {
     FakeFence {
         calls: calls.clone(),
         failure: None,
+        closed: Arc::default(),
     }
 }
 
@@ -560,24 +587,52 @@ fn a_mount_table_that_cannot_be_checked_blocks_a_capture() {
 fn a_fence_that_fails_to_close_stops_the_preparation() {
     let calls = Calls::default();
     let fence = FakeFence {
-        calls: calls.clone(),
-        failure: Some(Errno::EBUSY),
+        failure: Some(Errno::EIO),
+        ..fence(&calls)
     };
     let error = prepare(fence, FakeSystem::new(&calls)).unwrap_err();
     assert_eq!(error.stage(), CaptureStage::Fence);
     let CaptureCause::Io(cause) = error.cause() else {
         panic!("{error:?}");
     };
-    assert_eq!(cause.raw_os_error(), Some(Errno::EBUSY as i32));
+    assert_eq!(cause.raw_os_error(), Some(Errno::EIO as i32));
     assert_eq!(
         error.to_string(),
-        format!(
-            "failed to fence workload admission: {}",
-            Errno::EBUSY.desc()
-        )
+        format!("failed to fence workload admission: {}", Errno::EIO.desc())
     );
     // Nothing else runs, and the fence that did not close does not open.
     assert_eq!(calls.take(), Vec::<Call>::new());
+}
+
+#[test]
+fn a_preparation_behind_a_fence_that_another_holds_closed_fails_and_leaves_it_closed() {
+    let calls = Calls::default();
+    let gate = fence(&calls);
+    let barrier = prepare(gate.handle(), FakeSystem::new(&calls)).unwrap();
+    assert_eq!(calls.take(), preparation_calls());
+    // A second preparation behind the same gate, whose time ABI would find the first one's
+    // suppression pending, cannot close the fence, so it never opens it.
+    let mut system = FakeSystem::new(&calls);
+    system.preparation = Preparation::Pending;
+    let error = prepare(gate.handle(), system).unwrap_err();
+    assert_eq!(error.stage(), CaptureStage::Fence);
+    let CaptureCause::Io(cause) = error.cause() else {
+        panic!("{error:?}");
+    };
+    assert_eq!(cause.raw_os_error(), Some(Errno::EBUSY as i32));
+    assert_eq!(calls.take(), Vec::<Call>::new());
+    assert!(gate.is_closed());
+
+    // The first barrier holds the fence closed until it opens it, after which the next
+    // preparation closes it again.
+    barrier.cancel().unwrap();
+    assert_eq!(calls.take(), [Call::Open, Call::CancelCapture]);
+    assert!(!gate.is_closed());
+    let barrier = prepare(gate.handle(), FakeSystem::new(&calls)).unwrap();
+    assert_eq!(calls.take(), preparation_calls());
+    drop(barrier);
+    assert_eq!(calls.take(), [Call::Open, Call::CancelCapture]);
+    assert!(!gate.is_closed());
 }
 
 #[test]
@@ -748,6 +803,10 @@ fn a_restored_clone_gets_the_fence_closed_with_the_detectors_suppressed() {
     assert_eq!(clone.entropy_path(), Path::new("/run/nvx/restore-entropy"));
     let (restore, mut fence) = clone.into_parts();
     assert_eq!(restore, Restore::to(RESTORED));
+    assert_eq!(calls.take(), Vec::<Call>::new());
+    // A preparation behind another handle of the fence cannot close it, so it opens nothing.
+    let error = prepare(fence.handle(), FakeSystem::new(&calls)).unwrap_err();
+    assert_eq!(error.stage(), CaptureStage::Fence);
     assert_eq!(calls.take(), Vec::<Call>::new());
     // The caller opens the fence once repair acknowledged the restore.
     fence.open();

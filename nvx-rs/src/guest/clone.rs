@@ -9,7 +9,8 @@
 //! their MMIO windows name, and the host filesystem device, which its virtio-fs tag names.
 //! [`CapturePreparation::prepare`], in order:
 //!
-//! 1. closes the caller's fence, so that no execution starts;
+//! 1. closes the caller's fence, so that no execution starts; a fence that is closed already
+//!    fails to close, which stops the preparation;
 //! 2. reads the mount table of the caller's mount namespace, `/proc/self/mountinfo`, at most
 //!    [`MOUNT_TABLE_LIMIT`] bytes of it, and refuses to capture while anything is mounted from the
 //!    distro device or one of its partitions, the scratch device, an overlay, or the filesystem
@@ -56,6 +57,10 @@
 //!
 //! impl AdmissionFence for Admission {
 //!     fn close(&mut self) -> io::Result<()> {
+//!         // Another preparation, or a clone before its repair, holds the fence closed.
+//!         if !self.open {
+//!             return Err(io::ErrorKind::ResourceBusy.into());
+//!         }
 //!         self.open = false;
 //!         Ok(())
 //!     }
@@ -140,10 +145,14 @@ const ENTROPY_PATH: &str = "/run/nvx/restore-entropy";
 /// fails leaves it closed. The fence need not end the executions that run already: a template's
 /// guest captures before it starts any. A preparation takes the fence, so a caller that keeps
 /// its admission's state lends it a handle of that state, or a mutable reference to its fence,
-/// which the trait's implementation for `&mut F` takes.
+/// which the trait's implementation for `&mut F` takes. Several handles may share one state, so
+/// closing the fence acquires it: [`close`](Self::close) fails while the fence is closed, such as
+/// by another preparation's barrier, and a preparation opens only a fence that it closed, so it
+/// never opens one that another holds closed.
 pub trait AdmissionFence {
-    /// Closes the fence: once it returns, no execution starts until [`open`](Self::open). A
-    /// failure leaves the fence open.
+    /// Closes the fence: once it returns, no execution starts until [`open`](Self::open). It
+    /// fails while the fence is closed already, whoever closed it, and a failure leaves the fence
+    /// as it was.
     fn close(&mut self) -> io::Result<()>;
 
     /// Opens the fence that [`close`](Self::close) closed, so that executions start again.
@@ -200,9 +209,9 @@ impl<F: AdmissionFence> CapturePreparation<F> {
     ///
     /// The wait for the boot checks lasts 30 seconds at most. A capture check that fails reports
     /// a violation of the time ABI, which stops the VM in enforcing mode; in report-only mode,
-    /// the preparation goes on, as `nvx-time pre-capture` does. A preparation that fails opens
-    /// the fence again, and leaves the detectors' settings as they were: when it suppressed some
-    /// already, it restores their settings, and a failure to restore them is a
+    /// the preparation goes on, as `nvx-time pre-capture` does. A preparation that fails after it
+    /// closed the fence opens it again, and leaves the detectors' settings as they were: when it
+    /// suppressed some already, it restores their settings, and a failure to restore them is a
     /// [`CaptureStage::Release`] error. One after which the calling thread may still hold some of
     /// the permission for the time ABI's ports fails with [`TimeError::PortRelease`] instead,
     /// after which the thread must start neither a thread nor a process, which would inherit it.
@@ -217,7 +226,7 @@ impl<F: AdmissionFence> CapturePreparation<F> {
     /// Implements [`prepare`](Self::prepare) on `system`.
     fn prepare_with(self, system: Box<dyn System>) -> Result<CaptureBarrier<F>, CaptureError> {
         let Self { mut fence, devices } = self;
-        // A fence that failed to close is dropped closed or not, but never opened.
+        // A fence that failed to close, which another may hold closed, is never opened.
         fence
             .close()
             .map_err(|error| CaptureError::new(CaptureStage::Fence, CaptureCause::Io(error)))?;
@@ -476,7 +485,7 @@ impl<F> fmt::Debug for Restored<F> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum CaptureStage {
-    /// Closing the caller's fence of workload admission.
+    /// Closing the caller's fence of workload admission, which fails while it is closed already.
     Fence,
     /// Checking that nothing is mounted from the template's devices or an overlay.
     Mounts,
