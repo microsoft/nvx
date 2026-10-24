@@ -21,20 +21,23 @@
 //!
 //!   LAYERED, `--distro FORMAT:PATH --distro-identity UUID --upper (scratch:PATH | ram)
 //!   [--runtime-dir DIR] [--overlay-mode MODE] [--scratch-journal POLICY]
-//!   [--first-partition-bound BYTES] [SHARES]`, gives the VM a layered root, which the guest
-//!   agent's worker assembles; see `runtime_adapter::layered` and `runtime_adapter::worker`. Its
-//!   image is the raw file PATH, an EROFS filesystem, `erofs`, or a GPT disk, `gpt`, of which the
-//!   guest expects the identity UUID: the file system's UUID, or the disk's GUID. Its upper is the
-//!   ext4 scratch image PATH, or RAM. The guest assembles the root below its runtime directory
-//!   DIR, `/run/runtime-adapter` by default, in the overlay mode MODE, `trusted-lowers` or
-//!   `untrusted-lowers`, checks a scratch's journal against the policy POLICY, `allowed` or
-//!   `forbidden`, and refuses a first partition of a GPT disk larger than BYTES, with the guest's
-//!   defaults, `trusted-lowers`, `allowed`, and 64 KiB, unless given. Before it spawns the VM, the
+//!   [--first-partition-bound BYTES] [--workload-identity UID:GID] [SHARES]`, gives the VM a
+//!   layered root, which the guest agent's worker assembles; see `runtime_adapter::layered` and
+//!   `runtime_adapter::worker`. Its image is the raw file PATH, an EROFS filesystem, `erofs`, or a
+//!   GPT disk, `gpt`, of which the guest expects the identity UUID: the file system's UUID, or the
+//!   disk's GUID. Its upper is the ext4 scratch image PATH, or RAM. The guest assembles the root
+//!   below its runtime directory DIR, `/run/runtime-adapter` by default, in the overlay mode MODE,
+//!   `trusted-lowers` or `untrusted-lowers`, checks a scratch's journal against the policy POLICY,
+//!   `allowed` or `forbidden`, and refuses a first partition of a GPT disk larger than BYTES, with
+//!   the guest's defaults, `trusted-lowers`, `allowed`, and 64 KiB, unless given. A workload
+//!   identity, the user ID UID and the group ID GID, two numbers from 1 to 4294967294, is the
+//!   identity as which every execution of the sandbox runs: the guest checks its account in the
+//!   assembled root, without which the root's `identity` stage fails. Before it spawns the VM, the
 //!   launch checks the bindings that STORE stages for the image and the scratch image, from their
 //!   metadata alone, and fails if STORE stages none for either, or one no longer holds, as for an
 //!   image that changed after it was staged. It hands OpenVMM the files that the checks opened,
-//!   which it holds until the guest has assembled the root, or until it has torn down a launch
-//!   that failed, and records the bindings.
+//!   which it holds until the guest has assembled the root, or until it has torn down a launch that
+//!   failed, and records the bindings.
 //!
 //!   SHARES, `--share HOST:TARGET[:ro]... [--deny PATH]... [--reserved TARGET]...
 //!   [--share-root DIR]...`, shares each host directory or regular file HOST with the root, at the
@@ -69,6 +72,24 @@
 //!   runs each PROBE in the VM's layered root, and prints the facts that it found. A PROBE is the
 //!   text of a probe: its name, then its arguments, each after one space; see
 //!   `runtime_adapter::probe` and `runtime_adapter::worker::probes`.
+//! - `runtime-adapter-host exec STORE EXECUTION [; EXECUTION]...` reattaches and attaches as
+//!   `reattach` does, then runs each EXECUTION in the VM's layered root, all at once, over that
+//!   one session, through `runtime_adapter::host::Executions`, and prints their outputs and
+//!   outcomes once every one finished. An EXECUTION, `[--identity UID:GID [--groups GID,...]
+//!   [--capabilities N,...] [--numeric]] [--cwd DIR] [--env NAME=VALUE]... -- PROGRAM [ARG]...`,
+//!   runs PROGRAM with its ARGs, up to a lone `;`, as `find -exec` takes them, without standard
+//!   input. Without `--identity`, it names no identity, and runs as the sandbox's workload
+//!   identity, which the guest otherwise refuses; with it, it runs as the user ID UID and the
+//!   group ID GID, with the supplementary groups GIDs and the capabilities numbered N, such as 0
+//!   for `CAP_CHOWN`, if given, and the guest checks its account, unless `--numeric` says that
+//!   the IDs have none. It starts in the root's directory DIR, or `/`, with exactly the
+//!   environment of its `--env` entries. It runs for at most a minute, with 16 KiB chunks and the
+//!   credit of 4 of them for its input and 8 for its output, which its standard output and error
+//!   share. Execution N, from 1, has the key `(B + N, E)`: E is the epoch of the command's
+//!   attachment, and B the first 8 bytes of the broker instance's ID, as a little-endian number.
+//!   The guest refuses a key that it heard of before, and the epochs of a broker instance only
+//!   advance, while a broker restored from a snapshot has a new instance ID, so no command
+//!   repeats the key of another's execution.
 //!
 //! Each command but `stage` takes NVX's artifacts from the directory that `NVX_ARTIFACTS_DIR`
 //! names, a repository checkout or an extracted release, and the VM's runtime identity from NVX's
@@ -93,23 +114,35 @@
 //! - `mapped`: how many of the table's mappings the guest applied;
 //! - `sandbox`: `started` once the guest started the sandbox;
 //! - `PROBE.KEY`: the fact KEY that the probe named PROBE found;
+//! - `exec.N.KEY`: what execution N did, with these KEYs:
+//!   - `launch`: `started`, `failed STAGE ERRNO`, with the number of the guest's stage that failed
+//!     and the error number, or `none` once the guest reported neither;
+//!   - `status`: how the program ended: `exit CODE`, `signal NUMBER`, or `none`;
+//!   - `cause`: why a side ended the execution, `cancelled`, `dropped`, `timed-out`, `reset`, or
+//!     `disconnected`, `other` for a cause that `nvx` adds later, or `none` for an execution that
+//!     ended on its own;
+//!   - `truncated`: the streams that lost bytes, `stdout`, `stderr`, or both, separated by a
+//!     comma, or `none`;
+//!   - `settled`: `reusable` once the execution settled, or `fenced`;
+//!   - `stdout` and `stderr`: the program's standard output and error;
 //! - `stopped`: how the stop ended: `graceful`, `forced`, or `timed-out`;
 //! - `outcome`: the category and status code of the VM's outcome report, such as `success 0`;
 //! - `teardown`: whether the VM's teardown completed: `complete` or `incomplete`.
 //!
-//! Values escape `\`, newlines, and carriage returns as `\\`, `\n`, and `\r`.
+//! Values escape `\`, newlines, and carriage returns as `\\`, `\n`, and `\r`, and each byte of a
+//! program's output that is not part of UTF-8 text as `\xHH`, with two hexadecimal digits.
 //!
 //! For tests, `launch` takes a step hook from the variable `RUNTIME_ADAPTER_STEP_HOOK`, which
 //! pauses the launch at a named step, for a time that the launch leaves out of its deadline, or
 //! exits it there without unwinding, with status 5; see `runtime_adapter::hook`.
 //!
-//! They exit with 0 once they did what they were asked, with 3 when reattach finds the VM
-//! mismatched, with 4 when the guest reported that a stage of the root failed, and the VM ended
-//! with the stage's status and a complete teardown, with 5 when the step hook ends a launch, with
-//! 6 when the guest failed a mapping of the table, and the VM stopped gracefully, with success and
-//! a complete teardown, and with 1, after a diagnostic on standard error, when they fail. Anything
-//! else is a usage error, with status 2, as is a value of `RUNTIME_ADAPTER_STEP_HOOK` that sets no
-//! step hook.
+//! They exit with 0 once they did what they were asked, `exec` once every execution finished,
+//! whatever its outcome, with 3 when reattach finds the VM mismatched, with 4 when the guest
+//! reported that a stage of the root failed, and the VM ended with the stage's status and a
+//! complete teardown, with 5 when the step hook ends a launch, with 6 when the guest failed a
+//! mapping of the table, and the VM stopped gracefully, with success and a complete teardown, and
+//! with 1, after a diagnostic on standard error, when they fail. Anything else is a usage error,
+//! with status 2, as is a value of `RUNTIME_ADAPTER_STEP_HOOK` that sets no step hook.
 
 use std::env;
 use std::error::Error;
@@ -118,6 +151,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
+use nvx::exec::{Cause, Key, Limits, Outcome, Status, Stream, Timers, Window};
 use nvx::host::artifacts::Artifacts;
 use nvx::host::instance::generate_capability;
 use nvx::host::launch::LaunchSpec;
@@ -130,9 +164,10 @@ use nvx::protocol::root::ImageFormat;
 use nvx::uuid::Uuid;
 use nvx::{ErrorKind, Hypervisor};
 use runtime_adapter::GUEST_BUILD;
-use runtime_adapter::frame::MAX_BODY;
+use runtime_adapter::exec::{self, AccountMode, HostExecution, Start};
+use runtime_adapter::frame::{MAX_BODY, Message};
 use runtime_adapter::hook::{Step, StepHook};
-use runtime_adapter::host::{self, Client, ClientError, OrderError};
+use runtime_adapter::host::{self, Client, ClientError, Executions, OrderError};
 use runtime_adapter::initramfs;
 use runtime_adapter::layered::{LaunchRecord, LayeredLaunch, Share, Shares, Staged};
 use runtime_adapter::probe::{Probe, ProbeReply, escape};
@@ -162,6 +197,20 @@ const ROOT_FAILED: u8 = 4;
 /// The exit status of a launch whose guest failed a mapping of the table, once the VM stopped
 /// gracefully, with success and a complete teardown.
 const TABLE_FAILED: u8 = 6;
+/// How long an execution of `exec` may run before its sides end it.
+const EXEC_TIMEOUT: Duration = Duration::from_secs(60);
+/// How long the pending output of an execution of `exec` still flows once a side ended it.
+const EXEC_GRACE: Duration = Duration::from_secs(1);
+/// How long an execution of `exec` may take to settle, once its program or a side ended it.
+const EXEC_SETTLEMENT: Duration = Duration::from_secs(5);
+/// The most bytes of a chunk of an execution of `exec`.
+const EXEC_CHUNK: u32 = 16 * 1024;
+/// The chunks of an execution's input that the guest may hold for `exec`.
+const EXEC_INPUT_FRAMES: u32 = 4;
+/// The chunks of an execution's output, of both streams, that `exec` may hold.
+const EXEC_OUTPUT_FRAMES: u32 = 8;
+/// The argument that ends an execution's arguments, after which another execution may follow.
+const EXEC_END: &str = ";";
 /// The command lines that the program accepts.
 const USAGE: &str = concat!(
     "usage: runtime-adapter-host\n",
@@ -173,10 +222,15 @@ const USAGE: &str = concat!(
     " --upper (scratch:PATH | ram) [--runtime-dir DIR]\n",
     "            [--overlay-mode MODE] [--scratch-journal POLICY]",
     " [--first-partition-bound BYTES]\n",
+    "            [--workload-identity UID:GID]\n",
     "            [--share HOST:TARGET[:ro]... [--deny PATH]... [--reserved TARGET]...",
     " [--share-root DIR]...]]\n",
     "       runtime-adapter-host (reattach | stop) STORE [--guest-build BUILD]\n",
-    "       runtime-adapter-host probe STORE PROBE... [--guest-build BUILD]",
+    "       runtime-adapter-host probe STORE PROBE... [--guest-build BUILD]\n",
+    "       runtime-adapter-host exec STORE [--guest-build BUILD] EXECUTION [';' EXECUTION]...\n",
+    "           EXECUTION: [--identity UID:GID [--groups GID,...] [--capabilities N,...]",
+    " [--numeric]]\n",
+    "                      [--cwd DIR] [--env NAME=VALUE]... -- PROGRAM [ARG]...",
 );
 
 /// What the program was asked to do.
@@ -229,6 +283,73 @@ enum Command {
         /// The probes, in order.
         probes: Vec<Probe>,
     },
+    /// Reattach to the VM, and run executions in its layered root.
+    Exec {
+        /// The sandbox's store.
+        store: PathBuf,
+        /// The guest agent's build.
+        guest_build: String,
+        /// The executions, in order.
+        executions: Vec<Execution>,
+    },
+}
+
+/// An execution of `exec`, as its options and arguments give it.
+#[derive(Default)]
+struct Execution {
+    /// `--identity`: the user ID and the group ID.
+    identity: Option<(u32, u32)>,
+    /// `--groups`.
+    groups: Option<Vec<u32>>,
+    /// `--capabilities`: the set, a bit for each number.
+    capabilities: Option<u64>,
+    /// `--numeric`.
+    numeric: bool,
+    /// `--cwd`.
+    working_directory: Option<String>,
+    /// `--env`, in order.
+    environment: Vec<String>,
+    /// The program's path, then its arguments.
+    arguments: Vec<String>,
+}
+
+impl Execution {
+    /// Returns the start of the execution, as the execution `key`.
+    fn start(&self, key: Key) -> Start {
+        let arguments = self.arguments.iter().map(String::as_str);
+        let mut start = Start::new(key, exec_limits(), exec_timers(), arguments)
+            .with_environment(self.environment.iter().map(String::as_str));
+        start.identity = self.identity.map(|(uid, gid)| exec::Identity {
+            groups: self.groups.clone().unwrap_or_default(),
+            capabilities: self.capabilities.unwrap_or(0),
+            account: if self.numeric {
+                AccountMode::Numeric
+            } else {
+                AccountMode::Existing
+            },
+            ..exec::Identity::new(uid, gid)
+        });
+        start.working_directory = self.working_directory.clone().map(String::into_bytes);
+        start
+    }
+}
+
+/// Returns the limits of an execution of `exec`: chunks of [`EXEC_CHUNK`] bytes, and frame-counted
+/// credit, of [`EXEC_INPUT_FRAMES`] for the input, and of [`EXEC_OUTPUT_FRAMES`] in one pool that
+/// standard output and error share.
+fn exec_limits() -> Limits {
+    Limits::new(
+        EXEC_CHUNK,
+        Window::frames(EXEC_INPUT_FRAMES),
+        Window::frames(EXEC_OUTPUT_FRAMES),
+    )
+    .expect("the limits of `exec` hold no empty window, and a chunk that the framing carries")
+    .shared_output()
+}
+
+/// Returns the timers of both sides of an execution of `exec`.
+fn exec_timers() -> Timers {
+    Timers::new(EXEC_GRACE, EXEC_SETTLEMENT).timeout(EXEC_TIMEOUT)
 }
 
 /// The layered root of a launch, as its options give it.
@@ -249,6 +370,8 @@ struct Layered {
     scratch_journal: Option<JournalPolicy>,
     /// The most bytes that the first partition of a GPT disk may hold, unless the guest's default.
     first_partition_bound: Option<u64>,
+    /// The workload identity of the whole sandbox, if any: its user ID and its group ID.
+    workload_identity: Option<(u32, u32)>,
     /// The host paths that the launch shares with the root.
     shares: Shares,
 }
@@ -276,6 +399,8 @@ struct Options {
     scratch_journal: Option<JournalPolicy>,
     /// `--first-partition-bound`.
     first_partition_bound: Option<u64>,
+    /// `--workload-identity`.
+    workload_identity: Option<(u32, u32)>,
     /// `--share`, `--deny`, `--reserved`, and `--share-root`, in order.
     shares: Shares,
 }
@@ -329,6 +454,11 @@ fn main() -> ExitCode {
             guest_build,
             probes,
         } => probe(&store, &guest_build, &probes),
+        Command::Exec {
+            store,
+            guest_build,
+            executions,
+        } => exec(&store, &guest_build, &executions),
     };
     result.unwrap_or_else(|problem| {
         eprintln!("runtime-adapter-host: {problem}");
@@ -344,7 +474,9 @@ fn parse(arguments: Vec<OsString>) -> Result<Command, String> {
         return Ok(Command::Report);
     };
     let name = match name.to_str() {
-        Some(name @ ("stage" | "launch" | "reattach" | "stop" | "probe")) => name.to_owned(),
+        Some(name @ ("stage" | "launch" | "reattach" | "stop" | "probe" | "exec")) => {
+            name.to_owned()
+        }
         _ => return Err(format!("unknown command {name:?}")),
     };
     let store = PathBuf::from(
@@ -352,6 +484,9 @@ fn parse(arguments: Vec<OsString>) -> Result<Command, String> {
             .next()
             .ok_or_else(|| format!("{name} needs a sandbox store"))?,
     );
+    if name == "exec" {
+        return parse_exec(store, arguments);
+    }
     let mut options = Options::default();
     let mut probes = Vec::new();
     while let Some(argument) = arguments.next() {
@@ -417,6 +552,7 @@ fn parse(arguments: Vec<OsString>) -> Result<Command, String> {
                         overlay_mode: options.overlay_mode,
                         scratch_journal: options.scratch_journal,
                         first_partition_bound: options.first_partition_bound,
+                        workload_identity: options.workload_identity,
                         shares: options.shares,
                     }))
                 }
@@ -433,6 +569,7 @@ fn parse(arguments: Vec<OsString>) -> Result<Command, String> {
                             "--first-partition-bound",
                             options.first_partition_bound.is_some(),
                         ),
+                        ("--workload-identity", options.workload_identity.is_some()),
                         ("--share", !options.shares.shares.is_empty()),
                     ];
                     if let Some((option, _)) = layered.iter().find(|(_, given)| *given) {
@@ -538,6 +675,17 @@ fn parse_option(
                 format!("--first-partition-bound takes a positive number of bytes, not {value:?}")
             })?);
         }
+        ("launch", "--workload-identity") if options.workload_identity.is_none() => {
+            let value = text(value)?;
+            let identity = ids(&value)
+                .filter(|(uid, gid)| [uid, gid].into_iter().all(|id| (1..u32::MAX).contains(id)));
+            options.workload_identity = Some(identity.ok_or_else(|| {
+                format!(
+                    "--workload-identity takes UID:GID, two numbers from 1 to {}, not {value:?}",
+                    u32::MAX - 1
+                )
+            })?);
+        }
         ("launch", "--share") => {
             let value = text(value)?;
             let share = Share::parse(&value).ok_or_else(|| {
@@ -557,6 +705,128 @@ fn parse_option(
         _ => return Err(format!("unexpected option {option:?} of {name}")),
     }
     Ok(())
+}
+
+/// Parses the arguments of `exec` after its sandbox store `store`: its executions, each ended by
+/// a lone `;` or the end of the arguments, with the options before them, or says why they are not
+/// the command's.
+fn parse_exec(
+    store: PathBuf,
+    arguments: impl Iterator<Item = OsString>,
+) -> Result<Command, String> {
+    let mut arguments = arguments.map(|argument| {
+        argument
+            .into_string()
+            .map_err(|argument| format!("the argument {argument:?} of exec is not Unicode"))
+    });
+    let mut guest_build = None;
+    let mut executions = Vec::new();
+    loop {
+        let mut execution = Execution::default();
+        loop {
+            let option = arguments
+                .next()
+                .ok_or("exec needs `-- PROGRAM` after the options of each execution")??;
+            match option.as_str() {
+                "--" => break,
+                "--numeric" if !execution.numeric => {
+                    execution.numeric = true;
+                    continue;
+                }
+                _ => {}
+            }
+            let value = arguments
+                .next()
+                .ok_or_else(|| format!("{option:?} needs a value"))??;
+            match option.as_str() {
+                "--guest-build" if guest_build.is_none() => guest_build = Some(value),
+                "--identity" if execution.identity.is_none() => {
+                    let identity = ids(&value)
+                        .ok_or_else(|| format!("--identity takes UID:GID, not {value:?}"))?;
+                    execution.identity = Some(identity);
+                }
+                "--groups" if execution.groups.is_none() => {
+                    let groups =
+                        numbers(&value, |group| group.parse::<u32>().ok()).ok_or_else(|| {
+                            format!("--groups takes GIDs, separated by commas, not {value:?}")
+                        })?;
+                    execution.groups = Some(groups);
+                }
+                "--capabilities" if execution.capabilities.is_none() => {
+                    let capabilities = numbers(&value, |number| {
+                        number.parse::<u8>().ok().filter(|number| *number < 64)
+                    })
+                    .ok_or_else(|| {
+                        format!(
+                            "--capabilities takes capability numbers from 0 to 63, separated by \
+                             commas, not {value:?}"
+                        )
+                    })?;
+                    let set = capabilities
+                        .into_iter()
+                        .fold(0, |set, number| set | 1 << number);
+                    execution.capabilities = Some(set);
+                }
+                "--cwd" if execution.working_directory.is_none() => {
+                    execution.working_directory = Some(value);
+                }
+                "--env" => execution.environment.push(value),
+                _ => return Err(format!("unexpected option {option:?} of exec")),
+            }
+        }
+        let mut more = false;
+        for argument in arguments.by_ref() {
+            let argument = argument?;
+            if argument == EXEC_END {
+                more = true;
+                break;
+            }
+            execution.arguments.push(argument);
+        }
+        if execution.arguments.is_empty() {
+            return Err("exec needs a program after `--`".to_owned());
+        }
+        if execution.identity.is_none() {
+            let qualifiers = [
+                ("--groups", execution.groups.is_some()),
+                ("--capabilities", execution.capabilities.is_some()),
+                ("--numeric", execution.numeric),
+            ];
+            if let Some((option, _)) = qualifiers.iter().find(|(_, given)| *given) {
+                return Err(format!("{option} needs --identity"));
+            }
+        }
+        // The guest ends its session on a start that it cannot decode, so the program refuses
+        // one that breaks the rules of the encoding, as a relative working directory or an
+        // environment entry without a name does, or that the framing does not carry, before it
+        // attaches.
+        let encoded = execution.start(Key::new(0, 0)).encode();
+        Start::decode(&encoded).map_err(|error| error.problem().to_owned())?;
+        Message::ExecStart(encoded)
+            .encode()
+            .map_err(|error| format!("the start of an execution is too long: {error}"))?;
+        executions.push(execution);
+        if !more {
+            break;
+        }
+    }
+    Ok(Command::Exec {
+        store,
+        guest_build: guest_build.unwrap_or_else(|| GUEST_BUILD.to_owned()),
+        executions,
+    })
+}
+
+/// Returns the user ID and the group ID of `value`, `UID:GID`, or `None` if it is not that.
+fn ids(value: &str) -> Option<(u32, u32)> {
+    let (uid, gid) = value.split_once(':')?;
+    Some((uid.parse().ok()?, gid.parse().ok()?))
+}
+
+/// Returns the numbers of `value`, separated by commas, which `parse` reads, or `None` if one is
+/// not a number that it accepts, or `value` is empty.
+fn numbers<T>(value: &str, parse: impl Fn(&str) -> Option<T>) -> Option<Vec<T>> {
+    value.split(',').map(parse).collect()
 }
 
 /// Stages the image `distro`, in `format`, of which the guest expects `identity`, and the ext4
@@ -614,6 +884,7 @@ fn launch(
             launch.config.overlay_mode = layered.overlay_mode;
             launch.config.scratch_journal = layered.scratch_journal;
             launch.config.first_partition_bound = layered.first_partition_bound;
+            launch.config.workload_identity = layered.workload_identity;
             // The launch refuses shares that it cannot export before it touches the store.
             if let Some(export) = layered.shares.plan()? {
                 launch.share(export)?;
@@ -966,6 +1237,131 @@ fn probe(store: &Path, guest_build: &str, probes: &[Probe]) -> Result<ExitCode, 
         }
     }
     Ok(ExitCode::SUCCESS)
+}
+
+/// Reattaches to the VM of the sandbox store `store`, with the guest agent's build `guest_build`,
+/// attaches a session to it, runs `executions` at once in the VM's layered root, and prints what
+/// each did once every one finished.
+fn exec(store: &Path, guest_build: &str, executions: &[Execution]) -> Result<ExitCode, String> {
+    let runtime = runtime(guest_build)?;
+    let store = SandboxStore::open(store).map_err(|error| describe(&error))?;
+    let mut locked = store
+        .lock(Some(Instant::now() + LOCK_TIMEOUT))
+        .map_err(|error| describe(&error))?;
+    let vmm = match hold(&mut locked, &runtime)? {
+        Ok(vmm) => vmm,
+        Err(status) => return Ok(status),
+    };
+    let deadline = Instant::now() + SESSION_TIMEOUT;
+    let capability = store.read_capability().map_err(|error| describe(&error))?;
+    let mut client = connect(&vmm, &capability, deadline)?;
+    // The keys of the attachment's executions are new to the guest: see the module documentation.
+    let identity = client.identity();
+    let (base, _) = identity.instance_id.split_at(8);
+    let base = u64::from_le_bytes(base.try_into().expect("an instance ID has 16 bytes"));
+    let mut running = Executions::new();
+    let mut ids = Vec::new();
+    for (number, execution) in (1..).zip(executions) {
+        let key = Key::new(base.wrapping_add(number), identity.epoch);
+        running
+            .start(
+                &mut client,
+                execution.start(key),
+                exec_timers(),
+                Vec::new(),
+                deadline,
+            )
+            .map_err(|error| format!("cannot start execution {number}: {}", describe(&error)))?;
+        ids.push(key.id());
+    }
+    // Every execution finishes once it ended, which its timeout bounds, and its output's grace and
+    // its settlement passed, or once the guest's last messages about it arrived.
+    let deadline = Instant::now() + EXEC_TIMEOUT + EXEC_GRACE + EXEC_SETTLEMENT + SESSION_TIMEOUT;
+    running
+        .run(&mut client, deadline)
+        .map_err(|error| format!("the executions failed: {}", describe(&error)))?;
+    for (number, id) in (1..).zip(ids) {
+        let execution = running.get(id).expect("the driver started every execution");
+        print_execution(number, execution);
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+/// Prints what the execution numbered `number`, `execution`, which finished, did.
+fn print_execution(number: u64, execution: &HostExecution) {
+    let Some(outcome) = execution.outcome() else {
+        unreachable!("every execution finished");
+    };
+    let launch = match outcome.launch_failure() {
+        Some(failure) => format!("failed {} {}", failure.stage(), failure.error()),
+        None if execution.peer().has_started() => "started".to_owned(),
+        None => "none".to_owned(),
+    };
+    let status = match outcome.status() {
+        Some(Status::Exited(code)) => format!("exit {code}"),
+        Some(Status::Signaled(signal)) => format!("signal {signal}"),
+        None => "none".to_owned(),
+    };
+    let truncated = Stream::ALL
+        .into_iter()
+        .filter(|stream| outcome.is_truncated(*stream))
+        .map(stream_name)
+        .collect::<Vec<_>>();
+    let settled = if outcome.is_reusable() {
+        "reusable"
+    } else {
+        "fenced"
+    };
+    println!("exec.{number}.launch={launch}");
+    println!("exec.{number}.status={status}");
+    println!("exec.{number}.cause={}", cause_name(&outcome));
+    println!(
+        "exec.{number}.truncated={}",
+        if truncated.is_empty() {
+            "none".to_owned()
+        } else {
+            truncated.join(",")
+        }
+    );
+    println!("exec.{number}.settled={settled}");
+    for stream in Stream::ALL {
+        let output = escape_bytes(execution.output(stream));
+        println!("exec.{number}.{}={output}", stream_name(stream));
+    }
+}
+
+/// Returns the name of why a side ended the execution whose outcome is `outcome`, or `none`.
+fn cause_name(outcome: &Outcome) -> &'static str {
+    match outcome.cause() {
+        None => "none",
+        Some(Cause::Cancelled) => "cancelled",
+        Some(Cause::Dropped) => "dropped",
+        Some(Cause::TimedOut) => "timed-out",
+        Some(Cause::Reset) => "reset",
+        Some(Cause::Disconnected) => "disconnected",
+        Some(_) => "other",
+    }
+}
+
+/// Returns the name of `stream`: `stdout` or `stderr`.
+fn stream_name(stream: Stream) -> &'static str {
+    match stream {
+        Stream::Stdout => "stdout",
+        Stream::Stderr => "stderr",
+    }
+}
+
+/// Returns `bytes` as a value: the UTF-8 text that they hold, escaped as [`escape`] escapes it, and
+/// each other byte as `\xHH`, with two hexadecimal digits.
+fn escape_bytes(bytes: &[u8]) -> String {
+    let mut escaped = String::with_capacity(bytes.len());
+    for chunk in bytes.utf8_chunks() {
+        escaped.push_str(&escape(chunk.valid()));
+        for byte in chunk.invalid() {
+            escaped.push_str(&format!("\\x{byte:02x}"));
+        }
+    }
+    escaped
 }
 
 /// Reattaches to the VM of `locked`, with the runtime identity of `runtime`, and prints what it
