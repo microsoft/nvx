@@ -8,6 +8,10 @@
 //! - [`protocol`]: the codec of the control console, the `NVXS` session that OpenVMM brokers and
 //!   the `NVXC` frames of the guest agent, and the guest targets that a sandbox's live shares may
 //!   not take. It has no dependencies, so the host, the guest, and test doubles share it.
+//! - [`activation`]: the activation record of a layered root, the bounded, versioned, non-secret
+//!   record of the settings that its activation applies, which a clone restored from a template
+//!   reads in place of its captured configuration, and what Ready reports about the activation.
+//!   It needs no features, so the host, the guest, and every adapter's framing share it.
 //! - [`contract`]: the control-contract versions that this crate speaks, and the compatibility of
 //!   NVX releases with them.
 //! - [`exec`]: the credit and stdio engine of an execution, which the side that runs a workload
@@ -116,6 +120,7 @@
 //! - `guest`: the `guest` module and the guest binaries, which the `guest` profile builds as
 //!   static `x86_64-unknown-linux-musl` executables.
 
+pub mod activation;
 pub mod contract;
 mod error;
 pub mod exec;
