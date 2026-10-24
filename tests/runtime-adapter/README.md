@@ -17,11 +17,13 @@ also runs the guest agent in VMs of NVX's artifacts, in place of NVX's agents,
 through NVX's supervisor, and finds a VM again after it restarts, as an
 orchestrator does.
 
-A VM may have a layered root: an image under an upper, which the guest agent's
-worker assembles through `nvx::guest::root`, in a process of its own rather
-than PID 1, as the host program's root configuration asks. The host program
-then checks the root from inside the VM with the worker's probes, in a
-[table of scenarios](#layered-scenarios), to which each new check adds a row.
+A VM may have a layered root: an image under an upper, which the host program
+stages and plans with NVX's typed plan for an adapter's own guest, and which
+the guest agent's worker assembles through `nvx::guest::root`, in a process of
+its own rather than PID 1, as the host program's root configuration asks. The
+host program then checks the root from inside the VM with the worker's probes,
+in a [table of scenarios](#layered-scenarios), to which each new check adds a
+row.
 
 ## Configurations
 
@@ -555,21 +557,58 @@ version unless the caller names another. A host program that ships another
 build of the guest agent runs another runtime, and finds a VM of this one
 mismatched.
 
+### Staged images
+
+The images of a layered root are staged first, in the sandbox's store, as
+`layered::Staged::stage` stages them. Staging verifies the image explicitly,
+with `nvx::host::sandbox::distro::DistroBinding::verify`, which hashes the
+image only when a manifest is beside it, and compares the manifest's name of
+the image and digest with the image's own. It then checks the binding from
+metadata, as a launch checks it, so that it stages no binding that every launch
+would refuse. It binds the ext4 scratch image of an upper on scratch with
+`nvx::host::sandbox::scratch::ScratchBinding::bind`, which neither reads nor
+claims the image. Staging is where hashing belongs: a launch never hashes.
+Staging also refuses images that no launch could attach, as the plan of a
+launch checks them.
+
+Staging records both bindings in the sandbox's store, in
+`runtime-adapter-staged.json`, in place of those staged earlier:
+
+```json
+{"format": 1,
+ "distro": {"path": "/images/distro.erofs", "binding": DISTRO_BINDING},
+ "scratch": {"path": "/sandboxes/one/scratch.ext4", "binding": SCRATCH_BINDING}}
+```
+
+Each `path` is the absolute path of a file, as a plan names it, and each
+binding the serde form of NVX's `DistroBinding` or `ScratchBinding`. `scratch`
+is `null` when no scratch image was staged. A reader refuses another format,
+an object that lacks a member or has another, and a binding that does not
+decode.
+
 ### Layered roots
 
 `layered::LayeredLaunch` plans a VM with a layered root with NVX's typed plan
-of a cold layered launch, `nvx::host::sandbox::SandboxPlan`, with NVX's default
-sandbox settings, and checks it with `SandboxPlan::validated`. The plan names
-the images by absolute paths, since OpenVMM runs in the sandbox's store. The
-VM's kernel command line is the plan's, without parameters of the caller:
-`nvx_sandbox=1`, the image's token, such as
-`nvx_layer=distro,0xd0003000,erofs:UUID`, the upper's, such as
-`nvx_scratch=0xd0006000,ext4`, and those of the settings, which the worker
-ignores. OpenVMM's arguments are those that NVX's own sandbox start passes:
-the plan's, which attach the image and the scratch as block devices, then the
-managed lifecycle in one process, NVX's default memory, the kernel, the
-initramfs, that command line, no virtio console, the control console with the
-launch capability on standard input, and the outcome report.
+of a cold layered launch for an adapter's own guest,
+`nvx::host::sandbox::SandboxPlan::adapter`, and checks it with
+`SandboxPlan::validated`. The adapter's plan holds none of the settings of
+NVX's sandbox profile, such as a workload identity, since the guest agent runs
+its executions itself. The plan names the images by absolute paths, since
+OpenVMM runs in the sandbox's store, and the image's identity, which a launch
+requires, since a binding names it. The VM's kernel command line is
+`nvx_sandbox=1`, the launch's own token, with which NVX's `/init` hands the VM
+to NVX's init agent, which the guest agent replaces, then the plan's boot
+tokens of the root alone: the image's, such as
+`nvx_layer=distro,0xd0003000,erofs:UUID`, and the upper's, such as
+`nvx_scratch=0xd0006000,ext4`. OpenVMM's arguments are the plan's, which
+attach the image and the scratch as block devices, then the VM in one process,
+NVX's default memory, the kernel, the initramfs, that command line, no virtio
+console, the control console with the launch capability on standard input,
+and the outcome report. They name no workload identity, and no managed
+lifecycle: OpenVMM only checks the arguments of the managed lifecycle and
+labels its outcome report with it, and only NVX's init agent reads its boot
+token. A VM without a layered root keeps the managed lifecycle, with which
+NVX's `/init` starts the managed agent, which the guest agent replaces.
 
 The boot tokens carry only what NVX's boot contract defines. The launch sends
 the rest in the [root configuration](#root-configurations), once it attaches:
@@ -582,21 +621,33 @@ The launch records what it launched in the sandbox's store, beside NVX's
 runtime records, in `runtime-adapter.json`, before it spawns the VMM:
 
 ```json
-{"format": 1, "mode": "layered", "kernelCommandLine": "nvx_sandbox=1 ...",
- "plan": PLAN, "rootConfiguration": "version=1\nruntime=/run/runtime-adapter\n..."}
+{"format": 2, "mode": "layered", "kernelCommandLine": "nvx_sandbox=1 ...",
+ "plan": PLAN, "bindings": {"distro": DISTRO_BINDING, "scratch": SCRATCH_BINDING},
+ "rootConfiguration": "version=1\nruntime=/run/runtime-adapter\n..."}
 ```
 
 `mode` is `layered`, or `blockless` for a VM without a layered root, whose
-`plan` and `rootConfiguration` are `null`. `plan` is the persisted form of the
-VM's `SandboxPlan`, and `rootConfiguration` the root configuration that the
+`plan`, `bindings`, and `rootConfiguration` are `null`. `plan` is the persisted
+form of the VM's `SandboxPlan`. `bindings` holds the
+[staged](#staged-images) bindings of the launch's images: the image's, if the
+store stages the image at the path of the plan's, and the scratch image's, if
+the plan's upper is on a scratch image that the store stages at its path, each
+`null` otherwise. `rootConfiguration` is the root configuration that the
 launch sends, whether or not the guest accepts it.
 
 ### Commands
 
-`runtime-adapter-host` takes NVX's artifacts from the directory that
-`NVX_ARTIFACTS_DIR` names. Each command takes the guest agent's build from
+Each command of `runtime-adapter-host` but `stage` takes NVX's artifacts from
+the directory that `NVX_ARTIFACTS_DIR` names, and the guest agent's build from
 `--guest-build BUILD`, the crate's version by default:
 
+- `stage STORE --distro FORMAT:PATH --distro-identity UUID [--upper scratch:PATH]`
+  [stages](#staged-images) the images of a layered root for the launches of a
+  VM in the sandbox store STORE, which it creates if needed: the image PATH,
+  an EROFS file system, `erofs`, or a GPT disk, `gpt`, of which the guest
+  expects the identity UUID, and the ext4 scratch image PATH, if given. It
+  verifies and binds the images before it takes the sandbox's lock, which it
+  holds while it records them, and prints nothing.
 - `launch STORE --guest-agent PATH [--hypervisor NAME] [LAYERED]` launches a VM
   in the sandbox store STORE, which it creates if needed, with the guest agent
   PATH, a static `x86_64-unknown-linux-musl` build of `runtime-adapter-guest`,
@@ -610,20 +661,21 @@ launch sends, whether or not the guest accepts it.
   ends its VM.
 
   LAYERED,
-  `--distro FORMAT:PATH [--distro-identity UUID] --upper (scratch:PATH | ram) [--runtime-dir DIR] [--overlay-mode MODE] [--scratch-journal POLICY] [--first-partition-bound BYTES]`,
+  `--distro FORMAT:PATH --distro-identity UUID --upper (scratch:PATH | ram) [--runtime-dir DIR] [--overlay-mode MODE] [--scratch-journal POLICY] [--first-partition-bound BYTES]`,
   gives the VM a [layered root](#layered-roots). Its image is the file PATH, an
   EROFS file system, `erofs`, or a GPT disk, `gpt`, of which the guest expects
-  the identity UUID, if given: the file system's UUID, or the disk's GUID. Its
-  upper is the ext4 scratch image PATH, or RAM. The guest assembles the root
-  below its runtime directory DIR, `/run/runtime-adapter` by default, in the
-  overlay mode MODE, `trusted-lowers` or `untrusted-lowers`, checks a
-  scratch's journal against the policy POLICY, `allowed` or `forbidden`, which
-  only a scratch takes, and refuses a first partition larger than BYTES, which
-  only a GPT disk takes, with the guest's defaults unless given. Once attached,
-  the launch sends the root configuration, and exchanges the `Ping` and the
-  `Echo` once the guest assembled the root. If the guest reports that a stage
-  of the root failed instead, the launch waits for the VM to end, abandons the
-  launch, and checks that the VM ended with the stage's status.
+  the identity UUID: the file system's UUID, or the disk's GUID. Its upper is
+  the ext4 scratch image PATH, or RAM. The guest assembles the root below its
+  runtime directory DIR, `/run/runtime-adapter` by default, in the overlay mode
+  MODE, `trusted-lowers` or `untrusted-lowers`, checks a scratch's journal
+  against the policy POLICY, `allowed` or `forbidden`, which only a scratch
+  takes, and refuses a first partition larger than BYTES, which only a GPT disk
+  takes, with the guest's defaults unless given. The launch records the
+  bindings that STORE stages for the image and the scratch image. Once
+  attached, the launch sends the root configuration, and exchanges the `Ping`
+  and the `Echo` once the guest assembled the root. If the guest reports that a
+  stage of the root failed instead, the launch waits for the VM to end,
+  abandons the launch, and checks that the VM ended with the stage's status.
 - `reattach STORE` takes the sandbox's lock, and reattaches to its VM, which
   another process launched, and which it holds, although the VM is not its
   child, through its verified process identity. It reads the capability from
@@ -839,11 +891,24 @@ configuration, on Linux and Windows:
   reports it.
 
 `tests/layered_launch.rs` checks, in the host-only configuration, on Linux and
-Windows, the plan of a layered launch: its block devices and boot tokens, the
-OpenVMM arguments of NVX's sandbox start, and the sizes of the images; the
-options that it passes on as they are, for the guest to check; the record of
-a launch, with and without a layered root; and the command lines that the host
-program refuses, each with status 2.
+Windows:
+
+- the adapter's plan of a layered launch: its block devices and boot tokens,
+  with none of the sandbox profile's settings, its OpenVMM arguments, with no
+  workload identity and no managed lifecycle, and the sizes of the images; and
+  the options that it passes on as they are, for the guest to check;
+- staging: an image without a manifest, one whose manifest matches it, and
+  manifests that name another image or digest, which fail; a GPT disk over
+  RAM; and images that no launch could attach;
+- the bindings that a launch takes from the staged images, and those of other
+  images, which it does not;
+- the record of the staged images, as written and read, and the forms that a
+  reader refuses;
+- the record of a launch, with and without staged bindings, and of a VM without
+  a layered root;
+- `runtime-adapter-host stage`, which records the staged images, a staging that
+  fails, which leaves them, and a staging that replaces them;
+- the command lines that the host program refuses, each with status 2.
 
 `tests/vm_restart.rs` checks the restart of an orchestrator, on a real
 hypervisor, in the host-only configuration:

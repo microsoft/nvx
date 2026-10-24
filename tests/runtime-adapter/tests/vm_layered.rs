@@ -630,17 +630,20 @@ fn assert_failed(printed: &Printed, stage: RootStage, problem: &str) {
 }
 
 /// Checks what the launch recorded in the sandbox's store: a VM with the layered `root` of the
-/// image `distro`, over `scratch` or RAM, the image of the identity that the launch expects, the
-/// boot tokens of its plan, and the root configuration that the host sent, whether or not the
-/// guest accepted it, which it returns.
+/// image `distro`, over `scratch` or RAM, the image of the identity that the launch expects, no
+/// bindings, since the scenario staged nothing, the boot tokens of its plan alone, after the
+/// launch's own, and the root configuration that the host sent, whether or not the guest accepted
+/// it, which it returns.
 fn check_record(sandbox: &Sandbox, root: &Root, distro: &Distro, scratch: &Path) -> RootConfig {
     let record = fs::read_to_string(sandbox.store.join(RECORD_NAME)).unwrap();
     let record: Value = serde_json::from_str(&record).unwrap();
-    assert_eq!(record["format"], 1);
+    assert_eq!(record["format"], 2);
     assert_eq!(record["mode"], "layered");
+    assert_eq!(record["bindings"], json!({"distro": null, "scratch": null}));
     let plan = &record["plan"];
     assert_eq!(plan["distro"]["format"], distro.format);
     assert_eq!(plan["distro"]["identity"], distro.identity.as_str());
+    assert_eq!(plan["settings"], Value::Null);
     let path = |value: &Value| PathBuf::from(value.as_str().unwrap());
     assert_eq!(path(&plan["distro"]["path"]), distro.path);
     let upper = match root.upper {
@@ -663,16 +666,10 @@ fn check_record(sandbox: &Sandbox, root: &Root, distro: &Distro, scratch: &Path)
         "nvx_layer=distro,0xd0003000,{}:{}",
         distro.format, distro.identity
     );
-    for token in ["nvx_sandbox=1", &layer, upper] {
-        assert!(tokens.contains(token), "{token} in {tokens:?}");
-    }
-    let uppers = tokens
-        .iter()
-        .filter(|token| {
-            token.starts_with("nvx_scratch=") || token.starts_with("nvx_overlay_upper=")
-        })
-        .count();
-    assert_eq!(uppers, 1, "{tokens:?}");
+    assert_eq!(
+        tokens,
+        BTreeSet::from(["nvx_sandbox=1", layer.as_str(), upper])
+    );
     let sectors = |path: &Path| Some(fs::metadata(path).unwrap().len() / 512);
     let config = RootConfig {
         runtime: root.runtime.unwrap_or(DEFAULT_RUNTIME).to_owned(),
