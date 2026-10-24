@@ -42,12 +42,14 @@ use serde::{Deserialize, Serialize};
 
 use super::platform;
 use crate::error::{Error, Result};
+use crate::protocol::export::EXPORT_DIRECTORY;
 use crate::protocol::share::{RESERVED_EXACT_MOUNT_TARGETS, RESERVED_MOUNT_TARGETS};
 use crate::protocol::{HostMap, MAPS_TOKEN, MAX_HOST_MAPPINGS};
 
-/// Guest directory where the guest's init mounts the export; only the guest's root can enter
-/// its parent.
-pub const GUEST_EXPORT: &str = "/run/nvx/hostfs/root";
+/// Guest directory where the guest's init mounts the export, which the export's `virtfs_dir=`
+/// boot token names, and guests check: [`EXPORT_DIRECTORY`]. Only the guest's root can enter its
+/// parent.
+pub const GUEST_EXPORT: &str = EXPORT_DIRECTORY;
 
 /// Largest number of host directories and files that OpenVMM exports through one aggregate.
 pub const MAX_CHILDREN: usize = 256;
