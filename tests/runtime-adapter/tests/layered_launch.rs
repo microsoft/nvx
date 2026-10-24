@@ -1,6 +1,7 @@
 //! The host program plans a VM with a layered root with NVX's typed plan, composes OpenVMM's
 //! arguments as NVX's sandbox start does, records what it launches, and refuses layered options
-//! that do not make a root. The tests need no hypervisor.
+//! that do not make a root, and executions whose starts the guest would not take. The tests need
+//! no hypervisor.
 #![cfg(feature = "host")]
 
 use std::ffi::OsString;
@@ -199,7 +200,7 @@ fn a_launch_records_what_it_launched() {
 fn the_host_program_refuses_options_that_do_not_make_a_command() {
     let launch = ["launch", "store", "--guest-agent", "agent"];
     let uuid = "0a490905-41be-ed5f-984e-63eb7e5e20b1";
-    let cases: [(&[&str], &str); 23] = [
+    let cases: [(&[&str], &str); 27] = [
         (&["--distro", "erofs:image"], "--distro needs --upper"),
         (&["--upper", "ram"], "--upper needs --distro"),
         (
@@ -207,6 +208,22 @@ fn the_host_program_refuses_options_that_do_not_make_a_command() {
             "--distro-identity needs --distro",
         ),
         (&["--runtime-dir", "/run/a"], "--runtime-dir needs --distro"),
+        (
+            &["--workload-identity", "1000:1000"],
+            "--workload-identity needs --distro",
+        ),
+        (
+            &["--workload-identity", "0:1000"],
+            "--workload-identity takes UID:GID, two numbers from 1 to 4294967294, not \"0:1000\"",
+        ),
+        (
+            &["--workload-identity", "1000:4294967295"],
+            "--workload-identity takes UID:GID",
+        ),
+        (
+            &["--workload-identity", "1000"],
+            "--workload-identity takes UID:GID",
+        ),
         (
             &["--overlay-mode", "untrusted-lowers"],
             "--overlay-mode needs --distro",
@@ -302,6 +319,69 @@ fn the_host_program_refuses_options_that_do_not_make_a_command() {
         (
             vec!["reattach", "store", "--distro", "erofs:image"],
             "unexpected option \"--distro\" of reattach",
+        ),
+    ]);
+    // Each execution of `exec` has options of its own, before `--` and its program, and its
+    // arguments end at a lone `;`. The program refuses a start that the guest would not decode,
+    // on which the guest would end its session, before it attaches.
+    let program = ["--", "/bin/true"];
+    let exec = |options: &[&'static str]| [&["exec", "store"], options, &program[..]].concat();
+    commands.extend([
+        (
+            vec!["exec", "store"],
+            "exec needs `-- PROGRAM` after the options of each execution",
+        ),
+        (
+            vec!["exec", "store", "--"],
+            "exec needs a program after `--`",
+        ),
+        (
+            exec(&[]).into_iter().chain([";"]).collect(),
+            "exec needs `-- PROGRAM` after the options of each execution",
+        ),
+        (exec(&["--groups", "1"]), "--groups needs --identity"),
+        (
+            exec(&["--capabilities", "0"]),
+            "--capabilities needs --identity",
+        ),
+        (exec(&["--numeric"]), "--numeric needs --identity"),
+        (
+            exec(&["--identity", "1000"]),
+            "--identity takes UID:GID, not \"1000\"",
+        ),
+        (
+            exec(&["--identity", "0:0", "--groups", "1,,2"]),
+            "--groups takes GIDs, separated by commas, not \"1,,2\"",
+        ),
+        (
+            exec(&["--identity", "0:0", "--capabilities", "64"]),
+            "--capabilities takes capability numbers from 0 to 63",
+        ),
+        (
+            exec(&["--cwd", "tmp"]),
+            "names a working directory that is not absolute",
+        ),
+        (
+            exec(&["--env", "=value"]),
+            "has an environment entry that is not NAME=VALUE",
+        ),
+        (
+            exec(&["--cwd", "/a", "--cwd", "/b"]),
+            "unexpected option \"--cwd\" of exec",
+        ),
+        (
+            exec(&["--distro", "erofs:image"]),
+            "unexpected option \"--distro\" of exec",
+        ),
+        (vec!["exec", "store", "--env"], "\"--env\" needs a value"),
+        (
+            [
+                exec(&["--identity", "0:0", "--groups", "1"]),
+                vec![";"],
+                exec(&["--groups", "1"])[2..].to_vec(),
+            ]
+            .concat(),
+            "--groups needs --identity",
         ),
     ]);
     for (arguments, problem) in commands {

@@ -4,8 +4,9 @@
 //!
 //! Each scenario of the table that [`scenarios!`] declares is an ignored test, which launches a VM
 //! with a [`Root`] and checks what it [`Expect`]s: a root that the guest assembles, which the
-//! scenario probes and the stop tears down, or the stage of the root that fails. A new scenario is
-//! a new row, with its own checks, through the probes of the worker.
+//! scenario probes, or runs executions in through the host program's `exec`, and the stop tears
+//! down, or the stage of the root that fails. A new scenario is a new row, with its own checks,
+//! through the probes of the worker or executions.
 //!
 //! The tests boot VMs, so they are ignored. Besides what the `common` module lists, they read the
 //! fixtures that NVX's own layered scenarios use, from NVX's artifacts in `NVX_ARTIFACTS_DIR`:
@@ -91,6 +92,23 @@ const LAYER_BLOCKS: usize = 128;
 /// The number of inodes of that layer, of which the first ten are reserved, as in every ext2 file
 /// system, and the second is its top directory.
 const LAYER_INODES: usize = 16;
+/// The identity, besides root's, as which the scenarios' executions run: the image's `nobody`, of
+/// the group `nogroup`, which NVX's Ubuntu image always holds.
+const NOBODY: (u32, u32) = (65534, 65534);
+/// An identity whose account the image lacks.
+const ACCOUNTLESS: (u32, u32) = (4242, 4242);
+/// Linux's error number of an operation that is not permitted.
+const EPERM: i32 = 1;
+/// Linux's error number of an invalid argument.
+const EINVAL: i32 = 22;
+/// The number of executions that meet only while all of them run.
+const MEETING: usize = 4;
+/// A script that prints its process's user ID, group ID, and groups, and its permitted,
+/// effective, and bounding capability sets, which the shell reads itself.
+const IDENTITY_SCRIPT: &str = "id -u; id -g; id -G; \
+    while read -r key value; do \
+    case $key in CapPrm:|CapEff:|CapBnd:) echo \"$key $value\";; esac; \
+    done </proc/self/status";
 
 /// The fixtures of the scenarios, among NVX's artifacts.
 struct Fixtures {
@@ -195,6 +213,9 @@ struct Root {
     journal: Option<JournalPolicy>,
     /// The bound of the first partition, as the launch names it, unless the guest's default.
     first_partition_bound: Option<u64>,
+    /// The sandbox's workload identity, its user ID and its group ID, as the launch names it, if
+    /// any.
+    workload: Option<(u32, u32)>,
 }
 
 /// The root of the scenarios unless they say otherwise: NVX's EROFS image, with its own identity,
@@ -208,6 +229,7 @@ const ROOT: Root = Root {
     overlay: None,
     journal: None,
     first_partition_bound: None,
+    workload: None,
 };
 
 /// The root of the scenarios of a GPT disk unless they say otherwise: the disk, with its own GUID,
@@ -284,6 +306,9 @@ impl Root {
         if let Some(bound) = self.first_partition_bound {
             options.extend(["--first-partition-bound".into(), bound.to_string().into()]);
         }
+        if let Some((uid, gid)) = self.workload {
+            options.extend(["--workload-identity".into(), format!("{uid}:{gid}").into()]);
+        }
         options
     }
 
@@ -308,7 +333,8 @@ enum Expect {
     /// that failed with this problem, which leaves a scratch mounted when the VM ends.
     TeardownFails(fn(&mut Vm<'_>), &'static str),
     /// The guest reports that the stage failed with this problem, and the VM ends with its
-    /// status, before the guest mounted a scratch.
+    /// status, without a scratch mounted: the guest fails each stage but the identity's before it
+    /// mounts the scratch, and unmounts the root that it assembled once the identity's failed.
     Fails(RootStage, &'static str),
 }
 
@@ -339,6 +365,23 @@ impl Vm<'_> {
     fn probe(&mut self, probes: &[&str]) -> Printed {
         let probes = probes.iter().map(OsStr::new).collect::<Vec<_>>();
         let printed = self.sandbox.run("probe", &probes, 0);
+        assert_eq!(printed["reattached"], "live");
+        assert_eq!(printed["pid"], self.launched["pid"]);
+        printed
+    }
+
+    /// Runs `executions` at once in the VM's root, each the options and the arguments of one
+    /// execution of the host program's `exec`, and returns what they did, each fact as
+    /// `exec.N.KEY`, for execution N, from 1.
+    fn exec(&mut self, executions: &[Vec<String>]) -> Printed {
+        let mut options = Vec::new();
+        for (index, execution) in executions.iter().enumerate() {
+            if index > 0 {
+                options.push(OsStr::new(";"));
+            }
+            options.extend(execution.iter().map(OsStr::new));
+        }
+        let printed = self.sandbox.run("exec", &options, 0);
         assert_eq!(printed["reattached"], "live");
         assert_eq!(printed["pid"], self.launched["pid"]);
         printed
@@ -538,6 +581,33 @@ scenarios! {
         root: ROOT,
         expect: Expect::Ready(check_root_profiles),
     };
+    /// Executions that the host program runs at once over one session, in a sandbox without a
+    /// workload identity, so that each start names its own: output beyond 1 MiB, whole; several
+    /// executions that meet only while all of them run; a descendant in a session of its own,
+    /// which holds its program's output, and which the end of its program ends; a user other than
+    /// root, and root with an allowed capability alone; a working directory, an exact
+    /// environment, and the configured hostname, each as PID 1 of its namespaces. The guest
+    /// refuses a start without an identity, and one with a capability outside the entry's
+    /// allowlist, at stage 0.
+    executions_run_in_the_root: Scenario {
+        root: ROOT,
+        expect: Expect::Ready(check_executions),
+    };
+    /// Executions in a sandbox whose workload identity the launch names, which every execution
+    /// runs as: the guest refuses a start that names an identity of its own.
+    executions_run_as_the_workload_identity: Scenario {
+        root: Root { workload: Some(NOBODY), ..ROOT },
+        expect: Expect::Ready(check_workload_executions),
+    };
+    /// A workload identity without an account in the image, which fails the identity stage once
+    /// the guest assembled the root, before it answers the root configuration.
+    accountless_workload_identity_fails_its_stage: Scenario {
+        root: Root { workload: Some(ACCOUNTLESS), ..ROOT },
+        expect: Expect::Fails(
+            RootStage::Identity,
+            "cannot enter the root as the workload identity 4242:4242: ",
+        ),
+    };
 }
 
 /// Runs the scenario `name`, `scenario`.
@@ -565,7 +635,7 @@ fn run(name: &str, scenario: Scenario) {
             assert_eq!(sandbox.record(), None);
             assert!(
                 !(over_scratch && needs_recovery(&scratch)),
-                "the guest mounted the scratch"
+                "the guest left the scratch mounted"
             );
             return;
         }
@@ -683,6 +753,7 @@ fn check_record(sandbox: &Sandbox, root: &Root, distro: &Distro, scratch: &Path)
         first_partition_bound: root.first_partition_bound,
         overlay_mode: root.overlay,
         scratch_journal: root.journal,
+        workload_identity: root.workload,
         ..RootConfig::default()
     };
     let sent = String::from_utf8(config.encode()).unwrap();
@@ -1728,4 +1799,188 @@ fn check_root_profiles(vm: &mut Vm<'_>) {
     }
     assert_eq!(fact("after.machine-id"), ROOT_MACHINE_ID);
     assert_eq!(fact("after.mounts"), "0");
+}
+
+/// Returns the options and the arguments of an execution of the host program's `exec`: `options`,
+/// then `--`, then the program and its arguments, `command`.
+fn execution(options: &[&str], command: &[&str]) -> Vec<String> {
+    options
+        .iter()
+        .chain(&["--"])
+        .chain(command)
+        .map(|argument| (*argument).to_owned())
+        .collect()
+}
+
+/// Returns `identity` as the value of the option `--identity` of `exec`: `UID:GID`.
+fn ids((uid, gid): (u32, u32)) -> String {
+    format!("{uid}:{gid}")
+}
+
+/// Returns `text` as the host program prints a value: with `\`, newlines, and carriage returns
+/// escaped.
+fn escaped(text: &str) -> String {
+    text.replace('\\', "\\\\")
+        .replace('\n', "\\n")
+        .replace('\r', "\\r")
+}
+
+/// Returns the output of `seq first last`.
+fn lines(first: usize, last: usize) -> String {
+    (first..=last).map(|number| format!("{number}\n")).collect()
+}
+
+/// Returns what the [`IDENTITY_SCRIPT`] prints for the user ID `uid`, the group ID `gid`, the
+/// groups `groups`, and the capabilities `capabilities`, a set of each capability's bit.
+fn identity_facts(uid: u32, gid: u32, groups: &str, capabilities: u64) -> String {
+    let set = capability_set(capabilities);
+    format!("{uid}\n{gid}\n{groups}\nCapPrm: {set}\nCapEff: {set}\nCapBnd: {set}\n")
+}
+
+/// Returns the fact KEY of execution `number` that `exec` printed in `printed`.
+fn fact<'a>(printed: &'a Printed, number: usize, key: &str) -> &'a str {
+    let key = format!("exec.{number}.{key}");
+    printed
+        .get(&key)
+        .unwrap_or_else(|| panic!("{key} is missing: {printed:?}"))
+}
+
+/// Checks that execution `number` of what `exec` printed in `printed` started, ended on its own
+/// with the exit code `code`, lost no byte, and settled, so that its place is reusable, and that
+/// it wrote `stdout` and `stderr`.
+fn assert_ran(printed: &Printed, number: usize, code: i32, stdout: &str, stderr: &str) {
+    let status = format!("exit {code}");
+    let facts =
+        ["launch", "status", "cause", "truncated", "settled"].map(|key| fact(printed, number, key));
+    assert_eq!(
+        facts,
+        ["started", &*status, "none", "none", "reusable"],
+        "{number}: {printed:?}"
+    );
+    assert_eq!(fact(printed, number, "stdout"), escaped(stdout), "{number}");
+    assert_eq!(fact(printed, number, "stderr"), escaped(stderr), "{number}");
+}
+
+/// Checks that the guest refused execution `number` of what `exec` printed in `printed` at stage
+/// 0 with the error number `error`, before its program started: the execution is fenced, and has
+/// no output.
+fn assert_refused(printed: &Printed, number: usize, error: i32) {
+    let launch = format!("failed 0 {error}");
+    let facts =
+        ["launch", "status", "settled", "stdout", "stderr"].map(|key| fact(printed, number, key));
+    assert_eq!(
+        facts,
+        [&*launch, "none", "fenced", "", ""],
+        "{number}: {printed:?}"
+    );
+}
+
+/// Checks the VM of the `executions_run_in_the_root` scenario, whose starts name their identities.
+fn check_executions(vm: &mut Vm<'_>) {
+    let nobody = ids(NOBODY);
+
+    // Several executions at once, which meet only while all of them run: each leaves its mark in
+    // the root's `/tmp`, and waits for the others' marks. Beside them, one writes more than a MiB
+    // to its standard output, and a little to its standard error, which arrive whole.
+    let meet = format!(
+        "mkdir -p /tmp/meeting && touch /tmp/meeting/$NUMBER && \
+         until [ \"$(ls /tmp/meeting | wc -l)\" -ge {MEETING} ]; do sleep 0.01; done && \
+         echo \"$NUMBER met\""
+    );
+    let mut executions = (1..=MEETING)
+        .map(|number| {
+            let environment = format!("NUMBER={number}");
+            execution(
+                &["--identity", &nobody, "--env", &environment],
+                &["/bin/sh", "-c", &meet],
+            )
+        })
+        .collect::<Vec<_>>();
+    let writer = "seq 1 200000; seq 1 1000 >&2";
+    executions.push(execution(
+        &["--identity", "0:0"],
+        &["/bin/sh", "-c", writer],
+    ));
+    let printed = vm.exec(&executions);
+    for number in 1..=MEETING {
+        assert_ran(&printed, number, 0, &format!("{number} met\n"), "");
+    }
+    let output = lines(1, 200_000);
+    assert!(output.len() > 1 << 20, "{}", output.len());
+    assert_ran(&printed, MEETING + 1, 0, &output, &lines(1, 1000));
+
+    // In a later session, whose keys are new to the guest:
+    // 1. a descendant in a session of its own, which holds its program's output, and which the
+    //    end of its program, PID 1 of its namespace, ends, so that the execution loses no byte;
+    // 2. a user other than root, without capabilities, in existing-account mode;
+    // 3. root with `CAP_CHOWN` alone, in its permitted, effective, and bounding sets;
+    // 4. exactly the environment that the start names;
+    // 5. the working directory that the start names;
+    // 6. the configured hostname, as PID 1 of the execution's namespaces;
+    // 7. no identity, in a sandbox without a workload identity, which the guest refuses;
+    // 8. a capability outside the entry's allowlist, `CAP_SYS_ADMIN`, which the entry refuses.
+    let executions = [
+        execution(
+            &["--identity", "0:0"],
+            &["/bin/sh", "-c", "setsid sleep 600 & echo started"],
+        ),
+        execution(
+            &["--identity", &nobody],
+            &["/bin/sh", "-c", IDENTITY_SCRIPT],
+        ),
+        execution(
+            &["--identity", "0:0", "--capabilities", "0"],
+            &["/bin/sh", "-c", IDENTITY_SCRIPT],
+        ),
+        execution(
+            &[
+                "--identity",
+                &nobody,
+                "--env",
+                "FIRST=1",
+                "--env",
+                "SECOND=two words",
+            ],
+            &["/usr/bin/env"],
+        ),
+        execution(
+            &["--identity", &nobody, "--cwd", "/usr/share"],
+            &["/bin/pwd"],
+        ),
+        execution(
+            &["--identity", &nobody],
+            &["/bin/sh", "-c", "cat /proc/sys/kernel/hostname; echo $$"],
+        ),
+        execution(&[], &["/bin/true"]),
+        execution(
+            &["--identity", "0:0", "--capabilities", "21"],
+            &["/bin/true"],
+        ),
+    ];
+    let printed = vm.exec(&executions);
+    assert_ran(&printed, 1, 0, "started\n", "");
+    let nobody_facts = identity_facts(NOBODY.0, NOBODY.1, "65534", 0);
+    assert_ran(&printed, 2, 0, &nobody_facts, "");
+    assert_ran(&printed, 3, 0, &identity_facts(0, 0, "0", 1), "");
+    assert_ran(&printed, 4, 0, "FIRST=1\nSECOND=two words\n", "");
+    assert_ran(&printed, 5, 0, "/usr/share\n", "");
+    assert_ran(&printed, 6, 0, "nvx-sandbox\n1\n", "");
+    assert_refused(&printed, 7, EINVAL);
+    assert_refused(&printed, 8, EPERM);
+}
+
+/// Checks the VM of the `executions_run_as_the_workload_identity` scenario, whose sandbox's
+/// workload identity is [`NOBODY`].
+fn check_workload_executions(vm: &mut Vm<'_>) {
+    assert_eq!(vm.config.workload_identity, Some(NOBODY));
+    let executions = [
+        execution(&[], &["/bin/sh", "-c", IDENTITY_SCRIPT]),
+        execution(&["--env", "ONLY=this"], &["/usr/bin/env"]),
+        execution(&["--identity", &ids(NOBODY)], &["/bin/true"]),
+    ];
+    let printed = vm.exec(&executions);
+    let nobody_facts = identity_facts(NOBODY.0, NOBODY.1, "65534", 0);
+    assert_ran(&printed, 1, 0, &nobody_facts, "");
+    assert_ran(&printed, 2, 0, "ONLY=this\n", "");
+    assert_refused(&printed, 3, EINVAL);
 }

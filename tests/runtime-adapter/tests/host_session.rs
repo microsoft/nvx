@@ -8,15 +8,21 @@
 //! ERROR payloads, sequence and identity errors, resets and disconnects in the middle of a message,
 //! timeouts, sends that fail, the answers that requests check, the bounded buffer of the adapter's
 //! decoder, and the requests of a layered root: its configuration, its probes, and a stop whose
-//! teardown failed.
+//! teardown failed. The broker's guest also runs the runners of NVX's execution engine for the
+//! executions that the host program's driver runs, so that the tests cover the driver's output,
+//! credit, outcomes, and timers, and the refusals that end its run.
 #![cfg(feature = "host")]
 
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::io;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
+use nvx::exec::{
+    Cause, Key, LaunchFailure, Limits, Outcome, Runner, Settlement, Status, Stream, Timers,
+    Violation, Window, runner,
+};
 use nvx::host::nvxs::HostConnectionError;
 use nvx::host::platform::Transport;
 use nvx::protocol::nvxs::{
@@ -25,8 +31,9 @@ use nvx::protocol::nvxs::{
 use nvx::protocol::{
     CAPABILITY_LEN, OUTER_HEADER_LEN, OUTER_MAX_PAYLOAD, OUTER_MIN_RECEIVE_WINDOW,
 };
+use runtime_adapter::exec::{GuestMessage, HostMessage, Start};
 use runtime_adapter::frame::{Decoder, FrameError, HEADER_LEN, MAX_BODY, MAX_TEXT_BODY, Message};
-use runtime_adapter::host::{Client, ClientError};
+use runtime_adapter::host::{Client, ClientError, Executions, ExecutionsError};
 use runtime_adapter::probe::{Facts, Probe, ProbeReply};
 use runtime_adapter::root::{RootConfig, RootFailure, RootReply, RootStage};
 
@@ -1084,11 +1091,16 @@ fn the_client_refuses_messages_that_its_framing_does_not_allow() {
 
     // The client takes the guest agent's messages, and refuses those that only the host program
     // sends.
+    let key = Key::new(1, 1);
     let host_messages = [
         Message::Ping,
         Message::Stop,
         Message::RootConfig(RootConfig::default().encode()),
         Message::Probe(b"mounts".to_vec()),
+        HostMessage::Start(start_of(1)).encode(),
+        HostMessage::Input(key, b"input").encode(),
+        HostMessage::InputEnd(key).encode(),
+        HostMessage::Cancel(key, Cause::Cancelled).encode(),
     ];
     for message in host_messages {
         let (mut broker, mut client) = attached(FIRST, usize::MAX);
@@ -1389,4 +1401,389 @@ fn answers_whose_bodies_do_not_decode_end_the_client() {
         assert!(failed, "{name}: {result:?}");
         assert_ended(&mut client);
     }
+}
+
+/// The chunk of the executions of the tests of the host's driver.
+const CHUNK: u32 = 16 * 1024;
+
+/// Returns the limits of the executions of the tests of the host's driver, as the host program
+/// chooses them: chunks of 16 KiB, and frame-counted credit, of 4 frames of input, and of 8 frames
+/// of output in one pool that standard output and error share.
+fn limits() -> Limits {
+    Limits::new(CHUNK, Window::frames(4), Window::frames(8))
+        .unwrap()
+        .shared_output()
+}
+
+/// Returns the timers of both sides of the executions of the tests of the host's driver.
+fn timers() -> Timers {
+    Timers::new(Duration::from_millis(300), Duration::from_secs(5))
+}
+
+/// Returns the start of the execution `id` of the first generation, of a program that the test's
+/// guest plays.
+fn start_of(id: u64) -> Start {
+    Start::new(Key::new(id, 1), limits(), timers(), ["/bin/program"])
+}
+
+/// Returns the position of `stream` among [`Stream::ALL`].
+fn position(stream: Stream) -> usize {
+    match stream {
+        Stream::Stdout => 0,
+        Stream::Stderr => 1,
+    }
+}
+
+/// What the program of an execution that the test's guest plays does.
+#[derive(Clone, Debug)]
+struct Workload {
+    /// Whether the program starts, or why its launch failed.
+    launch: Result<(), LaunchFailure>,
+    /// What the program writes to its standard output and error, in the order of [`Stream::ALL`].
+    output: [Vec<u8>; 2],
+    /// How the program ends, once it wrote its output.
+    status: Status,
+}
+
+/// The guest's side of an execution that the test's guest plays: the runner of NVX's execution
+/// engine, which takes the program's output as its credit lets it, as the worker's does.
+struct Played {
+    /// The guest's side of the execution.
+    runner: Runner,
+    /// What the program does.
+    workload: Workload,
+    /// Whether the runner learned how the launch went.
+    launched: bool,
+    /// The bytes of each stream that the runner took.
+    written: [usize; 2],
+    /// Whether the program ended.
+    ended: bool,
+}
+
+impl Played {
+    /// Returns the guest's side of the execution of `runner`, whose program does `workload`.
+    fn new(runner: Runner, workload: Workload) -> Self {
+        Self {
+            runner,
+            workload,
+            launched: false,
+            written: [0, 0],
+            ended: false,
+        }
+    }
+
+    /// Takes every step that the program and the runner can take at `now`, as the worker takes
+    /// them, and returns the runner's messages, as frames.
+    fn step(&mut self, now: Instant) -> Vec<Message> {
+        if !self.launched {
+            self.launched = true;
+            self.runner.launched(self.workload.launch);
+            if self.workload.launch.is_err() {
+                for stream in Stream::ALL {
+                    self.runner.output_closed(stream);
+                }
+                self.runner.exited(now, None);
+                self.ended = true;
+            }
+        }
+        if !self.ended {
+            for stream in Stream::ALL {
+                let output = &self.workload.output[position(stream)];
+                let written = &mut self.written[position(stream)];
+                *written += self.runner.output(stream, &output[*written..]);
+            }
+            if self.written == self.workload.output.each_ref().map(Vec::len) {
+                for stream in Stream::ALL {
+                    self.runner.output_closed(stream);
+                }
+                self.runner.exited(now, Some(self.workload.status));
+                self.ended = true;
+            }
+        }
+        self.runner.tick(now);
+        while let Some(request) = self.runner.next_request() {
+            if let runner::Request::Settle = request {
+                self.runner.settled(match self.workload.launch {
+                    Ok(()) => Settlement::Settled,
+                    Err(_) => Settlement::Failed,
+                });
+            }
+        }
+        let key = self.runner.key();
+        let mut buffer = vec![0; self.runner.limits().chunk()];
+        let mut messages = Vec::new();
+        while let Some(message) = self.runner.next_message(&mut buffer) {
+            if let Some(message) = GuestMessage::from_runner(key, message, &buffer) {
+                messages.push(message.encode());
+            }
+        }
+        messages
+    }
+}
+
+/// Plays the guest's side of the host's executions until `count` of them finished: a runner for
+/// each start, whose program does what `workload` says of the start. Takes the host's messages,
+/// sends the runners' in DATA records of at most `size` bytes, and returns the starts, in order.
+fn play(
+    broker: &mut Broker,
+    count: usize,
+    size: usize,
+    workload: impl Fn(&Start) -> Workload,
+) -> Vec<Start> {
+    let mut starts = Vec::new();
+    let mut played = BTreeMap::<u64, Played>::new();
+    loop {
+        let now = Instant::now();
+        let messages = played
+            .values_mut()
+            .flat_map(|played| played.step(now))
+            .collect::<Vec<_>>();
+        broker.send_data(&encode(&messages), size);
+        if played.len() == count && played.values().all(|played| played.runner.is_finished()) {
+            return starts;
+        }
+        for message in broker.take() {
+            let decoded = HostMessage::decode(&message)
+                .expect("the host sends messages about executions")
+                .expect("the host's messages decode");
+            let message = match decoded {
+                HostMessage::Start(start) => {
+                    let runner = Runner::new(start.key, start.limits, start.timers, now);
+                    played.insert(start.key.id(), Played::new(runner, workload(&start)));
+                    starts.push(start);
+                    continue;
+                }
+                message => message,
+            };
+            let key = message.key();
+            let runner = &mut played
+                .get_mut(&key.id())
+                .expect("the host started the execution")
+                .runner;
+            match message {
+                HostMessage::Credit(key, pool, units) => runner.credit(key, pool, units),
+                HostMessage::Input(key, bytes) => runner.input(key, bytes),
+                HostMessage::InputEnd(key) => runner.end_input(key),
+                HostMessage::Cancel(key, cause) => runner.cancel(now, key, cause),
+                HostMessage::Start(_) => unreachable!("the start came first"),
+            }
+            .expect("the runner accepts the host's message");
+        }
+    }
+}
+
+/// Starts the executions of `starts` with `client`, each with its own timers, and runs them in a
+/// thread until `deadline`, which returns the client and the driver.
+fn run(
+    client: Client,
+    starts: Vec<Start>,
+    deadline: Instant,
+) -> JoinHandle<(Client, Result<Executions, ExecutionsError>)> {
+    spawn(client, move |client| {
+        let mut executions = Executions::new();
+        for start in starts {
+            let timers = start.timers;
+            executions.start(client, start, timers, Vec::new(), deadline)?;
+        }
+        executions.run(client, deadline)?;
+        Ok(executions)
+    })
+}
+
+#[test]
+fn the_driver_runs_executions_at_once_and_collects_their_output_and_outcomes() {
+    // The first program writes more to its standard output than the guest's credit holds, so that
+    // its output flows as the host takes it, and a little to its standard error, then exits with
+    // 3. The second one does not start. The guest's records carry its messages whole, or in
+    // pieces that split them, and each read of the host's takes at most 4 KiB.
+    let output = (0..=u8::MAX).cycle().take(300 * 1024).collect::<Vec<_>>();
+    let written = Workload {
+        launch: Ok(()),
+        output: [output.clone(), b"error".to_vec()],
+        status: Status::Exited(3),
+    };
+    let refused = Workload {
+        launch: Err(LaunchFailure::new(0, 13)),
+        output: [Vec::new(), Vec::new()],
+        status: Status::Exited(0),
+    };
+    for size in [OUTER_MAX_PAYLOAD, 1000] {
+        let (mut broker, client) = attached(FIRST, 4096);
+        let running = run(client, vec![start_of(1), start_of(2)], deadline());
+        let starts = play(&mut broker, 2, size, |start| match start.key.id() {
+            1 => written.clone(),
+            _ => refused.clone(),
+        });
+        assert_eq!(starts, [start_of(1), start_of(2)]);
+        let (_, executions) = joined(running);
+        let executions = executions.unwrap();
+        assert!(executions.is_finished());
+        let ids = executions
+            .iter()
+            .map(|execution| execution.start().key.id())
+            .collect::<Vec<_>>();
+        assert_eq!(ids, [1, 2]);
+
+        let first = executions.get(1).unwrap();
+        assert!(first.peer().has_started());
+        assert_eq!(first.output(Stream::Stdout), output);
+        assert_eq!(first.output(Stream::Stderr), b"error");
+        let outcome = first.outcome().unwrap();
+        assert_eq!(outcome.status(), Some(Status::Exited(3)));
+        assert_eq!((outcome.cause(), outcome.launch_failure()), (None, None));
+        assert!(outcome.is_reusable());
+        for stream in Stream::ALL {
+            assert!(!outcome.is_truncated(stream), "{stream:?}");
+        }
+
+        let second = executions.get(2).unwrap();
+        assert!(!second.peer().has_started());
+        let outcome = second.outcome().unwrap();
+        assert_eq!(outcome.launch_failure(), Some(LaunchFailure::new(0, 13)));
+        assert_eq!(outcome.status(), None);
+        assert!(!outcome.is_reusable());
+        for stream in Stream::ALL {
+            assert!(second.output(stream).is_empty(), "{stream:?}");
+        }
+    }
+}
+
+#[test]
+fn the_driver_refuses_starts_that_the_guest_would_not_take_and_sends_nothing() {
+    let (mut broker, mut client) = attached(FIRST, usize::MAX);
+    let mut executions = Executions::new();
+    // The guest ends its session on a start that it cannot decode.
+    let undecodable = [
+        start_of(1).with_working_directory("relative"),
+        start_of(1).with_environment(["=value"]),
+        Start::new(Key::new(1, 1), limits(), timers(), [""]),
+    ];
+    for start in undecodable {
+        let refused =
+            executions.start(&mut client, start.clone(), timers(), Vec::new(), deadline());
+        assert!(
+            matches!(refused, Err(ExecutionsError::Start(_))),
+            "{start:?}: {refused:?}"
+        );
+    }
+    // A second start of an ID.
+    executions
+        .start(&mut client, start_of(1), timers(), Vec::new(), deadline())
+        .unwrap();
+    let refused = executions.start(&mut client, start_of(1), timers(), Vec::new(), deadline());
+    assert!(
+        matches!(refused, Err(ExecutionsError::Duplicate(1))),
+        "{refused:?}"
+    );
+    // The guest received the one start alone, and the client stays usable.
+    assert_eq!(
+        broker.messages(1),
+        [HostMessage::Start(start_of(1)).encode()]
+    );
+    let pinging = spawn(client, |client| client.ping(deadline()));
+    assert_eq!(broker.answer(OUTER_MAX_PAYLOAD), Message::Ping);
+    joined(pinging).1.unwrap();
+}
+
+#[test]
+fn the_driver_ends_its_run_on_a_message_that_breaks_the_rules() {
+    /// A check of the failure that ended a run.
+    type Check = fn(&ExecutionsError) -> bool;
+    let key = Key::new(1, 1);
+    let key_body = [key.id().to_le_bytes(), key.generation().to_le_bytes()].concat();
+    let cases: [(&str, Vec<Message>, Check); 4] = [
+        (
+            "a message about an execution that the host did not start",
+            vec![GuestMessage::Started(Key::new(2, 1)).encode()],
+            |error| matches!(error, ExecutionsError::Unknown(key) if *key == Key::new(2, 1)),
+        ),
+        (
+            "a message about no execution",
+            vec![Message::Pong],
+            |error| matches!(error, ExecutionsError::Unexpected(kind) if *kind == Message::Pong.kind()),
+        ),
+        (
+            "output of a stream that does not exist",
+            vec![Message::ExecOutput([&key_body[..], &[9], b"x"].concat())],
+            |error| matches!(error, ExecutionsError::Body(_)),
+        ),
+        (
+            "an outcome before the ends of the streams",
+            vec![
+                GuestMessage::Started(key).encode(),
+                GuestMessage::Terminal(key, Outcome::new(Some(Status::Exited(0)))).encode(),
+            ],
+            |error| {
+                matches!(
+                    error,
+                    ExecutionsError::Violation(failed, Violation::Order) if *failed == Key::new(1, 1)
+                )
+            },
+        ),
+    ];
+    for (name, messages, check) in cases {
+        let (mut broker, client) = attached(FIRST, usize::MAX);
+        let running = run(client, vec![start_of(1)], deadline());
+        broker.messages(1);
+        broker.send_data(&encode(&messages), OUTER_MAX_PAYLOAD);
+        let (_, ran) = joined(running);
+        let failed = ran.as_ref().err().is_some_and(check);
+        assert!(failed, "{name}: {:?}", ran.err());
+    }
+
+    // The end of the guest's stream ends the run too.
+    let (mut broker, client) = attached(FIRST, usize::MAX);
+    let running = run(client, vec![start_of(1)], deadline());
+    broker.messages(1);
+    broker.close();
+    let (_, ran) = joined(running);
+    let closed = matches!(
+        ran,
+        Err(ExecutionsError::Client(ClientError::Session(
+            HostConnectionError::Closed
+        )))
+    );
+    assert!(closed, "{:?}", ran.err());
+}
+
+#[test]
+fn the_driver_fires_the_timers_of_its_executions_while_the_guest_says_nothing() {
+    // The execution's timeout passes while the guest sends nothing: the host cancels it, waits for
+    // its outcome for the grace and the settlement time, then gives up on it, and fences it.
+    let (grace, settlement, timeout) = (
+        Duration::from_millis(50),
+        Duration::from_millis(100),
+        Duration::from_millis(200),
+    );
+    let timed = Timers::new(grace, settlement).timeout(timeout);
+    let key = Key::new(1, 1);
+    let start = Start::new(key, limits(), timed, ["/bin/program"]);
+    let (mut broker, client) = attached(FIRST, usize::MAX);
+    let started = Instant::now();
+    let running = run(client, vec![start.clone()], deadline());
+    // The start, the credit of the output's pool, then the cancellation.
+    let messages = broker.messages(3);
+    assert_eq!(messages[0], HostMessage::Start(start).encode());
+    assert_eq!(
+        messages[2],
+        HostMessage::Cancel(key, Cause::TimedOut).encode()
+    );
+    let (_, executions) = joined(running);
+    assert!(started.elapsed() >= timeout + grace + settlement);
+    let executions = executions.unwrap();
+    let outcome = executions.get(1).unwrap().outcome().unwrap();
+    assert_eq!(outcome.cause(), Some(Cause::TimedOut));
+    assert_eq!(outcome.status(), None);
+    assert!(!outcome.is_reusable());
+
+    // A run whose deadline passes before its executions finish fails.
+    let (mut broker, client) = attached(FIRST, usize::MAX);
+    let running = run(client, vec![start_of(1)], Instant::now() + SHORT);
+    broker.messages(1);
+    let (_, ran) = joined(running);
+    assert!(
+        matches!(ran, Err(ExecutionsError::TimedOut)),
+        "{:?}",
+        ran.err()
+    );
 }

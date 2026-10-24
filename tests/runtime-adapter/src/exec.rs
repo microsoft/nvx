@@ -1,7 +1,9 @@
 //! The adapter's messages about executions: programs that the guest runs for the host, whose
 //! standard streams and outcome the execution engine of `nvx::exec` carries. The host's side of an
 //! execution is the engine's [`Peer`], and the guest's side its [`Runner`], which the guest agent's
-//! worker binds to the program through `nvx::guest::exec::binding`.
+//! worker binds to the program through `nvx::guest::exec::binding`. A [`HostExecution`] holds the
+//! peer with a sink of the program's output and a source of its input, as the host program's
+//! driver, `host::Executions`, and the in-process tests of the worker run it.
 //!
 //! Each message of the engine travels in a frame of its own kind. Its body starts with the
 //! execution's [`Key`]: the execution's ID, then its generation, each a `u64`:
@@ -572,6 +574,153 @@ impl<'a> GuestMessage<'a> {
             Self::InputClosed(key) => peer.input_closed(key),
             Self::Terminal(key, outcome) => peer.terminal(now, key, outcome),
         }
+    }
+}
+
+/// The host's side of an execution: its [`Peer`], with a sink that takes the program's output as
+/// it arrives, unless its caller stalls it, and a source that hands over the program's input, if
+/// the start says that the host sends it, then ends it.
+///
+/// Its caller sends the execution's [`Start`], hands it each of the guest's messages about the
+/// execution with [`deliver`](Self::deliver), and sends the frames that [`serve`](Self::serve)
+/// returns, until the peer [finished](Self::outcome). The host program's driver,
+/// `host::Executions`, runs several at once over the session.
+#[derive(Debug)]
+pub struct HostExecution {
+    /// The execution's start.
+    start: Start,
+    /// The host's side of the execution.
+    peer: Peer,
+    /// Whether the sink takes nothing.
+    stalled: bool,
+    /// The bytes of each stream that the sink took.
+    output: [Vec<u8>; 2],
+    /// The input that the source hands over, if the start says that the host sends it.
+    input: Vec<u8>,
+    /// How many bytes of the input the source handed over.
+    sent: usize,
+    /// Whether the source ended the input.
+    ended: bool,
+    /// The peer's events, in order.
+    events: Vec<peer::Event>,
+}
+
+impl HostExecution {
+    /// Returns the host's side of the execution of `start`, created at `now`, from which the
+    /// timeout of its peer's `timers` runs, with a source of `input`.
+    pub fn new(start: Start, timers: Timers, input: Vec<u8>, now: Instant) -> Self {
+        let peer = Peer::new(start.key, start.limits, timers, now);
+        Self {
+            start,
+            peer,
+            stalled: false,
+            output: [Vec::new(), Vec::new()],
+            input,
+            sent: 0,
+            ended: false,
+            events: Vec::new(),
+        }
+    }
+
+    /// Returns the execution's start.
+    pub fn start(&self) -> &Start {
+        &self.start
+    }
+
+    /// Returns the host's side of the execution.
+    pub fn peer(&self) -> &Peer {
+        &self.peer
+    }
+
+    /// Returns the host's side of the execution, with which the caller ends it, or tells it that
+    /// the session was reset or lost.
+    pub fn peer_mut(&mut self) -> &mut Peer {
+        &mut self.peer
+    }
+
+    /// Makes the sink take nothing while `stalled` holds, so that the program's output waits in
+    /// the peer, which grants the guest no credit for it.
+    pub fn stall(&mut self, stalled: bool) {
+        self.stalled = stalled;
+    }
+
+    /// Returns the bytes of `stream` that the sink took.
+    pub fn output(&self, stream: Stream) -> &[u8] {
+        &self.output[position(stream)]
+    }
+
+    /// Returns the peer's events, in order.
+    pub fn events(&self) -> &[peer::Event] {
+        &self.events
+    }
+
+    /// Returns the execution's outcome, once the peer finished.
+    pub fn outcome(&self) -> Option<Outcome> {
+        self.events.iter().find_map(|event| match event {
+            peer::Event::Finished(outcome) => Some(*outcome),
+            _ => None,
+        })
+    }
+
+    /// Returns when the peer's next timer fires, for the caller to [serve](Self::serve) the
+    /// execution then, or `None` while no timer runs.
+    pub fn deadline(&self) -> Option<Instant> {
+        self.peer.deadline()
+    }
+
+    /// Hands the guest's `message` about the execution to the peer at `now`, and returns what the
+    /// peer returns.
+    pub fn deliver(
+        &mut self,
+        message: &GuestMessage<'_>,
+        now: Instant,
+    ) -> Result<Receipt, Violation> {
+        message.deliver(&mut self.peer, now)
+    }
+
+    /// Takes every step that the source, the sink, and the peer can take at `now`, and returns
+    /// the peer's messages for the guest, as frames, in order.
+    pub fn serve(&mut self, now: Instant) -> Vec<Message> {
+        if self.start.input && !self.ended {
+            self.sent += self.peer.input(&self.input[self.sent..]);
+            if self.sent == self.input.len() {
+                self.peer.end_input();
+                self.ended = true;
+            }
+        }
+        if !self.stalled {
+            for stream in Stream::ALL {
+                loop {
+                    let pending = self.peer.pending_output(stream);
+                    if pending.is_empty() {
+                        break;
+                    }
+                    let length = pending.len();
+                    self.output[position(stream)].extend_from_slice(pending);
+                    self.peer.consumed(stream, length);
+                }
+            }
+        }
+        self.peer.tick(now);
+        while let Some(event) = self.peer.next_event() {
+            self.events.push(event);
+        }
+        let mut buffer = vec![0; self.start.limits.chunk()];
+        let mut messages = Vec::new();
+        while let Some(message) = self.peer.next_message(&mut buffer) {
+            if let Some(message) = HostMessage::from_peer(self.start.key, message, &buffer) {
+                messages.push(message.encode());
+            }
+        }
+        messages
+    }
+}
+
+/// Returns the position of `stream` among [`Stream::ALL`].
+fn position(stream: Stream) -> usize {
+    match stream {
+        Stream::Stdout => 0,
+        Stream::Stderr => 1,
     }
 }
 
