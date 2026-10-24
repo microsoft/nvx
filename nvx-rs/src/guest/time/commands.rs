@@ -150,10 +150,13 @@ fn cmd_pre_capture(abi: TimeAbi, err: &mut dyn Write) -> Result<(), CommandError
 }
 
 /// Reports why the preparation of a capture failed, such as `nvx-time: cannot suppress the stall
-/// detectors: a capture is already pending`, and fails. A violation's event is its only report.
+/// detectors: a capture is already pending`, and fails. A violation's event is its only report,
+/// and `run` reports a permission that the thread may still hold once, when the command ends.
 fn pre_capture_failure(err: &mut dyn Write, error: PreCaptureError) -> CommandError {
     let reason = match error {
-        PreCaptureError::BootChecks(_) | PreCaptureError::CaptureChecks(_) => {
+        PreCaptureError::BootChecks(_)
+        | PreCaptureError::CaptureChecks(_)
+        | PreCaptureError::PortRelease(_) => {
             return CommandError::Operation;
         }
         PreCaptureError::Pending => "a capture is already pending",
@@ -400,6 +403,11 @@ mod tests {
             ),
             (
                 PreCaptureError::CaptureChecks(TimeError::StateUnavailable),
+                String::new(),
+            ),
+            // `run` reports the permission once, when the command ends.
+            (
+                PreCaptureError::PortRelease(PortError::Revoke(Errno::ENOMEM).into()),
                 String::new(),
             ),
         ];

@@ -26,15 +26,19 @@
 //! - [`Captured::Continued`]: the VM continued without a restore, and the barrier opened the
 //!   fence, then restored the detectors' settings.
 //! - [`Captured::Restored`]: a restore of the snapshot started this VM, a clone whose wall clock
-//!   the time ABI repaired, and the barrier opened the fence. The detectors stay suppressed until
-//!   the restore's finish, [`TimeAbi::restore_finish`], hands their release to the time daemon.
-//!   The caller repairs the clone next, from the [`Restored`] restore. OpenVMM ends a platform
+//!   the time ABI repaired. Nothing else may run before repair acknowledges the restore, so the
+//!   fence stays closed: [`Restored::into_parts`] hands it to the caller, which opens it once
+//!   repair acknowledged the restore, or later. The detectors stay suppressed until the
+//!   restore's finish, [`TimeAbi::restore_finish`], hands their release to the time daemon. The
+//!   caller repairs the clone next, from the [`Restored`] restore. OpenVMM ends a platform
 //!   template's VM once its capture commits, so only clones return with this outcome.
 //!
-//! [`CaptureBarrier::cancel`] opens the fence, then restores the detectors' settings. So does a
-//! capture that fails, after which the caller ends the VM, and so does a barrier that is dropped,
-//! which ignores a failure. A preparation that fails releases what it took. A failure is a
-//! [`CaptureError`], which names the [`CaptureStage`] that failed and its [`CaptureCause`].
+//! [`CaptureBarrier::cancel`] opens the fence, then restores the detectors' settings, and so does
+//! a barrier that is dropped, which ignores a failure. A capture that fails restores the
+//! detectors' settings too, after which the caller ends the VM, but a request that fails leaves
+//! the fence closed: it may fail in a clone whose restore it could not repair. A preparation that
+//! fails releases what it took. A failure is a [`CaptureError`], which names the
+//! [`CaptureStage`] that failed and its [`CaptureCause`].
 //!
 //! ```no_run
 //! use std::io;
@@ -70,8 +74,11 @@
 //! match barrier.capture()? {
 //!     Captured::Continued => println!("the VM continued without a restore"),
 //!     Captured::Restored(restored) => {
-//!         // A clone continues here, and repairs the restore.
-//!         println!("restored to {}", restored.restore().generation_id());
+//!         // A clone continues here: it repairs the restore, and opens the fence once repair
+//!         // acknowledged it.
+//!         let (restore, fence) = restored.into_parts();
+//!         println!("restored to {}", restore.generation_id());
+//!         fence.open();
 //!     }
 //! }
 //! # Ok(())
@@ -121,11 +128,12 @@ const ENTROPY_PATH: &str = "/run/nvx/restore-entropy";
 /// execution: while the fence is closed, no execution starts.
 ///
 /// A [`CapturePreparation`] closes it before anything else, and its [`CaptureBarrier`] opens it
-/// again once the capture continues, restores, fails, or is canceled, or the barrier is dropped.
-/// The fence need not end the executions that run already: a template's guest captures before
-/// it starts any. A preparation takes the fence, so a caller that keeps its admission's state
-/// lends it a handle of that state, or a mutable reference to its fence, which the trait's
-/// implementation for `&mut F` takes.
+/// again once the capture continues or is canceled, or the barrier is dropped. A clone that a
+/// restore started gets the fence back closed, in its [`Restored`], and a capture request that
+/// fails leaves it closed. The fence need not end the executions that run already: a template's
+/// guest captures before it starts any. A preparation takes the fence, so a caller that keeps
+/// its admission's state lends it a handle of that state, or a mutable reference to its fence,
+/// which the trait's implementation for `&mut F` takes.
 pub trait AdmissionFence {
     /// Closes the fence: once it returns, no execution starts until [`open`](Self::open). A
     /// failure leaves the fence open.
@@ -186,7 +194,10 @@ impl<F: AdmissionFence> CapturePreparation<F> {
     /// The wait for the boot checks lasts 30 seconds at most. A capture check that fails reports
     /// a violation of the time ABI, which stops the VM in enforcing mode; in report-only mode,
     /// the preparation goes on, as `nvx-time pre-capture` does. A preparation that fails opens
-    /// the fence again, and leaves the detectors' settings as they were.
+    /// the fence again, and leaves the detectors' settings as they were. One after which the
+    /// calling thread may still hold some of the permission for the time ABI's ports fails with
+    /// [`TimeError::PortRelease`], after which the thread must start neither a thread nor a
+    /// process, which would inherit it.
     pub fn prepare(self) -> Result<CaptureBarrier<F>, CaptureError> {
         let system = LiveSystem {
             paths: Paths::default(),
@@ -197,25 +208,23 @@ impl<F: AdmissionFence> CapturePreparation<F> {
 
     /// Implements [`prepare`](Self::prepare) on `system`.
     fn prepare_with(self, system: Box<dyn System>) -> Result<CaptureBarrier<F>, CaptureError> {
-        let Self { fence, devices } = self;
+        let Self { mut fence, devices } = self;
+        // A fence that failed to close is dropped closed or not, but never opened.
+        fence
+            .close()
+            .map_err(|error| CaptureError::new(CaptureStage::Fence, CaptureCause::Io(error)))?;
         let mut barrier = CaptureBarrier {
-            fence,
-            fenced: false,
+            fence: Some(fence),
             suppressed: false,
             system,
         };
-        barrier
-            .fence
-            .close()
-            .map_err(|error| CaptureError::new(CaptureStage::Fence, CaptureCause::Io(error)))?;
-        barrier.fenced = true;
         check_mounts(barrier.system.as_mut(), &devices)
             .map_err(|cause| CaptureError::new(CaptureStage::Mounts, cause))?;
         barrier.system.pre_capture().map_err(|error| match error {
             PreCaptureError::BootChecks(error) => {
                 CaptureError::new(CaptureStage::BootChecks, CaptureCause::Time(error))
             }
-            PreCaptureError::CaptureChecks(error) => {
+            PreCaptureError::CaptureChecks(error) | PreCaptureError::PortRelease(error) => {
                 CaptureError::new(CaptureStage::CaptureChecks, CaptureCause::Time(error))
             }
             PreCaptureError::Pending => {
@@ -260,10 +269,9 @@ fn check_mounts(system: &mut dyn System, devices: &Devices) -> Result<(), Captur
 /// [module](self).
 #[must_use = "dropping the barrier opens the fence and restores the stall detectors"]
 pub struct CaptureBarrier<F: AdmissionFence> {
-    /// The caller's fence of workload admission.
-    fence: F,
-    /// Whether the barrier closed the fence, which it opens again.
-    fenced: bool,
+    /// The caller's fence of workload admission, which the barrier holds closed, until it opens
+    /// it, or hands it over closed.
+    fence: Option<F>,
     /// Whether the barrier suppressed the stall detectors, whose settings it restores.
     suppressed: bool,
     /// The kernel and the time ABI.
@@ -278,10 +286,15 @@ impl<F: AdmissionFence> CaptureBarrier<F> {
     /// A VM that continues without a restore gets [`Captured::Continued`], once the barrier
     /// opened the fence and restored the detectors' settings; a failure to restore them is a
     /// [`CaptureStage::Release`] error, after which the caller ends the VM. A clone that a
-    /// restore of the snapshot started gets [`Captured::Restored`], once the barrier opened the
-    /// fence, with the detectors still suppressed: see the [module](self). A capture that fails
-    /// opens the fence and restores the detectors' settings, and the caller ends the VM.
-    pub fn capture(mut self) -> Result<Captured, CaptureError> {
+    /// restore of the snapshot started gets [`Captured::Restored`], with the fence still closed
+    /// and the detectors still suppressed: see the [module](self).
+    ///
+    /// A failure to read the VM generation ID, before the request, opens the fence and restores
+    /// the detectors' settings, as [`cancel`](Self::cancel) does. A request that fails restores
+    /// the detectors' settings, but leaves the fence closed, since it may fail in a clone whose
+    /// restore it could not repair, where no execution may start. Either way, the caller ends
+    /// the VM.
+    pub fn capture(mut self) -> Result<Captured<F>, CaptureError> {
         let generation_id = self.system.generation_id().map_err(|error| {
             CaptureError::new(CaptureStage::GenerationId, CaptureCause::Time(error))
         })?;
@@ -290,10 +303,17 @@ impl<F: AdmissionFence> CaptureBarrier<F> {
             generation_id,
             PathBuf::from(ENTROPY_PATH),
         );
-        let outcome = self
-            .system
-            .capture(request)
-            .map_err(|error| CaptureError::new(CaptureStage::Capture, CaptureCause::Time(error)))?;
+        let outcome = match self.system.capture(request) {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                // The fence is dropped closed.
+                self.fence = None;
+                return Err(CaptureError::new(
+                    CaptureStage::Capture,
+                    CaptureCause::Time(error),
+                ));
+            }
+        };
         match outcome {
             CaptureOutcome::Continued => {
                 self.release()?;
@@ -301,10 +321,13 @@ impl<F: AdmissionFence> CaptureBarrier<F> {
             }
             CaptureOutcome::Restored(restore) => {
                 // The time daemon restores the detectors' settings once repair finishes the
-                // restore.
+                // restore, and the caller opens the fence once repair acknowledged it.
                 self.suppressed = false;
-                self.open();
-                Ok(Captured::Restored(Restored { restore }))
+                let fence = self
+                    .fence
+                    .take()
+                    .expect("a barrier holds the fence until it releases it");
+                Ok(Captured::Restored(Restored { restore, fence }))
             }
         }
     }
@@ -316,16 +339,11 @@ impl<F: AdmissionFence> CaptureBarrier<F> {
         self.release()
     }
 
-    /// Opens the fence, if the barrier holds it closed.
-    fn open(&mut self) {
-        if mem::take(&mut self.fenced) {
-            self.fence.open();
-        }
-    }
-
     /// Opens the fence, then restores the stall detectors' settings, if the barrier holds them.
     fn release(&mut self) -> Result<(), CaptureError> {
-        self.open();
+        if let Some(mut fence) = self.fence.take() {
+            fence.open();
+        }
         if mem::take(&mut self.suppressed) {
             self.system.cancel_capture().map_err(|detail| {
                 let detail = String::from_utf8_lossy(&detail).into_owned();
@@ -351,7 +369,7 @@ impl<F: AdmissionFence> fmt::Debug for CaptureBarrier<F> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("CaptureBarrier")
-            .field("fenced", &self.fenced)
+            .field("fenced", &self.fence.is_some())
             .field("suppressed", &self.suppressed)
             .finish_non_exhaustive()
     }
@@ -359,25 +377,38 @@ impl<F: AdmissionFence> fmt::Debug for CaptureBarrier<F> {
 
 /// How a capture that [`CaptureBarrier::capture`] requested ended, in the VM in which it
 /// returned.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Captured {
+pub enum Captured<F> {
     /// The VM continued without a restore, as [`CaptureOutcome::Continued`] tells: no snapshot
     /// was taken, or the restore packet was of the recorded generation. The barrier opened the
     /// fence and restored the stall detectors' settings.
     Continued,
     /// A restore of the snapshot started the VM, a clone, whose wall clock the time ABI repaired.
-    /// The barrier opened the fence, and the stall detectors stay suppressed.
-    Restored(Restored),
+    /// The fence stays closed, and the stall detectors stay suppressed.
+    Restored(Restored<F>),
 }
 
-/// A clone's restore, which [`CaptureBarrier::capture`] returns for repair to take next.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Restored {
+impl<F> fmt::Debug for Captured<F> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Continued => formatter.write_str("Continued"),
+            Self::Restored(restored) => formatter.debug_tuple("Restored").field(restored).finish(),
+        }
+    }
+}
+
+/// A clone's restore, which [`CaptureBarrier::capture`] returns for repair to take next, with
+/// the caller's fence, which stays closed until the caller opens it.
+///
+/// No execution may start before repair acknowledged the restore, so the caller opens the fence
+/// only then, or later. Dropping it leaves the fence closed.
+pub struct Restored<F> {
     /// The restore that the time ABI repaired, as its restore packet describes it.
     restore: Restore,
+    /// The caller's fence of workload admission, closed.
+    fence: F,
 }
 
-impl Restored {
+impl<F> Restored<F> {
     /// Returns the restore that the time ABI repaired: its new VM generation ID, its targets, and
     /// whether the host gates its input until the guest acknowledges it.
     pub fn restore(&self) -> &Restore {
@@ -391,9 +422,18 @@ impl Restored {
         Path::new(ENTROPY_PATH)
     }
 
-    /// Returns the restore that the time ABI repaired.
-    pub fn into_restore(self) -> Restore {
-        self.restore
+    /// Returns the restore that the time ABI repaired, and the caller's fence, still closed.
+    pub fn into_parts(self) -> (Restore, F) {
+        (self.restore, self.fence)
+    }
+}
+
+impl<F> fmt::Debug for Restored<F> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("Restored")
+            .field("restore", &self.restore)
+            .finish_non_exhaustive()
     }
 }
 
@@ -407,7 +447,8 @@ pub enum CaptureStage {
     Mounts,
     /// Waiting for the time ABI's boot checks.
     BootChecks,
-    /// Running the time ABI's capture checks.
+    /// Running the time ABI's capture checks, after which the calling thread must hold none of
+    /// the permission for the time ABI's ports.
     CaptureChecks,
     /// Saving the stall detectors' settings and suppressing the detectors.
     Suppression,

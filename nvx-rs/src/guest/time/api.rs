@@ -168,16 +168,21 @@ impl TimeAbi {
     ///
     /// A capture check that fails reports a violation, which stops the VM in enforcing mode; a
     /// report-only call goes on, as `nvx-time` does. A call that fails leaves the detectors as
-    /// they were: it restores the settings that it saved, and never touches those of a capture
-    /// that is pending already, [`PreCaptureError::Pending`].
+    /// they were: it restores the settings that it changed, and never touches those of a capture
+    /// that is pending already, [`PreCaptureError::Pending`]. Like the other calls, it fails with
+    /// [`TimeError::PortRelease`], as [`PreCaptureError::PortRelease`], if the thread may still
+    /// hold some of the permission for the ports, once it restored the detectors' settings.
     /// [`cancel_capture`](Self::cancel_capture) restores the settings that it saved.
     pub(crate) fn pre_capture(&self) -> Result<(), PreCaptureError> {
-        pre_capture(&self.runtime())
+        released_preparation(pre_capture(&self.runtime()), sys::check_released(), || {
+            let _ = system::suppression_restore(false);
+        })
     }
 
     /// Restores the stall detectors' settings that [`pre_capture`](Self::pre_capture) saved, and
     /// removes their record, as `nvx-time cancel-capture` does, or fails with its diagnostic,
-    /// such as `read /run/nvx/time-suppression: No such file or directory`.
+    /// such as `read /run/nvx/time-suppression: No such file or directory`. It takes no
+    /// permission for the ports.
     pub(crate) fn cancel_capture(&self) -> Result<(), Vec<u8>> {
         system::suppression_restore(false)
     }
@@ -204,6 +209,23 @@ fn cmdline_requests_report_only() -> bool {
 fn released<T>(result: Result<T, TimeError>) -> Result<T, TimeError> {
     sys::check_released().map_err(TimeError::from)?;
     result
+}
+
+/// Ends a preparation of a capture with `result`, unless the calling thread may still hold port
+/// permission, as `released` tells, which the preparation reports instead, once `restore`
+/// restored the stall detectors' settings that a preparation that succeeded saved.
+fn released_preparation(
+    result: Result<(), PreCaptureError>,
+    released: Result<(), PortError>,
+    restore: impl FnOnce(),
+) -> Result<(), PreCaptureError> {
+    let Err(error) = released else {
+        return result;
+    };
+    if result.is_ok() {
+        restore();
+    }
+    Err(PreCaptureError::PortRelease(error.into()))
 }
 
 /// The outcome of the cold-boot time step, from which [`TimeAbi::start_daemon`] starts the time
@@ -292,8 +314,12 @@ pub(crate) enum PreCaptureError {
     /// The stall detectors' settings are saved already, by a capture that is still pending.
     Pending,
     /// The stall detectors' settings could not be saved, or the detectors not suppressed, with
-    /// this error. The call restored the settings that it had saved.
+    /// this error. The call restored the settings that it had changed.
     Suppression(Errno),
+    /// The thread may still hold some of the permission for the ports, a
+    /// [`TimeError::PortRelease`], after which it must start neither a thread nor a process. The
+    /// call restored the stall detectors' settings.
+    PortRelease(TimeError),
 }
 
 /// The preparation of [`TimeAbi::pre_capture`].
@@ -322,11 +348,12 @@ fn pre_capture(runtime: &Runtime<'_>) -> Result<(), PreCaptureError> {
     let elapsed = clock_ns(sys::Clock::Monotonic).wrapping_sub(start);
     let cpu = cpu_time_ns().wrapping_sub(cpu_start);
     if let Err(error) = system::suppression_save() {
-        if error == Errno::EEXIST {
-            return Err(PreCaptureError::Pending);
-        }
-        let _ = system::suppression_restore(false);
-        return Err(PreCaptureError::Suppression(error));
+        // The save left the settings as they were, whether another capture is pending or not.
+        return Err(if error == Errno::EEXIST {
+            PreCaptureError::Pending
+        } else {
+            PreCaptureError::Suppression(error)
+        });
     }
     if let Err(error) = checks::record_check(
         runtime,
@@ -1237,6 +1264,37 @@ mod tests {
             "{error:?}"
         );
         assert_eq!(sys::check_released(), Ok(()));
+    }
+
+    #[test]
+    fn a_preparation_that_may_leave_port_permission_fails_with_the_detectors_restored() {
+        let revoke = Err(PortError::Revoke(Errno::ENOMEM));
+        let mut restores = 0;
+        // A preparation that suppressed the detectors restores their settings.
+        let error = released_preparation(Ok(()), revoke, || restores += 1).unwrap_err();
+        assert!(
+            matches!(
+                &error,
+                PreCaptureError::PortRelease(TimeError::PortRelease(source))
+                    if has_errno(source, Errno::ENOMEM)
+            ),
+            "{error:?}"
+        );
+        assert_eq!(restores, 1);
+        // One that failed changed no setting.
+        let failed = Err(PreCaptureError::Pending);
+        let error = released_preparation(failed, revoke, || restores += 1).unwrap_err();
+        assert!(
+            matches!(error, PreCaptureError::PortRelease(_)),
+            "{error:?}"
+        );
+        assert_eq!(restores, 1);
+        // Without port permission, the preparation's result stands.
+        released_preparation(Ok(()), Ok(()), || restores += 1).unwrap();
+        let failed = Err(PreCaptureError::Pending);
+        let error = released_preparation(failed, Ok(()), || restores += 1).unwrap_err();
+        assert!(matches!(error, PreCaptureError::Pending), "{error:?}");
+        assert_eq!(restores, 1);
     }
 
     /// Returns the outcome of a cold boot that accepted no sample.

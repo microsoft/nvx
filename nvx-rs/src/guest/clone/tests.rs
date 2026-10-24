@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use super::mounts::{self, DeviceNumber};
 use super::*;
-use crate::guest::sys::Errno;
+use crate::guest::sys::{Errno, PortError};
 
 /// The base address of the distro device's MMIO window.
 const DISTRO: u64 = 0xd000_3000;
@@ -117,6 +117,8 @@ enum Preparation {
     Pending,
     /// The detectors' settings cannot be saved, with this error number.
     Suppression(Errno),
+    /// The thread may still hold some of the permission for the ports, with this error number.
+    PortRelease(Errno),
 }
 
 /// How the fake capture ends.
@@ -235,6 +237,9 @@ impl System for FakeSystem {
             }
             Preparation::Pending => Err(PreCaptureError::Pending),
             Preparation::Suppression(errno) => Err(PreCaptureError::Suppression(errno)),
+            Preparation::PortRelease(errno) => Err(PreCaptureError::PortRelease(
+                PortError::Revoke(errno).into(),
+            )),
         }
     }
 
@@ -337,7 +342,7 @@ fn the_fence_closes_before_the_checks_and_the_detectors_are_suppressed_before_th
     let barrier = prepare(fence(&calls), FakeSystem::new(&calls)).unwrap();
     // The fence first, then the mount table, then the time ABI, which suppresses the detectors.
     assert_eq!(calls.take(), preparation_calls());
-    assert_eq!(barrier.capture().unwrap(), Captured::Continued);
+    assert!(matches!(barrier.capture().unwrap(), Captured::Continued));
     // The capture's request follows the suppression. A VM that continues opens the fence, then
     // restores the detectors' settings.
     assert_eq!(
@@ -576,6 +581,10 @@ fn a_failed_time_preparation_names_its_stage_and_opens_the_fence() {
             Preparation::Suppression(Errno::EROFS),
             CaptureStage::Suppression,
         ),
+        (
+            Preparation::PortRelease(Errno::ENOMEM),
+            CaptureStage::CaptureChecks,
+        ),
     ];
     for (failure, stage) in cases {
         let calls = Calls::default();
@@ -588,6 +597,15 @@ fn a_failed_time_preparation_names_its_stage_and_opens_the_fence() {
             | (Preparation::Pending, CaptureCause::Pending) => {}
             (Preparation::Suppression(errno), CaptureCause::Io(cause))
                 if cause.raw_os_error() == Some(errno as i32) => {}
+            (Preparation::PortRelease(_), CaptureCause::Time(TimeError::PortRelease(_))) => {
+                assert_eq!(
+                    error.to_string(),
+                    format!(
+                        "failed to run the time ABI's capture checks: ioperm revoke: {}",
+                        Errno::ENOMEM.desc()
+                    )
+                );
+            }
             _ => panic!("{failure:?}: {error:?}"),
         }
         // The time ABI left the detectors as they were, so the barrier restores nothing.
@@ -641,34 +659,42 @@ fn a_failed_restoration_of_the_detectors_is_reported_after_the_fence_opens() {
 }
 
 #[test]
-fn a_restored_clone_keeps_the_detectors_suppressed() {
+fn a_restored_clone_gets_the_fence_closed_with_the_detectors_suppressed() {
     let calls = Calls::default();
-    let mut system = FakeSystem::new(&calls);
-    system.outcome = Outcome::Restored;
-    let Captured::Restored(restored) = prepared(&calls, system).capture().unwrap() else {
-        panic!("the clone continued");
+    let restored = |calls: &Calls| {
+        let mut system = FakeSystem::new(calls);
+        system.outcome = Outcome::Restored;
+        let Captured::Restored(restored) = prepared(calls, system).capture().unwrap() else {
+            panic!("the clone continued");
+        };
+        restored
     };
-    // The fence opens, and the time daemon restores the detectors' settings once repair
-    // finishes the restore.
+    let clone = restored(&calls);
+    // Nothing opens the fence before repair, and the time daemon restores the detectors'
+    // settings once repair finishes the restore.
     assert_eq!(
         calls.take(),
-        [
-            Call::GenerationId,
-            Call::Capture(platform_request()),
-            Call::Open,
-        ]
+        [Call::GenerationId, Call::Capture(platform_request())]
     );
-    assert_eq!(restored.restore().generation_id(), RESTORED);
-    assert_eq!(
-        restored.entropy_path(),
-        Path::new("/run/nvx/restore-entropy")
-    );
-    assert_eq!(restored.into_restore(), Restore::to(RESTORED));
+    assert_eq!(clone.restore().generation_id(), RESTORED);
+    assert_eq!(clone.entropy_path(), Path::new("/run/nvx/restore-entropy"));
+    let (restore, mut fence) = clone.into_parts();
+    assert_eq!(restore, Restore::to(RESTORED));
     assert_eq!(calls.take(), Vec::<Call>::new());
+    // The caller opens the fence once repair acknowledged the restore.
+    fence.open();
+    assert_eq!(calls.take(), [Call::Open]);
+
+    // A clone that is dropped leaves the fence closed.
+    drop(restored(&calls));
+    assert_eq!(
+        calls.take(),
+        [Call::GenerationId, Call::Capture(platform_request())]
+    );
 }
 
 #[test]
-fn a_failed_capture_releases_the_barrier() {
+fn a_failed_capture_restores_the_detectors_and_opens_the_fence_only_before_its_request() {
     let calls = Calls::default();
     let mut system = FakeSystem::new(&calls);
     system.generation_fails = true;
@@ -690,6 +716,8 @@ fn a_failed_capture_releases_the_barrier() {
         [Call::GenerationId, Call::Open, Call::CancelCapture]
     );
 
+    // A request that fails may fail in a clone that its restore left unrepaired, so the fence
+    // stays closed.
     let mut system = FakeSystem::new(&calls);
     system.outcome = Outcome::Fails;
     let error = prepared(&calls, system).capture().unwrap_err();
@@ -704,7 +732,6 @@ fn a_failed_capture_releases_the_barrier() {
         [
             Call::GenerationId,
             Call::Capture(platform_request()),
-            Call::Open,
             Call::CancelCapture,
         ]
     );
