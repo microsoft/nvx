@@ -606,7 +606,13 @@ answer the wrong request.
   sends, and no execution's messages wait for another's. A message of the
   guest about no execution, about one that the driver did not start, whose body
   does not decode, or that breaks the engine's rules, ends the run, as a
-  deadline that passes first does.
+  deadline that passes first does: in a receive, which leaves the client
+  usable, or in a send. Each send waits, as the client's do, until the
+  transport takes the message or the run's deadline passes, and no timer fires
+  meanwhile, so a guest that stops reading the session holds the run until its
+  deadline, when the send's timeout ends the client. The adapter's guest agent
+  keeps reading the session while its own messages wait, until more than 4 MiB
+  of them do.
 
 The guest ends its session on a second start of the same key, even in a later
 epoch of the session, so the keys of a driver's executions must be new to the
@@ -826,10 +832,13 @@ The unit tests of `frame`, `root`, `probe`, and `exec` run in every
 configuration. They cover each kind's encoding, messages in pieces of any size
 and split at every byte, the headers that the framing refuses before their body
 arrives, and the root configurations, failures, probes, facts, and messages of
-executions that decode, and those that don't. In the guest-only configuration,
-the unit tests of `worker::probes` cover what the probes read: the mount table
-with its escapes, the kernel's records of a process, `os-release`, and the
-guest's memory, and the probes and arguments that the worker refuses. Those of
+executions that decode, and those that don't, and the host's side of an
+execution, which still sends the cancellation of one that it gives up on in the
+step that ends it, without grace or settlement time. In the guest-only
+configuration, the unit tests of `worker::probes` cover what the probes read:
+the mount table with its escapes, the kernel's records of a process,
+`os-release`, and the guest's memory, and the probes and arguments that the
+worker refuses. Those of
 `worker::executions`, which spawn each program without entering a root, as a
 fake root does, hand an execution the host's cancellation once its
 timeout's instant passed, after its program ended before it, as a worker that
@@ -896,9 +905,11 @@ Windows. They cover:
   not decode, and a second start of an ID, of which the driver sends nothing,
   with a client that stays usable; a message about an execution that it did
   not start, about none, whose body does not decode, or that breaks the
-  engine's rules, and the end of the stream, each of which ends the run; and a
+  engine's rules, and the end of the stream, each of which ends the run; a
   timeout that fires while the guest says nothing, after which the execution
-  is cancelled, then fenced, and a run whose deadline passes first.
+  is cancelled, then fenced; and a run whose deadline passes first, in a
+  receive, which leaves the client usable, or in a send that waits for a guest
+  that stopped reading, which ends it.
 
 Through a relay between its test broker and a pseudo-terminal,
 `tests/guest_session.rs` also checks that `guest::serve_terminal` and
