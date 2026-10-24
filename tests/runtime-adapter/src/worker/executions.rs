@@ -20,14 +20,15 @@ use nix::sys::signal::{self, Signal};
 use nix::sys::wait::{self, WaitPidFlag, WaitStatus};
 use nvx::exec::{Key, LaunchFailure, Runner, Settlement, Stream, Violation, runner};
 use nvx::guest::cgroup::{ExecutionCgroup, Layout, Scope};
+use nvx::guest::entry::{self, AccountError, Capabilities, Capability, Prepared};
 use nvx::guest::exec::binding::{Binding, Event};
 use nvx::guest::exec::{Execution, Options, Pipes, Source};
 use nvx::guest::process::Child;
 use nvx::guest::spawn::Command;
 
 use super::connection::{BACKLOG, Connection};
-use super::{MAX_EXECUTION_MEMORY, MAX_EXECUTIONS, MAX_HISTORY};
-use crate::exec::{GuestMessage, HostMessage, MAX_CHUNK, Start, name};
+use super::{Entrance, EntryOperations, MAX_EXECUTION_MEMORY, MAX_EXECUTIONS, MAX_HISTORY};
+use crate::exec::{AccountMode, GuestMessage, HostMessage, Identity, MAX_CHUNK, Start, name};
 use crate::guest::ServeError;
 
 /// The device that a program without the host's input reads.
@@ -63,6 +64,8 @@ pub(super) struct Executions {
     /// workload cgroup each execution gets a cgroup of its own. Without them, each program runs
     /// in a process group alone.
     cgroups: Option<Layout>,
+    /// The sandbox in which the executions run.
+    sandbox: Sandbox,
     /// How many cgroups of executions the worker prepared, which numbers the next one.
     prepared: u64,
     /// The cgroups of the executions that did not settle, each of which keeps its place among
@@ -85,6 +88,17 @@ pub(super) struct Executions {
     buffer: Vec<u8>,
 }
 
+/// The sandbox in which the executions run once the root is ready: what every execution's
+/// [`Entrance`] shares.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct Sandbox {
+    /// The executions' hostname, which the kernel command line configures.
+    pub(super) hostname: Vec<u8>,
+    /// The sandbox's workload identity, its user ID and group ID, if the root configuration
+    /// names one, as which every execution runs.
+    pub(super) identity: Option<(u32, u32)>,
+}
+
 /// One of the worker's executions: the binding of its runner to its program, and either the
 /// execution's cgroup, through which it settles, or, without cgroups, the worker's own handle of
 /// the program, whose status the binding leaves to the worker.
@@ -102,8 +116,9 @@ struct Run {
 }
 
 impl Executions {
-    /// Returns no executions, which run in process groups alone until
-    /// [`run_in`](Self::run_in) names their cgroups.
+    /// Returns no executions, which run in process groups alone, with the default hostname and
+    /// without a workload identity, until [`run_in`](Self::run_in) names their cgroups and their
+    /// sandbox.
     pub(super) fn new() -> Self {
         Self {
             attached: BTreeMap::new(),
@@ -112,6 +127,10 @@ impl Executions {
             reaped: None,
             cleared: None,
             cgroups: None,
+            sandbox: Sandbox {
+                hostname: entry::DEFAULT_HOSTNAME.as_bytes().to_vec(),
+                identity: None,
+            },
             prepared: 0,
             fenced: Vec::new(),
             turn: 0,
@@ -122,27 +141,31 @@ impl Executions {
         }
     }
 
-    /// Runs the executions that start from now on in `cgroups`: each in a cgroup of its own,
-    /// below the workload cgroup, or, without cgroups, in a process group alone.
-    pub(super) fn run_in(&mut self, cgroups: Option<Layout>) {
+    /// Runs the executions that start from now on in `cgroups`, and in `sandbox`: each in a
+    /// cgroup of its own, below the workload cgroup, or, without cgroups, in a process group
+    /// alone.
+    pub(super) fn run_in(&mut self, cgroups: Option<Layout>, sandbox: Sandbox) {
         self.cgroups = cgroups;
+        self.sandbox = sandbox;
     }
 
     /// Hands `message` from the host to its execution at `now`, and queues on `connection` the
-    /// terminal record of a start that the worker refuses. Before a cancellation, it gives the
-    /// execution a turn at `now`, and queues its messages on `connection`: the end of a program
-    /// that ended meanwhile, even before its timeout, while the worker did not run, reaches the
-    /// runner first, so that it stays the program's own, without the cause of the cancellation,
-    /// or of a timeout that `now` reached.
+    /// terminal record of a start that the worker refuses. A start's program enters the root
+    /// through `operations`. Before a cancellation, it gives the execution a turn at `now`, and
+    /// queues its messages on `connection`: the end of a program that ended meanwhile, even
+    /// before its timeout, while the worker did not run, reaches the runner first, so that it
+    /// stays the program's own, without the cause of the cancellation, or of a timeout that
+    /// `now` reached.
     pub(super) fn deliver<S: Read + Write + AsFd>(
         &mut self,
         now: Instant,
         message: HostMessage<'_>,
+        operations: &mut dyn EntryOperations,
         connection: &mut Connection<S>,
     ) -> Result<(), ServeError> {
         let key = message.key();
         if let HostMessage::Start(start) = message {
-            return self.start(now, start, connection);
+            return self.start(now, start, operations, connection);
         }
         // A message of an execution that the worker no longer runs is late.
         let Self {
@@ -414,13 +437,15 @@ impl Executions {
         self.reaped = Some(now);
     }
 
-    /// Starts the execution of `start` at `now`, or refuses it with a terminal record that it
-    /// queues on `connection`. A start of an earlier generation than the latest that the host
-    /// started of its ID is stale, and one of the same generation fails.
+    /// Starts the execution of `start` at `now`, whose program enters the root through
+    /// `operations`, or refuses it with a terminal record that it queues on `connection`. A start
+    /// of an earlier generation than the latest that the host started of its ID is stale, and one
+    /// of the same generation fails.
     fn start<S: Read + Write + AsFd>(
         &mut self,
         now: Instant,
         start: Start,
+        operations: &mut dyn EntryOperations,
         connection: &mut Connection<S>,
     ) -> Result<(), ServeError> {
         let key = start.key;
@@ -452,7 +477,7 @@ impl Executions {
         } else if runner.memory_bound() > MAX_EXECUTION_MEMORY {
             Err(Errno::ENOMEM as i32)
         } else {
-            self.launch(&start)
+            self.launch(&start, operations)
                 .map_err(|error| error.raw_os_error().unwrap_or(0))
         };
         match admitted {
@@ -471,25 +496,39 @@ impl Executions {
         }
     }
 
-    /// Starts the program of `start`: with cgroups, in a cgroup of its own that the worker
-    /// prepares below the workload cgroup, and otherwise with the worker's own handle of the
-    /// program. The worker removes the cgroup of a program that it could not spawn. One that it
-    /// spawned, but whose execution could not be had, may still join the cgroup until the worker
-    /// collected its status, so that a removal could hide it once it ended: its cgroup keeps its
-    /// place, as that of an execution that did not settle.
+    /// Starts the program of `start`, which enters the root through `operations` as its
+    /// [entrance](Self::entrance) describes, once the entry prepared its execution: with cgroups,
+    /// in a cgroup of its own that the worker prepares below the workload cgroup, and otherwise
+    /// with the worker's own handle of the program. A start whose entry the root's entry refuses
+    /// fails with the `errno` that [`refusal`] returns, before the worker prepares a cgroup. The
+    /// worker removes the cgroup of a program that it could not spawn. One that it spawned, but
+    /// whose execution could not be had, may still join the cgroup until the worker collected its
+    /// status, so that a removal could hide it once it ended: its cgroup keeps its place, as that
+    /// of an execution that did not settle.
     fn launch(
         &mut self,
         start: &Start,
+        operations: &mut dyn EntryOperations,
     ) -> io::Result<(Execution, Option<Child>, Option<ExecutionCgroup>)> {
+        let entrance = self.entrance(start)?;
+        let prepared = operations
+            .prepare(&entrance)
+            .map_err(|error| io::Error::from(refusal(&error)))?;
         let Some(cgroups) = &self.cgroups else {
-            let (execution, program) =
-                spawn(start, None, &mut self.reaping).map_err(|unstarted| unstarted.error)?;
+            let (execution, program) = spawn(start, prepared, None, operations, &mut self.reaping)
+                .map_err(|unstarted| unstarted.error)?;
             return Ok((execution, program, None));
         };
         self.prepared += 1;
         let name = format!("execution-{}", self.prepared);
         let cgroup = ExecutionCgroup::prepare(cgroups, Some(&name), &[])?;
-        match spawn(start, Some(&cgroup), &mut self.reaping) {
+        match spawn(
+            start,
+            prepared,
+            Some(&cgroup),
+            operations,
+            &mut self.reaping,
+        ) {
             Ok((execution, program)) => Ok((execution, program, Some(cgroup))),
             Err(Unstarted { error, spawned }) => {
                 if spawned || cgroup.remove().is_err() {
@@ -498,6 +537,22 @@ impl Executions {
                 Err(error)
             }
         }
+    }
+
+    /// Returns how the program of `start` enters the root: with the sandbox's hostname, as the
+    /// identity that exactly one source names, the sandbox's workload identity, if it has one, or
+    /// otherwise the identity that the start names. A start that names an identity in a sandbox
+    /// with a workload identity, or none in a sandbox without one, is `EINVAL`.
+    fn entrance(&self, start: &Start) -> io::Result<Entrance> {
+        let identity = match (self.sandbox.identity, &start.identity) {
+            (Some((uid, gid)), None) => entry::Identity::new(uid, gid),
+            (None, Some(identity)) => entry_identity(identity),
+            _ => return Err(Errno::EINVAL.into()),
+        };
+        Ok(Entrance {
+            identity,
+            hostname: self.sandbox.hostname.clone(),
+        })
     }
 
     /// Remembers that the host started `key`, the latest generation of its ID, and forgets the
@@ -652,23 +707,31 @@ impl From<io::Error> for Unstarted {
 }
 
 /// Spawns the program of `start` with pipes, in a process group of its own, and in `cgroup`, if
-/// any, and returns its execution. In a cgroup, the execution settles through the cgroup, and
-/// collects the program's status itself. Otherwise, it leaves the status to the worker, and comes
-/// with the worker's own handle of the program. If the program started, but the execution or the
-/// handle could not be had, the program ends, with its process group or the processes of its
-/// cgroup, and the program's ID goes to `reaping`, so that the worker collects its status once it
-/// ended, without waiting for it; the failure then tells that the worker spawned the program.
+/// any, through `operations`, whose spawn enters the root as `prepared` prepared it, which makes
+/// the program lead a session of its own, and returns its execution. The program starts in the
+/// start's working directory, or the root's `/`, with exactly the start's environment. In a
+/// cgroup, the execution settles through the cgroup, and collects the program's status itself.
+/// Otherwise, it leaves the status to the worker, and comes with the worker's own handle of the
+/// program. If the program started, but the execution or the handle could not be had, the
+/// program ends, with its process group or the processes of its cgroup, and the program's ID goes
+/// to `reaping`, so that the worker collects its status once it ended, without waiting for it;
+/// the failure then tells that the worker spawned the program.
 fn spawn(
     start: &Start,
+    prepared: Prepared,
     cgroup: Option<&ExecutionCgroup>,
+    operations: &mut dyn EntryOperations,
     reaping: &mut Vec<u32>,
 ) -> Result<(Execution, Option<Child>), Unstarted> {
-    let arguments = start
-        .arguments
-        .iter()
-        .map(|argument| CString::new(argument.as_slice()))
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(io::Error::from)?;
+    let strings = |items: &[Vec<u8>]| {
+        items
+            .iter()
+            .map(|item| CString::new(item.as_slice()))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(io::Error::from)
+    };
+    let arguments = strings(&start.arguments)?;
+    let environment = strings(&start.environment)?;
     let program = arguments.first().cloned().unwrap_or_default();
     let (pipes, ends) = Pipes::new(start.input)?;
     let stdin = match ends.stdin {
@@ -679,11 +742,16 @@ fn spawn(
         .stdin(stdin)
         .stdout(ends.stdout)
         .stderr(ends.stderr)
-        .new_process_group();
+        .new_process_group()
+        .environment(environment);
+    if let Some(directory) = &start.working_directory {
+        let directory = CString::new(directory.as_slice()).map_err(io::Error::from)?;
+        command = command.working_directory(directory);
+    }
     if let Some(cgroup) = cgroup {
         command = command.cgroup(cgroup.placement()?);
     }
-    let spawned = command.spawn()?;
+    let spawned = operations.spawn(command, prepared)?;
     let id = spawned.id();
     let options = match cgroup {
         Some(cgroup) => Options::new().cgroup(cgroup, Scope::Execution),
@@ -760,6 +828,42 @@ fn refuse<S: Read + Write + AsFd>(
 /// Returns the failure of the host's message about the execution `key` that its runner refused.
 fn refused(key: Key, violation: Violation) -> ServeError {
     ServeError::Execution(format!("execution {}: {violation}", name(key)))
+}
+
+/// Returns the `errno` with which the worker refuses a start whose entry `error` refused, at
+/// stage 0: `EPERM` for an identity that the entry does not permit, with a capability outside
+/// its allowlist, with any capability but user ID 0's, or with `CAP_NET_BIND_SERVICE` or
+/// `CAP_NET_RAW` while listeners are published; `ENOENT` for an identity whose account the root
+/// lacks in existing-account mode, without the user ID's passwd entry or the group ID's group
+/// entry; the error's own for an account database or a root that cannot be read; and `EINVAL`
+/// otherwise.
+fn refusal(error: &entry::Error) -> Errno {
+    match error {
+        entry::Error::Capability(_)
+        | entry::Error::NonRootCapabilities
+        | entry::Error::Published(_) => Errno::EPERM,
+        entry::Error::Account(AccountError::Missing | AccountError::Group) => Errno::ENOENT,
+        entry::Error::Account(AccountError::Read(_, error)) | entry::Error::Root(error) => {
+            error.raw_os_error().map_or(Errno::EIO, Errno::from_raw)
+        }
+        _ => Errno::EINVAL,
+    }
+}
+
+/// Returns the identity of `nvx::guest::entry` that a start's `identity` names.
+fn entry_identity(identity: &Identity) -> entry::Identity {
+    let capabilities = (0..64)
+        .filter(|number| identity.capabilities & 1 << number != 0)
+        .filter_map(Capability::new)
+        .collect::<Capabilities>();
+    let account = match identity.account {
+        AccountMode::Existing => entry::AccountMode::Existing,
+        AccountMode::Numeric => entry::AccountMode::Numeric,
+    };
+    entry::Identity::new(identity.uid, identity.gid)
+        .groups(identity.groups.clone())
+        .capabilities(capabilities)
+        .account(account)
 }
 
 /// Reports that the worker cannot collect the status of the program of `binding`'s execution,
