@@ -17,8 +17,17 @@
 //! Everything else that the root needs goes in one root configuration, a [`RootConfig`], which the
 //! host sends once it attaches.
 //!
+//! A launch may give the VM a network: a `SandboxNetwork`, the guest's address and the policy that
+//! OpenVMM enforces there, which [`read_network`] reads from a file in the serde form of a plan's
+//! network, and which the launch puts on the plan with `SandboxPlan::with_network`. The plan
+//! renders its OpenVMM arguments through NVX's one lowering of a policy,
+//! `nvx::host::network::openvmm_arguments`, as it renders those of NVX's sandbox profile. OpenVMM
+//! appends the guest's network settings to the kernel command line itself, and NVX's `/init`
+//! configures the network device from them before it hands the VM to the guest agent.
+//!
 //! The host records what it launched in the sandbox's store, beside NVX's runtime records, as a
-//! [`LaunchRecord`], with the bindings that the store stages for the launch's images.
+//! [`LaunchRecord`], with the bindings that the store stages for the launch's images, and the
+//! plan, which keeps the network.
 
 use std::ffi::{OsStr, OsString};
 use std::fs;
@@ -29,7 +38,9 @@ use nvx::host::artifacts::absolute;
 use nvx::host::launch::DEFAULT_MEMORY_MIB;
 use nvx::host::sandbox::distro::{DISTRO_POLICY_REVISION, DistroBinding};
 use nvx::host::sandbox::scratch::ScratchBinding;
-use nvx::host::sandbox::{LayerRole, SandboxDistro, SandboxLayer, SandboxPlan, SandboxUpper};
+use nvx::host::sandbox::{
+    LayerRole, SandboxDistro, SandboxLayer, SandboxNetwork, SandboxPlan, SandboxUpper,
+};
 use nvx::protocol::root::{ImageFormat, RootImage};
 use nvx::uuid::Uuid;
 use nvx::{Error, Hypervisor, Result};
@@ -57,7 +68,8 @@ const SECTOR_SIZE: u64 = 512;
 /// stages for its images.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LayeredLaunch {
-    /// The adapter's plan of the VM's block devices and of the boot tokens of its root.
+    /// The adapter's plan of the VM's block devices, of its network, if it has one, and of the boot
+    /// tokens of its root.
     pub plan: SandboxPlan,
     /// The root configuration that the host sends the guest agent once it attaches.
     pub config: RootConfig,
@@ -69,7 +81,8 @@ pub struct LayeredLaunch {
 impl LayeredLaunch {
     /// Returns the launch of the image at `distro`, in `format`, of which the guest expects the
     /// identity `identity`, over the ext4 scratch image at `scratch`, or over RAM without one,
-    /// without bindings.
+    /// without bindings, and without a network, which `SandboxPlan::with_network` puts on the
+    /// plan.
     ///
     /// The root configuration takes its defaults, with the runtime directory `runtime` instead, if
     /// any, as it is, so that the guest checks it, and with the size of each image, if it is a
@@ -114,11 +127,13 @@ impl LayeredLaunch {
         self.plan.kernel_command_line(SANDBOX_TOKEN)
     }
 
-    /// Returns OpenVMM's arguments for the VM: the plan's, which attach its block devices, then
-    /// the VM in one process on `hypervisor`, NVX's default memory, the kernel at `kernel`, the
-    /// initramfs at `initramfs`, the [kernel command line](Self::kernel_command_line), no virtio
-    /// console, the control console listening on `endpoint` with the launch capability on
-    /// standard input, and the outcome report at `report`.
+    /// Returns OpenVMM's arguments for the VM: the plan's, which attach its block devices, and its
+    /// network device, with the policy that NVX's lowering renders, if the plan has a network
+    /// that lets anything through, then the VM in one process on `hypervisor`, NVX's default
+    /// memory, the kernel at `kernel`, the initramfs at `initramfs`, the
+    /// [kernel command line](Self::kernel_command_line), no virtio console, the control console
+    /// listening on `endpoint` with the launch capability on standard input, and the outcome
+    /// report at `report`.
     ///
     /// Unlike those of NVX's sandbox start, they name no workload identity, which the adapter's
     /// plan does not hold, and no managed lifecycle: OpenVMM only checks the arguments of the
@@ -167,6 +182,27 @@ impl LayeredLaunch {
         arguments.extend(options.map(OsStr::to_os_string));
         Ok(arguments)
     }
+}
+
+/// Reads the network of a launch from the file at `path`: one `SandboxNetwork`, in the serde form
+/// of a plan's network, as NVX's plan persists it, which `SandboxPlan::with_network` puts on the
+/// adapter's plan. Without a network, a launch has no network device.
+///
+/// The form requires every member and refuses any other, and reading it checks the network as
+/// `SandboxNetwork::new` does: the guest's address must leave a gateway, and the policy must lower
+/// to OpenVMM's arguments, as [`LayeredLaunch::openvmm_arguments`] renders them. So a launch that
+/// reads its network first refuses one that the plan refuses before it launches anything.
+///
+/// Fails with [`ErrorKind::Io`](nvx::ErrorKind::Io) if the file cannot be read, and with
+/// [`ErrorKind::Unsupported`](nvx::ErrorKind::Unsupported), whose cause says why, if the file does
+/// not hold a network in that form, or the plan refuses it.
+pub fn read_network(path: &Path) -> Result<SandboxNetwork> {
+    let bytes = fs::read(path).map_err(|error| {
+        Error::io(format!("cannot read the network {}", path.display())).with_source(error)
+    })?;
+    serde_json::from_slice(&bytes).map_err(|error| {
+        Error::unsupported(format!("the network {} is refused", path.display())).with_source(error)
+    })
 }
 
 /// Returns the adapter's plan of the image at `distro`, in `format`, of which the guest expects
@@ -508,8 +544,9 @@ fn write_record(path: &Path, record: &Value) -> Result<()> {
 ///
 /// The `mode` is `layered`, or `blockless` for a VM without a layered root, whose `plan`,
 /// `bindings`, and `rootConfiguration` are `null`. The `plan` is the persisted form of the VM's
-/// `SandboxPlan`. The `bindings` are those that the store stages for the plan's images, as
-/// [`Staged::bindings`] finds them, in the serde forms of NVX's `DistroBinding` and
+/// `SandboxPlan`, whose `network` keeps the VM's network, in the form that [`read_network`]
+/// reads, or `null` without one. The `bindings` are those that the store stages for the plan's
+/// images, as [`Staged::bindings`] finds them, in the serde forms of NVX's `DistroBinding` and
 /// `ScratchBinding`, each `null` unless the store stages it, as for an upper in RAM, which has no
 /// scratch image. The `rootConfiguration` is the encoding of the root configuration that the host
 /// sends, as it sends it, whether or not the guest accepts it.

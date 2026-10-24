@@ -1,14 +1,17 @@
 //! The host program stages the images of a layered root, plans a VM with a layered root with NVX's
-//! typed plan for an adapter's own guest, composes OpenVMM's arguments without NVX's managed
-//! lifecycle, records what it launches, with the bindings that the store stages, and refuses
-//! options that do not make a command. The tests need no hypervisor.
+//! typed plan for an adapter's own guest, with the network that it reads, composes OpenVMM's
+//! arguments without NVX's managed lifecycle, records what it launches, with the bindings that the
+//! store stages, and refuses options that do not make a command, and networks that the plan
+//! refuses, before it launches anything. The tests need no hypervisor.
 #![cfg(feature = "host")]
 
 use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Output};
 
+use nvx::host::artifacts::Artifacts;
+use nvx::host::network;
 use nvx::host::sandbox::SandboxPlan;
 use nvx::host::sandbox::distro::DistroFormat;
 use nvx::protocol::root::{ImageFormat, RootImage, RootLayout, RootUpper};
@@ -16,6 +19,7 @@ use nvx::uuid::Uuid;
 use nvx::{ErrorKind, Hypervisor};
 use runtime_adapter::layered::{
     Bindings, LaunchRecord, LayeredLaunch, RECORD_NAME, SANDBOX_TOKEN, STAGED_NAME, Staged,
+    read_network,
 };
 use runtime_adapter::root::RootConfig;
 use serde_json::{Value, json};
@@ -59,6 +63,56 @@ fn identity() -> Uuid {
 /// Returns the absolute path of `path`.
 fn absolute(path: &Path) -> PathBuf {
     std::path::absolute(path).unwrap()
+}
+
+/// Returns the serde form of an open network of a guest at `10.0.0.2/24`, from which the network
+/// cases change one element at a time: egress allowed, without rules, ingress and host-loopback
+/// access denied, no forwards, and no proxy.
+fn open_network() -> Value {
+    json!({
+        "guestNetwork": "10.0.0.2/24",
+        "egress": "allow",
+        "allow": {"name": "egress.allow", "rules": []},
+        "deny": {"name": "egress.deny", "rules": []},
+        "ingress": "deny",
+        "hostLoopback": "deny",
+        "hostLoopbackForwards": [],
+        "proxy": null,
+    })
+}
+
+/// Returns the serde form of the open network, changed by `edit`.
+fn network_with(edit: impl FnOnce(&mut Value)) -> Value {
+    let mut network = open_network();
+    edit(&mut network);
+    network
+}
+
+/// Returns the OpenVMM arguments of a network of a guest at `guest`: the portable profile, with
+/// the defaults `egress` and `ingress`, the host-loopback access `loopback`, or none for OpenVMM's
+/// own, from the guest alone, then `more`.
+fn portable<'a>(
+    guest: &'a str,
+    egress: &'a str,
+    ingress: &'a str,
+    loopback: Option<&'a str>,
+    more: &[&'a str],
+) -> Vec<&'a str> {
+    let mut arguments = vec![
+        "--net",
+        guest,
+        "--network-profile",
+        "portable",
+        "--network-egress",
+        egress,
+        "--network-ingress",
+        ingress,
+    ];
+    if let Some(loopback) = loopback {
+        arguments.extend(["--host-loopback", loopback]);
+    }
+    arguments.extend_from_slice(more);
+    arguments
 }
 
 #[test]
@@ -450,6 +504,455 @@ fn a_launch_records_what_it_launched() {
 }
 
 #[test]
+fn a_launch_renders_each_element_of_its_network_through_the_plan() {
+    let directory = directory("layered-network");
+    let distro = image(directory.join("distro.erofs"), 512);
+    let scratch = image(directory.join("scratch.ext4"), 512);
+    let (kernel, initramfs) = (directory.join("vmlinux"), directory.join("initramfs"));
+    let report = directory.join("outcome.json");
+    let without = LayeredLaunch::new(
+        &distro,
+        ImageFormat::Erofs,
+        identity(),
+        Some(&scratch),
+        None,
+    )
+    .unwrap();
+    let arguments = |launch: &LayeredLaunch| {
+        launch
+            .openvmm_arguments(
+                Hypervisor::Kvm,
+                &kernel,
+                &initramfs,
+                "/run/control.sock",
+                &report,
+            )
+            .unwrap()
+    };
+    let blocks = without.plan.openvmm_arguments().unwrap();
+    let options = arguments(&without).split_off(blocks.len());
+    let cases: [(&str, Value, Vec<&str>, Option<&str>); 13] = [
+        (
+            "open",
+            open_network(),
+            portable("10.0.0.2/24", "allow", "deny", Some("deny"), &[]),
+            None,
+        ),
+        (
+            "guest-network",
+            network_with(|network| network["guestNetwork"] = json!("192.168.7.6/30")),
+            portable("192.168.7.6/30", "allow", "deny", Some("deny"), &[]),
+            None,
+        ),
+        // A policy that lets nothing through attaches no network device.
+        (
+            "closed",
+            network_with(|network| network["egress"] = json!("deny")),
+            Vec::new(),
+            None,
+        ),
+        (
+            "allow",
+            network_with(|network| {
+                network["egress"] = json!("deny");
+                network["allow"]["rules"] = json!([{
+                    "to": [{"cidr": "192.0.2.0/24", "except": ["192.0.2.128/25"]}],
+                    "ports": [{"protocol": "tcp", "port": 443, "endPort": null}],
+                }]);
+            }),
+            portable(
+                "10.0.0.2/24",
+                "deny",
+                "deny",
+                Some("deny"),
+                &["--network-egress-allow", "192.0.2.0/25:tcp:443"],
+            ),
+            None,
+        ),
+        (
+            "allow-everywhere",
+            network_with(|network| {
+                network["egress"] = json!("deny");
+                network["allow"]["rules"] = json!([{
+                    "to": [],
+                    "ports": [{"protocol": "any", "port": 8000, "endPort": 8010}],
+                }]);
+            }),
+            portable(
+                "10.0.0.2/24",
+                "deny",
+                "deny",
+                Some("deny"),
+                &[
+                    "--network-egress-allow",
+                    "0.0.0.0/0:tcp:8000-8010",
+                    "--network-egress-allow",
+                    "0.0.0.0/0:udp:8000-8010",
+                    "--network-egress-allow",
+                    "::/0:tcp:8000-8010",
+                    "--network-egress-allow",
+                    "::/0:udp:8000-8010",
+                ],
+            ),
+            None,
+        ),
+        (
+            "deny",
+            network_with(|network| {
+                network["deny"]["rules"] = json!([
+                    {
+                        "to": [{"cidr": "198.51.100.0/24", "except": []}],
+                        "ports": [{"protocol": "udp", "port": 53, "endPort": null}],
+                    },
+                    {
+                        "to": [{"cidr": "2001:db8::/32", "except": []}],
+                        "ports": [{"protocol": "icmp", "port": null, "endPort": null}],
+                    },
+                ]);
+            }),
+            portable(
+                "10.0.0.2/24",
+                "allow",
+                "deny",
+                Some("deny"),
+                &[
+                    "--network-egress-deny",
+                    "198.51.100.0/24:udp:53",
+                    "--network-egress-deny",
+                    "2001:db8::/32:icmp",
+                ],
+            ),
+            None,
+        ),
+        (
+            "ingress",
+            network_with(|network| {
+                network["egress"] = json!("deny");
+                network["ingress"] = json!("allow");
+            }),
+            portable("10.0.0.2/24", "deny", "allow", Some("deny"), &[]),
+            None,
+        ),
+        (
+            "host-loopback-outbound",
+            network_with(|network| network["hostLoopback"] = json!("outbound")),
+            portable("10.0.0.2/24", "allow", "deny", None, &[]),
+            None,
+        ),
+        (
+            "host-loopback-allowed",
+            network_with(|network| {
+                network["egress"] = json!("deny");
+                network["hostLoopback"] = json!("allow");
+            }),
+            portable("10.0.0.2/24", "deny", "deny", Some("allow"), &[]),
+            None,
+        ),
+        (
+            "forwards",
+            network_with(|network| {
+                network["hostLoopback"] = json!("allow");
+                network["hostLoopbackForwards"] = json!([
+                    {"protocol": "tcp", "hostPort": 18080, "guestPort": 8080},
+                    {"protocol": "udp", "hostPort": 18081, "guestPort": 8081},
+                ]);
+            }),
+            portable(
+                "10.0.0.2/24",
+                "allow",
+                "deny",
+                Some("allow"),
+                &[
+                    "--host-loopback-forward",
+                    "tcp:18080:8080",
+                    "--host-loopback-forward",
+                    "udp:18081:8081",
+                ],
+            ),
+            None,
+        ),
+        // A proxy-only network reaches its proxy at the gateway, which its URL names.
+        (
+            "proxy",
+            network_with(|network| {
+                network["egress"] = json!("deny");
+                network["proxy"] = json!({"port": 3128, "scheme": null});
+            }),
+            portable(
+                "10.0.0.2/24",
+                "deny",
+                "deny",
+                Some("deny"),
+                &["--network-proxy", "10.0.0.1:3128"],
+            ),
+            Some("10.0.0.1:3128"),
+        ),
+        (
+            "proxy-http",
+            network_with(|network| {
+                network["egress"] = json!("deny");
+                network["proxy"] = json!({"port": 3128, "scheme": "http"});
+            }),
+            portable(
+                "10.0.0.2/24",
+                "deny",
+                "deny",
+                Some("deny"),
+                &["--network-proxy", "10.0.0.1:3128"],
+            ),
+            Some("http://10.0.0.1:3128"),
+        ),
+        (
+            "proxy-https",
+            network_with(|network| {
+                network["guestNetwork"] = json!("192.168.7.6/30");
+                network["egress"] = json!("deny");
+                network["proxy"] = json!({"port": 8443, "scheme": "https"});
+            }),
+            portable(
+                "192.168.7.6/30",
+                "deny",
+                "deny",
+                Some("deny"),
+                &["--network-proxy", "192.168.7.5:8443"],
+            ),
+            Some("https://192.168.7.5:8443"),
+        ),
+    ];
+    for (name, form, rendered, proxy_url) in cases {
+        let path = directory.join(format!("{name}.json"));
+        fs::write(&path, form.to_string()).unwrap();
+        let network = read_network(&path).unwrap();
+        let mut launch = without.clone();
+        launch.plan = launch.plan.with_network(Some(network.clone()));
+        // NVX's lowering renders the network, as it does for NVX's own sandbox profile, and the
+        // plan puts it after the block devices, before the launch's own options.
+        assert_eq!(
+            network::openvmm_arguments(Some(network.policy()), network.guest_network()).unwrap(),
+            rendered,
+            "{name}"
+        );
+        let expected = blocks
+            .iter()
+            .map(String::as_str)
+            .chain(rendered.iter().copied())
+            .map(OsString::from)
+            .chain(options.iter().cloned())
+            .collect::<Vec<_>>();
+        assert_eq!(arguments(&launch), expected, "{name}");
+        assert_eq!(launch.plan.proxy_url().as_deref(), proxy_url, "{name}");
+        // The network adds no boot token: OpenVMM appends the guest's network settings itself.
+        assert_eq!(
+            launch.kernel_command_line().unwrap(),
+            without.kernel_command_line().unwrap()
+        );
+
+        // The record keeps the network in the plan, as the file gave it.
+        let record = LaunchRecord {
+            kernel_command_line: "nvx_sandbox=1",
+            layered: Some(&launch),
+        };
+        let json = record.to_json().unwrap();
+        assert_eq!(json["plan"]["network"], form, "{name}");
+        let plan: SandboxPlan = serde_json::from_value(json["plan"].clone()).unwrap();
+        assert_eq!(plan, launch.plan, "{name}");
+        assert_eq!(plan.proxy_url().as_deref(), proxy_url, "{name}");
+    }
+    // Without a network, the record says so.
+    let record = LaunchRecord {
+        kernel_command_line: "nvx_sandbox=1",
+        layered: Some(&without),
+    };
+    assert_eq!(record.to_json().unwrap()["plan"]["network"], Value::Null);
+}
+
+#[test]
+fn a_launch_reads_only_the_networks_that_the_plan_takes() {
+    let directory = directory("layered-network-refused");
+    let missing = directory.join("missing.json");
+    let error = read_network(&missing).unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::Io, "{error}");
+    assert_eq!(
+        error.message(),
+        format!("cannot read the network {}", missing.display())
+    );
+
+    // Each refusal names its reason in its cause: the forms that the plan does not read, then the
+    // networks that it refuses.
+    let mut cases = vec![
+        ("{".to_owned(), "EOF while parsing".to_owned()),
+        ("null".to_owned(), "invalid type: null".to_owned()),
+    ];
+    let mut change = |problem: &str, edit: &dyn Fn(&mut Value)| {
+        cases.push((network_with(edit).to_string(), problem.to_owned()));
+    };
+    change("unknown field `extra`", &|network| {
+        network["extra"] = json!(null);
+    });
+    change("missing field `proxy`", &|network| {
+        network.as_object_mut().unwrap().remove("proxy");
+    });
+    change("unknown variant `open`", &|network| {
+        network["egress"] = json!("open");
+    });
+    change("unknown variant `both`", &|network| {
+        network["hostLoopback"] = json!("both");
+    });
+    change("invalid value: integer `65536`", &|network| {
+        network["hostLoopback"] = json!("allow");
+        network["hostLoopbackForwards"] =
+            json!([{"protocol": "tcp", "hostPort": 65536, "guestPort": 8080}]);
+    });
+    for guest_network in ["10.0.0.1/24", "10.0.0.0/24", "10.0.0.2/31", "10.0.0.2"] {
+        change(
+            &format!(
+                "guest network '{guest_network}' must be an IPv4 address with a /1 to /30 prefix"
+            ),
+            &|network| network["guestNetwork"] = json!(guest_network),
+        );
+    }
+    change(
+        "egress.allow[0].to[0].cidr is not a valid IPv4 or IPv6 CIDR: 192.0.2.0/33",
+        &|network| {
+            network["allow"]["rules"] =
+                json!([{"to": [{"cidr": "192.0.2.0/33", "except": []}], "ports": []}]);
+        },
+    );
+    change(
+        "egress.deny[0].to[0].except[0] must be contained in 198.51.100.0/24",
+        &|network| {
+            network["deny"]["rules"] = json!([{
+                "to": [{"cidr": "198.51.100.0/24", "except": ["192.0.2.0/25"]}],
+                "ports": [],
+            }]);
+        },
+    );
+    change(
+        "egress.allow[0].ports[0].endPort 80 cannot be below port 443",
+        &|network| {
+            network["allow"]["rules"] =
+                json!([{"to": [], "ports": [{"protocol": "tcp", "port": 443, "endPort": 80}]}]);
+        },
+    );
+    change(
+        "egress.deny[0].ports[0].port is not supported with icmp",
+        &|network| {
+            network["deny"]["rules"] =
+                json!([{"to": [], "ports": [{"protocol": "icmp", "port": 8, "endPort": null}]}]);
+        },
+    );
+    // Hosts that never merge, one more than OpenVMM takes of one action.
+    change("egress.allow emits at most 256 native rules", &|network| {
+        let hosts = (0..=network::MAX_RULES)
+            .map(|index| {
+                let host = 2 * index + 1;
+                json!({"cidr": format!("10.1.{}.{}", host / 256, host % 256), "except": []})
+            })
+            .collect::<Vec<_>>();
+        network["egress"] = json!("deny");
+        network["allow"]["rules"] = json!([{"to": hosts, "ports": []}]);
+    });
+    change(
+        "host-loopback forwards need host-loopback access allowed",
+        &|network| {
+            network["hostLoopbackForwards"] =
+                json!([{"protocol": "tcp", "hostPort": 18080, "guestPort": 8080}]);
+        },
+    );
+    change(
+        "host-loopback forwards bind tcp host port 18080 more than once",
+        &|network| {
+            network["hostLoopback"] = json!("allow");
+            network["hostLoopbackForwards"] = json!([
+                {"protocol": "tcp", "hostPort": 18080, "guestPort": 8080},
+                {"protocol": "tcp", "hostPort": 18080, "guestPort": 8081},
+            ]);
+        },
+    );
+    change(
+        "host-loopback UDP forwards need egress allowed by default for their replies",
+        &|network| {
+            network["egress"] = json!("deny");
+            network["hostLoopback"] = json!("allow");
+            network["hostLoopbackForwards"] =
+                json!([{"protocol": "udp", "hostPort": 18081, "guestPort": 8081}]);
+        },
+    );
+    change(
+        "host-loopback access needs a guest network prefix of /29 or shorter",
+        &|network| {
+            network["guestNetwork"] = json!("10.0.0.2/30");
+            network["hostLoopback"] = json!("allow");
+        },
+    );
+    // A proxy is the guest's one way out.
+    let proxy = |network: &mut Value| {
+        network["egress"] = json!("deny");
+        network["proxy"] = json!({"port": 3128, "scheme": "http"});
+    };
+    change(
+        "a network proxy needs egress denied by default",
+        &|network| {
+            proxy(network);
+            network["egress"] = json!("allow");
+        },
+    );
+    change("a network proxy takes no egress.allow rules", &|network| {
+        proxy(network);
+        network["allow"]["rules"] = json!([{"to": [], "ports": []}]);
+    });
+    change("a network proxy needs ingress denied", &|network| {
+        proxy(network);
+        network["ingress"] = json!("allow");
+    });
+    change(
+        "a network proxy needs host-loopback access denied",
+        &|network| {
+            proxy(network);
+            network["hostLoopback"] = json!("outbound");
+        },
+    );
+    change(
+        "a network proxy takes no host-loopback forwards",
+        &|network| {
+            proxy(network);
+            network["hostLoopbackForwards"] =
+                json!([{"protocol": "tcp", "hostPort": 18080, "guestPort": 8080}]);
+        },
+    );
+    change("a network proxy needs a port other than 53", &|network| {
+        proxy(network);
+        network["proxy"]["port"] = json!(53);
+    });
+    change(
+        "a network proxy needs a port between 1 and 65535",
+        &|network| {
+            proxy(network);
+            network["proxy"]["port"] = json!(0);
+        },
+    );
+    change(
+        "network proxy scheme \"ftp\" must be http or https",
+        &|network| {
+            proxy(network);
+            network["proxy"]["scheme"] = json!("ftp");
+        },
+    );
+    let path = directory.join("network.json");
+    for (contents, problem) in cases {
+        fs::write(&path, &contents).unwrap();
+        let error = read_network(&path).unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::Unsupported, "{problem}: {error}");
+        assert_eq!(
+            error.message(),
+            format!("the network {} is refused", path.display())
+        );
+        let cause = std::error::Error::source(&error).unwrap().to_string();
+        assert!(cause.contains(&problem), "{problem}: {cause}");
+    }
+}
+
+#[test]
 fn the_host_program_stages_images_in_the_store() {
     let directory = directory("layered-stage-command");
     let distro = image(directory.join("distro.erofs"), 1024);
@@ -498,10 +1001,62 @@ fn the_host_program_stages_images_in_the_store() {
 }
 
 #[test]
+fn the_host_program_refuses_a_network_before_it_launches() {
+    let directory = directory("layered-network-command");
+    let distro = image(directory.join("distro.erofs"), 1024);
+    let store = directory.join("store");
+    // Without NVX's artifacts, a launch fails once it has read its network.
+    let launch = |network: &Path| -> Output {
+        let mut image = OsString::from("erofs:");
+        image.push(&distro);
+        Command::new(env!("CARGO_BIN_EXE_runtime-adapter-host"))
+            .arg("launch")
+            .arg(&store)
+            .args(["--guest-agent", "agent", "--hypervisor", "kvm", "--distro"])
+            .arg(image)
+            .args(["--distro-identity", &identity().to_string()])
+            .args(["--upper", "ram", "--network"])
+            .arg(network)
+            .env_remove(Artifacts::ENV_DIR)
+            .output()
+            .unwrap()
+    };
+    let failed = |output: Output| {
+        assert_eq!(output.status.code(), Some(1), "{output:?}");
+        // Nothing was launched: the store was never created.
+        assert!(!store.exists(), "{output:?}");
+        String::from_utf8_lossy(&output.stderr).into_owned()
+    };
+
+    // A network that the plan refuses, and one that cannot be read, fail the launch first.
+    let network = directory.join("network.json");
+    let proxy = network_with(|network| network["proxy"] = json!({"port": 3128, "scheme": "http"}));
+    fs::write(&network, proxy.to_string()).unwrap();
+    let stderr = failed(launch(&network));
+    let refused = format!(
+        "the network {} is refused: a network proxy needs egress denied by default",
+        network.display()
+    );
+    assert!(stderr.contains(&refused), "{stderr}");
+    let missing = directory.join("missing.json");
+    let stderr = failed(launch(&missing));
+    let unreadable = format!("cannot read the network {}", missing.display());
+    assert!(stderr.contains(&unreadable), "{stderr}");
+
+    // A network that the plan takes passes, and the launch goes on to need NVX's artifacts.
+    fs::write(&network, open_network().to_string()).unwrap();
+    let stderr = failed(launch(&network));
+    assert!(
+        stderr.contains(&format!("set {} to NVX's artifacts", Artifacts::ENV_DIR)),
+        "{stderr}"
+    );
+}
+
+#[test]
 fn the_host_program_refuses_options_that_do_not_make_a_command() {
     let launch = ["launch", "store", "--guest-agent", "agent"];
     let uuid = "0a490905-41be-ed5f-984e-63eb7e5e20b1";
-    let cases: [(&[&str], &str); 24] = [
+    let cases: [(&[&str], &str); 27] = [
         (
             &["--distro", "erofs:image", "--upper", "ram"],
             "--distro needs --distro-identity",
@@ -541,6 +1096,23 @@ fn the_host_program_refuses_options_that_do_not_make_a_command() {
             &["--first-partition-bound", "4096"],
             "--first-partition-bound needs --distro",
         ),
+        (&["--network", "network.json"], "--network needs --distro"),
+        (
+            &[
+                "--distro",
+                "erofs:image",
+                "--distro-identity",
+                uuid,
+                "--upper",
+                "ram",
+                "--network",
+                "network.json",
+                "--network",
+                "other.json",
+            ],
+            "unexpected option \"--network\"",
+        ),
+        (&["--network"], "\"--network\" needs a value"),
         (
             &[
                 "--distro",
@@ -598,7 +1170,7 @@ fn the_host_program_refuses_options_that_do_not_make_a_command() {
         .map(|(options, problem)| ([&launch[..], options].concat(), *problem))
         .collect::<Vec<_>>();
     let stage = ["stage", "store", "--distro", "erofs:image"];
-    let stage_cases: [(&[&str], &str); 7] = [
+    let stage_cases: [(&[&str], &str); 8] = [
         (&[], "stage needs --distro-identity"),
         (
             &["--distro-identity", uuid, "--upper", "ram"],
@@ -619,6 +1191,10 @@ fn the_host_program_refuses_options_that_do_not_make_a_command() {
         (
             &["--guest-build", "build"],
             "unexpected option \"--guest-build\" of stage",
+        ),
+        (
+            &["--network", "network.json"],
+            "unexpected option \"--network\" of stage",
         ),
         (&["image"], "unexpected argument \"image\" of stage"),
     ];
@@ -647,6 +1223,10 @@ fn the_host_program_refuses_options_that_do_not_make_a_command() {
         (
             vec!["reattach", "store", "--distro", "erofs:image"],
             "unexpected option \"--distro\" of reattach",
+        ),
+        (
+            vec!["stop", "store", "--network", "network.json"],
+            "unexpected option \"--network\" of stop",
         ),
     ]);
     for (arguments, problem) in commands {
