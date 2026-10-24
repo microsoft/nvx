@@ -8,7 +8,7 @@
 //!   items that `nvx` has without features, with the adapter's own [`frame`]s, and the bodies of
 //!   its messages about a layered [`root`], its [`probe`]s, and [`exec`]utions;
 //! - host-only, with the `host` feature: the host API too, and the host program, in the `host`,
-//!   `runtime`, `initramfs`, and `layered` modules and the `runtime-adapter-host` binary;
+//!   `runtime`, `initramfs`, `layered`, and `hook` modules and the `runtime-adapter-host` binary;
 //! - guest-only, with the `guest` feature: the guest API too, and the guest agent, in the `guest`
 //!   and `worker` modules and the `runtime-adapter-guest` binary, a static
 //!   `x86_64-unknown-linux-musl` executable.
@@ -28,17 +28,20 @@
 //!
 //! The host program also launches VMs with a layered root, of an image over an upper, which it
 //! stages, plans with NVX's typed plan for an adapter's own guest, and hands OpenVMM as the files
-//! that its checks of the staged bindings opened, in the `layered` module. In those, the guest
-//! agent's PID 1 starts a worker, in the `worker` module, which assembles the root through
-//! `nvx::guest::root` outside PID 1, as the host's root configuration of the [`root`] module asks,
-//! and runs the [`probe`]s with which the host checks the root. The worker also runs several
-//! [`exec`]utions at once through NVX's execution engine and its guest binding, from one loop that
-//! never blocks.
+//! that its checks of the staged bindings opened, in the `layered` module. Its step hook, in the
+//! `hook` module, lets tests pause a launch, or end it as a crash would, at a named step. In
+//! those VMs, the guest agent's PID 1 starts a worker, in the `worker` module, which assembles the
+//! root through `nvx::guest::root` outside PID 1, as the host's root configuration of the [`root`]
+//! module asks, and runs the [`probe`]s with which the host checks the root. The worker also runs
+//! several [`exec`]utions at once through NVX's execution engine and its guest binding, from one
+//! loop that never blocks.
 
 pub mod exec;
 pub mod frame;
 #[cfg(all(feature = "guest", target_os = "linux"))]
 pub mod guest;
+#[cfg(feature = "host")]
+pub mod hook;
 #[cfg(feature = "host")]
 pub mod host;
 #[cfg(feature = "host")]

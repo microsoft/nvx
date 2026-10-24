@@ -75,10 +75,15 @@
 //!
 //! Values escape `\`, newlines, and carriage returns as `\\`, `\n`, and `\r`.
 //!
+//! For tests, `launch` takes a step hook from the variable `RUNTIME_ADAPTER_STEP_HOOK`, which
+//! pauses the launch at a named step, or exits it there without unwinding, with status 5; see
+//! `runtime_adapter::hook`.
+//!
 //! They exit with 0 once they did what they were asked, with 3 when reattach finds the VM
 //! mismatched, with 4 when the guest reported that a stage of the root failed, and the VM ended
-//! with the stage's status and a complete teardown, and with 1, after a diagnostic on standard
-//! error, when they fail. Anything else is a usage error, with status 2.
+//! with the stage's status and a complete teardown, with 5 when the step hook ends a launch, and
+//! with 1, after a diagnostic on standard error, when they fail. Anything else is a usage error,
+//! with status 2, as is a value of `RUNTIME_ADAPTER_STEP_HOOK` that sets no step hook.
 
 use std::env;
 use std::error::Error;
@@ -99,6 +104,7 @@ use nvx::protocol::root::ImageFormat;
 use nvx::uuid::Uuid;
 use nvx::{ErrorKind, Hypervisor};
 use runtime_adapter::frame::MAX_BODY;
+use runtime_adapter::hook::{Step, StepHook};
 use runtime_adapter::host::Client;
 use runtime_adapter::initramfs;
 use runtime_adapter::layered::{LaunchRecord, LayeredLaunch, Staged};
@@ -170,6 +176,8 @@ enum Command {
         guest_build: String,
         /// The VM's layered root, if it has one.
         layered: Option<Layered>,
+        /// The step hook, for tests, if `RUNTIME_ADAPTER_STEP_HOOK` sets one.
+        hook: Option<StepHook>,
     },
     /// Reattach to the VM, and stop it if asked.
     Reattach {
@@ -266,12 +274,14 @@ fn main() -> ExitCode {
             hypervisor,
             guest_build,
             layered,
+            hook,
         } => launch(
             &store,
             &guest_agent,
             hypervisor,
             &guest_build,
             layered.as_ref(),
+            hook.as_ref(),
         ),
         Command::Reattach {
             store,
@@ -290,7 +300,8 @@ fn main() -> ExitCode {
     })
 }
 
-/// Parses the program's arguments, or says why they are not a command.
+/// Parses the program's arguments, with the step hook that `RUNTIME_ADAPTER_STEP_HOOK` sets for a
+/// launch, or says why they are not a command.
 fn parse(arguments: Vec<OsString>) -> Result<Command, String> {
     let mut arguments = arguments.into_iter();
     let Some(name) = arguments.next() else {
@@ -385,6 +396,7 @@ fn parse(arguments: Vec<OsString>) -> Result<Command, String> {
                 hypervisor: options.hypervisor,
                 guest_build,
                 layered,
+                hook: StepHook::from_env()?,
             }
         }
         "probe" if probes.is_empty() => return Err("probe needs a probe".to_owned()),
@@ -507,13 +519,15 @@ fn stage(
 
 /// Launches a VM of the guest agent `guest_agent` in the sandbox store `store`, on `hypervisor`
 /// or else the one that `nvx::Hypervisor::from_env_or_default` selects, with the guest agent's
-/// build `guest_build`, and with the layered root `layered`, if any.
+/// build `guest_build`, and with the layered root `layered`, if any. The step hook `hook`, if any,
+/// acts at its step of the launch.
 fn launch(
     store: &Path,
     guest_agent: &Path,
     hypervisor: Option<Hypervisor>,
     guest_build: &str,
     layered: Option<&Layered>,
+    hook: Option<&StepHook>,
 ) -> Result<ExitCode, String> {
     let hypervisor = match hypervisor {
         Some(hypervisor) => hypervisor,
@@ -555,6 +569,7 @@ fn launch(
         }
         prepared = Some(layered.prepare().map_err(|error| binding_error(&error))?);
     }
+    step(hook, Step::Checked)?;
     let capability = generate_capability().map_err(|error| describe(&error))?;
     let initramfs = store.dir().join(INITRAMFS_NAME);
     let spec = LaunchSpec::new(
@@ -606,6 +621,7 @@ fn launch(
     let process = starting.process().reference().clone();
     println!("pid={}", process.pid);
     // A launch that fails from here on ends its VM, once `starting` drops.
+    step(hook, Step::Spawned)?;
     let failed = |problem: String| {
         format!(
             "{problem}; see the VMM's log {}",
@@ -636,6 +652,7 @@ fn launch(
                 // can go, which releases their guards, while OpenVMM keeps the scratch image's
                 // claim.
                 drop(prepared);
+                step(hook, Step::Ready)?;
             }
             RootReply::Failed(failure) => {
                 print_failure(&failure);
@@ -653,8 +670,19 @@ fn launch(
                 describe(&error)
             ))
         })?;
+    step(hook, Step::Commit)?;
     starting.commit().map_err(|error| describe(&error))?;
     Ok(ExitCode::SUCCESS)
+}
+
+/// Runs the step hook `hook`, if any, at the launch's `step`.
+fn step(hook: Option<&StepHook>, step: Step) -> Result<(), String> {
+    match hook {
+        Some(hook) => hook
+            .at(step)
+            .map_err(|error| format!("the step hook cannot pause the launch at {step}: {error}")),
+        None => Ok(()),
+    }
 }
 
 /// Ends the launch `starting` of the sandbox `store`, whose guest reported `failure` and ends: it

@@ -16,11 +16,11 @@ use std::collections::BTreeMap;
 use std::convert::Infallible;
 use std::env;
 use std::error::Error;
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::fs::{self, File};
 use std::io;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -109,6 +109,34 @@ pub(crate) struct Sandbox {
     output: Option<PathBuf>,
 }
 
+/// A command of the host program that a test started, and that may still run, as one that the
+/// step hook paused, until [`Sandbox::finish`] waits for it to end.
+///
+/// Dropping it ends a command that still runs, as when a test fails while the hook pauses the
+/// command, so that the sandbox's own drop can take the sandbox's lock, which the command holds,
+/// and end the VM.
+pub(crate) struct Started {
+    /// The command.
+    command: String,
+    /// Its options.
+    options: Vec<OsString>,
+    /// Its process.
+    child: Child,
+    /// Its output files, without their extensions.
+    output: PathBuf,
+    /// When it must have ended.
+    deadline: Instant,
+}
+
+impl Drop for Started {
+    fn drop(&mut self) {
+        if let Ok(None) = self.child.try_wait() {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
+    }
+}
+
 impl Sandbox {
     /// Creates the directory of the test `name`, in the system's temporary directory, so that the
     /// path of a Linux control socket in it stays short. A directory that an earlier test process
@@ -135,6 +163,17 @@ impl Sandbox {
     /// with `options` too, checks that the launch exits with `status`, and returns what it
     /// printed. A launch that succeeded recorded its VM, which runs.
     pub(crate) fn launch(&mut self, options: &[&OsStr], status: i32) -> Printed {
+        let started = self.start_launch(options, &[]);
+        self.finish_launch(started, status)
+    }
+
+    /// Starts a launch of the VM, as [`launch`](Self::launch) does, with the variables
+    /// `environment` too, and returns it while it runs.
+    pub(crate) fn start_launch(
+        &mut self,
+        options: &[&OsStr],
+        environment: &[(&str, &OsStr)],
+    ) -> Started {
         let hypervisor = Hypervisor::from_env_or_default().expect("NVX_HYPERVISOR is valid");
         let guest_agent = env::var_os(GUEST_AGENT).unwrap_or_else(|| {
             panic!(
@@ -148,7 +187,13 @@ impl Sandbox {
             OsStr::new(hypervisor.as_str()),
         ];
         arguments.extend(options);
-        let launched = self.run("launch", &arguments, status);
+        self.start("launch", &arguments, environment)
+    }
+
+    /// Waits for the launch `started` to end, checks that it exits with `status`, and returns what
+    /// it printed. A launch that succeeded recorded its VM, which runs.
+    pub(crate) fn finish_launch(&self, started: Started, status: i32) -> Printed {
+        let launched = self.finish(started, status);
         if status == 0 {
             let record = self.record().expect("the launch recorded its VM");
             assert_eq!(launched["pid"], record.process().pid.to_string());
@@ -159,40 +204,62 @@ impl Sandbox {
     /// Runs the host program's `command` on the sandbox's store with `options`, checks that it
     /// exits with `status`, and returns the `KEY=VALUE` lines that it printed.
     pub(crate) fn run(&mut self, command: &str, options: &[&OsStr], status: i32) -> Printed {
+        let started = self.start(command, options, &[]);
+        self.finish(started, status)
+    }
+
+    /// Starts the host program's `command` on the sandbox's store with `options`, and with the
+    /// variables `environment` too, and returns it while it runs.
+    pub(crate) fn start(
+        &mut self,
+        command: &str,
+        options: &[&OsStr],
+        environment: &[(&str, &OsStr)],
+    ) -> Started {
         self.commands += 1;
         let output = self.root.join(format!("{}-{command}", self.commands));
         self.output = Some(output.clone());
         let (stdout, stderr) = (output.with_extension("out"), output.with_extension("err"));
         // Files, rather than pipes, take the output, so that nothing waits for a VMM that might
         // hold them.
-        let mut child = Command::new(env!("CARGO_BIN_EXE_runtime-adapter-host"))
+        let child = Command::new(env!("CARGO_BIN_EXE_runtime-adapter-host"))
             .arg(command)
             .arg(&self.store)
             .args(options)
+            .envs(environment.iter().copied())
             .stdin(Stdio::null())
             .stdout(File::create(&stdout).unwrap())
             .stderr(File::create(&stderr).unwrap())
             .spawn()
             .unwrap();
-        let deadline = Instant::now() + COMMAND_TIMEOUT;
+        Started {
+            command: command.to_owned(),
+            options: options.iter().map(|option| option.to_os_string()).collect(),
+            child,
+            output,
+            deadline: Instant::now() + COMMAND_TIMEOUT,
+        }
+    }
+
+    /// Waits for the command `started` to end, checks that it exits with `status`, and returns the
+    /// `KEY=VALUE` lines that it printed.
+    pub(crate) fn finish(&self, mut started: Started, status: i32) -> Printed {
         let exit = loop {
-            if let Some(exit) = child.try_wait().unwrap() {
+            if let Some(exit) = started.child.try_wait().unwrap() {
                 break exit;
             }
-            if Instant::now() >= deadline {
-                let _ = child.kill();
-                let _ = child.wait();
-                panic!("{command} did not end in time{}", self.diagnostics(&output));
-            }
+            self.check_deadline(&mut started);
             thread::sleep(Duration::from_millis(50));
         };
+        let command = &started.command;
         assert_eq!(
             exit.code(),
             Some(status),
-            "{command} {options:?} ended with {exit}{}",
-            self.diagnostics(&output)
+            "{command} {:?} ended with {exit}{}",
+            started.options,
+            self.diagnostics(&started.output)
         );
-        let printed = fs::read_to_string(&stdout).unwrap();
+        let printed = fs::read_to_string(started.output.with_extension("out")).unwrap();
         let mut lines = BTreeMap::new();
         for line in printed.lines() {
             let (key, value) = line
@@ -202,6 +269,40 @@ impl Sandbox {
             assert!(earlier.is_none(), "{command} printed {key} twice");
         }
         lines
+    }
+
+    /// Waits until the command `started` creates the file at `path` with the name of a step, as
+    /// the host program's step hook does when it pauses the command, and returns that name. Fails
+    /// if the command ends first.
+    pub(crate) fn paused(&self, started: &mut Started, path: &Path) -> String {
+        loop {
+            match fs::read_to_string(path) {
+                Ok(step) if !step.is_empty() => return step,
+                _ => {}
+            }
+            if let Some(exit) = started.child.try_wait().unwrap() {
+                panic!(
+                    "{} ended with {exit} before it paused{}",
+                    started.command,
+                    self.diagnostics(&started.output)
+                );
+            }
+            self.check_deadline(started);
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    /// Ends the command `started`, and fails, once its deadline has passed.
+    fn check_deadline(&self, started: &mut Started) {
+        if Instant::now() >= started.deadline {
+            let _ = started.child.kill();
+            let _ = started.child.wait();
+            panic!(
+                "{} did not end in time{}",
+                started.command,
+                self.diagnostics(&started.output)
+            );
+        }
     }
 
     /// Returns what the command whose output files start with `output` printed, and the end of the
