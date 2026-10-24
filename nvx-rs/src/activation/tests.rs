@@ -1,6 +1,7 @@
 //! Tests of the activation record's types and limits.
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::num::NonZeroU64;
 
 use super::*;
 
@@ -79,7 +80,7 @@ fn restore() -> RestoreSection {
     RestoreSection {
         transaction: TransactionId::from_bytes([0x22; 16]),
         template: TemplateReference {
-            generation: StoreGeneration::from_bytes([0x33; 16]),
+            generation: StoreGeneration::new(NonZeroU64::new(0x3333_3333_3333_3333).unwrap()),
             key: Identity::from_bytes([0x44; 32]),
         },
     }
@@ -122,7 +123,6 @@ fn the_limits_keep_their_values() {
     assert_eq!(Identity::LEN, 32);
     assert_eq!(ConfigurationIdentity::LEN, 32);
     assert_eq!(TransactionId::LEN, 16);
-    assert_eq!(StoreGeneration::LEN, 16);
 }
 
 #[test]
@@ -401,13 +401,21 @@ fn opaque_values_keep_their_bytes_and_display_them_in_hexadecimal() {
         format!("{transaction:?}"),
         format!("TransactionId({digits})")
     );
-    let generation = StoreGeneration::from_bytes(bytes);
-    assert_eq!(generation.as_bytes(), &bytes);
-    assert_eq!(generation.to_string(), digits);
-    assert_eq!(
-        format!("{generation:?}"),
-        format!("StoreGeneration({digits})")
-    );
+}
+
+#[test]
+fn a_store_generation_is_a_nonzero_number_in_the_order_of_publication() {
+    let first = StoreGeneration::new(NonZeroU64::MIN);
+    let number = NonZeroU64::new(1_000_000_007).unwrap();
+    let later = StoreGeneration::new(number);
+    assert_eq!(first.get(), NonZeroU64::MIN);
+    assert_eq!(later.get(), number);
+    assert!(first < later);
+    assert_eq!(later.to_string(), "1000000007");
+    assert_eq!(format!("{later:?}"), "StoreGeneration(1000000007)");
+    let last = StoreGeneration::new(NonZeroU64::MAX);
+    assert!(later < last);
+    assert_eq!(last.to_string(), "18446744073709551615");
 }
 
 #[test]

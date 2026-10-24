@@ -12,8 +12,8 @@
 //!   the [`Configuration`]. A clone's restore section holds the restore's [`TransactionId`], 16
 //!   random bytes that the host picks for each restore and keeps across the restore's retries,
 //!   and the [`TemplateReference`] of the template that the clone restores: the template's
-//!   [`StoreGeneration`] and the [`Identity`] of its key. A cold boot's record has no restore
-//!   section.
+//!   [`StoreGeneration`], the nonzero publication ID that its store assigned to it, and the
+//!   [`Identity`] of its key. A cold boot's record has no restore section.
 //! - [`Configuration`]: the non-secret settings that the activation applies, which the
 //!   [configuration](#configuration) lists.
 //! - [`ReadyActivation`]: what Ready reports about the activation: the [`ConfigurationIdentity`],
@@ -74,6 +74,8 @@
 //! or bound of a GPT disk's first partition.
 //!
 //! ```
+//! use std::num::NonZeroU64;
+//!
 //! use nvx::activation::{
 //!     ActivationRecord, Configuration, ExpectedResources, Identity, Image, MachineIdMode,
 //!     OverlayMode, RestoreSection, StoreGeneration, TemplateReference, TransactionId, Upper,
@@ -105,7 +107,7 @@
 //! let restore = RestoreSection {
 //!     transaction: TransactionId::from_bytes([0x22; 16]),
 //!     template: TemplateReference {
-//!         generation: StoreGeneration::from_bytes([0x33; 16]),
+//!         generation: StoreGeneration::new(NonZeroU64::MIN),
 //!         key: Identity::from_bytes([0x44; 32]),
 //!     },
 //! };
@@ -117,6 +119,7 @@
 
 use std::fmt;
 use std::net::IpAddr;
+use std::num::NonZeroU64;
 
 use crate::protocol::MAX_HOST_MAPPINGS;
 use crate::protocol::root::ImageFormat;
@@ -212,37 +215,30 @@ impl fmt::Debug for TransactionId {
     }
 }
 
-/// The generation of a template in its store: the 16 bytes that the store assigns to a
-/// generation when it publishes it, which a record holds without reading them.
+/// The generation of a template in its store: the template's publication ID, a nonzero number
+/// that the store assigns to each template that it publishes, in the order of publication, and
+/// never reuses.
 ///
-/// It displays as 32 lowercase hexadecimal digits.
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
-pub struct StoreGeneration([u8; 16]);
+/// Two generations of one store compare in the order of their publication. A generation displays
+/// as its decimal number.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct StoreGeneration(NonZeroU64);
 
 impl StoreGeneration {
-    /// The length of a store generation, in bytes.
-    pub const LEN: usize = 16;
-
-    /// Returns the store generation whose bytes are `bytes`.
-    pub const fn from_bytes(bytes: [u8; Self::LEN]) -> Self {
-        Self(bytes)
+    /// Returns the store generation `generation`.
+    pub const fn new(generation: NonZeroU64) -> Self {
+        Self(generation)
     }
 
-    /// Returns the store generation's bytes.
-    pub const fn as_bytes(&self) -> &[u8; Self::LEN] {
-        &self.0
+    /// Returns the store generation's number.
+    pub const fn get(self) -> NonZeroU64 {
+        self.0
     }
 }
 
 impl fmt::Display for StoreGeneration {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write_hex(formatter, &self.0)
-    }
-}
-
-impl fmt::Debug for StoreGeneration {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(formatter, "StoreGeneration({self})")
+        write!(formatter, "{}", self.0)
     }
 }
 
