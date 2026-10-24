@@ -26,7 +26,8 @@ name = "nvx"
 default = ["host"]
 # The host side: artifact discovery, launch, network and filesystem lowering, control sessions,
 # process and platform primitives, the supervision of VM instances, and the sandbox launch
-# profile, whose aggregate child names are SHA-256 digests.
+# profile, whose aggregate child names are SHA-256 digests, as are the configuration identities of
+# activation records.
 host = [
     "serde",
     "dep:getrandom",
@@ -47,14 +48,15 @@ cli = ["host"]
 # The serde form of `Hypervisor`. The `host` feature enables it.
 serde = ["dep:serde"]
 # The programs that run in Linux guests: the `guest` module and the `nvx-*` guest binaries. Build
-# them with `--no-default-features --features guest` and the `guest` profile; see README.md.
-guest = ["dep:nix", "dep:getrandom"]
+# them with `--no-default-features --features guest` and the `guest` profile; see README.md. It
+# enables `sha2` for the configuration identities of activation records.
+guest = ["dep:nix", "dep:getrandom", "dep:sha2"]
 
 [dependencies]
 getrandom = { version = "0.4", optional = true }
 serde = { version = "1.0.200", features = ["derive"], optional = true }
 serde_json = { version = "1.0.120", optional = true }
-# The same release as the build script's: `host` enables both.
+# The same release as the build script's: `host` enables both, and `guest` this one.
 sha2 = { version = "0.10", optional = true }
 
 [target.'cfg(windows)'.dependencies]
