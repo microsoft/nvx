@@ -32,7 +32,8 @@
 //! `hook` module, lets tests pause a launch, or end it as a crash would, at a named step. In
 //! those VMs, the guest agent's PID 1 starts a worker, in the `worker` module, which assembles the
 //! root through `nvx::guest::root` outside PID 1, as the host's root configuration of the [`root`]
-//! module asks, and runs the [`probe`]s with which the host checks the root. The worker also runs
+//! module asks, applies the host's mapping table from the host export, and runs the [`probe`]s
+//! with which the host checks the root. Once the host started the sandbox, the worker also runs
 //! several [`exec`]utions at once through NVX's execution engine and its guest binding, from one
 //! loop that never blocks.
 

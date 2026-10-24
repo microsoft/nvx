@@ -21,20 +21,30 @@
 //! 1. It opens the tty and attaches the session.
 //! 2. It receives the host's root configuration, a [`RootConfig`], and checks it.
 //! 3. It reads the boot layout of the root from the kernel command line with
-//!    `nvx::protocol::root::RootLayout::parse`, then bootstraps the guest and assembles the root.
+//!    `nvx::protocol::root::RootLayout::parse`, and the host export, if the command line names
+//!    one, with `nvx::protocol::export::HostExport::parse`, then bootstraps the guest, assembles
+//!    the root, and mounts the export out of the root.
 //! 4. It answers `Ready`, with the guest agent's build, [`GUEST_BUILD`], or `RootFailed` with the
 //!    stage that failed, and then ends.
-//! 5. It serves `Ping`, `Echo`, and `Probe`, whose probes the [`probes`], [`mapping`], and
-//!    [`entries`] modules run, and runs the host's executions. It runs a probe only while it runs
-//!    no execution, and otherwise answers it with `ProbeFailed` and [`EXECUTING`].
-//! 6. On `Stop`, it drops its executions, which ends their programs, tears the root down, reports
+//! 5. It applies the host's mapping table beneath the root, from the export, in the parts that
+//!    the host sends, and answers each part with `Mapped` or `MapFailed`.
+//! 6. On `Start`, once it applied every mapping that the configuration announced, it starts the
+//!    sandbox, which it confirms with `Started`.
+//! 7. It serves `Ping`, `Echo`, and `Probe`, whose probes the [`probes`], [`mapping`], and
+//!    [`entries`] modules run, and, once the sandbox started, runs the host's executions. It runs
+//!    a probe only while it runs no execution, and otherwise answers it with `ProbeFailed` and
+//!    [`EXECUTING`].
+//! 8. On `Stop`, it drops its executions, which ends their programs, tears the root down, reports
 //!    a teardown that failed with `RootFailed`, confirms the stop with `Stopped`, and ends.
 //!
 //! Before the root configuration, it accepts only the configuration, or a `Stop`, which ends it
 //! without a root. It assembles an EROFS image, or the layers of a GPT disk, whose first partition
 //! holds at most the bound of the configuration, over an ext4 scratch or over RAM, in the overlay
 //! mode that the configuration names. At the layout stage, it refuses a configuration that
-//! configures a scratch for a root over RAM, or bounds a first partition for an EROFS image.
+//! configures a scratch for a root over RAM, bounds a first partition for an EROFS image, or
+//! announces mappings while the kernel command line names no host export, from which they come,
+//! and a command line whose tokens of the export break their rules. An export that fails to mount
+//! fails the assembly.
 //!
 //! The worker, and with it the VM, ends with 0 once the host stopped it, after a teardown that
 //! succeeded, with the stage's [exit status](RootStage::exit_status) once a stage failed, from 11
@@ -43,15 +53,43 @@
 //! may close only the broker's end, the worker drops its executions, and writes what it queued,
 //! as once the host stopped it.
 //!
+//! # The mapping table and the start
+//!
+//! The root configuration announces how many mappings the host's mapping table holds, and the host
+//! sends the table once the root is ready, in parts, each in a `Maps`, in order. The worker
+//! applies each part's mappings beneath the root, in order, from the host export, through
+//! [`RootOperations::map`], which runs `nvx::guest::root::Root::map`, and answers the part with
+//! `Mapped`, or with `MapFailed`, whose [`MapFailure`](crate::root::MapFailure) holds how many of
+//! the table's mappings it applied:
+//!
+//! - It refuses a part as a whole, at the mapping that it expects next, if the part does not
+//!   decode, or does not continue the table: if its first mapping is not the one that the worker
+//!   expects next, or its last is past the count that the configuration announced.
+//! - A mapping that the root refuses or fails to apply latches the root, which keeps the mappings
+//!   before it, so that the count is that mapping's index in the table.
+//! - Once it answered `MapFailed`, the worker refuses every later part, with `MapFailed`, and the
+//!   start: it starts no workload on a partial table, and the host tears the VM down.
+//!
+//! A table of zero mappings does no work: the host sends no part, and the worker maps nothing,
+//! though it mounts the export if the command line names one.
+//!
+//! `Start` starts the sandbox once the worker applied every mapping that the configuration
+//! announced, and none failed, which the worker confirms with `Started`. Only then does it run the
+//! host's executions, and it takes no part of the table any more. A message about an execution
+//! before the start, a `Start` before every announced mapping is applied, once the table failed,
+//! or once the sandbox started, and a `Maps` once the sandbox started end the session with
+//! [`ServeError::Unexpected`], as a message that the worker does not take in its state does. The
+//! worker serves pings, echoes, probes, and the stop before the start and after it.
+//!
 //! # Executions
 //!
-//! Once the root is ready, the worker runs the host's [executions](crate::exec), several at once,
-//! each through NVX's execution engine, whose runner the guest binding of `nvx::guest::exec`
-//! binds to the program, with the limits and the timers that its start names, such as
-//! frame-counted credit and one output pool that standard output and error share. One loop that
-//! never blocks serves the session and every execution: it takes the host's messages as they
-//! arrive, steps every execution, queues the executions' messages for the host, and then waits
-//! until the session's stream or an execution's descriptor polls ready, or an execution's
+//! Once the host started the sandbox, the worker runs the host's [executions](crate::exec),
+//! several at once, each through NVX's execution engine, whose runner the guest binding of
+//! `nvx::guest::exec` binds to the program, with the limits and the timers that its start names,
+//! such as frame-counted credit and one output pool that standard output and error share. One
+//! loop that never blocks serves the session and every execution: it takes the host's messages as
+//! they arrive, steps every execution, queues the executions' messages for the host, and then
+//! waits until the session's stream or an execution's descriptor polls ready, or an execution's
 //! deadline passes. So a program's blocked stream, an exhausted window, a stalled sink of the
 //! host, or a full stream to the host holds back only the bytes that wait on it, never a timer, a
 //! cancellation, a reset, a stop, or another execution. Nor does a probe, which the worker refuses
@@ -110,6 +148,7 @@ mod connection;
 pub mod entries;
 mod executions;
 pub mod mapping;
+mod order;
 pub mod probes;
 
 use std::fs::{self, File, OpenOptions};
@@ -129,11 +168,13 @@ use nix::sys::wait::{self, Id, WaitPidFlag, WaitStatus};
 use nix::unistd::Pid;
 use nvx::gpt::Expected;
 use nvx::guest::cgroup::Layout;
+use nvx::guest::mappings::{Mapping, SourceRoot};
 use nvx::guest::nvxs::GuestConnectionError;
 use nvx::guest::process::Child;
 use nvx::guest::root::{
     self, Assembly, Bootstrap, Device, Image, Journal, Resources, Root, Upper, UpperKind,
 };
+use nvx::protocol::export::HostExport;
 use nvx::protocol::root::{
     DISTRO_MMIO_BASE, ImageFormat, RootLayout, RootUpper, SCRATCH_MMIO_BASE,
 };
@@ -149,6 +190,7 @@ use crate::root::{
 };
 use connection::{Connection, Received};
 use executions::Executions;
+use order::Order;
 
 /// The status with which the worker ends once its session failed or the broker closed it, and
 /// with which PID 1 ends the VM if a child cannot start or the worker's status cannot be collected.
@@ -175,9 +217,11 @@ pub const MAX_HISTORY: usize = 1024;
 const COMMAND_LINE: &str = "/proc/cmdline";
 
 /// The operations of a layered root that the worker runs: those of `nvx::guest::root` in a VM, in
-/// [`LibraryRoot`], and a fake's in tests. Each fails with the problem, as text.
+/// [`LibraryRoot`], and a fake's in tests. Each fails with the problem, as text, and
+/// [`map`](Self::map) with the mapping that failed too.
 pub trait RootOperations {
-    /// Returns the kernel command line, from which the worker reads the boot layout of the root.
+    /// Returns the kernel command line, from which the worker reads the boot layout of the root,
+    /// and the host export.
     fn command_line(&mut self) -> Result<Vec<u8>, String>;
 
     /// Bootstraps the guest for the root that `config` configures: its cgroups, and their
@@ -187,11 +231,33 @@ pub trait RootOperations {
     /// Assembles the root of `layout`, which the boot tokens name, as `config` configures it.
     fn assemble(&mut self, config: &RootConfig, layout: &RootLayout) -> Result<(), String>;
 
+    /// Mounts the host export `export`, which the kernel command line names, out of the assembled
+    /// root, as the source of the host's mapping table.
+    fn mount_export(&mut self, export: &HostExport) -> Result<(), String>;
+
+    /// Applies `mappings`, consecutive mappings of the host's mapping table, beneath the assembled
+    /// root, in order, from the host export, and keeps those before the first that it refuses or
+    /// fails to apply, which latches the root.
+    ///
+    /// Fails with a [`MapError`] that counts the mappings before the one that failed.
+    fn map(&mut self, mappings: &[Mapping]) -> Result<(), MapError>;
+
     /// Runs `probe` on the assembled root, and returns what it found.
     fn probe(&mut self, probe: &Probe) -> Result<Facts, String>;
 
     /// Tears the assembled root down.
     fn teardown(&mut self) -> Result<(), String>;
+}
+
+/// A mapping that [`RootOperations::map`] refused or failed to apply, once it applied those before
+/// it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MapError {
+    /// How many of the mappings the operations applied, in order, before the one that failed: its
+    /// index among them.
+    pub applied: usize,
+    /// What failed.
+    pub problem: String,
 }
 
 /// How the worker's session ended, when it did not fail.
@@ -235,7 +301,8 @@ pub fn work<S: Read + Write + AsFd>(
 ) -> Result<Worked, ServeError> {
     let mut connection = Connection::new(stream)?;
     let mut executions = Executions::new();
-    let mut ready = false;
+    // The worker's order, once its root is ready.
+    let mut order = None;
     loop {
         connection.flush()?;
         while !connection.is_overloaded() {
@@ -260,16 +327,25 @@ pub fn work<S: Read + Write + AsFd>(
             // launch that came before it takes nothing from the timers of an execution that it
             // starts.
             let now = Instant::now();
-            let step = if ready {
-                serve_root(operations, &mut executions, &mut connection, now, message)?
-            } else {
-                configure_root(operations, message)?
+            let step = match order.as_mut() {
+                Some(order) => serve_root(
+                    operations,
+                    order,
+                    &mut executions,
+                    &mut connection,
+                    now,
+                    message,
+                )?,
+                None => {
+                    let (step, ready) = configure_root(operations, message)?;
+                    order = ready;
+                    step
+                }
             };
             let (replies, ended) = match step {
                 Step::Continue(replies) => (replies, None),
                 Step::End(replies, worked) => (replies, Some(worked)),
             };
-            ready |= ended.is_none();
             for reply in &replies {
                 connection.send(reply)?;
             }
@@ -360,37 +436,45 @@ fn wait<S: Read + Write + AsFd>(
 }
 
 /// Handles `message` before the root is ready: a root configuration, whose root it assembles
-/// through `operations`, and which it answers with its readiness, or a `Stop`.
+/// through `operations`, and which it answers with its readiness, or a `Stop`. Returns the step,
+/// with the worker's order once the root is ready.
 fn configure_root(
     operations: &mut dyn RootOperations,
     message: Message,
-) -> Result<Step<Worked>, ServeError> {
+) -> Result<(Step<Worked>, Option<Order>), ServeError> {
     match message {
         Message::RootConfig(body) => Ok(match assemble(operations, &body) {
-            Ok(()) => {
+            Ok(config) => {
                 let ready = Ready::new(GUEST_BUILD).expect("this crate's version is a build");
-                Step::Continue(vec![Message::Ready(ready.encode())])
+                let step = Step::Continue(vec![Message::Ready(ready.encode())]);
+                (step, Some(Order::new(config.mapping_count)))
             }
-            Err(failure) => Step::End(
-                vec![Message::RootFailed(failure.encode())],
-                Worked::Failed(failure),
-            ),
+            Err(failure) => {
+                let replies = vec![Message::RootFailed(failure.encode())];
+                (Step::End(replies, Worked::Failed(failure)), None)
+            }
         }),
-        Message::Stop => Ok(Step::End(vec![Message::Stopped], Worked::Stopped)),
+        Message::Stop => Ok((Step::End(vec![Message::Stopped], Worked::Stopped), None)),
         message => Err(ServeError::Unexpected(message.kind())),
     }
 }
 
-/// Handles `message` at `now` once the root is ready, through `operations`, and hands a message
-/// about an execution to `executions`, which queue what they answer on `connection`.
+/// Handles `message` at `now` once the root is ready, through `operations`, in the worker's
+/// `order`, and hands a message about an execution to `executions`, which queue what they answer
+/// on `connection`.
 fn serve_root<S: Read + Write + AsFd>(
     operations: &mut dyn RootOperations,
+    order: &mut Order,
     executions: &mut Executions,
     connection: &mut Connection<S>,
     now: Instant,
     message: Message,
 ) -> Result<Step<Worked>, ServeError> {
     if let Some(decoded) = HostMessage::decode(&message) {
+        // The worker runs no execution before the host started the sandbox.
+        if !order.is_started() {
+            return Err(ServeError::Unexpected(message.kind()));
+        }
         let decoded = decoded.map_err(|error| ServeError::Execution(error.problem().to_owned()))?;
         executions.deliver(now, decoded, connection)?;
         return Ok(Step::Continue(Vec::new()));
@@ -405,6 +489,11 @@ fn serve_root<S: Read + Write + AsFd>(
             Step::Continue(vec![Message::ProbeFailed(EXECUTING.as_bytes().to_vec())])
         }
         Message::Probe(body) => Step::Continue(vec![run_probe(operations, &body)]),
+        // The mapping table comes before the start, which comes once the worker applied it.
+        Message::Maps(body) if !order.is_started() => {
+            Step::Continue(vec![order.map(operations, &body)])
+        }
+        Message::Start if order.may_start() => Step::Continue(vec![order.start()]),
         Message::Stop => {
             executions.clear();
             match operations.teardown() {
@@ -422,30 +511,45 @@ fn serve_root<S: Read + Write + AsFd>(
     })
 }
 
-/// Checks the root configuration `body`, reads the boot layout of the root, bootstraps the guest,
-/// and assembles the root, through `operations`, or returns the failure of the stage that failed.
-fn assemble(operations: &mut dyn RootOperations, body: &[u8]) -> Result<(), RootFailure> {
+/// Checks the root configuration `body`, reads the boot layout of the root and the host export,
+/// bootstraps the guest, assembles the root, and mounts the export out of it, if the kernel
+/// command line names one, through `operations`. Returns the configuration, or the failure of the
+/// stage that failed: the export's mount ends the assembly.
+fn assemble(operations: &mut dyn RootOperations, body: &[u8]) -> Result<RootConfig, RootFailure> {
     let config = RootConfig::decode(body)
         .map_err(|error| RootFailure::new(RootStage::Configuration, error.problem()))?;
-    let layout = layout(operations, &config)
+    let (layout, export) = layout(operations, &config)
         .map_err(|problem| RootFailure::new(RootStage::Layout, problem))?;
     operations
         .bootstrap(&config)
         .map_err(|problem| RootFailure::new(RootStage::Bootstrap, problem))?;
     operations
         .assemble(&config, &layout)
-        .map_err(|problem| RootFailure::new(RootStage::Assembly, problem))
+        .map_err(|problem| RootFailure::new(RootStage::Assembly, problem))?;
+    if let Some(export) = &export {
+        operations
+            .mount_export(export)
+            .map_err(|problem| RootFailure::new(RootStage::Assembly, problem))?;
+    }
+    Ok(config)
 }
 
-/// Reads the boot layout of the root from the kernel command line, through `operations`, and
-/// checks that the worker assembles it as `config` configures it: an EROFS image or a GPT disk,
-/// over an ext4 scratch, or over RAM if `config` configures no scratch, with a bound of the first
-/// partition for a GPT disk alone.
-fn layout(operations: &mut dyn RootOperations, config: &RootConfig) -> Result<RootLayout, String> {
+/// Reads the boot layout of the root, and the host export, if any, from the kernel command line,
+/// through `operations`, and checks that the worker assembles them as `config` configures it: an
+/// EROFS image or a GPT disk, over an ext4 scratch, or over RAM if `config` configures no scratch,
+/// with a bound of the first partition for a GPT disk alone, and with a host export, the source of
+/// the mapping table, if `config` announces mappings.
+fn layout(
+    operations: &mut dyn RootOperations,
+    config: &RootConfig,
+) -> Result<(RootLayout, Option<HostExport>), String> {
     let command_line = operations.command_line()?;
     let layout = RootLayout::parse(&command_line)
         .map_err(|error| format!("the kernel command line has invalid boot tokens: {error}"))?
         .ok_or("the kernel command line names no layered root")?;
+    let export = HostExport::parse(&command_line).map_err(|error| {
+        format!("the kernel command line has invalid tokens of the host export: {error}")
+    })?;
     if layout.image.format == ImageFormat::Erofs && config.first_partition_bound.is_some() {
         return Err(
             "the root configuration bounds the first partition, but the boot tokens name an \
@@ -461,7 +565,15 @@ fn layout(operations: &mut dyn RootOperations, config: &RootConfig) -> Result<Ro
                 .to_owned(),
         );
     }
-    Ok(layout)
+    if export.is_none() && config.mapping_count > 0 {
+        let count = config.mapping_count;
+        let plural = if count == 1 { "" } else { "s" };
+        return Err(format!(
+            "the root configuration announces {count} mapping{plural}, but the kernel command \
+             line names no host export to map from"
+        ));
+    }
+    Ok((layout, export))
 }
 
 /// Runs the probe `body` through `operations`, and returns the worker's answer: a report of what
@@ -489,8 +601,9 @@ fn run_probe(operations: &mut dyn RootOperations, body: &[u8]) -> Message {
 /// The root operations of `nvx::guest::root` on the guest's kernel, whose probes the [`probes`]
 /// module runs.
 ///
-/// Dropping it closes the descriptors that probes keep open, then unmounts a root that it still
-/// holds, as `nvx::guest::root::Root` does when it drops, ignoring failures.
+/// Dropping it closes the descriptors that probes keep open and the host export's root, then
+/// unmounts a root that it still holds, as `nvx::guest::root::Root` does when it drops, ignoring
+/// failures.
 pub struct LibraryRoot {
     /// The process ID of PID 1's unrelated child, which the probes check, if PID 1 named one.
     sibling: Option<u32>,
@@ -499,6 +612,10 @@ pub struct LibraryRoot {
     /// The descriptors that probes keep open until the worker ends, such as those of `hold`.
     /// They close before the root drops.
     held: Vec<File>,
+    /// The root of the host export, from which the worker maps the host's mapping table, once the
+    /// root mounted the export. It keeps the export busy, so it closes before the root drops, and
+    /// before its teardown.
+    export: Option<SourceRoot>,
     /// The root, from its assembly until its teardown.
     root: Option<Root>,
 }
@@ -510,6 +627,7 @@ impl LibraryRoot {
             sibling,
             bootstrap: None,
             held: Vec::new(),
+            export: None,
             root: None,
         }
     }
@@ -600,6 +718,38 @@ impl RootOperations for LibraryRoot {
         Ok(())
     }
 
+    /// Runs `nvx::guest::root::Root::mount_export` with the export's tag, and the access of its
+    /// mode, and keeps the export's root, from which the worker maps the host's mapping table.
+    fn mount_export(&mut self, export: &HostExport) -> Result<(), String> {
+        let Some(root) = &mut self.root else {
+            return Err("the worker holds no root to mount the host export for".to_owned());
+        };
+        let source = root
+            .mount_export(&export.tag, export.mode.into())
+            .map_err(|error| error.to_string())?;
+        self.export = Some(source);
+        Ok(())
+    }
+
+    /// Runs `nvx::guest::root::Root::map` from the host export's root, with each mapping in turn,
+    /// so that a failure tells how many of the mappings before it the root applied.
+    fn map(&mut self, mappings: &[Mapping]) -> Result<(), MapError> {
+        let (Some(root), Some(export)) = (&mut self.root, &self.export) else {
+            return Err(MapError {
+                applied: 0,
+                problem: "the worker holds no host export to map from".to_owned(),
+            });
+        };
+        for (applied, mapping) in mappings.iter().enumerate() {
+            root.map(export, std::slice::from_ref(mapping))
+                .map_err(|error| MapError {
+                    applied,
+                    problem: error.to_string(),
+                })?;
+        }
+        Ok(())
+    }
+
     /// Runs one of the [`probes`], of the [`mapping`] probes, which map beneath the root, or of the
     /// [`entries`] probes, which enter it.
     fn probe(&mut self, probe: &Probe) -> Result<Facts, String> {
@@ -639,8 +789,10 @@ impl RootOperations for LibraryRoot {
         probes::run(probe, &context, &mut self.held)
     }
 
-    /// Runs `nvx::guest::root::Root::teardown`. A root whose teardown failed keeps its mounts.
+    /// Runs `nvx::guest::root::Root::teardown`, once it closed the host export's root, which keeps
+    /// the export busy. A root whose teardown failed keeps its mounts.
     fn teardown(&mut self) -> Result<(), String> {
+        self.export = None;
         match self.root.take() {
             Some(root) => root.teardown().map_err(|error| error.to_string()),
             None => Ok(()),
