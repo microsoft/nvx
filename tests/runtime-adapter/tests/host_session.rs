@@ -23,12 +23,13 @@ use nvx::protocol::nvxs::{
     ErrorCode, Identity, Record, RecordError, RecordParser, RecordType, SessionError, encode_record,
 };
 use nvx::protocol::{
-    CAPABILITY_LEN, OUTER_HEADER_LEN, OUTER_MAX_PAYLOAD, OUTER_MIN_RECEIVE_WINDOW,
+    CAPABILITY_LEN, HostMap, OUTER_HEADER_LEN, OUTER_MAX_PAYLOAD, OUTER_MIN_RECEIVE_WINDOW,
 };
+use runtime_adapter::GUEST_BUILD;
 use runtime_adapter::frame::{Decoder, FrameError, HEADER_LEN, MAX_BODY, MAX_TEXT_BODY, Message};
 use runtime_adapter::host::{Client, ClientError};
 use runtime_adapter::probe::{Facts, Probe, ProbeReply};
-use runtime_adapter::root::{RootConfig, RootFailure, RootReply, RootStage};
+use runtime_adapter::root::{Ready, RootConfig, RootFailure, RootReply, RootStage, encode_maps};
 
 /// Launch capability that the test broker accepts.
 const CAPABILITY: [u8; CAPABILITY_LEN] = [0xa5; CAPABILITY_LEN];
@@ -478,6 +479,26 @@ fn decode(decoder: &mut Decoder, mut bytes: &[u8]) -> Vec<Message> {
 /// Returns the longest body: with its header, a message that carries it spans five records.
 fn longest() -> Vec<u8> {
     (0..=u8::MAX).cycle().take(MAX_BODY).collect()
+}
+
+/// Returns the guest's readiness, with the guest agent's build that the host program ships.
+fn ready() -> Ready {
+    Ready::new(GUEST_BUILD).unwrap()
+}
+
+/// Returns the message of the guest's [`ready`]ness.
+fn ready_message() -> Message {
+    Message::Ready(ready().encode())
+}
+
+/// Returns the body of a part of a mapping table, of one mapping.
+fn maps_part() -> Vec<u8> {
+    let table = [HostMap {
+        source: "dir".to_owned(),
+        target: "/srv/dir".to_owned(),
+        read_only: true,
+    }];
+    encode_maps(&table).unwrap().remove(0)
 }
 
 /// Checks that a failure ended `client`: every later call fails.
@@ -1042,7 +1063,7 @@ fn the_client_refuses_messages_that_its_framing_does_not_allow() {
     let too_long_text = u32::try_from(MAX_TEXT_BODY + 1).unwrap().to_le_bytes();
     let cases = [
         (header([0; 4], 0), FrameError::Kind(0)),
-        (header([0; 4], 22), FrameError::Kind(22)),
+        (header([0; 4], 27), FrameError::Kind(27)),
         (
             header(too_long, 3),
             FrameError::Length {
@@ -1069,8 +1090,25 @@ fn the_client_refuses_messages_that_its_framing_does_not_allow() {
             },
         ),
         (
-            header(1u32.to_le_bytes(), 7),
-            FrameError::Length { kind: 7, length: 1 },
+            header(too_long_text, 7),
+            FrameError::Length {
+                kind: 7,
+                length: MAX_TEXT_BODY + 1,
+            },
+        ),
+        (
+            header(1u32.to_le_bytes(), 23),
+            FrameError::Length {
+                kind: 23,
+                length: 1,
+            },
+        ),
+        (
+            header(1u32.to_le_bytes(), 26),
+            FrameError::Length {
+                kind: 26,
+                length: 1,
+            },
         ),
     ];
     for (bytes, expected) in cases {
@@ -1089,6 +1127,8 @@ fn the_client_refuses_messages_that_its_framing_does_not_allow() {
         Message::Stop,
         Message::RootConfig(RootConfig::default().encode()),
         Message::Probe(b"mounts".to_vec()),
+        Message::Maps(maps_part()),
+        Message::Start,
     ];
     for message in host_messages {
         let (mut broker, mut client) = attached(FIRST, usize::MAX);
@@ -1176,9 +1216,9 @@ fn requests_check_their_answers_and_end_the_client_when_they_fail() {
             Some((4, 3)),
         ),
         (
-            "Stop answered with RootReady",
+            "Stop answered with Ready",
             stop,
-            vec![Message::RootReady],
+            vec![ready_message()],
             Some((4, 7)),
         ),
         (
@@ -1209,9 +1249,9 @@ fn requests_check_their_answers_and_end_the_client_when_they_fail() {
             Some((6, 10)),
         ),
         (
-            "a probe answered with RootReady",
+            "a probe answered with Ready",
             probe,
-            vec![Message::RootReady],
+            vec![ready_message()],
             Some((9, 7)),
         ),
     ];
@@ -1250,15 +1290,15 @@ fn requests_check_their_answers_and_end_the_client_when_they_fail() {
 fn the_client_configures_a_layered_root_probes_it_and_learns_how_its_teardown_ended() {
     let (mut broker, client) = attached(FIRST, usize::MAX);
 
-    // The guest assembles the root.
+    // The guest assembles the root, and reports the guest agent's build.
     let configuring = spawn(client, |client| {
         client.configure_root(&RootConfig::default(), deadline())
     });
     let expected = Message::RootConfig(RootConfig::default().encode());
     assert_eq!(broker.messages(1), [expected]);
-    broker.send_data(&Message::RootReady.encode().unwrap(), OUTER_MAX_PAYLOAD);
+    broker.send_data(&ready_message().encode().unwrap(), OUTER_MAX_PAYLOAD);
     let (client, configured) = joined(configuring);
-    assert_eq!(configured.unwrap(), RootReply::Ready);
+    assert_eq!(configured.unwrap(), RootReply::Ready(ready()));
 
     // A probe's facts, in records of 7 bytes, and a probe that failed.
     let mut facts = Facts::new();
@@ -1338,7 +1378,25 @@ fn answers_whose_bodies_do_not_decode_end_the_client() {
         client.probe(&probe, deadline()).map(drop)
     };
     let stop: Request = |client| client.stop(deadline()).map(drop);
-    let cases: [(&str, Request, Message, &str); 6] = [
+    let cases: [(&str, Request, Message, &str); 9] = [
+        (
+            "a readiness without a build",
+            configure,
+            Message::Ready(Vec::new()),
+            "the guest's readiness names no build",
+        ),
+        (
+            "a readiness that ends before its build does",
+            configure,
+            Message::Ready(b"\x090.1.0".to_vec()),
+            "the guest's readiness ends early",
+        ),
+        (
+            "a readiness with a build that holds a space",
+            configure,
+            Message::Ready(b"\x030 1".to_vec()),
+            "without a space: \"0 1\"",
+        ),
         (
             "a root's failure without a stage",
             configure,
