@@ -144,9 +144,15 @@ fn cmd_check(
 
 /// Preparation steps 1 to 4: waits for the boot checks, which start the daemon that C10
 /// requires, runs the capture checks, and suppresses the stall detectors before the snapshot.
+/// A preparation that fails leaves the detectors as they were, as far as it can: the snapshot
+/// script cancels only a capture whose preparation succeeded.
 fn cmd_pre_capture(abi: TimeAbi, err: &mut dyn Write) -> Result<(), CommandError> {
-    abi.pre_capture()
-        .map_err(|error| pre_capture_failure(err, error))
+    abi.pre_capture().map_err(|error| {
+        if error.holds_suppression() {
+            let _ = abi.cancel_capture();
+        }
+        pre_capture_failure(err, error)
+    })
 }
 
 /// Reports why the preparation of a capture failed, such as `nvx-time: cannot suppress the stall
@@ -156,11 +162,11 @@ fn pre_capture_failure(err: &mut dyn Write, error: PreCaptureError) -> CommandEr
     let reason = match error {
         PreCaptureError::BootChecks(_)
         | PreCaptureError::CaptureChecks(_)
-        | PreCaptureError::PortRelease(_) => {
+        | PreCaptureError::PortRelease { .. } => {
             return CommandError::Operation;
         }
         PreCaptureError::Pending => "a capture is already pending",
-        PreCaptureError::Suppression(error) => error.desc(),
+        PreCaptureError::Suppression(error) | PreCaptureError::Unrestored(error) => error.desc(),
     };
     report(
         err,
@@ -396,6 +402,13 @@ mod tests {
                     Errno::EROFS.desc()
                 ),
             ),
+            (
+                PreCaptureError::Unrestored(Errno::EIO),
+                format!(
+                    "nvx-time: cannot suppress the stall detectors: {}\n",
+                    Errno::EIO.desc()
+                ),
+            ),
             // A violation's event is its only report.
             (
                 PreCaptureError::BootChecks(TimeError::StateUnavailable),
@@ -407,7 +420,10 @@ mod tests {
             ),
             // `run` reports the permission once, when the command ends.
             (
-                PreCaptureError::PortRelease(PortError::Revoke(Errno::ENOMEM).into()),
+                PreCaptureError::PortRelease {
+                    error: PortError::Revoke(Errno::ENOMEM).into(),
+                    suppressed: true,
+                },
                 String::new(),
             ),
         ];

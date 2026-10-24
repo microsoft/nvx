@@ -117,8 +117,12 @@ enum Preparation {
     Pending,
     /// The detectors' settings cannot be saved, with this error number.
     Suppression(Errno),
-    /// The thread may still hold some of the permission for the ports, with this error number.
-    PortRelease(Errno),
+    /// A detector cannot be suppressed, nor the others restored, with this error number, so
+    /// the time ABI holds their suppression.
+    Unrestored(Errno),
+    /// The thread may still hold some of the permission for the ports, with this error number,
+    /// after a preparation that held the suppression or not.
+    PortRelease(Errno, bool),
 }
 
 /// How the fake capture ends.
@@ -237,9 +241,11 @@ impl System for FakeSystem {
             }
             Preparation::Pending => Err(PreCaptureError::Pending),
             Preparation::Suppression(errno) => Err(PreCaptureError::Suppression(errno)),
-            Preparation::PortRelease(errno) => Err(PreCaptureError::PortRelease(
-                PortError::Revoke(errno).into(),
-            )),
+            Preparation::Unrestored(errno) => Err(PreCaptureError::Unrestored(errno)),
+            Preparation::PortRelease(errno, suppressed) => Err(PreCaptureError::PortRelease {
+                error: PortError::Revoke(errno).into(),
+                suppressed,
+            }),
         }
     }
 
@@ -573,20 +579,37 @@ fn a_fence_that_fails_to_close_stops_the_preparation() {
 
 #[test]
 fn a_failed_time_preparation_names_its_stage_and_opens_the_fence() {
+    // Each failure, its stage, and whether the time ABI holds the detectors' suppression.
     let cases = [
-        (Preparation::BootChecks, CaptureStage::BootChecks),
-        (Preparation::CaptureChecks, CaptureStage::CaptureChecks),
-        (Preparation::Pending, CaptureStage::Suppression),
+        (Preparation::BootChecks, CaptureStage::BootChecks, false),
+        (
+            Preparation::CaptureChecks,
+            CaptureStage::CaptureChecks,
+            false,
+        ),
+        (Preparation::Pending, CaptureStage::Suppression, false),
         (
             Preparation::Suppression(Errno::EROFS),
             CaptureStage::Suppression,
+            false,
         ),
         (
-            Preparation::PortRelease(Errno::ENOMEM),
+            Preparation::Unrestored(Errno::EIO),
+            CaptureStage::Suppression,
+            true,
+        ),
+        (
+            Preparation::PortRelease(Errno::ENOMEM, false),
             CaptureStage::CaptureChecks,
+            false,
+        ),
+        (
+            Preparation::PortRelease(Errno::ENOMEM, true),
+            CaptureStage::CaptureChecks,
+            true,
         ),
     ];
-    for (failure, stage) in cases {
+    for (failure, stage, held) in cases {
         let calls = Calls::default();
         let mut system = FakeSystem::new(&calls);
         system.preparation = failure;
@@ -595,9 +618,11 @@ fn a_failed_time_preparation_names_its_stage_and_opens_the_fence() {
         match (failure, error.cause()) {
             (Preparation::BootChecks | Preparation::CaptureChecks, CaptureCause::Time(_))
             | (Preparation::Pending, CaptureCause::Pending) => {}
-            (Preparation::Suppression(errno), CaptureCause::Io(cause))
-                if cause.raw_os_error() == Some(errno as i32) => {}
-            (Preparation::PortRelease(_), CaptureCause::Time(TimeError::PortRelease(_))) => {
+            (
+                Preparation::Suppression(errno) | Preparation::Unrestored(errno),
+                CaptureCause::Io(cause),
+            ) if cause.raw_os_error() == Some(errno as i32) => {}
+            (Preparation::PortRelease(..), CaptureCause::Time(TimeError::PortRelease(_))) => {
                 assert_eq!(
                     error.to_string(),
                     format!(
@@ -608,11 +633,33 @@ fn a_failed_time_preparation_names_its_stage_and_opens_the_fence() {
             }
             _ => panic!("{failure:?}: {error:?}"),
         }
-        // The time ABI left the detectors as they were, so the barrier restores nothing.
+        // The fence opens, and the barrier restores the detectors' settings that the time ABI
+        // holds, or nothing.
         let mut expected = preparation_calls();
         expected.push(Call::Open);
+        if held {
+            expected.push(Call::CancelCapture);
+        }
         assert_eq!(calls.take(), expected, "{failure:?}");
     }
+}
+
+#[test]
+fn a_held_suppression_that_a_failed_preparation_cannot_restore_is_a_release_error() {
+    let calls = Calls::default();
+    let mut system = FakeSystem::new(&calls);
+    system.preparation = Preparation::Unrestored(Errno::EIO);
+    system.restoration_fails = true;
+    let error = prepare(fence(&calls), system).unwrap_err();
+    assert_eq!(error.stage(), CaptureStage::Release);
+    assert_eq!(
+        error.to_string(),
+        "failed to restore the stall detectors: read /run/nvx/time-suppression: No such file or \
+         directory"
+    );
+    let mut expected = preparation_calls();
+    expected.extend([Call::Open, Call::CancelCapture]);
+    assert_eq!(calls.take(), expected);
 }
 
 #[test]

@@ -194,10 +194,11 @@ impl<F: AdmissionFence> CapturePreparation<F> {
     /// The wait for the boot checks lasts 30 seconds at most. A capture check that fails reports
     /// a violation of the time ABI, which stops the VM in enforcing mode; in report-only mode,
     /// the preparation goes on, as `nvx-time pre-capture` does. A preparation that fails opens
-    /// the fence again, and leaves the detectors' settings as they were. One after which the
-    /// calling thread may still hold some of the permission for the time ABI's ports fails with
-    /// [`TimeError::PortRelease`], after which the thread must start neither a thread nor a
-    /// process, which would inherit it.
+    /// the fence again, and leaves the detectors' settings as they were: when it suppressed some
+    /// already, it restores their settings, and a failure to restore them is a
+    /// [`CaptureStage::Release`] error. One after which the calling thread may still hold some of
+    /// the permission for the time ABI's ports fails with [`TimeError::PortRelease`], after which
+    /// the thread must start neither a thread nor a process, which would inherit it.
     pub fn prepare(self) -> Result<CaptureBarrier<F>, CaptureError> {
         let system = LiveSystem {
             paths: Paths::default(),
@@ -220,20 +221,29 @@ impl<F: AdmissionFence> CapturePreparation<F> {
         };
         check_mounts(barrier.system.as_mut(), &devices)
             .map_err(|cause| CaptureError::new(CaptureStage::Mounts, cause))?;
-        barrier.system.pre_capture().map_err(|error| match error {
-            PreCaptureError::BootChecks(error) => {
-                CaptureError::new(CaptureStage::BootChecks, CaptureCause::Time(error))
+        if let Err(error) = barrier.system.pre_capture() {
+            // The barrier restores a suppression that the time ABI holds after a failure, as
+            // after a preparation that succeeded, and reports a failure to restore it.
+            if error.holds_suppression() {
+                barrier.suppressed = true;
+                barrier.release()?;
             }
-            PreCaptureError::CaptureChecks(error) | PreCaptureError::PortRelease(error) => {
-                CaptureError::new(CaptureStage::CaptureChecks, CaptureCause::Time(error))
-            }
-            PreCaptureError::Pending => {
-                CaptureError::new(CaptureStage::Suppression, CaptureCause::Pending)
-            }
-            PreCaptureError::Suppression(error) => {
-                CaptureError::new(CaptureStage::Suppression, CaptureCause::Io(error.into()))
-            }
-        })?;
+            return Err(match error {
+                PreCaptureError::BootChecks(error) => {
+                    CaptureError::new(CaptureStage::BootChecks, CaptureCause::Time(error))
+                }
+                PreCaptureError::CaptureChecks(error)
+                | PreCaptureError::PortRelease { error, .. } => {
+                    CaptureError::new(CaptureStage::CaptureChecks, CaptureCause::Time(error))
+                }
+                PreCaptureError::Pending => {
+                    CaptureError::new(CaptureStage::Suppression, CaptureCause::Pending)
+                }
+                PreCaptureError::Suppression(error) | PreCaptureError::Unrestored(error) => {
+                    CaptureError::new(CaptureStage::Suppression, CaptureCause::Io(error.into()))
+                }
+            });
+        }
         barrier.suppressed = true;
         Ok(barrier)
     }

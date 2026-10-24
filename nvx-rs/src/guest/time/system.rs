@@ -473,9 +473,21 @@ pub(crate) fn rates_load() -> Result<(u64, u64), Errno> {
 /// Saves the stall detectors' settings in the suppression record, and suppresses them for a
 /// snapshot capture; see [`Suppression::save`]. A record that exists already, of a pending
 /// capture, is `EEXIST`.
-pub(crate) fn suppression_save() -> Result<(), Errno> {
+pub(crate) fn suppression_save() -> Result<(), SaveError> {
     make_runtime_directories();
     SUPPRESSION.save()
+}
+
+/// Why a save of the stall detectors' settings failed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SaveError {
+    /// The save failed with this error, and left the settings as they were: it changed none, or
+    /// undid every change and removed its record. A record that exists already, of a pending
+    /// capture, is `EEXIST`, and stays that capture's.
+    Undone(Errno),
+    /// The save failed to suppress a detector with this error, then to undo every change, so it
+    /// kept its record, from which [`suppression_restore`] restores the settings.
+    Kept(Errno),
 }
 
 /// Formats a diagnostic: `prefix`, then the description of `error`.
@@ -513,36 +525,51 @@ impl Suppression<'_> {
     /// Saves the detectors' settings in the record, and suppresses the detectors, under the
     /// lock, so that no restore runs between its reads and its writes. A record that exists
     /// already, of a pending capture, is `EEXIST`. A save that fails before it created the
-    /// record changes nothing; one that fails after restores the settings that it changed, and
-    /// removes the record.
-    fn save(&self) -> Result<(), Errno> {
-        let _lock = sys::lock_file(self.lock, PRIVATE_FILE_MODE)?;
+    /// record changes nothing; one that fails after undoes its changes and removes the record,
+    /// or keeps the record if it can't.
+    fn save(&self) -> Result<(), SaveError> {
+        self.save_with(sys::write_number)
+    }
+
+    /// Implements [`save`](Self::save), with `write` writing a detector's setting.
+    fn save_with(
+        &self,
+        mut write: impl FnMut(&CStr, i64) -> Result<(), Errno>,
+    ) -> Result<(), SaveError> {
+        let _lock = sys::lock_file(self.lock, PRIVATE_FILE_MODE).map_err(SaveError::Undone)?;
         let mut saved = Vec::new();
         for (index, &(path, suppressed)) in self.detectors.iter().enumerate() {
             if let Err(error) = sys::check_exists(path) {
                 if index == 0 {
-                    return Err(error);
+                    return Err(SaveError::Undone(error));
                 }
                 continue;
             }
-            saved.push((path, sys::read_number::<i64>(path)?, suppressed));
+            let value = sys::read_number::<i64>(path).map_err(SaveError::Undone)?;
+            saved.push((path, value, suppressed));
         }
         let mut text = Vec::new();
         for (path, value, _) in &saved {
             text.extend_from_slice(path.to_bytes());
             text.extend_from_slice(format!("={value}\n").as_bytes());
         }
-        let record = CreatedFile::create(self.record, true, PRIVATE_FILE_MODE)?;
-        record.write_all(&text)?;
+        let record =
+            CreatedFile::create(self.record, true, PRIVATE_FILE_MODE).map_err(SaveError::Undone)?;
+        record.write_all(&text).map_err(SaveError::Undone)?;
         // As in the C program, a record that fails to close stays, and the suppression goes on.
         let _ = record.keep();
         for (written, &(path, _, suppressed)) in saved.iter().enumerate() {
-            if let Err(error) = sys::write_number(path, suppressed) {
+            if let Err(error) = write(path, suppressed) {
+                // The record stays unless every earlier write is undone, so that a restore can
+                // still restore the settings.
+                let mut undone = true;
                 for &(path, value, _) in &saved[..written] {
-                    let _ = sys::write_number(path, value);
+                    undone &= write(path, value).is_ok();
                 }
-                let _ = sys::unlink(self.record);
-                return Err(error);
+                if undone && sys::unlink(self.record).is_ok() {
+                    return Err(SaveError::Undone(error));
+                }
+                return Err(SaveError::Kept(error));
             }
         }
         Ok(())
@@ -1260,7 +1287,7 @@ pub(crate) mod tests {
         assert_eq!(sys::read_file(&test.record).unwrap(), record.as_bytes());
 
         // Another save finds the pending capture's record, and changes nothing.
-        assert_eq!(suppression.save(), Err(Errno::EEXIST));
+        assert_eq!(suppression.save(), Err(SaveError::Undone(Errno::EEXIST)));
         assert_eq!(test.settings(), suppressed);
         assert_eq!(sys::read_file(&test.record).unwrap(), record.as_bytes());
 
@@ -1285,7 +1312,7 @@ pub(crate) mod tests {
         let detectors = test.detectors();
         let suppression = test.suppression(&detectors);
         let unchanged = settings([None, Some("60"), Some("120")]);
-        assert_eq!(suppression.save(), Err(Errno::ENOENT));
+        assert_eq!(suppression.save(), Err(SaveError::Undone(Errno::ENOENT)));
         assert_eq!(sys::check_exists(&test.record), Err(Errno::ENOENT));
         assert_eq!(test.settings(), unchanged);
 
@@ -1294,25 +1321,67 @@ pub(crate) mod tests {
         std::fs::create_dir(std_path(&test.paths[0])).unwrap();
         let pending = b"/proc/sys/kernel/hung_task_timeout_secs=120\n";
         std::fs::write(std_path(&test.record), pending).unwrap();
-        assert!(suppression.save().is_err());
+        let error = suppression.save().unwrap_err();
+        assert!(matches!(error, SaveError::Undone(_)), "{error:?}");
         assert_eq!(sys::read_file(&test.record).unwrap(), pending);
         assert_eq!(test.settings(), unchanged);
     }
 
+    /// Returns a save's write of a detector's setting, which fails with `EIO` for each detector
+    /// and value of `failing`, and writes the others.
+    fn failing_writes<'a>(
+        failing: &'a [(&'a CStr, i64)],
+    ) -> impl FnMut(&CStr, i64) -> Result<(), Errno> + 'a {
+        move |path, value| {
+            let fails = failing
+                .iter()
+                .any(|&(failing, failing_value)| failing == path && failing_value == value);
+            if fails {
+                Err(Errno::EIO)
+            } else {
+                sys::write_number(path, value)
+            }
+        }
+    }
+
     #[test]
-    fn a_save_that_fails_to_suppress_a_detector_restores_the_others_and_removes_its_record() {
-        let test = TestDetectors::new([Some("0"), Some("60"), None]);
-        // The hung-task detector reads as a number, but nobody may write it, root included.
-        std::os::unix::fs::symlink("/proc/sys/kernel/ngroups_max", std_path(&test.paths[2]))
-            .unwrap();
-        let ngroups_max = test.settings()[2].clone();
-        assert!(ngroups_max.is_some());
+    fn a_save_that_fails_to_suppress_a_detector_undoes_its_writes_and_removes_its_record() {
+        let test = TestDetectors::new([Some("0"), Some("60"), Some("120")]);
         let detectors = test.detectors();
-        assert!(test.suppression(&detectors).save().is_err());
-        let [rcu, soft_lockup, hung_task] = test.settings();
-        assert_eq!(rcu.as_deref(), Some("0"));
-        assert_eq!(soft_lockup.as_deref(), Some("60"));
-        assert_eq!(hung_task, ngroups_max);
+        let suppression = test.suppression(&detectors);
+        let failing = [(test.paths[1].as_c_str(), 0)];
+        assert_eq!(
+            suppression.save_with(failing_writes(&failing)),
+            Err(SaveError::Undone(Errno::EIO))
+        );
+        assert_eq!(
+            test.settings(),
+            settings([Some("0"), Some("60"), Some("120")])
+        );
+        assert_eq!(sys::check_exists(&test.record), Err(Errno::ENOENT));
+    }
+
+    #[test]
+    fn a_save_that_fails_to_undo_a_write_keeps_its_record_for_a_restore() {
+        let test = TestDetectors::new([Some("0"), Some("60"), Some("120")]);
+        let detectors = test.detectors();
+        let suppression = test.suppression(&detectors);
+        // The soft-lockup detector can't be suppressed, nor RCU's stall warnings restored.
+        let failing = [(test.paths[1].as_c_str(), 0), (test.paths[0].as_c_str(), 0)];
+        assert_eq!(
+            suppression.save_with(failing_writes(&failing)),
+            Err(SaveError::Kept(Errno::EIO))
+        );
+        assert_eq!(
+            test.settings(),
+            settings([Some("1"), Some("60"), Some("120")])
+        );
+        // The record keeps the settings, which a restore restores.
+        suppression.restore(false).unwrap();
+        assert_eq!(
+            test.settings(),
+            settings([Some("0"), Some("60"), Some("120")])
+        );
         assert_eq!(sys::check_exists(&test.record), Err(Errno::ENOENT));
     }
 
