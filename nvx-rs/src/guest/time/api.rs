@@ -160,6 +160,27 @@ impl TimeAbi {
     pub fn restore_finish(&self, request: RestoreFinish) -> Result<(), TimeError> {
         released(restore_finish(&self.runtime(), request))
     }
+
+    /// Prepares the guest for a capture, as `nvx-time pre-capture` does: waits until the boot
+    /// checks have completed, for 30 seconds at most, since they start the time daemon that the
+    /// capture checks require, runs the capture checks, saves the stall detectors' settings and
+    /// suppresses the detectors, and records the capture checks.
+    ///
+    /// A capture check that fails reports a violation, which stops the VM in enforcing mode; a
+    /// report-only call goes on, as `nvx-time` does. A call that fails leaves the detectors as
+    /// they were: it restores the settings that it saved, and never touches those of a capture
+    /// that is pending already, [`PreCaptureError::Pending`].
+    /// [`cancel_capture`](Self::cancel_capture) restores the settings that it saved.
+    pub(crate) fn pre_capture(&self) -> Result<(), PreCaptureError> {
+        pre_capture(&self.runtime())
+    }
+
+    /// Restores the stall detectors' settings that [`pre_capture`](Self::pre_capture) saved, and
+    /// removes their record, as `nvx-time cancel-capture` does, or fails with its diagnostic,
+    /// such as `read /run/nvx/time-suppression: No such file or directory`.
+    pub(crate) fn cancel_capture(&self) -> Result<(), Vec<u8>> {
+        system::suppression_restore(false)
+    }
 }
 
 impl Default for TimeAbi {
@@ -257,6 +278,71 @@ fn read_generation_id(runtime: &Runtime<'_>) -> Result<GenerationId, TimeError> 
         portb_read(&ports, Port::PortbData, &mut id);
     }
     Ok(GenerationId::from_bytes(id))
+}
+
+/// Why [`TimeAbi::pre_capture`] failed.
+#[derive(Debug)]
+pub(crate) enum PreCaptureError {
+    /// The boot checks were still pending when the wait ended: a violation of check C10, which
+    /// a report-only call reports with its event.
+    BootChecks(TimeError),
+    /// The capture checks could not read the CPU sets: a violation of check C6, which a
+    /// report-only call reports with its event.
+    CaptureChecks(TimeError),
+    /// The stall detectors' settings are saved already, by a capture that is still pending.
+    Pending,
+    /// The stall detectors' settings could not be saved, or the detectors not suppressed, with
+    /// this error. The call restored the settings that it had saved.
+    Suppression(Errno),
+}
+
+/// The preparation of [`TimeAbi::pre_capture`].
+fn pre_capture(runtime: &Runtime<'_>) -> Result<(), PreCaptureError> {
+    let (state, completed) = checks::wait_for_checks(true);
+    if !completed {
+        return Err(PreCaptureError::BootChecks(check_failed(
+            runtime,
+            Phase::Capture,
+            CheckId::C10,
+            "the boot checks are still pending",
+        )));
+    }
+    let start = clock_ns(sys::Clock::Monotonic);
+    let cpu_start = cpu_time_ns();
+    runtime.set_generation(state.generation as u32);
+    let mut checks = Checks::load(Phase::Capture).map_err(|_| {
+        PreCaptureError::CaptureChecks(check_failed(
+            runtime,
+            Phase::Capture,
+            CheckId::C6,
+            "cannot read the CPU sets",
+        ))
+    })?;
+    checks::run_capture_checks(runtime, &mut checks);
+    let elapsed = clock_ns(sys::Clock::Monotonic).wrapping_sub(start);
+    let cpu = cpu_time_ns().wrapping_sub(cpu_start);
+    if let Err(error) = system::suppression_save() {
+        if error == Errno::EEXIST {
+            return Err(PreCaptureError::Pending);
+        }
+        let _ = system::suppression_restore(false);
+        return Err(PreCaptureError::Suppression(error));
+    }
+    if let Err(error) = checks::record_check(
+        runtime,
+        &checks,
+        elapsed / NSEC_PER_USEC,
+        cpu / NSEC_PER_USEC,
+        0,
+        0,
+    ) {
+        checks.fail(
+            runtime,
+            CheckId::C10,
+            format!("cannot record the capture check: {}", error.desc()),
+        );
+    }
+    Ok(())
 }
 
 /// How a snapshot treats the guest's scratch disk, which the capture request selects.
@@ -391,6 +477,21 @@ impl Restore {
     /// Returns the restore packet's online processor count, which `nvx-time capture` prints.
     pub(crate) fn online_vp_count(&self) -> u8 {
         self.online_vp_count
+    }
+}
+
+#[cfg(test)]
+impl Restore {
+    /// Returns an unfinished restore to the new VM generation ID `generation_id`, with nothing to
+    /// activate, as a test's fake capture returns one.
+    pub(crate) fn to(generation_id: GenerationId) -> Self {
+        Self {
+            flags: 0,
+            online_vp_count: 0,
+            generation_id,
+            memory_ranges: Vec::new(),
+            finished: false,
+        }
     }
 }
 

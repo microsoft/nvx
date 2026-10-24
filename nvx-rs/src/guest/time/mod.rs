@@ -63,6 +63,7 @@ use std::ffi::CString;
 use std::io::{self, Write};
 use std::process::ExitCode;
 
+pub(crate) use api::PreCaptureError;
 pub use api::{
     CaptureOutcome, CaptureRequest, ColdBoot, CpuSet, MemoryRange, Restore, RestoreFinish,
     ScratchPolicy, TimeAbi, TimeError, Violation,
