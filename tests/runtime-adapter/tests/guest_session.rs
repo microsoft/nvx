@@ -2740,7 +2740,9 @@ fn the_worker_ends_what_is_left_of_the_process_group_of_a_program_that_ended() {
     host.run_until(|host| host.executions[&2].output[0].ends_with(b"\n"));
     let second = host.executions[&2].group();
     reaped(second);
-    let (_, worked) = host.stop();
+    // The fake root lives until the check, as its workload cgroup, if any, ends what is left in it
+    // once it drops.
+    let (_root, worked) = host.stop();
     assert_eq!(worked.unwrap(), Worked::Stopped);
     gone(second);
 }
@@ -2879,8 +2881,9 @@ fn an_execution_that_does_not_settle_keeps_its_place_until_the_host_stops_the_wo
     }
     fill_but_one(&mut host, 2 + most);
 
-    // The stop ends the executions, and removes every cgroup, the fenced one's included.
-    let (_, worked) = host.stop();
+    // The stop ends the executions, and removes every cgroup, the fenced one's included. The fake
+    // root lives until the check, as its workload cgroup removes what is left in it once it drops.
+    let (_root, worked) = host.stop();
     assert_eq!(worked.unwrap(), Worked::Stopped);
     assert!(!cgroup.exists(), "{}", cgroup.display());
 }
