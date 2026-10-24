@@ -29,11 +29,15 @@
 //!   `/run/runtime-adapter` by default, in the overlay mode MODE, `trusted-lowers` or
 //!   `untrusted-lowers`, checks a scratch's journal against the policy POLICY, `allowed` or
 //!   `forbidden`, and refuses a first partition of a GPT disk larger than BYTES, with the guest's
-//!   defaults, `trusted-lowers`, `allowed`, and 64 KiB, unless given. The launch records the
-//!   bindings that STORE stages for the image and the scratch image, if any. Once attached, the
-//!   launch sends the root configuration, and exchanges the `Ping` and the `Echo` once the guest
-//!   assembled the root. If the guest reports that a stage of the root failed instead, the launch
-//!   waits for the VM to end, abandons it, and checks that the VM ended with the stage's status.
+//!   defaults, `trusted-lowers`, `allowed`, and 64 KiB, unless given. Before it spawns the VM, the
+//!   launch checks the bindings that STORE stages for the image and the scratch image, from their
+//!   metadata alone, and fails if STORE stages none for either, or one no longer holds, as for an
+//!   image that changed after it was staged. It hands OpenVMM the files that the checks opened,
+//!   which it holds until the guest has assembled the root, or until it has torn down a launch
+//!   that failed, and records the bindings. Once attached, the launch sends the root
+//!   configuration, and exchanges the `Ping` and the `Echo` once the guest assembled the root. If
+//!   the guest reports that a stage of the root failed instead, the launch waits for the VM to
+//!   end, abandons it, and checks that the VM ended with the stage's status.
 //! - `runtime-adapter-host reattach STORE` reattaches to the VM of STORE, which an earlier process
 //!   launched and which it holds although it is not its child, attaches a new session to it, in
 //!   the session's next epoch, and exchanges a `Ping`, leaving the VM running.
@@ -83,7 +87,6 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
-use nvx::Hypervisor;
 use nvx::host::artifacts::Artifacts;
 use nvx::host::instance::generate_capability;
 use nvx::host::launch::LaunchSpec;
@@ -94,6 +97,7 @@ use nvx::host::supervisor::{self, Reattached, Starting, StopOutcome, Vmm, VmmCom
 use nvx::protocol::CAPABILITY_LEN;
 use nvx::protocol::root::ImageFormat;
 use nvx::uuid::Uuid;
+use nvx::{ErrorKind, Hypervisor};
 use runtime_adapter::frame::MAX_BODY;
 use runtime_adapter::host::Client;
 use runtime_adapter::initramfs;
@@ -540,11 +544,16 @@ fn launch(
     let mut locked = store
         .lock(Some(Instant::now() + LOCK_TIMEOUT))
         .map_err(|error| describe(&error))?;
+    // The launch checks the bindings that the store stages for its images before it spawns
+    // anything. The prepared launch holds the files that the checks opened until the guest has
+    // assembled the root, or until a launch that failed is torn down, which ends its VM first:
+    // the launch, declared after it, drops first.
+    let mut prepared = None;
     if let Some(layered) = &mut layered {
-        // The launch records the bindings that the store stages for its images.
         if let Some(staged) = Staged::read(store.dir()).map_err(|error| describe(&error))? {
             layered.bindings = staged.bindings(&layered.plan);
         }
+        prepared = Some(layered.prepare().map_err(|error| binding_error(&error))?);
     }
     let capability = generate_capability().map_err(|error| describe(&error))?;
     let initramfs = store.dir().join(INITRAMFS_NAME);
@@ -564,16 +573,17 @@ fn launch(
             nvx::Error::io("cannot write the initramfs of the guest agent").with_source(error)
         })?;
         let outcome = store.outcome_path();
-        let (arguments, kernel_command_line) = match &layered {
-            Some(layered) => (
+        let (arguments, kernel_command_line) = match layered.as_ref().zip(prepared.as_ref()) {
+            Some((layered, prepared)) => (
                 layered.openvmm_arguments(
+                    prepared,
                     hypervisor,
                     &spec.kernel,
                     &spec.initrd,
                     endpoint,
                     &outcome,
-                )?,
-                layered.kernel_command_line()?,
+                ),
+                prepared.kernel_command_line().to_owned(),
             ),
             None => (
                 spec.openvmm_arguments(endpoint, &outcome)?,
@@ -585,7 +595,12 @@ fn launch(
             layered: layered.as_ref(),
         };
         record.write(store.dir())?;
-        Ok(VmmCommand::new(&spec.openvmm, arguments, store.dir()))
+        let mut command = VmmCommand::new(&spec.openvmm, arguments, store.dir());
+        // OpenVMM inherits the checked files that the prepared launch passes, and nothing else.
+        if let Some(prepared) = &prepared {
+            command.inherit = prepared.inherited();
+        }
+        Ok(command)
     })
     .map_err(|error| describe(&error))?;
     let process = starting.process().reference().clone();
@@ -615,7 +630,13 @@ fn launch(
                 ))
             })?;
         match reply {
-            RootReply::Ready => println!("root=ready"),
+            RootReply::Ready => {
+                println!("root=ready");
+                // The guest has assembled the root, so OpenVMM holds the images: the checked files
+                // can go, which releases their guards, while OpenVMM keeps the scratch image's
+                // claim.
+                drop(prepared);
+            }
             RootReply::Failed(failure) => {
                 print_failure(&failure);
                 drop(client);
@@ -662,6 +683,17 @@ fn print_failure(failure: &RootFailure) {
     println!("root=failed");
     println!("stage={}", failure.stage());
     println!("problem={}", escape(failure.problem()));
+}
+
+/// Describes `error`, of a launch that could not check the bindings of its images or prepare their
+/// handoff: a binding that the store does not stage, or that no longer holds, needs the images
+/// staged again, while a scratch image that another sandbox claims, and a failure of the host, do
+/// not.
+fn binding_error(error: &nvx::Error) -> String {
+    match error.kind() {
+        ErrorKind::Unavailable => format!("{}; stage the images first", describe(error)),
+        _ => describe(error),
+    }
 }
 
 /// Returns the body of the launch's `Echo`: the longest that the framing allows, of every byte

@@ -1,8 +1,9 @@
-//! The host program launches a VM of the guest agent through NVX's supervisor, and later processes
-//! of it reattach to the VM and stop it, as an orchestrator does after it restarts, on a real
-//! hypervisor, through public APIs only.
+//! The host program stages an image and launches a VM of the guest agent with a layered root
+//! through NVX's supervisor, and later processes of it reattach to the VM and stop it, as an
+//! orchestrator does after it restarts, on a real hypervisor, through public APIs only.
 //!
-//! The tests boot VMs, so they are ignored. They read what the `common` module lists.
+//! The tests boot VMs, so they are ignored. They read what the `common` module lists, and boot its
+//! fixtures: NVX's Ubuntu EROFS image over a copy of the scratch template.
 //!
 //! ```text
 //! cargo test --locked --features host -- --ignored
@@ -11,11 +12,36 @@
 
 mod common;
 
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
+use std::fs;
 
 use nvx::host::process::Process;
 
-use common::{Printed, Sandbox, epoch};
+use common::{Fixtures, Printed, Sandbox, epoch};
+
+/// Stages the fixtures' image over a copy of the scratch template in `sandbox`, launches a VM of
+/// them, whose guest assembles the root, and returns what the launch printed.
+fn launch(sandbox: &mut Sandbox) -> Printed {
+    let fixtures = Fixtures::find();
+    let scratch = sandbox.root.join("scratch.ext4");
+    fs::copy(&fixtures.scratch, &scratch).unwrap();
+    let mut distro = OsString::from("erofs:");
+    distro.push(&fixtures.distro);
+    let mut upper = OsString::from("scratch:");
+    upper.push(&scratch);
+    let images = [
+        OsStr::new("--distro"),
+        &distro,
+        OsStr::new("--distro-identity"),
+        OsStr::new(&fixtures.identity),
+        OsStr::new("--upper"),
+        &upper,
+    ];
+    sandbox.run("stage", &images, 0);
+    let launched = sandbox.launch(&images, 0);
+    assert_eq!(launched["root"], "ready");
+    launched
+}
 
 /// Checks that a command stopped the VM of `vmm` that `launched` printed, with the guest agent's
 /// confirmation, after it attached a session in an epoch after `earlier`'s: the VM exited with
@@ -47,7 +73,7 @@ fn assert_stopped(
 fn a_restarted_host_program_reattaches_to_the_vm_and_stops_it() {
     let mut sandbox = Sandbox::new("restart");
     // The launching process has exited, and the VM runs on.
-    let launched = sandbox.launch(&[], 0);
+    let launched = launch(&mut sandbox);
     let vmm = sandbox
         .vmm()
         .expect("the VM runs after its launcher exited");
@@ -70,7 +96,7 @@ fn a_restarted_host_program_reattaches_to_the_vm_and_stops_it() {
 #[ignore = "boots a VM; see the module documentation for what it needs"]
 fn a_host_program_of_another_runtime_finds_the_vm_mismatched_and_signals_nothing() {
     let mut sandbox = Sandbox::new("identity");
-    let launched = sandbox.launch(&[], 0);
+    let launched = launch(&mut sandbox);
     let record = sandbox.record();
     let vmm = sandbox
         .vmm()

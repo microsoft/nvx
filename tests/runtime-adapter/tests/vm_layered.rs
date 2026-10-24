@@ -2,17 +2,15 @@
 //! through `nvx::guest::root` in a process of its own, never PID 1, on a real hypervisor, through
 //! public APIs only.
 //!
-//! Each scenario of the table that [`scenarios!`] declares is an ignored test, which launches a VM
-//! with a [`Root`] and checks what it [`Expect`]s: a root that the guest assembles, which the
-//! scenario probes and the stop tears down, or the stage of the root that fails. A new scenario is
-//! a new row, with its own checks, through the probes of the worker.
+//! Each scenario of the table that [`scenarios!`] declares is an ignored test, which stages the
+//! images of a [`Root`], launches a VM with it, and checks what it [`Expect`]s: a root that the
+//! guest assembles, which the scenario probes and the stop tears down, the stage of the root that
+//! fails, or a launch that the host program refuses before it spawns the VM, since the scenario
+//! changed what it staged. A new scenario is a new row, with its own checks, through the probes of
+//! the worker.
 //!
-//! The tests boot VMs, so they are ignored. Besides what the `common` module lists, they read the
-//! fixtures that NVX's own layered scenarios use, from NVX's artifacts in `NVX_ARTIFACTS_DIR`:
-//!
-//! - the Ubuntu EROFS image, `ubuntu-distro.erofs`, and its manifest, which holds its UUID;
-//! - the scratch template, `ubuntu-smoke-scratch.ext4`, an empty ext4 file system that NVX's CI
-//!   makes with the guest artifacts, of which each scenario boots a copy.
+//! The tests boot VMs, so they are ignored. Besides what the `common` module lists, they read its
+//! fixtures, those of NVX's own layered scenarios, from NVX's artifacts in `NVX_ARTIFACTS_DIR`.
 //!
 //! A scenario of a GPT disk writes the disk first, from the scratch template: its first
 //! partition, opaque bytes, then a copy of the template, the base layer, and a small layer that the
@@ -30,23 +28,22 @@
 mod common;
 
 use std::collections::BTreeSet;
-use std::env;
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, File};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use nvx::gpt::{Disk, Expected, ExpectedPartition};
-use nvx::host::artifacts::{ArtifactDir, Artifacts, Guest};
 use nvx::uuid::Uuid;
-use runtime_adapter::layered::RECORD_NAME;
+use runtime_adapter::layered::{RECORD_NAME, STAGED_NAME};
 use runtime_adapter::root::{DEFAULT_RUNTIME, JournalPolicy, OverlayMode, RootConfig, RootStage};
 use serde_json::{Value, json};
 
-use common::{Printed, Sandbox};
+use common::{Fixtures, Printed, Sandbox};
 
-/// The scratch template among NVX's artifacts.
-const SCRATCH_TEMPLATE: &str = "ubuntu-smoke-scratch.ext4";
+/// The exit status of the host program's command that failed, after a diagnostic.
+const FAILED: i32 = 1;
 /// The exit status of the host program's command whose guest reported that a stage of the root
 /// failed.
 const ROOT_FAILED: i32 = 4;
@@ -91,49 +88,6 @@ const LAYER_BLOCKS: usize = 128;
 /// The number of inodes of that layer, of which the first ten are reserved, as in every ext2 file
 /// system, and the second is its top directory.
 const LAYER_INODES: usize = 16;
-
-/// The fixtures of the scenarios, among NVX's artifacts.
-struct Fixtures {
-    /// NVX's Ubuntu EROFS image.
-    distro: PathBuf,
-    /// The image's UUID, from its manifest.
-    identity: String,
-    /// The scratch template.
-    scratch: PathBuf,
-}
-
-impl Fixtures {
-    /// Finds the fixtures among NVX's artifacts in `NVX_ARTIFACTS_DIR`.
-    fn find() -> Self {
-        let directory = env::var_os(Artifacts::ENV_DIR)
-            .unwrap_or_else(|| panic!("{} must name NVX's artifacts", Artifacts::ENV_DIR));
-        let artifacts = ArtifactDir::from_dir(directory).unwrap();
-        let distro = artifacts.distro_layer(Guest::Ubuntu).unwrap();
-        let manifest = artifacts.distro_manifest(Guest::Ubuntu).unwrap();
-        let scratch = artifacts.artifact(SCRATCH_TEMPLATE);
-        for (path, fixture) in [
-            (&distro, "the Ubuntu EROFS image"),
-            (&manifest, "the manifest of the Ubuntu EROFS image"),
-            (
-                &scratch,
-                "the scratch template, an empty ext4 file system, which `mkfs.ext4` makes",
-            ),
-        ] {
-            assert!(path.is_file(), "{fixture} is missing: {}", path.display());
-        }
-        let manifest: Value = serde_json::from_str(&fs::read_to_string(&manifest).unwrap())
-            .expect("the manifest is JSON");
-        let identity = manifest["uuid"]
-            .as_str()
-            .expect("the manifest holds the image's UUID")
-            .to_owned();
-        Self {
-            distro,
-            identity,
-            scratch,
-        }
-    }
-}
 
 /// The image of a scenario's root.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -250,28 +204,34 @@ impl Root {
         }
     }
 
-    /// Returns the launch's options of the root, with the image `distro`, and the `scratch` image
-    /// for a root over a scratch.
-    fn options(&self, distro: &Distro, scratch: &Path) -> Vec<OsString> {
+    /// Returns the options that name the images of the launch, which staging takes as they are:
+    /// the image `distro`, and the `scratch` image for a root over a scratch.
+    fn images(&self, distro: &Distro, scratch: &Path) -> Vec<OsString> {
         let mut image = OsString::from(format!("{}:", distro.format));
         image.push(&distro.path);
-        let upper = match self.upper {
-            Upper::Scratch => {
-                let mut upper = OsString::from("scratch:");
-                upper.push(scratch);
-                upper
-            }
-            Upper::Ram => "ram".into(),
-        };
         let mut options = [
             "--distro".into(),
             image,
             "--distro-identity".into(),
             distro.identity.clone().into(),
-            "--upper".into(),
-            upper,
         ]
         .to_vec();
+        if self.upper == Upper::Scratch {
+            let mut upper = OsString::from("scratch:");
+            upper.push(scratch);
+            options.extend(["--upper".into(), upper]);
+        }
+        options
+    }
+
+    /// Returns the launch's options of the root, with the image `distro`, and the `scratch` image
+    /// for a root over a scratch: its [images](Self::images), an upper in RAM for a root that is
+    /// not over a scratch, and the options of the root configuration that the root names.
+    fn options(&self, distro: &Distro, scratch: &Path) -> Vec<OsString> {
+        let mut options = self.images(distro, scratch);
+        if self.upper == Upper::Ram {
+            options.extend(["--upper".into(), "ram".into()]);
+        }
         if let Some(runtime) = self.runtime {
             options.extend(["--runtime-dir".into(), runtime.into()]);
         }
@@ -310,6 +270,54 @@ enum Expect {
     /// The guest reports that the stage failed with this problem, and the VM ends with its
     /// status, before the guest mounted a scratch.
     Fails(RootStage, &'static str),
+    /// The scenario makes this change between its staging and its launch, which the host program
+    /// then refuses with this problem, before it spawns the VM. Once the scenario stages the
+    /// images again, the guest assembles the root, which [`check_root`] probes, and the stop tears
+    /// it down.
+    Refused(Change, &'static str),
+}
+
+/// What a scenario changes between its staging and its launch.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Change {
+    /// It stages nothing.
+    Unstaged,
+    /// It changes the image in place: it writes its first sector again, as it was, then moves its
+    /// modification time an hour on, so that the change shows whatever the granularity of the
+    /// file system's times.
+    Image,
+    /// It replaces the scratch image with a copy of the template, a file of its own, which takes
+    /// the image's path.
+    Scratch,
+}
+
+impl Change {
+    /// Makes the change to the image `distro` or to the `scratch` image, a copy of the template in
+    /// the `fixtures`.
+    fn make(self, distro: &Distro, scratch: &Path, fixtures: &Fixtures) {
+        match self {
+            Self::Unstaged => {}
+            Self::Image => {
+                let mut file = File::options()
+                    .read(true)
+                    .write(true)
+                    .open(&distro.path)
+                    .unwrap();
+                let modified = file.metadata().unwrap().modified().unwrap();
+                let mut sector = [0; SECTOR as usize];
+                file.read_exact(&mut sector).unwrap();
+                file.seek(SeekFrom::Start(0)).unwrap();
+                file.write_all(&sector).unwrap();
+                file.set_modified(modified + Duration::from_secs(3600))
+                    .unwrap();
+            }
+            Self::Scratch => {
+                let copy = scratch.with_extension("copy");
+                fs::copy(&fixtures.scratch, &copy).unwrap();
+                fs::rename(&copy, scratch).unwrap();
+            }
+        }
+    }
 }
 
 /// A scenario: a VM with a layered root, and what the scenario expects of it.
@@ -538,6 +546,29 @@ scenarios! {
         root: ROOT,
         expect: Expect::Ready(check_root_profiles),
     };
+    /// Images that the store does not stage, which the launch refuses before it spawns the VM.
+    unstaged_images_are_refused_before_spawn: Scenario {
+        root: ROOT,
+        expect: Expect::Refused(Change::Unstaged, "the sandbox's store stages no image at "),
+    };
+    /// A GPT disk that changed after it was staged, which the launch refuses before it spawns the
+    /// VM.
+    a_changed_image_is_refused_before_spawn: Scenario {
+        root: GPT,
+        expect: Expect::Refused(
+            Change::Image,
+            "changed after its distro binding was made: its modification time differs",
+        ),
+    };
+    /// A scratch image that another file replaced after it was staged, which the launch refuses
+    /// before it spawns the VM.
+    a_replaced_scratch_is_refused_before_spawn: Scenario {
+        root: ROOT,
+        expect: Expect::Refused(
+            Change::Scratch,
+            "changed after its scratch binding was made: its identity differs",
+        ),
+    };
 }
 
 /// Runs the scenario `name`, `scenario`.
@@ -551,8 +582,26 @@ fn run(name: &str, scenario: Scenario) {
         fs::copy(&fixtures.scratch, &scratch).unwrap();
     }
     let distro = root.distro(&fixtures, &sandbox.root);
+    let images = root.images(&distro, &scratch);
+    let images = images.iter().map(OsString::as_os_str).collect::<Vec<_>>();
     let options = root.options(&distro, &scratch);
     let options = options.iter().map(OsString::as_os_str).collect::<Vec<_>>();
+    if let Expect::Refused(change, problem) = scenario.expect {
+        if change != Change::Unstaged {
+            sandbox.run("stage", &images, 0);
+        }
+        change.make(&distro, &scratch, &fixtures);
+        let refused = sandbox.launch(&options, FAILED);
+        assert!(refused.is_empty(), "{refused:?}");
+        let stderr = sandbox.stderr();
+        assert!(
+            stderr.contains(problem) && stderr.contains("; stage the images first"),
+            "{stderr}"
+        );
+        sandbox.assert_unlaunched();
+    }
+    // Each launch checks the images that the scenario staged.
+    sandbox.run("stage", &images, 0);
     let (check, failure) = match scenario.expect {
         Expect::Fails(stage, problem) => {
             let launched = sandbox.launch(&options, ROOT_FAILED);
@@ -571,6 +620,7 @@ fn run(name: &str, scenario: Scenario) {
         }
         Expect::Ready(check) => (check, None),
         Expect::TeardownFails(check, problem) => (check, Some(problem)),
+        Expect::Refused(..) => (check_root as fn(&mut Vm<'_>), None),
     };
     let launched = sandbox.launch(&options, 0);
     assert_eq!(launched["root"], "ready");
@@ -630,16 +680,27 @@ fn assert_failed(printed: &Printed, stage: RootStage, problem: &str) {
 }
 
 /// Checks what the launch recorded in the sandbox's store: a VM with the layered `root` of the
-/// image `distro`, over `scratch` or RAM, the image of the identity that the launch expects, no
-/// bindings, since the scenario staged nothing, the boot tokens of its plan alone, after the
-/// launch's own, and the root configuration that the host sent, whether or not the guest accepted
-/// it, which it returns.
+/// image `distro`, over `scratch` or RAM, the image of the identity that the launch expects, the
+/// bindings that the store stages for the images, which the launch checked, the boot tokens of its
+/// plan alone, after the launch's own, and the root configuration that the host sent, whether or
+/// not the guest accepted it, which it returns.
 fn check_record(sandbox: &Sandbox, root: &Root, distro: &Distro, scratch: &Path) -> RootConfig {
-    let record = fs::read_to_string(sandbox.store.join(RECORD_NAME)).unwrap();
-    let record: Value = serde_json::from_str(&record).unwrap();
+    let read = |name: &str| -> Value {
+        serde_json::from_str(&fs::read_to_string(sandbox.store.join(name)).unwrap()).unwrap()
+    };
+    let record = read(RECORD_NAME);
     assert_eq!(record["format"], 2);
     assert_eq!(record["mode"], "layered");
-    assert_eq!(record["bindings"], json!({"distro": null, "scratch": null}));
+    let staged = read(STAGED_NAME);
+    let scratch_binding = match root.upper {
+        Upper::Scratch => staged["scratch"]["binding"].clone(),
+        Upper::Ram => Value::Null,
+    };
+    assert_eq!(
+        record["bindings"],
+        json!({"distro": staged["distro"]["binding"], "scratch": scratch_binding})
+    );
+    assert_ne!(record["bindings"]["distro"], Value::Null);
     let plan = &record["plan"];
     assert_eq!(plan["distro"]["format"], distro.format);
     assert_eq!(plan["distro"]["identity"], distro.identity.as_str());
