@@ -207,8 +207,9 @@ pub const EXECUTING: &str = "the worker runs executions, and probes nothing unti
 /// The most executions that the worker runs at once, those that the host abandoned included, and
 /// those that ended but keep their places: with cgroups, those whose cgroups the worker has not
 /// removed, as those of the executions that did not settle, and without them, those whose
-/// programs the worker forgot before it collected their statuses.
-pub const MAX_EXECUTIONS: usize = 8;
+/// programs the worker forgot before it collected their statuses. The host's side knows it as
+/// [`exec::MAX_EXECUTIONS`](crate::exec::MAX_EXECUTIONS).
+pub const MAX_EXECUTIONS: usize = crate::exec::MAX_EXECUTIONS;
 
 /// The most bytes that one execution may hold in the worker: what its runner holds, a chunk of
 /// each output stream and the input's window. The output that waits for the session's stream

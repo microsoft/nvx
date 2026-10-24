@@ -1,5 +1,7 @@
 //! The encodings of the execution messages: round trips, the layout of a start, the bodies that
-//! break the rules, and a peer and a runner that exchange their messages through the frames.
+//! break the rules, and a peer and a runner that exchange their messages through the frames; and
+//! the host's side of an execution, which sends the cancellation of one that it gives up on at
+//! once, and cancels one whose stream outgrows what it keeps.
 
 use std::time::{Duration, Instant};
 
@@ -8,7 +10,10 @@ use nvx::exec::{
     Timers, Window, peer, runner,
 };
 
-use super::{AccountMode, GuestMessage, HostMessage, Identity, KEY_LEN, MAX_CHUNK, Start, name};
+use super::{
+    AccountMode, GuestMessage, HostExecution, HostMessage, Identity, KEY_LEN, MAX_CAPTURE,
+    MAX_CHUNK, Start, name,
+};
 use crate::frame::{MAX_BODY, Message};
 
 /// The key of most executions in these tests.
@@ -654,4 +659,97 @@ fn a_peer_and_a_runner_exchange_their_messages_through_the_frames() {
         .flat_map(|(stdout, stderr)| [*stdout, *stderr])
         .collect::<Vec<_>>();
     assert_eq!(interleaved, input);
+}
+
+#[test]
+fn the_host_s_side_sends_the_cancellation_of_an_execution_that_it_gives_up_on_at_once() {
+    // Without grace or settlement time, the host's side gives up on an execution in the step that
+    // ends it, for its timeout or its caller's cancellation, and still sends the cancellation.
+    let now = Instant::now();
+    let immediate = Timers::new(Duration::ZERO, Duration::ZERO);
+    let timeout = Duration::from_secs(1);
+    for (timers, cause) in [
+        (immediate.timeout(timeout), Cause::TimedOut),
+        (immediate, Cause::Cancelled),
+    ] {
+        let start = Start::new(KEY, shared(), timers, ["/bin/program"]);
+        let mut execution = HostExecution::new(start, timers, Vec::new(), now);
+        // The credit that opens the output's pool.
+        assert_eq!(execution.serve(now).len(), 1, "{cause:?}");
+        assert!(execution.outcome().is_none(), "{cause:?}");
+        let later = now + timeout;
+        if cause == Cause::Cancelled {
+            execution.peer_mut().cancel(later);
+        }
+        assert_eq!(
+            execution.serve(later),
+            [HostMessage::Cancel(KEY, cause).encode()],
+            "{cause:?}"
+        );
+        let outcome = execution.outcome().expect("the host's side gave up");
+        assert_eq!((outcome.cause(), outcome.status()), (Some(cause), None));
+        assert!(!outcome.is_reusable(), "{cause:?}");
+        assert!(execution.serve(later).is_empty(), "{cause:?}");
+    }
+}
+
+#[test]
+fn the_host_s_side_keeps_at_most_max_capture_bytes_of_a_stream_and_cancels_the_rest() {
+    // A program that writes a chunk to its standard output at each step, without end: the host's
+    // side keeps the first MAX_CAPTURE bytes, then cancels the execution, and its peer, without
+    // grace, discards the rest at once. The runner takes and drops what the program writes once
+    // it discards the stream, so each step writes once.
+    let now = Instant::now();
+    let timers = Timers::new(Duration::ZERO, Duration::from_secs(5));
+    let start = Start::new(KEY, shared(), timers, ["/usr/bin/yes"]);
+    let mut host = HostExecution::new(start, timers, Vec::new(), now);
+    let mut runner = Runner::new(KEY, shared(), timers, now);
+    runner.launched(Ok(()));
+    let written = vec![b'y'; shared().chunk()];
+    let mut buffer = vec![0u8; shared().chunk()];
+    let mut running = true;
+    for _ in 0..2 * MAX_CAPTURE / written.len() {
+        if host.outcome().is_some() {
+            break;
+        }
+        for frame in host.serve(now) {
+            match HostMessage::decode(&frame).unwrap().unwrap() {
+                HostMessage::Credit(key, pool, units) => runner.credit(key, pool, units),
+                HostMessage::Cancel(key, cause) => runner.cancel(now, key, cause),
+                message => panic!("{message:?}"),
+            }
+            .unwrap();
+        }
+        if running {
+            runner.output(Stream::Stdout, &written);
+        }
+        while let Some(request) = runner.next_request() {
+            match request {
+                runner::Request::Terminate(_) => {
+                    running = false;
+                    for stream in Stream::ALL {
+                        runner.output_closed(stream);
+                    }
+                    runner.exited(now, Some(Status::Signaled(15)));
+                }
+                runner::Request::Settle => runner.settled(Settlement::Settled),
+                _ => {}
+            }
+        }
+        while let Some(message) = runner.next_message(&mut buffer) {
+            let frame = GuestMessage::from_runner(KEY, message, &buffer)
+                .unwrap()
+                .encode();
+            let decoded = GuestMessage::decode(&frame).unwrap().unwrap();
+            host.deliver(&decoded, now).unwrap();
+        }
+    }
+    let outcome = host.outcome().expect("the execution finished");
+    let kept = host.output(Stream::Stdout);
+    assert_eq!(kept.len(), MAX_CAPTURE);
+    assert!(kept.iter().all(|byte| *byte == b'y'));
+    assert!(host.output(Stream::Stderr).is_empty());
+    assert_eq!(outcome.cause(), Some(Cause::Cancelled));
+    assert!(outcome.is_truncated(Stream::Stdout));
+    assert!(!outcome.is_truncated(Stream::Stderr));
 }

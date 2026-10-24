@@ -20,21 +20,21 @@
 //! children.
 //!
 //! The worker's executions run behind the test broker too, whose host side drives the engine's
-//! peers: the tests cover several executions at once, byte-exact, a stalled sink and a full
-//! stream to the host, which stall only what waits on them, executions that take turns at the
-//! stream, timeouts, cancellations, and stops, the starts, messages, and probes that the worker
-//! refuses, generations and resets, the descendants that a program leaves in its process group,
-//! and executions on a tty. The fake root prepares each execution's entry, as the worker
-//! describes it, in a directory of the tests' own that holds account databases, and then spawns
-//! the program without entering a root, which needs privileges, in the tests' own root and
-//! identity: the tests cover the identity that exactly one source names, the sandbox's or the
-//! start's, the entry's inputs, a program's working directory and environment, and the starts
-//! that the worker refuses for their identities. Where the tests can create cgroups, each fake
-//! root gives the worker a workload cgroup of the test's own, below which the executions run in
-//! cgroups of their own, and settle: the tests then also cover a descendant that leaves its
-//! program's process group, which the settlement ends, and an execution that does not settle,
-//! which keeps its place until the host stops the worker. Elsewhere, the programs run in process
-//! groups alone.
+//! peers through the host program's own `exec::HostExecution`: the tests cover several executions
+//! at once, byte-exact, a stalled sink and a full stream to the host, which stall only what waits
+//! on them, executions that take turns at the stream, timeouts, cancellations, and stops, the
+//! starts, messages, and probes that the worker refuses, generations and resets, the descendants
+//! that a program leaves in its process group, and executions on a tty. The fake root prepares
+//! each execution's entry, as the worker describes it, in a directory of the tests' own that holds
+//! account databases, and then spawns the program without entering a root, which needs
+//! privileges, in the tests' own root and identity: the tests cover the identity that exactly one
+//! source names, the sandbox's or the start's, the entry's inputs, a program's working directory
+//! and environment, and the starts that the worker refuses for their identities. Where the tests
+//! can create cgroups, each fake root gives the worker a workload cgroup of the test's own, below
+//! which the executions run in cgroups of their own, and settle: the tests then also cover a
+//! descendant that leaves its program's process group, which the settlement ends, and an execution
+//! that does not settle, which keeps its place until the host stops the worker. Elsewhere, the
+//! programs run in process groups alone.
 #![cfg(all(feature = "guest", target_os = "linux"))]
 
 use std::collections::BTreeMap;
@@ -59,9 +59,7 @@ use nix::pty;
 use nix::sys::signal::{self, Signal};
 use nix::sys::wait::{self, Id, WaitPidFlag, WaitStatus};
 use nix::unistd::Pid;
-use nvx::exec::{
-    Cause, Key, LaunchFailure, Limits, Outcome, Peer, Pool, Status, Stream, Timers, Window, peer,
-};
+use nvx::exec::{Cause, Key, LaunchFailure, Limits, Outcome, Pool, Status, Stream, Timers, Window};
 use nvx::guest::cgroup::Layout;
 use nvx::guest::entry::{self, Capabilities, Capability, Prepared};
 use nvx::guest::nvxs::GuestConnectionError;
@@ -72,7 +70,9 @@ use nvx::protocol::nvxs::{
 };
 use nvx::protocol::root::{RootImage, RootLayout, RootUpper};
 use nvx::uuid::Uuid;
-use runtime_adapter::exec::{self, AccountMode, GuestMessage, HostMessage, MAX_CHUNK, Start};
+use runtime_adapter::exec::{
+    self, AccountMode, GuestMessage, HostExecution, HostMessage, MAX_CHUNK, Start,
+};
 use runtime_adapter::frame::{Decoder, FrameError, HEADER_LEN, MAX_BODY, Message};
 use runtime_adapter::guest::{self, NO_ROOT, RECEIVE_WINDOW, ServeError, Served};
 use runtime_adapter::probe::{Facts, Probe};
@@ -2191,14 +2191,6 @@ fn lines(first: usize, last: usize) -> Vec<u8> {
         .into_bytes()
 }
 
-/// Returns `stream`'s position in [`Stream::ALL`].
-fn position(stream: Stream) -> usize {
-    match stream {
-        Stream::Stdout => 0,
-        Stream::Stderr => 1,
-    }
-}
-
 /// Waits until no process of the process group `group` runs, as once an execution ended the
 /// program that leads it.
 fn gone(group: u32) {
@@ -2241,93 +2233,24 @@ fn reaped(id: u32) {
     }
 }
 
-/// The host's side of one of the worker's executions in a test: its peer, with a sink that takes
-/// the output unless it stalls, and a source that hands over the input, then ends it.
-struct HostExecution {
-    /// The execution's start.
-    start: Start,
-    /// The host's side of the execution.
-    peer: Peer,
-    /// Whether the sink takes nothing.
-    stalled: bool,
-    /// The bytes of each stream that the sink took.
-    output: [Vec<u8>; 2],
-    /// The input that the source hands over, if the start says that the host sends it.
-    input: Vec<u8>,
-    /// How many bytes of the input the source handed over.
-    sent: usize,
-    /// Whether the source ended the input.
-    ended: bool,
-    /// The peer's events, in order.
-    events: Vec<peer::Event>,
-}
-
-impl HostExecution {
-    /// Returns the host's side of the execution of `start`, created at `now`, with a source of
-    /// `input`.
-    fn new(start: Start, input: Vec<u8>, now: Instant) -> Self {
-        let peer = Peer::new(start.key, start.limits, timers(), now);
-        Self {
-            start,
-            peer,
-            stalled: false,
-            output: [Vec::new(), Vec::new()],
-            input,
-            sent: 0,
-            ended: false,
-            events: Vec::new(),
-        }
-    }
-
-    /// Takes every step that the source, the sink, and the peer can take at `now`, and returns
-    /// the peer's messages for the guest.
-    fn serve(&mut self, now: Instant) -> Vec<Message> {
-        if self.start.input && !self.ended {
-            self.sent += self.peer.input(&self.input[self.sent..]);
-            if self.sent == self.input.len() {
-                self.peer.end_input();
-                self.ended = true;
-            }
-        }
-        if !self.stalled {
-            for stream in Stream::ALL {
-                loop {
-                    let pending = self.peer.pending_output(stream);
-                    if pending.is_empty() {
-                        break;
-                    }
-                    let length = pending.len();
-                    self.output[position(stream)].extend_from_slice(pending);
-                    self.peer.consumed(stream, length);
-                }
-            }
-        }
-        self.peer.tick(now);
-        while let Some(event) = self.peer.next_event() {
-            self.events.push(event);
-        }
-        let mut buffer = vec![0; self.start.limits.chunk()];
-        let mut messages = Vec::new();
-        while let Some(message) = self.peer.next_message(&mut buffer) {
-            let message = HostMessage::from_peer(self.start.key, message, &buffer)
-                .expect("the framing carries every message of the peer");
-            messages.push(message.encode());
-        }
-        messages
-    }
-
-    /// Returns the execution's outcome, once the peer finished.
-    fn outcome(&self) -> Option<Outcome> {
-        self.events.iter().find_map(|event| match event {
-            peer::Event::Finished(outcome) => Some(*outcome),
-            _ => None,
-        })
-    }
+/// What the tests read of the host's side of one of the worker's executions, a
+/// [`HostExecution`], besides what it tells itself.
+trait Taken {
+    /// Returns the bytes of each stream that the sink took, in the order of [`Stream::ALL`].
+    fn outputs(&self) -> [Vec<u8>; 2];
 
     /// Returns the process ID that the program printed on its first line, that of the process
     /// group that it leads.
+    fn group(&self) -> u32;
+}
+
+impl Taken for HostExecution {
+    fn outputs(&self) -> [Vec<u8>; 2] {
+        Stream::ALL.map(|stream| self.output(stream).to_vec())
+    }
+
     fn group(&self) -> u32 {
-        let output = String::from_utf8_lossy(&self.output[0]);
+        let output = String::from_utf8_lossy(self.output(Stream::Stdout));
         output.lines().next().unwrap().parse().unwrap()
     }
 }
@@ -2385,8 +2308,9 @@ impl Host {
     fn start_then(&mut self, start: Start, input: Vec<u8>, after: &[Message]) {
         let mut messages = vec![HostMessage::Start(start.clone()).encode()];
         messages.extend_from_slice(after);
-        let execution = HostExecution::new(start, input, Instant::now());
-        self.executions.insert(execution.start.key.id(), execution);
+        let execution = HostExecution::new(start, timers(), input, Instant::now());
+        self.executions
+            .insert(execution.start().key.id(), execution);
         self.send(&messages);
     }
 
@@ -2427,8 +2351,8 @@ impl Host {
                 .executions
                 .get_mut(&decoded.key().id())
                 .expect("the guest's message names an execution that the host started");
-            decoded
-                .deliver(&mut execution.peer, now)
+            execution
+                .deliver(&decoded, now)
                 .expect("the peer accepts the guest's message");
         }
     }
@@ -2504,7 +2428,7 @@ fn check_lossless(host: &Host, id: u64, status: Status) {
         assert!(!outcome.is_truncated(stream), "{id}: {stream:?}");
     }
     assert_eq!(outcome.is_reusable(), cgroups(), "{id}");
-    let peer = &host.executions[&id].peer;
+    let peer = host.executions[&id].peer();
     assert!(peer.high_water() <= peer.memory_bound(), "{id}");
 }
 
@@ -2525,16 +2449,19 @@ fn the_worker_runs_executions_at_once_with_frame_counted_credit_and_one_output_p
     );
     let both = "seq 1 30000; seq 30001 60000 >&2; exit 7";
     host.start(start_of(3, shell(both)), Vec::new());
-    host.run_until(|host| !host.executions[&1].output[0].is_empty());
+    host.run_until(|host| !host.executions[&1].output(Stream::Stdout).is_empty());
     host.send(&[Message::Ping]);
     host.run_until(|host| {
         host.replies.contains(&Message::Pong) && (1..=3).all(|id| host.outcome(id).is_some())
     });
     assert_eq!(host.replies, [Message::Pong]);
-    assert_eq!(host.executions[&1].output, [lines(1, 300_000), Vec::new()]);
-    assert_eq!(host.executions[&2].output, [input, Vec::new()]);
     assert_eq!(
-        host.executions[&3].output,
+        host.executions[&1].outputs(),
+        [lines(1, 300_000), Vec::new()]
+    );
+    assert_eq!(host.executions[&2].outputs(), [input, Vec::new()]);
+    assert_eq!(
+        host.executions[&3].outputs(),
         [lines(1, 30_000), lines(30_001, 60_000)]
     );
     check_lossless(&host, 1, Status::Exited(0));
@@ -2550,7 +2477,7 @@ fn a_stalled_sink_stalls_only_its_own_execution_while_timers_cancellations_and_c
     // program blocks once its pipe is full.
     let mut host = Host::new();
     host.start(start_of(1, shell("exec cat /dev/zero")), Vec::new());
-    host.execution(1).stalled = true;
+    host.execution(1).stall(true);
     // Another execution streams to its end meanwhile, a third one's timeout ends it in time, and
     // the host's ping is answered.
     host.start(start_of(2, shell("seq 1 200000")), Vec::new());
@@ -2569,18 +2496,21 @@ fn a_stalled_sink_stalls_only_its_own_execution_while_timers_cancellations_and_c
             && host.outcome(2).is_some()
             && host.outcome(3).is_some()
     });
-    assert_eq!(host.executions[&2].output, [lines(1, 200_000), Vec::new()]);
+    assert_eq!(
+        host.executions[&2].outputs(),
+        [lines(1, 200_000), Vec::new()]
+    );
     check_lossless(&host, 2, Status::Exited(0));
     let timed = host.outcome(3).unwrap();
     assert_eq!(timed.cause(), Some(Cause::TimedOut));
     assert!(started.elapsed() < timeout + GRACE + Duration::from_secs(2));
     let stalled = &host.executions[&1];
-    assert!(stalled.outcome().is_none() && stalled.peer.buffered() > 0);
-    assert!(stalled.output[0].is_empty());
+    assert!(stalled.outcome().is_none() && stalled.peer().buffered() > 0);
+    assert!(stalled.output(Stream::Stdout).is_empty());
 
     // The stalled execution's cancellation ends it within its grace, with its output truncated.
     let cancelled = Instant::now();
-    host.execution(1).peer.cancel(cancelled);
+    host.execution(1).peer_mut().cancel(cancelled);
     host.run_until(|host| host.outcome(1).is_some());
     assert!(cancelled.elapsed() < GRACE + Duration::from_secs(2));
     let outcome = host.outcome(1).unwrap();
@@ -2649,7 +2579,9 @@ fn a_full_stream_to_the_host_holds_back_only_output_while_cancellations_and_stop
             Vec::new(),
         );
     }
-    host.run_until(|host| (1..=4).all(|id| host.executions[&id].output[0].contains(&b'\n')));
+    host.run_until(|host| {
+        (1..=4).all(|id| host.executions[&id].output(Stream::Stdout).contains(&b'\n'))
+    });
     let groups = (1..=4)
         .map(|id| host.executions[&id].group())
         .collect::<Vec<_>>();
@@ -2663,7 +2595,7 @@ fn a_full_stream_to_the_host_holds_back_only_output_while_cancellations_and_stop
     // the others, while the stream stays full.
     assert!(host.broker.room >= 1024, "{}", host.broker.room);
     let now = Instant::now();
-    host.execution(1).peer.cancel(now);
+    host.execution(1).peer_mut().cancel(now);
     let cancel = host.execution(1).serve(now);
     host.send(&cancel);
     gone(groups[0]);
@@ -2698,7 +2630,7 @@ fn executions_that_write_without_end_take_turns_at_the_stream_to_the_host() {
     }
 
     // Each takes a fair part of what the stream carries.
-    let taken = |host: &Host, id: u64| host.executions[&id].output[0].len();
+    let taken = |host: &Host, id: u64| host.executions[&id].output(Stream::Stdout).len();
     let total = |host: &Host| taken(host, 1) + taken(host, 2);
     host.run_until(|host| total(host) >= 16 * 1024 * 1024);
     let total = total(&host);
@@ -2718,7 +2650,11 @@ fn the_worker_refuses_starts_beyond_its_limits_with_a_failed_launch() {
     for id in 1..=most {
         host.start(start_of(id, shell("exec sleep 60")), Vec::new());
     }
-    host.run_until(|host| host.executions.values().all(|side| side.peer.has_started()));
+    host.run_until(|host| {
+        host.executions
+            .values()
+            .all(|side| side.peer().has_started())
+    });
     host.start(start_of(most + 1, shell("exit 0")), Vec::new());
     host.run_until(|host| host.outcome(most + 1).is_some());
     let refused = host.outcome(most + 1).unwrap();
@@ -2726,13 +2662,13 @@ fn the_worker_refuses_starts_beyond_its_limits_with_a_failed_launch() {
     assert_eq!(refused.launch_failure(), Some(again));
     assert_eq!(refused.status(), None);
     assert!(!refused.is_reusable());
-    assert!(!host.executions[&(most + 1)].peer.has_started());
+    assert!(!host.executions[&(most + 1)].peer().has_started());
 
     // Once those ended, it refuses an execution that would hold more than it holds for one, and
     // reports a program that it cannot find.
     let now = Instant::now();
     for id in 1..=most {
-        host.execution(id).peer.cancel(now);
+        host.execution(id).peer_mut().cancel(now);
     }
     host.run_until(|host| (1..=most).all(|id| host.outcome(id).is_some()));
     for id in 1..=most {
@@ -2827,7 +2763,7 @@ fn a_reset_or_a_later_generation_abandons_executions_whose_programs_end() {
     host.run_until(|host| {
         [1, 2]
             .iter()
-            .all(|id| host.executions[id].output[0].ends_with(b"\n"))
+            .all(|id| host.executions[id].output(Stream::Stdout).ends_with(b"\n"))
     });
     let (first, second) = (host.executions[&1].group(), host.executions[&2].group());
 
@@ -2843,7 +2779,7 @@ fn a_reset_or_a_later_generation_abandons_executions_whose_programs_end() {
     host.start_then(later, Vec::new(), &[stale]);
     host.run_until(|host| host.outcome(2).is_some());
     assert_eq!(
-        host.executions[&2].output,
+        host.executions[&2].outputs(),
         [b"later\n".to_vec(), Vec::new()]
     );
     check_lossless(&host, 2, Status::Exited(0));
@@ -2853,12 +2789,12 @@ fn a_reset_or_a_later_generation_abandons_executions_whose_programs_end() {
     // executions of the new epoch.
     host.broker.reset_in_flight(Identity { epoch: 2, ..FIRST });
     let now = Instant::now();
-    host.execution(1).peer.reset(now);
+    host.execution(1).peer_mut().reset(now);
     gone(first);
     host.start(start_of(3, shell("echo again")), Vec::new());
     host.run_until(|host| host.outcome(1).is_some() && host.outcome(3).is_some());
     assert_eq!(
-        host.executions[&3].output,
+        host.executions[&3].outputs(),
         [b"again\n".to_vec(), Vec::new()]
     );
     check_lossless(&host, 3, Status::Exited(0));
@@ -2871,7 +2807,7 @@ fn a_reset_or_a_later_generation_abandons_executions_whose_programs_end() {
 fn the_worker_ends_its_executions_when_the_host_stops_it() {
     let mut host = Host::new();
     host.start(start_of(1, shell("echo $$; exec sleep 60")), Vec::new());
-    host.run_until(|host| host.executions[&1].output[0].ends_with(b"\n"));
+    host.run_until(|host| host.executions[&1].output(Stream::Stdout).ends_with(b"\n"));
     let group = host.executions[&1].group();
     let (root, worked) = host.stop();
     assert_eq!(worked.unwrap(), Worked::Stopped);
@@ -2891,9 +2827,9 @@ fn the_worker_collects_the_status_of_a_program_that_outlives_its_execution() {
         Start::new(Key::new(1, 1), shared_limits(), instant, sleeper),
         Vec::new(),
     );
-    host.run_until(|host| host.executions[&1].output[0].ends_with(b"\n"));
+    host.run_until(|host| host.executions[&1].output(Stream::Stdout).ends_with(b"\n"));
     let program = host.executions[&1].group();
-    host.execution(1).peer.cancel(Instant::now());
+    host.execution(1).peer_mut().cancel(Instant::now());
     host.run_until(|host| host.outcome(1).is_some());
     let outcome = host.outcome(1).unwrap();
     assert_eq!(outcome.cause(), Some(Cause::Cancelled));
@@ -2927,7 +2863,7 @@ fn the_worker_ends_what_is_left_of_the_process_group_of_a_program_that_ended() {
     // A stop once the worker collected the status of such a program leaves no process of the
     // group running either.
     host.start(start_of(2, leaving()), Vec::new());
-    host.run_until(|host| host.executions[&2].output[0].ends_with(b"\n"));
+    host.run_until(|host| host.executions[&2].output(Stream::Stdout).ends_with(b"\n"));
     let second = host.executions[&2].group();
     reaped(second);
     let (_, worked) = host.stop();
@@ -2939,7 +2875,7 @@ fn the_worker_ends_what_is_left_of_the_process_group_of_a_program_that_ended() {
 /// standard output of the execution `id`, and the directory of the program's cgroup from the next
 /// line, which `/proc/self/cgroup` gave.
 fn process_and_cgroup(host: &Host, id: u64, line: usize) -> (u32, PathBuf) {
-    let output = String::from_utf8(host.executions[&id].output[0].clone()).unwrap();
+    let output = String::from_utf8(host.executions[&id].output(Stream::Stdout).to_vec()).unwrap();
     let mut lines = output.lines().skip(line);
     let process = lines.next().unwrap().parse().unwrap();
     let cgroup = lines.next().unwrap().strip_prefix("0::/").unwrap();
@@ -2974,7 +2910,7 @@ fn an_execution_s_settlement_ends_a_descendant_that_left_its_process_group() {
     for id in 2..=most + 1 {
         host.start(start_of(id, shell("exec sleep 60")), Vec::new());
     }
-    host.run_until(|host| (2..=most + 1).all(|id| host.executions[&id].peer.has_started()));
+    host.run_until(|host| (2..=most + 1).all(|id| host.executions[&id].peer().has_started()));
     let (_, worked) = host.stop();
     assert_eq!(worked.unwrap(), Worked::Stopped);
 }
@@ -3040,7 +2976,7 @@ fn an_execution_that_does_not_settle_keeps_its_place_until_the_host_stops_the_wo
     );
     host.start(start, Vec::new());
     host.run_until(|host| {
-        let output = &host.executions[&1].output[0];
+        let output = host.executions[&1].output(Stream::Stdout);
         output.iter().filter(|&&byte| byte == b'\n').count() == 2
     });
     let (program, cgroup) = process_and_cgroup(&host, 1, 0);
@@ -3086,7 +3022,7 @@ fn fill_but_one(host: &mut Host, first: u64) {
     }
     host.run_until(|host| {
         ids.clone()
-            .all(|id| host.executions[&id].peer.has_started())
+            .all(|id| host.executions[&id].peer().has_started())
     });
     let refused = ids.end;
     host.start(start_of(refused, shell("exit 0")), Vec::new());
@@ -3095,7 +3031,7 @@ fn fill_but_one(host: &mut Host, first: u64) {
     assert_eq!(host.outcome(refused).unwrap().launch_failure(), Some(again));
     let now = Instant::now();
     for id in ids.clone() {
-        host.execution(id).peer.cancel(now);
+        host.execution(id).peer_mut().cancel(now);
     }
     host.run_until(|host| ids.clone().all(|id| host.outcome(id).is_some()));
     for id in ids {
@@ -3124,9 +3060,12 @@ fn an_execution_runs_in_its_working_directory_with_exactly_its_environment() {
         check_lossless(&host, id, Status::Exited(0));
     }
     let printed = environment.map(|entry| format!("{entry}\n")).concat();
-    assert_eq!(host.executions[&1].output[0], printed.as_bytes());
     assert_eq!(
-        host.executions[&2].output[0],
+        host.executions[&1].output(Stream::Stdout),
+        printed.as_bytes()
+    );
+    assert_eq!(
+        host.executions[&2].output(Stream::Stdout),
         format!("{directory}\n").as_bytes()
     );
     let (root, worked) = host.stop();
@@ -3261,7 +3200,7 @@ fn the_worker_refuses_at_stage_0_a_start_whose_identity_breaks_the_rules() {
     }
     host.run_until(|host| {
         ids.clone()
-            .all(|id| host.executions[&id].peer.has_started())
+            .all(|id| host.executions[&id].peer().has_started())
     });
     let (_, worked) = host.stop();
     assert_eq!(worked.unwrap(), Worked::Stopped);
@@ -3294,7 +3233,7 @@ fn an_execution_that_starts_with_the_root_counts_its_timeout_from_its_own_start(
         timed,
         shell("exec sleep 0.2"),
     );
-    let execution = HostExecution::new(start.clone(), Vec::new(), Instant::now());
+    let execution = HostExecution::new(start.clone(), timers(), Vec::new(), Instant::now());
     let mut host = Host {
         broker,
         working: Some(working),
@@ -3322,7 +3261,7 @@ fn a_host_that_a_test_drops_while_its_broker_pauses_ends_the_worker_and_its_prog
         start_of(1, shell("echo $$; exec cat /dev/zero")),
         Vec::new(),
     );
-    host.run_until(|host| host.executions[&1].output[0].contains(&b'\n'));
+    host.run_until(|host| host.executions[&1].output(Stream::Stdout).contains(&b'\n'));
     let group = host.executions[&1].group();
     host.broker.pause();
     let working = host.working.take().unwrap();
@@ -3407,7 +3346,7 @@ fn the_worker_runs_executions_on_a_tty() {
     host.start(start_of(1, shell(script)), Vec::new());
     host.run_until(|host| host.outcome(1).is_some());
     assert_eq!(
-        host.executions[&1].output,
+        host.executions[&1].outputs(),
         [lines(1, 100_000), lines(1, 1000)]
     );
     check_lossless(&host, 1, Status::Exited(0));
