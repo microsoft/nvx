@@ -679,7 +679,8 @@ impl HostExecution {
     }
 
     /// Takes every step that the source, the sink, and the peer can take at `now`, and returns
-    /// the peer's messages for the guest, as frames, in order.
+    /// the peer's messages for the guest, as frames, in order, the cancellation of an execution
+    /// that the peer gave up on in this step included.
     pub fn serve(&mut self, now: Instant) -> Vec<Message> {
         if self.start.input && !self.ended {
             self.sent += self.peer.input(&self.input[self.sent..]);
@@ -702,15 +703,18 @@ impl HostExecution {
             }
         }
         self.peer.tick(now);
-        while let Some(event) = self.peer.next_event() {
-            self.events.push(event);
-        }
+        // The messages go first: a peer without grace or settlement time gives up on an
+        // execution in the step that ends it, and its last event, once taken, discards the
+        // cancellation that waits to be sent.
         let mut buffer = vec![0; self.start.limits.chunk()];
         let mut messages = Vec::new();
         while let Some(message) = self.peer.next_message(&mut buffer) {
             if let Some(message) = HostMessage::from_peer(self.start.key, message, &buffer) {
                 messages.push(message.encode());
             }
+        }
+        while let Some(event) = self.peer.next_event() {
+            self.events.push(event);
         }
         messages
     }

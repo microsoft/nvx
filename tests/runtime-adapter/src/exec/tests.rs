@@ -1,5 +1,7 @@
 //! The encodings of the execution messages: round trips, the layout of a start, the bodies that
-//! break the rules, and a peer and a runner that exchange their messages through the frames.
+//! break the rules, and a peer and a runner that exchange their messages through the frames; and
+//! the host's side of an execution, which sends the cancellation of one that it gives up on at
+//! once.
 
 use std::time::{Duration, Instant};
 
@@ -8,7 +10,10 @@ use nvx::exec::{
     Timers, Window, peer, runner,
 };
 
-use super::{AccountMode, GuestMessage, HostMessage, Identity, KEY_LEN, MAX_CHUNK, Start, name};
+use super::{
+    AccountMode, GuestMessage, HostExecution, HostMessage, Identity, KEY_LEN, MAX_CHUNK, Start,
+    name,
+};
 use crate::frame::{MAX_BODY, Message};
 
 /// The key of most executions in these tests.
@@ -654,4 +659,36 @@ fn a_peer_and_a_runner_exchange_their_messages_through_the_frames() {
         .flat_map(|(stdout, stderr)| [*stdout, *stderr])
         .collect::<Vec<_>>();
     assert_eq!(interleaved, input);
+}
+
+#[test]
+fn the_host_s_side_sends_the_cancellation_of_an_execution_that_it_gives_up_on_at_once() {
+    // Without grace or settlement time, the host's side gives up on an execution in the step that
+    // ends it, for its timeout or its caller's cancellation, and still sends the cancellation.
+    let now = Instant::now();
+    let immediate = Timers::new(Duration::ZERO, Duration::ZERO);
+    let timeout = Duration::from_secs(1);
+    for (timers, cause) in [
+        (immediate.timeout(timeout), Cause::TimedOut),
+        (immediate, Cause::Cancelled),
+    ] {
+        let start = Start::new(KEY, shared(), timers, ["/bin/program"]);
+        let mut execution = HostExecution::new(start, timers, Vec::new(), now);
+        // The credit that opens the output's pool.
+        assert_eq!(execution.serve(now).len(), 1, "{cause:?}");
+        assert!(execution.outcome().is_none(), "{cause:?}");
+        let later = now + timeout;
+        if cause == Cause::Cancelled {
+            execution.peer_mut().cancel(later);
+        }
+        assert_eq!(
+            execution.serve(later),
+            [HostMessage::Cancel(KEY, cause).encode()],
+            "{cause:?}"
+        );
+        let outcome = execution.outcome().expect("the host's side gave up");
+        assert_eq!((outcome.cause(), outcome.status()), (Some(cause), None));
+        assert!(!outcome.is_reusable(), "{cause:?}");
+        assert!(execution.serve(later).is_empty(), "{cause:?}");
+    }
 }

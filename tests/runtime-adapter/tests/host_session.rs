@@ -12,7 +12,8 @@
 //! the mapping table in parts, and `Start`, and each failure of the order, after which the host
 //! sends nothing more, or stops the guest. The broker's guest also runs the runners of NVX's
 //! execution engine for the executions that the host program's driver runs, so that the tests cover
-//! the driver's output, credit, outcomes, and timers, and the refusals that end its run.
+//! the driver's output, credit, outcomes, and timers, the refusals that end its run, and a guest
+//! that stops reading.
 #![cfg(feature = "host")]
 
 use std::collections::{BTreeMap, VecDeque};
@@ -2192,14 +2193,41 @@ fn the_driver_fires_the_timers_of_its_executions_while_the_guest_says_nothing() 
     assert_eq!(outcome.status(), None);
     assert!(!outcome.is_reusable());
 
-    // A run whose deadline passes before its executions finish fails.
+    // A run whose deadline passes before its executions finish fails, in a receive, which leaves
+    // the client usable: the guest takes the start's credit, then answers a ping.
     let (mut broker, client) = attached(FIRST, usize::MAX);
     let running = run(client, vec![start_of(1)], Instant::now() + SHORT);
     broker.messages(1);
-    let (_, ran) = joined(running);
+    let (client, ran) = joined(running);
     assert!(
         matches!(ran, Err(ExecutionsError::TimedOut)),
         "{:?}",
         ran.err()
     );
+    broker.messages(1);
+    let pinging = spawn(client, |client| client.ping(deadline()));
+    assert_eq!(broker.answer(OUTER_MAX_PAYLOAD), Message::Ping);
+    joined(pinging).1.unwrap();
+}
+
+#[test]
+fn the_driver_s_sends_wait_for_a_guest_that_stops_reading_until_the_deadline_of_its_run() {
+    // The guest takes the start, then stops reading, and the host's stream holds 16 bytes, so the
+    // driver's next send, the credit of the output's pool, waits for the transport until the
+    // run's deadline, whose timeout ends the client.
+    let (mut broker, client) = attach_over(connect_bounded(FIRST, usize::MAX, 16));
+    let started = Instant::now();
+    let running = run(client, vec![start_of(1)], started + SHORT);
+    assert_eq!(
+        broker.messages(1),
+        [HostMessage::Start(start_of(1)).encode()]
+    );
+    let (mut client, ran) = joined(running);
+    assert!(started.elapsed() >= SHORT);
+    assert!(
+        matches!(ran, Err(ExecutionsError::TimedOut)),
+        "{:?}",
+        ran.err()
+    );
+    assert_ended(&mut client);
 }

@@ -85,7 +85,11 @@ impl From<ClientError> for ExecutionsError {
 /// guest's messages to the executions, and theirs to the guest, until every execution finished.
 /// One thread runs them all: each receive waits at most until the earliest timer of the
 /// executions, which so fires in time whatever the guest sends, and the guest's messages about one
-/// execution never wait for another's.
+/// execution never wait for another's. Each send waits, as the client's do, until the transport
+/// takes the message or the run's deadline passes, and no timer fires meanwhile: a guest that
+/// stops reading the session holds the run until its deadline, when the run fails, and the send's
+/// timeout ends the client. The adapter's guest agent keeps reading the session while its own
+/// messages wait, until more than 4 MiB of them do, as its worker describes.
 ///
 /// The guest ends its session on a second start of the same key, even in a later epoch of the
 /// session, so the keys of the executions must differ from those of every execution that the guest
@@ -132,7 +136,8 @@ impl Executions {
 
     /// Carries the guest's messages to the executions, and theirs to the guest, over `client`,
     /// until every execution finished, and fails with [`ExecutionsError::TimedOut`] once
-    /// `deadline` passed first.
+    /// `deadline` passed first: in a receive, which leaves the client usable, or in a send, which
+    /// ends it.
     pub fn run(&mut self, client: &mut Client, deadline: Instant) -> Result<(), ExecutionsError> {
         loop {
             let now = Instant::now();
