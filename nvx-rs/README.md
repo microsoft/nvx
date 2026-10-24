@@ -54,9 +54,11 @@ nvx-rs/
 │   │                the typed calls through which it runs the time ABI's steps and the reseed
 │   └── bin/         nvx-rs, nvx-fake-openvmm, and the guest binaries
 ├── tests/           fake-OpenVMM, CLI, NVXS session, process-supervision, checked-handoff, store,
-│                    and guest-binary tests, the store's record fixtures, the golden fixtures that
-│                    Python recorded for the ports of its code, in fixtures/, and the conformance
-│                    vectors of the wire formats, in vectors/
+│                    and guest-binary tests, the CLI's scenario tests and their harness, in cli/,
+│                    the store's record fixtures, the hand-written sandbox configurations of every
+│                    format, and the golden fixtures that Python recorded for the ports of its
+│                    code, in fixtures/, and the conformance vectors of the wire formats, in
+│                    vectors/
 ├── build.rs         bundled-release staging
 └── artifacts.json   the NVX release that the `bundled` feature stages
 ```
@@ -744,7 +746,7 @@ name and holds them until it exits, after `fake_block_delay_ms=MS` if asked,
 and records what each held in `fake-openvmm-TOKEN-blocks.json` next to the
 kernel. A managed `start` also reads the root's
 [runtime identity](#runtime-identity), so a test root holds build provenance,
-as the roots of the golden scenarios do.
+as the roots of the CLI tests do.
 
 ```bash
 cd nvx-rs
@@ -802,6 +804,18 @@ there, played its run scenarios with `nvx-rs run`, and found no difference,
 before [microsoft/nvx#638](https://github.com/microsoft/nvx/issues/638) retired
 it with the Python implementation of `nvx.py run`; since `nvx.py run` runs
 `nvx-rs`, these scenarios are its reference too.
+
+The scenario tests of `tests/cli/` replace these transcripts with checks of
+what callers rely on; see [Testing](#testing).
+[microsoft/nvx#728](https://github.com/microsoft/nvx/issues/728) retires the
+scenarios and their replay, and until then `tests/cli/scenarios.rs` maps each
+scenario of either section, and the regressions of
+[microsoft/nvx#369](https://github.com/microsoft/nvx/issues/369),
+[#373](https://github.com/microsoft/nvx/issues/373),
+[#462](https://github.com/microsoft/nvx/issues/462),
+[#464](https://github.com/microsoft/nvx/issues/464), and
+[#513](https://github.com/microsoft/nvx/issues/513), to the tests that check
+what it checked, and fails for a scenario that maps to none.
 
 ## Features
 
@@ -1042,9 +1056,22 @@ NVX_BUNDLE=skip cargo test --all-features   # unit, conformance-vector, property
 ```
 
 The tests need no hypervisor. The fake-OpenVMM test drives `Instance` end to end
-against `nvx-fake-openvmm`, and the CLI test replays the
-[golden scenarios](#golden-scenarios) and checks the guest-feature
-requirement and, on Linux, Ctrl-C. The
+against `nvx-fake-openvmm`. The CLI test runs `nvx-rs` with `nvx-fake-openvmm`
+as OpenVMM, in a fresh artifact root for each scenario, and its scenario tests,
+in `tests/cli/`, check from tables of cases what callers rely on: exit
+statuses; errors, by their [codes](#error-codes) and by stable fragments of
+their messages, such as option names, values, and paths; the entries of state
+directories, their records, parsed, and their POSIX modes; and the arguments
+that OpenVMM receives, which the fake OpenVMM records, and into which the `>> `
+line of a run splits back, with `CommandLineToArgvW` on Windows and a
+shell-word splitter on POSIX, as a property test checks for arbitrary kernel
+command lines too. The tables cover usage errors and help, the checks that
+refuse a command line before anything changes, dry runs, one-shot runs, the
+lifecycles of sandboxes of every configuration, their executions, the refusals
+of lifecycle operations, configurations of every format, from the hand-written
+`config.json` files of `tests/fixtures/state/`, `egress compile`, and
+`artifacts`. The CLI test also replays the [golden scenarios](#golden-scenarios)
+and checks the guest-feature requirement and, on Linux, Ctrl-C. The
 [conformance vectors](tests/vectors/README.md) of the wire formats cover both
 sides of every record, frame, and payload: the codec decodes each vector of
 `tests/vectors/nvxc-v1.txt` to its values and encodes them to its bytes, it

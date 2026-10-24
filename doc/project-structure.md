@@ -110,7 +110,7 @@ nvx/
 |   |   |-- testing/             Fake OpenVMM (feature `testing`)
 |   |   |-- guest/               Programs that run in Linux guests, the guest's NVXS connection, the libraries through which any guest init or agent opens the terminal on which it serves its session, starts a program, collects its children's statuses, settles its executions' cgroups, drives each execution, mounts host mappings beneath the descriptors of the roots that it names, assembles and tears down a layered root, and reads a GPT disk's partition table through its block device, and the typed calls through which it runs the time ABI's steps and the reseed (feature `guest`)
 |   |   `-- bin/                 nvx-rs CLI, nvx-fake-openvmm test double, and the guest binaries
-|   |-- tests/                   Fake-OpenVMM instance lifecycle, sandbox store, CLI, NVXS session, guest-binary, and hypervisor managed-lifecycle tests, the store's record fixtures, the golden fixtures that Python recorded, and the conformance vectors of the wire formats
+|   |-- tests/                   Fake-OpenVMM instance lifecycle, sandbox store, CLI scenario, NVXS session, guest-binary, and hypervisor managed-lifecycle tests, the store's record fixtures and sandbox configurations of every format, the golden fixtures that Python recorded, and the conformance vectors of the wire formats
 |   |-- build.rs                 Stages the bundled artifacts (feature `bundled`)
 |   `-- artifacts.json           Release package pinned for the bundled artifacts
 |-- openvmm/                     OpenVMM Git submodule

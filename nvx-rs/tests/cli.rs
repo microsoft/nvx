@@ -1,9 +1,21 @@
-//! Replays the scenarios of `tests/fixtures/cli.json` with the `nvx-rs` binary, and checks what
-//! `nvx-rs` adds to `nvx.py`.
+//! The tests of the `nvx-rs` CLI, which run it in fresh artifact roots with `nvx-fake-openvmm` as
+//! OpenVMM.
 //!
-//! The retired `scripts/nvx_rs_fixtures.py` recorded the scenarios from the Python
-//! implementation of `nvx.py sandbox`, which `nvx-rs` replaced, and from the Python functions
-//! behind `nvx-rs egress compile` and `nvx-rs artifacts`, and the retired
+//! The scenario tests of `tests/cli/` check what callers of `nvx-rs` rely on, as the [`harness`]
+//! observes it: exit statuses, errors by their codes and stable fragments, the entries of state
+//! directories and their records, parsed, POSIX file modes, and the arguments that OpenVMM
+//! receives. Their tables cover usage errors and help ([`usage`]), the checks that refuse a command
+//! line before anything changes ([`validation`]), dry runs and the splitting of their `>> ` lines
+//! ([`dry_run`]), one-shot runs ([`one_shot`]), the lifecycles of managed sandboxes, their
+//! executions, and the refusals of their operations ([`lifecycle`]), the configurations of every
+//! format ([`formats`]), `egress compile` ([`egress`]), and `artifacts` ([`artifacts`]).
+//!
+//! `nvx_rs_reproduces_the_recorded_scenarios` replays the scenarios of `tests/fixtures/cli.json`
+//! with the `nvx-rs` binary, until the scenario tests retire it (microsoft/nvx#728), and
+//! [`scenarios`] maps each scenario to the tests that replace it. The retired
+//! `scripts/nvx_rs_fixtures.py` recorded the scenarios from the Python implementation of
+//! `nvx.py sandbox`, which `nvx-rs` replaced, and from the Python functions behind
+//! `nvx-rs egress compile` and `nvx-rs artifacts`, and the retired
 //! `scripts/nvx_rs_run_fixtures.py` recorded those whose names start with `run, ` from the
 //! Python implementation of `nvx.py run`, with `nvx-fake-openvmm` as OpenVMM, in a section for
 //! POSIX hosts and one for Windows. Each scenario runs here in a fresh root, with
@@ -12,13 +24,37 @@
 //! replaced with the placeholders that the scripts used, and the devices, file IDs, and times
 //! that the bindings of `config.json` record, the file identities that its export plan records,
 //! and the numbers of the descriptors that name a launch's checked files, with `{int}` and
-//! `{hex32}` as well. Now that `nvx.py run` and `nvx.py sandbox` run `nvx-rs`, the recordings are
-//! their reference: a deliberate change of behavior updates them by hand.
+//! `{hex32}` as well. A deliberate change of behavior updates the recordings by hand.
+//!
+//! The other tests check what `nvx-rs` adds to `nvx.py`.
 #![cfg(all(
     feature = "cli",
     feature = "testing",
     any(target_os = "linux", windows)
 ))]
+
+#[path = "cli/artifacts.rs"]
+mod artifacts;
+#[path = "cli/dry_run.rs"]
+mod dry_run;
+#[path = "cli/egress.rs"]
+mod egress;
+#[path = "cli/formats.rs"]
+mod formats;
+#[path = "cli/harness.rs"]
+mod harness;
+#[path = "cli/lifecycle.rs"]
+mod lifecycle;
+#[path = "cli/one_shot.rs"]
+mod one_shot;
+#[path = "cli/openvmm.rs"]
+mod openvmm;
+#[path = "cli/scenarios.rs"]
+mod scenarios;
+#[path = "cli/usage.rs"]
+mod usage;
+#[path = "cli/validation.rs"]
+mod validation;
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -30,12 +66,10 @@ use std::time::{Duration, Instant};
 use nvx::host::process::{Process, ProcessRef};
 use serde_json::{Value, json};
 
+use self::harness::{FAKE_OPENVMM, NVX_RS, Root, canonical};
+
 /// The recorded scenarios.
 const FIXTURE: &str = include_str!("fixtures/cli.json");
-/// The CLI under test.
-const NVX_RS: &str = env!("CARGO_BIN_EXE_nvx-rs");
-/// The fake OpenVMM, which the root of every scenario holds as its OpenVMM executable.
-const FAKE_OPENVMM: &str = env!("CARGO_BIN_EXE_nvx-fake-openvmm");
 /// The section of the fixture for this host.
 const PLATFORM: &str = if cfg!(windows) { "windows" } else { "posix" };
 /// The files whose permissions the CLI sets, which the fixture records on POSIX hosts.
@@ -50,212 +84,90 @@ const MODE_NAMES: [&str; 5] = [
 /// How many scenarios run at once.
 const PARALLELISM: usize = 4;
 
-/// A fresh scenario root, removed on drop after the fake OpenVMM processes that it records end.
-struct Root {
-    /// The temporary directory.
-    _directory: tempfile::TempDir,
-    /// Its canonical path, as Python's `Path.resolve()` gives it.
-    path: PathBuf,
+/// Replaces the root and the volatile values of an output with the fixture's placeholders.
+fn normalize(root: &Root, text: &str) -> String {
+    let raw = root.text();
+    let escaped = python_json_escape(raw);
+    let mut text = text.to_owned();
+    if escaped != raw {
+        text = text.replace(&escaped, "{root_json}");
+    }
+    text = text.replace(raw, "{root}");
+    // The seals of a distro binding hold the device, file ID, and times of the layer, and an
+    // export plan the device and index of the objects that a workload could move.
+    for prefix in [
+        "\"pid\": ",
+        "\"start_time\": ",
+        "\"startTime\": ",
+        "\"device\": ",
+        "\"index\": ",
+        "\"seconds\": ",
+        "\"nanoseconds\": ",
+    ] {
+        text = replace_after(&text, prefix, |c| c.is_ascii_digit(), None, "{int}");
+    }
+    text = replace_after(&text, "openvmm-microvm-", is_hex, Some(32), "{hex32}");
+    for prefix in [
+        "\"operation_id\": \"",
+        "\"instance_id\": \"",
+        "\"fileId\": \"",
+        "\"launch\": \"",
+        "\"boot\": \"",
+    ] {
+        text = replace_after(&text, prefix, is_hex, Some(32), "{hex32}");
+    }
+    // On Linux, a launch names its checked files by the descriptors that OpenVMM inherits.
+    replace_after(
+        &text,
+        "/proc/self/fd/",
+        |c| c.is_ascii_digit(),
+        None,
+        "{int}",
+    )
 }
 
-impl Root {
-    fn new() -> Self {
-        let directory = tempfile::Builder::new()
-            .prefix("nvx-cli-")
-            .tempdir()
-            .unwrap();
-        let path = canonical(directory.path());
-        let text = path.to_str().expect("the temporary directory is Unicode");
-        // The recorded commands quote no part of the root, as `shlex.join` or
-        // `subprocess.list2cmdline` would quote a path with spaces or other special characters.
-        let plain = if cfg!(windows) {
-            text.is_ascii() && !text.contains([' ', '\t', '"'])
+/// Creates the tree of the fixture below `root`.
+fn populate(root: &Root, tree: &[Value]) {
+    for entry in tree {
+        let relative = entry["path"].as_str().unwrap();
+        if entry.get("openvmm").is_some() {
+            root.install_openvmm(relative);
+        } else if let Some(text) = entry.get("text") {
+            root.write(relative, text.as_str().unwrap());
         } else {
-            text.chars()
-                .all(|c| c.is_ascii_alphanumeric() || "_@%+=:,./-".contains(c))
-        };
-        assert!(
-            plain,
-            "the golden CLI tests need a temporary directory without spaces or special \
-             characters, not {text}; set TMPDIR or TEMP"
-        );
-        Self {
-            _directory: directory,
-            path,
-        }
-    }
-
-    fn text(&self) -> &str {
-        self.path.to_str().unwrap()
-    }
-
-    /// Returns the path of `relative`, with `/` separators and placeholders, below the root.
-    fn below(&self, relative: &str) -> PathBuf {
-        self.expand(relative)
-            .split('/')
-            .fold(self.path.clone(), |path, part| path.join(part))
-    }
-
-    /// Replaces the `{root}` and `{exe}` placeholders of an input.
-    fn expand(&self, text: &str) -> String {
-        text.replace("{root}", self.text())
-            .replace("{exe}", std::env::consts::EXE_SUFFIX)
-    }
-
-    /// Replaces the root and the volatile values of an output with the fixture's placeholders.
-    fn normalize(&self, text: &str) -> String {
-        let raw = self.text();
-        let escaped = python_json_escape(raw);
-        let mut text = text.to_owned();
-        if escaped != raw {
-            text = text.replace(&escaped, "{root_json}");
-        }
-        text = text.replace(raw, "{root}");
-        // The seals of a distro binding hold the device, file ID, and times of the layer, and an
-        // export plan the device and index of the objects that a workload could move.
-        for prefix in [
-            "\"pid\": ",
-            "\"start_time\": ",
-            "\"startTime\": ",
-            "\"device\": ",
-            "\"index\": ",
-            "\"seconds\": ",
-            "\"nanoseconds\": ",
-        ] {
-            text = replace_after(&text, prefix, |c| c.is_ascii_digit(), None, "{int}");
-        }
-        text = replace_after(&text, "openvmm-microvm-", is_hex, Some(32), "{hex32}");
-        for prefix in [
-            "\"operation_id\": \"",
-            "\"instance_id\": \"",
-            "\"fileId\": \"",
-            "\"launch\": \"",
-            "\"boot\": \"",
-        ] {
-            text = replace_after(&text, prefix, is_hex, Some(32), "{hex32}");
-        }
-        // On Linux, a launch names its checked files by the descriptors that OpenVMM inherits.
-        replace_after(
-            &text,
-            "/proc/self/fd/",
-            |c| c.is_ascii_digit(),
-            None,
-            "{int}",
-        )
-    }
-
-    /// Creates the tree of the fixture.
-    fn populate(&self, tree: &[Value]) {
-        for entry in tree {
-            let path = self.below(entry["path"].as_str().unwrap());
-            if entry.get("openvmm").is_some() {
-                fs::create_dir_all(path.parent().unwrap()).unwrap();
-                // Concurrent forks must not inherit a writable fixture executable.
-                #[cfg(unix)]
-                std::os::unix::fs::symlink(FAKE_OPENVMM, &path).unwrap();
-                #[cfg(windows)]
-                fs::copy(FAKE_OPENVMM, &path).unwrap();
-            } else if let Some(text) = entry.get("text") {
-                fs::create_dir_all(path.parent().unwrap()).unwrap();
-                fs::write(&path, text.as_str().unwrap()).unwrap();
-            } else {
-                fs::create_dir_all(&path).unwrap();
-            }
-        }
-    }
-
-    /// Returns what a step shows of a file or directory below the root, as the script records
-    /// it.
-    fn snapshot(&self, relative: &str) -> Value {
-        let path = self.below(relative);
-        let Ok(metadata) = fs::symlink_metadata(&path) else {
-            return Value::Null;
-        };
-        let name = path.file_name().unwrap().to_str().unwrap();
-        let mut entry = serde_json::Map::new();
-        if metadata.is_dir() {
-            let mut names: Vec<String> = fs::read_dir(&path)
-                .unwrap()
-                .map(|entry| entry.unwrap().file_name().into_string().unwrap())
-                .collect();
-            names.sort();
-            entry.insert("entries".into(), json!(names));
-        } else if name == "control.capability" {
-            entry.insert("size".into(), json!(metadata.len()));
-        } else {
-            let text = String::from_utf8(fs::read(&path).unwrap()).unwrap();
-            entry.insert("text".into(), json!(self.normalize(&text)));
-        }
-        #[cfg(unix)]
-        if MODE_NAMES.contains(&name) || name.starts_with("exec") {
-            use std::os::unix::fs::PermissionsExt;
-            entry.insert("mode".into(), json!(metadata.permissions().mode() & 0o7777));
-        }
-        Value::Object(entry)
-    }
-
-    /// Ends the fake OpenVMM processes that the runtime records and launch journals below the root
-    /// name, so that the root can be removed after a failure.
-    fn end_leftovers(&self) {
-        let mut pending = vec![self.path.clone()];
-        while let Some(directory) = pending.pop() {
-            let Ok(entries) = fs::read_dir(&directory) else {
-                continue;
-            };
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.is_dir() {
-                    pending.push(path);
-                } else if (entry.file_name() == "runtime.json"
-                    || entry.file_name() == "launch.json")
-                    && let Some(pid) = fs::read_to_string(&path)
-                        .ok()
-                        .and_then(|text| serde_json::from_str::<Value>(&text).ok())
-                        .and_then(|record| record["process"]["pid"].as_u64())
-                {
-                    kill(pid);
-                }
-            }
+            fs::create_dir_all(root.below(relative)).unwrap();
         }
     }
 }
 
-impl Drop for Root {
-    fn drop(&mut self) {
-        self.end_leftovers();
+/// Returns what a step shows of a file or directory below the root, as the script records
+/// it.
+fn snapshot(root: &Root, relative: &str) -> Value {
+    let path = root.below(relative);
+    let Ok(metadata) = fs::symlink_metadata(&path) else {
+        return Value::Null;
+    };
+    let name = path.file_name().unwrap().to_str().unwrap();
+    let mut entry = serde_json::Map::new();
+    if metadata.is_dir() {
+        let mut names: Vec<String> = fs::read_dir(&path)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect();
+        names.sort();
+        entry.insert("entries".into(), json!(names));
+    } else if name == "control.capability" {
+        entry.insert("size".into(), json!(metadata.len()));
+    } else {
+        let text = String::from_utf8(fs::read(&path).unwrap()).unwrap();
+        entry.insert("text".into(), json!(normalize(root, &text)));
     }
-}
-
-#[cfg(unix)]
-fn kill(pid: u64) {
-    if let Ok(pid) = i32::try_from(pid) {
-        let _ = nix::sys::signal::kill(
-            nix::unistd::Pid::from_raw(pid),
-            nix::sys::signal::Signal::SIGKILL,
-        );
-        thread::sleep(Duration::from_millis(200));
+    #[cfg(unix)]
+    if MODE_NAMES.contains(&name) || name.starts_with("exec") {
+        use std::os::unix::fs::PermissionsExt;
+        entry.insert("mode".into(), json!(metadata.permissions().mode() & 0o7777));
     }
-}
-
-#[cfg(windows)]
-fn kill(pid: u64) {
-    let _ = Command::new("taskkill")
-        .args(["/F", "/PID", &pid.to_string()])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status();
-    thread::sleep(Duration::from_millis(200));
-}
-
-/// Returns the canonical form of `path`, without the `\\?\` prefix that Windows adds and Python's
-/// `Path.resolve()` drops.
-fn canonical(path: &Path) -> PathBuf {
-    let path = fs::canonicalize(path).unwrap();
-    let text = path.to_str().unwrap();
-    match text.strip_prefix(r"\\?\") {
-        Some(rest) if !rest.starts_with("UNC\\") => PathBuf::from(rest),
-        _ => path,
-    }
+    Value::Object(entry)
 }
 
 fn is_hex(c: char) -> bool {
@@ -316,18 +228,7 @@ fn python_json_escape(text: &str) -> String {
 /// Runs `nvx-rs --root ROOT ARGUMENTS` in the root, without the variables that change its
 /// output.
 fn nvx_rs(root: &Root, arguments: &[String], environment: &BTreeMap<String, String>) -> Output {
-    Command::new(NVX_RS)
-        .arg("--root")
-        .arg(&root.path)
-        .args(arguments)
-        .current_dir(&root.path)
-        .env_remove("NVX_OPENVMM")
-        .env_remove("COLUMNS")
-        .env_remove("LINES")
-        .envs(environment)
-        .stdin(Stdio::null())
-        .output()
-        .unwrap()
+    root.command(arguments).envs(environment).output().unwrap()
 }
 
 /// Writes a file of a step: text, `hex` bytes, or `text` then `fill` repeated to `size` bytes.
@@ -363,8 +264,22 @@ fn write_file(path: &Path, content: &Value) {
 /// Plays a scenario and returns how its steps differ from the recording.
 fn play(tree: &[Value], scenario: &Value) -> Vec<String> {
     let name = scenario["name"].as_str().unwrap();
-    let root = Root::new();
-    root.populate(tree);
+    let root = Root::empty();
+    // The recorded commands quote no part of the root, as `shlex.join` or
+    // `subprocess.list2cmdline` would quote a path with spaces or other special characters.
+    let text = root.text();
+    let plain = if cfg!(windows) {
+        text.is_ascii() && !text.contains([' ', '\t', '"'])
+    } else {
+        text.chars()
+            .all(|c| c.is_ascii_alphanumeric() || "_@%+=:,./-".contains(c))
+    };
+    assert!(
+        plain,
+        "the golden CLI tests need a temporary directory without spaces or special \
+         characters, not {text}; set TMPDIR or TEMP"
+    );
+    populate(&root, tree);
     let mut problems = Vec::new();
     for (index, step) in scenario["steps"].as_array().unwrap().iter().enumerate() {
         for relative in step
@@ -399,15 +314,15 @@ fn play(tree: &[Value], scenario: &Value) -> Vec<String> {
         let output = nvx_rs(&root, &arguments, &environment);
         let mut actual = json!({
             "status": output.status.code(),
-            "stdout": root.normalize(&String::from_utf8_lossy(&output.stdout)),
-            "stderr": root.normalize(&String::from_utf8_lossy(&output.stderr)),
+            "stdout": normalize(&root, &String::from_utf8_lossy(&output.stdout)),
+            "stderr": normalize(&root, &String::from_utf8_lossy(&output.stderr)),
         });
         if let Some(checks) = step.get("check").and_then(Value::as_array) {
             let files: serde_json::Map<String, Value> = checks
                 .iter()
                 .map(|relative| {
                     let relative = relative.as_str().unwrap();
-                    (relative.to_owned(), root.snapshot(relative))
+                    (relative.to_owned(), snapshot(&root, relative))
                 })
                 .collect();
             actual["files"] = Value::Object(files);
@@ -431,6 +346,20 @@ fn play(tree: &[Value], scenario: &Value) -> Vec<String> {
 fn nvx_rs_reproduces_the_recorded_scenarios() {
     let fixture: Value = serde_json::from_str(FIXTURE).unwrap();
     let tree = fixture["tree"].as_array().unwrap().clone();
+    // The fixture's roots are those of the scenario tests.
+    let recorded = Root::empty();
+    populate(&recorded, &tree);
+    let fresh = Root::new();
+    let without_openvmm = |root: &Root| {
+        let mut snapshot = root.snapshot();
+        assert!(
+            snapshot
+                .remove(&harness::OPENVMM.replace("{exe}", std::env::consts::EXE_SUFFIX))
+                .is_some()
+        );
+        snapshot
+    };
+    assert_eq!(without_openvmm(&recorded), without_openvmm(&fresh));
     let scenarios = fixture[PLATFORM].as_array().unwrap().clone();
     assert!(
         !scenarios.is_empty(),
@@ -491,19 +420,11 @@ fn provision_layer(root: &Root, state: &str, layer: &Path, command_line: &str) -
     ]
 }
 
-/// Returns a root with the fixture's tree.
-fn populated_root() -> Root {
-    let fixture: Value = serde_json::from_str(FIXTURE).unwrap();
-    let root = Root::new();
-    root.populate(fixture["tree"].as_array().unwrap());
-    root
-}
-
 #[cfg(unix)]
 #[test]
-fn fixture_roots_link_the_built_executable() {
-    let root = populated_root();
-    let executable = root.below("openvmm/target/release/openvmm");
+fn roots_link_the_built_fake_openvmm() {
+    let root = Root::new();
+    let executable = root.below(harness::OPENVMM);
     assert_eq!(fs::read_link(executable).unwrap(), Path::new(FAKE_OPENVMM));
 }
 
@@ -526,7 +447,7 @@ fn text(data: &[u8]) -> String {
 
 #[test]
 fn start_requires_the_guest_features_of_layered_sandboxes() {
-    let root = populated_root();
+    let root = Root::new();
     // A guest that lacks per-execution environments or host path mapping tables, or that
     // predates feature negotiation, is stopped, and its start fails like any other.
     for (state, command_line, missing) in [
@@ -590,7 +511,7 @@ fn a_mapping_that_the_guest_refuses_leaves_no_usable_start() {
     // orders, and refuses workloads until then: a mapping that it cannot mount ends the start.
     // The guest then shuts down as a stop has it do, and OpenVMM reports a stopped VM, unless
     // the guest ignores the request, and OpenVMM is terminated without a report.
-    let root = populated_root();
+    let root = Root::new();
     let share = root.path.join("share");
     for (state, command_line, stops) in [
         ("refused", "fake_refuse_maps=1", true),
@@ -662,7 +583,7 @@ fn an_error_after_a_workloads_output_starts_a_line_of_its_own() {
     // The workload leaves its standard error without a line end and creates the outcome report's
     // destination, as one that writes a read-write share could, so the report cannot be published
     // after its output: the error starts a line of its own, where callers find errors.
-    let root = populated_root();
+    let root = Root::new();
     provisioned_with(&root, "unended", "");
     let output = run(&root, &lifecycle("start", &root, "unended"));
     assert!(output.status.success(), "{}", text(&output.stderr));
@@ -702,7 +623,7 @@ fn an_error_after_a_workloads_output_starts_a_line_of_its_own() {
 fn an_error_is_one_line_whatever_the_values_that_its_message_names() {
     // A line break in a value that a message names, here the path of OpenVMM, prints escaped, so
     // that no line of the message reads as another error.
-    let root = populated_root();
+    let root = Root::new();
     let path = |name: &str| root.path.join(name).to_str().unwrap().to_owned();
     let output = Command::new(NVX_RS)
         .arg("--root")
@@ -739,7 +660,7 @@ fn exec_and_stop_tell_a_directory_without_a_sandbox_from_a_stopped_sandbox() {
     // A state directory without the configuration of a sandbox holds no provisioned one, as start
     // finds too, whether it is empty or only the configuration is gone, while a provisioned
     // sandbox that is stopped is merely not running.
-    let root = populated_root();
+    let root = Root::new();
     for state in ["empty", "unconfigured", "stopped"] {
         provisioned_with(&root, state, "");
     }
@@ -783,7 +704,7 @@ fn a_sandbox_whose_configuration_names_another_layer_role_does_not_start() {
     // A sandbox takes only the distro layer, so a configuration whose layers name another role is
     // malformed: the start refuses it before OpenVMM starts, and deprovision, which reads no
     // layers, still removes the sandbox.
-    let root = populated_root();
+    let root = Root::new();
     let output = run(&root, &provision(&root, "other-role", ""));
     assert!(output.status.success(), "{}", text(&output.stderr));
     let config = root.path.join("other-role").join("config.json");
@@ -864,7 +785,7 @@ fn error_line(code: &str, message: &str) -> String {
 fn start_refuses_a_distro_layer_that_changed_after_provision() {
     // Start checks the binding that provision recorded against the layer's metadata alone, before
     // it launches OpenVMM; a layer that changed needs a new provision, which verifies it again.
-    let root = populated_root();
+    let root = Root::new();
     let distro = root.path.join("distro.erofs");
     let shown = distro.to_str().unwrap();
     provisioned(&root, "appended");
@@ -908,7 +829,7 @@ fn start_refuses_a_distro_layer_that_changed_after_provision() {
 
 #[test]
 fn start_refuses_a_distro_manifest_that_changed_after_provision() {
-    let root = populated_root();
+    let root = Root::new();
     let distro = root.path.join("distro.erofs");
     let distro = distro.to_str().unwrap();
     let manifest = root.path.join("distro.erofs.manifest.json");
@@ -968,7 +889,7 @@ fn a_distro_manifest_path_whose_lookup_fails_refuses_provision_and_start() {
     // run's outcome is unchanged. A binding of the manifest's absence holds only while nothing is
     // at its path: start refuses such a path, and provision refuses to record a binding that
     // every start would refuse.
-    let root = populated_root();
+    let root = Root::new();
     let manifest = root.path.join("distro.erofs.manifest.json");
     provisioned(&root, "absent");
     if !symlink_file(&manifest, &manifest) {
@@ -1017,7 +938,7 @@ fn provision_binds_a_linked_distro_layer_where_start_checks_it() {
     // Provision records a layer at its resolved path, and start checks the binding there, with
     // the manifest beside that path: through a link to a layer of another name, the manifest
     // beside the link's target. Provision verifies the layer there as well as at the path given.
-    let root = populated_root();
+    let root = Root::new();
     let distro = root.path.join("distro.erofs");
     let alias = root.path.join("alias.erofs");
     if !symlink_file(&distro, &alias) {
@@ -1098,7 +1019,7 @@ type ConfigEdit = fn(&mut Value);
 fn start_refuses_a_configuration_without_a_valid_distro_binding() {
     // nvx.py recorded no binding: a sandbox that it provisioned is provisioned again rather than
     // migrated. A binding that does not hold refuses the start before OpenVMM starts.
-    let root = populated_root();
+    let root = Root::new();
     let distro = root.path.join("distro.erofs");
     let distro = distro.to_str().unwrap();
     let uuid = "11111111-1111-1111-1111-111111111111";
@@ -1231,7 +1152,7 @@ const STALE: &str = "sandbox runtime state is stale because the OpenVMM process 
 fn a_restarted_cli_drives_only_a_vm_of_its_runtime_identity() {
     // Each run of the CLI is a new orchestrator, which finds the VM that an earlier one started
     // within the same boot through the runtime record of the store.
-    let root = populated_root();
+    let root = Root::new();
     provisioned(&root, "state");
     assert_eq!(transition(&root, "start", "state", &[]), succeeded());
     let record = runtime_record(&root, "state").unwrap();
@@ -1339,7 +1260,7 @@ fn sessions(root: &Root, state: &str) -> usize {
 
 #[test]
 fn a_stop_that_cannot_identify_the_runtime_keeps_the_vm_for_the_next_one() {
-    let root = populated_root();
+    let root = Root::new();
     provisioned(&root, "state");
     assert_eq!(transition(&root, "start", "state", &[]), succeeded());
     let record = runtime_record(&root, "state").unwrap();
@@ -1387,7 +1308,7 @@ fn a_stop_that_cannot_identify_the_runtime_keeps_the_vm_for_the_next_one() {
 
 #[test]
 fn a_stop_under_another_identity_never_ends_a_process_that_its_record_does_not_name() {
-    let root = populated_root();
+    let root = Root::new();
     provisioned(&root, "state");
     let kernel = root.below("build/vmlinux.provenance.json");
     let provenance = fs::read_to_string(&kernel).unwrap();
@@ -1435,7 +1356,7 @@ fn a_stop_under_another_identity_never_ends_a_process_that_its_record_does_not_n
 
 #[test]
 fn a_start_that_was_interrupted_is_ended_under_another_identity_too() {
-    let root = populated_root();
+    let root = Root::new();
     // A guest that answers after a minute keeps the start waiting.
     provisioned_with(&root, "state", "fake_boot_delay_ms=60000");
     let mut start = Command::new(NVX_RS)
@@ -1491,7 +1412,7 @@ fn a_start_that_was_interrupted_is_ended_under_another_identity_too() {
 
 #[test]
 fn runtime_records_of_earlier_formats_fail_and_name_their_format() {
-    let root = populated_root();
+    let root = Root::new();
     provisioned(&root, "state");
     // The runtime record that the CLI wrote before the store, in its format 1.
     let path = root.path.join("state").join("runtime.json");
@@ -1523,7 +1444,7 @@ fn runtime_records_of_earlier_formats_fail_and_name_their_format() {
 fn a_managed_start_runs_only_the_openvmm_of_the_root() {
     // The install metadata of the root identifies its own OpenVMM alone, so a start refuses
     // another one, which the runtime record would misname.
-    let root = populated_root();
+    let root = Root::new();
     provisioned(&root, "state");
     let environment = BTreeMap::from([("NVX_OPENVMM".to_owned(), FAKE_OPENVMM.to_owned())]);
     let output = nvx_rs(&root, &lifecycle("start", &root, "state"), &environment);
@@ -1548,7 +1469,7 @@ fn a_managed_start_runs_only_the_openvmm_of_the_root() {
 
 #[test]
 fn stop_reports_its_timeout_and_leaves_the_vm_running() {
-    let root = populated_root();
+    let root = Root::new();
     // A guest that never answers the stop.
     provisioned_with(&root, "unanswered", "fake_ignore_stop=1");
     assert_eq!(transition(&root, "start", "unanswered", &[]), succeeded());
@@ -1595,7 +1516,7 @@ fn stop_reports_its_timeout_and_leaves_the_vm_running() {
 
 #[test]
 fn a_sandbox_whose_openvmm_exited_reports_it_once_and_starts_again() {
-    let root = populated_root();
+    let root = Root::new();
     provisioned(&root, "state");
     let crash = || {
         assert_eq!(transition(&root, "start", "state", &[]), succeeded());
@@ -1878,7 +1799,7 @@ const REFUSED_NETWORKS: [(&[&str], &str); 27] = [
 fn network_policies_that_the_planner_refuses_fail_before_launch() {
     // The planner refuses what OpenVMM refused, and what a proxy-only network excludes, before a
     // run prints its command and before a provision records anything.
-    let root = populated_root();
+    let root = Root::new();
     let path = |name: &str| root.path.join(name).to_str().unwrap().to_owned();
     for (index, (options, message)) in REFUSED_NETWORKS.iter().enumerate() {
         let options: Vec<String> = match options.split_first() {
@@ -1929,7 +1850,7 @@ fn tcp_forwards_take_any_egress_policy() {
     // OpenVMM lets the guest's replies on a forwarded TCP connection through whatever the egress
     // policy, so the planner accepts TCP forwards under denied egress and beside a deny rule that
     // covers the guest network, as OpenVMM did.
-    let root = populated_root();
+    let root = Root::new();
     let path = |name: &str| root.path.join(name).to_str().unwrap().to_owned();
     for (egress, rendered) in [
         (
@@ -1991,7 +1912,7 @@ fn tcp_forwards_take_any_egress_policy() {
 #[test]
 fn network_policy_files_compile_into_the_typed_policy() {
     // The compiled rules join the typed policy as explicit rules do, so a proxy refuses them too.
-    let root = populated_root();
+    let root = Root::new();
     let policy = root.path.join("policy.json");
     fs::write(&policy, r#"{"allow": [{"cidr": "192.0.2.0/24"}]}"#).unwrap();
     let path = |name: &str| root.path.join(name).to_str().unwrap().to_owned();
@@ -2060,7 +1981,7 @@ fn start_refuses_a_configuration_without_a_valid_network_policy() {
     // A configuration records the typed network that provision checked, which start reads and
     // checks again; no reader reads the network options that nvx.py and earlier releases
     // recorded.
-    let root = populated_root();
+    let root = Root::new();
     let malformed = "sandbox configuration is malformed".to_owned();
     let cases: [(&str, ConfigEdit, &str, String); 5] = [
         (
@@ -2122,7 +2043,7 @@ fn start_refuses_a_configuration_without_a_valid_network_policy() {
 fn start_refuses_a_scratch_image_that_changed_after_provision() {
     // Start checks the binding of the scratch image that provision recorded against the image's
     // metadata alone, before it launches OpenVMM: an image that changed needs a new provision.
-    let root = populated_root();
+    let root = Root::new();
     let scratch = root.path.join("scratch.ext4");
     let shown = scratch.to_str().unwrap();
     let changed = |field: &str| {
@@ -2163,7 +2084,7 @@ fn start_refuses_a_scratch_image_that_changed_after_provision() {
 
 #[test]
 fn start_refuses_a_configuration_without_a_valid_scratch_binding() {
-    let root = populated_root();
+    let root = Root::new();
     let scratch = root.path.join("scratch.ext4");
     let scratch = scratch.to_str().unwrap();
     let malformed = "sandbox configuration is malformed".to_owned();
@@ -2238,7 +2159,7 @@ fn start_refuses_a_configuration_without_a_valid_scratch_binding() {
 fn a_running_sandbox_claims_its_scratch_image() {
     // Two sandboxes may record the same scratch image, but only one at a time runs on it: a start
     // claims the image until its OpenVMM exits, and a second start, or a run, fails meanwhile.
-    let root = populated_root();
+    let root = Root::new();
     let scratch = root.path.join("scratch.ext4");
     let claimed = error_line(
         "scratch-claimed",
@@ -2305,7 +2226,7 @@ fn start_hands_openvmm_the_images_that_it_checked() {
     // on Linux, OpenVMM opens the checked files through the descriptors that it inherits, whatever
     // has their paths now; on Windows, the checked files keep anything from replacing the images
     // until the guest is ready.
-    let root = populated_root();
+    let root = Root::new();
     let output = run(
         &root,
         &provision(
@@ -2514,7 +2435,7 @@ fn a_run_passes_openvmm_no_handle_of_its_caller() {
     // A handle that the CLI inherits from its caller, as from a launcher that started it without a
     // handle list, and that `std::process::Command` would pass on to OpenVMM.
     let (_reader, unrelated) = std::io::pipe().unwrap();
-    let root = populated_root();
+    let root = Root::new();
     let path = |name: &str| root.path.join(name).to_str().unwrap().to_owned();
     let mut command = Command::new(NVX_RS);
     command
@@ -2552,7 +2473,7 @@ fn a_run_passes_openvmm_no_handle_of_its_caller() {
     let cli_holds = holds(cli.id(), value);
     let openvmm_holds: Vec<bool> = openvmm.iter().map(|&pid| holds(pid, value)).collect();
     for &pid in &openvmm {
-        kill(u64::from(pid));
+        harness::kill(u64::from(pid));
     }
     if openvmm.is_empty() {
         let _ = cli.kill();
@@ -2590,7 +2511,7 @@ fn batch_openvmm(root: &Root) -> (BTreeMap<String, String>, PathBuf, String) {
 #[test]
 fn a_run_refuses_a_batch_file_as_openvmm() {
     // cmd.exe would read the `&` of the scratch image's path as a second command.
-    let root = populated_root();
+    let root = Root::new();
     let (environment, marker, refusal) = batch_openvmm(&root);
     let scratch = root.path.join("scratch&echo.ext4");
     fs::copy(root.path.join("scratch.ext4"), &scratch).unwrap();
@@ -2825,7 +2746,7 @@ fn guided_run(arguments: &[&str]) -> Vec<String> {
 
 #[test]
 fn run_prints_its_guidance_only_after_a_failed_cold_boot() {
-    let root = populated_root();
+    let root = Root::new();
     let snapshot = root.path.join("snapshot");
     fs::create_dir(&snapshot).unwrap();
     let snapshot = snapshot.to_str().unwrap();
@@ -2901,7 +2822,7 @@ fn run_prints_its_guidance_only_after_a_failed_cold_boot() {
 
 #[test]
 fn run_boots_each_guest_with_its_default_memory() {
-    let root = populated_root();
+    let root = Root::new();
     for guest in nvx::host::artifacts::Guest::ALL {
         let initramfs = root.path.join("build").join(guest.initramfs_name());
         fs::write(initramfs, "initramfs\n").unwrap();
@@ -2918,7 +2839,7 @@ fn run_shares_relative_roots_with_absolute_policy_paths() {
     // nvx-rs run passes the host path of each share as given, so the children of an aggregate may
     // be relative to the working directory, while their policy paths must be absolute: OpenVMM
     // attributes each one to the share whose root contains it once it has resolved both.
-    let root = populated_root();
+    let root = Root::new();
     let path = |parts: &[&str]| {
         parts
             .iter()
@@ -3063,7 +2984,7 @@ mod interrupts {
 
     #[test]
     fn interrupting_a_run_kills_openvmm_and_exits_with_130() {
-        let root = populated_root();
+        let root = Root::new();
         let (arguments, started) = sleeping_run(&root);
         let (output, elapsed) = interrupt(&root, &arguments, &started, false);
         assert_eq!(output.status.code(), Some(130));
@@ -3077,7 +2998,7 @@ mod interrupts {
         // The fake OpenVMM delays its boot, which Ctrl-C ends, alone or with OpenVMM, as the
         // terminal's does; nvx-rs run then exits as interrupted, without the guidance that it
         // prints after a failed cold boot.
-        let root = populated_root();
+        let root = Root::new();
         let arguments = guided_run(&["--cmdline", "fake_boot_delay_ms=60000"]);
         let started = root.path.join("build").join("fake-openvmm-.json");
         for group in [false, true] {
@@ -3094,7 +3015,7 @@ mod interrupts {
     fn interrupting_a_run_ends_it_as_interrupted_even_if_openvmm_exits_first() {
         // A terminal's Ctrl-C reaches OpenVMM too, which the fake lets end it at once; Python's
         // wait raises KeyboardInterrupt all the same, rather than return OpenVMM's status.
-        let root = populated_root();
+        let root = Root::new();
         let (arguments, started) = sleeping_run(&root);
         let (output, elapsed) = interrupt(&root, &arguments, &started, true);
         assert_eq!(output.status.code(), Some(130));
@@ -3104,7 +3025,7 @@ mod interrupts {
 
     #[test]
     fn interrupting_an_exec_leaves_the_sandbox_running() {
-        let root = populated_root();
+        let root = Root::new();
         let output = run(&root, &provision(&root, "state", ""));
         assert!(output.status.success(), "{}", text(&output.stderr));
         let output = run(&root, &lifecycle("start", &root, "state"));
@@ -3179,7 +3100,7 @@ mod interrupts {
     fn interrupting_an_exec_ends_its_write_to_a_full_pipe() {
         // The CLI writes a workload's output once the workload ends. Like Python's, the write
         // ends at Ctrl-C, also while it waits for a pipe's reader that does not read.
-        let root = populated_root();
+        let root = Root::new();
         for arguments in [
             provision(&root, "state", ""),
             lifecycle("start", &root, "state"),

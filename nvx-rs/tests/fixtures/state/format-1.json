@@ -1,0 +1,23 @@
+{
+  "cmdline": "quiet",
+  "distro_binding": "{distro_binding}",
+  "format": 1,
+  "hostname": "reader",
+  "hypervisor": "{hypervisor}",
+  "layers": [
+    {
+      "path": "{root/distro.erofs}",
+      "role": "distro",
+      "uuid": "11111111-1111-1111-1111-111111111111"
+    }
+  ],
+  "memory_max": 134217728,
+  "memory_mib": 320,
+  "mount": null,
+  "network": null,
+  "pids_max": 32,
+  "scratch": "{root/scratch.ext4}",
+  "scratch_binding": "{scratch_binding}",
+  "workload_gid": 2000,
+  "workload_uid": 2000
+}

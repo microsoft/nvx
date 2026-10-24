@@ -1,0 +1,29 @@
+{
+  "cmdline": "",
+  "format": 1,
+  "host_loopback": null,
+  "host_loopback_forward": [],
+  "hostname": "nvx-sandbox",
+  "hypervisor": "{hypervisor}",
+  "layers": [
+    {
+      "path": "{root/distro.erofs}",
+      "role": "distro",
+      "uuid": "11111111-1111-1111-1111-111111111111"
+    }
+  ],
+  "memory_max": null,
+  "memory_mib": 256,
+  "mount": null,
+  "net": null,
+  "network_egress": null,
+  "network_egress_allow": [],
+  "network_egress_deny": [],
+  "network_ingress": null,
+  "network_profile": null,
+  "network_proxy": null,
+  "pids_max": null,
+  "scratch": "{root/scratch.ext4}",
+  "workload_gid": 65534,
+  "workload_uid": 65534
+}
