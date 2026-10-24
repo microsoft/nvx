@@ -5,7 +5,8 @@
 //! The variable [`STEP_HOOK`] names the step, and what the hook does at it, its [`Action`]:
 //!
 //! - `STEP:pause:PATH`: the program creates the file PATH, which holds the step's name, and waits
-//!   until the file is gone, then goes on;
+//!   until the file is gone, then goes on, and leaves the time that it waited out of its deadlines,
+//!   so that a test may pause it for as long as it needs;
 //! - `STEP:exit`: the program exits at once with the status [`HOOK_EXIT`], without unwinding: it
 //!   ends nothing that it started, such as the VMM, and nothing that it holds is released but what
 //!   the system releases when a process exits, such as its descriptors or handles, and their
@@ -22,7 +23,7 @@ use std::io::{self, Write};
 use std::path::PathBuf;
 use std::process;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// The variable that sets the step hook.
 pub const STEP_HOOK: &str = "RUNTIME_ADAPTER_STEP_HOOK";
@@ -133,15 +134,19 @@ impl StepHook {
     /// Acts at `step`, if it is the hook's: exits the program, or creates the pause file, with the
     /// step's name, and waits until it is gone. Does nothing at another step.
     ///
+    /// Returns how long the hook paused the program, which is zero at another step, so that the
+    /// program can leave the pause out of its deadlines.
+    ///
     /// Fails if the pause file cannot be created, as when it exists already, or written, or if
     /// whether it is gone cannot be told.
-    pub fn at(&self, step: Step) -> io::Result<()> {
+    pub fn at(&self, step: Step) -> io::Result<Duration> {
         if step != self.step {
-            return Ok(());
+            return Ok(Duration::ZERO);
         }
         match &self.action {
             Action::Exit => process::exit(HOOK_EXIT.into()),
             Action::Pause(path) => {
+                let paused = Instant::now();
                 OpenOptions::new()
                     .write(true)
                     .create_new(true)
@@ -150,7 +155,7 @@ impl StepHook {
                 while path.try_exists()? {
                     thread::sleep(PAUSE_POLL);
                 }
-                Ok(())
+                Ok(paused.elapsed())
             }
         }
     }

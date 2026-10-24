@@ -668,7 +668,9 @@ test can act between two steps, or exits the launch there without unwinding,
 as a crash would end it:
 
 - `STEP:pause:PATH` creates the file PATH, which holds the step's name, and
-  waits until the file is gone, then goes on;
+  waits until the file is gone, then goes on: the launch leaves the time that
+  it waited out of its deadline, so that a test may pause it for as long as it
+  needs;
 - `STEP:exit` exits at once with status 5: the launch ends nothing that it
   started, such as the VMM, and the system releases what it holds, such as its
   descriptors or handles, and their locks.
@@ -977,9 +979,10 @@ Windows:
 Windows, the [step hook](#the-step-hook): the values of
 `RUNTIME_ADAPTER_STEP_HOOK` that set it, with each step and action, a path with
 colons, and those that set none, which the host program refuses with status
-2; and a pause, which does nothing at another step, creates its file with its
-step's name at its own, and waits until the file is gone, and which a file
-that is there already fails.
+2; and a pause, which does nothing, and pauses for no time, at another step,
+creates its file with its step's name at its own, waits until the file is
+gone, and says how long it paused, and which a file that is there already
+fails.
 
 `tests/vm_steps.rs` checks the step hook on a real hypervisor, in the
 host-only configuration, with NVX's Ubuntu EROFS image over a copy of the

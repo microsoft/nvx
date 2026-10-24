@@ -1,6 +1,7 @@
 //! The host program's step hook, for tests: the values of `RUNTIME_ADAPTER_STEP_HOOK` that set it,
-//! and those that the host program refuses, and a pause, which waits until its file is gone. The
-//! tests need no hypervisor; the VM tests pause launches with the hook, and end them.
+//! and those that the host program refuses, and a pause, which waits until its file is gone, and
+//! says how long it paused. The tests need no hypervisor; the VM tests pause launches with the hook,
+//! and end them.
 #![cfg(feature = "host")]
 
 use std::ffi::OsStr;
@@ -78,12 +79,12 @@ fn a_pause_waits_until_its_file_is_gone() {
         action: Action::Pause(path.clone()),
     };
 
-    // At another step, the hook does nothing.
-    hook.at(Step::Checked).unwrap();
+    // At another step, the hook does nothing, and pauses for no time.
+    assert_eq!(hook.at(Step::Checked).unwrap(), Duration::ZERO);
     assert!(!path.exists());
 
     // At its own, it creates its file, which holds the step's name, and returns once the file is
-    // gone.
+    // gone, with how long it paused, which is at least as long as the file was there.
     let paused = thread::spawn({
         let hook = hook.clone();
         move || hook.at(Step::Spawned)
@@ -93,10 +94,12 @@ fn a_pause_waits_until_its_file_is_gone() {
         assert!(Instant::now() < deadline, "the hook did not pause");
         thread::sleep(Duration::from_millis(10));
     }
-    thread::sleep(Duration::from_millis(100));
+    let held = Duration::from_millis(100);
+    thread::sleep(held);
     assert!(!paused.is_finished(), "the hook did not wait");
     fs::remove_file(&path).unwrap();
-    paused.join().unwrap().unwrap();
+    let paused = paused.join().unwrap().unwrap();
+    assert!(paused >= held, "the hook paused for {paused:?}");
 
     // A pause file that is there already fails the pause.
     fs::write(&path, "").unwrap();

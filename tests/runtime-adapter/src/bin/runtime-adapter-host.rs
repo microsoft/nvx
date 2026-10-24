@@ -76,8 +76,8 @@
 //! Values escape `\`, newlines, and carriage returns as `\\`, `\n`, and `\r`.
 //!
 //! For tests, `launch` takes a step hook from the variable `RUNTIME_ADAPTER_STEP_HOOK`, which
-//! pauses the launch at a named step, or exits it there without unwinding, with status 5; see
-//! `runtime_adapter::hook`.
+//! pauses the launch at a named step, for a time that the launch leaves out of its deadline, or
+//! exits it there without unwinding, with status 5; see `runtime_adapter::hook`.
 //!
 //! They exit with 0 once they did what they were asked, with 3 when reattach finds the VM
 //! mismatched, with 4 when the guest reported that a stage of the root failed, and the VM ended
@@ -580,7 +580,7 @@ fn launch(
         ),
         hypervisor,
     );
-    let deadline = Instant::now() + START_TIMEOUT;
+    let mut deadline = Instant::now() + START_TIMEOUT;
     let starting = supervisor::launch(&mut locked, &runtime.identity, &capability, |endpoint| {
         // The launch has checked that no VM of the sandbox runs, which could still read the
         // initramfs of an earlier launch.
@@ -620,8 +620,9 @@ fn launch(
     .map_err(|error| describe(&error))?;
     let process = starting.process().reference().clone();
     println!("pid={}", process.pid);
-    // A launch that fails from here on ends its VM, once `starting` drops.
-    step(hook, Step::Spawned)?;
+    // A launch that fails from here on ends its VM, once `starting` drops. Its deadline leaves out
+    // the time that the step hook pauses it.
+    deadline += step(hook, Step::Spawned)?;
     let failed = |problem: String| {
         format!(
             "{problem}; see the VMM's log {}",
@@ -652,7 +653,7 @@ fn launch(
                 // can go, which releases their guards, while OpenVMM keeps the scratch image's
                 // claim.
                 drop(prepared);
-                step(hook, Step::Ready)?;
+                deadline += step(hook, Step::Ready)?;
             }
             RootReply::Failed(failure) => {
                 print_failure(&failure);
@@ -675,13 +676,14 @@ fn launch(
     Ok(ExitCode::SUCCESS)
 }
 
-/// Runs the step hook `hook`, if any, at the launch's `step`.
-fn step(hook: Option<&StepHook>, step: Step) -> Result<(), String> {
+/// Runs the step hook `hook`, if any, at the launch's `step`, and returns how long it paused the
+/// launch there, which the launch leaves out of its deadline.
+fn step(hook: Option<&StepHook>, step: Step) -> Result<Duration, String> {
     match hook {
         Some(hook) => hook
             .at(step)
             .map_err(|error| format!("the step hook cannot pause the launch at {step}: {error}")),
-        None => Ok(()),
+        None => Ok(Duration::ZERO),
     }
 }
 
