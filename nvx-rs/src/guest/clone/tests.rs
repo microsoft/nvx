@@ -134,6 +134,8 @@ enum Outcome {
     Restored,
     /// The request fails.
     Fails,
+    /// The request fails, and the thread may still hold some of the permission for the ports.
+    PortRelease,
 }
 
 /// A system that records its calls, with a mount table, devices, and a time ABI that a test
@@ -273,6 +275,7 @@ impl System for FakeSystem {
             Outcome::Continued => Ok(CaptureOutcome::Continued),
             Outcome::Restored => Ok(CaptureOutcome::Restored(Restore::to(RESTORED))),
             Outcome::Fails => Err(TimeError::StateUnavailable),
+            Outcome::PortRelease => Err(PortError::Revoke(Errno::ENOMEM).into()),
         }
     }
 }
@@ -800,6 +803,50 @@ fn a_failed_capture_restores_the_detectors_and_opens_the_fence_only_before_its_r
             Call::CancelCapture,
         ]
     );
+}
+
+#[test]
+fn a_failed_capture_whose_detectors_cannot_be_restored_is_a_release_error() {
+    let release = "failed to restore the stall detectors: read /run/nvx/time-suppression: No such \
+                   file or directory";
+    let calls = Calls::default();
+    let failing = |calls: &Calls| {
+        let mut system = FakeSystem::new(calls);
+        system.restoration_fails = true;
+        system
+    };
+    let mut system = failing(&calls);
+    system.generation_fails = true;
+    let error = prepared(&calls, system).capture().unwrap_err();
+    assert_eq!(error.stage(), CaptureStage::Release);
+    assert_eq!(error.to_string(), release);
+    assert_eq!(
+        calls.take(),
+        [Call::GenerationId, Call::Open, Call::CancelCapture]
+    );
+
+    let mut system = failing(&calls);
+    system.outcome = Outcome::Fails;
+    let error = prepared(&calls, system).capture().unwrap_err();
+    assert_eq!(error.stage(), CaptureStage::Release);
+    assert_eq!(error.to_string(), release);
+    let request_calls = [
+        Call::GenerationId,
+        Call::Capture(platform_request()),
+        Call::CancelCapture,
+    ];
+    assert_eq!(calls.take(), request_calls);
+
+    // A permission for the ports that the thread may still hold takes precedence.
+    let mut system = failing(&calls);
+    system.outcome = Outcome::PortRelease;
+    let error = prepared(&calls, system).capture().unwrap_err();
+    assert_eq!(error.stage(), CaptureStage::Capture);
+    assert!(
+        matches!(error.cause(), CaptureCause::Time(TimeError::PortRelease(_))),
+        "{error:?}"
+    );
+    assert_eq!(calls.take(), request_calls);
 }
 
 #[test]

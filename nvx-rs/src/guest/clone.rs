@@ -223,16 +223,9 @@ impl<F: AdmissionFence> CapturePreparation<F> {
             .map_err(|cause| CaptureError::new(CaptureStage::Mounts, cause))?;
         if let Err(error) = barrier.system.pre_capture() {
             // The barrier restores a suppression that the time ABI holds after a failure, as
-            // after a preparation that succeeded, and reports a failure to restore it, unless the
-            // thread may still hold some of the permission for the ports, which takes precedence.
-            if error.holds_suppression() {
-                barrier.suppressed = true;
-                let released = barrier.release();
-                if !matches!(error, PreCaptureError::PortRelease { .. }) {
-                    released?;
-                }
-            }
-            return Err(match error {
+            // after a preparation that succeeded.
+            barrier.suppressed = error.holds_suppression();
+            let error = match error {
                 PreCaptureError::BootChecks(error) => {
                     CaptureError::new(CaptureStage::BootChecks, CaptureCause::Time(error))
                 }
@@ -246,7 +239,8 @@ impl<F: AdmissionFence> CapturePreparation<F> {
                 PreCaptureError::Suppression(error) | PreCaptureError::Unrestored(error) => {
                     CaptureError::new(CaptureStage::Suppression, CaptureCause::Io(error.into()))
                 }
-            });
+            };
+            return Err(barrier.fail(error));
         }
         barrier.suppressed = true;
         Ok(barrier)
@@ -307,11 +301,18 @@ impl<F: AdmissionFence> CaptureBarrier<F> {
     /// the detectors' settings, as [`cancel`](Self::cancel) does. A request that fails restores
     /// the detectors' settings, but leaves the fence closed, since it may fail in a clone whose
     /// restore it could not repair, where no execution may start. Either way, the caller ends
-    /// the VM.
+    /// the VM, and a failure to restore the settings is a [`CaptureStage::Release`] error, unless
+    /// the calling thread may still hold some of the permission for the time ABI's ports, which
+    /// [`TimeError::PortRelease`] reports instead.
     pub fn capture(mut self) -> Result<Captured<F>, CaptureError> {
-        let generation_id = self.system.generation_id().map_err(|error| {
-            CaptureError::new(CaptureStage::GenerationId, CaptureCause::Time(error))
-        })?;
+        let generation_id = match self.system.generation_id() {
+            Ok(generation_id) => generation_id,
+            Err(error) => {
+                let error =
+                    CaptureError::new(CaptureStage::GenerationId, CaptureCause::Time(error));
+                return Err(self.fail(error));
+            }
+        };
         let request = CaptureRequest::new(
             ScratchPolicy::Fresh,
             generation_id,
@@ -322,10 +323,8 @@ impl<F: AdmissionFence> CaptureBarrier<F> {
             Err(error) => {
                 // The fence is dropped closed.
                 self.fence = None;
-                return Err(CaptureError::new(
-                    CaptureStage::Capture,
-                    CaptureCause::Time(error),
-                ));
+                let error = CaptureError::new(CaptureStage::Capture, CaptureCause::Time(error));
+                return Err(self.fail(error));
             }
         };
         match outcome {
@@ -368,6 +367,21 @@ impl<F: AdmissionFence> CaptureBarrier<F> {
             })?;
         }
         Ok(())
+    }
+
+    /// Releases what the barrier holds after `error`, as [`release`](Self::release) does, and
+    /// returns `error`, or the failure to restore the stall detectors' settings, unless `error`
+    /// tells that the calling thread may still hold some of the permission for the time ABI's
+    /// ports, which takes precedence.
+    fn fail(&mut self, error: CaptureError) -> CaptureError {
+        match self.release() {
+            Err(release)
+                if !matches!(error.cause, CaptureCause::Time(TimeError::PortRelease(_))) =>
+            {
+                release
+            }
+            _ => error,
+        }
     }
 }
 
