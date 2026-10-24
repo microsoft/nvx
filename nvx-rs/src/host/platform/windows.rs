@@ -1248,6 +1248,78 @@ pub fn file_identity(path: &Path) -> io::Result<(u64, u64)> {
     handle_identity(file.as_raw_handle() as HANDLE)
 }
 
+/// Returns whether the file at `path` is deleted: whether an open of it finds no file, or one
+/// whose deletion is pending, which a file system without POSIX deletion keeps under its name,
+/// refusing every open of it, until the last handle to it closes. A file that opens is not, nor is
+/// one whose open fails otherwise, such as one whose access control list refuses the open.
+///
+/// Win32 reports a pending deletion as a denied access, so the file is opened with the native API,
+/// whose status tells the two apart, relative to its directory, which spares a native path.
+pub(crate) fn is_deleted(path: &Path) -> bool {
+    use windows_sys::Wdk::Foundation::OBJECT_ATTRIBUTES;
+    use windows_sys::Wdk::Storage::FileSystem::{FILE_OPEN_REPARSE_POINT, NtOpenFile};
+    use windows_sys::Win32::Foundation::{
+        OBJ_CASE_INSENSITIVE, STATUS_DELETE_PENDING, STATUS_OBJECT_NAME_NOT_FOUND, UNICODE_STRING,
+    };
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+    };
+    use windows_sys::Win32::System::IO::IO_STATUS_BLOCK;
+
+    let Some(name) = path.file_name() else {
+        return false;
+    };
+    let dir = match path.parent() {
+        Some(dir) if !dir.as_os_str().is_empty() => dir,
+        _ => Path::new("."),
+    };
+    let dir = match OpenOptions::new()
+        .access_mode(0)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+        .open(dir)
+    {
+        Ok(dir) => dir,
+        // The file went with its directory.
+        Err(error) => return error.kind() == io::ErrorKind::NotFound,
+    };
+    let name: Vec<u16> = name.encode_wide().collect();
+    let Ok(len) = u16::try_from(mem::size_of_val(name.as_slice())) else {
+        return false;
+    };
+    let name = UNICODE_STRING {
+        Length: len,
+        MaximumLength: len,
+        Buffer: name.as_ptr().cast_mut(),
+    };
+    let attributes = OBJECT_ATTRIBUTES {
+        Length: mem::size_of::<OBJECT_ATTRIBUTES>() as u32,
+        RootDirectory: dir.as_raw_handle() as HANDLE,
+        ObjectName: &name,
+        // As Win32 opens files.
+        Attributes: OBJ_CASE_INSENSITIVE,
+        ..OBJECT_ATTRIBUTES::default()
+    };
+    let mut handle = ptr::null_mut();
+    let mut status_block = IO_STATUS_BLOCK::default();
+    // SAFETY: the directory's handle is open, the attributes and the name that they point to
+    // outlive the call, and the outputs are valid.
+    let status = unsafe {
+        NtOpenFile(
+            &mut handle,
+            FILE_READ_ATTRIBUTES,
+            &attributes,
+            &mut status_block,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            FILE_OPEN_REPARSE_POINT,
+        )
+    };
+    if status >= 0 {
+        drop(owned(handle));
+        return false;
+    }
+    matches!(status, STATUS_DELETE_PENDING | STATUS_OBJECT_NAME_NOT_FOUND)
+}
+
 /// Returns the volume serial number and file index of the file that `file` holds open.
 pub(crate) fn opened_file_identity(file: &fs::File) -> io::Result<(u64, u64)> {
     handle_identity(file.as_raw_handle() as HANDLE)

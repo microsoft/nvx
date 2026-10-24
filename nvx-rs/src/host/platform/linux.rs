@@ -571,6 +571,12 @@ pub fn file_identity(path: &Path) -> io::Result<(u64, u64)> {
     Ok((metadata.dev(), metadata.ino()))
 }
 
+/// Returns whether the file at `path` is deleted: whether no file has that name, which a removal
+/// takes at once.
+pub(crate) fn is_deleted(path: &Path) -> bool {
+    fs::symlink_metadata(path).is_err_and(|error| error.kind() == io::ErrorKind::NotFound)
+}
+
 /// Returns the device and inode of the file that `file` holds open.
 pub(crate) fn opened_file_identity(file: &File) -> io::Result<(u64, u64)> {
     let metadata = file.metadata()?;

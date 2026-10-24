@@ -88,6 +88,12 @@ pub fn file_identity(_path: &Path) -> io::Result<(u64, u64)> {
     Err(unsupported())
 }
 
+/// Returns whether the file at `path` is deleted: whether no file has that name, which a removal
+/// takes at once.
+pub(crate) fn is_deleted(path: &Path) -> bool {
+    fs::symlink_metadata(path).is_err_and(|error| error.kind() == io::ErrorKind::NotFound)
+}
+
 pub(crate) fn opened_file_identity(_file: &File) -> io::Result<(u64, u64)> {
     Err(unsupported())
 }

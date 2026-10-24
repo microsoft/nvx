@@ -1417,7 +1417,8 @@ fn a_retirement_that_races_acquisitions_and_releases_in_other_processes_waits_fo
 }
 
 /// Tests of the records that a Windows file system without POSIX deletion keeps under their names
-/// while other handles hold them, after a transaction in another process removed them.
+/// while other handles hold them, after a transaction in another process removed them, and of the
+/// records whose access control lists refuse access, which are not removed ones.
 #[cfg(windows)]
 #[allow(unsafe_code)]
 mod windows {
@@ -1453,6 +1454,100 @@ mod windows {
         };
         assert_ne!(set, 0, "{}", io::Error::last_os_error());
         file
+    }
+
+    /// The access control list of a file that allows no one anything, which its owner may still
+    /// change: every open of the file fails, also one without access rights.
+    const NO_ACCESS: &str = "D:P";
+
+    /// The access control list of a file that allows its owner alone, as the store's files do.
+    const OWNER_ONLY: &str = "D:P(A;;FA;;;OW)";
+
+    #[test]
+    fn only_a_file_that_is_gone_or_whose_deletion_is_pending_was_removed() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("record.json");
+        fs::write(&path, b"{}").unwrap();
+        let denied = io::Error::from(io::ErrorKind::PermissionDenied);
+        assert!(!was_removed(&path, &denied));
+        // A file whose list refuses every open, also one without access rights, is not removed.
+        platform::set_access(&path, NO_ACCESS).unwrap();
+        let error = platform::file_identity(&path).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied, "{error}");
+        assert!(!was_removed(&path, &denied));
+        platform::set_access(&path, OWNER_ONLY).unwrap();
+        // One whose deletion is pending is, as is one that is gone, but only a denied access tells
+        // so.
+        let held = delete_pending(&path);
+        assert!(was_removed(&path, &denied));
+        assert!(!was_removed(&path, &io::Error::other("the open failed")));
+        drop(held);
+        assert!(was_removed(&path, &denied));
+        // So is a file whose directory is gone.
+        let gone = directory.path().join("gone").join("record.json");
+        assert!(was_removed(&gone, &denied));
+    }
+
+    #[test]
+    fn records_that_refuse_access_are_not_taken_for_removed_ones() {
+        let (directory, store) = new_store();
+        let published = publish(&store, &ManifestSpec::template(), storage(1));
+        let generation = published.generation();
+        let sandbox = provision(directory.path(), "sandbox");
+        let lease = leased(&store, &published, &sandbox);
+        let record = store
+            .dir()
+            .join(LEASES_NAME)
+            .join(format!("{}.json", lease.id()));
+        // A retirement that cannot read the record of a lease, or its clone binding, cannot tell
+        // whether the lease is live, and fails, keeping the generation.
+        for (path, description) in [
+            (record, LEASE_DESCRIPTION),
+            (sandbox.join(CLONE_BINDING_NAME), BINDING_DESCRIPTION),
+        ] {
+            platform::set_access(&path, NO_ACCESS).unwrap();
+            let error = store.retire(generation, None).unwrap_err();
+            assert!(
+                error
+                    .message()
+                    .starts_with(&format!("cannot read the {description} ")),
+                "{error}"
+            );
+            platform::set_access(&path, OWNER_ONLY).unwrap();
+        }
+        assert_eq!(
+            store.retire(generation, None).unwrap(),
+            Retirement::Draining(vec![lease.clone()])
+        );
+        assert_eq!(binding(&sandbox), Some(lease));
+        // A tombstone that refuses access quarantines its generation still.
+        let other = publish(&store, &ManifestSpec::template(), storage(2));
+        store.tombstone(other.generation(), None).unwrap();
+        let tombstone = store
+            .dir()
+            .join(TOMBSTONES_NAME)
+            .join(format!("{}.json", other.generation()));
+        platform::set_access(&tombstone, NO_ACCESS).unwrap();
+        let now = after(&other, 1);
+        let leasing = provision(directory.path(), "leasing");
+        for error in [
+            store.tombstones().unwrap_err(),
+            store.select(other.key(), &now).unwrap_err(),
+            refusal(&store, other.generation(), &leasing, &now),
+        ] {
+            assert!(
+                error
+                    .message()
+                    .starts_with(&format!("cannot read the {TOMBSTONE_DESCRIPTION} ")),
+                "{error}"
+            );
+        }
+        assert_eq!(binding(&leasing), None);
+        platform::set_access(&tombstone, OWNER_ONLY).unwrap();
+        assert_eq!(
+            store.tombstones().unwrap(),
+            [generation, other.generation()]
+        );
     }
 
     #[test]
