@@ -209,27 +209,31 @@ A value that a probe cannot read is `absent` if its file does not exist, and
 otherwise `unreadable: PROBLEM`. A new check of a root is a new probe in this
 table.
 
-The probes of `worker::mapping`, none of which takes arguments either, map
-beneath the root as an adapter maps the host paths of its sandboxes: through
-the root itself, with `nvx::guest::root::Root::map`, which checks the targets
-against the container root's reserved set, and through mappers of the
-adapter's own, `nvx::guest::mappings::Mapper`, with reserved sets of its
-choice. Each writes its sources below `/tmp/runtime-adapter-sources`, on the
-guest's tmpfs, in place of the guest's mount of a host's export: a directory
-`dir`, with a file `marker` and an empty directory `inner`, a file `file.txt`,
-and an empty directory `out`. The links that they plant in the root lead to
+The probes of `worker::mapping` inspect the mappings beneath the root, and map
+from the host export, as an adapter maps the host paths of its sandboxes. `map`
+inspects the mappings that the worker applied from the host's mapping table,
+through the root itself, with `nvx::guest::root::Root::map`, which checks their
+targets against the container root's reserved set, and the export that they
+come from. `map-checks` maps from the export through mappers of the adapter's
+own, `nvx::guest::mappings::Mapper`, with reserved sets of its choice, and
+tears down what it mapped. The links that it plants in the root lead to
 `/tmp/runtime-adapter-outside`, an empty directory outside it.
 
 | Probe | Facts |
 | --- | --- |
-| `map` | Through the root: zero mappings, `zero`, with the mounts below the root then, `zero.mounts`; then a table, `table`, of `dir` read-only at `/srv/maps/dir`, `dir/inner` read-write inside it, `file.txt` read-only at `/srv/maps/file.txt`, and `out` read-write at `/srv/maps/out`. The mount points below the root, in the mount table's order, `mounts`; for each mapping, `dir`, `inner`, `file`, and `out`, its options, `NAME.options`, whether a write is `allowed` or `refused`, `NAME.write`, what a write reached in its source, `NAME.source`, or what a read found, `NAME.read`; whether the overlay's upper holds the directory and the empty file that the mapper created, `upper.directory` and `upper.file`; and whether the root is latched, `latched` |
-| `map-refused` | Through the root: a mapping below the symbolic link `/srv/link`, `through-link`; whether the root is latched then, `latched`; a later mapping, `later`, and whether its target exists, `later.target`; and the mounts below the root, `mounts`, and the entries of the directory outside it, `outside` |
-| `map-checks` | Each check through a new mapper: a link at each component of a target, `link.a`, `link.b`, and `link.new`, and to `..`, `link.up`; a magic link of a procfs that it mounts in the root for the checks, `magic.self`, `magic.thread-self`, `magic.root`, `magic.cwd`, and `magic.fd`; a directory onto a file, `kind.directory`, and a file onto a directory, `kind.file`; a mapping onto a file that an earlier one shows, `nested.onto`, and one that would create its target inside it, `nested.create`, whether that reached the source, `nested.source`, and their teardown, `nested.teardown`; the runtime's reserved targets, `reserved.run`, `reserved.run-nvx`, `reserved.time`, and `reserved.time-below`, the container root's, `reserved.proc`, `reserved.sys`, `reserved.dev`, `reserved.agent`, `reserved.machine-id`, and `reserved.etc`, and those of a set of the adapter's, with the tree `/srv/adapter` and the path `/srv/checks/exact`, `reserved.adapter-tree`, `reserved.adapter-ancestor`, `reserved.adapter-path`, and `reserved.adapter-below`, and whether a refused one created anything, `reserved.created`; a read-only mapping attached and unmounted 200 times while another thread tries to open its file for writing, `read-only.attaches`, `read-only.flags`, `read-only.writable`, and `read-only.source`; and the entries and mounts of the directory outside the root, `outside.entries` and `outside.mounts`, and the mounts that the checks left, `left` |
+| `map [NAME=PATH...]` | The export's mount at `hostfs/root` in the runtime directory: the number of mounts there, `export.count`, and of the topmost, its `export.type` and `export.options`; the mode of `hostfs`, in octal, `hostfs.mode`, and its owner, `hostfs.owner`, as `UID:GID`, or `absent` for both; and the mount points below the root, in the mount table's order, `mounts`. For each NAME, at PATH in the root, such as a mapping's target: the options of the topmost mount there, `NAME.options`, or `none`; what it shows, `NAME.kind`; a directory's entries, by name, in order, separated by commas, `NAME.entries`, or a file's contents, `NAME.read`; whether a write is `allowed` or `refused`, `NAME.write`: of a new file `written`, which holds `runtime-adapter`, in a directory, or of the file, opened for writing; and what the overlay's upper holds at PATH, `NAME.upper`, an empty directory or file where the worker created the target. Finally whether the root is latched, `latched` |
+| `map-checks DIR FILE` | From the export's directory DIR, which holds a file `marker` and a directory `inner`, and in which the guest may write, and its file FILE, each check through a new mapper: a link at each component of a target, `link.a`, `link.b`, and `link.new`, and to `..`, `link.up`; a magic link of a procfs that it mounts in the root for the checks, `magic.self`, `magic.thread-self`, `magic.root`, `magic.cwd`, and `magic.fd`; a directory onto a file, `kind.directory`, and a file onto a directory, `kind.file`; a mapping onto a file that an earlier one shows, `nested.onto`, one that would create its target inside it, `nested.create`, and their teardown, `nested.teardown`; the runtime's reserved targets, `reserved.run`, `reserved.run-nvx`, `reserved.time`, and `reserved.time-below`, the container root's, `reserved.proc`, `reserved.sys`, `reserved.dev`, `reserved.agent`, `reserved.machine-id`, and `reserved.etc`, and those of a set of the adapter's, with the tree `/srv/adapter` and the path `/srv/checks/exact`, `reserved.adapter-tree`, `reserved.adapter-ancestor`, `reserved.adapter-path`, and `reserved.adapter-below`, and whether a refused one created anything, `reserved.created`; a read-only mapping of DIR attached and unmounted 200 times while another thread tries to open its `marker` for writing, `read-only.attaches`, `read-only.flags`, and `read-only.writable`; and the entries and mounts of the directory outside the root, `outside.entries` and `outside.mounts`, and the mounts that the checks left, `left` |
 
-A check's outcome is `applied`, or why the mapper refused the mapping: `link`
-for a link at the component that the check expects, and otherwise the kind of
-the error, such as `reserved` or `target-kind`, with the path that it names, if
-any.
+A NAME holds lowercase ASCII letters, digits, and `-`, but is neither `export`
+nor `hostfs`, and comes once. PATH is a relative path in the root, and DIR and
+FILE are relative paths in the export, such as `2`, its third child, each of
+normal components. A kind is `directory`, `file SIZE`, with the file's size in
+bytes, `link`, `other`, `denied` for a path that the guest may not look up,
+such as one that the export hides, or `absent`. A check's outcome is
+`applied`, or why the mapper refused the mapping: `link` for a link at the
+component that the check expects, and otherwise the kind of the error, such as
+`reserved` or `target-kind`, with the path that it names, if any. The checks
+write nothing to the export.
 
 ### Executions
 
@@ -1245,14 +1249,14 @@ the host-only configuration, through the host program's commands, and checks
 that the guest's worker, outside PID 1, assembles the root, or reports the
 stage that failed, and that the VM still ends cleanly. A launch whose guest
 assembled the root also follows the host's order: the guest agent is of the
-build that the host program ships, applies the empty mapping table, and starts
-the sandbox. Each scenario stages its images, then launches them, and is a row
-of the table that its `scenarios!` macro declares, and an ignored test of its
-own:
+build that the host program ships, applies the mapping table, which is empty
+unless the scenario shares host paths, and starts the sandbox. Each scenario
+stages its images, then launches them, and is a row of the table that its
+`scenarios!` macro declares, and an ignored test of its own:
 
 | Scenario | Root | Expects |
 | --- | --- | --- |
-| `erofs_over_scratch` | NVX's Ubuntu EROFS image, with its own identity, over a copy of the scratch template | A root that the worker assembled: the image, read-only, under the overlay, whose upper and work directories are on the scratch, each mounted once below the runtime directory, with the options of the default mode, which trusts its lowers; the merged root's contents, with a file that reaches the upper and not the image; a copy-up of a file's metadata alone, which leaves its data in the image, and the rename of a lower directory; the image's and the scratch's disks; the agent's and the workload's cgroups, with their resource values; a worker that is PID 1's child, and PID 1's unrelated child, untouched; and a teardown that unmounts the scratch cleanly |
+| `erofs_over_scratch` | NVX's Ubuntu EROFS image, with its own identity, over a copy of the scratch template | A root that the worker assembled: the image, read-only, under the overlay, whose upper and work directories are on the scratch, each mounted once below the runtime directory, with the options of the default mode, which trusts its lowers; the merged root's contents, with a file that reaches the upper and not the image; a copy-up of a file's metadata alone, which leaves its data in the image, and the rename of a lower directory; the image's and the scratch's disks; the agent's and the workload's cgroups, with their resource values; a worker that is PID 1's child, and PID 1's unrelated child, untouched; an empty mapping table, which does no work: the launch exports nothing, the guest mounts no export, and nothing is mounted below the root; and a teardown that unmounts the scratch cleanly |
 | `erofs_over_scratch_with_untrusted_lowers` | The image over the scratch, in the untrusted-lowers mode, with a journal that the launch allows | The root, whose overlay has none of the trusting mode's options, copies up a file's data too, and refuses the rename of a lower directory with `EXDEV` |
 | `erofs_over_ram` | The image over a tmpfs in RAM | The root, whose upper and work directories are on a tmpfs of the kernel's default size, whose root directory has mode 0755, with no scratch mounted, and no disk but the image's |
 | `erofs_over_ram_with_untrusted_lowers` | The image over a tmpfs, in the untrusted-lowers mode | The root over the tmpfs, which copies up a file's data too, and refuses the rename |
@@ -1271,8 +1275,15 @@ own:
 | `recovery_required_layer_fails_the_assembly` | The same cyclic journal with the top layer's `needs_recovery` bit set | The assembly refuses recovery before mounting anything, despite `noload`, and the VM ends cleanly with 14 |
 | `invalid_configuration_fails_its_stage` | A relative runtime directory | The configuration's failure, which the launch reports, and a VM that ends with 11 |
 | `busy_root_fails_the_teardown` | The image over the scratch, which the `hold` probe keeps open | The teardown's failure, which the stop reports, and a VM that ends with 15, leaving the scratch mounted |
-| `mappings_apply_beneath_the_root` | The image over the scratch, beneath which the `map` and `map-checks` probes map | Through the root: zero mappings that do no work, then a table mounted in order, each mapping with its access, `nosuid`, and `nodev`, whose writes reach the sources of the writable ones only, on targets that the mapper created on the overlay. Through mappers of the adapter's own: a link or a magic link at each component, the wrong kinds, a target that would be created inside another mapping, and the runtime's, the container root's, and the adapter's own reserved targets refused, and a read-only mapping that is never writable. A teardown that unmounts the mappings, then the scratch, cleanly |
-| `a_refused_mapping_latches_the_root` | The image over the scratch, in which the `map-refused` probe plants a symbolic link | A mapping through the link that the root refuses, nothing mounted or created, and a root that refuses every later mapping, then tears down cleanly |
+| `erofs_over_scratch_maps_the_table` | The image over the scratch, with the mapping table, from whose export the `map-checks` probe also maps | The export, mounted once, read-write, `nosuid`, and `nodev`, below a `hostfs` of mode 0700 that root owns; the table's mappings, mounted in the plan's order, by the depth of their targets, then by their targets, each with its access, `nosuid`, and `nodev`, on targets that the worker created on the overlay, but none inside another mapping; a hidden file that its directory does not list, and whose lookup the host refuses; and writes that reach the host's writable sources alone, the one inside a read-only mapping included. Through mappers of the adapter's own, from the export: a link or a magic link at each component, the wrong kinds, a target that would be created inside another mapping, and the runtime's, the container root's, and the adapter's own reserved targets refused, and a read-only mapping of a directory that the guest may write through the export, which is never writable. A teardown that unmounts the mappings, the export, then the scratch, cleanly |
+| `erofs_over_ram_maps_the_table` | The image over a tmpfs, with the mapping table | The table, as over the scratch |
+| `gpt_over_scratch_maps_the_table` | The GPT disk over the scratch, with the mapping table | The table, whose targets the worker created with their parents, which the disk's layers do not hold |
+| `gpt_over_ram_maps_the_table` | The disk over a tmpfs, with the mapping table | The table, as over the scratch |
+| `a_failed_mapping_tears_the_vm_down` | The image over the scratch, with the mapping table and `out` again at `/usr/lib/os-release`, a file of the image, which the plan orders fourth | The guest's refusal of the fourth mapping, a directory onto a file, which the launch reports with the three mappings that the guest applied; no more of the table, and no `Start`; a stop that the guest confirms once it tore the root down, a VM that ends with success and a complete teardown, an exit with 6, no runtime record, and the host's sources unchanged |
+| `a_read_only_share_inside_a_writable_one_is_refused_before_launch` | The image over the scratch, with the mapping table and a read-only share inside `out` | A launch that fails before it spawns the VM, since the host could not keep the share read-only, and that leaves nothing of a launch in the store |
+| `a_share_inside_a_reserved_tree_is_refused_before_launch` | The image over the scratch, with the mapping table, a tree `/srv/adapter` that the adapter reserves, and a share inside it | A launch that fails before it spawns the VM, and that leaves nothing of a launch in the store |
+| `a_share_over_a_reserved_tree_is_refused_before_launch` | The image over the scratch, with the mapping table, the reserved tree, and a share at `/srv`, which would cover it | A launch that fails before it spawns the VM, and that leaves nothing of a launch in the store |
+| `an_unauthorized_host_path_is_refused_before_launch` | The image over the scratch, with the mapping table and a share of a host directory beside the sources | A launch that fails before it spawns the VM, since the adapter authorizes the sources alone, and that leaves nothing of a launch in the store |
 | `root_profiles_enter_the_root` | The image over the scratch, which the `entries` probe enters | Executions that start as PID 1 of their namespaces, with the root moved over `/`, only their standard streams, the leaked descriptor closed, no inheritable or ambient capability, and no new privileges, blocking no signal that their caller blocks, at the top of the root unless they name a working directory. A working directory that the execution names is entered, but none through a magic link, such as the leaked descriptor's, its own working directory's or root's, or any descriptor's, nor through a symbolic link to one: each fails the launch before the program runs. User ID 0 with each allowed capability alone holds it alone, and only its own attempt succeeds; with none, nothing does, nor for a numeric identity without an account. No execution writes `/proc/sys`, so none lowers the unprivileged port start, and a nested `chroot` stays in the root. With published listeners, user ID 0 with every other allowed capability can neither bind a privileged source port nor open a raw socket, so it cannot forge a listener announcement in either publication mode; without them, it may. The entry refuses the 51 capabilities outside its allowlist, the binding and raw-socket ones while listeners are published, capabilities for another user ID, and an identity without an account in existing-account mode. The root's own machine ID, then a generated one and the time status that the guest's time daemon publishes, read-only, in which a root workload finds no lock of the daemon's, which the runtime bound in the helper's mount namespace, and which leave the worker's namespace without mounts below the root. A teardown that unmounts the scratch cleanly |
 | `unstaged_images_are_refused_before_spawn` | The image over the scratch, which the scenario does not stage | A launch that fails before it spawns the VM, since the store stages no image at its path, and that leaves no launch journal, VMM log, runtime record, or launch record; then, once the scenario stages the images, the root that the worker assembles, and a clean teardown |
 | `a_changed_image_is_refused_before_spawn` | The GPT disk over the scratch, which the scenario writes in place after it stages it | A launch that fails before it spawns the VM, since the disk's modification time differs from its binding's, and that leaves nothing of a launch in the store; then, once the scenario stages the disk again, the root, and a clean teardown |
@@ -1280,15 +1291,32 @@ own:
 
 A row names the root, the image, the GPT disk's top-layer variant, the
 identity that the launch expects of the image, the upper, the runtime
-directory, the overlay mode, the scratch's journal policy, and the bound of the
-first partition, and what the scenario expects: a root that the guest
-assembles, with a check that probes it, a teardown that fails after a check,
-the stage that fails, with its problem, or a launch that the host program
-refuses before it spawns the VM, with the change that the scenario makes after
-it stages the images, and the problem. Each scenario that launches a VM checks
-the launch's record, with the bindings that the store stages, which the launch
-checked, and, over a scratch, whether the VM left the scratch's journal to
-recover, which tells whether the guest unmounted the scratch.
+directory, the overlay mode, the scratch's journal policy, the bound of the
+first partition, and the host paths that the launch shares, and what the
+scenario expects: a root that the guest assembles, with a check that probes
+it, a teardown that fails after a check, the stage that fails, with its
+problem, a mapping of the table that the guest fails, after how many, with its
+problem, shares that the host program refuses before it spawns the VM, with
+the problem, or a launch that the host program refuses before it spawns the
+VM, with the change that the scenario makes after it stages the images, and
+the problem. Each scenario that launches a VM checks the launch's record, with
+the bindings that the store stages, which the launch checked, and the number
+of mappings that the root configuration announced, and, over a scratch,
+whether the VM left the scratch's journal to recover, which tells whether the
+guest unmounted the scratch.
+
+A scenario with the mapping table writes its sources in its directory, below
+`sources`: a directory `dir`, with the files `marker` and `secret` and an empty
+directory `inner`; a file `file.txt`; and a directory `out`, with a file
+`marker` and an empty directory `inner`. The launch shares `dir` read-only at
+`/srv/maps/dir`, `dir/inner` read-write inside it, `file.txt` read-only at
+`/srv/maps/file.txt`, and `out` read-write at `/srv/maps/out`, hides
+`dir/secret` with `--deny`, and authorizes `sources` alone with
+`--share-root`. The plan exports `dir`, `file.txt`, and `out` as the export's
+children `0`, `1`, and `2`. Once the `map` probe ran, the sources hold what
+the scenario wrote, and the file `written` in `dir/inner` and in `out` alone;
+the scenarios of a failed mapping and of refused shares leave the sources as
+the scenario wrote them.
 
 The scenarios use the fixtures of NVX's own layered scenarios, from NVX's
 artifacts: the Ubuntu EROFS image, `ubuntu-distro.erofs`, its manifest, which

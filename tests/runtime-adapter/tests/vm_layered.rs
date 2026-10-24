@@ -20,6 +20,12 @@
 //! panic on an error, as [`corrupt`] describes. Others give it a cyclic journal, with and without
 //! the file system's `needs_recovery` bit, as [`add_cyclic_journal`] describes.
 //!
+//! A scenario of a mapping [`Table`] shares host directories and a file, which the test writes in
+//! its directory, with the root, through the launch's `--share` options: the guest maps them
+//! beneath the root from the host export before the sandbox starts, and the scenario then checks
+//! the mappings in the guest and the files on the host. Others share what the guest, or the host
+//! program before it spawns the VM, refuses.
+//!
 //! ```text
 //! cargo test --locked --features host --test vm_layered -- --ignored
 //! ```
@@ -27,7 +33,7 @@
 
 mod common;
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, File};
 use std::io::{self, Read, Seek, SeekFrom, Write};
@@ -48,6 +54,9 @@ const FAILED: i32 = 1;
 /// The exit status of the host program's command whose guest reported that a stage of the root
 /// failed.
 const ROOT_FAILED: i32 = 4;
+/// The exit status of the host program's launch whose guest failed a mapping of the table, and
+/// stopped gracefully.
+const TABLE_FAILED: i32 = 6;
 /// The size of the guest's pages, in bytes.
 const PAGE: u64 = 4096;
 /// How many of the bytes available in an upper a file that fills it may leave, which the file's
@@ -89,6 +98,37 @@ const LAYER_BLOCKS: usize = 128;
 /// The number of inodes of that layer, of which the first ten are reserved, as in every ext2 file
 /// system, and the second is its top directory.
 const LAYER_INODES: usize = 16;
+/// The directory of a scenario's sandbox that holds the host directories and the file that a
+/// mapping table shares, as [`write_sources`] writes them.
+const SOURCES: &str = "sources";
+/// The files of the [`SOURCES`], each a path in them, with components separated by `/`, and its
+/// contents.
+const SOURCE_FILES: [(&str, &str); 4] = [
+    ("dir/marker", "marker"),
+    ("dir/secret", "secret"),
+    ("file.txt", "file"),
+    ("out/marker", "marker"),
+];
+/// The empty directory of a scenario's sandbox beside the [`SOURCES`], which the adapter does not
+/// authorize: the sources are the one host directory that it authorizes.
+const OUTSIDE: &str = "outside";
+/// The shares of a mapping table: each host path, a path in the [`SOURCES`], and its target in the
+/// root, with `:ro` for a read-only share. The launch hides `dir/secret`.
+const SHARES: [(&str, &str); 4] = [
+    ("dir", "/srv/maps/dir:ro"),
+    ("dir/inner", "/srv/maps/dir/inner"),
+    ("file.txt", "/srv/maps/file.txt:ro"),
+    ("out", "/srv/maps/out"),
+];
+/// The guest tree that the adapter reserves in the scenarios of its reserved targets.
+const ADAPTER_TREE: &str = "/srv/adapter";
+/// The `map` probe of the [`SHARES`]: each target, and the hidden file in `dir`.
+const MAP_TABLE: &str = "map dir=srv/maps/dir inner=srv/maps/dir/inner file=srv/maps/file.txt \
+                         out=srv/maps/out secret=srv/maps/dir/secret";
+/// The `map-checks` probe of the [`SHARES`], from the export's child `2`, `out`, and its child `1`,
+/// `file.txt`: the plan exports the outermost shares as its children, in the order of their host
+/// paths.
+const MAP_CHECKS: &str = "map-checks 2 1";
 
 /// The image of a scenario's root.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -150,10 +190,12 @@ struct Root {
     journal: Option<JournalPolicy>,
     /// The bound of the first partition, as the launch names it, unless the guest's default.
     first_partition_bound: Option<u64>,
+    /// The host paths that the launch shares with the root.
+    table: Table,
 }
 
 /// The root of the scenarios unless they say otherwise: NVX's EROFS image, with its own identity,
-/// over a copy of the scratch template, with the guest's defaults.
+/// over a copy of the scratch template, with the guest's defaults, and no share.
 const ROOT: Root = Root {
     image: Image::Erofs,
     top_layer: TopLayer::Sound,
@@ -163,6 +205,7 @@ const ROOT: Root = Root {
     overlay: None,
     journal: None,
     first_partition_bound: None,
+    table: Table::None,
 };
 
 /// The root of the scenarios of a GPT disk unless they say otherwise: the disk, with its own GUID,
@@ -260,6 +303,92 @@ fn other_identity(identity: &str) -> String {
     format!("{start}{}", if last == "0" { "1" } else { "0" })
 }
 
+/// The host paths that a scenario's launch shares with the root, from the [`SOURCES`] that
+/// [`write_sources`] writes: none, the [`SHARES`], or those and one more share, which the guest,
+/// or the host program before it spawns the VM, refuses.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Table {
+    /// No share: the launch exports nothing, and the mapping table is empty.
+    None,
+    /// The [`SHARES`]: a read-only directory, with a read-write directory inside it, a read-only
+    /// file, and a read-write directory, in a table of four mappings, which the plan orders by the
+    /// depth of their targets, then by their targets.
+    Maps,
+    /// The [`SHARES`], then `out` again, onto `/usr/lib/os-release`, a file of NVX's Ubuntu image:
+    /// the fourth mapping of the table, a directory onto a file, which the guest refuses.
+    Failing,
+    /// The [`SHARES`], then a read-only share inside `out`, which the guest may write.
+    ReadOnlyInsideWritable,
+    /// The [`SHARES`], then a share at a target inside the [`ADAPTER_TREE`], which the adapter
+    /// reserves.
+    InReservedTree,
+    /// The [`SHARES`], then a share at a target that would cover the [`ADAPTER_TREE`].
+    OverReservedTree,
+    /// The [`SHARES`], then the [`OUTSIDE`] directory, which the adapter does not authorize.
+    Unauthorized,
+}
+
+impl Table {
+    /// Returns the launch's options of the table, with the sources in `sandbox`, the sandbox's
+    /// directory: each share, with the [`ADAPTER_TREE`] reserved for the scenarios of reserved
+    /// targets, `dir/secret` hidden, and the [`SOURCES`] as the one host directory that the
+    /// adapter authorizes.
+    fn options(self, sandbox: &Path) -> Vec<OsString> {
+        let sources = sandbox.join(SOURCES);
+        let extra = match self {
+            Self::None => return Vec::new(),
+            Self::Maps => None,
+            Self::Failing => Some((source(&sources, "out"), "/usr/lib/os-release")),
+            Self::ReadOnlyInsideWritable => {
+                Some((source(&sources, "out/inner"), "/srv/maps/out/inner:ro"))
+            }
+            Self::InReservedTree => Some((source(&sources, "dir/inner"), "/srv/adapter/inner")),
+            Self::OverReservedTree => Some((source(&sources, "out"), "/srv")),
+            Self::Unauthorized => Some((sandbox.join(OUTSIDE), "/srv/outside")),
+        };
+        let shares = SHARES
+            .iter()
+            .map(|(path, target)| (source(&sources, path), *target))
+            .chain(extra);
+        let mut options = Vec::new();
+        for (host, target) in shares {
+            let mut share = host.into_os_string();
+            share.push(":");
+            share.push(target);
+            options.extend(["--share".into(), share]);
+        }
+        if matches!(self, Self::InReservedTree | Self::OverReservedTree) {
+            options.extend(["--reserved".into(), ADAPTER_TREE.into()]);
+        }
+        options.extend([
+            "--deny".into(),
+            source(&sources, "dir/secret").into_os_string(),
+            "--share-root".into(),
+            sources.into_os_string(),
+        ]);
+        options
+    }
+
+    /// Returns how many mappings the root configuration of a launch with the table announces.
+    fn mapping_count(self) -> u32 {
+        match self {
+            Self::Maps => 4,
+            Self::Failing => 5,
+            Self::None
+            | Self::ReadOnlyInsideWritable
+            | Self::InReservedTree
+            | Self::OverReservedTree
+            | Self::Unauthorized => 0,
+        }
+    }
+}
+
+/// Returns the host path of `path`, a path in the `sources`, with components separated by `/`.
+fn source(sources: &Path, path: &str) -> PathBuf {
+    path.split('/')
+        .fold(sources.to_path_buf(), |host, name| host.join(name))
+}
+
 /// What a scenario expects of its VM.
 enum Expect {
     /// The guest assembles the root, the check probes the VM, and the stop tears the root down,
@@ -271,6 +400,13 @@ enum Expect {
     /// The guest reports that the stage failed with this problem, and the VM ends with its
     /// status, before the guest mounted a scratch.
     Fails(RootStage, &'static str),
+    /// The guest assembles the root, applies this many mappings of the table, and fails the next
+    /// with a problem that holds this text: the launch sends no more of the table, nor `Start`, and
+    /// stops the VM, whose guest tears the root down, and which leaves the host's sources as they
+    /// were.
+    TableFails(u32, &'static str),
+    /// The host program refuses the launch's shares with this problem, before it spawns the VM.
+    Unlaunched(&'static str),
     /// The scenario makes this change between its staging and its launch, which the host program
     /// then refuses with this problem, before it spawns the VM. Once the scenario stages the
     /// images again, the guest assembles the root, which [`check_root`] probes, and the stop tears
@@ -515,22 +651,73 @@ scenarios! {
         root: ROOT,
         expect: Expect::TeardownFails(hold_root, "failed to unmount the overlay: "),
     };
-    /// Host paths mapped beneath the assembled root, as an adapter maps them. Through the root:
-    /// zero mappings, then a table in order, each with its access, `nosuid`, and `nodev`, on
-    /// targets created on the overlay. Through mappers of the adapter's own: the refusal of a
-    /// link and of a magic link at each component, of the wrong kinds, of a target that would be
-    /// created inside another mapping, and of reserved targets, the runtime's, the container
-    /// root's, and the adapter's own; and a read-only mapping that is never writable. The stop
-    /// unmounts the root's mappings before the overlay.
-    mappings_apply_beneath_the_root: Scenario {
-        root: ROOT,
-        expect: Expect::Ready(check_mappings),
+    /// The host's mapping table, which the guest maps beneath the root from the host export before
+    /// the sandbox starts: the export, mounted out of the root; the mappings, mounted in the plan's
+    /// order, each with its access, `nosuid`, and `nodev`, on targets created on the overlay; a
+    /// file that the launch hides; and writes that reach the host's writable sources alone. Then,
+    /// from the export, through mappers of the adapter's own: the refusal of a link and of a magic
+    /// link at each component, of the wrong kinds, of a target that would be created inside
+    /// another mapping, and of reserved targets, the runtime's, the container root's, and the
+    /// adapter's own; and a read-only mapping that is never writable. The stop unmounts the
+    /// mappings and the export before the overlay.
+    erofs_over_scratch_maps_the_table: Scenario {
+        root: Root { table: Table::Maps, ..ROOT },
+        expect: Expect::Ready(check_table_and_mappers),
     };
-    /// A mapping through a symbolic link in the root, which the root refuses, and after which it
-    /// refuses every mapping.
-    a_refused_mapping_latches_the_root: Scenario {
-        root: ROOT,
-        expect: Expect::Ready(check_refused_mapping),
+    /// The table over a tmpfs in RAM.
+    erofs_over_ram_maps_the_table: Scenario {
+        root: Root { upper: Upper::Ram, table: Table::Maps, ..ROOT },
+        expect: Expect::Ready(check_table),
+    };
+    /// The table on a GPT disk, whose layers hold no `/srv`, over the scratch.
+    gpt_over_scratch_maps_the_table: Scenario {
+        root: Root { table: Table::Maps, ..GPT },
+        expect: Expect::Ready(check_table),
+    };
+    /// The table on the disk over a tmpfs in RAM.
+    gpt_over_ram_maps_the_table: Scenario {
+        root: Root { upper: Upper::Ram, table: Table::Maps, ..GPT },
+        expect: Expect::Ready(check_table),
+    };
+    /// A mapping of the table that the guest refuses, which blocks the start: the launch stops the
+    /// VM, which tears the root down.
+    a_failed_mapping_tears_the_vm_down: Scenario {
+        root: Root { table: Table::Failing, ..ROOT },
+        expect: Expect::TableFails(
+            3,
+            "failed to mount the mapping at /usr/lib/os-release: the target exists as another kind \
+             than its source",
+        ),
+    };
+    /// A read-only share inside a read-write one, which the host could not keep read-only, and
+    /// which the launch refuses before it spawns the VM.
+    a_read_only_share_inside_a_writable_one_is_refused_before_launch: Scenario {
+        root: Root { table: Table::ReadOnlyInsideWritable, ..ROOT },
+        expect: Expect::Unlaunched("where the host cannot keep it read-only"),
+    };
+    /// A share inside a tree that the adapter reserves, which the launch refuses before it spawns
+    /// the VM.
+    a_share_inside_a_reserved_tree_is_refused_before_launch: Scenario {
+        root: Root { table: Table::InReservedTree, ..ROOT },
+        expect: Expect::Unlaunched(
+            "has the guest target /srv/adapter/inner, which would cover the guest's /srv/adapter",
+        ),
+    };
+    /// A share that would cover a tree that the adapter reserves, which the launch refuses before
+    /// it spawns the VM.
+    a_share_over_a_reserved_tree_is_refused_before_launch: Scenario {
+        root: Root { table: Table::OverReservedTree, ..ROOT },
+        expect: Expect::Unlaunched(
+            "has the guest target /srv, which would cover the guest's /srv/adapter",
+        ),
+    };
+    /// A share outside the host directories that the adapter authorizes, which the launch refuses
+    /// before it spawns the VM.
+    an_unauthorized_host_path_is_refused_before_launch: Scenario {
+        root: Root { table: Table::Unauthorized, ..ROOT },
+        expect: Expect::Unlaunched(
+            "lies outside the host directories that --share-root authorizes",
+        ),
     };
     /// Executions that enter the root as root profiles do, through `nvx::guest::entry`: user ID
     /// 0 with each allowed capability alone, with none, and with every one in each publication
@@ -585,7 +772,11 @@ fn run(name: &str, scenario: Scenario) {
     let distro = root.distro(&fixtures, &sandbox.root);
     let images = root.images(&distro, &scratch);
     let images = images.iter().map(OsString::as_os_str).collect::<Vec<_>>();
-    let options = root.options(&distro, &scratch);
+    let mut options = root.options(&distro, &scratch);
+    if root.table != Table::None {
+        write_sources(&sandbox.root);
+        options.extend(root.table.options(&sandbox.root));
+    }
     let options = options.iter().map(OsString::as_os_str).collect::<Vec<_>>();
     if let Expect::Refused(change, problem) = scenario.expect {
         if change != Change::Unstaged {
@@ -619,6 +810,38 @@ fn run(name: &str, scenario: Scenario) {
             );
             return;
         }
+        Expect::TableFails(mapped, problem) => {
+            let launched = sandbox.launch(&options, TABLE_FAILED);
+            assert_eq!(launched["root"], "ready", "{launched:?}");
+            assert_eq!(launched["build"], GUEST_BUILD);
+            // The guest applied the mappings before the one that it refused, and the launch sent
+            // neither the rest of the table nor `Start`.
+            assert_eq!(launched["table"], "failed", "{launched:?}");
+            assert_eq!(launched["mapped"], mapped.to_string(), "{launched:?}");
+            assert!(launched["problem"].contains(problem), "{launched:?}");
+            assert!(!launched.contains_key("sandbox"), "{launched:?}");
+            // The launch stopped the VM, whose guest tore the root down, mappings included.
+            assert_eq!(launched["stopped"], "graceful", "{launched:?}");
+            assert_eq!(launched["outcome"], "success 0", "{launched:?}");
+            assert_eq!(launched["teardown"], "complete", "{launched:?}");
+            check_record(&sandbox, &root, &distro, &scratch);
+            assert_eq!(sandbox.record(), None);
+            assert!(
+                !(over_scratch && needs_recovery(&scratch)),
+                "the stop left the scratch mounted"
+            );
+            check_sources(&sandbox.root, false);
+            return;
+        }
+        Expect::Unlaunched(problem) => {
+            let refused = sandbox.launch(&options, FAILED);
+            assert!(refused.is_empty(), "{refused:?}");
+            let stderr = sandbox.stderr();
+            assert!(stderr.contains(problem), "{stderr}");
+            sandbox.assert_unlaunched();
+            check_sources(&sandbox.root, false);
+            return;
+        }
         Expect::Ready(check) => (check, None),
         Expect::TeardownFails(check, problem) => (check, Some(problem)),
         Expect::Refused(..) => (check_root as fn(&mut Vm<'_>), None),
@@ -626,10 +849,10 @@ fn run(name: &str, scenario: Scenario) {
     let launched = sandbox.launch(&options, 0);
     assert_eq!(launched["root"], "ready");
     // The guest agent of the build that the host program ships assembled the root, applied the
-    // host's empty mapping table, and started the sandbox.
+    // host's mapping table, and started the sandbox.
     assert_eq!(launched["build"], GUEST_BUILD);
     assert_eq!(launched["table"], "applied");
-    assert_eq!(launched["mapped"], "0");
+    assert_eq!(launched["mapped"], root.table.mapping_count().to_string());
     assert_eq!(launched["sandbox"], "started");
     let config = check_record(&sandbox, &root, &distro, &scratch);
     let vmm = sandbox
@@ -748,6 +971,7 @@ fn check_record(sandbox: &Sandbox, root: &Root, distro: &Distro, scratch: &Path)
         first_partition_bound: root.first_partition_bound,
         overlay_mode: root.overlay,
         scratch_journal: root.journal,
+        mapping_count: root.table.mapping_count(),
         ..RootConfig::default()
     };
     let sent = String::from_utf8(config.encode()).unwrap();
@@ -1016,6 +1240,15 @@ fn check_erofs_over_scratch(vm: &mut Vm<'_>) {
         facts["processes.worker.command"].ends_with(&format!(" {sibling}")),
         "{facts:?}"
     );
+
+    // Zero mappings do no work: the launch exported nothing, so the guest mounted no export, and
+    // nothing is mounted below the root.
+    let facts = vm.probe(&["map"]);
+    assert_eq!(facts["map.export.count"], "0", "{facts:?}");
+    assert!(!facts.contains_key("map.export.type"), "{facts:?}");
+    assert_eq!(facts["map.hostfs.mode"], "absent", "{facts:?}");
+    assert_eq!(facts["map.mounts"], "", "{facts:?}");
+    assert_eq!(facts["map.latched"], "no", "{facts:?}");
 }
 
 /// Keeps the root of the `busy_root_fails_the_teardown` scenario busy.
@@ -1024,47 +1257,82 @@ fn hold_root(vm: &mut Vm<'_>) {
     assert_eq!(facts["hold.held"], format!("{}/rootfs", vm.runtime));
 }
 
-/// Checks the VM of the `mappings_apply_beneath_the_root` scenario.
-fn check_mappings(vm: &mut Vm<'_>) {
-    let facts = vm.probe(&["map", "map-checks"]);
+/// Checks the mappings of the table of [`SHARES`], which the guest mapped beneath the root from
+/// the host export before the sandbox started, and the host's sources, which they show.
+fn check_table(vm: &mut Vm<'_>) {
+    let facts = vm.probe(&[MAP_TABLE]);
     let fact = |key: &str| facts[&format!("map.{key}")].as_str();
 
-    // Zero mappings do no work; a table applies in order.
-    assert_eq!((fact("zero"), fact("zero.mounts")), ("applied", "0"));
-    assert_eq!(fact("table"), "applied");
+    // The export, mounted once, read-write since some of its children are, without set-user-ID
+    // programs or devices, below a directory of the runtime's that only root may enter.
+    assert_eq!(fact("export.count"), "1");
+    assert_eq!(fact("export.type"), "virtiofs");
+    let export = options(fact("export.options"));
+    assert!(
+        export.is_superset(&BTreeSet::from(["rw", "nosuid", "nodev"])),
+        "{export:?}"
+    );
+    assert_eq!((fact("hostfs.mode"), fact("hostfs.owner")), ("0700", "0:0"));
+
+    // The table's mappings, and nothing else, in the plan's order: by the depth of their targets,
+    // then by their targets.
     assert_eq!(
         fact("mounts"),
-        "/srv/maps/dir,/srv/maps/dir/inner,/srv/maps/file.txt,/srv/maps/out"
+        "/srv/maps/dir,/srv/maps/file.txt,/srv/maps/out,/srv/maps/dir/inner"
     );
-    // Each mapping has its access, `nosuid`, and `nodev`, and writes reach the sources of the
-    // writable ones only, the one inside a read-only mapping included.
-    for (name, access) in [
-        ("dir", "ro"),
-        ("inner", "rw"),
-        ("file", "ro"),
-        ("out", "rw"),
+    // Each mapping has its access, `nosuid`, and `nodev`, and the guest may write the writable
+    // ones alone, the one inside a read-only mapping included.
+    for (name, access, write) in [
+        ("dir", "ro", "refused"),
+        ("inner", "rw", "allowed"),
+        ("file", "ro", "refused"),
+        ("out", "rw", "allowed"),
     ] {
         let found = options(fact(&format!("{name}.options")));
         for flag in [access, "nosuid", "nodev"] {
             assert!(found.contains(flag), "{name}: {found:?}");
         }
+        assert_eq!(fact(&format!("{name}.write")), write, "{name}");
     }
-    assert_eq!((fact("dir.read"), fact("dir.write")), ("source", "refused"));
-    assert_eq!((fact("file.read"), fact("file.write")), ("file", "refused"));
-    for name in ["inner", "out"] {
-        let written = (
-            fact(&format!("{name}.write")),
-            fact(&format!("{name}.source")),
-        );
-        assert_eq!(written, ("allowed", "runtime-adapter"), "{name}");
-    }
-    // The missing targets were created on the overlay, in its upper.
+    // What each shows, as the host holds it, but for the file that the launch hides: its directory
+    // does not list it, and the host refuses its lookup.
     assert_eq!(
-        (fact("upper.directory"), fact("upper.file")),
-        ("yes", "yes")
+        (fact("dir.kind"), fact("dir.entries")),
+        ("directory", "inner,marker")
     );
+    assert_eq!(
+        (fact("inner.kind"), fact("inner.entries")),
+        ("directory", "")
+    );
+    assert_eq!((fact("file.kind"), fact("file.read")), ("file 4", "file"));
+    assert_eq!(
+        (fact("out.kind"), fact("out.entries")),
+        ("directory", "inner,marker")
+    );
+    assert_eq!(
+        (fact("secret.options"), fact("secret.kind")),
+        ("none", "denied")
+    );
+    // The guest created the missing targets on the overlay, in its upper, empty: those of the
+    // outermost mappings, but none inside another mapping.
+    for (name, upper) in [
+        ("dir", "directory"),
+        ("inner", "absent"),
+        ("file", "file 0"),
+        ("out", "directory"),
+        ("secret", "absent"),
+    ] {
+        assert_eq!(fact(&format!("{name}.upper")), upper, "{name}");
+    }
     assert_eq!(fact("latched"), "no");
+    check_sources(&vm.sandbox.root, true);
+}
 
+/// Checks the VM of the `erofs_over_scratch_maps_the_table` scenario: its [table](check_table),
+/// then mappers of the adapter's own, from the export.
+fn check_table_and_mappers(vm: &mut Vm<'_>) {
+    check_table(vm);
+    let facts = vm.probe(&[MAP_CHECKS]);
     let check = |key: &str| facts[&format!("map-checks.{key}")].as_str();
     // No link or magic link at any component leads a mapping anywhere.
     for key in [
@@ -1085,7 +1353,6 @@ fn check_mappings(vm: &mut Vm<'_>) {
     // A mapping may go onto what an earlier one shows, but creates nothing inside it.
     assert_eq!(check("nested.onto"), "applied");
     assert_eq!(check("nested.create"), "foreign /srv/checks/m/new");
-    assert_eq!(check("nested.source"), "absent");
     assert_eq!(check("nested.teardown"), "complete");
     // The runtime's, the container root's, and the adapter's own reserved targets, and the
     // ancestors of reserved trees, but not what is below a reserved path.
@@ -1108,27 +1375,73 @@ fn check_mappings(vm: &mut Vm<'_>) {
     }
     assert_eq!(check("reserved.adapter-below"), "applied");
     assert_eq!(check("reserved.created"), "absent");
-    // A read-only mapping is restricted before it is attached, so never writable.
+    // A read-only mapping of a directory that the guest may write through the export is
+    // restricted before it is attached, so never writable.
     assert_eq!(check("read-only.attaches"), "200");
     assert_eq!(check("read-only.flags"), "ro,nosuid,nodev");
     assert_eq!(check("read-only.writable"), "never");
-    assert_eq!(check("read-only.source"), "source");
-    // Nothing went outside the root, and the checks unmounted what they mapped.
+    // Nothing went outside the root, the checks unmounted what they mapped, and they wrote
+    // nothing to the host's sources.
     assert_eq!(check("outside.entries"), "0");
     assert_eq!(check("outside.mounts"), "0");
     assert_eq!(check("left"), "0");
+    check_sources(&vm.sandbox.root, true);
 }
 
-/// Checks the VM of the `a_refused_mapping_latches_the_root` scenario.
-fn check_refused_mapping(vm: &mut Vm<'_>) {
-    let facts = vm.probe(&["map-refused"]);
-    let fact = |key: &str| facts[&format!("map-refused.{key}")].as_str();
-    assert_eq!(fact("through-link"), "link /srv/link");
-    assert_eq!(fact("latched"), "yes");
-    assert_eq!(fact("later"), "latched");
-    assert_eq!(fact("later.target"), "absent");
-    assert_eq!(fact("mounts"), "0");
-    assert_eq!(fact("outside"), "0");
+/// Writes the [`SOURCES`] that a scenario's mapping table shares, in `sandbox`, the sandbox's
+/// directory: `dir`, with the [`SOURCE_FILES`] `marker` and `secret`, which the launch hides, and
+/// the empty directory `inner`; `file.txt`; and `out`, with the file `marker` and the empty
+/// directory `inner`. Beside them, the empty directory [`OUTSIDE`].
+fn write_sources(sandbox: &Path) {
+    let sources = sandbox.join(SOURCES);
+    for directory in ["dir/inner", "out/inner"] {
+        fs::create_dir_all(source(&sources, directory)).unwrap();
+    }
+    for (file, contents) in SOURCE_FILES {
+        fs::write(source(&sources, file), contents).unwrap();
+    }
+    fs::create_dir(sandbox.join(OUTSIDE)).unwrap();
+}
+
+/// Checks the files of the [`SOURCES`] in `sandbox`, the sandbox's directory: those that
+/// [`write_sources`] wrote, unchanged, and, once `written`, the files that the `map` probe wrote
+/// through the writable mappings of `dir/inner` and `out`, and nothing else; and the empty
+/// [`OUTSIDE`].
+fn check_sources(sandbox: &Path, written: bool) {
+    let mut expected: BTreeMap<String, Option<String>> = ["dir", "dir/inner", "out", "out/inner"]
+        .into_iter()
+        .map(|directory| (directory.to_owned(), None))
+        .collect();
+    for (file, contents) in SOURCE_FILES {
+        expected.insert(file.to_owned(), Some(contents.to_owned()));
+    }
+    if written {
+        for file in ["dir/inner/written", "out/written"] {
+            expected.insert(file.to_owned(), Some("runtime-adapter".to_owned()));
+        }
+    }
+    assert_eq!(tree(&sandbox.join(SOURCES)), expected);
+    assert_eq!(tree(&sandbox.join(OUTSIDE)), BTreeMap::new());
+}
+
+/// Returns what the directory `directory` holds, at any depth: each path in it, with components
+/// separated by `/`, and a file's contents, or `None` for a directory.
+fn tree(directory: &Path) -> BTreeMap<String, Option<String>> {
+    let mut found = BTreeMap::new();
+    let mut pending = vec![(directory.to_path_buf(), String::new())];
+    while let Some((path, prefix)) = pending.pop() {
+        for entry in fs::read_dir(&path).unwrap() {
+            let entry = entry.unwrap();
+            let name = format!("{prefix}{}", entry.file_name().to_str().unwrap());
+            if entry.file_type().unwrap().is_dir() {
+                pending.push((entry.path(), format!("{name}/")));
+                found.insert(name, None);
+            } else {
+                found.insert(name, Some(fs::read_to_string(entry.path()).unwrap()));
+            }
+        }
+    }
+    found
 }
 
 /// Writes the GPT disk of the scenarios at `path`, as UEFI lays out a disk, with a protective MBR,

@@ -750,8 +750,8 @@ impl RootOperations for LibraryRoot {
         Ok(())
     }
 
-    /// Runs one of the [`probes`], of the [`mapping`] probes, which map beneath the root, or of the
-    /// [`entries`] probes, which enter it.
+    /// Runs one of the [`probes`], of the [`mapping`] probes, which inspect the root's mappings
+    /// and map from the host export, or of the [`entries`] probes, which enter it.
     fn probe(&mut self, probe: &Probe) -> Result<Facts, String> {
         let (Some(bootstrap), Some(root)) = (&self.bootstrap, &mut self.root) else {
             return Err("the worker holds no root to probe".to_owned());
@@ -781,7 +781,7 @@ impl RootOperations for LibraryRoot {
             sibling: self.sibling,
         };
         if mapping::PROBES.contains(&probe.name()) {
-            return mapping::run(probe, &context, root);
+            return mapping::run(probe, &context, root, self.export.as_ref());
         }
         if entries::PROBES.contains(&probe.name()) {
             return entries::run(probe, &context);
