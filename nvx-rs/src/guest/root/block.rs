@@ -188,7 +188,21 @@ fn partition_node(disk: &Path, number: u8) -> PathBuf {
 /// Returns the name of the block device below the virtio MMIO window at `mmio`, or `None` while
 /// the kernel lists no such window, or has not probed it yet.
 fn find(paths: &Paths, mmio: u64) -> io::Result<Option<String>> {
+    for window in window_directories(paths, mmio)? {
+        if let Some(block) = block_device(&window)? {
+            return Ok(Some(block));
+        }
+    }
+    Ok(None)
+}
+
+/// Returns the sysfs directories of the virtio MMIO windows that the kernel lists at `mmio` in
+/// `/proc/iomem`, in its order, below which it creates their virtio devices, and the block devices
+/// and partitions of those. A directory may not exist yet: the kernel lists a window before it adds
+/// the window's device.
+pub(crate) fn window_directories(paths: &Paths, mmio: u64) -> io::Result<Vec<PathBuf>> {
     let windows = fs::read(paths.proc.join("iomem"))?;
+    let mut directories = Vec::new();
     for line in windows.split(|&byte| byte == b'\n') {
         // `START-END : NAME`, indented below the window that holds it.
         let mut fields = line
@@ -205,11 +219,9 @@ fn find(paths: &Paths, mmio: u64) -> io::Result<Option<String>> {
         let Ok(name) = std::str::from_utf8(name) else {
             continue;
         };
-        if let Some(block) = block_device(&paths.sys.join(WINDOW_DEVICES).join(name))? {
-            return Ok(Some(block));
-        }
+        directories.push(paths.sys.join(WINDOW_DEVICES).join(name));
     }
-    Ok(None)
+    Ok(directories)
 }
 
 /// Returns the name of the first block device, in byte order, of the first virtio device of the

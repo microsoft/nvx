@@ -3,6 +3,8 @@
 use std::fs;
 use std::path::Path;
 
+use proptest::prelude::*;
+use serde_json::json;
 use sha2::{Digest, Sha256};
 
 use super::*;
@@ -102,6 +104,263 @@ fn distro_sha256() -> String {
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect()
+}
+
+#[test]
+fn exec_environment_limits() {
+    for entries in [
+        Vec::new(),
+        vec!["EMPTY=".to_owned(), "EQUALS=a=b".to_owned()],
+        (0..256).map(|index| format!("K{index}=value")).collect(),
+        vec![format!("K={}", "x".repeat(4094))],
+        vec![format!("K={}", "\u{e9}".repeat(2047))],
+    ] {
+        validate_exec_environment(&entries).unwrap();
+    }
+    for entries in [
+        vec!["".to_owned()],
+        vec!["NO_EQUALS".to_owned()],
+        vec!["=no-name".to_owned()],
+        vec!["K=a\0b".to_owned()],
+        vec!["K\0=value".to_owned()],
+        vec!["K=first".to_owned(), "K=second".to_owned()],
+        (0..257).map(|index| format!("K{index}=value")).collect(),
+        vec![format!("K={}", "x".repeat(4095))],
+        vec![format!("K={}", "\u{e9}".repeat(2048))],
+    ] {
+        assert_eq!(
+            validate_exec_environment(&entries).unwrap_err().kind(),
+            ErrorKind::Unsupported,
+        );
+    }
+}
+
+#[test]
+fn environment_files_hold_a_json_array_of_strings() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("environment.json");
+    let path = path.to_str().unwrap();
+    for (text, entries) in [
+        ("[]", vec![]),
+        (r#"["K=V","EMPTY="]"#, vec!["K=V", "EMPTY="]),
+        (r#"["K=a=b","ESCAPED=\u0061"]"#, vec!["K=a=b", "ESCAPED=a"]),
+    ] {
+        fs::write(path, text).unwrap();
+        assert_eq!(exec_environment_from_file(path).unwrap(), entries);
+    }
+    for text in [
+        "",
+        "null",
+        "{}",
+        r#""K=V""#,
+        "[1]",
+        "[true]",
+        "[null]",
+        "[[]]",
+        "[{}]",
+        r#"["=V"]"#,
+        r#"["K"]"#,
+        r#"["K=\u0000"]"#,
+        r#"["K=a","K=b"]"#,
+        r#"["K=V",]"#,
+        r#"["K=V"] trailing"#,
+    ] {
+        fs::write(path, text).unwrap();
+        assert_eq!(
+            exec_environment_from_file(path).unwrap_err().kind(),
+            ErrorKind::Unsupported,
+            "{text}",
+        );
+    }
+    fs::write(path, b"[\xff]").unwrap();
+    assert_eq!(
+        exec_environment_from_file(path).unwrap_err().kind(),
+        ErrorKind::Unsupported,
+    );
+    let exact = format!("[]{}", " ".repeat(MAX_ENVIRONMENT_FILE_BYTES - 2));
+    fs::write(path, &exact).unwrap();
+    assert_eq!(
+        exec_environment_from_file(path).unwrap(),
+        Vec::<String>::new()
+    );
+    fs::write(path, format!("{exact} ")).unwrap();
+    assert_eq!(
+        exec_environment_from_file(path).unwrap_err().kind(),
+        ErrorKind::Unsupported,
+    );
+    fs::remove_file(path).unwrap();
+    assert_eq!(
+        exec_environment_from_file(path).unwrap_err().kind(),
+        ErrorKind::Unsupported,
+    );
+}
+
+#[test]
+fn distro_manifest_binds_the_layer() {
+    let layer = Layer::new();
+    let launch = layer.launch("/bin/sh");
+    let valid = json!({
+        "format": 1,
+        "artifact": "distro.erofs",
+        "artifact_sha256": distro_sha256(),
+        "packages": [{"name": "bash"}, {"name": "coreutils"}],
+    });
+    layer.manifest(&valid.to_string());
+    let binding = validate_sandbox_systemd_policy(&launch).unwrap();
+    assert_eq!(binding.identity(), "11111111-1111-1111-1111-111111111111");
+    assert_eq!(binding.format(), super::super::DistroFormat::Erofs);
+    assert!(binding.manifest().is_some());
+    binding
+        .check(
+            launch.distro(),
+            super::super::distro::DISTRO_POLICY_REVISION,
+        )
+        .unwrap();
+    for (field, value) in [
+        ("format", json!(2)),
+        ("format", json!("1")),
+        ("artifact", json!("other.erofs")),
+        ("artifact_sha256", json!("0".repeat(64))),
+        ("packages", json!(null)),
+        ("packages", json!([1])),
+        ("packages", json!([{}])),
+        ("packages", json!([{"name": 1}])),
+        ("packages", json!([{"name": "systemd"}, 1])),
+    ] {
+        let mut manifest = valid.clone();
+        manifest[field] = value;
+        layer.manifest(&manifest.to_string());
+        assert_eq!(
+            validate_sandbox_systemd_policy(&launch).unwrap_err().kind(),
+            ErrorKind::Unsupported,
+            "{field}: {manifest}",
+        );
+    }
+    for field in ["format", "artifact", "artifact_sha256", "packages"] {
+        let mut manifest = valid.clone();
+        manifest.as_object_mut().unwrap().remove(field);
+        layer.manifest(&manifest.to_string());
+        assert_eq!(
+            validate_sandbox_systemd_policy(&launch).unwrap_err().kind(),
+            ErrorKind::Unsupported,
+        );
+    }
+    layer.manifest(&valid.to_string());
+    fs::write(layer.path("distro.erofs"), b"changed distro").unwrap();
+    assert_eq!(
+        validate_sandbox_systemd_policy(&launch).unwrap_err().kind(),
+        ErrorKind::Unsupported,
+    );
+}
+
+#[test]
+fn systemd_entrypoints_and_images_are_refused_independently() {
+    let layer = Layer::new();
+    for packages in [json!([]), json!([{"name": "systemd"}])] {
+        layer.manifest(
+            &json!({
+                "format": 1,
+                "artifact": "distro.erofs",
+                "artifact_sha256": distro_sha256(),
+                "packages": packages,
+            })
+            .to_string(),
+        );
+        for entrypoint in ["/usr/lib/systemd/systemd", "/lib/systemd/systemd"] {
+            assert_eq!(
+                validate_sandbox_systemd_policy(&layer.launch(entrypoint))
+                    .unwrap_err()
+                    .kind(),
+                ErrorKind::Unsupported,
+            );
+        }
+        let result = validate_sandbox_systemd_policy(&layer.launch("/sbin/init"));
+        assert_eq!(result.is_ok(), packages.as_array().unwrap().is_empty());
+    }
+}
+
+#[test]
+fn policy_paths_need_a_preceding_mount_only_with_several_shares() {
+    let first = "/first,host-first,rw".to_owned();
+    let second = "/second,host-second,rw".to_owned();
+    let option = |preceding_mount| PolicyPathOption {
+        kind: PolicyKind::Denied,
+        preceding_mount,
+        path: "secret".to_owned(),
+    };
+    let mounts = sandbox_mounts(std::slice::from_ref(&first), &[option(None)], None).unwrap();
+    assert_eq!(mounts[0].policy().denied, ["secret"]);
+    for policy in [option(None), option(Some(2))] {
+        assert_eq!(
+            sandbox_mounts(&[first.clone(), second.clone()], &[policy], None)
+                .unwrap_err()
+                .kind(),
+            ErrorKind::Unsupported,
+        );
+    }
+    assert_eq!(
+        sandbox_mounts(&[], &[option(None)], None)
+            .unwrap_err()
+            .kind(),
+        ErrorKind::Unsupported,
+    );
+}
+
+proptest! {
+    #[test]
+    fn policy_paths_attach_to_their_shares(
+        events in prop::collection::vec((any::<bool>(), 0_u8..3), 0..60),
+    ) {
+        let mut mounts = Vec::new();
+        let mut options = Vec::new();
+        let mut expected = Vec::new();
+        for (sequence, (next_mount, kind)) in std::iter::once((true, 0)).chain(events).enumerate() {
+            if next_mount || mounts.is_empty() {
+                let index = mounts.len();
+                mounts.push(format!("/share-{index},host-{index},rw"));
+                expected.push(MountPolicy::default());
+                options.push(PolicyPathOption {
+                    kind: PolicyKind::Denied,
+                    preceding_mount: Some(index),
+                    path: "hidden".to_owned(),
+                });
+                expected[index].denied.push("hidden".to_owned());
+            }
+            let index = mounts.len() - 1;
+            let path = format!("hidden/path-{sequence}");
+            let (kind, paths) = match kind {
+                0 => (PolicyKind::Denied, &mut expected[index].denied),
+                1 => (PolicyKind::Allowed, &mut expected[index].allowed),
+                _ => (PolicyKind::Writable, &mut expected[index].writable),
+            };
+            paths.push(path.clone());
+            options.push(PolicyPathOption { kind, preceding_mount: Some(index), path });
+        }
+        let actual = sandbox_mounts(&mounts, &options, None).unwrap();
+        prop_assert_eq!(actual.len(), expected.len());
+        for (index, (mount, policy)) in actual.iter().zip(expected).enumerate() {
+            prop_assert_eq!(mount.guest_target(), format!("/share-{index}"));
+            prop_assert_eq!(mount.policy(), &policy);
+            prop_assert_eq!(mount.owner(), MountOwner::Vmm);
+            prop_assert_eq!(mount.kind(), MountKind::Directory);
+        }
+    }
+
+    #[test]
+    fn run_share_targets_are_disjoint(suffix in "[a-z]{1,20}") {
+        let first = format!("/first-{suffix}");
+        let second = format!("/second-{suffix}");
+        validate_run_share_targets(&[&first, &second]).unwrap();
+        for targets in [
+            vec![first.as_str(), first.as_str()],
+            vec![first.as_str(), "/run/nvx/shares"],
+        ] {
+            prop_assert!(validate_run_share_targets(&targets).is_err());
+        }
+        let child = format!("{first}/child");
+        prop_assert!(validate_run_share_targets(&[&first, &child]).is_err());
+        prop_assert!(validate_run_share_targets(&[&child, &first]).is_err());
+    }
 }
 
 #[test]

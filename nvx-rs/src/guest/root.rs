@@ -172,14 +172,16 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use self::kernel::{Kernel, Paths, SystemKernel};
+use self::kernel::{Kernel, SystemKernel};
 use super::gpt::DeviceError;
 use super::mappings::{Mapper, MappingError, below_its_root};
 use super::sys::{self, Errno, MountFlags};
 use crate::gpt::{Expected, GptError, Partition};
 use crate::uuid::Uuid;
 
+pub(crate) use self::block::window_directories;
 pub use self::bootstrap::{Bootstrap, BootstrapStep, Resources, bootstrap};
+pub(crate) use self::kernel::Paths;
 #[cfg(test)]
 pub(crate) use self::kernel::{Call, FakeKernel, Operation, attach_calls};
 pub use self::share::{ShareChild, ShareKind, ShareRefusal};

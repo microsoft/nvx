@@ -1,5 +1,15 @@
 //! Tests of the egress policy compiler: the parity fixture that the Python compiler recorded, and
 //! ports of the cases of the former `scripts/test_egress_policy.py`.
+//!
+//! The submodules hold the tests that are to replace the fixture (microsoft/nvx#729): a reference
+//! [`model`] of policies, written from the format that `doc/run.md` documents, a [`generator`]
+//! of policies, the [`properties`] of the rules that policies lower to, and tests of the format's
+//! [`grammar`].
+
+mod generator;
+mod grammar;
+mod model;
+mod properties;
 
 use std::path::{Path, PathBuf};
 
@@ -192,6 +202,43 @@ fn paths_print_as_pathlib_prints_them() {
         let windows = String::from_utf16(&windows_str(&units)).unwrap();
         assert_eq!(windows, case["windows"].as_str().unwrap(), "{path:?}");
     }
+}
+
+/// Checks the properties of the policy file `data` of a fixture case and, if the format accepts
+/// its policy, that reordering, repeating, and splitting its destinations change no lowering.
+fn check_properties(data: &[u8]) -> properties::Checked {
+    properties::check_file(data)?;
+    if let Some(value) = model::read_file(data)
+        && model::read_policy(&value).is_some()
+    {
+        for destination in 0..4 {
+            let swaps = [7 * destination + 3, destination];
+            let copies = [destination % 2 == 0, true, false];
+            properties::check_transformations(&value, &swaps, &copies, destination)?;
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn every_fixture_case_has_the_properties_that_replace_the_fixture() {
+    let fixture = fixture();
+    let cases = fixture["cases"].as_array().unwrap();
+    let failures: Vec<String> = cases
+        .iter()
+        .filter_map(|case| {
+            let name = case["name"].as_str().unwrap();
+            let error = check_properties(&input(&case["input"])).err()?;
+            Some(format!("{name}: {error}"))
+        })
+        .collect();
+    assert!(
+        failures.is_empty(),
+        "{} of {} cases fail:\n{}",
+        failures.len(),
+        cases.len(),
+        failures.join("\n")
+    );
 }
 
 // Ports of the former `scripts/test_egress_policy.py`, one test for each of its tests, under the

@@ -319,6 +319,11 @@ fn compile_category(
     id: Option<NodeId>,
     category: &str,
 ) -> Result<Vec<String>> {
+    lowering::lower(&parse_category(document, id, category)?, category)
+}
+
+/// Parses the rules of one action, which a policy without the field does not have.
+fn parse_category(document: &Document, id: Option<NodeId>, category: &str) -> Result<Vec<Rule>> {
     let elements = match id {
         Some(id) => array(document, id, category)?,
         None => &[],
@@ -331,7 +336,7 @@ fn compile_category(
             &format!("{category}[{index}]"),
         )?);
     }
-    lowering::lower(&rules, category)
+    Ok(rules)
 }
 
 /// Parses a rule of either form, as `_parse_rule` does.

@@ -307,13 +307,20 @@ fn too_many_rules(category: &str) -> Error {
 /// Lowers the rules of the action `category` into native rules, in the order in which the
 /// compiler sorts them, as `_compile_category` does once it has parsed them.
 pub(crate) fn lower(rules: &[Rule], category: &str) -> Result<Vec<String>> {
+    lower_within(rules, category, MAX_RULES_PER_ACTION)
+}
+
+/// Lowers the rules of the action `category` as [`lower`] does, but fails once they need more
+/// than `limit` native rules rather than [`MAX_RULES_PER_ACTION`]: tests lift the limit to learn
+/// how many native rules an action needs.
+pub(crate) fn lower_within(rules: &[Rule], category: &str, limit: usize) -> Result<Vec<String>> {
     // A native rule matches only its own family, so each family is lowered on its own, within
     // the action's shared limit.
     let mut lowered: Vec<NativeRule> = Vec::new();
     for family in Family::ALL {
         let family_rules: Vec<&Rule> = rules.iter().filter(|rule| rule.family == family).collect();
         if !family_rules.is_empty() {
-            let budget = MAX_RULES_PER_ACTION - lowered.len();
+            let budget = limit - lowered.len();
             let family_lowered = lower_family(&family_rules, family, category, budget)?;
             lowered.extend(family_lowered);
         }

@@ -50,7 +50,8 @@ nvx-rs/
 │   │                execution, alone or through the execution engine, collects its children's
 │   │                statuses, settles its executions' cgroups, mounts host mappings beneath the
 │   │                descriptors of the roots that it names, assembles and tears down a layered
-│   │                root, and reads a GPT disk's partition table through its block device, and
+│   │                root, reads a GPT disk's partition table through its block device, and
+│   │                prepares a template's guest for a capture before its root's assembly, and
 │   │                the typed calls through which it runs the time ABI's steps and the reseed
 │   └── bin/         nvx-rs, nvx-fake-openvmm, and the guest binaries
 ├── tests/           fake-OpenVMM, CLI, NVXS session, process-supervision, checked-handoff, store,
@@ -101,6 +102,7 @@ nvx-rs/
 | `nvx::guest::exec` | `Execution`: drives one program that the caller spawned with the program's ends of its `Pipes`, or that the caller started itself and adopts with its own ends of the program's pipes and a `Child` that names it, without blocking, from the caller's own loop or reactor, and reports each step as an `Event`: the launch report, which an adopted program has at once, the output of each stream, kill failures, and the `Outcome`. It reads a stream only as far as the caller's `grant` allows, so a stalled sink stalls its own execution alone, writes the program's standard input without `SIGPIPE`, and ends the program on a cancellation, a timeout, or a disconnection, with `SIGKILL` through the program's pidfd to the program and, if the caller asks, its process group, while no collector has taken its status, and, through the opened directory of a cgroup that the caller names, to that cgroup. It closes the program's input once the program has ended. It waits for its program alone, by a pidfd, or takes the status from the caller's collector with `observe`; with `Options::caller_reaps`, that collector is the program's only one. NVX's managed agent is one caller |
 | `nvx::guest::exec::binding` | `Binding`: an `nvx::exec::Runner` bound to an `Execution`, the glue that a guest adapter would otherwise write. The runner's read allowances become grants, its discards discards, the input that it accepted writes and then a close, its terminations a cancellation, a disconnection, or a termination, and its settlement a kill of the execution's cgroup and checks until no process occupies it; without a cgroup, nothing proves that the program's descendants are gone, so the execution is fenced. It feeds the execution's events back to the runner, statuses that a caller who reaps hands over with `observe` included, and never blocks: the caller polls its descriptors and its input writer until its deadline, and each call takes a bounded number of steps, so that no execution holds the caller's loop |
 | `nvx::guest::time` | x86_64: `TimeAbi`, the steps of NVX time ABI v1 as typed calls in the caller's process, for any guest init or agent: the cold-boot time step and, separately, the start of the time daemon in a child process that the caller supervises, the VM generation ID, a `CaptureRequest` that repairs a `Restore`, and a `RestoreFinish`. A call takes the permission for OpenVMM's ports on the calling thread for each port transaction alone, and fails with `TimeError::PortRelease` if the thread may still hold some of it, which a process that it started would inherit, and from which `nvx::guest::spawn` starts none. No call waits for a child that it did not start. `nvx-time` runs its steps through them |
+| `nvx::guest::clone` | x86_64: the preparation of a template's guest for a capture before its root's assembly, for a guest init or agent, whether or not it is PID 1. `CapturePreparation`, of the caller's `AdmissionFence` and the `Devices` that the template's clones replace, the `distro` and scratch block devices, which their MMIO windows name, and the host filesystem device's virtio-fs tag: `prepare` closes the fence, so that no execution starts, refuses with a `Mounted` the first mount from those devices, a distro partition included, or from an overlay, bind mounts included, in a bounded read of `/proc/self/mountinfo` of at most `MOUNT_TABLE_LIMIT` bytes, then waits for the time ABI's boot checks, runs its capture checks, and suppresses the stall detectors, as `nvx-time pre-capture` does, and returns an owned `CaptureBarrier`. `CaptureBarrier::capture` requests the capture with the platform tier's request, through `TimeAbi::capture`, and returns `Captured::Continued` once it opened the fence and restored the detectors' settings, or, in a clone, `Captured::Restored`, with the fence still closed, since nothing else may run before repair acknowledges the restore, and the detectors suppressed until the time daemon restores their settings: `Restored::into_parts` hands the `Restore` that repair takes next and the closed fence to the caller, which opens it once repair acknowledged the restore. `CaptureBarrier::cancel`, a dropped barrier, and a failure to read the VM generation ID open the fence and restore the detectors' settings; a capture request that fails restores the settings but leaves the fence closed, since it may fail in a clone whose restore it could not repair. Each failure is a `CaptureError`, with its `CaptureStage` and `CaptureCause` |
 | `nvx::guest::reseed` | `Seed::read` and `reseed`: a restore's fresh entropy, which starts with its `GenerationId`, and the reseed of the kernel's random number generator with it, in the caller's process. `nvx-reseed` runs them |
 | `nvx::guest::root` | The operations of a layered root, for a guest init or agent, whether or not it is PID 1. `bootstrap`: the agent's and the workload's sibling cgroups of a `Layout`, with every process of their parent moved into the agent's, the agent's `memory.low`, and the workload cgroup prepared through `ExecutionCgroup::prepare`, with its `memory.max` and `pids.max`, and user namespaces kept unavailable. `assemble`: the `Assembly`'s block devices, found by their MMIO windows, checked against their roles' access modes and their expected sizes, and flushed, and the `Root` that it mounts, at a runtime directory, a canonical path that no symbolic link leads through, that it holds exclusively until its teardown, where nothing is mounted already, once it has checked everything: the read-only layers of the `Image` that the caller names, which it never probes: an EROFS image, whose expected `nvx::uuid::Uuid` it checks in its superblock, or a GPT disk whose partition table it reads and checks with `nvx::guest::gpt::read_disk`, against the caller's `nvx::gpt::Expected` values, whose first partition it reads, up to the caller's bound, as opaque bytes that it never mounts, and whose later partitions, at least one, hold ext4 layers that it mounts `ro,nosuid,nodev` with `errors=remount-ro`, so that an error that the kernel finds in a layer fails the operation that found it, rather than panic the guest, as the layer's superblock may ask, from the block devices that the kernel created when it found the disk, once their superblocks show that no journal needs a recovery, which their read-only device can't take, partition 2's at the overlay's base and the last partition's at its top, under an overlay mounted `nosuid,nodev` with the one option set of the caller's `OverlayMode`, `metacopy=on,xino=on` or, for lowers that may carry untrusted overlay xattrs, `metacopy=off,redirect_dir=nofollow`, with no fallback, whose upper and work directories are on the `Upper`: an ext4 scratch mounted `nosuid,nodev`, whose superblock it checks for a journal that the caller's `Journal` policy forbids, or a tmpfs mounted `nosuid,nodev` at the kernel's default size. It refuses overlay options longer than `MOUNT_OPTIONS_LIMIT`, the most that a mount passes, which, below `/run/nvx`, fit up to 195 layers of a GPT disk, and an overlay that the kernel's mount table shows read-only or without the mode's options in effect, since the kernel mounts one so, rather than fail, when its upper can't hold its work directory or its extended attributes. The `Root` reports the first partition's bytes, its `Lower` layers, its `UpperKind`, and its `OverlayMode`. `Root::mount_share` and `Root::mount_aggregate`: virtio-fs live shares at targets in the root that it checks, against the targets that `protocol::share` reserves among others, with one aggregate per root, which it attaches through its `mappings::Mapper` beneath the overlay, with NVX's container root's reserved targets: a share's device mounted out of the root, then moved onto its target, and a copy of each child's entry of the aggregate. `Root::mount_export`: the host export, the aggregate device of `protocol::export`, one per root, mounted `nosuid,nodev` with the access of its `ExportMode` at `hostfs/root` in the runtime directory, out of the root, below a directory that only root may enter, whose root it returns as the `SourceRoot` of the caller's mappings. `Root::map`: a caller's host mappings, through the same mapper. A share, a child, the export, or a mapping that fails latches the root. `Root::teardown`: the shares and mappings in reverse order, then the mounts of an aggregate and of the export, the later first, the overlay, the layers from the top down, and the upper, with every failed unmount reported. Each failure is a typed `Error`. The operations collect no child's status, change neither the caller's root nor its credentials, start no async runtime, and never power the VM off |
 | `nvx::guest::gpt` | `read_disk`: the partition table of a GPT disk, read and checked with `nvx::gpt`'s `Disk::read` through the disk's block device, which the caller opened, at the logical block size and size that `BLKSSZGET` and `BLKGETSIZE64` report, with the caller's `Expected` values, such as the disk GUID that a boot parameter names. It only reads the device, at explicit offsets, so it never moves the file's position. It neither compares the partitions that the kernel created with the table nor asks the kernel to reread the table. Each failure is a typed `DeviceError` |
@@ -166,6 +168,25 @@ the Python compiler's outcomes for every policy that its tests compiled,
 hand-written edge cases, and a seeded random corpus, which the tests replay
 without Python; `NVX_EGRESS_POLICY_FIXTURE` points the tests at another corpus
 in the same format. See [Python parity](#python-parity).
+
+Tests whose expectations come from the format rather than from recorded
+outcomes check the compiler too, and are to replace the fixture
+([microsoft/nvx#729](https://github.com/microsoft/nvx/issues/729)). A reference
+model of policies, written from the format that
+[`doc/run.md`](../doc/run.md#run-openvmm-directly) documents, decides which
+packets the rules of an action match, and which packets the native rules that
+it lowers to match. Properties then hold for the policies that a `proptest` port
+of the generator of the fixture's random corpus draws, for networks at the ends
+of each family's addresses, and for the fixture's inputs: each action lowers to
+canonical native rules, none redundant, that match exactly what the model
+matches, at one point of every cell that the boundaries of the networks and port
+ranges delimit; an action is refused exactly when it needs more than 256 native
+rules; the order of the rules, repeated rules, and networks split into their
+halves change no lowering; `allow` and `deny` lower independently; and policy
+files, their values, and `NetworkPolicy` rules compile alike and
+deterministically, or fail with an error. A test of each rule of the format's
+grammar checks the field path, or the file, that each refusal names, a fragment
+of its reason, and its error code.
 
 ## Distro bindings
 
@@ -989,7 +1010,10 @@ beneath the container's assembled root in sandbox mode, where it unmounts the
 table before it returns to the init agent, and any other guest init or agent
 can use them too. Any guest init or agent can also run the steps of `nvx-time`
 and `nvx-reseed` in its own process, through the
-`nvx::guest::time` and `nvx::guest::reseed` calls, on which both programs run.
+`nvx::guest::time` and `nvx::guest::reseed` calls, on which both programs run,
+and a template's guest prepares for a capture before its root's assembly through
+`nvx::guest::clone`, which runs the steps of `nvx-time pre-capture` behind the
+caller's fence of workload admission.
 Nor is the `gpt` library a program: it reads the partition table of a GPT
 disk's block device.
 
@@ -1053,7 +1077,9 @@ accepts or refuses OpenVMM's vectors and cases of the `NVXS` session as they
 say, and, on Linux, the guest's listener announcements match
 `tests/vectors/nvxl-v1.txt`. Property tests check that records round-trip, and
 that the `NVXS` record parser and the host's and the guest's `EXEC` and `MAPS`
-decoders return, never panic, on arbitrary bytes. The NVXS test drives the
+decoders return, never panic, on arbitrary bytes; those of the egress policy
+compiler compare it with a reference model of the format
+([Egress policy files](#egress-policy-files)). The NVXS test drives the
 host's and the guest's roles of the session and their connections through a
 broker that relays records as OpenVMM's does, with messages of an application
 framing of its own that span records. The store test crashes orchestrator
@@ -1092,6 +1118,40 @@ measure, on Linux and Windows, the lines and branches that each family of golden
 tests alone reaches, and run cargo-mutants on the files and with the tests that
 a dispatch names; see [nvx-rs coverage](../doc/ci.md#nvx-rs-coverage) and
 [nvx-rs mutation testing](../doc/ci.md#nvx-rs-mutation-testing).
+
+### Sandbox specification tests
+
+The sandbox tests specify the documented option grammar and the contracts with
+OpenVMM and the guest, rather than Python's messages and input extensions.
+Properties cover the restore-stable aggregate child names, reserved targets and
+tokens, every generated launch token and its exact 1024-byte budget, policy option
+sequences, and paths on the host's own filesystem. The CLI tests check that
+`sandbox` records the preceding mount while `run` forwards absolute policy paths
+independently of option order, for OpenVMM to attribute by containment.
+
+During the transition tracked by microsoft/nvx#730, all six golden tests remain
+unchanged beside these tests. This temporary table maps every semantic section of
+the two fixtures to its replacement; generator metadata and the simulated working
+directories are not input contracts.
+
+| Fixture | Section | Specification tests |
+| --- | --- | --- |
+| `sandbox.json` | `identities` | `workload_identity_grammar`, `non_root_workload_identities_round_trip` |
+| `sandbox.json` | `layers` | `layer_values_are_role_path_uuid`, `canonical_layer_uuids_reach_the_guest` |
+| `sandbox.json` | `mount_values` | `mount_value_grammar` |
+| `sandbox.json` | `mount_targets` | `mount_targets_are_canonical_and_byte_bounded`, `reserved_mount_targets_are_refused` |
+| `sandbox.json` | `child_names` | `aggregate_child_name_known_answer`, `aggregate_child_names_follow_the_restore_contract` |
+| `sandbox.json` | `mounts` | `shares_follow_the_openvmm_and_guest_contracts`, `host_paths_become_absolute`, `windows_drive_relative_and_unc_paths`, and the access-policy tables in `mount::tests` |
+| `sandbox.json` | `launches` | `launch_arguments_follow_the_openvmm_contract`, `launch_settings_follow_the_guest_contract`, `kernel_command_line_stays_within_1024_bytes`, `reserved_kernel_tokens_are_always_refused` |
+| `sandbox_options.json` | `run_share_targets` | `run_share_targets_are_disjoint`, `run_share_targets_bind_from_an_aggregate` |
+| `sandbox_options.json` | `sandbox_mounts` | `policy_paths_attach_to_their_shares`, `policy_paths_need_a_preceding_mount_only_with_several_shares`, `policy_option_sequences_record_the_preceding_mount`, `aggregate_policy_paths_must_be_absolute` |
+| `sandbox_options.json` | `environments` | `exec_environment_limits` |
+| `sandbox_options.json` | `environment_files` | `environment_files_hold_a_json_array_of_strings` |
+| `sandbox_options.json` | `distro_manifests` | `distro_manifest_binds_the_layer`, `systemd_entrypoints_and_images_are_refused_independently` |
+
+The current sandbox policy refuses both systemd entrypoints unconditionally and
+refuses a manifest that lists `systemd`, independently of the selected entrypoint.
+It does not allow a systemd entrypoint when a manifest lists that package.
 
 `tests/openvmm_vectors.rs` is an ignored test that compares the copies of
 OpenVMM's vectors in `tests/vectors/openvmm/` with the files of the OpenVMM
