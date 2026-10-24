@@ -8,7 +8,7 @@ use nvx::exec::{
     Timers, Window, peer, runner,
 };
 
-use super::{GuestMessage, HostMessage, KEY_LEN, MAX_CHUNK, Start, name};
+use super::{AccountMode, GuestMessage, HostMessage, Identity, KEY_LEN, MAX_CHUNK, Start, name};
 use crate::frame::{MAX_BODY, Message};
 
 /// The key of most executions in these tests.
@@ -27,7 +27,18 @@ fn timers() -> Timers {
     Timers::new(Duration::from_secs(1), Duration::from_secs(5))
 }
 
-/// Returns starts with every unit, flag, and kind of argument.
+/// Returns an identity with every field: supplementary groups, capabilities, and numeric IDs.
+fn numeric() -> Identity {
+    Identity {
+        groups: vec![0, 50, u32::MAX],
+        capabilities: 1 | 1 << 13 | 1 << 63,
+        account: AccountMode::Numeric,
+        ..Identity::new(4242, u32::MAX)
+    }
+}
+
+/// Returns starts with every unit, flag, and kind of argument, of identity, of working
+/// directory, and of environment.
 fn starts() -> Vec<Start> {
     let bytes = Limits::new(1, Window::bytes(1), Window::bytes(u32::MAX)).unwrap();
     let largest = Limits::new(MAX_CHUNK, Window::frames(u32::MAX), Window::frames(1)).unwrap();
@@ -39,14 +50,20 @@ fn starts() -> Vec<Start> {
             bytes,
             Timers::new(Duration::ZERO, Duration::from_millis(u64::MAX)).timeout(Duration::ZERO),
             [b"/x".to_vec(), Vec::new(), (1..=u8::MAX).collect()],
-        ),
+        )
+        .with_identity(numeric())
+        .with_working_directory("/")
+        .with_environment(["A=", "B==", "PATH=/usr/bin:/bin"]),
         Start::new(
             Key::new(0, 0),
             largest,
             timers().timeout(Duration::from_millis(1500)),
             ["/bin/true"],
         )
-        .with_input(),
+        .with_input()
+        .with_identity(Identity::new(0, 0))
+        .with_working_directory(std::iter::once(b'/').chain(1..=u8::MAX).collect::<Vec<_>>())
+        .with_environment([(1..=u8::MAX).collect::<Vec<_>>()]),
     ]
 }
 
@@ -97,16 +114,56 @@ fn a_start_s_layout_is_its_key_limits_timers_input_and_arguments() {
     expected.extend_from_slice(b"/p");
     expected.extend_from_slice(&1u32.to_le_bytes());
     expected.extend_from_slice(b"a");
+    // No identity, no working directory, and an empty environment.
+    expected.extend_from_slice(&[0, 0, 0, 0]);
     assert_eq!(start.encode(), expected);
+}
+
+#[test]
+fn a_start_s_layout_ends_with_its_identity_working_directory_and_environment() {
+    let start = Start::new(KEY, shared(), timers(), ["/p"])
+        .with_identity(Identity {
+            groups: vec![50, 60],
+            capabilities: 1 << 13 | 1,
+            account: AccountMode::Numeric,
+            ..Identity::new(1000, 100)
+        })
+        .with_working_directory("/w")
+        .with_environment(["A=1", "B="]);
+    let head = Start::new(KEY, shared(), timers(), ["/p"]).encode();
+    let mut expected = head[..head.len() - 4].to_vec();
+    expected.push(1);
+    expected.extend_from_slice(&1000u32.to_le_bytes());
+    expected.extend_from_slice(&100u32.to_le_bytes());
+    expected.push(1);
+    expected.extend_from_slice(&0x2001u64.to_le_bytes());
+    expected.extend_from_slice(&2u16.to_le_bytes());
+    expected.extend_from_slice(&50u32.to_le_bytes());
+    expected.extend_from_slice(&60u32.to_le_bytes());
+    expected.push(1);
+    expected.extend_from_slice(&2u32.to_le_bytes());
+    expected.extend_from_slice(b"/w");
+    expected.extend_from_slice(&2u16.to_le_bytes());
+    expected.extend_from_slice(&3u32.to_le_bytes());
+    expected.extend_from_slice(b"A=1");
+    expected.extend_from_slice(&2u32.to_le_bytes());
+    expected.extend_from_slice(b"B=");
+    assert_eq!(start.encode(), expected);
+    // An existing account is 0.
+    let existing = Start::new(KEY, shared(), timers(), ["/p"]).with_identity(Identity::new(0, 0));
+    assert_eq!(existing.encode()[head.len() - 4 + 9], 0);
 }
 
 #[test]
 fn starts_that_break_the_rules_are_refused() {
     let valid = Start::new(KEY, shared(), timers(), ["/bin/sh", "-c", "exit"]).encode();
+    let full = starts()[2].encode();
     // Every start that ends early, and one with a byte too many.
-    for length in 0..valid.len() {
-        let problem = Start::decode(&valid[..length]).unwrap_err();
-        assert_eq!(problem.problem(), "an execution's start ends early");
+    for body in [&valid, &full] {
+        for length in 0..body.len() {
+            let problem = Start::decode(&body[..length]).unwrap_err();
+            assert_eq!(problem.problem(), "an execution's start ends early");
+        }
     }
     let mut longer = valid.clone();
     longer.push(0);
@@ -154,6 +211,7 @@ fn starts_that_break_the_rules_are_refused() {
     // Arguments: none, an empty program, a NUL byte, and a length beyond the body.
     let mut none = valid[..57].to_vec();
     none.extend_from_slice(&0u16.to_le_bytes());
+    none.extend_from_slice(&[0, 0, 0, 0]);
     assert_eq!(
         Start::decode(&none).unwrap_err().problem(),
         refused("names no program")
@@ -174,6 +232,64 @@ fn starts_that_break_the_rules_are_refused() {
         Start::decode(&beyond).unwrap_err().problem(),
         "an execution's start ends early"
     );
+    // The flags of the identity and the working directory, and the account mode, which the
+    // identity's IDs precede.
+    let head = &valid[..valid.len() - 4];
+    let ending = |tail: &[u8]| {
+        let body = [head, tail].concat();
+        Start::decode(&body).unwrap_err().problem().to_owned()
+    };
+    assert_eq!(ending(&[2, 0, 0, 0]), refused("has the flag 2"));
+    assert_eq!(ending(&[0, 3, 0, 0]), refused("has the flag 3"));
+    let mut identity = vec![1];
+    identity.extend_from_slice(&[0; 8]);
+    identity.push(2);
+    identity.extend_from_slice(&[0; 10]);
+    identity.extend_from_slice(&[0, 0, 0]);
+    assert_eq!(
+        ending(&identity),
+        refused("names the unknown account mode 2")
+    );
+    // Working directories that are not absolute, or hold a NUL byte, and environment entries
+    // that are not `NAME=VALUE`, or hold a NUL byte.
+    let start = || Start::new(KEY, shared(), timers(), ["/bin/true"]);
+    let cases = [
+        (
+            start().with_working_directory("relative"),
+            "names a working directory that is not absolute",
+        ),
+        (
+            start().with_working_directory(""),
+            "names a working directory that is not absolute",
+        ),
+        (
+            start().with_working_directory("/a\0b"),
+            "has a working directory with a NUL byte",
+        ),
+        (
+            start().with_environment(["A=1", "NAME"]),
+            "has an environment entry that is not NAME=VALUE",
+        ),
+        (
+            start().with_environment(["=value"]),
+            "has an environment entry that is not NAME=VALUE",
+        ),
+        (
+            start().with_environment([""]),
+            "has an environment entry that is not NAME=VALUE",
+        ),
+        (
+            start().with_environment(["A=b\0c"]),
+            "has an environment entry with a NUL byte",
+        ),
+    ];
+    for (start, problem) in cases {
+        assert_eq!(
+            Start::decode(&start.encode()).unwrap_err().problem(),
+            refused(problem),
+            "{start:?}"
+        );
+    }
 }
 
 /// Returns outcomes with every status, cause, launch failure, and flag.

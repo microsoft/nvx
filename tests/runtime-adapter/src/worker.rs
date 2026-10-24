@@ -21,7 +21,10 @@
 //! 1. It opens the tty and attaches the session.
 //! 2. It receives the host's root configuration, a [`RootConfig`], and checks it.
 //! 3. It reads the boot layout of the root from the kernel command line with
-//!    `nvx::protocol::root::RootLayout::parse`, then bootstraps the guest and assembles the root.
+//!    `nvx::protocol::root::RootLayout::parse`, and the executions' hostname, then bootstraps the
+//!    guest and assembles the root. If the configuration names a workload identity for the whole
+//!    sandbox, it then checks the identity's account in the assembled root, in existing-account
+//!    mode, through `nvx::guest::entry`.
 //! 4. It answers `RootReady`, or `RootFailed` with the stage that failed, and then ends.
 //! 5. It serves `Ping`, `Echo`, and `Probe`, whose probes the [`probes`], [`mapping`], and
 //!    [`entries`] modules run, and runs the host's executions. It runs a probe only while it runs
@@ -33,11 +36,16 @@
 //! without a root. It assembles an EROFS image, or the layers of a GPT disk, whose first partition
 //! holds at most the bound of the configuration, over an ext4 scratch or over RAM, in the overlay
 //! mode that the configuration names. At the layout stage, it refuses a configuration that
-//! configures a scratch for a root over RAM, or bounds a first partition for an EROFS image.
+//! configures a scratch for a root over RAM, or bounds a first partition for an EROFS image. The
+//! executions' hostname is the value of the kernel command line's first `nvx_hostname=`
+//! parameter, which NVX's sandbox plans configure, and which NVX's init agent reads too, or
+//! `nvx-sandbox`, `nvx::guest::entry::DEFAULT_HOSTNAME`, without one, or with an empty one. A
+//! hostname of more than 64 bytes fails the layout stage. A workload identity whose account the
+//! assembled root lacks fails the identity stage.
 //!
 //! The worker, and with it the VM, ends with 0 once the host stopped it, after a teardown that
 //! succeeded, with the stage's [exit status](RootStage::exit_status) once a stage failed, from 11
-//! for the configuration to 15 for the teardown, and with [`SESSION_STATUS`] once its session
+//! for the configuration to 16 for the identity, and with [`SESSION_STATUS`] once its session
 //! failed or the broker closed it. Once the broker closed the stream at a record boundary, which
 //! may close only the broker's end, the worker drops its executions, and writes what it queued,
 //! as once the host stopped it.
@@ -77,11 +85,28 @@
 //! - The worker admits at most [`MAX_EXECUTIONS`] executions at once, abandoned ones included,
 //!   and those that keep their places once they ended, as the items below describe, and none
 //!   that would hold more than [`MAX_EXECUTION_MEMORY`] bytes. It refuses a start beyond those,
-//!   or one whose cgroup it cannot prepare, or whose program it cannot spawn, with a terminal
-//!   record whose launch failed at stage 0, with `EAGAIN`, `ENOMEM`, or the `errno` of the
-//!   preparation or the spawn.
-//! - Each program runs in the worker's root and working directories, with its environment, and
-//!   leads a process group of its own.
+//!   one whose identity or entry it refuses, as the next item describes, or one whose cgroup it
+//!   cannot prepare, or whose program it cannot spawn, with a terminal record whose launch failed
+//!   at stage 0, with `EAGAIN`, `ENOMEM`, the `errno` of the refusal, or that of the preparation
+//!   or the spawn.
+//! - Each program enters the assembled root through `nvx::guest::entry`, as an [`Entrance`]
+//!   describes it: in new mount, PID, and UTS namespaces, with the root moved over `/`, the
+//!   configured hostname, the image's own machine ID, and no time status, so that the entry binds
+//!   nothing into the root, and with published listeners, the entry's default. It runs as the
+//!   identity that exactly one source names: the sandbox's workload identity, which the root
+//!   configuration names, with no supplementary groups or capabilities, or, in a sandbox without
+//!   one, the identity that its start names, with its supplementary groups, its capabilities, and
+//!   its account mode. A start that names an identity in a sandbox with a workload identity, or
+//!   none in a sandbox without one, is refused with `EINVAL`. Before the worker prepares the
+//!   execution's cgroup, the entry checks the identity, and reads its account in
+//!   existing-account mode: it refuses with `EPERM` a capability outside its allowlist, any
+//!   capability of a user ID other than 0, and `CAP_NET_BIND_SERVICE` and `CAP_NET_RAW` while
+//!   listeners are published, with `ENOENT` an identity without the user ID's passwd entry or
+//!   the group ID's group entry, with the error of an account database or a root that it cannot
+//!   read, and with `EINVAL` otherwise. The program starts in the working directory of its start,
+//!   or in the root's `/`, with exactly the environment of its start, and leads a session of its
+//!   own, without a controlling terminal, and the process group that the session creates. As PID
+//!   1 of its PID namespace, its end ends every process of the namespace.
 //! - Each execution runs in a cgroup of its own below the workload cgroup, `execution-N`, where N
 //!   counts the cgroups that the worker prepared. The worker prepares it with
 //!   `nvx::guest::cgroup::ExecutionCgroup::prepare`, and the program joins it as it spawns,
@@ -151,11 +176,13 @@ use nix::sys::wait::{self, Id, WaitPidFlag, WaitStatus};
 use nix::unistd::Pid;
 use nvx::gpt::Expected;
 use nvx::guest::cgroup::Layout;
+use nvx::guest::entry::{self, Entry, Identity, Prepared};
 use nvx::guest::nvxs::GuestConnectionError;
 use nvx::guest::process::Child;
 use nvx::guest::root::{
     self, Assembly, Bootstrap, Device, Image, Journal, Resources, Root, Upper, UpperKind,
 };
+use nvx::guest::spawn::{self, Spawned};
 use nvx::protocol::root::{
     DISTRO_MMIO_BASE, ImageFormat, RootLayout, RootUpper, SCRATCH_MMIO_BASE,
 };
@@ -168,7 +195,7 @@ use crate::root::{
     DEFAULT_FIRST_PARTITION_BOUND, JournalPolicy, OverlayMode, RootConfig, RootFailure, RootStage,
 };
 use connection::{Connection, Received};
-use executions::Executions;
+use executions::{Executions, Sandbox};
 
 /// The status with which the worker ends once its session failed or the broker closed it, and
 /// with which PID 1 ends the VM if a child cannot start or the worker's status cannot be collected.
@@ -196,9 +223,48 @@ pub const MAX_HISTORY: usize = 1024;
 /// The kernel command line, from which the worker reads the boot layout of the root.
 const COMMAND_LINE: &str = "/proc/cmdline";
 
+/// The kernel command line's parameter that names the executions' hostname, as NVX's init agent
+/// reads it.
+const HOSTNAME_PARAMETER: &[u8] = b"nvx_hostname=";
+
+/// How one execution enters the assembled root: the inputs of its `nvx::guest::entry::Entry` that
+/// the worker chooses. The entry keeps its defaults for the rest: new mount, PID, and UTS
+/// namespaces, with the root moved over `/`, the image's own machine ID and no time status, which
+/// leave `Entry::bind_runtime` nothing to bind, published listeners, which refuse
+/// `CAP_NET_BIND_SERVICE` and `CAP_NET_RAW`, and every device node.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Entrance {
+    /// The identity: the sandbox's workload identity, or the one that the execution's start names.
+    pub identity: Identity,
+    /// The hostname that the kernel command line configures.
+    pub hostname: Vec<u8>,
+}
+
+impl Entrance {
+    /// Returns the entry into the root at `root`.
+    pub fn entry(&self, root: impl Into<PathBuf>) -> Entry {
+        Entry::new(root, self.identity.clone()).hostname(self.hostname.clone())
+    }
+}
+
+/// The operations through which the executions enter the assembled root: those of
+/// `nvx::guest::entry` in a VM, in [`LibraryRoot`], and a fake's in tests, which cannot enter a
+/// root without privileges.
+pub trait EntryOperations {
+    /// Prepares the entry of an execution into the assembled root, as `entrance` describes it,
+    /// with `Entry::prepare`: checks its inputs, and reads and checks the identity's account in
+    /// existing-account mode.
+    fn prepare(&mut self, entrance: &Entrance) -> Result<Prepared, entry::Error>;
+
+    /// Spawns `command`, whose child enters the execution that `prepared` prepared. A fake that
+    /// cannot enter a root spawns the command in its own root instead, as its own identity.
+    fn spawn(&mut self, command: spawn::Command, prepared: Prepared) -> io::Result<Spawned>;
+}
+
 /// The operations of a layered root that the worker runs: those of `nvx::guest::root` in a VM, in
-/// [`LibraryRoot`], and a fake's in tests. Each fails with the problem, as text.
-pub trait RootOperations {
+/// [`LibraryRoot`], and a fake's in tests. Each fails with the problem, as text, but the
+/// [entry's](EntryOperations), which fail as `nvx::guest::entry` does.
+pub trait RootOperations: EntryOperations {
     /// Returns the kernel command line, from which the worker reads the boot layout of the root.
     fn command_line(&mut self) -> Result<Vec<u8>, String>;
 
@@ -389,7 +455,8 @@ fn wait<S: Read + Write + AsFd>(
 
 /// Handles `message` before the root is ready: a root configuration, whose root it assembles
 /// through `operations`, after which `executions` run in the cgroups that the operations
-/// prepared, or a `Stop`.
+/// prepared, as the sandbox that the configuration and the kernel command line describe, or a
+/// `Stop`.
 fn configure_root(
     operations: &mut dyn RootOperations,
     executions: &mut Executions,
@@ -397,8 +464,8 @@ fn configure_root(
 ) -> Result<Step<Worked>, ServeError> {
     match message {
         Message::RootConfig(body) => Ok(match assemble(operations, &body) {
-            Ok(()) => {
-                executions.run_in(operations.cgroups());
+            Ok(sandbox) => {
+                executions.run_in(operations.cgroups(), sandbox);
                 Step::Continue(vec![Message::RootReady])
             }
             Err(failure) => Step::End(
@@ -412,7 +479,8 @@ fn configure_root(
 }
 
 /// Handles `message` at `now` once the root is ready, through `operations`, and hands a message
-/// about an execution to `executions`, which queue what they answer on `connection`.
+/// about an execution to `executions`, which enter the root through `operations`, and queue what
+/// they answer on `connection`.
 fn serve_root<S: Read + Write + AsFd>(
     operations: &mut dyn RootOperations,
     executions: &mut Executions,
@@ -422,7 +490,7 @@ fn serve_root<S: Read + Write + AsFd>(
 ) -> Result<Step<Worked>, ServeError> {
     if let Some(decoded) = HostMessage::decode(&message) {
         let decoded = decoded.map_err(|error| ServeError::Execution(error.problem().to_owned()))?;
-        executions.deliver(now, decoded, connection)?;
+        executions.deliver(now, decoded, operations, connection)?;
         return Ok(Step::Continue(Vec::new()));
     }
     Ok(match message {
@@ -452,26 +520,47 @@ fn serve_root<S: Read + Write + AsFd>(
     })
 }
 
-/// Checks the root configuration `body`, reads the boot layout of the root, bootstraps the guest,
-/// and assembles the root, through `operations`, or returns the failure of the stage that failed.
-fn assemble(operations: &mut dyn RootOperations, body: &[u8]) -> Result<(), RootFailure> {
+/// Checks the root configuration `body`, reads the boot layout of the root and the executions'
+/// hostname, bootstraps the guest, assembles the root, and checks the account of the sandbox's
+/// workload identity there, if the configuration names one, through `operations`, and returns
+/// the sandbox in which the executions run, or the failure of the stage that failed.
+fn assemble(operations: &mut dyn RootOperations, body: &[u8]) -> Result<Sandbox, RootFailure> {
     let config = RootConfig::decode(body)
         .map_err(|error| RootFailure::new(RootStage::Configuration, error.problem()))?;
-    let layout = layout(operations, &config)
+    let (layout, hostname) = boot(operations, &config)
         .map_err(|problem| RootFailure::new(RootStage::Layout, problem))?;
     operations
         .bootstrap(&config)
         .map_err(|problem| RootFailure::new(RootStage::Bootstrap, problem))?;
     operations
         .assemble(&config, &layout)
-        .map_err(|problem| RootFailure::new(RootStage::Assembly, problem))
+        .map_err(|problem| RootFailure::new(RootStage::Assembly, problem))?;
+    if let Some((uid, gid)) = config.workload_identity {
+        let entrance = Entrance {
+            identity: Identity::new(uid, gid),
+            hostname: hostname.clone(),
+        };
+        operations.prepare(&entrance).map_err(|error| {
+            RootFailure::new(
+                RootStage::Identity,
+                format!("cannot enter the root as the workload identity {uid}:{gid}: {error}"),
+            )
+        })?;
+    }
+    Ok(Sandbox {
+        hostname,
+        identity: config.workload_identity,
+    })
 }
 
-/// Reads the boot layout of the root from the kernel command line, through `operations`, and
-/// checks that the worker assembles it as `config` configures it: an EROFS image or a GPT disk,
-/// over an ext4 scratch, or over RAM if `config` configures no scratch, with a bound of the first
-/// partition for a GPT disk alone.
-fn layout(operations: &mut dyn RootOperations, config: &RootConfig) -> Result<RootLayout, String> {
+/// Reads the boot layout of the root and the executions' hostname from the kernel command line,
+/// through `operations`, and checks that the worker assembles the layout as `config` configures
+/// it: an EROFS image or a GPT disk, over an ext4 scratch, or over RAM if `config` configures no
+/// scratch, with a bound of the first partition for a GPT disk alone.
+fn boot(
+    operations: &mut dyn RootOperations,
+    config: &RootConfig,
+) -> Result<(RootLayout, Vec<u8>), String> {
     let command_line = operations.command_line()?;
     let layout = RootLayout::parse(&command_line)
         .map_err(|error| format!("the kernel command line has invalid boot tokens: {error}"))?
@@ -491,7 +580,29 @@ fn layout(operations: &mut dyn RootOperations, config: &RootConfig) -> Result<Ro
                 .to_owned(),
         );
     }
-    Ok(layout)
+    Ok((layout, hostname(&command_line)?))
+}
+
+/// Returns the hostname that the kernel command line `command_line` configures, as NVX's init
+/// agent reads it: the value of its first `nvx_hostname=` parameter, or
+/// [`DEFAULT_HOSTNAME`](entry::DEFAULT_HOSTNAME) if it has none, or an empty one. A hostname of
+/// more than [`MAX_HOSTNAME_BYTES`](entry::MAX_HOSTNAME_BYTES), or with a NUL, is refused.
+fn hostname(command_line: &[u8]) -> Result<Vec<u8>, String> {
+    let named = command_line
+        .split(u8::is_ascii_whitespace)
+        .find_map(|parameter| parameter.strip_prefix(HOSTNAME_PARAMETER));
+    match named {
+        None | Some([]) => Ok(entry::DEFAULT_HOSTNAME.as_bytes().to_vec()),
+        Some(hostname) if hostname.len() > entry::MAX_HOSTNAME_BYTES || hostname.contains(&0) => {
+            Err(format!(
+                "the kernel command line names a hostname that is longer than {} bytes, or \
+                 holds a NUL: {:?}",
+                entry::MAX_HOSTNAME_BYTES,
+                String::from_utf8_lossy(hostname)
+            ))
+        }
+        Some(hostname) => Ok(hostname.to_vec()),
+    }
 }
 
 /// Runs the probe `body` through `operations`, and returns the worker's answer: a report of what
@@ -682,6 +793,22 @@ impl RootOperations for LibraryRoot {
             Some(root) => root.teardown().map_err(|error| error.to_string()),
             None => Ok(()),
         }
+    }
+}
+
+impl EntryOperations for LibraryRoot {
+    /// Runs `Entry::prepare` on the assembled root.
+    fn prepare(&mut self, entrance: &Entrance) -> Result<Prepared, entry::Error> {
+        let Some(root) = &self.root else {
+            let missing = io::Error::new(io::ErrorKind::NotFound, "the worker holds no root");
+            return Err(entry::Error::Root(missing));
+        };
+        entrance.entry(root.path()).prepare()
+    }
+
+    /// Spawns `command`, whose child enters the execution with `Command::enter`.
+    fn spawn(&mut self, command: spawn::Command, prepared: Prepared) -> io::Result<Spawned> {
+        command.enter(prepared).spawn()
     }
 }
 

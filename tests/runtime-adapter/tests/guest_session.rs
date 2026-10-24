@@ -11,22 +11,30 @@
 //!
 //! The worker of a layered root runs its session with fake root operations, which record the
 //! worker's calls and fail as a test asks: the tests cover the order of its stages, each stage
-//! that fails, the requests that it serves once the root is ready, its stop, the messages that it
-//! refuses, and a broker that closes only its end of the stream, which still receives the
-//! worker's replies. The binary's PID 1 of a layered root, and its worker, run on a pseudo-terminal
-//! too, on the test's host, whose kernel command line names no layered root, where PID 1 also
-//! collects the statuses that real-time signals leave, whatever the names of its children.
+//! that fails, the hostname that the kernel command line configures, the account check of a
+//! sandbox's workload identity, the requests that it serves once the root is ready, its stop, the
+//! messages that it refuses, and a broker that closes only its end of the stream, which still
+//! receives the worker's replies. The binary's PID 1 of a layered root, and its worker, run on a
+//! pseudo-terminal too, on the test's host, whose kernel command line names no layered root,
+//! where PID 1 also collects the statuses that real-time signals leave, whatever the names of its
+//! children.
 //!
 //! The worker's executions run behind the test broker too, whose host side drives the engine's
 //! peers: the tests cover several executions at once, byte-exact, a stalled sink and a full
 //! stream to the host, which stall only what waits on them, executions that take turns at the
 //! stream, timeouts, cancellations, and stops, the starts, messages, and probes that the worker
 //! refuses, generations and resets, the descendants that a program leaves in its process group,
-//! and executions on a tty. Where the tests can create cgroups, each fake root gives the worker a
-//! workload cgroup of the test's own, below which the executions run in cgroups of their own, and
-//! settle: the tests then also cover a descendant that leaves its program's process group, which
-//! the settlement ends, and an execution that does not settle, which keeps its place until the
-//! host stops the worker. Elsewhere, the programs run in process groups alone.
+//! and executions on a tty. The fake root prepares each execution's entry, as the worker
+//! describes it, in a directory of the tests' own that holds account databases, and then spawns
+//! the program without entering a root, which needs privileges, in the tests' own root and
+//! identity: the tests cover the identity that exactly one source names, the sandbox's or the
+//! start's, the entry's inputs, a program's working directory and environment, and the starts
+//! that the worker refuses for their identities. Where the tests can create cgroups, each fake
+//! root gives the worker a workload cgroup of the test's own, below which the executions run in
+//! cgroups of their own, and settle: the tests then also cover a descendant that leaves its
+//! program's process group, which the settlement ends, and an execution that does not settle,
+//! which keeps its place until the host stops the worker. Elsewhere, the programs run in process
+//! groups alone.
 #![cfg(all(feature = "guest", target_os = "linux"))]
 
 use std::collections::BTreeMap;
@@ -55,19 +63,23 @@ use nvx::exec::{
     Cause, Key, LaunchFailure, Limits, Outcome, Peer, Pool, Status, Stream, Timers, Window, peer,
 };
 use nvx::guest::cgroup::Layout;
+use nvx::guest::entry::{self, Capabilities, Capability, Prepared};
 use nvx::guest::nvxs::GuestConnectionError;
+use nvx::guest::spawn::{self, Spawned};
 use nvx::protocol::OUTER_MAX_PAYLOAD;
 use nvx::protocol::nvxs::{
     ErrorCode, Identity, Record, RecordError, RecordParser, RecordType, SessionError, encode_record,
 };
 use nvx::protocol::root::{RootImage, RootLayout, RootUpper};
 use nvx::uuid::Uuid;
-use runtime_adapter::exec::{GuestMessage, HostMessage, MAX_CHUNK, Start};
+use runtime_adapter::exec::{self, AccountMode, GuestMessage, HostMessage, MAX_CHUNK, Start};
 use runtime_adapter::frame::{Decoder, FrameError, HEADER_LEN, MAX_BODY, Message};
 use runtime_adapter::guest::{self, NO_ROOT, RECEIVE_WINDOW, ServeError, Served};
 use runtime_adapter::probe::{Facts, Probe};
 use runtime_adapter::root::{JournalPolicy, OverlayMode, RootConfig, RootFailure, RootStage};
-use runtime_adapter::worker::{self, MAX_EXECUTIONS, RootOperations, Worked};
+use runtime_adapter::worker::{
+    self, Entrance, EntryOperations, MAX_EXECUTIONS, RootOperations, Worked,
+};
 
 /// Identity of the broker's first epoch.
 const FIRST: Identity = Identity {
@@ -1096,6 +1108,8 @@ enum Call {
     Bootstrap(RootConfig),
     /// The assembly ran with the configuration and the layout.
     Assemble(RootConfig, RootLayout),
+    /// The entry of an execution, or of the sandbox's workload identity, was prepared.
+    Prepare(Entrance),
     /// The probe ran.
     Probe(Probe),
     /// The teardown ran.
@@ -1213,6 +1227,59 @@ impl RootOperations for FakeRoot {
     }
 }
 
+impl EntryOperations for FakeRoot {
+    /// Prepares the entry into the [accounts' root](accounts), whose account databases it reads.
+    fn prepare(&mut self, entrance: &Entrance) -> Result<Prepared, entry::Error> {
+        self.calls.push(Call::Prepare(entrance.clone()));
+        entrance.entry(accounts()).prepare()
+    }
+
+    /// Spawns `command` without entering a root, which needs privileges: the program runs in the
+    /// test's own root, as the test's own identity, in the process group that it leads.
+    fn spawn(&mut self, command: spawn::Command, _prepared: Prepared) -> io::Result<Spawned> {
+        command.spawn()
+    }
+}
+
+/// The user and group IDs of the workload's account in the [accounts' root](accounts).
+const WORKLOAD: (u32, u32) = (1000, 1000);
+
+/// The user and group IDs of an account in the [accounts' root](accounts) whose primary group
+/// has no group entry.
+const ORPHAN: (u32, u32) = (2000, 2000);
+
+/// The `/etc/passwd` of the [accounts' root](accounts).
+const PASSWD: &str = "root:x:0:0:root:/root:/bin/sh\n\
+                      workload:x:1000:1000:workload:/home/workload:/bin/sh\n\
+                      orphan:x:2000:2000:orphan:/home/orphan:/bin/sh\n";
+
+/// The `/etc/group` of the [accounts' root](accounts).
+const GROUP: &str = "root:x:0:\nstaff:x:50:\nworkload:x:1000:\n";
+
+/// Returns the directory that stands for the assembled root of every fake root when the worker
+/// prepares an entry: one of the tests' own, below the target directory, for the tests' user,
+/// with the account databases [`PASSWD`] and [`GROUP`], and nothing else.
+fn accounts() -> &'static Path {
+    static ROOT: OnceLock<PathBuf> = OnceLock::new();
+    ROOT.get_or_init(|| {
+        let uid = nix::unistd::getuid();
+        let root = Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("accounts-{uid}"));
+        let etc = root.join("etc");
+        fs::create_dir_all(&etc).unwrap();
+        for (name, contents) in [("passwd", PASSWD), ("group", GROUP)] {
+            let path = etc.join(name);
+            if fs::read_to_string(&path).is_ok_and(|current| current == contents) {
+                continue;
+            }
+            // Another test process may read the database meanwhile, so it is replaced whole.
+            let staged = etc.join(format!("{name}.{}", std::process::id()));
+            fs::write(&staged, contents).unwrap();
+            fs::rename(&staged, &path).unwrap();
+        }
+        root
+    })
+}
+
 /// Returns the facts that a [`FakeRoot`] finds with `probe`.
 fn found(probe: &Probe) -> Facts {
     let mut facts = Facts::new();
@@ -1309,6 +1376,23 @@ fn start_worker(root: FakeRoot) -> (Broker, Working) {
 /// Returns the default root configuration's message.
 fn configuration() -> Message {
     Message::RootConfig(RootConfig::default().encode())
+}
+
+/// Returns the configuration of a sandbox whose executions run as the workload identity
+/// [`WORKLOAD`], whose account the [accounts' root](accounts) holds.
+fn sandbox() -> RootConfig {
+    RootConfig {
+        workload_identity: Some(WORKLOAD),
+        ..RootConfig::default()
+    }
+}
+
+/// Returns the kernel command line of `layout` that names the executions' hostname `hostname`.
+fn naming_hostname(layout: &RootLayout, hostname: &str) -> String {
+    format!(
+        "console=hvc0 nvx_sandbox=1 {} nvx_hostname={hostname}",
+        layout.tokens().join(" ")
+    )
 }
 
 /// Returns the probe that `text` names.
@@ -1432,6 +1516,11 @@ fn the_worker_reports_the_stage_that_failed_and_ends_with_its_status() {
         upper: RootUpper::Ram,
         ..layout()
     };
+    let lacking = RootConfig {
+        workload_identity: Some((4242, 4242)),
+        ..RootConfig::default()
+    };
+    let long = naming_hostname(&layout(), &"h".repeat(65));
     let cases = [
         (
             "a configuration of another version",
@@ -1515,6 +1604,14 @@ fn the_worker_reports_the_stage_that_failed_and_ends_with_its_status() {
             read(),
         ),
         (
+            "a hostname longer than 64 bytes",
+            FakeRoot::reading(long.as_bytes()),
+            config.encode(),
+            RootStage::Layout,
+            "the kernel command line names a hostname that is longer than 64 bytes",
+            read(),
+        ),
+        (
             "a bootstrap that failed",
             FakeRoot::failing(Operation::Bootstrap, "failed to create the agent's cgroup"),
             config.encode(),
@@ -1534,6 +1631,20 @@ fn the_worker_reports_the_stage_that_failed_and_ends_with_its_status() {
             ]
             .concat(),
         ),
+        (
+            "a workload identity whose account the root lacks",
+            FakeRoot::booting(&layout()),
+            lacking.encode(),
+            RootStage::Identity,
+            "cannot enter the root as the workload identity 4242:4242: the account is \
+             unavailable: no passwd entry has the user ID",
+            vec![
+                Call::CommandLine,
+                Call::Bootstrap(lacking.clone()),
+                Call::Assemble(lacking.clone(), layout()),
+                Call::Prepare(entrance(entry::Identity::new(4242, 4242))),
+            ],
+        ),
     ];
     for (name, root, body, stage, problem, calls) in cases {
         let (mut broker, working) = start_worker(root);
@@ -1552,6 +1663,75 @@ fn the_worker_reports_the_stage_that_failed_and_ends_with_its_status() {
         assert_eq!(worked, Worked::Failed(reported), "{name}");
         assert_eq!(worked.status(), stage.exit_status(), "{name}");
         assert_eq!(root.calls, calls, "{name}");
+    }
+}
+
+/// Returns the entrance of an execution as `identity`, with the default hostname.
+fn entrance(identity: entry::Identity) -> Entrance {
+    Entrance {
+        identity,
+        hostname: entry::DEFAULT_HOSTNAME.as_bytes().to_vec(),
+    }
+}
+
+/// Returns the entrances that the worker prepared through `root`, in order.
+fn entrances(root: &FakeRoot) -> Vec<Entrance> {
+    root.calls
+        .iter()
+        .filter_map(|call| match call {
+            Call::Prepare(entrance) => Some(entrance.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn the_worker_checks_the_account_of_the_sandbox_s_workload_identity_in_the_assembled_root() {
+    // The kernel command line names the executions' hostname, which the check's entry takes
+    // too, as every execution's does.
+    let root = FakeRoot::reading(naming_hostname(&layout(), "example").as_bytes());
+    let (mut broker, working) = start_worker(root);
+    broker.attach(FIRST);
+    let config = sandbox();
+    let messages = [Message::RootConfig(config.encode()), Message::Stop];
+    let replies = broker.exchange(&messages, OUTER_MAX_PAYLOAD, 2);
+    assert_eq!(replies, [Message::RootReady, Message::Stopped]);
+    let (root, worked) = joined(working);
+    assert_eq!(worked.unwrap(), Worked::Stopped);
+    let checked = Entrance {
+        identity: entry::Identity::new(WORKLOAD.0, WORKLOAD.1),
+        hostname: b"example".to_vec(),
+    };
+    let expected = [
+        Call::CommandLine,
+        Call::Bootstrap(config.clone()),
+        Call::Assemble(config, layout()),
+        Call::Prepare(checked),
+        Call::Teardown,
+    ];
+    assert_eq!(root.calls, expected);
+
+    // An empty hostname is the default one, and only the first names it.
+    for (command_line, hostname) in [
+        (naming_hostname(&layout(), ""), entry::DEFAULT_HOSTNAME),
+        (
+            format!(
+                "{} nvx_hostname=second",
+                naming_hostname(&layout(), "first")
+            ),
+            "first",
+        ),
+    ] {
+        let mut host = Host::configured(FakeRoot::reading(command_line.as_bytes()), &sandbox());
+        host.start(start_of(1, shell("exit 0")), Vec::new());
+        host.run_until(|host| host.outcome(1).is_some());
+        let (root, worked) = host.stop();
+        assert_eq!(worked.unwrap(), Worked::Stopped);
+        let entrance = Entrance {
+            identity: entry::Identity::new(WORKLOAD.0, WORKLOAD.1),
+            hostname: hostname.as_bytes().to_vec(),
+        };
+        assert_eq!(entrances(&root), [entrance.clone(), entrance], "{hostname}");
     }
 }
 
@@ -2169,17 +2349,27 @@ struct Host {
 
 impl Host {
     /// Starts a worker whose root operations succeed, and returns the host, once the worker
-    /// assembled its root.
+    /// assembled its root for a [sandbox](sandbox) whose executions run as its workload identity.
     fn new() -> Self {
-        let (broker, working) = start_worker(FakeRoot::booting(&layout()));
-        Self::ready(broker, working)
+        Self::configured(FakeRoot::booting(&layout()), &sandbox())
+    }
+
+    /// Starts a worker with the root operations `root`, and returns the host, once the worker
+    /// assembled its root as `config` configures it.
+    fn configured(root: FakeRoot, config: &RootConfig) -> Self {
+        let (broker, working) = start_worker(root);
+        Self::ready(broker, working, config)
     }
 
     /// Attaches the session of the worker that runs in `working` in the first epoch, has it
-    /// assemble its root, and returns the host.
-    fn ready(mut broker: Broker, working: Working) -> Self {
+    /// assemble its root as `config` configures it, and returns the host.
+    fn ready(mut broker: Broker, working: Working, config: &RootConfig) -> Self {
         broker.attach(FIRST);
-        let replies = broker.exchange(&[configuration()], OUTER_MAX_PAYLOAD, 1);
+        let replies = broker.exchange(
+            &[Message::RootConfig(config.encode())],
+            OUTER_MAX_PAYLOAD,
+            1,
+        );
         assert_eq!(replies, [Message::RootReady]);
         Self {
             broker,
@@ -2407,7 +2597,7 @@ fn the_worker_refuses_probes_while_it_runs_executions() {
     // runs: a probe that ran then would hold back the execution's timeout.
     let (root, gate) = FakeRoot::booting(&layout()).gated();
     let (broker, working) = start_worker(root);
-    let mut host = Host::ready(broker, working);
+    let mut host = Host::ready(broker, working, &sandbox());
     let timeout = Duration::from_millis(500);
     let timed = Start::new(
         Key::new(1, 1),
@@ -2916,6 +3106,168 @@ fn fill_but_one(host: &mut Host, first: u64) {
 }
 
 #[test]
+fn an_execution_runs_in_its_working_directory_with_exactly_its_environment() {
+    // In a sandbox with a workload identity, the worker prepares each execution's entry as it.
+    // Without privileges, the program runs in the test's own root, so that its working directory
+    // is one of the test's host. The first program prints its environment, which none of the
+    // worker's own joins, and the second its working directory.
+    let mut host = Host::new();
+    let environment = ["GREETING=hello world", "EMPTY=", "TWICE=a=b"];
+    let directory = fs::canonicalize(accounts()).unwrap();
+    let directory = directory.to_str().unwrap();
+    let printing = start_of(1, vec![b"/usr/bin/env".to_vec()]).with_environment(environment);
+    host.start(printing, Vec::new());
+    let moved = start_of(2, shell("pwd -P")).with_working_directory(directory);
+    host.start(moved, Vec::new());
+    host.run_until(|host| (1..=2).all(|id| host.outcome(id).is_some()));
+    for id in 1..=2 {
+        check_lossless(&host, id, Status::Exited(0));
+    }
+    let printed = environment.map(|entry| format!("{entry}\n")).concat();
+    assert_eq!(host.executions[&1].output[0], printed.as_bytes());
+    assert_eq!(
+        host.executions[&2].output[0],
+        format!("{directory}\n").as_bytes()
+    );
+    let (root, worked) = host.stop();
+    assert_eq!(worked.unwrap(), Worked::Stopped);
+    // The configuration's check, then each execution.
+    let workload = entrance(entry::Identity::new(WORKLOAD.0, WORKLOAD.1));
+    assert_eq!(
+        entrances(&root),
+        [workload.clone(), workload.clone(), workload]
+    );
+}
+
+#[test]
+fn an_execution_enters_the_root_as_the_identity_that_its_start_names() {
+    // In a sandbox without a workload identity, each start names an identity, with its
+    // supplementary groups, its capabilities, and its account mode, which the worker prepares an
+    // entry with, and the hostname that the kernel command line configures.
+    let root = FakeRoot::reading(naming_hostname(&layout(), "example").as_bytes());
+    let mut host = Host::configured(root, &RootConfig::default());
+    let bit = |capability: Capability| 1 << capability.number();
+    let identities = [
+        exec::Identity {
+            groups: vec![50],
+            capabilities: bit(Capability::CHOWN) | bit(Capability::KILL),
+            ..exec::Identity::new(0, 0)
+        },
+        exec::Identity {
+            groups: vec![50, WORKLOAD.1],
+            ..exec::Identity::new(WORKLOAD.0, WORKLOAD.1)
+        },
+        exec::Identity {
+            account: AccountMode::Numeric,
+            ..exec::Identity::new(4242, 4243)
+        },
+    ];
+    for (id, identity) in (1..).zip(&identities) {
+        let start = start_of(id, shell("exit 0")).with_identity(identity.clone());
+        host.start(start, Vec::new());
+    }
+    host.run_until(|host| (1..=3).all(|id| host.outcome(id).is_some()));
+    for id in 1..=3 {
+        check_lossless(&host, id, Status::Exited(0));
+    }
+    let (root, worked) = host.stop();
+    assert_eq!(worked.unwrap(), Worked::Stopped);
+    let capabilities = Capabilities::EMPTY
+        .with(Capability::CHOWN)
+        .with(Capability::KILL);
+    let expected = [
+        entry::Identity::new(0, 0)
+            .groups([50])
+            .capabilities(capabilities),
+        entry::Identity::new(WORKLOAD.0, WORKLOAD.1).groups([50, WORKLOAD.1]),
+        entry::Identity::new(4242, 4243).account(entry::AccountMode::Numeric),
+    ]
+    .map(|identity| Entrance {
+        identity,
+        hostname: b"example".to_vec(),
+    });
+    assert_eq!(entrances(&root), expected);
+}
+
+#[test]
+fn the_worker_refuses_at_stage_0_a_start_whose_identity_breaks_the_rules() {
+    // Each refusal's terminal record tells its `errno`, and the refusal takes no place.
+    fn refused(host: &mut Host, cases: Vec<(Option<exec::Identity>, Errno)>) {
+        let ids = 1..=u64::try_from(cases.len()).unwrap();
+        for (id, (identity, _)) in ids.clone().zip(&cases) {
+            let mut start = start_of(id, shell("exit 0"));
+            start.identity = identity.clone();
+            host.start(start, Vec::new());
+        }
+        host.run_until(|host| ids.clone().all(|id| host.outcome(id).is_some()));
+        for (id, (identity, error)) in ids.zip(&cases) {
+            let failure = LaunchFailure::new(0, *error as i32);
+            let outcome = host.outcome(id).unwrap();
+            assert_eq!(outcome.launch_failure(), Some(failure), "{identity:?}");
+        }
+    }
+
+    // In a sandbox with a workload identity, a start names none.
+    let mut host = Host::new();
+    let workload = exec::Identity::new(WORKLOAD.0, WORKLOAD.1);
+    refused(&mut host, vec![(Some(workload), Errno::EINVAL)]);
+    let (_, worked) = host.stop();
+    assert_eq!(worked.unwrap(), Worked::Stopped);
+
+    // In a sandbox without one, a start names its own, which the entry checks: its
+    // capabilities, its IDs, and its account in existing-account mode.
+    let mut host = Host::configured(FakeRoot::booting(&layout()), &RootConfig::default());
+    let root = |capability: Capability| exec::Identity {
+        capabilities: 1 << capability.number(),
+        ..exec::Identity::new(0, 0)
+    };
+    let cases = vec![
+        (None, Errno::EINVAL),
+        (
+            Some(exec::Identity {
+                capabilities: 1 << 21,
+                ..exec::Identity::new(0, 0)
+            }),
+            Errno::EPERM,
+        ),
+        (
+            Some(exec::Identity {
+                capabilities: 1 << Capability::CHOWN.number(),
+                ..exec::Identity::new(WORKLOAD.0, WORKLOAD.1)
+            }),
+            Errno::EPERM,
+        ),
+        (Some(root(Capability::NET_BIND_SERVICE)), Errno::EPERM),
+        (Some(root(Capability::NET_RAW)), Errno::EPERM),
+        (Some(exec::Identity::new(4242, 4242)), Errno::ENOENT),
+        (Some(exec::Identity::new(ORPHAN.0, ORPHAN.1)), Errno::ENOENT),
+        (Some(exec::Identity::new(WORKLOAD.0, 50)), Errno::EINVAL),
+        (
+            Some(exec::Identity {
+                account: AccountMode::Numeric,
+                ..exec::Identity::new(u32::MAX, 0)
+            }),
+            Errno::EINVAL,
+        ),
+    ];
+    let first = u64::try_from(cases.len()).unwrap() + 1;
+    refused(&mut host, cases);
+    let most = u64::try_from(MAX_EXECUTIONS).unwrap();
+    let ids = first..first + most;
+    for id in ids.clone() {
+        let start = start_of(id, shell("exec sleep 60"))
+            .with_identity(exec::Identity::new(WORKLOAD.0, WORKLOAD.1));
+        host.start(start, Vec::new());
+    }
+    host.run_until(|host| {
+        ids.clone()
+            .all(|id| host.executions[&id].peer.has_started())
+    });
+    let (_, worked) = host.stop();
+    assert_eq!(worked.unwrap(), Worked::Stopped);
+}
+
+#[test]
 fn the_worker_collects_the_status_of_a_program_that_a_real_time_signal_ended() {
     // `nix` decodes no real-time signal in a status, so that the worker learns that the program
     // ended from its pidfd, and leaves the status to the program's handle.
@@ -2950,7 +3302,10 @@ fn an_execution_that_starts_with_the_root_counts_its_timeout_from_its_own_start(
         replies: Vec::new(),
         stopping: false,
     };
-    host.send(&[configuration(), HostMessage::Start(start).encode()]);
+    host.send(&[
+        Message::RootConfig(sandbox().encode()),
+        HostMessage::Start(start).encode(),
+    ]);
     host.run_until(|host| host.outcome(1).is_some());
     assert_eq!(host.replies, [Message::RootReady]);
     check_lossless(&host, 1, Status::Exited(0));
@@ -3047,7 +3402,7 @@ fn the_worker_runs_executions_on_a_tty() {
         let worked = worker::work_on_terminal(&path, &mut root);
         (root, worked)
     });
-    let mut host = Host::ready(broker, working);
+    let mut host = Host::ready(broker, working, &sandbox());
     let script = "seq 1 100000; seq 1 1000 >&2";
     host.start(start_of(1, shell(script)), Vec::new());
     host.run_until(|host| host.outcome(1).is_some());
