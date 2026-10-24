@@ -1,7 +1,9 @@
 //! The activation of a repaired clone, in the caller's process: [`Activation`], the state machine
 //! of the clone's restricted control session, through which the clone takes its configuration from
-//! the host in one Activate, as the [module](super#activation) describes.
+//! the host in one Activate, and [`apply`](fn@apply), which activates the clone's root and workload
+//! with that configuration, as the [module](super#activation) describes.
 
+mod apply;
 #[cfg(test)]
 mod tests;
 
@@ -15,6 +17,8 @@ use crate::activation::{
     ActivationError, ActivationRecord, ExpectedResources, ReadyActivation, TransactionId,
 };
 
+pub use self::apply::{Applied, ApplyError, RootTemplate, apply};
+
 /// The activation of a repaired clone: the state machine, without I/O and independent of any
 /// framing, of the clone's control session, which takes the clone's configuration from the host
 /// in one Activate, behind the caller's fence of workload admission, which it opens once the
@@ -22,11 +26,12 @@ use crate::activation::{
 ///
 /// The adapter passes it what it receives on the session, each an [`ActivationInput`], through
 /// [`input`](Self::input), and does what the [`ActivationAction`] that it returns says. The
-/// adapter applies the record of the Activate that the activation accepted, and reports the
-/// result through [`complete`](Self::complete), and it reports the start of the sandbox, which
-/// its own order takes once the activation is ready, through [`start`](Self::start). The
-/// adapter's loop wakes by the [`deadline`](Self::deadline), and [ticks](Self::tick) the
-/// activation then, whether input arrives or not, and whether its output drains or not.
+/// adapter applies the record of the Activate that the activation accepted, with
+/// [`apply`](fn@apply), and reports the result through [`complete`](Self::complete), and it
+/// reports the start of the sandbox, which its own order takes once the activation is ready,
+/// through [`start`](Self::start). The adapter's loop wakes by the [`deadline`](Self::deadline),
+/// and [ticks](Self::tick) the activation then, whether input arrives or not, and whether its
+/// output drains or not.
 ///
 /// It goes through the [`ActivationState`]s in order, and each takes these inputs:
 ///
@@ -45,12 +50,12 @@ use crate::activation::{
 /// # Example
 ///
 /// ```no_run
-/// use std::error::Error;
 /// use std::time::Instant;
 ///
-/// use nvx::activation::{ActivationRecord, ReadyActivation};
+/// use nvx::activation::ReadyActivation;
 /// use nvx::guest::clone::{
-///     Activation, ActivationAction, ActivationFailure, ActivationInput, AdmissionFence,
+///     self, Activation, ActivationAction, ActivationFailure, ActivationInput, AdmissionFence,
+///     Applied, RootTemplate,
 /// };
 ///
 /// /// What the agent's control session received from the host, in the agent's own framing.
@@ -71,18 +76,22 @@ use crate::activation::{
 ///     fn receive(&mut self, deadline: Option<Instant>) -> Option<Received>;
 ///     /// Acknowledges the session's reset, and abandons the earlier epoch's work.
 ///     fn acknowledge(&mut self);
-///     /// Activates the root and the workload with the settings of `record`.
-///     fn apply(&mut self, record: &ActivationRecord) -> Result<(), Box<dyn Error + Send + Sync>>;
-///     /// Sends Ready, which reports `activation`.
+///     /// Keeps the clone's activated root, and the identity, if any, in which it runs every
+///     /// execution.
+///     fn keep(&mut self, applied: Applied);
+///     /// Sends Ready, which reports `activation` beside the agent's own identities, such as its
+///     /// build.
 ///     fn ready(&mut self, activation: ReadyActivation);
 ///     /// Serves `message` in the agent's order, as after a cold boot, and returns whether the
 ///     /// host started the sandbox with it.
 ///     fn serve(&mut self, message: Vec<u8>) -> bool;
 /// }
 ///
-/// /// Serves the control session of the clone whose activation is `activation`, until it fails.
+/// /// Serves the control session of the clone whose activation is `activation`, and whose
+/// /// template captured `template`, the inputs of its root's assembly, until it fails.
 /// fn serve<F: AdmissionFence>(
 ///     agent: &mut impl Agent,
+///     template: &RootTemplate,
 ///     mut activation: Activation<F>,
 /// ) -> Result<(), ActivationFailure> {
 ///     loop {
@@ -103,8 +112,14 @@ use crate::activation::{
 ///             ActivationAction::Apply(record) => {
 ///                 // The record is valid, and nothing happened before: the activation's side
 ///                 // effects start here, and the fence opens once they all succeeded.
-///                 let result = agent.apply(&record);
-///                 let ready = activation.complete(Instant::now(), result)?;
+///                 let ready = match clone::apply(&record, template) {
+///                     Ok(applied) => {
+///                         agent.keep(applied);
+///                         activation.complete(Instant::now(), Ok(()))?
+///                     }
+///                     // A failed application fails the activation: the fence stays closed.
+///                     Err(error) => activation.complete(Instant::now(), Err(error.into()))?,
+///                 };
 ///                 agent.ready(ready);
 ///             }
 ///             ActivationAction::Ready(ready) => agent.ready(ready),
@@ -415,9 +430,9 @@ pub enum ActivationAction {
     /// The activation took the input, which needs nothing more of the adapter.
     Continue,
     /// The activation accepted the host's Activate, whose record decoded and validated, and
-    /// which nothing before had any side effect of: the adapter applies the record, activating
-    /// the root and the workload with its settings, then reports the result to
-    /// [`Activation::complete`].
+    /// which nothing before had any side effect of: the adapter applies the record with
+    /// [`apply`](fn@apply), which activates the root and the workload with its settings, then
+    /// reports the result to [`Activation::complete`].
     Apply(Box<ActivationRecord>),
     /// A retry of the accepted Activate joined the activation that runs: what
     /// [`Activation::complete`] returns answers it too, as the adapter's framing answers each
