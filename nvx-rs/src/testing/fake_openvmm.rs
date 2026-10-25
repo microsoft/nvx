@@ -8,6 +8,11 @@
 //! and decodes requests with the guest agent's decoders, whose conformance vectors pin the wire
 //! format independently.
 //!
+//! On Unix, as OpenVMM does, the fake refuses a control console unless its socket's directory is a
+//! directory, not a link, that belongs to the current user, with exactly the mode 0700, and, if
+//! the command line names a snapshot, the canonical directory that holds it: the one that
+//! `--restore-snapshot` restores, or else the destination of `--snapshot-destination`.
+//!
 //! Workloads are `/bin/sh -c SCRIPT`, `/bin/echo ARGS...`, `/bin/pwd`, or a program named `env`
 //! or `printenv` in any directory, which prints its environment. A script is a `;`-separated
 //! list of commands: `echo TEXT`, `echoerr TEXT`, `printerr TEXT`, which writes `TEXT` to
@@ -95,17 +100,16 @@
 //! `--snapshot-block-identity generation` with a nonzero `--snapshot-generation-id` of 32
 //! hexadecimal digits, the options of a cold boot of a run with a `--memory-capacity` that is a
 //! multiple of 128 MiB, `nvx_sandbox=1` alone on the kernel command line, `--virtio-console none`,
-//! the control console with its capability on standard input, and an outcome report. On Unix, as
-//! OpenVMM requires of a VM that captures a snapshot, the control console's socket must be in the
-//! directory of the snapshot's destination. The fake
-//! serves no control session of a capture, which the host opens none of. Like OpenVMM, it opens
-//! each block device itself, at its path, without following a link, and on Windows sharing only
-//! reads and deletion, so that its open fails while another handle may write the file; on Linux,
-//! a read lease, which no process may take of a file that a handle holds open for writing, finds
-//! such a handle. It records each device's role, path, and length, and whether it found a writer,
-//! in the blocks dump. It then backs the RAM with a sparse file beside the destination, and does
-//! what `fake-openvmm-capture.json` next to the kernel asks, a JSON object of these fields, each
-//! optional but `manifest`:
+//! the control console with its capability on standard input, and an outcome report. On Unix, the
+//! control console's socket must be in the directory of the snapshot's destination, as above. The
+//! fake serves no control session of a capture, which the host opens none of. Like OpenVMM, it
+//! opens each block device itself, at its path, without following a link, and on Windows sharing
+//! only reads and deletion, so that its open fails while another handle may write the file; on
+//! Linux, a read lease, which no process may take of a file that a handle holds open for writing,
+//! finds such a handle. It records each device's role, path, and length, and whether it found a
+//! writer, in the blocks dump. It then backs the RAM with a sparse file beside the destination, and
+//! does what `fake-openvmm-capture.json` next to the kernel asks, a JSON object of these fields,
+//! each optional but `manifest`:
 //!
 //! - `manifest`: the manifest to publish, which the fake copies, since it reads none;
 //! - `stateLen`: the length of the saved state to publish, 0 by default;
@@ -1110,6 +1114,11 @@ fn parse(program: &str, arguments: &[String]) -> Result<Options, String> {
                 .strip_prefix("listen=")
                 .ok_or("--microvm-control-console must use listen=")?
                 .to_owned();
+            if endpoint.is_empty() {
+                return Err(
+                    "--microvm-control-console must name its endpoint after listen=".to_owned(),
+                );
+            }
             (endpoint, Some(PathBuf::from(single("--microvm-report")?)))
         }
         Lifecycle::OneShot | Lifecycle::Run => {
@@ -1164,10 +1173,19 @@ fn parse(program: &str, arguments: &[String]) -> Result<Options, String> {
         if !sandbox {
             return Err("a capture takes sandbox block devices".to_owned());
         }
-        Some(check_capture(&values, &anchor, &endpoint)?)
+        Some(check_capture(&values, &anchor)?)
     } else {
         None
     };
+    // OpenVMM checks where a control console listens before it starts the VM, beside the snapshot
+    // that the VM restores, or else captures, if any.
+    #[cfg(unix)]
+    if matches!(lifecycle, Lifecycle::Managed | Lifecycle::Capture) {
+        let snapshot = ["--restore-snapshot", "--snapshot-destination"]
+            .into_iter()
+            .find_map(|option| values.get(option).and_then(|given| given.first()));
+        check_control_console(&endpoint, snapshot.map(|snapshot| Path::new(*snapshot)))?;
+    }
     if let Some(report) = &report
         && report.exists()
     {
@@ -1486,14 +1504,12 @@ fn check_run_boot(
 
 /// Checks the options of a template's capture, besides those of its boot, and returns them: RAM
 /// and a RAM capacity in MiB, the capacity a multiple of 128 MiB no smaller than the RAM, a
-/// `--snapshot-destination` that does not exist, in an existing directory, in which the control
-/// console's socket `endpoint` must be on Unix, `--snapshot-tier platform`,
-/// `--snapshot-block-identity generation`, and a `--snapshot-generation-id` of 32 hexadecimal
-/// digits that are not all zero. The scenario of the capture is next to `kernel`.
+/// `--snapshot-destination` that does not exist, in an existing directory, `--snapshot-tier
+/// platform`, `--snapshot-block-identity generation`, and a `--snapshot-generation-id` of 32
+/// hexadecimal digits that are not all zero. The scenario of the capture is next to `kernel`.
 fn check_capture(
     values: &BTreeMap<&str, Vec<&str>>,
     kernel: &Path,
-    endpoint: &str,
 ) -> Result<CaptureOptions, String> {
     let bytes = |name: &str| {
         let value = exactly_once(values, name)?;
@@ -1540,29 +1556,79 @@ fn check_capture(
             destination.display()
         ));
     }
-    // OpenVMM finds a Unix socket's identity in the canonical directory of its path, which must
-    // be the directory of the destination, in which a restore listens again.
-    #[cfg(unix)]
-    {
-        let canonical = |path: &Path| {
-            path.parent()
-                .and_then(|parent| fs::canonicalize(parent).ok())
-        };
-        let namespace = canonical(&destination);
-        if canonical(Path::new(endpoint)) != namespace {
-            return Err(format!(
-                "microVM console socket must be inside the snapshot parent namespace {}",
-                namespace.as_deref().unwrap_or(Path::new("")).display()
-            ));
-        }
-    }
-    #[cfg(not(unix))]
-    let _ = endpoint;
     Ok(CaptureOptions {
         destination,
         memory,
         scenario: kernel.with_file_name(CAPTURE_SCENARIO_NAME),
     })
+}
+
+/// Checks the socket `endpoint` of a control console as OpenVMM checks it on Unix before it
+/// starts the VM: its directory, once its path is absolute, must be a directory, not a link, that
+/// belongs to the effective user, with exactly the mode 0700, and, if the VM restores or captures
+/// the snapshot directory `snapshot`, the canonical directory that holds it, in which a restore of
+/// the snapshot listens again.
+#[cfg(unix)]
+fn check_control_console(endpoint: &str, snapshot: Option<&Path>) -> Result<(), String> {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+    let endpoint = Path::new(endpoint);
+    let absolute = if endpoint.is_absolute() {
+        endpoint.to_owned()
+    } else {
+        std::env::current_dir()
+            .map_err(|error| {
+                format!("failed to resolve current directory for control endpoint: {error}")
+            })?
+            .join(endpoint)
+    };
+    let directory = absolute
+        .parent()
+        .ok_or("microVM control endpoint has no parent directory")?;
+    let metadata = fs::symlink_metadata(directory).map_err(|error| {
+        format!(
+            "failed to inspect microVM control endpoint parent {}: {error}",
+            directory.display()
+        )
+    })?;
+    if !metadata.is_dir()
+        || metadata.file_type().is_symlink()
+        || metadata.uid() != nix::unistd::geteuid().as_raw()
+        || metadata.permissions().mode() & 0o7777 != 0o700
+    {
+        return Err(
+            "microVM control endpoint parent must be a non-symlink directory owned by \
+                    OpenVMM with mode 0700"
+                .to_owned(),
+        );
+    }
+    let Some(snapshot) = snapshot else {
+        return Ok(());
+    };
+    // OpenVMM finds the socket's identity in the canonical directory of its path.
+    let directory = fs::canonicalize(directory).map_err(|error| {
+        format!(
+            "failed to canonicalize microVM console endpoint parent {}: {error}",
+            directory.display()
+        )
+    })?;
+    let parent = snapshot
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    let namespace = fs::canonicalize(parent).map_err(|error| {
+        format!(
+            "failed to canonicalize snapshot parent {}: {error}",
+            parent.display()
+        )
+    })?;
+    if directory != namespace {
+        return Err(format!(
+            "microVM console socket must be inside the snapshot parent namespace {}",
+            namespace.display()
+        ));
+    }
+    Ok(())
 }
 
 /// Checks the sandbox block devices of a sandbox: each layer, `ROLE:file:PATH,ro` with a role of
@@ -2800,9 +2866,19 @@ mod tests {
     ];
 
     /// Returns a directory with a kernel, an initramfs, a placeholder, and a transaction with a
-    /// scratch disk, and the parse of the command line that `arguments` gives with the path of
-    /// that directory in place of `{dir}`.
+    /// scratch disk, the directory and the transaction private to the current user, as the
+    /// directory of a control console's socket must be, and the parse of the command line that
+    /// `arguments` gives with the path of that directory in place of `{dir}`.
     fn parse_capture(arguments: &[&str]) -> (tempfile::TempDir, Result<Options, String>) {
+        parse_capture_in(arguments, |_| {})
+    }
+
+    /// Returns the directory of [`parse_capture`], and the parse of `arguments` there once
+    /// `prepare` has changed the directory.
+    fn parse_capture_in(
+        arguments: &[&str],
+        prepare: impl FnOnce(&Path),
+    ) -> (tempfile::TempDir, Result<Options, String>) {
         let temporary = tempfile::tempdir().unwrap();
         let root = temporary.path();
         fs::write(root.join("vmlinux"), b"kernel").unwrap();
@@ -2810,6 +2886,12 @@ mod tests {
         fs::write(root.join("placeholder"), [0; 512]).unwrap();
         fs::create_dir(root.join("transaction")).unwrap();
         fs::write(root.join("transaction").join("scratch.raw"), [0; 512]).unwrap();
+        #[cfg(unix)]
+        for directory in [root.to_owned(), root.join("transaction")] {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(directory, fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        prepare(root);
         let directory = root.to_str().unwrap();
         let arguments: Vec<String> = arguments
             .iter()
@@ -2885,6 +2967,74 @@ mod tests {
                 namespace.display()
             ))
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn control_consoles_listen_in_a_private_directory_of_their_user() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+
+        let refusal = "microVM control endpoint parent must be a non-symlink directory owned by \
+                       OpenVMM with mode 0700";
+        // OpenVMM takes exactly the mode 0700.
+        for mode in [0o750, 0o701, 0o1700] {
+            let (_temporary, options) = parse_capture_in(CAPTURE, |root| {
+                let transaction = root.join("transaction");
+                fs::set_permissions(transaction, fs::Permissions::from_mode(mode)).unwrap();
+            });
+            assert_eq!(options.err().as_deref(), Some(refusal), "{mode:o}");
+        }
+        // It follows no link to the socket's directory, even to a private one.
+        let (_temporary, options) = parse_capture_in(
+            &capture_with(
+                "--microvm-control-console",
+                "listen={dir}/link/control.sock",
+            ),
+            |root| symlink(root.join("transaction"), root.join("link")).unwrap(),
+        );
+        assert_eq!(options.err().as_deref(), Some(refusal));
+        let (temporary, options) = parse_capture(&capture_with(
+            "--microvm-control-console",
+            "listen={dir}/missing/control.sock",
+        ));
+        let missing = format!(
+            "failed to inspect microVM control endpoint parent {}: ",
+            temporary.path().join("missing").display()
+        );
+        let error = options.err().unwrap();
+        assert!(error.starts_with(&missing), "{error}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_restore_listens_in_the_directory_of_the_snapshot_that_it_restores() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temporary = tempfile::tempdir().unwrap();
+        let (clone, generation) = (
+            temporary.path().join("clone"),
+            temporary.path().join("generation"),
+        );
+        for directory in [&clone, &generation] {
+            fs::create_dir(directory).unwrap();
+            fs::set_permissions(directory, fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let endpoint = clone.join("control.sock");
+        let endpoint = endpoint.to_str().unwrap();
+        assert_eq!(
+            check_control_console(endpoint, Some(&clone.join("snapshot"))),
+            Ok(())
+        );
+        // A VM that restores a snapshot elsewhere cannot listen in its own directory.
+        assert_eq!(
+            check_control_console(endpoint, Some(&generation.join("snapshot"))),
+            Err(format!(
+                "microVM console socket must be inside the snapshot parent namespace {}",
+                fs::canonicalize(&generation).unwrap().display()
+            ))
+        );
+        // Without a snapshot, the socket's directory alone counts.
+        assert_eq!(check_control_console(endpoint, None), Ok(()));
     }
 
     #[test]
@@ -2974,6 +3124,10 @@ mod tests {
             (
                 capture_with("--virtio-console", "stdio"),
                 "--virtio-console must be none, not stdio".to_owned(),
+            ),
+            (
+                capture_with("--microvm-control-console", "listen="),
+                "--microvm-control-console must name its endpoint after listen=".to_owned(),
             ),
         ];
         for (arguments, message) in cases {
