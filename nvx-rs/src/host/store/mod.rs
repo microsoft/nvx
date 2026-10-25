@@ -235,7 +235,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 pub use self::caller::CallerFiles;
-use self::caller::is_report_staging;
+use self::caller::{is_report_staging, is_store_temporary};
 use self::files::{io_error, remove_if_present};
 pub use self::identity::{
     ArtifactIdentity, IdentityCheck, IdentityPart, MAX_IDENTITY_LEN, RuntimeIdentity,
@@ -678,6 +678,26 @@ impl LockedStore {
     /// until [`begin_launch`](Self::begin_launch) begins it, or a release ends the lease.
     pub(crate) fn reserved(&self) -> Option<&LaunchId> {
         self.reserved.as_ref()
+    }
+
+    /// Returns the paths of the entries of the sandbox's directory that the store owns now: its
+    /// files, [`FILE_NAMES`], the temporary files of its records, and the files in which a VMM
+    /// staged an outcome report, which the store's transitions replace and remove. Entries whose
+    /// names are not Unicode are none of them.
+    pub(crate) fn owned_entries(&self) -> io::Result<Vec<PathBuf>> {
+        let mut owned = Vec::new();
+        for entry in std::fs::read_dir(self.dir())? {
+            let entry = entry?;
+            let name = entry.file_name();
+            if let Some(name) = name.to_str()
+                && (FILE_NAMES.contains(&name)
+                    || is_store_temporary(name)
+                    || is_report_staging(name))
+            {
+                owned.push(entry.path());
+            }
+        }
+        Ok(owned)
     }
 
     /// Returns the caller's files that the lock knows: those that a [lifecycle

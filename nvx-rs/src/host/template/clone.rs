@@ -101,12 +101,13 @@ pub enum CloneUpper {
 ///   regular file, not a link, nor on Windows any other reparse point, that is the file that the
 ///   check found, that belongs to the current user or to an administrator, and that no one else
 ///   may change. The plan holds the file that the check opened, for reading alone.
-/// - Neither the image nor a scratch image may be the sandbox's file of the scratch device of a
-///   clone in RAM, [`CLONE_SCRATCH_NAME`](crate::host::store::CLONE_SCRATCH_NAME), by any path,
-///   through a link among its directories, say, or a hard link: a plan replaces that file, and a
-///   release of the lease removes it. The store creates nothing but a regular file there, so the
-///   plan also refuses a link or a file of another kind at that path, through which the path of
-///   an image could pass.
+/// - Neither the image nor a scratch image may be a file that the sandbox's store owns, by any
+///   path, through a link among its directories, say, or a hard link: the store's transitions
+///   replace or remove its files, as a plan replaces the file of the scratch device of a clone in
+///   RAM, [`CLONE_SCRATCH_NAME`](crate::host::store::CLONE_SCRATCH_NAME), a launch its log, and a
+///   release the clone binding. The store creates nothing but regular files under its names, and
+///   its control socket, so the plan also refuses a link or a directory under one of them,
+///   through which the path of an image could pass.
 /// - An upper in RAM, a tmpfs, leaves the `scratch` block device unused, which the restore
 ///   attaches all the same: the plan creates its file,
 ///   [`CLONE_SCRATCH_NAME`](crate::host::store::CLONE_SCRATCH_NAME) in the sandbox's directory, a
@@ -242,13 +243,14 @@ impl ClonePlan {
     ///   NIC, or without one for a template with a NIC; and a memory target that is not whole
     ///   blocks of [`MEMORY_BLOCK_SIZE`] and of the template's memory blocks, from the template's
     ///   RAM to its RAM capacity;
+    /// - with [`ErrorKind::Unavailable`] for a link or a directory under a name that the sandbox's
+    ///   store owns, and with [`ErrorKind::Io`] if the store's files cannot be listed or examined;
     /// - as [`DistroBinding::check`] and [`CheckedDistro::geometry`] fail, with
     ///   [`ErrorKind::Unsupported`] for an image of another geometry than the template's
     ///   placeholder, its length included, with [`ErrorKind::Unavailable`] for an image that is
     ///   not, at its path, the regular file that the check found, of the current user or an
     ///   administrator, and that no one else may change, and with [`ErrorKind::Unsupported`] for
-    ///   an image that is the sandbox's file of the scratch device of a clone in RAM, and with
-    ///   [`ErrorKind::Unavailable`] if a link or a file of another kind is at that file's path;
+    ///   an image that is a file of the sandbox's store;
     /// - for an upper in RAM, with [`ErrorKind::Unsupported`] for a sandbox whose path holds a
     ///   comma or a semicolon, or whose filesystem presents another geometry than the template's
     ///   scratch, and with [`ErrorKind::Io`] if the sparse file cannot be created, sized, or
@@ -258,11 +260,8 @@ impl ClonePlan {
     ///   another geometry than the template's scratch, its length included, with
     ///   [`ErrorKind::Unavailable`] for an image that is not, at its path, the regular file that
     ///   the check found, of the current user or an administrator, and that no one else may
-    ///   change, and with [`ErrorKind::Unsupported`] for an image that is the sandbox's file of
-    ///   the scratch device of a clone in RAM.
-    ///
-    /// It fails with [`ErrorKind::Io`] if it cannot tell whether the image or the scratch image is
-    /// that file.
+    ///   change, and with [`ErrorKind::Unsupported`] for an image that is a file of the sandbox's
+    ///   store.
     pub fn new(
         store: &Store,
         acquired: &mut Acquired,
@@ -312,14 +311,15 @@ impl ClonePlan {
         let key = store.read_key(&generation)?;
         let snapshot = store.snapshot_dir(&generation)?;
         check_template(request, &key, &generation)?;
-        let image = check_image(request, &key, locked, access)?;
+        let owned = StoreFiles::of(locked)?;
+        let image = check_image(request, &key, &owned, access)?;
         let capability = generate_capability()?;
         let upper = match (
             request.adapter.upper().pure_scratch_path(),
             &request.scratch,
         ) {
             (Some(path), Some(binding)) => CloneUpper::Scratch(check_scratch(
-                path, binding, &key, locked, deadline, access,
+                path, binding, &key, &owned, deadline, access,
             )?),
             _ => CloneUpper::Tmpfs {
                 path: create_scratch(locked, &key, access)?,
@@ -540,13 +540,13 @@ fn check_template(
 }
 
 /// Checks the image of `request` against its binding, through `access`, and then its geometry,
-/// against the placeholder's that `key` records, the image at its path, and that it is not the
-/// file of the scratch device of a clone in RAM in the sandbox of `locked`, as [`ClonePlan`]
-/// describes, and returns the file that the binding's check opened.
+/// against the placeholder's that `key` records, the image at its path, and that it is none of
+/// `owned`, the files of the sandbox's store, as [`ClonePlan`] describes, and returns the file
+/// that the binding's check opened.
 fn check_image(
     request: &CloneRequest,
     key: &TemplateKey,
-    locked: &LockedStore,
+    owned: &StoreFiles,
     access: Access<'_>,
 ) -> Result<CheckedDistro> {
     let path = request.adapter.distro().pure_path();
@@ -570,20 +570,20 @@ fn check_image(
     let identity = identity_of(checked.file())
         .map_err(|error| refused(format!("cannot be identified: {error}")))?;
     check_at_path(path.as_path(), identity, refused)?;
-    check_not_clone_scratch(locked, identity, "image", path)?;
+    owned.check(identity, "image", path)?;
     Ok(checked)
 }
 
 /// Checks and claims the scratch image at `path` against `binding`, through `access`, waiting
 /// until `deadline` for a claim that another launch holds to be released, and then checks its
 /// geometry, against the template's scratch that `key` records, the image at its path, and that
-/// it is not the file of the scratch device of a clone in RAM in the sandbox of `locked`, as
-/// [`ClonePlan`] describes, and returns the image that the binding's check opened and claimed.
+/// it is none of `owned`, the files of the sandbox's store, as [`ClonePlan`] describes, and
+/// returns the image that the binding's check opened and claimed.
 fn check_scratch(
     path: &PurePath,
     binding: &ScratchBinding,
     key: &TemplateKey,
-    locked: &LockedStore,
+    owned: &StoreFiles,
     deadline: Instant,
     access: Access<'_>,
 ) -> Result<CheckedScratch> {
@@ -599,60 +599,84 @@ fn check_scratch(
     let identity = identity_of(checked.file())
         .map_err(|error| refused(format!("cannot be identified: {error}")))?;
     check_at_path(path.as_path(), identity, refused)?;
-    check_not_clone_scratch(locked, identity, "scratch image", path)?;
+    owned.check(identity, "scratch image", path)?;
     Ok(checked)
 }
 
-/// Refuses the clone's image or scratch image at `path`, which messages call `what`, and whose
-/// identity is `identity`, if it is the file of the scratch device of a clone in RAM in the
-/// sandbox of `locked`, [`CLONE_SCRATCH_NAME`](crate::host::store::CLONE_SCRATCH_NAME), by
-/// whatever path `path` names it, as through a link among its directories, or a hard link: a plan
-/// replaces that file, and a release of the lease removes it.
-///
-/// The store creates nothing but a regular file at that path, so anything else there is refused:
-/// a link, through which `path` could pass as through a directory, so that a plan that replaces
-/// the link, or a release that removes it, would leave `path` naming nothing, or a file of
-/// another kind, which a release could not remove.
-fn check_not_clone_scratch(
-    locked: &LockedStore,
-    identity: (u64, u128),
-    what: &str,
-    path: &PurePath,
-) -> Result<()> {
-    let sparse = locked.clone_scratch_path();
-    // The sandbox's path, which its lease names, is valid Unicode.
-    let shown = PurePath::native(&sparse.to_string_lossy());
-    let absent =
-        |error: &io::Error| error.kind() == io::ErrorKind::NotFound || was_removed(&sparse, error);
-    let failed = |error: io::Error| {
-        Error::io(format!(
-            "cannot tell whether the {what} {path} is the {SPARSE_WHAT} {shown}"
-        ))
-        .with_source(error)
-    };
-    let metadata = match fs::symlink_metadata(&sparse) {
-        Ok(metadata) => metadata,
-        Err(error) if absent(&error) => return Ok(()),
-        Err(error) => return Err(failed(error)),
-    };
-    if !metadata.file_type().is_file() || filesystem::is_reparse_point(&metadata) {
-        return Err(Error::unavailable(format!(
-            "the {SPARSE_WHAT} {shown} is a link, or not a regular file, which the sandbox's \
-             store never creates there"
-        )));
+/// The regular files that the store of a sandbox owns, with their identities, which no image or
+/// scratch image of a clone may be.
+struct StoreFiles(Vec<(PurePath, (u64, u128))>);
+
+impl StoreFiles {
+    /// Returns the regular files that the store of the sandbox of `locked` owns now, as
+    /// [`LockedStore::owned_entries`] lists its entries: its files, among them the file of the
+    /// scratch device of a clone in RAM, which a plan replaces, its log, which a launch replaces,
+    /// and the clone binding, which a release removes, and its temporary files.
+    ///
+    /// The store creates nothing but regular files under its names, and its control socket, so a
+    /// link or a directory among its entries is refused: the path of an image could pass through
+    /// it as through a directory, and a transition that replaces or removes it would leave that
+    /// path naming nothing. Other kinds of files, such as a socket, are no image.
+    fn of(locked: &LockedStore) -> Result<Self> {
+        let failed = |error: io::Error| {
+            Error::io(format!(
+                "cannot list the files of the sandbox's store in {}",
+                locked.dir().display()
+            ))
+            .with_source(error)
+        };
+        let mut files = Vec::new();
+        for entry in locked.owned_entries().map_err(failed)? {
+            // The sandbox's path, which its lease names, is valid Unicode, and so are the names
+            // that the store owns.
+            let shown = PurePath::native(&entry.to_string_lossy());
+            let absent = |error: &io::Error| {
+                error.kind() == io::ErrorKind::NotFound || was_removed(&entry, error)
+            };
+            let failed = |error: io::Error| {
+                Error::io(format!(
+                    "cannot examine {shown}, a file of the sandbox's store"
+                ))
+                .with_source(error)
+            };
+            let metadata = match fs::symlink_metadata(&entry) {
+                Ok(metadata) => metadata,
+                Err(error) if absent(&error) => continue,
+                Err(error) => return Err(failed(error)),
+            };
+            let kind = metadata.file_type();
+            if kind.is_dir() || kind.is_symlink() || filesystem::is_reparse_point(&metadata) {
+                return Err(Error::unavailable(format!(
+                    "{shown} is a link or a directory, which the sandbox's store never creates \
+                     there"
+                )));
+            }
+            if !kind.is_file() {
+                continue;
+            }
+            let file = match open_regular(&entry) {
+                Ok(file) => file,
+                Err(error) if absent(&error) => continue,
+                Err(error) => return Err(failed(error)),
+            };
+            let identity = identity_of(&file).map_err(failed)?;
+            files.push((shown, identity));
+        }
+        Ok(Self(files))
     }
-    let file = match open_regular(&sparse) {
-        Ok(file) => file,
-        Err(error) if absent(&error) => return Ok(()),
-        Err(error) => return Err(failed(error)),
-    };
-    if identity_of(&file).map_err(failed)? == identity {
-        return Err(Error::unsupported(format!(
-            "the {what} {path} is the {SPARSE_WHAT} {shown}, which the sandbox's store owns: a \
-             plan of a clone in RAM replaces it, and a release of the lease removes it"
-        )));
+
+    /// Refuses the clone's image or scratch image at `path`, which messages call `what`, and
+    /// whose identity is `identity`, if it is one of these files, by whatever path `path` names
+    /// it, as through a link among its directories, or a hard link.
+    fn check(&self, identity: (u64, u128), what: &str, path: &PurePath) -> Result<()> {
+        match self.0.iter().find(|(_, owned)| *owned == identity) {
+            None => Ok(()),
+            Some((shown, _)) => Err(Error::unsupported(format!(
+                "the {what} {path} is {shown}, a file of the sandbox's store, which its \
+                 transitions replace or remove"
+            ))),
+        }
     }
-    Ok(())
 }
 
 /// Creates the file of the `scratch` block device of a clone whose upper is in RAM, in the
