@@ -84,22 +84,32 @@
 //!    GPT disk, over a fresh upper, and checks the account of the record's workload identity, if
 //!    it has one, in the assembled root, as the worker of a VM that boots cold does for a root
 //!    configuration. If the record asks for a generated machine ID, it then generates one, once,
-//!    after the repair's reseed, and binds it read-only over the root's `/etc/machine-id`, in the
-//!    worker's mount namespace, which each execution's copies. The template bootstrapped the guest
-//!    for its root with its own configuration before its capture, so the clone has its cgroups.
+//!    after the repair's reseed. If the record has an export, it mounts the host export out of the
+//!    root, through the template's host filesystem device, `capture::FILESYSTEM_TAG`, as the
+//!    worker of a VM that boots cold mounts the one that its command line names, and if the
+//!    record's network names a DNS server, it writes a resolver file that names it. It then binds
+//!    the generated machine ID read-only over the root's `/etc/machine-id`, and the resolver file
+//!    over its `/etc/resolv.conf`, in the worker's mount namespace, which each execution's copies.
+//!    The template bootstrapped the guest for its root with its own configuration before its
+//!    capture, so the clone has its cgroups.
 //! 4. It completes the activation, which opens the fence, and answers `Ready`, which reports the
 //!    record's configuration identity and its transaction after the guest agent's build.
 //! 5. It then serves the host's order as after a cold boot: the mapping table that the record
-//!    announces, the start, the executions, the probes, and the stop. The record's workload
-//!    identity, if it has one, is the whole sandbox's, as a root configuration's is, so that
-//!    executions name none, every execution takes the record's hostname, and a clone's
-//!    executions run in the cgroups of the template's bootstrap. On the stop, the worker removes
-//!    the binds of the application before it tears the root down, since they keep the root's
-//!    mount busy, through `nvx::guest::clone::Applied::teardown`.
+//!    announces, which it maps from the record's export, the start, the executions, the probes,
+//!    and the stop. The record's workload identity, if it has one, is the whole sandbox's, as a
+//!    root configuration's is, so that executions name none, every execution takes the record's
+//!    hostname, and a clone's executions run in the cgroups of the template's bootstrap. On the
+//!    stop, the worker closes the export's root and removes the binds of the application before
+//!    it tears the root down, since they keep the root's mounts busy, through
+//!    `nvx::guest::clone::Applied::teardown`.
 //!
-//! The application applies none of the record's other settings: its export, and its network.
-//! Without an export, a clone refuses each part of a mapping table with `MapFailed`, as the worker
-//! of a VM that boots cold does without one.
+//! The application leaves out two of the record's settings. The endpoint of its network's proxy,
+//! which `nvx::guest::clone::Applied::proxy` returns, is the host's to tell the workloads, as
+//! after a cold boot: the host program's `exec` gives each execution the proxy's URL in its
+//! environment, from the plan of the VM's network, so that an execution's environment stays
+//! exactly its start's. And the publication of the record's listeners is not applied, so a
+//! clone's executions enter the root with listeners published, the entry's default, which refuses
+//! the most.
 //!
 //! Until the clone is ready, its session takes nothing but that `Activate`: another reset, any
 //! other message, a `Stop` and a `Ping` included, an `Activate` that the activation refuses, and
@@ -189,9 +199,11 @@
 //!   sandbox's hostname, the entry's default, `nvx-sandbox`, after a cold boot, and the record's in
 //!   a clone, and no time status, and with the publication of listeners that the root
 //!   configuration names, published unless it names them unpublished, as the entry's default is.
-//!   After a cold boot, it sees the image's own machine ID, so that the worker binds nothing into
-//!   the root, and in a clone, the machine ID that the record names, which the clone's
-//!   application bound for every execution if the record asks for a generated one. It runs as
+//!   After a cold boot, it sees the image's own machine ID and `/etc/resolv.conf`, so that the
+//!   worker binds nothing into the root, and in a clone, the machine ID that the record names,
+//!   which the clone's application bound for every execution if the record asks for a generated
+//!   one, and, if the record's network names a DNS server, the resolver file that names it, which
+//!   the application bound over the root's `/etc/resolv.conf`. It runs as
 //!   the identity that exactly one source names: the sandbox's workload identity, which the root
 //!   configuration names, with no supplementary groups or capabilities, or, in a sandbox without
 //!   one, the identity that its start names, with its supplementary groups, its capabilities, and
@@ -352,10 +364,11 @@ const COMMAND_LINE: &str = "/proc/cmdline";
 
 /// How one execution enters the assembled root: the inputs of its `nvx::guest::entry::Entry` that
 /// the worker chooses. The entry keeps its defaults for the rest: new mount, PID, and UTS
-/// namespaces, with the root moved over `/`, the image's own machine ID and no time status, which
-/// leave `Entry::bind_runtime` nothing to bind, and every device node. A clone's application binds
-/// the machine ID that its record asks the guest to generate once, for every execution, before
-/// any execution enters the root.
+/// namespaces, with the root moved over `/`, the image's own machine ID and `/etc/resolv.conf`,
+/// and no time status, which leave `Entry::bind_runtime` nothing to bind, and every device node.
+/// A clone's application binds the machine ID that its record asks the guest to generate once,
+/// and the resolver file that names the DNS server of its record's network, if any, for every
+/// execution, before any execution enters the root.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Entrance {
     /// The identity: the sandbox's workload identity, or the one that the execution's start names.
@@ -434,8 +447,10 @@ pub trait RootOperations: EntryOperations {
     /// Applies `record`, the record of the Activate that a clone's activation accepted, to the
     /// clone, as `nvx::guest::clone::apply` does, with `template`, the inputs of the root's
     /// assembly that the clone's template captured, and keeps the root that it assembled, with the
-    /// runtime's binds that it made on it, which the [teardown](Self::teardown) removes first: in
-    /// place of a root configuration's [layout](Self::command_line), assembly, and account check.
+    /// runtime's binds that it made on it, which the [teardown](Self::teardown) removes first, and
+    /// the root of the host export that it mounted, if the record has one, from which
+    /// [`map`](Self::map) maps the host's mapping table: in place of a root configuration's
+    /// [layout](Self::command_line), assembly, [export](Self::mount_export), and account check.
     /// The template's VM [bootstrapped](Self::bootstrap) the guest before its capture.
     ///
     /// Returns the identity in which every execution runs, that of the record's workload identity,
@@ -1004,8 +1019,9 @@ pub struct LibraryRoot {
     /// They close before the root drops.
     held: Vec<File>,
     /// The root of the host export, from which the worker maps the host's mapping table, once the
-    /// root mounted the export. It keeps the export busy, so it closes before the root drops, and
-    /// before its teardown.
+    /// root mounted the export, as the worker of a VM that boots cold mounts it, or as a clone's
+    /// application does. It keeps the export busy, so it closes before the root drops, and before
+    /// its teardown.
     export: Option<SourceRoot>,
     /// The root, from its assembly until its teardown.
     root: Option<Assembled>,
@@ -1013,6 +1029,9 @@ pub struct LibraryRoot {
 
 /// A root that the worker assembled: a cold boot's, from its root configuration, or a clone's,
 /// which the application of its activation record assembled.
+// The worker holds one root for its life, so the larger variant's size costs nothing, and boxing
+// either would add an allocation for nothing.
+#[allow(clippy::large_enum_variant)]
 enum Assembled {
     /// The root of a VM that boots cold.
     Cold(Root),
@@ -1243,15 +1262,18 @@ impl RootOperations for LibraryRoot {
         }
     }
 
-    /// Runs `nvx::guest::clone::apply`, and keeps the root and the runtime's binds that it made.
+    /// Runs `nvx::guest::clone::apply`, and keeps the root and the runtime's binds that it made,
+    /// and the root of the host export that it mounted, if the record has one, from which the
+    /// worker maps the host's mapping table, as after a cold boot.
     #[cfg(target_arch = "x86_64")]
     fn apply(
         &mut self,
         record: &ActivationRecord,
         template: &RootTemplate,
     ) -> Result<Option<Identity>, ApplyError> {
-        let applied = clone::apply(record, template)?;
+        let mut applied = clone::apply(record, template)?;
         let identity = applied.identity().cloned();
+        self.export = applied.take_export();
         self.root = Some(Assembled::Clone(applied));
         Ok(identity)
     }

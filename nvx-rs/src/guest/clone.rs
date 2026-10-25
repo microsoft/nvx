@@ -144,31 +144,39 @@
 //! record expects one, or a GPT disk whose GUID it checks if the record expects one, its upper, a
 //! tmpfs or the scratch, with the record's journal policy, and its overlay mode, and with the
 //! inputs that the guest takes from its own configuration, which its template captured, a
-//! [`RootTemplate`]: the runtime directory, the block devices, and how long the assembly waits for
-//! them. For a GPT disk, it first asks the kernel to reread the disk's partition table: the kernel
-//! created the block devices of partitions from the template's placeholder, when it found it, and
-//! creates those of the clone's disk then, from the same read-only bytes that the assembly reads
-//! and checks, as at a cold boot. The upper must be fresh: the assembly refuses one whose `upper`
-//! or `work` directory exists and is not empty, since a clone's root starts as its image alone,
-//! while a cold sandbox's scratch keeps its upper across boots; the check reads at most one entry
-//! of each, and no file. If the record has a workload identity, it then checks its account in the
-//! assembled root, before Ready, as NVX's init checks it at boot: the identity is
-//! [`Identity::new`](super::entry::Identity::new) of the record's user and group IDs, without
-//! supplementary groups or capabilities, in existing-account mode, and every execution runs as
-//! it. Without one, the adapter gives each execution its own identity, which
-//! [`Entry::check`](super::entry::Entry::check) checks. If the record asks for a generated machine
-//! ID, it then generates one, once, with
+//! [`RootTemplate`]: the runtime directory, the block devices, how long the assembly waits for
+//! them, and the host filesystem device's virtio-fs tag. For a GPT disk, it first asks the kernel
+//! to reread the disk's partition table: the kernel created the block devices of partitions from
+//! the template's placeholder, when it found it, and creates those of the clone's disk then, from
+//! the same read-only bytes that the assembly reads and checks, as at a cold boot. The upper must
+//! be fresh: the assembly refuses one whose `upper` or `work` directory exists and is not empty,
+//! since a clone's root starts as its image alone, while a cold sandbox's scratch keeps its upper
+//! across boots; the check reads at most one entry of each, and no file. If the record has a
+//! workload identity, it then checks its account in the assembled root, before Ready, as NVX's
+//! init checks it at boot: the identity is [`Identity::new`](super::entry::Identity::new) of the
+//! record's user and group IDs, without supplementary groups or capabilities, in existing-account
+//! mode, and every execution runs as it. Without one, the adapter gives each execution its own
+//! identity, which [`Entry::check`](super::entry::Entry::check) checks. If the record asks for a
+//! generated machine ID, it then generates one, once, with
 //! [`MachineId::generate`](super::entry::MachineId::generate), after the repair's reseed, so that
 //! no two clones of a template share it, to [`MACHINE_ID_FILE`] in the template's runtime
-//! directory, and it binds the runtime's files into the root for every execution, with
-//! [`Entry::bind_runtime`](super::entry::Entry::bind_runtime), in the caller's mount namespace: the
-//! generated machine ID's file, read-only over the root's `/etc/machine-id`, or, with the image's
-//! own machine ID, nothing. The entry checks the record's hostname first, which every execution's
-//! entry then takes. It returns the [`Applied`] root and workload, which the adapter keeps, and
-//! whose [`teardown`](Applied::teardown) removes the binds before it tears the root down, or an
-//! [`ApplyError`], after which nothing that it mounted or bound stays mounted, unless the error
-//! holds the unmounts that failed. It applies none of the record's other settings: its export,
-//! and its network.
+//! directory. If the record has an export, it mounts the host export through the template's
+//! filesystem device, with [`Root::mount_export`](root::Root::mount_export), read-write, at
+//! `hostfs/root` in the runtime directory, outside the root, where only the guest's root user
+//! reaches it: the record names no mode, and OpenVMM limits each of the export's children to its
+//! own access. If the record's network names a DNS server, it writes a resolver file that names
+//! it to [`RESOLVER_FILE`] in the runtime directory. It then binds the runtime's files into the
+//! root for every execution, with one [`Entry::bind_runtime`](super::entry::Entry::bind_runtime),
+//! in the caller's mount namespace: the generated machine ID's file, read-only over the root's
+//! `/etc/machine-id`, and the resolver file, read-only over the root's `/etc/resolv.conf`, or,
+//! with neither, nothing. The entry checks the record's hostname first, which every execution's
+//! entry then takes. It returns the [`Applied`] root and workload, which the adapter keeps, with
+//! the export's root, from which the adapter maps the host's mapping table once the clone is
+//! ready, and the network's proxy endpoint, which the adapter tells its workloads as at a cold
+//! boot, and whose [`teardown`](Applied::teardown) closes the export's root and removes the binds
+//! before it tears the root down, or an [`ApplyError`], after which nothing that it mounted or
+//! bound stays mounted, unless the error holds the unmounts that failed. It applies none of the
+//! record's other settings: the publication of the workload's listeners.
 //!
 //! # Example
 //!
@@ -255,8 +263,9 @@
 //! namespace, as [`root::assemble`] does: for a GPT disk, it asks the kernel to reread the disk's
 //! partition table, which needs `CAP_SYS_ADMIN`; it mounts the root, reads the account databases
 //! below it, and, if it fails, tears it down. It starts no process, and generates at most one ID,
-//! a machine ID that the record asks for, whose bind over the root's `/etc/machine-id` needs
-//! Linux 6.8 or later.
+//! a machine ID that the record asks for. It mounts the host export of a record that has one, and
+//! writes the machine ID's and the resolver's files in the runtime directory, whose binds over
+//! the root's `/etc/machine-id` and `/etc/resolv.conf` need Linux 6.8 or later.
 
 mod activation;
 mod mounts;
@@ -280,8 +289,8 @@ use super::time::{
 
 pub use self::activation::{
     Activation, ActivationAction, ActivationCause, ActivationFailure, ActivationInput,
-    ActivationState, Applied, AppliedTeardownError, ApplyError, MACHINE_ID_FILE, RootTemplate,
-    apply,
+    ActivationState, Applied, AppliedTeardownError, ApplyError, MACHINE_ID_FILE, NetworkError,
+    RESOLVER_FILE, RootTemplate, apply,
 };
 pub use self::mounts::{Mounted, Origin};
 pub use self::repair::{

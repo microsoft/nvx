@@ -1,22 +1,26 @@
 //! Tests of the application of a clone's activation record, through a fake system, which records
 //! every call of the application, and whose assembly returns a temporary directory that stands
 //! for the root, the image's view through the overlay, whose account databases the application
-//! reads and checks for real, and which generates no machine ID, and binds and unmounts nothing;
-//! and, with the clone's activation, through an adapter of the tests' own, which takes what the
-//! host sends, applies the record of the Activate that the activation accepted through the fake
-//! system, and spawns an execution for each request that the activation serves.
+//! reads and checks for real, and which generates no machine ID, writes no resolver file, and
+//! mounts, binds, and unmounts nothing; and, with the clone's activation, through an adapter of
+//! the tests' own, which takes what the host sends, applies the record of the Activate that the
+//! activation accepted through the fake system, and spawns an execution for each request that
+//! the activation serves.
 //!
-//! One test runs the live system's generation and bind of a machine ID with the kernel itself,
-//! over a tmpfs that stands for the root, which needs the privilege to mount and Linux 6.8 or
-//! later; it is ignored unless asked for:
-//! `cargo test --all-features -- --ignored guest::clone::activation::apply`, as root.
+//! One test runs the live system's generation of a machine ID, its write of a resolver file, and
+//! their binds with the kernel itself, over a tmpfs that stands for the root, which needs the
+//! privilege to mount and Linux 6.8 or later; it is ignored unless asked for:
+//! `cargo test --all-features -- --ignored guest::clone::activation::apply`, as root. The host
+//! export's mount, which needs a virtio-fs device, is `Root::mount_export`'s, which its own
+//! tests cover.
 
 use std::cell::Cell;
 use std::error::Error as _;
 use std::fs;
 use std::io;
-use std::net::{IpAddr, Ipv4Addr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::num::NonZeroU64;
+use std::os::unix::fs::{PermissionsExt, symlink};
 use std::rc::Rc;
 use std::time::Instant;
 
@@ -37,6 +41,8 @@ use crate::uuid::Uuid;
 
 /// The runtime directory of the tests' template.
 const RUNTIME: &str = "/run/nvx";
+/// The virtio-fs tag of the host filesystem device of the tests' template.
+const TAG: &str = "microvm";
 /// How long the tests' assembly waits for each device.
 const DEVICE_TIMEOUT: Duration = Duration::from_secs(5);
 /// The number of online CPUs of the tests' clone.
@@ -65,12 +71,19 @@ workload:x:1000:1001::/home/workload:/bin/sh\n";
 const GROUP: &[u8] = b"root:x:0:\nworkload:x:1001:\n";
 /// The hostname of the tests' records.
 const HOSTNAME: &[u8] = b"clone";
+/// The DNS server of the tests' networks.
+const DNS: IpAddr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+/// The endpoint of the proxy of the tests' networks.
+const PROXY: &str = "http://10.0.0.1:3128";
 
 /// Returns whether a failure's cause is the one that a test expects.
 type Expected = fn(&ActivationCause) -> bool;
 
 /// Returns whether an account's refusal is the one that a test expects.
 type Refusal = fn(&AccountError) -> bool;
+
+/// Returns whether an application's failure is the one that a test expects.
+type Failed = fn(&ApplyError) -> bool;
 
 /// What a clone did, in order: each call that the application made of the fake system, and each
 /// execution that the tests' adapter spawned.
@@ -86,9 +99,17 @@ enum Effect {
     Account(Identity),
     /// The application generated a machine ID, which it wrote to a new file at this path.
     Generate(PathBuf),
+    /// The application mounted the host export, the virtio-fs device of this tag, with this
+    /// access.
+    MountExport(String, Access),
+    /// The application wrote a resolver file that names this DNS server to a new file at this
+    /// path.
+    Resolver(PathBuf, IpAddr),
     /// The application bound the runtime's files of this view into the root, for every
     /// execution.
     Bind(View),
+    /// The root of the host export was closed.
+    Close,
     /// The runtime's binds were removed.
     Remove,
     /// The application tore the root down, which unmounts it.
@@ -109,9 +130,14 @@ struct FakeSystem {
     refusing: Option<Errno>,
     /// The kind of the error with which each generation of a machine ID fails, if it does.
     generating: Option<io::ErrorKind>,
-    /// Whether each bind of the runtime's files fails, as when the image's `/etc/machine-id` is a
-    /// directory.
-    unbindable: bool,
+    /// Whether each mount of the host export fails, as when the template's filesystem device has
+    /// no export attached.
+    unmountable: bool,
+    /// The kind of the error with which each write of a resolver file fails, if it does.
+    unwritable: Option<io::ErrorKind>,
+    /// The error with which each bind of the runtime's files fails, if it does, as when the
+    /// image's `/etc/machine-id` or `/etc/resolv.conf` is a directory.
+    unbindable: Option<fn() -> entry::Error>,
     /// Whether each removal of the runtime's binds fails, as when another mount covers one.
     stuck: bool,
     /// What the clone did, in order.
@@ -131,7 +157,9 @@ impl FakeSystem {
             failing: false,
             refusing: None,
             generating: None,
-            unbindable: false,
+            unmountable: false,
+            unwritable: None,
+            unbindable: None,
             stuck: false,
             effects: Vec::new(),
         }
@@ -170,11 +198,30 @@ impl FakeSystem {
         }
     }
 
-    /// Returns a system whose image holds the tests' account databases, and each of whose binds
-    /// of the runtime's files fails.
-    fn unbindable() -> Self {
+    /// Returns a system whose image holds the tests' account databases, and each of whose mounts
+    /// of the host export fails.
+    fn unmountable() -> Self {
         Self {
-            unbindable: true,
+            unmountable: true,
+            ..Self::new()
+        }
+    }
+
+    /// Returns a system whose image holds the tests' account databases, and each of whose writes
+    /// of a resolver file fails with an error of `kind`.
+    fn unwritable(kind: io::ErrorKind) -> Self {
+        Self {
+            unwritable: Some(kind),
+            ..Self::new()
+        }
+    }
+
+    /// Returns a system whose image holds the tests' account databases, and each of whose binds
+    /// of the runtime's files fails with the error that `error` returns, once the entry checked
+    /// its inputs.
+    fn unbindable(error: fn() -> entry::Error) -> Self {
+        Self {
+            unbindable: Some(error),
             ..Self::new()
         }
     }
@@ -202,6 +249,7 @@ impl FakeSystem {
 
 impl System for FakeSystem {
     type Root = PathBuf;
+    type Export = ();
     type Binds = ();
 
     fn reread(&mut self, distro: Device, _timeout: Duration) -> Result<(), root::Error> {
@@ -244,15 +292,48 @@ impl System for FakeSystem {
         }
     }
 
+    fn mount_export(
+        &mut self,
+        root: &mut PathBuf,
+        tag: &str,
+        access: Access,
+    ) -> Result<(), root::Error> {
+        assert_eq!(*root, self.root());
+        self.effects
+            .push(Effect::MountExport(tag.to_owned(), access));
+        if self.unmountable {
+            // The virtio-fs device has no export attached.
+            return Err(root::Error::Mount {
+                mount: root::Mount::Export {
+                    tag: tag.to_owned(),
+                },
+                error: Errno::ENOENT.into(),
+            });
+        }
+        Ok(())
+    }
+
+    fn close(&mut self, (): ()) {
+        self.effects.push(Effect::Close);
+    }
+
+    fn write_resolver(&mut self, path: &Path, server: IpAddr) -> io::Result<()> {
+        self.effects.push(Effect::Resolver(path.to_owned(), server));
+        match self.unwritable {
+            Some(kind) => Err(kind.into()),
+            None => Ok(()),
+        }
+    }
+
     fn bind(&mut self, root: &PathBuf, view: &View) -> Result<(), entry::Error> {
         assert_eq!(*root, self.root());
         self.effects.push(Effect::Bind(view.clone()));
         // The entry checks its inputs, the hostname among them, before it binds anything.
         view.entry(root).check()?;
-        if self.unbindable {
-            return Err(entry::Error::MachineId(MappingError::TargetKind));
+        match self.unbindable {
+            Some(error) => Err(error()),
+            None => Ok(()),
         }
-        Ok(())
     }
 
     fn remove(&mut self, (): ()) -> Result<(), mappings::TeardownError> {
@@ -309,9 +390,10 @@ struct Adapter {
     fence: FakeFence,
     /// The system through which the adapter applies the record, which records what the clone did.
     system: FakeSystem,
-    /// What the application activated: the root, the runtime's binds on it, the identity in
-    /// which every execution runs, if any, and the workload's hostname and machine ID.
-    applied: Option<Activated<PathBuf, ()>>,
+    /// What the application activated: the root, the export's root, if any, the runtime's binds
+    /// on the root, the identity in which every execution runs, if any, the workload's hostname
+    /// and machine ID, the resolver file, if any, and the proxy's endpoint, if any.
+    applied: Option<Activated<PathBuf, (), ()>>,
     /// What the adapter's latest Ready reported.
     ready: Option<ReadyActivation>,
 }
@@ -392,7 +474,7 @@ impl Adapter {
 }
 
 /// Returns the tests' template: its runtime directory, its devices at NVX's MMIO windows, with
-/// the sizes that they must have, and its timeout.
+/// the sizes that they must have, its timeout, and its host filesystem device's tag.
 fn template() -> RootTemplate {
     RootTemplate {
         runtime: PathBuf::from(RUNTIME),
@@ -405,6 +487,7 @@ fn template() -> RootTemplate {
             sectors: Some(1 << 22),
         },
         timeout: DEVICE_TIMEOUT,
+        filesystem_tag: TAG.to_owned(),
     }
 }
 
@@ -527,6 +610,35 @@ fn with_generated_id() -> ActivationRecord {
     clone_record(configuration)
 }
 
+/// Returns an export of `kind`, of the tests' plan.
+fn export(kind: ExportKind) -> Export {
+    Export {
+        kind,
+        plan: activation::Identity::from_bytes([0x77; activation::Identity::LEN]),
+    }
+}
+
+/// Returns a network whose resolver names `dns`, if any, and whose proxy is `proxy`, if any,
+/// with published listeners.
+fn network(dns: Option<IpAddr>, proxy: Option<&str>) -> Network {
+    Network {
+        policy: activation::Identity::from_bytes([0x88; activation::Identity::LEN]),
+        dns,
+        publication: Publication::Published,
+        proxy: proxy.map(str::to_owned),
+    }
+}
+
+/// Returns the record of the tests' Activate, as [`with_generated_id`] returns it, but with an
+/// aggregate export, of three mappings, and a network that names [`DNS`] and [`PROXY`].
+fn with_everything() -> ActivationRecord {
+    let mut configuration = with_generated_id().configuration().clone();
+    configuration.export = Some(export(ExportKind::Aggregate));
+    configuration.mappings = 3;
+    configuration.network = Some(network(Some(DNS), Some(PROXY)));
+    clone_record(configuration)
+}
+
 /// Returns where the application writes the machine ID that it generates with the tests'
 /// template.
 fn machine_id_path() -> PathBuf {
@@ -538,30 +650,62 @@ fn generated_id() -> MachineId {
     MachineId::Generated(machine_id_path())
 }
 
+/// Returns where the application writes the resolver file with the tests' template.
+fn resolver_path() -> PathBuf {
+    Path::new(RUNTIME).join(RESOLVER_FILE)
+}
+
 /// Returns the view that the application binds for a record of the tests' hostname, whose
-/// workload runs as `identity`, if any, and sees `machine_id`.
+/// workload runs as `identity`, if any, and sees `machine_id`, without a resolver file.
 fn view(identity: Option<Identity>, machine_id: MachineId) -> View {
     View {
         identity: identity.unwrap_or_else(|| Identity::new(0, 0)),
         hostname: HOSTNAME.to_vec(),
         machine_id,
+        resolver: None,
+    }
+}
+
+/// Returns the view that the application binds for [`with_everything`]'s record: of its
+/// workload identity, with the generated machine ID and the resolver file.
+fn full_view() -> View {
+    View {
+        resolver: Some(resolver_path()),
+        ..view(Some(workload()), generated_id())
     }
 }
 
 /// Returns what the application activates through `system` for a record of the tests' hostname,
-/// whose workload runs as `identity`, if any, and sees `machine_id`.
+/// whose workload runs as `identity`, if any, and sees `machine_id`, without an export or a
+/// network.
 fn activated(
     system: &FakeSystem,
     identity: Option<Identity>,
     machine_id: MachineId,
-) -> Activated<PathBuf, ()> {
+) -> Activated<PathBuf, (), ()> {
     Activated {
         root: system.root(),
+        export: None,
         binds: (),
         identity,
         hostname: HOSTNAME.to_vec(),
         machine_id,
+        resolver: None,
+        proxy: None,
     }
+}
+
+/// Returns the effects of the application of [`with_everything`]'s record, which the system
+/// records until it bound the runtime's files.
+fn applied_everything() -> Vec<Effect> {
+    vec![
+        Effect::Assemble(accepted_assembly()),
+        Effect::Account(workload()),
+        Effect::Generate(machine_id_path()),
+        Effect::MountExport(TAG.to_owned(), Access::ReadWrite),
+        Effect::Resolver(resolver_path(), DNS),
+        Effect::Bind(full_view()),
+    ]
 }
 
 /// Returns the application's error that `failure`, an activation's, holds.
@@ -576,11 +720,12 @@ fn apply_error(failure: &ActivationFailure) -> &ApplyError {
 fn no_mount_spawn_or_id_generation_happens_before_the_gate() {
     // The application reaches the system only through its calls, which the fake records in
     // full: none starts a process, and the adapter spawns each execution itself, once the
-    // activation serves its request. Every record asks for a generated machine ID, which only
-    // the application of an accepted record generates.
+    // activation serves its request. Every record asks for a generated machine ID, has an
+    // export, and names a DNS server, which only the application of an accepted record
+    // generates, mounts, and writes.
     let base = Instant::now();
-    let record = with_generated_id().encode();
-    let settings = with_generated_id().configuration().clone();
+    let record = with_everything().encode();
+    let settings = with_everything().configuration().clone();
     let cold = ActivationRecord::new(None, settings.clone())
         .unwrap()
         .encode();
@@ -667,22 +812,15 @@ fn no_mount_spawn_or_id_generation_happens_before_the_gate() {
     adapter.assert_untouched(&failure, |cause| matches!(cause, ActivationCause::Expired));
 
     // Only a valid Activate mounts the root, reads its account databases, generates the machine
-    // ID, and binds it, before Ready, and an execution spawns only once Ready opened the fence.
+    // ID, mounts the export, writes the resolver file, and binds the runtime's files, before
+    // Ready, and an execution spawns only once Ready opened the fence.
     let mut adapter = Adapter::restricted(FakeSystem::new(), base);
     adapter.take(base, ActivationInput::Flow).unwrap();
     assert!(adapter.system.effects.is_empty());
     adapter
         .take(base, ActivationInput::Activate(&record))
         .unwrap();
-    assert_eq!(
-        adapter.system.effects,
-        [
-            Effect::Assemble(accepted_assembly()),
-            Effect::Account(workload()),
-            Effect::Generate(machine_id_path()),
-            Effect::Bind(view(Some(workload()), generated_id())),
-        ]
-    );
+    assert_eq!(adapter.system.effects, applied_everything());
     assert!(adapter.fence.is_open());
     adapter.take(base, ActivationInput::Request).unwrap();
     assert_eq!(adapter.system.effects.last(), Some(&Effect::Spawn));
@@ -821,22 +959,23 @@ fn assembly_and_identity_inputs_are_taken_exactly_from_the_record() {
     }
 
     // The record's other settings, which the application leaves alone, change no input: its
-    // bindings, export, network, resources, and restore section.
-    let mut other = accepted().configuration().clone();
+    // bindings, its export's shape and plan, the number of its mappings, which the adapter's
+    // order takes, its network's policy and the publication of its listeners, its resources,
+    // and its restore section.
+    let mut other = with_everything().configuration().clone();
     other.image = activation::Image::Erofs {
         binding: activation::Identity::from_bytes([0x66; activation::Identity::LEN]),
         uuid: Some(IMAGE_UUID),
     };
     other.export = Some(Export {
-        kind: ExportKind::Aggregate,
-        plan: activation::Identity::from_bytes([0x77; activation::Identity::LEN]),
+        kind: ExportKind::Directory,
+        plan: activation::Identity::from_bytes([0x99; activation::Identity::LEN]),
     });
-    other.mappings = 3;
+    other.mappings = 7;
     other.network = Some(Network {
-        policy: activation::Identity::from_bytes([0x88; activation::Identity::LEN]),
-        dns: Some(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))),
-        publication: Publication::Published,
-        proxy: Some("http://10.0.0.1:3128".to_owned()),
+        policy: activation::Identity::from_bytes([0xaa; activation::Identity::LEN]),
+        publication: Publication::Unpublished,
+        ..network(Some(DNS), Some(PROXY))
     });
     other.resources = ExpectedResources {
         cpus: 8,
@@ -844,8 +983,9 @@ fn assembly_and_identity_inputs_are_taken_exactly_from_the_record() {
     };
     let other = ActivationRecord::new(None, other).unwrap();
     let (mut first, mut second) = (FakeSystem::new(), FakeSystem::new());
-    let first_applied = apply_with(&mut first, &accepted(), &template).unwrap();
+    let first_applied = apply_with(&mut first, &with_everything(), &template).unwrap();
     let second_applied = apply_with(&mut second, &other, &template).unwrap();
+    assert_eq!(first.effects, applied_everything());
     assert_eq!(first.effects, second.effects);
     assert_eq!(
         first_applied,
@@ -1094,14 +1234,20 @@ fn the_view_s_entry_takes_the_record_s_hostname_and_machine_id() {
         );
     }
 
-    // It binds a generated machine ID, and nothing for the image's own: only the former opens
-    // the root, which a temporary directory, not the root of a mount, fails.
+    // It binds a generated machine ID, a resolver file, or both, and nothing for the image's own
+    // machine ID without a resolver file: only the former open the root, which a temporary
+    // directory, not the root of a mount, fails.
     let directory = tempfile::tempdir().unwrap();
     let image = view(None, MachineId::Image).entry(directory.path());
     image.bind_runtime().unwrap().remove().unwrap();
-    let generated = view(None, generated_id()).entry(directory.path());
-    let error = generated.bind_runtime().unwrap_err();
-    assert!(matches!(error, entry::Error::Root(_)), "{error}");
+    let resolver = View {
+        resolver: Some(resolver_path()),
+        ..view(None, MachineId::Image)
+    };
+    for bound in [view(None, generated_id()), resolver, full_view()] {
+        let error = bound.entry(directory.path()).bind_runtime().unwrap_err();
+        assert!(matches!(error, entry::Error::Root(_)), "{bound:?}: {error}");
+    }
 }
 
 #[test]
@@ -1117,7 +1263,10 @@ fn a_machine_id_or_a_view_that_fails_fails_the_activation_once_the_root_is_torn_
             FakeSystem::generating(io::ErrorKind::AlreadyExists),
             vec![generation.clone()],
         ),
-        (FakeSystem::unbindable(), vec![generation, bind]),
+        (
+            FakeSystem::unbindable(|| entry::Error::MachineId(MappingError::TargetKind)),
+            vec![generation, bind],
+        ),
     ];
     for (system, effects) in cases {
         let mut adapter = Adapter::restricted(system, base);
@@ -1161,18 +1310,29 @@ fn a_machine_id_or_a_view_that_fails_fails_the_activation_once_the_root_is_torn_
 
 #[test]
 fn the_runtime_s_binds_are_removed_before_the_root_is_torn_down() {
-    // The binds keep the root's mount busy, so they go first.
+    // The binds keep the root's mount busy, so they go first, and the export's root, which keeps
+    // the export's mount busy, before them, unless the adapter took it.
     let mut system = FakeSystem::new();
     let root = system.root();
-    teardown_with(&mut system, (), root).unwrap();
+    teardown_with(&mut system, None, (), root).unwrap();
     assert_eq!(system.effects, [Effect::Remove, Effect::Teardown]);
+    let mut system = FakeSystem::new();
+    let root = system.root();
+    teardown_with(&mut system, Some(()), (), root).unwrap();
+    assert_eq!(
+        system.effects,
+        [Effect::Close, Effect::Remove, Effect::Teardown]
+    );
 
     // A removal that fails leaves those binds mounted, and the teardown is attempted all the
     // same; the error reports both.
     let mut system = FakeSystem::stuck();
     let root = system.root();
-    let error = teardown_with(&mut system, (), root).unwrap_err();
-    assert_eq!(system.effects, [Effect::Remove, Effect::Teardown]);
+    let error = teardown_with(&mut system, Some(()), (), root).unwrap_err();
+    assert_eq!(
+        system.effects,
+        [Effect::Close, Effect::Remove, Effect::Teardown]
+    );
     assert!(error.root().is_none());
     let binds = error.binds().unwrap();
     assert_eq!(binds.failures().len(), 1);
@@ -1184,6 +1344,252 @@ fn the_runtime_s_binds_are_removed_before_the_root_is_torn_down() {
             .starts_with("failed to unmount the mapping at /etc/machine-id: "),
         "{error}"
     );
+}
+
+#[test]
+fn an_export_is_mounted_through_the_template_s_device_and_handed_to_the_adapter() {
+    // A record's export, of either shape, is mounted once, before Ready, read-write, through the
+    // template's filesystem device, once the workload's identity was checked, and the adapter
+    // gets its root, to map the host's mapping table from.
+    let base = Instant::now();
+    for kind in [ExportKind::Directory, ExportKind::Aggregate] {
+        let mut configuration = accepted().configuration().clone();
+        configuration.export = Some(export(kind));
+        configuration.mappings = 2;
+        let record = clone_record(configuration).encode();
+        let mut adapter = Adapter::restricted(FakeSystem::new(), base);
+        adapter
+            .take(base, ActivationInput::Activate(&record))
+            .unwrap();
+        let expected = [
+            Effect::Assemble(accepted_assembly()),
+            Effect::Account(workload()),
+            Effect::MountExport(TAG.to_owned(), Access::ReadWrite),
+            Effect::Bind(view(Some(workload()), MachineId::Image)),
+        ];
+        assert_eq!(adapter.system.effects, expected, "{kind:?}");
+        assert_eq!(
+            adapter.applied,
+            Some(Activated {
+                export: Some(()),
+                ..activated(&adapter.system, Some(workload()), MachineId::Image)
+            })
+        );
+        // A retry and an execution mount nothing again.
+        adapter
+            .take(base, ActivationInput::Activate(&record))
+            .unwrap();
+        adapter.take(base, ActivationInput::Request).unwrap();
+        assert_eq!(adapter.system.effects[expected.len()..], [Effect::Spawn]);
+    }
+
+    // A record without an export mounts none.
+    let mut system = FakeSystem::new();
+    let applied = apply_with(&mut system, &accepted(), &template()).unwrap();
+    assert_eq!(applied.export, None);
+    assert!(
+        !system
+            .effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::MountExport(..))),
+        "{:?}",
+        system.effects
+    );
+}
+
+#[test]
+fn a_network_s_dns_server_is_written_to_a_resolver_file_that_every_execution_sees() {
+    // A network that names a DNS server, IPv4 or IPv6, has the application write a resolver file
+    // that names it in the template's runtime directory, and bind it with the runtime's other
+    // files, in the one bind; the network's proxy endpoint goes back to the adapter.
+    let ipv6 = IpAddr::V6(Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0xa00, 1));
+    for dns in [DNS, ipv6] {
+        let mut configuration = accepted().configuration().clone();
+        configuration.network = Some(network(Some(dns), Some(PROXY)));
+        let record = clone_record(configuration);
+        let mut system = FakeSystem::new();
+        let applied = apply_with(&mut system, &record, &template()).unwrap();
+        let bound = View {
+            resolver: Some(resolver_path()),
+            ..view(Some(workload()), MachineId::Image)
+        };
+        let expected = [
+            Effect::Assemble(accepted_assembly()),
+            Effect::Account(workload()),
+            Effect::Resolver(resolver_path(), dns),
+            Effect::Bind(bound),
+        ];
+        assert_eq!(system.effects, expected, "{dns}");
+        assert_eq!(
+            applied,
+            Activated {
+                resolver: Some(resolver_path()),
+                proxy: Some(PROXY.to_owned()),
+                ..activated(&system, Some(workload()), MachineId::Image)
+            }
+        );
+    }
+
+    // A network without a DNS server, whether or not it names a proxy, writes no resolver file,
+    // so that every execution sees the image's own, and the image's own machine ID binds
+    // nothing.
+    for proxy in [None, Some(PROXY)] {
+        let mut configuration = accepted().configuration().clone();
+        configuration.network = Some(network(None, proxy));
+        let record = clone_record(configuration);
+        let mut system = FakeSystem::new();
+        let applied = apply_with(&mut system, &record, &template()).unwrap();
+        let expected = [
+            Effect::Assemble(accepted_assembly()),
+            Effect::Account(workload()),
+            Effect::Bind(view(Some(workload()), MachineId::Image)),
+        ];
+        assert_eq!(system.effects, expected, "{proxy:?}");
+        assert_eq!(
+            applied,
+            Activated {
+                proxy: proxy.map(str::to_owned),
+                ..activated(&system, Some(workload()), MachineId::Image)
+            }
+        );
+    }
+}
+
+#[test]
+fn a_resolver_file_names_its_dns_server_once_and_every_execution_may_read_it() {
+    // The file names the server in its canonical text, as NVX's init writes the initramfs's,
+    // with mode 0444, whatever the umask.
+    let directory = tempfile::tempdir().unwrap();
+    let ipv6 = IpAddr::V6(Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0xa00, 1));
+    let cases = [
+        ("v4", DNS, &b"nameserver 10.0.0.1\n"[..]),
+        ("v6", ipv6, &b"nameserver fd00::a00:1\n"[..]),
+    ];
+    for (name, server, text) in cases {
+        let path = directory.path().join(name);
+        sys::with_thread_umask(0o077, || write_resolver_file(&path, server)).unwrap();
+        assert_eq!(fs::read(&path).unwrap(), text);
+        let mode = fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o7777, 0o444, "{mode:o}");
+    }
+
+    // A file there already fails the write, and is left alone, and so is the file that a
+    // symbolic link there names, or the path where a dangling one leads.
+    let written = directory.path().join("v4");
+    let error = write_resolver_file(&written, ipv6).unwrap_err();
+    assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
+    let link = directory.path().join("link");
+    symlink(&written, &link).unwrap();
+    let error = write_resolver_file(&link, ipv6).unwrap_err();
+    assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
+    assert_eq!(fs::read(&written).unwrap(), b"nameserver 10.0.0.1\n");
+    let absent = directory.path().join("absent");
+    let dangling = directory.path().join("dangling");
+    symlink(&absent, &dangling).unwrap();
+    let error = write_resolver_file(&dangling, DNS).unwrap_err();
+    assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
+    assert!(!absent.exists());
+}
+
+#[test]
+fn an_export_or_a_network_that_fails_fails_the_activation_once_the_root_is_torn_down() {
+    // The export's mount fails with the export's class, and the resolver file's write and bind
+    // with the network's, while the machine ID's bind fails with the view's, each once the
+    // application closed the export's root, if it mounted the export, and tore the root down,
+    // which unmounts the export.
+    let base = Instant::now();
+    let bytes = with_everything().encode();
+    let failed = |done: usize, closed: bool| {
+        let mut effects = applied_everything()[..done].to_vec();
+        if closed {
+            effects.push(Effect::Close);
+        }
+        effects.push(Effect::Teardown);
+        effects
+    };
+    let cases: [(FakeSystem, Vec<Effect>, Failed); 5] = [
+        (FakeSystem::unmountable(), failed(4, false), |error| {
+            matches!(
+                error,
+                ApplyError::Export {
+                    error: root::Error::Mount {
+                        mount: root::Mount::Export { tag },
+                        ..
+                    },
+                    teardown: None,
+                } if tag == TAG
+            )
+        }),
+        (
+            FakeSystem::unwritable(io::ErrorKind::AlreadyExists),
+            failed(5, true),
+            |error| {
+                matches!(
+                    error,
+                    ApplyError::Network {
+                        error: NetworkError::Write(error),
+                        teardown: None,
+                    } if error.kind() == io::ErrorKind::AlreadyExists
+                )
+            },
+        ),
+        (
+            FakeSystem::unbindable(|| entry::Error::Resolver(MappingError::TargetKind)),
+            failed(6, true),
+            |error| {
+                matches!(
+                    error,
+                    ApplyError::Network {
+                        error: NetworkError::Bind(entry::Error::Resolver(MappingError::TargetKind)),
+                        teardown: None,
+                    }
+                )
+            },
+        ),
+        // A resolver's bind that failed once the machine ID's bind stayed mounted.
+        (
+            FakeSystem::unbindable(|| entry::Error::Rollback {
+                error: Box::new(entry::Error::Resolver(MappingError::TargetKind)),
+                teardown: mappings::TeardownError::of("/etc/machine-id", MappingError::MountPoint),
+            }),
+            failed(6, true),
+            |error| {
+                matches!(
+                    error,
+                    ApplyError::Network {
+                        error: NetworkError::Bind(entry::Error::Rollback { .. }),
+                        teardown: None,
+                    }
+                )
+            },
+        ),
+        (
+            FakeSystem::unbindable(|| entry::Error::MachineId(MappingError::TargetKind)),
+            failed(6, true),
+            |error| {
+                matches!(
+                    error,
+                    ApplyError::View {
+                        error: entry::Error::MachineId(MappingError::TargetKind),
+                        teardown: None,
+                    }
+                )
+            },
+        ),
+    ];
+    for (system, effects, expected) in cases {
+        let mut adapter = Adapter::restricted(system, base);
+        let failure = adapter
+            .take(base, ActivationInput::Activate(&bytes))
+            .unwrap_err();
+        let error = apply_error(&failure);
+        assert!(expected(error), "{error}");
+        assert_eq!(adapter.system.effects, effects, "{error}");
+        assert_eq!(adapter.activation.state(), ActivationState::Failed);
+        assert_eq!(adapter.applied, None);
+        assert_eq!(adapter.ready, None);
+        assert!(!adapter.fence.is_open());
+    }
 }
 
 /// A tmpfs that stands for a clone's root, mounted at `root` below a temporary directory, in a
@@ -1199,8 +1605,9 @@ struct LiveRoot {
 }
 
 impl LiveRoot {
-    /// Returns a root whose `/etc/machine-id` holds [`IMAGE_MACHINE_ID`], or `None` where the
-    /// test cannot run: without root, or without unique mount IDs, which Linux 6.8 added.
+    /// Returns a root whose `/etc/machine-id` holds [`IMAGE_MACHINE_ID`], and whose
+    /// `/etc/resolv.conf` holds [`IMAGE_RESOLVER`], or `None` where the test cannot run: without
+    /// root, or without unique mount IDs, which Linux 6.8 added.
     fn new() -> Option<Self> {
         if !nix::unistd::geteuid().is_root() {
             report("skipped: the test needs root");
@@ -1222,6 +1629,7 @@ impl LiveRoot {
         sys::mount(tmpfs, &root, tmpfs, MountFlags::empty(), options).unwrap();
         fs::create_dir(live.root.join("etc")).unwrap();
         fs::write(live.root.join("etc/machine-id"), IMAGE_MACHINE_ID).unwrap();
+        fs::write(live.root.join("etc/resolv.conf"), IMAGE_RESOLVER).unwrap();
         let flags = OpenFlags::O_PATH | OpenFlags::O_CLOEXEC;
         match sys::file_status(&sys::open(&root, flags, Mode::empty()).unwrap()) {
             Err(Errno::EOPNOTSUPP) => {
@@ -1247,6 +1655,9 @@ impl Drop for LiveRoot {
 /// The machine ID of the image of the privileged test's root.
 const IMAGE_MACHINE_ID: &[u8] = b"0123456789abcdef0123456789abcdef\n";
 
+/// The resolver file of the image of the privileged test's root.
+const IMAGE_RESOLVER: &[u8] = b"nameserver 192.0.2.53\n";
+
 /// Writes `message` to the standard error, past the test harness's capture, as the guest's
 /// programs write theirs.
 fn report(message: &str) {
@@ -1257,10 +1668,11 @@ fn report(message: &str) {
 
 #[test]
 #[ignore = "needs root and Linux 6.8 or later"]
-fn a_generated_machine_id_keeps_the_root_busy_until_its_bind_is_removed() {
+fn a_generated_machine_id_and_a_resolver_file_keep_the_root_busy_until_their_binds_are_removed() {
     // With the kernel itself: the live system generates the machine ID in the runtime directory
-    // once, and binds it read-only over the root's `/etc/machine-id` through the view's entry,
-    // in the calling thread's mount namespace, of which an execution's starts as a copy.
+    // once, writes the resolver file there once, and binds both read-only over the root's
+    // `/etc/machine-id` and `/etc/resolv.conf` through the view's entry, in the calling thread's
+    // mount namespace, of which an execution's starts as a copy.
     let Some(live) = LiveRoot::new() else {
         return;
     };
@@ -1273,24 +1685,46 @@ fn a_generated_machine_id_keeps_the_root_busy_until_its_bind_is_removed() {
     assert_ne!(generated, IMAGE_MACHINE_ID);
     let again = system.generate(&path).unwrap_err();
     assert_eq!(again.kind(), io::ErrorKind::AlreadyExists);
-    let binds = view(Some(workload()), machine_id)
-        .entry(&live.root)
-        .bind_runtime()
-        .unwrap();
-    let target = live.root.join("etc/machine-id");
-    assert_eq!(fs::read(&target).unwrap(), generated);
-    let writing = fs::OpenOptions::new().write(true).open(&target);
-    assert_eq!(
-        writing.unwrap_err().raw_os_error(),
-        Some(Errno::EROFS as i32)
-    );
+    let resolver = live.runtime.join(RESOLVER_FILE);
+    system.write_resolver(&resolver, DNS).unwrap();
+    let again = system.write_resolver(&resolver, DNS).unwrap_err();
+    assert_eq!(again.kind(), io::ErrorKind::AlreadyExists);
+    let bound = View {
+        resolver: Some(resolver),
+        ..view(Some(workload()), machine_id)
+    };
+    let binds = bound.entry(&live.root).bind_runtime().unwrap();
+    let targets = [
+        (
+            live.root.join("etc/machine-id"),
+            generated,
+            IMAGE_MACHINE_ID,
+        ),
+        (
+            live.root.join("etc/resolv.conf"),
+            b"nameserver 10.0.0.1\n".to_vec(),
+            IMAGE_RESOLVER,
+        ),
+    ];
+    for (target, shown, _) in &targets {
+        assert_eq!(fs::read(target).unwrap(), *shown, "{}", target.display());
+        let writing = fs::OpenOptions::new().write(true).open(target);
+        assert_eq!(
+            writing.unwrap_err().raw_os_error(),
+            Some(Errno::EROFS as i32),
+            "{}",
+            target.display()
+        );
+    }
 
-    // The bind keeps the root's mount busy, so that the root's teardown, which detaches no busy
-    // mount, fails until the bind is removed, which shows the image's own ID again.
+    // The binds keep the root's mount busy, so that the root's teardown, which detaches no busy
+    // mount, fails until the binds are removed, which shows the image's own files again.
     let root = sys::path_c_string(&live.root).unwrap();
     assert_eq!(sys::unmount(&root), Err(Errno::EBUSY));
     system.remove(binds).unwrap();
-    assert_eq!(fs::read(&target).unwrap(), IMAGE_MACHINE_ID);
+    for (target, _, image) in &targets {
+        assert_eq!(fs::read(target).unwrap(), *image, "{}", target.display());
+    }
     sys::unmount(&root).unwrap();
 }
 
@@ -1405,6 +1839,60 @@ fn application_errors_name_their_cause() {
     assert_eq!(
         error.source().unwrap().to_string(),
         "the hostname is invalid"
+    );
+
+    let unmounted = root::Error::Mount {
+        mount: root::Mount::Export {
+            tag: TAG.to_owned(),
+        },
+        error: Errno::ENOENT.into(),
+    };
+    let refusal = unmounted.to_string();
+    let error = ApplyError::Export {
+        error: unmounted,
+        teardown: None,
+    };
+    assert_eq!(
+        error.to_string(),
+        format!("the host export cannot be mounted: {refusal}")
+    );
+    assert_eq!(error.source().unwrap().to_string(), refusal);
+
+    let error = ApplyError::Network {
+        error: NetworkError::Write(io::ErrorKind::AlreadyExists.into()),
+        teardown: None,
+    };
+    assert_eq!(
+        error.to_string(),
+        format!(
+            "the network settings cannot be applied: the resolver file cannot be written: {exists}"
+        )
+    );
+    let source = error.source().unwrap();
+    assert_eq!(
+        source.to_string(),
+        format!("the resolver file cannot be written: {exists}")
+    );
+    assert_eq!(source.source().unwrap().to_string(), exists.to_string());
+    let unbound = entry::Error::Resolver(MappingError::TargetKind);
+    let refusal = unbound.to_string();
+    let error = ApplyError::Network {
+        error: NetworkError::Bind(unbound),
+        teardown: None,
+    };
+    assert!(
+        refusal.starts_with("cannot bind the resolver file: "),
+        "{refusal}"
+    );
+    assert_eq!(
+        error.to_string(),
+        format!("the network settings cannot be applied: {refusal}")
+    );
+    let source = error.source().unwrap();
+    assert_eq!(source.to_string(), refusal);
+    assert_eq!(
+        source.source().unwrap().to_string(),
+        MappingError::TargetKind.to_string()
     );
 
     // The adapter hands the error to the activation, whose failure names it.
