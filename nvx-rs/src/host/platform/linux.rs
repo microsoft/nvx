@@ -702,11 +702,13 @@ pub(crate) fn control_endpoint(socket_path: &Path) -> io::Result<String> {
 
 /// The listener at which the launch of a clone awaits the restore-ready event of its VMM: a Unix
 /// socket, which the VMM connects to once, and which queues its connection until the host
-/// accepts it.
+/// accepts it, then the connection that the host accepted, from which it reads the event.
 #[derive(Debug)]
 pub(crate) struct ReadyListener {
     /// The listening socket, which the VMM finds as long as it is open.
-    _socket: UnixListener,
+    socket: UnixListener,
+    /// The VMM's connection, once the host accepted it.
+    connection: Option<UnixStream>,
 }
 
 /// Listens at the Unix socket `socket_path`, in place of a socket that an earlier launch left
@@ -722,7 +724,90 @@ pub(crate) fn listen_ready(socket_path: &Path) -> io::Result<(String, ReadyListe
         _ => {}
     }
     let socket = UnixListener::bind(socket_path)?;
-    Ok((endpoint, ReadyListener { _socket: socket }))
+    // The host polls the socket before it accepts, so an accept never blocks.
+    socket.set_nonblocking(true)?;
+    let listener = ReadyListener {
+        socket,
+        connection: None,
+    };
+    Ok((endpoint, listener))
+}
+
+impl ReadyListener {
+    /// Waits at most `timeout` for what the VMM, the process `pid`, sends to the endpoint, and
+    /// appends it to `received`, which then holds at most `limit` bytes. Returns whether more may
+    /// arrive: `false` once the VMM closed its end of the connection.
+    ///
+    /// The endpoint's first connection must be the VMM's: one of another process fails with
+    /// [`io::ErrorKind::PermissionDenied`].
+    pub(crate) fn receive(
+        &mut self,
+        pid: u32,
+        received: &mut Vec<u8>,
+        limit: usize,
+        timeout: Duration,
+    ) -> io::Result<bool> {
+        let deadline = Instant::now() + timeout;
+        if self.connection.is_none() {
+            if !sys::wait_readable(&self.socket, timeout)? {
+                return Ok(true);
+            }
+            let connection = match self.socket.accept() {
+                Ok((connection, _)) => connection,
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
+                    ) =>
+                {
+                    return Ok(true);
+                }
+                Err(error) => return Err(error),
+            };
+            let peer = sys::peer_pid(&connection)?;
+            if peer != pid {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    format!(
+                        "process {peer} connected to the restore-ready endpoint, not the VMM, \
+                         process {pid}"
+                    ),
+                ));
+            }
+            connection.set_nonblocking(true)?;
+            self.connection = Some(connection);
+        }
+        let connection = self
+            .connection
+            .as_mut()
+            .expect("the host accepted the VMM's connection");
+        let mut buffer = [0; 64];
+        let room = limit.saturating_sub(received.len()).min(buffer.len());
+        if room == 0
+            || !sys::wait_readable(
+                connection,
+                deadline.saturating_duration_since(Instant::now()),
+            )?
+        {
+            return Ok(true);
+        }
+        match connection.read(&mut buffer[..room]) {
+            Ok(0) => Ok(false),
+            Ok(count) => {
+                received.extend_from_slice(&buffer[..count]);
+                Ok(true)
+            }
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
+                ) =>
+            {
+                Ok(true)
+            }
+            Err(error) => Err(error),
+        }
+    }
 }
 
 /// Connects to a control endpoint served by the process `expected_pid`.

@@ -15,10 +15,10 @@ use windows_sys::Win32::Foundation::{DUPLICATE_SAME_ACCESS, DuplicateHandle};
 use windows_sys::Win32::Foundation::{
     ERROR_ACCESS_DENIED, ERROR_ALREADY_EXISTS, ERROR_BROKEN_PIPE, ERROR_FILE_NOT_FOUND,
     ERROR_INVALID_PARAMETER, ERROR_IO_PENDING, ERROR_MORE_DATA, ERROR_NO_DATA,
-    ERROR_OPERATION_ABORTED, ERROR_PIPE_BUSY, ERROR_PIPE_NOT_CONNECTED, ERROR_SHARING_VIOLATION,
-    ERROR_SUCCESS, FILETIME, FreeLibrary, GENERIC_ALL, GENERIC_READ, GENERIC_WRITE,
-    GetHandleInformation, GetLastError, HANDLE, HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE,
-    SetHandleInformation, WAIT_OBJECT_0, WAIT_TIMEOUT,
+    ERROR_OPERATION_ABORTED, ERROR_PIPE_BUSY, ERROR_PIPE_CONNECTED, ERROR_PIPE_NOT_CONNECTED,
+    ERROR_SHARING_VIOLATION, ERROR_SUCCESS, FILETIME, FreeLibrary, GENERIC_ALL, GENERIC_READ,
+    GENERIC_WRITE, GetHandleInformation, GetLastError, HANDLE, HANDLE_FLAG_INHERIT,
+    INVALID_HANDLE_VALUE, SetHandleInformation, WAIT_OBJECT_0, WAIT_TIMEOUT,
 };
 use windows_sys::Win32::Security::{
     ACCESS_ALLOWED_ACE, ACE_HEADER, ACL, ACL_REVISION, ACL_SIZE_INFORMATION, AclSizeInformation,
@@ -50,8 +50,8 @@ use windows_sys::Win32::System::LibraryLoader::{
     GetProcAddress, LOAD_LIBRARY_SEARCH_SYSTEM32, LoadLibraryExW,
 };
 use windows_sys::Win32::System::Pipes::{
-    CreateNamedPipeW, GetNamedPipeServerProcessId, PIPE_READMODE_BYTE, PIPE_REJECT_REMOTE_CLIENTS,
-    PIPE_TYPE_BYTE, PIPE_WAIT, WaitNamedPipeW,
+    ConnectNamedPipe, CreateNamedPipeW, GetNamedPipeClientProcessId, GetNamedPipeServerProcessId,
+    PIPE_READMODE_BYTE, PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, PIPE_WAIT, WaitNamedPipeW,
 };
 use windows_sys::Win32::System::Registry::{
     HKEY_LOCAL_MACHINE, RRF_RT_REG_DWORD, RRF_RT_REG_SZ, RegGetValueW,
@@ -64,7 +64,7 @@ use windows_sys::Win32::System::Threading::{
     EXTENDED_STARTUPINFO_PRESENT, GetCurrentProcess, GetProcessTimes, INFINITE,
     InitializeProcThreadAttributeList, LPPROC_THREAD_ATTRIBUTE_LIST, OpenProcess, OpenProcessToken,
     PROC_THREAD_ATTRIBUTE_HANDLE_LIST, PROCESS_CREATION_FLAGS, PROCESS_INFORMATION,
-    PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE, PROCESS_TERMINATE,
+    PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE, PROCESS_TERMINATE, ResetEvent,
     STARTF_USESTDHANDLES, STARTUPINFOEXW, TerminateProcess, UpdateProcThreadAttribute,
     WaitForSingleObject,
 };
@@ -1529,12 +1529,16 @@ pub(crate) fn control_endpoint(_socket_path: &Path) -> io::Result<String> {
 const READY_BUFFER_LEN: u32 = 4096;
 
 /// The listener at which the launch of a clone awaits the restore-ready event of its VMM: the
-/// one instance of a named pipe, inbound, which only the current user may open, from this host
-/// alone, and which takes the connection of the VMM before the host accepts it.
+/// one instance of a named pipe, inbound and overlapped, which only the current user may open,
+/// from this host alone, and which takes the connection of the VMM before the host accepts it.
 #[derive(Debug)]
 pub(crate) struct ReadyListener {
     /// The pipe's instance, which the VMM finds as long as it is open.
-    _pipe: OwnedHandle,
+    pipe: OwnedHandle,
+    /// The manual-reset event of the overlapped operations on the pipe.
+    event: OwnedHandle,
+    /// Whether the host accepted the VMM's connection.
+    connected: bool,
 }
 
 /// Listens at a fresh named pipe, whose name it draws at random, as the restore-ready endpoint of
@@ -1553,7 +1557,7 @@ pub(crate) fn listen_ready(_socket_path: &Path) -> io::Result<(String, ReadyList
             let handle = unsafe {
                 CreateNamedPipeW(
                     name.as_ptr(),
-                    PIPE_ACCESS_INBOUND | FILE_FLAG_FIRST_PIPE_INSTANCE,
+                    PIPE_ACCESS_INBOUND | FILE_FLAG_FIRST_PIPE_INSTANCE | FILE_FLAG_OVERLAPPED,
                     PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
                     1,
                     0,
@@ -1564,7 +1568,90 @@ pub(crate) fn listen_ready(_socket_path: &Path) -> io::Result<(String, ReadyList
             };
             owned(handle).ok_or_else(io::Error::last_os_error)
         })??;
-    Ok((endpoint, ReadyListener { _pipe: pipe }))
+    // SAFETY: creates an unnamed manual-reset event with default security.
+    let event = owned(unsafe { CreateEventW(ptr::null(), 1, 0, ptr::null()) })
+        .ok_or_else(io::Error::last_os_error)?;
+    let listener = ReadyListener {
+        pipe,
+        event,
+        connected: false,
+    };
+    Ok((endpoint, listener))
+}
+
+impl ReadyListener {
+    /// Waits at most `timeout` for what the VMM, the process `pid`, sends to the endpoint, and
+    /// appends it to `received`, which then holds at most `limit` bytes. Returns whether more may
+    /// arrive: `false` once the VMM closed its end of the pipe.
+    ///
+    /// The pipe's client must be the VMM: another process fails with
+    /// [`io::ErrorKind::PermissionDenied`].
+    pub(crate) fn receive(
+        &mut self,
+        pid: u32,
+        received: &mut Vec<u8>,
+        limit: usize,
+        timeout: Duration,
+    ) -> io::Result<bool> {
+        let deadline = Instant::now() + timeout;
+        let (pipe, event) = (raw(&self.pipe), raw(&self.event));
+        if !self.connected {
+            // ConnectNamedPipe does not promise to reset the event before it starts, as ReadFile
+            // and WriteFile do, so it is reset here.
+            // SAFETY: the event belongs to the listener, and no operation that uses it is pending.
+            if unsafe { ResetEvent(event) } == 0 {
+                return Err(io::Error::last_os_error());
+            }
+            // A wait that times out cancels the connection's operation, and the next wait issues
+            // it again, which a client that connected meanwhile completes at once.
+            // SAFETY: the operation's `OVERLAPPED` outlives it, as `overlapped` guarantees.
+            let connection = overlapped(pipe, event, Some(timeout), |pipe, overlapped| unsafe {
+                ConnectNamedPipe(pipe, overlapped)
+            });
+            match connection {
+                Ok(_) => {}
+                Err(error) if error.raw_os_error() == Some(ERROR_PIPE_CONNECTED as i32) => {}
+                Err(error) if error.kind() == io::ErrorKind::TimedOut => return Ok(true),
+                Err(error) => return Err(error),
+            }
+            let mut client = 0u32;
+            // SAFETY: the handle is a pipe's server end, and the output pointer is valid.
+            if unsafe { GetNamedPipeClientProcessId(pipe, &mut client) } == 0 {
+                return Err(io::Error::last_os_error());
+            }
+            if client != pid {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    format!(
+                        "process {client} connected to the restore-ready endpoint, not the VMM, \
+                         process {pid}"
+                    ),
+                ));
+            }
+            self.connected = true;
+        }
+        let mut buffer = [0u8; 64];
+        let room = limit.saturating_sub(received.len()).min(buffer.len());
+        if room == 0 {
+            return Ok(true);
+        }
+        let (data, length) = (buffer.as_mut_ptr(), room as u32);
+        let left = deadline.saturating_duration_since(Instant::now());
+        // SAFETY: `data` is valid for `length` bytes until the operation completes, which
+        // `overlapped` guarantees before it returns.
+        let read = overlapped(pipe, event, Some(left), |pipe, overlapped| unsafe {
+            ReadFile(pipe, data, length, ptr::null_mut(), overlapped)
+        });
+        match read {
+            Ok(0) => Ok(false),
+            Ok(count) => {
+                received.extend_from_slice(&buffer[..count]);
+                Ok(true)
+            }
+            Err(error) if error.kind() == io::ErrorKind::TimedOut => Ok(true),
+            Err(error) => Err(error),
+        }
+    }
 }
 
 /// Connects to a named pipe served by the process `expected_pid`.
@@ -1670,45 +1757,55 @@ struct PipeTransport {
 }
 
 impl PipeTransport {
-    /// Runs one overlapped operation to completion or timeout.
-    ///
-    /// `start` issues the operation. The function always waits for the operation to finish,
-    /// cancelling it on timeout, so the `OVERLAPPED` and the caller's buffer outlive it.
+    /// Runs one overlapped operation on the pipe to completion or timeout, as [`overlapped`]
+    /// runs it.
     fn overlapped(
         &mut self,
         timeout: Option<Duration>,
         start: impl FnOnce(HANDLE, *mut OVERLAPPED) -> i32,
     ) -> io::Result<usize> {
-        let pipe = raw(&self.pipe);
-        // SAFETY: OVERLAPPED is plain data for which all-zero bytes are a valid initial state.
-        let mut overlapped: OVERLAPPED = unsafe { std::mem::zeroed() };
-        // The event can be reused: ReadFile and WriteFile reset it to nonsignaled before they
-        // start an operation.
-        overlapped.hEvent = raw(&self.event);
-        if start(pipe, &raw mut overlapped) == 0 {
-            let error = last_error();
-            if error != ERROR_IO_PENDING {
-                return completion_error(error, 0, false);
-            }
-        }
-        let wait = timeout.map_or(INFINITE, |timeout| {
-            u32::try_from(timeout.as_millis())
-                .unwrap_or(INFINITE - 1)
-                .clamp(1, INFINITE - 1)
-        });
-        // SAFETY: the event belongs to this transport.
-        let signaled = unsafe { WaitForSingleObject(overlapped.hEvent, wait) } == WAIT_OBJECT_0;
-        if !signaled {
-            // SAFETY: cancels only the operation that uses this OVERLAPPED.
-            unsafe { CancelIoEx(pipe, &overlapped) };
-        }
-        let mut transferred = 0u32;
-        // SAFETY: waits for the operation to finish, so nothing references `overlapped` after.
-        if unsafe { GetOverlappedResult(pipe, &overlapped, &mut transferred, 1) } != 0 {
-            return Ok(transferred as usize);
-        }
-        completion_error(last_error(), transferred as usize, !signaled)
+        overlapped(raw(&self.pipe), raw(&self.event), timeout, start)
     }
+}
+
+/// Runs one overlapped operation on `pipe` to completion or timeout, waiting on `event`, a
+/// manual-reset event that no other operation uses meanwhile, and which the operation resets to
+/// nonsignaled before it starts, as ReadFile and WriteFile do.
+///
+/// `start` issues the operation. The function always waits for the operation to finish,
+/// cancelling it on timeout, so the `OVERLAPPED` and the caller's buffer outlive it.
+fn overlapped(
+    pipe: HANDLE,
+    event: HANDLE,
+    timeout: Option<Duration>,
+    start: impl FnOnce(HANDLE, *mut OVERLAPPED) -> i32,
+) -> io::Result<usize> {
+    // SAFETY: OVERLAPPED is plain data for which all-zero bytes are a valid initial state.
+    let mut overlapped: OVERLAPPED = unsafe { std::mem::zeroed() };
+    overlapped.hEvent = event;
+    if start(pipe, &raw mut overlapped) == 0 {
+        let error = last_error();
+        if error != ERROR_IO_PENDING {
+            return completion_error(error, 0, false);
+        }
+    }
+    let wait = timeout.map_or(INFINITE, |timeout| {
+        u32::try_from(timeout.as_millis())
+            .unwrap_or(INFINITE - 1)
+            .clamp(1, INFINITE - 1)
+    });
+    // SAFETY: the event belongs to the caller.
+    let signaled = unsafe { WaitForSingleObject(overlapped.hEvent, wait) } == WAIT_OBJECT_0;
+    if !signaled {
+        // SAFETY: cancels only the operation that uses this OVERLAPPED.
+        unsafe { CancelIoEx(pipe, &overlapped) };
+    }
+    let mut transferred = 0u32;
+    // SAFETY: waits for the operation to finish, so nothing references `overlapped` after.
+    if unsafe { GetOverlappedResult(pipe, &overlapped, &mut transferred, 1) } != 0 {
+        return Ok(transferred as usize);
+    }
+    completion_error(last_error(), transferred as usize, !signaled)
 }
 
 /// Maps a completed pipe operation's Win32 status to Rust I/O semantics.

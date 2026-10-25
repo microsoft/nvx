@@ -40,6 +40,13 @@
 //! - [`ClonePlan::launch`] launches the clone, as the launch that its lease reserves: OpenVMM
 //!   restores the generation's snapshot in place with the clone's devices, and the clone's
 //!   activation record waits in its sandbox, as a [`Restoring`] describes.
+//! - [`Restoring::activate`] runs the clone's restore sequence through the adapter's framing of
+//!   the clone's control session, a [`CloneControl`]: it waits for OpenVMM's restore-ready event,
+//!   then connects, sends the clone's activation record in the adapter's Activate, and checks the
+//!   activation that the clone's Ready reports, by a deadline that starts with the launch, and
+//!   resends the same record in a new session once the adapter lost one. [`Activated::start`]
+//!   then starts the clone's sandbox by a deadline that starts at its Ready, and
+//!   [`Started::commit`] commits the launch.
 //!
 //! # Canonical encoding
 //!
@@ -72,7 +79,11 @@ mod store;
 mod test_support;
 mod wire;
 
-pub use self::clone::{ClonePlan, CloneRequest, CloneUpper, Restoring};
+pub use self::clone::{
+    Activated, CloneControl, ClonePlan, CloneRequest, CloneUpper, MAX_ACTIVATION_SESSIONS,
+    READY_TO_START_TIMEOUT, RESTORE_READY_EVENT, RESTORE_TO_READY_TIMEOUT, RestoreDeadlines,
+    Restoring, Started,
+};
 pub use self::eligibility::{Downtime, DowntimeSource, Eligibility, HostTime, MAX_DOWNTIME_NS};
 pub use self::key::{CaptureClass, ClassIdentity, Invariants, KeyIdentity, TemplateKey};
 pub use self::manifest::{

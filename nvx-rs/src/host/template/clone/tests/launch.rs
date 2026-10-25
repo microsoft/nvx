@@ -3,7 +3,8 @@
 //! [`restore_vmm_role`] stands in, listening beside the snapshot on Linux as OpenVMM does; the
 //! checks that keep a VMM from starting before the clone's binding is durable, or with a control
 //! socket that OpenVMM or the host could not use; the removal of that socket; and the crashes of
-//! a launch's caller, which a [`launch_role`] runs.
+//! a launch's caller, which a [`launch_role`] runs, in the launch and in the restore sequence that
+//! follows it, around the clone's Ready and the start of its sandbox.
 
 use std::cell::RefCell;
 use std::env;
@@ -14,8 +15,9 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use super::*;
-use crate::activation::StoreGeneration;
+use crate::activation::{ReadyActivation, StoreGeneration};
 use crate::host::artifacts;
+use crate::host::platform::Transport;
 use crate::host::process::{Process, ProcessRef};
 use crate::host::store::{
     CLONE_ACTIVATION_NAME, CLONE_BINDING_NAME, CLONE_SCRATCH_NAME, JOURNAL_NAME, LaunchState,
@@ -55,19 +57,24 @@ const ARGUMENTS: &str = "arguments.json";
 /// File in which a [`restore_vmm_role`] writes, once it has tried to send its restore-ready
 /// event, the capability that it read, in hexadecimal, and whether it sent the event.
 const STARTED: &str = "started";
-/// The restore-ready event that OpenVMM sends.
-const READY_EVENT: &[u8] = b"OPENVMM_RESTORE_READY_V1\n";
+/// File in the working directory of a [`restore_vmm_role`] whose words change how it sends its
+/// restore-ready event, as [`VmmDir::plan`] describes them. Without it, the VMM sends the event at
+/// once, and closes its end of the endpoint.
+const EVENT_PLAN: &str = "event-plan";
+/// File in which a [`restore_vmm_role`] whose plan asks it to flush its event as OpenVMM does
+/// notes that the flush returned: on Windows, once the host read the event.
+const FLUSHED: &str = "flushed";
 /// The OpenVMM executable that the tests' launches name, which [`fake_vmm`] replaces.
-const OPENVMM: &str = "openvmm";
+pub(super) const OPENVMM: &str = "openvmm";
 /// Longest wait for a VMM that is expected to start or exit, for a sandbox's lock, or for a
 /// reattach to become determinate.
-const TIMEOUT: Duration = Duration::from_secs(60);
+pub(super) const TIMEOUT: Duration = Duration::from_secs(60);
 /// Longest life of a [`restore_vmm_role`] that nothing ends, so that a failed test leaves no
 /// process.
 const VMM_LIFETIME: Duration = Duration::from_secs(180);
 
 /// Returns `bytes` in lowercase hexadecimal.
-fn hex(bytes: &[u8]) -> String {
+pub(super) fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
@@ -88,7 +95,7 @@ fn role(name: &str) -> Vec<OsString> {
 /// Gives the snapshot of the generation of `fixture` its RAM and saved state beside its manifest,
 /// as OpenVMM publishes them, and returns the snapshot's directory, and the content of each of
 /// its files, by name.
-fn complete_snapshot(fixture: &Fixture) -> (PathBuf, Vec<(&'static str, Vec<u8>)>) {
+pub(super) fn complete_snapshot(fixture: &Fixture) -> (PathBuf, Vec<(&'static str, Vec<u8>)>) {
     let snapshot = fixture.store.snapshot_dir(&fixture.generation).unwrap();
     let mut contents = Vec::new();
     for name in SNAPSHOT_ARTIFACTS {
@@ -115,7 +122,7 @@ fn seals(snapshot: &Path) -> Vec<(&'static str, FileSeal)> {
 
 /// Returns the runtime identity that captured the template of `fixture`, under which its clones
 /// launch.
-fn runtime_of(fixture: &Fixture) -> RuntimeIdentity {
+pub(super) fn runtime_of(fixture: &Fixture) -> RuntimeIdentity {
     fixture
         .store
         .read_key(&fixture.generation)
@@ -125,7 +132,7 @@ fn runtime_of(fixture: &Fixture) -> RuntimeIdentity {
 }
 
 /// Returns whether a socket, or another file, is at `path`.
-fn exists(path: &Path) -> bool {
+pub(super) fn exists(path: &Path) -> bool {
     fs::symlink_metadata(path).is_ok()
 }
 
@@ -167,7 +174,7 @@ fn assert_unlaunched(fixture: &Fixture, acquired: &Acquired) {
 
 /// Asserts that the sandbox in `sandbox` holds none of the files that the launch of a clone
 /// leaves for its release.
-fn assert_released(sandbox: &Path) {
+pub(super) fn assert_released(sandbox: &Path) {
     for name in [
         CLONE_SCRATCH_NAME,
         CLONE_ACTIVATION_NAME,
@@ -185,7 +192,7 @@ fn never_spawned(_: VmmCommand<'_>) -> VmmCommand<'_> {
 /// The command that a launch made for its VMM, before [`fake_vmm`] replaced it, and what the
 /// sandbox held as the VMM was about to start.
 #[derive(Debug)]
-struct Made {
+pub(super) struct Made {
     /// The VMM's executable.
     program: PathBuf,
     /// The VMM's arguments.
@@ -204,7 +211,7 @@ struct Made {
 /// keeps the command that the launch made in `made`, writes its arguments in [`ARGUMENTS`] in
 /// `vmm`, and runs the role there instead, with the descriptors or handles that the command
 /// passes.
-fn fake_vmm<'a>(
+pub(super) fn fake_vmm<'a>(
     vmm: &'a Path,
     made: &'a RefCell<Option<Made>>,
 ) -> impl for<'h> Fn(VmmCommand<'h>) -> VmmCommand<'h> + 'a {
@@ -235,16 +242,16 @@ fn fake_vmm<'a>(
 
 /// The working directory of a [`restore_vmm_role`], which it marks. Dropping it ends the VMM, and
 /// waits for it to exit, so that a failed test leaves no process behind.
-struct VmmDir {
+pub(super) struct VmmDir {
     /// The reference of the VMM, once the test knows it.
-    reference: Option<ProcessRef>,
+    pub(super) reference: Option<ProcessRef>,
     /// The directory, which is removed after the VMM exits.
     dir: tempfile::TempDir,
 }
 
 impl VmmDir {
     /// Creates the directory, and marks it.
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         let dir = tempfile::tempdir().unwrap();
         fs::write(dir.path().join(VMM_MARKER), b"").unwrap();
         Self {
@@ -254,13 +261,13 @@ impl VmmDir {
     }
 
     /// Returns the path of the directory.
-    fn path(&self) -> &Path {
+    pub(super) fn path(&self) -> &Path {
         self.dir.path()
     }
 
     /// Waits until the VMM has tried to send its restore-ready event, and returns what it wrote
     /// in [`STARTED`].
-    fn started(&self) -> String {
+    pub(super) fn started(&self) -> String {
         let path = self.path().join(STARTED);
         let deadline = Instant::now() + TIMEOUT;
         loop {
@@ -276,8 +283,38 @@ impl VmmDir {
     }
 
     /// Asks the VMM to exit.
-    fn end(&self) {
+    pub(super) fn end(&self) {
         fs::write(self.path().join(EXIT_MARKER), b"").unwrap();
+    }
+
+    /// Asks the VMM, which runs, to exit, and waits until it has. It opens the VMM's process
+    /// before it asks, since a process that has exited no longer opens.
+    pub(super) fn end_and_wait(&self) {
+        let reference = self.reference.as_ref().expect("the test knows the VMM");
+        let process = Process::open(reference)
+            .unwrap()
+            .expect("the VMM runs until the test ends it");
+        self.end();
+        assert!(process.wait(Instant::now() + TIMEOUT).unwrap());
+    }
+
+    /// Changes how the VMM sends its restore-ready event, before it starts, by the words of
+    /// `plan`:
+    ///
+    /// - `delay:MS` sends it after MS milliseconds;
+    /// - `none` sends nothing, and runs on;
+    /// - `exit` sends nothing, and exits at once;
+    /// - `other` sends a version of the event that OpenVMM does not send;
+    /// - `partial` sends the first bytes of the event, then closes its end of the endpoint;
+    /// - `flush` flushes the event as OpenVMM does, which waits on Windows until the host read
+    ///   it, before the VMM writes [`STARTED`], then notes it in [`FLUSHED`].
+    pub(super) fn plan(&self, plan: &str) {
+        fs::write(self.path().join(EVENT_PLAN), plan).unwrap();
+    }
+
+    /// Returns whether the VMM's flush of its event returned.
+    pub(super) fn flushed(&self) -> bool {
+        self.path().join(FLUSHED).exists()
     }
 }
 
@@ -299,9 +336,11 @@ impl Drop for VmmDir {
 /// restore-ready event, and the snapshot that it restores, among the arguments that its launch
 /// made, which [`ARGUMENTS`] holds; holds the snapshot as OpenVMM does, which on Linux listens at
 /// the control endpoint beside the snapshot, and on Windows opens the snapshot's directory and
-/// files sharing nothing but reading; sends the restore-ready event as OpenVMM does; writes
-/// [`STARTED`]; then runs until a file named [`EXIT_MARKER`] appears, or for [`VMM_LIFETIME`] at
-/// most, and removes its control socket as it exits, as OpenVMM does at a normal exit.
+/// files sharing nothing but reading, and serves its control endpoint's named pipe; sends the
+/// restore-ready event as OpenVMM does, or as its [plan](VmmDir::plan) says; writes [`STARTED`];
+/// then runs until a file named [`EXIT_MARKER`] appears, or for [`VMM_LIFETIME`] at most, and
+/// removes its control socket as it exits, as OpenVMM does at a normal exit. It never answers on
+/// its control endpoint.
 ///
 /// Where OpenVMM would refuse its arguments, this VMM writes why in [`STARTED`] after its
 /// capability and whether it sent its event. Where OpenVMM would abort a restore whose event it
@@ -316,14 +355,46 @@ fn restore_vmm_role() {
     }
     let mut capability = [0; CAPABILITY_LEN];
     std::io::stdin().read_exact(&mut capability).unwrap();
+    let plan = fs::read_to_string(directory.join(EVENT_PLAN)).unwrap_or_default();
+    let words: Vec<&str> = plan.split_whitespace().collect();
+    if words.contains(&"exit") {
+        return;
+    }
     let arguments: Vec<String> =
         serde_json::from_slice(&fs::read(directory.join(ARGUMENTS)).unwrap()).unwrap();
     let (held, problem) = match hold_snapshot(&arguments) {
         Ok(held) => (Some(held), String::new()),
         Err(problem) => (None, format!(" {problem}")),
     };
+    let delay = words
+        .iter()
+        .find_map(|word| word.strip_prefix("delay:"))
+        .map_or(0, |milliseconds| milliseconds.parse().unwrap());
+    thread::sleep(Duration::from_millis(delay));
+    let event = if words.contains(&"other") {
+        b"OPENVMM_RESTORE_READY_V2\n"
+    } else if words.contains(&"partial") {
+        &RESTORE_READY_EVENT[..10]
+    } else {
+        RESTORE_READY_EVENT
+    };
     let ready = argument(&arguments, "--restore-ready-path").unwrap();
-    let sent = send_ready(Path::new(&ready)).is_ok();
+    let sent = if words.contains(&"none") {
+        false
+    } else {
+        match send_ready(Path::new(&ready), event) {
+            Ok(sink) if words.contains(&"flush") => {
+                // OpenVMM flushes its event, and then closes its end of the endpoint.
+                #[cfg(windows)]
+                sink.sync_all().unwrap();
+                drop(sink);
+                fs::write(directory.join(FLUSHED), b"").unwrap();
+                true
+            }
+            Ok(_) => true,
+            Err(_) => false,
+        }
+    };
     let staged = directory.join(format!(".{STARTED}"));
     fs::write(&staged, format!("{} {sent}{problem}", hex(&capability))).unwrap();
     fs::rename(&staged, directory.join(STARTED)).unwrap();
@@ -352,6 +423,9 @@ struct Held {
     /// The snapshot's directory and files, open, on Windows.
     #[cfg(windows)]
     _files: Vec<File>,
+    /// The instances of the control endpoint's named pipe, on Windows.
+    #[cfg(windows)]
+    _control: Vec<std::os::windows::io::OwnedHandle>,
 }
 
 impl Held {
@@ -412,7 +486,8 @@ fn hold_snapshot(arguments: &[String]) -> std::result::Result<Held, String> {
 /// Holds the snapshot that `arguments` restore as OpenVMM does, or returns why OpenVMM would
 /// refuse them: on Windows, OpenVMM opens the snapshot's directory and files for reading, sharing
 /// nothing but reading, so that a restore of another clone, which shares reading, reads them too,
-/// while no one changes them.
+/// while no one changes them. It also serves the named pipe of its control endpoint, as
+/// [`control_pipe::serve`] does.
 #[cfg(windows)]
 fn hold_snapshot(arguments: &[String]) -> std::result::Result<Held, String> {
     use std::os::windows::fs::OpenOptionsExt;
@@ -433,17 +508,79 @@ fn hold_snapshot(arguments: &[String]) -> std::result::Result<Held, String> {
             .map_err(|error| format!("cannot open {}: {error}", path.display()))?;
         files.push(file);
     }
-    Ok(Held { _files: files })
+    let endpoint = argument(arguments, "--microvm-control-console")
+        .and_then(|console| console.strip_prefix("listen=").map(str::to_owned))
+        .ok_or("no control endpoint")?;
+    let control = control_pipe::serve(&endpoint)
+        .map_err(|error| format!("cannot serve the control endpoint {endpoint}: {error}"))?;
+    Ok(Held {
+        _files: files,
+        _control: control,
+    })
 }
 
-/// Sends the restore-ready event to the endpoint at `path`, as OpenVMM does: through a Unix
-/// socket, or a named pipe on Windows.
-fn send_ready(path: &Path) -> io::Result<()> {
+/// The named pipe of the control endpoint that a [`restore_vmm_role`] serves on Windows, as
+/// OpenVMM does, through the Win32 calls that the standard library lacks.
+#[cfg(windows)]
+#[allow(unsafe_code)]
+mod control_pipe {
+    use std::io;
+    use std::os::windows::io::{FromRawHandle, OwnedHandle};
+
+    use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
+    use windows_sys::Win32::Storage::FileSystem::PIPE_ACCESS_DUPLEX;
+    use windows_sys::Win32::System::Pipes::{
+        CreateNamedPipeW, PIPE_READMODE_BYTE, PIPE_TYPE_BYTE, PIPE_WAIT,
+    };
+
+    /// How many hosts may connect to the endpoint at once, one to each instance of its pipe: as
+    /// many as a test's restore sequence connects, at most.
+    const INSTANCES: u32 = 4;
+
+    /// Creates the instances of the named pipe `endpoint`, `//./pipe/NAME`, each of which a host
+    /// connects to before the role, which never answers, would accept it.
+    pub(super) fn serve(endpoint: &str) -> io::Result<Vec<OwnedHandle>> {
+        let name: Vec<u16> = endpoint
+            .replace('/', "\\")
+            .encode_utf16()
+            .chain(Some(0))
+            .collect();
+        (0..INSTANCES)
+            .map(|_| {
+                // SAFETY: the name is NUL-terminated, and outlives the call.
+                let handle = unsafe {
+                    CreateNamedPipeW(
+                        name.as_ptr(),
+                        PIPE_ACCESS_DUPLEX,
+                        PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
+                        INSTANCES,
+                        4096,
+                        4096,
+                        0,
+                        std::ptr::null(),
+                    )
+                };
+                if handle == INVALID_HANDLE_VALUE {
+                    return Err(io::Error::last_os_error());
+                }
+                // SAFETY: CreateNamedPipeW returned a fresh handle that nothing else owns.
+                Ok(unsafe { OwnedHandle::from_raw_handle(handle) })
+            })
+            .collect()
+    }
+}
+
+/// Sends `event` to the restore-ready endpoint at `path`, as OpenVMM sends its event: through a
+/// Unix socket, or a named pipe on Windows. Returns the VMM's end of the endpoint.
+fn send_ready(path: &Path, event: &[u8]) -> io::Result<File> {
     #[cfg(unix)]
-    let mut sink = std::os::unix::net::UnixStream::connect(path)?;
+    let mut sink = File::from(std::os::fd::OwnedFd::from(
+        std::os::unix::net::UnixStream::connect(path)?,
+    ));
     #[cfg(windows)]
     let mut sink = fs::OpenOptions::new().write(true).open(path)?;
-    sink.write_all(READY_EVENT)
+    sink.write_all(event)?;
+    Ok(sink)
 }
 
 #[test]
@@ -639,10 +776,7 @@ fn clones_of_one_generation_restore_its_snapshot_in_place_at_once() {
     }
     // Each VMM exits as OpenVMM does, removing its socket, and each lease is released.
     for ((restoring, _), vmm) in launched.into_iter().zip(&vmms) {
-        vmm.end();
-        let reference = vmm.reference.as_ref().unwrap();
-        let process = Process::open(reference).unwrap().unwrap();
-        assert!(process.wait(Instant::now() + TIMEOUT).unwrap());
+        vmm.end_and_wait();
         assert_eq!(restoring.abandon().unwrap(), Recovery::Exited);
     }
     for (acquired, lease) in clones.iter_mut().zip(leases) {
@@ -835,9 +969,7 @@ fn a_clone_on_a_scratch_image_passes_its_claim_to_its_vmm() {
     assert_eq!(error.code(), ErrorCode::ScratchClaimed, "{error}");
     // The claim is the VMM's alone: once the VMM has exited, the image serves another check,
     // while the launch lasts.
-    vmm.end();
-    let process = Process::open(&reference).unwrap().unwrap();
-    assert!(process.wait(Instant::now() + TIMEOUT).unwrap());
+    vmm.end_and_wait();
     assert!(released(|| scratch_binding
         .check(&scratch, Instant::now())
         .is_ok()));
@@ -1079,7 +1211,70 @@ fn launch_role() {
     if step == "launched" {
         crash(&step);
     }
+    // The restore sequence, through a framing that crashes within the Activate or the start.
+    let mut control = RoleControl { step: &step };
+    let activated = restoring
+        .activate(&mut control, RestoreDeadlines::default())
+        .unwrap();
+    if step == "activated" {
+        crash(&step);
+    }
+    let started = activated.start(&mut control).unwrap();
+    if step == "started" {
+        crash(&step);
+    }
+    let committed = started.commit().unwrap();
+    if step == "committed" {
+        crash(&step);
+    }
+    drop(committed);
     panic!("the clone's launch did not crash at {step}");
+}
+
+/// The adapter's framing of a [`launch_role`], whose clone answers as the record asks, and which
+/// crashes as it awaits the clone's Ready, at the step `activating`, or the start of its sandbox,
+/// at the step `starting`.
+struct RoleControl<'a> {
+    /// The step at which the role crashes.
+    step: &'a str,
+}
+
+impl CloneControl for RoleControl<'_> {
+    type Session = Box<dyn Transport>;
+    type Error = io::Error;
+
+    fn attach(
+        &mut self,
+        transport: Box<dyn Transport>,
+        _capability: &[u8; CAPABILITY_LEN],
+        _deadline: Instant,
+    ) -> io::Result<Box<dyn Transport>> {
+        Ok(transport)
+    }
+
+    fn activate(
+        &mut self,
+        _session: &mut Box<dyn Transport>,
+        record: &[u8],
+        _deadline: Instant,
+    ) -> io::Result<Option<ReadyActivation>> {
+        if self.step == "activating" {
+            crash(self.step);
+        }
+        let record = ActivationRecord::decode(record).unwrap();
+        Ok(Some(ReadyActivation::of(&record)))
+    }
+
+    fn start(&mut self, _session: &mut Box<dyn Transport>, _deadline: Instant) -> io::Result<()> {
+        if self.step == "starting" {
+            crash(self.step);
+        }
+        Ok(())
+    }
+
+    fn lost(&self, _error: &io::Error) -> bool {
+        false
+    }
 }
 
 /// Ends this process at once, once it has printed that it crashes at `step`, without unwinding
@@ -1149,6 +1344,10 @@ impl Crashed {
         let (image, _) = fixture.image("distro.erofs", IMAGE_LEN);
         let sandbox = fixture.provision("sandbox");
         let mut vmm = VmmDir::new();
+        if !matches!(step, "prepared" | "begun" | "launched") {
+            // The restore sequence reads the event, whose flush waits for that on Windows.
+            vmm.plan("flush");
+        }
         vmm.reference = run_launch_role(step, &fixture, &sandbox, &image, vmm.path());
         let lease = Lease::of(&SandboxStore::open(&sandbox).unwrap())
             .unwrap()
@@ -1294,6 +1493,66 @@ fn a_launch_whose_caller_crashes_once_its_vmm_started_ends_the_vmm_as_reattach_r
         other => panic!("unexpected reattach: {other:?}"),
     }
     assert!(process.wait(Instant::now() + TIMEOUT).unwrap());
+    assert!(!exists(&crashed.socket()));
+    crashed.releases(&mut locked);
+}
+
+#[test]
+fn a_restore_whose_caller_crashes_before_its_commit_ends_its_vmm_as_reattach_recovers_it() {
+    // The caller crashes as it awaits the clone's Ready, once the clone is ready, as it awaits the
+    // start of the clone's sandbox, and once the sandbox started: each time, the launch has not
+    // committed, and its journal names the VMM.
+    for step in ["activating", "activated", "starting", "started"] {
+        let crashed = Crashed::at(step);
+        let reference = crashed.vmm.reference.clone().unwrap();
+        let process = Process::open(&reference).unwrap().unwrap();
+        // The caller read the VMM's restore-ready event, whose flush waited for that on Windows.
+        assert!(crashed.vmm.started().ends_with(" true"), "{step}");
+        assert!(crashed.vmm.flushed(), "{step}");
+        let mut locked = crashed.lock();
+        let journal = locked.journal().unwrap().unwrap();
+        assert_eq!(journal.launch(), crashed.lease.launch(), "{step}");
+        assert_eq!(journal.state(), LaunchState::Spawned, "{step}");
+        assert_eq!(journal.process(), Some(&reference), "{step}");
+        assert!(locked.runtime().unwrap().is_none(), "{step}");
+        crashed.kept_its_files(&locked);
+        // The lease lasts until reattach ended the VMM, through its verified reference.
+        crashed.refuses_release(&mut locked);
+        match crashed.reattach(&mut locked) {
+            Reattached::Exited {
+                record: None,
+                recovery: Recovery::Terminated(terminated),
+            } => assert_eq!(terminated, reference, "{step}"),
+            other => panic!("unexpected reattach at {step}: {other:?}"),
+        }
+        assert!(process.wait(Instant::now() + TIMEOUT).unwrap(), "{step}");
+        assert!(!exists(&crashed.socket()), "{step}");
+        crashed.releases(&mut locked);
+    }
+}
+
+#[test]
+fn a_restore_whose_caller_crashes_once_it_committed_keeps_its_lease_while_its_vm_runs() {
+    let crashed = Crashed::at("committed");
+    let reference = crashed.vmm.reference.clone().unwrap();
+    let mut locked = crashed.lock();
+    // The runtime record names the VM, which reattach holds again, and the lease lasts as long as
+    // the VM runs.
+    assert!(locked.journal().unwrap().is_none());
+    let record = locked.runtime().unwrap().unwrap();
+    assert_eq!(record.process(), &reference);
+    crashed.kept_its_files(&locked);
+    let vmm = match crashed.reattach(&mut locked) {
+        Reattached::Live(vmm) => vmm,
+        other => panic!("unexpected reattach: {other:?}"),
+    };
+    assert_eq!(vmm.process().reference(), &reference);
+    crashed.refuses_release(&mut locked);
+    // Once a termination verified the VM's exit, the release ends the lease.
+    assert_eq!(
+        vmm.terminate(&mut locked, TIMEOUT).unwrap(),
+        StopOutcome::Forced
+    );
     assert!(!exists(&crashed.socket()));
     crashed.releases(&mut locked);
 }

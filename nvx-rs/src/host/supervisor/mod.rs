@@ -124,7 +124,14 @@
 //!    socket that the lease reserves in the generation's payload, named after the launch, which
 //!    [`Starting::endpoint`] and the runtime record name, as every launch's endpoint, rather than
 //!    at the sandbox's own socket.
-//! 3. Once the clone's VM has exited, as a stop, a termination, or a reattach verifies,
+//! 3. Still under that lock, the caller runs the clone's restore sequence:
+//!    [`Restoring::activate`](crate::host::template::Restoring::activate) waits for the VMM's
+//!    restore-ready event, activates the clone through the adapter's framing of its control
+//!    session, and checks its Ready, by a deadline that runs from the launch;
+//!    [`Activated::start`](crate::host::template::Activated::start) starts its sandbox; and
+//!    [`Started::commit`](crate::host::template::Started::commit) commits the launch, as
+//!    [`Starting::commit`] does. A failure ends the launch, as [`Starting::abandon`] does.
+//! 4. Once the clone's VM has exited, as a stop, a termination, or a reattach verifies,
 //!    [`Store::release`](crate::host::template::Store::release) ends the lease, under the
 //!    sandbox's lock, taken through the lease's path,
 //!    [`Lease::sandbox`](crate::host::template::Lease::sandbox), as the acquisition took it. The
@@ -158,9 +165,10 @@
 //! - After the acquisition, the binding reserves a launch that never began, and that no later lock
 //!   begins: a release ends the lease at once, and another acquisition, which checks the
 //!   generation's eligibility again, reserves another launch.
-//! - After the launch's journal, before or after the spawn, [`reattach`] ends the launch, as
-//!   [`LockedStore::recover`] does, and the lease lasts until it has: a launch that cannot be
-//!   ended yet is [`Reattached::Indeterminate`], and keeps it.
+//! - After the launch's journal, before or after the spawn, or in the clone's restore sequence,
+//!   before its commit, [`reattach`] ends the launch, as [`LockedStore::recover`] does, and the
+//!   lease lasts until it has: a launch that cannot be ended yet is
+//!   [`Reattached::Indeterminate`], and keeps it.
 //! - After the commit, the runtime record names the VM, which [`reattach`] holds again: the lease
 //!   lasts as long as the VM runs, until a stop or a termination verifies its exit.
 //! - During a release, the binding goes first, durably, and leaves the record of the lease, which

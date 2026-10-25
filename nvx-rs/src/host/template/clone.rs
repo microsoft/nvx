@@ -9,8 +9,13 @@ mod tests;
 
 mod launch;
 mod record;
+mod restore;
 
 pub use self::launch::Restoring;
+pub use self::restore::{
+    Activated, CloneControl, MAX_ACTIVATION_SESSIONS, READY_TO_START_TIMEOUT, RESTORE_READY_EVENT,
+    RESTORE_TO_READY_TIMEOUT, RestoreDeadlines, Started,
+};
 
 use std::fmt;
 use std::fs::{self, File};
