@@ -23,6 +23,7 @@ use crate::host::template::store::tests::{
     link_dir, link_file, publish, publish_with, remove, storage, store as new_store, unlink_dir,
 };
 use crate::host::template::test_support::{ManifestSpec, artifact, network_class};
+use crate::host::test_support::released;
 use crate::protocol::CAPABILITY_LEN;
 
 /// A change to a record, as JSON.
@@ -155,6 +156,14 @@ fn record_vm(sandbox: &Path) {
         "runtime": serde_json::to_value(runtime()).unwrap(),
     });
     write_private(&sandbox.join(RUNTIME_NAME), record.to_string().as_bytes()).unwrap();
+}
+
+/// Ends, through `locked`, a launch that spawned nothing, and whose log is closed.
+///
+/// A process that a concurrent test spawned may still hold the log, until it executes its
+/// program, and a later recovery then ends the launch.
+fn recover_unspawned(locked: &mut LockedStore) {
+    assert!(released(|| locked.recover().unwrap() == Recovery::Exited));
 }
 
 /// Returns the file at `path` as JSON.
@@ -292,7 +301,7 @@ fn acquisitions_refuse_what_they_cannot_lease_and_lease_nothing() {
     let error = refusal(&store, generation, &sandbox, &now);
     assert_eq!(error.code(), ErrorCode::SandboxRunning, "{error}");
     let mut locked = SandboxStore::lock_existing(&sandbox, &files(), None).unwrap();
-    assert_eq!(locked.recover().unwrap(), Recovery::Exited);
+    recover_unspawned(&mut locked);
     record_vm(&sandbox);
     drop(locked);
     let error = refusal(&store, generation, &sandbox, &now);
@@ -329,7 +338,7 @@ fn releases_end_leases_once_their_clones_have_exited() {
     );
     let error = store.release(&mut acquired.locked).unwrap_err();
     assert_eq!(error.code(), ErrorCode::SandboxRunning, "{error}");
-    assert_eq!(acquired.locked.recover().unwrap(), Recovery::Exited);
+    recover_unspawned(&mut acquired.locked);
     record_vm(&sandbox);
     let error = store.release(&mut acquired.locked).unwrap_err();
     assert_eq!(error.code(), ErrorCode::SandboxRunning, "{error}");
@@ -397,7 +406,7 @@ fn a_lease_allows_one_launch_of_its_clone_under_the_lock_that_acquired_it() {
         acquired.locked.journal().unwrap().unwrap().launch(),
         &reserved
     );
-    assert_eq!(acquired.locked.recover().unwrap(), Recovery::Exited);
+    recover_unspawned(&mut acquired.locked);
     for launch in [&reserved, &other] {
         let error = launch_refusal(&mut acquired.locked, launch);
         assert_eq!(error.code(), ErrorCode::SandboxLeased, "{error}");
@@ -415,7 +424,7 @@ fn a_lease_allows_one_launch_of_its_clone_under_the_lock_that_acquired_it() {
             .begin_launch(&other, &runtime(), &CAPABILITY)
             .unwrap(),
     );
-    assert_eq!(acquired.locked.recover().unwrap(), Recovery::Exited);
+    recover_unspawned(&mut acquired.locked);
     drop(acquired);
     // The launch of a lease whose acquisition's lock is gone, as a crash leaves it, begins under
     // no other lock.
