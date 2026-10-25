@@ -365,6 +365,22 @@ fn symlink_file(target: &Path, link: &Path) -> bool {
     let linked = std::os::unix::fs::symlink(target, link);
     #[cfg(windows)]
     let linked = std::os::windows::fs::symlink_file(target, link);
+    created_link(linked)
+}
+
+/// Links `link` to the directory `target` with a symbolic link, and returns whether it could, as
+/// [`symlink_file`] does.
+fn symlink_dir(target: &Path, link: &Path) -> bool {
+    #[cfg(unix)]
+    let linked = std::os::unix::fs::symlink(target, link);
+    #[cfg(windows)]
+    let linked = std::os::windows::fs::symlink_dir(target, link);
+    created_link(linked)
+}
+
+/// Returns whether a symbolic link was created, as `linked` reports, and fails unless Windows
+/// refused it.
+fn created_link(linked: io::Result<()>) -> bool {
     match linked {
         Ok(()) => true,
         Err(error) if cfg!(windows) => {
@@ -515,6 +531,174 @@ fn a_scratch_device_that_the_plan_cannot_initialize_goes() {
         fs::metadata(plan.scratch_path()).unwrap().len(),
         SCRATCH_LEN
     );
+}
+
+#[test]
+fn files_that_are_the_scratch_device_of_a_clone_in_ram_are_refused() {
+    let fixture = Fixture::new();
+    let mut acquired = fixture.acquire("sandbox");
+    let sparse = sparse_path(&acquired);
+    let refusal = |what: &str, path: &Path| {
+        (
+            ErrorKind::Unsupported,
+            format!(
+                "the {what} {} is the scratch device of the clone {}, which the sandbox's store \
+                 owns: a plan of a clone in RAM replaces it, and a release of the lease removes it",
+                shown(path),
+                shown(&sparse)
+            ),
+        )
+    };
+    let seal_of = |path: &Path| FileSeal::of(&File::open(path).unwrap()).unwrap();
+    // An image there, which a plan of a clone in RAM would replace, is refused before anything
+    // replaces it...
+    stage(&sparse, IMAGE_LEN);
+    let binding = DistroBinding::import(&layer(&sparse), PolicyVerdict::ACCEPTED).unwrap();
+    let staged = seal_of(&sparse);
+    assert_eq!(
+        failure(fixture.plan(&mut acquired, &tmpfs_request(&sparse, &binding), NO_CONTENT)),
+        refusal("image", &sparse)
+    );
+    assert_eq!(seal_of(&sparse), staged);
+    // ...by whatever path the request names it: through a hard link...
+    let hard = fixture.path("images", "hard.erofs");
+    fs::hard_link(&sparse, &hard).unwrap();
+    let hard_binding = DistroBinding::import(&layer(&hard), PolicyVerdict::ACCEPTED).unwrap();
+    assert_eq!(
+        failure(fixture.plan(
+            &mut acquired,
+            &tmpfs_request(&hard, &hard_binding),
+            NO_CONTENT
+        )),
+        refusal("image", &hard)
+    );
+    // ...or through a link among its directories.
+    let alias = fixture.path("images", "alias");
+    if symlink_dir(acquired.locked.dir(), &alias) {
+        let aliased = alias.join(CLONE_SCRATCH_NAME);
+        let aliased_binding =
+            DistroBinding::import(&layer(&aliased), PolicyVerdict::ACCEPTED).unwrap();
+        assert_eq!(
+            failure(fixture.plan(
+                &mut acquired,
+                &tmpfs_request(&aliased, &aliased_binding),
+                NO_CONTENT
+            )),
+            refusal("image", &aliased)
+        );
+    }
+    // A release of the lease removes the file, so a clone on a scratch image takes it neither as
+    // its image, which is bound again, since the hard link changed its change time on Linux...
+    let binding = DistroBinding::import(&layer(&sparse), PolicyVerdict::ACCEPTED).unwrap();
+    let staged = seal_of(&sparse);
+    let (image, image_binding) = fixture.image("distro.erofs", IMAGE_LEN);
+    let (scratch, scratch_binding) = fixture.scratch("scratch.ext4", SCRATCH_LEN);
+    let request = scratch_request(&sparse, &binding, &scratch, &scratch_binding);
+    assert_eq!(
+        failure(fixture.plan(&mut acquired, &request, NO_CONTENT)),
+        refusal("image", &sparse)
+    );
+    assert_eq!(seal_of(&sparse), staged);
+    // ...nor as its scratch image, whose claim the refused plan releases.
+    fs::remove_file(&sparse).unwrap();
+    stage(&sparse, SCRATCH_LEN);
+    let sparse_binding = ScratchBinding::bind(&sparse).unwrap();
+    let request = scratch_request(&image, &image_binding, &sparse, &sparse_binding);
+    assert_eq!(
+        failure(fixture.plan(&mut acquired, &request, NO_CONTENT)),
+        refusal("scratch image", &sparse)
+    );
+    assert_eq!(fs::metadata(&sparse).unwrap().len(), SCRATCH_LEN);
+    assert!(released(|| sparse_binding
+        .check(&sparse, Instant::now())
+        .is_ok()));
+    assert_eq!(acquired.locked.reserved(), Some(acquired.lease.launch()));
+}
+
+#[test]
+fn what_the_store_never_creates_where_a_clone_in_ram_keeps_its_scratch_device_is_refused() {
+    let fixture = Fixture::new();
+    let (image, binding) = fixture.image("distro.erofs", IMAGE_LEN);
+    let mut acquired = fixture.acquire("sandbox");
+    let sparse = sparse_path(&acquired);
+    let refusal = (
+        ErrorKind::Unavailable,
+        format!(
+            "the scratch device of the clone {} is a link, or not a regular file, which the \
+             sandbox's store never creates there",
+            shown(&sparse)
+        ),
+    );
+    let request = tmpfs_request(&image, &binding);
+    // A directory, which a release could not remove.
+    fs::create_dir(&sparse).unwrap();
+    assert_eq!(
+        failure(fixture.plan(&mut acquired, &request, NO_CONTENT)),
+        refusal
+    );
+    assert!(sparse.is_dir());
+    fs::remove_dir(&sparse).unwrap();
+    // A link to the directory of the images, through which the path of an image can pass, and
+    // which a plan would replace, leaving that path naming nothing.
+    if symlink_dir(image.parent().unwrap(), &sparse) {
+        let through = sparse.join("distro.erofs");
+        let through_binding =
+            DistroBinding::import(&layer(&through), PolicyVerdict::ACCEPTED).unwrap();
+        for request in [tmpfs_request(&through, &through_binding), request.clone()] {
+            assert_eq!(
+                failure(fixture.plan(&mut acquired, &request, NO_CONTENT)),
+                refusal
+            );
+        }
+        assert!(
+            fs::symlink_metadata(&sparse)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert!(fs::metadata(&through).unwrap().is_file());
+        #[cfg(unix)]
+        fs::remove_file(&sparse).unwrap();
+        #[cfg(windows)]
+        fs::remove_dir(&sparse).unwrap();
+    }
+    // Once it is gone, the plan creates its file there.
+    let plan = fixture.plan(&mut acquired, &request, NO_CONTENT).unwrap();
+    assert!(fs::symlink_metadata(plan.scratch_path()).unwrap().is_file());
+}
+
+#[test]
+fn templates_that_a_runtime_of_other_contracts_captured_are_refused() {
+    // A store that a build of other boot or control contracts kept holds templates whose guests
+    // this build cannot drive.
+    type ClassChange = fn(&mut CaptureClass);
+    let changes: [(&str, ClassChange); 3] = [
+        ("boot contract", |class| class.runtime.boot_contract += 1),
+        ("control contract", |class| {
+            class.runtime.control_contract = "other-revision".to_owned();
+        }),
+        ("control session", |class| {
+            class.runtime.control_session += 1
+        }),
+    ];
+    for (name, change) in changes {
+        let fixture = Fixture::with(|class, _, _| change(class));
+        let (image, binding) = fixture.image("distro.erofs", IMAGE_LEN);
+        let mut acquired = fixture.acquire("sandbox");
+        assert_eq!(
+            failure(fixture.plan(&mut acquired, &tmpfs_request(&image, &binding), NO_CONTENT)),
+            (
+                ErrorKind::Unsupported,
+                format!(
+                    "the template's generation {} speaks other contracts than this build, which \
+                     restores none of its clones",
+                    fixture.generation.generation()
+                )
+            ),
+            "{name}"
+        );
+        assert_untouched(&acquired);
+    }
 }
 
 #[test]
