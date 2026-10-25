@@ -365,6 +365,74 @@ fn a_key_holds_what_its_capture_made() {
     assert_eq!(made.invariants(), &Invariants::new());
 }
 
+#[test]
+fn a_key_names_the_dns_server_that_its_command_line_names() {
+    // Neither manifest of the tests names a DNS server.
+    assert_eq!(network_key().dns_server().unwrap(), None);
+    let template = key(&support::class(), &ManifestSpec::template());
+    assert_eq!(template.dns_server().unwrap(), None);
+    let with_tokens = |class: CaptureClass, mut spec: ManifestSpec, tokens: &str| {
+        spec.contract().command_line.push_str(tokens);
+        key(&class, &spec)
+    };
+    let with_dns = |tokens| with_tokens(network_class(), ManifestSpec::with_network(), tokens);
+    for (tokens, server) in [
+        (
+            " virtnet_dns=10.0.0.1",
+            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+        ),
+        (
+            " virtnet_dns=fd00::a00:1",
+            IpAddr::V6(Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0xa00, 1)),
+        ),
+    ] {
+        assert_eq!(with_dns(tokens).dns_server().unwrap(), Some(server));
+    }
+    // OpenVMM writes one token at most, with one address in its canonical spelling, and only
+    // for a NIC.
+    let noncanonical = |value: &str| {
+        format!(
+            "its virtnet_dns= token names {value:?}, which is not an IP address in its canonical \
+             spelling"
+        )
+    };
+    let without_nic = with_tokens(
+        support::class(),
+        ManifestSpec::template(),
+        " virtnet_dns=10.0.0.1",
+    );
+    for (made, problem) in [
+        (
+            with_dns(" virtnet_dns=10.0.0.1 virtnet_dns=10.0.0.1"),
+            "it holds more than one virtnet_dns= token".to_owned(),
+        ),
+        (with_dns(" virtnet_dns="), noncanonical("")),
+        (
+            with_dns(" virtnet_dns=010.0.0.1"),
+            noncanonical("010.0.0.1"),
+        ),
+        (
+            with_dns(" virtnet_dns=fd00:0::a00:1"),
+            noncanonical("fd00:0::a00:1"),
+        ),
+        (
+            with_dns(" virtnet_dns=10.0.0.1,fd00::a00:1"),
+            noncanonical("10.0.0.1,fd00::a00:1"),
+        ),
+        (
+            without_nic,
+            "it names a DNS server, \"10.0.0.1\", for a template without a NIC".to_owned(),
+        ),
+    ] {
+        let error = made.dns_server().unwrap_err();
+        assert_eq!(error.code(), ErrorCode::Io, "{error}");
+        assert_eq!(
+            error.message(),
+            format!("the command line of the template's key is malformed: {problem}")
+        );
+    }
+}
+
 /// Asserts that the capture of `class` whose manifest is `spec` does not match its class, with
 /// a message that holds `expected`.
 fn assert_mismatched(class: &CaptureClass, spec: &ManifestSpec, expected: &str) {

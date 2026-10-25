@@ -3,7 +3,7 @@
 
 use std::collections::BTreeMap;
 use std::fmt;
-use std::net::{Ipv4Addr, Ipv6Addr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use sha2::{Digest, Sha256};
 
@@ -32,6 +32,10 @@ const CLASS_DOMAIN: &[u8] = b"nvx capture class\0";
 
 /// The generation of a CPU profile that a host derives, rather than a built-in one.
 const HOST_GENERATION: &str = "host";
+
+/// The prefix of the command line's token that names the DNS server of the guest's resolver,
+/// which OpenVMM writes once at most, with an IP address in its canonical spelling.
+const DNS_TOKEN: &str = "virtnet_dns=";
 
 /// The versions of the contracts of a template's clones that its runtime identity does not
 /// record: the snapshot format, the saved device state, the time ABI, the restore packet, and the
@@ -770,6 +774,52 @@ impl TemplateKey {
     /// Returns whether the template has a NIC.
     pub fn has_network(&self) -> bool {
         self.machine.nic.is_some()
+    }
+
+    /// Returns the SHA-256 digest of the canonical encoding of the network policy that OpenVMM
+    /// enforces on the template's NIC, which OpenVMM computed and the manifest records, or `None`
+    /// for a template without a NIC.
+    pub(crate) fn network_policy_digest(&self) -> Option<[u8; 32]> {
+        self.machine.nic.as_ref().map(|nic| nic.policy.digest)
+    }
+
+    /// Returns the address of the DNS server with which the template's guest configured its
+    /// resolver at boot: the one that the `virtnet_dns=` token of the command line names, which
+    /// OpenVMM adds when the policy of the template's NIC lets the guest reach the gateway's DNS
+    /// server, or `None` for a command line without the token.
+    ///
+    /// Fails with [`ErrorKind::Io`](crate::ErrorKind::Io) for a command line that OpenVMM does
+    /// not write: one with more than one such token, with a token for a template without a NIC,
+    /// or with a token that does not name one IP address in its canonical spelling.
+    pub(crate) fn dns_server(&self) -> Result<Option<IpAddr>> {
+        let mut tokens = self
+            .machine
+            .command_line
+            .split_ascii_whitespace()
+            .filter_map(|token| token.strip_prefix(DNS_TOKEN));
+        let Some(token) = tokens.next() else {
+            return Ok(None);
+        };
+        let malformed = |problem: &str| {
+            Err(Error::io(format!(
+                "the command line of the template's key is malformed: {problem}"
+            )))
+        };
+        if tokens.next().is_some() {
+            return malformed(&format!("it holds more than one {DNS_TOKEN} token"));
+        }
+        if self.machine.nic.is_none() {
+            return malformed(&format!(
+                "it names a DNS server, {token:?}, for a template without a NIC"
+            ));
+        }
+        match token.parse::<IpAddr>() {
+            Ok(server) if server.to_string() == token => Ok(Some(server)),
+            _ => malformed(&format!(
+                "its {DNS_TOKEN} token names {token:?}, which is not an IP address in its \
+                 canonical spelling"
+            )),
+        }
     }
 
     /// Returns the tag of the filesystem slot, on which a clone's export is bound.

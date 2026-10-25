@@ -6,6 +6,8 @@
 #[cfg(all(test, any(target_os = "linux", windows)))]
 mod tests;
 
+mod record;
+
 use std::fmt;
 use std::fs::{self, File};
 use std::io;
@@ -17,6 +19,7 @@ use super::key::TemplateKey;
 use super::manifest::BlockGeometry;
 use super::plan::MEMORY_BLOCK_SIZE;
 use super::store::{Acquired, Generation, Lease, Store};
+use crate::activation::{ActivationRecord, Journal, OverlayMode, WorkloadView};
 use crate::contract;
 use crate::error::{Error, ErrorKind, Result};
 use crate::host::filesystem;
@@ -43,11 +46,13 @@ const SPARSE_WHAT: &str = "scratch device of the clone";
 /// What the clone of a sandbox restores of the generation of a template that it leased: the
 /// adapter's plan of the clone's image and upper, the binding of the image, the binding of the
 /// scratch image of an upper on one, and the memory target, which [`ClonePlan::new`] checks
-/// against the generation.
+/// against the generation, and the settings of the clone's activation that the template does not
+/// fix, which the clone's [activation record](ClonePlan::activation) names: the workload's view
+/// of its VM, the overlay's mode, and the journal policy of a scratch image.
 #[derive(Debug, Clone)]
 pub struct CloneRequest {
     /// The adapter's plan, which [`SandboxPlan::adapter`] makes, of the clone's image, its
-    /// `distro`, over its upper: in RAM, a tmpfs, as
+    /// `distro`, an EROFS layer, over its upper: in RAM, a tmpfs, as
     /// [`SandboxUpper::RAM`](crate::host::sandbox::SandboxUpper::RAM) plans it, or on the
     /// caller's scratch image. Its network is the one of the template's NIC, which every restore
     /// of the template attaches, or none for a template without a NIC.
@@ -63,6 +68,15 @@ pub struct CloneRequest {
     /// The memory target, in bytes: the RAM of the clone's VM once restored, to which the restore
     /// expands the template's RAM in whole blocks.
     pub memory: u64,
+    /// The view that the clone's workload has of its VM: its hostname, the machine ID that it
+    /// sees, and the identity in which every execution runs, unless the executions name their
+    /// own.
+    pub workload: WorkloadView,
+    /// The mode of the clone's overlay, which selects its options.
+    pub overlay: OverlayMode,
+    /// Whether the filesystem of the scratch image of an upper on one may have a journal. An
+    /// upper in RAM has none, so the record of a clone in RAM leaves the policy out.
+    pub journal: Journal,
 }
 
 /// The upper of a clone's plan, with the file of the clone's `scratch` block device, which every
@@ -84,9 +98,9 @@ pub enum CloneUpper {
 }
 
 /// The plan of a clone: the generation of a template that the clone leased, with the clone's own
-/// image, upper, and memory target, checked against the generation, and a fresh capability, which
-/// [`new`](Self::new) makes under the lock of the sandbox that acquired the lease, before the
-/// clone's launch.
+/// image, upper, and memory target, checked against the generation, the clone's activation
+/// record, and a fresh capability, which [`new`](Self::new) makes under the lock of the sandbox
+/// that acquired the lease, before the clone's launch.
 ///
 /// A restore of a template attaches the template's two block devices, its `distro` and its
 /// `scratch`, with files of the clone's, which OpenVMM opens itself, by their paths, as
@@ -123,6 +137,11 @@ pub enum CloneUpper {
 ///   the claim. Nothing reads, formats, or copies the image.
 /// - The memory target must be whole blocks of [`MEMORY_BLOCK_SIZE`], and of the template's own
 ///   memory blocks, from the template's RAM to its RAM capacity.
+/// - The activation record, which the clone's guest applies in place of the configuration that
+///   the template captured, names the restore, with a fresh transaction ID, the clone's image,
+///   upper, and settings, the template's network, and the resources that the clone must have,
+///   as [`activation`](Self::activation) describes. Its image must be an EROFS layer, and its
+///   settings must keep the limits of a record, as [`Configuration::check`] checks them.
 /// - The capability is fresh: the plan draws it for the clone's launch.
 ///
 /// The plan's checks read the metadata of the clone's files, never their content.
@@ -130,6 +149,7 @@ pub enum CloneUpper {
 /// ```no_run
 /// use std::time::{Duration, Instant};
 ///
+/// use nvx::activation::{Journal, MachineIdMode, OverlayMode, WorkloadView};
 /// use nvx::host::sandbox::distro::{DISTRO_POLICY_REVISION, DistroBinding};
 /// use nvx::host::sandbox::{SandboxDistro, SandboxPlan, SandboxUpper};
 /// use nvx::host::store::CallerFiles;
@@ -157,15 +177,25 @@ pub enum CloneUpper {
 ///     policy_revision: DISTRO_POLICY_REVISION,
 ///     scratch: None,
 ///     memory: 8 * MEMORY_BLOCK_SIZE,
+///     workload: WorkloadView {
+///         hostname: b"clone".to_vec(),
+///         machine_id: MachineIdMode::Image,
+///         identity: None,
+///     },
+///     overlay: OverlayMode::UntrustedLowers,
+///     journal: Journal::Allowed,
 /// };
 /// let deadline = Instant::now() + Duration::from_secs(5);
 /// let plan = ClonePlan::new(store, &mut acquired, &request, deadline)?;
 /// // ... the clone's launch, under `acquired.locked`, as the launch that the lease reserves, of
-/// // `plan.snapshot()` with `plan.image().path()` and `plan.scratch_path()` ...
+/// // `plan.snapshot()` with `plan.image().path()` and `plan.scratch_path()`, whose guest applies
+/// // `plan.activation()` ...
 /// # let _ = plan;
 /// # Ok(())
 /// # }
 /// ```
+///
+/// [`Configuration::check`]: crate::activation::Configuration::check
 pub struct ClonePlan {
     /// The lease of the generation.
     lease: Lease,
@@ -181,6 +211,8 @@ pub struct ClonePlan {
     upper: CloneUpper,
     /// The memory target, in bytes.
     memory: u64,
+    /// The clone's activation record.
+    activation: ActivationRecord,
     /// The capability of the clone's launch.
     capability: [u8; CAPABILITY_LEN],
 }
@@ -227,11 +259,13 @@ impl ClonePlan {
     /// - with [`ErrorKind::Unsupported`] for a request that no clone takes: a plan of the sandbox
     ///   profile, with workload settings and its shares; a plan whose image is not the format and
     ///   identity that the binding names, as for a binding whose identity is not a UUID in its
-    ///   canonical text; an image or a scratch image whose path is relative, which OpenVMM would
-    ///   resolve against the directory in which it runs, holds a comma or a semicolon, which
-    ///   OpenVMM's block device options would split, or whose name ends in `.vhd`, `.vhdx`,
-    ///   `.vmgs`, or `.iso`, which OpenVMM would not attach as a raw image; and an upper on a
-    ///   scratch image without the image's binding, or one in RAM with a binding;
+    ///   canonical text; an image that is a GPT disk, of which this build restores no clone, since
+    ///   a clone's guest assembles its root only from an EROFS layer; an image or a scratch image
+    ///   whose path is relative, which OpenVMM would resolve against the directory in which it
+    ///   runs, holds a comma or a semicolon, which OpenVMM's block device options would split, or
+    ///   whose name ends in `.vhd`, `.vhdx`, `.vmgs`, or `.iso`, which OpenVMM would not attach as
+    ///   a raw image; and an upper on a scratch image without the image's binding, or one in RAM
+    ///   with a binding;
     /// - with [`ErrorKind::Other`] for a lease of another store, and a lock that is not the one
     ///   that acquired the lease, before the launch that it reserves began;
     /// - with [`ErrorKind::NotFound`] if the store no longer indexes the leased generation, with
@@ -243,6 +277,14 @@ impl ClonePlan {
     ///   NIC, or without one for a template with a NIC; and a memory target that is not whole
     ///   blocks of [`MEMORY_BLOCK_SIZE`] and of the template's memory blocks, from the template's
     ///   RAM to its RAM capacity;
+    /// - with [`ErrorKind::Io`] for a template whose command line names the DNS server of its
+    ///   guest's resolver in another form than OpenVMM writes: more than once, without a NIC, or
+    ///   other than as one IP address in its canonical spelling;
+    /// - with [`ErrorKind::Unsupported`] for settings that no activation record holds, as
+    ///   [`Configuration::check`] finds them, such as a hostname that is empty, longer than
+    ///   [`MAX_HOSTNAME_BYTES`](crate::activation::MAX_HOSTNAME_BYTES), or holds a NUL, and a
+    ///   workload identity whose UID or GID is 0, and with [`ErrorKind::Other`] if the
+    ///   transaction ID of the clone's restore cannot be drawn;
     /// - with [`ErrorKind::Unavailable`] for a link or a directory under a name that the sandbox's
     ///   store owns, and with [`ErrorKind::Io`] if the store's files cannot be listed or examined;
     /// - as [`DistroBinding::check`] and [`CheckedDistro::geometry`] fail, with
@@ -262,6 +304,8 @@ impl ClonePlan {
     ///   the check found, of the current user or an administrator, and that no one else may
     ///   change, and with [`ErrorKind::Unsupported`] for an image that is a file of the sandbox's
     ///   store.
+    ///
+    /// [`Configuration::check`]: crate::activation::Configuration::check
     pub fn new(
         store: &Store,
         acquired: &mut Acquired,
@@ -311,6 +355,7 @@ impl ClonePlan {
         let key = store.read_key(&generation)?;
         let snapshot = store.snapshot_dir(&generation)?;
         check_template(request, &key, &generation)?;
+        let activation = record::build(request, lease, &key)?;
         let owned = StoreFiles::of(locked)?;
         let image = check_image(request, &key, &owned, access)?;
         let capability = generate_capability()?;
@@ -333,6 +378,7 @@ impl ClonePlan {
             image,
             upper,
             memory: request.memory,
+            activation,
             capability,
         })
     }
@@ -385,6 +431,28 @@ impl ClonePlan {
         self.memory
     }
 
+    /// Returns the clone's activation record, which its guest applies in place of the
+    /// configuration that the template captured, and whose identity,
+    /// [`ActivationRecord::identity`], the guest's Ready reports.
+    ///
+    /// The record holds the restore section, with the restore's transaction ID, 16 random bytes
+    /// that the plan drew, and the template that the [lease](Lease::template) names; the image,
+    /// an EROFS layer, with the identity of its binding and the UUID that the guest expects of its
+    /// filesystem, if the adapter's plan names one; the upper, a tmpfs, or the scratch image, with
+    /// the identity of its binding and the request's journal policy; the request's overlay mode
+    /// and workload view; no export; the network of the template's NIC, if it has one, with the
+    /// identity of the policy that OpenVMM enforces there, as the template's key records it, the
+    /// DNS server with which the template's guest configured its resolver at boot, if the
+    /// template's [command line](TemplateKey::command_line) names one, unpublished listeners, and
+    /// the URL of the policy's proxy as the guest sees it, if any; and the template's processors,
+    /// all online, and the memory target, as the resources that the clone must have.
+    ///
+    /// The identity of a binding is the SHA-256 digest of a domain of its kind and of its serde
+    /// form, a few hundred bytes of metadata: the plan reads no content to compute it.
+    pub fn activation(&self) -> &ActivationRecord {
+        &self.activation
+    }
+
     /// Returns the capability of the clone's launch, which the plan drew, and which the VMM
     /// receives, as [`LockedStore::begin_launch`] stores it.
     pub fn capability(&self) -> &[u8; CAPABILITY_LEN] {
@@ -403,6 +471,7 @@ impl fmt::Debug for ClonePlan {
             .field("image", &self.image)
             .field("upper", &self.upper)
             .field("memory", &self.memory)
+            .field("activation", &self.activation)
             .finish_non_exhaustive()
     }
 }
@@ -426,6 +495,9 @@ fn check_request(request: &CloneRequest) -> Result<()> {
             binding.format(),
             binding.identity()
         )));
+    }
+    if matches!(binding.format(), DistroFormat::Gpt) {
+        return Err(record::gpt_refused());
     }
     check_disk_path(distro.pure_path(), "image")?;
     match (adapter.upper().pure_scratch_path(), &request.scratch) {
