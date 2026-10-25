@@ -22,9 +22,11 @@
 //!   session failed or the broker closed the tty, each but the first after a diagnostic on
 //!   standard error. In a template's VM, whose kernel command line names the platform snapshot
 //!   tier, the worker captures the VM before it assembles any root instead, on x86_64, as
-//!   `runtime_adapter::worker::capture` describes: it exits with 20 to 31, or with 1 once its
-//!   session failed, each after a diagnostic on standard error, unless a committed capture ended
-//!   the VM; see `runtime_adapter::template`.
+//!   `runtime_adapter::worker::capture` describes: it exits with 20 to 30, or, in a clone, which
+//!   it repairs, with 31 once it repaired the clone, with 40 to 45, 193, or 195 once the repair
+//!   failed, as `nvx::protocol::status` documents, or with 1 once its session failed, each after a
+//!   diagnostic on standard error, unless a committed capture ended the VM; see
+//!   `runtime_adapter::template`.
 //! - `runtime-adapter-guest idle` sleeps until a signal ends it.
 //! - `runtime-adapter-guest entries ROOT CGROUP` runs the executions of the worker's `entries`
 //!   probe in the root ROOT, each placed in the cgroup CGROUP, in a mount namespace of its own, and
@@ -174,9 +176,10 @@ fn worker(tty: &std::path::Path, sibling: Option<u32>) -> ExitCode {
 }
 
 /// Reads the kernel command line through `operations`, before anything else, and captures a
-/// template's VM on the tty `tty`, as `runtime_adapter::worker::capture` describes. Returns the
-/// status with which the worker ends then, after a diagnostic on standard error, or `None` in a
-/// VM that boots cold, whose worker serves the host.
+/// template's VM on the tty `tty`, as `runtime_adapter::worker::capture` describes, then repairs
+/// a clone that a restore of its snapshot started. Returns the status with which the worker ends
+/// then, after a diagnostic on standard error, or `None` in a VM that boots cold, whose worker
+/// serves the host.
 ///
 /// A command line that the worker cannot read, or that `runtime_adapter::template::boot` refuses,
 /// ends the worker with `COMMAND_LINE_STATUS`.

@@ -19,20 +19,31 @@
 //!
 //! A committed capture ends the template's VM. The worker returns only once the capture ended
 //! without a snapshot, or failed, or in a clone, which a restore of the snapshot started, as a
-//! [`Templated`] tells, and with which the worker ends. The worker does not repair a clone yet:
-//! the clone ends too, with its fence still closed.
+//! [`Templated`] tells, and with which the worker ends. In a clone, the worker repairs the restore
+//! next, with `nvx::guest::clone::repair`, behind its fence, which stays closed: the repair
+//! activates the restore's memory target, reseeds the kernel's random number generator, and
+//! finishes the restore, with the acknowledgement that the host awaits, which hands the deferred
+//! time work to the time daemon. NVX's `/init` started the daemon in the template, with the time
+//! ABI's boot step, before the worker, so the snapshot holds it, and PID 1 collects its status. The
+//! worker does not activate a clone yet: a clone that it repaired ends at once, with
+//! [`RESTORED_STATUS`] and its fence still closed, which may cut the deferred time work short. A
+//! repair that failed ends the clone with the [status](nvx::guest::clone::RepairError::status) of
+//! its failure, which `nvx::protocol::status` documents, and a capture request that failed in a
+//! clone, since the time ABI could not repair its restore, with the status of the time ABI's
+//! violation, as [`capture_status`] tells.
 
 use std::fmt;
 use std::io::{self, Read, Write};
 use std::path::Path;
 
 use nvx::guest::clone::{
-    AdmissionFence, CaptureBarrier, CaptureError, CapturePreparation, CaptureStage, Captured,
-    Devices, Restored,
+    self, AdmissionFence, CaptureBarrier, CaptureCause, CaptureError, CapturePreparation,
+    CaptureStage, Captured, Devices, RepairError, Repaired,
 };
 use nvx::guest::nvxs::GuestConnection;
 use nvx::guest::root::Device;
 use nvx::guest::terminal::Terminal;
+use nvx::guest::time::TimeError;
 use nvx::protocol::root::{DISTRO_MMIO_BASE, SCRATCH_MMIO_BASE};
 
 use crate::guest::{self, ServeError};
@@ -46,10 +57,11 @@ pub const FILESYSTEM_TAG: &str = "microvm";
 /// The worker's fence of workload admission in a template's VM, which it hands the capture's
 /// preparation.
 ///
-/// The worker of a template's VM admits no execution before the capture, nor, in a clone, before
-/// repair acknowledged the restore. Closing the fence acquires it, as `nvx::guest::clone`
-/// requires: [`close`](AdmissionFence::close) fails while the fence is closed, whoever closed it,
-/// and leaves it closed.
+/// The worker of a template's VM admits no execution before the capture, nor in a clone, which it
+/// repairs behind the fence, and whose activation would open it, which the worker does not run
+/// yet. Closing the fence acquires it, as `nvx::guest::clone` requires:
+/// [`close`](AdmissionFence::close) fails while the fence is closed, whoever closed it, and leaves
+/// it closed.
 #[derive(Debug, Default)]
 pub struct Admission {
     /// Whether the fence is closed, so that no execution starts.
@@ -116,6 +128,27 @@ pub fn stage_status(stage: CaptureStage) -> u8 {
         }
 }
 
+/// Returns the status with which the worker of a template's VM ends once its capture failed with
+/// `error`: the [status](nvx::guest::time::Violation::status) of the time ABI's violation, 195 or
+/// 193, when the request failed with one, as in a clone whose restore the time ABI could not
+/// repair, and the [status](stage_status) of the stage that failed otherwise.
+pub fn capture_status(error: &CaptureError) -> u8 {
+    let violation = match error.cause() {
+        CaptureCause::Time(TimeError::Violation(violation)) => Some(violation.status()),
+        _ => None,
+    };
+    failure_status(error.stage(), violation)
+}
+
+/// Returns the status of a capture that failed at `stage`, with a violation of the time ABI of
+/// the status `violation`, if any, as [`capture_status`] tells.
+fn failure_status(stage: CaptureStage, violation: Option<u8>) -> u8 {
+    match (stage, violation) {
+        (CaptureStage::Capture, Some(status)) => status,
+        (stage, _) => stage_status(stage),
+    }
+}
+
 /// How the capture of a template's VM ended, once the worker attached its session.
 #[derive(Debug)]
 pub enum Templated {
@@ -123,10 +156,17 @@ pub enum Templated {
     /// it, and the template continued: the barrier opened the fence, and restored the stall
     /// detectors' settings.
     Continued,
-    /// A restore of the template's snapshot started this VM, a clone, whose wall clock the time
-    /// ABI repaired, with the fence still closed and the stall detectors still suppressed, as
-    /// `Restored` holds them for repair, which the worker does not run yet.
-    Restored(Restored<Admission>),
+    /// A restore of the template's snapshot started this VM, a clone, which the worker repaired,
+    /// and does not activate yet.
+    Repaired {
+        /// The repaired clone, with its resources.
+        repaired: Repaired,
+        /// The worker's fence of workload admission, still closed: opening it is the activation's.
+        fence: Admission,
+    },
+    /// A restore of the template's snapshot started this VM, a clone, whose repair failed. The
+    /// fence stays closed.
+    Unrepaired(RepairError),
     /// A stage of the capture failed. The preparation released what it took, and a failed
     /// request left the fence closed.
     Failed(CaptureError),
@@ -134,12 +174,15 @@ pub enum Templated {
 
 impl Templated {
     /// Returns the status with which the worker, and with it the VM, ends: [`CONTINUED_STATUS`],
-    /// [`RESTORED_STATUS`], or the [status](stage_status) of the stage that failed.
+    /// [`RESTORED_STATUS`] once it repaired a clone, the
+    /// [status](nvx::guest::clone::RepairError::status) of a repair that failed, or the
+    /// [status](capture_status) of a capture that failed.
     pub fn status(&self) -> u8 {
         match self {
             Self::Continued => CONTINUED_STATUS,
-            Self::Restored(_) => RESTORED_STATUS,
-            Self::Failed(error) => stage_status(error.stage()),
+            Self::Repaired { .. } => RESTORED_STATUS,
+            Self::Unrepaired(error) => error.status(),
+            Self::Failed(error) => capture_status(error),
         }
     }
 }
@@ -150,9 +193,18 @@ impl fmt::Display for Templated {
             Self::Continued => formatter.write_str(
                 "the template's capture ended without a snapshot, and the template continued",
             ),
-            Self::Restored(_) => formatter.write_str(
-                "a restore of the template's snapshot started this clone, which the worker does \
-                 not repair",
+            Self::Repaired { repaired, .. } => write!(
+                formatter,
+                "a restore of the template's snapshot started this clone, which the worker \
+                 repaired, with {} online CPUs and {} bytes of memory, and does not activate",
+                repaired.cpus(),
+                repaired.memory()
+            ),
+            Self::Unrepaired(error) => write!(
+                formatter,
+                "the repair of this clone, which a restore of the template's snapshot started, \
+                 {error} ({})",
+                error.progress()
             ),
             Self::Failed(error) => error.fmt(formatter),
         }
@@ -160,7 +212,8 @@ impl fmt::Display for Templated {
 }
 
 /// Captures the template's VM on its control tty at `tty`, as the [module documentation](self)
-/// describes, and returns how the capture ended.
+/// describes, and returns how the capture ended, once the worker repaired a clone that a restore
+/// of the snapshot started.
 ///
 /// It opens the tty through [`guest::on_terminal`], as the worker of a VM that boots cold does,
 /// and fails as that does if the tty cannot be opened or put in raw mode. It fails with
@@ -178,7 +231,14 @@ pub fn capture_on_terminal(tty: &Path) -> Result<Templated, ServeError> {
             let preparation = CapturePreparation::new(Admission::default(), devices());
             match preparation.prepare().and_then(CaptureBarrier::capture) {
                 Ok(Captured::Continued) => Templated::Continued,
-                Ok(Captured::Restored(restored)) => Templated::Restored(restored),
+                Ok(Captured::Restored(restored)) => {
+                    // The repair runs behind the fence, which stays closed.
+                    let (restore, fence) = restored.into_parts();
+                    match clone::repair(restore) {
+                        Ok(repaired) => Templated::Repaired { repaired, fence },
+                        Err(error) => Templated::Unrepaired(error),
+                    }
+                }
                 Err(error) => Templated::Failed(error),
             }
         })
@@ -208,6 +268,7 @@ mod tests {
 
     use nvx::guest::nvxs::GuestConnectionError;
     use nvx::protocol::nvxs::GuestSession;
+    use nvx::protocol::status;
 
     use super::*;
     use crate::root::RootStage;
@@ -248,13 +309,15 @@ mod tests {
         ];
         for (stage, status) in stages {
             assert_eq!(stage_status(stage), status, "{stage}");
+            assert_eq!(failure_status(stage, None), status, "{stage}");
         }
         assert_eq!(Templated::Continued.status(), CONTINUED_STATUS);
         assert_eq!(
             Templated::Continued.to_string(),
             "the template's capture ended without a snapshot, and the template continued"
         );
-        // No two outcomes of the worker share a status.
+        // No two outcomes of the worker share a status, nor one of a clone's repair or
+        // activation.
         let mut statuses = stages.map(|(_, status)| status).to_vec();
         statuses.extend([
             COMMAND_LINE_STATUS,
@@ -264,10 +327,36 @@ mod tests {
             0,
         ]);
         statuses.extend(RootStage::ALL.map(RootStage::exit_status));
+        statuses.extend(status::TIME_STATUSES);
+        statuses.extend(status::REPAIR_STATUSES);
+        statuses.extend(status::ACTIVATION_STATUSES);
         let count = statuses.len();
         statuses.sort_unstable();
         statuses.dedup();
         assert_eq!(statuses.len(), count);
+    }
+
+    #[test]
+    fn a_request_that_the_time_abi_could_not_repair_ends_with_the_violation_s_status() {
+        // In a clone, whose restore the time ABI's part of the repair refused.
+        assert_eq!(
+            failure_status(CaptureStage::Capture, Some(status::TIME_REPAIR)),
+            195
+        );
+        assert_eq!(
+            failure_status(CaptureStage::Capture, Some(status::TIME_CONFORMANCE)),
+            193
+        );
+        // A violation of the preparation, which only a report-only time ABI returns, keeps the
+        // stage's status.
+        assert_eq!(
+            failure_status(CaptureStage::BootChecks, Some(status::TIME_CONFORMANCE)),
+            23
+        );
+        assert_eq!(
+            failure_status(CaptureStage::CaptureChecks, Some(status::TIME_CONFORMANCE)),
+            24
+        );
     }
 
     #[test]

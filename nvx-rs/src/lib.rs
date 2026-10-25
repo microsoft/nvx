@@ -6,8 +6,9 @@
 //! control console. This crate holds everything it takes to drive one:
 //!
 //! - [`protocol`]: the codec of the control console, the `NVXS` session that OpenVMM brokers and
-//!   the `NVXC` frames of the guest agent, and the guest targets that a sandbox's live shares may
-//!   not take. It has no dependencies, so the host, the guest, and test doubles share it.
+//!   the `NVXC` frames of the guest agent, the guest targets that a sandbox's live shares may not
+//!   take, and the exit statuses with which a clone's guest fails fast. It has no dependencies,
+//!   so the host, the guest, and test doubles share it.
 //! - [`activation`]: the activation record of a layered root, the bounded, versioned, non-secret
 //!   record of the settings that its activation applies, which a clone restored from a template
 //!   reads in place of its captured configuration, and what Ready reports about the activation.
@@ -51,8 +52,8 @@
 //!   (`guest::root`), and reads the partition table of a GPT disk's block device (`guest::gpt`),
 //!   the typed calls through which it runs the time ABI's steps (`guest::time`) and reseeds after
 //!   a restore (`guest::reseed`) in its own process, and the preparation of a template's guest
-//!   for a capture before its root's assembly (`guest::clone`). The crate's `nvx-*` guest
-//!   binaries run the programs.
+//!   for a capture before its root's assembly, and the repair of its clones (`guest::clone`). The
+//!   crate's `nvx-*` guest binaries run the programs.
 //!
 //! # Example
 //!

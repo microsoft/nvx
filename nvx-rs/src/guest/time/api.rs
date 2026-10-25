@@ -15,10 +15,10 @@ use super::state::{
     CheckState, CheckStatus, Discontinuity, DowntimeSource, SampleRejection, TimeState,
 };
 use super::system::{
-    self, PORTB_GENERATION_ID_AVAILABLE, PORTB_PACKET_AVAILABLE, PRIVATE_FILE_MODE, RESTORE_PATH,
-    RESTORE_TEMP_PATH, RealOps, Runtime, SELECT_GENERATION_ID, SELECT_PACKET, SampleError,
-    SaveError, SpawnError, clock_ns, cpu_time_ns, current_frequency, fork_process, initial_sample,
-    portb_read, set_frequency, state_apply, state_load, state_store, step_clock,
+    self, PORTB_GENERATION_ID_AVAILABLE, PORTB_PACKET_AVAILABLE, PRIVATE_FILE_MODE, PowerOffStatus,
+    RESTORE_PATH, RESTORE_TEMP_PATH, RealOps, Runtime, SELECT_GENERATION_ID, SELECT_PACKET,
+    SampleError, SaveError, SpawnError, clock_ns, cpu_time_ns, current_frequency, fork_process,
+    initial_sample, portb_read, set_frequency, state_apply, state_load, state_store, step_clock,
 };
 use super::{NSEC_PER_USEC, Phase};
 use crate::guest::GenerationId;
@@ -47,13 +47,19 @@ const REPORT_ONLY_TOKEN: &[u8] = b"nvx_time_abi=report-only";
 ///
 /// A violation of the time ABI is reported by a violation event on the console, in the kernel
 /// log, and on OpenVMM's debug console. In enforcing mode, the event stops the VM, so the call
-/// does not return. In report-only mode, the call fails with [`TimeError::Violation`] when the
-/// violation keeps it from doing its work. Otherwise, it goes on as `nvx-time` does, and the
-/// event is the only report of the violation, as each call tells.
+/// does not return. In strict mode, which a caller selects with [`strict`](Self::strict), so
+/// that it owns the VM's exit status and its shutdown, such as a guest init or agent that runs a
+/// clone's capture and repair in its own process, the call fails with [`TimeError::Violation`]
+/// instead, whose [`status`](Violation::status) is the one with which enforcing mode would have
+/// stopped the VM, and never stops the VM. In report-only mode, the call fails with
+/// [`TimeError::Violation`] when the violation keeps it from doing its work. Otherwise, it goes
+/// on as `nvx-time` does, and the event is the only report of the violation, as each call tells.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TimeAbi {
     /// Whether violations are reported instead of stopping the VM.
     report_only: bool,
+    /// Whether a violation that stops the VM in enforcing mode fails the call instead.
+    strict: bool,
 }
 
 impl TimeAbi {
@@ -62,12 +68,32 @@ impl TimeAbi {
     pub fn new() -> Self {
         Self {
             report_only: cmdline_requests_report_only(),
+            strict: false,
         }
     }
 
     /// Returns the time ABI in report-only mode, whatever the kernel command line selects.
     pub fn report_only() -> Self {
-        Self { report_only: true }
+        Self {
+            report_only: true,
+            strict: false,
+        }
+    }
+
+    /// Returns the time ABI in strict mode, unless it is in report-only mode, which it keeps: a
+    /// violation that stops the VM in enforcing mode fails the call instead, after its event,
+    /// with [`TimeError::Violation`], the call's first, so that the caller ends the VM, with the
+    /// violation's [`status`](Violation::status). The command tools, such as `nvx-time`, keep
+    /// enforcing mode.
+    ///
+    /// The time daemon that [`start_daemon`](Self::start_daemon) starts enforces the ABI even
+    /// then, since no caller owns its failures, and so does the preparation of a capture that
+    /// `nvx::guest::clone` runs, as `nvx-time pre-capture` does.
+    pub fn strict(self) -> Self {
+        Self {
+            strict: !self.report_only,
+            ..self
+        }
     }
 
     /// Returns whether violations are reported instead of stopping the VM.
@@ -75,8 +101,24 @@ impl TimeAbi {
         self.report_only
     }
 
+    /// Returns whether a violation that stops the VM in enforcing mode fails the call instead.
+    pub fn is_strict(&self) -> bool {
+        self.strict
+    }
+
     /// Returns the runtime of one call.
     pub(crate) fn runtime(self) -> Runtime<'static> {
+        let runtime = self.enforcing_runtime();
+        if self.strict {
+            runtime.strict()
+        } else {
+            runtime
+        }
+    }
+
+    /// Returns the runtime of a call that enforces the ABI even in strict mode: in enforcing or
+    /// report-only mode, as the kernel command line selects.
+    fn enforcing_runtime(self) -> Runtime<'static> {
         Runtime::new(&RealOps, self.report_only)
     }
 
@@ -89,7 +131,8 @@ impl TimeAbi {
     /// [`start_daemon`](Self::start_daemon) starts the time daemon from its outcome,
     /// separately, which `nvx-time boot` does next.
     pub fn cold_boot(&self) -> Result<ColdBoot, TimeError> {
-        released(cold_boot(&self.runtime()))
+        let runtime = self.runtime();
+        settled(&runtime, cold_boot(&runtime))
     }
 
     /// Starts the time daemon of `boot`, the outcome of [`cold_boot`](Self::cold_boot), in a
@@ -102,7 +145,9 @@ impl TimeAbi {
     /// its standard streams on the null device, until the VM stops or `SIGTERM` stops it, and
     /// waits only for the children that it starts itself. It takes the command name `nvx-time`,
     /// by which the calls of the time ABI recognize it. The caller supervises it and collects
-    /// its status: no call of the time ABI waits for it.
+    /// its status: no call of the time ABI waits for it. The child enforces the ABI even when it
+    /// is [strict](Self::strict), since no caller owns its failures: a violation that it reports
+    /// stops the VM, unless the ABI is report-only.
     ///
     /// The call returns when the child starts, so the boot checks' failures, which the child
     /// reports by their events, do not fail it.
@@ -116,7 +161,7 @@ impl TimeAbi {
         match fork_process() {
             Ok(ForkResult::Child) => {
                 sys::reset_child_signal();
-                daemon::boot_checker(&self.runtime(), &boot)
+                daemon::boot_checker(&self.enforcing_runtime(), &boot)
             }
             Ok(ForkResult::Parent(child)) => Ok(child.raw().unsigned_abs()),
             Err(SpawnError::Ports(error)) => Err(error.into()),
@@ -126,7 +171,8 @@ impl TimeAbi {
 
     /// Reads the VM generation ID, which a [capture](Self::capture) needs.
     pub fn generation_id(&self) -> Result<GenerationId, TimeError> {
-        released(read_generation_id(&self.runtime()))
+        let runtime = self.runtime();
+        settled(&runtime, read_generation_id(&runtime))
     }
 
     /// Requests a capture through the snapshot port, preparation step 5, and, in a VM that a
@@ -144,7 +190,8 @@ impl TimeAbi {
     /// [`Restore::finished`] tells whether the call finished the restore, and how it reports a
     /// failed handoff of repair step 7.
     pub fn capture(&self, request: CaptureRequest) -> Result<CaptureOutcome, TimeError> {
-        released(capture(&self.runtime(), request))
+        let runtime = self.runtime();
+        settled(&runtime, capture(&runtime, request))
     }
 
     /// Finishes a restore that [`capture`](Self::capture) left unfinished, after the caller
@@ -152,16 +199,17 @@ impl TimeAbi {
     /// CPUs that it brought online, acknowledges it when asked, repair step 6, and hands repair
     /// step 7, the restore checks and the release of the stall detectors, to the time daemon.
     ///
-    /// Without a running daemon, an enforcing call reports a violation of check C10, and a
-    /// report-only call runs step 7 itself, which needs a process that has no other thread. Step
-    /// 7 forces an RCU grace period in a grandchild, which a child of the call waits for until
-    /// the RCU stall timeout at the latest. The call waits for that child alone, whatever the
-    /// process's disposition of `SIGCHLD`, so a release that outlives the timeout passes to
-    /// init, or to the nearest subreaper, without the process's descriptors. The call returns
-    /// when step 7 ends, which reports its failures by their events only, as
+    /// Without a running daemon, an enforcing or strict call reports a violation of check C10,
+    /// and a report-only call runs step 7 itself, which needs a process that has no other
+    /// thread. Step 7 forces an RCU grace period in a grandchild, which a child of the call waits
+    /// for until the RCU stall timeout at the latest. The call waits for that child alone,
+    /// whatever the process's disposition of `SIGCHLD`, so a release that outlives the timeout
+    /// passes to init, or to the nearest subreaper, without the process's descriptors. The call
+    /// returns when step 7 ends, which reports its failures by their events only, as
     /// `nvx-time restore-finish` does.
     pub fn restore_finish(&self, request: RestoreFinish) -> Result<(), TimeError> {
-        released(restore_finish(&self.runtime(), request))
+        let runtime = self.runtime();
+        settled(&runtime, restore_finish(&runtime, request))
     }
 
     /// Prepares the guest for a capture, as `nvx-time pre-capture` does: waits until the boot
@@ -169,9 +217,10 @@ impl TimeAbi {
     /// capture checks require, runs the capture checks, saves the stall detectors' settings and
     /// suppresses the detectors, and records the capture checks.
     ///
-    /// A capture check that fails reports a violation, which stops the VM in enforcing mode; a
-    /// report-only call goes on, as `nvx-time` does. A call that fails leaves the detectors as
-    /// they were, and never touches those of a capture that is pending already,
+    /// A capture check that fails reports a violation, which stops the VM in enforcing mode, and
+    /// in strict mode too, in which the preparation enforces the ABI, as `nvx-time pre-capture`
+    /// does; a report-only call goes on, as `nvx-time` does. A call that fails leaves the
+    /// detectors as they were, and never touches those of a capture that is pending already,
     /// [`PreCaptureError::Pending`], unless it
     /// [holds their suppression](PreCaptureError::holds_suppression), which the caller then
     /// releases with [`cancel_capture`](Self::cancel_capture), as after a call that succeeded.
@@ -179,7 +228,10 @@ impl TimeAbi {
     /// [`PreCaptureError::PortRelease`], if the thread may still hold some of the permission for
     /// the ports.
     pub(crate) fn pre_capture(&self) -> Result<(), PreCaptureError> {
-        released_preparation(pre_capture(&self.runtime()), sys::check_released())
+        released_preparation(
+            pre_capture(&self.enforcing_runtime()),
+            sys::check_released(),
+        )
     }
 
     /// Restores the stall detectors' settings that [`pre_capture`](Self::pre_capture) saved, and
@@ -212,6 +264,16 @@ fn cmdline_requests_report_only() -> bool {
 fn released<T>(result: Result<T, TimeError>) -> Result<T, TimeError> {
     sys::check_released().map_err(TimeError::from)?;
     result
+}
+
+/// Ends a call of `runtime` with `result`, as `released` does, unless the call reported a
+/// violation in strict mode, with which it fails instead: the first that it reported, with which
+/// enforcing mode would have stopped the VM.
+fn settled<T>(runtime: &Runtime<'_>, result: Result<T, TimeError>) -> Result<T, TimeError> {
+    released(match runtime.take_violation() {
+        Some(violation) => Err(TimeError::Violation(violation)),
+        None => result,
+    })
 }
 
 /// Ends a preparation of a capture with `result`, unless the calling thread may still hold port
@@ -265,6 +327,10 @@ fn cold_boot(runtime: &Runtime<'_>) -> Result<ColdBoot, TimeError> {
         Ok(initial) => Some((initial, clock_ns(sys::Clock::Monotonic))),
         Err(detail) => {
             checks.fail(runtime, CheckId::C12, detail);
+            // A strict call stops where enforcing mode stops the VM.
+            if let Some(violation) = runtime.take_violation() {
+                return Err(TimeError::Violation(violation));
+            }
             None
         }
     };
@@ -1162,19 +1228,23 @@ fn restore_finish(runtime: &Runtime<'_>, request: RestoreFinish) -> Result<(), T
     })
 }
 
-/// Reports that restore-time repair failed, which stops the VM unless report-only, and returns
-/// the violation.
+/// Reports that restore-time repair failed, which stops the VM unless report-only or strict,
+/// and returns the violation.
 fn repair_failed(
     runtime: &Runtime<'_>,
     code: ViolationCode,
     detail: impl AsRef<[u8]>,
 ) -> TimeError {
     runtime.repair_failure(code, detail.as_ref());
-    TimeError::Violation(Violation::new(code, detail.as_ref()))
+    TimeError::Violation(Violation::new(
+        PowerOffStatus::Repair,
+        code,
+        detail.as_ref(),
+    ))
 }
 
-/// Reports that check `id` failed in `phase`, which stops the VM unless report-only, and
-/// returns the violation.
+/// Reports that check `id` failed in `phase`, which stops the VM unless report-only or strict,
+/// and returns the violation.
 fn check_failed(
     runtime: &Runtime<'_>,
     phase: Phase,
@@ -1183,6 +1253,7 @@ fn check_failed(
 ) -> TimeError {
     Checks::empty(phase).fail(runtime, id, detail.as_ref());
     TimeError::Violation(Violation::new(
+        PowerOffStatus::Conformance,
         ViolationCode::Conformance(id),
         detail.as_ref(),
     ))
@@ -1191,6 +1262,8 @@ fn check_failed(
 /// A violation of the time ABI, which a violation event reported.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Violation {
+    /// The status with which enforcing mode stops the VM for the violation.
+    status: PowerOffStatus,
     /// The ABI's code of the violation.
     code: String,
     /// The event's detail.
@@ -1198,12 +1271,24 @@ pub struct Violation {
 }
 
 impl Violation {
-    /// Returns the violation of `code`, with `detail`.
-    fn new(code: ViolationCode, detail: &[u8]) -> Self {
+    /// Returns the violation of `code`, with `detail`, for which enforcing mode stops the VM
+    /// with `status`.
+    pub(crate) fn new(status: PowerOffStatus, code: ViolationCode, detail: &[u8]) -> Self {
         Self {
+            status,
             code: code.to_string(),
             detail: String::from_utf8_lossy(detail).into_owned(),
         }
+    }
+
+    /// Returns the exit status with which enforcing mode stops the VM for the violation, and
+    /// with which a [strict](TimeAbi::strict) caller ends it: 193,
+    /// [`TIME_CONFORMANCE`](crate::protocol::status::TIME_CONFORMANCE), for a conformance check
+    /// that failed, or 195, [`TIME_REPAIR`](crate::protocol::status::TIME_REPAIR), for the
+    /// repair of a restore that failed. Only the time daemon stops the VM with 194,
+    /// [`TIME_VIOLATION`](crate::protocol::status::TIME_VIOLATION).
+    pub fn status(&self) -> u8 {
+        self.status.code()
     }
 
     /// Returns the time ABI's code of the violation, such as `G_REPAIR_PACKET`.
@@ -1221,6 +1306,29 @@ impl Display for Violation {
     /// Writes the code and the detail, such as `G_REPAIR_PACKET: restore packet version is 3`.
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(formatter, "{}: {}", self.code, self.detail)
+    }
+}
+
+#[cfg(test)]
+impl Violation {
+    /// Returns the violation with which a strict call fails once the time ABI's part of a
+    /// restore's repair failed, with `detail`, as the tests of the ABI's callers need one.
+    pub(crate) fn of_repair(detail: &str) -> Self {
+        Self::new(
+            PowerOffStatus::Repair,
+            ViolationCode::RepairClock,
+            detail.as_bytes(),
+        )
+    }
+
+    /// Returns the violation with which a strict finish fails without a running time daemon, a
+    /// failure of check C10, as the tests of the ABI's callers need one.
+    pub(crate) fn of_missing_daemon() -> Self {
+        Self::new(
+            PowerOffStatus::Conformance,
+            ViolationCode::Conformance(CheckId::C10),
+            b"the time daemon is not running",
+        )
     }
 }
 
@@ -1252,8 +1360,9 @@ pub enum TimeError {
     GenerationIdUnavailable,
     /// The time daemon's process could not be started.
     Spawn(io::Error),
-    /// The guest violates the time ABI, which a report-only call reports with a violation
-    /// event before it fails.
+    /// The guest violates the time ABI, which a report-only or [strict](TimeAbi::strict) call
+    /// reports with a violation event before it fails. Its
+    /// [`status`](Violation::status) is the one with which enforcing mode stops the VM.
     Violation(Violation),
 }
 
@@ -1311,9 +1420,11 @@ mod tests {
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
     use std::path::Path;
+    use std::sync::atomic::Ordering;
 
     use super::*;
     use crate::guest::time::system::tests::FakeOps;
+    use crate::protocol::status;
 
     /// Returns whether `error` holds the error number `errno`.
     fn has_errno(error: &io::Error, errno: Errno) -> bool {
@@ -1360,6 +1471,7 @@ mod tests {
             ),
             (
                 TimeError::Violation(Violation::new(
+                    PowerOffStatus::Repair,
                     ViolationCode::RepairPacket,
                     b"restore packet version is 3",
                 )),
@@ -1369,11 +1481,77 @@ mod tests {
         for (error, text) in cases {
             assert_eq!(error.to_string(), text, "{error:?}");
         }
-        let violation = Violation::new(ViolationCode::Conformance(CheckId::C10), b"detail");
-        assert_eq!(
-            (violation.code(), violation.detail()),
-            ("G_CONFORMANCE_C10", "detail")
+        let violation = Violation::new(
+            PowerOffStatus::Conformance,
+            ViolationCode::Conformance(CheckId::C10),
+            b"detail",
         );
+        assert_eq!(
+            (violation.status(), violation.code(), violation.detail()),
+            (193, "G_CONFORMANCE_C10", "detail")
+        );
+    }
+
+    #[test]
+    fn strict_mode_keeps_report_only_mode_and_spares_the_daemon_and_the_preparation() {
+        let enforcing = TimeAbi {
+            report_only: false,
+            strict: false,
+        };
+        assert!(!enforcing.is_strict() && !enforcing.runtime().is_strict());
+        let strict = enforcing.strict();
+        assert!(strict.is_strict() && !strict.is_report_only());
+        assert!(strict.runtime().is_strict());
+        // The daemon and the preparation of a capture enforce the ABI.
+        let spared = strict.enforcing_runtime();
+        assert!(!spared.is_strict() && !spared.report_only());
+        // Report-only mode stays report-only.
+        let report_only = TimeAbi::report_only().strict();
+        assert!(report_only.is_report_only() && !report_only.is_strict());
+        assert!(report_only.runtime().report_only() && !report_only.runtime().is_strict());
+        assert_eq!(TimeAbi::report_only(), report_only);
+    }
+
+    #[test]
+    fn a_strict_call_fails_with_the_violation_that_stops_an_enforcing_one() {
+        for (report_only, strict, power) in [
+            (false, false, status::TIME_REPAIR),
+            (false, true, 0),
+            (true, false, 0),
+            (true, true, 0),
+        ] {
+            let ops = FakeOps::new([]);
+            let runtime = Runtime::new(&ops, report_only);
+            let runtime = if strict { runtime.strict() } else { runtime };
+            for read in [
+                PacketRead::InvalidHeader(PacketError::Version(3)),
+                PacketRead::Generation(3),
+            ] {
+                let target = RepairTarget {
+                    previous_id: GenerationId::from_bytes([1; GenerationId::LENGTH]),
+                    entropy: EntropySink::Seed,
+                    finish: false,
+                    daemon_pid: None,
+                };
+                let error = settled(&runtime, repair_restore(&runtime, read, target, 0));
+                let Err(TimeError::Violation(violation)) = error else {
+                    panic!("{error:?}");
+                };
+                assert_eq!(violation.status(), status::TIME_REPAIR, "{violation}");
+                assert!(violation.code().starts_with("G_REPAIR_"), "{violation}");
+                // The call keeps no violation for the next one.
+                assert_eq!(runtime.take_violation(), None);
+            }
+            assert_eq!(ops.power.load(Ordering::Relaxed), usize::from(power));
+            // Each violation has its event, in its mode's form.
+            let console = String::from_utf8(ops.console.lock().unwrap().clone()).unwrap();
+            let prefix = if report_only {
+                "NVX-TIME-REPORT-VIOLATION: "
+            } else {
+                "NVX-TIME-ABI-VIOLATION: "
+            };
+            assert_eq!(console.matches(prefix).count(), 2, "{console}");
+        }
     }
 
     #[test]
@@ -1769,6 +1947,67 @@ mod tests {
         match sys::fork_isolated_test().unwrap() {
             ForkResult::Child => {
                 let outcome = std::panic::catch_unwind(capture_in_each_mode);
+                sys::exit_immediately(u8::from(outcome.is_err()));
+            }
+            ForkResult::Parent(child) => {
+                assert_eq!(sys::wait(child), Some(sys::ChildStatus::Exited(0)));
+            }
+        }
+    }
+
+    /// Runs, through the fakes, cold boots whose initial sample fails check C12, in strict mode
+    /// and then in report-only mode, on a tmpfs at `/run` in a mount namespace of the process's
+    /// own.
+    fn cold_boot_in_strict_and_report_only_mode() {
+        sys::enter_private_mount_namespace().unwrap();
+        let _run = sys::TmpfsMount::mount(c"nvx-test", c"/run", c"mode=0755").unwrap();
+        // Port B offers no time-sample window, so the initial sample fails check C12.
+        let ops = FakeOps::new([0]);
+        let runtime = Runtime::new(&ops, false).strict();
+        let error = super::cold_boot(&runtime);
+        let Err(TimeError::Violation(violation)) = error else {
+            panic!("{error:?}");
+        };
+        assert_eq!(
+            (violation.status(), violation.code()),
+            (status::TIME_CONFORMANCE, "G_CONFORMANCE_C12")
+        );
+        // A strict cold boot stops where enforcing mode stops the VM, without stopping it: it
+        // publishes no time state.
+        assert_eq!(ops.power.load(Ordering::Relaxed), 0);
+        assert!(state_load().is_err());
+        assert_eq!(runtime.take_violation(), None);
+        let console = String::from_utf8(ops.console.lock().unwrap().clone()).unwrap();
+        assert!(
+            console.starts_with(
+                "NVX-TIME-ABI-VIOLATION: v=1 code=G_CONFORMANCE_C12 source=conformance phase=boot "
+            ),
+            "{console}"
+        );
+        // A report-only cold boot goes on, and leaves the wall clock unsynchronized.
+        let ops = FakeOps::new([0]);
+        let boot = super::cold_boot(&Runtime::new(&ops, true)).unwrap();
+        assert!(!boot.synchronized());
+        assert_eq!(boot.failures, 1);
+        assert!(!state_load().unwrap().synchronized);
+    }
+
+    #[test]
+    fn a_privileged_strict_cold_boot_stops_at_its_violation() {
+        if crate::guest::managed_agent::isolate_process_test(
+            "NVX_TIME_COLD_BOOT_PRIVILEGED_TEST_CHILD",
+            "guest::time::api::tests::a_privileged_strict_cold_boot_stops_at_its_violation",
+        ) {
+            return;
+        }
+        if !sys::holds_capability(sys::CAP_SYS_ADMIN).unwrap() {
+            return;
+        }
+        // A cold boot keeps its state and its locks in `/run/nvx`, which a child of the
+        // harness's process holds alone in a mount namespace of its own.
+        match sys::fork_isolated_test().unwrap() {
+            ForkResult::Child => {
+                let outcome = std::panic::catch_unwind(cold_boot_in_strict_and_report_only_mode);
                 sys::exit_immediately(u8::from(outcome.is_err()));
             }
             ForkResult::Parent(child) => {

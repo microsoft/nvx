@@ -41,6 +41,13 @@
 //! # }
 //! ```
 //!
+//! A violation of the ABI stops the VM in enforcing mode, the mode of the command tools, with a
+//! status that `nvx::protocol::status` publishes: 193 for a conformance check, 194 for the time
+//! daemon's watcher, and 195 for the repair of a restore. A caller that owns the VM's exit
+//! status and its shutdown takes the ABI in strict mode, with [`TimeAbi::strict`], in which a
+//! call fails with the violation instead, whose [`status`](Violation::status) the caller ends the
+//! VM with.
+//!
 //! `nvx-time` runs the conformance checks, the violation watcher and the wall-clock discipline
 //! in one daemon, a separate process, and the snapshot agent's time steps: the guest preparation
 //! steps of the architecture guide's section 5.3.2 and the guest repair steps of its section

@@ -722,13 +722,24 @@ through `worker::capture::capture_on_terminal`:
 
 Closing the worker's fence, `worker::capture::Admission`, acquires it: a close
 fails while the fence is closed, whoever closed it, and leaves it closed. The
-worker of a template's VM admits no execution before the capture, nor, in a
-clone, before repair acknowledged the restore. The worker returns from the
-capture only once the capture ended without a snapshot, or failed, or in a
-clone, which a restore of the snapshot started. It does not repair a clone yet:
-the clone ends with its fence still closed and its stall detectors still
-suppressed. The worker, and with it the VM, ends with one of these statuses,
-after a diagnostic on standard error:
+worker of a template's VM admits no execution before the capture. The worker
+returns from the capture only once the capture ended without a snapshot, or
+failed, or in a clone, which a restore of the snapshot started. In a clone, the
+worker repairs the restore next, with `nvx::guest::clone::repair`, behind its
+fence, which stays closed: the repair checks the online CPUs, activates the
+restore's memory target, reseeds the kernel's random number generator with the
+restore's fresh entropy, and finishes the restore, with the acknowledgement
+that the host awaits, which hands the deferred time work, the restore checks
+and the release of the stall detectors, to the time daemon. NVX's `/init`
+started the daemon in the template, with the time ABI's boot step, before the
+guest agent, so every clone holds it, and the guest agent's PID 1 collects its
+status. The repair takes the time ABI in strict mode, so that a violation of
+the ABI fails the repair, rather than stopping the VM, and the worker ends the
+VM with the failure's status. The worker does not activate a clone yet: a
+clone that it repaired ends at once, with its fence still closed, which may cut
+the deferred time work short. A failure of that work stops the VM with the time
+ABI's own status, since the daemon enforces the ABI. The worker, and with it
+the VM, ends with one of these statuses, after a diagnostic on standard error:
 
 | Status | When |
 | --- | --- |
@@ -740,19 +751,34 @@ after a diagnostic on standard error:
 | 24 | The time ABI's capture checks failed |
 | 25 | The stall detectors cannot be suppressed |
 | 26 | The VM generation ID cannot be read |
-| 27 | The capture request failed, which leaves the fence closed |
+| 27 | The capture request failed, which leaves the fence closed, other than by a violation of the time ABI in a clone |
 | 28 | The stall detectors' settings cannot be restored once the capture ended without a snapshot |
 | 29 | A stage of the capture failed that this build of the worker does not know |
 | 30 | The capture ended without a snapshot, as without a destination, or once OpenVMM rejected it, and the template continued |
-| 31 | A restore of the template's snapshot started this VM, a clone, which the worker does not repair yet |
+| 31 | A restore of the template's snapshot started this VM, a clone, which the worker repaired, and does not activate yet |
+| 40 | The clone's restore cannot be repaired: it holds no fresh entropy, or its capture finished it |
+| 41 | The clone's online CPUs cannot be read, are not a prefix of the CPUs, or do not meet the restore's processor target |
+| 42 | The restore's memory target is refused, before any memory block is added |
+| 43 | The activation of the restore's memory target failed |
+| 44 | The reseed of the kernel's random number generator failed |
+| 45 | The restore's finish failed, other than by a violation of the time ABI |
+| 193 | A conformance check of the time ABI failed in the clone's repair, such as the finish's, which needs a running time daemon |
+| 195 | The time ABI's part of the clone's repair failed, such as the validation of the restore packet, or the record of the restore |
 
 The statuses from 21 to 29 are `template::CAPTURE_STATUS_BASE` plus the number
 of the stage that failed, in the order in which
-`nvx::guest::clone::CaptureStage` declares the stages. A stage whose failure
-may leave the worker some of the permission for the time ABI's ports fails with
-the time ABI's port error, and the worker then starts no thread or process
-before it ends. A violation of the time ABI in enforcing mode stops the VM with
-the time ABI's own status, from 193 to 195, instead.
+`nvx::guest::clone::CaptureStage` declares the stages. A capture request that
+fails with a violation of the time ABI, which it does in a clone whose restore
+the time ABI could not repair, ends with the violation's status instead, as
+`worker::capture::capture_status` tells. `nvx::protocol::status` documents
+the statuses of a clone's repair, from 40 to 45, which
+`nvx::guest::clone::RepairError::status` selects, the time ABI's own, from 193
+to 195, and those that it reserves for a clone's activation, from 50 to 58. A
+stage whose failure may leave the worker some of the permission for the time
+ABI's ports fails with the time ABI's port error, and the worker then starts no
+thread or process before it ends. A violation of the time ABI in enforcing
+mode, in the capture's preparation or in the time daemon, stops the VM with the
+time ABI's own status, from 193 to 195, instead.
 
 ## Host program
 
