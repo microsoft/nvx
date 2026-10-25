@@ -401,6 +401,33 @@ fn a_lock_file_that_is_a_link_fails_at_once() {
     assert_eq!(fs::read(&target).unwrap(), CAPABILITY);
 }
 
+#[test]
+fn the_files_that_a_clone_kept_of_its_launch_go_and_nothing_else() {
+    let (_directory, store) = store();
+    let locked = store.lock(None).unwrap();
+    for path in [
+        store.clone_scratch_path(),
+        store.clone_activation_path(),
+        store.restore_ready_path(),
+        store.log_path(),
+        store.binding_path(),
+    ] {
+        fs::write(path, b"left").unwrap();
+    }
+    locked.remove_clone_files().unwrap();
+    let mut left: Vec<String> = fs::read_dir(store.dir())
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .collect();
+    left.sort();
+    // The binding goes later, once the release or the removal has removed the clone's files.
+    let mut expected = [CLONE_BINDING_NAME, LOCK_NAME, LOG_NAME];
+    expected.sort_unstable();
+    assert_eq!(left, expected);
+    // Nothing to remove is no failure.
+    locked.remove_clone_files().unwrap();
+}
+
 #[cfg(unix)]
 #[test]
 fn records_and_capabilities_that_are_not_regular_files_fail_at_once() {

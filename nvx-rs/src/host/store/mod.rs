@@ -17,6 +17,9 @@
 //!   clone.json             the binding of a clone to the generation of a template that it leases
 //!   clone-scratch.raw      the file of the scratch device of a clone whose upper is in RAM, a
 //!                          sparse file that the clone's plan creates
+//!   clone-activation.bin   the activation record of a clone, which its launch writes
+//!   restore.sock           the endpoint at which the launch of a clone awaits the restore-ready
+//!                          event of its VMM, on Linux
 //!   ...                    the caller's configuration record and other files, which it declares
 //! ```
 //!
@@ -197,12 +200,13 @@
 //! # Removal
 //!
 //! [`LockedStore::remove`] removes a sandbox that no VMM can run in: it refuses while the store
-//! records a VM or a launch, which the caller reattaches to, or recovers, first. It removes the
-//! sandbox's [clone binding](CLONE_BINDING_NAME) first, and makes its absence durable before
-//! anything else goes. It checks for those records, and removes the binding, through one handle of
-//! the directory, once it has checked through that handle that the directory holds its lock, so
-//! that no change of a link in the path meanwhile makes it remove another sandbox's binding. It
-//! then removes the store's files and the caller's, the configuration record last, and the
+//! records a VM or a launch, which the caller reattaches to, or recovers, first. It removes what a
+//! clone kept of its launch, as a release does, and the sandbox's
+//! [clone binding](CLONE_BINDING_NAME) first, and makes their absence durable before anything
+//! else goes. It checks for those records, and removes those files, through one handle of the
+//! directory, once it has checked through that handle that the directory holds its lock, so that
+//! no change of a link in the path meanwhile makes it remove another sandbox's files. It then
+//! removes the store's other files and the caller's, the configuration record last, and the
 //! temporary files that the store owns: those that an interrupted replacement of one of its files
 //! leaves, `.NAME.NUMBER.tmp`, and the VMM's [report staging file](#the-report-staging-file). It
 //! then refuses entries that are neither the store's nor the caller's, naming them, and keeps the
@@ -293,11 +297,32 @@ pub const CLONE_BINDING_NAME: &str = "clone.json";
 /// [`template::Store::release`](crate::host::template::Store::release) removes once the clone's VM
 /// has exited, as a [removal](self#removal) of the sandbox does.
 pub const CLONE_SCRATCH_NAME: &str = "clone-scratch.raw";
+/// Name of the activation record of a clone, in its canonical encoding, which the clone's launch
+/// writes before it spawns the clone's VMM, so that the restore activates the clone with that
+/// record and its transaction whatever happens to the launch's caller, and which
+/// [`template::Store::release`](crate::host::template::Store::release) removes once the clone's VM
+/// has exited, as a [removal](self#removal) of the sandbox does.
+pub const CLONE_ACTIVATION_NAME: &str = "clone-activation.bin";
+/// Name of the Linux socket at which the launch of a clone listens for the restore-ready event of
+/// its VMM, which OpenVMM sends once it has prepared the restore, before the restored VM runs; on
+/// Windows, the endpoint is a named pipe, whose name each launch draws at random.
+/// [`template::Store::release`](crate::host::template::Store::release) removes it once the clone's
+/// VM has exited, as a [removal](self#removal) of the sandbox does. Its name is as long as
+/// [`SOCKET_NAME`], so that both sockets' paths fit a Unix socket's address alike.
+pub const RESTORE_READY_NAME: &str = "restore.sock";
+/// The files that the clone of a sandbox keeps of its launch, which a release removes once the
+/// clone's VM has exited, as a [removal](self#removal) of the sandbox does, before the clone
+/// binding.
+const CLONE_FILE_NAMES: [&str; 3] = [
+    CLONE_SCRATCH_NAME,
+    CLONE_ACTIVATION_NAME,
+    RESTORE_READY_NAME,
+];
 /// Every file that the store keeps in a sandbox's directory. Replacing a record leaves a
 /// temporary file named `.NAME.NUMBER.tmp` beside it only if the replacement was interrupted, and
 /// a VMM that is killed while it writes its outcome report leaves the file in which it stages it;
 /// see [the report staging file](self#the-report-staging-file).
-pub const FILE_NAMES: [&str; 10] = [
+pub const FILE_NAMES: [&str; 12] = [
     LOCK_NAME,
     JOURNAL_NAME,
     RUNTIME_NAME,
@@ -308,6 +333,8 @@ pub const FILE_NAMES: [&str; 10] = [
     OUTCOME_NAME,
     CLONE_BINDING_NAME,
     CLONE_SCRATCH_NAME,
+    CLONE_ACTIVATION_NAME,
+    RESTORE_READY_NAME,
 ];
 
 /// Interval at which a lock that another holder has is tried again: the sandbox's lock, by a
@@ -504,6 +531,17 @@ impl SandboxStore {
     /// [`CLONE_SCRATCH_NAME`].
     pub fn clone_scratch_path(&self) -> PathBuf {
         self.path(CLONE_SCRATCH_NAME)
+    }
+
+    /// Returns the path of the activation record of a clone, [`CLONE_ACTIVATION_NAME`].
+    pub fn clone_activation_path(&self) -> PathBuf {
+        self.path(CLONE_ACTIVATION_NAME)
+    }
+
+    /// Returns the path of the Linux socket at which the launch of a clone awaits the
+    /// restore-ready event of its VMM, [`RESTORE_READY_NAME`].
+    pub fn restore_ready_path(&self) -> PathBuf {
+        self.path(RESTORE_READY_NAME)
     }
 
     /// Reads the runtime record, which names the sandbox's VM from the commit of its launch until
@@ -703,6 +741,31 @@ impl LockedStore {
             }
         }
         Ok(owned)
+    }
+
+    /// Removes what the clone of the sandbox kept of its launch in the sandbox's directory, whose
+    /// VM has exited: the file of its scratch device, [`CLONE_SCRATCH_NAME`], its activation
+    /// record, [`CLONE_ACTIVATION_NAME`], and the socket of its restore-ready event,
+    /// [`RESTORE_READY_NAME`]. A release, as a [removal](self#removal) does, removes them before
+    /// the clone binding, whose removal, once durable, makes theirs durable too, since all are
+    /// entries of the sandbox's directory. A file whose deletion is pending, as a Windows file
+    /// system without POSIX deletion leaves a removed file that another handle holds, is removed
+    /// already, as [`was_removed`](regular::was_removed) tells, so that a release that failed once
+    /// it removed the file can be retried.
+    pub(crate) fn remove_clone_files(&self) -> Result<()> {
+        for name in CLONE_FILE_NAMES {
+            let path = self.path(name);
+            match std::fs::remove_file(&path) {
+                Err(error)
+                    if error.kind() != io::ErrorKind::NotFound
+                        && !regular::was_removed(&path, &error) =>
+                {
+                    return Err(io_error(format!("cannot remove {}", path.display()))(error));
+                }
+                _ => {}
+            }
+        }
+        Ok(())
     }
 
     /// Returns the caller's files that the lock knows: those that a [lifecycle
