@@ -1106,6 +1106,189 @@ fn a_clone_on_a_scratch_image_passes_its_claim_to_its_vmm() {
 }
 
 #[test]
+fn a_clone_with_an_export_binds_it_to_its_template_s_dormant_filesystem_slot() {
+    let fixture = Fixture::new();
+    complete_snapshot(&fixture);
+    let (image, binding) = fixture.image("distro.erofs", IMAGE_LEN);
+    let mut acquired = fixture.acquire("sandbox");
+    let export = fixture.data_export("data");
+    let request = with_export(tmpfs_request(&image, &binding), &export);
+    let plan = fixture.plan(&mut acquired, &request, NO_CONTENT).unwrap();
+    let runtime = plan.key().runtime().clone();
+    let mut vmm = VmmDir::new();
+    let dir = vmm.path().to_owned();
+    let made = RefCell::new(None);
+    let command = fake_vmm(&dir, &made);
+    let hooks = Hooks {
+        command: &command,
+        ..Hooks::LAUNCH
+    };
+    let restoring = plan
+        .launch_with(&mut acquired, Path::new(OPENVMM), &runtime, hooks)
+        .unwrap();
+    let reference = restoring.starting().process().reference().clone();
+    vmm.reference = Some(reference.clone());
+    vmm.started();
+    // The export follows the clone's block devices: its directory on the dormant slot, writable,
+    // since the guest writes a directory in it, to which the export narrows the guest's writes.
+    let data = &export.children[0].root;
+    let mount = format!("{},{},rw", filesystem::GUEST_EXPORT, data.display());
+    let work = data.join("work");
+    let arguments = made.take().unwrap().arguments;
+    let devices = arguments
+        .iter()
+        .position(|argument| argument == "--single-process")
+        .unwrap();
+    assert_eq!(
+        arguments[6..devices],
+        [
+            "--mount",
+            mount.as_str(),
+            "--mount-write",
+            work.to_str().unwrap()
+        ]
+    );
+    // The restore sequence sends the export's table once the clone is ready.
+    assert_eq!(restoring.table, data_table());
+    assert_eq!(
+        restoring.abandon().unwrap(),
+        Recovery::Terminated(reference)
+    );
+}
+
+#[test]
+fn a_clone_whose_exported_objects_changed_since_its_plan_starts_nothing() {
+    let fixture = Fixture::new();
+    complete_snapshot(&fixture);
+    let (image, binding) = fixture.image("distro.erofs", IMAGE_LEN);
+    let request = tmpfs_request(&image, &binding);
+    let runtime = runtime_of(&fixture);
+    let hooks = Hooks {
+        command: &never_spawned,
+        ..Hooks::LAUNCH
+    };
+    let changed = |path: &Path| {
+        (
+            ErrorKind::Other,
+            format!(
+                "{} no longer names the host object it named at provision; deprovision the \
+                 sandbox and provision it again",
+                path.display()
+            ),
+        )
+    };
+    // A directory that the guest writes, in which it maps a directory that a workload could
+    // move, which another directory has replaced since the plan.
+    let mut moved = fixture.acquire("moved");
+    let data = fixture.exported("moved", &["inner"]);
+    let inner = data.join("inner");
+    let export = export_plan(
+        &[(&data, "/data", false), (&inner, "/inner", false)],
+        &[],
+        &[],
+    );
+    assert!(export.binds[1].identity.is_some());
+    let plan = fixture
+        .plan(
+            &mut moved,
+            &with_export(request.clone(), &export),
+            NO_CONTENT,
+        )
+        .unwrap();
+    fs::rename(&inner, data.join("renamed")).unwrap();
+    fs::create_dir(&inner).unwrap();
+    assert_eq!(
+        refused_at(
+            plan.launch_with(&mut moved, Path::new(OPENVMM), &runtime, hooks),
+            Stage::Launch,
+            Evidence::InvalidMappings,
+        ),
+        changed(&inner)
+    );
+    assert_unlaunched(&fixture, &moved);
+    // The exported directory, which is missing since the plan.
+    let mut missing = fixture.acquire("missing");
+    let export = fixture.data_export("missing");
+    let data = export.children[0].root.clone();
+    let plan = fixture
+        .plan(
+            &mut missing,
+            &with_export(request.clone(), &export),
+            NO_CONTENT,
+        )
+        .unwrap();
+    fs::remove_dir_all(&data).unwrap();
+    assert_eq!(
+        refused_at(
+            plan.launch_with(&mut missing, Path::new(OPENVMM), &runtime, hooks),
+            Stage::Launch,
+            Evidence::InvalidMappings,
+        ),
+        changed(&data)
+    );
+    assert_unlaunched(&fixture, &missing);
+    // The exported directory, which a file has replaced since the plan.
+    let mut replaced = fixture.acquire("replaced");
+    let export = fixture.data_export("replaced");
+    let data = export.children[0].root.clone();
+    let plan = fixture
+        .plan(&mut replaced, &with_export(request, &export), NO_CONTENT)
+        .unwrap();
+    fs::remove_dir_all(&data).unwrap();
+    fs::write(&data, b"file").unwrap();
+    assert_eq!(
+        refused_at(
+            plan.launch_with(&mut replaced, Path::new(OPENVMM), &runtime, hooks),
+            Stage::Launch,
+            Evidence::InvalidMappings,
+        ),
+        changed(&data)
+    );
+    assert_unlaunched(&fixture, &replaced);
+}
+
+#[test]
+fn a_clone_whose_export_cannot_be_inspected_starts_nothing_and_fails_with_the_host_s_evidence() {
+    let fixture = Fixture::new();
+    complete_snapshot(&fixture);
+    let (image, binding) = fixture.image("distro.erofs", IMAGE_LEN);
+    let request = tmpfs_request(&image, &binding);
+    let runtime = runtime_of(&fixture);
+    let hooks = Hooks {
+        command: &never_spawned,
+        ..Hooks::LAUNCH
+    };
+    // The plan pins an object at a name that the host's file system cannot hold: the failure to
+    // inspect it shows nothing of the object, so it is the host's own, not the request's.
+    let mut acquired = fixture.acquire("uninspected");
+    let data = fixture.exported("uninspected", &["inner"]);
+    let inner = data.join("inner");
+    let mut export = export_plan(
+        &[(&data, "/data", false), (&inner, "/inner", false)],
+        &[],
+        &[],
+    );
+    assert!(export.binds[1].identity.is_some());
+    export.binds[1].source = "n".repeat(300);
+    let unnamed = export.children[0].root.join(&export.binds[1].source);
+    let plan = fixture
+        .plan(&mut acquired, &with_export(request, &export), NO_CONTENT)
+        .unwrap();
+    assert_eq!(
+        refused_at(
+            plan.launch_with(&mut acquired, Path::new(OPENVMM), &runtime, hooks),
+            Stage::Launch,
+            Evidence::HostFailure,
+        ),
+        (
+            ErrorKind::Io,
+            format!("cannot inspect {}", unnamed.display())
+        )
+    );
+    assert_unlaunched(&fixture, &acquired);
+}
+
+#[test]
 fn a_clone_launches_only_as_the_launch_that_its_durable_binding_reserves() {
     let fixture = Fixture::new();
     complete_snapshot(&fixture);
@@ -1653,6 +1836,16 @@ impl CloneControl for RoleControl<'_> {
         Ok(Some(ReadyActivation::of(&record)))
     }
 
+    fn map(
+        &mut self,
+        _session: &mut Box<dyn Transport>,
+        _table: &[HostMap],
+        _deadline: Instant,
+    ) -> io::Result<()> {
+        // The role's clone has no export, so its sequence sends no mapping table.
+        unreachable!("a clone without an export got a mapping table")
+    }
+
     fn start(&mut self, _session: &mut Box<dyn Transport>, _deadline: Instant) -> io::Result<()> {
         if self.step == "starting" {
             crash(self.step);
@@ -2131,6 +2324,15 @@ impl CloneControl for ReattachControl {
         self.records.push(record.to_vec());
         let record = ActivationRecord::decode(record).unwrap();
         Ok((self.answer)(ReadyActivation::of(&record)))
+    }
+
+    fn map(
+        &mut self,
+        _session: &mut Box<dyn Transport>,
+        _table: &[HostMap],
+        _deadline: Instant,
+    ) -> io::Result<()> {
+        panic!("a reattach sends no mapping table")
     }
 
     fn start(&mut self, _session: &mut Box<dyn Transport>, _deadline: Instant) -> io::Result<()> {

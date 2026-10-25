@@ -532,7 +532,7 @@ pub fn plan(request: &ExportRequest<'_>) -> Result<Option<ExportPlan>> {
             .then_with(|| left.target.cmp(&right.target))
     });
     if request.owner == Owner::Caller {
-        check_caller_roots(&children)?;
+        check_caller_roots(&children, unsupported_inspection)?;
     }
     let plan = ExportPlan {
         children,
@@ -711,16 +711,18 @@ fn shows(outer: &Mapped<'_>, inner: &Mapped<'_>) -> bool {
 }
 
 /// Refuses an exported directory or file that belongs to UID 0 or GID 0, to which the caller
-/// owner would squash guest root.
-fn check_caller_roots(children: &[ExportChild]) -> Result<()> {
+/// owner would squash guest root, and fails as `uninspected` returns for one whose owner cannot be
+/// read, with its path and the failure.
+fn check_caller_roots(
+    children: &[ExportChild],
+    uninspected: fn(&Path, std::io::Error) -> Error,
+) -> Result<()> {
     #[cfg(unix)]
     for child in children {
         use std::os::unix::fs::MetadataExt;
 
-        let metadata = fs::metadata(&child.root).map_err(|error| {
-            Error::unsupported(format!("cannot inspect {}", child.root.display()))
-                .with_source(error)
-        })?;
+        let metadata =
+            fs::metadata(&child.root).map_err(|error| uninspected(&child.root, error))?;
         if metadata.uid() == 0 || metadata.gid() == 0 {
             return Err(Error::unsupported(format!(
                 "the caller owner squashes guest root to the owner of each exported directory or \
@@ -730,8 +732,42 @@ fn check_caller_roots(children: &[ExportChild]) -> Result<()> {
         }
     }
     #[cfg(not(unix))]
-    let _ = children;
+    let _ = (children, uninspected);
     Ok(())
+}
+
+/// Returns the failure of a plan that cannot inspect `path`, with `error`, which refuses the
+/// request.
+fn unsupported_inspection(path: &Path, error: std::io::Error) -> Error {
+    Error::unsupported(format!("cannot inspect {}", path.display())).with_source(error)
+}
+
+/// Returns the failure of [`ExportPlan::verify`] for `path`, which no longer names the host object
+/// that the plan found there.
+fn changed_object(path: &Path) -> Error {
+    Error::other(format!(
+        "{} no longer names the host object it named at provision; deprovision the sandbox and \
+         provision it again",
+        path.display()
+    ))
+}
+
+/// Returns the failure of [`ExportPlan::verify`] that cannot inspect `path`, an object that the
+/// plan found, with `error`: a path that no longer reaches the object, as the host sees it, whose
+/// object went, a component of which is no longer a directory, or that the host may no longer
+/// search or open, names it no longer, [`changed_object`], and any other failure is the host's
+/// own, which shows nothing of the object.
+fn uninspected(path: &Path, error: std::io::Error) -> Error {
+    if matches!(
+        error.kind(),
+        std::io::ErrorKind::NotFound
+            | std::io::ErrorKind::NotADirectory
+            | std::io::ErrorKind::PermissionDenied
+    ) {
+        changed_object(path).with_source(error)
+    } else {
+        Error::io(format!("cannot inspect {}", path.display())).with_source(error)
+    }
 }
 
 /// Explains why a mapped host directory, given in canonical form, cannot be exported, or returns

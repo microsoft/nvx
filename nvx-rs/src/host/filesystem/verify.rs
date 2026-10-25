@@ -10,7 +10,8 @@ use super::policy::{Writable, nearest_rule, policy_rule_problem};
 use super::{
     Bind, CALLER_OWNER_ON_WINDOWS, ExportChild, ExportPlan, FileIdentity, GUEST_EXPORT,
     MAX_AGGREGATE_POLICY_BYTES, MAX_CHILDREN, MAX_GUEST_PATH, Owner, ReservedTargets,
-    check_caller_roots, outermost, resolved_path_problem, target_problem, volume_root_refusal,
+    changed_object, check_caller_roots, outermost, resolved_path_problem, target_problem,
+    uninspected, volume_root_refusal,
 };
 use crate::error::{Error, Result};
 use crate::host::platform;
@@ -328,11 +329,14 @@ impl ExportPlan {
     /// would otherwise grant the whole directory, and a workload that may write a directory could
     /// rename a denied or mapped object inside it and put a decoy at its path, so the next start
     /// would hide or bind the decoy instead; these fail with
-    /// [`ErrorKind::Other`](crate::ErrorKind::Other). With the caller owner, the host must be a
-    /// Linux host, and no exported directory or file may belong to UID 0 or GID 0; these fail with
-    /// [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported). Run it while the VM is stopped,
-    /// so that no workload can race with it; OpenVMM checks each child's kind again when it opens
-    /// it.
+    /// [`ErrorKind::Other`](crate::ErrorKind::Other), as does a path that no longer reaches its
+    /// object, as the host sees it: one whose object went, one a component of which is no longer a
+    /// directory, and one that the host may no longer search or open. With the caller owner, the
+    /// host must be a Linux host, and no exported directory or file may belong to UID 0 or GID 0;
+    /// these fail with [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported). Any other
+    /// failure to inspect an object, which shows nothing of the object, fails with
+    /// [`ErrorKind::Io`](crate::ErrorKind::Io), with its cause. Run it while the VM is stopped, so
+    /// that no workload can race with it; OpenVMM checks each child's kind again when it opens it.
     pub fn verify(&self) -> Result<()> {
         for bind in self.binds.iter().filter(|bind| bind.read_only) {
             let (child, path) = self.bound(bind)?;
@@ -350,23 +354,14 @@ impl ExportPlan {
                 )));
             }
         }
-        let changed = |path: &Path| {
-            Err(Error::other(format!(
-                "{} no longer names the host object it named at provision; deprovision the \
-                 sandbox and provision it again",
-                path.display()
-            )))
-        };
         for child in &self.children {
-            let kind_matches = fs::symlink_metadata(&child.root).is_ok_and(|metadata| {
-                if child.file {
-                    metadata.is_file()
-                } else {
-                    metadata.is_dir()
-                }
-            });
+            let kind_matches = match fs::symlink_metadata(&child.root) {
+                Ok(metadata) if child.file => metadata.is_file(),
+                Ok(metadata) => metadata.is_dir(),
+                Err(error) => return Err(uninspected(&child.root, error)),
+            };
             if !kind_matches {
-                return changed(&child.root);
+                return Err(changed_object(&child.root));
             }
         }
         for bind in &self.binds {
@@ -376,7 +371,8 @@ impl ExportPlan {
             let (_, path) = self.bound(bind)?;
             match platform::file_identity(&path) {
                 Ok((device, index)) if (FileIdentity { device, index }) == expected => {}
-                _ => return changed(&path),
+                Ok(_) => return Err(changed_object(&path)),
+                Err(error) => return Err(uninspected(&path, error)),
             }
         }
         for child in &self.children {
@@ -386,7 +382,8 @@ impl ExportPlan {
                 };
                 match platform::file_identity(path) {
                     Ok((device, index)) if (FileIdentity { device, index }) == *expected => {}
-                    _ => return changed(path),
+                    Ok(_) => return Err(changed_object(path)),
+                    Err(error) => return Err(uninspected(path, error)),
                 }
             }
         }
@@ -394,13 +391,13 @@ impl ExportPlan {
             if cfg!(windows) {
                 return Err(Error::unsupported(CALLER_OWNER_ON_WINDOWS));
             }
-            check_caller_roots(&self.children)?;
+            check_caller_roots(&self.children, uninspected)?;
         }
         Ok(())
     }
 
     /// Returns the child that holds `bind` and the host path that `bind` maps.
-    fn bound(&self, bind: &Bind) -> Result<(&ExportChild, PathBuf)> {
+    pub(super) fn bound(&self, bind: &Bind) -> Result<(&ExportChild, PathBuf)> {
         let Some(child) = self.children.get(bind.child) else {
             return Err(Error::io(
                 "the sandbox state maps a path of an unknown host directory",

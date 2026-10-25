@@ -33,19 +33,22 @@
 //!   leases have drained.
 //! - [`ClonePlan::new`] plans the clone of a leased generation, as a [`CloneRequest`] asks, under
 //!   the lock that acquired the lease, before the clone's launch: it checks the clone's image
-//!   against its binding, its upper, in RAM or on the caller's scratch image, which it claims, and
-//!   its memory target against the template, and refuses a request that the template cannot
-//!   serve, such as an image of another length or block geometry than the template's placeholder,
-//!   before any VMM starts.
-//! - [`ClonePlan::launch`] launches the clone, as the launch that its lease reserves: OpenVMM
-//!   restores the generation's snapshot in place with the clone's devices, and the clone's
-//!   activation record waits in its sandbox, as a [`Restoring`] describes.
+//!   against its binding, its upper, in RAM or on the caller's scratch image, which it claims, its
+//!   memory target against the template, and its export, if it has one, a plan of one directory,
+//!   which the template's dormant filesystem slot binds, and refuses a request that the template
+//!   cannot serve, such as an image of another length or block geometry than the template's
+//!   placeholder, or an export of several directories or of a file, before any VMM starts.
+//! - [`ClonePlan::launch`] launches the clone, as the launch that its lease reserves, once the
+//!   objects of its export are still those that its plan found: OpenVMM restores the generation's
+//!   snapshot in place with the clone's devices and export, and the clone's activation record
+//!   waits in its sandbox, as a [`Restoring`] describes.
 //! - [`Restoring::activate`] runs the clone's restore sequence through the adapter's framing of
 //!   the clone's control session, a [`CloneControl`]: it waits for OpenVMM's restore-ready event,
 //!   then connects, sends the clone's activation record in the adapter's Activate, and checks the
 //!   activation that the clone's Ready reports, by a deadline that starts with the launch, and
 //!   resends the same record in a new session once the adapter lost one. [`Activated::start`]
-//!   then starts the clone's sandbox by a deadline that starts at its Ready, and
+//!   then sends the clone's mapping table, if it has an export, and starts the clone's sandbox
+//!   once the guest applied every mapping, by a deadline that starts at its Ready, and
 //!   [`Started::commit`] commits the launch.
 //! - The plan, the launch, and the restore sequence fail with a [`CloneFailure`], whose
 //!   [`Evidence`] attributes it to an [`Outcome`], at a [`Stage`], once the clone got as far as
