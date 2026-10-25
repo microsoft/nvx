@@ -31,6 +31,12 @@
 //!   sandbox, until [`Store::release`] ends the lease once the clone's VM has exited. A tombstone
 //!   quarantines a generation, which takes no new lease, and [`Store::retire`] deletes it once its
 //!   leases have drained.
+//! - [`ClonePlan::new`] plans the clone of a leased generation, as a [`CloneRequest`] asks, under
+//!   the lock that acquired the lease, before the clone's launch: it checks the clone's image
+//!   against its binding, its upper, in RAM or on the caller's scratch image, which it claims, and
+//!   its memory target against the template, and refuses a request that the template cannot
+//!   serve, such as an image of another length or block geometry than the template's placeholder,
+//!   before any VMM starts.
 //!
 //! # Canonical encoding
 //!
@@ -52,6 +58,7 @@
 //! `tests/vectors/template-key-v1.txt` fix version 1 of a key's encoding.
 
 mod canonical;
+mod clone;
 mod eligibility;
 mod key;
 mod manifest;
@@ -61,6 +68,7 @@ mod store;
 mod test_support;
 mod wire;
 
+pub use self::clone::{ClonePlan, CloneRequest, CloneUpper};
 pub use self::eligibility::{Downtime, DowntimeSource, Eligibility, HostTime, MAX_DOWNTIME_NS};
 pub use self::key::{CaptureClass, ClassIdentity, Invariants, KeyIdentity, TemplateKey};
 pub use self::manifest::{

@@ -18,6 +18,7 @@ use super::wire::{Field, Message, WireError};
 use crate::contract;
 use crate::error::{Error, ErrorCode, Result};
 use crate::host::process::BootId;
+pub use crate::host::sandbox::geometry::BlockGeometry;
 use crate::host::store::regular;
 use crate::hypervisor::Hypervisor;
 
@@ -432,18 +433,6 @@ pub(super) struct Interrupts {
     pub(super) status_page_start: u64,
     /// The length of the shared interrupt-status page, or 0 without one.
     pub(super) status_page_length: u64,
-}
-
-/// The length and block sizes of a sandbox block device.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct BlockGeometry {
-    /// The length that the device presents, in bytes: nonzero, and a multiple of the logical
-    /// block size.
-    pub length: u64,
-    /// The logical block size, in bytes: a power of two of at least 512.
-    pub logical_block_size: u32,
-    /// The physical block size, in bytes: a power of two of at least the logical block size.
-    pub physical_block_size: u32,
 }
 
 impl BlockGeometry {

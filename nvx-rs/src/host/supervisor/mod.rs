@@ -110,10 +110,13 @@
 //!    identity of the launch that the lease reserves,
 //!    [`Lease::launch`](crate::host::template::Lease::launch), before any VMM of the clone
 //!    exists. It returns the sandbox's lock.
-//! 2. Under that lock, the caller claims the clone's scratch image, if it has one, as
-//!    [`ScratchBinding::check`](crate::host::sandbox::scratch::ScratchBinding::check) does, and
-//!    runs [`launch`] as the reserved launch, which [`LockedStore::begin_launch`] requires of a
-//!    sandbox that holds a lease, and begins once, under that lock alone, whatever its outcome.
+//! 2. Under that lock, the caller plans the clone with
+//!    [`ClonePlan::new`](crate::host::template::ClonePlan::new), which checks the clone's image,
+//!    upper, and memory target against the generation, and claims the clone's scratch image, if
+//!    it has one, as
+//!    [`ScratchBinding::check`](crate::host::sandbox::scratch::ScratchBinding::check) does. It
+//!    then runs [`launch`] as the reserved launch, which [`LockedStore::begin_launch`] requires of
+//!    a sandbox that holds a lease, and begins once, under that lock alone, whatever its outcome.
 //! 3. Once the clone's VM has exited, as a stop, a termination, or a reattach verifies,
 //!    [`Store::release`](crate::host::template::Store::release) ends the lease, under the
 //!    sandbox's lock, taken through the lease's path,

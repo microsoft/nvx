@@ -319,10 +319,12 @@ impl Store {
     /// run. The sandbox's store clears those records only once it has verified that the VM's
     /// process exited, through its recorded [`ProcessRef`](crate::host::process::ProcessRef), as
     /// a stop or a [`reattach`](crate::host::supervisor::reattach) does. The release removes the
-    /// clone binding, and once its removal is durable, the lease's record in the store, so that an
-    /// interrupted release leaves a record that no binding names, which a
-    /// [retirement](Self::retire) removes, and never a binding without its record. It takes no
-    /// lock of the store.
+    /// file of the scratch device of a clone whose upper is in RAM,
+    /// [`CLONE_SCRATCH_NAME`](crate::host::store::CLONE_SCRATCH_NAME), which the clone's
+    /// [plan](crate::host::template::ClonePlan) created, then the clone binding, and once their
+    /// removal is durable, the lease's record in the store, so that an interrupted release leaves
+    /// a record that no binding names, which a [retirement](Self::retire) removes, and never a
+    /// binding without its record. It takes no lock of the store.
     ///
     /// The caller takes the sandbox's lock through the lease's path, as [`Lease::sandbox`]
     /// returns it, and as [`acquire`](Self::acquire) takes it, which has no links: a link in the
@@ -361,6 +363,10 @@ impl Store {
             )));
         }
         let recorded = self.check_records_dir(LEASES_NAME, LEASES_WHAT)?;
+        // The clone's VM has exited, and the sandbox launches nothing else under the lease, so no
+        // VM holds the scratch device's file of a RAM upper. The binding's removal makes the
+        // file's durable too, since both are entries of the sandbox's directory.
+        remove_if_present(&locked.clone_scratch_path())?;
         unbind(locked.dir(), sync)?;
         locked.reserve(None);
         if recorded {

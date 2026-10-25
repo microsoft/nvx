@@ -42,9 +42,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
+use super::geometry::BlockGeometry;
 use super::layer::SandboxLayer;
 use super::mount::os_error;
-use super::refused;
+use super::{block_geometry, refused};
 use crate::error::{Error, Result};
 use crate::host::artifacts::DISTRO_MANIFEST_SUFFIX;
 use crate::host::network::policy::MAX_JSON_DEPTH;
@@ -211,6 +212,29 @@ impl CheckedDistro {
     /// names them.
     pub(crate) fn bound(&self) -> (DistroFormat, &str) {
         (self.format, &self.identity)
+    }
+
+    /// Returns the block geometry that OpenVMM presents for the layer as the read-only `distro`
+    /// block device, read through the checked file, as OpenVMM reads it through its own open of
+    /// the layer: the layer's length, which must be a nonzero multiple of 512 bytes; logical
+    /// blocks of 512 bytes; and physical blocks of the I/O block size of the layer's filesystem,
+    /// its `st_blksize`, on Linux, of 4096 bytes on Windows, and of the logical block size on
+    /// other hosts, which must be a power of two of at least 512 bytes.
+    ///
+    /// It reads the file's metadata alone. A restore of a template compares the geometry of each
+    /// of its block devices with the one that the template recorded, so the image of a clone must
+    /// present the geometry of the template's `distro`, as
+    /// [`ClonePlan`](crate::host::template::ClonePlan) checks before the clone's launch.
+    ///
+    /// Fails with [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported) for a length or a
+    /// physical block size that OpenVMM refuses, and with [`ErrorKind::Io`](crate::ErrorKind::Io)
+    /// if the metadata cannot be read.
+    pub fn geometry(&self) -> Result<BlockGeometry> {
+        let description = match self.format {
+            DistroFormat::Erofs => "distro EROFS layer",
+            DistroFormat::Gpt => "distro GPT image",
+        };
+        block_geometry(&self.file, &self.path, description)
     }
 
     /// Returns the checked layer, for a prepared launch to move.

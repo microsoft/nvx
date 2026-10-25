@@ -17,7 +17,9 @@ use super::*;
 use crate::activation::TemplateReference;
 use crate::host::process::{Process, ProcessRef};
 use crate::host::store::files::write_private;
-use crate::host::store::{FORMAT, LaunchState, RUNTIME_NAME, Recovery, RuntimeIdentity};
+use crate::host::store::{
+    CLONE_SCRATCH_NAME, FORMAT, LaunchState, RUNTIME_NAME, Recovery, RuntimeIdentity,
+};
 use crate::host::supervisor::{self, Reattached, StopOutcome, VmmCommand};
 use crate::host::template::eligibility::MAX_DOWNTIME_NS;
 use crate::host::template::store::tests::{
@@ -784,19 +786,22 @@ fn a_release_makes_the_removal_of_its_binding_durable_before_it_removes_its_reco
         .dir()
         .join(LEASES_NAME)
         .join(format!("{}.json", lease.id()));
-    // Each sync notes its directory, and whether the binding and the record existed then.
+    // Each sync notes its directory, and whether the scratch device's file of a clone in RAM,
+    // the binding, and the record existed then.
     let synced = RefCell::new(Vec::new());
     let sync = |dir: &Path| -> Result<()> {
+        let scratch = sandbox.join(CLONE_SCRATCH_NAME).exists();
         let bound = sandbox.join(CLONE_BINDING_NAME).exists();
         synced
             .borrow_mut()
-            .push((dir.to_owned(), bound, record.exists()));
+            .push((dir.to_owned(), scratch, bound, record.exists()));
         Ok(())
     };
+    fs::write(sandbox.join(CLONE_SCRATCH_NAME), b"").unwrap();
     let mut locked = SandboxStore::lock_existing(&sandbox, &files(), None).unwrap();
     assert_eq!(store.release_with(&mut locked, &sync).unwrap(), Some(lease));
     drop(locked);
-    assert_eq!(*synced.borrow(), [(sandbox.clone(), false, true)]);
+    assert_eq!(*synced.borrow(), [(sandbox.clone(), false, false, true)]);
     assert!(!record.exists());
     // A release that cannot make the binding's removal durable keeps the record, which a
     // retirement removes once no binding names it.
