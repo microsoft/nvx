@@ -74,7 +74,7 @@ use crate::template::{CAPTURE_STATUS_BASE, CONTINUED_STATUS};
 
 /// The virtio-fs tag of the VM's host filesystem device, OpenVMM's one filesystem slot: dormant in
 /// a template's VM, and the device of the host export that the worker of a VM that boots cold
-/// mounts.
+/// mounts, and that the application of a clone's record mounts if the record has an export.
 pub const FILESYSTEM_TAG: &str = "microvm";
 
 /// Returns the root configuration that a template's VM holds as its own, since the host sends it
@@ -89,8 +89,9 @@ pub fn template_config() -> RootConfig {
 /// Returns the inputs of a clone's root's assembly that its template captured, from `config`, the
 /// template's own root configuration: its runtime directory; the distro and the scratch block
 /// devices, at the MMIO windows from which the worker of a VM that boots cold assembles its root,
-/// with the sizes that the configuration names, if any; and how long the assembly waits for each.
-/// The record of the clone's `Activate` holds the rest.
+/// with the sizes that the configuration names, if any; how long the assembly waits for each;
+/// and the host filesystem device, by [`FILESYSTEM_TAG`], through which the host attaches the
+/// export of a clone's record. The record of the clone's `Activate` holds the rest.
 pub fn root_template(config: &RootConfig) -> RootTemplate {
     RootTemplate {
         runtime: PathBuf::from(&config.runtime),
@@ -103,6 +104,7 @@ pub fn root_template(config: &RootConfig) -> RootTemplate {
             sectors: config.scratch_sectors,
         },
         timeout: config.device_timeout,
+        filesystem_tag: FILESYSTEM_TAG.to_owned(),
     }
 }
 
@@ -511,10 +513,13 @@ mod tests {
         let template = root_template(&config);
         assert_eq!(template.runtime, Path::new(&config.runtime));
         assert_eq!(template.timeout, config.device_timeout);
-        // The clone's root comes from the devices whose mounts the template's capture checks.
+        // The clone's root comes from the devices whose mounts the template's capture checks, and
+        // its export, if its record has one, through the host filesystem device that the capture
+        // found unmounted.
         let devices = devices();
         assert_eq!(template.distro, devices.distro);
         assert_eq!(template.scratch, devices.scratch);
+        assert_eq!(template.filesystem_tag, devices.filesystem_tag);
         // A configuration that sizes the devices sizes the clone's.
         let sized = RootConfig {
             distro_sectors: Some(8),
