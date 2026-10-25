@@ -1,6 +1,6 @@
 //! How the [host's order](super#the-hosts-order) of a VM with a layered root fails, which
-//! [`ready`](super::ready) and [`start_sandbox`](super::start_sandbox) return: an
-//! [`OrderError`].
+//! [`ready`](super::ready), [`activate`](super::activate), and
+//! [`start_sandbox`](super::start_sandbox) return: an [`OrderError`].
 
 use std::fmt;
 
@@ -15,8 +15,8 @@ use crate::root::{MapFailure, RootFailure};
 pub enum OrderError {
     /// The guest agent reported that a stage of the root failed, after which it ends.
     Root(RootFailure),
-    /// The guest agent assembled the root, but is of another build than the one that the host
-    /// ships, so the host sent it nothing more.
+    /// The guest agent assembled the root, or activated a clone, but is of another build than the
+    /// one that the host ships, so the host sent it nothing more.
     Build {
         /// The build that the guest agent reported in its `Ready`.
         reported: String,
