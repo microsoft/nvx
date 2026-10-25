@@ -685,19 +685,19 @@ impl LockedStore {
         self.reserved.as_ref()
     }
 
-    /// Returns the paths of the entries of the sandbox's directory that the store owns now: its
-    /// files, [`FILE_NAMES`], the temporary files of its records, and the files in which a VMM
-    /// staged an outcome report, which the store's transitions replace and remove. Entries whose
-    /// names are not Unicode are none of them.
+    /// Returns the paths at which the store reaches the entries of the sandbox's directory that
+    /// it owns, which its transitions replace and remove: its files, [`FILE_NAMES`], at its own
+    /// paths, whether or not they exist, which the file system resolves as it resolves every
+    /// name, without regard to case on Windows, say; and the temporary files of its records and
+    /// the files in which a VMM staged an outcome report, under the names by which the directory
+    /// lists them now, as a [removal](self#removal) finds them.
     pub(crate) fn owned_entries(&self) -> io::Result<Vec<PathBuf>> {
-        let mut owned = Vec::new();
+        let mut owned: Vec<PathBuf> = FILE_NAMES.iter().map(|name| self.path(name)).collect();
         for entry in std::fs::read_dir(self.dir())? {
             let entry = entry?;
             let name = entry.file_name();
             if let Some(name) = name.to_str()
-                && (FILE_NAMES.contains(&name)
-                    || is_store_temporary(name)
-                    || is_report_staging(name))
+                && (is_store_temporary(name) || is_report_staging(name))
             {
                 owned.push(entry.path());
             }
