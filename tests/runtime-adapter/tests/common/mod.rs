@@ -29,6 +29,7 @@ use nvx::host::artifacts::{ArtifactDir, Artifacts, Guest};
 use nvx::host::process::Process;
 use nvx::host::store::{LOG_NAME, RuntimeRecord, SandboxStore};
 use nvx::host::supervisor::{self, Reattached, StopOutcome};
+use nvx::host::template::{CAPTURES_NAME, Store, TRANSACTION_NAME};
 use runtime_adapter::layered::RECORD_NAME;
 use serde_json::Value;
 
@@ -52,6 +53,8 @@ pub(crate) type Printed = BTreeMap<String, String>;
 pub(crate) struct Fixtures {
     /// NVX's Ubuntu EROFS image.
     pub(crate) distro: PathBuf,
+    /// The image's manifest, beside it.
+    pub(crate) manifest: PathBuf,
     /// The image's UUID, from its manifest.
     pub(crate) identity: String,
     /// The scratch template.
@@ -77,23 +80,24 @@ impl Fixtures {
         ] {
             assert!(path.is_file(), "{fixture} is missing: {}", path.display());
         }
-        let manifest: Value = serde_json::from_str(&fs::read_to_string(&manifest).unwrap())
+        let contents: Value = serde_json::from_str(&fs::read_to_string(&manifest).unwrap())
             .expect("the manifest is JSON");
-        let identity = manifest["uuid"]
+        let identity = contents["uuid"]
             .as_str()
             .expect("the manifest holds the image's UUID")
             .to_owned();
         Self {
             distro,
+            manifest,
             identity,
             scratch,
         }
     }
 }
 
-/// A sandbox of a test: a directory of its own, which holds the sandbox's store, the output of
-/// each command of the host program that the test runs, and any file that the test makes for its
-/// VM.
+/// A sandbox of a test: a directory of its own, which holds the store of its commands, the output
+/// of each command of the host program that the test runs, and any file that the test makes for
+/// its VM.
 ///
 /// Dropping it ends a VM that a failed test left running, through its verified identity, and
 /// removes the directory once no VM of the sandbox runs. Should that remain uncertain, it keeps
@@ -101,7 +105,9 @@ impl Fixtures {
 pub(crate) struct Sandbox {
     /// The test's directory.
     pub(crate) root: PathBuf,
-    /// The sandbox's store, which the launch creates.
+    /// The store of the commands that the test runs: the sandbox's store, which the launch
+    /// creates, or a template store, which `create` creates, whose captures run their VMs in its
+    /// slots.
     pub(crate) store: PathBuf,
     /// The number of commands that the test ran.
     commands: usize,
@@ -174,20 +180,21 @@ impl Sandbox {
         options: &[&OsStr],
         environment: &[(&str, &OsStr)],
     ) -> Started {
-        let hypervisor = Hypervisor::from_env_or_default().expect("NVX_HYPERVISOR is valid");
-        let guest_agent = env::var_os(GUEST_AGENT).unwrap_or_else(|| {
-            panic!(
-                "{GUEST_AGENT} must name a static x86_64-unknown-linux-musl runtime-adapter-guest"
-            )
-        });
-        let mut arguments = vec![
-            OsStr::new("--guest-agent"),
-            &guest_agent,
-            OsStr::new("--hypervisor"),
-            OsStr::new(hypervisor.as_str()),
-        ];
+        let guest = guest_options();
+        let mut arguments: Vec<&OsStr> = guest.iter().map(OsString::as_os_str).collect();
         arguments.extend(options);
         self.start("launch", &arguments, environment)
+    }
+
+    /// Creates a template of the guest agent in the sandbox's store, a template store, on the
+    /// hypervisor that `NVX_HYPERVISOR` selects, and with `options` too, checks that the creation
+    /// exits with `status`, and returns what it printed.
+    pub(crate) fn create(&mut self, options: &[&OsStr], status: i32) -> Printed {
+        let guest = guest_options();
+        let mut arguments: Vec<&OsStr> = guest.iter().map(OsString::as_os_str).collect();
+        arguments.extend(options);
+        let started = self.start("create", &arguments, &[]);
+        self.finish(started, status)
     }
 
     /// Waits for the launch `started` to end, checks that it exits with `status`, and returns what
@@ -306,19 +313,38 @@ impl Sandbox {
     }
 
     /// Returns what the command whose output files start with `output` printed, and the end of the
-    /// VMM's log.
+    /// VMM's log, or of the log of each capture's VMM in a template store.
     fn diagnostics(&self, output: &Path) -> String {
         let read = |path: PathBuf| {
             let bytes = fs::read(path).unwrap_or_default();
             let tail = bytes.len().saturating_sub(LOG_TAIL);
             String::from_utf8_lossy(&bytes[tail..]).into_owned()
         };
-        format!(
+        let mut diagnostics = format!(
             "\nstdout:\n{}\nstderr:\n{}\nthe end of the VMM's log:\n{}",
             read(output.with_extension("out")),
             read(output.with_extension("err")),
             read(self.store.join(LOG_NAME)),
-        )
+        );
+        let slots = fs::read_dir(self.store.join(CAPTURES_NAME))
+            .into_iter()
+            .flatten();
+        for slot in slots.flatten() {
+            // The slot keeps the log of its latest capture once the capture's launch has ended,
+            // and until then the capture's transaction does.
+            let logs = [
+                slot.path().join(LOG_NAME),
+                slot.path().join(TRANSACTION_NAME).join(LOG_NAME),
+            ];
+            for log in logs.into_iter().filter(|log| log.exists()) {
+                diagnostics.push_str(&format!(
+                    "\nthe end of the capture's VMM's log {}:\n{}",
+                    log.display(),
+                    read(log.clone())
+                ));
+            }
+        }
+        diagnostics
     }
 
     /// Returns what the last command that the test ran wrote to its standard error.
@@ -356,12 +382,19 @@ impl Sandbox {
 
     /// Ends the VM that the sandbox's store records, whatever its runtime identity: reattach ends
     /// an interrupted launch, and holds a VM that runs, which the stop then terminates through its
-    /// verified identity. Fails with the reason why a VM of the sandbox might still run.
+    /// verified identity. In a template store, the store's recovery ends the captures that a
+    /// failed test interrupted, whose VMs run in its slots. Fails with the reason why a VM of the
+    /// sandbox might still run.
     fn end_vm(&self) -> Result<(), String> {
         if !self.store.exists() {
             return Ok(());
         }
         let failed = |error: nvx::Error| describe(&error);
+        if self.store.join(CAPTURES_NAME).is_dir() {
+            let store = Store::open(&self.store).map_err(failed)?;
+            let deadline = Instant::now() + Duration::from_secs(30);
+            return store.recover_captures(deadline).map(drop).map_err(failed);
+        }
         let store = SandboxStore::open(&self.store).map_err(failed)?;
         let recorded = (
             store.runtime().map_err(failed)?,
@@ -419,6 +452,21 @@ pub(crate) fn describe(error: &dyn Error) -> String {
         source = cause.source();
     }
     description
+}
+
+/// Returns the options of a launch or a creation that name the guest agent, which
+/// `RUNTIME_ADAPTER_GUEST` names, and the hypervisor that `NVX_HYPERVISOR` selects.
+fn guest_options() -> [OsString; 4] {
+    let hypervisor = Hypervisor::from_env_or_default().expect("NVX_HYPERVISOR is valid");
+    let guest_agent = env::var_os(GUEST_AGENT).unwrap_or_else(|| {
+        panic!("{GUEST_AGENT} must name a static x86_64-unknown-linux-musl runtime-adapter-guest")
+    });
+    [
+        OsString::from("--guest-agent"),
+        guest_agent,
+        OsString::from("--hypervisor"),
+        OsString::from(hypervisor.as_str()),
+    ]
 }
 
 /// Returns the epoch that a command printed.

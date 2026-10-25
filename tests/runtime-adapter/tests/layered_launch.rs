@@ -2023,6 +2023,127 @@ fn the_host_program_refuses_options_that_do_not_make_a_command() {
             .iter()
             .map(|(options, problem)| ([&stage[..], options].concat(), *problem)),
     );
+    let create = [
+        "create",
+        "templates",
+        "--guest-agent",
+        "agent",
+        "--distro",
+        "erofs:image",
+        "--distro-identity",
+        uuid,
+    ];
+    let create_cases: [(&[&str], &str); 16] = [
+        (
+            &["--processors", "0"],
+            "--processors takes a positive number, not \"0\"",
+        ),
+        (
+            &["--processors", "two"],
+            "--processors takes a positive number, not \"two\"",
+        ),
+        (
+            &["--memory", "0"],
+            "--memory takes a positive number of MiB, not \"0\"",
+        ),
+        (
+            &["--memory", "256M"],
+            "--memory takes a positive number of MiB, not \"256M\"",
+        ),
+        // A number of mebibytes whose bytes do not fit 64 bits.
+        (
+            &["--memory-capacity", "17592186044416"],
+            "--memory-capacity takes a positive number of MiB, not \"17592186044416\"",
+        ),
+        (
+            &["--scratch-length", "0"],
+            "--scratch-length takes a positive number of bytes, not \"0\"",
+        ),
+        (
+            &["--scratch-length", "64M"],
+            "--scratch-length takes a positive number of bytes, not \"64M\"",
+        ),
+        (
+            &["--cpu-profile", "auto", "--cpu-profile", "host"],
+            "unexpected option \"--cpu-profile\" of create",
+        ),
+        (
+            &["--upper", "ram"],
+            "unexpected option \"--upper\" of create",
+        ),
+        (
+            &["--runtime-dir", "/run/a"],
+            "unexpected option \"--runtime-dir\" of create",
+        ),
+        (
+            &["--workload-identity", "1000:1000"],
+            "unexpected option \"--workload-identity\" of create",
+        ),
+        (
+            &["--share", "a:/b"],
+            "unexpected option \"--share\" of create",
+        ),
+        (
+            &["--first-partition-bound", "4096"],
+            "unexpected option \"--first-partition-bound\" of create",
+        ),
+        (
+            &["--distro", "gpt:image"],
+            "unexpected option \"--distro\" of create",
+        ),
+        (&["--network"], "\"--network\" needs a value"),
+        (&["image"], "unexpected argument \"image\" of create"),
+    ];
+    commands.extend(
+        create_cases
+            .iter()
+            .map(|(options, problem)| ([&create[..], options].concat(), *problem)),
+    );
+    commands.extend([
+        (vec!["create"], "create needs a template store"),
+        (vec!["create", "templates"], "create needs --guest-agent"),
+        (
+            vec!["create", "templates", "--guest-agent", "agent"],
+            "create needs --distro",
+        ),
+        (
+            vec![
+                "create",
+                "templates",
+                "--guest-agent",
+                "agent",
+                "--distro",
+                "erofs:image",
+            ],
+            "create needs --distro-identity",
+        ),
+        (
+            vec![
+                "launch",
+                "store",
+                "--guest-agent",
+                "agent",
+                "--cpu-profile",
+                "host",
+            ],
+            "unexpected option \"--cpu-profile\" of launch",
+        ),
+        (
+            vec![
+                "launch",
+                "store",
+                "--guest-agent",
+                "agent",
+                "--processors",
+                "2",
+            ],
+            "unexpected option \"--processors\" of launch",
+        ),
+        (
+            vec!["stage", "store", "--memory", "256"],
+            "unexpected option \"--memory\" of stage",
+        ),
+    ]);
     commands.extend([
         (vec!["stage"], "stage needs a sandbox store"),
         (vec!["stage", "store"], "stage needs --distro"),

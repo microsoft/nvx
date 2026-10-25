@@ -10,11 +10,12 @@
 //! with `nvx::protocol::cmdline::parameters`: a command line without that parameter boots cold,
 //! as before, whatever else it holds. A platform snapshot holds the platform's invariant
 //! configuration alone, which every clone shares, so with that parameter, `boot` refuses any
-//! parameter that [`is_platform_token`] does not accept: the platform tier's allowlist, the same
-//! as OpenVMM's capture of a platform snapshot allows. The kernel drops double quotes from a
-//! parameter, and hands what follows `--` to init rather than taking it as parameters, though init
-//! may still read it from `/proc/cmdline`, so `boot` also refuses a template's command line that
-//! holds either, as OpenVMM refuses them in the command line of a VM with a control console.
+//! parameter that [`is_platform_token`] does not accept: the platform tier's allowlist, OpenVMM's
+//! own, compiled from the excerpts of its sources that NVX's tests keep. The kernel drops double
+//! quotes from a parameter, and hands what follows `--` to init rather than taking it as
+//! parameters, though init may still read it from `/proc/cmdline`, so `boot` also refuses a
+//! template's command line that holds either, as OpenVMM refuses them in the command line of a VM
+//! with a control console.
 //!
 //! The worker of a template's VM, and with it the VM, ends with [`COMMAND_LINE_STATUS`] once
 //! `boot` refused its command line, with [`CAPTURE_STATUS_BASE`] plus the number of the stage of
@@ -22,41 +23,54 @@
 //! and with [`RESTORED_STATUS`] in a clone, which it does not repair yet. A committed capture ends
 //! the template's VM before the worker returns.
 
-use std::fmt;
+use std::{fmt, str};
 
 use nvx::protocol::cmdline::{self, Parameter};
+
+/// Returns whether `token`, a parameter of a kernel command line as the command line spells it,
+/// such as `nr_cpus=2`, is on the platform tier's allowlist: whether OpenVMM's capture of a
+/// platform snapshot admits it in the VM's kernel command line.
+///
+/// The allowlist holds `earlycon=xe9`, `console=hvc0`, `console=hvc1`, `reboot=t`, `panic=-1`,
+/// `nvx_sandbox=1`, `nvx_config=0xd0010000,65536`, [`PLATFORM_TIER`], and the control tty's token,
+/// `nvx_control_tty=hvc2`, whole, and the tokens that start with `nr_cpus=`,
+/// `virtio_mmio.device=`, `virtnet_ip=`, `virtnet_mask=`, `virtnet_gw=`, `virtnet_dns=`,
+/// `virtnet_ip6=`, or `virtnet_gw6=`, whose values OpenVMM writes.
+///
+/// It is OpenVMM's own check, `platform_command_line_token_is_invariant` of
+/// `openvmm_helpers::snapshot::microvm`, compiled from the excerpts of OpenVMM's sources that
+/// `nvx-rs/tests/vectors/openvmm/` keeps, of the OpenVMM revision that NVX pins. NVX's tests check
+/// each token of a template's kernel command line with the same excerpts, and an ignored test of
+/// `nvx-rs/tests/openvmm_vectors.rs` compares them with the OpenVMM submodule. OpenVMM checks
+/// tokens as text, so a token that is not UTF-8 is not on the allowlist, and it compares names
+/// exactly, though the kernel takes a dash in a parameter's name for an underscore.
+pub fn is_platform_token(token: &[u8]) -> bool {
+    str::from_utf8(token).is_ok_and(openvmm::admits)
+}
+
+/// OpenVMM's allowlist of the kernel command-line tokens of its platform snapshot tier, compiled
+/// from the excerpts of its sources in `nvx-rs/tests/vectors/openvmm/`, unchanged.
+#[allow(unreachable_pub)]
+mod openvmm {
+    /// OpenVMM's `openvmm_defs` crate, of which the allowlist reads one constant.
+    mod openvmm_defs {
+        /// OpenVMM's `openvmm_defs::microvm`.
+        pub(super) mod microvm {
+            include!("../../../nvx-rs/tests/vectors/openvmm/microvm_control_tty_command_line.rs");
+        }
+    }
+
+    include!("../../../nvx-rs/tests/vectors/openvmm/platform_command_line_token_is_invariant.rs");
+
+    /// Returns whether OpenVMM's platform allowlist admits `token`.
+    pub(super) fn admits(token: &str) -> bool {
+        platform_command_line_token_is_invariant(token)
+    }
+}
 
 /// The parameter that names the platform snapshot tier, which OpenVMM adds to the kernel command
 /// line of a template's VM.
 pub const PLATFORM_TIER: &str = "nvx_snapshot_tier=platform";
-
-/// The tokens of the platform tier's allowlist that it names whole: the consoles, the reboot
-/// and panic settings, the sandbox's guest mode, NVX's configuration window, the tier itself, and
-/// the control tty.
-const PLATFORM_TOKENS: [&str; 9] = [
-    "earlycon=xe9",
-    "console=hvc0",
-    "console=hvc1",
-    "reboot=t",
-    "panic=-1",
-    "nvx_sandbox=1",
-    "nvx_config=0xd0010000,65536",
-    PLATFORM_TIER,
-    "nvx_control_tty=hvc2",
-];
-
-/// The prefixes of the platform tier's tokens whose values the host chooses: the processor
-/// capacity, the virtio-mmio devices, and the addresses of the VM's network, if it has one.
-const PLATFORM_PREFIXES: [&str; 8] = [
-    "nr_cpus=",
-    "virtio_mmio.device=",
-    "virtnet_ip=",
-    "virtnet_mask=",
-    "virtnet_gw=",
-    "virtnet_dns=",
-    "virtnet_ip6=",
-    "virtnet_gw6=",
-];
 
 /// The status with which the worker of a template's VM, and with it the VM, ends once [`boot`]
 /// refused its kernel command line, or the worker could not read it.
@@ -151,25 +165,6 @@ pub fn boot(command_line: &[u8]) -> Result<Boot, CommandLineError> {
     }
 }
 
-/// Returns whether `token`, a parameter of a kernel command line as the command line spells it,
-/// is one of the platform tier's: `earlycon=xe9`, `console=hvc0`, `console=hvc1`, `reboot=t`,
-/// `panic=-1`, `nvx_sandbox=1`, `nvx_config=0xd0010000,65536`, [`PLATFORM_TIER`], or
-/// `nvx_control_tty=hvc2`, or a token that starts with `nr_cpus=`, `virtio_mmio.device=`,
-/// `virtnet_ip=`, `virtnet_mask=`, `virtnet_gw=`, `virtnet_dns=`, `virtnet_ip6=`, or
-/// `virtnet_gw6=`.
-///
-/// These are the tokens that OpenVMM's capture of a platform snapshot allows, byte for byte, so it
-/// compares names exactly, though the kernel takes a dash in a parameter's name for an
-/// underscore.
-pub fn is_platform_token(token: &[u8]) -> bool {
-    PLATFORM_TOKENS
-        .iter()
-        .any(|whole| token == whole.as_bytes())
-        || PLATFORM_PREFIXES
-            .iter()
-            .any(|prefix| token.starts_with(prefix.as_bytes()))
-}
-
 /// Returns `parameter` as the command line spells it, without quotes: its name, then `=` and its
 /// value, if it has one.
 fn token(parameter: &Parameter<'_>) -> Vec<u8> {
@@ -210,9 +205,24 @@ mod tests {
         ]
     }
 
+    /// The tokens that the platform tier's allowlist holds whole: the consoles, the reboot and
+    /// panic settings, the sandbox's guest mode, NVX's configuration window, the tier itself, and
+    /// the control tty.
+    const WHOLE: [&str; 9] = [
+        "earlycon=xe9",
+        "console=hvc0",
+        "console=hvc1",
+        "reboot=t",
+        "panic=-1",
+        "nvx_sandbox=1",
+        "nvx_config=0xd0010000,65536",
+        PLATFORM_TIER,
+        "nvx_control_tty=hvc2",
+    ];
+
     #[test]
     fn the_platform_tier_s_allowlist_is_openvmm_s() {
-        for token in PLATFORM_TOKENS {
+        for token in WHOLE {
             assert!(is_platform_token(token.as_bytes()), "{token}");
         }
         for token in [
@@ -273,6 +283,33 @@ mod tests {
         ] {
             assert!(!is_platform_token(token.as_bytes()), "{token}");
         }
+        // OpenVMM checks text: a token that is not UTF-8 is not on the allowlist, whatever it
+        // starts with.
+        for token in [
+            &b"virtnet_dns=10.0.2.3\xc2"[..],
+            b"nr_cpus=\xff",
+            b"\xff=\x01",
+        ] {
+            assert!(!is_platform_token(token), "{}", token.escape_ascii());
+        }
+    }
+
+    #[test]
+    fn the_platform_tier_s_allowlist_takes_tokens_as_openvmm_splits_them() {
+        // OpenVMM splits at ASCII whitespace alone, so it admits these tokens by their prefixes,
+        // but the kernel splits each in two at the vertical tab or at the no-break space's 0xa0,
+        // and its second parameter is not on the allowlist, so a template's VM refuses it.
+        for token in [
+            "virtnet_dns=10.0.2.3\u{0b}quiet",
+            "virtnet_dns=10.0.2.3\u{a0}quiet",
+        ] {
+            assert!(is_platform_token(token.as_bytes()), "{token:?}");
+            let names: Vec<&[u8]> = cmdline::parameters(token.as_bytes())
+                .map(|parameter| parameter.name)
+                .collect();
+            assert_eq!(names, [&b"virtnet_dns"[..], b"quiet"], "{token:?}");
+        }
+        assert!(!is_platform_token(b"quiet"));
     }
 
     #[test]
@@ -316,7 +353,7 @@ mod tests {
             // The tier alone, and each token whole once more, which OpenVMM leaves to its own
             // checks.
             format!("{PLATFORM_TIER}\n"),
-            format!("{} {}\n", TEMPLATE.trim_end(), PLATFORM_TOKENS.join(" ")),
+            format!("{} {}\n", TEMPLATE.trim_end(), WHOLE.join(" ")),
             // The kernel's whitespace: tabs, newlines, carriage returns, and no-break spaces.
             TEMPLATE.replace(' ', " \t\r\n\u{0b}\u{0c}"),
         ] {
@@ -387,18 +424,29 @@ mod tests {
         // The kernel's whitespace includes the vertical tab and the byte 0xa0, with which the
         // no-break space ends in UTF-8. A split at ASCII whitespace, as OpenVMM's checks of a
         // platform snapshot's command line make, keeps either within a token, but to the kernel,
-        // what follows either in a platform token's value is a parameter of its own.
-        for separator in ["\u{0b}", "\u{a0}"] {
+        // what follows either in a platform token's value is a parameter of its own. Before the
+        // no-break space's 0xa0, its first byte, 0xc2, stays in the platform token, which is then
+        // not text, and so not on the allowlist, which takes tokens as OpenVMM's text.
+        for (separator, refused) in [
+            ("\u{0b}", &b"quiet"[..]),
+            ("\u{a0}", b"virtnet_dns=10.0.2.3\xc2"),
+        ] {
             let command_line = format!(
                 "{} virtnet_dns=10.0.2.3{separator}quiet\n",
                 TEMPLATE.trim_end()
             );
             assert_eq!(
                 boot(command_line.as_bytes()),
-                Err(CommandLineError::Token(b"quiet".to_vec())),
+                Err(CommandLineError::Token(refused.to_vec())),
                 "{command_line:?}"
             );
         }
+        let mut latin1 = format!("{} virtnet_dns=10.0.2.3", TEMPLATE.trim_end()).into_bytes();
+        latin1.extend_from_slice(b"\xa0quiet\n");
+        assert_eq!(
+            boot(&latin1),
+            Err(CommandLineError::Token(b"quiet".to_vec()))
+        );
         assert_eq!(
             CommandLineError::Token(b"\xff=\x01".to_vec()).to_string(),
             "the kernel command line names the platform snapshot tier, but holds `\\xff=\\x01`, \

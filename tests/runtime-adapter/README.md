@@ -682,8 +682,11 @@ kernel finds no parameter `nvx_snapshot_tier=platform` boots cold: the worker
 goes on as above, whatever else the command line holds. With it, the VM is a
 template's, whose snapshot holds the platform's invariant configuration alone,
 which every clone shares. So the worker accepts only the parameters of the
-platform tier's allowlist, `template::is_platform_token`, which OpenVMM's
-capture of a platform snapshot allows too, byte for byte:
+platform tier's allowlist, `template::is_platform_token`: OpenVMM's own check,
+which the adapter compiles from the excerpts of OpenVMM's sources that NVX's
+tests keep in `nvx-rs/tests/vectors/openvmm/`, so that the worker accepts
+exactly what OpenVMM's capture of a platform snapshot admits, as text, byte for
+byte:
 
 - `earlycon=xe9`, `console=hvc0`, `console=hvc1`, `reboot=t`, `panic=-1`,
   `nvx_sandbox=1`, `nvx_config=0xd0010000,65536`,
@@ -692,10 +695,13 @@ capture of a platform snapshot allows too, byte for byte:
   `virtnet_gw=`, `virtnet_dns=`, `virtnet_ip6=`, and `virtnet_gw6=`, with any
   value that the host chooses.
 
-It refuses any other parameter, and a double quote, which the kernel drops from
-a parameter, or `--`, after which the kernel hands the rest of the command line
-to init, though init may still read it from `/proc/cmdline`: OpenVMM refuses
-both in the command line of a VM with a control console. Otherwise, the worker,
+It refuses any other parameter, one that is not UTF-8 text among them, and a
+double quote, which the kernel drops from a parameter, or `--`, after which the
+kernel hands the rest of the command line to init, though init may still read
+it from `/proc/cmdline`: OpenVMM refuses both in the command line of a VM with
+a control console. OpenVMM checks the tokens that it finds at ASCII
+whitespace, while the kernel also splits at the vertical tab and at 0xa0, so
+the worker checks the parameters that the kernel finds. Otherwise, the worker,
 through `worker::capture::capture_on_terminal`:
 
 1. opens the control tty, in raw mode, as the worker of a VM that boots cold
@@ -1130,6 +1136,57 @@ The steps of a launch, in order, are:
 A value that names no step or action is a usage error. Without the variable,
 the hook does nothing.
 
+### Templates
+
+`runtime-adapter-host create` serves a template of the guest agent from an NVX
+template store, `nvx::host::template::Store`, with `Store::create_template`: a
+generation of the template's capture class that the store holds, and that is
+eligible at the host's time, or else a new one, which the store captures
+through NVX's supervisor and publishes. `capture::Request` holds what the
+command's options choose of the template, and `Request::capture` returns NVX's
+`Capture` of it:
+
+- the adapter's plan of the placeholder, with the template's network, if any,
+  and the placeholder's binding, which the command plans and stages as `stage`
+  plans and stages an image. The placeholder is a trusted artifact of the
+  platform, whose length is the capacity of every clone's image, and the
+  capture refuses one that anyone else may change;
+- the capture class, from which the store takes the slot that serializes the
+  class's captures, and the template's compatibility key: the runtime identity
+  of the adapter's VMs, with the guest agent's build,
+  `runtime-adapter-guest/BUILD`, the backend and the CPU profile, the
+  processors, all online at boot, the RAM and its capacity, the geometries of
+  the placeholder and of the dormant scratch, as OpenVMM presents a sandbox
+  block device, which `capture::geometry` gives, and the network;
+- NVX's artifacts, with the initramfs that puts the guest agent in place of
+  NVX's agents, which the command writes into a directory of its own in the
+  system's temporary directory, private to the current user, as a launch
+  writes it into the sandbox's private store, and removes once the creation
+  returns.
+
+NVX's store launches the capture's VM from the capture's transaction, in the
+class's slot, whose VMM listens there, beside the snapshot's destination, as
+OpenVMM requires. On Linux, the path of that socket,
+`captures/C/transaction/control.sock` in the store, must fit a Unix socket's,
+so NVX refuses a store whose path is too long for it.
+
+The capture boots the template's VM with the kernel command line
+`nvx_sandbox=1`, to which OpenVMM adds the platform tier's tokens,
+`nvx_snapshot_tier=platform` among them, so the worker of the guest agent
+captures the VM in [template mode](#template-mode) before it assembles any root,
+and the capture ends the VM. The store checks what the VM left, and publishes
+the snapshot as its next generation, with the record of its capture and its
+compatibility key, whose kernel command line holds the platform tier's tokens
+alone: neither the placeholder's identity nor a root's tokens. The template has
+a NIC exactly when its network lets something through: a network that denies
+egress, ingress, and host-loopback access, without a proxy, attaches none, as
+no network does. NVX refuses a network whose policy no template takes, one that
+allows ingress or host-loopback access both ways, before any VM starts, and the
+command refuses a class that no capture takes, such as one of 3 processors,
+before it creates the store. A capture that fails leaves the store's
+generations as they were, and the command's diagnostic names the log of the VMM
+of the class's latest capture, when the class's slot keeps one.
+
 ### Commands
 
 Each command of `runtime-adapter-host` but `stage` takes NVX's artifacts from
@@ -1199,6 +1256,22 @@ the directory that `NVX_ARTIFACTS_DIR` names, and the guest agent's build from
   mapping, the launch sends no more of the table, nor `Start`, stops the guest,
   which tears down the root, waits for the VM to end, abandons the launch, and
   checks that the VM ended with a success and a complete teardown.
+- `create STORE --guest-agent PATH --distro FORMAT:PATH --distro-identity UUID [--hypervisor NAME] [--cpu-profile PROFILE] [--processors N] [--memory MIB] [--memory-capacity MIB] [--scratch-length BYTES] [--network FILE]`
+  serves a [template](#templates) of the guest agent PATH from the template
+  store STORE, which it creates if needed: a generation of the template's
+  class that the store holds, and that is eligible at the host's time, or else
+  a new one, which the store captures and publishes. The placeholder is the
+  file PATH, an EROFS file system, `erofs`, or a GPT disk, `gpt`, with the
+  identity UUID. The template's VM runs on the hypervisor NAME, as a launch's
+  does, with the CPU profile PROFILE, `auto` by default, as OpenVMM's
+  `--cpu-profile` takes it, N processors, 1 by default, all online at boot,
+  MIB mebibytes of RAM, 256 by default, a RAM capacity of MIB mebibytes, its
+  RAM by default, and a dormant scratch of BYTES bytes, 64 MiB by default. It
+  has one NIC under the policy of the [network](#networks) FILE, unless the
+  policy lets nothing through, and none without a network. The command reads
+  the network before anything else, as a launch does, and checks the class
+  before it creates the store, then prints the generation once the store has
+  committed it.
 - `reattach STORE` takes the sandbox's lock, and reattaches to its VM, which
   another process launched, and which it holds, although the VM is not its
   child, through its verified process identity. It reads the capability from
@@ -1264,8 +1337,12 @@ the probe named PROBE found), `exec.N.KEY` (what execution N did: its `launch`,
 `stdout,stderr`, or `none`; whether it `settled`, `reusable` or `fenced`; and
 its `stdout` and `stderr`), `stopped` (`graceful`, `forced`, or `timed-out`),
 `outcome` (such as `success 0`, or `guest-exit 14` once the assembly failed),
-and `teardown` (`complete` or `incomplete`: whether the VMM's teardown of the VM
-completed, which the outcome report records apart from the root's). Values
+`teardown` (`complete` or `incomplete`: whether the VMM's teardown of the VM
+completed, which the outcome report records apart from the root's), `created`
+(`captured` once a capture made the template's generation, or `existing` once
+the store held it), `generation` (the generation's number in the template
+store), and `key` and `class` (the identities of its compatibility key and of
+its capture class, in hexadecimal). Values
 escape `\`, newlines, and carriage returns as `\\`, `\n`, and `\r`, and each
 byte of a program's output that is not part of UTF-8 text as `\xHH`. The
 commands exit with 0 once they did what they were asked, `exec` once every
@@ -1305,13 +1382,17 @@ cancellation of one that it gives up on in the step that ends it, without grace
 or settlement time, and which cancels one whose stream outgrows the 16 MiB that
 it keeps. Those of `template` check the platform tier's allowlist, token by
 token, against the tokens that OpenVMM's capture of a platform snapshot allows
-and refuses, and template mode: a command line in which the kernel finds no
-platform tier boots cold, whatever else it holds, and one with it boots a
-template's VM if it holds the tier's tokens alone, between any of the kernel's
-whitespace, and is refused otherwise, for a parameter outside the allowlist at
-its start, in its middle, or at its end, or within a platform token's value,
-after a vertical tab or the byte 0xa0, which the kernel takes for whitespace
-and a split at ASCII whitespace does not, for a double quote, and for `--`. In
+and refuses, through NVX's copy of OpenVMM's check, which refuses a token that
+is not UTF-8 text, and admits by its prefix one that the kernel splits in two at
+a vertical tab or at 0xa0, and template mode: a command
+line in which the kernel finds no platform tier boots cold, whatever else it
+holds, and one with it boots a template's VM if it holds the tier's tokens
+alone, between any of the kernel's whitespace, and is refused otherwise, for a
+parameter outside the allowlist at its start, in its middle, or at its end, or
+within a platform token's value, after a vertical tab or the byte 0xa0, which
+the kernel takes for whitespace and a split at ASCII whitespace does not, for a
+platform token that the no-break space's first byte leaves without UTF-8 text,
+for a double quote, and for `--`. In
 the guest-only configuration, the unit tests of `worker::probes`
 cover what the probes read: the mount table with its escapes, the kernel's
 records of a process, `os-release`, and the guest's memory, and the probes and
@@ -1610,7 +1691,24 @@ Windows:
   plan refuses, or that it cannot read, with status 1 before it needs NVX's
   artifacts or creates the store, and passes one that the plan takes;
 - the command lines that the host program refuses, each with status 2, those of
-  `exec` and of `--workload-identity` included.
+  `exec`, of `--workload-identity`, and of `create` included.
+
+`tests/template_capture.rs` checks, in the host-only configuration, on Linux
+and Windows:
+
+- the capture that `capture::Request::capture` makes of a request: the
+  adapter's plan of the placeholder, as the host program stages it, with the
+  request's network, over RAM, which no template keeps; the placeholder's
+  binding, the policy revision, and the artifacts, with the initramfs that it
+  names; and the class, with the runtime identity of the adapter's VMs and the
+  guest agent's build, the backend, the `auto` CPU profile, every processor
+  online at boot, the RAM and its capacity, the geometries that OpenVMM
+  presents, of 512-byte logical blocks, and the network, which names the class:
+  a class without it is another;
+- `runtime-adapter-host create` with a network that the plan refuses, or that
+  it cannot read, which it refuses with status 1 before it needs NVX's
+  artifacts or creates the store, and with one that the plan takes, or none,
+  which goes on to need NVX's artifacts.
 
 `tests/step_hook.rs` checks, in the host-only configuration, on Linux and
 Windows, the [step hook](#the-step-hook): the values of
@@ -1819,19 +1917,54 @@ With the file system's `needs_recovery` bit clear, `noload` bypasses that scan
 and the root remains usable. With that bit set, the assembly refuses the
 layer before any mount: `noload` is not permission to ignore required recovery.
 
+### Template scenarios
+
+`tests/vm_template.rs` creates [templates](#templates) on a real hypervisor, in
+the host-only configuration, through `runtime-adapter-host create`. Each test
+stages its placeholder, a copy of NVX's Ubuntu EROFS image with its manifest,
+in a directory that only its user may change, as a platform stages its trusted
+artifacts, and creates a template of it in a template store of its own:
+
+| Test | Template | Expects |
+| --- | --- | --- |
+| `a_template_without_a_network_has_no_nic` | 2 processors, 256 MiB of RAM with a capacity of 512 MiB, a 32 MiB scratch, and no network | A captured template without a NIC |
+| `a_network_that_lets_nothing_through_has_no_nic` | A network that denies egress, ingress, and host-loopback access, without a proxy | A captured template without a NIC |
+| `an_egress_network_has_its_nic` | Egress allowed | A captured template with a NIC |
+| `an_allow_rule_has_its_nic` | Egress denied but for one TCP rule to the gateway, with outbound host-loopback access | A captured template with a NIC |
+| `outbound_host_loopback_has_its_nic` | Egress allowed, with outbound host-loopback access | A captured template with a NIC |
+| `a_proxy_only_network_has_its_nic` | A proxy-only network | A captured template with a NIC |
+| `ingress_is_refused_before_any_vm_starts` | Ingress allowed | NVX's refusal, with status 1, a store without a generation, and no VMM's log or transaction in any slot |
+| `host_loopback_both_ways_is_refused_before_any_vm_starts` | Host-loopback access both ways | NVX's refusal, with status 1, a store without a generation, and no VMM's log or transaction in any slot |
+| `a_class_that_no_capture_takes_is_refused_before_the_store` | 3 processors | NVX's refusal of the class, with status 1, before the store exists |
+
+Unless a test says otherwise, a template has 1 processor, 256 MiB of RAM, its
+capacity, and a 64 MiB scratch. A captured template is the store's one
+generation, whose payload holds the record of its capture, its key, and its
+snapshot, and whose key holds what the test asked for: the runtime identity of
+the adapter's VMs with the guest agent's build, the backend, the processors, of
+which a restore activates none, as all are online at boot, the RAM and its
+capacity, the geometries of the placeholder and of the scratch, the NIC, and a
+kernel command line of the platform tier's tokens alone, with the processors
+and, exactly with a NIC, the NIC's addresses, which names neither the
+placeholder's identity nor a root's tokens. Its class's slot then holds no
+transaction and records no launch, and a second creation prints `existing`,
+with the same generation, key, and class, without a capture: the slot's log of
+the VMM stays as the capture left it.
+
 ### Running the VM tests
 
-The VM tests, `tests/vm_restart.rs`, `tests/vm_steps.rs`, and
-`tests/vm_layered.rs`, share their sandboxes and the fixtures of their layered
-roots through `tests/common`. A test that fails ends the VM that it left
-running, and the host program that it left paused, and keeps the sandbox's
-directory, whose path it prints, unless it can confirm that the VM ended. The
-tests boot VMs, so they are ignored. They read the hypervisor from
-`NVX_HYPERVISOR`, through `nvx::Hypervisor::from_env_or_default`, NVX's
-artifacts, with their install metadata and the fixtures, from
-`NVX_ARTIFACTS_DIR`, and the guest agent from `RUNTIME_ADAPTER_GUEST`. In a
-checkout where `python3 scripts/nvx.py download` installed NVX's artifacts,
-and with the scratch template, run them in this directory with:
+The VM tests, `tests/vm_restart.rs`, `tests/vm_steps.rs`,
+`tests/vm_layered.rs`, and `tests/vm_template.rs`, share their sandboxes and
+the fixtures of their layered roots through `tests/common`. A test that fails
+ends the VM that it left running, and the host program that it left paused,
+and keeps the sandbox's directory, whose path it prints, unless it can confirm
+that the VM ended. The tests boot VMs, so they are ignored. They read the
+hypervisor from `NVX_HYPERVISOR`, through
+`nvx::Hypervisor::from_env_or_default`, NVX's artifacts, with their install
+metadata and the fixtures, from `NVX_ARTIFACTS_DIR`, and the guest agent from
+`RUNTIME_ADAPTER_GUEST`. In a checkout where `python3 scripts/nvx.py download`
+installed NVX's artifacts, and with the scratch template, run them in this
+directory with:
 
 ```bash
 cargo build --locked --release --features guest \
@@ -1868,10 +2001,11 @@ configuration. A change to the adapter is a test input of CI's
 NVX microVM tests. Their
 [workflow](../../.github/workflows/run-nvx-microvm-tests.yml) builds the
 host-only configuration on each backend, in the jobs that run the guest and
-sandbox steps, and runs its ignored tests, the adapter's VM scenarios, with
-`NVX_HYPERVISOR` naming the backend, `NVX_ARTIFACTS_DIR` the checkout, into
-which the job downloaded NVX's artifacts, their provenance, and the fixtures
-of the layered scenarios with the guest artifacts, as NVX's own layered
-scenarios take them, and `RUNTIME_ADAPTER_GUEST` the guest agent. The Linux
-jobs build the guest agent first, and the Windows job takes the one that CI's
-`distro-artifacts` job builds on Linux.
+sandbox steps, and runs its ignored tests, the adapter's VM scenarios and
+template captures, with `NVX_HYPERVISOR` naming the backend,
+`NVX_ARTIFACTS_DIR` the checkout, into which the job downloaded NVX's
+artifacts, their provenance, and the fixtures of the layered scenarios with
+the guest artifacts, as NVX's own layered scenarios take them, and
+`RUNTIME_ADAPTER_GUEST` the guest agent. The Linux jobs build the guest agent
+first, and the Windows job takes the one that CI's `distro-artifacts` job
+builds on Linux.
