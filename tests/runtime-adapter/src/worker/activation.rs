@@ -72,9 +72,10 @@ pub const ACTIVATION_PROBE: &str = "activation";
 ///   breaks a limit, or is a cold boot's;
 /// - [`ACTIVATION_RESOURCES`](status::ACTIVATION_RESOURCES): the record expects other resources
 ///   than the repaired clone has;
-/// - [`ACTIVATION_ROOT`](status::ACTIVATION_ROOT): the root's assembly failed, or the record's
-///   image is a GPT disk, which a clone does not assemble yet, as
-///   [`ApplyError::Assembly`] and [`ApplyError::Gpt`] tell, or the application failed otherwise;
+/// - [`ACTIVATION_ROOT`](status::ACTIVATION_ROOT): the root's assembly failed, the scratch's upper
+///   is not fresh among its causes, or the kernel did not reread the partition table of the
+///   record's GPT disk before it, as [`ApplyError::Assembly`] and [`ApplyError::Gpt`] tell, or the
+///   application failed otherwise;
 /// - [`ACTIVATION_WORKLOAD`](status::ACTIVATION_WORKLOAD): the image refuses the record's
 ///   workload identity, as [`ApplyError::Account`] tells;
 /// - [`ACTIVATION_ORDER`](status::ACTIVATION_ORDER): the worker's own order completed an
@@ -92,7 +93,8 @@ pub fn failure_status(failure: &ActivationFailure) -> u8 {
         ActivationCause::Resources { .. } => status::ACTIVATION_RESOURCES,
         ActivationCause::Failed(error) => match error.downcast_ref::<ApplyError>() {
             Some(ApplyError::Account { .. }) => status::ACTIVATION_WORKLOAD,
-            // The root's assembly, a GPT image, and any other failure of the application.
+            // The root's assembly, the reread of a GPT disk's partition table, and any other
+            // failure of the application.
             _ => status::ACTIVATION_ROOT,
         },
         ActivationCause::Completion | ActivationCause::Start => status::ACTIVATION_ORDER,
@@ -421,6 +423,8 @@ mod tests {
     };
     use nvx::guest::clone::AdmissionFence;
     use nvx::guest::entry;
+    use nvx::guest::root::{Error as RootError, Role};
+    use nvx::protocol::root::DISTRO_MMIO_BASE;
 
     use super::*;
 
@@ -544,7 +548,11 @@ mod tests {
         let failure = failed(more.input(now(), ActivationInput::Activate(&bytes)));
         cases.push((failure, status::ACTIVATION_RESOURCES));
         // The application: of the root, of the workload, and any other.
-        let root = activating().complete(now(), Err(ApplyError::Gpt.into()));
+        let reread = ApplyError::Gpt(RootError::Missing {
+            role: Role::Distro,
+            mmio: DISTRO_MMIO_BASE,
+        });
+        let root = activating().complete(now(), Err(reread.into()));
         cases.push((failed(root), status::ACTIVATION_ROOT));
         let refused = ApplyError::Account {
             error: entry::Error::Root(io::Error::other("no account")),

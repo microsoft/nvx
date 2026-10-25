@@ -798,12 +798,17 @@ after the repair's acknowledgement of the restore:
 3. It applies the record with `nvx::guest::clone::apply`, with
    `worker::capture::root_template` of the template's configuration: its
    runtime directory, the `distro` and scratch block devices, and its device
-   timeout. The application assembles the root, an EROFS image over a tmpfs
-   or the scratch, in the record's overlay mode, waiting for each device until
-   the activation's deadline at the latest, so that it ends by then, and checks
-   the account of the record's workload identity, if it has one, in the
-   assembled root, in existing-account mode. It applies none of the record's
-   other settings: its export, its network, its hostname, and its machine ID.
+   timeout. The application assembles the root, an EROFS image or a GPT disk
+   over a tmpfs or the scratch, in the record's overlay mode, waiting for each
+   device until the activation's deadline at the latest, so that it ends by
+   then, and checks the account of the record's workload identity, if it has
+   one, in the assembled root, in existing-account mode. For a GPT disk, it
+   first asks the kernel to reread the disk's partition table, so that the
+   block devices of its partitions are the clone's disk's, not the template's
+   placeholder's. The upper must be fresh: the assembly refuses one whose
+   `upper` or `work` directory exists and is not empty. It applies none of the
+   record's other settings: its export, its network, its hostname, and its
+   machine ID.
 4. Once it took what the session received while the application ran, which
    came before `Ready`, it completes the activation, which opens the fence,
    and answers `Ready`, which reports the activation after the guest agent's
@@ -866,7 +871,7 @@ ends with one of these statuses, after a diagnostic on standard error:
 | 51 | The host broke the clone's session: it reset the session again, or sent another request, before the clone was ready, or an `Activate` of another transaction, or one that changes the accepted record |
 | 52 | The `Activate`'s record does not decode, breaks a limit, or is a cold boot's |
 | 53 | The record expects other resources than the clone has |
-| 54 | The root's assembly failed, or the record's image is a GPT disk, which a clone does not assemble |
+| 54 | The root's assembly failed, its upper not fresh among its causes, or the kernel did not reread the partition table of the record's GPT disk before it |
 | 55 | The image refuses the record's workload identity: it holds no account of the identity, or not its group, or its account databases cannot be read |
 | 58 | The worker's own order misused the activation: it completed an activation that did not run, or started the sandbox before the clone was ready, or again |
 | 193 | A conformance check of the time ABI failed in the clone's repair, such as the finish's, which needs a running time daemon |
@@ -1967,11 +1972,12 @@ restore of a template's snapshot started, with `worker::work_clone`, behind its
 test broker, with the session that the template's VM attached, active in the
 epoch of its broker's first reset, and the clone's activation,
 `nvx::guest::clone::Activation::with_resources`, behind a closed fence. The fake
-root applies each record as `nvx::guest::clone::apply` does, without a root: it
-refuses a GPT disk, takes as long as a test asks, but no longer than until the
-activation's deadline, as the waits for the devices do, and checks the account
-of the record's workload identity in the tests' directory of account databases.
-The tests cover:
+root applies each record as `nvx::guest::clone::apply` does, without a root: for
+a GPT disk, it stands for the kernel's reread of the disk's partition table,
+which a test may fail; it takes as long as a test asks, but no longer than until
+the activation's deadline, as the waits for the devices do, and checks the
+account of the record's workload identity in the tests' directory of account
+databases. The tests cover:
 
 - the reset that the restore queued, of another instance, which the worker
   acknowledges without an attachment, and the `Activate`, whose record it
@@ -1985,9 +1991,10 @@ The tests cover:
   reset, which fail the activation with the status of the host's session, with
   nothing answered or applied;
 - a record that does not decode, a cold boot's, and one that expects other
-  resources, which fail the activation with nothing applied, and a GPT disk and
-  a workload identity whose account or group the image lacks, which fail its
-  application, each with the status of its class, and no `Ready`;
+  resources, which fail the activation with nothing applied, and a GPT disk
+  whose partition table the kernel does not reread, and a workload identity
+  whose account or group the image lacks, which fail its application, each
+  with the status of its class, and no `Ready`;
 - an `Activate` whose header announces more than 1 KiB, which the framing
   refuses before it takes any byte of its body, and which fails the activation
   with the record's status, before the clone is ready and once it is;

@@ -1121,6 +1121,9 @@ enum Operation {
     Bootstrap,
     /// The assembly.
     Assemble,
+    /// A clone's reread of its GPT disk's partition table, before its assembly.
+    #[cfg(target_arch = "x86_64")]
+    Reread,
     /// The host export's mount.
     MountExport,
     /// A probe.
@@ -1334,10 +1337,12 @@ impl RootOperations for FakeRoot {
     }
 
     /// Applies the record as `nvx::guest::clone::apply` does, without a root, once the test opened
-    /// the gate, if any: it refuses a GPT disk before anything else, takes as long as the
-    /// assembly, but no longer than until `deadline`, as the waits for the devices do, and checks
-    /// the account of the record's workload identity, if it has one, in existing-account mode, in
-    /// the [accounts' root](accounts), which stands for the root that it assembled.
+    /// the gate, if any: for a GPT disk, it stands for the kernel's reread of the disk's partition
+    /// table first, which fails as the kernel does while a partition is open if the test fails
+    /// [`Operation::Reread`]; it then takes as long as the assembly, but no longer than until
+    /// `deadline`, as the waits for the devices do, and checks the account of the record's
+    /// workload identity, if it has one, in existing-account mode, in the
+    /// [accounts' root](accounts), which stands for the root that it assembled.
     #[cfg(target_arch = "x86_64")]
     fn apply(
         &mut self,
@@ -1346,6 +1351,7 @@ impl RootOperations for FakeRoot {
         deadline: Option<Instant>,
     ) -> Result<Option<entry::Identity>, nvx::guest::clone::ApplyError> {
         use nvx::guest::clone::ApplyError;
+        use nvx::guest::root::{DeviceStep, Error, Role};
 
         let applied = (record.clone(), template.clone());
         self.calls.push(Call::Apply(Box::new(applied)));
@@ -1356,7 +1362,14 @@ impl RootOperations for FakeRoot {
         }
         let configuration = record.configuration();
         if matches!(configuration.image, nvx::activation::Image::Gpt { .. }) {
-            return Err(ApplyError::Gpt);
+            self.result(Operation::Reread).map_err(|problem| {
+                ApplyError::Gpt(Error::Device {
+                    role: Role::Distro,
+                    step: DeviceStep::Reread,
+                    device: PathBuf::from("/dev/vda"),
+                    error: io::Error::other(problem),
+                })
+            })?;
         }
         let assembly = match deadline {
             Some(deadline) => self
@@ -4344,8 +4357,9 @@ mod clones {
             assert_eq!(root.calls, [], "{message:?}");
         }
 
-        // The application refuses a GPT disk, which a clone does not assemble, and a workload
-        // identity whose account the image lacks, or whose primary group it lacks, before Ready.
+        // The application fails once the kernel refused to reread a GPT disk's partition table,
+        // and refuses a workload identity whose account the image lacks, or whose primary group
+        // it lacks, before Ready.
         let gpt = changed(&clone, |configuration| {
             configuration.image = activation::Image::Gpt {
                 binding: activation::Identity::from_bytes([0x11; 32]),
@@ -4354,13 +4368,24 @@ mod clones {
             };
         });
         let cases = [
-            (gpt, status::ACTIVATION_ROOT),
-            (record(1, Some((4242, 4242))), status::ACTIVATION_WORKLOAD),
-            (record(1, Some(ORPHAN)), status::ACTIVATION_WORKLOAD),
+            (
+                gpt,
+                FakeRoot::failing(Operation::Reread, "the disk is busy"),
+                status::ACTIVATION_ROOT,
+            ),
+            (
+                record(1, Some((4242, 4242))),
+                FakeRoot::booting(&layout()),
+                status::ACTIVATION_WORKLOAD,
+            ),
+            (
+                record(1, Some(ORPHAN)),
+                FakeRoot::booting(&layout()),
+                status::ACTIVATION_WORKLOAD,
+            ),
         ];
-        for (record, expected) in cases {
-            let (mut broker, working) =
-                start_clone(FakeRoot::booting(&layout()), ACTIVATION_TIMEOUT);
+        for (record, root, expected) in cases {
+            let (mut broker, working) = start_clone(root, ACTIVATION_TIMEOUT);
             broker.reset(RESTORED);
             broker.send_data(&activate(&record).encode().unwrap(), OUTER_MAX_PAYLOAD);
             let root = unactivated(&mut broker, working, expected);
