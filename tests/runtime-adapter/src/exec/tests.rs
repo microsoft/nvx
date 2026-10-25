@@ -1,5 +1,7 @@
 //! The encodings of the execution messages: round trips, the layout of a start, the bodies that
-//! break the rules, and a peer and a runner that exchange their messages through the frames.
+//! break the rules, and a peer and a runner that exchange their messages through the frames; and
+//! the host's side of an execution, which sends the cancellation of one that it gives up on at
+//! once, and cancels one whose stream outgrows what it keeps.
 
 use std::time::{Duration, Instant};
 
@@ -8,7 +10,10 @@ use nvx::exec::{
     Timers, Window, peer, runner,
 };
 
-use super::{GuestMessage, HostMessage, KEY_LEN, MAX_CHUNK, Start, name};
+use super::{
+    AccountMode, GuestMessage, HostExecution, HostMessage, Identity, KEY_LEN, MAX_CAPTURE,
+    MAX_CHUNK, Start, name,
+};
 use crate::frame::{MAX_BODY, Message};
 
 /// The key of most executions in these tests.
@@ -27,7 +32,18 @@ fn timers() -> Timers {
     Timers::new(Duration::from_secs(1), Duration::from_secs(5))
 }
 
-/// Returns starts with every unit, flag, and kind of argument.
+/// Returns an identity with every field: supplementary groups, capabilities, and numeric IDs.
+fn numeric() -> Identity {
+    Identity {
+        groups: vec![0, 50, u32::MAX],
+        capabilities: 1 | 1 << 13 | 1 << 63,
+        account: AccountMode::Numeric,
+        ..Identity::new(4242, u32::MAX)
+    }
+}
+
+/// Returns starts with every unit, flag, and kind of argument, of identity, of working
+/// directory, and of environment.
 fn starts() -> Vec<Start> {
     let bytes = Limits::new(1, Window::bytes(1), Window::bytes(u32::MAX)).unwrap();
     let largest = Limits::new(MAX_CHUNK, Window::frames(u32::MAX), Window::frames(1)).unwrap();
@@ -39,14 +55,20 @@ fn starts() -> Vec<Start> {
             bytes,
             Timers::new(Duration::ZERO, Duration::from_millis(u64::MAX)).timeout(Duration::ZERO),
             [b"/x".to_vec(), Vec::new(), (1..=u8::MAX).collect()],
-        ),
+        )
+        .with_identity(numeric())
+        .with_working_directory("/")
+        .with_environment(["A=", "B==", "PATH=/usr/bin:/bin"]),
         Start::new(
             Key::new(0, 0),
             largest,
             timers().timeout(Duration::from_millis(1500)),
             ["/bin/true"],
         )
-        .with_input(),
+        .with_input()
+        .with_identity(Identity::new(0, 0))
+        .with_working_directory(std::iter::once(b'/').chain(1..=u8::MAX).collect::<Vec<_>>())
+        .with_environment([(1..=u8::MAX).collect::<Vec<_>>()]),
     ]
 }
 
@@ -97,16 +119,56 @@ fn a_start_s_layout_is_its_key_limits_timers_input_and_arguments() {
     expected.extend_from_slice(b"/p");
     expected.extend_from_slice(&1u32.to_le_bytes());
     expected.extend_from_slice(b"a");
+    // No identity, no working directory, and an empty environment.
+    expected.extend_from_slice(&[0, 0, 0, 0]);
     assert_eq!(start.encode(), expected);
+}
+
+#[test]
+fn a_start_s_layout_ends_with_its_identity_working_directory_and_environment() {
+    let start = Start::new(KEY, shared(), timers(), ["/p"])
+        .with_identity(Identity {
+            groups: vec![50, 60],
+            capabilities: 1 << 13 | 1,
+            account: AccountMode::Numeric,
+            ..Identity::new(1000, 100)
+        })
+        .with_working_directory("/w")
+        .with_environment(["A=1", "B="]);
+    let head = Start::new(KEY, shared(), timers(), ["/p"]).encode();
+    let mut expected = head[..head.len() - 4].to_vec();
+    expected.push(1);
+    expected.extend_from_slice(&1000u32.to_le_bytes());
+    expected.extend_from_slice(&100u32.to_le_bytes());
+    expected.push(1);
+    expected.extend_from_slice(&0x2001u64.to_le_bytes());
+    expected.extend_from_slice(&2u16.to_le_bytes());
+    expected.extend_from_slice(&50u32.to_le_bytes());
+    expected.extend_from_slice(&60u32.to_le_bytes());
+    expected.push(1);
+    expected.extend_from_slice(&2u32.to_le_bytes());
+    expected.extend_from_slice(b"/w");
+    expected.extend_from_slice(&2u16.to_le_bytes());
+    expected.extend_from_slice(&3u32.to_le_bytes());
+    expected.extend_from_slice(b"A=1");
+    expected.extend_from_slice(&2u32.to_le_bytes());
+    expected.extend_from_slice(b"B=");
+    assert_eq!(start.encode(), expected);
+    // An existing account is 0.
+    let existing = Start::new(KEY, shared(), timers(), ["/p"]).with_identity(Identity::new(0, 0));
+    assert_eq!(existing.encode()[head.len() - 4 + 9], 0);
 }
 
 #[test]
 fn starts_that_break_the_rules_are_refused() {
     let valid = Start::new(KEY, shared(), timers(), ["/bin/sh", "-c", "exit"]).encode();
+    let full = starts()[2].encode();
     // Every start that ends early, and one with a byte too many.
-    for length in 0..valid.len() {
-        let problem = Start::decode(&valid[..length]).unwrap_err();
-        assert_eq!(problem.problem(), "an execution's start ends early");
+    for body in [&valid, &full] {
+        for length in 0..body.len() {
+            let problem = Start::decode(&body[..length]).unwrap_err();
+            assert_eq!(problem.problem(), "an execution's start ends early");
+        }
     }
     let mut longer = valid.clone();
     longer.push(0);
@@ -154,6 +216,7 @@ fn starts_that_break_the_rules_are_refused() {
     // Arguments: none, an empty program, a NUL byte, and a length beyond the body.
     let mut none = valid[..57].to_vec();
     none.extend_from_slice(&0u16.to_le_bytes());
+    none.extend_from_slice(&[0, 0, 0, 0]);
     assert_eq!(
         Start::decode(&none).unwrap_err().problem(),
         refused("names no program")
@@ -174,6 +237,64 @@ fn starts_that_break_the_rules_are_refused() {
         Start::decode(&beyond).unwrap_err().problem(),
         "an execution's start ends early"
     );
+    // The flags of the identity and the working directory, and the account mode, which the
+    // identity's IDs precede.
+    let head = &valid[..valid.len() - 4];
+    let ending = |tail: &[u8]| {
+        let body = [head, tail].concat();
+        Start::decode(&body).unwrap_err().problem().to_owned()
+    };
+    assert_eq!(ending(&[2, 0, 0, 0]), refused("has the flag 2"));
+    assert_eq!(ending(&[0, 3, 0, 0]), refused("has the flag 3"));
+    let mut identity = vec![1];
+    identity.extend_from_slice(&[0; 8]);
+    identity.push(2);
+    identity.extend_from_slice(&[0; 10]);
+    identity.extend_from_slice(&[0, 0, 0]);
+    assert_eq!(
+        ending(&identity),
+        refused("names the unknown account mode 2")
+    );
+    // Working directories that are not absolute, or hold a NUL byte, and environment entries
+    // that are not `NAME=VALUE`, or hold a NUL byte.
+    let start = || Start::new(KEY, shared(), timers(), ["/bin/true"]);
+    let cases = [
+        (
+            start().with_working_directory("relative"),
+            "names a working directory that is not absolute",
+        ),
+        (
+            start().with_working_directory(""),
+            "names a working directory that is not absolute",
+        ),
+        (
+            start().with_working_directory("/a\0b"),
+            "has a working directory with a NUL byte",
+        ),
+        (
+            start().with_environment(["A=1", "NAME"]),
+            "has an environment entry that is not NAME=VALUE",
+        ),
+        (
+            start().with_environment(["=value"]),
+            "has an environment entry that is not NAME=VALUE",
+        ),
+        (
+            start().with_environment([""]),
+            "has an environment entry that is not NAME=VALUE",
+        ),
+        (
+            start().with_environment(["A=b\0c"]),
+            "has an environment entry with a NUL byte",
+        ),
+    ];
+    for (start, problem) in cases {
+        assert_eq!(
+            Start::decode(&start.encode()).unwrap_err().problem(),
+            refused(problem),
+            "{start:?}"
+        );
+    }
 }
 
 /// Returns outcomes with every status, cause, launch failure, and flag.
@@ -538,4 +659,97 @@ fn a_peer_and_a_runner_exchange_their_messages_through_the_frames() {
         .flat_map(|(stdout, stderr)| [*stdout, *stderr])
         .collect::<Vec<_>>();
     assert_eq!(interleaved, input);
+}
+
+#[test]
+fn the_host_s_side_sends_the_cancellation_of_an_execution_that_it_gives_up_on_at_once() {
+    // Without grace or settlement time, the host's side gives up on an execution in the step that
+    // ends it, for its timeout or its caller's cancellation, and still sends the cancellation.
+    let now = Instant::now();
+    let immediate = Timers::new(Duration::ZERO, Duration::ZERO);
+    let timeout = Duration::from_secs(1);
+    for (timers, cause) in [
+        (immediate.timeout(timeout), Cause::TimedOut),
+        (immediate, Cause::Cancelled),
+    ] {
+        let start = Start::new(KEY, shared(), timers, ["/bin/program"]);
+        let mut execution = HostExecution::new(start, timers, Vec::new(), now);
+        // The credit that opens the output's pool.
+        assert_eq!(execution.serve(now).len(), 1, "{cause:?}");
+        assert!(execution.outcome().is_none(), "{cause:?}");
+        let later = now + timeout;
+        if cause == Cause::Cancelled {
+            execution.peer_mut().cancel(later);
+        }
+        assert_eq!(
+            execution.serve(later),
+            [HostMessage::Cancel(KEY, cause).encode()],
+            "{cause:?}"
+        );
+        let outcome = execution.outcome().expect("the host's side gave up");
+        assert_eq!((outcome.cause(), outcome.status()), (Some(cause), None));
+        assert!(!outcome.is_reusable(), "{cause:?}");
+        assert!(execution.serve(later).is_empty(), "{cause:?}");
+    }
+}
+
+#[test]
+fn the_host_s_side_keeps_at_most_max_capture_bytes_of_a_stream_and_cancels_the_rest() {
+    // A program that writes a chunk to its standard output at each step, without end: the host's
+    // side keeps the first MAX_CAPTURE bytes, then cancels the execution, and its peer, without
+    // grace, discards the rest at once. The runner takes and drops what the program writes once
+    // it discards the stream, so each step writes once.
+    let now = Instant::now();
+    let timers = Timers::new(Duration::ZERO, Duration::from_secs(5));
+    let start = Start::new(KEY, shared(), timers, ["/usr/bin/yes"]);
+    let mut host = HostExecution::new(start, timers, Vec::new(), now);
+    let mut runner = Runner::new(KEY, shared(), timers, now);
+    runner.launched(Ok(()));
+    let written = vec![b'y'; shared().chunk()];
+    let mut buffer = vec![0u8; shared().chunk()];
+    let mut running = true;
+    for _ in 0..2 * MAX_CAPTURE / written.len() {
+        if host.outcome().is_some() {
+            break;
+        }
+        for frame in host.serve(now) {
+            match HostMessage::decode(&frame).unwrap().unwrap() {
+                HostMessage::Credit(key, pool, units) => runner.credit(key, pool, units),
+                HostMessage::Cancel(key, cause) => runner.cancel(now, key, cause),
+                message => panic!("{message:?}"),
+            }
+            .unwrap();
+        }
+        if running {
+            runner.output(Stream::Stdout, &written);
+        }
+        while let Some(request) = runner.next_request() {
+            match request {
+                runner::Request::Terminate(_) => {
+                    running = false;
+                    for stream in Stream::ALL {
+                        runner.output_closed(stream);
+                    }
+                    runner.exited(now, Some(Status::Signaled(15)));
+                }
+                runner::Request::Settle => runner.settled(Settlement::Settled),
+                _ => {}
+            }
+        }
+        while let Some(message) = runner.next_message(&mut buffer) {
+            let frame = GuestMessage::from_runner(KEY, message, &buffer)
+                .unwrap()
+                .encode();
+            let decoded = GuestMessage::decode(&frame).unwrap().unwrap();
+            host.deliver(&decoded, now).unwrap();
+        }
+    }
+    let outcome = host.outcome().expect("the execution finished");
+    let kept = host.output(Stream::Stdout);
+    assert_eq!(kept.len(), MAX_CAPTURE);
+    assert!(kept.iter().all(|byte| *byte == b'y'));
+    assert!(host.output(Stream::Stderr).is_empty());
+    assert_eq!(outcome.cause(), Some(Cause::Cancelled));
+    assert!(outcome.is_truncated(Stream::Stdout));
+    assert!(!outcome.is_truncated(Stream::Stderr));
 }

@@ -16,8 +16,8 @@
 //!
 //! FILE and DIRECTORY are relative paths in the root, of normal components, and the other probes take
 //! no arguments. A value that a probe cannot read is `absent` if its file does not exist, and
-//! otherwise `unreadable: PROBLEM`. The probes that map beneath the root are those of the
-//! [`mapping`](super::mapping) module.
+//! otherwise `unreadable: PROBLEM`. The probes of the mappings beneath the root, and of the host
+//! export that they come from, are those of the [`mapping`](super::mapping) module.
 
 use std::ffi::OsString;
 use std::fs::{self, File};
@@ -103,7 +103,7 @@ impl Context<'_> {
     }
 
     /// Returns the overlay's `upper` directory.
-    fn upper_directory(&self) -> PathBuf {
+    pub(super) fn upper_directory(&self) -> PathBuf {
         self.upper.join("upper")
     }
 }
@@ -153,7 +153,7 @@ pub fn run(probe: &Probe, context: &Context<'_>, held: &mut Vec<File>) -> Result
 
 /// Returns the path that the argument `argument` of the probe `name` names in the root: a relative
 /// path of normal components, or the problem.
-fn path_argument<'a>(name: &str, argument: &'a str) -> Result<&'a Path, String> {
+pub(super) fn path_argument<'a>(name: &str, argument: &'a str) -> Result<&'a Path, String> {
     let path = Path::new(argument);
     let mut components = path.components().peekable();
     let normal = components.peek().is_some()
@@ -505,7 +505,7 @@ pub(super) struct Mount {
     /// The mount's options.
     pub(super) options: String,
     /// The file system's type.
-    kind: String,
+    pub(super) kind: String,
     /// The mount's source.
     source: String,
     /// The file system's own options.

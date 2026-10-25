@@ -10,24 +10,49 @@
 //! the guest agent on a tty, which it puts in raw mode, as it serves a VM's control tty.
 //!
 //! The worker of a layered root runs its session with fake root operations, which record the
-//! worker's calls and fail as a test asks: the tests cover the order of its stages, each stage
-//! that fails, the requests that it serves once the root is ready, its stop, the messages that it
-//! refuses, and a broker that closes only its end of the stream, which still receives the
-//! worker's replies. The binary's PID 1 of a layered root, and its worker, run on a pseudo-terminal
-//! too, on the test's host, whose kernel command line names no layered root, where PID 1 also
-//! collects the statuses that real-time signals leave, whatever the names of its children.
+//! worker's calls and fail as a test asks: the tests cover the order of its stages, the host export
+//! that it mounts, the mapping table that it applies in order, in parts, which outlives a reset, a
+//! table of zero mappings, which does no work, the parts that it refuses, a mapping that fails and
+//! latches the root, the start of the sandbox, and the executions and starts that it refuses out of
+//! order, each stage that fails, the account check of a sandbox's workload identity, the requests
+//! that it serves once the root is ready, its stop, the messages that it refuses, and a broker that
+//! closes only its end of the stream, which still receives the worker's replies. The binary's PID 1
+//! of a layered root, and its worker, run on a pseudo-terminal too, on the test's host, whose
+//! kernel command line names no layered root, where PID 1 also collects the statuses that real-time
+//! signals leave, whatever the names of its children.
+//!
+//! On x86_64, the worker of a clone, which a restore of a template's snapshot started, resumes the
+//! session that the template's VM attached before its capture, active in the epoch of its broker's
+//! first reset, with the same fake root operations, whose application of an activation record
+//! mirrors the guest's: the tests cover the reset that the restore queued, the one `Activate` that
+//! the clone takes before it is ready, the application of its record, the `Ready` that reports the
+//! activation, retries of the `Activate`, the order that the worker serves once the clone is
+//! ready, the status of each class of the activation's failures, which the worker answers with
+//! nothing, before any side effect where the class allows, its deadline, also once the stream
+//! takes nothing more, and the record's workload identity, as which every execution runs.
 //!
 //! The worker's executions run behind the test broker too, whose host side drives the engine's
-//! peers: the tests cover several executions at once, byte-exact, a stalled sink and a full
-//! stream to the host, which stall only what waits on them, executions that take turns at the
-//! stream, timeouts, cancellations, and stops, the starts, messages, and probes that the worker
-//! refuses, generations and resets, the descendants that a program leaves in its process group,
-//! and executions on a tty.
+//! peers through the host program's own `exec::HostExecution`: the tests cover several executions
+//! at once, byte-exact, a stalled sink and a full stream to the host, which stall only what waits
+//! on them, executions that take turns at the stream, timeouts, cancellations, and stops, the
+//! starts, messages, and probes that the worker refuses, generations and resets, the descendants
+//! that a program leaves in its process group, and executions on a tty. The fake root prepares each
+//! execution's entry, as the worker describes it, in a directory of the tests' own that holds
+//! account databases, and then spawns the program without entering a root, which needs privileges,
+//! in the tests' own root and identity: the tests cover the identity that exactly one source names,
+//! the sandbox's or the start's, the entry's inputs, the publication of listeners that the root
+//! configuration names, which refuses the capabilities that could forge a listener announcement
+//! while listeners are published, a program's working directory and environment, and the starts
+//! that the worker refuses for their identities. Where the tests can create cgroups, each fake root
+//! gives the worker a workload cgroup of the test's own, below which the executions run in cgroups
+//! of their own, and settle: the tests then also cover a descendant that leaves its program's
+//! process group, which the settlement ends, and an execution that does not settle, which keeps its
+//! place until the host stops the worker. Elsewhere, the programs run in process groups alone.
 #![cfg(all(feature = "guest", target_os = "linux"))]
 
 use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, Read, Write};
+use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::Shutdown;
 use std::os::fd::OwnedFd;
 use std::os::unix::fs::OpenOptionsExt;
@@ -35,9 +60,9 @@ use std::os::unix::net::UnixStream;
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::{Arc, OnceLock};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -47,22 +72,35 @@ use nix::pty;
 use nix::sys::signal::{self, Signal};
 use nix::sys::wait::{self, Id, WaitPidFlag, WaitStatus};
 use nix::unistd::Pid;
-use nvx::exec::{
-    Cause, Key, LaunchFailure, Limits, Outcome, Peer, Pool, Status, Stream, Timers, Window, peer,
-};
+use nvx::exec::{Cause, Key, LaunchFailure, Limits, Outcome, Pool, Status, Stream, Timers, Window};
+use nvx::guest::cgroup::Layout;
+use nvx::guest::entry::{self, Capabilities, Capability, Prepared, Publication};
+use nvx::guest::mappings::{Access, Mapping};
 use nvx::guest::nvxs::GuestConnectionError;
-use nvx::protocol::OUTER_MAX_PAYLOAD;
+use nvx::guest::spawn::{self, Spawned};
+use nvx::protocol::export::{EXPORT_DIRECTORY, ExportMode, HostExport};
 use nvx::protocol::nvxs::{
     ErrorCode, Identity, Record, RecordError, RecordParser, RecordType, SessionError, encode_record,
 };
 use nvx::protocol::root::{RootImage, RootLayout, RootUpper};
+use nvx::protocol::{
+    HostMap, MAP_ENTRY_HEADER_LEN, MAPS_HEADER_LEN, OUTER_MAX_PAYLOAD, encode_maps_payloads,
+};
 use nvx::uuid::Uuid;
-use runtime_adapter::exec::{GuestMessage, HostMessage, MAX_CHUNK, Start};
+use runtime_adapter::GUEST_BUILD;
+use runtime_adapter::exec::{
+    self, AccountMode, GuestMessage, HostExecution, HostMessage, MAX_CHUNK, Start,
+};
 use runtime_adapter::frame::{Decoder, FrameError, HEADER_LEN, MAX_BODY, Message};
 use runtime_adapter::guest::{self, NO_ROOT, RECEIVE_WINDOW, ServeError, Served};
 use runtime_adapter::probe::{Facts, Probe};
-use runtime_adapter::root::{JournalPolicy, OverlayMode, RootConfig, RootFailure, RootStage};
-use runtime_adapter::worker::{self, MAX_EXECUTIONS, RootOperations, Worked};
+use runtime_adapter::root::{
+    JournalPolicy, Listeners, MapFailure, OverlayMode, Ready, RootConfig, RootFailure, RootStage,
+    encode_maps,
+};
+use runtime_adapter::worker::{
+    self, Entrance, EntryOperations, MAX_EXECUTIONS, MapError, RootOperations, Worked,
+};
 
 /// Identity of the broker's first epoch.
 const FIRST: Identity = Identity {
@@ -727,7 +765,7 @@ fn the_guest_agent_refuses_messages_that_its_framing_does_not_allow() {
     };
     let cases = [
         (header([0; 4], 0), FrameError::Kind(0)),
-        (header([0; 4], 22), FrameError::Kind(22)),
+        (header([0; 4], 28), FrameError::Kind(28)),
         (
             header(too_long, 3),
             FrameError::Length {
@@ -746,17 +784,24 @@ fn the_guest_agent_refuses_messages_that_its_framing_does_not_allow() {
         assert!(failed, "{message:?}: {error:?}");
     }
 
-    // The guest agent answers requests, and refuses the messages that only it sends, the
-    // configuration of a layered root, which its VM does not have, and executions, which only
-    // the worker of a layered root runs.
+    // The guest agent answers requests, and refuses the messages that only it sends, and those
+    // about a layered root, which its VM does not have: its configuration, a part of its mapping
+    // table, and the start of its workloads, a clone's activation, and executions, which only the
+    // worker of a layered root runs.
     let refused_messages = [
         Message::Pong,
         Message::Stopped,
-        Message::RootReady,
+        ready(),
         Message::RootFailed(vec![1]),
         Message::Report(Vec::new()),
         Message::ProbeFailed(Vec::new()),
+        Message::Mapped,
+        Message::MapFailed(MapFailure::new(0, "refused").encode()),
+        Message::Started,
         Message::RootConfig(RootConfig::default().encode()),
+        Message::Maps(maps_part()),
+        Message::Start,
+        Message::Activate(Vec::new()),
         Message::ExecStart(Vec::new()),
         Message::ExecCredit(Vec::new()),
         Message::ExecTerminal(Vec::new()),
@@ -956,13 +1001,13 @@ fn the_guest_binary_serves_the_session_on_its_standard_streams() {
     // The host sends a malformed message.
     let (mut broker, child) = start_binary();
     broker.attach(FIRST);
-    broker.send_data(&[0, 0, 0, 0, 22], OUTER_MAX_PAYLOAD);
+    broker.send_data(&[0, 0, 0, 0, 28], OUTER_MAX_PAYLOAD);
     let output = child.finished();
     assert_eq!(output.status.code(), Some(1), "{output:?}");
     let diagnostic = String::from_utf8_lossy(&output.stderr);
     assert_eq!(
         diagnostic,
-        "runtime-adapter-guest: unknown message kind 22\n"
+        "runtime-adapter-guest: unknown message kind 28\n"
     );
 }
 
@@ -1076,6 +1121,8 @@ enum Operation {
     Bootstrap,
     /// The assembly.
     Assemble,
+    /// The host export's mount.
+    MountExport,
     /// A probe.
     Probe,
     /// The teardown.
@@ -1091,10 +1138,24 @@ enum Call {
     Bootstrap(RootConfig),
     /// The assembly ran with the configuration and the layout.
     Assemble(RootConfig, RootLayout),
+    /// The host export was mounted.
+    MountExport(HostExport),
+    /// The mappings were applied, in order.
+    Map(Vec<Mapping>),
+    /// The entry of an execution, or of the sandbox's workload identity, was prepared.
+    Prepare(Entrance),
     /// The probe ran.
     Probe(Probe),
     /// The teardown ran.
     Teardown,
+    /// A clone's activation record was applied with the inputs that its template captured.
+    #[cfg(target_arch = "x86_64")]
+    Apply(
+        Box<(
+            nvx::activation::ActivationRecord,
+            nvx::guest::clone::RootTemplate,
+        )>,
+    ),
 }
 
 /// Root operations that record the worker's calls, and fail as a test asks.
@@ -1104,6 +1165,12 @@ struct FakeRoot {
     command_line: Vec<u8>,
     /// The operation that fails, and its problem, if any.
     failing: Option<(Operation, &'static str)>,
+    /// The target of the mapping that the operations refuse, after those before it, and the
+    /// problem, if any.
+    refusing: Option<(PathBuf, &'static str)>,
+    /// Whether the operations refused a mapping, after which they refuse every mapping, as a
+    /// latched root does.
+    latched: bool,
     /// How long the assembly takes.
     assembly: Duration,
     /// The gate that each probe waits on, once it recorded its call, until the test opens it, if
@@ -1111,6 +1178,9 @@ struct FakeRoot {
     gate: Option<Receiver<()>>,
     /// The worker's calls, in order.
     calls: Vec<Call>,
+    /// The workload cgroup of the test's own, below which the worker runs its executions in
+    /// cgroups of their own, where the test can create cgroups.
+    workload: Option<Workload>,
 }
 
 impl FakeRoot {
@@ -1120,14 +1190,33 @@ impl FakeRoot {
         Self::reading(command_line.as_bytes())
     }
 
-    /// Returns operations whose kernel command line is `command_line`.
+    /// Returns operations whose kernel command line names `layout` and the host export `export`,
+    /// as OpenVMM appends its tokens.
+    fn exporting(layout: &RootLayout, export: &HostExport) -> Self {
+        let command_line = format!(
+            "console=hvc0 nvx_sandbox=1 {} virtfs_dir={EXPORT_DIRECTORY} virtfs_tag={} \
+             virtfs_mode={} virtfs_aggregate=1",
+            layout.tokens().join(" "),
+            export.tag,
+            export.mode,
+        );
+        Self::reading(command_line.as_bytes())
+    }
+
+    /// Returns operations whose kernel command line is `command_line`, with a workload cgroup of
+    /// the test's own where the test can create cgroups.
     fn reading(command_line: &[u8]) -> Self {
+        let workload =
+            cgroups().then(|| Workload::new().expect("the test creates a workload cgroup"));
         Self {
             command_line: command_line.to_vec(),
             failing: None,
+            refusing: None,
+            latched: false,
             assembly: Duration::ZERO,
             gate: None,
             calls: Vec::new(),
+            workload,
         }
     }
 
@@ -1138,6 +1227,13 @@ impl FakeRoot {
             failing: Some((operation, problem)),
             ..Self::booting(&layout())
         }
+    }
+
+    /// Makes the operations refuse the mapping at `target` with `problem`, once they applied the
+    /// mappings before it, and refuse every mapping after it.
+    fn refusing(mut self, target: &str, problem: &'static str) -> Self {
+        self.refusing = Some((PathBuf::from(target), problem));
+        self
     }
 
     /// Makes the assembly take `assembly`.
@@ -1181,6 +1277,41 @@ impl RootOperations for FakeRoot {
         self.result(Operation::Assemble)
     }
 
+    fn mount_export(&mut self, export: &HostExport) -> Result<(), String> {
+        self.calls.push(Call::MountExport(export.clone()));
+        self.result(Operation::MountExport)
+    }
+
+    fn map(&mut self, mappings: &[Mapping]) -> Result<(), MapError> {
+        self.calls.push(Call::Map(mappings.to_vec()));
+        if self.latched {
+            return Err(MapError {
+                applied: 0,
+                problem: "the root is latched".to_owned(),
+            });
+        }
+        let Some((target, problem)) = &self.refusing else {
+            return Ok(());
+        };
+        let refused = mappings
+            .iter()
+            .position(|mapping| Path::new("/").join(mapping.target()) == *target);
+        match refused {
+            Some(applied) => {
+                self.latched = true;
+                Err(MapError {
+                    applied,
+                    problem: (*problem).to_owned(),
+                })
+            }
+            None => Ok(()),
+        }
+    }
+
+    fn cgroups(&self) -> Option<Layout> {
+        self.workload.as_ref().map(|workload| workload.0.clone())
+    }
+
     fn probe(&mut self, probe: &Probe) -> Result<Facts, String> {
         self.calls.push(Call::Probe(probe.clone()));
         if let Some(gate) = &self.gate {
@@ -1195,6 +1326,91 @@ impl RootOperations for FakeRoot {
         self.calls.push(Call::Teardown);
         self.result(Operation::Teardown)
     }
+
+    /// Applies the record as `nvx::guest::clone::apply` does, without a root: it refuses a GPT
+    /// disk before anything else, takes as long as the assembly, and checks the account of the
+    /// record's workload identity, if it has one, in existing-account mode, in the [accounts'
+    /// root](accounts), which stands for the root that it assembled.
+    #[cfg(target_arch = "x86_64")]
+    fn apply(
+        &mut self,
+        record: &nvx::activation::ActivationRecord,
+        template: &nvx::guest::clone::RootTemplate,
+    ) -> Result<Option<entry::Identity>, nvx::guest::clone::ApplyError> {
+        use nvx::guest::clone::ApplyError;
+
+        let applied = (record.clone(), template.clone());
+        self.calls.push(Call::Apply(Box::new(applied)));
+        let configuration = record.configuration();
+        if matches!(configuration.image, nvx::activation::Image::Gpt { .. }) {
+            return Err(ApplyError::Gpt);
+        }
+        thread::sleep(self.assembly);
+        let Some(workload) = configuration.workload.identity else {
+            return Ok(None);
+        };
+        let identity = entry::Identity::new(workload.uid, workload.gid);
+        match entry::Entry::new(accounts(), identity.clone()).prepare() {
+            Ok(_) => Ok(Some(identity)),
+            Err(error) => Err(ApplyError::Account {
+                error,
+                teardown: None,
+            }),
+        }
+    }
+}
+
+impl EntryOperations for FakeRoot {
+    /// Prepares the entry into the [accounts' root](accounts), whose account databases it reads.
+    fn prepare(&mut self, entrance: &Entrance) -> Result<Prepared, entry::Error> {
+        self.calls.push(Call::Prepare(entrance.clone()));
+        entrance.entry(accounts()).prepare()
+    }
+
+    /// Spawns `command` without entering a root, which needs privileges: the program runs in the
+    /// test's own root, as the test's own identity, in the process group that it leads.
+    fn spawn(&mut self, command: spawn::Command, _prepared: Prepared) -> io::Result<Spawned> {
+        command.spawn()
+    }
+}
+
+/// The user and group IDs of the workload's account in the [accounts' root](accounts).
+const WORKLOAD: (u32, u32) = (1000, 1000);
+
+/// The user and group IDs of an account in the [accounts' root](accounts) whose primary group
+/// has no group entry.
+const ORPHAN: (u32, u32) = (2000, 2000);
+
+/// The `/etc/passwd` of the [accounts' root](accounts).
+const PASSWD: &str = "root:x:0:0:root:/root:/bin/sh\n\
+                      workload:x:1000:1000:workload:/home/workload:/bin/sh\n\
+                      orphan:x:2000:2000:orphan:/home/orphan:/bin/sh\n";
+
+/// The `/etc/group` of the [accounts' root](accounts).
+const GROUP: &str = "root:x:0:\nstaff:x:50:\nworkload:x:1000:\n";
+
+/// Returns the directory that stands for the assembled root of every fake root when the worker
+/// prepares an entry: one of the tests' own, below the target directory, for the tests' user,
+/// with the account databases [`PASSWD`] and [`GROUP`], and nothing else.
+fn accounts() -> &'static Path {
+    static ROOT: OnceLock<PathBuf> = OnceLock::new();
+    ROOT.get_or_init(|| {
+        let uid = nix::unistd::getuid();
+        let root = Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("accounts-{uid}"));
+        let etc = root.join("etc");
+        fs::create_dir_all(&etc).unwrap();
+        for (name, contents) in [("passwd", PASSWD), ("group", GROUP)] {
+            let path = etc.join(name);
+            if fs::read_to_string(&path).is_ok_and(|current| current == contents) {
+                continue;
+            }
+            // Another test process may read the database meanwhile, so it is replaced whole.
+            let staged = etc.join(format!("{name}.{}", std::process::id()));
+            fs::write(&staged, contents).unwrap();
+            fs::rename(&staged, &path).unwrap();
+        }
+        root
+    })
 }
 
 /// Returns the facts that a [`FakeRoot`] finds with `probe`.
@@ -1203,6 +1419,66 @@ fn found(probe: &Probe) -> Facts {
     facts.push("name", probe.name());
     facts.push("arguments", probe.arguments().join(" "));
     facts
+}
+
+/// Returns whether the tests can create cgroups, as where they run as root in a cgroup v2
+/// hierarchy with the `pids` controller. Each fake root then has a [`Workload`] cgroup of its
+/// own, below which the worker runs its executions in cgroups, and otherwise none, so that the
+/// worker runs each program in a process group alone.
+fn cgroups() -> bool {
+    static CGROUPS: OnceLock<bool> = OnceLock::new();
+    *CGROUPS.get_or_init(|| Workload::new().is_some())
+}
+
+/// A workload cgroup of a test's own, in the real hierarchy, which it removes, with whatever is
+/// left in it, when it drops.
+#[derive(Debug)]
+struct Workload(Layout);
+
+impl Workload {
+    /// Creates a new workload cgroup below the root of the hierarchy at `/sys/fs/cgroup`, with the
+    /// test's own cgroup as the agent's, or returns `None` where the test cannot create one, or
+    /// the hierarchy lacks the `pids` controller, which the cgroups of executions need.
+    fn new() -> Option<Self> {
+        static CREATED: AtomicU64 = AtomicU64::new(0);
+        let root = Path::new("/sys/fs/cgroup");
+        let controllers = fs::read_to_string(root.join("cgroup.controllers")).ok()?;
+        if !controllers
+            .split_whitespace()
+            .any(|controller| controller == "pids")
+        {
+            return None;
+        }
+        let own = fs::read_to_string("/proc/self/cgroup").ok()?;
+        let own = own.lines().find_map(|line| line.strip_prefix("0::"))?;
+        let agent = root.join(own.trim_start_matches('/'));
+        let number = CREATED.fetch_add(1, Ordering::Relaxed);
+        let name = format!("runtime-adapter-test-{}-{number}", std::process::id());
+        let layout = Layout::new(agent, root.join(name)).ok()?;
+        fs::create_dir(layout.workload()).ok()?;
+        Some(Self(layout))
+    }
+}
+
+impl Drop for Workload {
+    /// Ends whatever is left in the workload cgroup, waits until it is empty, then removes the
+    /// cgroups of the executions, and the workload cgroup.
+    fn drop(&mut self) {
+        let workload = self.0.workload();
+        let _ = fs::write(workload.join("cgroup.kill"), b"1");
+        let deadline = Instant::now() + TIMEOUT;
+        while fs::read(workload.join("pids.current")).is_ok_and(|count| count != b"0\n")
+            && Instant::now() < deadline
+        {
+            thread::sleep(Duration::from_millis(10));
+        }
+        for entry in fs::read_dir(workload).into_iter().flatten().flatten() {
+            if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+                let _ = fs::remove_dir(entry.path());
+            }
+        }
+        let _ = fs::remove_dir(workload);
+    }
 }
 
 /// Returns a layout that the worker assembles: an EROFS image, with the identity that the guest
@@ -1235,6 +1511,99 @@ fn configuration() -> Message {
     Message::RootConfig(RootConfig::default().encode())
 }
 
+/// Returns the worker's answer to a root configuration once it assembled the root: its
+/// readiness, with the guest agent's build.
+fn ready() -> Message {
+    Message::Ready(Ready::new(GUEST_BUILD).unwrap().encode())
+}
+
+/// Returns the body of a part of a mapping table, of one mapping.
+fn maps_part() -> Vec<u8> {
+    let table = [HostMap {
+        source: "dir".to_owned(),
+        target: "/srv/dir".to_owned(),
+        read_only: true,
+    }];
+    encode_maps(&table).unwrap().remove(0)
+}
+
+/// Returns the host export that the tests' kernel command lines name: a read-write export.
+fn export() -> HostExport {
+    HostExport {
+        tag: "hostfs".to_owned(),
+        mode: ExportMode::ReadWrite,
+    }
+}
+
+/// Returns the default root configuration, which announces `count` mappings.
+fn announcing(count: u32) -> RootConfig {
+    RootConfig {
+        mapping_count: count,
+        ..RootConfig::default()
+    }
+}
+
+/// Returns the configuration of a sandbox whose executions run as the workload identity
+/// [`WORKLOAD`], whose account the [accounts' root](accounts) holds.
+fn sandbox() -> RootConfig {
+    RootConfig {
+        workload_identity: Some(WORKLOAD),
+        ..RootConfig::default()
+    }
+}
+
+/// Returns a mapping table of `count` mappings: the export's entry `NNN` at `/srv/table/NNN`, for
+/// each index NNN, read-only for the even ones.
+fn table(count: usize) -> Vec<HostMap> {
+    (0..count)
+        .map(|index| HostMap {
+            source: format!("{index:03}"),
+            target: format!("/srv/table/{index:03}"),
+            read_only: index % 2 == 0,
+        })
+        .collect()
+}
+
+/// Returns the bodies of the parts that carry `table`, a [`table`] of up to 1000 mappings, in
+/// order, each of at most `per_part` mappings, as `nvx::protocol::encode_maps_payloads` splits it.
+fn parts(table: &[HostMap], per_part: usize) -> Vec<Vec<u8>> {
+    // The table's mappings have paths of the same lengths.
+    let entry = MAP_ENTRY_HEADER_LEN + table[0].source.len() + table[0].target.len();
+    encode_maps_payloads(table, MAPS_HEADER_LEN + per_part * entry).unwrap()
+}
+
+/// Returns the mappings that the worker applies for `maps`, entries of a mapping table.
+fn mappings(maps: &[HostMap]) -> Vec<Mapping> {
+    maps.iter()
+        .map(|map| {
+            let access = if map.read_only {
+                Access::ReadOnly
+            } else {
+                Access::ReadWrite
+            };
+            Mapping::new(&map.source, &map.target, access).unwrap()
+        })
+        .collect()
+}
+
+/// Returns the worker's `MapFailed`, once it applied `applied` of the table's mappings, with
+/// `problem`.
+fn map_failed(applied: u32, problem: &str) -> Message {
+    Message::MapFailed(MapFailure::new(applied, problem).encode())
+}
+
+/// Returns the calls of a [`FakeRoot`] of the exporting kind until the worker answered `Ready` to
+/// `config`: it read the kernel command line, bootstrapped the guest, assembled the root, and
+/// mounted the host export.
+fn exported(config: &RootConfig) -> Vec<Call> {
+    vec![
+        Call::CommandLine,
+        Call::Bootstrap(config.clone()),
+        Call::Assemble(config.clone(), layout()),
+        Call::MountExport(export()),
+    ]
+}
+
 /// Returns the probe that `text` names.
 fn probe(text: &str) -> Probe {
     Probe::parse(text).unwrap()
@@ -1245,7 +1614,7 @@ fn the_worker_assembles_the_root_serves_it_and_tears_it_down_on_stop() {
     let (mut broker, working) = start_worker(FakeRoot::booting(&layout()));
     broker.attach(FIRST);
     let replies = broker.exchange(&[configuration()], OUTER_MAX_PAYLOAD, 1);
-    assert_eq!(replies, [Message::RootReady]);
+    assert_eq!(replies, [ready()]);
 
     // It serves pings, echoes, and probes, in records of several sizes.
     let messages = [Message::Ping, longest(), Message::Probe(b"mounts".to_vec())];
@@ -1309,7 +1678,7 @@ fn the_worker_assembles_an_image_over_ram_in_the_overlay_mode_of_its_configurati
     broker.attach(FIRST);
     let messages = [Message::RootConfig(config.encode()), Message::Stop];
     let replies = broker.exchange(&messages, OUTER_MAX_PAYLOAD, 2);
-    assert_eq!(replies, [Message::RootReady, Message::Stopped]);
+    assert_eq!(replies, [ready(), Message::Stopped]);
     let (root, worked) = joined(working);
     assert_eq!(worked.unwrap(), Worked::Stopped);
     let expected = [
@@ -1335,7 +1704,7 @@ fn the_worker_assembles_a_gpt_disk_with_the_first_partition_bound_of_its_configu
     broker.attach(FIRST);
     let messages = [Message::RootConfig(config.encode()), Message::Stop];
     let replies = broker.exchange(&messages, OUTER_MAX_PAYLOAD, 2);
-    assert_eq!(replies, [Message::RootReady, Message::Stopped]);
+    assert_eq!(replies, [ready(), Message::Stopped]);
     let (root, worked) = joined(working);
     assert_eq!(worked.unwrap(), Worked::Stopped);
     let expected = [
@@ -1355,6 +1724,13 @@ fn the_worker_reports_the_stage_that_failed_and_ends_with_its_status() {
     let ram = RootLayout {
         upper: RootUpper::Ram,
         ..layout()
+    };
+    // The boot tokens of the layout that the worker assembles, after which a command line may name
+    // more.
+    let tokens = format!("console=hvc0 nvx_sandbox=1 {}", layout().tokens().join(" "));
+    let lacking = RootConfig {
+        workload_identity: Some((4242, 4242)),
+        ..RootConfig::default()
     };
     let cases = [
         (
@@ -1439,6 +1815,33 @@ fn the_worker_reports_the_stage_that_failed_and_ends_with_its_status() {
             read(),
         ),
         (
+            "an incomplete host export",
+            FakeRoot::reading(format!("{tokens} virtfs_tag=hostfs").as_bytes()),
+            config.encode(),
+            RootStage::Layout,
+            "the kernel command line has invalid tokens of the host export: the host export is \
+             incomplete",
+            read(),
+        ),
+        (
+            "the token of a live share",
+            FakeRoot::reading(format!("{tokens} nvx_share=0:/srv/share:ro").as_bytes()),
+            config.encode(),
+            RootStage::Layout,
+            "the kernel command line has invalid tokens of the host export: the nvx_share kernel \
+             parameter binds a live share",
+            read(),
+        ),
+        (
+            "mappings without a host export",
+            FakeRoot::booting(&layout()),
+            announcing(2).encode(),
+            RootStage::Layout,
+            "the root configuration announces 2 mappings, but the kernel command line names no \
+             host export to map from",
+            read(),
+        ),
+        (
             "a bootstrap that failed",
             FakeRoot::failing(Operation::Bootstrap, "failed to create the agent's cgroup"),
             config.encode(),
@@ -1457,6 +1860,34 @@ fn the_worker_reports_the_stage_that_failed_and_ends_with_its_status() {
                 vec![Call::Assemble(config.clone(), layout())],
             ]
             .concat(),
+        ),
+        (
+            "a host export that failed to mount",
+            FakeRoot {
+                failing: Some((
+                    Operation::MountExport,
+                    "failed to mount the host export hostfs: No such device (os error 19)",
+                )),
+                ..FakeRoot::exporting(&layout(), &export())
+            },
+            config.encode(),
+            RootStage::Assembly,
+            "failed to mount the host export hostfs",
+            exported(&config),
+        ),
+        (
+            "a workload identity whose account the root lacks",
+            FakeRoot::booting(&layout()),
+            lacking.encode(),
+            RootStage::Identity,
+            "cannot enter the root as the workload identity 4242:4242: the account is \
+             unavailable: no passwd entry has the user ID",
+            vec![
+                Call::CommandLine,
+                Call::Bootstrap(lacking.clone()),
+                Call::Assemble(lacking.clone(), layout()),
+                Call::Prepare(entrance(entry::Identity::new(4242, 4242))),
+            ],
         ),
     ];
     for (name, root, body, stage, problem, calls) in cases {
@@ -1479,6 +1910,49 @@ fn the_worker_reports_the_stage_that_failed_and_ends_with_its_status() {
     }
 }
 
+/// Returns the entrance of an execution as `identity`, with the default hostname and published
+/// listeners, as a configuration that names no publication has them.
+fn entrance(identity: entry::Identity) -> Entrance {
+    Entrance {
+        identity,
+        hostname: entry::DEFAULT_HOSTNAME.as_bytes().to_vec(),
+        publication: Publication::Published,
+    }
+}
+
+/// Returns the entrances that the worker prepared through `root`, in order.
+fn entrances(root: &FakeRoot) -> Vec<Entrance> {
+    root.calls
+        .iter()
+        .filter_map(|call| match call {
+            Call::Prepare(entrance) => Some(entrance.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn the_worker_checks_the_account_of_the_sandbox_s_workload_identity_in_the_assembled_root() {
+    // The check's entry takes the default hostname, as every execution's does.
+    let (mut broker, working) = start_worker(FakeRoot::booting(&layout()));
+    broker.attach(FIRST);
+    let config = sandbox();
+    let messages = [Message::RootConfig(config.encode()), Message::Stop];
+    let replies = broker.exchange(&messages, OUTER_MAX_PAYLOAD, 2);
+    assert_eq!(replies, [ready(), Message::Stopped]);
+    let (root, worked) = joined(working);
+    assert_eq!(worked.unwrap(), Worked::Stopped);
+    let checked = entrance(entry::Identity::new(WORKLOAD.0, WORKLOAD.1));
+    let expected = [
+        Call::CommandLine,
+        Call::Bootstrap(config.clone()),
+        Call::Assemble(config, layout()),
+        Call::Prepare(checked),
+        Call::Teardown,
+    ];
+    assert_eq!(root.calls, expected);
+}
+
 #[test]
 fn the_worker_reports_a_teardown_that_failed_before_it_confirms_the_stop() {
     let problem = "failed to unmount the overlay: Device or resource busy (os error 16)";
@@ -1487,7 +1961,7 @@ fn the_worker_reports_a_teardown_that_failed_before_it_confirms_the_stop() {
     let replies = broker.exchange(&[configuration(), Message::Stop], OUTER_MAX_PAYLOAD, 3);
     let failure = RootFailure::new(RootStage::Teardown, problem);
     let expected = [
-        Message::RootReady,
+        ready(),
         Message::RootFailed(failure.encode()),
         Message::Stopped,
     ];
@@ -1510,14 +1984,21 @@ fn the_worker_accepts_only_its_configuration_or_a_stop_before_its_root() {
     assert_eq!(worked.unwrap(), Worked::Stopped);
     assert_eq!(root.calls, []);
 
-    // Any other message ends it with an error, as do the messages that only the guest sends.
+    // Any other message ends it with an error, as do the messages that only the guest sends, and
+    // a clone's activation, which a VM that boots cold does not take.
     let refused = [
         Message::Ping,
         Message::Echo(b"early".to_vec()),
         Message::Probe(b"mounts".to_vec()),
+        Message::Maps(maps_part()),
+        Message::Start,
+        Message::Activate(Vec::new()),
         Message::Pong,
-        Message::RootReady,
+        ready(),
         Message::Report(Vec::new()),
+        Message::Mapped,
+        Message::MapFailed(MapFailure::new(0, "refused").encode()),
+        Message::Started,
     ];
     for message in refused {
         let (mut broker, working) = start_worker(FakeRoot::booting(&layout()));
@@ -1530,23 +2011,26 @@ fn the_worker_accepts_only_its_configuration_or_a_stop_before_its_root() {
         assert_eq!(root.calls, [], "{message:?}");
     }
 
-    // Once the root is ready, a second configuration ends it with an error too, and the worker
-    // leaves the root that it assembled to its operations.
-    let (mut broker, working) = start_worker(FakeRoot::booting(&layout()));
-    broker.attach(FIRST);
-    let replies = broker.exchange(&[configuration()], OUTER_MAX_PAYLOAD, 1);
-    assert_eq!(replies, [Message::RootReady]);
-    broker.send_data(&configuration().encode().unwrap(), OUTER_MAX_PAYLOAD);
-    let (root, worked) = joined(working);
-    let failed = matches!(&worked, Err(ServeError::Unexpected(6)));
-    assert!(failed, "{worked:?}");
-    assert!(!root.calls.contains(&Call::Teardown), "{:?}", root.calls);
+    // Once the root is ready, a second configuration ends it with an error too, as does a clone's
+    // activation, and the worker leaves the root that it assembled to its operations.
+    for refused in [configuration(), Message::Activate(Vec::new())] {
+        let (mut broker, working) = start_worker(FakeRoot::booting(&layout()));
+        broker.attach(FIRST);
+        let replies = broker.exchange(&[configuration()], OUTER_MAX_PAYLOAD, 1);
+        assert_eq!(replies, [ready()]);
+        broker.send_data(&refused.encode().unwrap(), OUTER_MAX_PAYLOAD);
+        let (root, worked) = joined(working);
+        let failed =
+            matches!(&worked, Err(ServeError::Unexpected(kind)) if *kind == refused.kind());
+        assert!(failed, "{refused:?}: {worked:?}");
+        assert!(!root.calls.contains(&Call::Teardown), "{:?}", root.calls);
+    }
 
     // So does a broker that closes the stream.
     let (mut broker, working) = start_worker(FakeRoot::booting(&layout()));
     broker.attach(FIRST);
     let replies = broker.exchange(&[configuration()], OUTER_MAX_PAYLOAD, 1);
-    assert_eq!(replies, [Message::RootReady]);
+    assert_eq!(replies, [ready()]);
     broker.close();
     let (root, worked) = joined(working);
     let worked = worked.unwrap();
@@ -1563,7 +2047,7 @@ fn a_broker_that_closes_only_its_end_of_the_stream_receives_what_the_worker_queu
     let (mut broker, working) = start_worker(root);
     broker.attach(FIRST);
     let replies = broker.exchange(&[configuration()], OUTER_MAX_PAYLOAD, 1);
-    assert_eq!(replies, [Message::RootReady]);
+    assert_eq!(replies, [ready()]);
     let messages = [Message::Probe(b"mounts".to_vec()), Message::Ping];
     let mut replies = broker.send_data(&encode(&messages), OUTER_MAX_PAYLOAD);
     broker.close();
@@ -1577,6 +2061,296 @@ fn a_broker_that_closes_only_its_end_of_the_stream_receives_what_the_worker_queu
     let (_, worked) = joined(working);
     let worked = worked.unwrap();
     assert_eq!((&worked, worked.status()), (&Worked::Closed, 1));
+}
+
+#[test]
+fn the_worker_mounts_the_export_applies_the_mapping_table_in_order_and_starts_the_sandbox() {
+    // A table of five mappings, in three parts. The host reattaches after the first, which resets
+    // the session: the worker's order outlives the reset, as its root does.
+    let table = table(5);
+    let parts = parts(&table, 2);
+    assert_eq!(parts.len(), 3);
+    let config = announcing(5);
+    let (mut broker, working) = start_worker(FakeRoot::exporting(&layout(), &export()));
+    broker.attach(FIRST);
+    let messages = [
+        Message::RootConfig(config.encode()),
+        Message::Maps(parts[0].clone()),
+    ];
+    let replies = broker.exchange(&messages, OUTER_MAX_PAYLOAD, 2);
+    assert_eq!(replies, [ready(), Message::Mapped]);
+    broker.settle();
+    broker.reset(Identity { epoch: 2, ..FIRST });
+    let messages = [
+        Message::Maps(parts[1].clone()),
+        Message::Maps(parts[2].clone()),
+        Message::Start,
+        Message::Ping,
+    ];
+    let replies = broker.exchange(&messages, OUTER_MAX_PAYLOAD, 4);
+    let expected = [
+        Message::Mapped,
+        Message::Mapped,
+        Message::Started,
+        Message::Pong,
+    ];
+    assert_eq!(replies, expected);
+
+    // Once the sandbox started, the worker serves on, and tears the root down on a stop.
+    let messages = [Message::Probe(b"mounts".to_vec()), Message::Stop];
+    let replies = broker.exchange(&messages, OUTER_MAX_PAYLOAD, 2);
+    let report = Message::Report(found(&probe("mounts")).encode());
+    assert_eq!(replies, [report, Message::Stopped]);
+    let (root, worked) = joined(working);
+    assert_eq!(worked.unwrap(), Worked::Stopped);
+    let mut expected = exported(&config);
+    expected.extend([
+        Call::Map(mappings(&table[..2])),
+        Call::Map(mappings(&table[2..4])),
+        Call::Map(mappings(&table[4..])),
+        Call::Probe(probe("mounts")),
+        Call::Teardown,
+    ]);
+    assert_eq!(root.calls, expected);
+}
+
+#[test]
+fn a_table_of_zero_mappings_does_no_work() {
+    // The worker maps nothing, and the host starts the sandbox at once, whether or not the kernel
+    // command line names a host export, which the worker mounts all the same.
+    let config = RootConfig::default();
+    let cases = [
+        (FakeRoot::booting(&layout()), None),
+        (FakeRoot::exporting(&layout(), &export()), Some(export())),
+    ];
+    for (root, mounted) in cases {
+        let (mut broker, working) = start_worker(root);
+        broker.attach(FIRST);
+        let messages = [configuration(), Message::Start, Message::Stop];
+        let replies = broker.exchange(&messages, OUTER_MAX_PAYLOAD, 3);
+        let expected = [ready(), Message::Started, Message::Stopped];
+        assert_eq!(replies, expected, "{mounted:?}");
+        let (root, worked) = joined(working);
+        assert_eq!(worked.unwrap(), Worked::Stopped, "{mounted:?}");
+        let mut expected = vec![
+            Call::CommandLine,
+            Call::Bootstrap(config.clone()),
+            Call::Assemble(config.clone(), layout()),
+        ];
+        expected.extend(mounted.map(Call::MountExport));
+        expected.push(Call::Teardown);
+        assert_eq!(root.calls, expected);
+    }
+}
+
+#[test]
+fn a_failed_mapping_latches_the_root_and_holds_the_sandbox_back() {
+    // The root refuses the table's fourth mapping, in its second part, once it applied the three
+    // before it, and latches. The worker answers with their count, then refuses the third part
+    // without applying it, and still serves the host, which tears the VM down.
+    let table = table(5);
+    let parts = parts(&table, 2);
+    let problem = "failed to mount the mapping at /srv/table/003: the target is reserved";
+    let refusing = || FakeRoot::exporting(&layout(), &export()).refusing("/srv/table/003", problem);
+    let config = announcing(5);
+    let (mut broker, working) = start_worker(refusing());
+    broker.attach(FIRST);
+    let mut messages = vec![Message::RootConfig(config.encode())];
+    messages.extend(parts.iter().cloned().map(Message::Maps));
+    messages.extend([Message::Ping, Message::Stop]);
+    let replies = broker.exchange(&messages, OUTER_MAX_PAYLOAD, 6);
+    let expected = [
+        ready(),
+        Message::Mapped,
+        map_failed(3, problem),
+        map_failed(3, "the mapping table failed before this part"),
+        Message::Pong,
+        Message::Stopped,
+    ];
+    assert_eq!(replies, expected);
+    let (root, worked) = joined(working);
+    assert_eq!(worked.unwrap(), Worked::Stopped);
+    assert!(root.latched);
+    let mut expected = exported(&config);
+    expected.extend([
+        Call::Map(mappings(&table[..2])),
+        Call::Map(mappings(&table[2..4])),
+        Call::Teardown,
+    ]);
+    assert_eq!(root.calls, expected);
+
+    // Nor does the worker start the sandbox then: the start ends its session, and the worker
+    // leaves the root to its operations.
+    let (mut broker, working) = start_worker(refusing());
+    broker.attach(FIRST);
+    let messages = [
+        Message::RootConfig(config.encode()),
+        Message::Maps(parts[0].clone()),
+        Message::Maps(parts[1].clone()),
+    ];
+    let replies = broker.exchange(&messages, OUTER_MAX_PAYLOAD, 3);
+    assert_eq!(replies[2], map_failed(3, problem));
+    broker.send_data(&Message::Start.encode().unwrap(), OUTER_MAX_PAYLOAD);
+    let (root, worked) = joined(working);
+    assert!(
+        matches!(worked, Err(ServeError::Unexpected(25))),
+        "{worked:?}"
+    );
+    assert!(!root.calls.contains(&Call::Teardown), "{:?}", root.calls);
+}
+
+#[test]
+fn the_worker_refuses_parts_that_do_not_continue_the_table() {
+    // The worker refuses such a part as a whole, at the mapping that it expects next, without
+    // applying any of the part's mappings, and the start then.
+    let table = table(4);
+    let parts = parts(&table, 2);
+    let maps = |index: usize| Message::Maps(parts[index].clone());
+    let cases = [
+        (
+            "a part that skips mappings",
+            4,
+            vec![maps(1)],
+            0,
+            "a part of the mapping table starts at its mapping 2, but the worker expects its \
+             mapping 0 next",
+        ),
+        (
+            "a part that repeats mappings",
+            4,
+            vec![maps(0), maps(0)],
+            2,
+            "a part of the mapping table starts at its mapping 0, but the worker expects its \
+             mapping 2 next",
+        ),
+        (
+            "a part past the mappings that the configuration announced",
+            3,
+            vec![maps(0), maps(1)],
+            2,
+            "a part of the mapping table ends it at 4 mappings, past the 3 that the root \
+             configuration announced",
+        ),
+        (
+            "a part when the configuration announced no mapping",
+            0,
+            vec![maps(0)],
+            0,
+            "a part of the mapping table ends it at 2 mappings, past the 0 that the root \
+             configuration announced",
+        ),
+        (
+            "a part that does not decode",
+            4,
+            vec![Message::Maps(vec![0; 3])],
+            0,
+            "a part of the mapping table does not decode: ",
+        ),
+        (
+            "a part without a mapping",
+            4,
+            vec![Message::Maps(vec![0; MAPS_HEADER_LEN])],
+            0,
+            "a part of the mapping table holds no mapping",
+        ),
+    ];
+    for (name, announced, messages, applied, problem) in cases {
+        let config = announcing(announced);
+        let (mut broker, working) = start_worker(FakeRoot::exporting(&layout(), &export()));
+        broker.attach(FIRST);
+        let configuration = [Message::RootConfig(config.encode())];
+        let replies = broker.exchange(&configuration, OUTER_MAX_PAYLOAD, 1);
+        assert_eq!(replies, [ready()], "{name}");
+        let replies = broker.exchange(&messages, OUTER_MAX_PAYLOAD, messages.len());
+        let (refused, mapped) = replies.split_last().unwrap();
+        assert!(
+            mapped.iter().all(|reply| *reply == Message::Mapped),
+            "{name}: {replies:?}"
+        );
+        let Message::MapFailed(body) = refused else {
+            panic!("{name}: {replies:?}");
+        };
+        let failure = MapFailure::decode(body).unwrap();
+        assert_eq!(failure.applied(), applied, "{name}: {failure}");
+        assert!(failure.problem().starts_with(problem), "{name}: {failure}");
+        broker.send_data(&Message::Start.encode().unwrap(), OUTER_MAX_PAYLOAD);
+        let (root, worked) = joined(working);
+        assert!(
+            matches!(worked, Err(ServeError::Unexpected(25))),
+            "{name}: {worked:?}"
+        );
+        // The first part is the only one that the worker applies before it refuses one.
+        let mut expected = exported(&config);
+        expected.extend(mapped.iter().map(|_| Call::Map(mappings(&table[..2]))));
+        assert_eq!(root.calls, expected, "{name}");
+    }
+}
+
+#[test]
+fn the_worker_refuses_executions_and_the_start_out_of_order() {
+    // Each refused message ends the session once the worker answered those before it, and the
+    // worker leaves the root to its operations.
+    let table = table(4);
+    let parts = parts(&table, 2);
+    let maps = |index: usize| Message::Maps(parts[index].clone());
+    let execution = HostMessage::Start(start_of(1, shell("exit 0"))).encode();
+    let credit = HostMessage::Credit(Key::new(1, 1), Pool::Output, 1).encode();
+    let cases = [
+        ("an execution before the table", vec![], execution.clone()),
+        ("credit of an execution before the table", vec![], credit),
+        (
+            "an execution once part of the table is applied",
+            vec![maps(0)],
+            execution.clone(),
+        ),
+        (
+            "an execution once the table is applied, before the start",
+            vec![maps(0), maps(1)],
+            execution,
+        ),
+        ("a start before the table", vec![], Message::Start),
+        (
+            "a start once part of the table is applied",
+            vec![maps(0)],
+            Message::Start,
+        ),
+        (
+            "a second start",
+            vec![maps(0), maps(1), Message::Start],
+            Message::Start,
+        ),
+        (
+            "a part of the table once the sandbox started",
+            vec![maps(0), maps(1), Message::Start],
+            maps(1),
+        ),
+    ];
+    for (name, before, refused) in cases {
+        let (mut broker, working) = start_worker(FakeRoot::exporting(&layout(), &export()));
+        broker.attach(FIRST);
+        let mut messages = vec![Message::RootConfig(announcing(4).encode())];
+        messages.extend(before);
+        let replies = broker.exchange(&messages, OUTER_MAX_PAYLOAD, messages.len());
+        let expected = messages
+            .iter()
+            .map(|message| match message {
+                Message::RootConfig(_) => ready(),
+                Message::Maps(_) => Message::Mapped,
+                _ => Message::Started,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(replies, expected, "{name}");
+        broker.send_data(&refused.encode().unwrap(), OUTER_MAX_PAYLOAD);
+        let (root, worked) = joined(working);
+        let failed =
+            matches!(&worked, Err(ServeError::Unexpected(kind)) if *kind == refused.kind());
+        assert!(failed, "{name}: {worked:?}");
+        assert!(
+            !root.calls.contains(&Call::Teardown),
+            "{name}: {:?}",
+            root.calls
+        );
+    }
 }
 
 /// Starts the guest binary with `arguments`, its standard input closed and its output piped.
@@ -1935,14 +2709,6 @@ fn lines(first: usize, last: usize) -> Vec<u8> {
         .into_bytes()
 }
 
-/// Returns `stream`'s position in [`Stream::ALL`].
-fn position(stream: Stream) -> usize {
-    match stream {
-        Stream::Stdout => 0,
-        Stream::Stderr => 1,
-    }
-}
-
 /// Waits until no process of the process group `group` runs, as once an execution ended the
 /// program that leads it.
 fn gone(group: u32) {
@@ -1985,93 +2751,24 @@ fn reaped(id: u32) {
     }
 }
 
-/// The host's side of one of the worker's executions in a test: its peer, with a sink that takes
-/// the output unless it stalls, and a source that hands over the input, then ends it.
-struct HostExecution {
-    /// The execution's start.
-    start: Start,
-    /// The host's side of the execution.
-    peer: Peer,
-    /// Whether the sink takes nothing.
-    stalled: bool,
-    /// The bytes of each stream that the sink took.
-    output: [Vec<u8>; 2],
-    /// The input that the source hands over, if the start says that the host sends it.
-    input: Vec<u8>,
-    /// How many bytes of the input the source handed over.
-    sent: usize,
-    /// Whether the source ended the input.
-    ended: bool,
-    /// The peer's events, in order.
-    events: Vec<peer::Event>,
-}
-
-impl HostExecution {
-    /// Returns the host's side of the execution of `start`, created at `now`, with a source of
-    /// `input`.
-    fn new(start: Start, input: Vec<u8>, now: Instant) -> Self {
-        let peer = Peer::new(start.key, start.limits, timers(), now);
-        Self {
-            start,
-            peer,
-            stalled: false,
-            output: [Vec::new(), Vec::new()],
-            input,
-            sent: 0,
-            ended: false,
-            events: Vec::new(),
-        }
-    }
-
-    /// Takes every step that the source, the sink, and the peer can take at `now`, and returns
-    /// the peer's messages for the guest.
-    fn serve(&mut self, now: Instant) -> Vec<Message> {
-        if self.start.input && !self.ended {
-            self.sent += self.peer.input(&self.input[self.sent..]);
-            if self.sent == self.input.len() {
-                self.peer.end_input();
-                self.ended = true;
-            }
-        }
-        if !self.stalled {
-            for stream in Stream::ALL {
-                loop {
-                    let pending = self.peer.pending_output(stream);
-                    if pending.is_empty() {
-                        break;
-                    }
-                    let length = pending.len();
-                    self.output[position(stream)].extend_from_slice(pending);
-                    self.peer.consumed(stream, length);
-                }
-            }
-        }
-        self.peer.tick(now);
-        while let Some(event) = self.peer.next_event() {
-            self.events.push(event);
-        }
-        let mut buffer = vec![0; self.start.limits.chunk()];
-        let mut messages = Vec::new();
-        while let Some(message) = self.peer.next_message(&mut buffer) {
-            let message = HostMessage::from_peer(self.start.key, message, &buffer)
-                .expect("the framing carries every message of the peer");
-            messages.push(message.encode());
-        }
-        messages
-    }
-
-    /// Returns the execution's outcome, once the peer finished.
-    fn outcome(&self) -> Option<Outcome> {
-        self.events.iter().find_map(|event| match event {
-            peer::Event::Finished(outcome) => Some(*outcome),
-            _ => None,
-        })
-    }
+/// What the tests read of the host's side of one of the worker's executions, a
+/// [`HostExecution`], besides what it tells itself.
+trait Taken {
+    /// Returns the bytes of each stream that the sink took, in the order of [`Stream::ALL`].
+    fn outputs(&self) -> [Vec<u8>; 2];
 
     /// Returns the process ID that the program printed on its first line, that of the process
     /// group that it leads.
+    fn group(&self) -> u32;
+}
+
+impl Taken for HostExecution {
+    fn outputs(&self) -> [Vec<u8>; 2] {
+        Stream::ALL.map(|stream| self.output(stream).to_vec())
+    }
+
     fn group(&self) -> u32 {
-        let output = String::from_utf8_lossy(&self.output[0]);
+        let output = String::from_utf8_lossy(self.output(Stream::Stdout));
         output.lines().next().unwrap().parse().unwrap()
     }
 }
@@ -2093,18 +2790,26 @@ struct Host {
 
 impl Host {
     /// Starts a worker whose root operations succeed, and returns the host, once the worker
-    /// assembled its root.
+    /// assembled its root for a [sandbox](sandbox) whose executions run as its workload identity.
     fn new() -> Self {
-        let (broker, working) = start_worker(FakeRoot::booting(&layout()));
-        Self::ready(broker, working)
+        Self::configured(FakeRoot::booting(&layout()), &sandbox())
+    }
+
+    /// Starts a worker with the root operations `root`, and returns the host, once the worker
+    /// assembled its root as `config` configures it.
+    fn configured(root: FakeRoot, config: &RootConfig) -> Self {
+        let (broker, working) = start_worker(root);
+        Self::ready(broker, working, config)
     }
 
     /// Attaches the session of the worker that runs in `working` in the first epoch, has it
-    /// assemble its root, and returns the host.
-    fn ready(mut broker: Broker, working: Working) -> Self {
+    /// assemble its root as `config` configures it, starts the sandbox, of no mapping, and returns
+    /// the host.
+    fn ready(mut broker: Broker, working: Working, config: &RootConfig) -> Self {
         broker.attach(FIRST);
-        let replies = broker.exchange(&[configuration()], OUTER_MAX_PAYLOAD, 1);
-        assert_eq!(replies, [Message::RootReady]);
+        let messages = [Message::RootConfig(config.encode()), Message::Start];
+        let replies = broker.exchange(&messages, OUTER_MAX_PAYLOAD, 2);
+        assert_eq!(replies, [ready(), Message::Started]);
         Self {
             broker,
             working: Some(working),
@@ -2119,8 +2824,9 @@ impl Host {
     fn start_then(&mut self, start: Start, input: Vec<u8>, after: &[Message]) {
         let mut messages = vec![HostMessage::Start(start.clone()).encode()];
         messages.extend_from_slice(after);
-        let execution = HostExecution::new(start, input, Instant::now());
-        self.executions.insert(execution.start.key.id(), execution);
+        let execution = HostExecution::new(start, timers(), input, Instant::now());
+        self.executions
+            .insert(execution.start().key.id(), execution);
         self.send(&messages);
     }
 
@@ -2161,8 +2867,8 @@ impl Host {
                 .executions
                 .get_mut(&decoded.key().id())
                 .expect("the guest's message names an execution that the host started");
-            decoded
-                .deliver(&mut execution.peer, now)
+            execution
+                .deliver(&decoded, now)
                 .expect("the peer accepts the guest's message");
         }
     }
@@ -2226,8 +2932,9 @@ impl Drop for Host {
     }
 }
 
-/// Checks that the execution `id` ended on its own with `status`, losing no byte, and fenced, as
-/// nothing proves that the descendants of a program without a cgroup are gone.
+/// Checks that the execution `id` ended on its own with `status`, losing no byte, and settled if
+/// its program ran in a cgroup of its own, where the tests can create cgroups: otherwise it is
+/// fenced, as nothing proves that the descendants of a program without a cgroup are gone.
 fn check_lossless(host: &Host, id: u64, status: Status) {
     let outcome = host.outcome(id).unwrap();
     assert_eq!(outcome.status(), Some(status), "{id}");
@@ -2236,8 +2943,8 @@ fn check_lossless(host: &Host, id: u64, status: Status) {
     for stream in Stream::ALL {
         assert!(!outcome.is_truncated(stream), "{id}: {stream:?}");
     }
-    assert!(!outcome.is_reusable(), "{id}");
-    let peer = &host.executions[&id].peer;
+    assert_eq!(outcome.is_reusable(), cgroups(), "{id}");
+    let peer = host.executions[&id].peer();
     assert!(peer.high_water() <= peer.memory_bound(), "{id}");
 }
 
@@ -2258,16 +2965,19 @@ fn the_worker_runs_executions_at_once_with_frame_counted_credit_and_one_output_p
     );
     let both = "seq 1 30000; seq 30001 60000 >&2; exit 7";
     host.start(start_of(3, shell(both)), Vec::new());
-    host.run_until(|host| !host.executions[&1].output[0].is_empty());
+    host.run_until(|host| !host.executions[&1].output(Stream::Stdout).is_empty());
     host.send(&[Message::Ping]);
     host.run_until(|host| {
         host.replies.contains(&Message::Pong) && (1..=3).all(|id| host.outcome(id).is_some())
     });
     assert_eq!(host.replies, [Message::Pong]);
-    assert_eq!(host.executions[&1].output, [lines(1, 300_000), Vec::new()]);
-    assert_eq!(host.executions[&2].output, [input, Vec::new()]);
     assert_eq!(
-        host.executions[&3].output,
+        host.executions[&1].outputs(),
+        [lines(1, 300_000), Vec::new()]
+    );
+    assert_eq!(host.executions[&2].outputs(), [input, Vec::new()]);
+    assert_eq!(
+        host.executions[&3].outputs(),
         [lines(1, 30_000), lines(30_001, 60_000)]
     );
     check_lossless(&host, 1, Status::Exited(0));
@@ -2283,7 +2993,7 @@ fn a_stalled_sink_stalls_only_its_own_execution_while_timers_cancellations_and_c
     // program blocks once its pipe is full.
     let mut host = Host::new();
     host.start(start_of(1, shell("exec cat /dev/zero")), Vec::new());
-    host.execution(1).stalled = true;
+    host.execution(1).stall(true);
     // Another execution streams to its end meanwhile, a third one's timeout ends it in time, and
     // the host's ping is answered.
     host.start(start_of(2, shell("seq 1 200000")), Vec::new());
@@ -2302,18 +3012,21 @@ fn a_stalled_sink_stalls_only_its_own_execution_while_timers_cancellations_and_c
             && host.outcome(2).is_some()
             && host.outcome(3).is_some()
     });
-    assert_eq!(host.executions[&2].output, [lines(1, 200_000), Vec::new()]);
+    assert_eq!(
+        host.executions[&2].outputs(),
+        [lines(1, 200_000), Vec::new()]
+    );
     check_lossless(&host, 2, Status::Exited(0));
     let timed = host.outcome(3).unwrap();
     assert_eq!(timed.cause(), Some(Cause::TimedOut));
     assert!(started.elapsed() < timeout + GRACE + Duration::from_secs(2));
     let stalled = &host.executions[&1];
-    assert!(stalled.outcome().is_none() && stalled.peer.buffered() > 0);
-    assert!(stalled.output[0].is_empty());
+    assert!(stalled.outcome().is_none() && stalled.peer().buffered() > 0);
+    assert!(stalled.output(Stream::Stdout).is_empty());
 
     // The stalled execution's cancellation ends it within its grace, with its output truncated.
     let cancelled = Instant::now();
-    host.execution(1).peer.cancel(cancelled);
+    host.execution(1).peer_mut().cancel(cancelled);
     host.run_until(|host| host.outcome(1).is_some());
     assert!(cancelled.elapsed() < GRACE + Duration::from_secs(2));
     let outcome = host.outcome(1).unwrap();
@@ -2330,7 +3043,7 @@ fn the_worker_refuses_probes_while_it_runs_executions() {
     // runs: a probe that ran then would hold back the execution's timeout.
     let (root, gate) = FakeRoot::booting(&layout()).gated();
     let (broker, working) = start_worker(root);
-    let mut host = Host::ready(broker, working);
+    let mut host = Host::ready(broker, working, &sandbox());
     let timeout = Duration::from_millis(500);
     let timed = Start::new(
         Key::new(1, 1),
@@ -2382,7 +3095,9 @@ fn a_full_stream_to_the_host_holds_back_only_output_while_cancellations_and_stop
             Vec::new(),
         );
     }
-    host.run_until(|host| (1..=4).all(|id| host.executions[&id].output[0].contains(&b'\n')));
+    host.run_until(|host| {
+        (1..=4).all(|id| host.executions[&id].output(Stream::Stdout).contains(&b'\n'))
+    });
     let groups = (1..=4)
         .map(|id| host.executions[&id].group())
         .collect::<Vec<_>>();
@@ -2396,7 +3111,7 @@ fn a_full_stream_to_the_host_holds_back_only_output_while_cancellations_and_stop
     // the others, while the stream stays full.
     assert!(host.broker.room >= 1024, "{}", host.broker.room);
     let now = Instant::now();
-    host.execution(1).peer.cancel(now);
+    host.execution(1).peer_mut().cancel(now);
     let cancel = host.execution(1).serve(now);
     host.send(&cancel);
     gone(groups[0]);
@@ -2431,7 +3146,7 @@ fn executions_that_write_without_end_take_turns_at_the_stream_to_the_host() {
     }
 
     // Each takes a fair part of what the stream carries.
-    let taken = |host: &Host, id: u64| host.executions[&id].output[0].len();
+    let taken = |host: &Host, id: u64| host.executions[&id].output(Stream::Stdout).len();
     let total = |host: &Host| taken(host, 1) + taken(host, 2);
     host.run_until(|host| total(host) >= 16 * 1024 * 1024);
     let total = total(&host);
@@ -2451,7 +3166,11 @@ fn the_worker_refuses_starts_beyond_its_limits_with_a_failed_launch() {
     for id in 1..=most {
         host.start(start_of(id, shell("exec sleep 60")), Vec::new());
     }
-    host.run_until(|host| host.executions.values().all(|side| side.peer.has_started()));
+    host.run_until(|host| {
+        host.executions
+            .values()
+            .all(|side| side.peer().has_started())
+    });
     host.start(start_of(most + 1, shell("exit 0")), Vec::new());
     host.run_until(|host| host.outcome(most + 1).is_some());
     let refused = host.outcome(most + 1).unwrap();
@@ -2459,13 +3178,13 @@ fn the_worker_refuses_starts_beyond_its_limits_with_a_failed_launch() {
     assert_eq!(refused.launch_failure(), Some(again));
     assert_eq!(refused.status(), None);
     assert!(!refused.is_reusable());
-    assert!(!host.executions[&(most + 1)].peer.has_started());
+    assert!(!host.executions[&(most + 1)].peer().has_started());
 
     // Once those ended, it refuses an execution that would hold more than it holds for one, and
     // reports a program that it cannot find.
     let now = Instant::now();
     for id in 1..=most {
-        host.execution(id).peer.cancel(now);
+        host.execution(id).peer_mut().cancel(now);
     }
     host.run_until(|host| (1..=most).all(|id| host.outcome(id).is_some()));
     for id in 1..=most {
@@ -2560,7 +3279,7 @@ fn a_reset_or_a_later_generation_abandons_executions_whose_programs_end() {
     host.run_until(|host| {
         [1, 2]
             .iter()
-            .all(|id| host.executions[id].output[0].ends_with(b"\n"))
+            .all(|id| host.executions[id].output(Stream::Stdout).ends_with(b"\n"))
     });
     let (first, second) = (host.executions[&1].group(), host.executions[&2].group());
 
@@ -2576,7 +3295,7 @@ fn a_reset_or_a_later_generation_abandons_executions_whose_programs_end() {
     host.start_then(later, Vec::new(), &[stale]);
     host.run_until(|host| host.outcome(2).is_some());
     assert_eq!(
-        host.executions[&2].output,
+        host.executions[&2].outputs(),
         [b"later\n".to_vec(), Vec::new()]
     );
     check_lossless(&host, 2, Status::Exited(0));
@@ -2586,12 +3305,12 @@ fn a_reset_or_a_later_generation_abandons_executions_whose_programs_end() {
     // executions of the new epoch.
     host.broker.reset_in_flight(Identity { epoch: 2, ..FIRST });
     let now = Instant::now();
-    host.execution(1).peer.reset(now);
+    host.execution(1).peer_mut().reset(now);
     gone(first);
     host.start(start_of(3, shell("echo again")), Vec::new());
     host.run_until(|host| host.outcome(1).is_some() && host.outcome(3).is_some());
     assert_eq!(
-        host.executions[&3].output,
+        host.executions[&3].outputs(),
         [b"again\n".to_vec(), Vec::new()]
     );
     check_lossless(&host, 3, Status::Exited(0));
@@ -2604,7 +3323,7 @@ fn a_reset_or_a_later_generation_abandons_executions_whose_programs_end() {
 fn the_worker_ends_its_executions_when_the_host_stops_it() {
     let mut host = Host::new();
     host.start(start_of(1, shell("echo $$; exec sleep 60")), Vec::new());
-    host.run_until(|host| host.executions[&1].output[0].ends_with(b"\n"));
+    host.run_until(|host| host.executions[&1].output(Stream::Stdout).ends_with(b"\n"));
     let group = host.executions[&1].group();
     let (root, worked) = host.stop();
     assert_eq!(worked.unwrap(), Worked::Stopped);
@@ -2624,9 +3343,9 @@ fn the_worker_collects_the_status_of_a_program_that_outlives_its_execution() {
         Start::new(Key::new(1, 1), shared_limits(), instant, sleeper),
         Vec::new(),
     );
-    host.run_until(|host| host.executions[&1].output[0].ends_with(b"\n"));
+    host.run_until(|host| host.executions[&1].output(Stream::Stdout).ends_with(b"\n"));
     let program = host.executions[&1].group();
-    host.execution(1).peer.cancel(Instant::now());
+    host.execution(1).peer_mut().cancel(Instant::now());
     host.run_until(|host| host.outcome(1).is_some());
     let outcome = host.outcome(1).unwrap();
     assert_eq!(outcome.cause(), Some(Cause::Cancelled));
@@ -2660,12 +3379,421 @@ fn the_worker_ends_what_is_left_of_the_process_group_of_a_program_that_ended() {
     // A stop once the worker collected the status of such a program leaves no process of the
     // group running either.
     host.start(start_of(2, leaving()), Vec::new());
-    host.run_until(|host| host.executions[&2].output[0].ends_with(b"\n"));
+    host.run_until(|host| host.executions[&2].output(Stream::Stdout).ends_with(b"\n"));
     let second = host.executions[&2].group();
     reaped(second);
-    let (_, worked) = host.stop();
+    // The fake root lives until the check, as its workload cgroup, if any, ends what is left in it
+    // once it drops.
+    let (_root, worked) = host.stop();
     assert_eq!(worked.unwrap(), Worked::Stopped);
     gone(second);
+}
+
+/// Returns the program's process ID, or that of another process, from the line `line` of the
+/// standard output of the execution `id`, and the directory of the program's cgroup from the next
+/// line, which `/proc/self/cgroup` gave.
+fn process_and_cgroup(host: &Host, id: u64, line: usize) -> (u32, PathBuf) {
+    let output = String::from_utf8(host.executions[&id].output(Stream::Stdout).to_vec()).unwrap();
+    let mut lines = output.lines().skip(line);
+    let process = lines.next().unwrap().parse().unwrap();
+    let cgroup = lines.next().unwrap().strip_prefix("0::/").unwrap();
+    (process, Path::new("/sys/fs/cgroup").join(cgroup))
+}
+
+#[test]
+fn an_execution_s_settlement_ends_a_descendant_that_left_its_process_group() {
+    // Only an execution's cgroup reaches a descendant in a session of its own.
+    if !cgroups() {
+        return;
+    }
+    // The program starts a descendant in a session of its own, which holds the program's output
+    // open once it wrote its process ID, and prints the descendant's process ID and its own
+    // cgroup, then ends. The execution's settlement kills the descendant, so that the output ends
+    // at once, losing nothing, and the execution settles.
+    let mut host = Host::new();
+    let script = "exec 3>&1; \
+                  descendant=$(setsid sh -c 'echo $$; exec sleep 60 >&3 3>&-' &); \
+                  echo \"$descendant\"; cat /proc/self/cgroup; exit 3";
+    let started = Instant::now();
+    host.start(start_of(1, shell(script)), Vec::new());
+    host.run_until(|host| host.outcome(1).is_some());
+    assert!(started.elapsed() < SETTLEMENT, "{:?}", started.elapsed());
+    check_lossless(&host, 1, Status::Exited(3));
+    let (descendant, cgroup) = process_and_cgroup(&host, 1, 0);
+    reaped(descendant);
+    // The worker removed the execution's cgroup before it sent the outcome, which freed the
+    // execution's place: it runs its limit of executions at once again.
+    assert!(!cgroup.exists(), "{}", cgroup.display());
+    let most = u64::try_from(MAX_EXECUTIONS).unwrap();
+    for id in 2..=most + 1 {
+        host.start(start_of(id, shell("exec sleep 60")), Vec::new());
+    }
+    host.run_until(|host| (2..=most + 1).all(|id| host.executions[&id].peer().has_started()));
+    let (_, worked) = host.stop();
+    assert_eq!(worked.unwrap(), Worked::Stopped);
+}
+
+/// A process with a child that it never waits for, so that the child, once it ended, stays a
+/// zombie, and occupies its cgroup, until the process ends. Both run in a process group that the
+/// process leads, which the test kills when it drops, so that neither outlives a test that fails;
+/// the system's collector of orphans then collects the child's status.
+struct Holder {
+    /// The process.
+    process: Child,
+    /// The process ID of its child.
+    child: u32,
+}
+
+impl Holder {
+    /// Starts the process and its child.
+    fn new() -> Self {
+        let mut process = Command::new("/bin/sh")
+            .args(["-c", "sleep 600 & echo $!; exec sleep 600"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let mut line = String::new();
+        BufReader::new(process.stdout.take().unwrap())
+            .read_line(&mut line)
+            .unwrap();
+        let child = line.trim().parse().unwrap();
+        Self { process, child }
+    }
+}
+
+impl Drop for Holder {
+    fn drop(&mut self) {
+        // Until its status is collected, the process keeps its ID, which is the group's.
+        let group = Pid::from_raw(i32::try_from(self.process.id()).unwrap());
+        let _ = signal::killpg(group, Signal::SIGKILL);
+        let _ = self.process.wait();
+    }
+}
+
+#[test]
+fn an_execution_that_does_not_settle_keeps_its_place_until_the_host_stops_the_worker() {
+    // A zombie whose parent is outside the cgroup keeps a cgroup occupied, which needs cgroups.
+    if !cgroups() {
+        return;
+    }
+    // The program prints its process ID and its cgroup, and waits until the test signals it,
+    // once the test moved a holder's child into the cgroup. The settlement kills the child, which
+    // stays a zombie, so that the execution does not settle within its settlement time.
+    let holder = Holder::new();
+    let mut host = Host::new();
+    let waiting = "trap 'exit 0' USR1; echo $$; cat /proc/self/cgroup; \
+                   while :; do sleep 0.01; done";
+    let settlement = Duration::from_secs(1);
+    let start = Start::new(
+        Key::new(1, 1),
+        shared_limits(),
+        Timers::new(GRACE, settlement),
+        shell(waiting),
+    );
+    host.start(start, Vec::new());
+    host.run_until(|host| {
+        let output = host.executions[&1].output(Stream::Stdout);
+        output.iter().filter(|&&byte| byte == b'\n').count() == 2
+    });
+    let (program, cgroup) = process_and_cgroup(&host, 1, 0);
+    fs::write(cgroup.join("cgroup.procs"), holder.child.to_string()).unwrap();
+    let program = Pid::from_raw(i32::try_from(program).unwrap());
+    signal::kill(program, Signal::SIGUSR1).unwrap();
+    host.run_until(|host| host.outcome(1).is_some());
+    let outcome = host.outcome(1).unwrap();
+    assert_eq!(outcome.status(), Some(Status::Exited(0)));
+    assert_eq!(outcome.cause(), None);
+    for stream in Stream::ALL {
+        assert!(!outcome.is_truncated(stream), "{stream:?}");
+    }
+    assert!(!outcome.is_reusable());
+    assert!(cgroup.exists(), "{}", cgroup.display());
+
+    // The execution keeps its place: the worker runs one execution fewer than its limit, and
+    // refuses the next start. It still does once the cgroup is empty, after the holder ended.
+    let most = u64::try_from(MAX_EXECUTIONS).unwrap();
+    fill_but_one(&mut host, 2);
+    drop(holder);
+    let deadline = Instant::now() + TIMEOUT;
+    while fs::read(cgroup.join("pids.current")).unwrap() != b"0\n" {
+        assert!(Instant::now() < deadline, "the cgroup stays occupied");
+        thread::sleep(Duration::from_millis(10));
+    }
+    fill_but_one(&mut host, 2 + most);
+
+    // The stop ends the executions, and removes every cgroup, the fenced one's included. The fake
+    // root lives until the check, as its workload cgroup removes what is left in it once it drops.
+    let (_root, worked) = host.stop();
+    assert_eq!(worked.unwrap(), Worked::Stopped);
+    assert!(!cgroup.exists(), "{}", cgroup.display());
+}
+
+/// Starts one execution fewer than the worker's limit, from the ID `first` on, while another
+/// execution keeps its place: checks that they run, and that the worker refuses the next start,
+/// then cancels them, and checks that they settled.
+fn fill_but_one(host: &mut Host, first: u64) {
+    let most = u64::try_from(MAX_EXECUTIONS).unwrap();
+    let ids = first..first + most - 1;
+    for id in ids.clone() {
+        host.start(start_of(id, shell("exec sleep 60")), Vec::new());
+    }
+    host.run_until(|host| {
+        ids.clone()
+            .all(|id| host.executions[&id].peer().has_started())
+    });
+    let refused = ids.end;
+    host.start(start_of(refused, shell("exit 0")), Vec::new());
+    host.run_until(|host| host.outcome(refused).is_some());
+    let again = LaunchFailure::new(0, Errno::EAGAIN as i32);
+    assert_eq!(host.outcome(refused).unwrap().launch_failure(), Some(again));
+    let now = Instant::now();
+    for id in ids.clone() {
+        host.execution(id).peer_mut().cancel(now);
+    }
+    host.run_until(|host| ids.clone().all(|id| host.outcome(id).is_some()));
+    for id in ids {
+        let outcome = host.outcome(id).unwrap();
+        assert_eq!(outcome.cause(), Some(Cause::Cancelled), "{id}");
+        assert!(outcome.is_reusable(), "{id}");
+    }
+}
+
+#[test]
+fn an_execution_runs_in_its_working_directory_with_exactly_its_environment() {
+    // In a sandbox with a workload identity, the worker prepares each execution's entry as it.
+    // Without privileges, the program runs in the test's own root, so that its working directory
+    // is one of the test's host. The first program prints its environment, which none of the
+    // worker's own joins, and the second its working directory.
+    let mut host = Host::new();
+    let environment = ["GREETING=hello world", "EMPTY=", "TWICE=a=b"];
+    let directory = fs::canonicalize(accounts()).unwrap();
+    let directory = directory.to_str().unwrap();
+    let printing = start_of(1, vec![b"/usr/bin/env".to_vec()]).with_environment(environment);
+    host.start(printing, Vec::new());
+    let moved = start_of(2, shell("pwd -P")).with_working_directory(directory);
+    host.start(moved, Vec::new());
+    host.run_until(|host| (1..=2).all(|id| host.outcome(id).is_some()));
+    for id in 1..=2 {
+        check_lossless(&host, id, Status::Exited(0));
+    }
+    let printed = environment.map(|entry| format!("{entry}\n")).concat();
+    assert_eq!(
+        host.executions[&1].output(Stream::Stdout),
+        printed.as_bytes()
+    );
+    assert_eq!(
+        host.executions[&2].output(Stream::Stdout),
+        format!("{directory}\n").as_bytes()
+    );
+    let (root, worked) = host.stop();
+    assert_eq!(worked.unwrap(), Worked::Stopped);
+    // The configuration's check, then each execution.
+    let workload = entrance(entry::Identity::new(WORKLOAD.0, WORKLOAD.1));
+    assert_eq!(
+        entrances(&root),
+        [workload.clone(), workload.clone(), workload]
+    );
+}
+
+#[test]
+fn an_execution_enters_the_root_as_the_identity_that_its_start_names() {
+    // In a sandbox without a workload identity, each start names an identity, with its
+    // supplementary groups, its capabilities, and its account mode, which the worker prepares an
+    // entry with, and the default hostname.
+    let mut host = Host::configured(FakeRoot::booting(&layout()), &RootConfig::default());
+    let bit = |capability: Capability| 1 << capability.number();
+    let identities = [
+        exec::Identity {
+            groups: vec![50],
+            capabilities: bit(Capability::CHOWN) | bit(Capability::KILL),
+            ..exec::Identity::new(0, 0)
+        },
+        exec::Identity {
+            groups: vec![50, WORKLOAD.1],
+            ..exec::Identity::new(WORKLOAD.0, WORKLOAD.1)
+        },
+        exec::Identity {
+            account: AccountMode::Numeric,
+            ..exec::Identity::new(4242, 4243)
+        },
+    ];
+    for (id, identity) in (1..).zip(&identities) {
+        let start = start_of(id, shell("exit 0")).with_identity(identity.clone());
+        host.start(start, Vec::new());
+    }
+    host.run_until(|host| (1..=3).all(|id| host.outcome(id).is_some()));
+    for id in 1..=3 {
+        check_lossless(&host, id, Status::Exited(0));
+    }
+    let (root, worked) = host.stop();
+    assert_eq!(worked.unwrap(), Worked::Stopped);
+    let capabilities = Capabilities::EMPTY
+        .with(Capability::CHOWN)
+        .with(Capability::KILL);
+    let expected = [
+        entry::Identity::new(0, 0)
+            .groups([50])
+            .capabilities(capabilities),
+        entry::Identity::new(WORKLOAD.0, WORKLOAD.1).groups([50, WORKLOAD.1]),
+        entry::Identity::new(4242, 4243).account(entry::AccountMode::Numeric),
+    ]
+    .map(entrance);
+    assert_eq!(entrances(&root), expected);
+}
+
+#[test]
+fn an_execution_enters_the_root_with_the_publication_of_listeners_that_its_configuration_names() {
+    // Listeners are published unless the configuration names them unpublished. While they are,
+    // the entry refuses at stage 0 the capabilities that could forge a listener announcement,
+    // binding a privileged port and opening a raw socket, which it allows otherwise, as it allows
+    // the other capabilities of its allowlist either way.
+    let capabilities = [
+        Capability::NET_BIND_SERVICE,
+        Capability::NET_RAW,
+        Capability::CHOWN,
+    ];
+    for (listeners, publication) in [
+        (None, Publication::Published),
+        (Some(Listeners::Published), Publication::Published),
+        (Some(Listeners::Unpublished), Publication::Unpublished),
+    ] {
+        let config = RootConfig {
+            listeners,
+            ..RootConfig::default()
+        };
+        let mut host = Host::configured(FakeRoot::booting(&layout()), &config);
+        for (id, capability) in (1..).zip(capabilities) {
+            let identity = exec::Identity {
+                capabilities: 1 << capability.number(),
+                ..exec::Identity::new(0, 0)
+            };
+            host.start(
+                start_of(id, shell("exit 0")).with_identity(identity),
+                Vec::new(),
+            );
+        }
+        host.run_until(|host| (1..=3).all(|id| host.outcome(id).is_some()));
+        for (id, capability) in (1..).zip(capabilities) {
+            if publication == Publication::Published && capability != Capability::CHOWN {
+                let failure = LaunchFailure::new(0, Errno::EPERM as i32);
+                let outcome = host.outcome(id).unwrap();
+                assert_eq!(
+                    outcome.launch_failure(),
+                    Some(failure),
+                    "{listeners:?}: {capability}"
+                );
+            } else {
+                check_lossless(&host, id, Status::Exited(0));
+            }
+        }
+        let (root, worked) = host.stop();
+        assert_eq!(worked.unwrap(), Worked::Stopped);
+        let expected = capabilities.map(|capability| Entrance {
+            publication,
+            ..entrance(
+                entry::Identity::new(0, 0).capabilities(Capabilities::EMPTY.with(capability)),
+            )
+        });
+        assert_eq!(entrances(&root), expected, "{listeners:?}");
+    }
+
+    // The check of a sandbox's workload identity enters with the configuration's publication, as
+    // each execution does.
+    let config = RootConfig {
+        listeners: Some(Listeners::Unpublished),
+        ..sandbox()
+    };
+    let mut host = Host::configured(FakeRoot::booting(&layout()), &config);
+    host.start(start_of(1, shell("exit 0")), Vec::new());
+    host.run_until(|host| host.outcome(1).is_some());
+    check_lossless(&host, 1, Status::Exited(0));
+    let (root, worked) = host.stop();
+    assert_eq!(worked.unwrap(), Worked::Stopped);
+    let workload = Entrance {
+        publication: Publication::Unpublished,
+        ..entrance(entry::Identity::new(WORKLOAD.0, WORKLOAD.1))
+    };
+    assert_eq!(entrances(&root), [workload.clone(), workload]);
+}
+
+#[test]
+fn the_worker_refuses_at_stage_0_a_start_whose_identity_breaks_the_rules() {
+    // Each refusal's terminal record tells its `errno`, and the refusal takes no place.
+    fn refused(host: &mut Host, cases: Vec<(Option<exec::Identity>, Errno)>) {
+        let ids = 1..=u64::try_from(cases.len()).unwrap();
+        for (id, (identity, _)) in ids.clone().zip(&cases) {
+            let mut start = start_of(id, shell("exit 0"));
+            start.identity = identity.clone();
+            host.start(start, Vec::new());
+        }
+        host.run_until(|host| ids.clone().all(|id| host.outcome(id).is_some()));
+        for (id, (identity, error)) in ids.zip(&cases) {
+            let failure = LaunchFailure::new(0, *error as i32);
+            let outcome = host.outcome(id).unwrap();
+            assert_eq!(outcome.launch_failure(), Some(failure), "{identity:?}");
+        }
+    }
+
+    // In a sandbox with a workload identity, a start names none.
+    let mut host = Host::new();
+    let workload = exec::Identity::new(WORKLOAD.0, WORKLOAD.1);
+    refused(&mut host, vec![(Some(workload), Errno::EINVAL)]);
+    let (_, worked) = host.stop();
+    assert_eq!(worked.unwrap(), Worked::Stopped);
+
+    // In a sandbox without one, a start names its own, which the entry checks: its
+    // capabilities, its IDs, and its account in existing-account mode.
+    let mut host = Host::configured(FakeRoot::booting(&layout()), &RootConfig::default());
+    let root = |capability: Capability| exec::Identity {
+        capabilities: 1 << capability.number(),
+        ..exec::Identity::new(0, 0)
+    };
+    let cases = vec![
+        (None, Errno::EINVAL),
+        (
+            Some(exec::Identity {
+                capabilities: 1 << 21,
+                ..exec::Identity::new(0, 0)
+            }),
+            Errno::EPERM,
+        ),
+        (
+            Some(exec::Identity {
+                capabilities: 1 << Capability::CHOWN.number(),
+                ..exec::Identity::new(WORKLOAD.0, WORKLOAD.1)
+            }),
+            Errno::EPERM,
+        ),
+        (Some(root(Capability::NET_BIND_SERVICE)), Errno::EPERM),
+        (Some(root(Capability::NET_RAW)), Errno::EPERM),
+        (Some(exec::Identity::new(4242, 4242)), Errno::ENOENT),
+        (Some(exec::Identity::new(ORPHAN.0, ORPHAN.1)), Errno::ENOENT),
+        (Some(exec::Identity::new(WORKLOAD.0, 50)), Errno::EINVAL),
+        (
+            Some(exec::Identity {
+                account: AccountMode::Numeric,
+                ..exec::Identity::new(u32::MAX, 0)
+            }),
+            Errno::EINVAL,
+        ),
+    ];
+    let first = u64::try_from(cases.len()).unwrap() + 1;
+    refused(&mut host, cases);
+    let most = u64::try_from(MAX_EXECUTIONS).unwrap();
+    let ids = first..first + most;
+    for id in ids.clone() {
+        let start = start_of(id, shell("exec sleep 60"))
+            .with_identity(exec::Identity::new(WORKLOAD.0, WORKLOAD.1));
+        host.start(start, Vec::new());
+    }
+    host.run_until(|host| {
+        ids.clone()
+            .all(|id| host.executions[&id].peer().has_started())
+    });
+    let (_, worked) = host.stop();
+    assert_eq!(worked.unwrap(), Worked::Stopped);
 }
 
 #[test]
@@ -2682,9 +3810,10 @@ fn the_worker_collects_the_status_of_a_program_that_a_real_time_signal_ended() {
 
 #[test]
 fn an_execution_that_starts_with_the_root_counts_its_timeout_from_its_own_start() {
-    // The start comes in the same payload as the root's configuration, whose assembly takes
-    // longer than the execution's timeout. The timeout counts from the start's own instant, so
-    // the program, which ends well before it, ends on its own.
+    // The execution's start comes in the same payload as the root's configuration and the
+    // sandbox's start, and the root's assembly takes longer than the execution's timeout. The
+    // timeout counts from the execution's own instant, so the program, which ends well before it,
+    // ends on its own.
     let root = FakeRoot::booting(&layout()).assembling_for(Duration::from_secs(2));
     let (mut broker, working) = start_worker(root);
     broker.attach(FIRST);
@@ -2695,7 +3824,7 @@ fn an_execution_that_starts_with_the_root_counts_its_timeout_from_its_own_start(
         timed,
         shell("exec sleep 0.2"),
     );
-    let execution = HostExecution::new(start.clone(), Vec::new(), Instant::now());
+    let execution = HostExecution::new(start.clone(), timers(), Vec::new(), Instant::now());
     let mut host = Host {
         broker,
         working: Some(working),
@@ -2703,9 +3832,13 @@ fn an_execution_that_starts_with_the_root_counts_its_timeout_from_its_own_start(
         replies: Vec::new(),
         stopping: false,
     };
-    host.send(&[configuration(), HostMessage::Start(start).encode()]);
+    host.send(&[
+        Message::RootConfig(sandbox().encode()),
+        Message::Start,
+        HostMessage::Start(start).encode(),
+    ]);
     host.run_until(|host| host.outcome(1).is_some());
-    assert_eq!(host.replies, [Message::RootReady]);
+    assert_eq!(host.replies, [ready(), Message::Started]);
     check_lossless(&host, 1, Status::Exited(0));
     let (_, worked) = host.stop();
     assert_eq!(worked.unwrap(), Worked::Stopped);
@@ -2720,7 +3853,7 @@ fn a_host_that_a_test_drops_while_its_broker_pauses_ends_the_worker_and_its_prog
         start_of(1, shell("echo $$; exec cat /dev/zero")),
         Vec::new(),
     );
-    host.run_until(|host| host.executions[&1].output[0].contains(&b'\n'));
+    host.run_until(|host| host.executions[&1].output(Stream::Stdout).contains(&b'\n'));
     let group = host.executions[&1].group();
     host.broker.pause();
     let working = host.working.take().unwrap();
@@ -2800,15 +3933,622 @@ fn the_worker_runs_executions_on_a_tty() {
         let worked = worker::work_on_terminal(&path, &mut root);
         (root, worked)
     });
-    let mut host = Host::ready(broker, working);
+    let mut host = Host::ready(broker, working, &sandbox());
     let script = "seq 1 100000; seq 1 1000 >&2";
     host.start(start_of(1, shell(script)), Vec::new());
     host.run_until(|host| host.outcome(1).is_some());
     assert_eq!(
-        host.executions[&1].output,
+        host.executions[&1].outputs(),
         [lines(1, 100_000), lines(1, 1000)]
     );
     check_lossless(&host, 1, Status::Exited(0));
     let (_, worked) = host.stop();
     assert_eq!(worked.unwrap(), Worked::Stopped);
+}
+
+/// The worker of a clone, which a restore of a template's snapshot started, on x86_64, whose time
+/// ABI a clone needs. It resumes the session that the template's VM attached before its capture,
+/// answers the reset that the restore queued, takes nothing but the host's `Activate` until the
+/// clone is ready, applies its record, and then serves the host's order, as after a cold boot.
+#[cfg(target_arch = "x86_64")]
+mod clones {
+    use std::num::NonZeroU64;
+
+    use nvx::activation::{
+        self, ActivationRecord, Configuration, ExpectedResources, MachineIdMode, ReadyActivation,
+        RestoreSection, StoreGeneration, TemplateReference, TransactionId, WorkloadIdentity,
+        WorkloadView,
+    };
+    use nvx::guest::clone::{Activation, AdmissionFence, RootTemplate};
+    use nvx::protocol::nvxs::{GuestEvent, GuestSession};
+    use nvx::protocol::status;
+    use runtime_adapter::worker::UNACTIVATED_DRAIN;
+    use runtime_adapter::worker::activation::ACTIVATION_TIMEOUT;
+    use runtime_adapter::worker::capture::{self, Admission};
+
+    use super::*;
+
+    /// Identity of the epoch that the broker of the clones' template started with the reset with
+    /// which it answered the template's attachment, before the capture.
+    const TEMPLATE: Identity = Identity {
+        instance_id: [0x7e; 16],
+        epoch: 1,
+    };
+
+    /// Identity of the epoch that the broker of a clone starts with the reset that the restore
+    /// queued, of another instance.
+    const RESTORED: Identity = Identity {
+        instance_id: [0xc1; 16],
+        epoch: 1,
+    };
+
+    /// The CPU count and the memory size of the tests' clones, as their repair found them.
+    const RESOURCES: ExpectedResources = ExpectedResources {
+        cpus: 2,
+        memory: 1 << 30,
+    };
+
+    /// Returns the record of a clone's Activate of the transaction `transaction`, whose workload
+    /// runs as `identity`, if any: an EROFS image over a scratch, without an export, a mapping, or
+    /// a network, which expects [`RESOURCES`].
+    fn record(transaction: u8, identity: Option<(u32, u32)>) -> ActivationRecord {
+        let configuration = Configuration {
+            image: activation::Image::Erofs {
+                binding: activation::Identity::from_bytes([0x11; 32]),
+                uuid: None,
+            },
+            upper: activation::Upper::Scratch {
+                binding: activation::Identity::from_bytes([0x22; 32]),
+                journal: activation::Journal::Forbidden,
+            },
+            overlay: activation::OverlayMode::UntrustedLowers,
+            export: None,
+            mappings: 0,
+            network: None,
+            workload: WorkloadView {
+                hostname: b"clone".to_vec(),
+                machine_id: MachineIdMode::Image,
+                identity: identity.map(|(uid, gid)| WorkloadIdentity { uid, gid }),
+            },
+            resources: RESOURCES,
+        };
+        let restore = RestoreSection {
+            transaction: TransactionId::from_bytes([transaction; 16]),
+            template: TemplateReference {
+                generation: StoreGeneration::new(NonZeroU64::MIN),
+                key: activation::Identity::from_bytes([0x44; 32]),
+            },
+        };
+        ActivationRecord::new(Some(restore), configuration).unwrap()
+    }
+
+    /// Returns the record of `record`'s transaction whose configuration `change` changed.
+    fn changed(
+        record: &ActivationRecord,
+        change: impl FnOnce(&mut Configuration),
+    ) -> ActivationRecord {
+        let mut configuration = record.configuration().clone();
+        change(&mut configuration);
+        ActivationRecord::new(record.restore().cloned(), configuration).unwrap()
+    }
+
+    /// Returns the activation of a clone that the worker repaired, with [`RESOURCES`], behind the
+    /// worker's fence, which the capture's barrier handed over closed, and whose deadline ends
+    /// `timeout` from now, as from the repair's acknowledgement of the restore.
+    fn repaired(timeout: Duration) -> Activation<Admission> {
+        let mut fence = Admission::default();
+        fence.close().unwrap();
+        let now = Instant::now();
+        Activation::with_resources(RESOURCES, Some(now), fence, timeout, now)
+    }
+
+    /// Returns the inputs of the assembly of the clones' roots that their template captured:
+    /// those of the template's own configuration.
+    fn template() -> RootTemplate {
+        capture::root_template(&capture::template_config())
+    }
+
+    /// Returns the guest's role of the session that the template's VM attached before its
+    /// capture, as the snapshot holds it: active in the epoch of [`TEMPLATE`], which the
+    /// template's broker started with the reset with which it answered the attachment, and which
+    /// the template acknowledged.
+    fn captured_session() -> GuestSession {
+        let mut session = GuestSession::new();
+        let mut output = Vec::new();
+        session.attach(&mut output).unwrap();
+        let reset = super::record(RecordType::Reset, TEMPLATE, 0, &[]);
+        let (consumed, event) = session.receive(&reset).unwrap();
+        assert_eq!(
+            (consumed, event),
+            (reset.len(), Some(GuestEvent::Reset(TEMPLATE)))
+        );
+        session.acknowledge(RECEIVE_WINDOW, &mut output).unwrap();
+        session
+    }
+
+    /// Starts a clone's worker in a thread, with the root operations `root`, on one end of a
+    /// socket pair, and returns the broker on the other end with the thread. The worker resumes
+    /// the session that the template's VM attached, so it sends no attachment, and its
+    /// activation's deadline ends `timeout` from now.
+    fn start_clone(root: FakeRoot, timeout: Duration) -> (Broker, Working) {
+        start_clone_after(root, timeout, |_| {})
+    }
+
+    /// Starts a clone's worker as [`start_clone`] does, once `ahead` sent what the broker sends
+    /// before the worker runs, which the worker then takes at once, however late its thread runs.
+    fn start_clone_after(
+        root: FakeRoot,
+        timeout: Duration,
+        ahead: impl FnOnce(&mut Broker),
+    ) -> (Broker, Working) {
+        let (broker, guest) = UnixStream::pair().unwrap();
+        let mut broker = Broker::new(broker);
+        ahead(&mut broker);
+        (broker, run_clone(guest, root, timeout))
+    }
+
+    /// Runs a clone's worker in a thread, with the root operations `root`, on `guest`, the guest's
+    /// end of the stream, and returns the thread, as [`start_clone`] does.
+    fn run_clone(guest: UnixStream, root: FakeRoot, timeout: Duration) -> Working {
+        let session = captured_session();
+        let activation = repaired(timeout);
+        thread::spawn(move || {
+            let mut root = root;
+            let worked = worker::work_clone(guest, session, &mut root, activation, template());
+            (root, worked)
+        })
+    }
+
+    /// Returns the broker's end and the guest's end of a socket pair whose guest direction is
+    /// full, as once the broker failed: the stream takes nothing more from the guest.
+    fn stalled() -> (UnixStream, UnixStream) {
+        let (broker, guest) = UnixStream::pair().unwrap();
+        let filler = guest.try_clone().unwrap();
+        filler.set_nonblocking(true).unwrap();
+        loop {
+            match (&filler).write(&[0; 4096]) {
+                Ok(_) => {}
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => break,
+                Err(error) => panic!("cannot fill the stream: {error}"),
+            }
+        }
+        (broker, guest)
+    }
+
+    impl Broker {
+        /// Starts the epoch of `identity` with a RESET, as [`reset`](Self::reset) does, but takes
+        /// the guest's acknowledgement later, with [`acknowledged`](Self::acknowledged), as from a
+        /// guest that may not run yet: meanwhile, the broker takes the guest's receive window as
+        /// the guest agent's, which the acknowledgement grants.
+        fn reset_ahead(&mut self, identity: Identity) {
+            self.identity = identity;
+            self.send_sequence = 0;
+            self.receive_sequence = 0;
+            self.send(RecordType::Reset, &[]);
+            self.room = RECEIVE_WINDOW as usize;
+        }
+
+        /// Takes the guest's acknowledgement of the reset that [`reset_ahead`](Self::reset_ahead)
+        /// sent.
+        fn acknowledged(&mut self) {
+            let ack = self.expect();
+            assert_eq!(ack.record_type(), RecordType::Ack);
+            assert_eq!(ack.window(), Some(RECEIVE_WINDOW));
+        }
+    }
+
+    /// Returns the host's Activate of `record`.
+    fn activate(record: &ActivationRecord) -> Message {
+        Message::Activate(record.encode())
+    }
+
+    /// Returns the worker's answer to the Activate of `record` once it activated the clone: its
+    /// readiness, with the guest agent's build, and the activation, which reports the record's
+    /// configuration identity and its transaction.
+    fn activated(record: &ActivationRecord) -> Message {
+        let ready = Ready::new(GUEST_BUILD).unwrap();
+        Message::Ready(ready.with_activation(ReadyActivation::of(record)).encode())
+    }
+
+    /// Returns the call of a fake root that applied `record` with the clones' [`template`].
+    fn applied(record: &ActivationRecord) -> Call {
+        Call::Apply(Box::new((record.clone(), template())))
+    }
+
+    /// Returns the root operations of the worker that runs in `working`, once it ended because the
+    /// clone's activation failed with the status `expected`, and checks that it answered nothing,
+    /// but credited what it took, before it ended its stream.
+    fn unactivated(broker: &mut Broker, working: Working, expected: u8) -> FakeRoot {
+        let (root, worked) = joined(working);
+        let worked = worked.unwrap();
+        assert!(matches!(worked, Worked::Unactivated { .. }), "{worked:?}");
+        assert_eq!(worked.status(), expected, "{worked:?}");
+        while let Some(record) = broker.read() {
+            broker.check(&record);
+            assert_eq!(broker.accept(&record), [], "{worked:?}");
+        }
+        root
+    }
+
+    impl Host {
+        /// Starts a clone's worker with the root operations `root`, and returns the host, once the
+        /// worker activated the clone with `record`, which announces no mapping, and started the
+        /// sandbox.
+        fn activated(root: FakeRoot, record: &ActivationRecord) -> Self {
+            let (mut broker, working) = start_clone(root, ACTIVATION_TIMEOUT);
+            broker.reset(RESTORED);
+            let messages = [activate(record), Message::Start];
+            let replies = broker.exchange(&messages, OUTER_MAX_PAYLOAD, 2);
+            assert_eq!(replies, [activated(record), Message::Started]);
+            Self {
+                broker,
+                working: Some(working),
+                executions: BTreeMap::new(),
+                replies: Vec::new(),
+                stopping: false,
+            }
+        }
+    }
+
+    #[test]
+    fn a_clone_answers_the_restore_s_reset_and_activates_with_the_record_of_its_activate() {
+        let (mut broker, working) = start_clone(FakeRoot::booting(&layout()), ACTIVATION_TIMEOUT);
+        // The worker sends no attachment: it acknowledges the reset that the restore queued, with
+        // its receive window, first.
+        broker.reset(RESTORED);
+        let record = record(1, Some(WORKLOAD));
+        let replies = broker.exchange(&[activate(&record)], OUTER_MAX_PAYLOAD, 1);
+        assert_eq!(replies, [activated(&record)]);
+        let Message::Ready(body) = &replies[0] else {
+            panic!("{replies:?}");
+        };
+        let ready = Ready::decode(body).unwrap();
+        assert_eq!(ready.build(), GUEST_BUILD);
+        assert_eq!(ready.activation(), Some(ReadyActivation::of(&record)));
+
+        // A retry of the Activate, byte for byte, gets the same Ready, without a second
+        // application, in records of any size, and after a later reset, as once the host attached
+        // again.
+        let replies = broker.exchange(&[activate(&record)], 7, 1);
+        assert_eq!(replies, [activated(&record)]);
+        broker.settle();
+        broker.reset(Identity {
+            epoch: 2,
+            ..RESTORED
+        });
+        let replies = broker.exchange(&[activate(&record)], OUTER_MAX_PAYLOAD, 1);
+        assert_eq!(replies, [activated(&record)]);
+
+        // The worker then serves the host's order, as after a cold boot: the record announces no
+        // mapping, so the sandbox starts at once, and a retry still gets the same Ready.
+        let messages = [
+            Message::Ping,
+            Message::Start,
+            Message::Probe(b"mounts".to_vec()),
+            activate(&record),
+            Message::Stop,
+        ];
+        let expected = [
+            Message::Pong,
+            Message::Started,
+            Message::Report(found(&probe("mounts")).encode()),
+            activated(&record),
+            Message::Stopped,
+        ];
+        let replies = broker.exchange(&messages, OUTER_MAX_PAYLOAD, expected.len());
+        assert_eq!(replies, expected);
+        let (root, worked) = joined(working);
+        let worked = worked.unwrap();
+        assert_eq!((&worked, worked.status()), (&Worked::Stopped, 0));
+        assert!(broker.read().is_none(), "the worker ended its stream");
+        // It applied the record once, with the template's inputs, and read no command line,
+        // bootstrapped nothing, and assembled no root of a configuration: the template
+        // bootstrapped the guest before its capture.
+        let expected = [
+            applied(&record),
+            Call::Probe(probe("mounts")),
+            Call::Teardown,
+        ];
+        assert_eq!(root.calls, expected);
+    }
+
+    #[test]
+    fn a_clone_takes_nothing_but_its_activate_before_it_is_ready() {
+        // Any other message fails the activation, finally, with the status of the host's session,
+        // a stop and a ping included, as do the messages that only the guest sends. The worker
+        // answers nothing, and applies, mounts, and spawns nothing.
+        let refused = [
+            Message::Ping,
+            Message::Stop,
+            Message::Echo(b"early".to_vec()),
+            Message::Probe(b"mounts".to_vec()),
+            configuration(),
+            Message::Maps(maps_part()),
+            Message::Start,
+            HostMessage::Start(start_of(1, shell("exit 0"))).encode(),
+            Message::Pong,
+            ready(),
+            Message::Started,
+        ];
+        for message in refused {
+            let (mut broker, working) =
+                start_clone(FakeRoot::booting(&layout()), ACTIVATION_TIMEOUT);
+            broker.reset(RESTORED);
+            broker.send_data(&message.encode().unwrap(), OUTER_MAX_PAYLOAD);
+            let root = unactivated(&mut broker, working, status::ACTIVATION_PROTOCOL);
+            assert_eq!(root.calls, [], "{message:?}");
+        }
+
+        // So does another reset, which the worker acknowledges first.
+        let (mut broker, working) = start_clone(FakeRoot::booting(&layout()), ACTIVATION_TIMEOUT);
+        broker.reset(RESTORED);
+        broker.reset(Identity {
+            epoch: 2,
+            ..RESTORED
+        });
+        let root = unactivated(&mut broker, working, status::ACTIVATION_PROTOCOL);
+        assert_eq!(root.calls, []);
+    }
+
+    #[test]
+    fn a_clone_s_activation_fails_finally_with_the_status_of_the_failure_s_class() {
+        // The activation refuses a record that does not decode, a cold boot's, and one that
+        // expects other resources than the repair found, before anything has a side effect.
+        let clone = record(1, None);
+        let cold = ActivationRecord::new(None, clone.configuration().clone()).unwrap();
+        let more = changed(&clone, |configuration| configuration.resources.memory *= 2);
+        let cases = [
+            (Message::Activate(Vec::new()), status::ACTIVATION_RECORD),
+            (
+                Message::Activate(b"\x01".to_vec()),
+                status::ACTIVATION_RECORD,
+            ),
+            (activate(&cold), status::ACTIVATION_RECORD),
+            (activate(&more), status::ACTIVATION_RESOURCES),
+        ];
+        for (message, expected) in cases {
+            let (mut broker, working) =
+                start_clone(FakeRoot::booting(&layout()), ACTIVATION_TIMEOUT);
+            broker.reset(RESTORED);
+            broker.send_data(&message.encode().unwrap(), OUTER_MAX_PAYLOAD);
+            let root = unactivated(&mut broker, working, expected);
+            assert_eq!(root.calls, [], "{message:?}");
+        }
+
+        // The application refuses a GPT disk, which a clone does not assemble, and a workload
+        // identity whose account the image lacks, or whose primary group it lacks, before Ready.
+        let gpt = changed(&clone, |configuration| {
+            configuration.image = activation::Image::Gpt {
+                binding: activation::Identity::from_bytes([0x11; 32]),
+                disk_guid: None,
+                first_partition_bound: 1 << 20,
+            };
+        });
+        let cases = [
+            (gpt, status::ACTIVATION_ROOT),
+            (record(1, Some((4242, 4242))), status::ACTIVATION_WORKLOAD),
+            (record(1, Some(ORPHAN)), status::ACTIVATION_WORKLOAD),
+        ];
+        for (record, expected) in cases {
+            let (mut broker, working) =
+                start_clone(FakeRoot::booting(&layout()), ACTIVATION_TIMEOUT);
+            broker.reset(RESTORED);
+            broker.send_data(&activate(&record).encode().unwrap(), OUTER_MAX_PAYLOAD);
+            let root = unactivated(&mut broker, working, expected);
+            assert_eq!(root.calls, [applied(&record)]);
+        }
+    }
+
+    #[test]
+    fn a_clone_that_the_host_does_not_activate_in_time_ends_with_the_deadline_s_status() {
+        // Whether the restore's reset came or not, or part of an Activate, the deadline ends the
+        // activation, before anything has a side effect. The broker sends what it sends before the
+        // worker runs, which then takes it at once: a worker that runs only once the deadline
+        // passed still acknowledges the reset, and fails with the deadline's status.
+        let record = record(1, Some(WORKLOAD));
+        let bytes = activate(&record).encode().unwrap();
+        let cases: [Option<&[u8]>; 3] = [None, Some(&[]), Some(&bytes[..bytes.len() / 2])];
+        for sent in cases {
+            let deadline = Duration::from_millis(200);
+            let root = FakeRoot::booting(&layout());
+            let (mut broker, working) = start_clone_after(root, deadline, |broker| {
+                if let Some(sent) = sent {
+                    broker.reset_ahead(RESTORED);
+                    broker.send_data(sent, OUTER_MAX_PAYLOAD);
+                }
+            });
+            if sent.is_some() {
+                broker.acknowledged();
+            }
+            let root = unactivated(&mut broker, working, status::ACTIVATION_DEADLINE);
+            assert_eq!(root.calls, [], "{sent:?}");
+        }
+
+        // Once the clone is ready, the deadline ends nothing.
+        let deadline = Duration::from_secs(2);
+        let root = FakeRoot::booting(&layout());
+        let (mut broker, working) = start_clone_after(root, deadline, |broker| {
+            broker.reset_ahead(RESTORED);
+            broker.send_data(&bytes, OUTER_MAX_PAYLOAD);
+        });
+        broker.acknowledged();
+        let mut replies = Vec::new();
+        while replies.is_empty() {
+            replies.extend(broker.take());
+        }
+        assert_eq!(replies, [activated(&record)]);
+        thread::sleep(deadline + Duration::from_millis(500));
+        let replies = broker.exchange(&[Message::Ping, Message::Stop], OUTER_MAX_PAYLOAD, 2);
+        assert_eq!(replies, [Message::Pong, Message::Stopped]);
+        let (_, worked) = joined(working);
+        assert_eq!(worked.unwrap(), Worked::Stopped);
+    }
+
+    #[test]
+    fn a_clone_whose_stream_takes_nothing_still_ends_once_its_activation_failed() {
+        // The guest's direction of the stream is full, as once the broker failed: the worker
+        // cannot send its acknowledgement of the restore's reset, and still ends once the
+        // deadline passed, with the deadline's status, once it waited for the stream for
+        // `UNACTIVATED_DRAIN`.
+        let (broker, guest) = stalled();
+        let reset = super::record(RecordType::Reset, RESTORED, 0, &[]);
+        (&broker).write_all(&reset).unwrap();
+        let deadline = Duration::from_millis(200);
+        let started = Instant::now();
+        let working = run_clone(guest, FakeRoot::booting(&layout()), deadline);
+        let (root, worked) = joined(working);
+        let worked = worked.unwrap();
+        assert_eq!(worked.status(), status::ACTIVATION_DEADLINE, "{worked:?}");
+        assert!(started.elapsed() >= deadline + UNACTIVATED_DRAIN);
+        assert_eq!(root.calls, []);
+
+        // So does a worker whose broker closes its end of the stream before the clone is ready,
+        // as an abandoned clone, long before the deadline passes.
+        let (broker, guest) = stalled();
+        (&broker).write_all(&reset).unwrap();
+        broker.shutdown(Shutdown::Write).unwrap();
+        let started = Instant::now();
+        let working = run_clone(guest, FakeRoot::booting(&layout()), ACTIVATION_TIMEOUT);
+        let (root, worked) = joined(working);
+        assert_eq!(worked.unwrap(), Worked::Abandoned);
+        assert!(started.elapsed() >= UNACTIVATED_DRAIN);
+        assert_eq!(root.calls, []);
+    }
+
+    #[test]
+    fn a_clone_whose_broker_closes_the_stream_before_it_is_ready_is_abandoned() {
+        // Whether the restore's reset came or not, or part of an Activate, a broker that closes
+        // the stream before the clone is ready ends the clone with the status of the host's
+        // session, with nothing applied, and its fence closed.
+        let record = record(1, Some(WORKLOAD));
+        let bytes = activate(&record).encode().unwrap();
+        let cases: [Option<&[u8]>; 3] = [None, Some(&[]), Some(&bytes[..bytes.len() / 2])];
+        for sent in cases {
+            let (mut broker, working) =
+                start_clone(FakeRoot::booting(&layout()), ACTIVATION_TIMEOUT);
+            if let Some(sent) = sent {
+                broker.reset(RESTORED);
+                broker.send_data(sent, OUTER_MAX_PAYLOAD);
+            }
+            broker.close();
+            let (root, worked) = joined(working);
+            let worked = worked.unwrap();
+            assert_eq!(
+                (&worked, worked.status()),
+                (&Worked::Abandoned, 1),
+                "{sent:?}"
+            );
+            assert_eq!(root.calls, [], "{sent:?}");
+            while let Some(record) = broker.read() {
+                broker.check(&record);
+                assert_eq!(broker.accept(&record), [], "{sent:?}");
+            }
+        }
+
+        // Once the clone is ready, it ends as the worker of a VM that boots cold does, and leaves
+        // the root that it assembled to its operations.
+        let (mut broker, working) = start_clone(FakeRoot::booting(&layout()), ACTIVATION_TIMEOUT);
+        broker.reset(RESTORED);
+        let replies = broker.exchange(&[activate(&record)], OUTER_MAX_PAYLOAD, 1);
+        assert_eq!(replies, [activated(&record)]);
+        broker.close();
+        let (root, worked) = joined(working);
+        let worked = worked.unwrap();
+        assert_eq!((&worked, worked.status()), (&Worked::Closed, 1));
+        assert_eq!(root.calls, [applied(&record)]);
+    }
+
+    #[test]
+    fn a_clone_whose_broker_is_gone_still_ends_as_its_activation_tells() {
+        // The broker sends the restore's reset, and a ping, which fails the activation, or
+        // nothing more, and closes its socket before the worker runs: the worker cannot write
+        // its acknowledgement, and still ends with the activation's status, or as an abandoned
+        // clone, rather than with the failure of its stream.
+        let reset = super::record(RecordType::Reset, RESTORED, 0, &[]);
+        let ping = Message::Ping.encode().unwrap();
+        let ping = super::record(RecordType::Data, RESTORED, 1, &ping);
+        let cases = [
+            (
+                [reset.as_slice(), &ping].concat(),
+                Some(status::ACTIVATION_PROTOCOL),
+            ),
+            (reset, None),
+        ];
+        for (sent, expected) in cases {
+            let (broker, guest) = UnixStream::pair().unwrap();
+            (&broker).write_all(&sent).unwrap();
+            drop(broker);
+            let working = run_clone(guest, FakeRoot::booting(&layout()), ACTIVATION_TIMEOUT);
+            let (root, worked) = joined(working);
+            let worked = worked.unwrap();
+            match expected {
+                Some(expected) => {
+                    assert!(matches!(worked, Worked::Unactivated { .. }), "{worked:?}");
+                    assert_eq!(worked.status(), expected, "{worked:?}");
+                }
+                None => assert_eq!(worked, Worked::Abandoned),
+            }
+            assert_eq!(root.calls, [], "{worked:?}");
+        }
+    }
+
+    #[test]
+    fn a_ready_clone_fails_on_an_activate_that_is_not_a_retry() {
+        // An Activate of another transaction, or of the same transaction with another record, once
+        // the clone is ready or its sandbox started, fails the activation with the status of the
+        // host's session. The worker leaves the root that it assembled to its operations.
+        let accepted = record(1, Some(WORKLOAD));
+        let cases = [
+            (record(2, Some(WORKLOAD)), false),
+            (record(1, None), false),
+            (record(1, None), true),
+        ];
+        for (other, started) in cases {
+            let (mut broker, working) =
+                start_clone(FakeRoot::booting(&layout()), ACTIVATION_TIMEOUT);
+            broker.reset(RESTORED);
+            let mut messages = vec![activate(&accepted)];
+            let mut expected = vec![activated(&accepted)];
+            if started {
+                messages.push(Message::Start);
+                expected.push(Message::Started);
+            }
+            let replies = broker.exchange(&messages, OUTER_MAX_PAYLOAD, messages.len());
+            assert_eq!(replies, expected);
+            broker.send_data(&activate(&other).encode().unwrap(), OUTER_MAX_PAYLOAD);
+            let root = unactivated(&mut broker, working, status::ACTIVATION_PROTOCOL);
+            assert_eq!(root.calls, [applied(&accepted)], "{other:?}");
+        }
+    }
+
+    #[test]
+    fn a_clone_s_executions_run_as_the_workload_identity_of_its_record() {
+        // The record's workload identity is the whole sandbox's, as a root configuration's is:
+        // every execution runs as it, and a start that names an identity is refused.
+        let refused = LaunchFailure::new(0, Errno::EINVAL as i32);
+        let workload = exec::Identity::new(WORKLOAD.0, WORKLOAD.1);
+        let mut host = Host::activated(FakeRoot::booting(&layout()), &record(1, Some(WORKLOAD)));
+        host.start(start_of(1, shell("exit 0")), Vec::new());
+        let named = start_of(2, shell("exit 0")).with_identity(workload.clone());
+        host.start(named, Vec::new());
+        host.run_until(|host| (1..=2).all(|id| host.outcome(id).is_some()));
+        check_lossless(&host, 1, Status::Exited(0));
+        assert_eq!(host.outcome(2).unwrap().launch_failure(), Some(refused));
+        let (root, worked) = host.stop();
+        assert_eq!(worked.unwrap(), Worked::Stopped);
+        let identity = entry::Identity::new(WORKLOAD.0, WORKLOAD.1);
+        assert_eq!(entrances(&root), [entrance(identity.clone())]);
+
+        // Without one, each start names its own.
+        let mut host = Host::activated(FakeRoot::booting(&layout()), &record(1, None));
+        host.start(start_of(1, shell("exit 0")), Vec::new());
+        let named = start_of(2, shell("exit 0")).with_identity(workload);
+        host.start(named, Vec::new());
+        host.run_until(|host| (1..=2).all(|id| host.outcome(id).is_some()));
+        assert_eq!(host.outcome(1).unwrap().launch_failure(), Some(refused));
+        check_lossless(&host, 2, Status::Exited(0));
+        let (root, worked) = host.stop();
+        assert_eq!(worked.unwrap(), Worked::Stopped);
+        assert_eq!(entrances(&root), [entrance(identity)]);
+    }
 }

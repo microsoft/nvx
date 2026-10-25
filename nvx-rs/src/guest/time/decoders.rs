@@ -10,6 +10,7 @@ use crate::guest::kernel_text::{
     self, ClockEventState, SyslogLine, TickDevice, TickMode, TimerList,
 };
 use crate::guest::parse::parse_decimal;
+use crate::guest::reseed::Seed;
 use crate::guest::sys::ClockAdjustment;
 use crate::guest::sys::x86::{CpuidResult, cpuid};
 
@@ -17,8 +18,10 @@ use crate::guest::sys::x86::{CpuidResult, cpuid};
 pub(crate) const PACKET_HEADER_SIZE: usize = 32;
 /// Encoded length of one memory range.
 pub(crate) const PACKET_RANGE_SIZE: usize = 16;
-/// Entropy payload length appended to every restore packet.
+/// Entropy payload length appended to every restore packet: a restore's [`Seed`].
 pub(crate) const PACKET_ENTROPY_SIZE: usize = 64;
+// The packet's entropy is decoded straight into a seed.
+const _: () = assert!(PACKET_ENTROPY_SIZE == Seed::LENGTH);
 /// Fixed host time-sample record length.
 pub(crate) const SAMPLE_SIZE: usize = 16;
 /// VM generation identifier length.
@@ -95,9 +98,14 @@ impl<'a, E: Copy> Fields<'a, E> {
 
     /// Reads the next `N` bytes.
     fn bytes<const N: usize>(&mut self) -> Result<[u8; N], E> {
+        self.chunk().copied()
+    }
+
+    /// Reads the next `N` bytes, which it borrows from the record rather than copies.
+    fn chunk<const N: usize>(&mut self) -> Result<&'a [u8; N], E> {
         let (field, rest) = self.rest.split_first_chunk().ok_or(self.incomplete)?;
         self.rest = rest;
-        Ok(*field)
+        Ok(field)
     }
 
     /// Reads the next 16-bit field.
@@ -282,14 +290,17 @@ impl PacketHeader {
 }
 
 /// A validated version-one restore packet.
-#[derive(Clone, Debug, PartialEq, Eq)]
+///
+/// It is neither `Clone` nor comparable, since its entropy is a [`Seed`], which has one owner.
+#[derive(Debug)]
 pub(crate) struct RestorePacket {
     /// The packet's header.
     pub(crate) header: PacketHeader,
     /// Memory ranges as `(start, length)` pairs.
     pub(crate) ranges: Vec<(u64, u64)>,
-    /// Fresh entropy, which starts with the new VM generation ID.
-    pub(crate) entropy: [u8; PACKET_ENTROPY_SIZE],
+    /// Fresh entropy, which starts with the new VM generation ID, decoded straight into the
+    /// seed's allocation.
+    pub(crate) entropy: Seed,
 }
 
 impl RestorePacket {
@@ -308,13 +319,13 @@ impl RestorePacket {
         Ok(Self {
             header,
             ranges,
-            entropy: fields.bytes()?,
+            entropy: Seed::copy_from(fields.chunk()?),
         })
     }
 
     /// Returns the new VM generation ID, which leads the entropy.
     pub(crate) fn generation_id(&self) -> &[u8] {
-        &self.entropy[..GENERATION_ID_SIZE]
+        &self.entropy.bytes()[..GENERATION_ID_SIZE]
     }
 }
 
@@ -944,11 +955,11 @@ mod tests {
         assert_eq!(header.body_size(), PACKET_ENTROPY_SIZE);
         let entropy: Vec<u8> = (0..64).collect();
         let packet = RestorePacket::parse(header, &entropy).unwrap();
-        assert_eq!(packet.entropy.as_slice(), entropy);
+        assert_eq!(packet.entropy.bytes().as_slice(), entropy);
         assert_eq!(packet.generation_id(), &entropy[..GENERATION_ID_SIZE]);
         assert_eq!(
-            RestorePacket::parse(header, &entropy[1..]),
-            Err(PacketError::IncompleteBody)
+            RestorePacket::parse(header, &entropy[1..]).unwrap_err(),
+            PacketError::IncompleteBody
         );
         assert_eq!(
             PacketHeader::parse(&valid_header()[..31]),

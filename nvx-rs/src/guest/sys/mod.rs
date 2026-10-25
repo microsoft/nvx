@@ -7,7 +7,8 @@
 //! pointer, lifetime, and ownership invariants. Errors are `nix`'s [`Errno`], whose descriptions
 //! the programs print. It also builds and decodes the kernel's binary interfaces that `nix` does
 //! not model, such as the netlink messages of socket diagnostics, as explicit byte layouts, so
-//! that the programs handle only typed values.
+//! that the programs handle only typed values, and erases secrets, such as a restore's seed,
+//! with the volatile writes of `zeroize`, which the compiler cannot drop as dead stores.
 //!
 //! A descriptor that this module opens keeps one owner, its wrapper here, such as
 //! `FileDescriptor`, and the programs read and write it only through that wrapper, never through
@@ -63,6 +64,7 @@ mod port;
 mod process;
 mod rooted;
 mod scheduler;
+mod secret;
 mod signal;
 mod sock_diag;
 mod socket;
@@ -113,6 +115,8 @@ pub(crate) use port::PortBackend;
 pub(crate) use port::{PORT_DEVICE, Port};
 #[cfg(target_arch = "x86_64")]
 pub(crate) use port::{PortAccess, PortError, check_released, power_off, probe_port};
+#[cfg(all(test, target_arch = "x86_64"))]
+pub(crate) use process::forbid_system_calls;
 pub(crate) use process::set_command_name;
 #[cfg(target_arch = "x86_64")]
 pub(crate) use process::syscall_process_id;
@@ -142,6 +146,7 @@ pub(crate) use scheduler::{
     pin_current_thread, promote_all_threads, scheduling_policy, set_scheduling_policy,
     thread_count,
 };
+pub(crate) use secret::zeroize;
 #[cfg(test)]
 pub(crate) use signal::default_sigpipe;
 pub(crate) use signal::{

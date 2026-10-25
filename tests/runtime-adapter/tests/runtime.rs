@@ -9,7 +9,8 @@ use std::path::{Path, PathBuf};
 use nvx::ErrorKind;
 use nvx::host::artifacts::ArtifactDir;
 use nvx::host::store::{ArtifactIdentity, IdentityPart, RuntimeIdentity};
-use runtime_adapter::runtime::{GUEST_BUILD, Runtime};
+use runtime_adapter::GUEST_BUILD;
+use runtime_adapter::runtime::Runtime;
 
 /// The digests that the install metadata of the test's artifacts records.
 const OPENVMM: &str = "0a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f9";

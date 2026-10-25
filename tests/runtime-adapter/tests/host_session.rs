@@ -7,28 +7,44 @@
 //! messages that span records and records that share messages, partial records, record lengths,
 //! ERROR payloads, sequence and identity errors, resets and disconnects in the middle of a message,
 //! timeouts, sends that fail, the answers that requests check, the bounded buffer of the adapter's
-//! decoder, and the requests of a layered root: its configuration, its probes, and a stop whose
-//! teardown failed.
+//! decoder, the requests of a layered root: its configuration, its probes, and a stop whose
+//! teardown failed, and the host's order of a layered root: the guest agent's readiness and build,
+//! the mapping table in parts, and `Start`, and each failure of the order, after which the host
+//! sends nothing more, or stops the guest. The broker's guest also runs the runners of NVX's
+//! execution engine for the executions that the host program's driver runs, so that the tests cover
+//! the driver's output, credit, outcomes, and timers, the refusals that end its run, and a guest
+//! that stops reading.
 #![cfg(feature = "host")]
 
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::io;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
+use nvx::exec::{
+    Cause, Key, LaunchFailure, Limits, Outcome, Runner, Settlement, Status, Stream, Timers,
+    Violation, Window, runner,
+};
 use nvx::host::nvxs::HostConnectionError;
 use nvx::host::platform::Transport;
 use nvx::protocol::nvxs::{
     ErrorCode, Identity, Record, RecordError, RecordParser, RecordType, SessionError, encode_record,
 };
 use nvx::protocol::{
-    CAPABILITY_LEN, OUTER_HEADER_LEN, OUTER_MAX_PAYLOAD, OUTER_MIN_RECEIVE_WINDOW,
+    CAPABILITY_LEN, HostMap, MAX_HOST_MAPPINGS, MAX_MAP_PATH_BYTES, OUTER_HEADER_LEN,
+    OUTER_MAX_PAYLOAD, OUTER_MIN_RECEIVE_WINDOW,
 };
+use runtime_adapter::GUEST_BUILD;
+use runtime_adapter::exec::{GuestMessage, HostMessage, MAX_EXECUTIONS, Start};
 use runtime_adapter::frame::{Decoder, FrameError, HEADER_LEN, MAX_BODY, MAX_TEXT_BODY, Message};
-use runtime_adapter::host::{Client, ClientError};
+use runtime_adapter::host::{
+    self, Client, ClientError, Executions, ExecutionsError, MAX_OUTPUT_FRAMES, MapReply, OrderError,
+};
 use runtime_adapter::probe::{Facts, Probe, ProbeReply};
-use runtime_adapter::root::{RootConfig, RootFailure, RootReply, RootStage};
+use runtime_adapter::root::{
+    MapFailure, Ready, RootConfig, RootFailure, RootReply, RootStage, decode_maps, encode_maps,
+};
 
 /// Launch capability that the test broker accepts.
 const CAPABILITY: [u8; CAPABILITY_LEN] = [0xa5; CAPABILITY_LEN];
@@ -303,6 +319,20 @@ impl Broker {
         message
     }
 
+    /// Takes the host's next message, which must be `expected`, and answers it with `reply`.
+    fn expect(&mut self, expected: Message, reply: &Message) {
+        assert_eq!(self.messages(1), [expected]);
+        self.send_data(&reply.encode().unwrap(), OUTER_MAX_PAYLOAD);
+    }
+
+    /// Checks that the host sends nothing for a while, as when it waits for an answer.
+    fn assert_quiet(&self) {
+        let mut byte = [0];
+        let read = self.from_host.read(&mut byte, Some(SHORT));
+        let quiet = matches!(&read, Err(error) if error.kind() == io::ErrorKind::TimedOut);
+        assert!(quiet, "the host sent more: {read:?}");
+    }
+
     /// Serves the host as the guest agent does until it answered `Stop`: it answers the messages
     /// that each of the host's records completes, together, in DATA records of at most `size`
     /// bytes. Returns the host's messages.
@@ -446,12 +476,15 @@ fn with_length(record_type: RecordType, identity: Identity, sequence: u64, lengt
     bytes
 }
 
-/// Returns the guest agent's answer to `message`.
+/// Returns the guest agent's answer to `message`, in a guest whose root and mappings succeed.
 fn answer(message: &Message) -> Message {
     match message {
         Message::Ping => Message::Pong,
         Message::Echo(body) => Message::Echo(body.clone()),
         Message::Stop => Message::Stopped,
+        Message::RootConfig(_) => ready_message(),
+        Message::Maps(_) => Message::Mapped,
+        Message::Start => Message::Started,
         message => panic!("the host sent {message:?}, which only the guest sends"),
     }
 }
@@ -478,6 +511,74 @@ fn decode(decoder: &mut Decoder, mut bytes: &[u8]) -> Vec<Message> {
 /// Returns the longest body: with its header, a message that carries it spans five records.
 fn longest() -> Vec<u8> {
     (0..=u8::MAX).cycle().take(MAX_BODY).collect()
+}
+
+/// Returns the guest's readiness, with the guest agent's build that the host program ships.
+fn ready() -> Ready {
+    Ready::new(GUEST_BUILD).unwrap()
+}
+
+/// Returns the message of the guest's [`ready`]ness.
+fn ready_message() -> Message {
+    Message::Ready(ready().encode())
+}
+
+/// Returns the body of a part of a mapping table, of one mapping.
+fn maps_part() -> Vec<u8> {
+    encode_maps(&[mapping("dir", "/srv/dir", true)])
+        .unwrap()
+        .remove(0)
+}
+
+/// Returns a mapping of the host's mapping table.
+fn mapping(source: &str, target: &str, read_only: bool) -> HostMap {
+    HostMap {
+        source: source.to_owned(),
+        target: target.to_owned(),
+        read_only,
+    }
+}
+
+/// Returns a mapping table of long paths, which travels in several parts.
+fn long_table() -> Vec<HostMap> {
+    let long = "p".repeat(MAX_MAP_PATH_BYTES - 6);
+    (0..100)
+        .map(|index| {
+            let source = format!("{index:03}/{long}");
+            mapping(&source, &format!("/{source}"), index % 3 == 0)
+        })
+        .collect()
+}
+
+/// Returns the root configuration that announces the mappings of `table`.
+fn announcing(table: &[HostMap]) -> RootConfig {
+    RootConfig {
+        mapping_count: u32::try_from(table.len()).unwrap(),
+        ..RootConfig::default()
+    }
+}
+
+/// Runs the host's order with `client` in a thread, for the mapping table `table`: `ready`, with
+/// the guest agent's build that the host program ships, then `start_sandbox`. The thread returns
+/// the client with the guest's readiness, or how the order failed.
+fn order(client: Client, table: Vec<HostMap>) -> JoinHandle<(Client, Result<Ready, OrderError>)> {
+    spawn(client, move |client| {
+        let ready = host::ready(client, &announcing(&table), GUEST_BUILD, deadline())?;
+        host::start_sandbox(client, &table, deadline())?;
+        Ok(ready)
+    })
+}
+
+/// Checks that the host sent nothing more once its order ended: the host's stream ends at a record
+/// boundary once its client, which `ordering` returns, drops. Returns how the order ended.
+fn ended(
+    mut broker: Broker,
+    ordering: JoinHandle<(Client, Result<Ready, OrderError>)>,
+) -> OrderError {
+    let (client, ordered) = joined(ordering);
+    drop(client);
+    assert!(broker.read().is_none(), "the host sent more");
+    ordered.unwrap_err()
 }
 
 /// Checks that a failure ended `client`: every later call fails.
@@ -1042,7 +1143,7 @@ fn the_client_refuses_messages_that_its_framing_does_not_allow() {
     let too_long_text = u32::try_from(MAX_TEXT_BODY + 1).unwrap().to_le_bytes();
     let cases = [
         (header([0; 4], 0), FrameError::Kind(0)),
-        (header([0; 4], 22), FrameError::Kind(22)),
+        (header([0; 4], 28), FrameError::Kind(28)),
         (
             header(too_long, 3),
             FrameError::Length {
@@ -1069,8 +1170,25 @@ fn the_client_refuses_messages_that_its_framing_does_not_allow() {
             },
         ),
         (
-            header(1u32.to_le_bytes(), 7),
-            FrameError::Length { kind: 7, length: 1 },
+            header(too_long_text, 7),
+            FrameError::Length {
+                kind: 7,
+                length: MAX_TEXT_BODY + 1,
+            },
+        ),
+        (
+            header(1u32.to_le_bytes(), 23),
+            FrameError::Length {
+                kind: 23,
+                length: 1,
+            },
+        ),
+        (
+            header(1u32.to_le_bytes(), 26),
+            FrameError::Length {
+                kind: 26,
+                length: 1,
+            },
         ),
     ];
     for (bytes, expected) in cases {
@@ -1084,11 +1202,18 @@ fn the_client_refuses_messages_that_its_framing_does_not_allow() {
 
     // The client takes the guest agent's messages, and refuses those that only the host program
     // sends.
+    let key = Key::new(1, 1);
     let host_messages = [
         Message::Ping,
         Message::Stop,
         Message::RootConfig(RootConfig::default().encode()),
         Message::Probe(b"mounts".to_vec()),
+        Message::Maps(maps_part()),
+        Message::Start,
+        HostMessage::Start(start_of(1)).encode(),
+        HostMessage::Input(key, b"input").encode(),
+        HostMessage::InputEnd(key).encode(),
+        HostMessage::Cancel(key, Cause::Cancelled).encode(),
     ];
     for message in host_messages {
         let (mut broker, mut client) = attached(FIRST, usize::MAX);
@@ -1142,9 +1267,11 @@ fn requests_check_their_answers_and_end_the_client_when_they_fail() {
         client.probe(&probe, deadline()).map(drop)
     };
     let stop: Request = |client| client.stop(deadline()).map(drop);
+    let map: Request = |client| client.map(&maps_part(), deadline()).map(drop);
+    let start: Request = |client| client.start(deadline());
     let teardown = RootFailure::new(RootStage::Teardown, "busy").encode();
     // Each request, and answers that don't answer it.
-    let cases: [(&str, Request, Vec<Message>, Kinds); 11] = [
+    let cases: [(&str, Request, Vec<Message>, Kinds); 16] = [
         (
             "Ping answered with Stopped",
             |client| client.ping(deadline()),
@@ -1176,9 +1303,9 @@ fn requests_check_their_answers_and_end_the_client_when_they_fail() {
             Some((4, 3)),
         ),
         (
-            "Stop answered with RootReady",
+            "Stop answered with Ready",
             stop,
-            vec![Message::RootReady],
+            vec![ready_message()],
             Some((4, 7)),
         ),
         (
@@ -1209,10 +1336,40 @@ fn requests_check_their_answers_and_end_the_client_when_they_fail() {
             Some((6, 10)),
         ),
         (
-            "a probe answered with RootReady",
+            "a probe answered with Ready",
             probe,
-            vec![Message::RootReady],
+            vec![ready_message()],
             Some((9, 7)),
+        ),
+        (
+            "a part of the mapping table answered with Pong",
+            map,
+            vec![Message::Pong],
+            Some((22, 2)),
+        ),
+        (
+            "a part of the mapping table answered with Started",
+            map,
+            vec![Message::Started],
+            Some((22, 26)),
+        ),
+        (
+            "a part of the mapping table answered with Ready",
+            map,
+            vec![ready_message()],
+            Some((22, 7)),
+        ),
+        (
+            "Start answered with Mapped",
+            start,
+            vec![Message::Mapped],
+            Some((25, 23)),
+        ),
+        (
+            "Start answered with a mapping's failure",
+            start,
+            vec![Message::MapFailed(MapFailure::new(0, "late").encode())],
+            Some((25, 24)),
         ),
     ];
     for (name, request, replies, kinds) in cases {
@@ -1250,15 +1407,15 @@ fn requests_check_their_answers_and_end_the_client_when_they_fail() {
 fn the_client_configures_a_layered_root_probes_it_and_learns_how_its_teardown_ended() {
     let (mut broker, client) = attached(FIRST, usize::MAX);
 
-    // The guest assembles the root.
+    // The guest assembles the root, and reports the guest agent's build.
     let configuring = spawn(client, |client| {
         client.configure_root(&RootConfig::default(), deadline())
     });
     let expected = Message::RootConfig(RootConfig::default().encode());
     assert_eq!(broker.messages(1), [expected]);
-    broker.send_data(&Message::RootReady.encode().unwrap(), OUTER_MAX_PAYLOAD);
+    broker.send_data(&ready_message().encode().unwrap(), OUTER_MAX_PAYLOAD);
     let (client, configured) = joined(configuring);
-    assert_eq!(configured.unwrap(), RootReply::Ready);
+    assert_eq!(configured.unwrap(), RootReply::Ready(ready()));
 
     // A probe's facts, in records of 7 bytes, and a probe that failed.
     let mut facts = Facts::new();
@@ -1338,7 +1495,26 @@ fn answers_whose_bodies_do_not_decode_end_the_client() {
         client.probe(&probe, deadline()).map(drop)
     };
     let stop: Request = |client| client.stop(deadline()).map(drop);
-    let cases: [(&str, Request, Message, &str); 6] = [
+    let map: Request = |client| client.map(&maps_part(), deadline()).map(drop);
+    let cases: [(&str, Request, Message, &str); 11] = [
+        (
+            "a readiness without a build",
+            configure,
+            Message::Ready(Vec::new()),
+            "the guest's readiness names no build",
+        ),
+        (
+            "a readiness that ends before its build does",
+            configure,
+            Message::Ready(b"\x090.1.0".to_vec()),
+            "the guest's readiness ends early",
+        ),
+        (
+            "a readiness with a build that holds a space",
+            configure,
+            Message::Ready(b"\x030 1".to_vec()),
+            "without a space: \"0 1\"",
+        ),
         (
             "a root's failure without a stage",
             configure,
@@ -1375,6 +1551,18 @@ fn answers_whose_bodies_do_not_decode_end_the_client() {
             Message::RootFailed(vec![5, 0xff]),
             "is not UTF-8 text",
         ),
+        (
+            "a mapping's failure that ends before its count does",
+            map,
+            Message::MapFailed(vec![1, 0, 0]),
+            "a failure of the mapping table ends early",
+        ),
+        (
+            "a mapping's failure that is not UTF-8 text",
+            map,
+            Message::MapFailed(vec![0, 0, 0, 0, 0xff]),
+            "a failure of the mapping table is not UTF-8 text",
+        ),
     ];
     for (name, request, reply, problem) in cases {
         let (mut broker, client) = attached(FIRST, usize::MAX);
@@ -1389,4 +1577,709 @@ fn answers_whose_bodies_do_not_decode_end_the_client() {
         assert!(failed, "{name}: {result:?}");
         assert_ended(&mut client);
     }
+}
+
+#[test]
+fn the_host_orders_a_layered_root_ready_then_its_table_in_parts_then_start() {
+    let long = long_table();
+    assert!(encode_maps(&long).unwrap().len() >= 3);
+    // Tables of no mapping, which sends no part, of one, of several in one part, and of several
+    // parts.
+    let tables = [
+        Vec::new(),
+        vec![mapping("0", "/srv/dir", true)],
+        vec![
+            mapping("0", "/srv/dir", true),
+            mapping("1", "/srv/file.txt", true),
+            mapping("0/inner", "/srv/dir/inner", false),
+        ],
+        long,
+    ];
+    for table in tables {
+        let count = table.len();
+        let parts = encode_maps(&table).unwrap();
+        let (mut broker, client) = attached(FIRST, usize::MAX);
+        let ordering = order(client, table.clone());
+        // The root configuration announces the table, and the host waits for the guest's
+        // readiness.
+        let config = Message::RootConfig(announcing(&table).encode());
+        assert_eq!(broker.messages(1), [config], "{count} mappings");
+        broker.assert_quiet();
+        broker.send_data(&ready_message().encode().unwrap(), OUTER_MAX_PAYLOAD);
+        // Then each part of the table, once the guest applied the one before, then `Start`.
+        for part in parts {
+            assert_eq!(
+                broker.messages(1),
+                [Message::Maps(part)],
+                "{count} mappings"
+            );
+            broker.assert_quiet();
+            broker.send_data(&Message::Mapped.encode().unwrap(), OUTER_MAX_PAYLOAD);
+        }
+        broker.expect(Message::Start, &Message::Started);
+        let (client, ordered) = joined(ordering);
+        assert_eq!(ordered.unwrap(), ready(), "{count} mappings");
+
+        // The client stays usable.
+        let pinging = spawn(client, |client| client.ping(deadline()));
+        assert_eq!(broker.answer(OUTER_MAX_PAYLOAD), Message::Ping);
+        joined(pinging).1.unwrap();
+    }
+
+    // The client returns how the guest took a part of the table.
+    let (mut broker, client) = attached(FIRST, usize::MAX);
+    let applying = spawn(client, |client| client.map(&maps_part(), deadline()));
+    broker.expect(Message::Maps(maps_part()), &Message::Mapped);
+    let (client, mapped) = joined(applying);
+    assert_eq!(mapped.unwrap(), MapReply::Mapped);
+    let applying = spawn(client, |client| client.map(&maps_part(), deadline()));
+    let failure = MapFailure::new(0, "the target /srv/dir is not a directory");
+    broker.expect(
+        Message::Maps(maps_part()),
+        &Message::MapFailed(failure.encode()),
+    );
+    assert_eq!(joined(applying).1.unwrap(), MapReply::Failed(failure));
+
+    // The whole order, a `Ping`, and a stop, in records of 7 bytes each way.
+    let table = vec![
+        mapping("0", "/srv/dir", true),
+        mapping("0/inner", "/srv/dir/inner", false),
+    ];
+    let (mut broker, transport) = connect(FIRST, 7);
+    let serving = thread::spawn(move || {
+        broker.attach();
+        let served = broker.serve(7);
+        assert!(broker.read().is_none());
+        served
+    });
+    let mut client = Client::attach(transport, &CAPABILITY, deadline()).unwrap();
+    let readiness = host::ready(&mut client, &announcing(&table), GUEST_BUILD, deadline()).unwrap();
+    assert_eq!(readiness.build(), GUEST_BUILD);
+    host::start_sandbox(&mut client, &table, deadline()).unwrap();
+    client.ping(deadline()).unwrap();
+    assert_eq!(client.stop(deadline()).unwrap(), None);
+    drop(client);
+    let mut expected = vec![Message::RootConfig(announcing(&table).encode())];
+    expected.extend(encode_maps(&table).unwrap().into_iter().map(Message::Maps));
+    expected.extend([Message::Start, Message::Ping, Message::Stop]);
+    assert_eq!(joined(serving), expected);
+}
+
+#[test]
+fn the_host_sends_nothing_more_to_a_guest_agent_of_another_build_or_whose_root_failed() {
+    let table = vec![mapping("0", "/srv/dir", true)];
+    let config = || Message::RootConfig(announcing(&table).encode());
+
+    // A guest agent of another build assembled the root: the host sends it neither the table nor
+    // `Start`.
+    let (mut broker, client) = attached(FIRST, usize::MAX);
+    let ordering = order(client, table.clone());
+    let another = Ready::new("another-build").unwrap();
+    broker.expect(config(), &Message::Ready(another.encode()));
+    let error = ended(broker, ordering);
+    let other = matches!(
+        &error,
+        OrderError::Build { reported, expected }
+            if reported == "another-build" && expected == GUEST_BUILD
+    );
+    assert!(other, "{error:?}");
+    assert_eq!(
+        error.to_string(),
+        format!("the guest agent is of build another-build, not of the host's build {GUEST_BUILD}")
+    );
+
+    // The guest reports that a stage of the root failed, after which it ends.
+    for stage in RootStage::ALL {
+        let failure = RootFailure::new(stage, format!("the {stage} failed"));
+        let (mut broker, client) = attached(FIRST, usize::MAX);
+        let ordering = order(client, table.clone());
+        broker.expect(config(), &Message::RootFailed(failure.encode()));
+        let error = ended(broker, ordering);
+        let failed = matches!(&error, OrderError::Root(reported) if *reported == failure);
+        assert!(failed, "{stage}: {error:?}");
+        assert_eq!(error.to_string(), failure.to_string());
+    }
+
+    // The client failed, as when the guest agent answers the root configuration with another
+    // kind.
+    let (mut broker, client) = attached(FIRST, usize::MAX);
+    let ordering = order(client, table.clone());
+    broker.expect(config(), &Message::Pong);
+    let error = ended(broker, ordering);
+    let failed = matches!(
+        error,
+        OrderError::Client(ClientError::Reply {
+            request: 6,
+            reply: 2
+        })
+    );
+    assert!(failed, "{error:?}");
+
+    // A table that does not encode fails before the host sends any of it, and the client stays
+    // usable.
+    let (mut broker, client) = attached(FIRST, usize::MAX);
+    let too_many = vec![mapping("a", "/a", false); MAX_HOST_MAPPINGS + 1];
+    let starting = spawn(client, move |client| {
+        host::start_sandbox(client, &too_many, deadline())
+    });
+    let (client, started) = joined(starting);
+    let refused = matches!(
+        &started,
+        Err(OrderError::Table(error))
+            if error.problem().starts_with("the mapping table does not encode")
+    );
+    assert!(refused, "{started:?}");
+    let pinging = spawn(client, |client| client.ping(deadline()));
+    assert_eq!(broker.answer(OUTER_MAX_PAYLOAD), Message::Ping);
+    joined(pinging).1.unwrap();
+}
+
+#[test]
+fn a_mapping_that_the_guest_fails_ends_the_table_and_the_host_stops_the_guest() {
+    let table = long_table();
+    let parts = encode_maps(&table).unwrap();
+    let config = Message::RootConfig(announcing(&table).encode());
+    let teardown = RootFailure::new(RootStage::Teardown, "failed to unmount /srv/000: busy");
+    // The guest fails the first, a middle, or the last part, then confirms the stop, after a
+    // teardown that succeeded or failed.
+    let cases = [
+        (0, None),
+        (parts.len() / 2, None),
+        (parts.len() - 1, None),
+        (parts.len() / 2, Some(teardown)),
+    ];
+    for (failing, teardown) in cases {
+        let (mut broker, client) = attached(FIRST, usize::MAX);
+        let ordering = order(client, table.clone());
+        broker.expect(config.clone(), &ready_message());
+        for part in &parts[..failing] {
+            broker.expect(Message::Maps(part.clone()), &Message::Mapped);
+        }
+        // The guest applied the mappings before the failing part.
+        let applied = decode_maps(&parts[failing]).unwrap().first;
+        let failure = MapFailure::new(applied, "the target is not a directory");
+        broker.expect(
+            Message::Maps(parts[failing].clone()),
+            &Message::MapFailed(failure.encode()),
+        );
+        // The host sends no more of the table, nor `Start`, but asks the guest to stop.
+        assert_eq!(broker.messages(1), [Message::Stop], "part {failing}");
+        let mut replies = Vec::new();
+        replies.extend(
+            teardown
+                .iter()
+                .map(|teardown| Message::RootFailed(teardown.encode())),
+        );
+        replies.push(Message::Stopped);
+        broker.send_data(&encode(&replies), OUTER_MAX_PAYLOAD);
+        let error = ended(broker, ordering);
+        let mut description = failure.to_string();
+        if let Some(teardown) = &teardown {
+            description = format!("{description}; then {teardown}");
+        }
+        assert_eq!(error.to_string(), description);
+        let OrderError::Mapping {
+            failure: found,
+            stop,
+        } = &error
+        else {
+            panic!("part {failing}: {error:?}");
+        };
+        assert_eq!(*found, failure, "part {failing}");
+        assert!(matches!(stop, Ok(found) if *found == teardown), "{stop:?}");
+    }
+
+    // A guest agent that does not confirm the stop, as when its session ends, fails the stop,
+    // which the failure reports.
+    let (mut broker, client) = attached(FIRST, usize::MAX);
+    let ordering = order(client, table.clone());
+    broker.expect(config, &ready_message());
+    let failure = MapFailure::new(0, "the target is not a directory");
+    broker.expect(
+        Message::Maps(parts[0].clone()),
+        &Message::MapFailed(failure.encode()),
+    );
+    assert_eq!(broker.messages(1), [Message::Stop]);
+    broker.close();
+    let error = ended(broker, ordering);
+    let OrderError::Mapping {
+        failure: found,
+        stop,
+    } = &error
+    else {
+        panic!("{error:?}");
+    };
+    assert_eq!(*found, failure);
+    assert!(matches!(stop, Err(ClientError::Session(_))), "{stop:?}");
+    let description = error.to_string();
+    assert!(
+        description.starts_with(&format!(
+            "{failure}; the guest agent did not confirm the stop: "
+        )),
+        "{description}"
+    );
+}
+
+/// The chunk of the executions of the tests of the host's driver.
+const CHUNK: u32 = 16 * 1024;
+
+/// Returns the limits of the executions of the tests of the host's driver, as the host program
+/// chooses them: chunks of 16 KiB, and frame-counted credit, of 4 frames of input, and of 8 frames
+/// of output in one pool that standard output and error share.
+fn limits() -> Limits {
+    Limits::new(CHUNK, Window::frames(4), Window::frames(8))
+        .unwrap()
+        .shared_output()
+}
+
+/// Returns the timers of both sides of the executions of the tests of the host's driver.
+fn timers() -> Timers {
+    Timers::new(Duration::from_millis(300), Duration::from_secs(5))
+}
+
+/// Returns the start of the execution `id` of the first generation, of a program that the test's
+/// guest plays.
+fn start_of(id: u64) -> Start {
+    Start::new(Key::new(id, 1), limits(), timers(), ["/bin/program"])
+}
+
+/// Returns the position of `stream` among [`Stream::ALL`].
+fn position(stream: Stream) -> usize {
+    match stream {
+        Stream::Stdout => 0,
+        Stream::Stderr => 1,
+    }
+}
+
+/// What the program of an execution that the test's guest plays does.
+#[derive(Clone, Debug)]
+struct Workload {
+    /// Whether the program starts, or why its launch failed.
+    launch: Result<(), LaunchFailure>,
+    /// What the program writes to its standard output and error, in the order of [`Stream::ALL`].
+    output: [Vec<u8>; 2],
+    /// How the program ends, once it wrote its output.
+    status: Status,
+}
+
+/// The guest's side of an execution that the test's guest plays: the runner of NVX's execution
+/// engine, which takes the program's output as its credit lets it, as the worker's does.
+struct Played {
+    /// The guest's side of the execution.
+    runner: Runner,
+    /// What the program does.
+    workload: Workload,
+    /// Whether the runner learned how the launch went.
+    launched: bool,
+    /// The bytes of each stream that the runner took.
+    written: [usize; 2],
+    /// Whether the program ended.
+    ended: bool,
+}
+
+impl Played {
+    /// Returns the guest's side of the execution of `runner`, whose program does `workload`.
+    fn new(runner: Runner, workload: Workload) -> Self {
+        Self {
+            runner,
+            workload,
+            launched: false,
+            written: [0, 0],
+            ended: false,
+        }
+    }
+
+    /// Takes every step that the program and the runner can take at `now`, as the worker takes
+    /// them, and returns the runner's messages, as frames.
+    fn step(&mut self, now: Instant) -> Vec<Message> {
+        if !self.launched {
+            self.launched = true;
+            self.runner.launched(self.workload.launch);
+            if self.workload.launch.is_err() {
+                for stream in Stream::ALL {
+                    self.runner.output_closed(stream);
+                }
+                self.runner.exited(now, None);
+                self.ended = true;
+            }
+        }
+        if !self.ended {
+            for stream in Stream::ALL {
+                let output = &self.workload.output[position(stream)];
+                let written = &mut self.written[position(stream)];
+                *written += self.runner.output(stream, &output[*written..]);
+            }
+            if self.written == self.workload.output.each_ref().map(Vec::len) {
+                for stream in Stream::ALL {
+                    self.runner.output_closed(stream);
+                }
+                self.runner.exited(now, Some(self.workload.status));
+                self.ended = true;
+            }
+        }
+        self.runner.tick(now);
+        while let Some(request) = self.runner.next_request() {
+            if let runner::Request::Settle = request {
+                self.runner.settled(match self.workload.launch {
+                    Ok(()) => Settlement::Settled,
+                    Err(_) => Settlement::Failed,
+                });
+            }
+        }
+        let key = self.runner.key();
+        let mut buffer = vec![0; self.runner.limits().chunk()];
+        let mut messages = Vec::new();
+        while let Some(message) = self.runner.next_message(&mut buffer) {
+            if let Some(message) = GuestMessage::from_runner(key, message, &buffer) {
+                messages.push(message.encode());
+            }
+        }
+        messages
+    }
+}
+
+/// Plays the guest's side of the host's executions until `count` of them finished: a runner for
+/// each start, whose program does what `workload` says of the start. Takes the host's messages,
+/// sends the runners' in DATA records of at most `size` bytes, and returns the starts, in order.
+fn play(
+    broker: &mut Broker,
+    count: usize,
+    size: usize,
+    workload: impl Fn(&Start) -> Workload,
+) -> Vec<Start> {
+    let mut starts = Vec::new();
+    let mut played = BTreeMap::<u64, Played>::new();
+    loop {
+        let now = Instant::now();
+        let messages = played
+            .values_mut()
+            .flat_map(|played| played.step(now))
+            .collect::<Vec<_>>();
+        broker.send_data(&encode(&messages), size);
+        if played.len() == count && played.values().all(|played| played.runner.is_finished()) {
+            return starts;
+        }
+        for message in broker.take() {
+            let decoded = HostMessage::decode(&message)
+                .expect("the host sends messages about executions")
+                .expect("the host's messages decode");
+            let message = match decoded {
+                HostMessage::Start(start) => {
+                    let runner = Runner::new(start.key, start.limits, start.timers, now);
+                    played.insert(start.key.id(), Played::new(runner, workload(&start)));
+                    starts.push(start);
+                    continue;
+                }
+                message => message,
+            };
+            let key = message.key();
+            let runner = &mut played
+                .get_mut(&key.id())
+                .expect("the host started the execution")
+                .runner;
+            match message {
+                HostMessage::Credit(key, pool, units) => runner.credit(key, pool, units),
+                HostMessage::Input(key, bytes) => runner.input(key, bytes),
+                HostMessage::InputEnd(key) => runner.end_input(key),
+                HostMessage::Cancel(key, cause) => runner.cancel(now, key, cause),
+                HostMessage::Start(_) => unreachable!("the start came first"),
+            }
+            .expect("the runner accepts the host's message");
+        }
+    }
+}
+
+/// Starts the executions of `starts` with `client`, each with its own timers, and runs them in a
+/// thread until `deadline`, which returns the client and the driver.
+fn run(
+    client: Client,
+    starts: Vec<Start>,
+    deadline: Instant,
+) -> JoinHandle<(Client, Result<Executions, ExecutionsError>)> {
+    spawn(client, move |client| {
+        let mut executions = Executions::new();
+        for start in starts {
+            let timers = start.timers;
+            executions.start(client, start, timers, deadline)?;
+        }
+        executions.run(client, deadline)?;
+        Ok(executions)
+    })
+}
+
+#[test]
+fn the_driver_runs_executions_at_once_and_collects_their_output_and_outcomes() {
+    // The first program writes more to its standard output than the guest's credit holds, so that
+    // its output flows as the host takes it, and a little to its standard error, then exits with
+    // 3. The second one does not start. The guest's records carry its messages whole, or in
+    // pieces that split them, and each read of the host's takes at most 4 KiB.
+    let output = (0..=u8::MAX).cycle().take(300 * 1024).collect::<Vec<_>>();
+    let written = Workload {
+        launch: Ok(()),
+        output: [output.clone(), b"error".to_vec()],
+        status: Status::Exited(3),
+    };
+    let refused = Workload {
+        launch: Err(LaunchFailure::new(0, 13)),
+        output: [Vec::new(), Vec::new()],
+        status: Status::Exited(0),
+    };
+    for size in [OUTER_MAX_PAYLOAD, 1000] {
+        let (mut broker, client) = attached(FIRST, 4096);
+        let running = run(client, vec![start_of(1), start_of(2)], deadline());
+        let starts = play(&mut broker, 2, size, |start| match start.key.id() {
+            1 => written.clone(),
+            _ => refused.clone(),
+        });
+        assert_eq!(starts, [start_of(1), start_of(2)]);
+        let (_, executions) = joined(running);
+        let executions = executions.unwrap();
+        assert!(executions.is_finished());
+        let ids = executions
+            .iter()
+            .map(|execution| execution.start().key.id())
+            .collect::<Vec<_>>();
+        assert_eq!(ids, [1, 2]);
+
+        let first = executions.get(1).unwrap();
+        assert!(first.peer().has_started());
+        assert_eq!(first.output(Stream::Stdout), output);
+        assert_eq!(first.output(Stream::Stderr), b"error");
+        let outcome = first.outcome().unwrap();
+        assert_eq!(outcome.status(), Some(Status::Exited(3)));
+        assert_eq!((outcome.cause(), outcome.launch_failure()), (None, None));
+        assert!(outcome.is_reusable());
+        for stream in Stream::ALL {
+            assert!(!outcome.is_truncated(stream), "{stream:?}");
+        }
+
+        let second = executions.get(2).unwrap();
+        assert!(!second.peer().has_started());
+        let outcome = second.outcome().unwrap();
+        assert_eq!(outcome.launch_failure(), Some(LaunchFailure::new(0, 13)));
+        assert_eq!(outcome.status(), None);
+        assert!(!outcome.is_reusable());
+        for stream in Stream::ALL {
+            assert!(second.output(stream).is_empty(), "{stream:?}");
+        }
+    }
+}
+
+#[test]
+fn the_driver_refuses_starts_before_it_sends_them() {
+    let (mut broker, mut client) = attached(FIRST, usize::MAX);
+    let mut executions = Executions::new();
+    // The guest ends its session on a start that it cannot decode.
+    let undecodable = [
+        start_of(1).with_working_directory("relative"),
+        start_of(1).with_environment(["=value"]),
+        Start::new(Key::new(1, 1), limits(), timers(), [""]),
+    ];
+    for start in undecodable {
+        let refused = executions.start(&mut client, start.clone(), timers(), deadline());
+        assert!(
+            matches!(refused, Err(ExecutionsError::Start(_))),
+            "{start:?}: {refused:?}"
+        );
+    }
+    // A start whose input the host would send while it reads the guest's output, and starts whose
+    // output windows would let the guest send many messages ahead of its credit for the host's.
+    let refused = executions.start(&mut client, start_of(1).with_input(), timers(), deadline());
+    assert!(
+        matches!(refused, Err(ExecutionsError::Input)),
+        "{refused:?}"
+    );
+    let program = ["/bin/program"];
+    for output in [
+        Window::bytes(64 * 1024),
+        Window::frames(MAX_OUTPUT_FRAMES + 1),
+    ] {
+        let limits = Limits::new(CHUNK, Window::frames(4), output).unwrap();
+        let start = Start::new(Key::new(1, 1), limits, timers(), program);
+        let refused = executions.start(&mut client, start, timers(), deadline());
+        assert!(
+            matches!(refused, Err(ExecutionsError::Window)),
+            "{output:?}: {refused:?}"
+        );
+    }
+    // A second start of an ID, and a start beyond the executions that the guest runs at once,
+    // after starts of which one has the widest output windows that the driver takes.
+    let most = u64::try_from(MAX_EXECUTIONS).unwrap();
+    let mut starts = (1..=most).map(start_of).collect::<Vec<_>>();
+    let widest = Limits::new(CHUNK, Window::frames(4), Window::frames(MAX_OUTPUT_FRAMES)).unwrap();
+    starts[0] = Start::new(Key::new(1, 1), widest, timers(), program);
+    for start in &starts {
+        executions
+            .start(&mut client, start.clone(), timers(), deadline())
+            .unwrap();
+    }
+    let refused = executions.start(&mut client, start_of(1), timers(), deadline());
+    assert!(
+        matches!(refused, Err(ExecutionsError::Duplicate(1))),
+        "{refused:?}"
+    );
+    let refused = executions.start(&mut client, start_of(most + 1), timers(), deadline());
+    assert!(matches!(refused, Err(ExecutionsError::Full)), "{refused:?}");
+    // The guest received those starts alone, and the client stays usable.
+    let sent = starts
+        .into_iter()
+        .map(|start| HostMessage::Start(start).encode())
+        .collect::<Vec<_>>();
+    assert_eq!(broker.messages(MAX_EXECUTIONS), sent);
+    let pinging = spawn(client, |client| client.ping(deadline()));
+    assert_eq!(broker.answer(OUTER_MAX_PAYLOAD), Message::Ping);
+    joined(pinging).1.unwrap();
+
+    // A driver runs one batch: once it ran, it starts nothing more.
+    let (mut broker, client) = attached(FIRST, usize::MAX);
+    let running = run(client, vec![start_of(1)], deadline());
+    let refused = Workload {
+        launch: Err(LaunchFailure::new(0, 11)),
+        output: [Vec::new(), Vec::new()],
+        status: Status::Exited(0),
+    };
+    let played = play(&mut broker, 1, OUTER_MAX_PAYLOAD, |_| refused.clone());
+    assert_eq!(played, [start_of(1)]);
+    let (mut client, executions) = joined(running);
+    let mut executions = executions.unwrap();
+    assert!(executions.is_finished());
+    let refused = executions.start(&mut client, start_of(2), timers(), deadline());
+    assert!(matches!(refused, Err(ExecutionsError::Ran)), "{refused:?}");
+}
+
+#[test]
+fn the_driver_ends_its_run_on_a_message_that_breaks_the_rules() {
+    /// A check of the failure that ended a run.
+    type Check = fn(&ExecutionsError) -> bool;
+    let key = Key::new(1, 1);
+    let key_body = [key.id().to_le_bytes(), key.generation().to_le_bytes()].concat();
+    let cases: [(&str, Vec<Message>, Check); 4] = [
+        (
+            "a message about an execution that the host did not start",
+            vec![GuestMessage::Started(Key::new(2, 1)).encode()],
+            |error| matches!(error, ExecutionsError::Unknown(key) if *key == Key::new(2, 1)),
+        ),
+        (
+            "a message about no execution",
+            vec![Message::Pong],
+            |error| matches!(error, ExecutionsError::Unexpected(kind) if *kind == Message::Pong.kind()),
+        ),
+        (
+            "output of a stream that does not exist",
+            vec![Message::ExecOutput([&key_body[..], &[9], b"x"].concat())],
+            |error| matches!(error, ExecutionsError::Body(_)),
+        ),
+        (
+            "an outcome before the ends of the streams",
+            vec![
+                GuestMessage::Started(key).encode(),
+                GuestMessage::Terminal(key, Outcome::new(Some(Status::Exited(0)))).encode(),
+            ],
+            |error| {
+                matches!(
+                    error,
+                    ExecutionsError::Violation(failed, Violation::Order) if *failed == Key::new(1, 1)
+                )
+            },
+        ),
+    ];
+    for (name, messages, check) in cases {
+        let (mut broker, client) = attached(FIRST, usize::MAX);
+        let running = run(client, vec![start_of(1)], deadline());
+        broker.messages(1);
+        broker.send_data(&encode(&messages), OUTER_MAX_PAYLOAD);
+        let (_, ran) = joined(running);
+        let failed = ran.as_ref().err().is_some_and(check);
+        assert!(failed, "{name}: {:?}", ran.err());
+    }
+
+    // The end of the guest's stream ends the run too.
+    let (mut broker, client) = attached(FIRST, usize::MAX);
+    let running = run(client, vec![start_of(1)], deadline());
+    broker.messages(1);
+    broker.close();
+    let (_, ran) = joined(running);
+    let closed = matches!(
+        ran,
+        Err(ExecutionsError::Client(ClientError::Session(
+            HostConnectionError::Closed
+        )))
+    );
+    assert!(closed, "{:?}", ran.err());
+}
+
+#[test]
+fn the_driver_fires_the_timers_of_its_executions_while_the_guest_says_nothing() {
+    // The execution's timeout passes while the guest sends nothing: the host cancels it, waits for
+    // its outcome for the grace and the settlement time, then gives up on it, and fences it.
+    let (grace, settlement, timeout) = (
+        Duration::from_millis(50),
+        Duration::from_millis(100),
+        Duration::from_millis(200),
+    );
+    let timed = Timers::new(grace, settlement).timeout(timeout);
+    let key = Key::new(1, 1);
+    let start = Start::new(key, limits(), timed, ["/bin/program"]);
+    let (mut broker, client) = attached(FIRST, usize::MAX);
+    let started = Instant::now();
+    let running = run(client, vec![start.clone()], deadline());
+    // The start, the credit of the output's pool, then the cancellation.
+    let messages = broker.messages(3);
+    assert_eq!(messages[0], HostMessage::Start(start).encode());
+    assert_eq!(
+        messages[2],
+        HostMessage::Cancel(key, Cause::TimedOut).encode()
+    );
+    let (_, executions) = joined(running);
+    assert!(started.elapsed() >= timeout + grace + settlement);
+    let executions = executions.unwrap();
+    let outcome = executions.get(1).unwrap().outcome().unwrap();
+    assert_eq!(outcome.cause(), Some(Cause::TimedOut));
+    assert_eq!(outcome.status(), None);
+    assert!(!outcome.is_reusable());
+
+    // A run whose deadline passes before its executions finish fails, in a receive, which leaves
+    // the client usable: the guest takes the start's credit, then answers a ping.
+    let (mut broker, client) = attached(FIRST, usize::MAX);
+    let running = run(client, vec![start_of(1)], Instant::now() + SHORT);
+    broker.messages(1);
+    let (client, ran) = joined(running);
+    assert!(
+        matches!(ran, Err(ExecutionsError::TimedOut)),
+        "{:?}",
+        ran.err()
+    );
+    broker.messages(1);
+    let pinging = spawn(client, |client| client.ping(deadline()));
+    assert_eq!(broker.answer(OUTER_MAX_PAYLOAD), Message::Ping);
+    joined(pinging).1.unwrap();
+}
+
+#[test]
+fn the_driver_s_sends_wait_for_a_guest_that_stops_reading_until_the_deadline_of_its_run() {
+    // The guest takes the start, then stops reading, and the host's stream holds 16 bytes, so the
+    // driver's next send, the credit of the output's pool, waits for the transport until the
+    // run's deadline, whose timeout ends the client. The run's deadline counts from the start's
+    // send, which the guest took.
+    let (mut broker, client) = attach_over(connect_bounded(FIRST, usize::MAX, 16));
+    let running = spawn(client, |client| {
+        let mut executions = Executions::new();
+        executions.start(client, start_of(1), timers(), deadline())?;
+        let started = Instant::now();
+        let ran = executions.run(client, started + SHORT);
+        Ok::<_, ExecutionsError>((started.elapsed(), ran))
+    });
+    assert_eq!(
+        broker.messages(1),
+        [HostMessage::Start(start_of(1)).encode()]
+    );
+    let (mut client, result) = joined(running);
+    let (elapsed, ran) = result.unwrap();
+    assert!(elapsed >= SHORT, "{elapsed:?}");
+    assert!(
+        matches!(ran, Err(ExecutionsError::TimedOut)),
+        "{:?}",
+        ran.err()
+    );
+    assert_ended(&mut client);
 }

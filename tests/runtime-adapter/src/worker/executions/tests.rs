@@ -9,16 +9,43 @@ use std::time::{Duration, Instant};
 
 use nix::poll::{self, PollFd, PollFlags, PollTimeout};
 use nvx::exec::{Cause, Key, Limits, Outcome, Status, Timers, Window};
+use nvx::guest::entry::{self, Prepared};
 use nvx::guest::process::Child;
+use nvx::guest::spawn::{Command, Spawned};
 use nvx::protocol::nvxs::{RecordParser, RecordType, encode_record};
 
 use super::Executions;
-use crate::exec::{GuestMessage, HostMessage, Start};
+use crate::exec::{AccountMode, GuestMessage, HostMessage, Identity, Start};
 use crate::frame::{Decoder, Message};
 use crate::worker::connection::{Connection, Received};
+use crate::worker::{Entrance, EntryOperations};
 
 /// Longest wait for an execution's terminal outcome.
 const TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Entry operations that run each program without entering a root, which needs privileges: they
+/// prepare each entry into the test's own root, `/`, whose account databases they read in
+/// existing-account mode alone, which the [identities](numeric) of these tests do not use.
+struct Unentered;
+
+impl EntryOperations for Unentered {
+    fn prepare(&mut self, entrance: &Entrance) -> Result<Prepared, entry::Error> {
+        entrance.entry("/").prepare()
+    }
+
+    fn spawn(&mut self, command: Command, _prepared: Prepared) -> io::Result<Spawned> {
+        command.spawn()
+    }
+}
+
+/// Returns the identity of user ID 0 and group ID 0, with numeric IDs, which the executions of
+/// these tests name, as the worker runs them without a workload identity.
+fn numeric() -> Identity {
+    Identity {
+        account: AccountMode::Numeric,
+        ..Identity::new(0, 0)
+    }
+}
 
 /// The broker's end of the worker's stream, which takes the worker's records as they arrive, and
 /// decodes the messages of their DATA.
@@ -121,8 +148,11 @@ fn a_cancellation_after_the_timeout_leaves_a_program_that_ended_before_it_its_ow
     let timers = Timers::new(Duration::from_millis(300), Duration::from_secs(5)).timeout(timeout);
     let arguments = [&b"/bin/sh"[..], b"-c", b"exit 0"];
     let started = Instant::now();
-    let start = HostMessage::Start(Start::new(key, limits, timers, arguments));
-    executions.deliver(started, start, &mut connection).unwrap();
+    let start = Start::new(key, limits, timers, arguments).with_identity(numeric());
+    let start = HostMessage::Start(start);
+    executions
+        .deliver(started, start, &mut Unentered, &mut connection)
+        .unwrap();
     {
         let program = executions.attached[&1].program.as_ref();
         let pidfd = program.and_then(Child::pidfd).unwrap();
@@ -141,7 +171,7 @@ fn a_cancellation_after_the_timeout_leaves_a_program_that_ended_before_it_its_ow
 
     let cancel = HostMessage::Cancel(key, Cause::Cancelled);
     executions
-        .deliver(Instant::now(), cancel, &mut connection)
+        .deliver(Instant::now(), cancel, &mut Unentered, &mut connection)
         .unwrap();
     let outcome = terminal(&mut executions, &mut connection, &mut broker);
     assert_eq!(outcome.status(), Some(Status::Exited(0)));

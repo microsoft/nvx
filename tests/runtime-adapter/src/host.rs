@@ -1,19 +1,43 @@
 //! The adapter's host program: a client of the guest agent that attaches to the host's end of the
 //! control session between the host and the guest, and exchanges the adapter's own
 //! [framing](crate::frame) with the guest agent, through `nvx::host::nvxs` alone, over any platform
-//! transport.
+//! transport, and the driver of the [executions](crate::exec) that the host program runs over it,
+//! [`Executions`].
+//!
+//! # The host's order
+//!
+//! A VM with a layered root is ready for workloads once its guest assembled the root and applied
+//! the host's mapping table. The host runs that order over a [`Client`] in two steps, between
+//! which it may do what the root's readiness allows, such as releasing the files that it handed
+//! the VMM:
+//!
+//! 1. [`ready`] sends the root configuration, and waits for the guest agent's `Ready`, whose
+//!    build must be the one that the host ships: the host sends a guest agent of another build
+//!    nothing more, since it cannot tell what that build would do with it.
+//! 2. [`start_sandbox`] sends the mapping table, in order, in parts that the guest applies one
+//!    after the other, then `Start`, which the guest confirms with `Started`.
+//!
+//! A part that the guest fails ends the order: the host sends no more of the table, nor `Start`,
+//! so the guest starts no workload on a partial table, and asks the guest to stop, which tears
+//! its root down, as NVX's managed lifecycle stops a guest whose mappings failed. The caller then
+//! waits for the VM to end, and ends a VM whose guest did not stop, as it ends one after any other
+//! failure of the order, an [`OrderError`].
 
 use std::fmt;
 use std::time::Instant;
 
 use nvx::host::nvxs::{HostConnection, HostConnectionError};
 use nvx::host::platform::Transport;
-use nvx::protocol::CAPABILITY_LEN;
 use nvx::protocol::nvxs::Identity;
+use nvx::protocol::{CAPABILITY_LEN, HostMap};
 
 use crate::frame::{BodyError, Decoder, FrameError, Message};
 use crate::probe::{Facts, Probe, ProbeReply};
-use crate::root::{RootConfig, RootFailure, RootReply};
+use crate::root::{MapFailure, Ready, RootConfig, RootFailure, RootReply, encode_maps};
+
+mod executions;
+
+pub use executions::{Executions, ExecutionsError, MAX_OUTPUT_FRAMES};
 
 /// A failure of a [`Client`].
 #[derive(Debug)]
@@ -91,7 +115,8 @@ impl From<FrameError> for ClientError {
 /// message in as many of the session's records as it takes, and [`receive`](Self::receive)
 /// returns the guest agent's next message, whether it spans records or shares one with the next
 /// message. [`ping`](Self::ping), [`echo`](Self::echo), [`configure_root`](Self::configure_root),
-/// [`probe`](Self::probe), and [`stop`](Self::stop) each send a request and wait for its answer.
+/// [`map`](Self::map), [`start`](Self::start), [`probe`](Self::probe), and [`stop`](Self::stop)
+/// each send a request and wait for its answer, and [`Executions`] runs executions over the client.
 ///
 /// Besides the session's own buffers, the client holds at most the rest of one of the guest's
 /// records and one partial message, whose header [`Decoder`] checks before it takes any byte of
@@ -180,7 +205,13 @@ impl Client {
                         message @ (Message::Ping
                         | Message::Stop
                         | Message::RootConfig(_)
-                        | Message::Probe(_)),
+                        | Message::Probe(_)
+                        | Message::Maps(_)
+                        | Message::Start
+                        | Message::ExecStart(_)
+                        | Message::ExecInput(_)
+                        | Message::ExecInputEnd(_)
+                        | Message::ExecCancel(_)),
                     ) => {
                         return Err(self.fail(ClientError::Unexpected(message.kind())));
                     }
@@ -223,8 +254,8 @@ impl Client {
     }
 
     /// Sends the root configuration `config` of a VM with a layered root, and waits until
-    /// `deadline` for the guest agent's answer: `RootReady` once it assembled the root, or
-    /// `RootFailed` with the stage that failed, after which the guest ends.
+    /// `deadline` for the guest agent's answer: `Ready`, with the guest agent's build, once it
+    /// assembled the root, or `RootFailed` with the stage that failed, after which the guest ends.
     ///
     /// A configuration whose encoding is longer than
     /// [`MAX_TEXT_BODY`](crate::frame::MAX_TEXT_BODY) bytes fails before anything is sent, and the
@@ -236,10 +267,39 @@ impl Client {
     ) -> Result<RootReply, ClientError> {
         let request = Message::RootConfig(config.encode());
         match self.request(&request, deadline)? {
-            Message::RootReady => Ok(RootReply::Ready),
+            Message::Ready(body) => self.decoded(Ready::decode(&body).map(RootReply::Ready)),
             Message::RootFailed(body) => {
                 self.decoded(RootFailure::decode(&body).map(RootReply::Failed))
             }
+            reply => Err(self.mismatched(&request, &reply)),
+        }
+    }
+
+    /// Sends `part`, a part of the host's mapping table as [`encode_maps`] encodes it, in a
+    /// `Maps`, and waits until `deadline` for the guest agent's answer: `Mapped` once it applied the
+    /// part's mappings, or `MapFailed` once it refused the part or failed to apply one of them,
+    /// after which it refuses the rest of the table and the start.
+    ///
+    /// A part of more than [`MAX_BODY`](crate::frame::MAX_BODY) bytes fails before anything is
+    /// sent, and the client stays usable.
+    pub fn map(&mut self, part: &[u8], deadline: Instant) -> Result<MapReply, ClientError> {
+        let request = Message::Maps(part.to_vec());
+        match self.request(&request, deadline)? {
+            Message::Mapped => Ok(MapReply::Mapped),
+            Message::MapFailed(body) => {
+                self.decoded(MapFailure::decode(&body).map(MapReply::Failed))
+            }
+            reply => Err(self.mismatched(&request, &reply)),
+        }
+    }
+
+    /// Sends `Start`, and waits until `deadline` for the guest agent's `Started`, with which it
+    /// confirms that it started the sandbox, once it applied every mapping that the root
+    /// configuration announced.
+    pub fn start(&mut self, deadline: Instant) -> Result<(), ClientError> {
+        let request = Message::Start;
+        match self.request(&request, deadline)? {
+            Message::Started => Ok(()),
             reply => Err(self.mismatched(&request, &reply)),
         }
     }
@@ -327,4 +387,136 @@ impl fmt::Debug for Client {
             .field("ended", &self.ended)
             .finish_non_exhaustive()
     }
+}
+
+/// How the guest agent answered a part of the host's mapping table.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum MapReply {
+    /// `Mapped`: it applied the part's mappings.
+    Mapped,
+    /// `MapFailed`: it refused the part, or failed to apply one of its mappings, after which it
+    /// refuses the rest of the table and the start.
+    Failed(MapFailure),
+}
+
+/// A failure of the [host's order](self#the-hosts-order) of a VM with a layered root: what the
+/// guest agent reported, or how the client failed, and what the host did about it.
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum OrderError {
+    /// The guest agent reported that a stage of the root failed, after which it ends.
+    Root(RootFailure),
+    /// The guest agent assembled the root, but is of another build than the one that the host
+    /// ships, so the host sent it nothing more.
+    Build {
+        /// The build that the guest agent reported in its `Ready`.
+        reported: String,
+        /// The build that the host ships.
+        expected: String,
+    },
+    /// The guest agent failed the mapping table, so the host sent it no more of the table, nor
+    /// `Start`, and asked it to stop, which tears its root down.
+    Mapping {
+        /// How the table failed.
+        failure: MapFailure,
+        /// How the stop ended, as [`Client::stop`] returns it: the failure of the root's teardown,
+        /// if the guest reported one before it confirmed the stop.
+        stop: Result<Option<RootFailure>, ClientError>,
+    },
+    /// The mapping table does not encode, so the host sent nothing of it.
+    Table(BodyError),
+    /// The client failed, which ended it.
+    Client(ClientError),
+}
+
+impl fmt::Display for OrderError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Root(failure) => failure.fmt(formatter),
+            Self::Build { reported, expected } => write!(
+                formatter,
+                "the guest agent is of build {reported}, not of the host's build {expected}"
+            ),
+            Self::Mapping { failure, stop } => {
+                failure.fmt(formatter)?;
+                match stop {
+                    Ok(None) => Ok(()),
+                    Ok(Some(teardown)) => write!(formatter, "; then {teardown}"),
+                    Err(error) => {
+                        write!(
+                            formatter,
+                            "; the guest agent did not confirm the stop: {error}"
+                        )
+                    }
+                }
+            }
+            Self::Table(error) => error.fmt(formatter),
+            Self::Client(error) => error.fmt(formatter),
+        }
+    }
+}
+
+impl std::error::Error for OrderError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Table(error) => Some(error),
+            Self::Client(error) => Some(error),
+            Self::Root(_) | Self::Build { .. } | Self::Mapping { .. } => None,
+        }
+    }
+}
+
+/// Runs the first step of the host's order of a VM with a layered root over `client`: sends the
+/// root configuration `config`, and waits until `deadline` for the guest agent's `Ready`, which it
+/// returns once it names `build`, the guest agent's build that the host ships.
+///
+/// Fails with [`OrderError::Root`] once the guest reports that a stage of the root failed, with
+/// [`OrderError::Build`] for a guest agent of another build, to which it sends nothing more, and
+/// with [`OrderError::Client`] once the client fails.
+pub fn ready(
+    client: &mut Client,
+    config: &RootConfig,
+    build: &str,
+    deadline: Instant,
+) -> Result<Ready, OrderError> {
+    match client
+        .configure_root(config, deadline)
+        .map_err(OrderError::Client)?
+    {
+        RootReply::Ready(ready) if ready.build() == build => Ok(ready),
+        RootReply::Ready(ready) => Err(OrderError::Build {
+            reported: ready.build().to_owned(),
+            expected: build.to_owned(),
+        }),
+        RootReply::Failed(failure) => Err(OrderError::Root(failure)),
+    }
+}
+
+/// Runs the rest of the host's order over `client`, once the guest agent is [`ready`]: sends the
+/// mapping table `table`, which the root configuration announced, in the parts that
+/// [`encode_maps`] splits it into, each once the guest applied the one before, then `Start`, and
+/// waits until `deadline` for `Started`. A table of no mapping sends no part.
+///
+/// Fails with [`OrderError::Table`], before it sends anything, for a table that does not encode;
+/// with [`OrderError::Mapping`] once the guest fails a part, after which it sends no more of the
+/// table, nor `Start`, but asks the guest to stop; and with [`OrderError::Client`] once the client
+/// fails.
+pub fn start_sandbox(
+    client: &mut Client,
+    table: &[HostMap],
+    deadline: Instant,
+) -> Result<(), OrderError> {
+    let parts = encode_maps(table).map_err(OrderError::Table)?;
+    for part in &parts {
+        match client.map(part, deadline).map_err(OrderError::Client)? {
+            MapReply::Mapped => {}
+            MapReply::Failed(failure) => {
+                // The guest starts no workload on a partial table, and tears its root down as it
+                // stops, which unmounts the mappings that it applied.
+                let stop = client.stop(deadline);
+                return Err(OrderError::Mapping { failure, stop });
+            }
+        }
+    }
+    client.start(deadline).map_err(OrderError::Client)
 }

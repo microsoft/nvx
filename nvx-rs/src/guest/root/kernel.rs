@@ -162,13 +162,13 @@ pub(super) fn super_options(table: &[u8], mount: u64) -> Option<&[u8]> {
 
 /// The directories of the kernel's interfaces that the root operations read.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) struct Paths {
+pub(crate) struct Paths {
     /// The mount point of procfs.
-    pub(super) proc: PathBuf,
+    pub(crate) proc: PathBuf,
     /// The mount point of sysfs.
-    pub(super) sys: PathBuf,
+    pub(crate) sys: PathBuf,
     /// The directory of the device nodes.
-    pub(super) dev: PathBuf,
+    pub(crate) dev: PathBuf,
 }
 
 impl Default for Paths {

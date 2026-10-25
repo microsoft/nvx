@@ -17,10 +17,17 @@ also runs the guest agent in VMs of NVX's artifacts, in place of NVX's agents,
 through NVX's supervisor, and finds a VM again after it restarts, as an
 orchestrator does.
 
-A VM may have a layered root: an image under an upper, which the guest agent's
-worker assembles through `nvx::guest::root`, in a process of its own rather
-than PID 1, as the host program's root configuration asks. The host program
-then checks the root from inside the VM with the worker's probes, in a
+A VM may have a layered root: an image under an upper, which the host program
+stages and plans with NVX's typed plan for an adapter's own guest, whose staged
+bindings a launch checks before it hands OpenVMM the checked files, and which
+the guest agent's worker assembles through `nvx::guest::root`, in a process of
+its own rather than PID 1, as the host program's root configuration asks. The
+plan also holds the VM's [network](#networks), if any. The host program may
+share host directories and files with the root, which it exports with NVX's
+`filesystem::plan`, and which the worker maps beneath the root from the host's
+mapping table, before the host starts the sandbox. The host program then checks
+the root from inside the VM with the worker's probes, and runs executions in
+it, several at once over one session, in a
 [table of scenarios](#layered-scenarios), to which each new check adds a row.
 
 ## Configurations
@@ -29,9 +36,9 @@ Each configuration enables one side of `nvx`:
 
 | Configuration | Cargo options | `nvx` features | Modules | Binary |
 | --- | --- | --- | --- | --- |
-| Protocol-only | none | none | `frame`, `root`, `probe`, `exec` | none |
-| Host-only | `--features host` | `host` | `frame`, `root`, `probe`, `exec`, `host`, `runtime`, `initramfs`, `layered` | `runtime-adapter-host` |
-| Guest-only | `--features guest --target x86_64-unknown-linux-musl` | `guest` | `frame`, `root`, `probe`, `exec`, `guest`, `worker` | `runtime-adapter-guest`, a static executable |
+| Protocol-only | none | none | `frame`, `root`, `probe`, `exec`, `template` | none |
+| Host-only | `--features host` | `host` | `frame`, `root`, `probe`, `exec`, `template`, `host`, `runtime`, `initramfs`, `layered`, `hook` | `runtime-adapter-host` |
+| Guest-only | `--features guest --target x86_64-unknown-linux-musl` | `guest` | `frame`, `root`, `probe`, `exec`, `template`, `guest`, `worker` | `runtime-adapter-guest`, a static executable |
 
 ## Framing
 
@@ -47,13 +54,19 @@ length, a little-endian `u32`, then the message's kind:
 | 3 | `Echo`: bytes that the guest sends back in an `Echo` of its own | at most 256 KiB, what four of the session's largest records carry |
 | 4 | `Stop`: asks the guest to stop serving | none |
 | 5 | `Stopped`: the guest's confirmation of `Stop`, its last message | none |
-| 6 | `RootConfig`: the host's [root configuration](#root-configurations) of a layered root, which the guest answers with `RootReady` or `RootFailed` | the configuration, at most 4 KiB |
-| 7 | `RootReady`: the guest assembled the root | none |
+| 6 | `RootConfig`: the host's [root configuration](#root-configurations) of a layered root, which the guest answers with `Ready` or `RootFailed` | the configuration, at most 4 KiB |
+| 7 | `Ready`: the guest assembled the root, or activated a clone | the guest agent's [build](#ready-mapping-tables-and-start), and a clone's activation, at most 4 KiB |
 | 8 | `RootFailed`: a stage of the root failed: the guest's answer to `RootConfig`, or its report of a failed teardown before it confirms a `Stop` | the stage, then the problem, at most 4 KiB |
 | 9 | `Probe`: asks the guest to run a [probe](#probes) on its root | the probe, at most 4 KiB |
 | 10 | `Report`: the guest's answer to `Probe`: the facts that the probe found | at most 256 KiB |
 | 11 | `ProbeFailed`: the guest's answer to a `Probe` that it does not know, or that failed | the problem, at most 4 KiB |
 | 12 to 21 | The messages of an [execution](#executions) | at most 256 KiB for a start, input, or output, and 64 bytes for the others |
+| 22 | `Maps`: a part of the host's [mapping table](#ready-mapping-tables-and-start), which the guest applies beneath the root, in order, and answers with `Mapped` or `MapFailed` | a `MAPS` payload of `nvx::protocol`, at most 256 KiB |
+| 23 | `Mapped`: the guest applied the part's mappings | none |
+| 24 | `MapFailed`: the guest refused the part, or failed to apply one of its mappings | how many mappings it applied, then the problem, at most 4 KiB |
+| 25 | `Start`: asks the guest to start the sandbox's workloads once it applied the mapping table, which it confirms with `Started` | none |
+| 26 | `Started`: the guest's confirmation of `Start` | none |
+| 27 | `Activate`: the host's activation of a clone, which a restore of a [template's](#template-mode) snapshot started, and which the guest answers with `Ready` | a clone's activation record, as `nvx::activation::ActivationRecord::encode` writes it, at most 1 KiB |
 
 The session keeps no message boundaries, so a message may span several of its
 records, and one record may end a message and start the next. `Decoder`
@@ -62,14 +75,16 @@ the body, and holds at most one partial message. A malformed message ends the
 stream, because the framing cannot find the next message after it.
 
 The framing carries each body as bytes, within its kind's limit. The bodies of
-kinds 6 and 8 to 21 have encodings of their own, which the `root`, `probe`, and
-`exec` modules write and read. A body that does not decode leaves the stream
-intact, at the start of the next message. The guest answers a root
-configuration that does not decode with `RootFailed`, as a configuration that
-it refuses, and a probe with `ProbeFailed`, while a message about an execution
-that does not decode ends the worker's session, as one that breaks the
-execution's rules does. The host program's client ends on an answer that does
-not decode, since it cannot tell what the guest did.
+kinds 6 to 22 and 24 have encodings of their own, which the `root`, `probe`,
+and `exec` modules write and read, and that of kind 27 is `nvx::activation`'s.
+A body that does not decode leaves the stream intact, at the start of the next
+message. The guest answers a root configuration that does not decode with
+`RootFailed`, as a configuration that it refuses, and a probe with
+`ProbeFailed`, while a message about an execution that does not decode ends the
+worker's session, as one that breaks the execution's rules does, and an
+activation record that does not decode fails the clone's activation. The host
+program's client ends on an answer that does not decode, since it cannot tell
+what the guest did.
 
 ### Root configurations
 
@@ -96,24 +111,37 @@ zeros:
 | `first-partition-bound` | The most bytes that the first partition of a GPT disk may hold | no |
 | `overlay-mode` | The overlay's mode: `trusted-lowers` or `untrusted-lowers` | no |
 | `scratch-journal` | Whether an ext4 scratch may have a journal: `allowed` or `forbidden` | no |
+| `mapping-count` | The number of mappings of the host's [mapping table](#ready-mapping-tables-and-start), at most 4,096 | no |
+| `workload-uid` | The user ID of the sandbox's workload identity, as which every execution runs | with `workload-gid` |
+| `workload-gid` | The group ID of the sandbox's workload identity | with `workload-uid` |
+| `listeners` | Whether the guest's listeners are published, with which every execution enters the root: `published` or `unpublished` | no |
 
 The paths are absolute and canonical guest paths of at most 4,095 bytes,
 without a NUL or a newline: not `/`, and without an empty, `.`, or `..`
 component, or a trailing `/`. The runtime directory holds no `,`, `:`, `\`, or
 `=`, which the overlay's options reserve, and the two cgroups are siblings,
-whose parent is not `/`. The optional numbers are positive. Without an
-overlay mode or a journal policy, the guest takes the defaults of
+whose parent is not `/`. The optional numbers are positive. A workload
+identity has both IDs, each below 4,294,967,295, which the kernel reads as
+"unchanged", and no supplementary groups or capabilities, as a layered
+sandbox's identity does; the worker checks its account once it assembled the
+root, and every execution then runs as it, naming no identity of its own.
+Without an overlay mode or a journal policy, the guest takes the defaults of
 `nvx::guest::root`: an overlay that trusts its lowers, and a scratch that may
 have a journal. Without a bound of the first partition, the guest bounds it at
-`root::DEFAULT_FIRST_PARTITION_BOUND`, 64 KiB. The host program and the guest
-agent ship together, so the guest refuses every other configuration, one with
-an unknown field included, rather than ignore what it does not know.
+`root::DEFAULT_FIRST_PARTITION_BOUND`, 64 KiB. Without a mapping count, the
+host's mapping table has no mapping. Without `listeners`, the guest's listeners
+are published, as `nvx::guest::entry`'s default has them, which refuses the
+most to the executions. The host program and the guest agent ship together, so
+the guest refuses every other configuration, one with an unknown field
+included, rather than ignore what it does not know.
 `RootConfig::default()` holds the values that the host program sends unless its
 caller names others: the runtime directory `/run/runtime-adapter`, the cgroups
 `/sys/fs/cgroup/agent` and `/sys/fs/cgroup/workload`, a wait of 30 seconds, an
 agent's `memory.low` of 16 MiB, as NVX's own guest reserves, and a workload's
 `memory.max` of 128 MiB and `pids.max` of 128, with neither a bound of the
-first partition, an overlay mode, nor a journal policy.
+first partition, an overlay mode, a journal policy, a workload identity, nor a
+publication of listeners, and no mapping. A layered launch names the
+publication of its network; see [Networks](#networks).
 
 A stage of the root that fails is a `root::RootFailure`: the stage's code, one
 byte, then the problem, as UTF-8 text. The guest's worker, and with it the VM,
@@ -122,10 +150,54 @@ then ends with the stage's status:
 | Code | Stage | What failed | Status |
 | --- | --- | --- | --- |
 | 1 | `configuration` | Receiving and checking the root configuration | 11 |
-| 2 | `layout` | Reading the boot layout of the root from the kernel command line, and checking that the worker assembles it | 12 |
+| 2 | `layout` | Reading the boot layout of the root and the host export from the kernel command line, and checking that the worker assembles them, with an export if the configuration announces mappings | 12 |
 | 3 | `bootstrap` | Bootstrapping the guest for the root: its cgroups and their resource values | 13 |
-| 4 | `assembly` | Assembling the root, such as from an image of another identity than the boot tokens expect | 14 |
+| 4 | `assembly` | Assembling the root, such as from an image of another identity than the boot tokens expect, and mounting the host export that the kernel command line names | 14 |
 | 5 | `teardown` | Tearing the root down, such as while a process holds it open | 15 |
+| 6 | `identity` | Checking the account of the sandbox's workload identity in the assembled root, in existing-account mode, such as one that the image lacks | 16 |
+
+### Ready, mapping tables, and Start
+
+`Ready`, the guest's answer to a root configuration once it assembled the
+root, carries its readiness, `root::Ready`: the length of the guest agent's
+build, one byte, then the build, 1 to 255 printable ASCII characters without a
+space. The guest agent's build is the crate's version, `GUEST_BUILD`, which is
+also the build that the host program ships unless it names another; see
+[The runtime identity](#the-runtime-identity). The host sends a guest agent of
+another build nothing more; see [The host's order](#the-hosts-order).
+
+A clone's `Ready`, its answer to the host's `Activate`, also reports its
+activation after the build, as `nvx::activation::ReadyActivation::encode`
+writes it: the configuration identity of the `Activate`'s record, 32 bytes,
+then 1, and the transaction ID of the record's restore, 16 bytes.
+`root::Ready::with_activation` adds it, and `root::Ready::activation` returns
+it. A guest that boots cold reports none, and `root::Ready::decode` refuses
+bytes after the build that are not an activation.
+
+The host's mapping table, of as many mappings as the root configuration
+announces, travels in parts, each in a `Maps`, whose body is a `MAPS` payload
+of `nvx::protocol`, as its `encode_maps_payloads` writes it: the index in the
+table of the part's first mapping, then the number of its mappings, each a
+little-endian `u32`, then each mapping: its flags, a little-endian `u16` that
+is 1 for a read-only mapping and 0 otherwise, then the lengths of its source
+and its target, each a little-endian `u16`, then the source, a path relative
+to the guest's mount of the host's export, and the target, an absolute path
+in the root. `root::encode_maps` splits a table into parts of at most 256 KiB,
+and an empty table into none. `root::decode_maps` reads a part with
+`nvx::protocol::decode_guest_maps_payload`, which takes the paths as bytes, as
+Linux does, and refuses what that decoder refuses, a part without a mapping,
+and a part that would end the table past 4,096 mappings.
+
+`Mapped` answers a part whose mappings the guest applied, and `MapFailed` one
+that it refused, or one of whose mappings it failed to apply. The body of
+`MapFailed`, `root::MapFailure`, holds how many of the table's mappings the
+guest applied, in order, a little-endian `u32`, which is the index in the
+table of the mapping that failed, then the problem, as UTF-8 text. `Start`
+asks the guest to start the sandbox's workloads once it applied the table,
+and `Started` confirms it. `Mapped`, `Start`, and `Started` have no body. The
+guest's worker takes the table and the start in the order that
+[The mapping table and the start](#the-mapping-table-and-the-start)
+describes.
 
 ### Probes
 
@@ -161,27 +233,31 @@ A value that a probe cannot read is `absent` if its file does not exist, and
 otherwise `unreadable: PROBLEM`. A new check of a root is a new probe in this
 table.
 
-The probes of `worker::mapping`, none of which takes arguments either, map
-beneath the root as an adapter maps the host paths of its sandboxes: through
-the root itself, with `nvx::guest::root::Root::map`, which checks the targets
-against the container root's reserved set, and through mappers of the
-adapter's own, `nvx::guest::mappings::Mapper`, with reserved sets of its
-choice. Each writes its sources below `/tmp/runtime-adapter-sources`, on the
-guest's tmpfs, in place of the guest's mount of a host's export: a directory
-`dir`, with a file `marker` and an empty directory `inner`, a file `file.txt`,
-and an empty directory `out`. The links that they plant in the root lead to
+The probes of `worker::mapping` inspect the mappings beneath the root, and map
+from the host export, as an adapter maps the host paths of its sandboxes. `map`
+inspects the mappings that the worker applied from the host's mapping table,
+through the root itself, with `nvx::guest::root::Root::map`, which checks their
+targets against the container root's reserved set, and the export that they
+come from. `map-checks` maps from the export through mappers of the adapter's
+own, `nvx::guest::mappings::Mapper`, with reserved sets of its choice, and
+tears down what it mapped. The links that it plants in the root lead to
 `/tmp/runtime-adapter-outside`, an empty directory outside it.
 
 | Probe | Facts |
 | --- | --- |
-| `map` | Through the root: zero mappings, `zero`, with the mounts below the root then, `zero.mounts`; then a table, `table`, of `dir` read-only at `/srv/maps/dir`, `dir/inner` read-write inside it, `file.txt` read-only at `/srv/maps/file.txt`, and `out` read-write at `/srv/maps/out`. The mount points below the root, in the mount table's order, `mounts`; for each mapping, `dir`, `inner`, `file`, and `out`, its options, `NAME.options`, whether a write is `allowed` or `refused`, `NAME.write`, what a write reached in its source, `NAME.source`, or what a read found, `NAME.read`; whether the overlay's upper holds the directory and the empty file that the mapper created, `upper.directory` and `upper.file`; and whether the root is latched, `latched` |
-| `map-refused` | Through the root: a mapping below the symbolic link `/srv/link`, `through-link`; whether the root is latched then, `latched`; a later mapping, `later`, and whether its target exists, `later.target`; and the mounts below the root, `mounts`, and the entries of the directory outside it, `outside` |
-| `map-checks` | Each check through a new mapper: a link at each component of a target, `link.a`, `link.b`, and `link.new`, and to `..`, `link.up`; a magic link of a procfs that it mounts in the root for the checks, `magic.self`, `magic.thread-self`, `magic.root`, `magic.cwd`, and `magic.fd`; a directory onto a file, `kind.directory`, and a file onto a directory, `kind.file`; a mapping onto a file that an earlier one shows, `nested.onto`, and one that would create its target inside it, `nested.create`, whether that reached the source, `nested.source`, and their teardown, `nested.teardown`; the runtime's reserved targets, `reserved.run`, `reserved.run-nvx`, `reserved.time`, and `reserved.time-below`, the container root's, `reserved.proc`, `reserved.sys`, `reserved.dev`, `reserved.agent`, `reserved.machine-id`, and `reserved.etc`, and those of a set of the adapter's, with the tree `/srv/adapter` and the path `/srv/checks/exact`, `reserved.adapter-tree`, `reserved.adapter-ancestor`, `reserved.adapter-path`, and `reserved.adapter-below`, and whether a refused one created anything, `reserved.created`; a read-only mapping attached and unmounted 200 times while another thread tries to open its file for writing, `read-only.attaches`, `read-only.flags`, `read-only.writable`, and `read-only.source`; and the entries and mounts of the directory outside the root, `outside.entries` and `outside.mounts`, and the mounts that the checks left, `left` |
+| `map [NAME=PATH...]` | The export's mount at `hostfs/root` in the runtime directory: the number of mounts there, `export.count`, and of the topmost, its `export.type` and `export.options`; the mode of `hostfs`, in octal, `hostfs.mode`, and its owner, `hostfs.owner`, as `UID:GID`, or `absent` for both; and the mount points below the root, in the mount table's order, `mounts`. For each NAME, at PATH in the root, such as a mapping's target: the options of the topmost mount there, `NAME.options`, or `none`; what it shows, `NAME.kind`; a directory's entries, by name, in order, separated by commas, `NAME.entries`, or a file's contents, `NAME.read`; whether a write is `allowed` or `refused`, `NAME.write`: of a new file `written`, which holds `runtime-adapter`, in a directory, or of the file, opened for writing; and what the overlay's upper holds at PATH, `NAME.upper`, an empty directory or file where the worker created the target. Finally whether the root is latched, `latched` |
+| `map-checks DIR FILE` | From the export's directory DIR, which holds a file `marker` and a directory `inner`, and in which the guest may write, and its file FILE, each check through a new mapper: a link at each component of a target, `link.a`, `link.b`, and `link.new`, and to `..`, `link.up`; a magic link of a procfs that it mounts in the root for the checks, `magic.self`, `magic.thread-self`, `magic.root`, `magic.cwd`, and `magic.fd`; a directory onto a file, `kind.directory`, and a file onto a directory, `kind.file`; a mapping onto a file that an earlier one shows, `nested.onto`, one that would create its target inside it, `nested.create`, and their teardown, `nested.teardown`; the runtime's reserved targets, `reserved.run`, `reserved.run-nvx`, `reserved.time`, and `reserved.time-below`, the container root's, `reserved.proc`, `reserved.sys`, `reserved.dev`, `reserved.agent`, `reserved.machine-id`, and `reserved.etc`, and those of a set of the adapter's, with the tree `/srv/adapter` and the path `/srv/checks/exact`, `reserved.adapter-tree`, `reserved.adapter-ancestor`, `reserved.adapter-path`, and `reserved.adapter-below`, and whether a refused one created anything, `reserved.created`; a read-only mapping of DIR attached and unmounted 200 times while another thread tries to open its `marker` for writing, `read-only.attaches`, `read-only.flags`, and `read-only.writable`; and the entries and mounts of the directory outside the root, `outside.entries` and `outside.mounts`, and the mounts that the checks left, `left` |
 
-A check's outcome is `applied`, or why the mapper refused the mapping: `link`
-for a link at the component that the check expects, and otherwise the kind of
-the error, such as `reserved` or `target-kind`, with the path that it names, if
-any.
+A NAME holds lowercase ASCII letters, digits, and `-`, but is neither `export`
+nor `hostfs`, and comes once. PATH is a relative path in the root, and DIR and
+FILE are relative paths in the export, such as `2`, its third child, each of
+normal components. A kind is `directory`, `file SIZE`, with the file's size in
+bytes, `link`, `other`, `denied` for a path that the guest may not look up,
+such as one that the export hides, or `absent`. A check's outcome is
+`applied`, or why the mapper refused the mapping: `link` for a link at the
+component that the check expects, and otherwise the kind of the error, such as
+`reserved` or `target-kind`, with the path that it names, if any. The checks
+write nothing to the export.
 
 ### Executions
 
@@ -220,11 +296,26 @@ the key and a stream; the input's window, then the output's, each a unit, 0
 for bytes or 1 for frames, then its size, a `u32`; and whether the streams
 share one output pool, 0 or 1. It then holds the worker's timers, in
 milliseconds, each a `u64`: the grace, the settlement time, and whether a
-timeout follows, 0 or 1, then the timeout, or 0. Last come whether the host
+timeout follows, 0 or 1, then the timeout, or 0. Then come whether the host
 sends the program's standard input, 0 or 1, and the program's arguments: their
 count, a `u16`, then each argument's length, a `u32`, and its bytes. The first
 argument is the program's path, which is not searched for in `PATH`, and no
-argument holds a NUL byte.
+argument holds a NUL byte. The start ends with how the program enters the
+worker's root:
+
+- whether it names the program's identity, `exec::Identity`, 0 or 1, and if
+  it does, the user ID and the group ID, each a `u32`, the account mode,
+  `exec::AccountMode`, 0 for an existing account or 1 for numeric IDs, the
+  capabilities, a `u64` whose bit N stands for the capability numbered N, then
+  the supplementary groups: their count, a `u16`, then each group, a `u32`.
+  Exactly one source names an execution's identity: its start, or the
+  sandbox's workload identity, which the root configuration names;
+- whether it names the program's working directory, 0 or 1, and if it does,
+  the directory's length, a `u32`, and its bytes: an absolute path in the
+  root, without a NUL byte. Otherwise the program starts in the root's `/`;
+- the program's whole environment: the count of its entries, a `u16`, then
+  each entry's length, a `u32`, and its bytes, `NAME=VALUE`, with a name that
+  is not empty, and without a NUL byte.
 
 An outcome holds the program's status: 0 for none, 1 for an exit, or 2 for a
 signal, then the exit's code or the signal's number, an `i32`, or 0; the cause,
@@ -233,6 +324,20 @@ its `errno`, an `i32`, or 0 for each; and flags: 1 if standard output lost
 bytes, 2 if standard error did, and 4 if the execution is reusable. Stage 0 is
 the worker's refusal of the start, and a later stage is the binding's number of
 the stage of `nvx::guest::spawn` that failed, such as 21 for its `exec`.
+
+`exec::HostExecution` is the host's side of one execution, in every
+configuration: the engine's `Peer`, with a sink that takes the program's output
+as it arrives, unless its caller stalls it, so that the guest gets no credit
+for more, and a source that hands over the program's input, if the start says
+that the host sends it, then ends it. Its caller sends the start, hands it each
+of the guest's messages about the execution with `deliver`, and sends the
+messages that `serve` returns, until the peer finished, serving it again once
+its `deadline`, the peer's next timer, passes. The sink keeps at most
+`exec::MAX_CAPTURE`, 16 MiB, of each stream: once more of a stream arrives, the
+host's side cancels the execution, and its peer discards the rest once the grace
+ends, so that the outcome marks the stream truncated, with the cause
+`cancelled`. The host program's [driver](#host-program) and the tests of the
+worker run it.
 
 ### Root-profile entries
 
@@ -293,9 +398,10 @@ control session, through `nvx::guest::nvxs`. It attaches, then:
   `Probe` with `ProbeFailed`, since the VM has no layered root to probe, and
   answers `Stop` with `Stopped`, then returns.
 
-A failure of the session, a malformed message, a root configuration or an
-execution, which only the worker of a VM with a layered root accepts, and a
-message that only the guest sends end serving with an error.
+A failure of the session, a malformed message, a message about a layered root,
+such as its configuration, or about an execution, which the guest agent of a
+VM without a layered root does not accept, and a message that only the guest
+sends end serving with an error.
 
 `runtime-adapter-guest serve` runs the guest agent on its standard input and
 output, which connect to the guest's end of the session, such as a control
@@ -352,15 +458,25 @@ then:
 1. attaches the session;
 2. receives the host's root configuration, and checks it;
 3. reads the boot layout of the root from the kernel command line, with
-   `nvx::protocol::root::RootLayout::parse`, then bootstraps the guest's
-   cgroups with `nvx::guest::root::bootstrap`, which moves the guest's
-   processes into the agent's cgroup, and assembles the root with
-   `nvx::guest::root::assemble`;
-4. answers `RootReady`, or `RootFailed` with the stage that failed, and then
-   ends;
-5. serves `Ping`, `Echo`, and `Probe`, though it refuses a probe while it runs
-   executions, and runs the host's [executions](#the-workers-executions);
-6. on `Stop`, drops its executions, which ends their programs, tears the root
+   `nvx::protocol::root::RootLayout::parse`, and the host export, if the
+   command line names one, with `nvx::protocol::export::HostExport::parse`,
+   then bootstraps the guest's cgroups with `nvx::guest::root::bootstrap`,
+   which moves the guest's processes into the agent's cgroup, assembles the
+   root with `nvx::guest::root::assemble`, and mounts the export out of the
+   root with `Root::mount_export`. If the configuration names a workload
+   identity, it then checks the identity's account in the assembled root, in
+   existing-account mode, with `nvx::guest::entry`;
+4. answers `Ready`, with the guest agent's build, or `RootFailed` with the
+   stage that failed, and then ends;
+5. applies the host's [mapping table](#the-mapping-table-and-the-start)
+   beneath the root, from the export, in the parts that the host sends, and
+   answers each part with `Mapped` or `MapFailed`;
+6. on `Start`, once it applied every mapping that the configuration
+   announced, starts the sandbox, which it confirms with `Started`;
+7. serves `Ping`, `Echo`, and `Probe`, though it refuses a probe while it runs
+   executions, and, once the sandbox started, runs the host's
+   [executions](#the-workers-executions);
+8. on `Stop`, drops its executions, which ends their programs, tears the root
    down, reports a teardown that failed with `RootFailed`, confirms the stop
    with `Stopped`, and ends.
 
@@ -369,23 +485,65 @@ Before the root configuration, the worker accepts only the configuration, or a
 layers of a GPT disk, whose first partition holds at most the bound of the
 configuration, over an ext4 scratch or a tmpfs in RAM, in the overlay mode of
 the configuration. At the layout stage, it refuses a configuration that
-configures a scratch for an upper in RAM, or bounds a first partition for an
-EROFS image. It ends with 0 once the host stopped it, after a teardown that
-succeeded, with the stage's status, from 11 to 15, once a stage failed, and
-with 1 once its session failed or the broker closed the tty, each but the first
-after a diagnostic on standard error. Once the broker closed the stream at a
-record boundary, which may close only the broker's end, the worker drops its
-executions, and writes what it queued, as once the host stopped it. Before it
-exits, it closes what its probes hold, then unmounts a root that it still
-holds, as `nvx::guest::root::Root` does when it drops, ignoring failures. A
-teardown that failed leaves the root mounted until the VM ends. The worker runs
-the root's operations through `worker::RootOperations`, so that tests run it
-against a fake root.
+configures a scratch for an upper in RAM, bounds a first partition for an EROFS
+image, or announces mappings while the kernel command line names no host export,
+from which they come, and a command line whose tokens of the export break their
+rules, as `HostExport::parse` checks them. An export that fails to mount fails
+the assembly. A workload identity whose account the assembled root lacks fails
+the identity stage. The worker ends with 0 once the host stopped it, after a
+teardown that succeeded, with the stage's status, from 11 to 16, once a stage
+failed, and with 1 once its session failed or the broker closed the tty, each
+but the first after a diagnostic on standard error. Once the broker closed the
+stream at a record boundary, which may close only the broker's end, the worker
+drops its executions, and writes what it queued, as once the host stopped it.
+Before it exits, it closes what its probes hold and the host export's root, then
+unmounts a root that it still holds, as `nvx::guest::root::Root` does when it
+drops, ignoring failures. A teardown that failed leaves the root mounted until
+the VM ends. The worker runs the root's operations through
+`worker::RootOperations`, and enters its executions through
+`worker::EntryOperations`, so that tests run it against a fake root. In a
+template's VM, the worker captures the VM instead, and then activates and serves
+each clone that a restore of the snapshot starts, as
+[Template mode](#template-mode) describes.
+
+#### The mapping table and the start
+
+The root configuration announces how many mappings the host's mapping table
+holds, and the host sends the table once the root is ready, in parts, each in
+a `Maps`, in order. The worker applies each part's mappings beneath the root,
+in order, from the host export, with `nvx::guest::root::Root::map`, and
+answers the part with `Mapped`, or with `MapFailed` and how many of the
+table's mappings it applied:
+
+- It refuses a part as a whole, at the mapping that it expects next, if the
+  part does not decode, or does not continue the table: if its first mapping
+  is not the one that the worker expects next, or its last is past the count
+  that the configuration announced.
+- A mapping that the root refuses or fails to apply latches the root, which
+  keeps the mappings before it, so that the count is that mapping's index in
+  the table.
+- Once it answered `MapFailed`, the worker refuses every later part, with
+  `MapFailed`, and the start: it starts no workload on a partial table, and
+  the host tears the VM down.
+
+A table of zero mappings does no work: the host sends no part, and the worker
+maps nothing, though it mounts the export if the command line names one.
+
+`Start` starts the sandbox once the worker applied every mapping that the
+configuration announced, and none failed, which the worker confirms with
+`Started`. Only then does it run the host's executions, and it takes no part
+of the table any more. A message about an execution before the start, a
+`Start` before every announced mapping is applied, once the table failed, or
+once the sandbox started, and a `Maps` once the sandbox started end the
+worker's session with an error, as a message that it does not take in its
+state does. The worker serves pings, echoes, probes, and the stop before the
+start and after it. Its order outlives a reset of the session, as its root
+does.
 
 #### The worker's executions
 
-Once the root is ready, the worker runs several executions at once, each
-through NVX's execution engine and its guest binding, with the limits and
+Once the host started the sandbox, the worker runs several executions at once,
+each through NVX's execution engine and its guest binding, with the limits and
 timers of its start, such as frame-counted credit and one output pool that
 standard output and error share, which the adapter's tests use. One loop that
 never blocks serves the session and every execution: it takes the host's
@@ -423,28 +581,75 @@ credit that it needs, never keeps the others' output from the host.
   runs until it ends, detached from the host, which receives nothing more
   about it.
 - The worker admits at most `worker::MAX_EXECUTIONS`, 8, executions at once,
-  abandoned ones included, and those whose programs' statuses it has not
-  collected, and none that would hold more than
+  abandoned ones included, and those that keep their places once they ended,
+  as the items below describe, and none that would hold more than
   `worker::MAX_EXECUTION_MEMORY`, 1 MiB: its runner's buffers, a chunk of each
-  output stream and the input's window. It refuses a start beyond those, or
-  one whose program it cannot spawn, with a terminal record whose launch failed
-  at stage 0, with `EAGAIN`, `ENOMEM`, or the spawn's `errno`.
-- Each program runs in the worker's own root and working directories, with its
-  environment, not in the layered root, with its standard input from the host
-  or the null device, and leads a process group of its own, which its
-  execution kills as a whole.
-- The worker collects the status of every program itself, without waiting for
-  it, and learns that a program ended from a pidfd of its own. Before it
-  collects the status, it kills what is left of the program's process group,
-  as NVX's settlement through a cgroup kills what is left in the cgroup: until
-  then, the program, a zombie, keeps its process ID, which is the group's, from
-  any other process. So a descendant that stayed in the group neither outlives
-  the program nor holds its output open. The program runs without a cgroup,
-  though, so nothing proves that a descendant that left the group is gone, and
-  each outcome is fenced: once the program ended, a stream that such a process
-  may still hold has the settlement time and the grace to close, after which
-  the runner gives up on it, while a stream that no process holds any more
-  loses nothing, however slowly the host takes it.
+  output stream and the input's window. It refuses a start beyond those, one
+  whose identity or entry it refuses, as the next item describes, or one whose
+  cgroup it cannot prepare, or whose program it cannot spawn, with a terminal
+  record whose launch failed at stage 0, with `EAGAIN`, `ENOMEM`, the `errno`
+  of the refusal, or that of the preparation or the spawn.
+- Each program enters the layered root through `nvx::guest::entry`, as a
+  `worker::Entrance` describes it: in new mount, PID, and UTS namespaces, with
+  the root moved over `/`, the entry's default hostname, `nvx-sandbox`, the
+  image's own machine ID, and no time status, so that the entry binds nothing
+  into the root, and with the publication of listeners that the root
+  configuration names, published unless it names them unpublished. It runs as
+  the identity that exactly one source names: the sandbox's workload identity,
+  with no supplementary groups or capabilities, or, in a sandbox without one,
+  the identity that its start names, with its supplementary groups, its
+  capabilities, and its account mode. A start that names an identity in a
+  sandbox with a workload identity, or none in a sandbox without one, is
+  refused with `EINVAL`. Before the worker prepares the execution's cgroup, the
+  entry checks the identity, and reads its account in existing-account mode: it
+  refuses with `EPERM` a capability outside its allowlist, any capability of a
+  user ID other than 0, and `CAP_NET_BIND_SERVICE` and `CAP_NET_RAW` while
+  listeners are published, with `ENOENT` an identity without the user ID's
+  passwd entry or the group ID's group entry, with the error of an account
+  database or a root that it cannot read, and with `EINVAL` otherwise. The
+  program starts in the working directory of its start, or in the root's `/`,
+  with exactly the environment of its start, none of the worker's own, and with
+  its standard input from the host or the null device. It leads a session of
+  its own, without a controlling terminal, and the process group that the
+  session creates, and, as PID 1 of its PID namespace, its end ends every
+  process of the namespace. The guest's network device, its addresses, and the
+  announcer of its listeners stay with NVX's `/init`, which configures them
+  before PID 1 starts; see [Networks](#networks).
+- Each execution runs in a cgroup of its own below the workload cgroup of the
+  root configuration, `execution-N`, where N counts the cgroups that the worker
+  prepared. The worker prepares it with
+  `nvx::guest::cgroup::ExecutionCgroup::prepare`, and the program joins it as
+  it spawns, before it runs, so that its descendants start in it, however they
+  leave its process group or session. The execution settles through that
+  cgroup alone, which leaves the other executions running: once the program
+  ended, as its status, which the execution collects itself, tells, the
+  execution kills what is left in the cgroup, and settles once the cgroup is
+  empty. So no descendant outlives the program or holds its output open, and
+  an execution whose program ends on its own loses nothing, however slowly the
+  host takes its output, and is reusable.
+- An execution keeps its place among `worker::MAX_EXECUTIONS` until its cgroup
+  is empty and the worker removed it, which the worker does once the runner
+  returned the terminal outcome of an execution that settled. One that did not
+  settle, whose outcome is fenced, keeps its place and its cgroup until the
+  host stops the worker, as does a start whose program the worker spawned, but
+  whose execution it could not have: until the worker collected the status of
+  such a program, the program may still join the cgroup, so that a removal
+  could hide it once it ended.
+- Without cgroups, as where the in-process tests cannot create them, the
+  root's operations name none, and the program's process group stands in for
+  its cgroup: its execution kills the group as a whole. The worker collects the
+  status of every program itself then, without waiting for it, and learns that
+  a program ended from a pidfd of its own. Before it collects the status, it
+  kills what is left of the program's process group, as the settlement through
+  a cgroup kills what is left in the cgroup: until then, the program, a
+  zombie, keeps its process ID, which is the group's, from any other process.
+  So a descendant that stayed in the group neither outlives the program nor
+  holds its output open. Nothing proves that a descendant that left the group
+  is gone, though, so each outcome is fenced: once the program ended, a stream
+  that such a process may still hold has the settlement time and the grace to
+  close, after which the runner gives up on it, while a stream that no process
+  holds any more loses nothing, however slowly the host takes it. Such an
+  execution keeps its place until the worker collected its program's status.
 - Before it hands an execution the host's cancellation, the worker gives the
   execution a turn, as the loop does, which collects the status of a program
   that ended, and reports the program's end to the runner. So the end of a
@@ -455,11 +660,14 @@ credit that it needs, never keeps the others' output from the host.
 - The worker forgets an execution once its runner returned the terminal
   outcome, which may come before the program's end, as once the runner gave up
   on a program that a kill did not end in time: forgetting it kills the
-  program and its process group again, and the worker collects the program's
-  status once it ended. On a stop, or once its session ended otherwise, the
-  worker drops every execution, which kills the process group of each program
-  whose status it has not collected, and waits up to a second in all for those
-  programs to end.
+  program, and what is left in its cgroup or its process group, again, and the
+  worker collects the program's status once it ended. On a stop, or once its
+  session ended otherwise, the worker drops every execution, which kills the
+  program of each one that has not ended, with what is left in its cgroup or
+  its process group, and what is left in the cgroups of the executions that did
+  not settle, and waits up to a second in all for those programs to end and
+  those cgroups to empty, removing each cgroup that emptied once it collected
+  the statuses of those programs.
 
 The worker's `entries` probe runs two more commands of the guest agent:
 `runtime-adapter-guest entries ROOT CGROUP`, its helper, which runs the probe's
@@ -469,6 +677,185 @@ or with 1 after a diagnostic on standard error; and
 `runtime-adapter-guest inside DIRECTORY DESCRIPTOR`, which each execution runs
 from inside the root, and which reports what the execution sees and may do;
 see [Probes](#probes).
+
+### Template mode
+
+A template's VM captures a snapshot of its guest before the guest assembles any
+root, so that every clone that a restore of the snapshot starts attaches a root
+of its own. The host opens no application session with it, and waits for no
+`Ready`: a committed capture ends the VM. Its kernel command line has
+`nvx_sandbox=1`, so NVX's `/init` runs the time ABI's boot step, then hands the
+VM to the guest agent's PID 1 of a layered root, which starts the worker, as in
+every VM with a layered root. OpenVMM adds `nvx_snapshot_tier=platform` to the
+kernel command line of a VM that captures a platform snapshot.
+
+On x86_64, whose time ABI a capture needs, the worker reads the kernel command
+line before anything else, with `template::boot`, which splits it as the kernel
+does, with `nvx::protocol::cmdline::parameters`. A command line in which the
+kernel finds no parameter `nvx_snapshot_tier=platform` boots cold: the worker
+goes on as above, whatever else the command line holds. With it, the VM is a
+template's, whose snapshot holds the platform's invariant configuration alone,
+which every clone shares. So the worker accepts only the parameters of the
+platform tier's allowlist, `template::is_platform_token`, which OpenVMM's
+capture of a platform snapshot allows too, byte for byte:
+
+- `earlycon=xe9`, `console=hvc0`, `console=hvc1`, `reboot=t`, `panic=-1`,
+  `nvx_sandbox=1`, `nvx_config=0xd0010000,65536`,
+  `nvx_snapshot_tier=platform`, and `nvx_control_tty=hvc2`;
+- `nr_cpus=`, `virtio_mmio.device=`, `virtnet_ip=`, `virtnet_mask=`,
+  `virtnet_gw=`, `virtnet_dns=`, `virtnet_ip6=`, and `virtnet_gw6=`, with any
+  value that the host chooses.
+
+It refuses any other parameter, and a double quote, which the kernel drops from
+a parameter, or `--`, after which the kernel hands the rest of the command line
+to init, though init may still read it from `/proc/cmdline`: OpenVMM refuses
+both in the command line of a VM with a control console. Otherwise, the worker,
+through `worker::capture::capture_on_terminal`:
+
+1. opens the control tty, in raw mode, as the worker of a VM that boots cold
+   does;
+2. bootstraps the guest for the root of every clone, with the template's own
+   root configuration, `worker::capture::template_config`, the default one,
+   since the host sends a template's VM none: it mounts the cgroup v2
+   hierarchy unless it is mounted, and prepares the agent's and the workload
+   cgroups, with their resource values, as the worker of a VM that boots cold
+   does before it assembles its root. The snapshot holds them, so that a
+   clone assembles its root without them;
+3. attaches the control session with `nvx::guest::nvxs::GuestConnection::attach`,
+   takes the reset with which the broker answers the attachment at once,
+   acknowledges it with the guest agent's receive window, and waits until the
+   tty has sent the acknowledgement, so that the snapshot holds the guest's
+   session active, in the broker's first epoch. A clone then reads no reset but
+   the one that the restore queues, of another instance: the restore's broker
+   would finish sending a reset that the template's broker began to send, and
+   the clone would read one that the template did not. The worker reads nothing
+   else from the session before the capture, and serves no application session;
+4. prepares the guest for the capture with
+   `nvx::guest::clone::CapturePreparation`, which closes the worker's fence of
+   workload admission, checks that nothing is mounted from the `distro` or the
+   scratch block device, at the MMIO windows from which the worker assembles a
+   root, from an overlay, or from OpenVMM's host filesystem device, whose tag
+   is `microvm`, then waits for the time ABI's boot checks, runs its capture
+   checks, and suppresses the stall detectors;
+5. requests the capture with `CaptureBarrier::capture`, with the platform
+   tier's request, which keeps no scratch.
+
+Closing the worker's fence, `worker::capture::Admission`, acquires it: a close
+fails while the fence is closed, whoever closed it, and leaves it closed. The
+worker of a template's VM admits no execution before the capture. The worker
+returns from the capture only once the capture ended without a snapshot, or
+failed, or in a clone, which a restore of the snapshot started. In a clone, the
+worker repairs the restore next, with `nvx::guest::clone::repair`, behind its
+fence, which stays closed: the repair checks the online CPUs, activates the
+restore's memory target, reseeds the kernel's random number generator with the
+restore's fresh entropy, and finishes the restore, with the acknowledgement
+that the host awaits, which hands the deferred time work, the restore checks
+and the release of the stall detectors, to the time daemon. NVX's `/init`
+started the daemon in the template, with the time ABI's boot step, before the
+guest agent, so every clone holds it, and the guest agent's PID 1 collects its
+status. The repair takes the time ABI in strict mode, so that a violation of
+the ABI fails the repair, rather than stopping the VM, and the worker ends the
+VM with the failure's status. A failure of the deferred time work stops the VM
+with the time ABI's own status, since the daemon enforces the ABI.
+
+Once it repaired a clone, the worker activates it, on the same tty, with
+`worker::work_clone`, through the clone's `nvx::guest::clone::Activation`,
+whose deadline ends `worker::activation::ACTIVATION_TIMEOUT`, 120 seconds,
+after the repair's acknowledgement of the restore:
+
+1. It resumes the session that the template attached, and whose first epoch it
+   acknowledged, which the snapshot holds, and acknowledges the reset that the
+   restore queued, the only one that the clone reads, with its receive window:
+   it attaches no session.
+2. It takes the host's `Activate`. The activation decodes its record, which
+   must be a clone's, with a restore section, and checks that it expects the
+   CPU count and the memory size that the repair found, before anything has a
+   side effect.
+3. It applies the record with `nvx::guest::clone::apply`, with
+   `worker::capture::root_template` of the template's configuration: its
+   runtime directory, the `distro` and scratch block devices, and its device
+   timeout. The application assembles the root, an EROFS image over a tmpfs
+   or the scratch, in the record's overlay mode, and checks the account of the
+   record's workload identity, if it has one, in the assembled root, in
+   existing-account mode. It applies none of the record's other settings: its
+   export, its network, its hostname, and its machine ID.
+4. It completes the activation, which opens the fence, and answers `Ready`,
+   which reports the activation after the guest agent's build.
+5. It then serves the host's order, as after a cold boot: the mapping table
+   that the record announces, the start, the executions, the probes, and the
+   stop. The record's workload identity, if it has one, is the whole
+   sandbox's, as a root configuration's is: every execution runs as it, and a
+   start that names an identity is refused. Without an export, the clone
+   refuses each part of a mapping table with `MapFailed`.
+
+Until the clone is ready, its session takes nothing but that `Activate`:
+another reset, any other message, a `Stop` and a `Ping` included, an
+`Activate` that the activation refuses, and the passing of the deadline fail
+the activation finally, as does an application that failed, which nothing
+retries. Once the clone is ready, a retry of the same `Activate`, byte for
+byte, gets the same `Ready` without a second application, and any other
+`Activate` fails the activation. A failed activation ends the clone with the
+status of its class, which `worker::activation::failure_status` selects, and a
+broker that closes the stream before the clone is ready ends the clone with
+status 1, once the worker dropped its executions, and waited for its stream,
+and then the tty, to take what it wrote, for at most
+`worker::UNACTIVATED_DRAIN`, a second each, whatever the stream does, so that a
+stream that takes nothing, as once the broker failed, does not keep the clone
+from ending; the fence stays closed if the clone was not ready. Once the clone
+is ready, a broker that closes the stream ends it as it ends the worker of a VM
+that boots cold. The worker of a VM that boots cold refuses an `Activate` as
+any message that it does not take in its state. The worker, and with it the VM,
+ends with one of these statuses, after a diagnostic on standard error:
+
+| Status | When |
+| --- | --- |
+| 0 | In a clone, the host stopped the worker once the clone was ready, after a teardown that succeeded |
+| 1 | The control tty cannot be opened or put in raw mode, the attachment or the acknowledgement of the broker's reset cannot be sent, or the broker closes the session or sends anything but a reset first, or, in a clone, its session failed or the broker closed it |
+| 13 | The bootstrap of the guest for the template's root failed, before the attachment |
+| 15 | In a clone, the root's teardown failed once the host stopped the worker |
+| 20 | The kernel command line names the platform tier, but holds another parameter, a double quote, or `--`, or the worker cannot read it |
+| 21 | The fence of workload admission cannot be closed |
+| 22 | Something is mounted from the template's devices or from an overlay, or the mount table cannot be checked |
+| 23 | The time ABI's boot checks did not complete |
+| 24 | The time ABI's capture checks failed |
+| 25 | The stall detectors cannot be suppressed |
+| 26 | The VM generation ID cannot be read |
+| 27 | The capture request failed, which leaves the fence closed, other than by a violation of the time ABI in a clone |
+| 28 | The stall detectors' settings cannot be restored once the capture ended without a snapshot |
+| 29 | A stage of the capture failed that this build of the worker does not know |
+| 30 | The capture ended without a snapshot, as without a destination, or once OpenVMM rejected it, and the template continued |
+| 40 | The clone's restore cannot be repaired: it holds no fresh entropy, or its capture finished it |
+| 41 | The clone's online CPUs cannot be read, are not a prefix of the CPUs, or do not meet the restore's processor target |
+| 42 | The restore's memory target is refused, before any memory block is added |
+| 43 | The activation of the restore's memory target failed |
+| 44 | The reseed of the kernel's random number generator failed |
+| 45 | The restore's finish failed, other than by a violation of the time ABI |
+| 50 | The clone was not ready before its activation's deadline |
+| 51 | The host broke the clone's session: it reset the session again, or sent another request, before the clone was ready, or an `Activate` of another transaction, or one that changes the accepted record |
+| 52 | The `Activate`'s record does not decode, breaks a limit, or is a cold boot's |
+| 53 | The record expects other resources than the clone has |
+| 54 | The root's assembly failed, or the record's image is a GPT disk, which a clone does not assemble |
+| 55 | The image refuses the record's workload identity: it holds no account of the identity, or not its group, or its account databases cannot be read |
+| 58 | The worker's own order misused the activation: it completed an activation that did not run, or started the sandbox before the clone was ready, or again |
+| 193 | A conformance check of the time ABI failed in the clone's repair, such as the finish's, which needs a running time daemon |
+| 195 | The time ABI's part of the clone's repair failed, such as the validation of the restore packet, or the record of the restore |
+
+The statuses from 21 to 29 are `template::CAPTURE_STATUS_BASE` plus the number
+of the stage that failed, in the order in which
+`nvx::guest::clone::CaptureStage` declares the stages. A capture request that
+fails with a violation of the time ABI, which it does in a clone whose restore
+the time ABI could not repair, ends with the violation's status instead, as
+`worker::capture::capture_status` tells. `nvx::protocol::status` documents
+the statuses of a clone's repair, from 40 to 45, which
+`nvx::guest::clone::RepairError::status` selects, the time ABI's own, from 193
+to 195, and those of a clone's activation, from 50 to 58, of which the worker
+leaves 56 and 57, the export's and the network's, to the activation of those
+settings. A
+stage whose failure may leave the worker some of the permission for the time
+ABI's ports fails with the time ABI's port error, and the worker then starts no
+thread or process before it ends. A violation of the time ABI in enforcing
+mode, in the capture's preparation or in the time daemon, stops the VM with the
+time ABI's own status, from 193 to 195, instead.
 
 ## Host program
 
@@ -487,7 +874,12 @@ transport to the session's host endpoint, such as the one that
   an `Echo` of the same bytes, and `Stopped`. `stop` also returns the failure
   of a layered root's teardown, which the guest reports before it confirms;
 - `configure_root` sends a root configuration, and returns how the guest
-  answered: `RootReady`, or the stage of the root that failed;
+  answered: `Ready`, with the guest agent's build, or the stage of the root
+  that failed;
+- `map` sends a part of the host's mapping table, and returns how the guest
+  answered: `Mapped`, or `MapFailed`, with how many of the table's mappings it
+  applied and the problem; `start` sends `Start`, and checks that the guest
+  answers `Started`;
 - `probe` sends a probe, and returns the facts that it found, or the problem.
 
 Besides the session's own buffers, the client holds at most the rest of one of
@@ -497,10 +889,77 @@ with a new message, in a new attachment.
 
 A failure of the session, a send that fails or times out, a malformed message,
 an answer whose body does not decode, and a message that only the host program
-sends end the client, and its later calls fail. A receive that times out
-doesn't: it keeps what arrived. A request ends the client on any failure after
-the framing accepted it, a timeout included, because an answer that arrived
-later would answer the wrong request.
+sends, an execution's start, input, end of input, or cancellation included,
+end the client, and its later calls fail. A receive that times out doesn't: it
+keeps what arrived. A request ends the client on any failure after the framing
+accepted it, a timeout included, because an answer that arrived later would
+answer the wrong request.
+
+`host::Executions` is the host program's driver of
+[executions](#executions), over one attachment of the client:
+
+- `start` sends an execution's start, once it checks that the start decodes,
+  as the guest decodes it. A start that does not, such as one with a relative
+  working directory, and one of an ID that the driver started already, fail
+  before anything is sent, and leave the client usable: the guest would end its
+  session on either. So do a start that says that the host sends the program's
+  input, one whose output windows count bytes, or more than
+  `host::MAX_OUTPUT_FRAMES`, 32, frames, one beyond `exec::MAX_EXECUTIONS`, 8,
+  executions, as the guest runs no more at once, and any once the driver ran:
+  a driver runs one batch, whose executions it starts before it runs them;
+- `run` carries the guest's messages to each execution's
+  `exec::HostExecution`, and theirs to the guest, until every execution
+  finished. One thread runs them all: each receive waits at most until the
+  earliest timer of the executions, which so fires in time whatever the guest
+  sends, and no execution's messages wait for another's. A message of the
+  guest about no execution, about one that the driver did not start, whose body
+  does not decode, or that breaks the engine's rules, ends the run, as a
+  deadline that passes first does: in a receive, which leaves the client
+  usable, or in a send. Each send waits, as the client's do, until the
+  transport takes the message or the run's deadline passes, and no timer fires
+  meanwhile, so a guest that stops reading the session holds the run until its
+  deadline, when the send's timeout ends the client.
+
+Even a guest that reads can hold a send while the host does not read: the
+session's broker passes the guest's credit for the host's records on only
+behind the guest's own records, and takes no more of the host's records than
+that credit allows. So the driver sends little before it reads: no program's
+input, which one thread could not send while it reads the programs' output; the
+starts of at most 8 executions, whose answers wait for the run, as no program's
+output flows before the run's credit does; and, in the run, besides a
+cancellation for each execution, at most a credit for each message that it
+reads, of output windows of at most 32 frames, so that the guest's messages
+ahead of its own credit stay few. The guest may still send messages about the
+executions of a run that gave up on one or failed, so a later batch takes an
+attachment of its own, as each command of the host program does.
+
+The guest ends its session on a second start of the same key, even in a later
+epoch of the session, so the keys of a driver's executions must be new to the
+guest.
+
+### The host's order
+
+A VM with a layered root is ready for workloads once its guest assembled the
+root, and applied the host's mapping table. The `host` module runs that order
+over a client in two steps, between which the host program releases the files
+that it handed OpenVMM, and its [step hook](#the-step-hook) may pause it:
+
+1. `host::ready` sends the root configuration, which announces how many
+   mappings the table holds, and waits for `Ready`, whose build must be the
+   one that the host ships. The host sends a guest agent of another build
+   nothing more, since it cannot tell what that build would do with it.
+2. `host::start_sandbox` sends the table in the parts that `root::encode_maps`
+   splits it into, each once the guest applied the one before, then `Start`,
+   and waits for `Started`. A table of no mapping sends no part.
+
+A part that the guest fails ends the order: the host sends no more of the
+table, nor `Start`, so the guest starts no workload on a partial table, and
+sends `Stop`, which tears the root down, mappings first, as NVX's managed
+lifecycle stops a guest whose mappings failed. The order fails with an
+`host::OrderError`: the stage of the root that failed, another build, the
+mapping that failed with how the stop ended, a table that does not encode,
+which fails before anything is sent, or a failure of the client. The host
+program [tears the VM down](#commands) after any of them.
 
 ## VMs
 
@@ -555,48 +1014,244 @@ version unless the caller names another. A host program that ships another
 build of the guest agent runs another runtime, and finds a VM of this one
 mismatched.
 
+### Staged images
+
+The images of a layered root are staged first, in the sandbox's store, as
+`layered::Staged::stage` stages them. Staging verifies the image explicitly,
+with `nvx::host::sandbox::distro::DistroBinding::verify`, which hashes the
+image only when a manifest is beside it, and compares the manifest's name of
+the image and digest with the image's own. It then checks the binding from
+metadata, as a launch checks it, so that it stages no binding that every launch
+would refuse. It binds the ext4 scratch image of an upper on scratch with
+`nvx::host::sandbox::scratch::ScratchBinding::bind`, which neither reads nor
+claims the image. Staging is where hashing belongs: a launch never hashes.
+Staging also refuses images that no launch could attach, as the plan of a
+launch checks them.
+
+Staging records both bindings in the sandbox's store, in
+`runtime-adapter-staged.json`, in place of those staged earlier:
+
+```json
+{"format": 1,
+ "distro": {"path": "/images/distro.erofs", "binding": DISTRO_BINDING},
+ "scratch": {"path": "/sandboxes/one/scratch.ext4", "binding": SCRATCH_BINDING}}
+```
+
+Each `path` is the absolute path of a file, as a plan names it, and each
+binding the serde form of NVX's `DistroBinding` or `ScratchBinding`. `scratch`
+is `null` when no scratch image was staged. A reader refuses another format,
+an object that lacks a member or has another, and a binding that does not
+decode. A launch takes the bindings of its images from the record, by their
+paths, and [checks them](#the-checked-handoff) before it spawns the VM.
+
 ### Layered roots
 
 `layered::LayeredLaunch` plans a VM with a layered root with NVX's typed plan
-of a cold layered launch, `nvx::host::sandbox::SandboxPlan`, with NVX's default
-sandbox settings, and checks it with `SandboxPlan::validated`. The plan names
-the images by absolute paths, since OpenVMM runs in the sandbox's store. The
-VM's kernel command line is the plan's, without parameters of the caller:
-`nvx_sandbox=1`, the image's token, such as
-`nvx_layer=distro,0xd0003000,erofs:UUID`, the upper's, such as
-`nvx_scratch=0xd0006000,ext4`, and those of the settings, which the worker
-ignores. OpenVMM's arguments are those that NVX's own sandbox start passes:
-the plan's, which attach the image and the scratch as block devices, then the
-managed lifecycle in one process, NVX's default memory, the kernel, the
-initramfs, that command line, no virtio console, the control console with the
-launch capability on standard input, and the outcome report.
+of a cold layered launch for an adapter's own guest,
+`nvx::host::sandbox::SandboxPlan::adapter`, and checks it with
+`SandboxPlan::validated`. The adapter's plan holds none of the settings of
+NVX's sandbox profile, such as a workload identity, since the guest agent runs
+its executions itself. The plan names the images by absolute paths, since
+OpenVMM runs in the sandbox's store, and the image's identity, which a launch
+requires, since a binding names it. The VM's kernel command line is
+`nvx_sandbox=1`, the launch's own token, with which NVX's `/init` hands the VM
+to NVX's init agent, which the guest agent replaces, then the plan's boot
+tokens of the root alone: the image's, such as
+`nvx_layer=distro,0xd0003000,erofs:UUID`, and the upper's, such as
+`nvx_scratch=0xd0006000,ext4`. OpenVMM's arguments are the plan's, which
+attach the [checked files](#the-checked-handoff) of the image and the scratch
+as block devices, and the VM's [network](#networks), if any, then those of the
+export of the launch's [shares](#shares), if any, then the VM in one process,
+NVX's default memory, the kernel, the initramfs, that command line, no virtio
+console, the control console with the launch capability on standard input,
+and the outcome report. They name no workload identity, and no managed
+lifecycle: OpenVMM only checks the arguments of the managed lifecycle and
+labels its outcome report with it, and only NVX's init agent reads its boot
+token. A VM without a layered root keeps the managed lifecycle, with which
+NVX's `/init` starts the managed agent, which the guest agent replaces.
 
 The boot tokens carry only what NVX's boot contract defines. The launch sends
 the rest in the [root configuration](#root-configurations), once it attaches:
 the defaults, with the runtime directory that the caller names, as it is, so
 that the guest checks it, the size of each image in sectors, if it is a whole
-number of them, which the guest checks against its block device, and the
-overlay mode and the scratch's journal policy that the caller names, if any.
+number of them, which the guest checks against its block device, the overlay
+mode and the scratch's journal policy that the caller names, if any, and the
+number of the mappings of the export's table, if the launch shares anything.
 
 The launch records what it launched in the sandbox's store, beside NVX's
 runtime records, in `runtime-adapter.json`, before it spawns the VMM:
 
 ```json
-{"format": 1, "mode": "layered", "kernelCommandLine": "nvx_sandbox=1 ...",
- "plan": PLAN, "rootConfiguration": "version=1\nruntime=/run/runtime-adapter\n..."}
+{"format": 2, "mode": "layered", "kernelCommandLine": "nvx_sandbox=1 ...",
+ "plan": PLAN, "bindings": {"distro": DISTRO_BINDING, "scratch": SCRATCH_BINDING},
+ "rootConfiguration": "version=1\nruntime=/run/runtime-adapter\n..."}
 ```
 
 `mode` is `layered`, or `blockless` for a VM without a layered root, whose
-`plan` and `rootConfiguration` are `null`. `plan` is the persisted form of the
-VM's `SandboxPlan`, and `rootConfiguration` the root configuration that the
-launch sends, whether or not the guest accepts it.
+`plan`, `bindings`, and `rootConfiguration` are `null`. `plan` is the persisted
+form of the VM's `SandboxPlan`, whose `network` keeps the VM's
+[network](#networks), or is `null` without one. `bindings` holds the bindings
+that the launch checked, which the store [stages](#staged-images) for the
+launch's images: the image's, and the scratch image's, `null` for an upper in
+RAM. `rootConfiguration` is the root configuration that the launch sends,
+whether or not the guest accepts it.
+
+### The checked handoff
+
+Before it spawns the VM, a launch checks the bindings of its images from their
+metadata alone, with `LayeredLaunch::prepare`: NVX's
+`DistroBinding::check` checks the image against its binding, under the distro
+policy that this build accepts, and `ScratchBinding::check` checks the scratch
+image of an upper on scratch against its own, and claims it for the sandbox.
+Neither reads the images, and neither hashes. A launch fails before it begins,
+leaving no launch journal, VMM log, or record in the store, if the store stages
+no binding for the image or for the scratch image at its path, if a binding no
+longer holds, as for an image that changed or was replaced after it was
+staged, or if another sandbox's VM still claims the scratch image.
+
+The checks return the files that they opened, which NVX's
+`nvx::host::sandbox::PreparedLaunch` hands OpenVMM in place of the images'
+paths, so that nothing that takes a path after the checks reaches the VM. On
+Linux, OpenVMM inherits the checked files' descriptors, which its arguments
+name as `/proc/self/fd/N`, and nothing else of the host program's; on Windows,
+its arguments name the checked files by their final paths, which the checked
+files keep anything else from taking while they are open, and OpenVMM inherits
+the scratch image's claim. The launch holds the checked files until the guest
+has assembled the root, or until it has torn down a launch that failed.
+
+### Shares
+
+A launch may share host directories and regular files with the root, as
+`layered::Shares`: each `layered::Share` at an absolute guest path in the root,
+read-only or read-write. `Shares::plan` plans their export with NVX's
+`nvx::host::filesystem::plan`, through an `ExportRequest` of a mapping for each
+share at its target, the host paths that it hides inside the shares, and the
+guest targets that the root keeps: those of NVX's container root,
+`ReservedTargets::CONTAINER_ROOT`, and the trees that the adapter keeps for
+itself. Each share must lie inside a host directory that the adapter
+authorizes, once links are resolved: `Shares::plan` refuses one outside them
+before it plans, and checks the export's directories and files, which the
+planner resolves anew, again. The planner refuses what it cannot export, such
+as a target that takes or covers a reserved tree, or a read-only share inside
+a read-write one, which the host could not keep read-only, and a hidden
+path that does not exist inside a share, which nothing would hide once a
+workload creates it.
+
+`LayeredLaunch::share` attaches the export to the launch, and announces its
+table, of at most 4,096 mappings, in the root configuration. NVX's adapter plan
+holds no export, so the launch attaches it itself: OpenVMM's arguments export
+the shares through OpenVMM's aggregate virtio-fs device, as
+`ExportPlan::openvmm_arguments` renders them, and OpenVMM appends the boot
+tokens with which the guest mounts the export, out of the root. Before it
+spawns the VM, `LayeredLaunch::prepare` checks the export with
+`ExportPlan::verify`: the host still keeps its read-only mappings read-only,
+and its directories and files, and the paths that the guest could move inside
+the parts that it may write, still name what they named when the export was
+planned. Once the guest is ready, the launch sends the table,
+`LayeredLaunch::table`, in the [host's order](#the-hosts-order): each mapping
+before those inside its target.
+
+### Networks
+
+A layered launch may give the VM a network: an
+`nvx::host::sandbox::SandboxNetwork`, the guest's address and the policy that
+OpenVMM enforces there. `layered::read_network` reads it from a file, in the
+serde form of a plan's network, as NVX's plan persists it, such as:
+
+```json
+{"guestNetwork": "10.0.0.2/24", "egress": "deny",
+ "allow": {"name": "egress.allow",
+           "rules": [{"to": [{"cidr": "192.0.2.0/24", "except": []}],
+                      "ports": [{"protocol": "tcp", "port": 443, "endPort": null}]}]},
+ "deny": {"name": "egress.deny", "rules": []},
+ "ingress": "deny", "hostLoopback": "deny", "hostLoopbackForwards": [],
+ "proxy": null}
+```
+
+The form requires every member and refuses any other. Reading it checks the
+network as the plan does: the guest's address must leave a gateway, and the
+policy must lower to OpenVMM's arguments. A launch reads its network before
+anything else, so it refuses one that the plan refuses before it needs NVX's
+artifacts or creates the store.
+
+The launch puts the network on the adapter's plan, with
+`LayeredLaunch::with_network`, which renders it after the block devices,
+through NVX's one lowering of a policy, `nvx::host::network::openvmm_arguments`:
+the portable profile at the guest's address, the defaults of egress and
+ingress, the host-loopback access, the egress rules, lowered into OpenVMM's
+native ones, the host-loopback forwards, and the proxy of a proxy-only
+network, which the guest reaches at its gateway, at the URL that
+`SandboxPlan::proxy_url` gives. A policy that lets nothing through attaches no
+network device. OpenVMM appends the guest's network settings to the kernel
+command line, from which NVX's `/init` configures the network device and its
+addresses, and starts the announcer of the guest's listeners if OpenVMM
+publishes them, before it hands the VM to the guest agent, which leaves all
+three to `/init`. The launch's [record](#layered-roots) keeps the network in
+its plan, which `LaunchRecord::read_plan` reads back from the store.
+
+The guest's executions follow the network:
+
+- The [root configuration](#root-configurations) says whether the guest's
+  listeners are published, as OpenVMM publishes them: to the host's private
+  networks with ingress allowed, or on host loopback with host-loopback access
+  allowed, but neither with outbound host-loopback access alone nor through a
+  proxy, and not without a network. The executions enter the root with that
+  publication, so while listeners are published the entry refuses
+  `CAP_NET_BIND_SERVICE` and `CAP_NET_RAW`, with which an execution could bind
+  the privileged port from which the announcer sends, or forge its datagrams,
+  at stage 0 with `EPERM`.
+- `runtime-adapter-host exec` gives each of its executions the URL of a
+  proxy-only network's proxy in its environment, from the plan that the
+  launch's record keeps, with `layered::with_proxy`, since NVX gives an
+  execution no proxy settings, and its environment is exactly its start's: in
+  each of `layered::PROXY_VARIABLES`, `http_proxy`, `https_proxy`,
+  `HTTP_PROXY`, and `HTTPS_PROXY`, after the start's own entries. A start that
+  names any of them keeps its own proxy settings.
+
+In VMs, the [layered scenarios](#layered-scenarios) check what each kind of
+network lets the guest's executions reach, and whether the host reaches the
+guest's listeners, through publication or a forward.
+
+### The step hook
+
+For tests, `launch` takes a step hook, `hook::StepHook`, from the variable
+`RUNTIME_ADAPTER_STEP_HOOK`, which pauses the launch at a named step, so that a
+test can act between two steps, or exits the launch there without unwinding,
+as a crash would end it:
+
+- `STEP:pause:PATH` creates the file PATH, which holds the step's name, and
+  waits until the file is gone, then goes on: the launch leaves the time that
+  it waited out of its deadline, so that a test may pause it for as long as it
+  needs;
+- `STEP:exit` exits at once with status 5: the launch ends nothing that it
+  started, such as the VMM, and the system releases what it holds, such as its
+  descriptors or handles, and their locks.
+
+The steps of a launch, in order, are:
+
+| Step | Where the launch is |
+| --- | --- |
+| `checked` | It has checked the bindings of its images, and the export of its shares, if any, and holds the checked files, which claim the scratch image, but has begun nothing in the store, and spawned nothing. A launch without a layered root reaches it too. |
+| `spawned` | The VMM runs, and the launch's journal records it, but the launch has not connected to the VM. |
+| `ready` | The guest agent, of the build that the host ships, has assembled the layered root, and the launch has released the checked files, but has sent neither the mapping table nor `Start`. |
+| `commit` | The guest has started the sandbox, if the VM has a layered root, the guest agent has answered, and the launch is about to commit: its journal still records the VMM, which no runtime record names yet. |
+
+A value that names no step or action is a usage error. Without the variable,
+the hook does nothing.
 
 ### Commands
 
-`runtime-adapter-host` takes NVX's artifacts from the directory that
-`NVX_ARTIFACTS_DIR` names. Each command takes the guest agent's build from
+Each command of `runtime-adapter-host` but `stage` takes NVX's artifacts from
+the directory that `NVX_ARTIFACTS_DIR` names, and the guest agent's build from
 `--guest-build BUILD`, the crate's version by default:
 
+- `stage STORE --distro FORMAT:PATH --distro-identity UUID [--upper scratch:PATH]`
+  [stages](#staged-images) the images of a layered root for the launches of a
+  VM in the sandbox store STORE, which it creates if needed: the image PATH,
+  an EROFS file system, `erofs`, or a GPT disk, `gpt`, of which the guest
+  expects the identity UUID, and the ext4 scratch image PATH, if given. It
+  verifies and binds the images before it takes the sandbox's lock, which it
+  holds while it records them, and prints nothing.
 - `launch STORE --guest-agent PATH [--hypervisor NAME] [LAYERED]` launches a VM
   in the sandbox store STORE, which it creates if needed, with the guest agent
   PATH, a static `x86_64-unknown-linux-musl` build of `runtime-adapter-guest`,
@@ -610,20 +1265,49 @@ launch sends, whether or not the guest accepts it.
   ends its VM.
 
   LAYERED,
-  `--distro FORMAT:PATH [--distro-identity UUID] --upper (scratch:PATH | ram) [--runtime-dir DIR] [--overlay-mode MODE] [--scratch-journal POLICY] [--first-partition-bound BYTES]`,
+  `--distro FORMAT:PATH --distro-identity UUID --upper (scratch:PATH | ram) [--runtime-dir DIR] [--overlay-mode MODE] [--scratch-journal POLICY] [--first-partition-bound BYTES] [--workload-identity UID:GID] [--network FILE] [SHARES]`,
   gives the VM a [layered root](#layered-roots). Its image is the file PATH, an
   EROFS file system, `erofs`, or a GPT disk, `gpt`, of which the guest expects
-  the identity UUID, if given: the file system's UUID, or the disk's GUID. Its
-  upper is the ext4 scratch image PATH, or RAM. The guest assembles the root
-  below its runtime directory DIR, `/run/runtime-adapter` by default, in the
-  overlay mode MODE, `trusted-lowers` or `untrusted-lowers`, checks a
-  scratch's journal against the policy POLICY, `allowed` or `forbidden`, which
-  only a scratch takes, and refuses a first partition larger than BYTES, which
-  only a GPT disk takes, with the guest's defaults unless given. Once attached,
-  the launch sends the root configuration, and exchanges the `Ping` and the
-  `Echo` once the guest assembled the root. If the guest reports that a stage
-  of the root failed instead, the launch waits for the VM to end, abandons the
-  launch, and checks that the VM ended with the stage's status.
+  the identity UUID: the file system's UUID, or the disk's GUID. Its upper is
+  the ext4 scratch image PATH, or RAM. The guest assembles the root below its
+  runtime directory DIR, `/run/runtime-adapter` by default, in the overlay mode
+  MODE, `trusted-lowers` or `untrusted-lowers`, checks a scratch's journal
+  against the policy POLICY, `allowed` or `forbidden`, which only a scratch
+  takes, and refuses a first partition larger than BYTES, which only a GPT disk
+  takes, with the guest's defaults unless given. A workload identity, the user
+  ID UID and the group ID GID, two numbers from 1 to 4294967294, is the identity
+  as which every execution of the sandbox runs: the guest checks its account in
+  the assembled root, without which the root's `identity` stage fails. The VM
+  has the [network](#networks) that FILE holds, if given, which the launch
+  reads before anything else: one that the plan refuses fails the launch before
+  it needs NVX's artifacts or creates the store. Before it spawns the VM, the
+  launch checks the bindings that STORE stages for the image and the scratch
+  image, and fails if STORE stages none for either, or one no longer holds, as
+  [the checked handoff](#the-checked-handoff) describes. It records the
+  bindings that it checked.
+
+  SHARES,
+  `--share HOST:TARGET[:ro]... [--deny PATH]... [--reserved TARGET]... [--share-root DIR]...`,
+  shares each host directory or regular file HOST with the root, at the
+  absolute guest path TARGET, which starts at the last `:/`, read-only with
+  `:ro`, as [Shares](#shares) describes. Each HOST must lie inside a host
+  directory DIR that the adapter authorizes, the export hides each host path
+  PATH inside the shares, and no TARGET may take or cover a guest tree that the
+  container root keeps, or a tree TARGET that the adapter keeps. The launch
+  refuses shares that it cannot export before it touches STORE, and checks the
+  export before it spawns the VM.
+
+  Once attached, the launch follows the [host's order](#the-hosts-order): it
+  sends the root configuration, checks that the guest agent that assembled the
+  root is of the build that the host program ships, sends the mapping table,
+  then `Start`, and exchanges the `Ping` and the `Echo` once the guest started
+  the sandbox. A guest agent of another build gets nothing more, and the launch
+  fails, which ends the VM. If the guest reports that a stage of the root
+  failed instead, the launch waits for the VM to end, abandons the launch, and
+  checks that the VM ended with the stage's status. If the guest fails a
+  mapping, the launch sends no more of the table, nor `Start`, stops the guest,
+  which tears down the root, waits for the VM to end, abandons the launch, and
+  checks that the VM ended with a success and a complete teardown.
 - `reattach STORE` takes the sandbox's lock, and reattaches to its VM, which
   another process launched, and which it holds, although the VM is not its
   child, through its verified process identity. It reads the capability from
@@ -641,27 +1325,67 @@ launch sends, whether or not the guest accepts it.
   each PROBE in the VM's layered root, in order, and prints the facts that it
   found. A PROBE is the text of a [probe](#probes): its name, then its
   arguments, each after one space. A probe that fails fails the command.
+- `exec STORE EXECUTION [; EXECUTION]...` reattaches and attaches as
+  `reattach` does, then runs each EXECUTION in the VM's layered root, all at
+  once, over that one session, through `host::Executions`, and prints their
+  outputs and outcomes once every one finished. It runs at most 8 executions,
+  as many as the guest runs at once. An EXECUTION,
+  `[--identity UID:GID [--groups GID,...] [--capabilities N,...] [--numeric]] [--cwd DIR] [--env NAME=VALUE]... -- PROGRAM [ARG]...`,
+  runs PROGRAM with its ARGs, up to a lone `;`, which a shell takes quoted, as
+  `find -exec` takes them, without standard input. Without `--identity`, it
+  names no identity, and runs as the sandbox's workload identity, which the
+  guest otherwise refuses; with it, it runs as the user ID UID and the group ID
+  GID, with the supplementary groups GIDs and the capabilities numbered N, such
+  as 0 for `CAP_CHOWN`, if given, and the guest checks its account, unless
+  `--numeric` says that the IDs have none. It starts in the root's directory
+  DIR, or `/`, with exactly the environment of its `--env` entries, then, if
+  the VM's [network](#networks) has a proxy, the proxy's URL as the guest sees
+  it in `http_proxy`, `https_proxy`, `HTTP_PROXY`, and `HTTPS_PROXY`, unless
+  the entries name any of them. Before it attaches, the command checks that the
+  framing still carries each start with the proxy's URL, and runs none of the
+  executions if one no longer fits. It runs for at most a minute, with 16 KiB
+  chunks and the credit of 4 of them for its input and 8 for its output, which
+  its standard output and error share. The command keeps at most 16 MiB of each
+  stream, and cancels an execution whose stream would exceed them. Execution N,
+  from 1, has the key `(B + N, E)`: E is the epoch of the command's attachment,
+  and B the first 8 bytes of the broker instance's ID, as a little-endian
+  number. The guest refuses a key that it heard of before, and the epochs of a
+  broker instance only advance, while a broker restored from a snapshot has a
+  new instance ID, so no command repeats the key of another's execution.
 
-`reattach`, `stop`, and `probe` find a VM that another runtime identity
-launched mismatched, and then signal nothing: the VM keeps running. The
-commands print what they find as `KEY=VALUE` lines: `reattached` (`live`,
-`mismatched`, `exited`, or `indeterminate`), `differences` (the parts of the
-runtime identity in which a mismatched VM differs), `pid` (the VMM's process
-ID), `instance` and `epoch` (the identity of the session that they attached
-to), `root` (`ready` or `failed`: how the guest answered the root
-configuration, or `failed` when a stop finds that the root's teardown failed),
-`stage` and `problem` (the stage of the root that failed, such as `assembly`,
-and the problem), `PROBE.KEY` (the fact KEY that the probe named PROBE found),
-`stopped` (`graceful`, `forced`, or `timed-out`), `outcome` (such as
-`success 0`, or `guest-exit 14` once the assembly failed), and `teardown`
-(`complete` or `incomplete`: whether the VMM's teardown of the VM completed,
-which the outcome report records apart from the root's). Values escape `\`, newlines, and
-carriage returns as `\\`, `\n`, and `\r`. The commands exit with 0 once they
-did what they were asked, with 3 when they find the VM mismatched, with 4 when
-the guest reported that a stage of the root failed, and the VM ended with the
-stage's status and a complete teardown, and with 1, after a diagnostic on
-standard error, when they fail. Without arguments, the program reports the
-contract that it was built against.
+`reattach`, `stop`, `probe`, and `exec` find a VM that another runtime identity
+launched mismatched, and then signal nothing: the VM keeps running. The commands
+print what they find as `KEY=VALUE` lines: `reattached` (`live`, `mismatched`,
+`exited`, or `indeterminate`), `differences` (the parts of the runtime identity
+in which a mismatched VM differs), `pid` (the VMM's process ID), `instance` and
+`epoch` (the identity of the session that they attached to), `root` (`ready` or
+`failed`: how the guest answered the root configuration, or `failed` when a stop
+finds that the root's teardown failed), `build` (the build of the guest agent
+that assembled the root), `stage` and `problem` (the stage of the root that
+failed, such as `assembly`, and the problem, or the problem of a mapping that
+failed), `table` (`applied` or `failed`: how the guest took the mapping table),
+`mapped` (how many of the table's mappings the guest applied), `sandbox`
+(`started` once the guest started the sandbox), `PROBE.KEY` (the fact KEY that
+the probe named PROBE found), `exec.N.KEY` (what execution N did: its `launch`,
+`started`, `failed STAGE ERRNO`, or `none`; its `status`, `exit CODE`,
+`signal NUMBER`, or `none`; the `cause` for which a side ended it, such as
+`timed-out`, or `none`; the streams that it `truncated`, such as
+`stdout,stderr`, or `none`; whether it `settled`, `reusable` or `fenced`; and
+its `stdout` and `stderr`), `stopped` (`graceful`, `forced`, or `timed-out`),
+`outcome` (such as `success 0`, or `guest-exit 14` once the assembly failed),
+and `teardown` (`complete` or `incomplete`: whether the VMM's teardown of the VM
+completed, which the outcome report records apart from the root's). Values
+escape `\`, newlines, and carriage returns as `\\`, `\n`, and `\r`, and each
+byte of a program's output that is not part of UTF-8 text as `\xHH`. The
+commands exit with 0 once they did what they were asked, `exec` once every
+execution finished, whatever its outcome, with 3 when they find the VM
+mismatched, with 4 when the guest reported that a stage of the root failed, and
+the VM ended with the stage's status and a complete teardown, with 5 when the
+[step hook](#the-step-hook) ended a launch, with 6 when the guest failed a
+mapping of the table, and the VM stopped gracefully, with a success and a
+complete teardown, and with 1, after a diagnostic on standard error, when they
+fail. Without arguments, the program reports the contract that it was built
+against.
 
 ## Tests
 
@@ -680,15 +1404,30 @@ independent adapter's does:
   guest binary is a static executable: it has no program interpreter, needs no
   shared library, and keeps its stack non-executable.
 
-The unit tests of `frame`, `root`, `probe`, and `exec` run in every
-configuration. They cover each kind's encoding, messages in pieces of any size
-and split at every byte, the headers that the framing refuses before their body
-arrives, and the root configurations, failures, probes, facts, and messages of
-executions that decode, and those that don't. In the guest-only configuration,
-the unit tests of `worker::probes` cover what the probes read: the mount table
-with its escapes, the kernel's records of a process, `os-release`, and the
-guest's memory, and the probes and arguments that the worker refuses. Those of
-`worker::executions` hand an execution the host's cancellation once its
+The unit tests of `frame`, `root`, `probe`, `exec`, and `template` run in every
+configuration. They cover each kind's encoding, messages in pieces of any size,
+a message of each kind split at every byte, the headers that the framing refuses
+before their body arrives, and the root configurations, readinesses, with or
+without a clone's activation, parts of mapping tables, failures, probes, facts,
+and messages of executions that decode, and those that don't, and the host's
+side of an execution, which still sends the cancellation of one that it gives up
+on in the step that ends it, without grace or settlement time, and which cancels
+one whose stream outgrows the 16 MiB that it keeps. Those of `template` check
+the platform tier's allowlist, token by
+token, against the tokens that OpenVMM's capture of a platform snapshot allows
+and refuses, and template mode: a command line in which the kernel finds no
+platform tier boots cold, whatever else it holds, and one with it boots a
+template's VM if it holds the tier's tokens alone, between any of the kernel's
+whitespace, and is refused otherwise, for a parameter outside the allowlist at
+its start, in its middle, or at its end, or within a platform token's value,
+after a vertical tab or the byte 0xa0, which the kernel takes for whitespace
+and a split at ASCII whitespace does not, for a double quote, and for `--`. In
+the guest-only configuration, the unit tests of `worker::probes`
+cover what the probes read: the mount table with its escapes, the kernel's
+records of a process, `os-release`, and the guest's memory, and the probes and
+arguments that the worker refuses. Those of
+`worker::executions`, which spawn each program without entering a root, as a
+fake root does, hand an execution the host's cancellation once its
 timeout's instant passed, after its program ended before it, as a worker that
 did not run meanwhile would, and check that the program's end stays its own.
 Those of `worker` run PID 1's collection alone, in a run of the test binary of
@@ -698,7 +1437,18 @@ with a real-time signal, and check that PID 1 takes both stops and goes on
 until it collects the worker's status.
 Those of `worker::entries` cover the names of capabilities, the fields of a
 process's status, the outcomes of attempts, the entry's refusals, and the
-probe's arguments.
+probe's arguments. Those of `worker::capture` check that closing the worker's
+fence acquires it, the status of each stage of a capture, which no other
+outcome of the worker shares, a template's devices, the template's own root
+configuration, and the inputs of a clone's root that it gives, and that the
+worker attaches its session, takes the broker's reset, and acknowledges it,
+which the stream sent, before the capture runs, without reading anything more
+of the session, and keeps the session, active in the broker's first epoch, and
+that no capture runs once the attachment cannot be written, the broker closes
+the stream or sends anything but a reset first, or the acknowledgement cannot
+be sent. Those of `worker::activation` check the status of
+each class of a clone's activation's failures, and that the activation's
+timeout covers the wait for both block devices.
 
 `tests/guest_session.rs` checks, in the guest-only configuration, that the
 guest agent serves the control session with the adapter's own framing. A test
@@ -711,8 +1461,8 @@ instance, streams that end at and inside a record, and the records and
 messages that the guest agent refuses: sequence, epoch, and instance errors,
 stale and identity-less resets, record lengths, bootstrap identity, ERROR
 payloads, and malformed headers. It also checks that the guest agent of a VM
-without a layered root answers probes with a failure, and refuses root
-configurations and executions.
+without a layered root answers probes with a failure, and refuses the messages
+about a layered root, such as its configuration, and executions.
 
 `tests/host_session.rs` checks, in the host-only configuration, that the host
 program's client attaches to the control session and exchanges the adapter's
@@ -742,9 +1492,35 @@ Windows. They cover:
 - the answers that its requests check, and a request whose answer arrives too
   late;
 - a layered root: the configuration that the client sends, the guest's
-  answers, ready or the stage that failed, probes and their facts, a stop
-  that learns that the teardown failed, and answers whose bodies do not
-  decode, which end the client.
+  answers, ready with the guest agent's build or the stage that failed, probes
+  and their facts, a stop that learns that the teardown failed, and answers
+  whose bodies do not decode, which end the client;
+- the host's order: the root configuration that announces the table, the
+  guest's readiness, then each part of a table of no mapping, of one, and of
+  several parts, once the guest applied the one before, then `Start`, also in
+  records of 7 bytes; a guest agent of another build, and a root that failed,
+  after which the host sends nothing more; a table that does not encode, of
+  which the host sends nothing; a mapping that the guest fails at the first, a
+  middle, or the last part, after which the host sends no more of the table,
+  nor `Start`, but `Stop`, and learns how the stop ended, with or without a
+  teardown that failed, or as the session ends; and `Maps` or `Start` answered
+  with another kind, or failures whose bodies do not decode, which end the
+  client;
+- the driver of executions, whose guest runs the runner of NVX's execution
+  engine for each start, as the worker does, without a program: two
+  executions at once, one with more output than its credit holds, each
+  byte-exact, with its outcome, and one whose launch the guest refuses, whose
+  records carry their messages whole or split; the starts that the guest would
+  not decode, a second start of an ID, a start whose input the host would
+  send, starts whose output windows count bytes or more than 32 frames, a
+  start beyond 8 executions, and a start once the driver ran, of which the
+  driver sends nothing, with a client that stays usable; a message about an
+  execution that it did not start, about none, whose body does not decode, or
+  that breaks the engine's rules, and the end of the stream, each of which ends
+  the run; a timeout that fires while the guest says nothing, after which the
+  execution is cancelled, then fenced; and a run whose deadline passes first,
+  in a receive, which leaves the client usable, or in a send that waits for a
+  guest that stopped reading, which ends it.
 
 Through a relay between its test broker and a pseudo-terminal,
 `tests/guest_session.rs` also checks that `guest::serve_terminal` and
@@ -755,11 +1531,22 @@ byte value, and that `init` fails at once on a path that is no tty.
 test broker: a root that the worker assembles, probes, and tears down on a
 stop, across a reset of the session; an image over RAM, in the overlay mode of
 the configuration; a GPT disk, with the configuration's bound of the first
-partition; the failure of each stage, which the worker reports before it ends
-with the stage's status, without the operations of the later stages; a teardown
+partition; the host export that it mounts, the mapping table that it applies in
+order, in parts, across a reset of the session, and the start; a table of zero
+mappings, which does no work, with or without an export; the parts that do not
+continue the table, which it refuses as a whole, and a mapping that the root
+refuses, which latches the root, after either of which it refuses the later
+parts and the start; the executions and starts that it refuses out of order,
+before the start and after it; the failure of each stage, the tokens of a host
+export that break their rules, mappings without an export, an export that fails
+to mount, and a workload identity whose account the root lacks among them, which
+the worker reports before it ends with the stage's status, without the
+operations of the later stages; the account check of a sandbox's workload
+identity, once the root is assembled, with the default hostname; a teardown
 that fails; before the root, the configuration and the `Stop` that it accepts,
-and the messages that it refuses; a second configuration and a broker that
-closes the stream, which leave the root that it assembled to its operations;
+and the messages that it refuses, a clone's `Activate` among them; once the
+root is ready, a second configuration, an `Activate`, and a broker that closes
+the stream, which leave the root that it assembled to its operations;
 and a broker that closes only its end of the stream while the worker probes,
 which still receives the replies that the worker queued.
 Through the binary, it checks that `runtime-adapter-guest init TTY layered`,
@@ -779,8 +1566,19 @@ the binary exited, so that none of them outlives the test or holds its output
 open, which tests check too.
 
 `tests/guest_session.rs` also runs the worker's executions behind its test
-broker, whose host side drives the engine's peers, with frame-counted credit
-and one output pool:
+broker, whose host side starts the sandbox, then drives each execution's
+`exec::HostExecution`, with frame-counted credit and one output pool. The fake
+root prepares each execution's entry, as the worker describes it, in a directory
+of the tests' own whose account databases hold the accounts that the tests name,
+and then spawns the program without entering a root, which needs privileges, in
+the tests' own root and identity. Unless a test says otherwise, the sandbox has
+a workload identity, as which every execution runs. Where the tests can create
+cgroups, as root in a cgroup v2 hierarchy with the `pids` controller, the fake
+root gives the worker a workload cgroup of the test's own, below which each
+execution runs in a cgroup of its own, so that an execution whose program ends
+on its own settles, and is reusable. Elsewhere, the fake root names no cgroups,
+and each program runs in a process group alone, so that such an execution is
+fenced. The tests cover:
 
 - three executions at once, each byte-exact: standard output beyond a MiB, 1.5
   MiB of input through `cat`, and both streams of a program that fails;
@@ -810,19 +1608,98 @@ and one output pool:
   statuses, and a program whose status the worker collects once it ended,
   after its execution's runner gave up on it;
 - programs that end while a descendant holds their output: the worker ends
-  the descendant, so that the output ends at once, losing nothing, and a stop
-  once the worker collected such a program's status leaves no process of its
-  group running;
+  the descendant, through the execution's cgroup or the program's process
+  group, so that the output ends at once, losing nothing, and a stop once the
+  worker collected such a program's status leaves no process of its group
+  running;
+- with cgroups, a descendant in a session of its own, which holds a program's
+  output once the program ended, and which the execution's settlement ends, so
+  that the output ends at once, losing nothing, and the execution settles;
+  the worker removed the execution's cgroup before it sent the outcome, and
+  runs its limit of executions at once again;
+- with cgroups, an execution that does not settle within its settlement time,
+  because a zombie whose parent is outside its cgroup occupies the cgroup: it
+  keeps its place, so that the worker runs one execution fewer than its limit,
+  even once the cgroup emptied, until the host stops the worker, which then
+  removes the cgroup;
 - a program that a real-time signal ends, whose status the worker collects;
-- an execution whose start comes in the payload of the root's configuration,
-  whose timeout counts from its own start, however long the root's assembly
-  takes;
+- a program that runs in the working directory of its start, with exactly the
+  environment of its start;
+- the identities that starts name in a sandbox without a workload identity,
+  with their supplementary groups, capabilities, and account modes, and the
+  default hostname, all of which the worker's entry takes;
+- the publication of listeners that the root configuration names, published
+  without it, with which every execution enters, and the account check of a
+  sandbox's workload identity too: while listeners are published, the entry
+  refuses `CAP_NET_BIND_SERVICE` and `CAP_NET_RAW` at stage 0, with `EPERM`,
+  and while they are not, it takes them, as it takes the other capabilities
+  of its allowlist either way;
+- the starts that the worker refuses at stage 0 for their identities: one that
+  names an identity in a sandbox with a workload identity, or none in a
+  sandbox without one, with `EINVAL`; a capability outside the entry's
+  allowlist, one of a user ID other than 0, and `CAP_NET_BIND_SERVICE` and
+  `CAP_NET_RAW` while listeners are published, with `EPERM`; an identity
+  without a passwd entry, or whose primary group has no group entry, with
+  `ENOENT`; and one whose passwd entry has another primary group, or whose
+  user ID the kernel reads as "unchanged", with `EINVAL`. None of them takes a
+  place, so the worker then runs its limit of executions at once;
+- an execution whose start comes in the payload of the root's configuration
+  and the sandbox's start, whose timeout counts from its own start, however
+  long the root's assembly takes;
 - executions on a tty in raw mode.
 
 A test of the worker's executions that fails before it stops the worker, even
 while its broker pauses, ends the worker's session as it drops its host, so
 that the worker drops its executions, and their programs end, which a test
 checks too.
+
+On x86_64, `tests/guest_session.rs` also runs the worker of a clone, which a
+restore of a template's snapshot started, with `worker::work_clone`, behind its
+test broker, with the session that the template's VM attached, active in the
+epoch of its broker's first reset, and the clone's activation,
+`nvx::guest::clone::Activation::with_resources`, behind a closed fence. The fake
+root applies each record as `nvx::guest::clone::apply` does, without a root: it
+refuses a GPT disk, and checks the account of the record's workload identity in
+the tests' directory of account databases. The tests cover:
+
+- the reset that the restore queued, of another instance, which the worker
+  acknowledges without an attachment, and the `Activate`, whose record it
+  applies once, with the template's inputs, and answers with the `Ready` that
+  reports the activation;
+- retries of the `Activate`, in records of 7 bytes, after a later reset, and
+  once the sandbox started, which get the same `Ready` without a second
+  application, and the order that the worker serves once the clone is ready,
+  as after a cold boot;
+- the messages before the `Activate`, a stop and a ping among them, and another
+  reset, which fail the activation with the status of the host's session, with
+  nothing answered or applied;
+- a record that does not decode, a cold boot's, and one that expects other
+  resources, which fail the activation with nothing applied, and a GPT disk and
+  a workload identity whose account or group the image lacks, which fail its
+  application, each with the status of its class, and no `Ready`;
+- the activation's deadline, whether the restore's reset came or not, or part
+  of an `Activate`, which the broker sends before the worker runs, so that the
+  worker takes it at once, however late it runs: the deadline fails the
+  activation with nothing applied, and ends nothing once the clone is ready;
+- a stream that takes nothing more from the worker, as once the broker failed,
+  after which the worker still ends once its activation's deadline passed,
+  with the deadline's status, or once the broker closed its end of the stream
+  before the clone was ready, with status 1, once it waited for the stream for
+  `worker::UNACTIVATED_DRAIN`;
+- a broker that closes the stream before the clone is ready, whether the
+  restore's reset came or not, or part of an `Activate`, which ends the clone
+  with status 1, with nothing applied, and once the clone is ready, which ends
+  it as it ends the worker of a VM that boots cold;
+- a broker that sent the restore's reset, and a ping or nothing more, and is
+  gone before the worker runs, so that the worker cannot write its
+  acknowledgement: the worker still ends with the activation's status, or with
+  status 1, rather than with the failure of its stream;
+- an `Activate` of another transaction, or of the same transaction with
+  another record, once the clone is ready, or its sandbox started, which fails
+  the activation with the status of the host's session;
+- the record's workload identity, as which every execution runs, while a start
+  that names an identity is refused with `EINVAL`, as is a start that names
+  none once the record has none.
 
 `tests/initramfs.rs` and `tests/runtime.rs` check, in the host-only
 configuration, on Linux and Windows:
@@ -839,16 +1716,101 @@ configuration, on Linux and Windows:
   reports it.
 
 `tests/layered_launch.rs` checks, in the host-only configuration, on Linux and
-Windows, the plan of a layered launch: its block devices and boot tokens, the
-OpenVMM arguments of NVX's sandbox start, and the sizes of the images; the
-options that it passes on as they are, for the guest to check; the record of
-a launch, with and without a layered root; and the command lines that the host
-program refuses, each with status 2.
+Windows:
+
+- the adapter's plan of a layered launch: its block devices and boot tokens,
+  with none of the sandbox profile's settings, and the sizes of the images;
+  and the options that it passes on as they are, for the guest to check;
+- the checked handoff: OpenVMM's arguments, which name the checked files, on
+  Linux by the descriptors that OpenVMM inherits and on Windows by their final
+  paths, with no workload identity and no managed lifecycle, and what OpenVMM
+  inherits, over a scratch image and over RAM;
+- staging: an image without a manifest, one whose manifest matches it, and
+  manifests that name another image or digest, which fail; a GPT disk over
+  RAM; and images that no launch could attach;
+- the bindings that a launch takes from the staged images, and those of other
+  images, which it does not;
+- the launches that the checks refuse: of images that the store does not
+  stage, of another format or identity than the staged image's, and of an
+  image that changed, a scratch image that another file replaced, and an image
+  that is gone, after they were staged;
+- the scratch image's claim, which a second launch waits for, then fails to
+  take, until the first one releases its checked files;
+- the record of the staged images, as written and read, and the forms that a
+  reader refuses;
+- the record of a launch, with the bindings that it checked, over a scratch
+  image and over RAM, and of a VM without a layered root;
+- shares: their text, `HOST:TARGET[:ro]`; the export of a table of shares
+  inside an authorized directory, which maps each at its target, parents
+  first, hides a denied path, and narrows the writes of a read-only directory
+  to the read-write share inside it; the root configuration that announces the
+  table, OpenVMM's arguments that attach the export, a launch that shares
+  nothing, the export that the launch verifies before it prepares anything,
+  and a table that the guest would refuse;
+- the shares that a launch refuses: outside the authorized directories, also
+  through a link on Linux, without any, with an authorized directory that is
+  not one, or a share that is not accessible; reserved trees that are not
+  canonical guest paths, targets that take or cover the adapter's or the
+  container root's reserved targets, a read-only share inside a read-write
+  one, and a hidden path that does not exist inside a share;
+- the networks that a launch reads: the OpenVMM arguments of each element of a
+  policy, which NVX's lowering renders after the plan's block devices, a policy
+  that lets nothing through, which attaches no network device, the proxy's
+  URL, the publication of listeners that the root configuration names for
+  each, and the record, which keeps the network as the file gave it; and the
+  files that it refuses, each for the plan's reason;
+- the URL of a network's proxy in an execution's environment, as the guest
+  sees it, with and without a scheme, after the start's own entries, which the
+  start carries; a start that names its own proxy settings, which keeps them;
+  and a launch without a proxy, which leaves the environment as it is;
+- the plan that the record of a launch gives back, from which the host finds
+  the proxy's URL, none for a VM without a layered root, and the records that
+  it refuses;
+- `runtime-adapter-host stage`, which records the staged images, a staging that
+  fails, which leaves them, and a staging that replaces them;
+- `runtime-adapter-host launch` with shares that it cannot export, which it
+  refuses with status 1 before it creates the store, with artifacts that boot
+  nothing;
+- `runtime-adapter-host launch --network`, which refuses a network that the
+  plan refuses, or that it cannot read, with status 1 before it needs NVX's
+  artifacts or creates the store, and passes one that the plan takes;
+- the command lines that the host program refuses, each with status 2, those of
+  `exec` and of `--workload-identity` included.
+
+`tests/step_hook.rs` checks, in the host-only configuration, on Linux and
+Windows, the [step hook](#the-step-hook): the values of
+`RUNTIME_ADAPTER_STEP_HOOK` that set it, with each step and action, a path with
+colons, and those that set none, which the host program refuses with status
+2; and a pause, which does nothing, and pauses for no time, at another step,
+creates its file with its step's name at its own, waits until the file is
+gone, and says how long it paused, and which a file that is there already
+fails.
+
+`tests/vm_steps.rs` checks the step hook on a real hypervisor, in the
+host-only configuration, with NVX's Ubuntu EROFS image over a copy of the
+scratch template:
+
+- a launch paused at `checked`, while files of zeros, which the guest could
+  neither assemble nor mount, try to replace the image and the scratch image
+  at their paths: on Linux, they replace them, and the guest still assembles
+  the checked originals, and writes nothing to the replacements; on Windows,
+  the checked files keep the replacements from the paths, and keep the images
+  from being deleted or the image from being opened for writing, until the
+  guest is ready, after which the images can be renamed again;
+- a launch that the hook ends at `checked`, with status 5, which leaves nothing
+  of a launch in the store, and whose exit released the scratch image's claim,
+  since the next launch takes it;
+- a launch paused at each step in turn, at which the store holds what the step
+  says, and the scratch image's claim is held at `checked`, and which then
+  goes on, and is stopped.
 
 `tests/vm_restart.rs` checks the restart of an orchestrator, on a real
 hypervisor, in the host-only configuration:
 
-- `runtime-adapter-host launch` launches a VM, and exits;
+- `runtime-adapter-host stage` stages NVX's Ubuntu EROFS image over a copy of
+  the scratch template, and `runtime-adapter-host launch` launches a VM with
+  them as its layered root, whose guest agent, of the build that the host
+  program ships, starts the sandbox, and exits;
 - another process's `reattach` holds the VM, which is not its child, and
   attaches a new session, in a later epoch of the same broker instance;
 - a third process's `stop` stops the VM: gracefully, with a successful outcome,
@@ -857,20 +1819,26 @@ hypervisor, in the host-only configuration:
 In another test, a host program that ships another build of the guest agent
 finds the VM mismatched in its initramfs, and signals nothing: the VM runs on,
 under the same runtime record, until the host program of the right runtime
-stops it.
+stops it. In a third, a launch of a host program that ships another build than
+the one that it boots finds that build in the guest's readiness, sends it
+neither the mapping table nor `Start`, and fails, which ends the VM, whose
+scratch image the next launch claims.
 
 ### Layered scenarios
 
 `tests/vm_layered.rs` launches VMs with a layered root on a real hypervisor, in
 the host-only configuration, through the host program's commands, and checks
 that the guest's worker, outside PID 1, assembles the root, or reports the
-stage that failed, and that the VM still ends cleanly. Each scenario is a row
-of the table that its `scenarios!` macro declares, and an ignored test of its
-own:
+stage that failed, and that the VM still ends cleanly. A launch whose guest
+assembled the root also follows the host's order: the guest agent is of the
+build that the host program ships, applies the mapping table, which is empty
+unless the scenario shares host paths, and starts the sandbox. Each scenario
+stages its images, then launches them, and is a row of the table that its
+`scenarios!` macro declares, and an ignored test of its own:
 
 | Scenario | Root | Expects |
 | --- | --- | --- |
-| `erofs_over_scratch` | NVX's Ubuntu EROFS image, with its own identity, over a copy of the scratch template | A root that the worker assembled: the image, read-only, under the overlay, whose upper and work directories are on the scratch, each mounted once below the runtime directory, with the options of the default mode, which trusts its lowers; the merged root's contents, with a file that reaches the upper and not the image; a copy-up of a file's metadata alone, which leaves its data in the image, and the rename of a lower directory; the image's and the scratch's disks; the agent's and the workload's cgroups, with their resource values; a worker that is PID 1's child, and PID 1's unrelated child, untouched; and a teardown that unmounts the scratch cleanly |
+| `erofs_over_scratch` | NVX's Ubuntu EROFS image, with its own identity, over a copy of the scratch template | A root that the worker assembled: the image, read-only, under the overlay, whose upper and work directories are on the scratch, each mounted once below the runtime directory, with the options of the default mode, which trusts its lowers; the merged root's contents, with a file that reaches the upper and not the image; a copy-up of a file's metadata alone, which leaves its data in the image, and the rename of a lower directory; the image's and the scratch's disks; the agent's and the workload's cgroups, with their resource values; a worker that is PID 1's child, and PID 1's unrelated child, untouched; an empty mapping table, which does no work: the launch exports nothing, the guest mounts no export, and nothing is mounted below the root; and a teardown that unmounts the scratch cleanly |
 | `erofs_over_scratch_with_untrusted_lowers` | The image over the scratch, in the untrusted-lowers mode, with a journal that the launch allows | The root, whose overlay has none of the trusting mode's options, copies up a file's data too, and refuses the rename of a lower directory with `EXDEV` |
 | `erofs_over_ram` | The image over a tmpfs in RAM | The root, whose upper and work directories are on a tmpfs of the kernel's default size, whose root directory has mode 0755, with no scratch mounted, and no disk but the image's |
 | `erofs_over_ram_with_untrusted_lowers` | The image over a tmpfs, in the untrusted-lowers mode | The root over the tmpfs, which copies up a file's data too, and refuses the rename |
@@ -889,18 +1857,99 @@ own:
 | `recovery_required_layer_fails_the_assembly` | The same cyclic journal with the top layer's `needs_recovery` bit set | The assembly refuses recovery before mounting anything, despite `noload`, and the VM ends cleanly with 14 |
 | `invalid_configuration_fails_its_stage` | A relative runtime directory | The configuration's failure, which the launch reports, and a VM that ends with 11 |
 | `busy_root_fails_the_teardown` | The image over the scratch, which the `hold` probe keeps open | The teardown's failure, which the stop reports, and a VM that ends with 15, leaving the scratch mounted |
-| `mappings_apply_beneath_the_root` | The image over the scratch, beneath which the `map` and `map-checks` probes map | Through the root: zero mappings that do no work, then a table mounted in order, each mapping with its access, `nosuid`, and `nodev`, whose writes reach the sources of the writable ones only, on targets that the mapper created on the overlay. Through mappers of the adapter's own: a link or a magic link at each component, the wrong kinds, a target that would be created inside another mapping, and the runtime's, the container root's, and the adapter's own reserved targets refused, and a read-only mapping that is never writable. A teardown that unmounts the mappings, then the scratch, cleanly |
-| `a_refused_mapping_latches_the_root` | The image over the scratch, in which the `map-refused` probe plants a symbolic link | A mapping through the link that the root refuses, nothing mounted or created, and a root that refuses every later mapping, then tears down cleanly |
+| `erofs_over_scratch_maps_the_table` | The image over the scratch, with the mapping table, from whose export the `map-checks` probe also maps | The export, mounted once, read-write, `nosuid`, and `nodev`, below a `hostfs` of mode 0700 that root owns; the table's mappings, mounted in the plan's order, by the depth of their targets, then by their targets, each with its access, `nosuid`, and `nodev`, on targets that the worker created on the overlay, but none inside another mapping; a hidden file that its directory does not list, and whose lookup the host refuses; and writes that reach the host's writable sources alone, the one inside a read-only mapping included. Through mappers of the adapter's own, from the export: a link or a magic link at each component, the wrong kinds, a target that would be created inside another mapping, and the runtime's, the container root's, and the adapter's own reserved targets refused, and a read-only mapping of a directory that the guest may write through the export, which is never writable. A teardown that unmounts the mappings, the export, then the scratch, cleanly |
+| `erofs_over_ram_maps_the_table` | The image over a tmpfs, with the mapping table | The table, as over the scratch |
+| `gpt_over_scratch_maps_the_table` | The GPT disk over the scratch, with the mapping table | The table, whose targets the worker created with their parents, which the disk's layers do not hold |
+| `gpt_over_ram_maps_the_table` | The disk over a tmpfs, with the mapping table | The table, as over the scratch |
+| `a_failed_mapping_tears_the_vm_down` | The image over the scratch, with the mapping table and `out` again at `/usr/lib/os-release`, a file of the image, which the plan orders fourth | The guest's refusal of the fourth mapping, a directory onto a file, which the launch reports with the three mappings that the guest applied; no more of the table, and no `Start`; a stop that the guest confirms once it tore the root down, a VM that ends with success and a complete teardown, an exit with 6, no runtime record, and the host's sources unchanged |
+| `a_read_only_share_inside_a_writable_one_is_refused_before_launch` | The image over the scratch, with the mapping table and a read-only share inside `out` | A launch that fails before it spawns the VM, since the host could not keep the share read-only, and that leaves nothing of a launch in the store |
+| `a_share_inside_a_reserved_tree_is_refused_before_launch` | The image over the scratch, with the mapping table, a tree `/srv/adapter` that the adapter reserves, and a share inside it | A launch that fails before it spawns the VM, and that leaves nothing of a launch in the store |
+| `a_share_over_a_reserved_tree_is_refused_before_launch` | The image over the scratch, with the mapping table, the reserved tree, and a share at `/srv`, which would cover it | A launch that fails before it spawns the VM, and that leaves nothing of a launch in the store |
+| `an_unauthorized_host_path_is_refused_before_launch` | The image over the scratch, with the mapping table and a share of a host directory beside the sources | A launch that fails before it spawns the VM, since the adapter authorizes the sources alone, and that leaves nothing of a launch in the store |
 | `root_profiles_enter_the_root` | The image over the scratch, which the `entries` probe enters | Executions that start as PID 1 of their namespaces, with the root moved over `/`, only their standard streams, the leaked descriptor closed, no inheritable or ambient capability, and no new privileges, blocking no signal that their caller blocks, at the top of the root unless they name a working directory. A working directory that the execution names is entered, but none through a magic link, such as the leaked descriptor's, its own working directory's or root's, or any descriptor's, nor through a symbolic link to one: each fails the launch before the program runs. User ID 0 with each allowed capability alone holds it alone, and only its own attempt succeeds; with none, nothing does, nor for a numeric identity without an account. No execution writes `/proc/sys`, so none lowers the unprivileged port start, and a nested `chroot` stays in the root. With published listeners, user ID 0 with every other allowed capability can neither bind a privileged source port nor open a raw socket, so it cannot forge a listener announcement in either publication mode; without them, it may. The entry refuses the 51 capabilities outside its allowlist, the binding and raw-socket ones while listeners are published, capabilities for another user ID, and an identity without an account in existing-account mode. The root's own machine ID, then a generated one and the time status that the guest's time daemon publishes, read-only, in which a root workload finds no lock of the daemon's, which the runtime bound in the helper's mount namespace, and which leave the worker's namespace without mounts below the root. A teardown that unmounts the scratch cleanly |
+| `unstaged_images_are_refused_before_spawn` | The image over the scratch, which the scenario does not stage | A launch that fails before it spawns the VM, since the store stages no image at its path, and that leaves no launch journal, VMM log, runtime record, or launch record; then, once the scenario stages the images, the root that the worker assembles, and a clean teardown |
+| `a_changed_image_is_refused_before_spawn` | The GPT disk over the scratch, which the scenario writes in place after it stages it | A launch that fails before it spawns the VM, since the disk's modification time differs from its binding's, and that leaves nothing of a launch in the store; then, once the scenario stages the disk again, the root, and a clean teardown |
+| `a_replaced_scratch_is_refused_before_spawn` | The image over the scratch, which another copy of the template replaces after the scenario stages it | A launch that fails before it spawns the VM, since the scratch image's identity differs from its binding's, and that leaves nothing of a launch in the store; then, once the scenario stages the images again, the root, and a clean teardown |
+| `executions_run_in_the_root` | The image over the scratch, without a workload identity, in which `exec` runs executions that name their identities | Over one session, four executions as `nobody` that meet only while all of them run, beside one as root that writes more than a MiB to its standard output and a little to its standard error, each byte-exact, ending on its own with 0, and reusable. Over a later session, with new keys: a program that leaves a descendant in a session of its own, which the program's end, as PID 1 of its namespace, ends, so that no output is lost; `nobody`'s IDs and groups, with empty permitted, effective, and bounding sets; root with `CAP_CHOWN` alone in each of them; exactly the start's environment; the start's working directory; the entry's default hostname, `nvx-sandbox`, and PID 1; and a start without an identity, and one with `CAP_SYS_ADMIN`, which the guest refuses at stage 0 with `EINVAL` and `EPERM`, fenced and without output |
+| `executions_run_as_the_workload_identity` | The image over the scratch, with the workload identity of `nobody` | Executions that name no identity, which run as `nobody`, without capabilities, with exactly the start's environment, and a start that names an identity, which the guest refuses at stage 0 with `EINVAL` |
+| `accountless_workload_identity_fails_its_stage` | The image over the scratch, with a workload identity whose account the image lacks | The identity stage's failure once the guest assembled the root, which the launch reports, and a VM that ends with 16, which unmounted the scratch |
+| `executions_take_the_settings_of_a_proxy_only_network` | The image over the scratch, in a proxy-only network, whose proxy is the test proxy on host loopback | A root configuration whose listeners are unpublished; executions that find the proxy's URL, `http://192.0.2.1:PORT`, at the test proxy's port, in `http_proxy`, `https_proxy`, `HTTP_PROXY`, and `HTTPS_PROXY`, after their own entries, but one that names `HTTPS_PROXY` itself, which keeps exactly its own environment; root with `CAP_NET_BIND_SERVICE` and `CAP_NET_RAW`, which hold them; and, on Linux, a batch with a start that the framing carries alone but not with the proxy's URL, which `exec` refuses before it attaches, running none of its executions |
+| `published_listeners_refuse_binding_and_raw_sockets` | The image over the scratch, in a network with ingress allowed, through which OpenVMM publishes the guest's listeners | A root configuration whose listeners are published; root with `CAP_NET_BIND_SERVICE`, and with `CAP_NET_RAW`, which the guest refuses at stage 0 with `EPERM`, fenced and without output, and with `CAP_CHOWN`, which holds it; and an execution with exactly its start's environment, without a proxy |
+| `a_denied_network_lets_no_probe_through` | The image over the scratch, in a network that denies everything, without a proxy | After the positive control, no network device, and an execution that reaches neither the proxy nor any destination, none of whose traffic arrives |
+| `an_allow_rule_lets_only_its_destination_through` | The image over the scratch, in a network that denies egress but for one rule, TCP to the gateway at the port of a service of host loopback, with outbound host-loopback access | After the positive control, an execution that reaches that service alone: not the proxy, nor the proxy's port over UDP, the host's own address, or host IPv6 loopback |
+| `a_proxy_only_network_lets_only_its_proxy_through` | The image over the scratch, in a proxy-only network, whose proxy is the test proxy | After the positive control, an execution that reaches the test proxy through the URL in its environment, and none of the destinations, whose traffic never arrives |
+| `outbound_host_loopback_publishes_no_listener` | The image over the scratch, in a network with egress allowed and outbound host-loopback access | After the positive control, an execution that reaches the proxy and every destination, and a listener of the guest that the host never reaches at the guest's port of host loopback while it listens, since OpenVMM does not publish it |
+| `allowed_host_loopback_publishes_the_listeners` | The image over the scratch, in a network with host-loopback access in both directions, and egress denied | After the positive control, an execution that reaches neither the proxy nor any destination, since egress governs the guest's own connections, and a listener of the guest that the host reaches at the guest's port of host loopback, and exchanges a line each way with |
+| `a_forward_reaches_its_guest_port` | The image over the scratch, in that network, with a forward of a port of host loopback to a guest port | A listener of the guest at that port, which the host reaches through the forward, and exchanges a line each way with |
 
 A row names the root, the image, the GPT disk's top-layer variant, the
 identity that the launch expects of the image, the upper, the runtime
-directory, the overlay mode, the scratch's journal policy, and the bound of the
-first partition, and what the scenario expects: a root that the guest
-assembles, with a check that probes it, a teardown that fails after a check, or
-the stage that fails, with its problem. Each scenario checks the launch's
-record, and, over a scratch, whether the VM left the scratch's journal to
+directory, the overlay mode, the scratch's journal policy, the bound of the
+first partition, the sandbox's workload identity, the VM's network, which the
+launch reads from a file that the scenario writes, and the host paths that the
+launch shares, and what the scenario expects: a root that the guest assembles,
+with a check that probes it or runs executions in it, a teardown that fails
+after a check, the stage that fails, with its problem, a mapping of the table
+that the guest fails, after how many, with its problem, shares that the host
+program refuses before it spawns the VM, with the problem, or a launch that the
+host program refuses before it spawns the VM, with the change that the scenario
+makes after it stages the images, and the problem. Each scenario that launches a
+VM checks the launch's record, with the bindings that the store stages, which
+the launch checked, and the number of mappings that the root configuration
+announced, and, over a scratch, whether the VM left the scratch's journal to
 recover, which tells whether the guest unmounted the scratch.
+
+A scenario with the mapping table writes its sources in its directory, below
+`sources`: a directory `dir`, with the files `marker` and `secret` and an empty
+directory `inner`; a file `file.txt`; and a directory `out`, with a file
+`marker` and an empty directory `inner`. The launch shares `dir` read-only at
+`/srv/maps/dir`, `dir/inner` read-write inside it, `file.txt` read-only at
+`/srv/maps/file.txt`, and `out` read-write at `/srv/maps/out`, hides
+`dir/secret` with `--deny`, and authorizes `sources` alone with
+`--share-root`. The plan exports `dir`, `file.txt`, and `out` as the export's
+children `0`, `1`, and `2`. Once the `map` probe ran, the sources hold what
+the scenario wrote, and the file `written` in `dir/inner` and in `out` alone;
+the scenarios of a failed mapping and of refused shares leave the sources as
+the scenario wrote them.
+
+The scenarios with a network give the guest the address `192.0.2.2/24`, in a
+range reserved for documentation, which no host's own address shares, so that
+the guest reaches the host's address through its gateway, `192.0.2.1`. Before
+the launch, the test binds the host's side of the network, whose ports the
+network names: a test proxy on host IPv4 loopback, which the guest reaches at
+the same port of its gateway, and the sockets of the probes' destinations,
+another port of host loopback over TCP, the proxy's port over UDP, and the
+proxy's port over TCP at the host's own address, if it has one, and on host
+IPv6 loopback, if it has that, which the guest reaches at its gateway's IPv6
+address. It also draws the port of a listener of the guest, which no socket
+holds for TCP or UDP, on every host address or on loopback alone, as OpenVMM
+needs to publish the listener on host loopback, and the port of a forward. It
+draws each port at random from the dynamic range, since Windows excludes ports
+per protocol, in blocks. Scenarios run at the same time, so each holds the
+ports that it drew until it ends, or for good if it fails, and draws none that
+another holds: OpenVMM binds the ports of a listener and of a forward only once
+it runs, and again for the scenario's VM after the positive control's.
+
+Each VM with a network first has its guest's network devices checked, of which
+OpenVMM attaches none for a network that lets nothing through, and otherwise
+one, which `/init` configures, and that OpenVMM asks `/init` on the kernel
+command line to publish the guest's listeners exactly where the root
+configuration says that they are published. Then, as NVX's proxy-only scenario
+does, an execution requests a URL through the test proxy with `wget`, while the
+host serves the proxy, and tries each destination with `nc`, and the host
+checks what arrived at each of its sockets. A listener of the guest, `nc` in
+the image, greets the host, which tries to reach it until the listener's
+execution ends.
+
+A scenario whose network stops traffic begins, as NVX's proxy-only scenario
+does, with the positive control: a VM of an open network, with egress allowed
+and host-loopback access in both directions, over the same host's side. There
+the execution reaches the test proxy, which it names itself, and every
+destination, whose traffic arrives at the host's socket, and the host reaches
+a listener of the guest at the guest's port of host loopback. Once that VM
+ended, the host discards what is left at its sockets, and the scenario's own VM
+runs the same checks, so that what does not arrive there shows the network's
+policy, not a broken probe.
 
 The scenarios use the fixtures of NVX's own layered scenarios, from NVX's
 artifacts: the Ubuntu EROFS image, `ubuntu-distro.erofs`, its manifest, which
@@ -937,16 +1986,17 @@ layer before any mount: `noload` is not permission to ignore required recovery.
 
 ### Running the VM tests
 
-The VM tests, `tests/vm_restart.rs` and `tests/vm_layered.rs`, share their
-sandboxes through `tests/common`. A test that fails ends the VM that it left
-running, and keeps the sandbox's directory, whose path it prints, unless it can
-confirm that the VM ended. The tests boot VMs, so they are ignored. They read
-the hypervisor from `NVX_HYPERVISOR`, through
-`nvx::Hypervisor::from_env_or_default`, NVX's artifacts, with their install
-metadata and the fixtures, from `NVX_ARTIFACTS_DIR`, and the guest agent from
-`RUNTIME_ADAPTER_GUEST`. In a checkout where `python3 scripts/nvx.py download`
-installed NVX's artifacts, and with the scratch template, run them in this
-directory with:
+The VM tests, `tests/vm_restart.rs`, `tests/vm_steps.rs`, and
+`tests/vm_layered.rs`, share their sandboxes and the fixtures of their layered
+roots through `tests/common`. A test that fails ends the VM that it left
+running, and the host program that it left paused, and keeps the sandbox's
+directory, whose path it prints, unless it can confirm that the VM ended. The
+tests boot VMs, so they are ignored. They read the hypervisor from
+`NVX_HYPERVISOR`, through `nvx::Hypervisor::from_env_or_default`, NVX's
+artifacts, with their install metadata and the fixtures, from
+`NVX_ARTIFACTS_DIR`, and the guest agent from `RUNTIME_ADAPTER_GUEST`. In a
+checkout where `python3 scripts/nvx.py download` installed NVX's artifacts,
+and with the scratch template, run them in this directory with:
 
 ```bash
 cargo build --locked --release --features guest \
