@@ -48,7 +48,9 @@
 //! worker captures before it assembles any root, so that every clone of the snapshot attaches a
 //! root of its own, in [`template`] mode. In each clone, the worker repairs the restore, then
 //! activates the clone with the host's `Activate`, whose record the guest library applies, answers
-//! `Ready` with the activation, and serves the host's order as after a cold boot.
+//! `Ready` with the activation, and serves the host's order as after a cold boot. On the host, the
+//! `host` module's clone order is the framing through which the restore sequence of
+//! `nvx::host::template` activates a clone and starts its sandbox.
 
 pub mod exec;
 pub mod frame;
