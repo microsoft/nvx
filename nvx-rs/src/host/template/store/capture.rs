@@ -27,7 +27,10 @@ use crate::host::platform;
 use crate::host::sandbox::distro::{CheckedDistro, DistroBinding, DistroFormat};
 use crate::host::sandbox::{LayerRole, SandboxLayer, SandboxPlan};
 use crate::host::store::files::{create_new, remove_if_present, sync_dir, write_private};
-use crate::host::store::{LaunchId, LockedStore, Recovery, SandboxStore};
+use crate::host::store::{
+    JOURNAL_NAME, LOCK_NAME, LOG_NAME, LaunchId, LockedStore, OUTCOME_NAME, Recovery, SOCKET_NAME,
+    SandboxStore,
+};
 use crate::host::supervisor::{self, VmmCommand};
 use crate::host::template::eligibility::HostTime;
 use crate::host::template::files::{open_regular, read_at_most};
@@ -37,7 +40,8 @@ use crate::host::template::plan::{SCRATCH_NAME, TemplatePlan, TemplateResources}
 
 /// Name of the directory of a store's captures, in which each capture class has a slot.
 pub const CAPTURES_NAME: &str = "captures";
-/// Name of the transaction directory of a capture, in the slot of its class.
+/// Name of the transaction directory of a capture, in the slot of its class, which is also the
+/// sandbox store of the capture's VM until the VM has ended.
 pub const TRANSACTION_NAME: &str = "transaction";
 /// Name of the record of a capture, in its transaction and then in its generation's payload.
 pub const CAPTURE_RECORD_NAME: &str = "capture.json";
@@ -281,8 +285,8 @@ struct Vm<'a> {
 }
 
 impl Vm<'_> {
-    /// Returns the command of the capture's VMM, run in the slot's directory `dir`, whose control
-    /// console listens on `endpoint`, and whose outcome report goes to `report`.
+    /// Returns the command of the capture's VMM, run in the capture's transaction `dir`, whose
+    /// control console listens on `endpoint`, and whose outcome report goes to `report`.
     ///
     /// Its arguments are the template's, as [`TemplatePlan::openvmm_arguments`] renders them,
     /// then the backend, the CPU profile, the kernel and the initramfs, the template's kernel
@@ -323,9 +327,9 @@ impl Vm<'_> {
     }
 }
 
-/// Runs the VM of a capture through the supervisor, in the slot of `locked`, as a launch of its
-/// own, until its VMM exits, or until the capture's deadline, at which it ends the VMM, and then
-/// ends the launch.
+/// Runs the VM of a capture through the supervisor, from the sandbox store of `locked`, the
+/// capture's transaction, as a launch of its own, until its VMM exits, or until the capture's
+/// deadline, at which it ends the VMM, and then ends the launch.
 ///
 /// The capture opens no control session, and waits for no Ready: its guest captures itself, and
 /// OpenVMM exits once it has published the snapshot, or once the capture failed. Fails with
@@ -411,12 +415,12 @@ impl Store {
     /// generation, which later selections of its key take before the older ones, waiting for the
     /// capture's slot and the store's lock until `deadline`, which bounds the capture too.
     ///
-    /// The capture cold-boots the template's VM through [`supervisor::launch`], in the slot of
-    /// its class, and waits for it to exit: its guest captures itself, and OpenVMM publishes the
-    /// snapshot into the capture's transaction and exits. The capture checks the files before
-    /// the VM starts, and what the VM left once it has exited, publishes the transaction in two
-    /// commits, and leaves the older generations, and their leases, untouched; see
-    /// [the store's documentation](Store#captures-and-publication).
+    /// The capture cold-boots the template's VM through [`supervisor::launch`], from its
+    /// transaction, in the slot of its class, and waits for it to exit: its guest captures itself,
+    /// and OpenVMM publishes the snapshot into the capture's transaction and exits. The capture
+    /// checks the files before the VM starts, and what the VM left once it has exited, publishes
+    /// the transaction in two commits, and leaves the older generations, and their leases,
+    /// untouched; see [the store's documentation](Store#captures-and-publication).
     ///
     /// Fails, and publishes nothing, but a transaction that it checked, which the next recovery
     /// of the slot publishes:
@@ -476,8 +480,8 @@ impl Store {
     ) -> Result<Created> {
         let inputs = Inputs::check(capture)?;
         let slot = self.open_slot(inputs.class)?;
-        let mut locked = lock_slot(&slot, deadline)?;
-        self.recover_slot(&mut locked, deadline, hooks)?;
+        let locked = lock_slot(&slot, deadline)?;
+        self.recover_slot(&locked, deadline, hooks)?;
         // The index then lists every generation that a publication renamed into the store, and
         // none whose payload a crash lost, for the lookup and the store's capacity alike.
         self.recover_publications(deadline, hooks)?;
@@ -502,13 +506,14 @@ impl Store {
             StorageGeneration::generate()?,
         )?;
         let envelope =
-            match self.check_capture(capture, &inputs, &template, &mut locked, deadline, hooks) {
+            match self.check_capture(capture, &inputs, &template, &locked, deadline, hooks) {
                 Ok(envelope) => envelope,
                 Err(error) => {
-                    // A transaction stays while the slot records a launch, whose VMM may still write
-                    // it, for the slot's recovery to retire once the VMM has ended; and so does
-                    // one that a retirement interrupted, as a crash would leave it.
-                    if !hooks.crash && matches!(locked.journal(), Ok(None)) {
+                    // A transaction stays while its sandbox store records a launch, whose VMM may
+                    // still write it, for the slot's recovery to retire once the VMM has ended;
+                    // and so does one that a retirement interrupted, as a crash would leave it.
+                    if !hooks.crash && !records_launch(&transaction) {
+                        let _ = keep_diagnostics(&transaction, locked.dir());
                         let _ = retire(&transaction);
                     }
                     return Err(error);
@@ -520,19 +525,28 @@ impl Store {
     }
 
     /// Runs the capture of `template`, with the inputs `capture`, checked as `inputs`, in the slot
-    /// of `locked`, through `hooks`, until the capture checks its transaction, or until
+    /// whose lock `slot` holds, through `hooks`, until the capture checks its transaction, or until
     /// `deadline`, and returns its envelope.
+    ///
+    /// The transaction is the sandbox store of the capture's VM: OpenVMM requires the control
+    /// socket of a VM that captures a snapshot, on Linux, beside the snapshot's destination, and a
+    /// sandbox store's VM listens in the store's directory.
     fn check_capture(
         &self,
         capture: &Capture,
         inputs: &Inputs,
         template: &TemplatePlan,
-        locked: &mut LockedStore,
+        slot: &LockedStore,
         deadline: Instant,
         hooks: &Hooks<'_>,
     ) -> Result<Envelope> {
         let transaction = template.transaction();
-        create_private_dir(transaction, TRANSACTION_WHAT)?;
+        // The slot keeps the log and outcome report of its class's latest capture, this one, so
+        // that the capture never reads an earlier VM's report for its own.
+        for name in [LOG_NAME, OUTCOME_NAME] {
+            remove_if_present(&slot.dir().join(name))?;
+        }
+        let mut launch = SandboxStore::create(transaction)?.lock(Some(deadline))?;
         write_record(
             &transaction.join(CAPTURE_RECORD_NAME),
             &CaptureRecord::new(self, inputs.class, template.generation()),
@@ -547,18 +561,22 @@ impl Store {
             artifacts: &inputs.artifacts,
             deadline,
         };
-        (hooks.run)(locked, &vm)?;
+        (hooks.run)(&mut launch, &vm)?;
         drop(placeholder);
+        keep_diagnostics(transaction, slot.dir())?;
         hooks.at(Point::Exited)?;
-        check_exit(&locked.outcome_path())?;
+        check_exit(&slot.outcome_path())?;
         let snapshot = template.destination();
         let manifest = check_snapshot(snapshot)?;
         let key = TemplateKey::new(&capture.class, &manifest)?;
+        // The host closes its handles before it publishes: the transaction's lock goes, and its
+        // file with what else the capture leaves.
+        drop(launch);
         clean_transaction(transaction)?;
         write_private(&transaction.join(KEY_NAME), &key.to_bytes())?;
         // The checked transaction must survive a crash, for the slot's recovery to publish it,
         // and so must the store, whose own entry in its parent its creation does not sync.
-        for dir in [transaction, locked.dir(), &self.captures_dir()] {
+        for dir in [transaction, slot.dir(), &self.captures_dir()] {
             (hooks.sync)(dir)?;
         }
         self.sync_store(hooks)?;
@@ -786,21 +804,20 @@ impl Store {
         Ok(Envelope::new(&key, class, storage, &manifest))
     }
 
-    /// Ends the capture that a crash interrupted in the slot of `locked`, if any, through `hooks`:
-    /// ends its VMM, as [`LockedStore::recover`] does, and then publishes its transaction if the
-    /// capture checked it, waiting for the store's lock until `deadline`, and retires it
-    /// otherwise. Returns the generations that it published: those of the publications that it
-    /// completed first, as [`publish`](Self::publish) does, and then the transaction's.
+    /// Ends the capture that a crash interrupted in the slot whose lock `slot` holds, if any,
+    /// through `hooks`: ends its VMM, which the transaction's sandbox store records, as
+    /// [`LockedStore::recover`] does, and then publishes its transaction if the capture checked
+    /// it, waiting for the store's lock until `deadline`, and retires it otherwise, once it has
+    /// moved the VMM's log and outcome report to the slot. Returns the generations that it
+    /// published: those of the publications that it completed first, as
+    /// [`publish`](Self::publish) does, and then the transaction's.
     fn recover_slot(
         &self,
-        locked: &mut LockedStore,
+        slot: &LockedStore,
         deadline: Instant,
         hooks: &Hooks<'_>,
     ) -> Result<Vec<Generation>> {
-        if let Recovery::Indeterminate(reason) = locked.recover()? {
-            return Err(indeterminate(locked.dir(), &reason));
-        }
-        let transaction = locked.dir().join(TRANSACTION_NAME);
+        let transaction = slot.dir().join(TRANSACTION_NAME);
         match platform::check_owner_only_dir(&transaction) {
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
             checked => {
@@ -811,9 +828,11 @@ impl Store {
                 refuse_problem(&transaction, TRANSACTION_WHAT, problem)?;
             }
         }
+        end_launch(&transaction, deadline)?;
         let key = transaction.join(KEY_NAME);
         match fs::symlink_metadata(&key) {
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                keep_diagnostics(&transaction, slot.dir())?;
                 retire(&transaction)?;
                 Ok(Vec::new())
             }
@@ -867,8 +886,8 @@ impl Store {
             }
             for name in slots {
                 let slot = SandboxStore::open(captures.join(name))?;
-                let mut locked = lock_slot(&slot, deadline)?;
-                published.extend(self.recover_slot(&mut locked, deadline, hooks)?);
+                let locked = lock_slot(&slot, deadline)?;
+                published.extend(self.recover_slot(&locked, deadline, hooks)?);
             }
         }
         published.extend(self.recover_publications(deadline, hooks)?);
@@ -910,7 +929,8 @@ impl Store {
         let captures = self.captures_dir();
         create_private_dir(&captures, CAPTURES_WHAT)?;
         let slot = SandboxStore::create(captures.join(slot_name(class)))?;
-        let socket = slot.socket_path();
+        // A capture's VM listens in its transaction, the sandbox store from which it launches.
+        let socket = slot.dir().join(TRANSACTION_NAME).join(SOCKET_NAME);
         if cfg!(target_os = "linux") && socket.as_os_str().len() >= SOCKET_PATH_LIMIT {
             return Err(Error::unsupported(format!(
                 "the template store {} is too deep for the control socket of a capture's VMM, \
@@ -1216,15 +1236,15 @@ fn check_snapshot(snapshot: &Path) -> Result<TemplateManifest> {
     Ok(manifest)
 }
 
-/// Removes from the capture's transaction `transaction` what the template does not keep: the
-/// dormant scratch device's file, the file that backed the VM's RAM, which OpenVMM removes as
-/// the VM ends unless it ends abruptly, and directories in which OpenVMM staged a snapshot that
-/// it did not publish. Fails unless the transaction then holds the record of the capture and its
-/// snapshot alone.
+/// Removes from the capture's transaction `transaction` what the template does not keep: the lock
+/// file of its sandbox store, which the capture closed once its VM had ended, the dormant scratch
+/// device's file, the file that backed the VM's RAM, which OpenVMM removes as the VM ends unless
+/// it ends abruptly, and directories in which OpenVMM staged a snapshot that it did not publish.
+/// Fails unless the transaction then holds the record of the capture and its snapshot alone.
 fn clean_transaction(transaction: &Path) -> Result<()> {
     for name in entries(transaction)? {
         let path = transaction.join(&name);
-        if name == SCRATCH_NAME || name.starts_with(MEMORY_FILE_PREFIX) {
+        if name == LOCK_NAME || name == SCRATCH_NAME || name.starts_with(MEMORY_FILE_PREFIX) {
             remove_if_present(&path)?;
         } else if name.starts_with(STAGING_PREFIX) {
             match fs::remove_dir_all(&path) {
@@ -1246,6 +1266,62 @@ fn clean_transaction(transaction: &Path) -> Result<()> {
             transaction.display(),
             names.join(", ")
         )));
+    }
+    Ok(())
+}
+
+/// Returns whether the sandbox store of the capture's transaction `transaction` records a launch,
+/// whose VMM may still run, or whether that cannot be told: whether the journal of a launch is
+/// there, unless nothing is.
+fn records_launch(transaction: &Path) -> bool {
+    !matches!(
+        fs::symlink_metadata(transaction.join(JOURNAL_NAME)),
+        Err(error) if error.kind() == io::ErrorKind::NotFound
+    )
+}
+
+/// Ends the launch that the sandbox store of the capture's transaction `transaction` records, if
+/// any, as [`LockedStore::recover`] ends it, waiting for the store's lock until `deadline`.
+///
+/// A transaction without the store's lock file records no launch: a capture creates the lock file
+/// before it launches, and removes it once its VM has ended, before it checks the transaction.
+/// Fails with [`ErrorCode::VmmIndeterminate`] if the recovery cannot prove that the VMM no longer
+/// runs, and the store then keeps the launch.
+fn end_launch(transaction: &Path, deadline: Instant) -> Result<()> {
+    let lock = transaction.join(LOCK_NAME);
+    match fs::symlink_metadata(&lock) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(store_error(format!("cannot open {}", lock.display()))(
+                error,
+            ));
+        }
+        Ok(_) => {}
+    }
+    let mut launch = SandboxStore::open(transaction)?.lock(Some(deadline))?;
+    match launch.recover()? {
+        Recovery::Indeterminate(reason) => Err(indeterminate(transaction, &reason)),
+        _ => Ok(()),
+    }
+}
+
+/// Moves the VMM's log and outcome report of the capture whose transaction is `transaction` to
+/// its slot, `slot`, which keeps those of its class's latest capture, once the capture's launch
+/// has ended. A file that the transaction lacks, such as one that this moved already, stays as it
+/// is.
+fn keep_diagnostics(transaction: &Path, slot: &Path) -> Result<()> {
+    for name in [LOG_NAME, OUTCOME_NAME] {
+        let from = transaction.join(name);
+        match fs::rename(&from, slot.join(name)) {
+            Err(error) if error.kind() != io::ErrorKind::NotFound => {
+                return Err(store_error(format!(
+                    "cannot move {} to the slot {}",
+                    from.display(),
+                    slot.display()
+                ))(error));
+            }
+            _ => {}
+        }
     }
     Ok(())
 }

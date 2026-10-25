@@ -95,7 +95,9 @@
 //! `--snapshot-block-identity generation` with a nonzero `--snapshot-generation-id` of 32
 //! hexadecimal digits, the options of a cold boot of a run with a `--memory-capacity` that is a
 //! multiple of 128 MiB, `nvx_sandbox=1` alone on the kernel command line, `--virtio-console none`,
-//! the control console with its capability on standard input, and an outcome report. The fake
+//! the control console with its capability on standard input, and an outcome report. On Unix, as
+//! OpenVMM requires of a VM that captures a snapshot, the control console's socket must be in the
+//! directory of the snapshot's destination. The fake
 //! serves no control session of a capture, which the host opens none of. Like OpenVMM, it opens
 //! each block device itself, at its path, without following a link, and on Windows sharing only
 //! reads and deletion, so that its open fails while another handle may write the file; on Linux,
@@ -1162,7 +1164,7 @@ fn parse(program: &str, arguments: &[String]) -> Result<Options, String> {
         if !sandbox {
             return Err("a capture takes sandbox block devices".to_owned());
         }
-        Some(check_capture(&values, &anchor)?)
+        Some(check_capture(&values, &anchor, &endpoint)?)
     } else {
         None
     };
@@ -1484,13 +1486,14 @@ fn check_run_boot(
 
 /// Checks the options of a template's capture, besides those of its boot, and returns them: RAM
 /// and a RAM capacity in MiB, the capacity a multiple of 128 MiB no smaller than the RAM, a
-/// `--snapshot-destination` that does not exist, in an existing directory,
-/// `--snapshot-tier platform`, `--snapshot-block-identity generation`, and a
-/// `--snapshot-generation-id` of 32 hexadecimal digits that are not all zero. The scenario of the
-/// capture is next to `kernel`.
+/// `--snapshot-destination` that does not exist, in an existing directory, in which the control
+/// console's socket `endpoint` must be on Unix, `--snapshot-tier platform`,
+/// `--snapshot-block-identity generation`, and a `--snapshot-generation-id` of 32 hexadecimal
+/// digits that are not all zero. The scenario of the capture is next to `kernel`.
 fn check_capture(
     values: &BTreeMap<&str, Vec<&str>>,
     kernel: &Path,
+    endpoint: &str,
 ) -> Result<CaptureOptions, String> {
     let bytes = |name: &str| {
         let value = exactly_once(values, name)?;
@@ -1537,6 +1540,24 @@ fn check_capture(
             destination.display()
         ));
     }
+    // OpenVMM finds a Unix socket's identity in the canonical directory of its path, which must
+    // be the directory of the destination, in which a restore listens again.
+    #[cfg(unix)]
+    {
+        let canonical = |path: &Path| {
+            path.parent()
+                .and_then(|parent| fs::canonicalize(parent).ok())
+        };
+        let namespace = canonical(&destination);
+        if canonical(Path::new(endpoint)) != namespace {
+            return Err(format!(
+                "microVM console socket must be inside the snapshot parent namespace {}",
+                namespace.as_deref().unwrap_or(Path::new("")).display()
+            ));
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = endpoint;
     Ok(CaptureOptions {
         destination,
         memory,
@@ -2772,10 +2793,10 @@ mod tests {
         "--virtio-console",
         "none",
         "--microvm-control-console",
-        "listen={dir}/slot/control.sock",
+        "listen={dir}/transaction/control.sock",
         "--microvm-control-auth-stdin",
         "--microvm-report",
-        "{dir}/slot/outcome.json",
+        "{dir}/transaction/outcome.json",
     ];
 
     /// Returns a directory with a kernel, an initramfs, a placeholder, and a transaction with a
@@ -2839,14 +2860,31 @@ mod tests {
         assert_eq!(capture.scenario, root.join(CAPTURE_SCENARIO_NAME));
         assert_eq!(
             options.endpoint,
-            format!("{}/slot/control.sock", root.to_str().unwrap())
+            format!("{}/transaction/control.sock", root.to_str().unwrap())
         );
         assert_eq!(
             options.blocks_dump,
-            root.join("fake-openvmm-slot-blocks.json")
+            root.join("fake-openvmm-transaction-blocks.json")
         );
         assert!(options.workload.is_empty());
         assert!(options.children.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn captures_listen_in_the_directory_of_their_snapshot_destination() {
+        let (temporary, options) = parse_capture(&capture_with(
+            "--microvm-control-console",
+            "listen={dir}/control.sock",
+        ));
+        let namespace = fs::canonicalize(temporary.path().join("transaction")).unwrap();
+        assert_eq!(
+            options.err(),
+            Some(format!(
+                "microVM console socket must be inside the snapshot parent namespace {}",
+                namespace.display()
+            ))
+        );
     }
 
     #[test]

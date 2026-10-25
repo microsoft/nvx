@@ -309,8 +309,11 @@ impl Index {
 ///     <G>.json             the tombstone of the store generation G
 ///   captures/              the slots of the capture classes
 ///     <C>/                 the slot of the classes whose identities start with the digits C,
-///                          a sandbox store whose launches are the classes' captures' VMs
-///       transaction/       the capture in progress, which becomes the payload of a generation
+///                          a sandbox store whose lock serializes the classes' captures
+///       openvmm.log        the log of the VMM of the slot's latest capture
+///       outcome.json       the outcome report of the VMM of the slot's latest capture
+///       transaction/       the capture in progress: the sandbox store of its VM until the VM has
+///                          ended, and then the payload of a generation
 ///         capture.json     the record of the capture
 ///         scratch.raw      the dormant scratch device, which the capture removes once checked
 ///         snapshot/        the snapshot, once OpenVMM has published it
@@ -331,9 +334,9 @@ impl Index {
 /// of its key and of its capture class, its storage generation, and what its manifest records of
 /// the capture itself, its creation time, its time contract, and the lengths of its artifacts.
 /// The payload of a generation never changes once the index lists it: the record of its capture,
-/// the canonical encoding of its key, which [`Store::read_key`] reads, and its snapshot. The index changes as generations
-/// are published and retired, and the records of leases and tombstones as clones lease
-/// generations, and as generations are quarantined and retired.
+/// the canonical encoding of its key, which [`Store::read_key`] reads, and its snapshot. The index
+/// changes as generations are published and retired, and the records of leases and tombstones as
+/// clones lease generations, and as generations are quarantined and retired.
 ///
 /// The store's records, its identity record, its index, and the records of its leases and
 /// tombstones, are JSON in format [`STORE_FORMAT`].
@@ -367,9 +370,9 @@ impl Index {
 /// generations: a creation serves the class with a generation that the store holds, if one is
 /// eligible, and captures one otherwise, while a refresh always captures. Each class has a slot in
 /// `captures/`, a sandbox store named by the first 16 hexadecimal digits of the class's identity,
-/// whose lifecycle lock serializes the captures of the class, and whose launch journal records
-/// each capture's VMM. A capture holds its slot's lock until its VM has ended, and takes the
-/// store's lock under it to publish, as the supervisor's
+/// whose lock serializes the captures of the class, and which keeps the log and the outcome report
+/// of the VMM of the class's latest capture. A capture holds its slot's lock until its VM has
+/// ended, and takes the store's lock under it to publish, as the supervisor's
 /// [lock order](crate::host::supervisor#the-lock-order) allows.
 ///
 /// A capture runs in a transaction, a directory private to the current user, in its slot, on the
@@ -377,10 +380,15 @@ impl Index {
 /// store, the class, and the [`StorageGeneration`] that it drew, and creates the template's
 /// dormant scratch device, a sparse file, then lowers the adapter's plan to a
 /// [`TemplatePlan`](crate::host::template::TemplatePlan), whose snapshot destination is in the
-/// transaction. It cold-boots the template's VM through
-/// [`supervisor::launch`](crate::host::supervisor::launch), in its slot, as a launch of its own,
-/// and waits for the VMM to exit: the guest captures itself, and OpenVMM publishes the snapshot
-/// at its destination, and exits.
+/// transaction. The transaction is also the sandbox store of the capture's VM, whose launch
+/// journal records its VMM: OpenVMM requires the control socket of a VM that captures a snapshot,
+/// on Linux, beside the snapshot's destination, and a sandbox store's VM listens in the store's
+/// directory. The capture holds the transaction's lock, under its slot's, until the VM has ended,
+/// and releases it before it publishes. It cold-boots the template's VM through
+/// [`supervisor::launch`](crate::host::supervisor::launch), from the transaction, as a launch of
+/// its own, and waits for the VMM to exit: the guest captures itself, and OpenVMM publishes the
+/// snapshot at its destination, and exits. The capture then moves the VMM's log and outcome
+/// report to its slot.
 ///
 /// ## Block devices by path
 ///
@@ -415,8 +423,9 @@ impl Index {
 /// [`TemplateManifest::read`](crate::host::template::TemplateManifest::read) reads, whose artifacts
 /// are exactly its manifest, RAM, and saved state, each a regular file private to the current
 /// user, of the length that the manifest records, and whose key, [`TemplateKey::new`], is its
-/// class's. It then removes the scratch, and what OpenVMM left beside the snapshot, and writes the
-/// key, `key.bin`, which marks the transaction as checked, durably.
+/// class's. It then closes the lock of the transaction's sandbox store, removes the lock's file,
+/// the scratch, and what OpenVMM left beside the snapshot, and writes the key, `key.bin`, which
+/// marks the transaction as checked, durably.
 ///
 /// ## Two commits
 ///
@@ -436,10 +445,11 @@ impl Index {
 /// A capture that fails before it checks its transaction publishes nothing, and retires the
 /// transaction once its VMM has ended. One that a crash of the host interrupts is ended by the
 /// next capture of its class, or by [`Store::recover_captures`], which an adapter calls as it
-/// starts: each ends the slot's launch, as
+/// starts: each ends the launch that the transaction's sandbox store records, as
 /// [`LockedStore::recover`](crate::host::store::LockedStore::recover) ends a sandbox's, and then
 /// publishes the transaction if the capture had checked it, once it has synced the transaction
-/// again, and retires it otherwise.
+/// again, and retires it otherwise, once it has moved the VMM's log and outcome report to the
+/// slot.
 ///
 /// # Leases, tombstones, and retirement
 ///

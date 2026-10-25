@@ -26,7 +26,9 @@ use nvx::host::platform;
 use nvx::host::process::{BootId, Process, ProcessRef};
 use nvx::host::sandbox::distro::{DISTRO_POLICY_REVISION, DistroBinding, PolicyVerdict};
 use nvx::host::sandbox::{LayerRole, SandboxDistro, SandboxLayer, SandboxPlan, SandboxUpper};
-use nvx::host::store::{ArtifactIdentity, RuntimeIdentity, SandboxStore};
+#[cfg(target_os = "linux")]
+use nvx::host::store::SOCKET_NAME;
+use nvx::host::store::{ArtifactIdentity, OUTCOME_NAME, RuntimeIdentity, SandboxStore};
 use nvx::host::template::{
     BlockGeometry, CAPTURES_NAME, Capture, CaptureClass, Created, GENERATIONS_NAME, Generation,
     HostTime, Invariants, SCRATCH_NAME, SNAPSHOT_NAME, Store, TRANSACTION_NAME, TemplateKey,
@@ -241,12 +243,12 @@ impl Bench {
         captures.join(&slots[0])
     }
 
-    /// Returns the path of the file `suffix` that the fake OpenVMM wrote of the slot's last VM.
+    /// Returns the path of the file `suffix` that the fake OpenVMM wrote of the slot's last VM,
+    /// which it names after the directory of the VM's outcome report: the capture's transaction,
+    /// from whose sandbox store the VM launched.
     fn dump(&self, suffix: &str) -> PathBuf {
-        let slot = self.slot();
-        let name = slot.file_name().unwrap().to_str().unwrap();
         self.platform()
-            .join(format!("fake-openvmm-{name}{suffix}.json"))
+            .join(format!("fake-openvmm-{TRANSACTION_NAME}{suffix}.json"))
     }
 
     /// Creates a template at a second after the fixture's capture.
@@ -339,6 +341,19 @@ fn captures_publish_generations_that_creations_then_serve() {
         Path::new(value_of(&arguments, "--snapshot-destination")),
         transaction.join(SNAPSHOT_NAME)
     );
+    // The VM launched from the transaction's sandbox store, so that its control socket, on
+    // Linux, is beside the snapshot's destination, as OpenVMM requires, and its outcome report
+    // too, which the slot then keeps.
+    assert_eq!(
+        Path::new(value_of(&arguments, "--microvm-report")),
+        transaction.join(OUTCOME_NAME)
+    );
+    #[cfg(target_os = "linux")]
+    assert_eq!(
+        value_of(&arguments, "--microvm-control-console"),
+        format!("listen={}", transaction.join(SOCKET_NAME).display())
+    );
+    assert!(bench.slot().join(OUTCOME_NAME).is_file());
     // The VMM opened the placeholder and the scratch at their paths, and found no handle that
     // could write them: on Windows, its open would have failed, and on Linux, its read lease
     // finds one, unless the file system takes no lease.
@@ -520,9 +535,10 @@ impl Drop for Orphan {
     }
 }
 
-/// Runs [`adapter_role`] on `bench` until its capture's VM is active, the slot's journal records
-/// the VMM, and, if `published`, the VM has published its snapshot, then kills the adapter, as a
-/// crash would end it, and returns the VMM, which still runs.
+/// Runs [`adapter_role`] on `bench` until its capture's VM is active, the journal of the
+/// transaction's sandbox store records the VMM, and, if `published`, the VM has published its
+/// snapshot, then kills the adapter, as a crash would end it, and returns the VMM, which still
+/// runs.
 fn crash_adapter(bench: &Bench, published: bool) -> Orphan {
     let mut adapter = Command::new(env::current_exe().unwrap())
         .args([
@@ -545,11 +561,11 @@ fn crash_adapter(bench: &Bench, published: bool) -> Orphan {
         );
         // The VM marks itself active before it publishes its snapshot.
         let recorded = bench.active().exists().then(|| {
-            let slot = bench.slot();
-            if published && !slot.join(TRANSACTION_NAME).join(SNAPSHOT_NAME).is_dir() {
+            let transaction = bench.slot().join(TRANSACTION_NAME);
+            if published && !transaction.join(SNAPSHOT_NAME).is_dir() {
                 return None;
             }
-            SandboxStore::open(slot)
+            SandboxStore::open(transaction)
                 .ok()?
                 .journal()
                 .ok()??

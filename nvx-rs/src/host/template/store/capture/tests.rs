@@ -148,9 +148,16 @@ impl Emulation {
         }
     }
 
-    /// Runs the VM of `vm` in the slot of `locked`, after removing the outcome report of the
-    /// slot's previous VM, as a launch does.
+    /// Runs the VM of `vm` from the sandbox store of `locked`, the capture's transaction, after
+    /// removing the outcome report of the store's previous VM, as a launch does.
     fn run(&self, locked: &mut LockedStore, vm: &Vm<'_>) -> Result<()> {
+        // OpenVMM requires the control socket of a VM that captures a snapshot, on Linux, beside
+        // the snapshot's destination: the VM launches from its transaction.
+        assert_eq!(locked.dir(), vm.template.transaction());
+        assert_eq!(
+            locked.socket_path().parent(),
+            vm.template.destination().parent()
+        );
         remove_if_present(&locked.outcome_path())?;
         let transaction = vm.template.transaction();
         let ram = transaction.join(format!("{MEMORY_FILE_PREFIX}emulated"));
@@ -644,6 +651,11 @@ fn failures_before_the_check_retire_the_transaction() {
         assert!(error.message().contains(message), "{error}");
         assert_eq!(bench.runs.replace(0), 1);
         assert_clean(&bench);
+        // The slot keeps the outcome report of the latest capture, and none of an earlier one.
+        assert_eq!(
+            bench.slot().join(OUTCOME_NAME).exists(),
+            emulation.outcome.is_some()
+        );
     }
     assert!(bench.indexed().is_empty());
 }
@@ -922,12 +934,12 @@ fn recovery_ends_the_captures_that_crashes_interrupt() {
     for (point, left, indexed) in [
         (
             Point::Prepared,
-            vec![CAPTURE_RECORD_NAME, SCRATCH_NAME],
+            vec![CAPTURE_RECORD_NAME, LOCK_NAME, SCRATCH_NAME],
             vec![],
         ),
         (
             Point::Exited,
-            vec![CAPTURE_RECORD_NAME, SCRATCH_NAME, SNAPSHOT_NAME],
+            vec![CAPTURE_RECORD_NAME, LOCK_NAME, SCRATCH_NAME, SNAPSHOT_NAME],
             vec![],
         ),
         (
@@ -982,7 +994,7 @@ fn generations_whose_payloads_are_lost_are_dropped_from_the_index() {
 }
 
 #[test]
-fn a_transaction_stays_while_its_slot_records_a_launch() {
+fn a_transaction_stays_while_it_records_a_launch() {
     let bench = Bench::new();
     // A source that fails while its launch remains, as one whose VMM may still run: dropping a
     // launch leaves its journal, as a crash would.
@@ -996,11 +1008,13 @@ fn a_transaction_stays_while_its_slot_records_a_launch() {
         .serve_with(None, &failed, &uninterrupted, false)
         .unwrap_err();
     assert_eq!(error.message(), "the VMM may still run");
-    assert!(bench.slot().join(JOURNAL_NAME).exists());
-    assert_eq!(
-        sorted(&bench.transaction()),
-        [CAPTURE_RECORD_NAME, SCRATCH_NAME]
-    );
+    // The transaction's sandbox store records the launch, and the slot none.
+    assert!(bench.transaction().join(JOURNAL_NAME).exists());
+    assert!(!bench.slot().join(JOURNAL_NAME).exists());
+    let left = sorted(&bench.transaction());
+    for name in [CAPTURE_RECORD_NAME, SCRATCH_NAME, LOCK_NAME, LOG_NAME] {
+        assert!(left.iter().any(|left| left == name), "{name}: {left:?}");
+    }
     // The next capture ends the launch, which nothing holds, retires the transaction, and
     // captures.
     bench.refresh(&Emulation::capture()).unwrap();

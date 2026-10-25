@@ -124,16 +124,17 @@
 //! These steps, and every other transition of a template store or a sandbox, take their locks in
 //! one order: the lifecycle lock of a capture class's slot, which serializes the class's captures,
 //! as [`Store::refresh_template`](crate::host::template::Store::refresh_template) describes, then
-//! the template store's lock, then the sandbox's
-//! [lifecycle lock](super::store#lifecycle-locks), which guards its clone binding and its launch
-//! journal, then the scratch image's claim. None waits for a lock while it holds a later one: a
-//! capture takes the store's lock under its slot's to publish, and no other; an acquisition
-//! releases the store's lock before it returns; a release, a launch, a stop, a reattach, and a
-//! removal of the sandbox take no lock of the store; and a retirement takes no lock of a sandbox.
-//! No lock but a capture's slot lasts for a VM's lifetime: a capture holds its slot's lock until
-//! its VM has ended, while the caller of a clone's launch releases the sandbox's lock once the
-//! launch commits or ends, and the scratch image's claim belongs to the VMM, which holds it until
-//! it exits.
+//! the template store's lock, then the [lifecycle lock](super::store#lifecycle-locks) of a sandbox,
+//! which guards its clone binding and its launch journal, or of a capture's transaction, the
+//! sandbox store of the capture's VM, then the scratch image's claim. None waits for a lock while
+//! it holds a later one: under its slot's lock, a capture, or its recovery, takes its
+//! transaction's lock and then, once it has released it, the store's lock, to publish, and no
+//! other; an acquisition releases the store's lock before it returns; a release, a launch, a stop,
+//! a reattach, and a removal of the sandbox take no lock of the store; and a retirement takes no
+//! lock of a sandbox. No lock but those of a capture lasts for a VM's lifetime: a capture holds
+//! its slot's lock and its transaction's until its VM has ended, while the caller of a clone's
+//! launch releases the sandbox's lock once the launch commits or ends, and the scratch image's
+//! claim belongs to the VMM, which holds it until it exits.
 //!
 //! ## Crashes
 //!
