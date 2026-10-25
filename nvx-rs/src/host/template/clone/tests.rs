@@ -3,12 +3,19 @@
 //! the sparse scratch device of an upper in RAM.
 
 use std::io::Read;
+use std::net::{IpAddr, Ipv4Addr};
 use std::time::Duration;
+
+use sha2::{Digest, Sha256};
 
 use super::*;
 use crate::ErrorCode;
+use crate::activation::{
+    Configuration, ExpectedResources, Identity, Image, MachineIdMode, Network, Publication, Upper,
+    WorkloadIdentity,
+};
 use crate::host::filesystem;
-use crate::host::network::{Access as NetworkAccess, NetworkPolicy};
+use crate::host::network::{Access as NetworkAccess, NetworkPolicy, NetworkProxy, ProxyScheme};
 use crate::host::paths;
 use crate::host::sandbox::distro::{DISTRO_POLICY_REVISION, PolicyVerdict};
 use crate::host::sandbox::scratch::CLAIM_RELEASE_WAIT;
@@ -152,7 +159,9 @@ fn layer(path: &Path) -> SandboxLayer {
 }
 
 /// Returns the request of a clone of the image at `image`, which `binding` binds, over an upper in
-/// RAM, with the template's RAM as its memory target.
+/// RAM, with the template's RAM as its memory target, and the settings of [`workload`], for
+/// untrusted lowers, and with a journal policy, [`Journal::Forbidden`], that its record leaves
+/// out.
 fn tmpfs_request(image: &Path, binding: &DistroBinding) -> CloneRequest {
     CloneRequest {
         adapter: SandboxPlan::adapter(
@@ -163,6 +172,21 @@ fn tmpfs_request(image: &Path, binding: &DistroBinding) -> CloneRequest {
         policy_revision: DISTRO_POLICY_REVISION,
         scratch: None,
         memory: MEMORY,
+        workload: workload(),
+        overlay: OverlayMode::UntrustedLowers,
+        journal: Journal::Forbidden,
+    }
+}
+
+/// Returns the view that these tests' clones give their workloads of their VMs.
+fn workload() -> WorkloadView {
+    WorkloadView {
+        hostname: b"clone".to_vec(),
+        machine_id: MachineIdMode::Generated,
+        identity: Some(WorkloadIdentity {
+            uid: 1000,
+            gid: 1000,
+        }),
     }
 }
 
@@ -1466,4 +1490,258 @@ fn files_that_their_paths_do_not_name_as_checked_are_refused() {
         )
     );
     assert_untouched(&acquired);
+}
+
+/// Returns the SHA-256 digest of `domain` and of the serde form of `binding`, as the identity of a
+/// binding is documented.
+fn digest_of(domain: &[u8], binding: &impl serde::Serialize) -> Identity {
+    let digest = Sha256::new()
+        .chain_update(domain)
+        .chain_update(serde_json::to_vec(binding).unwrap())
+        .finalize();
+    Identity::from_bytes(digest.into())
+}
+
+#[test]
+fn the_activation_record_of_a_clone_in_ram_names_its_restore_image_and_settings() {
+    let fixture = Fixture::new();
+    let (image, binding) = fixture.image("distro.erofs", IMAGE_LEN);
+    let mut acquired = fixture.acquire("sandbox");
+    let request = tmpfs_request(&image, &binding);
+    let plan = fixture.plan(&mut acquired, &request, NO_CONTENT).unwrap();
+    let record = plan.activation();
+    let restore = record.restore().unwrap();
+    assert_eq!(restore.template, acquired.lease.template());
+    assert_eq!(
+        record.configuration(),
+        &Configuration {
+            image: Image::Erofs {
+                binding: digest_of(b"nvx distro binding\0", &binding),
+                uuid: Some(Uuid::parse(UUID).unwrap()),
+            },
+            // A clone in RAM has no journal policy, whatever the request's.
+            upper: Upper::Tmpfs,
+            overlay: OverlayMode::UntrustedLowers,
+            export: None,
+            mappings: 0,
+            network: None,
+            workload: workload(),
+            resources: ExpectedResources {
+                cpus: plan.key().processors(),
+                memory: MEMORY,
+            },
+        }
+    );
+    // The plan shows the record, which holds nothing secret.
+    let shown_plan = format!("{plan:?}");
+    assert!(
+        shown_plan.contains(&format!("activation: {record:?}")),
+        "{shown_plan}"
+    );
+    // Each plan draws its own transaction.
+    let transaction = restore.transaction;
+    drop(plan);
+    let again = fixture.plan(&mut acquired, &request, NO_CONTENT).unwrap();
+    let restored = again.activation().restore().unwrap();
+    assert_ne!(restored.transaction, transaction);
+    assert_eq!(restored.template, acquired.lease.template());
+    // A larger memory target is the resources that the clone must have.
+    drop(again);
+    let larger = CloneRequest {
+        memory: 2 * MEMORY,
+        ..request
+    };
+    let plan = fixture.plan(&mut acquired, &larger, NO_CONTENT).unwrap();
+    assert_eq!(
+        plan.activation().configuration().resources.memory,
+        2 * MEMORY
+    );
+}
+
+#[test]
+fn the_activation_record_of_a_clone_on_a_scratch_image_names_its_binding_and_journal() {
+    let fixture = Fixture::new();
+    let (image, binding) = fixture.image("distro.erofs", IMAGE_LEN);
+    let (scratch, scratch_binding) = fixture.scratch("scratch.ext4", SCRATCH_LEN);
+    let mut acquired = fixture.acquire("sandbox");
+    for journal in [Journal::Forbidden, Journal::Allowed] {
+        let request = CloneRequest {
+            overlay: OverlayMode::TrustedLowers,
+            journal,
+            ..scratch_request(&image, &binding, &scratch, &scratch_binding)
+        };
+        let plan = fixture.plan(&mut acquired, &request, NO_CONTENT).unwrap();
+        let configuration = plan.activation().configuration();
+        assert_eq!(
+            configuration.upper,
+            Upper::Scratch {
+                binding: digest_of(b"nvx scratch binding\0", &scratch_binding),
+                journal,
+            }
+        );
+        assert_eq!(configuration.overlay, OverlayMode::TrustedLowers);
+        assert_eq!(
+            *configuration.image.binding(),
+            digest_of(b"nvx distro binding\0", &binding)
+        );
+    }
+    // The identities of two bindings differ, as their files do.
+    let (other, other_binding) = fixture.scratch("other.ext4", SCRATCH_LEN);
+    let request = scratch_request(&image, &binding, &other, &other_binding);
+    let plan = fixture.plan(&mut acquired, &request, NO_CONTENT).unwrap();
+    assert_ne!(
+        plan.activation().configuration().upper,
+        Upper::Scratch {
+            binding: digest_of(b"nvx scratch binding\0", &scratch_binding),
+            journal: Journal::Forbidden,
+        }
+    );
+}
+
+#[test]
+fn the_activation_record_of_a_clone_of_a_template_with_a_nic_names_its_policy_and_dns_server() {
+    let fixture = Fixture::with(|class, spec, physical| {
+        *class = network_class();
+        *spec = ManifestSpec::with_network();
+        let (distro, scratch) = (
+            geometry(IMAGE_LEN, physical),
+            geometry(SCRATCH_LEN, physical),
+        );
+        set_geometries(class, spec, distro, scratch);
+    });
+    let (image, binding) = fixture.image("distro.erofs", IMAGE_LEN);
+    let mut acquired = fixture.acquire("sandbox");
+    // The policy's identity is the digest that OpenVMM computed, as the template's key records
+    // it, [7; 32] in this manifest, and the network names no proxy without one.
+    let attached = with_network(
+        tmpfs_request(&image, &binding),
+        Some(network(NetworkAccess::Allow)),
+    );
+    let plan = fixture.plan(&mut acquired, &attached, NO_CONTENT).unwrap();
+    let expected = Network {
+        policy: Identity::from_bytes([7; 32]),
+        dns: None,
+        publication: Publication::Unpublished,
+        proxy: None,
+    };
+    assert_eq!(
+        plan.activation().configuration().network.as_ref(),
+        Some(&expected)
+    );
+    drop(plan);
+    // A proxy's URL is the one that the guest sees, at its gateway.
+    let proxy = NetworkProxy::new(3128).with_scheme(ProxyScheme::Http);
+    let proxied = with_network(
+        tmpfs_request(&image, &binding),
+        Some(SandboxNetwork::new("10.0.0.2/24", NetworkPolicy::proxy_only(proxy)).unwrap()),
+    );
+    let plan = fixture.plan(&mut acquired, &proxied, NO_CONTENT).unwrap();
+    assert_eq!(
+        plan.activation().configuration().network,
+        Some(Network {
+            proxy: Some("http://10.0.0.1:3128".to_owned()),
+            ..expected.clone()
+        })
+    );
+    drop((plan, acquired, fixture));
+    // The DNS server with which the template's guest configured its resolver at boot, as its
+    // command line asks, is the clone's.
+    let fixture = Fixture::with(|class, spec, physical| {
+        *class = network_class();
+        *spec = ManifestSpec::with_network();
+        spec.contract()
+            .command_line
+            .push_str(" virtnet_dns=10.0.0.1");
+        let (distro, scratch) = (
+            geometry(IMAGE_LEN, physical),
+            geometry(SCRATCH_LEN, physical),
+        );
+        set_geometries(class, spec, distro, scratch);
+    });
+    let (image, binding) = fixture.image("distro.erofs", IMAGE_LEN);
+    let mut acquired = fixture.acquire("sandbox");
+    let attached = with_network(
+        tmpfs_request(&image, &binding),
+        Some(network(NetworkAccess::Allow)),
+    );
+    let plan = fixture.plan(&mut acquired, &attached, NO_CONTENT).unwrap();
+    assert_eq!(
+        plan.activation().configuration().network,
+        Some(Network {
+            dns: Some(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))),
+            ..expected
+        })
+    );
+}
+
+#[test]
+fn settings_that_no_activation_record_holds_are_refused_before_anything_is_created() {
+    let fixture = Fixture::new();
+    let (image, binding) = fixture.image("distro.erofs", IMAGE_LEN);
+    let mut acquired = fixture.acquire("sandbox");
+    let request = tmpfs_request(&image, &binding);
+    let with_workload = |workload: WorkloadView| CloneRequest {
+        workload,
+        ..request.clone()
+    };
+    for (workload, problem) in [
+        (
+            WorkloadView {
+                hostname: Vec::new(),
+                ..workload()
+            },
+            "the hostname is not 1 to 64 bytes without a NUL",
+        ),
+        (
+            WorkloadView {
+                hostname: vec![b'h'; 65],
+                ..workload()
+            },
+            "the hostname is not 1 to 64 bytes without a NUL",
+        ),
+        (
+            WorkloadView {
+                hostname: b"clone\0".to_vec(),
+                ..workload()
+            },
+            "the hostname is not 1 to 64 bytes without a NUL",
+        ),
+        (
+            WorkloadView {
+                identity: Some(WorkloadIdentity { uid: 0, gid: 1000 }),
+                ..workload()
+            },
+            "the workload identity's UID or GID is 0 or 4294967295",
+        ),
+    ] {
+        assert_eq!(
+            failure(fixture.plan(&mut acquired, &with_workload(workload), NO_CONTENT)),
+            (
+                ErrorKind::Unsupported,
+                format!("no clone activates with the settings of the request: {problem}")
+            )
+        );
+        assert_untouched(&acquired);
+    }
+    // A GPT image, whose binding names it, is refused before anything is opened.
+    let path = fixture.path("images", "distro.gpt");
+    stage(&path, IMAGE_LEN);
+    let gpt = SandboxLayer::gpt(LayerRole::Distro, path.to_str().unwrap(), UUID);
+    let gpt_binding = DistroBinding::import(&gpt, PolicyVerdict::ACCEPTED).unwrap();
+    let gpt_request = CloneRequest {
+        adapter: SandboxPlan::adapter(
+            SandboxDistro::new(path.to_str().unwrap(), bound_image(&gpt_binding).unwrap()),
+            SandboxUpper::RAM,
+        ),
+        binding: gpt_binding,
+        ..request.clone()
+    };
+    let (kind, message) = failure(fixture.plan(&mut acquired, &gpt_request, NO_CONTENT));
+    assert_eq!(kind, ErrorKind::Unsupported, "{message}");
+    assert!(
+        message.starts_with("the image of a clone must be an EROFS layer"),
+        "{message}"
+    );
+    assert_untouched(&acquired);
+    drop(fixture.plan(&mut acquired, &request, NO_CONTENT).unwrap());
 }

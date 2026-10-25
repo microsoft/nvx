@@ -643,6 +643,18 @@ formats, copies, or reads, or for an upper in RAM a fresh sparse file,
 `clone-scratch.raw` in the sandbox's directory, which the release removes; and a
 fresh capability.
 
+It builds the clone's activation record, `ClonePlan::activation`, which the
+clone's guest applies in place of the configuration that the template captured,
+from the request's `WorkloadView`, overlay mode, and journal policy, and from
+the checked inputs: a restore section with a fresh transaction ID of 16 random
+bytes and the lease's `TemplateReference`; the image, an EROFS layer, with its
+binding's identity and the UUID that the adapter's plan expects of it, since a
+GPT image is refused; a tmpfs, or the scratch image's binding identity with the
+journal policy; no export; the template NIC's policy identity, as its key
+records it, unpublished listeners, and the guest's proxy URL; and the template's
+processors and the memory target. A binding's identity is the SHA-256 digest of
+a domain and of the binding's serde form, never of a file's content.
+
 The image and the scratch device must present the `BlockGeometry` of the
 template's, which a restore compares, and be, at the paths by which OpenVMM
 opens them, the regular files that the checks found, which are not links or
