@@ -139,14 +139,19 @@
 //! and its [`ActivationCause`], and which every later call returns again. The activation never
 //! powers the VM off: the adapter reports the failure, and ends the VM.
 //!
-//! [`apply`](fn@apply) activates the clone as at a cold boot. It assembles the root with
-//! [`root::assemble`], with the record's image, an EROFS image whose UUID it checks if the record
-//! expects one, its upper, a tmpfs or the scratch, with the record's journal policy, and its
-//! overlay mode, and with the inputs that the guest takes from its own configuration, which its
-//! template captured, a [`RootTemplate`]: the runtime directory, the block devices, and how long
-//! the assembly waits for them. It refuses a GPT disk before anything has a side effect: the
-//! kernel created the block devices of a disk's partitions when it found the template's
-//! placeholder. If the record has a workload identity, it then checks its account in the
+//! [`apply`](fn@apply) activates the clone as at a cold boot. It assembles the root as
+//! [`root::assemble`] does, with the record's image, an EROFS image whose UUID it checks if the
+//! record expects one, or a GPT disk whose GUID it checks if the record expects one, its upper, a
+//! tmpfs or the scratch, with the record's journal policy, and its overlay mode, and with the
+//! inputs that the guest takes from its own configuration, which its template captured, a
+//! [`RootTemplate`]: the runtime directory, the block devices, and how long the assembly waits for
+//! them. For a GPT disk, it first asks the kernel to reread the disk's partition table: the kernel
+//! created the block devices of partitions from the template's placeholder, when it found it, and
+//! creates those of the clone's disk then, from the same read-only bytes that the assembly reads
+//! and checks, as at a cold boot. The upper must be fresh: the assembly refuses one whose `upper`
+//! or `work` directory exists and is not empty, since a clone's root starts as its image alone,
+//! while a cold sandbox's scratch keeps its upper across boots; the check reads at most one entry
+//! of each, and no file. If the record has a workload identity, it then checks its account in the
 //! assembled root, before Ready, as NVX's init checks it at boot: the identity is
 //! [`Identity::new`](super::entry::Identity::new) of the record's user and group IDs, without
 //! supplementary groups or capabilities, in existing-account mode, and every execution runs as
@@ -238,8 +243,9 @@
 //! its own reaping, transport, and shutdown. The activation needs no privilege, and makes no
 //! system call: of the clone, it changes only the caller's fence, which it opens. Its
 //! application, [`apply`](fn@apply), needs the guest's root user, in the guest's initial mount
-//! namespace, as [`root::assemble`] does: it mounts the root, reads the account databases below
-//! it, and, if it fails, tears it down. It starts no process and generates no ID.
+//! namespace, as [`root::assemble`] does: for a GPT disk, it asks the kernel to reread the disk's
+//! partition table, which needs `CAP_SYS_ADMIN`; it mounts the root, reads the account databases
+//! below it, and, if it fails, tears it down. It starts no process and generates no ID.
 
 mod activation;
 mod mounts;

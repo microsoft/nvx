@@ -25,6 +25,7 @@ use crate::guest::clone::{
     ActivationState, AdmissionFence,
 };
 use crate::guest::entry::{AccountError, AccountMode, Capabilities, Database};
+use crate::guest::sys::Errno;
 use crate::protocol::root::{DISTRO_MMIO_BASE, SCRATCH_MMIO_BASE};
 use crate::uuid::Uuid;
 
@@ -42,6 +43,10 @@ const TIMEOUT: Duration = Duration::from_secs(10);
 const TRANSACTION: TransactionId = TransactionId::from_bytes([0x22; TransactionId::LEN]);
 /// The UUID that the record of the tests' Activate expects of its EROFS image.
 const IMAGE_UUID: Uuid = Uuid::from_bytes([0x5a; 16]);
+/// The GUID that a record of the tests expects of its GPT disk.
+const DISK_GUID: Uuid = Uuid::from_bytes([0xd1; 16]);
+/// The most bytes that the first partition of the tests' GPT disks may hold.
+const FIRST_PARTITION_BOUND: u64 = 4096;
 /// The tests' workload identity, whose account the tests' image holds.
 const WORKLOAD: WorkloadIdentity = WorkloadIdentity {
     uid: 1000,
@@ -63,7 +68,10 @@ type Refusal = fn(&AccountError) -> bool;
 /// execution that the tests' adapter spawned.
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Effect {
-    /// The application assembled the root of this assembly, which mounts it.
+    /// The application asked the kernel to reread the partition table of the GPT disk on this
+    /// distro device, which drops and creates the block devices of the disk's partitions.
+    Reread(Device),
+    /// The application assembled the root of this assembly, with a fresh upper, which mounts it.
     Assemble(Assembly),
     /// The application checked this identity's account in the root, which reads the image's
     /// account databases.
@@ -82,6 +90,8 @@ struct FakeSystem {
     image: tempfile::TempDir,
     /// Whether each assembly fails.
     failing: bool,
+    /// The error with which the kernel refuses each reread of a partition table, if it does.
+    refusing: Option<Errno>,
     /// What the clone did, in order.
     effects: Vec<Effect>,
 }
@@ -97,6 +107,7 @@ impl FakeSystem {
         Self {
             image,
             failing: false,
+            refusing: None,
             effects: Vec::new(),
         }
     }
@@ -115,6 +126,16 @@ impl FakeSystem {
         }
     }
 
+    /// Returns a system whose image holds the tests' account databases, and whose kernel refuses
+    /// each reread of a partition table with `error`, as while one of the disk's partitions is
+    /// open.
+    fn refusing(error: Errno) -> Self {
+        Self {
+            refusing: Some(error),
+            ..Self::new()
+        }
+    }
+
     /// Returns the path of the root that each assembly returns.
     fn root(&self) -> PathBuf {
         self.image.path().to_owned()
@@ -123,6 +144,19 @@ impl FakeSystem {
 
 impl System for FakeSystem {
     type Root = PathBuf;
+
+    fn reread(&mut self, distro: Device, _timeout: Duration) -> Result<(), root::Error> {
+        self.effects.push(Effect::Reread(distro));
+        match self.refusing {
+            Some(error) => Err(root::Error::Device {
+                role: root::Role::Distro,
+                step: root::DeviceStep::Reread,
+                device: PathBuf::from("/dev/vda"),
+                error: error.into(),
+            }),
+            None => Ok(()),
+        }
+    }
 
     fn assemble(&mut self, assembly: &Assembly) -> Result<PathBuf, AssemblyError> {
         self.effects.push(Effect::Assemble(assembly.clone()));
@@ -293,12 +327,25 @@ fn erofs(uuid: Option<Uuid>) -> activation::Image {
     }
 }
 
-/// Returns a GPT disk, without a GUID that the record expects of it.
-fn gpt() -> activation::Image {
+/// Returns a GPT disk, with the GUID `disk_guid` that the record expects of it, if any, whose
+/// first partition holds at most [`FIRST_PARTITION_BOUND`] bytes.
+fn gpt(disk_guid: Option<Uuid>) -> activation::Image {
     activation::Image::Gpt {
         binding: activation::Identity::from_bytes([0x11; activation::Identity::LEN]),
-        disk_guid: None,
-        first_partition_bound: 4096,
+        disk_guid,
+        first_partition_bound: FIRST_PARTITION_BOUND,
+    }
+}
+
+/// Returns the image of the root's assembly of a GPT disk of [`gpt`]`(disk_guid)`.
+fn gpt_image(disk_guid: Option<Uuid>) -> root::Image {
+    let expected = crate::gpt::Expected::new();
+    root::Image::Gpt {
+        expected: match disk_guid {
+            Some(guid) => expected.disk_guid(guid),
+            None => expected,
+        },
+        first_partition_bound: FIRST_PARTITION_BOUND as usize,
     }
 }
 
@@ -411,7 +458,7 @@ fn no_mount_spawn_or_id_generation_happens_before_the_gate() {
     })
     .encode();
     let disk = clone_record(Configuration {
-        image: gpt(),
+        image: gpt(None),
         ..settings
     })
     .encode();
@@ -454,17 +501,28 @@ fn no_mount_spawn_or_id_generation_happens_before_the_gate() {
         adapter.assert_untouched(&failure, expected);
     }
 
-    // The application refuses a GPT disk, which the activation accepted, before it mounts
-    // anything.
-    let mut adapter = Adapter::restricted(FakeSystem::new(), base);
+    // A GPT disk, which the activation accepted, whose partition table the kernel refuses to
+    // reread, fails the application before anything is mounted: the reread is its one call.
+    let mut adapter = Adapter::restricted(FakeSystem::refusing(Errno::EBUSY), base);
     let failure = adapter
         .take(base, ActivationInput::Activate(&disk))
         .unwrap_err();
-    adapter.assert_untouched(&failure, |cause| {
-        matches!(cause, ActivationCause::Failed(error)
-            if matches!(error.downcast_ref::<ApplyError>(), Some(ApplyError::Gpt)))
-    });
+    assert!(
+        matches!(
+            apply_error(&failure),
+            ApplyError::Gpt(root::Error::Device {
+                step: root::DeviceStep::Reread,
+                ..
+            })
+        ),
+        "{failure}"
+    );
     assert_eq!(failure.state(), ActivationState::Activating);
+    assert_eq!(adapter.activation.state(), ActivationState::Failed);
+    assert_eq!(adapter.system.effects, [Effect::Reread(template().distro)]);
+    assert_eq!(adapter.applied, None);
+    assert_eq!(adapter.ready, None);
+    assert!(!adapter.fence.is_open());
 
     // Past the deadline, even a valid Activate does nothing.
     let mut adapter = Adapter::restricted(FakeSystem::new(), base);
@@ -549,9 +607,19 @@ fn a_valid_activate_activates_the_root_and_the_workload_once_before_ready() {
 #[test]
 fn assembly_and_identity_inputs_are_taken_exactly_from_the_record() {
     let template = template();
+    // Each image, with what the assembly expects of it, and whether the kernel rereads its
+    // partition table first.
     let images = [
-        (erofs(None), None),
-        (erofs(Some(IMAGE_UUID)), Some(IMAGE_UUID)),
+        (erofs(None), root::Image::Erofs { uuid: None }, false),
+        (
+            erofs(Some(IMAGE_UUID)),
+            root::Image::Erofs {
+                uuid: Some(IMAGE_UUID),
+            },
+            false,
+        ),
+        (gpt(None), gpt_image(None), true),
+        (gpt(Some(DISK_GUID)), gpt_image(Some(DISK_GUID)), true),
     ];
     let uppers = [
         (activation::Upper::Tmpfs, root::Upper::Tmpfs),
@@ -580,7 +648,7 @@ fn assembly_and_identity_inputs_are_taken_exactly_from_the_record() {
             root::OverlayMode::UntrustedLowers,
         ),
     ];
-    for (image, uuid) in images {
+    for (image, root_image, reread) in images {
         for (upper, root_upper) in uppers {
             for (overlay, root_overlay) in overlays {
                 for identity in [None, Some(WORKLOAD)] {
@@ -591,13 +659,17 @@ fn assembly_and_identity_inputs_are_taken_exactly_from_the_record() {
                     let assembly = Assembly {
                         runtime: template.runtime.clone(),
                         distro: template.distro,
-                        image: root::Image::Erofs { uuid },
+                        image: root_image.clone(),
                         upper: root_upper,
                         overlay: root_overlay,
                         timeout: template.timeout,
                     };
                     let identity = identity.map(|_| workload());
-                    let mut effects = vec![Effect::Assemble(assembly)];
+                    let mut effects = Vec::new();
+                    if reread {
+                        effects.push(Effect::Reread(template.distro));
+                    }
+                    effects.push(Effect::Assemble(assembly));
                     effects.extend(identity.clone().map(Effect::Account));
                     assert_eq!(system.effects, effects, "{record:?}");
                     assert_eq!(applied, identity);
@@ -636,6 +708,47 @@ fn assembly_and_identity_inputs_are_taken_exactly_from_the_record() {
     let second_identity = apply_with(&mut second, &other, &template).unwrap().1;
     assert_eq!(first.effects, second.effects);
     assert_eq!(first_identity, second_identity);
+}
+
+#[test]
+fn a_gpt_disk_s_partition_table_is_reread_before_its_root_is_assembled() {
+    // The kernel rereads the table from the clone's disk before the assembly reads and checks
+    // it, as at a cold boot, where it read the table when it found the disk; the clone then
+    // activates as with an EROFS image, over a fresh upper.
+    let base = Instant::now();
+    let record = clone_record(configuration(
+        gpt(Some(DISK_GUID)),
+        scratch(activation::Journal::Forbidden),
+        activation::OverlayMode::UntrustedLowers,
+        Some(WORKLOAD),
+    ));
+    let mut adapter = Adapter::restricted(FakeSystem::new(), base);
+    adapter
+        .take(base, ActivationInput::Activate(&record.encode()))
+        .unwrap();
+    let template = template();
+    let assembly = Assembly {
+        runtime: template.runtime.clone(),
+        distro: template.distro,
+        image: gpt_image(Some(DISK_GUID)),
+        upper: root::Upper::Scratch {
+            device: template.scratch,
+            journal: root::Journal::Forbidden,
+        },
+        overlay: root::OverlayMode::UntrustedLowers,
+        timeout: template.timeout,
+    };
+    assert_eq!(
+        adapter.system.effects,
+        [
+            Effect::Reread(template.distro),
+            Effect::Assemble(assembly),
+            Effect::Account(workload()),
+        ]
+    );
+    assert_eq!(adapter.activation.state(), ActivationState::Ready);
+    assert_eq!(adapter.ready, Some(ReadyActivation::of(&record)));
+    assert!(adapter.fence.is_open());
 }
 
 #[test]
@@ -752,15 +865,8 @@ fn a_failed_assembly_is_final_and_reads_and_tears_down_nothing() {
 
 #[test]
 fn the_application_refuses_without_privileges_what_it_cannot_assemble() {
-    // A GPT disk is refused before anything is mounted, and a template's runtime directory
-    // reaches the assembly, which refuses a relative one before it does anything else.
-    let disk = clone_record(configuration(
-        gpt(),
-        activation::Upper::Tmpfs,
-        activation::OverlayMode::TrustedLowers,
-        Some(WORKLOAD),
-    ));
-    assert!(matches!(apply(&disk, &template()), Err(ApplyError::Gpt)));
+    // A template's runtime directory reaches the assembly, which refuses a relative one before it
+    // does anything else.
     let relative = RootTemplate {
         runtime: PathBuf::from("run/nvx"),
         ..template()
@@ -772,15 +878,52 @@ fn the_application_refuses_without_privileges_what_it_cannot_assemble() {
         matches!(error.error(), root::Error::Runtime { path } if path == Path::new("run/nvx")),
         "{error}"
     );
+
+    // A GPT disk's partition table is reread before that refusal: on a host without the
+    // template's distro device, the reread fails at its one poll, with nothing mounted.
+    let disk = clone_record(configuration(
+        gpt(None),
+        activation::Upper::Tmpfs,
+        activation::OverlayMode::TrustedLowers,
+        Some(WORKLOAD),
+    ));
+    let at_once = RootTemplate {
+        timeout: Duration::ZERO,
+        ..relative
+    };
+    let Err(ApplyError::Gpt(error)) = apply(&disk, &at_once) else {
+        panic!("a GPT disk was assembled before its partition table was reread");
+    };
+    // A host that hides its MMIO windows fails the lookup instead.
+    assert!(
+        matches!(
+            error,
+            root::Error::Missing {
+                role: root::Role::Distro,
+                mmio: DISTRO_MMIO_BASE,
+            } | root::Error::Lookup {
+                role: root::Role::Distro,
+                mmio: DISTRO_MMIO_BASE,
+                ..
+            }
+        ),
+        "{error}"
+    );
 }
 
 #[test]
 fn application_errors_name_their_cause() {
+    let missing = root::Error::Missing {
+        role: root::Role::Distro,
+        mmio: DISTRO_MMIO_BASE,
+    };
+    let refusal = missing.to_string();
+    let error = ApplyError::Gpt(missing);
     assert_eq!(
-        ApplyError::Gpt.to_string(),
-        "the record's image is a GPT disk, which a clone does not assemble"
+        error.to_string(),
+        format!("the reread of the GPT disk's partition table failed: {refusal}")
     );
-    assert!(ApplyError::Gpt.source().is_none());
+    assert_eq!(error.source().unwrap().to_string(), refusal);
 
     let relative = Assembly {
         runtime: PathBuf::from("run/nvx"),

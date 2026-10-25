@@ -3,11 +3,11 @@
 //! The operations read the kernel's text files and walk directories through the standard
 //! library, at the paths of a [`Paths`], so that a test relocates them to a temporary directory.
 //! What a test cannot do in a temporary directory, such as a mount, an unmount, a flush of a
-//! block device's buffers, or a read of a GPT disk's partition table at the geometry that its
-//! block device reports, and the writes to the kernel's control files, the check for a mount
-//! point, and the options of a mount, whose effects and answers a test simulates, go through a
-//! [`Kernel`], which also performs the mapper's operations for the root's live shares and
-//! mappings.
+//! block device's buffers, a reread of a disk's partition table, or a read of a GPT disk's
+//! partition table at the geometry that its block device reports, and the writes to the kernel's
+//! control files, the check for a mount point, and the options of a mount, whose effects and
+//! answers a test simulates, go through a [`Kernel`], which also performs the mapper's operations
+//! for the root's live shares and mappings.
 
 use std::ffi::CStr;
 use std::fs::{self, File};
@@ -27,11 +27,11 @@ pub(crate) use crate::guest::mappings::SystemKernel;
 const MOUNT_TABLE: &str = "/proc/self/mountinfo";
 
 /// The kernel's operations that the root operations perform, other than reads: mounts and
-/// unmounts, flushes of a block device's buffers, writes of a control file, and the sleeps
-/// between two polls for a block device; the check for a mount point and the options of a mount,
-/// which depend on them; since only a block device reports its geometry, the read of a GPT disk's
-/// partition table; and the mapper's operations, through which the root mounts its live shares
-/// and mappings.
+/// unmounts, flushes of a block device's buffers, rereads of a disk's partition table, writes of
+/// a control file, and the sleeps between two polls for a block device; the check for a mount
+/// point and the options of a mount, which depend on them; since only a block device reports its
+/// geometry, the read of a GPT disk's partition table; and the mapper's operations, through which
+/// the root mounts its live shares and mappings.
 ///
 /// [`SystemKernel`] performs them. The tests' fake records the operations, simulates the effect
 /// of a cgroup's membership file and its own mounts, reads a GPT disk's table from a regular
@@ -53,6 +53,10 @@ pub(super) trait Kernel: MappingKernel + Send + Sync {
 
     /// Writes the dirty buffers of the block device `device`, then drops its cached ones.
     fn flush(&mut self, device: &CStr) -> Result<(), Errno>;
+
+    /// Asks the kernel to reread the partition table of the disk whose whole-disk block device is
+    /// `device`, as [`sys::reread_partition_table`] does.
+    fn reread_partitions(&mut self, device: &CStr) -> Result<(), Errno>;
 
     /// Reads and checks the partition table of the GPT disk that `file` opens, the whole-disk
     /// block device whose node is `device`, with the caller's `expected` values, at the device's
@@ -105,6 +109,16 @@ impl Kernel for SystemKernel {
             Mode::empty(),
         )?;
         sys::flush_block_buffers(&descriptor)?;
+        descriptor.close()
+    }
+
+    fn reread_partitions(&mut self, device: &CStr) -> Result<(), Errno> {
+        let descriptor = sys::open(
+            device,
+            OpenFlags::O_RDONLY | OpenFlags::O_CLOEXEC,
+            Mode::empty(),
+        )?;
+        sys::reread_partition_table(&descriptor)?;
         descriptor.close()
     }
 
@@ -185,7 +199,8 @@ impl Default for Paths {
 #[cfg(test)]
 pub(crate) use fake::{Call, FakeKernel, Operation, attach_calls};
 
-/// The tests' kernel, which records each operation and performs no mount, unmount, or flush.
+/// The tests' kernel, which records each operation and performs no mount, unmount, flush, or
+/// reread.
 #[cfg(test)]
 mod fake {
     use std::ffi::{CStr, OsStr};
@@ -225,6 +240,8 @@ mod fake {
         Unmount,
         /// A flush of a block device's buffers, which the device names.
         Flush,
+        /// A reread of a disk's partition table, which the disk's block device names.
+        Reread,
         /// A write of a control file, which its path names.
         Write,
         /// An open beneath a directory, which the opened path names.
@@ -270,6 +287,8 @@ mod fake {
         Unmount(String),
         /// A flush of a block device's buffers.
         Flush(String),
+        /// A reread of the partition table of a disk, which its block device's node names.
+        Reread(String),
         /// A read of the partition table of the GPT disk on a block device, which its node names.
         ReadDisk(String),
         /// A write of a value to a control file.
@@ -381,8 +400,8 @@ mod fake {
         }
     }
 
-    /// A kernel that records each mount operation, performs no mount, unmount, or flush, and
-    /// fails the operations that a test chooses.
+    /// A kernel that records each mount operation, performs no mount, unmount, flush, or reread
+    /// of a partition table, and fails the operations that a test chooses.
     ///
     /// A write of a control file writes the regular file at its path, which it creates if
     /// needed, except that a write of a process ID to a cgroup's `cgroup.procs` moves the ID
@@ -737,6 +756,10 @@ mod fake {
 
         fn flush(&mut self, device: &CStr) -> Result<(), Errno> {
             self.record(Call::Flush(text(device)), Operation::Flush, &path(device))
+        }
+
+        fn reread_partitions(&mut self, device: &CStr) -> Result<(), Errno> {
+            self.record(Call::Reread(text(device)), Operation::Reread, &path(device))
         }
 
         fn read_disk(

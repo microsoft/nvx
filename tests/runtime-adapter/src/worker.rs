@@ -80,10 +80,11 @@
 //!    effect.
 //! 3. The worker applies the record through `RootOperations::apply`, which runs
 //!    `nvx::guest::clone::apply`: it assembles the root from the template's devices, with the
-//!    record's image, upper, and overlay mode, and checks the account of the record's workload
-//!    identity, if it has one, in the assembled root, as the worker of a VM that boots cold does
-//!    for a root configuration. The template bootstrapped the guest for its root with its own
-//!    configuration before its capture, so the clone has its cgroups.
+//!    record's image, upper, and overlay mode, once the kernel reread the partition table of a
+//!    GPT disk, over a fresh upper, and checks the account of the record's workload identity, if
+//!    it has one, in the assembled root, as the worker of a VM that boots cold does for a root
+//!    configuration. The template bootstrapped the guest for its root with its own configuration
+//!    before its capture, so the clone has its cgroups.
 //! 4. It completes the activation, which opens the fence, and answers `Ready`, which reports the
 //!    record's configuration identity and its transaction after the guest agent's build.
 //! 5. It then serves the host's order as after a cold boot: the mapping table that the record

@@ -12,6 +12,7 @@ use std::time::Duration;
 #[cfg(doc)]
 use super::Activation;
 use crate::activation::{self, ActivationRecord, Configuration, WorkloadIdentity};
+use crate::gpt::Expected;
 #[cfg(doc)]
 use crate::guest::entry::AccountMode;
 use crate::guest::entry::{self, Entry, Identity};
@@ -82,14 +83,24 @@ impl Applied {
 /// In order, it:
 ///
 /// 1. takes the inputs of the root's [`Assembly`] from the record: its image, an EROFS image,
-///    with the UUID that the record expects of it, if any; its upper, a tmpfs, or the scratch,
-///    with the record's journal policy; and its overlay mode; and, from `template`, the runtime
-///    directory, the devices, and the timeout. It refuses a GPT disk, with
-///    [`ApplyError::Gpt`], before anything has a side effect;
-/// 2. assembles the root with [`root::assemble`], which checks the devices, and the image as the
-///    record expects it, and mounts the root, or fails with [`ApplyError::Assembly`], once it
-///    unmounted what it mounted;
-/// 3. if the record has a workload identity, checks its account in the assembled root, before
+///    with the UUID that the record expects of it, if any, or a GPT disk, with the disk GUID that
+///    the record expects of it, if any, and the bound of its first partition; its upper, a tmpfs,
+///    or the scratch, with the record's journal policy; and its overlay mode; and, from
+///    `template`, the runtime directory, the devices, and the timeout;
+/// 2. for a GPT disk, asks the kernel to reread the disk's partition table, once the distro
+///    device appeared, so that the block devices of the disk's partitions are those of the
+///    clone's disk, rather than those of the template's placeholder, which the kernel created
+///    when it found the placeholder: the kernel then has parsed the same read-only bytes that
+///    the assembly reads and checks, as at a cold boot. A failure, before anything is mounted,
+///    fails with [`ApplyError::Gpt`];
+/// 3. assembles the root as [`root::assemble`] does, which checks the devices, and the image as
+///    the record expects it, and mounts the root, but with a fresh upper: it refuses the upper's
+///    `upper` or `work` directory if it exists and is not empty, with
+///    [`root::Error::NotFresh`], since a clone's root starts as its image alone, while a cold
+///    sandbox's scratch keeps its upper across boots. That check reads at most one entry of
+///    each directory, and no file. A failure fails with [`ApplyError::Assembly`], once the
+///    assembly unmounted what it mounted;
+/// 4. if the record has a workload identity, checks its account in the assembled root, before
 ///    Ready, as NVX's init checks it at boot: the identity is [`Identity::new`] of the record's
 ///    user and group IDs, without supplementary groups or capabilities, in
 ///    [existing-account](AccountMode::Existing) mode, whose account [`Entry::prepare`] reads and
@@ -115,12 +126,15 @@ pub fn apply(record: &ActivationRecord, template: &RootTemplate) -> Result<Appli
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum ApplyError {
-    /// The record's image is a GPT disk, which the application refuses before anything has a
-    /// side effect: the kernel created the block devices of a disk's partitions when it found the
-    /// template's placeholder, so they need not be the clone's.
-    Gpt,
+    /// The partition table of the record's GPT disk could not be reread, before anything was
+    /// mounted, as this error tells: the distro device did not appear in time, or the kernel
+    /// refused the reread, as it does while one of the disk's partitions is open. The block
+    /// devices of the disk's partitions need not be the clone's then: the kernel created them
+    /// when it found the template's placeholder.
+    Gpt(root::Error),
     /// The root's assembly failed, as this error tells, and unmounted what it had mounted, unless
-    /// the error holds the unmounts that failed.
+    /// the error holds the unmounts that failed. It fails with [`root::Error::NotFresh`] if the
+    /// upper's `upper` or `work` directory exists and is not empty.
     Assembly(AssemblyError),
     /// Existing-account mode refused the record's workload identity in the assembled root, which
     /// the application then tore down.
@@ -137,8 +151,10 @@ pub enum ApplyError {
 impl fmt::Display for ApplyError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Gpt => formatter
-                .write_str("the record's image is a GPT disk, which a clone does not assemble"),
+            Self::Gpt(error) => write!(
+                formatter,
+                "the reread of the GPT disk's partition table failed: {error}"
+            ),
             Self::Assembly(error) => write!(formatter, "the root's assembly failed: {error}"),
             Self::Account { error, teardown } => {
                 write!(formatter, "the root refuses the workload identity: {error}")?;
@@ -154,7 +170,7 @@ impl fmt::Display for ApplyError {
 impl std::error::Error for ApplyError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Self::Gpt => None,
+            Self::Gpt(error) => Some(error),
             Self::Assembly(error) => Some(error),
             Self::Account { error, .. } => Some(error),
         }
@@ -167,7 +183,12 @@ trait System {
     /// What an assembly mounted: a [`Root`], in a VM.
     type Root;
 
-    /// Assembles the root of `assembly`, as [`root::assemble`] does.
+    /// Asks the kernel to reread the partition table of the GPT disk on the distro device
+    /// `distro`, once it appeared, waiting for it for as long as `timeout` allows, as
+    /// [`root::reread_partitions`] does.
+    fn reread(&mut self, distro: Device, timeout: Duration) -> Result<(), root::Error>;
+
+    /// Assembles the root of `assembly` with a fresh upper, as [`root::assemble_fresh`] does.
     fn assemble(&mut self, assembly: &Assembly) -> Result<Self::Root, AssemblyError>;
 
     /// Reads and checks the account of `identity` in `root`, as [`check_account`] does.
@@ -183,8 +204,12 @@ struct LiveSystem;
 impl System for LiveSystem {
     type Root = Root;
 
+    fn reread(&mut self, distro: Device, timeout: Duration) -> Result<(), root::Error> {
+        root::reread_partitions(distro, timeout)
+    }
+
     fn assemble(&mut self, assembly: &Assembly) -> Result<Root, AssemblyError> {
-        root::assemble(assembly)
+        root::assemble_fresh(assembly)
     }
 
     fn account(&mut self, root: &Root, identity: &Identity) -> Result<(), entry::Error> {
@@ -204,8 +229,13 @@ fn apply_with<S: System>(
     template: &RootTemplate,
 ) -> Result<(S::Root, Option<Identity>), ApplyError> {
     let configuration = record.configuration();
-    let assembly = assembly(template, configuration)?;
+    let assembly = assembly(template, configuration);
     let identity = configuration.workload.identity.map(workload_identity);
+    if let root::Image::Gpt { .. } = assembly.image {
+        system
+            .reread(assembly.distro, assembly.timeout)
+            .map_err(ApplyError::Gpt)?;
+    }
     let root = system.assemble(&assembly).map_err(ApplyError::Assembly)?;
     if let Some(identity) = &identity
         && let Err(error) = system.account(&root, identity)
@@ -217,14 +247,22 @@ fn apply_with<S: System>(
 }
 
 /// Returns the assembly of the root that `configuration` sets, with `template`'s runtime
-/// directory, devices, and timeout, or refuses a GPT disk.
-fn assembly(
-    template: &RootTemplate,
-    configuration: &Configuration,
-) -> Result<Assembly, ApplyError> {
+/// directory, devices, and timeout.
+fn assembly(template: &RootTemplate, configuration: &Configuration) -> Assembly {
     let image = match configuration.image {
         activation::Image::Erofs { uuid, .. } => root::Image::Erofs { uuid },
-        activation::Image::Gpt { .. } => return Err(ApplyError::Gpt),
+        activation::Image::Gpt {
+            disk_guid,
+            first_partition_bound,
+            ..
+        } => root::Image::Gpt {
+            expected: match disk_guid {
+                Some(guid) => Expected::new().disk_guid(guid),
+                None => Expected::new(),
+            },
+            // A larger bound than the guest can address bounds nothing more.
+            first_partition_bound: usize::try_from(first_partition_bound).unwrap_or(usize::MAX),
+        },
     };
     let upper = match configuration.upper {
         activation::Upper::Tmpfs => root::Upper::Tmpfs,
@@ -240,14 +278,14 @@ fn assembly(
         activation::OverlayMode::TrustedLowers => root::OverlayMode::TrustedLowers,
         activation::OverlayMode::UntrustedLowers => root::OverlayMode::UntrustedLowers,
     };
-    Ok(Assembly {
+    Assembly {
         runtime: template.runtime.clone(),
         distro: template.distro,
         image,
         upper,
         overlay,
         timeout: template.timeout,
-    })
+    }
 }
 
 /// Returns the identity in which every execution of a workload with `identity` runs: its user

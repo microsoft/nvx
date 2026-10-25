@@ -1,5 +1,6 @@
 //! The block devices that the VMM attaches in the root's roles, which the base addresses of their
-//! MMIO windows name, and the block devices of a GPT disk's partitions.
+//! MMIO windows name, and the block devices of a GPT disk's partitions, whose table a clone asks
+//! the kernel to reread.
 //!
 //! The VMM declares each device on the kernel command line, so the kernel names its MMIO window
 //! `virtio-mmio.N` in `/proc/iomem`, and creates its block device below the window's device in
@@ -118,6 +119,29 @@ pub(super) fn prepare(
     Ok(path)
 }
 
+/// Finds the distro device that the VMM attached at `device`'s MMIO window, polling until it
+/// appears for as long as `timeout` allows, as [`prepare`] does, and asks the kernel to reread
+/// the partition table of the disk on it, which drops the block devices of the partitions that
+/// the kernel created from the table that the disk held before, and creates those of the table
+/// that it holds now, and their nodes. It checks nothing else of the device, whose checks
+/// [`prepare`] makes. Returns the path of its node.
+pub(super) fn reread(
+    kernel: &mut dyn Kernel,
+    paths: &Paths,
+    device: Device,
+    timeout: Duration,
+) -> Result<PathBuf, Error> {
+    let (_, path) = resolve(kernel, paths, Role::Distro, device.mmio, timeout)?;
+    let reread = sys::path_c_string(&path).and_then(|node| kernel.reread_partitions(&node));
+    reread.map_err(|error| Error::Device {
+        role: Role::Distro,
+        step: DeviceStep::Reread,
+        device: path.clone(),
+        error: error.into(),
+    })?;
+    Ok(path)
+}
+
 /// Returns the name and the node of the block device that the VMM attached at `mmio`, polling
 /// for it every [`POLL_INTERVAL`] while `timeout` allows another poll.
 fn resolve(
@@ -148,10 +172,11 @@ fn resolve(
 /// node is `disk`, in order.
 ///
 /// The kernel created the block devices of the disk's partitions from the table that the disk
-/// held when the kernel found it, and devtmpfs created their nodes beside the disk's, under the
-/// names that the kernel gives them: the disk's name and the partition's number, with a `p`
-/// between them if the disk's name ends with a digit, as `vda2` and `nvme0n1p2` are. It waits for
-/// none: a partition whose node is missing fails at once.
+/// held when the kernel found it, or when it last reread the table, as a clone asks of it, and
+/// devtmpfs created their nodes beside the disk's, under the names that the kernel gives them:
+/// the disk's name and the partition's number, with a `p` between them if the disk's name ends
+/// with a digit, as `vda2` and `nvme0n1p2` are. It waits for none: a partition whose node is
+/// missing fails at once.
 pub(super) fn partition_nodes(disk: &Path, numbers: &[u8]) -> Result<Vec<PathBuf>, Error> {
     numbers
         .iter()
