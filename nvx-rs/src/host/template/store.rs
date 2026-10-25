@@ -408,6 +408,11 @@ impl Index {
 /// - The scratch must be, at its path, the regular file of the template's length that the capture
 ///   created, which no one else may change.
 ///
+/// The host tells these files apart by the identity that their seals record,
+/// [`FileSeal`](crate::host::seal::FileSeal): their device or volume and their file ID, on Windows
+/// the 128-bit ID of `FILE_ID_INFO`, which a file system such as ReFS keeps unique where the
+/// 64-bit file index is not.
+///
 /// As the VM starts, the host holds no handle through which it could write either file: it closes
 /// the scratch once it has checked it, and holds only the placeholder that its binding's check
 /// opened for reading, which on Windows lets no one write it, until the VM has ended. The

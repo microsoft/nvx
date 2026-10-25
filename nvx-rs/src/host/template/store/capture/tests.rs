@@ -1136,6 +1136,53 @@ fn links_and_unsafe_ownership_are_refused_before_the_vm_starts() {
     assert!(fs::symlink_metadata(&transaction).is_ok());
 }
 
+#[test]
+fn scratches_are_the_files_that_their_captures_created() {
+    // Another file of the scratch's length, renamed over the scratch. It is created while the
+    // scratch exists, so that the host cannot give it the scratch's identity again.
+    let bench = Bench::new();
+    let scratch = bench.transaction().join(SCRATCH_NAME);
+    let replaced = |point: Point| -> Result<()> {
+        if point == Point::Prepared {
+            let other = bench.slot().join("other.raw");
+            sparse(&other, class().scratch.length);
+            fs::rename(&other, &scratch).unwrap();
+        }
+        Ok(())
+    };
+    let result = bench.serve(None, &Emulation::capture(), &replaced, false);
+    assert_refused(
+        &bench,
+        result,
+        ErrorKind::Io,
+        "is not the file that the capture created",
+    );
+    assert_clean(&bench);
+    // A file whose ID differs from the scratch's only above its low 64 bits, as the 128-bit IDs
+    // of two files of a file system such as ReFS may: the check compares the whole ID.
+    let inputs = Inputs::check(&bench.capture).unwrap();
+    let template = TemplatePlan::new(
+        &bench.capture.adapter,
+        &bench.capture.binding,
+        bench.capture.class.scratch.length,
+        inputs.resources,
+        &bench.transaction(),
+        StorageGeneration::generate().unwrap(),
+    )
+    .unwrap();
+    private_dir(&bench.transaction());
+    let created = create_scratch(template.scratch_path(), template.scratch_length()).unwrap();
+    check_scratch(&template, created).unwrap();
+    let (device, file_id) = created;
+    let error = check_scratch(&template, (device, file_id ^ (1 << 64))).unwrap_err();
+    assert!(
+        error
+            .message()
+            .contains("is not the file that the capture created"),
+        "{error}"
+    );
+}
+
 /// Returns whether this process holds the file at `path` open for writing.
 #[cfg(target_os = "linux")]
 fn held_for_writing(path: &Path) -> bool {
