@@ -21,9 +21,13 @@
 //!
 //! [`ActivationRecord::new`] admits a configuration only once [`Configuration::check`] finds that
 //! it keeps every [limit](#limits), so that every record holds settings that a guest can apply.
-//! The module depends on nothing outside the standard library and the crate's `protocol` and
-//! `uuid` modules, so it builds without features, and the host, the guest, and every adapter
-//! share it.
+//! [`ActivationRecord::encode`] writes a record's canonical [encoding](#encoding), and
+//! [`ActivationRecord::decode`] reads it back, by the same rules. [`ActivationRecord::identity`]
+//! computes the record's [identity](#identity), and [`ReadyActivation`] has a canonical
+//! [encoding](#ready) of its own. The module depends on nothing outside the standard library and
+//! the crate's `protocol` and `uuid` modules, except for the identity, a SHA-256 digest, which
+//! needs the `host` or the `guest` feature. So the records and their encodings build without
+//! features, and the host, the guest, and every adapter's framing share them.
 //!
 //! # Configuration
 //!
@@ -61,17 +65,81 @@
 //!
 //! # Limits
 //!
-//! The limits are public constants: a record holds at most [`MAX_RECORD_BYTES`] bytes, so that a
-//! restore packet could carry the same bytes, a configuration announces at most [`MAX_MAPPINGS`]
-//! mappings, a hostname holds at most [`MAX_HOSTNAME_BYTES`] bytes, and a proxy endpoint at most
-//! [`MAX_PROXY_ENDPOINT_BYTES`]. The limits of a record's parts keep every record within
-//! [`MAX_RECORD_BYTES`].
+//! The limits are public constants: a record's encoding holds at most [`MAX_RECORD_BYTES`] bytes,
+//! so that a restore packet could carry the same bytes, a configuration announces at most
+//! [`MAX_MAPPINGS`] mappings, a hostname holds at most [`MAX_HOSTNAME_BYTES`] bytes, and a proxy
+//! endpoint at most [`MAX_PROXY_ENDPOINT_BYTES`]. The limits of a record's parts keep every
+//! record's encoding within [`MAX_RECORD_BYTES`].
 //!
 //! [`Configuration::check`] also refuses an export without mappings, mappings without an export,
 //! a workload identity whose UID or GID is 0, or `u32::MAX`, which the kernel reads as an
 //! unchanged ID, a hostname with a NUL, a proxy endpoint with anything other than visible ASCII
 //! characters or with an `@`, which would start credentials, and a zero CPU count, memory size,
 //! or bound of a GPT disk's first partition.
+//!
+//! # Encoding
+//!
+//! A record's canonical encoding is the record's [`VERSION`], a little-endian `u16`, then its
+//! fields, without padding, in the increasing order of their tags, each at most once. A field is
+//! its tag, one byte, the number of bytes of its value, one byte, and its value:
+//!
+//! | Tag | [`Field`] | Value | Bytes | Present |
+//! | --- | --- | --- | --- | --- |
+//! | `0x01` | [`Restore`](Field::Restore) | The transaction ID, the store generation, a `u64`, and the identity of the template's key | 56 | In a clone's record |
+//! | `0x10` | [`Image`](Field::Image) | The format, `1` for EROFS or `2` for GPT, the identity of the image's binding, and a GPT disk's first-partition bound, a `u64` | 33 for EROFS, 41 for GPT | Always |
+//! | `0x11` | [`ImageIdentity`](Field::ImageIdentity) | The UUID or the disk GUID that the guest expects, in the order of its canonical text | 16 | If the guest expects one |
+//! | `0x20` | [`Upper`](Field::Upper) | `1` for a tmpfs, or `2` for the scratch, then the identity of the scratch's binding and its journal policy, `1` allowed or `2` forbidden | 1 for a tmpfs, 34 for the scratch | Always |
+//! | `0x30` | [`Overlay`](Field::Overlay) | `1` for trusted lowers, or `2` for untrusted lowers | 1 | Always |
+//! | `0x40` | [`Export`](Field::Export) | The shape, `1` for a directory or `2` for an aggregate, and the identity of the export's plan | 33 | With an export |
+//! | `0x41` | [`Mappings`](Field::Mappings) | The number of mappings, a `u16` from 1 to [`MAX_MAPPINGS`] | 2 | With an export |
+//! | `0x50` | [`Network`](Field::Network) | The identity of the policy, and `1` if listeners are published, or `2` if not | 33 | With a network |
+//! | `0x51` | [`Dns`](Field::Dns) | The DNS server's IPv4 or IPv6 address | 4 or 16 | With a network that has one |
+//! | `0x52` | [`Proxy`](Field::Proxy) | The proxy endpoint | 1 to [`MAX_PROXY_ENDPOINT_BYTES`] | With a network that has one |
+//! | `0x60` | [`Hostname`](Field::Hostname) | The hostname | 1 to [`MAX_HOSTNAME_BYTES`] | Always |
+//! | `0x61` | [`MachineId`](Field::MachineId) | `1` for the image's machine ID, or `2` for a generated one | 1 | Always |
+//! | `0x62` | [`WorkloadIdentity`](Field::WorkloadIdentity) | The UID and the GID, each a `u32` | 8 | With a workload identity |
+//! | `0x70` | [`Resources`](Field::Resources) | The CPU count, a `u32`, and the memory size, a `u64` | 12 | Always |
+//!
+//! Integers are little-endian, and identities, IDs, and addresses are their bytes, in order. The
+//! largest record, with every field at its largest, holds 602 bytes.
+//!
+//! [`ActivationRecord::decode`] refuses bytes that are longer than [`MAX_RECORD_BYTES`], end
+//! inside the version or a field, or hold another version; a field with an unknown tag, a
+//! repeated field, and a field out of order; a value with another number of bytes than its
+//! contents take, or with a code that the version does not define; a mapping count of 0, since
+//! a record without mappings leaves the field out, and a store generation of 0, which no store
+//! assigns; a record without a field that is always present, or with a DNS server or a proxy but
+//! no network; and every configuration that [`Configuration::check`] refuses, such as one with
+//! an export without mappings, or with mappings without an export. A record therefore has
+//! exactly one encoding, which [`ActivationRecord::encode`] writes, and which the decoder reads
+//! back to the same record.
+//!
+//! # Identity
+//!
+//! A record's [`ConfigurationIdentity`] is the SHA-256 digest of the label
+//! `nvx activation configuration identity v1`, a NUL byte, and the record's canonical
+//! [encoding](#encoding). [`ActivationRecord::identity`] computes it, with the `host` or the
+//! `guest` feature. The label sets the identity apart from any other digest of the same bytes,
+//! and names version 1 of the identity, which hashes records of version 1. The identity covers
+//! the whole record, a clone's restore section included, so the host learns, from the identity
+//! that Ready reports, that the guest applied exactly the record that the host gave it. It
+//! hashes at most [`MAX_RECORD_BYTES`] bytes of settings, never an object that the record names.
+//!
+//! # Ready
+//!
+//! [`ReadyActivation::of`] returns what Ready reports about the activation of a record: the
+//! record's identity, and a clone's transaction ID. Its canonical encoding, which
+//! [`ReadyActivation::encode`] writes and [`ReadyActivation::decode`] reads back, is the
+//! identity's 32 bytes, then `0` for a cold boot, or `1` and the clone's 16-byte transaction ID:
+//! [`ReadyActivation::COLD_LEN`] or [`ReadyActivation::CLONE_LEN`] bytes. A Ready that embeds
+//! these bytes therefore has the same encoding for a clone as for a cold boot. The encoding needs
+//! no features.
+//!
+//! The conformance vectors of `tests/vectors/activation-v1.txt` hold records, with their
+//! identities, and what Ready reports about their activations, in both encodings, and bytes that
+//! every decoder refuses.
+//!
+//! # Example
 //!
 //! ```
 //! use std::num::NonZeroU64;
@@ -113,6 +181,9 @@
 //! };
 //! let clone = ActivationRecord::new(Some(restore), configuration)?;
 //! assert_eq!(clone.restore(), Some(&restore));
+//! // Its canonical encoding reads back to it.
+//! let bytes = clone.encode();
+//! assert_eq!(ActivationRecord::decode(&bytes)?, clone);
 //! # Ok(())
 //! # }
 //! ```
@@ -125,14 +196,20 @@ use crate::protocol::MAX_HOST_MAPPINGS;
 use crate::protocol::root::ImageFormat;
 use crate::uuid::Uuid;
 
+mod codec;
+#[cfg(any(feature = "host", feature = "guest"))]
+mod identity;
+mod ready;
 #[cfg(test)]
 mod tests;
+
+pub use self::codec::Field;
 
 /// The version of the activation contract that this build speaks: the schema of an
 /// [`ActivationRecord`], which every record names. A record of another version is refused.
 pub const VERSION: u16 = 1;
 
-/// The most bytes that a record holds, so that a restore packet could carry the same bytes.
+/// The most bytes of a record's encoding, so that a restore packet could carry the same bytes.
 pub const MAX_RECORD_BYTES: usize = 1024;
 
 /// The most host mappings that a configuration announces: as many as a host mapping table holds,
@@ -243,7 +320,8 @@ impl fmt::Display for StoreGeneration {
 }
 
 /// The identity of the configuration that a layered root's activation applied, which its Ready
-/// reports: 32 bytes.
+/// reports: the SHA-256 digest of its record that the [module](self#identity) describes, 32
+/// bytes.
 ///
 /// It displays as 64 lowercase hexadecimal digits.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
@@ -587,6 +665,8 @@ impl ActivationRecord {
 
 /// What Ready reports about a layered root's activation: the identity of the configuration that
 /// the activation applied, and, for a clone, the transaction ID of the restore that it activated.
+/// Its canonical [encoding](self#ready) holds [`COLD_LEN`](Self::COLD_LEN) or
+/// [`CLONE_LEN`](Self::CLONE_LEN) bytes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct ReadyActivation {
     /// The identity of the configuration that the activation applied.
@@ -595,7 +675,8 @@ pub struct ReadyActivation {
     pub transaction: Option<TransactionId>,
 }
 
-/// Why an activation record was refused: the limit or the rule that it breaks.
+/// Why an activation record, or what Ready reports about an activation, was refused: the limit or
+/// the rule that it breaks.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum ActivationError {
@@ -619,6 +700,31 @@ pub enum ActivationError {
     Cpus,
     /// The expected memory size is 0.
     Memory,
+    /// The bytes hold more than [`MAX_RECORD_BYTES`]: this many.
+    TooLong(usize),
+    /// The bytes end inside the record's version or inside one of its fields.
+    Truncated,
+    /// The record's version is not [`VERSION`], but this one.
+    Version(u16),
+    /// A field has a tag that the record's version does not define: this one.
+    UnknownField(u8),
+    /// A field is repeated.
+    DuplicateField(Field),
+    /// A field follows a field whose tag is greater.
+    FieldOrder(Field),
+    /// A field's value holds another number of bytes than its contents take: this many.
+    FieldLength(Field, usize),
+    /// A field's value holds a code that the record's version does not define, or a form that
+    /// no record takes, such as a mapping count of 0.
+    FieldValue(Field),
+    /// A field that every record holds is missing.
+    MissingField(Field),
+    /// A field that only a record with a network holds, its DNS server's or its proxy's, is
+    /// present without one.
+    WithoutNetwork(Field),
+    /// The bytes of what Ready reports are not a configuration identity followed by `0`, or by
+    /// `1` and a transaction ID.
+    Ready,
 }
 
 impl fmt::Display for ActivationError {
@@ -647,6 +753,47 @@ impl fmt::Display for ActivationError {
             }
             Self::Cpus => formatter.write_str("the expected CPU count is 0"),
             Self::Memory => formatter.write_str("the expected memory size is 0"),
+            Self::TooLong(length) => write!(
+                formatter,
+                "the record's {length} bytes are more than the {MAX_RECORD_BYTES} that a record \
+                 holds"
+            ),
+            Self::Truncated => {
+                formatter.write_str("the record ends inside its version or one of its fields")
+            }
+            Self::Version(version) => {
+                write!(
+                    formatter,
+                    "the record's version is {version}, not {VERSION}"
+                )
+            }
+            Self::UnknownField(tag) => {
+                write!(
+                    formatter,
+                    "the record holds a field of the unknown tag {tag:#04x}"
+                )
+            }
+            Self::DuplicateField(field) => {
+                write!(formatter, "the record repeats its {field} field")
+            }
+            Self::FieldOrder(field) => {
+                write!(formatter, "the record's {field} field is out of order")
+            }
+            Self::FieldLength(field, length) => write!(
+                formatter,
+                "the record's {field} field holds {length} bytes, which its value never takes"
+            ),
+            Self::FieldValue(field) => write!(
+                formatter,
+                "the record's {field} field holds a value that no record takes"
+            ),
+            Self::MissingField(field) => write!(formatter, "the record has no {field} field"),
+            Self::WithoutNetwork(field) => {
+                write!(formatter, "the record has a {field} field but no network")
+            }
+            Self::Ready => formatter.write_str(
+                "what Ready reports is not an identity followed by 0, or by 1 and a transaction ID",
+            ),
         }
     }
 }

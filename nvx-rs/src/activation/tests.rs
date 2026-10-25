@@ -10,7 +10,7 @@ const DISK_GUID: &str = "fedcba98-7654-3210-fedc-ba9876543210";
 
 /// Returns the configuration of the tests: an EROFS image over a tmpfs, without an export, a
 /// network, or a workload identity.
-fn configuration() -> Configuration {
+pub(super) fn configuration() -> Configuration {
     Configuration {
         image: Image::Erofs {
             binding: Identity::from_bytes([0x11; 32]),
@@ -37,7 +37,7 @@ fn configuration() -> Configuration {
 /// aggregate export of [`MAX_MAPPINGS`] mappings, a network with an IPv6 DNS server and a proxy
 /// endpoint of [`MAX_PROXY_ENDPOINT_BYTES`], a hostname of [`MAX_HOSTNAME_BYTES`], and the largest
 /// IDs and resources.
-fn maximal() -> Configuration {
+pub(super) fn maximal() -> Configuration {
     Configuration {
         image: Image::Gpt {
             binding: Identity::from_bytes([0xff; 32]),
@@ -76,7 +76,7 @@ fn maximal() -> Configuration {
 }
 
 /// Returns the restore section of the tests' clones.
-fn restore() -> RestoreSection {
+pub(super) fn restore() -> RestoreSection {
     RestoreSection {
         transaction: TransactionId::from_bytes([0x22; 16]),
         template: TemplateReference {

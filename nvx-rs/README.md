@@ -27,8 +27,9 @@ nvx-rs/
 │   ├── protocol/    NVXS session, NVXC frames, EXEC and MAPS payloads, guest features, kernel
 │   │                command-line tokens, and the guest targets that live shares may not take;
 │   │                no dependencies, shared by the host and the guest
-│   ├── activation/  the activation record of a layered root and what Ready reports about it;
-│   │                no dependencies, shared by the host, the guest, and every adapter's framing
+│   ├── activation/  the activation record of a layered root, its canonical encoding, and what
+│   │                Ready reports about it; no dependencies, shared by the host, the guest, and
+│   │                every adapter's framing
 │   ├── contract.rs  control-contract versions, release-manifest compatibility, and the versions
 │   │                of the contracts through which OpenVMM restores a snapshot
 │   ├── net/         CIDR parsing and subtraction, and hostname and guest-network forms
@@ -73,7 +74,7 @@ nvx-rs/
 | `nvx::protocol::nvxs` | The NVXS session, independent of `NVXC` and of any other application protocol: `RecordType`, `Record`, `encode_record`, and `RecordParser`, which parses records incrementally across partial reads with buffers bounded by one record; `HostSession` and `GuestSession`, the state machines of the host's and the guest's roles, which validate every record's type, identity, and sequence number, and the guest's receive window and credits, without I/O. An application message may span DATA records, and the application's own framing reassembles it |
 | `nvx::protocol::root` | The boot tokens of a layered root, which the host renders and guests parse by the same rules: a `RootLayout` is a `RootImage` on the `distro` block device, an EROFS filesystem or a GPT disk with the `nvx::uuid::Uuid` that the guest expects of it, if any, over a `RootUpper`, the ext4 scratch disk or RAM. `RootLayout::tokens` renders `nvx_layer=distro,0xd0003000,FORMAT[:IDENTITY]` and `nvx_scratch=0xd0006000,ext4` or `nvx_overlay_upper=ramfs`, and `RootLayout::parse` reads them from a kernel command line, and refuses malformed, repeated, and conflicting tokens and the earlier form without a format, with no fallback that probes the devices. It reads the virtio-mmio devices of the command line with `nvx::protocol::cmdline`, to refuse a RAM upper beside one at the scratch base. `tests/fixtures/root-tokens.json` holds its cases, which the tests of the guest's shell init replay too |
 | `nvx::protocol::share` | The guest targets that a sandbox's live shares may not take, which the host's `sandbox::mount` and the guest's `root` both refuse: `RESERVED_MOUNT_TARGETS`, the trees where the container runtime mounts or binds, `RESERVED_EXACT_MOUNT_TARGETS`, the directories that it creates, `RESERVED_TARGET_CHARACTERS`, and `reservation`, which tells why a target is reserved |
-| `nvx::activation` | The activation record of a layered root: one bounded, versioned, non-secret record of the settings that its activation applies, which a clone restored from a template reads in place of its captured configuration. An `ActivationRecord` holds the schema's `VERSION`, a clone's `RestoreSection`, the restore's `TransactionId` and the `TemplateReference` of its template, the template's `StoreGeneration`, a nonzero publication ID that its store assigns in order, and the `Identity` of its key, and the `Configuration`: the `Image`, EROFS or GPT, with the `Identity` of its binding and the UUID or disk GUID that the guest expects; the `Upper`, a tmpfs or the scratch with its binding's `Identity` and its `Journal` policy; the `OverlayMode`; an `Export`, a directory or an aggregate with its plan's `Identity`, and its 1 to 4,096 mappings; the `Network`, its policy's `Identity`, a DNS address, the listeners' `Publication`, and a proxy endpoint without credentials; the `WorkloadView`, its hostname, `MachineIdMode`, and `WorkloadIdentity`, whose IDs are neither 0 nor `u32::MAX`; and the `ExpectedResources`. The other inputs of the root's assembly are invariants of the template. `ActivationRecord::new` refuses a configuration that `Configuration::check` finds past a public limit, `MAX_MAPPINGS`, `MAX_HOSTNAME_BYTES`, or `MAX_PROXY_ENDPOINT_BYTES`, which keep every record within `MAX_RECORD_BYTES`, or with an export without mappings, mappings without an export, a UID or GID of 0 or `u32::MAX`, a proxy endpoint with credentials, or a zero size. `ReadyActivation` is what Ready reports: the `ConfigurationIdentity`, and a clone's transaction ID. It needs no features |
+| `nvx::activation` | The activation record of a layered root: one bounded, versioned, non-secret record of the settings that its activation applies, which a clone restored from a template reads in place of its captured configuration. An `ActivationRecord` holds the schema's `VERSION`, a clone's `RestoreSection`, the restore's `TransactionId` and the `TemplateReference` of its template, the template's `StoreGeneration`, a nonzero publication ID that its store assigns in order, and the `Identity` of its key, and the `Configuration`: the `Image`, EROFS or GPT, with the `Identity` of its binding and the UUID or disk GUID that the guest expects; the `Upper`, a tmpfs or the scratch with its binding's `Identity` and its `Journal` policy; the `OverlayMode`; an `Export`, a directory or an aggregate with its plan's `Identity`, and its 1 to 4,096 mappings; the `Network`, its policy's `Identity`, a DNS address, the listeners' `Publication`, and a proxy endpoint without credentials; the `WorkloadView`, its hostname, `MachineIdMode`, and `WorkloadIdentity`, whose IDs are neither 0 nor `u32::MAX`; and the `ExpectedResources`. The other inputs of the root's assembly are invariants of the template. `ActivationRecord::new` refuses a configuration that `Configuration::check` finds past a public limit, `MAX_MAPPINGS`, `MAX_HOSTNAME_BYTES`, or `MAX_PROXY_ENDPOINT_BYTES`, which keep every record within `MAX_RECORD_BYTES`, or with an export without mappings, mappings without an export, a UID or GID of 0 or `u32::MAX`, a proxy endpoint with credentials, or a zero size. `ActivationRecord::encode` writes a record's canonical encoding, its version, then a tagged, length-prefixed field for each part in the order of their tags, 602 bytes at most, and `ActivationRecord::decode` reads exactly those bytes back and refuses any others, naming the `Field` at fault. `ActivationRecord::identity`, with `host` or `guest`, computes the record's `ConfigurationIdentity`, the SHA-256 digest of a label that names its version and of the record's encoding. `ReadyActivation` is what Ready reports: the `ConfigurationIdentity`, and a clone's transaction ID, which `ReadyActivation::of` takes from a record, and whose canonical encoding, of `COLD_LEN` or `CLONE_LEN` bytes, `ReadyActivation::encode` writes and `ReadyActivation::decode` reads. The records and both encodings need no features |
 | `nvx::contract` | The OpenVMM microVM ABI, boot contract, broker protocol, and control-contract revision that the crate speaks, and when each changes, and `manifest_is_compatible` for a release's `SOURCE-MANIFEST.json`; and the versions of OpenVMM's snapshot format, saved device state, time ABI, and restore packet, which a template's key holds and which an ignored test of `tests/openvmm_vectors.rs` checks against the OpenVMM submodule |
 | `nvx::net` | `Cidr`: IPv4 and IPv6 networks and their subtraction, which `Cidr::parse` reads without host bits and `Cidr::parse_masked` as OpenVMM reads the destination of an egress rule; `is_valid_hostname` and `is_valid_guest_network`, the forms of a VM's hostname and guest address, and `guest_gateway`, the gateway of a guest address |
 | `nvx::gpt` | `Disk::read`: the protective MBR, primary header, and primary partition entry array of a GPT disk, read through a `ReadAt` source that the caller gives and checked strictly, as UEFI specifies them and as Linux requires them, without ever reading the backup: 128-byte entries, at most 1 MiB of them, used entries first and without holes, a first partition and 1 to 254 layers, extents in the usable blocks without overlap, and unique GUIDs, with checked arithmetic in the disk's logical blocks. `Expected` adds the disk GUID and the partitions' unique GUIDs and sizes that a caller knows, and `Disk::read_first_partition` returns the first partition's opaque bytes, up to a bound and without trailing NUL bytes and whitespace. GUIDs are `nvx::uuid::Uuid`s. It has no dependencies, so the guest and the host's checks of the images that it stages share it |
@@ -845,17 +846,18 @@ it with the Python implementation of `nvx.py run`; since `nvx.py run` runs
 
 | Feature | Contents |
 | --- | --- |
-| `host` (default) | The `host` module. It enables `serde`, and `sha2`, which names the children of a sandbox's aggregate share and hashes distro layers in their explicit verification |
+| `host` (default) | The `host` module. It enables `serde`, and `sha2`, which names the children of a sandbox's aggregate share, hashes distro layers in their explicit verification, and computes the configuration identities of activation records |
 | `bundled` | Stages a release at build time; see [Bundled artifacts](#bundled-artifacts) |
 | `testing` | The fake OpenVMM and the `nvx-fake-openvmm` binary |
 | `cli` | The `nvx-rs` CLI of `host::cli` and its `nvx-rs` binary; it enables `host`. See [The nvx-rs CLI](#the-nvx-rs-cli) |
 | `serde` | The serde form of `Hypervisor` |
-| `guest` | The `guest` module and the guest binaries; see [Guest binaries](#guest-binaries) |
+| `guest` | The `guest` module and the guest binaries; see [Guest binaries](#guest-binaries). It enables `sha2`, which computes the configuration identities of activation records |
 
 Without default features, the crate has only `protocol`, `activation`, `exec`,
 `contract`, `net`, `gpt`, `uuid`, `Hypervisor`, and `Error`, and depends on
-nothing but `serde` when `serde` is enabled and `nix` and `getrandom` when
-`guest` is; `aci_edge_sandboxes_model` uses it that way.
+nothing but `serde` when `serde` is enabled and `nix`, `getrandom`, and `sha2`
+when `guest` is; `aci_edge_sandboxes_model` uses it that way. Without `host`
+or `guest`, `activation` lacks only the configuration identity.
 
 ## Example
 
@@ -1093,9 +1095,15 @@ sides of every record, frame, and payload: the codec decodes each vector of
 `tests/vectors/nvxc-v1.txt` to its values and encodes them to its bytes, it
 accepts or refuses OpenVMM's vectors and cases of the `NVXS` session as they
 say, and, on Linux, the guest's listener announcements match
-`tests/vectors/nvxl-v1.txt`. Property tests check that records round-trip, and
-that the `NVXS` record parser and the host's and the guest's `EXEC` and `MAPS`
-decoders return, never panic, on arbitrary bytes; those of the egress policy
+`tests/vectors/nvxl-v1.txt`. The activation codecs decode each record and
+Ready activation of `tests/vectors/activation-v1.txt` to its values, encode
+them to its bytes, and refuse its invalid bytes, and each record's
+configuration identity matches its vector's. Property tests check that records
+and activation records round-trip, that the activation record and Ready
+activation decoders accept only canonical encodings, and that the `NVXS`
+record parser, those decoders, and the host's and the guest's `EXEC` and
+`MAPS` decoders return, never panic, on arbitrary bytes; those of the egress
+policy
 compiler compare it with a reference model of the format
 ([Egress policy files](#egress-policy-files)). The NVXS test drives the
 host's and the guest's roles of the session and their connections through a

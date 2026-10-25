@@ -10,7 +10,8 @@
 //!   not take. It has no dependencies, so the host, the guest, and test doubles share it.
 //! - [`activation`]: the activation record of a layered root, the bounded, versioned, non-secret
 //!   record of the settings that its activation applies, which a clone restored from a template
-//!   reads in place of its captured configuration, and what Ready reports about the activation.
+//!   reads in place of its captured configuration, its canonical encoding and configuration
+//!   identity, and what Ready reports about the activation.
 //!   It needs no features, so the host, the guest, and every adapter's framing share it.
 //! - [`contract`]: the control-contract versions that this crate speaks and the compatibility of
 //!   NVX releases with them, and the versions of the contracts through which OpenVMM restores a
