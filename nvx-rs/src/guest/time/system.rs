@@ -471,30 +471,23 @@ pub(crate) fn rates_load() -> Result<(u64, u64), Errno> {
 }
 
 /// Saves the stall detectors' settings in the suppression record, and suppresses them for a
-/// snapshot capture. A record that exists already, of a pending capture, is `EEXIST`.
-pub(crate) fn suppression_save() -> Result<(), Errno> {
-    let mut saved = Vec::new();
-    for (index, (path, _)) in SUPPRESSED_DETECTORS.iter().enumerate() {
-        if let Err(error) = sys::check_exists(path) {
-            if index == 0 {
-                return Err(error);
-            }
-            continue;
-        }
-        let value = sys::read_number::<i64>(path)?;
-        saved.extend_from_slice(path.to_bytes());
-        saved.extend_from_slice(format!("={value}\n").as_bytes());
-    }
-    let record = CreatedFile::create(SUPPRESSION_PATH, true, PRIVATE_FILE_MODE)?;
-    record.write_all(&saved)?;
-    // As in the C program, a record that fails to close stays, and the suppression goes on.
-    let _ = record.keep();
-    for (path, value) in SUPPRESSED_DETECTORS {
-        if sys::path_exists(path) {
-            sys::write_number(path, value)?;
-        }
-    }
-    Ok(())
+/// snapshot capture; see [`Suppression::save`]. A record that exists already, of a pending
+/// capture, is `EEXIST`.
+pub(crate) fn suppression_save() -> Result<(), SaveError> {
+    make_runtime_directories();
+    SUPPRESSION.save()
+}
+
+/// Why a save of the stall detectors' settings failed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SaveError {
+    /// The save failed with this error, and left the settings as they were: it changed none, or
+    /// undid every change and removed its record. A record that exists already, of a pending
+    /// capture, is `EEXIST`, and stays that capture's.
+    Undone(Errno),
+    /// The save failed to suppress a detector with this error, then to undo every change, so it
+    /// kept its record, from which [`suppression_restore`] restores the settings.
+    Kept(Errno),
 }
 
 /// Formats a diagnostic: `prefix`, then the description of `error`.
@@ -502,36 +495,117 @@ fn describe(prefix: &[u8], error: Errno) -> Vec<u8> {
     [prefix, error.desc().as_bytes()].concat()
 }
 
-/// Restores the stall detectors' settings from the suppression record, and removes the record.
-/// A missing record succeeds when `missing_ok`.
+/// Restores the stall detectors' settings from the suppression record, and removes the record;
+/// see [`Suppression::restore`]. A missing record succeeds when `missing_ok`.
 pub(crate) fn suppression_restore(missing_ok: bool) -> Result<(), Vec<u8>> {
-    let _lock = lock_file(SUPPRESSION_LOCK_PATH)
-        .map_err(|error| describe(b"lock /run/nvx/time-suppression.lock: ", error))?;
-    let text = match sys::read_file(SUPPRESSION_PATH) {
-        Ok(text) => text,
-        Err(Errno::ENOENT) if missing_ok => return Ok(()),
-        Err(error) => return Err(describe(b"read /run/nvx/time-suppression: ", error)),
-    };
-    for line in text
-        .split(|byte| *byte == b'\n')
-        .filter(|line| !line.is_empty())
-    {
-        let Some(equal) = line.iter().position(|byte| *byte == b'=') else {
-            break;
-        };
-        let Ok(path) = CString::new(&line[..equal]) else {
-            break;
-        };
-        if let Err(error) = sys::write_file(&path, &line[equal + 1..]) {
-            let quoted = &line[..equal.min(QUOTED_PATH_LIMIT)];
-            return Err(describe(
-                &[b"restore ".as_slice(), quoted, b": "].concat(),
-                error,
-            ));
-        }
+    make_runtime_directories();
+    SUPPRESSION.restore(missing_ok)
+}
+
+/// The suppression of the stall detectors for a capture: the detectors, the record of their
+/// saved settings, which exists while a capture is pending, and the lock that serializes the
+/// record's saves and restores, so that each restores only the settings that a save recorded.
+struct Suppression<'a> {
+    /// The detectors, of which only the first must exist, and the value that suppresses each.
+    detectors: &'a [(&'a CStr, i64)],
+    /// The record of the detectors' saved settings.
+    record: &'a CStr,
+    /// The lock that serializes the saves and restores of the record.
+    lock: &'a CStr,
+}
+
+/// The guest's suppression of its stall detectors.
+const SUPPRESSION: Suppression<'static> = Suppression {
+    detectors: &SUPPRESSED_DETECTORS,
+    record: SUPPRESSION_PATH,
+    lock: SUPPRESSION_LOCK_PATH,
+};
+
+impl Suppression<'_> {
+    /// Saves the detectors' settings in the record, and suppresses the detectors, under the
+    /// lock, so that no restore runs between its reads and its writes. A record that exists
+    /// already, of a pending capture, is `EEXIST`. A save that fails before it created the
+    /// record changes nothing; one that fails after undoes its changes and removes the record,
+    /// or keeps the record if it can't.
+    fn save(&self) -> Result<(), SaveError> {
+        self.save_with(sys::write_number)
     }
-    sys::unlink(SUPPRESSION_PATH)
-        .map_err(|error| describe(b"remove /run/nvx/time-suppression: ", error))
+
+    /// Implements [`save`](Self::save), with `write` writing a detector's setting.
+    fn save_with(
+        &self,
+        mut write: impl FnMut(&CStr, i64) -> Result<(), Errno>,
+    ) -> Result<(), SaveError> {
+        let _lock = sys::lock_file(self.lock, PRIVATE_FILE_MODE).map_err(SaveError::Undone)?;
+        let mut saved = Vec::new();
+        for (index, &(path, suppressed)) in self.detectors.iter().enumerate() {
+            if let Err(error) = sys::check_exists(path) {
+                if index == 0 {
+                    return Err(SaveError::Undone(error));
+                }
+                continue;
+            }
+            let value = sys::read_number::<i64>(path).map_err(SaveError::Undone)?;
+            saved.push((path, value, suppressed));
+        }
+        let mut text = Vec::new();
+        for (path, value, _) in &saved {
+            text.extend_from_slice(path.to_bytes());
+            text.extend_from_slice(format!("={value}\n").as_bytes());
+        }
+        let record =
+            CreatedFile::create(self.record, true, PRIVATE_FILE_MODE).map_err(SaveError::Undone)?;
+        record.write_all(&text).map_err(SaveError::Undone)?;
+        // As in the C program, a record that fails to close stays, and the suppression goes on.
+        let _ = record.keep();
+        for (written, &(path, _, suppressed)) in saved.iter().enumerate() {
+            if let Err(error) = write(path, suppressed) {
+                // The record stays unless every earlier write is undone, so that a restore can
+                // still restore the settings.
+                let mut undone = true;
+                for &(path, value, _) in &saved[..written] {
+                    undone &= write(path, value).is_ok();
+                }
+                if undone && sys::unlink(self.record).is_ok() {
+                    return Err(SaveError::Undone(error));
+                }
+                return Err(SaveError::Kept(error));
+            }
+        }
+        Ok(())
+    }
+
+    /// Restores the detectors' settings from the record, and removes it, under the lock. A
+    /// missing record succeeds when `missing_ok`.
+    fn restore(&self, missing_ok: bool) -> Result<(), Vec<u8>> {
+        let _lock = sys::lock_file(self.lock, PRIVATE_FILE_MODE)
+            .map_err(|error| describe(b"lock /run/nvx/time-suppression.lock: ", error))?;
+        let text = match sys::read_file(self.record) {
+            Ok(text) => text,
+            Err(Errno::ENOENT) if missing_ok => return Ok(()),
+            Err(error) => return Err(describe(b"read /run/nvx/time-suppression: ", error)),
+        };
+        for line in text
+            .split(|byte| *byte == b'\n')
+            .filter(|line| !line.is_empty())
+        {
+            let Some(equal) = line.iter().position(|byte| *byte == b'=') else {
+                break;
+            };
+            let Ok(path) = CString::new(&line[..equal]) else {
+                break;
+            };
+            if let Err(error) = sys::write_file(&path, &line[equal + 1..]) {
+                let quoted = &line[..equal.min(QUOTED_PATH_LIMIT)];
+                return Err(describe(
+                    &[b"restore ".as_slice(), quoted, b": "].concat(),
+                    error,
+                ));
+            }
+        }
+        sys::unlink(self.record)
+            .map_err(|error| describe(b"remove /run/nvx/time-suppression: ", error))
+    }
 }
 
 /// Reads a byte buffer using one scalar four-byte port access per chunk.
@@ -752,7 +826,13 @@ pub(crate) mod tests {
     //! A fake of the privileged operations, and checks of the runtime over it.
 
     use std::collections::VecDeque;
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::{OsStrExt, OsStringExt};
+    use std::path::Path;
     use std::sync::atomic::AtomicUsize;
+    use std::sync::mpsc::{self, RecvTimeoutError};
+    use std::thread;
+    use std::time::Duration;
 
     use super::*;
     use crate::guest::sys::PortBackend;
@@ -1115,5 +1195,217 @@ pub(crate) mod tests {
             assert!(!within(path), "{path:?}");
             assert!(path.to_bytes().starts_with(b"/run/nvx/"), "{path:?}");
         }
+    }
+
+    /// Stall detectors in a temporary directory, as files that hold their settings, and the
+    /// record and the lock of their suppression beside them.
+    struct TestDetectors {
+        /// The temporary directory, which holds the files until the test ends.
+        _directory: tempfile::TempDir,
+        /// The detectors' files: RCU's stall warnings, the soft-lockup detector, and the
+        /// hung-task detector.
+        paths: [CString; 3],
+        /// The suppression record.
+        record: CString,
+        /// The suppression lock.
+        lock: CString,
+    }
+
+    impl TestDetectors {
+        /// Returns detectors whose files hold `settings`, and are missing for `None`.
+        fn new(settings: [Option<&str>; 3]) -> Self {
+            let directory = tempfile::tempdir().unwrap();
+            let path = |name: &str| {
+                CString::new(directory.path().join(name).into_os_string().into_vec()).unwrap()
+            };
+            let paths = ["rcu", "soft-lockup", "hung-task"].map(&path);
+            for (path, setting) in paths.iter().zip(settings) {
+                if let Some(setting) = setting {
+                    std::fs::write(std_path(path), format!("{setting}\n")).unwrap();
+                }
+            }
+            let record = path("suppression");
+            let lock = path("suppression.lock");
+            Self {
+                _directory: directory,
+                paths,
+                record,
+                lock,
+            }
+        }
+
+        /// Returns the detectors, with the value that suppresses each, as the guest's.
+        fn detectors(&self) -> [(&CStr, i64); 3] {
+            let [rcu, soft_lockup, hung_task] = &self.paths;
+            [
+                (rcu.as_c_str(), 1),
+                (soft_lockup.as_c_str(), 0),
+                (hung_task.as_c_str(), 0),
+            ]
+        }
+
+        /// Returns the suppression of `detectors`, with the record and the lock.
+        fn suppression<'a>(&'a self, detectors: &'a [(&'a CStr, i64)]) -> Suppression<'a> {
+            Suppression {
+                detectors,
+                record: &self.record,
+                lock: &self.lock,
+            }
+        }
+
+        /// Returns the first line of each detector's file, or `None` for one that can't be read.
+        fn settings(&self) -> [Option<String>; 3] {
+            self.paths.each_ref().map(|path| {
+                let text = sys::read_file(path).ok()?;
+                let text = String::from_utf8(text).unwrap();
+                Some(text.lines().next().unwrap_or_default().to_owned())
+            })
+        }
+    }
+
+    /// Returns `path` as a standard path.
+    fn std_path(path: &CStr) -> &Path {
+        Path::new(OsStr::from_bytes(path.to_bytes()))
+    }
+
+    /// Returns `settings` as the detectors' settings that [`TestDetectors::settings`] returns.
+    fn settings(settings: [Option<&str>; 3]) -> [Option<String>; 3] {
+        settings.map(|setting| setting.map(str::to_owned))
+    }
+
+    #[test]
+    fn a_suppression_saves_the_settings_and_suppresses_the_detectors_until_its_restore() {
+        let test = TestDetectors::new([Some("0"), Some("60"), Some("120")]);
+        let detectors = test.detectors();
+        let suppression = test.suppression(&detectors);
+        suppression.save().unwrap();
+        let suppressed = settings([Some("1"), Some("0"), Some("0")]);
+        assert_eq!(test.settings(), suppressed);
+        let [rcu, soft_lockup, hung_task] =
+            test.paths.each_ref().map(|path| path.to_str().unwrap());
+        let record = format!("{rcu}=0\n{soft_lockup}=60\n{hung_task}=120\n");
+        assert_eq!(sys::read_file(&test.record).unwrap(), record.as_bytes());
+
+        // Another save finds the pending capture's record, and changes nothing.
+        assert_eq!(suppression.save(), Err(SaveError::Undone(Errno::EEXIST)));
+        assert_eq!(test.settings(), suppressed);
+        assert_eq!(sys::read_file(&test.record).unwrap(), record.as_bytes());
+
+        suppression.restore(false).unwrap();
+        assert_eq!(
+            test.settings(),
+            settings([Some("0"), Some("60"), Some("120")])
+        );
+        assert_eq!(sys::check_exists(&test.record), Err(Errno::ENOENT));
+        // Without a record, only a restore that allows a missing one succeeds.
+        assert_eq!(
+            suppression.restore(false).unwrap_err(),
+            format!("read /run/nvx/time-suppression: {}", Errno::ENOENT.desc()).into_bytes()
+        );
+        suppression.restore(true).unwrap();
+    }
+
+    #[test]
+    fn a_save_that_fails_before_its_record_changes_nothing() {
+        // The first detector, which must exist, is missing.
+        let test = TestDetectors::new([None, Some("60"), Some("120")]);
+        let detectors = test.detectors();
+        let suppression = test.suppression(&detectors);
+        let unchanged = settings([None, Some("60"), Some("120")]);
+        assert_eq!(suppression.save(), Err(SaveError::Undone(Errno::ENOENT)));
+        assert_eq!(sys::check_exists(&test.record), Err(Errno::ENOENT));
+        assert_eq!(test.settings(), unchanged);
+
+        // A detector that can't be read, while another capture is pending, leaves that capture's
+        // record and the settings as they were.
+        std::fs::create_dir(std_path(&test.paths[0])).unwrap();
+        let pending = b"/proc/sys/kernel/hung_task_timeout_secs=120\n";
+        std::fs::write(std_path(&test.record), pending).unwrap();
+        let error = suppression.save().unwrap_err();
+        assert!(matches!(error, SaveError::Undone(_)), "{error:?}");
+        assert_eq!(sys::read_file(&test.record).unwrap(), pending);
+        assert_eq!(test.settings(), unchanged);
+    }
+
+    /// Returns a save's write of a detector's setting, which fails with `EIO` for each detector
+    /// and value of `failing`, and writes the others.
+    fn failing_writes<'a>(
+        failing: &'a [(&'a CStr, i64)],
+    ) -> impl FnMut(&CStr, i64) -> Result<(), Errno> + 'a {
+        move |path, value| {
+            let fails = failing
+                .iter()
+                .any(|&(failing, failing_value)| failing == path && failing_value == value);
+            if fails {
+                Err(Errno::EIO)
+            } else {
+                sys::write_number(path, value)
+            }
+        }
+    }
+
+    #[test]
+    fn a_save_that_fails_to_suppress_a_detector_undoes_its_writes_and_removes_its_record() {
+        let test = TestDetectors::new([Some("0"), Some("60"), Some("120")]);
+        let detectors = test.detectors();
+        let suppression = test.suppression(&detectors);
+        let failing = [(test.paths[1].as_c_str(), 0)];
+        assert_eq!(
+            suppression.save_with(failing_writes(&failing)),
+            Err(SaveError::Undone(Errno::EIO))
+        );
+        assert_eq!(
+            test.settings(),
+            settings([Some("0"), Some("60"), Some("120")])
+        );
+        assert_eq!(sys::check_exists(&test.record), Err(Errno::ENOENT));
+    }
+
+    #[test]
+    fn a_save_that_fails_to_undo_a_write_keeps_its_record_for_a_restore() {
+        let test = TestDetectors::new([Some("0"), Some("60"), Some("120")]);
+        let detectors = test.detectors();
+        let suppression = test.suppression(&detectors);
+        // The soft-lockup detector can't be suppressed, nor RCU's stall warnings restored.
+        let failing = [(test.paths[1].as_c_str(), 0), (test.paths[0].as_c_str(), 0)];
+        assert_eq!(
+            suppression.save_with(failing_writes(&failing)),
+            Err(SaveError::Kept(Errno::EIO))
+        );
+        assert_eq!(
+            test.settings(),
+            settings([Some("1"), Some("60"), Some("120")])
+        );
+        // The record keeps the settings, which a restore restores.
+        suppression.restore(false).unwrap();
+        assert_eq!(
+            test.settings(),
+            settings([Some("0"), Some("60"), Some("120")])
+        );
+        assert_eq!(sys::check_exists(&test.record), Err(Errno::ENOENT));
+    }
+
+    #[test]
+    fn a_save_waits_for_the_suppression_lock() {
+        let test = TestDetectors::new([Some("0"), Some("60"), Some("120")]);
+        let detectors = test.detectors();
+        let suppression = test.suppression(&detectors);
+        let lock = sys::lock_file(&test.lock, PRIVATE_FILE_MODE).unwrap();
+        let (sender, receiver) = mpsc::channel();
+        thread::scope(|scope| {
+            scope.spawn(|| sender.send(suppression.save()).unwrap());
+            // While a restore holds the lock, the save reads and changes nothing.
+            assert_eq!(
+                receiver.recv_timeout(Duration::from_millis(200)),
+                Err(RecvTimeoutError::Timeout)
+            );
+            assert_eq!(
+                test.settings(),
+                settings([Some("0"), Some("60"), Some("120")])
+            );
+            drop(lock);
+            assert_eq!(receiver.recv().unwrap(), Ok(()));
+        });
+        assert_eq!(test.settings(), settings([Some("1"), Some("0"), Some("0")]));
     }
 }

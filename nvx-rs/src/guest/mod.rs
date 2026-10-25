@@ -9,9 +9,11 @@
 //! program as one execution, with its launch, its bounded output and input, its ending, and its
 //! outcome, alone or, through its [`binding`](exec::binding), under the
 //! [execution engine](crate::exec); [`root`], through which it bootstraps the guest for a layered
-//! root, assembles the root, mounts live shares and mappings in it, and tears it down; and
+//! root, assembles the root, mounts live shares and mappings in it, and tears it down;
 //! [`gpt`], through which it reads the partition table of a GPT disk that the kernel attached as
-//! a block device.
+//! a block device; and, on x86-64, `clone`, through which a template's guest prepares for and
+//! requests a snapshot's capture before its root's assembly, behind the caller's fence of
+//! workload admission, with nothing mounted from the devices that its clones replace.
 //!
 //! Each other module holds one program, and the crate's binary of the same name runs its `main`.
 //! Two of them also offer their steps as typed calls, which any guest init or agent runs in its
@@ -82,6 +84,8 @@ mod kernel_text;
 pub use generation::GenerationId;
 
 pub mod cgroup;
+#[cfg(target_arch = "x86_64")]
+pub mod clone;
 pub mod console_pending;
 #[cfg(target_arch = "x86_64")]
 pub mod device_io;

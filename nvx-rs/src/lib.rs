@@ -49,9 +49,10 @@
 //!   execution engine (`guest::exec::binding`), bootstraps the guest for a layered root,
 //!   assembles the root, mounts live shares and mappings in it, and tears it down
 //!   (`guest::root`), and reads the partition table of a GPT disk's block device (`guest::gpt`),
-//!   and the typed calls through which it runs the time ABI's steps (`guest::time`) and reseeds
-//!   after a restore (`guest::reseed`) in its own process. The crate's `nvx-*` guest binaries run
-//!   the programs.
+//!   the typed calls through which it runs the time ABI's steps (`guest::time`) and reseeds after
+//!   a restore (`guest::reseed`) in its own process, and the preparation of a template's guest
+//!   for a capture before its root's assembly (`guest::clone`). The crate's `nvx-*` guest
+//!   binaries run the programs.
 //!
 //! # Example
 //!

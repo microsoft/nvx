@@ -1,18 +1,25 @@
 //! Live shares, virtio-fs devices that the VMM exports from the host, and a caller's mappings,
 //! mounted at targets in a layered root through the root's mapper, after the checks that the
-//! [module](super#live-shares-and-mappings) lists.
+//! [module](super#live-shares-and-mappings) lists, and the host export, the device from which a
+//! caller's mappings come.
 
 use std::fmt;
+use std::fs;
 use std::io;
 use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
-use super::{AGGREGATE_DIRECTORY, Error, Mount, Root, STAGING_DIRECTORY};
+use super::{
+    AGGREGATE_DIRECTORY, EXPORT_DIRECTORY, Error, HOSTFS_DIRECTORY, HOSTFS_DIRECTORY_MODE, Mount,
+    Root, STAGING_DIRECTORY,
+};
 use crate::guest::mappings::{
     self, Access, Kernel as MappingKernel, Kind, Mapper, Mapping, MappingError, Reserved,
     SourceRoot, TargetRoot,
 };
 use crate::guest::sys::{self, Errno, FileDescriptor, Mode, OpenFlags};
+use crate::protocol::export::ExportMode;
 use crate::protocol::share::{self, RESERVED_TARGET_CHARACTERS};
 
 /// The file system type of a live share.
@@ -52,7 +59,7 @@ pub struct ShareChild {
     pub kind: ShareKind,
 }
 
-/// Why a live share was refused before anything was mounted for it.
+/// Why a live share, or the host export, was refused before anything was mounted for it.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum ShareRefusal {
@@ -86,6 +93,8 @@ pub enum ShareRefusal {
     /// The root owns an aggregate already, whose children may or may not all be bound: it mounts
     /// every aggregate at the same place.
     SecondAggregate,
+    /// The root owns the host export already: it mounts every export at the same place.
+    SecondExport,
 }
 
 impl fmt::Display for ShareRefusal {
@@ -126,6 +135,18 @@ impl fmt::Display for ShareRefusal {
             Self::SecondAggregate => {
                 formatter.write_str("the root has an aggregate live share already")
             }
+            Self::SecondExport => formatter.write_str("the root has a host export already"),
+        }
+    }
+}
+
+impl From<ExportMode> for Access {
+    /// Returns the access of the guest's mount of a host export of `mode`, which
+    /// [`Root::mount_export`] takes: read-only for `ro`, and read-write for `rw`.
+    fn from(mode: ExportMode) -> Self {
+        match mode {
+            ExportMode::ReadOnly => Self::ReadOnly,
+            ExportMode::ReadWrite => Self::ReadWrite,
         }
     }
 }
@@ -223,6 +244,48 @@ impl Root {
             binds.push((mount, mapping.with_kind(child.kind.kind())));
         }
         let mounted = self.bind_children(&aggregate, tag, access, &binds);
+        self.latched |= mounted.is_err();
+        mounted
+    }
+
+    /// Mounts the host export, the aggregate virtio-fs device `tag` from which the caller maps host
+    /// paths into the root with [`map`](Self::map), and returns the export's root, the
+    /// [`SourceRoot`] of those mappings. A guest reads the export's tag and [`ExportMode`] from
+    /// its kernel command line with
+    /// [`HostExport::parse`](crate::protocol::export::HostExport::parse), and mounts it with the
+    /// mode's access.
+    ///
+    /// The device is mounted with `access`, `nosuid`, and `nodev` at `hostfs/root` in the runtime
+    /// directory, outside the root, where the workload cannot list the export's children: below
+    /// `hostfs`, a directory that the root creates with mode 0700, whatever the umask, so that only
+    /// root may enter it. A `hostfs` that is there already, such as one that an earlier root left,
+    /// must be as private: owned by the process's effective user, root in a guest, with no
+    /// permission for its group or others. Another is refused, and keeps its owner and mode.
+    /// Neither `hostfs` nor `hostfs/root` may be a symbolic link. The tag is checked first, as a
+    /// live share's is; nothing is created or mounted for a refused one.
+    ///
+    /// The mount belongs to the root, which unmounts it when it is torn down, after the live
+    /// shares and mappings, those mapped from the export included. The returned [`SourceRoot`]
+    /// holds a descriptor of the export's root, which keeps the mount busy: drop it before the
+    /// teardown, which otherwise fails to unmount the export, and leaves it mounted.
+    ///
+    /// A root has one export at most, since every export is mounted at the same place: once the
+    /// root has mounted one, another is refused. A failure once the tag passed its check latches
+    /// the root; an export that is mounted by then stays for the teardown.
+    pub fn mount_export(&mut self, tag: &str, access: Access) -> Result<SourceRoot, Error> {
+        let export = Mount::Export {
+            tag: tag.to_owned(),
+        };
+        self.check_latch(&export)?;
+        if self
+            .shares
+            .iter()
+            .any(|(mount, _)| matches!(mount, Mount::Export { .. }))
+        {
+            return Err(Error::Share(ShareRefusal::SecondExport));
+        }
+        check_tag(tag)?;
+        let mounted = self.mount_export_at(&export, tag, access);
         self.latched |= mounted.is_err();
         mounted
     }
@@ -355,6 +418,39 @@ impl Root {
         Ok(())
     }
 
+    /// Mounts the export's device `tag` at `hostfs/root` and opens its root, as
+    /// [`mount_export`](Self::mount_export) describes.
+    fn mount_export_at(
+        &mut self,
+        export: &Mount,
+        tag: &str,
+        access: Access,
+    ) -> Result<SourceRoot, Error> {
+        let hostfs = self.runtime.join(HOSTFS_DIRECTORY);
+        create_private_directory(&hostfs).map_err(|error| Error::MountPoint {
+            path: hostfs,
+            error,
+        })?;
+        let directory = self.runtime.join(EXPORT_DIRECTORY);
+        super::create_directory(&directory).map_err(|error| Error::MountPoint {
+            path: directory.clone(),
+            error,
+        })?;
+        self.mount_at(
+            export,
+            Some(tag.as_bytes()),
+            &directory,
+            Some(VIRTIOFS),
+            access.flags(),
+            None,
+        )?;
+        self.shares.push((export.clone(), directory.clone()));
+        SourceRoot::open(&directory).map_err(|error| Error::MountPoint {
+            path: directory,
+            error,
+        })
+    }
+
     /// Applies `mappings` from `source` through the root's mapper, as [`map`](Self::map)
     /// describes.
     fn apply(&mut self, source: &SourceRoot, mappings: &[Mapping]) -> Result<(), Error> {
@@ -470,6 +566,48 @@ fn open_mount_point(path: &Path) -> Result<FileDescriptor, Errno> {
     let flags =
         OpenFlags::O_PATH | OpenFlags::O_DIRECTORY | OpenFlags::O_NOFOLLOW | OpenFlags::O_CLOEXEC;
     sys::open(&sys::path_c_string(path)?, flags, Mode::empty())
+}
+
+/// Creates the directory `path` with [`HOSTFS_DIRECTORY_MODE`], whatever the umask, unless a
+/// directory, and not a symbolic link, is there already, which must be private to the process's
+/// effective user, as [`check_private`] requires; another is refused, and stays unchanged. It is
+/// created with no permission beyond that mode at any time.
+fn create_private_directory(path: &Path) -> io::Result<()> {
+    match fs::DirBuilder::new()
+        .mode(HOSTFS_DIRECTORY_MODE)
+        .create(path)
+    {
+        // The umask may have withheld some of the mode's permissions.
+        Ok(()) => fs::set_permissions(path, fs::Permissions::from_mode(HOSTFS_DIRECTORY_MODE)),
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+            let metadata = fs::symlink_metadata(path)?;
+            if !metadata.is_dir() {
+                return Err(Errno::ENOTDIR.into());
+            }
+            check_private(
+                metadata.uid(),
+                metadata.mode(),
+                nix::unistd::geteuid().as_raw(),
+            )
+        }
+        Err(error) => Err(error),
+    }
+}
+
+/// Refuses a directory that the user `owner` owns with `mode` unless it is private to `user`:
+/// unless `user` owns it, and it grants its group and others no permission.
+fn check_private(owner: u32, mode: u32, user: u32) -> io::Result<()> {
+    if owner == user && mode & (Mode::S_IRWXG | Mode::S_IRWXO).bits() == 0 {
+        return Ok(());
+    }
+    Err(io::Error::new(
+        io::ErrorKind::PermissionDenied,
+        format!(
+            "the directory there already is not private to user {user}: user {owner} owns it \
+             with mode {:04o}",
+            mode & 0o7777
+        ),
+    ))
 }
 
 /// Returns `error` as the error of a teardown's failed unmount: the call's own for a failed
@@ -624,5 +762,73 @@ mod tests {
         for name in ["", ".", "..", "a/b", "a b", "a,b"] {
             assert!(check_name(name).is_err(), "{name}");
         }
+    }
+
+    #[test]
+    fn the_export_s_directory_is_created_private_whatever_the_umask() {
+        for umask in [0o000, 0o022, 0o077, 0o777] {
+            // The test's own directory is created with the test's umask, in which this thread
+            // may still create entries.
+            let directory = tempfile::tempdir().unwrap();
+            let hostfs = directory.path().join("hostfs");
+            let mode = |path: &Path| fs::metadata(path).unwrap().permissions().mode() & 0o7777;
+            sys::with_thread_umask(umask, || create_private_directory(&hostfs)).unwrap();
+            assert_eq!(mode(&hostfs), HOSTFS_DIRECTORY_MODE, "{umask:o}");
+            // A private directory that is there already, such as this one, serves as it is.
+            sys::with_thread_umask(umask, || create_private_directory(&hostfs)).unwrap();
+            assert_eq!(mode(&hostfs), HOSTFS_DIRECTORY_MODE, "{umask:o}");
+            // One that its group or others may enter is refused, and keeps its mode.
+            fs::set_permissions(&hostfs, fs::Permissions::from_mode(0o750)).unwrap();
+            let error =
+                sys::with_thread_umask(umask, || create_private_directory(&hostfs)).unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::PermissionDenied, "{umask:o}");
+            assert_eq!(mode(&hostfs), 0o750, "{umask:o}");
+        }
+        // Anything else there is refused, a symbolic link to a directory included.
+        let directory = tempfile::tempdir().unwrap();
+        let file = directory.path().join("file");
+        fs::write(&file, "").unwrap();
+        let link = directory.path().join("link");
+        std::os::unix::fs::symlink(directory.path(), &link).unwrap();
+        for path in [file, link] {
+            let error = create_private_directory(&path).unwrap_err();
+            assert_eq!(
+                error.raw_os_error(),
+                Some(Errno::ENOTDIR as i32),
+                "{path:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_directory_is_private_to_its_owner_when_its_group_and_others_have_no_permission() {
+        // The owner's permissions, the file type, and the set-ID and sticky bits grant no one
+        // else access.
+        for mode in [0o700, 0o500, 0o000, 0o40700, 0o2700, 0o1700] {
+            check_private(0, mode, 0).unwrap();
+            check_private(1000, mode, 1000).unwrap();
+        }
+        for mode in [0o710, 0o701, 0o750, 0o705, 0o755, 0o777, 0o40711] {
+            let error = check_private(0, mode, 0).unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::PermissionDenied, "{mode:o}");
+        }
+        assert_eq!(
+            check_private(0, 0o40750, 0).unwrap_err().to_string(),
+            "the directory there already is not private to user 0: user 0 owns it with mode 0750"
+        );
+        // Another user's directory is refused, however private.
+        let error = check_private(1000, 0o40700, 0).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        assert_eq!(
+            error.to_string(),
+            "the directory there already is not private to user 0: user 1000 owns it with mode \
+             0700"
+        );
+    }
+
+    #[test]
+    fn an_export_s_mode_is_the_access_of_its_mount() {
+        assert_eq!(Access::from(ExportMode::ReadOnly), Access::ReadOnly);
+        assert_eq!(Access::from(ExportMode::ReadWrite), Access::ReadWrite);
     }
 }

@@ -1,8 +1,10 @@
 //! The worker's executions, as the worker's module documentation describes them: the table that
 //! reaches each one by its ID, the generations that the host started, their admission, the
-//! refusal of a start, the loop's turns at every execution, the collection of each program's
-//! status, before which the worker ends what is left of the program's process group, and that of
-//! the statuses of the programs that the worker forgot.
+//! refusal of a start, the loop's turns at every execution, the cgroup of each execution, through
+//! which it settles, and which keeps its place until the worker removes it, and, without
+//! cgroups, the collection of each program's status, before which the worker ends what is left
+//! of the program's process group, and that of the statuses of the programs that the worker
+//! forgot.
 
 use std::collections::{BTreeMap, VecDeque};
 use std::ffi::CString;
@@ -17,14 +19,16 @@ use nix::poll::{self, PollFd, PollFlags, PollTimeout};
 use nix::sys::signal::{self, Signal};
 use nix::sys::wait::{self, WaitPidFlag, WaitStatus};
 use nvx::exec::{Key, LaunchFailure, Runner, Settlement, Stream, Violation, runner};
+use nvx::guest::cgroup::{ExecutionCgroup, Layout, Scope};
+use nvx::guest::entry::{self, AccountError, Capabilities, Capability, Prepared, Publication};
 use nvx::guest::exec::binding::{Binding, Event};
 use nvx::guest::exec::{Execution, Options, Pipes, Source};
 use nvx::guest::process::Child;
 use nvx::guest::spawn::Command;
 
 use super::connection::{BACKLOG, Connection};
-use super::{MAX_EXECUTION_MEMORY, MAX_EXECUTIONS, MAX_HISTORY};
-use crate::exec::{GuestMessage, HostMessage, MAX_CHUNK, Start, name};
+use super::{Entrance, EntryOperations, MAX_EXECUTION_MEMORY, MAX_EXECUTIONS, MAX_HISTORY};
+use crate::exec::{AccountMode, GuestMessage, HostMessage, Identity, MAX_CHUNK, Start, name};
 use crate::guest::ServeError;
 
 /// The device that a program without the host's input reads.
@@ -56,6 +60,17 @@ pub(super) struct Executions {
     /// When the worker stops waiting for the programs once it dropped every execution: a while
     /// after it first did.
     cleared: Option<Instant>,
+    /// The cgroups in which the executions run, once the root is ready: the layout below whose
+    /// workload cgroup each execution gets a cgroup of its own. Without them, each program runs
+    /// in a process group alone.
+    cgroups: Option<Layout>,
+    /// The sandbox in which the executions run.
+    sandbox: Sandbox,
+    /// How many cgroups of executions the worker prepared, which numbers the next one.
+    prepared: u64,
+    /// The cgroups of the executions that did not settle, each of which keeps its place among
+    /// [`MAX_EXECUTIONS`] until the worker drops every execution.
+    fenced: Vec<ExecutionCgroup>,
     /// The ID from which the next turn serves the executions that the host reaches, before
     /// those of lower IDs: the ID after that of the execution that the last turn served first,
     /// so that the executions take turns at being served first.
@@ -73,18 +88,53 @@ pub(super) struct Executions {
     buffer: Vec<u8>,
 }
 
-/// One of the worker's executions: the binding of its runner to its program, which leaves the
-/// program's status to the worker, and the worker's own handle of the program.
+/// The sandbox in which the executions run once the root is ready: what every execution's
+/// [`Entrance`] shares.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct Sandbox {
+    /// The executions' hostname.
+    pub(super) hostname: Vec<u8>,
+    /// The sandbox's workload identity, its user ID and group ID, if the root configuration
+    /// names one, as which every execution runs.
+    pub(super) identity: Option<(u32, u32)>,
+    /// Whether the sandbox's listeners are published, as the root configuration says.
+    pub(super) publication: Publication,
+}
+
+impl Sandbox {
+    /// Returns the sandbox whose workload identity is `identity`, if it has one, and whose
+    /// listeners are published as `publication` says. Its executions take the entry's default
+    /// hostname, [`DEFAULT_HOSTNAME`](entry::DEFAULT_HOSTNAME), as nothing configures another:
+    /// this is the one place that names their hostname.
+    pub(super) fn new(identity: Option<(u32, u32)>, publication: Publication) -> Self {
+        Self {
+            hostname: entry::DEFAULT_HOSTNAME.as_bytes().to_vec(),
+            identity,
+            publication,
+        }
+    }
+}
+
+/// One of the worker's executions: the binding of its runner to its program, and either the
+/// execution's cgroup, through which it settles, or, without cgroups, the worker's own handle of
+/// the program, whose status the binding leaves to the worker.
 struct Run {
     /// The binding of the execution's runner to its program.
     binding: Binding,
-    /// The program, through a pidfd of the worker's own, which polls readable once the program
-    /// ended, until the worker collected its status.
+    /// Without cgroups, the program, through a pidfd of the worker's own, which polls readable
+    /// once the program ended, until the worker collected its status.
     program: Option<Child>,
+    /// The execution's cgroup, if the worker runs it in one.
+    cgroup: Option<ExecutionCgroup>,
+    /// Whether the runner's terminal outcome tells that the execution settled, so that its
+    /// cgroup is empty, and the worker may remove it.
+    settled: bool,
 }
 
 impl Executions {
-    /// Returns no executions.
+    /// Returns no executions, which run in process groups alone, with the default hostname,
+    /// without a workload identity, and with published listeners, until
+    /// [`run_in`](Self::run_in) names their cgroups and their sandbox.
     pub(super) fn new() -> Self {
         Self {
             attached: BTreeMap::new(),
@@ -92,6 +142,10 @@ impl Executions {
             reaping: Vec::new(),
             reaped: None,
             cleared: None,
+            cgroups: None,
+            sandbox: Sandbox::new(None, Publication::Published),
+            prepared: 0,
+            fenced: Vec::new(),
             turn: 0,
             owed: None,
             generations: BTreeMap::new(),
@@ -100,21 +154,31 @@ impl Executions {
         }
     }
 
+    /// Runs the executions that start from now on in `cgroups`, and in `sandbox`: each in a
+    /// cgroup of its own, below the workload cgroup, or, without cgroups, in a process group
+    /// alone.
+    pub(super) fn run_in(&mut self, cgroups: Option<Layout>, sandbox: Sandbox) {
+        self.cgroups = cgroups;
+        self.sandbox = sandbox;
+    }
+
     /// Hands `message` from the host to its execution at `now`, and queues on `connection` the
-    /// terminal record of a start that the worker refuses. Before a cancellation, it gives the
-    /// execution a turn at `now`, and queues its messages on `connection`: the end of a program
-    /// that ended meanwhile, even before its timeout, while the worker did not run, reaches the
-    /// runner first, so that it stays the program's own, without the cause of the cancellation,
-    /// or of a timeout that `now` reached.
+    /// terminal record of a start that the worker refuses. A start's program enters the root
+    /// through `operations`. Before a cancellation, it gives the execution a turn at `now`, and
+    /// queues its messages on `connection`: the end of a program that ended meanwhile, even
+    /// before its timeout, while the worker did not run, reaches the runner first, so that it
+    /// stays the program's own, without the cause of the cancellation, or of a timeout that
+    /// `now` reached.
     pub(super) fn deliver<S: Read + Write + AsFd>(
         &mut self,
         now: Instant,
         message: HostMessage<'_>,
+        operations: &mut dyn EntryOperations,
         connection: &mut Connection<S>,
     ) -> Result<(), ServeError> {
         let key = message.key();
         if let HostMessage::Start(start) = message {
-            return self.start(now, start, connection);
+            return self.start(now, start, operations, connection);
         }
         // A message of an execution that the worker no longer runs is late.
         let Self {
@@ -142,8 +206,9 @@ impl Executions {
 
     /// Takes a turn at `now`: collects the status of each program that ended, takes every step
     /// that the executions can take, queues their messages for the host on `connection`,
-    /// forgets each execution once it returned its terminal outcome, and collects the statuses
-    /// of the programs that it forgot, of those that ended.
+    /// forgets each execution once it returned its terminal outcome, which removes the cgroup of
+    /// one that settled, and collects the statuses of the programs that it forgot, of those that
+    /// ended.
     ///
     /// The executions that the host reaches take turns at being served first: a turn starts with
     /// the execution after the one that the last turn started with, in the order of their IDs,
@@ -162,7 +227,6 @@ impl Executions {
         let Self {
             attached,
             detached,
-            reaping,
             turn,
             owed,
             buffer,
@@ -184,17 +248,32 @@ impl Executions {
             *turn = first.wrapping_add(1);
         }
         *owed = more.then_some(now);
-        attached.retain(|_, run| running(run, reaping));
         for run in detached.iter_mut() {
             let key = run.binding.runner().key();
             while let Some(event) = run.binding.next(now, buffer) {
-                // A detached runner returns only its terminal outcome, which no host takes.
-                if !matches!(event, Event::Message(_)) {
-                    report(key, &event);
+                match event {
+                    // A detached runner returns only its terminal outcome, which no host takes.
+                    Event::Message(runner::Message::Terminal(outcome)) => {
+                        run.settled = outcome.is_reusable();
+                    }
+                    Event::Message(_) => {}
+                    event => report(key, &event),
                 }
             }
         }
-        detached.retain(|run| running(run, reaping));
+        let finished = attached
+            .iter()
+            .filter(|(_, run)| run.binding.is_finished())
+            .map(|(&id, _)| id)
+            .collect::<Vec<_>>();
+        let mut forgotten = finished
+            .into_iter()
+            .filter_map(|id| attached.remove(&id))
+            .collect::<Vec<_>>();
+        forgotten.extend(detached.extract_if(.., |run| run.binding.is_finished()));
+        for run in forgotten {
+            self.forget(run);
+        }
         self.reap(now);
         Ok(())
     }
@@ -208,29 +287,45 @@ impl Executions {
     }
 
     /// Returns whether the worker runs no execution: none that the host reaches, and none that it
-    /// abandoned. It may still collect the statuses of programs that it forgot.
+    /// abandoned. It may still collect the statuses of programs that it forgot, and hold the
+    /// cgroups of executions that did not settle.
     pub(super) fn is_empty(&self) -> bool {
         self.attached.is_empty() && self.detached.is_empty()
     }
 
-    /// Drops every execution, which ends the program and its process group of each one whose
-    /// program's status the worker has not collected, and waits for those programs to end, so
-    /// that the worker collects their statuses, at most [`REAP_WAIT`] after it first dropped
-    /// every execution: a later call, as once the executions drop after a stop, waits no longer.
-    /// The worker ended the process groups of the others when it collected their programs'
-    /// statuses.
+    /// Drops every execution, which ends the program and its process group, or the processes of
+    /// its cgroup, of each one that has not ended, and waits until the programs ended and their
+    /// cgroups emptied, so that the worker collects the programs' statuses and removes the
+    /// cgroups, those of the executions that did not settle included, whose processes it ends
+    /// too, at most [`REAP_WAIT`] after it first dropped every execution: a later call, as once
+    /// the executions drop after a stop, waits no longer. It removes the cgroups once it
+    /// collected the status of every program that it forgot: until then, such a program may
+    /// still join its cgroup, as its launch may not have reported, and a removal could hide it
+    /// once it ended. Without cgroups, the worker ended the process groups of the other programs
+    /// when it collected their statuses.
     pub(super) fn clear(&mut self) {
-        let Self {
-            attached,
-            detached,
-            reaping,
-            ..
-        } = self;
-        for run in std::mem::take(attached)
+        let runs = std::mem::take(&mut self.attached)
             .into_values()
-            .chain(detached.drain(..))
-        {
-            forget(&run, reaping);
+            .chain(self.detached.drain(..))
+            .collect::<Vec<_>>();
+        for run in runs {
+            let Run {
+                binding, cgroup, ..
+            } = run;
+            if binding.execution().status().is_none() {
+                self.reaping.push(binding.id());
+            }
+            drop(binding);
+            self.fenced.extend(cgroup);
+        }
+        // An execution that settled gave its cgroup back, which its drop then leaves alone.
+        for cgroup in &self.fenced {
+            if let Err(error) = cgroup.kill(Scope::Execution) {
+                eprintln!(
+                    "runtime-adapter-guest: cannot end the processes of {}: {error}",
+                    cgroup.path().display()
+                );
+            }
         }
         let deadline = *self
             .cleared
@@ -238,7 +333,10 @@ impl Executions {
         loop {
             let now = Instant::now();
             self.reap(now);
-            if self.reaping.is_empty() || now >= deadline {
+            if self.reaping.is_empty() {
+                self.fenced.retain(|cgroup| !removed(cgroup));
+            }
+            if (self.reaping.is_empty() && self.fenced.is_empty()) || now >= deadline {
                 return;
             }
             thread::sleep(REAP_INTERVAL);
@@ -292,6 +390,52 @@ impl Executions {
         self.attached.values().chain(&self.detached)
     }
 
+    /// Returns how many of the places of [`MAX_EXECUTIONS`] the executions take: one for each
+    /// execution that the worker runs, and, with cgroups, one for each cgroup of an execution that
+    /// did not settle, or, without them, one for each program that the worker forgot before it
+    /// collected its status.
+    fn places(&self) -> usize {
+        let held = if self.cgroups.is_some() {
+            self.fenced.len()
+        } else {
+            self.reaping.len()
+        };
+        self.attached.len() + self.detached.len() + held
+    }
+
+    /// Forgets `run`, whose runner returned its terminal outcome. Unless the worker collected
+    /// the program's status, the program's ID goes to `reaping`, so that the worker collects the
+    /// status once the program ended. Dropping the binding ends a program that has not ended, and
+    /// its process group, or the processes of its cgroup. The worker then removes the cgroup of
+    /// an execution that settled, which frees its place, and keeps that of one that did not, or
+    /// that it cannot remove, which keeps its place until the worker drops every execution.
+    fn forget(&mut self, run: Run) {
+        let Run {
+            binding,
+            cgroup,
+            settled,
+            ..
+        } = run;
+        if binding.execution().status().is_none() {
+            self.reaping.push(binding.id());
+        }
+        let key = binding.runner().key();
+        drop(binding);
+        let Some(cgroup) = cgroup else {
+            return;
+        };
+        if settled {
+            match cgroup.remove() {
+                Ok(()) => return,
+                Err(error) => eprintln!(
+                    "runtime-adapter-guest: execution {}: cannot remove its cgroup: {error}",
+                    name(key)
+                ),
+            }
+        }
+        self.fenced.push(cgroup);
+    }
+
     /// Collects at `now` the statuses of the programs that the worker forgot, of those that
     /// ended.
     fn reap(&mut self, now: Instant) {
@@ -306,13 +450,15 @@ impl Executions {
         self.reaped = Some(now);
     }
 
-    /// Starts the execution of `start` at `now`, or refuses it with a terminal record that it
-    /// queues on `connection`. A start of an earlier generation than the latest that the host
-    /// started of its ID is stale, and one of the same generation fails.
+    /// Starts the execution of `start` at `now`, whose program enters the root through
+    /// `operations`, or refuses it with a terminal record that it queues on `connection`. A start
+    /// of an earlier generation than the latest that the host started of its ID is stale, and one
+    /// of the same generation fails.
     fn start<S: Read + Write + AsFd>(
         &mut self,
         now: Instant,
         start: Start,
+        operations: &mut dyn EntryOperations,
         connection: &mut Connection<S>,
     ) -> Result<(), ServeError> {
         let key = start.key;
@@ -339,23 +485,89 @@ impl Executions {
             self.detached.push(abandoned);
         }
         let runner = Runner::new(key, start.limits, start.timers, now);
-        let executions = self.attached.len() + self.detached.len() + self.reaping.len();
-        let admitted = if executions >= MAX_EXECUTIONS {
+        let admitted = if self.places() >= MAX_EXECUTIONS {
             Err(Errno::EAGAIN as i32)
         } else if runner.memory_bound() > MAX_EXECUTION_MEMORY {
             Err(Errno::ENOMEM as i32)
         } else {
-            spawn(&start, &mut self.reaping).map_err(|error| error.raw_os_error().unwrap_or(0))
+            self.launch(&start, operations)
+                .map_err(|error| error.raw_os_error().unwrap_or(0))
         };
         match admitted {
-            Ok((execution, program)) => {
+            Ok((execution, program, cgroup)) => {
                 let binding = Binding::new(execution, runner);
-                let program = Some(program);
-                self.attached.insert(key.id(), Run { binding, program });
+                let run = Run {
+                    binding,
+                    program,
+                    cgroup,
+                    settled: false,
+                };
+                self.attached.insert(key.id(), run);
                 Ok(())
             }
             Err(error) => refuse(now, runner, error, connection),
         }
+    }
+
+    /// Starts the program of `start`, which enters the root through `operations` as its
+    /// [entrance](Self::entrance) describes, once the entry prepared its execution: with cgroups,
+    /// in a cgroup of its own that the worker prepares below the workload cgroup, and otherwise
+    /// with the worker's own handle of the program. A start whose entry the root's entry refuses
+    /// fails with the `errno` that [`refusal`] returns, before the worker prepares a cgroup. The
+    /// worker removes the cgroup of a program that it could not spawn. One that it spawned, but
+    /// whose execution could not be had, may still join the cgroup until the worker collected its
+    /// status, so that a removal could hide it once it ended: its cgroup keeps its place, as that
+    /// of an execution that did not settle.
+    fn launch(
+        &mut self,
+        start: &Start,
+        operations: &mut dyn EntryOperations,
+    ) -> io::Result<(Execution, Option<Child>, Option<ExecutionCgroup>)> {
+        let entrance = self.entrance(start)?;
+        let prepared = operations
+            .prepare(&entrance)
+            .map_err(|error| io::Error::from(refusal(&error)))?;
+        let Some(cgroups) = &self.cgroups else {
+            let (execution, program) = spawn(start, prepared, None, operations, &mut self.reaping)
+                .map_err(|unstarted| unstarted.error)?;
+            return Ok((execution, program, None));
+        };
+        self.prepared += 1;
+        let name = format!("execution-{}", self.prepared);
+        let cgroup = ExecutionCgroup::prepare(cgroups, Some(&name), &[])?;
+        match spawn(
+            start,
+            prepared,
+            Some(&cgroup),
+            operations,
+            &mut self.reaping,
+        ) {
+            Ok((execution, program)) => Ok((execution, program, Some(cgroup))),
+            Err(Unstarted { error, spawned }) => {
+                if spawned || cgroup.remove().is_err() {
+                    self.fenced.push(cgroup);
+                }
+                Err(error)
+            }
+        }
+    }
+
+    /// Returns how the program of `start` enters the root: with the sandbox's hostname and its
+    /// publication of listeners, as the identity that exactly one source names, the sandbox's
+    /// workload identity, if it has one, or otherwise the identity that the start names. A start
+    /// that names an identity in a sandbox with a workload identity, or none in a sandbox without
+    /// one, is `EINVAL`.
+    fn entrance(&self, start: &Start) -> io::Result<Entrance> {
+        let identity = match (self.sandbox.identity, &start.identity) {
+            (Some((uid, gid)), None) => entry::Identity::new(uid, gid),
+            (None, Some(identity)) => entry_identity(identity),
+            _ => return Err(Errno::EINVAL.into()),
+        };
+        Ok(Entrance {
+            identity,
+            hostname: self.sandbox.hostname.clone(),
+            publication: self.sandbox.publication,
+        })
     }
 
     /// Remembers that the host started `key`, the latest generation of its ID, and forgets the
@@ -386,13 +598,16 @@ impl Drop for Executions {
 
 impl Run {
     /// Collects the program's status without blocking once the program ended, and hands it to
-    /// the binding. First, it kills what is left of the process group that the program leads, as
-    /// the binding's settlement through a cgroup kills what is left in the cgroup, so that no
-    /// descendant that stayed in the group outlives the program, or holds its output open: until
-    /// its status is collected, the program, a zombie, keeps its process ID, which is the
-    /// group's, from any other process, so that the kill reaches that group alone.
+    /// the binding, if the worker collects it: without cgroups. First, it kills what is left of
+    /// the process group that the program leads, as the binding's settlement through a cgroup
+    /// kills what is left in the cgroup, so that no descendant that stayed in the group outlives
+    /// the program, or holds its output open: until its status is collected, the program, a
+    /// zombie, keeps its process ID, which is the group's, from any other process, so that the
+    /// kill reaches that group alone.
     fn collect(&mut self) {
-        let Self { binding, program } = self;
+        let Self {
+            binding, program, ..
+        } = self;
         let Some(child) = program else {
             return;
         };
@@ -447,10 +662,11 @@ impl Run {
     }
 
     /// Serves the execution in a turn at `now`: takes every step that it can take, and queues its
-    /// messages for the host on `connection`. Each read of its program's output goes into
-    /// `buffer`, until it read [`SHARE`] bytes in the turn, or while the connection is
-    /// backlogged: an empty buffer then lets it read no output, and return none. Returns whether
-    /// it read its whole share, and so may have more output to read in the next turn.
+    /// messages for the host on `connection`, and notes whether its terminal outcome tells that
+    /// it settled. Each read of its program's output goes into `buffer`, until it read [`SHARE`]
+    /// bytes in the turn, or while the connection is backlogged: an empty buffer then lets it
+    /// read no output, and return none. Returns whether it read its whole share, and so may have
+    /// more output to read in the next turn.
     fn serve<S: Read + Write + AsFd>(
         &mut self,
         now: Instant,
@@ -471,8 +687,10 @@ impl Run {
             };
             match event {
                 Event::Message(message) => {
-                    if let runner::Message::Output { length: bytes, .. } = message {
-                        read += bytes;
+                    match message {
+                        runner::Message::Output { length: bytes, .. } => read += bytes,
+                        runner::Message::Terminal(outcome) => self.settled = outcome.is_reusable(),
+                        _ => {}
                     }
                     if let Some(message) = GuestMessage::from_runner(key, message, lent) {
                         connection.send(&message.encode())?;
@@ -485,62 +703,114 @@ impl Run {
     }
 }
 
-/// Returns whether the runner of `run` has not returned its terminal outcome, and otherwise
-/// [forgets](forget) the execution.
-fn running(run: &Run, reaping: &mut Vec<u32>) -> bool {
-    if run.binding.is_finished() {
-        forget(run, reaping);
-        return false;
-    }
-    true
+/// Why the worker could not start a program.
+struct Unstarted {
+    /// The error.
+    error: io::Error,
+    /// Whether the worker spawned the program before the error.
+    spawned: bool,
 }
 
-/// Adds the process ID of the program of `run` to `reaping`, unless the worker collected the
-/// program's status: the worker drops the execution next, whose binding kills the program and its
-/// process group, which the program's ID still names, and the worker collects the program's
-/// status once the program ended.
-fn forget(run: &Run, reaping: &mut Vec<u32>) {
-    if run.binding.execution().status().is_none() {
-        reaping.push(run.binding.id());
+impl From<io::Error> for Unstarted {
+    /// Returns the failure of a program that the worker did not spawn.
+    fn from(error: io::Error) -> Self {
+        Self {
+            error,
+            spawned: false,
+        }
     }
 }
 
-/// Spawns the program of `start` with pipes, in a process group of its own, and returns its
-/// execution, which leaves the program's status to the worker, with the worker's own handle of
-/// the program. If the program started, but the execution or the handle could not be had, the
-/// program and its process group end, and the program's ID goes to `reaping`, so that the worker
-/// collects its status once it ended, without waiting for it.
-fn spawn(start: &Start, reaping: &mut Vec<u32>) -> io::Result<(Execution, Child)> {
-    let arguments = start
-        .arguments
-        .iter()
-        .map(|argument| CString::new(argument.as_slice()))
-        .collect::<Result<Vec<_>, _>>()?;
+/// Spawns the program of `start` with pipes, in a process group of its own, and in `cgroup`, if
+/// any, through `operations`, whose spawn enters the root as `prepared` prepared it, which makes
+/// the program lead a session of its own, and returns its execution. The program starts in the
+/// start's working directory, or the root's `/`, with exactly the start's environment. In a
+/// cgroup, the execution settles through the cgroup, and collects the program's status itself.
+/// Otherwise, it leaves the status to the worker, and comes with the worker's own handle of the
+/// program. If the program started, but the execution or the handle could not be had, the
+/// program ends, with its process group or the processes of its cgroup, and the program's ID goes
+/// to `reaping`, so that the worker collects its status once it ended, without waiting for it;
+/// the failure then tells that the worker spawned the program.
+fn spawn(
+    start: &Start,
+    prepared: Prepared,
+    cgroup: Option<&ExecutionCgroup>,
+    operations: &mut dyn EntryOperations,
+    reaping: &mut Vec<u32>,
+) -> Result<(Execution, Option<Child>), Unstarted> {
+    let strings = |items: &[Vec<u8>]| {
+        items
+            .iter()
+            .map(|item| CString::new(item.as_slice()))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(io::Error::from)
+    };
+    let arguments = strings(&start.arguments)?;
+    let environment = strings(&start.environment)?;
     let program = arguments.first().cloned().unwrap_or_default();
     let (pipes, ends) = Pipes::new(start.input)?;
     let stdin = match ends.stdin {
         Some(stdin) => stdin,
         None => OwnedFd::from(File::open(NULL_DEVICE)?),
     };
-    let spawned = Command::new(program, arguments)
+    let mut command = Command::new(program, arguments)
         .stdin(stdin)
         .stdout(ends.stdout)
         .stderr(ends.stderr)
         .new_process_group()
-        .spawn()?;
+        .environment(environment);
+    if let Some(directory) = &start.working_directory {
+        let directory = CString::new(directory.as_slice()).map_err(io::Error::from)?;
+        command = command.working_directory(directory);
+    }
+    if let Some(cgroup) = cgroup {
+        command = command.cgroup(cgroup.placement()?);
+    }
+    let spawned = operations.spawn(command, prepared)?;
     let id = spawned.id();
-    let options = Options::new().process_group().caller_reaps();
-    let execution = Execution::new(spawned, pipes, options).inspect_err(|error| {
-        // The execution ended the program and its process group, and the program's status is
-        // still the worker's, unless `ESRCH` tells that it is gone already.
-        if error.raw_os_error() != Some(Errno::ESRCH as i32) {
-            reaping.push(id);
-        }
-    })?;
+    let options = match cgroup {
+        Some(cgroup) => Options::new().cgroup(cgroup, Scope::Execution),
+        None => Options::new().process_group().caller_reaps(),
+    };
+    let unstarted = |error| Unstarted {
+        error,
+        spawned: true,
+    };
+    let execution = Execution::new(spawned, pipes, options)
+        .inspect_err(|error| {
+            // The execution ended the program, and the program's status is still the worker's,
+            // unless `ESRCH` tells that it is gone already.
+            if error.raw_os_error() != Some(Errno::ESRCH as i32) {
+                reaping.push(id);
+            }
+        })
+        .map_err(unstarted)?;
+    if cgroup.is_some() {
+        return Ok((execution, None));
+    }
     // Nothing collected the program's status, so its ID still names it. Dropping the execution
     // after a failure ends the program and its process group.
-    let program = Child::with_pidfd(id).inspect_err(|_| reaping.push(id))?;
-    Ok((execution, program))
+    let program = Child::with_pidfd(id)
+        .inspect_err(|_| reaping.push(id))
+        .map_err(unstarted)?;
+    Ok((execution, Some(program)))
+}
+
+/// Removes the cgroup `cgroup` of an execution that the worker dropped, and returns whether it is
+/// gone, or false while a process, a zombie included, is left in it. A removal that fails
+/// otherwise is reported, and given up.
+fn removed(cgroup: &ExecutionCgroup) -> bool {
+    match cgroup.remove() {
+        Ok(()) => true,
+        Err(error) if error.raw_os_error() == Some(Errno::EBUSY as i32) => false,
+        Err(error) => {
+            eprintln!(
+                "runtime-adapter-guest: cannot remove {}: {error}",
+                cgroup.path().display()
+            );
+            true
+        }
+    }
 }
 
 /// Refuses the execution of `runner` at `now`, whose launch failed at stage 0 with `error`: queues
@@ -573,6 +843,42 @@ fn refuse<S: Read + Write + AsFd>(
 /// Returns the failure of the host's message about the execution `key` that its runner refused.
 fn refused(key: Key, violation: Violation) -> ServeError {
     ServeError::Execution(format!("execution {}: {violation}", name(key)))
+}
+
+/// Returns the `errno` with which the worker refuses a start whose entry `error` refused, at
+/// stage 0: `EPERM` for an identity that the entry does not permit, with a capability outside
+/// its allowlist, with any capability but user ID 0's, or with `CAP_NET_BIND_SERVICE` or
+/// `CAP_NET_RAW` while listeners are published; `ENOENT` for an identity whose account the root
+/// lacks in existing-account mode, without the user ID's passwd entry or the group ID's group
+/// entry; the error's own for an account database or a root that cannot be read; and `EINVAL`
+/// otherwise.
+fn refusal(error: &entry::Error) -> Errno {
+    match error {
+        entry::Error::Capability(_)
+        | entry::Error::NonRootCapabilities
+        | entry::Error::Published(_) => Errno::EPERM,
+        entry::Error::Account(AccountError::Missing | AccountError::Group) => Errno::ENOENT,
+        entry::Error::Account(AccountError::Read(_, error)) | entry::Error::Root(error) => {
+            error.raw_os_error().map_or(Errno::EIO, Errno::from_raw)
+        }
+        _ => Errno::EINVAL,
+    }
+}
+
+/// Returns the identity of `nvx::guest::entry` that a start's `identity` names.
+fn entry_identity(identity: &Identity) -> entry::Identity {
+    let capabilities = (0..64)
+        .filter(|number| identity.capabilities & 1 << number != 0)
+        .filter_map(Capability::new)
+        .collect::<Capabilities>();
+    let account = match identity.account {
+        AccountMode::Existing => entry::AccountMode::Existing,
+        AccountMode::Numeric => entry::AccountMode::Numeric,
+    };
+    entry::Identity::new(identity.uid, identity.gid)
+        .groups(identity.groups.clone())
+        .capabilities(capabilities)
+        .account(account)
 }
 
 /// Reports that the worker cannot collect the status of the program of `binding`'s execution,

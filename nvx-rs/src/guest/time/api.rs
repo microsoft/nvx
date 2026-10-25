@@ -19,8 +19,8 @@ use super::state::{
 use super::system::{
     self, PORTB_GENERATION_ID_AVAILABLE, PORTB_PACKET_AVAILABLE, PRIVATE_FILE_MODE, RESTORE_PATH,
     RESTORE_TEMP_PATH, RealOps, Runtime, SELECT_GENERATION_ID, SELECT_PACKET, SampleError,
-    SpawnError, clock_ns, cpu_time_ns, current_frequency, fork_process, initial_sample, portb_read,
-    set_frequency, state_apply, state_load, state_store, step_clock,
+    SaveError, SpawnError, clock_ns, cpu_time_ns, current_frequency, fork_process, initial_sample,
+    portb_read, set_frequency, state_apply, state_load, state_store, step_clock,
 };
 use super::{NSEC_PER_USEC, Phase};
 use crate::guest::GenerationId;
@@ -160,6 +160,32 @@ impl TimeAbi {
     pub fn restore_finish(&self, request: RestoreFinish) -> Result<(), TimeError> {
         released(restore_finish(&self.runtime(), request))
     }
+
+    /// Prepares the guest for a capture, as `nvx-time pre-capture` does: waits until the boot
+    /// checks have completed, for 30 seconds at most, since they start the time daemon that the
+    /// capture checks require, runs the capture checks, saves the stall detectors' settings and
+    /// suppresses the detectors, and records the capture checks.
+    ///
+    /// A capture check that fails reports a violation, which stops the VM in enforcing mode; a
+    /// report-only call goes on, as `nvx-time` does. A call that fails leaves the detectors as
+    /// they were, and never touches those of a capture that is pending already,
+    /// [`PreCaptureError::Pending`], unless it
+    /// [holds their suppression](PreCaptureError::holds_suppression), which the caller then
+    /// releases with [`cancel_capture`](Self::cancel_capture), as after a call that succeeded.
+    /// Like the other calls, it fails with [`TimeError::PortRelease`], as
+    /// [`PreCaptureError::PortRelease`], if the thread may still hold some of the permission for
+    /// the ports.
+    pub(crate) fn pre_capture(&self) -> Result<(), PreCaptureError> {
+        released_preparation(pre_capture(&self.runtime()), sys::check_released())
+    }
+
+    /// Restores the stall detectors' settings that [`pre_capture`](Self::pre_capture) saved, and
+    /// removes their record, as `nvx-time cancel-capture` does, or fails with its diagnostic,
+    /// such as `read /run/nvx/time-suppression: No such file or directory`. It takes no
+    /// permission for the ports.
+    pub(crate) fn cancel_capture(&self) -> Result<(), Vec<u8>> {
+        system::suppression_restore(false)
+    }
 }
 
 impl Default for TimeAbi {
@@ -183,6 +209,25 @@ fn cmdline_requests_report_only() -> bool {
 fn released<T>(result: Result<T, TimeError>) -> Result<T, TimeError> {
     sys::check_released().map_err(TimeError::from)?;
     result
+}
+
+/// Ends a preparation of a capture with `result`, unless the calling thread may still hold port
+/// permission, as `released` tells, which the preparation reports instead, with whether it holds
+/// the stall detectors' suppression.
+fn released_preparation(
+    result: Result<(), PreCaptureError>,
+    released: Result<(), PortError>,
+) -> Result<(), PreCaptureError> {
+    let Err(error) = released else {
+        return result;
+    };
+    let suppressed = result
+        .as_ref()
+        .map_or_else(PreCaptureError::holds_suppression, |()| true);
+    Err(PreCaptureError::PortRelease {
+        error: error.into(),
+        suppressed,
+    })
 }
 
 /// The outcome of the cold-boot time step, from which [`TimeAbi::start_daemon`] starts the time
@@ -257,6 +302,99 @@ fn read_generation_id(runtime: &Runtime<'_>) -> Result<GenerationId, TimeError> 
         portb_read(&ports, Port::PortbData, &mut id);
     }
     Ok(GenerationId::from_bytes(id))
+}
+
+/// Why [`TimeAbi::pre_capture`] failed.
+#[derive(Debug)]
+pub(crate) enum PreCaptureError {
+    /// The boot checks were still pending when the wait ended: a violation of check C10, which
+    /// a report-only call reports with its event.
+    BootChecks(TimeError),
+    /// The capture checks could not read the CPU sets: a violation of check C6, which a
+    /// report-only call reports with its event.
+    CaptureChecks(TimeError),
+    /// The stall detectors' settings are saved already, by a capture that is still pending.
+    Pending,
+    /// The stall detectors' settings could not be saved, or the detectors not suppressed, with
+    /// this error. The call left the settings as they were.
+    Suppression(Errno),
+    /// The stall detectors could not be suppressed, with this error, nor the ones that the call
+    /// suppressed restored, so it kept the record of their settings: the call
+    /// [holds their suppression](PreCaptureError::holds_suppression).
+    Unrestored(Errno),
+    /// The thread may still hold some of the permission for the ports, a
+    /// [`TimeError::PortRelease`], after which it must start neither a thread nor a process.
+    PortRelease {
+        /// The error.
+        error: TimeError,
+        /// Whether the call [holds the suppression](PreCaptureError::holds_suppression) of the
+        /// stall detectors, as one that succeeded does.
+        suppressed: bool,
+    },
+}
+
+impl PreCaptureError {
+    /// Returns whether the call that failed holds the suppression of the stall detectors, as a
+    /// call that succeeded does: their record stays, and the caller restores their settings with
+    /// [`TimeAbi::cancel_capture`].
+    pub(crate) fn holds_suppression(&self) -> bool {
+        matches!(
+            self,
+            Self::Unrestored(_)
+                | Self::PortRelease {
+                    suppressed: true,
+                    ..
+                }
+        )
+    }
+}
+
+/// The preparation of [`TimeAbi::pre_capture`].
+fn pre_capture(runtime: &Runtime<'_>) -> Result<(), PreCaptureError> {
+    let (state, completed) = checks::wait_for_checks(true);
+    if !completed {
+        return Err(PreCaptureError::BootChecks(check_failed(
+            runtime,
+            Phase::Capture,
+            CheckId::C10,
+            "the boot checks are still pending",
+        )));
+    }
+    let start = clock_ns(sys::Clock::Monotonic);
+    let cpu_start = cpu_time_ns();
+    runtime.set_generation(state.generation as u32);
+    let mut checks = Checks::load(Phase::Capture).map_err(|_| {
+        PreCaptureError::CaptureChecks(check_failed(
+            runtime,
+            Phase::Capture,
+            CheckId::C6,
+            "cannot read the CPU sets",
+        ))
+    })?;
+    checks::run_capture_checks(runtime, &mut checks);
+    let elapsed = clock_ns(sys::Clock::Monotonic).wrapping_sub(start);
+    let cpu = cpu_time_ns().wrapping_sub(cpu_start);
+    match system::suppression_save() {
+        Ok(()) => {}
+        Err(SaveError::Undone(Errno::EEXIST)) => return Err(PreCaptureError::Pending),
+        Err(SaveError::Undone(error)) => return Err(PreCaptureError::Suppression(error)),
+        Err(SaveError::Kept(error)) => return Err(PreCaptureError::Unrestored(error)),
+    }
+    if let Err(error) = checks::record_check(
+        runtime,
+        &checks,
+        elapsed / NSEC_PER_USEC,
+        cpu / NSEC_PER_USEC,
+        0,
+        0,
+    ) {
+        checks.fail(
+            runtime,
+            CheckId::C10,
+            format!("cannot record the capture check: {}", error.desc()),
+        );
+    }
+    Ok(())
 }
 
 /// How a snapshot treats the guest's scratch disk, which the capture request selects.
@@ -391,6 +529,21 @@ impl Restore {
     /// Returns the restore packet's online processor count, which `nvx-time capture` prints.
     pub(crate) fn online_vp_count(&self) -> u8 {
         self.online_vp_count
+    }
+}
+
+#[cfg(test)]
+impl Restore {
+    /// Returns an unfinished restore to the new VM generation ID `generation_id`, with nothing to
+    /// activate, as a test's fake capture returns one.
+    pub(crate) fn to(generation_id: GenerationId) -> Self {
+        Self {
+            flags: 0,
+            online_vp_count: 0,
+            generation_id,
+            memory_ranges: Vec::new(),
+            finished: false,
+        }
     }
 }
 
@@ -1136,6 +1289,57 @@ mod tests {
             "{error:?}"
         );
         assert_eq!(sys::check_released(), Ok(()));
+    }
+
+    #[test]
+    fn a_preparation_that_may_leave_port_permission_fails_with_its_suppression() {
+        let revoke = Err(PortError::Revoke(Errno::ENOMEM));
+        // A preparation that suppressed the detectors holds their suppression.
+        let error = released_preparation(Ok(()), revoke).unwrap_err();
+        assert!(
+            matches!(
+                &error,
+                PreCaptureError::PortRelease {
+                    error: TimeError::PortRelease(source),
+                    suppressed: true,
+                } if has_errno(source, Errno::ENOMEM)
+            ),
+            "{error:?}"
+        );
+        assert!(error.holds_suppression());
+        // One that kept the record of the settings that it could not restore holds it too.
+        let kept = Err(PreCaptureError::Unrestored(Errno::EIO));
+        let error = released_preparation(kept, revoke).unwrap_err();
+        assert!(error.holds_suppression(), "{error:?}");
+        // One that left the settings as they were holds nothing.
+        for failed in [
+            PreCaptureError::Pending,
+            PreCaptureError::Suppression(Errno::EIO),
+        ] {
+            let error = released_preparation(Err(failed), revoke).unwrap_err();
+            assert!(
+                matches!(
+                    error,
+                    PreCaptureError::PortRelease {
+                        suppressed: false,
+                        ..
+                    }
+                ),
+                "{error:?}"
+            );
+            assert!(!error.holds_suppression());
+        }
+        // Without port permission, the preparation's result stands.
+        released_preparation(Ok(()), Ok(())).unwrap();
+        let error = released_preparation(Err(PreCaptureError::Pending), Ok(())).unwrap_err();
+        assert!(matches!(error, PreCaptureError::Pending), "{error:?}");
+        assert!(!error.holds_suppression());
+        let kept = Err(PreCaptureError::Unrestored(Errno::EIO));
+        assert!(
+            released_preparation(kept, Ok(()))
+                .unwrap_err()
+                .holds_suppression()
+        );
     }
 
     /// Returns the outcome of a cold boot that accepted no sample.

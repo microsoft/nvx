@@ -7,20 +7,19 @@ use std::os::unix::ffi::OsStrExt;
 use std::path::PathBuf;
 
 use super::api::{
-    self, CaptureOutcome, CaptureRequest, CpuSet, RestoreFinish, ScratchPolicy, TimeAbi, TimeError,
+    self, CaptureOutcome, CaptureRequest, CpuSet, PreCaptureError, RestoreFinish, ScratchPolicy,
+    TimeAbi, TimeError,
 };
 use super::checks::{self, Checks};
 use super::cpu_mask::CpuMask;
 use super::decoders::{self, GENERATION_ID_SIZE};
 use super::events::CheckId;
-use super::system::{
-    self, PORTB_TIME_WINDOW, Runtime, clock_ns, cpu_time_ns, suppression_restore, suppression_save,
-};
+use super::system::{self, PORTB_TIME_WINDOW, Runtime, clock_ns, cpu_time_ns};
 use super::{NSEC_PER_USEC, Phase, USAGE};
 use crate::guest::GenerationId;
 use crate::guest::parse::parse_decimal;
 use crate::guest::status::CommandError;
-use crate::guest::sys::{self, Errno, Port, PortError};
+use crate::guest::sys::{self, Port, PortError};
 
 /// The capture requests that `capture` accepts, and writes to the snapshot port: 0 or 1.
 const CAPTURE_REQUESTS: std::ops::RangeInclusive<u64> = 0..=1;
@@ -145,64 +144,44 @@ fn cmd_check(
 
 /// Preparation steps 1 to 4: waits for the boot checks, which start the daemon that C10
 /// requires, runs the capture checks, and suppresses the stall detectors before the snapshot.
-fn cmd_pre_capture(runtime: &Runtime<'_>, err: &mut dyn Write) -> Result<(), CommandError> {
-    let (state, completed) = checks::wait_for_checks(true);
-    if !completed {
-        let mut checks = Checks::empty(Phase::Capture);
-        checks.fail(runtime, CheckId::C10, "the boot checks are still pending");
-        return Err(CommandError::Operation);
-    }
-    let start = clock_ns(sys::Clock::Monotonic);
-    let cpu_start = cpu_time_ns();
-    runtime.set_generation(state.generation as u32);
-    let mut checks = match Checks::load(Phase::Capture) {
-        Ok(checks) => checks,
-        Err(_) => {
-            let mut checks = Checks::empty(Phase::Capture);
-            checks.fail(runtime, CheckId::C6, "cannot read the CPU sets");
-            return Err(CommandError::Operation);
+/// A preparation that fails leaves the detectors as they were, as far as it can: the snapshot
+/// script cancels only a capture whose preparation succeeded.
+fn cmd_pre_capture(abi: TimeAbi, err: &mut dyn Write) -> Result<(), CommandError> {
+    abi.pre_capture().map_err(|error| {
+        if error.holds_suppression() {
+            let _ = abi.cancel_capture();
         }
+        pre_capture_failure(err, error)
+    })
+}
+
+/// Reports why the preparation of a capture failed, such as `nvx-time: cannot suppress the stall
+/// detectors: a capture is already pending`, and fails. A violation's event is its only report,
+/// and `run` reports a permission that the thread may still hold once, when the command ends.
+fn pre_capture_failure(err: &mut dyn Write, error: PreCaptureError) -> CommandError {
+    let reason = match error {
+        PreCaptureError::BootChecks(_)
+        | PreCaptureError::CaptureChecks(_)
+        | PreCaptureError::PortRelease { .. } => {
+            return CommandError::Operation;
+        }
+        PreCaptureError::Pending => "a capture is already pending",
+        PreCaptureError::Suppression(error) | PreCaptureError::Unrestored(error) => error.desc(),
     };
-    checks::run_capture_checks(runtime, &mut checks);
-    let elapsed = clock_ns(sys::Clock::Monotonic).wrapping_sub(start);
-    let cpu = cpu_time_ns().wrapping_sub(cpu_start);
-    if let Err(error) = suppression_save() {
-        let reason = if error == Errno::EEXIST {
-            "a capture is already pending"
-        } else {
-            let _ = suppression_restore(false);
-            error.desc()
-        };
-        report(
-            err,
-            &[
-                b"nvx-time: cannot suppress the stall detectors: ",
-                reason.as_bytes(),
-                b"\n",
-            ],
-        );
-        return Err(CommandError::Operation);
-    }
-    if let Err(error) = checks::record_check(
-        runtime,
-        &checks,
-        elapsed / NSEC_PER_USEC,
-        cpu / NSEC_PER_USEC,
-        0,
-        0,
-    ) {
-        checks.fail(
-            runtime,
-            CheckId::C10,
-            format!("cannot record the capture check: {}", error.desc()),
-        );
-    }
-    Ok(())
+    report(
+        err,
+        &[
+            b"nvx-time: cannot suppress the stall detectors: ",
+            reason.as_bytes(),
+            b"\n",
+        ],
+    );
+    CommandError::Operation
 }
 
 /// Cancels capture by restoring saved stall-detector settings.
-fn cmd_cancel_capture(err: &mut dyn Write) -> Result<(), CommandError> {
-    suppression_restore(false).map_err(|detail| {
+fn cmd_cancel_capture(abi: TimeAbi, err: &mut dyn Write) -> Result<(), CommandError> {
+    abi.cancel_capture().map_err(|detail| {
         report(err, &[b"nvx-time: ", &detail, b"\n"]);
         CommandError::Operation
     })
@@ -387,9 +366,9 @@ pub(super) fn run(
     let result = match (command, rest) {
         (b"boot", []) => cmd_boot(abi, &runtime, err),
         (b"check", arguments) => cmd_check(&runtime, arguments, err),
-        (b"pre-capture", []) => cmd_pre_capture(&runtime, err),
+        (b"pre-capture", []) => cmd_pre_capture(abi, err),
         (b"capture", arguments) => cmd_capture(abi, arguments, out, err),
-        (b"cancel-capture", []) => cmd_cancel_capture(err),
+        (b"cancel-capture", []) => cmd_cancel_capture(abi, err),
         (b"restore-finish", arguments) => cmd_restore_finish(abi, arguments, err),
         (b"status", []) => cmd_status(&runtime, out),
         (b"sample", []) => cmd_sample(&runtime, out, err),
@@ -406,6 +385,57 @@ pub(super) fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::guest::sys::Errno;
+
+    #[test]
+    fn a_failed_preparation_reports_why_the_detectors_stay_unsuppressed() {
+        let cases = [
+            (
+                PreCaptureError::Pending,
+                "nvx-time: cannot suppress the stall detectors: a capture is already pending\n"
+                    .to_owned(),
+            ),
+            (
+                PreCaptureError::Suppression(Errno::EROFS),
+                format!(
+                    "nvx-time: cannot suppress the stall detectors: {}\n",
+                    Errno::EROFS.desc()
+                ),
+            ),
+            (
+                PreCaptureError::Unrestored(Errno::EIO),
+                format!(
+                    "nvx-time: cannot suppress the stall detectors: {}\n",
+                    Errno::EIO.desc()
+                ),
+            ),
+            // A violation's event is its only report.
+            (
+                PreCaptureError::BootChecks(TimeError::StateUnavailable),
+                String::new(),
+            ),
+            (
+                PreCaptureError::CaptureChecks(TimeError::StateUnavailable),
+                String::new(),
+            ),
+            // `run` reports the permission once, when the command ends.
+            (
+                PreCaptureError::PortRelease {
+                    error: PortError::Revoke(Errno::ENOMEM).into(),
+                    suppressed: true,
+                },
+                String::new(),
+            ),
+        ];
+        for (error, text) in cases {
+            let mut err = Vec::new();
+            assert_eq!(
+                pre_capture_failure(&mut err, error),
+                CommandError::Operation
+            );
+            assert_eq!(String::from_utf8(err).unwrap(), text);
+        }
+    }
 
     #[test]
     fn capture_requests_are_plain_decimal_zero_or_one() {

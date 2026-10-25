@@ -1,11 +1,12 @@
 //! What the VM tests share: the sandbox of a test, in which they run the host program's commands,
-//! and the environment that they read.
+//! the fixtures of its layered roots, and the environment that they read.
 //!
 //! The tests read:
 //!
 //! - `NVX_HYPERVISOR`: the hypervisor, through `nvx::Hypervisor::from_env_or_default`;
 //! - `NVX_ARTIFACTS_DIR`: NVX's artifacts, a repository checkout or an extracted release, with
-//!   the install metadata from which NVX gives their runtime identity;
+//!   the install metadata from which NVX gives their runtime identity, and the [`Fixtures`] of
+//!   the layered roots;
 //! - `RUNTIME_ADAPTER_GUEST`: the guest agent, a static `x86_64-unknown-linux-musl` build of
 //!   `runtime-adapter-guest`.
 // Each test crate uses its own part of this module.
@@ -15,21 +16,26 @@ use std::collections::BTreeMap;
 use std::convert::Infallible;
 use std::env;
 use std::error::Error;
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::fs::{self, File};
 use std::io;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use nvx::Hypervisor;
+use nvx::host::artifacts::{ArtifactDir, Artifacts, Guest};
 use nvx::host::process::Process;
-use nvx::host::store::{RuntimeRecord, SandboxStore};
+use nvx::host::store::{LOG_NAME, RuntimeRecord, SandboxStore};
 use nvx::host::supervisor::{self, Reattached, StopOutcome};
+use runtime_adapter::layered::RECORD_NAME;
+use serde_json::Value;
 
 /// The variable that names the guest agent.
 pub(crate) const GUEST_AGENT: &str = "RUNTIME_ADAPTER_GUEST";
+/// The scratch template among NVX's artifacts.
+pub(crate) const SCRATCH_TEMPLATE: &str = "ubuntu-smoke-scratch.ext4";
 /// The longest that a command of the host program may take.
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(180);
 /// How much of the end of the VMM's log a failure shows.
@@ -37,6 +43,53 @@ const LOG_TAIL: usize = 8192;
 
 /// The `KEY=VALUE` lines that a command of the host program printed.
 pub(crate) type Printed = BTreeMap<String, String>;
+
+/// The fixtures of the layered roots, those of NVX's own layered scenarios, among NVX's artifacts:
+///
+/// - the Ubuntu EROFS image, `ubuntu-distro.erofs`, and its manifest, which holds its UUID;
+/// - the scratch template, [`SCRATCH_TEMPLATE`], an empty ext4 file system that NVX's CI makes
+///   with the guest artifacts, of which each test boots a copy.
+pub(crate) struct Fixtures {
+    /// NVX's Ubuntu EROFS image.
+    pub(crate) distro: PathBuf,
+    /// The image's UUID, from its manifest.
+    pub(crate) identity: String,
+    /// The scratch template.
+    pub(crate) scratch: PathBuf,
+}
+
+impl Fixtures {
+    /// Finds the fixtures among NVX's artifacts in `NVX_ARTIFACTS_DIR`.
+    pub(crate) fn find() -> Self {
+        let directory = env::var_os(Artifacts::ENV_DIR)
+            .unwrap_or_else(|| panic!("{} must name NVX's artifacts", Artifacts::ENV_DIR));
+        let artifacts = ArtifactDir::from_dir(directory).unwrap();
+        let distro = artifacts.distro_layer(Guest::Ubuntu).unwrap();
+        let manifest = artifacts.distro_manifest(Guest::Ubuntu).unwrap();
+        let scratch = artifacts.artifact(SCRATCH_TEMPLATE);
+        for (path, fixture) in [
+            (&distro, "the Ubuntu EROFS image"),
+            (&manifest, "the manifest of the Ubuntu EROFS image"),
+            (
+                &scratch,
+                "the scratch template, an empty ext4 file system, which `mkfs.ext4` makes",
+            ),
+        ] {
+            assert!(path.is_file(), "{fixture} is missing: {}", path.display());
+        }
+        let manifest: Value = serde_json::from_str(&fs::read_to_string(&manifest).unwrap())
+            .expect("the manifest is JSON");
+        let identity = manifest["uuid"]
+            .as_str()
+            .expect("the manifest holds the image's UUID")
+            .to_owned();
+        Self {
+            distro,
+            identity,
+            scratch,
+        }
+    }
+}
 
 /// A sandbox of a test: a directory of its own, which holds the sandbox's store, the output of
 /// each command of the host program that the test runs, and any file that the test makes for its
@@ -52,6 +105,36 @@ pub(crate) struct Sandbox {
     pub(crate) store: PathBuf,
     /// The number of commands that the test ran.
     commands: usize,
+    /// The output files of the last command that the test ran, without their extensions.
+    output: Option<PathBuf>,
+}
+
+/// A command of the host program that a test started, and that may still run, as one that the
+/// step hook paused, until [`Sandbox::finish`] waits for it to end.
+///
+/// Dropping it ends a command that still runs, as when a test fails while the hook pauses the
+/// command, so that the sandbox's own drop can take the sandbox's lock, which the command holds,
+/// and end the VM.
+pub(crate) struct Started {
+    /// The command.
+    command: String,
+    /// Its options.
+    options: Vec<OsString>,
+    /// Its process.
+    child: Child,
+    /// Its output files, without their extensions.
+    output: PathBuf,
+    /// When it must have ended.
+    deadline: Instant,
+}
+
+impl Drop for Started {
+    fn drop(&mut self) {
+        if let Ok(None) = self.child.try_wait() {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
+    }
 }
 
 impl Sandbox {
@@ -72,6 +155,7 @@ impl Sandbox {
             store: root.join("store"),
             root,
             commands: 0,
+            output: None,
         }
     }
 
@@ -79,6 +163,17 @@ impl Sandbox {
     /// with `options` too, checks that the launch exits with `status`, and returns what it
     /// printed. A launch that succeeded recorded its VM, which runs.
     pub(crate) fn launch(&mut self, options: &[&OsStr], status: i32) -> Printed {
+        let started = self.start_launch(options, &[]);
+        self.finish_launch(started, status)
+    }
+
+    /// Starts a launch of the VM, as [`launch`](Self::launch) does, with the variables
+    /// `environment` too, and returns it while it runs.
+    pub(crate) fn start_launch(
+        &mut self,
+        options: &[&OsStr],
+        environment: &[(&str, &OsStr)],
+    ) -> Started {
         let hypervisor = Hypervisor::from_env_or_default().expect("NVX_HYPERVISOR is valid");
         let guest_agent = env::var_os(GUEST_AGENT).unwrap_or_else(|| {
             panic!(
@@ -92,7 +187,13 @@ impl Sandbox {
             OsStr::new(hypervisor.as_str()),
         ];
         arguments.extend(options);
-        let launched = self.run("launch", &arguments, status);
+        self.start("launch", &arguments, environment)
+    }
+
+    /// Waits for the launch `started` to end, checks that it exits with `status`, and returns what
+    /// it printed. A launch that succeeded recorded its VM, which runs.
+    pub(crate) fn finish_launch(&self, started: Started, status: i32) -> Printed {
+        let launched = self.finish(started, status);
         if status == 0 {
             let record = self.record().expect("the launch recorded its VM");
             assert_eq!(launched["pid"], record.process().pid.to_string());
@@ -103,39 +204,62 @@ impl Sandbox {
     /// Runs the host program's `command` on the sandbox's store with `options`, checks that it
     /// exits with `status`, and returns the `KEY=VALUE` lines that it printed.
     pub(crate) fn run(&mut self, command: &str, options: &[&OsStr], status: i32) -> Printed {
+        let started = self.start(command, options, &[]);
+        self.finish(started, status)
+    }
+
+    /// Starts the host program's `command` on the sandbox's store with `options`, and with the
+    /// variables `environment` too, and returns it while it runs.
+    pub(crate) fn start(
+        &mut self,
+        command: &str,
+        options: &[&OsStr],
+        environment: &[(&str, &OsStr)],
+    ) -> Started {
         self.commands += 1;
         let output = self.root.join(format!("{}-{command}", self.commands));
+        self.output = Some(output.clone());
         let (stdout, stderr) = (output.with_extension("out"), output.with_extension("err"));
         // Files, rather than pipes, take the output, so that nothing waits for a VMM that might
         // hold them.
-        let mut child = Command::new(env!("CARGO_BIN_EXE_runtime-adapter-host"))
+        let child = Command::new(env!("CARGO_BIN_EXE_runtime-adapter-host"))
             .arg(command)
             .arg(&self.store)
             .args(options)
+            .envs(environment.iter().copied())
             .stdin(Stdio::null())
             .stdout(File::create(&stdout).unwrap())
             .stderr(File::create(&stderr).unwrap())
             .spawn()
             .unwrap();
-        let deadline = Instant::now() + COMMAND_TIMEOUT;
+        Started {
+            command: command.to_owned(),
+            options: options.iter().map(|option| option.to_os_string()).collect(),
+            child,
+            output,
+            deadline: Instant::now() + COMMAND_TIMEOUT,
+        }
+    }
+
+    /// Waits for the command `started` to end, checks that it exits with `status`, and returns the
+    /// `KEY=VALUE` lines that it printed.
+    pub(crate) fn finish(&self, mut started: Started, status: i32) -> Printed {
         let exit = loop {
-            if let Some(exit) = child.try_wait().unwrap() {
+            if let Some(exit) = started.child.try_wait().unwrap() {
                 break exit;
             }
-            if Instant::now() >= deadline {
-                let _ = child.kill();
-                let _ = child.wait();
-                panic!("{command} did not end in time{}", self.diagnostics(&output));
-            }
+            self.check_deadline(&mut started);
             thread::sleep(Duration::from_millis(50));
         };
+        let command = &started.command;
         assert_eq!(
             exit.code(),
             Some(status),
-            "{command} {options:?} ended with {exit}{}",
-            self.diagnostics(&output)
+            "{command} {:?} ended with {exit}{}",
+            started.options,
+            self.diagnostics(&started.output)
         );
-        let printed = fs::read_to_string(&stdout).unwrap();
+        let printed = fs::read_to_string(started.output.with_extension("out")).unwrap();
         let mut lines = BTreeMap::new();
         for line in printed.lines() {
             let (key, value) = line
@@ -145,6 +269,40 @@ impl Sandbox {
             assert!(earlier.is_none(), "{command} printed {key} twice");
         }
         lines
+    }
+
+    /// Waits until the command `started` creates the file at `path` with the name of a step, as
+    /// the host program's step hook does when it pauses the command, and returns that name. Fails
+    /// if the command ends first.
+    pub(crate) fn paused(&self, started: &mut Started, path: &Path) -> String {
+        loop {
+            match fs::read_to_string(path) {
+                Ok(step) if !step.is_empty() => return step,
+                _ => {}
+            }
+            if let Some(exit) = started.child.try_wait().unwrap() {
+                panic!(
+                    "{} ended with {exit} before it paused{}",
+                    started.command,
+                    self.diagnostics(&started.output)
+                );
+            }
+            self.check_deadline(started);
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    /// Ends the command `started`, and fails, once its deadline has passed.
+    fn check_deadline(&self, started: &mut Started) {
+        if Instant::now() >= started.deadline {
+            let _ = started.child.kill();
+            let _ = started.child.wait();
+            panic!(
+                "{} did not end in time{}",
+                started.command,
+                self.diagnostics(&started.output)
+            );
+        }
     }
 
     /// Returns what the command whose output files start with `output` printed, and the end of the
@@ -159,8 +317,31 @@ impl Sandbox {
             "\nstdout:\n{}\nstderr:\n{}\nthe end of the VMM's log:\n{}",
             read(output.with_extension("out")),
             read(output.with_extension("err")),
-            read(self.store.join(nvx::host::store::LOG_NAME)),
+            read(self.store.join(LOG_NAME)),
         )
+    }
+
+    /// Returns what the last command that the test ran wrote to its standard error.
+    pub(crate) fn stderr(&self) -> String {
+        let output = self.output.as_ref().expect("the test ran a command");
+        fs::read_to_string(output.with_extension("err")).unwrap()
+    }
+
+    /// Checks that no launch of the sandbox got as far as spawning a VMM: its store holds no
+    /// runtime record, no launch journal, no VMM's log, and no record of a launch of the host
+    /// program, which a launch writes just before it spawns the VMM.
+    pub(crate) fn assert_unlaunched(&self) {
+        let store = SandboxStore::open(&self.store).unwrap();
+        assert_eq!(
+            store.runtime().unwrap(),
+            None,
+            "a runtime record names a VM"
+        );
+        assert!(store.journal().unwrap().is_none(), "a launch was begun");
+        for name in [LOG_NAME, RECORD_NAME] {
+            let path = self.store.join(name);
+            assert!(!path.exists(), "{} exists", path.display());
+        }
     }
 
     /// Returns the sandbox's runtime record, if it has one.
