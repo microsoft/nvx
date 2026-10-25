@@ -1203,9 +1203,10 @@ with the record's image, an EROFS image whose UUID it checks if the record
 expects one, or a GPT disk whose GUID it checks if the record expects one, its
 upper, a tmpfs or the scratch with the record's journal policy, and its overlay
 mode, and with the `RootTemplate` that the guest's own configuration holds,
-which its template captured: the runtime directory, the block devices, and the
-timeout, but waits for no device past the activation's deadline, which the
-adapter passes, so that the application ends by then.
+which its template captured: the runtime directory, the block devices, the
+timeout, and the host filesystem device's virtio-fs tag, but waits for no device
+past the activation's deadline, which the adapter passes, so that the
+application ends by then.
 
 For a GPT disk, it first asks the kernel to reread the disk's partition table
 with `BLKRRPART`, since the kernel created the block devices of partitions for
@@ -1219,15 +1220,24 @@ every execution runs, while without one each execution names its own identity,
 which `Entry::check` checks. With the record's generated machine ID, it then
 generates one, once, with `MachineId::generate`, after the repair's reseed, so
 that no two clones share it, to `MACHINE_ID_FILE` in the template's runtime
-directory, and it binds the runtime's files for every execution with
-`Entry::bind_runtime` in the caller's mount namespace: that file read-only over
-the root's `/etc/machine-id`, or, with the image's own machine ID, nothing; the
-entry checks the record's hostname, which every execution's entry takes with
-`Entry::hostname`. It returns the `Applied` root and workload, whose `teardown`
+directory. With the record's export, it mounts the host export through that
+filesystem device with `Root::mount_export`, read-write, at `hostfs/root` in the
+runtime directory, outside the root, since the record names no mode and OpenVMM
+limits each child to its own access; with its network's DNS server, it writes a
+resolver file that names it, mode 0444, to `RESOLVER_FILE` in the runtime
+directory. It then binds the runtime's files for every execution with one
+`Entry::bind_runtime` in the caller's mount namespace: the machine ID's file
+read-only over the root's `/etc/machine-id` and the resolver file over its
+`/etc/resolv.conf`, or, with neither, nothing; the entry checks the record's
+hostname, which every execution's entry takes with `Entry::hostname`. It returns
+the `Applied` root and workload, from which `take_export` hands the adapter the
+export's `SourceRoot`, to map the host's mapping table from once the clone is
+ready, and `proxy` the network's proxy endpoint, which the adapter tells its
+workloads as at a cold boot, and whose `teardown` closes the export's root and
 removes the binds before it tears the root down, as a drop does, or an
-`ApplyError`, after which nothing that it mounted or bound stays mounted unless
-the error reports the unmounts that failed, and applies none of the record's
-export or network.
+`ApplyError`, `Export` or `Network` among them, after which nothing that it
+mounted or bound stays mounted unless the error reports the unmounts that
+failed, and applies none of the record's listener publication.
 
 Once the adapter passed the activation what the session received while the
 application ran, which came before Ready, `Activation::complete` opens the fence

@@ -81,14 +81,15 @@ pub const ACTIVATION_PROBE: &str = "activation";
 ///   guest to generate cannot be written, as [`ApplyError::MachineId`] tells, or the record's
 ///   hostname or that machine ID cannot be set for every execution, as [`ApplyError::View`]
 ///   tells;
+/// - [`ACTIVATION_EXPORT`](status::ACTIVATION_EXPORT): the host export of the record cannot be
+///   mounted, as [`ApplyError::Export`] tells;
+/// - [`ACTIVATION_NETWORK`](status::ACTIVATION_NETWORK): the resolver file that names the DNS
+///   server of the record's network cannot be written or set for every execution, as
+///   [`ApplyError::Network`] tells;
 /// - [`ACTIVATION_ORDER`](status::ACTIVATION_ORDER): the worker's own order completed an
 ///   activation that did not run, or started the sandbox before the clone was ready, or again.
 ///
-/// The statuses of the export's and the network's classes,
-/// [`ACTIVATION_EXPORT`](status::ACTIVATION_EXPORT) and
-/// [`ACTIVATION_NETWORK`](status::ACTIVATION_NETWORK), are left to the activation of those
-/// settings. A cause that this build of the adapter does not know ends it with
-/// `ACTIVATION_PROTOCOL`.
+/// A cause that this build of the adapter does not know ends it with `ACTIVATION_PROTOCOL`.
 pub fn failure_status(failure: &ActivationFailure) -> u8 {
     match failure.cause() {
         ActivationCause::Expired => status::ACTIVATION_DEADLINE,
@@ -103,6 +104,8 @@ pub fn failure_status(failure: &ActivationFailure) -> u8 {
             Some(
                 ApplyError::Account { .. } | ApplyError::MachineId { .. } | ApplyError::View { .. },
             ) => status::ACTIVATION_WORKLOAD,
+            Some(ApplyError::Export { .. }) => status::ACTIVATION_EXPORT,
+            Some(ApplyError::Network { .. }) => status::ACTIVATION_NETWORK,
             // A failure of the application that this build does not know.
             _ => status::ACTIVATION_ROOT,
         },
@@ -437,11 +440,13 @@ mod tests {
         RestoreSection, StoreGeneration, TemplateReference, TransactionId, Upper, WorkloadIdentity,
         WorkloadView,
     };
-    use nvx::guest::clone::AdmissionFence;
+    use nvx::guest::clone::{AdmissionFence, NetworkError};
     use nvx::guest::entry;
+    use nvx::guest::mappings::MappingError;
     use nvx::guest::root::{self, Assembly, Device, Error as RootError, Role};
     use nvx::protocol::root::DISTRO_MMIO_BASE;
 
+    use super::super::capture::FILESYSTEM_TAG;
     use super::*;
 
     /// The resources of the clones of the tests.
@@ -563,7 +568,8 @@ mod tests {
         more.input(now(), ActivationInput::Reset).unwrap();
         let failure = failed(more.input(now(), ActivationInput::Activate(&bytes)));
         cases.push((failure, status::ACTIVATION_RESOURCES));
-        // The application: of the root, of the workload, and any other.
+        // The application: of the root, of the workload, of the export, of the network, and any
+        // other.
         let reread = ApplyError::Gpt(RootError::Missing {
             role: Role::Distro,
             mmio: DISTRO_MMIO_BASE,
@@ -603,6 +609,29 @@ mod tests {
         };
         let workload = activating().complete(now(), Err(view.into()));
         cases.push((failed(workload), status::ACTIVATION_WORKLOAD));
+        let unmounted = ApplyError::Export {
+            error: RootError::Mount {
+                mount: root::Mount::Export {
+                    tag: FILESYSTEM_TAG.to_owned(),
+                },
+                error: io::ErrorKind::NotFound.into(),
+            },
+            teardown: None,
+        };
+        let export = activating().complete(now(), Err(unmounted.into()));
+        cases.push((failed(export), status::ACTIVATION_EXPORT));
+        let unwritten = ApplyError::Network {
+            error: NetworkError::Write(io::ErrorKind::AlreadyExists.into()),
+            teardown: None,
+        };
+        let network = activating().complete(now(), Err(unwritten.into()));
+        cases.push((failed(network), status::ACTIVATION_NETWORK));
+        let unbound = ApplyError::Network {
+            error: NetworkError::Bind(entry::Error::Resolver(MappingError::TargetKind)),
+            teardown: None,
+        };
+        let network = activating().complete(now(), Err(unbound.into()));
+        cases.push((failed(network), status::ACTIVATION_NETWORK));
         let other = activating().complete(now(), Err("another failure of the application".into()));
         cases.push((failed(other), status::ACTIVATION_ROOT));
         // The worker's own order.
@@ -625,15 +654,14 @@ mod tests {
                 }
             );
         }
-        // Every class that the adapter's clones reach has its status; the export's and the
-        // network's are left to the activation of those settings.
+        // Every class that the adapter's clones reach has its status.
         let mut statuses = cases
             .iter()
             .map(|(failure, _)| failure_status(failure))
             .collect::<Vec<_>>();
         statuses.sort_unstable();
         statuses.dedup();
-        assert_eq!(statuses, [50, 51, 52, 53, 54, 55, 58]);
+        assert_eq!(statuses, [50, 51, 52, 53, 54, 55, 56, 57, 58]);
         assert!(
             statuses
                 .iter()
