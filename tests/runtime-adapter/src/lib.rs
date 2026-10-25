@@ -46,7 +46,9 @@
 //!
 //! A VM whose kernel command line names the platform snapshot tier is a template's, which the
 //! worker captures before it assembles any root, so that every clone of the snapshot attaches a
-//! root of its own, in [`template`] mode.
+//! root of its own, in [`template`] mode. In each clone, the worker repairs the restore, then
+//! activates the clone with the host's `Activate`, whose record the guest library applies, answers
+//! `Ready` with the activation, and serves the host's order as after a cold boot.
 
 pub mod exec;
 pub mod frame;

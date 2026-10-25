@@ -55,7 +55,7 @@ length, a little-endian `u32`, then the message's kind:
 | 4 | `Stop`: asks the guest to stop serving | none |
 | 5 | `Stopped`: the guest's confirmation of `Stop`, its last message | none |
 | 6 | `RootConfig`: the host's [root configuration](#root-configurations) of a layered root, which the guest answers with `Ready` or `RootFailed` | the configuration, at most 4 KiB |
-| 7 | `Ready`: the guest assembled the root | the guest agent's [build](#ready-mapping-tables-and-start), at most 4 KiB |
+| 7 | `Ready`: the guest assembled the root, or activated a clone | the guest agent's [build](#ready-mapping-tables-and-start), and a clone's activation, at most 4 KiB |
 | 8 | `RootFailed`: a stage of the root failed: the guest's answer to `RootConfig`, or its report of a failed teardown before it confirms a `Stop` | the stage, then the problem, at most 4 KiB |
 | 9 | `Probe`: asks the guest to run a [probe](#probes) on its root | the probe, at most 4 KiB |
 | 10 | `Report`: the guest's answer to `Probe`: the facts that the probe found | at most 256 KiB |
@@ -66,6 +66,7 @@ length, a little-endian `u32`, then the message's kind:
 | 24 | `MapFailed`: the guest refused the part, or failed to apply one of its mappings | how many mappings it applied, then the problem, at most 4 KiB |
 | 25 | `Start`: asks the guest to start the sandbox's workloads once it applied the mapping table, which it confirms with `Started` | none |
 | 26 | `Started`: the guest's confirmation of `Start` | none |
+| 27 | `Activate`: the host's activation of a clone, which a restore of a [template's](#template-mode) snapshot started, and which the guest answers with `Ready` | a clone's activation record, as `nvx::activation::ActivationRecord::encode` writes it, at most 1 KiB |
 
 The session keeps no message boundaries, so a message may span several of its
 records, and one record may end a message and start the next. `Decoder`
@@ -75,13 +76,15 @@ stream, because the framing cannot find the next message after it.
 
 The framing carries each body as bytes, within its kind's limit. The bodies of
 kinds 6 to 22 and 24 have encodings of their own, which the `root`, `probe`,
-and `exec` modules write and read. A body that does not decode leaves the
-stream intact, at the start of the next message. The guest answers a root
-configuration that does not decode with `RootFailed`, as a configuration that
-it refuses, and a probe with `ProbeFailed`, while a message about an execution
-that does not decode ends the worker's session, as one that breaks the
-execution's rules does. The host program's client ends on an answer that does
-not decode, since it cannot tell what the guest did.
+and `exec` modules write and read, and that of kind 27 is `nvx::activation`'s.
+A body that does not decode leaves the stream intact, at the start of the next
+message. The guest answers a root configuration that does not decode with
+`RootFailed`, as a configuration that it refuses, and a probe with
+`ProbeFailed`, while a message about an execution that does not decode ends the
+worker's session, as one that breaks the execution's rules does, and an
+activation record that does not decode fails the clone's activation. The host
+program's client ends on an answer that does not decode, since it cannot tell
+what the guest did.
 
 ### Root configurations
 
@@ -162,6 +165,14 @@ space. The guest agent's build is the crate's version, `GUEST_BUILD`, which is
 also the build that the host program ships unless it names another; see
 [The runtime identity](#the-runtime-identity). The host sends a guest agent of
 another build nothing more; see [The host's order](#the-hosts-order).
+
+A clone's `Ready`, its answer to the host's `Activate`, also reports its
+activation after the build, as `nvx::activation::ReadyActivation::encode`
+writes it: the configuration identity of the `Activate`'s record, 32 bytes,
+then 1, and the transaction ID of the record's restore, 16 bytes.
+`root::Ready::with_activation` adds it, and `root::Ready::activation` returns
+it. A guest that boots cold reports none, and `root::Ready::decode` refuses
+bytes after the build that are not an activation.
 
 The host's mapping table, of as many mappings as the root configuration
 announces, travels in parts, each in a `Maps`, whose body is a `MAPS` payload
@@ -490,7 +501,10 @@ unmounts a root that it still holds, as `nvx::guest::root::Root` does when it
 drops, ignoring failures. A teardown that failed leaves the root mounted until
 the VM ends. The worker runs the root's operations through
 `worker::RootOperations`, and enters its executions through
-`worker::EntryOperations`, so that tests run it against a fake root.
+`worker::EntryOperations`, so that tests run it against a fake root. In a
+template's VM, the worker captures the VM instead, and then activates and serves
+each clone that a restore of the snapshot starts, as
+[Template mode](#template-mode) describes.
 
 #### The mapping table and the start
 
@@ -700,18 +714,30 @@ through `worker::capture::capture_on_terminal`:
 
 1. opens the control tty, in raw mode, as the worker of a VM that boots cold
    does;
-2. attaches the control session with `nvx::guest::nvxs::GuestConnection::attach`,
-   and waits until the tty has sent the attachment, so that the snapshot holds
-   the guest attached. It reads nothing from the session before the capture,
-   and serves no application session;
-3. prepares the guest for the capture with
+2. bootstraps the guest for the root of every clone, with the template's own
+   root configuration, `worker::capture::template_config`, the default one,
+   since the host sends a template's VM none: it mounts the cgroup v2
+   hierarchy unless it is mounted, and prepares the agent's and the workload
+   cgroups, with their resource values, as the worker of a VM that boots cold
+   does before it assembles its root. The snapshot holds them, so that a
+   clone assembles its root without them;
+3. attaches the control session with `nvx::guest::nvxs::GuestConnection::attach`,
+   takes the reset with which the broker answers the attachment at once,
+   acknowledges it with the guest agent's receive window, and waits until the
+   tty has sent the acknowledgement, so that the snapshot holds the guest's
+   session active, in the broker's first epoch. A clone then reads no reset but
+   the one that the restore queues, of another instance: the restore's broker
+   would finish sending a reset that the template's broker began to send, and
+   the clone would read one that the template did not. The worker reads nothing
+   else from the session before the capture, and serves no application session;
+4. prepares the guest for the capture with
    `nvx::guest::clone::CapturePreparation`, which closes the worker's fence of
    workload admission, checks that nothing is mounted from the `distro` or the
    scratch block device, at the MMIO windows from which the worker assembles a
    root, from an overlay, or from OpenVMM's host filesystem device, whose tag
    is `microvm`, then waits for the time ABI's boot checks, runs its capture
    checks, and suppresses the stall detectors;
-4. requests the capture with `CaptureBarrier::capture`, with the platform
+5. requests the capture with `CaptureBarrier::capture`, with the platform
    tier's request, which keeps no scratch.
 
 Closing the worker's fence, `worker::capture::Admission`, acquires it: a close
@@ -729,15 +755,64 @@ started the daemon in the template, with the time ABI's boot step, before the
 guest agent, so every clone holds it, and the guest agent's PID 1 collects its
 status. The repair takes the time ABI in strict mode, so that a violation of
 the ABI fails the repair, rather than stopping the VM, and the worker ends the
-VM with the failure's status. The worker does not activate a clone yet: a
-clone that it repaired ends at once, with its fence still closed, which may cut
-the deferred time work short. A failure of that work stops the VM with the time
-ABI's own status, since the daemon enforces the ABI. The worker, and with it
-the VM, ends with one of these statuses, after a diagnostic on standard error:
+VM with the failure's status. A failure of the deferred time work stops the VM
+with the time ABI's own status, since the daemon enforces the ABI.
+
+Once it repaired a clone, the worker activates it, on the same tty, with
+`worker::work_clone`, through the clone's `nvx::guest::clone::Activation`,
+whose deadline ends `worker::activation::ACTIVATION_TIMEOUT`, 120 seconds,
+after the repair's acknowledgement of the restore:
+
+1. It resumes the session that the template attached, and whose first epoch it
+   acknowledged, which the snapshot holds, and acknowledges the reset that the
+   restore queued, the only one that the clone reads, with its receive window:
+   it attaches no session.
+2. It takes the host's `Activate`. The activation decodes its record, which
+   must be a clone's, with a restore section, and checks that it expects the
+   CPU count and the memory size that the repair found, before anything has a
+   side effect.
+3. It applies the record with `nvx::guest::clone::apply`, with
+   `worker::capture::root_template` of the template's configuration: its
+   runtime directory, the `distro` and scratch block devices, and its device
+   timeout. The application assembles the root, an EROFS image over a tmpfs
+   or the scratch, in the record's overlay mode, and checks the account of the
+   record's workload identity, if it has one, in the assembled root, in
+   existing-account mode. It applies none of the record's other settings: its
+   export, its network, its hostname, and its machine ID.
+4. It completes the activation, which opens the fence, and answers `Ready`,
+   which reports the activation after the guest agent's build.
+5. It then serves the host's order, as after a cold boot: the mapping table
+   that the record announces, the start, the executions, the probes, and the
+   stop. The record's workload identity, if it has one, is the whole
+   sandbox's, as a root configuration's is: every execution runs as it, and a
+   start that names an identity is refused. Without an export, the clone
+   refuses each part of a mapping table with `MapFailed`.
+
+Until the clone is ready, its session takes nothing but that `Activate`:
+another reset, any other message, a `Stop` and a `Ping` included, an
+`Activate` that the activation refuses, and the passing of the deadline fail
+the activation finally, as does an application that failed, which nothing
+retries. Once the clone is ready, a retry of the same `Activate`, byte for
+byte, gets the same `Ready` without a second application, and any other
+`Activate` fails the activation. A failed activation ends the clone with the
+status of its class, which `worker::activation::failure_status` selects, and a
+broker that closes the stream before the clone is ready ends the clone with
+status 1, once the worker dropped its executions, and waited for its stream,
+and then the tty, to take what it wrote, for at most
+`worker::UNACTIVATED_DRAIN`, a second each, whatever the stream does, so that a
+stream that takes nothing, as once the broker failed, does not keep the clone
+from ending; the fence stays closed if the clone was not ready. Once the clone
+is ready, a broker that closes the stream ends it as it ends the worker of a VM
+that boots cold. The worker of a VM that boots cold refuses an `Activate` as
+any message that it does not take in its state. The worker, and with it the VM,
+ends with one of these statuses, after a diagnostic on standard error:
 
 | Status | When |
 | --- | --- |
-| 1 | The control tty cannot be opened or put in raw mode, or the attachment cannot be sent |
+| 0 | In a clone, the host stopped the worker once the clone was ready, after a teardown that succeeded |
+| 1 | The control tty cannot be opened or put in raw mode, the attachment or the acknowledgement of the broker's reset cannot be sent, or the broker closes the session or sends anything but a reset first, or, in a clone, its session failed or the broker closed it |
+| 13 | The bootstrap of the guest for the template's root failed, before the attachment |
+| 15 | In a clone, the root's teardown failed once the host stopped the worker |
 | 20 | The kernel command line names the platform tier, but holds another parameter, a double quote, or `--`, or the worker cannot read it |
 | 21 | The fence of workload admission cannot be closed |
 | 22 | Something is mounted from the template's devices or from an overlay, or the mount table cannot be checked |
@@ -749,13 +824,19 @@ the VM, ends with one of these statuses, after a diagnostic on standard error:
 | 28 | The stall detectors' settings cannot be restored once the capture ended without a snapshot |
 | 29 | A stage of the capture failed that this build of the worker does not know |
 | 30 | The capture ended without a snapshot, as without a destination, or once OpenVMM rejected it, and the template continued |
-| 31 | A restore of the template's snapshot started this VM, a clone, which the worker repaired, and does not activate yet |
 | 40 | The clone's restore cannot be repaired: it holds no fresh entropy, or its capture finished it |
 | 41 | The clone's online CPUs cannot be read, are not a prefix of the CPUs, or do not meet the restore's processor target |
 | 42 | The restore's memory target is refused, before any memory block is added |
 | 43 | The activation of the restore's memory target failed |
 | 44 | The reseed of the kernel's random number generator failed |
 | 45 | The restore's finish failed, other than by a violation of the time ABI |
+| 50 | The clone was not ready before its activation's deadline |
+| 51 | The host broke the clone's session: it reset the session again, or sent another request, before the clone was ready, or an `Activate` of another transaction, or one that changes the accepted record |
+| 52 | The `Activate`'s record does not decode, breaks a limit, or is a cold boot's |
+| 53 | The record expects other resources than the clone has |
+| 54 | The root's assembly failed, or the record's image is a GPT disk, which a clone does not assemble |
+| 55 | The image refuses the record's workload identity: it holds no account of the identity, or not its group, or its account databases cannot be read |
+| 58 | The worker's own order misused the activation: it completed an activation that did not run, or started the sandbox before the clone was ready, or again |
 | 193 | A conformance check of the time ABI failed in the clone's repair, such as the finish's, which needs a running time daemon |
 | 195 | The time ABI's part of the clone's repair failed, such as the validation of the restore packet, or the record of the restore |
 
@@ -767,7 +848,9 @@ the time ABI could not repair, ends with the violation's status instead, as
 `worker::capture::capture_status` tells. `nvx::protocol::status` documents
 the statuses of a clone's repair, from 40 to 45, which
 `nvx::guest::clone::RepairError::status` selects, the time ABI's own, from 193
-to 195, and those that it reserves for a clone's activation, from 50 to 58. A
+to 195, and those of a clone's activation, from 50 to 58, of which the worker
+leaves 56 and 57, the export's and the network's, to the activation of those
+settings. A
 stage whose failure may leave the worker some of the permission for the time
 ABI's ports fails with the time ABI's port error, and the worker then starts no
 thread or process before it ends. A violation of the time ABI in enforcing
@@ -1324,12 +1407,13 @@ independent adapter's does:
 The unit tests of `frame`, `root`, `probe`, `exec`, and `template` run in every
 configuration. They cover each kind's encoding, messages in pieces of any size,
 a message of each kind split at every byte, the headers that the framing refuses
-before their body arrives, and the root configurations, readinesses, parts of
-mapping tables, failures, probes, facts, and messages of executions that decode,
-and those that don't, and the host's side of an execution, which still sends the
-cancellation of one that it gives up on in the step that ends it, without grace
-or settlement time, and which cancels one whose stream outgrows the 16 MiB that
-it keeps. Those of `template` check the platform tier's allowlist, token by
+before their body arrives, and the root configurations, readinesses, with or
+without a clone's activation, parts of mapping tables, failures, probes, facts,
+and messages of executions that decode, and those that don't, and the host's
+side of an execution, which still sends the cancellation of one that it gives up
+on in the step that ends it, without grace or settlement time, and which cancels
+one whose stream outgrows the 16 MiB that it keeps. Those of `template` check
+the platform tier's allowlist, token by
 token, against the tokens that OpenVMM's capture of a platform snapshot allows
 and refuses, and template mode: a command line in which the kernel finds no
 platform tier boots cold, whatever else it holds, and one with it boots a
@@ -1355,10 +1439,16 @@ Those of `worker::entries` cover the names of capabilities, the fields of a
 process's status, the outcomes of attempts, the entry's refusals, and the
 probe's arguments. Those of `worker::capture` check that closing the worker's
 fence acquires it, the status of each stage of a capture, which no other
-outcome of the worker shares, a template's devices, and that the worker
-attaches its session, and the stream sent the attachment, before the capture
-runs, without reading anything of the session, and that no capture runs once
-the attachment cannot be written or sent.
+outcome of the worker shares, a template's devices, the template's own root
+configuration, and the inputs of a clone's root that it gives, and that the
+worker attaches its session, takes the broker's reset, and acknowledges it,
+which the stream sent, before the capture runs, without reading anything more
+of the session, and keeps the session, active in the broker's first epoch, and
+that no capture runs once the attachment cannot be written, the broker closes
+the stream or sends anything but a reset first, or the acknowledgement cannot
+be sent. Those of `worker::activation` check the status of
+each class of a clone's activation's failures, and that the activation's
+timeout covers the wait for both block devices.
 
 `tests/guest_session.rs` checks, in the guest-only configuration, that the
 guest agent serves the control session with the adapter's own framing. A test
@@ -1454,8 +1544,9 @@ the worker reports before it ends with the stage's status, without the
 operations of the later stages; the account check of a sandbox's workload
 identity, once the root is assembled, with the default hostname; a teardown
 that fails; before the root, the configuration and the `Stop` that it accepts,
-and the messages that it refuses; a second configuration and a broker that
-closes the stream, which leave the root that it assembled to its operations;
+and the messages that it refuses, a clone's `Activate` among them; once the
+root is ready, a second configuration, an `Activate`, and a broker that closes
+the stream, which leave the root that it assembled to its operations;
 and a broker that closes only its end of the stream while the worker probes,
 which still receives the replies that the worker queued.
 Through the binary, it checks that `runtime-adapter-guest init TTY layered`,
@@ -1561,6 +1652,54 @@ A test of the worker's executions that fails before it stops the worker, even
 while its broker pauses, ends the worker's session as it drops its host, so
 that the worker drops its executions, and their programs end, which a test
 checks too.
+
+On x86_64, `tests/guest_session.rs` also runs the worker of a clone, which a
+restore of a template's snapshot started, with `worker::work_clone`, behind its
+test broker, with the session that the template's VM attached, active in the
+epoch of its broker's first reset, and the clone's activation,
+`nvx::guest::clone::Activation::with_resources`, behind a closed fence. The fake
+root applies each record as `nvx::guest::clone::apply` does, without a root: it
+refuses a GPT disk, and checks the account of the record's workload identity in
+the tests' directory of account databases. The tests cover:
+
+- the reset that the restore queued, of another instance, which the worker
+  acknowledges without an attachment, and the `Activate`, whose record it
+  applies once, with the template's inputs, and answers with the `Ready` that
+  reports the activation;
+- retries of the `Activate`, in records of 7 bytes, after a later reset, and
+  once the sandbox started, which get the same `Ready` without a second
+  application, and the order that the worker serves once the clone is ready,
+  as after a cold boot;
+- the messages before the `Activate`, a stop and a ping among them, and another
+  reset, which fail the activation with the status of the host's session, with
+  nothing answered or applied;
+- a record that does not decode, a cold boot's, and one that expects other
+  resources, which fail the activation with nothing applied, and a GPT disk and
+  a workload identity whose account or group the image lacks, which fail its
+  application, each with the status of its class, and no `Ready`;
+- the activation's deadline, whether the restore's reset came or not, or part
+  of an `Activate`, which the broker sends before the worker runs, so that the
+  worker takes it at once, however late it runs: the deadline fails the
+  activation with nothing applied, and ends nothing once the clone is ready;
+- a stream that takes nothing more from the worker, as once the broker failed,
+  after which the worker still ends once its activation's deadline passed,
+  with the deadline's status, or once the broker closed its end of the stream
+  before the clone was ready, with status 1, once it waited for the stream for
+  `worker::UNACTIVATED_DRAIN`;
+- a broker that closes the stream before the clone is ready, whether the
+  restore's reset came or not, or part of an `Activate`, which ends the clone
+  with status 1, with nothing applied, and once the clone is ready, which ends
+  it as it ends the worker of a VM that boots cold;
+- a broker that sent the restore's reset, and a ping or nothing more, and is
+  gone before the worker runs, so that the worker cannot write its
+  acknowledgement: the worker still ends with the activation's status, or with
+  status 1, rather than with the failure of its stream;
+- an `Activate` of another transaction, or of the same transaction with
+  another record, once the clone is ready, or its sandbox started, which fails
+  the activation with the status of the host's session;
+- the record's workload identity, as which every execution runs, while a start
+  that names an identity is refused with `EINVAL`, as is a start that names
+  none once the record has none.
 
 `tests/initramfs.rs` and `tests/runtime.rs` check, in the host-only
 configuration, on Linux and Windows:

@@ -55,9 +55,9 @@ pub const REPAIR_FINISH: u8 = 45;
 /// The clone was not activated before its deadline, which starts at its repair's
 /// acknowledgement.
 pub const ACTIVATION_DEADLINE: u8 = 50;
-/// The host broke the restricted session of a repaired clone before the clone was ready: it
-/// reset the session again, sent a request before the activation, or sent an Activate of
-/// another transaction, or one that changes the accepted record.
+/// The host broke the session of a repaired clone's activation: before the clone was ready, it
+/// reset the session again, or sent a request before the activation, and, before or after, it
+/// sent an Activate of another transaction, or one that changes the accepted record.
 pub const ACTIVATION_PROTOCOL: u8 = 51;
 /// The Activate's record is refused: it does not decode, breaks a limit, or is a cold boot's,
 /// without the restore section of a clone's.

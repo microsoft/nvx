@@ -50,7 +50,12 @@
 //!
 //! Once the guest assembled the root, it answers the configuration with its [`Ready`]: the length
 //! of the guest agent's build, one byte, then the build, 1 to [`MAX_BUILD_LEN`] printable ASCII
-//! characters without a space, such as [`GUEST_BUILD`](crate::GUEST_BUILD).
+//! characters without a space, such as [`GUEST_BUILD`](crate::GUEST_BUILD). A clone, which a
+//! restore of a template's snapshot started, answers the host's Activate with its `Ready` once it
+//! activated, which reports its activation after the build: the canonical encoding of
+//! `nvx::activation::ReadyActivation`, the identity of the configuration of the activation record
+//! that it applied, then `1` and the restore's transaction ID. A cold boot's `Ready` reports no
+//! activation, since a root configuration, not an activation record, configures its root.
 //!
 //! The host's mapping table travels in parts, each a `MAPS` payload of `nvx::protocol`, as its
 //! `encode_maps_payloads` writes it: the index in the table of the part's first mapping, then the
@@ -67,6 +72,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::time::Duration;
 
+use nvx::activation::ReadyActivation;
 use nvx::protocol::{
     GuestMapsPayload, HostMap, MAX_HOST_MAPPINGS, decode_guest_maps_payload, encode_maps_payloads,
 };
@@ -734,17 +740,22 @@ pub enum RootReply {
 /// The most bytes of the guest agent's build in a [`Ready`]: as many as the byte before it counts.
 pub const MAX_BUILD_LEN: usize = u8::MAX as usize;
 
-/// The guest's readiness, with which it answers a root configuration once it assembled the root:
-/// the guest agent's build, which the host can check against the build that it ships.
+/// The guest's readiness, with which it answers a root configuration once it assembled the root,
+/// or a clone's Activate once it activated the clone: the guest agent's build, which the host can
+/// check against the build that it ships, and, for a clone, what the guest reports about its
+/// activation, which the host can check against the record that it sent.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Ready {
     /// The guest agent's build.
     build: String,
+    /// What the guest reports about its activation, if anything: a clone's, but not a cold
+    /// boot's, whose root a root configuration configures.
+    activation: Option<ReadyActivation>,
 }
 
 impl Ready {
     /// Returns the readiness of the guest agent of the build `build`, such as
-    /// [`GUEST_BUILD`](crate::GUEST_BUILD).
+    /// [`GUEST_BUILD`](crate::GUEST_BUILD), which reports no activation.
     ///
     /// Fails with a [`BodyError`] unless the build holds 1 to [`MAX_BUILD_LEN`] printable ASCII
     /// characters, without a space.
@@ -756,7 +767,20 @@ impl Ready {
                  ASCII characters without a space"
             )));
         }
-        Ok(Self { build })
+        Ok(Self {
+            build,
+            activation: None,
+        })
+    }
+
+    /// Returns the readiness, which reports `activation`: what `nvx::guest::clone::Activation`
+    /// returns once it completed a clone's activation, the identity of the configuration that the
+    /// clone applied, and the restore's transaction ID.
+    pub fn with_activation(self, activation: ReadyActivation) -> Self {
+        Self {
+            activation: Some(activation),
+            ..self
+        }
     }
 
     /// Returns the guest agent's build.
@@ -764,32 +788,39 @@ impl Ready {
         &self.build
     }
 
-    /// Returns the readiness's encoding: the build's length, one byte, then the build.
+    /// Returns what the guest reports about its activation, if anything.
+    pub fn activation(&self) -> Option<ReadyActivation> {
+        self.activation
+    }
+
+    /// Returns the readiness's encoding: the build's length, one byte, then the build, then the
+    /// canonical encoding of the activation that it reports, if any, which
+    /// `ReadyActivation::encode` writes.
     pub fn encode(&self) -> Vec<u8> {
-        let mut body = Vec::with_capacity(1 + self.build.len());
+        let activation = self.activation.as_ref().map(ReadyActivation::encode);
+        let reported = activation.as_ref().map_or(0, Vec::len);
+        let mut body = Vec::with_capacity(1 + self.build.len() + reported);
         // The build has at most `MAX_BUILD_LEN` bytes, so its length fits the byte.
         body.push(self.build.len() as u8);
         body.extend_from_slice(self.build.as_bytes());
+        body.extend(activation.into_iter().flatten());
         body
     }
 
-    /// Reads a readiness from its encoding.
+    /// Reads a readiness from its encoding, which reports an activation if it has bytes after its
+    /// build.
     ///
-    /// Fails with a [`BodyError`] for a body that ends before its build does, or that has bytes
-    /// after it, and for a build that [`new`](Self::new) refuses.
+    /// Fails with a [`BodyError`] for a body that ends before its build does, for a build that
+    /// [`new`](Self::new) refuses, and for bytes after the build that `ReadyActivation::decode`
+    /// refuses: anything but an identity followed by `0`, or by `1` and a transaction ID.
     pub fn decode(body: &[u8]) -> Result<Self, BodyError> {
         let refused = |problem: String| BodyError::new(format!("the guest's readiness {problem}"));
         let Some((&length, rest)) = body.split_first() else {
             return Err(refused("names no build".to_owned()));
         };
-        let Some((build, extra)) = rest.split_at_checked(usize::from(length)) else {
+        let Some((build, reported)) = rest.split_at_checked(usize::from(length)) else {
             return Err(refused("ends early".to_owned()));
         };
-        match extra.len() {
-            0 => {}
-            1 => return Err(refused("has 1 byte too many".to_owned())),
-            extra => return Err(refused(format!("has {extra} bytes too many"))),
-        }
         if !valid_build(build) {
             return Err(refused(format!(
                 "names a build that does not hold 1 to {MAX_BUILD_LEN} printable ASCII \
@@ -797,8 +828,23 @@ impl Ready {
                 String::from_utf8_lossy(build)
             )));
         }
+        let activation = match reported.len() {
+            0 => None,
+            count => Some(ReadyActivation::decode(reported).map_err(|error| {
+                let (bytes, verb) = if count == 1 {
+                    ("byte", "is")
+                } else {
+                    ("bytes", "are")
+                };
+                refused(format!(
+                    "has {count} {bytes} after its build, which {verb} not an activation: \
+                     {error}"
+                ))
+            })?),
+        };
         Ok(Self {
             build: build.iter().copied().map(char::from).collect(),
+            activation,
         })
     }
 }
@@ -928,6 +974,7 @@ impl std::error::Error for MapFailure {}
 
 #[cfg(test)]
 mod tests {
+    use nvx::activation::{ConfigurationIdentity, TransactionId};
     use nvx::protocol::{GuestHostMap, MAP_READ_ONLY, MAX_MAP_PATH_BYTES};
 
     use super::*;
@@ -1301,6 +1348,7 @@ mod tests {
     fn a_readiness_is_the_length_of_its_build_then_the_build() {
         let ready = Ready::new("0.1.0").unwrap();
         assert_eq!(ready.build(), "0.1.0");
+        assert_eq!(ready.activation(), None);
         assert_eq!(ready.encode(), b"\x050.1.0");
         assert_eq!(Ready::decode(&ready.encode()), Ok(ready));
 
@@ -1323,6 +1371,47 @@ mod tests {
             assert!(body.len() <= MAX_TEXT_BODY, "{build}");
             assert_eq!(Ready::decode(&body), Ok(ready), "{build}");
         }
+    }
+
+    #[test]
+    fn a_clone_s_readiness_reports_its_activation_after_the_build() {
+        let clone = ReadyActivation {
+            identity: ConfigurationIdentity::from_bytes([0x5a; ConfigurationIdentity::LEN]),
+            transaction: Some(TransactionId::from_bytes([0x7e; TransactionId::LEN])),
+        };
+        // A cold boot's activation, which the encoding takes too, though the adapter's cold boots
+        // report none.
+        let cold = ReadyActivation {
+            transaction: None,
+            ..clone
+        };
+        let longest = "b".repeat(MAX_BUILD_LEN);
+        for build in ["0.1.0", longest.as_str()] {
+            for activation in [clone, cold] {
+                let ready = Ready::new(build).unwrap().with_activation(activation);
+                assert_eq!(ready.build(), build);
+                assert_eq!(ready.activation(), Some(activation));
+                let body = ready.encode();
+                let mut expected = vec![u8::try_from(build.len()).unwrap()];
+                expected.extend_from_slice(build.as_bytes());
+                expected.extend(activation.encode());
+                assert_eq!(body, expected, "{build}: {activation:?}");
+                assert!(body.len() <= MAX_TEXT_BODY, "{build}");
+                assert_eq!(Ready::decode(&body), Ok(ready), "{build}: {activation:?}");
+            }
+        }
+        // The clone's: the identity, `1`, and the transaction ID, after the build.
+        let ready = Ready::new("0.1.0").unwrap().with_activation(clone);
+        let mut expected = b"\x050.1.0".to_vec();
+        expected.extend([0x5a; 32]);
+        expected.push(1);
+        expected.extend([0x7e; 16]);
+        assert_eq!(ready.encode(), expected);
+        assert_eq!(
+            ready.encode().len(),
+            6 + ReadyActivation::CLONE_LEN,
+            "{ready:?}"
+        );
     }
 
     #[test]
@@ -1354,9 +1443,18 @@ mod tests {
             ),
             (b"\x060.1.0", "ends early"),
             (b"\xff0.1.0", "ends early"),
-            (b"\x050.1.0\x00", "has 1 byte too many"),
-            (b"\x040.1.0", "has 1 byte too many"),
-            (b"\x010.1.0", "has 4 bytes too many"),
+            (
+                b"\x050.1.0\x00",
+                "has 1 byte after its build, which is not an activation",
+            ),
+            (
+                b"\x040.1.0",
+                "has 1 byte after its build, which is not an activation",
+            ),
+            (
+                b"\x010.1.0",
+                "has 4 bytes after its build, which are not an activation",
+            ),
             (b"\x050.1 0", "without a space: \"0.1 0\""),
             (b"\x050.1\xff0", "without a space: \"0.1\u{fffd}0\""),
             (b"\x02\xc3\xa9", "without a space: \"\u{e9}\""),
@@ -1367,6 +1465,43 @@ mod tests {
                 error.problem().starts_with("the guest's readiness ")
                     && error.problem().contains(problem),
                 "{body:?}: {error}"
+            );
+        }
+        // Bytes after the build that are not an identity followed by `0`, or by `1` and a
+        // transaction ID, which `ReadyActivation::decode` refuses.
+        let identity = [0x5a; ConfigurationIdentity::LEN];
+        let reported = |rest: &[u8]| {
+            let mut body = b"\x050.1.0".to_vec();
+            body.extend_from_slice(&identity);
+            body.extend_from_slice(rest);
+            body
+        };
+        for (body, count) in [
+            (
+                b"\x050.1.0"
+                    .iter()
+                    .chain(&identity[..31])
+                    .copied()
+                    .collect(),
+                31,
+            ),
+            (reported(&[]), 32),
+            (reported(&[2]), 33),
+            (reported(&[1]), 33),
+            (reported(&[0; 17]), 49),
+            (reported(&[1; 16]), 48),
+            (reported(&[1; 18]), 50),
+            (reported(&[0, 0]), 34),
+        ] {
+            let error = Ready::decode(&body).unwrap_err();
+            assert_eq!(
+                error.problem(),
+                format!(
+                    "the guest's readiness has {count} bytes after its build, which are not an \
+                     activation: what Ready reports is not an identity followed by 0, or by 1 and \
+                     a transaction ID"
+                ),
+                "{body:?}"
             );
         }
     }
