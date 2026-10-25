@@ -14,7 +14,7 @@ use crate::host::sandbox::distro::{DISTRO_POLICY_REVISION, PolicyVerdict};
 use crate::host::sandbox::scratch::CLAIM_RELEASE_WAIT;
 use crate::host::sandbox::{SandboxDistro, SandboxNetwork, SandboxSettings, SandboxUpper};
 use crate::host::seal::{FileSeal, open_metadata_only};
-use crate::host::store::{CLONE_SCRATCH_NAME, CallerFiles, SandboxStore};
+use crate::host::store::{CLONE_SCRATCH_NAME, CallerFiles, LOG_NAME, SandboxStore};
 use crate::host::template::test_support::{MIB, ManifestSpec, class, network_class};
 use crate::host::template::{CaptureClass, HostTime};
 use crate::host::test_support::released;
@@ -534,30 +534,30 @@ fn a_scratch_device_that_the_plan_cannot_initialize_goes() {
 }
 
 #[test]
-fn files_that_are_the_scratch_device_of_a_clone_in_ram_are_refused() {
+fn files_of_the_sandboxs_store_are_refused_as_images() {
     let fixture = Fixture::new();
     let mut acquired = fixture.acquire("sandbox");
     let sparse = sparse_path(&acquired);
-    let refusal = |what: &str, path: &Path| {
+    let refusal = |what: &str, path: &Path, owned: &Path| {
         (
             ErrorKind::Unsupported,
             format!(
-                "the {what} {} is the scratch device of the clone {}, which the sandbox's store \
-                 owns: a plan of a clone in RAM replaces it, and a release of the lease removes it",
+                "the {what} {} is {}, a file of the sandbox's store, which its transitions \
+                 replace or remove",
                 shown(path),
-                shown(&sparse)
+                shown(owned)
             ),
         )
     };
     let seal_of = |path: &Path| FileSeal::of(&File::open(path).unwrap()).unwrap();
-    // An image there, which a plan of a clone in RAM would replace, is refused before anything
-    // replaces it...
+    // An image that is the file of the scratch device of a clone in RAM, which a plan would
+    // replace, is refused before anything replaces it...
     stage(&sparse, IMAGE_LEN);
     let binding = DistroBinding::import(&layer(&sparse), PolicyVerdict::ACCEPTED).unwrap();
     let staged = seal_of(&sparse);
     assert_eq!(
         failure(fixture.plan(&mut acquired, &tmpfs_request(&sparse, &binding), NO_CONTENT)),
-        refusal("image", &sparse)
+        refusal("image", &sparse, &sparse)
     );
     assert_eq!(seal_of(&sparse), staged);
     // ...by whatever path the request names it: through a hard link...
@@ -570,7 +570,7 @@ fn files_that_are_the_scratch_device_of_a_clone_in_ram_are_refused() {
             &tmpfs_request(&hard, &hard_binding),
             NO_CONTENT
         )),
-        refusal("image", &hard)
+        refusal("image", &hard, &sparse)
     );
     // ...or through a link among its directories.
     let alias = fixture.path("images", "alias");
@@ -584,11 +584,12 @@ fn files_that_are_the_scratch_device_of_a_clone_in_ram_are_refused() {
                 &tmpfs_request(&aliased, &aliased_binding),
                 NO_CONTENT
             )),
-            refusal("image", &aliased)
+            refusal("image", &aliased, &sparse)
         );
     }
-    // A release of the lease removes the file, so a clone on a scratch image takes it neither as
-    // its image, which is bound again, since the hard link changed its change time on Linux...
+    // A release of the lease removes that file, so a clone on a scratch image takes it neither
+    // as its image, which is bound again, since the hard link changed its change time on
+    // Linux...
     let binding = DistroBinding::import(&layer(&sparse), PolicyVerdict::ACCEPTED).unwrap();
     let staged = seal_of(&sparse);
     let (image, image_binding) = fixture.image("distro.erofs", IMAGE_LEN);
@@ -596,7 +597,7 @@ fn files_that_are_the_scratch_device_of_a_clone_in_ram_are_refused() {
     let request = scratch_request(&sparse, &binding, &scratch, &scratch_binding);
     assert_eq!(
         failure(fixture.plan(&mut acquired, &request, NO_CONTENT)),
-        refusal("image", &sparse)
+        refusal("image", &sparse, &sparse)
     );
     assert_eq!(seal_of(&sparse), staged);
     // ...nor as its scratch image, whose claim the refused plan releases.
@@ -606,38 +607,56 @@ fn files_that_are_the_scratch_device_of_a_clone_in_ram_are_refused() {
     let request = scratch_request(&image, &image_binding, &sparse, &sparse_binding);
     assert_eq!(
         failure(fixture.plan(&mut acquired, &request, NO_CONTENT)),
-        refusal("scratch image", &sparse)
+        refusal("scratch image", &sparse, &sparse)
     );
     assert_eq!(fs::metadata(&sparse).unwrap().len(), SCRATCH_LEN);
     assert!(released(|| sparse_binding
         .check(&sparse, Instant::now())
         .is_ok()));
-    assert_eq!(acquired.locked.reserved(), Some(acquired.lease.launch()));
+    fs::remove_file(&sparse).unwrap();
+    // The store's other files are refused alike, such as its log, which a launch replaces, and
+    // the temporary files of its records.
+    for name in [LOG_NAME, ".runtime.json.1.tmp"] {
+        let owned = acquired.locked.dir().join(name);
+        stage(&owned, IMAGE_LEN);
+        let binding = DistroBinding::import(&layer(&owned), PolicyVerdict::ACCEPTED).unwrap();
+        assert_eq!(
+            failure(fixture.plan(&mut acquired, &tmpfs_request(&owned, &binding), NO_CONTENT)),
+            refusal("image", &owned, &owned)
+        );
+        assert_eq!(fs::metadata(&owned).unwrap().len(), IMAGE_LEN);
+        fs::remove_file(&owned).unwrap();
+    }
+    assert_untouched(&acquired);
 }
 
 #[test]
-fn what_the_store_never_creates_where_a_clone_in_ram_keeps_its_scratch_device_is_refused() {
+fn links_and_directories_under_the_names_of_the_sandboxs_store_are_refused() {
     let fixture = Fixture::new();
     let (image, binding) = fixture.image("distro.erofs", IMAGE_LEN);
     let mut acquired = fixture.acquire("sandbox");
     let sparse = sparse_path(&acquired);
-    let refusal = (
-        ErrorKind::Unavailable,
-        format!(
-            "the scratch device of the clone {} is a link, or not a regular file, which the \
-             sandbox's store never creates there",
-            shown(&sparse)
-        ),
-    );
+    let refusal = |owned: &Path| {
+        (
+            ErrorKind::Unavailable,
+            format!(
+                "{} is a link or a directory, which the sandbox's store never creates there",
+                shown(owned)
+            ),
+        )
+    };
     let request = tmpfs_request(&image, &binding);
-    // A directory, which a release could not remove.
-    fs::create_dir(&sparse).unwrap();
-    assert_eq!(
-        failure(fixture.plan(&mut acquired, &request, NO_CONTENT)),
-        refusal
-    );
-    assert!(sparse.is_dir());
-    fs::remove_dir(&sparse).unwrap();
+    // A directory, which a plan could not replace, nor a release or a launch remove.
+    for name in [CLONE_SCRATCH_NAME, LOG_NAME] {
+        let owned = acquired.locked.dir().join(name);
+        fs::create_dir(&owned).unwrap();
+        assert_eq!(
+            failure(fixture.plan(&mut acquired, &request, NO_CONTENT)),
+            refusal(&owned)
+        );
+        assert!(owned.is_dir());
+        fs::remove_dir(&owned).unwrap();
+    }
     // A link to the directory of the images, through which the path of an image can pass, and
     // which a plan would replace, leaving that path naming nothing.
     if symlink_dir(image.parent().unwrap(), &sparse) {
@@ -647,7 +666,7 @@ fn what_the_store_never_creates_where_a_clone_in_ram_keeps_its_scratch_device_is
         for request in [tmpfs_request(&through, &through_binding), request.clone()] {
             assert_eq!(
                 failure(fixture.plan(&mut acquired, &request, NO_CONTENT)),
-                refusal
+                refusal(&sparse)
             );
         }
         assert!(
@@ -662,7 +681,14 @@ fn what_the_store_never_creates_where_a_clone_in_ram_keeps_its_scratch_device_is
         #[cfg(windows)]
         fs::remove_dir(&sparse).unwrap();
     }
-    // Once it is gone, the plan creates its file there.
+    assert_untouched(&acquired);
+    // A control socket that a launch left is no image, and the launch removes it.
+    #[cfg(unix)]
+    let _socket = std::os::unix::net::UnixListener::bind(
+        acquired.locked.dir().join(crate::host::store::SOCKET_NAME),
+    )
+    .unwrap();
+    // The plan creates the file of the scratch device once nothing else is there.
     let plan = fixture.plan(&mut acquired, &request, NO_CONTENT).unwrap();
     assert!(fs::symlink_metadata(plan.scratch_path()).unwrap().is_file());
 }
