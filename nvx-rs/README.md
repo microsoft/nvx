@@ -1216,10 +1216,18 @@ the record's workload identity, it checks its account in the assembled root
 before Ready, as NVX's init checks it at boot: `entry::Identity::new(uid, gid)`,
 without supplementary groups or capabilities, in existing-account mode, as which
 every execution runs, while without one each execution names its own identity,
-which `Entry::check` checks. It returns the `Applied` root and identity, or an
-`ApplyError`, after which nothing that it mounted stays mounted unless the error
-reports the unmounts that failed, and applies none of the record's export,
-network, hostname, or machine ID.
+which `Entry::check` checks. With the record's generated machine ID, it then
+generates one, once, with `MachineId::generate`, after the repair's reseed, so
+that no two clones share it, to `MACHINE_ID_FILE` in the template's runtime
+directory, and it binds the runtime's files for every execution with
+`Entry::bind_runtime` in the caller's mount namespace: that file read-only over
+the root's `/etc/machine-id`, or, with the image's own machine ID, nothing; the
+entry checks the record's hostname, which every execution's entry takes with
+`Entry::hostname`. It returns the `Applied` root and workload, whose `teardown`
+removes the binds before it tears the root down, as a drop does, or an
+`ApplyError`, after which nothing that it mounted or bound stays mounted unless
+the error reports the unmounts that failed, and applies none of the record's
+export or network.
 
 Once the adapter passed the activation what the session received while the
 application ran, which came before Ready, `Activation::complete` opens the fence

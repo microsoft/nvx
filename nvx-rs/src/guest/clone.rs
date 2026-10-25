@@ -161,10 +161,19 @@
 //! [`Identity::new`](super::entry::Identity::new) of the record's user and group IDs, without
 //! supplementary groups or capabilities, in existing-account mode, and every execution runs as
 //! it. Without one, the adapter gives each execution its own identity, which
-//! [`Entry::check`](super::entry::Entry::check) checks. It returns the [`Applied`] root and
-//! identity, which the adapter keeps, or an [`ApplyError`], after which nothing that it mounted
-//! stays mounted, unless the error holds the unmounts that failed. It applies none of the
-//! record's other settings: its export, its network, its hostname, and its machine ID.
+//! [`Entry::check`](super::entry::Entry::check) checks. If the record asks for a generated machine
+//! ID, it then generates one, once, with
+//! [`MachineId::generate`](super::entry::MachineId::generate), after the repair's reseed, so that
+//! no two clones of a template share it, to [`MACHINE_ID_FILE`] in the template's runtime
+//! directory, and it binds the runtime's files into the root for every execution, with
+//! [`Entry::bind_runtime`](super::entry::Entry::bind_runtime), in the caller's mount namespace: the
+//! generated machine ID's file, read-only over the root's `/etc/machine-id`, or, with the image's
+//! own machine ID, nothing. The entry checks the record's hostname first, which every execution's
+//! entry then takes. It returns the [`Applied`] root and workload, which the adapter keeps, and
+//! whose [`teardown`](Applied::teardown) removes the binds before it tears the root down, or an
+//! [`ApplyError`], after which nothing that it mounted or bound stays mounted, unless the error
+//! holds the unmounts that failed. It applies none of the record's other settings: its export,
+//! and its network.
 //!
 //! # Example
 //!
@@ -250,7 +259,9 @@
 //! application, [`apply`](fn@apply), needs the guest's root user, in the guest's initial mount
 //! namespace, as [`root::assemble`] does: for a GPT disk, it asks the kernel to reread the disk's
 //! partition table, which needs `CAP_SYS_ADMIN`; it mounts the root, reads the account databases
-//! below it, and, if it fails, tears it down. It starts no process and generates no ID.
+//! below it, and, if it fails, tears it down. It starts no process, and generates at most one ID,
+//! a machine ID that the record asks for, whose bind over the root's `/etc/machine-id` needs
+//! Linux 6.8 or later.
 
 mod activation;
 mod mounts;
@@ -274,7 +285,8 @@ use super::time::{
 
 pub use self::activation::{
     Activation, ActivationAction, ActivationCause, ActivationFailure, ActivationInput,
-    ActivationState, Applied, ApplyError, RootTemplate, apply,
+    ActivationState, Applied, AppliedTeardownError, ApplyError, MACHINE_ID_FILE, RootTemplate,
+    apply,
 };
 pub use self::mounts::{Mounted, Origin};
 pub use self::repair::{
