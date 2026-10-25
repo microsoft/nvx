@@ -12,8 +12,9 @@ use std::path::{Path, PathBuf};
 use windows_sys::Win32::Foundation::{FILETIME, GetLastError, HANDLE};
 use windows_sys::Win32::Storage::FileSystem::{
     BY_HANDLE_FILE_INFORMATION, FILE_ATTRIBUTE_DIRECTORY, FILE_FLAG_BACKUP_SEMANTICS, FILE_ID_INFO,
-    FILE_SHARE_READ, FILE_TYPE_DISK, FILE_TYPE_UNKNOWN, FileIdInfo, GetFileInformationByHandle,
-    GetFileInformationByHandleEx, GetFileType, GetFinalPathNameByHandleW, VOLUME_NAME_DOS,
+    FILE_SHARE_READ, FILE_TYPE_DISK, FILE_TYPE_UNKNOWN, FileIdInfo, GETFINALPATHNAMEBYHANDLE_FLAGS,
+    GetFileInformationByHandle, GetFileInformationByHandleEx, GetFileType,
+    GetFinalPathNameByHandleW, VOLUME_NAME_DOS, VOLUME_NAME_GUID,
 };
 
 use super::{FileId, FileKind, FileSeal, SEAL_VERSION, SealScheme, SealTime};
@@ -110,18 +111,23 @@ pub(super) fn open_read(path: &Path) -> io::Result<File> {
 
 /// See [`super::final_path`].
 pub(super) fn final_path(file: &File) -> io::Result<PathBuf> {
+    final_path_by(file, VOLUME_NAME_DOS)
+}
+
+/// See [`super::final_volume_path`].
+pub(super) fn final_volume_path(file: &File) -> io::Result<PathBuf> {
+    final_path_by(file, VOLUME_NAME_GUID)
+}
+
+/// Returns the final path of the open `file`, which names its volume as `volume` asks.
+fn final_path_by(file: &File, volume: GETFINALPATHNAMEBYHANDLE_FLAGS) -> io::Result<PathBuf> {
     let handle = file.as_raw_handle() as HANDLE;
     let mut buffer = vec![0u16; 260];
     loop {
         // SAFETY: the handle is open for as long as `file` is borrowed, and the buffer holds
         // `buffer.len()` units.
         let length = unsafe {
-            GetFinalPathNameByHandleW(
-                handle,
-                buffer.as_mut_ptr(),
-                buffer.len() as u32,
-                VOLUME_NAME_DOS,
-            )
+            GetFinalPathNameByHandleW(handle, buffer.as_mut_ptr(), buffer.len() as u32, volume)
         } as usize;
         if length == 0 {
             return Err(io::Error::last_os_error());
@@ -215,5 +221,24 @@ mod tests {
         }
         let file = File::open(deep.join("long")).unwrap();
         assert!(final_path(&file).unwrap().as_os_str().len() > 260);
+    }
+
+    #[test]
+    fn final_volume_paths_name_the_file_by_its_volume() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("file");
+        std::fs::write(&path, b"").unwrap();
+        let found = final_volume_path(&File::open(&path).unwrap()).unwrap();
+        assert!(
+            found.to_string_lossy().starts_with(r"\\?\Volume{"),
+            "{}",
+            found.display()
+        );
+        // The path names the file, which its final path by its drive names too.
+        let reopened = File::open(&found).unwrap();
+        assert_eq!(
+            final_path(&reopened).unwrap(),
+            std::fs::canonicalize(&path).unwrap()
+        );
     }
 }

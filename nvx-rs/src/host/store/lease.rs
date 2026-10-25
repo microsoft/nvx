@@ -6,6 +6,7 @@
 //! [`template::Store`](crate::host::template::Store), grants and ends leases, and reads its own
 //! records, with these, and [`template`](crate::host::template) re-exports what is public here.
 
+use std::ffi::OsStr;
 use std::fmt;
 use std::io;
 use std::num::NonZeroU64;
@@ -23,6 +24,9 @@ use crate::host::platform::{self, parse_hex_id, parse_hex32};
 
 /// Version of the store's records: its identity record and its index.
 pub const STORE_FORMAT: u32 = 1;
+
+/// Name of the directory of the generations' payloads.
+pub const GENERATIONS_NAME: &str = "generations";
 
 /// Bytes of a [`StoreId`] and of a [`StorageGeneration`](crate::host::template::StorageGeneration).
 pub(crate) const ID_LEN: usize = 16;
@@ -245,6 +249,26 @@ impl fmt::Debug for Lease {
             .field("launch", &self.launch)
             .finish()
     }
+}
+
+/// Returns the name of the control socket of the VMM of the clone whose launch is `launch`, in the
+/// payload of the leased generation: `<launch>.sock`.
+pub(crate) fn clone_socket_name(launch: &LaunchId) -> String {
+    format!("{launch}.sock")
+}
+
+/// Returns whether `path` names the control socket of the VMM of the clone that holds `lease`, as
+/// [`template::Store::clone_socket_path`](crate::host::template::Store::clone_socket_path) returns
+/// it: `generations/<generation>/<launch>.sock`, in a template store, which a lease names by its
+/// identity alone.
+pub(crate) fn is_clone_socket(lease: &Lease, path: &Path) -> bool {
+    let name = clone_socket_name(&lease.launch);
+    let generation = lease.generation.to_string();
+    let payload = path.parent();
+    path.file_name() == Some(OsStr::new(&name))
+        && payload.and_then(Path::file_name) == Some(OsStr::new(&generation))
+        && payload.and_then(Path::parent).and_then(Path::file_name)
+            == Some(OsStr::new(GENERATIONS_NAME))
 }
 
 /// Reads the clone binding of the sandbox in `dir`, or returns `None` if it holds none, or if the

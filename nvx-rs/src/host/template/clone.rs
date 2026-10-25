@@ -1,12 +1,16 @@
 //! The plan of a clone, [`ClonePlan`]: the generation of a template that a clone leased, with the
 //! clone's own image, upper, and memory target, which the plan checks against the generation
 //! before the clone's launch, so that a request that the template cannot serve fails before any
-//! VMM starts.
+//! VMM starts; and the clone's launch, [`ClonePlan::launch`], OpenVMM's restore of the
+//! generation's snapshot with what the plan checked.
 
 #[cfg(all(test, any(target_os = "linux", windows)))]
 mod tests;
 
+mod launch;
 mod record;
+
+pub use self::launch::Restoring;
 
 use std::fmt;
 use std::fs::{self, File};
@@ -29,7 +33,8 @@ use crate::host::sandbox::distro::{self, CheckedDistro, DistroBinding, DistroFor
 use crate::host::sandbox::plan::bound_image;
 use crate::host::sandbox::scratch::{self, CheckedScratch, ScratchBinding};
 use crate::host::sandbox::{
-    LayerRole, SandboxLayer, SandboxPlan, block_geometry, reject_container_path, reject_disk_path,
+    LayerRole, SandboxLayer, SandboxPlan, SandboxUpper, block_geometry, reject_container_path,
+    reject_disk_path,
 };
 use crate::host::store::LockedStore;
 use crate::host::store::files::{create_new, remove_if_present};
@@ -132,8 +137,20 @@ pub enum CloneUpper {
 ///   for the clone, and present the geometry of the template's scratch, its length included,
 ///   which [`CheckedScratch::geometry`] reads through the checked file. At its path, it must be a
 ///   regular file, not a link, nor on Windows any other reparse point, that is the file that the
-///   check found, and that no one else may change. The plan holds the checked image, and with it
-///   the claim. Nothing reads, formats, or copies the image.
+///   check found, and that no one else may change. Nor may it be a file of the snapshot of any of
+///   the store's generations, by any path, through a hard link, say: every clone of a generation
+///   restores its snapshot in place, while its guest writes its scratch image. So, once claimed,
+///   it must be outside the store's directory, wherever the links on its path lead: the store's
+///   generations hold their snapshots there, and its captures write theirs there, which their
+///   publications make generations' by renaming directories within it, so a file in the store
+///   could be, or become as the plan examines it, a file of a snapshot, while nothing that the
+///   host does moves a file into the store's directory. And it must have a single name: another,
+///   a hard link, could make it a file of a snapshot, of this store or of another, that its
+///   location does not show. These checks open nothing in the store, however many generations it
+///   holds. They resolve the aliases that the file system makes, links, junctions, directories
+///   held open, and other names, but not a mount or a network share that exposes the store's
+///   directories elsewhere: a store's directories must not be exposed that way. The plan holds
+///   the checked image, and with it the claim. Nothing reads, formats, or copies the image.
 /// - The memory target must be whole blocks of [`MEMORY_BLOCK_SIZE`], and of the template's own
 ///   memory blocks, from the template's RAM to its RAM capacity.
 /// - The activation record, which the clone's guest applies in place of the configuration that
@@ -141,17 +158,18 @@ pub enum CloneUpper {
 ///   upper, and settings, the template's network, and the resources that the clone must have,
 ///   as [`activation`](Self::activation) describes. Its image must be an EROFS layer, and its
 ///   settings must keep the limits of a record, as [`Configuration::check`] checks them.
-/// - The capability is fresh: the plan draws it for the clone's launch.
+/// - The capability is fresh: the plan draws it for the clone's launch, [`launch`](Self::launch).
 ///
 /// The plan's checks read the metadata of the clone's files, never their content.
 ///
 /// ```no_run
+/// use std::path::Path;
 /// use std::time::{Duration, Instant};
 ///
 /// use nvx::activation::{Journal, MachineIdMode, OverlayMode, WorkloadView};
 /// use nvx::host::sandbox::distro::{DISTRO_POLICY_REVISION, DistroBinding};
 /// use nvx::host::sandbox::{SandboxDistro, SandboxPlan, SandboxUpper};
-/// use nvx::host::store::CallerFiles;
+/// use nvx::host::store::{CallerFiles, RuntimeIdentity};
 /// use nvx::host::template::{
 ///     CloneRequest, ClonePlan, Generation, HostTime, MEMORY_BLOCK_SIZE, Store,
 /// };
@@ -161,6 +179,7 @@ pub enum CloneUpper {
 /// #     generation: &Generation,
 /// #     image: SandboxDistro,
 /// #     binding: DistroBinding,
+/// #     runtime: &RuntimeIdentity,
 /// # ) -> nvx::Result<()> {
 /// let files = CallerFiles::new("config.json")?;
 /// let mut acquired = store.acquire(
@@ -186,10 +205,12 @@ pub enum CloneUpper {
 /// };
 /// let deadline = Instant::now() + Duration::from_secs(5);
 /// let plan = ClonePlan::new(store, &mut acquired, &request, deadline)?;
-/// // ... the clone's launch, under `acquired.locked`, as the launch that the lease reserves, of
-/// // `plan.snapshot()` with `plan.image().path()` and `plan.scratch_path()`, whose guest applies
-/// // `plan.activation()` ...
-/// # let _ = plan;
+/// // OpenVMM restores the generation's snapshot under the runtime that captured the template.
+/// let restoring = plan.launch(&mut acquired, Path::new("openvmm"), runtime)?;
+/// // ... the restore, whose VMM sends its restore-ready event to `restoring.ready_endpoint()`,
+/// // serves its control console at `restoring.starting().endpoint()`, and whose guest applies
+/// // `restoring.activation()` ...
+/// # let _ = restoring;
 /// # Ok(())
 /// # }
 /// ```
@@ -214,6 +235,9 @@ pub struct ClonePlan {
     activation: ActivationRecord,
     /// The capability of the clone's launch.
     capability: [u8; CAPABILITY_LEN],
+    /// The clone's devices, which its restore attaches: the adapter's plan of its image and
+    /// network, over the file of its `scratch` block device.
+    devices: SandboxPlan,
 }
 
 /// How a plan reaches the clone's files: as the checks of their bindings reach them, and as it
@@ -245,7 +269,7 @@ impl ClonePlan {
     ///
     /// The plan is made under the lock that acquired the lease, which `acquired` holds, before the
     /// launch that the lease reserves, [`Lease::launch`], which the caller then runs under the
-    /// same lock: the sandbox records no VM and no launch, so no VM of an earlier clone holds a
+    /// same lock, with [`launch`](Self::launch): the sandbox records no VM and no launch, so no VM of an earlier clone holds a
     /// file that the plan replaces. It takes `acquired` exclusively while it plans, since it may
     /// create a file in the sandbox's directory, as the transitions of a sandbox's store take its
     /// lock, and borrows nothing of it once it returns. It reads the generation's key,
@@ -296,13 +320,15 @@ impl ClonePlan {
     ///   comma or a semicolon, or whose filesystem presents another geometry than the template's
     ///   scratch, and with [`ErrorKind::Io`] if the sparse file cannot be created, sized, or
     ///   checked;
-    /// - for an upper on a scratch image, as [`ScratchBinding::check`] and
-    ///   [`CheckedScratch::geometry`] fail, with [`ErrorKind::Unsupported`] for an image of
-    ///   another geometry than the template's scratch, its length included, with
-    ///   [`ErrorKind::Unavailable`] for an image that is not, at its path, the regular file that
-    ///   the check found, of the current user or an administrator, and that no one else may
-    ///   change, and with [`ErrorKind::Unsupported`] for an image that is a file of the sandbox's
-    ///   store.
+    /// - for an upper on a scratch image, with [`ErrorKind::Io`] if the image's location cannot be
+    ///   compared with the template store's directory, or its names cannot be counted, as
+    ///   [`ScratchBinding::check`] and [`CheckedScratch::geometry`] fail, with
+    ///   [`ErrorKind::Unsupported`] for an image of another geometry than the template's scratch,
+    ///   its length included, with [`ErrorKind::Unavailable`] for an image that is not, at its
+    ///   path, the regular file that the check found, of the current user or an administrator,
+    ///   and that no one else may change, and with [`ErrorKind::Unsupported`] for an image that
+    ///   is a file of the sandbox's store, or that is in the template store's directory, as the
+    ///   files of its snapshots are, or has another name.
     ///
     /// [`Configuration::check`]: crate::activation::Configuration::check
     pub fn new(
@@ -360,12 +386,18 @@ impl ClonePlan {
         let capability = generate_capability()?;
         let upper = match (request.adapter.upper().scratch_path(), &request.scratch) {
             (Some(path), Some(binding)) => CloneUpper::Scratch(check_scratch(
-                path, binding, &key, &owned, deadline, access,
+                path,
+                binding,
+                &key,
+                (&owned, store),
+                deadline,
+                access,
             )?),
             _ => CloneUpper::Tmpfs {
                 path: create_scratch(locked, &key, access)?,
             },
         };
+        let devices = devices_of(request, &upper);
         Ok(Self {
             lease: lease.clone(),
             generation,
@@ -376,6 +408,7 @@ impl ClonePlan {
             memory: request.memory,
             activation,
             capability,
+            devices,
         })
     }
 
@@ -471,6 +504,18 @@ impl fmt::Debug for ClonePlan {
             .field("activation", &self.activation)
             .finish_non_exhaustive()
     }
+}
+
+/// Returns the devices of the clone of `request`, whose upper is `upper`: the adapter's plan of its
+/// image and network, over the file of its `scratch` block device, which every restore attaches,
+/// the sparse file of an upper in RAM included.
+fn devices_of(request: &CloneRequest, upper: &CloneUpper) -> SandboxPlan {
+    let adapter = &request.adapter;
+    let scratch = match upper {
+        CloneUpper::Tmpfs { path } => SandboxUpper::scratch_at(paths::normalized(path)),
+        CloneUpper::Scratch(_) => adapter.upper().clone(),
+    };
+    SandboxPlan::adapter(adapter.distro().clone(), scratch).with_network(adapter.network().cloned())
 }
 
 /// Refuses a request that no clone takes, as [`ClonePlan::new`] describes, without reading or
@@ -647,14 +692,15 @@ fn check_image(
 
 /// Checks and claims the scratch image at `path` against `binding`, through `access`, waiting
 /// until `deadline` for a claim that another launch holds to be released, and then checks its
-/// geometry, against the template's scratch that `key` records, the image at its path, and that
-/// it is none of `owned`, the files of the sandbox's store, as [`ClonePlan`] describes, and
+/// geometry, against the template's scratch that `key` records, the image at its path, that it
+/// is none of `owned`, the files of the sandbox's store, that it is outside the directory of
+/// `store`, the template store, and that it has no other name, as [`ClonePlan`] describes, and
 /// returns the image that the binding's check opened and claimed.
 fn check_scratch(
     path: &Path,
     binding: &ScratchBinding,
     key: &TemplateKey,
-    owned: &StoreFiles,
+    (owned, store): (&StoreFiles, &Store),
     deadline: Instant,
     access: Access<'_>,
 ) -> Result<CheckedScratch> {
@@ -672,7 +718,109 @@ fn check_scratch(
         .map_err(|error| refused(format!("cannot be identified: {error}")))?;
     check_at_path(path, identity, refused)?;
     owned.check(identity, "scratch image", path)?;
+    check_outside_store(&checked, store, path)?;
+    check_single_name(&checked, path)?;
     Ok(checked)
+}
+
+/// Refuses the clone's scratch image at `path`, which `checked` holds open and claims, if it is in
+/// the directory of `store`, the template store, where it is now, every link on the way to it
+/// resolved: the store's generations hold their snapshots there, which every clone of a
+/// generation restores in place, and its captures write theirs there, which their publications
+/// make generations' by renaming directories within it, so a file in the store could be, or
+/// become as the plan examines it, a file of such a snapshot. Nothing that the host does moves a
+/// file into the store's directory, so one outside it stays outside it. The location resolves the
+/// aliases that the file system makes, links and junctions on the way and directories held open,
+/// but not a mount or a network share that exposes the store's directories elsewhere, which
+/// [`ClonePlan`] leaves to the system's administration.
+fn check_outside_store(checked: &CheckedScratch, store: &Store, path: &Path) -> Result<()> {
+    let failed = |error: io::Error| {
+        Error::io(format!(
+            "cannot compare the location of the scratch image {} with the template store in {}",
+            path.display(),
+            store.dir().display()
+        ))
+        .with_source(error)
+    };
+    let location = location_of(checked.file()).map_err(failed)?;
+    if is_within(&location, store.dir()).map_err(failed)? {
+        return Err(Error::unsupported(format!(
+            "the scratch image {} is {}, in the directory of the template store {}, where its \
+             captures write the snapshots that every clone of a generation restores in place: a \
+             clone's scratch image must be outside it",
+            path.display(),
+            location.display(),
+            store.dir().display()
+        )));
+    }
+    Ok(())
+}
+
+/// Returns whether the directory `dir` is one of those above `location`, by their identities, past
+/// those that went from their paths meanwhile, as a publication renames a capture's transaction,
+/// which `dir`, the store's own directory, outlives.
+fn is_within(location: &Path, dir: &Path) -> io::Result<bool> {
+    let dir = platform::file_identity(dir)?;
+    for ancestor in location.ancestors().skip(1) {
+        match platform::file_identity(ancestor) {
+            Ok(identity) if identity == dir => return Ok(true),
+            Ok(_) => {}
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+                ) => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(false)
+}
+
+/// Returns where the open `file` is now, every link on the way to it resolved: on Linux, the
+/// target of its link in `/proc/self/fd`, which follows renames of its directories, and on
+/// Windows its final path, which names its volume by a drive letter or a mount point, or else by
+/// the volume's GUID.
+fn location_of(file: &File) -> io::Result<PathBuf> {
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::fd::AsRawFd;
+
+        fs::read_link(Path::new("/proc/self/fd").join(file.as_raw_fd().to_string()))
+    }
+    #[cfg(windows)]
+    {
+        // A volume without a drive letter or a mount point has no path by a drive.
+        crate::host::seal::final_path(file)
+            .or_else(|error| crate::host::seal::final_volume_path(file).map_err(|_| error))
+    }
+    #[cfg(not(any(target_os = "linux", windows)))]
+    {
+        let _ = file;
+        Err(io::Error::from(io::ErrorKind::Unsupported))
+    }
+}
+
+/// Refuses the clone's scratch image at `path`, which `checked` holds open, unless it has a single
+/// name: another name, a hard link, could make it a file of a snapshot that the clone's guest then
+/// writes, of one of the store's generations or captures, or of another store, which the image's
+/// location does not show.
+fn check_single_name(checked: &CheckedScratch, path: &Path) -> Result<()> {
+    let links = platform::link_count(checked.file()).map_err(|error| {
+        Error::io(format!(
+            "cannot count the names of the scratch image {}",
+            path.display()
+        ))
+        .with_source(error)
+    })?;
+    if links > 1 {
+        return Err(Error::unsupported(format!(
+            "the scratch image {} has {links} names, but a clone's scratch image must have a \
+             single name: another, a hard link, could make it a file of a snapshot, which every \
+             clone of its generation restores in place",
+            path.display()
+        )));
+    }
+    Ok(())
 }
 
 /// The regular files that the store of a sandbox owns, with their identities, which no image or

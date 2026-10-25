@@ -33,10 +33,10 @@ use windows_sys::Win32::Security::{
 use windows_sys::Win32::Storage::FileSystem::{
     BY_HANDLE_FILE_INFORMATION, CreateDirectoryW, CreateFileW, DELETE, FILE_ALL_ACCESS,
     FILE_APPEND_DATA, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT, FILE_DELETE_CHILD,
-    FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_FLAG_OVERLAPPED,
-    FILE_WRITE_ATTRIBUTES, FILE_WRITE_DATA, FILE_WRITE_EA, GetFileInformationByHandle, MoveFileExW,
-    OPEN_EXISTING, READ_CONTROL, ReadFile, SECURITY_IDENTIFICATION, SECURITY_SQOS_PRESENT,
-    WRITE_DAC, WRITE_OWNER, WriteFile,
+    FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_FIRST_PIPE_INSTANCE, FILE_FLAG_OPEN_REPARSE_POINT,
+    FILE_FLAG_OVERLAPPED, FILE_WRITE_ATTRIBUTES, FILE_WRITE_DATA, FILE_WRITE_EA,
+    GetFileInformationByHandle, MoveFileExW, OPEN_EXISTING, PIPE_ACCESS_INBOUND, READ_CONTROL,
+    ReadFile, SECURITY_IDENTIFICATION, SECURITY_SQOS_PRESENT, WRITE_DAC, WRITE_OWNER, WriteFile,
 };
 #[cfg(feature = "cli")]
 use windows_sys::Win32::System::Console::{
@@ -49,7 +49,10 @@ use windows_sys::Win32::System::IO::{
 use windows_sys::Win32::System::LibraryLoader::{
     GetProcAddress, LOAD_LIBRARY_SEARCH_SYSTEM32, LoadLibraryExW,
 };
-use windows_sys::Win32::System::Pipes::{GetNamedPipeServerProcessId, WaitNamedPipeW};
+use windows_sys::Win32::System::Pipes::{
+    CreateNamedPipeW, GetNamedPipeServerProcessId, PIPE_READMODE_BYTE, PIPE_REJECT_REMOTE_CLIENTS,
+    PIPE_TYPE_BYTE, PIPE_WAIT, WaitNamedPipeW,
+};
 use windows_sys::Win32::System::Registry::{
     HKEY_LOCAL_MACHINE, RRF_RT_REG_DWORD, RRF_RT_REG_SZ, RegGetValueW,
 };
@@ -1007,6 +1010,35 @@ impl CurrentUser {
 /// that allows others is not restricted, since a handle that they opened keeps its access.
 pub(crate) fn create_store_dir(path: &Path) -> io::Result<Option<String>> {
     let user = CurrentUser::get()?;
+    let name = wide(path);
+    with_owner_only_attributes(
+        &user,
+        FILE_ALL_ACCESS,
+        OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE,
+        |attributes| {
+            // SAFETY: the name is NUL-terminated, and the attributes hold a valid descriptor.
+            if unsafe { CreateDirectoryW(name.as_ptr(), attributes) } == 0 {
+                let error = last_error();
+                if error != ERROR_ALREADY_EXISTS {
+                    return Err(io::Error::from_raw_os_error(error as i32));
+                }
+            }
+            Ok(())
+        },
+    )??;
+    store_dir_problem(path, &user)
+}
+
+/// Runs `create` with the attributes of a new object that `user` owns, whose protected access
+/// control list allows `user` alone, `access`, with an entry that the objects created in it
+/// inherit as `inheritance` says, and returns what `create` returns. The attributes let no child
+/// process inherit the object's handle.
+fn with_owner_only_attributes<T>(
+    user: &CurrentUser,
+    access: u32,
+    inheritance: u32,
+    create: impl FnOnce(&SECURITY_ATTRIBUTES) -> T,
+) -> io::Result<T> {
     let sid = user.sid();
     // SAFETY: the identifier is valid.
     let sid_len = unsafe { GetLengthSid(sid) } as usize;
@@ -1025,13 +1057,7 @@ pub(crate) fn create_store_dir(path: &Path) -> io::Result<Option<String>> {
     // its use below.
     let built = unsafe {
         InitializeAcl(acl_ptr, acl_len, ACL_REVISION) != 0
-            && AddAccessAllowedAceEx(
-                acl_ptr,
-                ACL_REVISION,
-                OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE,
-                FILE_ALL_ACCESS,
-                sid,
-            ) != 0
+            && AddAccessAllowedAceEx(acl_ptr, ACL_REVISION, inheritance, access, sid) != 0
             && InitializeSecurityDescriptor(descriptor_ptr, SECURITY_DESCRIPTOR_REVISION) != 0
             && SetSecurityDescriptorOwner(descriptor_ptr, sid, 0) != 0
             && SetSecurityDescriptorDacl(descriptor_ptr, 1, acl_ptr, 0) != 0
@@ -1046,15 +1072,7 @@ pub(crate) fn create_store_dir(path: &Path) -> io::Result<Option<String>> {
         lpSecurityDescriptor: descriptor_ptr,
         bInheritHandle: 0,
     };
-    let name = wide(path);
-    // SAFETY: the name is NUL-terminated, and the attributes hold a valid descriptor.
-    if unsafe { CreateDirectoryW(name.as_ptr(), &attributes) } == 0 {
-        let error = last_error();
-        if error != ERROR_ALREADY_EXISTS {
-            return Err(io::Error::from_raw_os_error(error as i32));
-        }
-    }
-    store_dir_problem(path, &user)
+    Ok(create(&attributes))
 }
 
 /// Returns why the directory `path` cannot hold a sandbox store, if it cannot: unless it is
@@ -1576,6 +1594,13 @@ pub(crate) fn opened_file_identity(file: &fs::File) -> io::Result<(u64, u64)> {
     handle_identity(file.as_raw_handle() as HANDLE)
 }
 
+/// Returns the number of names, its hard links, of the file that `file` holds open.
+pub(crate) fn link_count(file: &fs::File) -> io::Result<u64> {
+    Ok(u64::from(
+        handle_information(file.as_raw_handle() as HANDLE)?.nNumberOfLinks,
+    ))
+}
+
 /// Returns the volume serial number and file index of the file that `handle` holds open.
 fn handle_identity(handle: HANDLE) -> io::Result<(u64, u64)> {
     let information = handle_information(handle)?;
@@ -1645,6 +1670,48 @@ pub(crate) fn control_endpoint(_socket_path: &Path) -> io::Result<String> {
     getrandom::fill(&mut bytes).map_err(io::Error::other)?;
     let suffix: String = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
     Ok(format!("//./pipe/openvmm-microvm-{suffix}"))
+}
+
+/// The bytes that the inbound buffer of a restore-ready pipe holds, more than OpenVMM's event.
+const READY_BUFFER_LEN: u32 = 4096;
+
+/// The listener at which the launch of a clone awaits the restore-ready event of its VMM: the
+/// one instance of a named pipe, inbound, which only the current user may open, from this host
+/// alone, and which takes the connection of the VMM before the host accepts it.
+#[derive(Debug)]
+pub(crate) struct ReadyListener {
+    /// The pipe's instance, which the VMM finds as long as it is open.
+    _pipe: OwnedHandle,
+}
+
+/// Listens at a fresh named pipe, whose name it draws at random, as the restore-ready endpoint of
+/// a clone's launch, and returns the endpoint, as OpenVMM's `--restore-ready-path` takes it, and
+/// its listener. The first instance of the pipe is the listener's, so no other process holds the
+/// name, and the pipe's protected access control list allows the current user alone.
+pub(crate) fn listen_ready(_socket_path: &Path) -> io::Result<(String, ReadyListener)> {
+    let mut bytes = [0u8; 16];
+    getrandom::fill(&mut bytes).map_err(io::Error::other)?;
+    let suffix: String = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
+    let endpoint = format!("//./pipe/nvx-restore-ready-{suffix}");
+    let name = wide(endpoint.replace('/', "\\"));
+    let pipe =
+        with_owner_only_attributes(&CurrentUser::get()?, FILE_ALL_ACCESS, 0, |attributes| {
+            // SAFETY: the name is NUL-terminated, and the attributes hold a valid descriptor.
+            let handle = unsafe {
+                CreateNamedPipeW(
+                    name.as_ptr(),
+                    PIPE_ACCESS_INBOUND | FILE_FLAG_FIRST_PIPE_INSTANCE,
+                    PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
+                    1,
+                    0,
+                    READY_BUFFER_LEN,
+                    0,
+                    attributes,
+                )
+            };
+            owned(handle).ok_or_else(io::Error::last_os_error)
+        })??;
+    Ok((endpoint, ReadyListener { _pipe: pipe }))
 }
 
 /// Connects to a named pipe served by the process `expected_pid`.

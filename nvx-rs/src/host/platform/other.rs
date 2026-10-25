@@ -98,6 +98,10 @@ pub(crate) fn opened_file_identity(_file: &File) -> io::Result<(u64, u64)> {
     Err(unsupported())
 }
 
+pub(crate) fn link_count(_file: &File) -> io::Result<u64> {
+    Err(unsupported())
+}
+
 /// An open directory, which this host never holds: it keeps no sandbox's store.
 pub(crate) enum Directory {}
 
@@ -207,6 +211,14 @@ pub fn create_private_dir(path: &Path) -> io::Result<()> {
 }
 
 pub(crate) fn control_endpoint(_socket_path: &Path) -> io::Result<String> {
+    Err(unsupported())
+}
+
+/// The listener of the restore-ready endpoint of a clone's launch, which this host never makes.
+#[derive(Debug)]
+pub(crate) struct ReadyListener;
+
+pub(crate) fn listen_ready(_socket_path: &Path) -> io::Result<(String, ReadyListener)> {
     Err(unsupported())
 }
 

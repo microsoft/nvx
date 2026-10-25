@@ -1,6 +1,8 @@
 //! Tests of the plans of clones: the checks of their images, uppers, and memory targets against
 //! the generation that they lease, which read no content, the claims of their scratch images, and
-//! the sparse scratch device of an upper in RAM.
+//! the sparse scratch device of an upper in RAM; and, in [`launch`], of their launches.
+
+mod launch;
 
 use std::io::Read;
 use std::net::{IpAddr, Ipv4Addr};
@@ -22,6 +24,7 @@ use crate::host::sandbox::scratch::CLAIM_RELEASE_WAIT;
 use crate::host::sandbox::{SandboxDistro, SandboxNetwork, SandboxSettings, SandboxUpper};
 use crate::host::seal::{FileSeal, open_metadata_only};
 use crate::host::store::{CLONE_SCRATCH_NAME, CallerFiles, LOG_NAME, SandboxStore};
+use crate::host::template::store::{CAPTURES_NAME, SNAPSHOT_NAME, TRANSACTION_NAME};
 use crate::host::template::test_support::{MIB, ManifestSpec, class, network_class};
 use crate::host::template::{CaptureClass, HostTime};
 use crate::host::test_support::released;
@@ -85,6 +88,25 @@ fn stage(path: &Path, length: u64) {
     #[cfg(unix)]
     std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
     options.open(path).unwrap().set_len(length).unwrap();
+}
+
+/// Makes `link` a junction to the directory `target`, quoting both paths, since `cmd` splits its
+/// arguments at commas and semicolons.
+#[cfg(windows)]
+fn junction(link: &Path, target: &Path) {
+    use std::os::windows::process::CommandExt;
+    use std::process::{Command, Stdio};
+
+    let status = Command::new("cmd")
+        .raw_arg(format!(
+            "/C mklink /J \"{}\" \"{}\"",
+            link.display(),
+            target.display()
+        ))
+        .stdout(Stdio::null())
+        .status()
+        .unwrap();
+    assert!(status.success(), "cannot link {}", link.display());
 }
 
 /// Returns the physical block size that OpenVMM presents for the files of the directory `dir`:
@@ -267,9 +289,18 @@ impl Fixture {
     /// Publishes a template as [`new`](Self::new) does, of the class and manifest that `change`
     /// changes, given the physical block size of the files of the directory.
     fn with(change: impl FnOnce(&mut CaptureClass, &mut ManifestSpec, u32)) -> Self {
+        Self::in_store(|directory| directory.join("templates"), change)
+    }
+
+    /// Publishes a template as [`with`](Self::with) does, in a store at the path that `store`
+    /// returns, given the temporary directory, in which it creates the store's parent directory.
+    fn in_store(
+        store: impl FnOnce(&Path) -> PathBuf,
+        change: impl FnOnce(&mut CaptureClass, &mut ManifestSpec, u32),
+    ) -> Self {
         let directory = tempfile::tempdir().unwrap();
         let physical = physical_block_size(directory.path());
-        let store = Store::create(directory.path().join("templates")).unwrap();
+        let store = Store::create(store(directory.path())).unwrap();
         let (mut class, mut spec) = (class(), ManifestSpec::template());
         set_geometries(
             &mut class,
@@ -313,17 +344,24 @@ impl Fixture {
         (path, binding)
     }
 
-    /// Provisions the sandbox `name`, and leases the generation to it, a second after its
-    /// capture.
-    fn acquire(&self, name: &str) -> Acquired {
+    /// Provisions the sandbox `name`, and returns its directory, with its links resolved, as a
+    /// lease names it.
+    fn provision(&self, name: &str) -> PathBuf {
         let dir = self.path("sandboxes", name);
         let locked = SandboxStore::lock_for_provision(&dir, &files(), None).unwrap();
         fs::write(dir.join(CONFIG), b"{}").unwrap();
         drop(locked);
+        filesystem::canonicalize(&dir).unwrap()
+    }
+
+    /// Provisions the sandbox `name`, and leases the generation to it, a second after its
+    /// capture.
+    fn acquire(&self, name: &str) -> Acquired {
+        let sandbox = self.provision(name);
         self.store
             .acquire(
                 self.generation.generation(),
-                filesystem::canonicalize(&dir).unwrap(),
+                sandbox,
                 &files(),
                 &after(&self.generation, 1),
                 None,
@@ -715,6 +753,188 @@ fn links_and_directories_under_the_names_of_the_sandboxs_store_are_refused() {
     // The plan creates the file of the scratch device once nothing else is there.
     let plan = fixture.plan(&mut acquired, &request, NO_CONTENT).unwrap();
     assert!(fs::symlink_metadata(plan.scratch_path()).unwrap().is_file());
+}
+
+#[test]
+fn a_scratch_image_that_is_a_file_of_a_generation_s_snapshot_is_refused() {
+    let fixture = Fixture::new();
+    let (image, image_binding) = fixture.image("distro.erofs", IMAGE_LEN);
+    let mut acquired = fixture.acquire("sandbox");
+    // The RAM of the leased generation's snapshot, and that of another generation's, which the
+    // store's index need not list, of the template's scratch length: the clone's guest would write
+    // a snapshot that every clone of its generation restores in place.
+    let snapshot = fixture.store.snapshot_dir(&fixture.generation).unwrap();
+    let leased = snapshot.join("memory.bin");
+    stage(&leased, SCRATCH_LEN);
+    let next = fixture.generation.generation().get().get() + 1;
+    let other = crate::activation::StoreGeneration::new(std::num::NonZeroU64::new(next).unwrap());
+    let other = fixture
+        .store
+        .payload_dir(other)
+        .join(snapshot.file_name().unwrap());
+    fs::create_dir_all(&other).unwrap();
+    let other = other.join("memory.bin");
+    stage(&other, SCRATCH_LEN);
+    // Through a hard link among the scratch images, another name of the file, and by its own
+    // path, in the store's directory.
+    let cases = [
+        (&leased, fixture.path("scratches", "leased.raw")),
+        (&other, fixture.path("scratches", "other.raw")),
+        (&other, other.clone()),
+    ];
+    for (memory, scratch) in cases {
+        let linked = scratch != *memory;
+        if linked {
+            fs::hard_link(memory, &scratch).unwrap();
+        }
+        let binding = ScratchBinding::bind(&scratch).unwrap();
+        let request = scratch_request(&image, &image_binding, &scratch, &binding);
+        let expected = if linked {
+            format!(
+                "the scratch image {} has 2 names, but a clone's scratch image must have a single \
+                 name: another, a hard link, could make it a file of a snapshot, which every \
+                 clone of its generation restores in place",
+                scratch.display()
+            )
+        } else {
+            format!(
+                "the scratch image {} is {}, in the directory of the template store {}, where its \
+                 captures write the snapshots that every clone of a generation restores in place: \
+                 a clone's scratch image must be outside it",
+                scratch.display(),
+                location_of(&File::open(&scratch).unwrap())
+                    .unwrap()
+                    .display(),
+                fixture.store.dir().display()
+            )
+        };
+        assert_eq!(
+            failure(fixture.plan(&mut acquired, &request, NO_CONTENT)),
+            (ErrorKind::Unsupported, expected)
+        );
+        assert_untouched(&acquired);
+    }
+}
+
+#[test]
+fn a_scratch_image_in_the_template_store_is_refused() {
+    let fixture = Fixture::new();
+    let (image, image_binding) = fixture.image("distro.erofs", IMAGE_LEN);
+    let mut acquired = fixture.acquire("sandbox");
+    // A file in the store's directory, and one of a snapshot that a capture of the store writes,
+    // which its publication makes a generation's by renaming the capture's transaction, of the
+    // template's scratch length: by their own paths, and through links on the way to them, which
+    // the image's location resolves.
+    let dir = fixture.store.dir().to_owned();
+    let loose = dir.join("scratch.raw");
+    let transaction = dir.join(CAPTURES_NAME).join("slot").join(TRANSACTION_NAME);
+    let memory = transaction.join(SNAPSHOT_NAME).join("memory.bin");
+    fs::create_dir_all(memory.parent().unwrap()).unwrap();
+    for file in [&loose, &memory] {
+        stage(file, SCRATCH_LEN);
+    }
+    let through = |link: &Path| link.join(SNAPSHOT_NAME).join("memory.bin");
+    let mut cases = vec![(&loose, loose.clone()), (&memory, memory.clone())];
+    let link = fixture.path("links", "transaction");
+    fs::create_dir_all(link.parent().unwrap()).unwrap();
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&transaction, &link).unwrap();
+    #[cfg(windows)]
+    junction(&link, &transaction);
+    cases.push((&memory, through(&link)));
+    // The transaction held open, as a descriptor keeps a directory whatever renames it.
+    #[cfg(target_os = "linux")]
+    let held = File::open(&transaction).unwrap();
+    #[cfg(target_os = "linux")]
+    cases.push((
+        &memory,
+        through(
+            &Path::new("/proc/self/fd").join(std::os::fd::AsRawFd::as_raw_fd(&held).to_string()),
+        ),
+    ));
+    for (file, scratch) in cases {
+        let binding = ScratchBinding::bind(&scratch).unwrap();
+        let request = scratch_request(&image, &image_binding, &scratch, &binding);
+        let location = location_of(&File::open(file).unwrap()).unwrap();
+        assert_eq!(
+            failure(fixture.plan(&mut acquired, &request, NO_CONTENT)),
+            (
+                ErrorKind::Unsupported,
+                format!(
+                    "the scratch image {} is {}, in the directory of the template store {}, \
+                     where its captures write the snapshots that every clone of a generation \
+                     restores in place: a clone's scratch image must be outside it",
+                    scratch.display(),
+                    location.display(),
+                    dir.display()
+                )
+            )
+        );
+        assert_untouched(&acquired);
+    }
+}
+
+/// On Windows, a file of a volume without a drive letter or a mount point is located by the
+/// volume's GUID, above which the store's directory is found all the same.
+#[cfg(windows)]
+#[test]
+fn locations_that_name_their_volume_by_its_guid_are_compared_with_the_store() {
+    let fixture = Fixture::new();
+    let dir = fixture.store.dir().to_owned();
+    let inside = dir
+        .join(CAPTURES_NAME)
+        .join("slot")
+        .join(TRANSACTION_NAME)
+        .join("memory.bin");
+    fs::create_dir_all(inside.parent().unwrap()).unwrap();
+    stage(&inside, SCRATCH_LEN);
+    let (outside, _) = fixture.scratch("scratch.ext4", SCRATCH_LEN);
+    for (file, within) in [(&inside, true), (&outside, false)] {
+        let location = crate::host::seal::final_volume_path(&File::open(file).unwrap()).unwrap();
+        assert!(
+            location.to_string_lossy().starts_with(r"\\?\Volume{"),
+            "{}",
+            location.display()
+        );
+        assert_eq!(
+            is_within(&location, &dir).unwrap(),
+            within,
+            "{}",
+            location.display()
+        );
+    }
+}
+
+#[test]
+fn a_scratch_image_with_another_name_is_refused() {
+    let fixture = Fixture::new();
+    let (image, image_binding) = fixture.image("distro.erofs", IMAGE_LEN);
+    let mut acquired = fixture.acquire("sandbox");
+    // Another name of the image, outside the template store, as a file of the snapshot of another
+    // store would be, or one of a snapshot that a capture of this store writes, which neither the
+    // store's generations nor the image's location show.
+    let (scratch, _) = fixture.scratch("scratch.ext4", SCRATCH_LEN);
+    let other = fixture.path("stores", "memory.bin");
+    fs::create_dir_all(other.parent().unwrap()).unwrap();
+    fs::hard_link(&scratch, &other).unwrap();
+    let binding = ScratchBinding::bind(&scratch).unwrap();
+    let request = scratch_request(&image, &image_binding, &scratch, &binding);
+    assert_eq!(
+        failure(fixture.plan(&mut acquired, &request, NO_CONTENT)),
+        (
+            ErrorKind::Unsupported,
+            format!(
+                "the scratch image {} has 2 names, but a clone's scratch image must have a single \
+                 name: another, a hard link, could make it a file of a snapshot, which every clone \
+                 of its generation restores in place",
+                scratch.display()
+            )
+        )
+    );
+    assert_untouched(&acquired);
+    // Once its other name went, the image is the clone's alone.
+    fs::remove_file(&other).unwrap();
+    drop(fixture.plan(&mut acquired, &request, NO_CONTENT).unwrap());
 }
 
 #[test]
