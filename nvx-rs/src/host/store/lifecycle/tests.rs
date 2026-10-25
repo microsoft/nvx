@@ -11,7 +11,8 @@ use std::time::Duration;
 
 use super::*;
 use crate::host::store::{
-    CAPABILITY_NAME, CLONE_SCRATCH_NAME, CONSOLE_NAME, LOG_NAME, OUTCOME_NAME, SOCKET_NAME,
+    CAPABILITY_NAME, CLONE_ACTIVATION_NAME, CLONE_SCRATCH_NAME, CONSOLE_NAME, LOG_NAME,
+    OUTCOME_NAME, RESTORE_READY_NAME, SOCKET_NAME,
 };
 use crate::host::test_support::released;
 
@@ -324,6 +325,8 @@ fn a_removal_removes_the_store_the_callers_files_and_the_directory() {
         SOCKET_NAME,
         CLONE_BINDING_NAME,
         CLONE_SCRATCH_NAME,
+        CLONE_ACTIVATION_NAME,
+        RESTORE_READY_NAME,
         BOOT,
         ".runtime.json.12345.tmp",
         ".sandbox.lock.7.tmp",
@@ -408,10 +411,23 @@ fn a_removal_is_refused_while_a_vm_or_a_launch_is_recorded() {
     }
 }
 
+/// Writes the files that a clone keeps of its launch in the sandbox `dir`, its binding included.
+fn write_clone_files(dir: &Path) {
+    for name in [
+        CLONE_BINDING_NAME,
+        CLONE_SCRATCH_NAME,
+        CLONE_ACTIVATION_NAME,
+        RESTORE_READY_NAME,
+    ] {
+        fs::write(dir.join(name), b"{}").unwrap();
+    }
+}
+
 #[test]
-fn a_removal_makes_the_absence_of_the_clone_binding_durable_before_it_removes_anything_else() {
+fn a_removal_makes_the_absence_of_the_clones_files_durable_before_it_removes_anything_else() {
     let (_directory, dir) = sandbox();
-    for name in [CLONE_BINDING_NAME, LOG_NAME, BOOT] {
+    write_clone_files(&dir);
+    for name in [LOG_NAME, BOOT] {
         fs::write(dir.join(name), b"{}").unwrap();
     }
     let locked = SandboxStore::lock_existing(&dir, &files(), None).unwrap();
@@ -425,8 +441,8 @@ fn a_removal_makes_the_absence_of_the_clone_binding_durable_before_it_removes_an
         })
         .unwrap();
     // A crash after the sync, even once the directory or one of its ancestors is gone, cannot
-    // bring the binding back, and one before the configuration record goes leaves a provisioned
-    // sandbox, whose removal can be retried.
+    // bring the binding or the clone's files back, and one before the configuration record goes
+    // leaves a provisioned sandbox, whose removal can be retried.
     assert_eq!(
         synced.into_inner(),
         [(
@@ -440,11 +456,10 @@ fn a_removal_makes_the_absence_of_the_clone_binding_durable_before_it_removes_an
 }
 
 #[test]
-fn a_removal_that_cannot_make_the_absence_of_the_clone_binding_durable_keeps_the_sandbox() {
+fn a_removal_that_cannot_make_the_absence_of_the_clones_files_durable_keeps_the_sandbox() {
     let (_directory, dir) = sandbox();
-    for name in [CLONE_BINDING_NAME, LOG_NAME] {
-        fs::write(dir.join(name), b"{}").unwrap();
-    }
+    write_clone_files(&dir);
+    fs::write(dir.join(LOG_NAME), b"{}").unwrap();
     let locked = SandboxStore::lock_existing(&dir, &files(), None).unwrap();
     let error = locked
         .remove_contents(&|_: &Path| Err(Error::io("the sync failed")))
@@ -455,7 +470,8 @@ fn a_removal_that_cannot_make_the_absence_of_the_clone_binding_durable_keeps_the
     );
     assert_eq!(Error::from(error).kind(), ErrorKind::Io);
     drop(locked);
-    // Only the binding went, so the sandbox is still provisioned, and its removal can be retried.
+    // Only the clone's files went, so the sandbox is still provisioned, and its removal can be
+    // retried.
     assert_eq!(entries_of(&dir), sorted(&[CONFIG, LOCK_NAME, LOG_NAME]));
     assert!(remove(&dir).unwrap().is_none());
     assert!(!dir.exists());

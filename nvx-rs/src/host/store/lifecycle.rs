@@ -238,19 +238,19 @@ impl LockedStore {
     ///
     /// The removal refuses, and removes nothing, while the store records a VM or a launch: the
     /// caller reattaches to the VM and stops it, or recovers the launch, first, as
-    /// [`supervisor::reattach`](crate::host::supervisor::reattach) does. It then removes the
-    /// sandbox's [clone binding](CLONE_BINDING_NAME), if it holds one, and makes the binding's
-    /// absence durable before anything else goes, so that no crash after the removal of the
-    /// directory, or of one of its ancestors, brings back a binding whose lease a retirement may
-    /// have ended. It then removes the store's files but its lock, the caller's files, its
-    /// configuration record last, so that an interrupted removal leaves a provisioned sandbox,
-    /// which can be removed again, and the temporary files that the store owns. It refuses the
-    /// entries that are neither the store's nor the caller's, which it names in the order in which
-    /// the directory lists them, and keeps them and the directory; the lock file goes as the lock
-    /// is released, since the configuration record is gone. Otherwise it removes its lock file
-    /// while it still holds the lock, so that a transition that waited for the lock finds the
-    /// sandbox gone rather than halfway removed, and then the directory, as long as the path still
-    /// names it.
+    /// [`supervisor::reattach`](crate::host::supervisor::reattach) does. It then removes what a
+    /// clone kept of its launch, as a release does, and the sandbox's
+    /// [clone binding](CLONE_BINDING_NAME), if it holds one, and makes their absence durable
+    /// before anything else goes, so that no crash after the removal of the directory, or of one
+    /// of its ancestors, brings back a binding whose lease a retirement may have ended. It then
+    /// removes the store's other files but its lock, the caller's files, its configuration record
+    /// last, so that an interrupted removal leaves a provisioned sandbox, which can be removed
+    /// again, and the temporary files that the store owns. It refuses the entries that are
+    /// neither the store's nor the caller's, which it names in the order in which the directory
+    /// lists them, and keeps them and the directory; the lock file goes as the lock is released,
+    /// since the configuration record is gone. Otherwise it removes its lock file while it still
+    /// holds the lock, so that a transition that waited for the lock finds the sandbox gone rather
+    /// than halfway removed, and then the directory, as long as the path still names it.
     ///
     /// Lock files of other transitions, and on NFS other removed files that handles still hold,
     /// can keep the emptied directory, and are not refused: NFS renames a removed file that is
@@ -269,9 +269,10 @@ impl LockedStore {
 
     /// Empties the directory but for lingering files, its own lock file included, as
     /// [`remove`](Self::remove) does first: it refuses without the caller's configuration record
-    /// and while the store records a VM or a launch, removes the clone binding, and makes its
-    /// absence durable with `sync`, removes the store's files and the caller's, and the temporary
-    /// files that the store owns, and refuses any other entry.
+    /// and while the store records a VM or a launch, removes what a clone kept of its launch and
+    /// the clone binding, and makes their absence durable with `sync`, removes the store's other
+    /// files and the caller's, and the temporary files that the store owns, and refuses any other
+    /// entry.
     fn remove_contents(
         &self,
         sync: &dyn Fn(&Path) -> Result<()>,
@@ -287,6 +288,10 @@ impl LockedStore {
                 Err(error) => return Err(RemovalError::Io { path, error }),
             }
         }
+        // What a clone kept of its launch goes before its binding, as a release removes it, so
+        // that the binding's durable absence makes theirs durable too.
+        self.remove_clone_files_io()
+            .map_err(|(path, error)| RemovalError::Io { path, error })?;
         // The binding's absence, after this removal or after a release that a crash interrupted
         // before its sync, is durable while the directory, which keeps the sandbox provisioned,
         // remains.
