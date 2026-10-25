@@ -20,11 +20,15 @@
 //!   devices, of any type, that its `virtio_mmio.device` parameters describe.
 //! - [`root`]: the boot tokens of a layered root, which name its image's format and identity and
 //!   its upper, with the host's renderer and the guest's parser.
+//! - [`export`]: the boot tokens of the host export, the aggregate virtio-fs device from which a
+//!   guest maps host paths, and the guest's strict parser of them.
 //! - [`share`]: the guest targets that a sandbox's live shares may not take, which the host and
 //!   the guest both refuse.
 //! - [`nvxs`]: the NVXS session without I/O: validated records, incremental parsing, and the
 //!   state machines of the host's and the guest's roles, which carry application bytes of any
 //!   protocol.
+//! - [`status`]: the exit statuses with which a clone's guest ends its VM once its repair or its
+//!   activation failed, the time ABI's included, from which the host classifies a clone's end.
 //!
 //! The module depends on nothing outside the standard library, so the host, the guest, and test
 //! doubles share it. Tests pin its wire constants as literals, and its records, frames, and
@@ -37,12 +41,14 @@ mod app;
 mod boot;
 pub mod cmdline;
 mod exec;
+pub mod export;
 mod features;
 mod maps;
 pub mod nvxs;
 mod outer;
 pub mod root;
 pub mod share;
+pub mod status;
 #[cfg(test)]
 mod tests;
 

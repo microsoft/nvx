@@ -10,6 +10,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use super::*;
 use crate::guest::reseed::tests::take_dropped;
 use crate::guest::sys::Errno;
+use crate::guest::time::Violation;
 
 /// The new VM generation ID of the clone.
 const RESTORED: GenerationId = GenerationId::from_bytes([8; GenerationId::LENGTH]);
@@ -82,6 +83,11 @@ struct FakeSystem {
     add_failures: BTreeMap<u64, Errno>,
     /// The error numbers with which the next onlining of each block fails, once.
     online_failures: BTreeMap<u64, Errno>,
+    /// The error numbers with which a read of a block's state fails, once, by the block's number
+    /// and the read's index among the reads of its state, from 0.
+    read_failures: BTreeMap<(u64, usize), Errno>,
+    /// The number of reads of each block's state so far.
+    reads: BTreeMap<u64, usize>,
     /// Whether an added block comes online by itself, as the kernel onlines added memory when its
     /// policy says so.
     auto_online: bool,
@@ -91,6 +97,8 @@ struct FakeSystem {
     reseed_failure: Option<Errno>,
     /// Whether the finish fails.
     finish_fails: bool,
+    /// The violation with which the finish fails, as the strict time ABI's finish does, if any.
+    finish_violation: Option<Violation>,
     /// Whether the finish panics, as one that never returns would leave the repair.
     finish_panics: bool,
 }
@@ -105,10 +113,13 @@ impl FakeSystem {
             blocks: (0..4).map(|block| (block, ONLINE_STATE)).collect(),
             add_failures: BTreeMap::new(),
             online_failures: BTreeMap::new(),
+            read_failures: BTreeMap::new(),
+            reads: BTreeMap::new(),
             auto_online: false,
             stuck: None,
             reseed_failure: None,
             finish_fails: false,
+            finish_violation: None,
             finish_panics: false,
         }
     }
@@ -140,6 +151,12 @@ impl RepairSystem for FakeSystem {
     }
 
     fn block_state(&mut self, block: u64) -> io::Result<Option<Vec<u8>>> {
+        let reads = self.reads.entry(block).or_default();
+        let read = *reads;
+        *reads += 1;
+        if let Some(errno) = self.read_failures.remove(&(block, read)) {
+            return Err(errno.into());
+        }
         Ok(self.blocks.get(&block).map(|state| state.to_vec()))
     }
 
@@ -187,6 +204,9 @@ impl RepairSystem for FakeSystem {
         self.calls.push(Call::Finish(finish));
         if self.finish_panics {
             panic!("the finish never returns");
+        }
+        if let Some(violation) = &self.finish_violation {
+            return Err(TimeError::Violation(violation.clone()));
         }
         if self.finish_fails {
             Err(TimeError::StateUnavailable)
@@ -556,6 +576,220 @@ fn a_finish_that_never_returned_never_runs_again() {
         assert!(matches!(error.cause(), RepairCause::Incomplete));
     }
     assert_eq!(calls.take(), Vec::<Call>::new());
+}
+
+/// Returns the error with which the repair of `restore` on `system` fails.
+fn failure(restore: Restore, system: FakeSystem) -> RepairError {
+    repairing(restore, system).run().unwrap_err()
+}
+
+#[test]
+fn each_failure_class_ends_the_clone_with_a_status_of_its_own() {
+    let calls = Calls::default();
+    let system = || FakeSystem::new(&calls);
+    let target = || restore().with_memory_target(&[(512 * MIB, 256 * MIB)]);
+    let mut cases = Vec::new();
+    // The restore.
+    let unseeded = Restore::to(RESTORED).gated();
+    cases.push((
+        "no seed",
+        failure(unseeded, system()),
+        status::REPAIR_RESTORE,
+    ));
+    let finished = restore().finished_by_capture();
+    cases.push((
+        "finished",
+        failure(finished, system()),
+        status::REPAIR_RESTORE,
+    ));
+    // The processors.
+    let mut unlisted = system();
+    unlisted.cpus = b"1-3\n";
+    let error = failure(restore(), unlisted);
+    cases.push(("online CPUs", error, status::REPAIR_PROCESSORS));
+    let error = failure(restore().with_processor_target(4), system());
+    cases.push(("a processor target", error, status::REPAIR_PROCESSORS));
+    // The memory target, which the repair refuses before it adds any memory block.
+    let mut wide = system();
+    wide.block_size = b"40000000\n";
+    let error = failure(target(), wide);
+    cases.push(("the block size", error, status::REPAIR_MEMORY_TARGET));
+    let untargeted = restore().with_memory_ranges(&[(512 * MIB, 128 * MIB)]);
+    let error = failure(untargeted, system());
+    cases.push(("untargeted ranges", error, status::REPAIR_MEMORY_TARGET));
+    let mut unordered = system();
+    unordered.blocks.remove(&2);
+    let error = failure(target(), unordered);
+    cases.push(("the captured RAM", error, status::REPAIR_MEMORY_TARGET));
+    let overlap = restore().with_memory_target(&[(384 * MIB, 256 * MIB)]);
+    let error = failure(overlap, system());
+    cases.push(("a range", error, status::REPAIR_MEMORY_TARGET));
+    // The memory target's activation.
+    let mut refusing = system();
+    refusing.add_failures.insert(512 * MIB, Errno::EIO);
+    let error = failure(target(), refusing);
+    cases.push(("an addition", error, status::REPAIR_MEMORY));
+    let mut stuck = system();
+    stuck.stuck = Some(5);
+    let error = failure(target(), stuck);
+    cases.push(("an offline block", error, status::REPAIR_MEMORY));
+    // The reseed.
+    let mut refused = system();
+    refused.reseed_failure = Some(Errno::EPERM);
+    let error = failure(restore(), refused);
+    cases.push(("the reseed", error, status::REPAIR_RESEED));
+    // The finish, and one that never returned.
+    let mut unfinished = system();
+    unfinished.finish_fails = true;
+    let error = failure(restore(), unfinished);
+    cases.push(("the finish", error, status::REPAIR_FINISH));
+    let mut panicking = system();
+    panicking.finish_panics = true;
+    let mut repair = repairing(restore(), panicking);
+    let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| repair.run()));
+    assert!(unwound.is_err());
+    let error = repair.run().unwrap_err();
+    cases.push(("an incomplete finish", error, status::REPAIR_FINISH));
+    // The violations of the time ABI, whose statuses they keep.
+    let mut unrepaired = system();
+    unrepaired.finish_violation = Some(Violation::of_repair("the time state is unreadable"));
+    let error = failure(restore(), unrepaired);
+    cases.push(("the time ABI's repair", error, status::TIME_REPAIR));
+    let mut undaemoned = system();
+    undaemoned.finish_violation = Some(Violation::of_missing_daemon());
+    let error = failure(restore(), undaemoned);
+    cases.push(("the time daemon", error, status::TIME_CONFORMANCE));
+
+    let mut classes = Vec::new();
+    for (case, error, class) in cases {
+        assert_eq!(error.status(), class, "{case}: {error}");
+        classes.push(class);
+    }
+    // The cases cover every status of the repair, and the time ABI's statuses of a strict call.
+    classes.sort_unstable();
+    classes.dedup();
+    let mut expected: Vec<_> = status::REPAIR_STATUSES.collect();
+    expected.extend([status::TIME_CONFORMANCE, status::TIME_REPAIR]);
+    assert_eq!(classes, expected);
+}
+
+#[test]
+fn a_violation_of_the_strict_finish_is_final() {
+    let calls = Calls::default();
+    let mut system = FakeSystem::new(&calls);
+    system.finish_violation = Some(Violation::of_missing_daemon());
+    let mut repair = repairing(restore(), system);
+    let error = repair.run().unwrap_err();
+    assert_eq!(error.stage(), RepairStage::Finish);
+    assert_eq!(
+        error.to_string(),
+        "failed to finish the restore: G_CONFORMANCE_C10: the time daemon is not running"
+    );
+    let mut expected = vec![Call::OnlineCpus, Call::BlockSize];
+    expected.extend(finishing());
+    assert_eq!(calls.take(), expected);
+    // Every retry returns the same error, with its status, without a second acknowledgement.
+    for _ in 0..2 {
+        let again = repair.run().unwrap_err();
+        assert!(Arc::ptr_eq(&again.cause, &error.cause));
+        assert_eq!(again.status(), status::TIME_CONFORMANCE);
+    }
+    assert_eq!(calls.take(), Vec::<Call>::new());
+}
+
+#[test]
+fn errors_report_how_far_the_repair_got() {
+    let calls = Calls::default();
+    let mut system = FakeSystem::new(&calls);
+    system.add_failures.insert(768 * MIB, Errno::EIO);
+    system.online_failures.insert(7, Errno::EBUSY);
+    let target = restore().with_memory_target(&[(512 * MIB, 512 * MIB)]);
+    let mut repair = repairing(target, system);
+    // The first attempt added and onlined two blocks before the third's addition failed.
+    let progress = repair.run().unwrap_err().progress();
+    assert_eq!((progress.added(), progress.onlined()), (2, 2), "{progress}");
+    assert!(!progress.reseeded() && !progress.finish_started());
+    assert_eq!(progress.to_string(), "added 2 memory blocks, onlined 2");
+    // The retry added the third and the fourth, and onlined the third, before the fourth's
+    // onlining failed: the progress counts the attempts' work together.
+    let progress = repair.run().unwrap_err().progress();
+    assert_eq!((progress.added(), progress.onlined()), (4, 3), "{progress}");
+    repair.run().unwrap();
+
+    // A failed finish follows the reseed, and may have acknowledged the restore. The kernel
+    // brought the blocks that the repair added online itself.
+    let mut system = FakeSystem::new(&calls);
+    system.auto_online = true;
+    system.finish_fails = true;
+    let target = restore().with_memory_target(&[(512 * MIB, 256 * MIB)]);
+    let mut repair = repairing(target, system);
+    let progress = repair.run().unwrap_err().progress();
+    assert_eq!((progress.added(), progress.onlined()), (2, 0), "{progress}");
+    assert!(progress.reseeded() && progress.finish_started());
+    assert_eq!(
+        progress.to_string(),
+        "added 2 memory blocks, onlined 0, reseeded, started the finish"
+    );
+    // A final failure keeps its progress.
+    assert_eq!(repair.run().unwrap_err().progress(), progress);
+
+    // A failed reseed reseeded nothing, and started no finish.
+    let mut system = FakeSystem::new(&calls);
+    system.reseed_failure = Some(Errno::EPERM);
+    let error = repairing(restore(), system).run().unwrap_err();
+    assert_eq!(error.progress(), RepairProgress::default());
+    assert_eq!(
+        error.progress().to_string(),
+        "added 0 memory blocks, onlined 0"
+    );
+}
+
+#[test]
+fn a_block_counts_once_the_repair_finds_it_added_or_online() {
+    let calls = Calls::default();
+    let mut system = FakeSystem::new(&calls);
+    // The reads of a block's state come before its addition, then before its onlining, then
+    // after it: block 4's state cannot be read once it was added, nor block 5's once it was
+    // onlined.
+    system.read_failures.insert((4, 1), Errno::EIO);
+    system.read_failures.insert((5, 2), Errno::EIO);
+    system.reseed_failure = Some(Errno::EPERM);
+    let target = restore().with_memory_target(&[(512 * MIB, 256 * MIB)]);
+    let mut repair = repairing(target, system);
+    let expected = |added, onlined| RepairProgress {
+        added,
+        onlined,
+        ..RepairProgress::default()
+    };
+    // The kernel added block 4, which the attempt could not find.
+    let error = repair.run().unwrap_err();
+    assert!(matches!(
+        error.cause(),
+        RepairCause::Io(error) if error.raw_os_error() == Some(Errno::EIO as i32)
+    ));
+    assert_eq!(error.progress(), expected(0, 0));
+    assert_eq!(
+        changes(calls.take()),
+        [Call::MemoryBlocks, Call::Add(512 * MIB)]
+    );
+    // The retry finds block 4 added, and onlines it, then adds and onlines block 5, which it
+    // could not find online.
+    let error = repair.run().unwrap_err();
+    assert_eq!(error.stage(), RepairStage::Memory);
+    assert_eq!(error.progress(), expected(2, 1));
+    let mut activated = vec![Call::Online(4)];
+    activated.extend(activations([5]));
+    assert_eq!(changes(calls.take()), activated);
+    // The next finds block 5 online, which counts once, and adds and onlines nothing.
+    let error = repair.run().unwrap_err();
+    assert_eq!(error.stage(), RepairStage::Reseed);
+    assert_eq!(error.progress(), expected(2, 2));
+    assert_eq!(
+        changes(calls.take()),
+        [Call::MemoryBlocks, Call::Reseed(RESTORED)]
+    );
+    // A final failure keeps the count.
+    assert_eq!(repair.run().unwrap_err().progress(), expected(2, 2));
 }
 
 /// Checks that the repair of a clone whose kernel lists the online CPUs `cpus`, and whose restore

@@ -1,26 +1,33 @@
-//! The probes that map beneath the worker's assembled root, as an adapter maps the host paths of
-//! its sandboxes: through the root itself, with `nvx::guest::root::Root::map`, which checks the
-//! targets against the container root's reserved set, and through mappers of the adapter's own,
-//! `nvx::guest::mappings::Mapper`, with reserved sets of its choice. Each probe writes its
-//! sources below `/tmp/runtime-adapter-sources`, on the guest's tmpfs, in place of the guest's
-//! mount of a host's export: a directory `dir`, which holds the file `marker` and the empty
-//! directory `inner`; a file `file.txt`; and an empty directory `out`. The links that the probes
-//! plant in the root lead to `/tmp/runtime-adapter-outside`, an empty directory outside it.
+//! The probes of the mappings beneath the worker's assembled root, which come from the host
+//! export, as an adapter maps the host paths of its sandboxes:
+//!
+//! - `map` inspects the mappings that the worker applied from the host's mapping table, through
+//!   the root itself, with `nvx::guest::root::Root::map`, which checks their targets against the
+//!   container root's reserved set, and the export that they come from;
+//! - `map-checks` maps from the export through mappers of the adapter's own,
+//!   `nvx::guest::mappings::Mapper`, with reserved sets of its choice, and tears down what it
+//!   mapped. The links that it plants in the root lead to `/tmp/runtime-adapter-outside`, an empty
+//!   directory outside it.
 //!
 //! | Probe | Facts |
 //! | --- | --- |
-//! | `map` | Through the root, zero mappings, `zero`, and the mounts below the root then, `zero.mounts`; then a table, `table`: `dir` read-only at `/srv/maps/dir`, `dir/inner` read-write at `/srv/maps/dir/inner`, inside the first, `file.txt` read-only at `/srv/maps/file.txt`, and `out` read-write at `/srv/maps/out`. The mount points below the root, in the mount table's order, `mounts`, and of each mapping, `dir`, `inner`, `file`, and `out`, the options, `NAME.options`, and whether a write is `allowed` or `refused`, `NAME.write`, with what a write reached in the source, `NAME.source`, and what a read found, `NAME.read`. Whether the overlay's upper holds the created directory `srv/maps`, `upper.directory`, and the created empty file `srv/maps/file.txt`, `upper.file`; and whether the root is latched, `latched` |
-//! | `map-refused` | Through the root, a mapping whose target is below the link `/srv/link`, `through-link`; whether the root is latched then, `latched`; a later mapping at `/srv/later`, `later`, and whether its target exists, `later.target`; the number of mounts below the root, `mounts`, and of entries in the directory outside it, `outside` |
-//! | `map-checks` | Through a new mapper for each check: a link at each component of `/srv/checks/tN/a/b/new`, `link.a`, `link.b`, and `link.new`, and a link to `..`, `link.up`; magic links of a procfs that it mounts at `/srv/checks/proc`, then unmounts, `magic.self`, `magic.thread-self`, `magic.root`, `magic.cwd`, and `magic.fd`; a directory onto a file, `kind.directory`, and a file onto a directory, `kind.file`; through one mapper, a mapping onto a file that an earlier one shows, `nested.onto`, one that would create a target inside it, `nested.create`, whether that reached the source, `nested.source`, and its teardown, `nested.teardown`; the runtime's reserved targets, `reserved.run`, `reserved.run-nvx`, `reserved.time`, and `reserved.time-below`, the container root's, `reserved.proc`, `reserved.sys`, `reserved.dev`, `reserved.agent`, `reserved.machine-id`, and `reserved.etc`, and those of a set that the adapter chooses, the tree `/srv/adapter` and the path `/srv/checks/exact`: `reserved.adapter-tree`, `reserved.adapter-ancestor`, `reserved.adapter-path`, and `reserved.adapter-below`, with whether the refused ones created anything, `reserved.created`. A read-only mapping attached and unmounted again and again while another thread tries to open its file for writing: the attaches, `read-only.attaches`, their flags, `read-only.flags`, whether the file was ever writable, `read-only.writable`, and the source's file afterwards, `read-only.source`. Finally the entries and the mounts of the directory outside the root, `outside.entries` and `outside.mounts`, and the mounts that the checks left below `/srv/checks`, `left` |
+//! | `map [NAME=PATH...]` | The export's mount at `hostfs/root` in the runtime directory: the number of mounts there, `export.count`, and of the topmost, its `export.type` and `export.options`; the mode of `hostfs`, in octal, `hostfs.mode`, and its owner, `hostfs.owner`, as `UID:GID`, or `absent` for both; and the mount points below the root, in the mount table's order, `mounts`. For each NAME, at PATH in the root, such as a mapping's target: the options of the topmost mount there, `NAME.options`, or `none`; what it shows, `NAME.kind`; a directory's entries, by name, in order, separated by commas, `NAME.entries`, or a file's contents, `NAME.read`; whether a write is `allowed` or `refused`, `NAME.write`: of the new file [`WRITTEN_FILE`], with [`WRITTEN`], in a directory, or of the file, opened for writing; and what the overlay's upper holds at PATH, `NAME.upper`, an empty directory or file where the mapper created the target. Finally whether the root is latched, `latched` |
+//! | `map-checks DIR FILE` | From the export's directory DIR, which holds a file `marker` and a directory `inner`, and in which the guest may write, and from its file FILE, through a new mapper for each check: a link at each component of `/srv/checks/tN/a/b/new`, `link.a`, `link.b`, and `link.new`, and a link to `..`, `link.up`; magic links of a procfs that it mounts at `/srv/checks/proc`, then unmounts, `magic.self`, `magic.thread-self`, `magic.root`, `magic.cwd`, and `magic.fd`; a directory onto a file, `kind.directory`, and a file onto a directory, `kind.file`; through one mapper, a mapping onto a file that an earlier one shows, `nested.onto`, one that would create a target inside it, `nested.create`, and its teardown, `nested.teardown`; the runtime's reserved targets, `reserved.run`, `reserved.run-nvx`, `reserved.time`, and `reserved.time-below`, the container root's, `reserved.proc`, `reserved.sys`, `reserved.dev`, `reserved.agent`, `reserved.machine-id`, and `reserved.etc`, and those of a set that the adapter chooses, the tree `/srv/adapter` and the path `/srv/checks/exact`: `reserved.adapter-tree`, `reserved.adapter-ancestor`, `reserved.adapter-path`, and `reserved.adapter-below`, with whether the refused ones created anything, `reserved.created`. A read-only mapping of DIR attached and unmounted again and again while another thread tries to open its `marker` for writing: the attaches, `read-only.attaches`, their flags, `read-only.flags`, and whether the file was ever writable, `read-only.writable`. Finally the entries and the mounts of the directory outside the root, `outside.entries` and `outside.mounts`, and the mounts that the checks left below `/srv/checks`, `left` |
 //!
-//! A check's outcome is `applied`, or why the mapper refused the mapping: `link` for a link at the
-//! component that the check expects, and otherwise the kind of the error, such as `reserved` or
-//! `target-kind`, with the path that it names, if any. None of the probes takes arguments.
+//! A NAME holds lowercase ASCII letters, digits, and `-`, but is neither `export` nor `hostfs`, and
+//! comes once. PATH is a relative path in the root, and DIR and FILE are relative paths in the
+//! export, each of normal components. A kind is `directory`, `file SIZE`, with the file's size in
+//! bytes, `link`, `other`, `denied` for a path that the guest may not look up, such as one that
+//! the export hides, or `absent`. A check's outcome is `applied`, or why the mapper refused
+//! the mapping: `link` for a link at the component that the check expects, and otherwise the kind
+//! of the error, such as `reserved` or `target-kind`, with the path that it names, if any. The
+//! checks write nothing to the export, which the host's own sources show.
 
+use std::fmt;
 use std::fs::{self, File, OpenOptions};
 use std::io;
 use std::os::fd::AsRawFd;
-use std::os::unix::fs::symlink;
+use std::os::unix::fs::{MetadataExt, symlink};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, PoisonError, RwLock};
@@ -31,132 +38,195 @@ use nix::mount::{self, MsFlags};
 use nvx::guest::mappings::{
     Access, InvalidMapping, Mapper, Mapping, MappingError, Reserved, SourceRoot, TargetRoot,
 };
-use nvx::guest::root::{self, Root};
+use nvx::guest::root::Root;
 
 use super::probes::{self, Context};
 use crate::probe::{Facts, Probe};
 
-/// The names of the probes of this module, which the worker runs with its root.
-pub const PROBES: [&str; 3] = ["map", "map-refused", "map-checks"];
+/// The names of the probes of this module, which the worker runs with its root and the host
+/// export.
+pub const PROBES: [&str; 2] = ["map", "map-checks"];
 
-/// The directory below which each probe writes its sources, in a directory of its name.
-const SOURCES: &str = "/tmp/runtime-adapter-sources";
-/// The directory outside the root to which the links that the probes plant lead.
+/// The mount point of the host export, below the runtime directory, as `nvx::guest::root` names
+/// it.
+const EXPORT: &str = "hostfs/root";
+/// The directory of the export's mount point, below the runtime directory, which only root may
+/// enter.
+const HOSTFS: &str = "hostfs";
+/// The names of the facts of the `map` probe that no mapping's name may take.
+const GENERAL: [&str; 2] = ["export", "hostfs"];
+/// The directory outside the root to which the links that `map-checks` plants lead.
 const OUTSIDE: &str = "/tmp/runtime-adapter-outside";
-/// What the probes write through writable mappings.
+/// The file that the `map` probe creates in a directory that a mapping shows.
+const WRITTEN_FILE: &str = "written";
+/// What the `map` probe writes through writable mappings.
 const WRITTEN: &str = "runtime-adapter";
 /// The number of times that `map-checks` attaches a read-only mapping, and unmounts it again,
 /// while another thread tries to open its file for writing.
 const READ_ONLY_ATTACHES: usize = 200;
 
-/// Runs `probe`, one of [`PROBES`], with `context` and the worker's `root`, and returns its facts.
+/// Runs `probe`, one of [`PROBES`], with `context`, the worker's `root`, and the root of the host
+/// export, `export`, once the root mounted one, and returns its facts.
 ///
-/// Fails with the problem for another probe, one with arguments, and one that fails.
-pub fn run(probe: &Probe, context: &Context<'_>, root: &mut Root) -> Result<Facts, String> {
+/// Fails with the problem for another probe, one with arguments that the
+/// [module documentation](self) does not allow, `map-checks` without an export, and one that
+/// fails.
+pub fn run(
+    probe: &Probe,
+    context: &Context<'_>,
+    root: &Root,
+    export: Option<&SourceRoot>,
+) -> Result<Facts, String> {
     let name = probe.name();
-    if !PROBES.contains(&name) {
-        return Err(format!("the worker runs no probe named {name}"));
-    }
-    if !probe.arguments().is_empty() {
-        return Err(format!("the {name} probe takes no arguments"));
-    }
-    let facts = match name {
-        "map" => map(context, root),
-        "map-refused" => map_refused(context, root),
-        _ => map_checks(context),
+    let facts = match (name, probe.arguments()) {
+        ("map", arguments) => map(context, root, &mappings(arguments)?),
+        ("map-checks", [directory, file]) => {
+            let export = export.ok_or(
+                "the map-checks probe maps from the host export, which the root has not mounted",
+            )?;
+            map_checks(context, export, export_path(directory)?, export_path(file)?)
+        }
+        ("map-checks", _) => return Err("the map-checks probe takes two arguments".to_owned()),
+        _ => return Err(format!("the worker runs no probe named {name}")),
     };
     facts.map_err(|error| format!("the {name} probe failed: {error}"))
 }
 
-/// Runs the `map` probe.
-fn map(context: &Context<'_>, root: &mut Root) -> io::Result<Facts> {
-    let (sources, source) = sources("map")?;
-    let mut facts = Facts::new();
-    facts.push("zero", outcome(root.map(&source, &[])));
-    facts.push("zero.mounts", mounts_below(context.root)?.len().to_string());
-    let table = [
-        mapping("dir", "/srv/maps/dir", Access::ReadOnly)?,
-        mapping("dir/inner", "/srv/maps/dir/inner", Access::ReadWrite)?,
-        mapping("file.txt", "/srv/maps/file.txt", Access::ReadOnly)?,
-        mapping("out", "/srv/maps/out", Access::ReadWrite)?,
-    ];
-    facts.push("table", outcome(root.map(&source, &table)));
-    let mounts = mounts_below(context.root)?
-        .iter()
-        .map(|(point, _)| in_root(context.root, point))
-        .collect::<Vec<_>>();
-    facts.push("mounts", mounts.join(","));
-    let target = |path: &str| context.root.join(path);
-    for (name, path) in [
-        ("dir", "srv/maps/dir"),
-        ("inner", "srv/maps/dir/inner"),
-        ("file", "srv/maps/file.txt"),
-        ("out", "srv/maps/out"),
-    ] {
-        facts.push(format!("{name}.options"), options_at(&target(path))?);
+/// Reads the arguments of the `map` probe, each `NAME=PATH`: a name in the facts, and the path that
+/// it inspects, a relative path in the root.
+///
+/// Fails with the problem for an argument that breaks the rules of the
+/// [module documentation](self).
+fn mappings(arguments: &[String]) -> Result<Vec<(&str, &Path)>, String> {
+    let mut mappings: Vec<(&str, &Path)> = Vec::with_capacity(arguments.len());
+    for argument in arguments {
+        let refused = || {
+            format!(
+                "the map probe takes NAME=PATH, with a name of lowercase ASCII letters, digits, \
+                 and `-`, other than export and hostfs, not {argument:?}"
+            )
+        };
+        let (name, path) = argument.split_once('=').ok_or_else(refused)?;
+        let valid = !name.is_empty()
+            && !GENERAL.contains(&name)
+            && name
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-');
+        if !valid {
+            return Err(refused());
+        }
+        let path = probes::path_argument("map", path)?;
+        if mappings.iter().any(|(other, _)| *other == name) {
+            return Err(format!("the map probe names {name} twice"));
+        }
+        mappings.push((name, path));
     }
-    facts.push("dir.read", probes::read(&target("srv/maps/dir/marker")));
-    facts.push("dir.write", create(&target("srv/maps/dir/new")));
-    facts.push("inner.write", create(&target("srv/maps/dir/inner/new")));
-    facts.push("inner.source", probes::read(&sources.join("dir/inner/new")));
-    facts.push("file.read", probes::read(&target("srv/maps/file.txt")));
-    facts.push("file.write", open_for_writing(&target("srv/maps/file.txt")));
-    facts.push("out.write", create(&target("srv/maps/out/new")));
-    facts.push("out.source", probes::read(&sources.join("out/new")));
-    let upper = context.upper.join("upper/srv/maps");
-    facts.push("upper.directory", yes(upper.is_dir()));
-    let file = fs::symlink_metadata(upper.join("file.txt"));
-    facts.push(
-        "upper.file",
-        yes(file.is_ok_and(|file| file.is_file() && file.len() == 0)),
-    );
-    facts.push("latched", yes(root.is_latched()));
-    Ok(facts)
+    Ok(mappings)
 }
 
-/// Runs the `map-refused` probe.
-fn map_refused(context: &Context<'_>, root: &mut Root) -> io::Result<Facts> {
-    let (_, source) = sources("map-refused")?;
-    let outside = outside()?;
-    symlink(&outside, context.root.join("srv/link"))?;
+/// Returns `argument`, a path in the host export, once it is a relative path of normal
+/// components, or the problem.
+fn export_path(argument: &str) -> Result<&str, String> {
+    if argument
+        .split('/')
+        .all(|component| !matches!(component, "" | "." | ".."))
+    {
+        Ok(argument)
+    } else {
+        Err(format!(
+            "the map-checks probe takes relative paths in the host export, not {argument:?}"
+        ))
+    }
+}
+
+/// Runs the `map` probe, of `mappings`, each a name and the path that it inspects, a relative path
+/// in the root.
+fn map(context: &Context<'_>, root: &Root, mappings: &[(&str, &Path)]) -> io::Result<Facts> {
+    let table = probes::mount_table(&fs::read_to_string(probes::MOUNTINFO)?)?;
+    // Of the mounts at a point, the table lists the topmost last.
+    let topmost = |point: &Path| table.iter().rev().find(|mount| mount.point == point);
     let mut facts = Facts::new();
-    let through = mapping("dir", "/srv/link/escape", Access::ReadOnly)?;
-    facts.push("through-link", outcome(root.map(&source, &[through])));
+    let export = context.runtime.join(EXPORT);
+    let exports = table.iter().filter(|mount| mount.point == export).count();
+    facts.push("export.count", exports.to_string());
+    if let Some(mount) = topmost(&export) {
+        facts.push("export.type", mount.kind.as_str());
+        facts.push("export.options", mount.options.as_str());
+    }
+    let (mode, owner) = match fs::symlink_metadata(context.runtime.join(HOSTFS)) {
+        Ok(metadata) => (
+            format!("{:04o}", metadata.mode() & 0o7777),
+            format!("{}:{}", metadata.uid(), metadata.gid()),
+        ),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            ("absent".to_owned(), "absent".to_owned())
+        }
+        Err(error) => return Err(error),
+    };
+    facts.push("hostfs.mode", mode);
+    facts.push("hostfs.owner", owner);
+    let below = table
+        .iter()
+        .filter(|mount| mount.point.starts_with(context.root) && mount.point != context.root)
+        .map(|mount| in_root(context.root, &mount.point))
+        .collect::<Vec<_>>();
+    facts.push("mounts", below.join(","));
+    for (name, path) in mappings {
+        let target = context.root.join(path);
+        let options = topmost(&target).map_or("none", |mount| mount.options.as_str());
+        facts.push(format!("{name}.options"), options);
+        let kind = Kind::of(&target)?;
+        facts.push(format!("{name}.kind"), kind.to_string());
+        match kind {
+            Kind::Directory => {
+                facts.push(format!("{name}.entries"), entries(&target));
+                facts.push(format!("{name}.write"), create(&target.join(WRITTEN_FILE)));
+            }
+            Kind::File(_) => {
+                facts.push(format!("{name}.read"), probes::read(&target));
+                facts.push(format!("{name}.write"), open_for_writing(&target));
+            }
+            Kind::Absent | Kind::Link | Kind::Denied | Kind::Other => {}
+        }
+        let upper = Kind::of(&context.upper_directory().join(path))?;
+        facts.push(format!("{name}.upper"), upper.to_string());
+    }
     facts.push("latched", yes(root.is_latched()));
-    let later = mapping("dir", "/srv/later", Access::ReadOnly)?;
-    facts.push("later", outcome(root.map(&source, &[later])));
-    facts.push("later.target", exists(&context.root.join("srv/later")));
-    facts.push("mounts", mounts_below(context.root)?.len().to_string());
-    facts.push("outside", fs::read_dir(&outside)?.count().to_string());
     Ok(facts)
 }
 
-/// Runs the `map-checks` probe.
-fn map_checks(context: &Context<'_>) -> io::Result<Facts> {
-    let (sources, source) = sources("map-checks")?;
+/// Runs the `map-checks` probe, from the root of the host export, `export`, with its directory
+/// `directory`, and its file `file`.
+fn map_checks(
+    context: &Context<'_>,
+    export: &SourceRoot,
+    directory: &str,
+    file: &str,
+) -> io::Result<Facts> {
     let outside = outside()?;
     let base = context.root.join("srv/checks");
     fs::create_dir_all(&base)?;
     let checks = Checks {
         root: context.root,
-        source: &source,
+        source: export,
+        directory,
     };
     let mut facts = Facts::new();
 
     // A link at each component in turn, to the directory outside the root, and one to `..`.
     let components = ["a", "b", "new"];
     for (index, link) in components.iter().enumerate() {
-        let mut directory = base.join(format!("t{index}"));
-        directory.extend(&components[..index]);
-        fs::create_dir_all(&directory)?;
-        symlink(&outside, directory.join(link))?;
+        let mut parent = base.join(format!("t{index}"));
+        parent.extend(&components[..index]);
+        fs::create_dir_all(&parent)?;
+        symlink(&outside, parent.join(link))?;
         let target = format!("/srv/checks/t{index}/{}", components.join("/"));
         let linked = format!("/srv/checks/t{index}/{}", components[..=index].join("/"));
-        let found = checks.one(Reserved::default(), "dir", &target)?;
+        let found = checks.one(Reserved::default(), directory, &target)?;
         facts.push(format!("link.{link}"), at_link(found, &linked));
     }
     symlink("..", base.join("up"))?;
-    let found = checks.one(Reserved::default(), "dir", "/srv/checks/up/new")?;
+    let found = checks.one(Reserved::default(), directory, "/srv/checks/up/new")?;
     facts.push("link.up", at_link(found, "/srv/checks/up"));
 
     // Magic links of a procfs in the root, which comes off again whatever the checks found.
@@ -182,7 +252,7 @@ fn map_checks(context: &Context<'_>) -> io::Result<Facts> {
         ]
         .into_iter()
         .map(|(name, link)| {
-            let found = checks.one(Reserved::default(), "dir", &format!("{link}/new"))?;
+            let found = checks.one(Reserved::default(), directory, &format!("{link}/new"))?;
             Ok((name, at_link(found, &link)))
         })
         .collect::<io::Result<Vec<_>>>()
@@ -195,21 +265,21 @@ fn map_checks(context: &Context<'_>) -> io::Result<Facts> {
     // Kinds.
     fs::write(base.join("plain"), "")?;
     fs::create_dir(base.join("directory"))?;
-    let directory_on_file = checks.one(Reserved::default(), "dir", "/srv/checks/plain")?;
+    let directory_on_file = checks.one(Reserved::default(), directory, "/srv/checks/plain")?;
     facts.push("kind.directory", directory_on_file);
-    let file_on_directory = checks.one(Reserved::default(), "file.txt", "/srv/checks/directory")?;
+    let file_on_directory = checks.one(Reserved::default(), file, "/srv/checks/directory")?;
     facts.push("kind.file", file_on_directory);
 
     // A mapping may go onto what an earlier one shows, but creates nothing inside it.
     let mut nested = checks.mapper(Reserved::default())?;
     let onto = [
-        mapping("dir", "/srv/checks/m", Access::ReadWrite)?,
-        mapping("file.txt", "/srv/checks/m/marker", Access::ReadOnly)?,
+        mapping(directory, "/srv/checks/m", Access::ReadWrite)?,
+        mapping(file, "/srv/checks/m/marker", Access::ReadOnly)?,
     ];
-    facts.push("nested.onto", applied(&mut nested, &source, &onto));
-    let inside = [mapping("dir/inner", "/srv/checks/m/new", Access::ReadOnly)?];
-    facts.push("nested.create", applied(&mut nested, &source, &inside));
-    facts.push("nested.source", exists(&sources.join("dir/new")));
+    facts.push("nested.onto", applied(&mut nested, export, &onto));
+    let inner = format!("{directory}/inner");
+    let inside = [mapping(&inner, "/srv/checks/m/new", Access::ReadOnly)?];
+    facts.push("nested.create", applied(&mut nested, export, &inside));
     facts.push("nested.teardown", torn_down(nested));
 
     // The runtime's reserved targets, the container root's, and a set of the adapter's.
@@ -219,7 +289,7 @@ fn map_checks(context: &Context<'_>) -> io::Result<Facts> {
         ("time", "/run/nvx/time"),
         ("time-below", "/run/nvx/time/x"),
     ] {
-        let found = checks.one(Reserved::default(), "dir", target)?;
+        let found = checks.one(Reserved::default(), directory, target)?;
         facts.push(format!("reserved.{name}"), found);
     }
     for (name, target) in [
@@ -230,7 +300,7 @@ fn map_checks(context: &Context<'_>) -> io::Result<Facts> {
         ("machine-id", "/etc/machine-id"),
         ("etc", "/etc"),
     ] {
-        let found = checks.one(Reserved::container_root(), "dir", target)?;
+        let found = checks.one(Reserved::container_root(), directory, target)?;
         facts.push(format!("reserved.{name}"), found);
     }
     for (name, target) in [
@@ -240,7 +310,7 @@ fn map_checks(context: &Context<'_>) -> io::Result<Facts> {
         ("adapter-below", "/srv/checks/exact/below"),
     ] {
         let adapter = Reserved::new(["/srv/adapter"], ["/srv/checks/exact"]).map_err(invalid)?;
-        let found = checks.one(adapter, "dir", target)?;
+        let found = checks.one(adapter, directory, target)?;
         facts.push(format!("reserved.{name}"), found);
     }
     facts.push(
@@ -252,10 +322,6 @@ fn map_checks(context: &Context<'_>) -> io::Result<Facts> {
     facts.push("read-only.attaches", attaches.to_string());
     facts.push("read-only.flags", flags);
     facts.push("read-only.writable", writable);
-    facts.push(
-        "read-only.source",
-        probes::read(&sources.join("dir/marker")),
-    );
 
     facts.push(
         "outside.entries",
@@ -270,8 +336,10 @@ fn map_checks(context: &Context<'_>) -> io::Result<Facts> {
 struct Checks<'a> {
     /// The root, the overlay's mount point.
     root: &'a Path,
-    /// The root of the probe's sources.
+    /// The root of the host export.
     source: &'a SourceRoot,
+    /// The export's directory, which holds the file `marker`, and in which the guest may write.
+    directory: &'a str,
 }
 
 impl Checks<'_> {
@@ -293,10 +361,11 @@ impl Checks<'_> {
         Ok(found)
     }
 
-    /// Attaches `dir` read-only at `target` and unmounts it again, [`READ_ONLY_ATTACHES`] times,
-    /// while another thread tries to open its `marker` for writing, and returns the number of
-    /// attaches, their flags, `ro,nosuid,nodev` if each had them, and whether the file was ever
-    /// `writable` or `never`.
+    /// Attaches the export's directory read-only at `target` and unmounts it again,
+    /// [`READ_ONLY_ATTACHES`] times, while another thread tries to open its `marker` for writing,
+    /// and returns the number of attaches, their flags, `ro,nosuid,nodev` if each had them, and
+    /// whether the file was ever `writable` or `never`. The guest may write the directory through
+    /// the export, so only the mapping keeps the file read-only.
     fn read_only(&self, target: &Path) -> io::Result<(usize, String, &'static str)> {
         let relative = in_root(self.root, target);
         let marker = target.join("marker");
@@ -321,7 +390,7 @@ impl Checks<'_> {
         let attached_all = (|| -> io::Result<()> {
             for _ in 0..READ_ONLY_ATTACHES {
                 let mut mapper = self.mapper(Reserved::default())?;
-                let mapping = mapping("dir", &relative, Access::ReadOnly)?;
+                let mapping = mapping(self.directory, &relative, Access::ReadOnly)?;
                 mapper
                     .apply(self.source, &[mapping])
                     .map_err(io::Error::other)?;
@@ -357,18 +426,6 @@ impl Checks<'_> {
     }
 }
 
-/// Writes the sources of the probe `name` below [`SOURCES`], as the
-/// [module documentation](self) describes, and returns their directory and root.
-fn sources(name: &str) -> io::Result<(PathBuf, SourceRoot)> {
-    let directory = Path::new(SOURCES).join(name);
-    fs::create_dir_all(directory.join("dir/inner"))?;
-    fs::create_dir_all(directory.join("out"))?;
-    fs::write(directory.join("dir/marker"), "source")?;
-    fs::write(directory.join("file.txt"), "file")?;
-    let root = SourceRoot::open(&directory)?;
-    Ok((directory, root))
-}
-
 /// Creates [`OUTSIDE`], if it does not exist, and returns it.
 fn outside() -> io::Result<PathBuf> {
     fs::create_dir_all(OUTSIDE)?;
@@ -385,12 +442,74 @@ fn invalid(error: InvalidMapping) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidInput, error)
 }
 
-/// Returns the outcome of a root's mapping: `applied`, or why the root refused it.
-fn outcome(mapped: Result<(), root::Error>) -> String {
-    match mapped {
-        Ok(()) => "applied".to_owned(),
-        Err(root::Error::Mapping { error, .. }) => refusal(&error),
-        Err(error) => format!("failed: {error}"),
+/// What a path shows, without following a final link.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Kind {
+    /// Nothing.
+    Absent,
+    /// A directory.
+    Directory,
+    /// A regular file, of this many bytes.
+    File(u64),
+    /// A symbolic link.
+    Link,
+    /// Something that the guest may not look up, such as a path that the host export hides.
+    Denied,
+    /// Something else, such as a device.
+    Other,
+}
+
+impl Kind {
+    /// Returns what `path` shows: [`Absent`](Self::Absent) too if a component of its parent is
+    /// not a directory.
+    fn of(path: &Path) -> io::Result<Self> {
+        match fs::symlink_metadata(path) {
+            Ok(metadata) if metadata.is_dir() => Ok(Self::Directory),
+            Ok(metadata) if metadata.is_file() => Ok(Self::File(metadata.len())),
+            Ok(metadata) if metadata.is_symlink() => Ok(Self::Link),
+            Ok(_) => Ok(Self::Other),
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+                ) =>
+            {
+                Ok(Self::Absent)
+            }
+            Err(error) if error.kind() == io::ErrorKind::PermissionDenied => Ok(Self::Denied),
+            Err(error) => Err(error),
+        }
+    }
+}
+
+impl fmt::Display for Kind {
+    /// Writes `absent`, `directory`, `file SIZE`, `link`, `denied`, or `other`.
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Absent => formatter.write_str("absent"),
+            Self::Directory => formatter.write_str("directory"),
+            Self::File(size) => write!(formatter, "file {size}"),
+            Self::Link => formatter.write_str("link"),
+            Self::Denied => formatter.write_str("denied"),
+            Self::Other => formatter.write_str("other"),
+        }
+    }
+}
+
+/// Returns the names of the entries of the directory `path`, in order, separated by commas, or
+/// `unreadable: PROBLEM`.
+fn entries(path: &Path) -> String {
+    let names = fs::read_dir(path).and_then(|entries| {
+        entries
+            .map(|entry| entry.map(|entry| entry.file_name().to_string_lossy().into_owned()))
+            .collect::<io::Result<Vec<_>>>()
+    });
+    match names {
+        Ok(mut names) => {
+            names.sort();
+            names.join(",")
+        }
+        Err(error) => format!("unreadable: {error}"),
     }
 }
 
@@ -525,5 +644,47 @@ mod tests {
             in_root(Path::new("/run/a/rootfs"), Path::new("/run/a/rootfs/srv/x")),
             "/srv/x"
         );
+    }
+
+    #[test]
+    fn the_probes_take_named_targets_and_paths_in_the_export() {
+        let arguments = |list: &[&str]| {
+            list.iter()
+                .map(|&argument| argument.to_owned())
+                .collect::<Vec<_>>()
+        };
+        let named = arguments(&["dir=srv/maps/dir", "file-2=srv/maps/file.txt"]);
+        let expected = [
+            ("dir", Path::new("srv/maps/dir")),
+            ("file-2", Path::new("srv/maps/file.txt")),
+        ];
+        assert_eq!(mappings(&named).unwrap(), expected);
+        assert!(mappings(&[]).unwrap().is_empty());
+        for refused in [
+            "dir",
+            "=srv/maps/dir",
+            "Dir=srv/maps/dir",
+            "dir.x=srv/maps/dir",
+            "export=srv/maps/dir",
+            "hostfs=srv/maps/dir",
+            "dir=/srv/maps/dir",
+            "dir=srv/../dir",
+            "dir=",
+        ] {
+            assert!(mappings(&arguments(&[refused])).is_err(), "{refused}");
+        }
+        let twice = mappings(&arguments(&["dir=a", "dir=b"])).unwrap_err();
+        assert_eq!(twice, "the map probe names dir twice");
+
+        assert_eq!(export_path("2"), Ok("2"));
+        assert_eq!(export_path("0/inner"), Ok("0/inner"));
+        for refused in ["", "/2", "2/", "2//inner", "./2", "2/..", ".."] {
+            assert!(export_path(refused).is_err(), "{refused}");
+        }
+
+        assert_eq!(Kind::File(4).to_string(), "file 4");
+        assert_eq!(Kind::Directory.to_string(), "directory");
+        assert_eq!(Kind::Denied.to_string(), "denied");
+        assert_eq!(Kind::Absent.to_string(), "absent");
     }
 }

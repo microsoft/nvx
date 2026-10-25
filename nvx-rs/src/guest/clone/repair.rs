@@ -4,9 +4,11 @@
 #[cfg(test)]
 mod tests;
 
+use std::collections::BTreeMap;
 use std::fmt;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
+use std::mem;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -19,6 +21,7 @@ use crate::guest::reseed::{self, ReseedError, Seed};
 use crate::guest::root::Paths;
 use crate::guest::sys;
 use crate::guest::time::{MemoryRange, Restore, RestoreFinish, TimeAbi, TimeError};
+use crate::protocol::status;
 
 /// The memory block size of the snapshot ABI, 128 MiB, to which a restore's memory ranges are
 /// aligned.
@@ -63,21 +66,28 @@ pub fn repair(restore: Restore) -> Result<Repaired, RepairError> {
 ///
 /// - Until the memory target is active, a failed attempt may be retried, and the next one
 ///   repeats the checks and adds or onlines only the memory blocks that are not online yet. The
-///   first attempt derives the end of the RAM that the clone captured, before it adds any block,
-///   and every later one keeps it.
+///   first attempt derives the end of the RAM that the clone captured, before it adds any memory
+///   block, and every later one keeps it.
 /// - The reseed and the finish run at most once. A failure of either is final: every later call
 ///   returns its error again.
 /// - Once the repair completed, every later call returns the same [`Repaired`].
 ///
-/// The repair never touches the caller's fence of workload admission, which stays closed: the
-/// caller opens it when the clone may admit executions, such as once it is activated.
+/// The repair takes the time ABI in strict mode, [`TimeAbi::strict`], so that a violation of the
+/// ABI fails it, with the violation's status, instead of stopping the VM: it never powers the VM
+/// off, and the caller ends the VM with [`RepairError::status`]. The repair never touches the
+/// caller's fence of workload admission, which stays closed: the caller opens it when the clone
+/// may admit executions, such as once it is activated.
 pub struct Repair {
     /// The restore that the clone's capture returned, without its seed.
     restore: Restore,
     /// The restore's fresh entropy, until the reseed drops it.
     seed: Option<Seed>,
-    /// How far the repair got.
-    progress: Progress,
+    /// Where the repair resumes.
+    state: State,
+    /// The memory blocks that the repair added and onlined, across its attempts.
+    activations: Activations,
+    /// How far the repair got, which its errors report.
+    progress: RepairProgress,
     /// The kernel and the time ABI.
     system: Box<dyn RepairSystem>,
 }
@@ -90,7 +100,7 @@ impl Repair {
     pub fn new(restore: Restore) -> Self {
         let system = LiveSystem {
             paths: Paths::default(),
-            abi: TimeAbi::new(),
+            abi: super::live_abi(),
         };
         Self::with_system(restore, Box::new(system))
     }
@@ -101,7 +111,9 @@ impl Repair {
         Self {
             restore,
             seed,
-            progress: Progress::Memory { captured: None },
+            state: State::Memory { captured: None },
+            activations: Activations::default(),
+            progress: RepairProgress::default(),
             system,
         }
     }
@@ -109,32 +121,41 @@ impl Repair {
     /// Runs the repair from where it got, as the [module](super) describes, and returns the
     /// repaired clone.
     ///
-    /// A failure names its [`RepairStage`] and its [`RepairCause`]. One before the reseed may be
-    /// retried, and changes nothing that a retry undoes: a refused restore or memory target adds
-    /// no memory block, and a failed activation leaves the blocks that it added and onlined,
-    /// which a retry counts as done. The reseed and the finish run at most once, so a failure of
-    /// either, or of a finish that never returned, such as after a panic, is final, and every
-    /// later call returns that error again. A failed finish may have acknowledged the restore
-    /// already. Once the repair completed, every later call returns the same [`Repaired`],
-    /// without another step.
+    /// A failure names its [`RepairStage`], its [`RepairCause`], and the repair's
+    /// [`RepairProgress`]. One before the reseed may be retried, and changes nothing that a retry
+    /// undoes: a refused restore or memory target adds no memory block, and a failed activation
+    /// leaves the blocks that it added and onlined, which a retry counts as done. The reseed and
+    /// the finish run at most once, so a failure of either, or of a finish that never returned,
+    /// such as after a panic, is final, and every later call returns that error again. A failed
+    /// finish may have acknowledged the restore already. Once the repair completed, every later
+    /// call returns the same [`Repaired`], without another step.
     pub fn run(&mut self) -> Result<Repaired, RepairError> {
+        self.resume().map_err(|error| RepairError {
+            progress: self.progress,
+            ..error
+        })
+    }
+
+    /// Runs the repair from where it got, as [`run`](Self::run) does, with errors that do not
+    /// tell its progress yet.
+    fn resume(&mut self) -> Result<Repaired, RepairError> {
         loop {
-            match &self.progress {
-                Progress::Memory { .. } => {
+            match &self.state {
+                State::Memory { .. } => {
                     let resources = self.activate()?;
-                    self.progress = Progress::Reseed(resources);
+                    self.state = State::Reseed(resources);
                 }
-                Progress::Reseed(resources) => {
+                State::Reseed(resources) => {
                     let resources = *resources;
                     if let Err(error) = self.reseed() {
-                        self.progress = Progress::Failed(error.clone());
+                        self.state = State::Failed(error.clone());
                         return Err(error);
                     }
-                    self.progress = Progress::Finish(resources);
+                    self.state = State::Finish(resources);
                 }
-                Progress::Finish(resources) => return self.finish(*resources),
-                Progress::Repaired(repaired) => return Ok(*repaired),
-                Progress::Failed(error) => return Err(error.clone()),
+                State::Finish(resources) => return self.finish(*resources),
+                State::Repaired(repaired) => return Ok(*repaired),
+                State::Failed(error) => return Err(error.clone()),
             }
         }
     }
@@ -194,14 +215,14 @@ impl Repair {
     /// any memory block, then adds each block of the ranges that the kernel lacks, onlines each
     /// that is not online, and verifies that it is.
     fn add_ranges(&mut self) -> Result<(), RepairCause> {
-        let captured = match self.progress {
-            Progress::Memory {
+        let captured = match self.state {
+            State::Memory {
                 captured: Some(captured),
             } => captured,
             _ => {
                 let blocks = self.system.memory_blocks().map_err(RepairCause::Io)?;
                 let captured = captured_end(&blocks)?;
-                self.progress = Progress::Memory {
+                self.state = State::Memory {
                     captured: Some(captured),
                 };
                 captured
@@ -211,7 +232,12 @@ impl Repair {
         for range in self.restore.memory_ranges() {
             let mut address = range.start();
             while address < range.start() + range.length() {
-                activate_block(self.system.as_mut(), address)?;
+                activate_block(
+                    self.system.as_mut(),
+                    &mut self.activations,
+                    &mut self.progress,
+                    address,
+                )?;
                 address += BLOCK_SIZE;
             }
         }
@@ -240,7 +266,9 @@ impl Repair {
         let seed = self.seed.take().ok_or_else(|| fail(RepairCause::NoSeed))?;
         let result = self.system.reseed(&seed);
         drop(seed);
-        result.map_err(|error| fail(RepairCause::Reseed(error)))
+        result.map_err(|error| fail(RepairCause::Reseed(error)))?;
+        self.progress.reseeded = true;
+        Ok(())
     }
 
     /// Finishes the restore, with the acknowledgement if the host gates its input until then,
@@ -252,13 +280,14 @@ impl Repair {
             finish = finish.acknowledge();
         }
         // The finish runs at most once, even when it never returns, such as after a panic.
-        self.progress = Progress::Failed(RepairError::new(
+        self.progress.finish_started = true;
+        self.state = State::Failed(RepairError::new(
             RepairStage::Finish,
             RepairCause::Incomplete,
         ));
         if let Err(error) = self.system.restore_finish(finish) {
             let error = RepairError::new(RepairStage::Finish, RepairCause::Time(error));
-            self.progress = Progress::Failed(error.clone());
+            self.state = State::Failed(error.clone());
             return Err(error);
         }
         let repaired = Repaired {
@@ -267,7 +296,7 @@ impl Repair {
             memory: resources.memory,
             acknowledged_at: acknowledge.then(Instant::now),
         };
-        self.progress = Progress::Repaired(repaired);
+        self.state = State::Repaired(repaired);
         Ok(repaired)
     }
 }
@@ -277,14 +306,15 @@ impl fmt::Debug for Repair {
         formatter
             .debug_struct("Repair")
             .field("restore", &self.restore)
+            .field("state", &self.state)
             .field("progress", &self.progress)
             .finish_non_exhaustive()
     }
 }
 
-/// How far a repair got, from which its next attempt resumes.
+/// Where a repair resumes, which its next attempt starts from.
 #[derive(Debug)]
-enum Progress {
+enum State {
     /// The memory target is not active yet, which the next attempt activates.
     Memory {
         /// The logical end of the RAM that the clone captured, which the first attempt that
@@ -308,6 +338,26 @@ struct Resources {
     cpus: u32,
     /// The memory size of the online memory blocks, in bytes.
     memory: u64,
+}
+
+/// The memory blocks that a repair added and onlined, across its attempts, each with whether the
+/// repair found it since, present or online, so that its progress counts each block once, once it
+/// found it: an attempt may fail between an addition or an onlining that the kernel accepted and
+/// the read that finds the block, which a later attempt then makes.
+#[derive(Debug, Default)]
+struct Activations {
+    /// The blocks whose addition the kernel accepted, each with whether the repair found it since.
+    added: BTreeMap<u64, bool>,
+    /// The blocks whose onlining the kernel accepted, each with whether the repair found it online
+    /// since.
+    onlined: BTreeMap<u64, bool>,
+}
+
+/// Records that the repair found `block`, if `log` holds it, and returns whether it had not
+/// found it before.
+fn first_found(log: &mut BTreeMap<u64, bool>, block: u64) -> bool {
+    log.get_mut(&block)
+        .is_some_and(|found| !mem::replace(found, true))
 }
 
 /// A clone that its [`Repair`] repaired: its new VM generation ID, the resources that it has,
@@ -346,6 +396,71 @@ impl Repaired {
     /// the host did not gate its input until the acknowledgement.
     pub fn acknowledged_at(&self) -> Option<Instant> {
         self.acknowledged_at
+    }
+}
+
+/// How far a clone's repair got, across its attempts, which its [`RepairError`] reports: the
+/// memory blocks that it added and brought online, whether it reseeded the kernel's random number
+/// generator, and whether it started the finish, which may have acknowledged the restore.
+///
+/// It counts each memory block once, once the repair found it present after its addition, or
+/// online after its onlining. A block whose addition or onlining the kernel accepted, but that an
+/// attempt could not find, such as when a read of its state failed, counts once a later attempt
+/// finds it.
+///
+/// Its `Display` form lists them, such as `added 2 memory blocks, onlined 2, reseeded, started
+/// the finish`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub struct RepairProgress {
+    /// The memory blocks that the repair added, and found since.
+    added: u64,
+    /// The memory blocks that the repair onlined, and found online since.
+    onlined: u64,
+    /// Whether the repair reseeded the kernel's random number generator.
+    reseeded: bool,
+    /// Whether the repair started the finish.
+    finish_started: bool,
+}
+
+impl RepairProgress {
+    /// Returns the number of memory blocks that the repair added through the kernel's memory
+    /// probe interface, and found present since.
+    pub fn added(&self) -> u64 {
+        self.added
+    }
+
+    /// Returns the number of memory blocks that the repair brought online, and found online
+    /// since, besides those that the kernel brought online itself.
+    pub fn onlined(&self) -> u64 {
+        self.onlined
+    }
+
+    /// Returns whether the repair reseeded the kernel's random number generator.
+    pub fn reseeded(&self) -> bool {
+        self.reseeded
+    }
+
+    /// Returns whether the repair started the restore's finish, which may have acknowledged the
+    /// restore.
+    pub fn finish_started(&self) -> bool {
+        self.finish_started
+    }
+}
+
+impl fmt::Display for RepairProgress {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "added {} memory blocks, onlined {}",
+            self.added, self.onlined
+        )?;
+        if self.reseeded {
+            formatter.write_str(", reseeded")?;
+        }
+        if self.finish_started {
+            formatter.write_str(", started the finish")?;
+        }
+        Ok(())
     }
 }
 
@@ -459,8 +574,8 @@ pub enum RepairCause {
     },
     /// The kernel refused the reseed.
     Reseed(ReseedError),
-    /// The time ABI's finish failed: a violation that a report-only call reports, or a failure of
-    /// its ports or its time state.
+    /// The time ABI's finish failed: a violation that a strict or report-only call reports, whose
+    /// status the error takes, or a failure of its ports or its time state.
     Time(TimeError),
     /// An earlier attempt at the stage, which runs at most once, never returned, such as after a
     /// panic.
@@ -505,25 +620,29 @@ impl fmt::Display for RepairCause {
     }
 }
 
-/// Why a clone's repair failed: the stage that failed, and its cause.
+/// Why a clone's repair failed: the stage that failed, its cause, and how far the repair got.
 ///
-/// Its `Display` form names both, such as `failed to activate the memory target: memory range 0
-/// overlaps the RAM before it`. A clone keeps one error of a final failure, which every later
-/// [`Repair::run`] returns again.
+/// Its `Display` form names the stage and the cause, such as `failed to activate the memory
+/// target: memory range 0 overlaps the RAM before it`. A clone keeps one error of a final
+/// failure, which every later [`Repair::run`] returns again. The caller ends the clone's VM with
+/// its [`status`](Self::status), after an error line that names it.
 #[derive(Clone, Debug)]
 pub struct RepairError {
     /// The stage that failed.
     stage: RepairStage,
     /// Why it failed.
     cause: Arc<RepairCause>,
+    /// How far the repair got.
+    progress: RepairProgress,
 }
 
 impl RepairError {
-    /// Returns the failure of `stage`, because of `cause`.
+    /// Returns the failure of `stage`, because of `cause`, of a repair that did nothing yet.
     fn new(stage: RepairStage, cause: RepairCause) -> Self {
         Self {
             stage,
             cause: Arc::new(cause),
+            progress: RepairProgress::default(),
         }
     }
 
@@ -535,6 +654,42 @@ impl RepairError {
     /// Returns why it failed.
     pub fn cause(&self) -> &RepairCause {
         &self.cause
+    }
+
+    /// Returns how far the repair got, across its attempts, when it failed.
+    pub fn progress(&self) -> RepairProgress {
+        self.progress
+    }
+
+    /// Returns the exit status with which the clone's guest ends its VM for the failure, as
+    /// `nvx::protocol::status` documents it. A violation of the time ABI, a [`RepairCause::Time`]
+    /// of [`TimeError::Violation`], has the violation's
+    /// [`status`](crate::guest::time::Violation::status): 193 for a conformance check, or 195
+    /// for the time ABI's part of the repair. Any other failure has its stage's status, from 40
+    /// to 45: [`REPAIR_RESTORE`](status::REPAIR_RESTORE),
+    /// [`REPAIR_PROCESSORS`](status::REPAIR_PROCESSORS),
+    /// [`REPAIR_MEMORY_TARGET`](status::REPAIR_MEMORY_TARGET) for a memory target that the memory
+    /// stage refused before it added any memory block, [`REPAIR_MEMORY`](status::REPAIR_MEMORY)
+    /// for the memory stage's other failures, [`REPAIR_RESEED`](status::REPAIR_RESEED), and
+    /// [`REPAIR_FINISH`](status::REPAIR_FINISH).
+    pub fn status(&self) -> u8 {
+        if let RepairCause::Time(TimeError::Violation(violation)) = self.cause.as_ref() {
+            return violation.status();
+        }
+        match (self.stage, self.cause.as_ref()) {
+            (RepairStage::Restore, _) => status::REPAIR_RESTORE,
+            (RepairStage::Processors, _) => status::REPAIR_PROCESSORS,
+            (
+                RepairStage::Memory,
+                RepairCause::BlockSize(_)
+                | RepairCause::CapturedRam
+                | RepairCause::UntargetedRanges
+                | RepairCause::Range { .. },
+            ) => status::REPAIR_MEMORY_TARGET,
+            (RepairStage::Memory, _) => status::REPAIR_MEMORY,
+            (RepairStage::Reseed, _) => status::REPAIR_RESEED,
+            (RepairStage::Finish, _) => status::REPAIR_FINISH,
+        }
     }
 }
 
@@ -635,35 +790,45 @@ fn check_ranges(ranges: &[MemoryRange], captured: u64) -> Result<(), RepairCause
 }
 
 /// Adds the memory block that starts at `address` through `system`, unless the kernel has it
-/// already, onlines it, unless it is online, and verifies that it is.
-fn activate_block(system: &mut dyn RepairSystem, address: u64) -> Result<(), RepairCause> {
+/// already, onlines it, unless it is online, and verifies that it is. `activations` records the
+/// additions and onlinings that the kernel accepted, across the repair's attempts, and `progress`
+/// counts the block once, once the repair found it present after its own addition, and once, once
+/// it found it online after its own onlining.
+fn activate_block(
+    system: &mut dyn RepairSystem,
+    activations: &mut Activations,
+    progress: &mut RepairProgress,
+    address: u64,
+) -> Result<(), RepairCause> {
     let block = address / BLOCK_SIZE;
-    let state = match system.block_state(block).map_err(RepairCause::Io)? {
-        Some(state) => state,
-        None => {
-            system.add_block(address).map_err(RepairCause::Io)?;
-            system
-                .block_state(block)
-                .map_err(RepairCause::Io)?
-                .ok_or(RepairCause::Missing(block))?
+    let mut state = system.block_state(block).map_err(RepairCause::Io)?;
+    if state.is_none() {
+        system.add_block(address).map_err(RepairCause::Io)?;
+        activations.added.entry(block).or_insert(false);
+        state = system.block_state(block).map_err(RepairCause::Io)?;
+    }
+    let state = state.ok_or(RepairCause::Missing(block))?;
+    if first_found(&mut activations.added, block) {
+        progress.added += 1;
+    }
+    if trimmed(&state) != ONLINE {
+        system.online_block(block).map_err(RepairCause::Io)?;
+        activations.onlined.entry(block).or_insert(false);
+        let state = system
+            .block_state(block)
+            .map_err(RepairCause::Io)?
+            .ok_or(RepairCause::Missing(block))?;
+        if trimmed(&state) != ONLINE {
+            return Err(RepairCause::Offline {
+                block,
+                state: lossy(&state),
+            });
         }
-    };
-    if trimmed(&state) == ONLINE {
-        return Ok(());
     }
-    system.online_block(block).map_err(RepairCause::Io)?;
-    let state = system
-        .block_state(block)
-        .map_err(RepairCause::Io)?
-        .ok_or(RepairCause::Missing(block))?;
-    if trimmed(&state) == ONLINE {
-        Ok(())
-    } else {
-        Err(RepairCause::Offline {
-            block,
-            state: lossy(&state),
-        })
+    if first_found(&mut activations.onlined, block) {
+        progress.onlined += 1;
     }
+    Ok(())
 }
 
 /// Returns `text`, a value that the kernel writes in sysfs, without the newline that ends it.
@@ -709,7 +874,7 @@ trait RepairSystem: Send {
 struct LiveSystem {
     /// The directories of the kernel's interfaces.
     paths: Paths,
-    /// The time ABI, in the mode that the kernel command line selects.
+    /// The time ABI, in strict mode unless the kernel command line makes it report-only.
     abi: TimeAbi,
 }
 
