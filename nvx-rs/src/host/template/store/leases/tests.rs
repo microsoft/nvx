@@ -786,8 +786,10 @@ fn a_release_makes_the_removal_of_its_binding_durable_before_it_removes_its_reco
         .dir()
         .join(LEASES_NAME)
         .join(format!("{}.json", lease.id()));
+    let payload = store.payload_dir(generation);
+    let socket = store.clone_socket_path(&lease);
     // Each sync notes its directory, and whether any file that the clone kept of its launch, the
-    // binding, and the record existed then.
+    // control socket of its VMM included, the binding, and the record existed then.
     let kept = [
         CLONE_SCRATCH_NAME,
         CLONE_ACTIVATION_NAME,
@@ -797,7 +799,8 @@ fn a_release_makes_the_removal_of_its_binding_durable_before_it_removes_its_reco
     let sync = |dir: &Path| -> Result<()> {
         let clone = kept
             .iter()
-            .any(|name| fs::symlink_metadata(sandbox.join(name)).is_ok());
+            .any(|name| fs::symlink_metadata(sandbox.join(name)).is_ok())
+            || fs::symlink_metadata(&socket).is_ok();
         let bound = sandbox.join(CLONE_BINDING_NAME).exists();
         synced
             .borrow_mut()
@@ -807,17 +810,48 @@ fn a_release_makes_the_removal_of_its_binding_durable_before_it_removes_its_reco
     for name in kept {
         fs::write(sandbox.join(name), b"").unwrap();
     }
+    // A socket that a VMM on Linux left in the payload, which a file stands for.
+    if cfg!(unix) {
+        fs::write(&socket, b"").unwrap();
+    }
     let mut locked = SandboxStore::lock_existing(&sandbox, &files(), None).unwrap();
     assert_eq!(store.release_with(&mut locked, &sync).unwrap(), Some(lease));
     drop(locked);
-    assert_eq!(*synced.borrow(), [(sandbox.clone(), false, false, true)]);
+    let mut expected = vec![(sandbox.clone(), false, false, true)];
+    if cfg!(unix) {
+        expected.insert(0, (payload.clone(), false, true, true));
+    }
+    assert_eq!(*synced.borrow(), expected);
     assert!(!record.exists());
+    assert!(fs::symlink_metadata(&socket).is_err());
+    // A release that cannot make the socket's removal durable keeps the binding, and the lease.
+    let again = leased(&store, &published, &sandbox);
+    if cfg!(unix) {
+        let mut locked = SandboxStore::lock_existing(&sandbox, &files(), None).unwrap();
+        let error = store
+            .release_with(&mut locked, &|dir: &Path| {
+                if dir == payload {
+                    Err(Error::io("the disk failed"))
+                } else {
+                    Ok(())
+                }
+            })
+            .unwrap_err();
+        drop(locked);
+        assert_eq!(error.message(), "the disk failed");
+        assert_eq!(binding(&sandbox), Some(again.clone()));
+    }
     // A release that cannot make the binding's removal durable keeps the record, which a
     // retirement removes once no binding names it.
-    let again = leased(&store, &published, &sandbox);
     let mut locked = SandboxStore::lock_existing(&sandbox, &files(), None).unwrap();
     let error = store
-        .release_with(&mut locked, &|_: &Path| Err(Error::io("the disk failed")))
+        .release_with(&mut locked, &|dir: &Path| {
+            if dir == sandbox {
+                Err(Error::io("the disk failed"))
+            } else {
+                Ok(())
+            }
+        })
         .unwrap_err();
     drop(locked);
     assert_eq!(error.message(), "the disk failed");

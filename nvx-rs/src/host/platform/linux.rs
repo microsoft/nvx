@@ -2,7 +2,7 @@ use std::fs::{self, DirBuilder, File, OpenOptions, Permissions, TryLockError};
 use std::io::{self, Read};
 use std::os::fd::{AsFd, AsRawFd, RawFd};
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
-use std::os::unix::net::UnixStream;
+use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
 use std::process::Command;
 use std::thread;
@@ -698,6 +698,31 @@ pub(crate) fn control_endpoint(socket_path: &Path) -> io::Result<String> {
         .to_str()
         .map(str::to_owned)
         .ok_or_else(|| io::Error::other("control socket path is not valid UTF-8"))
+}
+
+/// The listener at which the launch of a clone awaits the restore-ready event of its VMM: a Unix
+/// socket, which the VMM connects to once, and which queues its connection until the host
+/// accepts it.
+#[derive(Debug)]
+pub(crate) struct ReadyListener {
+    /// The listening socket, which the VMM finds as long as it is open.
+    _socket: UnixListener,
+}
+
+/// Listens at the Unix socket `socket_path`, in place of a socket that an earlier launch left
+/// there, as the restore-ready endpoint of a clone's launch, and returns the endpoint, as
+/// OpenVMM's `--restore-ready-path` takes it, and its listener.
+pub(crate) fn listen_ready(socket_path: &Path) -> io::Result<(String, ReadyListener)> {
+    let endpoint = socket_path
+        .to_str()
+        .map(str::to_owned)
+        .ok_or_else(|| io::Error::other("restore-ready socket path is not valid UTF-8"))?;
+    match fs::remove_file(socket_path) {
+        Err(error) if error.kind() != io::ErrorKind::NotFound => return Err(error),
+        _ => {}
+    }
+    let socket = UnixListener::bind(socket_path)?;
+    Ok((endpoint, ReadyListener { _socket: socket }))
 }
 
 /// Connects to a control endpoint served by the process `expected_pid`.

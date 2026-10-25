@@ -1,12 +1,16 @@
 //! The plan of a clone, [`ClonePlan`]: the generation of a template that a clone leased, with the
 //! clone's own image, upper, and memory target, which the plan checks against the generation
 //! before the clone's launch, so that a request that the template cannot serve fails before any
-//! VMM starts.
+//! VMM starts; and the clone's launch, [`ClonePlan::launch`], OpenVMM's restore of the
+//! generation's snapshot with what the plan checked.
 
 #[cfg(all(test, any(target_os = "linux", windows)))]
 mod tests;
 
+mod launch;
 mod record;
+
+pub use self::launch::Restoring;
 
 use std::fmt;
 use std::fs::{self, File};
@@ -30,7 +34,8 @@ use crate::host::sandbox::distro::{self, CheckedDistro, DistroBinding, DistroFor
 use crate::host::sandbox::plan::bound_image;
 use crate::host::sandbox::scratch::{self, CheckedScratch, ScratchBinding};
 use crate::host::sandbox::{
-    LayerRole, SandboxLayer, SandboxPlan, block_geometry, reject_container_path, reject_disk_path,
+    LayerRole, SandboxLayer, SandboxPlan, SandboxUpper, block_geometry, reject_container_path,
+    reject_disk_path,
 };
 use crate::host::seal::FileSeal;
 use crate::host::store::LockedStore;
@@ -142,17 +147,18 @@ pub enum CloneUpper {
 ///   upper, and settings, the template's network, and the resources that the clone must have,
 ///   as [`activation`](Self::activation) describes. Its image must be an EROFS layer, and its
 ///   settings must keep the limits of a record, as [`Configuration::check`] checks them.
-/// - The capability is fresh: the plan draws it for the clone's launch.
+/// - The capability is fresh: the plan draws it for the clone's launch, [`launch`](Self::launch).
 ///
 /// The plan's checks read the metadata of the clone's files, never their content.
 ///
 /// ```no_run
+/// use std::path::Path;
 /// use std::time::{Duration, Instant};
 ///
 /// use nvx::activation::{Journal, MachineIdMode, OverlayMode, WorkloadView};
 /// use nvx::host::sandbox::distro::{DISTRO_POLICY_REVISION, DistroBinding};
 /// use nvx::host::sandbox::{SandboxDistro, SandboxPlan, SandboxUpper};
-/// use nvx::host::store::CallerFiles;
+/// use nvx::host::store::{CallerFiles, RuntimeIdentity};
 /// use nvx::host::template::{
 ///     CloneRequest, ClonePlan, Generation, HostTime, MEMORY_BLOCK_SIZE, Store,
 /// };
@@ -162,6 +168,7 @@ pub enum CloneUpper {
 /// #     generation: &Generation,
 /// #     image: SandboxDistro,
 /// #     binding: DistroBinding,
+/// #     runtime: &RuntimeIdentity,
 /// # ) -> nvx::Result<()> {
 /// let files = CallerFiles::new("config.json")?;
 /// let mut acquired = store.acquire(
@@ -187,10 +194,12 @@ pub enum CloneUpper {
 /// };
 /// let deadline = Instant::now() + Duration::from_secs(5);
 /// let plan = ClonePlan::new(store, &mut acquired, &request, deadline)?;
-/// // ... the clone's launch, under `acquired.locked`, as the launch that the lease reserves, of
-/// // `plan.snapshot()` with `plan.image().path()` and `plan.scratch_path()`, whose guest applies
-/// // `plan.activation()` ...
-/// # let _ = plan;
+/// // OpenVMM restores the generation's snapshot under the runtime that captured the template.
+/// let restoring = plan.launch(&mut acquired, Path::new("openvmm"), runtime)?;
+/// // ... the restore, whose VMM sends its restore-ready event to `restoring.ready_endpoint()`,
+/// // serves its control console at `restoring.starting().endpoint()`, and whose guest applies
+/// // `restoring.activation()` ...
+/// # let _ = restoring;
 /// # Ok(())
 /// # }
 /// ```
@@ -215,6 +224,9 @@ pub struct ClonePlan {
     activation: ActivationRecord,
     /// The capability of the clone's launch.
     capability: [u8; CAPABILITY_LEN],
+    /// The clone's devices, which its restore attaches: the adapter's plan of its image and
+    /// network, over the file of its `scratch` block device.
+    devices: SandboxPlan,
 }
 
 /// How a plan reaches the clone's files: as the checks of their bindings reach them, and as it
@@ -246,7 +258,7 @@ impl ClonePlan {
     ///
     /// The plan is made under the lock that acquired the lease, which `acquired` holds, before the
     /// launch that the lease reserves, [`Lease::launch`], which the caller then runs under the
-    /// same lock: the sandbox records no VM and no launch, so no VM of an earlier clone holds a
+    /// same lock, with [`launch`](Self::launch): the sandbox records no VM and no launch, so no VM of an earlier clone holds a
     /// file that the plan replaces. It takes `acquired` exclusively while it plans, since it may
     /// create a file in the sandbox's directory, as the transitions of a sandbox's store take its
     /// lock, and borrows nothing of it once it returns. It reads the generation's key,
@@ -370,6 +382,7 @@ impl ClonePlan {
                 path: create_scratch(locked, &key, access)?,
             },
         };
+        let devices = devices_of(request, &upper);
         Ok(Self {
             lease: lease.clone(),
             generation,
@@ -380,6 +393,7 @@ impl ClonePlan {
             memory: request.memory,
             activation,
             capability,
+            devices,
         })
     }
 
@@ -474,6 +488,21 @@ impl fmt::Debug for ClonePlan {
             .field("activation", &self.activation)
             .finish_non_exhaustive()
     }
+}
+
+/// Returns the devices of the clone of `request`, whose upper is `upper`: the adapter's plan of its
+/// image and network, over the file of its `scratch` block device, which every restore attaches,
+/// the sparse file of an upper in RAM included.
+fn devices_of(request: &CloneRequest, upper: &CloneUpper) -> SandboxPlan {
+    let adapter = &request.adapter;
+    let scratch = match upper {
+        // The sandbox's path, which its lease names, is valid Unicode.
+        CloneUpper::Tmpfs { path } => {
+            SandboxUpper::scratch_at(PurePath::native(&path.to_string_lossy()))
+        }
+        CloneUpper::Scratch(_) => adapter.upper().clone(),
+    };
+    SandboxPlan::adapter(adapter.distro().clone(), scratch).with_network(adapter.network().cloned())
 }
 
 /// Refuses a request that no clone takes, as [`ClonePlan::new`] describes, without reading or

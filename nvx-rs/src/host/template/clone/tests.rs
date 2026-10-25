@@ -1,6 +1,8 @@
 //! Tests of the plans of clones: the checks of their images, uppers, and memory targets against
 //! the generation that they lease, which read no content, the claims of their scratch images, and
-//! the sparse scratch device of an upper in RAM.
+//! the sparse scratch device of an upper in RAM; and, in [`launch`], of their launches.
+
+mod launch;
 
 use std::io::Read;
 use std::net::{IpAddr, Ipv4Addr};
@@ -266,9 +268,18 @@ impl Fixture {
     /// Publishes a template as [`new`](Self::new) does, of the class and manifest that `change`
     /// changes, given the physical block size of the files of the directory.
     fn with(change: impl FnOnce(&mut CaptureClass, &mut ManifestSpec, u32)) -> Self {
+        Self::in_store(|directory| directory.join("templates"), change)
+    }
+
+    /// Publishes a template as [`with`](Self::with) does, in a store at the path that `store`
+    /// returns, given the temporary directory, in which it creates the store's parent directory.
+    fn in_store(
+        store: impl FnOnce(&Path) -> PathBuf,
+        change: impl FnOnce(&mut CaptureClass, &mut ManifestSpec, u32),
+    ) -> Self {
         let directory = tempfile::tempdir().unwrap();
         let physical = physical_block_size(directory.path());
-        let store = Store::create(directory.path().join("templates")).unwrap();
+        let store = Store::create(store(directory.path())).unwrap();
         let (mut class, mut spec) = (class(), ManifestSpec::template());
         set_geometries(
             &mut class,
@@ -312,17 +323,24 @@ impl Fixture {
         (path, binding)
     }
 
-    /// Provisions the sandbox `name`, and leases the generation to it, a second after its
-    /// capture.
-    fn acquire(&self, name: &str) -> Acquired {
+    /// Provisions the sandbox `name`, and returns its directory, with its links resolved, as a
+    /// lease names it.
+    fn provision(&self, name: &str) -> PathBuf {
         let dir = self.path("sandboxes", name);
         let locked = SandboxStore::lock_for_provision(&dir, &files(), None).unwrap();
         fs::write(dir.join(CONFIG), b"{}").unwrap();
         drop(locked);
+        filesystem::canonicalize(&dir).unwrap()
+    }
+
+    /// Provisions the sandbox `name`, and leases the generation to it, a second after its
+    /// capture.
+    fn acquire(&self, name: &str) -> Acquired {
+        let sandbox = self.provision(name);
         self.store
             .acquire(
                 self.generation.generation(),
-                filesystem::canonicalize(&dir).unwrap(),
+                sandbox,
                 &files(),
                 &after(&self.generation, 1),
                 None,

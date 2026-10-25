@@ -53,7 +53,8 @@ const STATE_NAME: &str = "state.bin";
 const MEMORY_NAME: &str = "memory.bin";
 /// The artifacts of a platform-tier snapshot, in the order of their names: its manifest, its RAM,
 /// and its saved state.
-const SNAPSHOT_ARTIFACTS: [&str; 3] = [MANIFEST_NAME, MEMORY_NAME, STATE_NAME];
+pub(in crate::host::template) const SNAPSHOT_ARTIFACTS: [&str; 3] =
+    [MANIFEST_NAME, MEMORY_NAME, STATE_NAME];
 
 /// Prefix of the name of the file that backs the RAM of a capture's VM, which OpenVMM creates
 /// beside the snapshot's destination, and removes as the VM ends.
@@ -68,7 +69,7 @@ const STAGING_PREFIX: &str = ".snapshot.staging-";
 const SLOT_NAME_LEN: usize = 16;
 
 /// Most bytes of a Unix socket's path on Linux, `sun_path`, with its terminating NUL.
-const SOCKET_PATH_LIMIT: usize = 108;
+pub(in crate::host::template) const SOCKET_PATH_LIMIT: usize = 108;
 
 /// Longest record of a capture, in bytes.
 const MAX_CAPTURE_RECORD_LEN: u64 = 4 * 1024;

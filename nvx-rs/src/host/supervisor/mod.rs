@@ -115,12 +115,22 @@
 //!    upper, and memory target against the generation, and claims the clone's scratch image, if
 //!    it has one, as
 //!    [`ScratchBinding::check`](crate::host::sandbox::scratch::ScratchBinding::check) does. It
-//!    then runs [`launch`] as the reserved launch, which [`LockedStore::begin_launch`] requires of
-//!    a sandbox that holds a lease, and begins once, under that lock alone, whatever its outcome.
+//!    then launches the clone with
+//!    [`ClonePlan::launch`](crate::host::template::ClonePlan::launch), which checks that the
+//!    binding records the lease, writes the clone's files in the sandbox, and runs [`launch`] as
+//!    the reserved launch, which [`LockedStore::begin_launch`] requires of a sandbox that holds a
+//!    lease, and begins once, under that lock alone, whatever its outcome. The clone's VMM
+//!    restores the generation's snapshot in place, and on Linux listens beside it, at the control
+//!    socket that the lease reserves in the generation's payload, named after the launch, which
+//!    [`Starting::endpoint`] and the runtime record name, as every launch's endpoint, rather than
+//!    at the sandbox's own socket.
 //! 3. Once the clone's VM has exited, as a stop, a termination, or a reattach verifies,
 //!    [`Store::release`](crate::host::template::Store::release) ends the lease, under the
 //!    sandbox's lock, taken through the lease's path,
-//!    [`Lease::sandbox`](crate::host::template::Lease::sandbox), as the acquisition took it.
+//!    [`Lease::sandbox`](crate::host::template::Lease::sandbox), as the acquisition took it. The
+//!    VMM removes its control socket as it exits, the stop or the reattach removes the one that an
+//!    abrupt exit leaves, and the release makes the socket's absence durable before the lease
+//!    ends.
 //!
 //! ## The lock order
 //!
@@ -543,7 +553,7 @@ impl Vmm {
                 .runtime()?
                 .is_some_and(|record| record == self.record)
         {
-            locked.clear_runtime()?;
+            locked.clear_runtime_of(Some(&self.record))?;
         }
         Ok(())
     }
@@ -761,7 +771,7 @@ fn reattach_with(
     let process = match open(record.process()) {
         Ok(Some(process)) => process,
         Ok(None) => {
-            locked.clear_runtime()?;
+            locked.clear_runtime_of(Some(&record))?;
             return Ok(Reattached::Exited {
                 record: Some(record),
                 recovery,

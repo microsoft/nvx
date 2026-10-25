@@ -185,6 +185,14 @@ pub(crate) fn control_endpoint(_socket_path: &Path) -> io::Result<String> {
     Err(unsupported())
 }
 
+/// The listener of the restore-ready endpoint of a clone's launch, which this host never makes.
+#[derive(Debug)]
+pub(crate) struct ReadyListener;
+
+pub(crate) fn listen_ready(_socket_path: &Path) -> io::Result<(String, ReadyListener)> {
+    Err(unsupported())
+}
+
 pub(crate) fn connect_endpoint(
     _endpoint: &str,
     _expected_pid: u32,
