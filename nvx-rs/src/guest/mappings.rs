@@ -4,8 +4,9 @@
 //! export; a target below a target root, the tree that the mappings go into; and the target's
 //! [`Access`]. A [`Mapper`] applies mappings beneath one [`TargetRoot`], in order, from a
 //! [`SourceRoot`], tracks them, and unmounts them at its [`teardown`](Mapper::teardown). [`bind`]
-//! applies one runtime bind, such as a generated machine ID or the runtime's time status, through
-//! the same walk and attach, without the checks of a host mapping's target and without tracking.
+//! applies one runtime bind, such as a generated machine ID, a resolver file, or the runtime's time
+//! status, through the same walk and attach, without the checks of a host mapping's target and
+//! without tracking.
 //!
 //! # Walk
 //!
@@ -364,8 +365,8 @@ impl Reserved {
 
     /// Returns the targets that NVX's container runtime reserves in a container root, which
     /// [`protocol::share`](crate::protocol::share) lists for the host and the guest: the trees
-    /// `/proc`, `/sys`, `/dev`, `/.nvx-agent`, `/etc/machine-id`, and `/run/nvx/time`, and the
-    /// paths `/etc`, `/run`, and `/run/nvx`.
+    /// `/proc`, `/sys`, `/dev`, `/.nvx-agent`, `/etc/machine-id`, `/etc/resolv.conf`, and
+    /// `/run/nvx/time`, and the paths `/etc`, `/run`, and `/run/nvx`.
     pub fn container_root() -> Self {
         Self::new(RESERVED_MOUNT_TARGETS, RESERVED_EXACT_MOUNT_TARGETS)
             .expect("the container runtime's reserved targets are canonical")
@@ -728,13 +729,22 @@ impl fmt::Display for TeardownError {
 
 impl std::error::Error for TeardownError {}
 
-/// A mapping that a mapper attached and tracks.
+/// A mapping that a mapper attached and tracks, or a runtime bind that [`bind_with`] made, which
+/// [`unbind_with`] unmounts.
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct Mapped {
+pub(crate) struct Mapped {
     /// The target, relative to the root.
     target: PathBuf,
     /// The unique ID of the mapping's mount.
     mount: u64,
+}
+
+#[cfg(test)]
+impl Mapped {
+    /// Returns the target, relative to the root.
+    pub(crate) fn target(&self) -> &Path {
+        &self.target
+    }
 }
 
 /// A mapping that a rename moved away from its target while the walk ran, which the attach
@@ -959,16 +969,16 @@ impl Mapper {
 /// So does a bind that a rename moved and that it failed to detach, wherever it went, which it
 /// reports as [`MappingError::Moved`] with `mounted`. It needs the privilege to mount.
 pub fn bind(root: &TargetRoot, source: &SourceRoot, mapping: &Mapping) -> Result<(), MappingError> {
-    bind_with(&mut SystemKernel, root, source, mapping)
+    bind_with(&mut SystemKernel, root, source, mapping).map(drop)
 }
 
-/// Implements [`bind`] with `kernel`.
+/// Implements [`bind`] with `kernel`, and returns the bind, which [`unbind_with`] unmounts.
 pub(crate) fn bind_with(
     kernel: &mut dyn Kernel,
     root: &TargetRoot,
     source: &SourceRoot,
     mapping: &Mapping,
-) -> Result<(), MappingError> {
+) -> Result<Mapped, MappingError> {
     attach(
         kernel,
         root,
@@ -978,8 +988,34 @@ pub(crate) fn bind_with(
         mapping.access(),
         mapping.kind(),
     )
-    .map(drop)
+    .map(|mount| Mapped {
+        target: mapping.target().to_path_buf(),
+        mount,
+    })
     .map_err(|failure| failure.error)
+}
+
+/// Unmounts `binds`, which [`bind_with`] made beneath `root`, in reverse order, with `kernel`, as a
+/// mapper's teardown unmounts its mappings: each that is the topmost mount at its target, by its
+/// name in its parent directory, without detaching a busy one. It attempts each, whatever failed
+/// before, and reports every one that it failed to unmount, which stays mounted.
+pub(crate) fn unbind_with(
+    kernel: &mut dyn Kernel,
+    root: &TargetRoot,
+    binds: &[Mapped],
+) -> Result<(), TeardownError> {
+    let mut failures = Vec::new();
+    for bind in binds.iter().rev() {
+        if let Err(error) = unmount(kernel, root, bind) {
+            let target = absolute(&bind.target);
+            failures.push(UnmountFailure { target, error });
+        }
+    }
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(TeardownError { failures })
+    }
 }
 
 /// What a mapping attaches: the object at a path beneath a source root, whose mount the attach

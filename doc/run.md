@@ -871,9 +871,10 @@ the export, before the overlay is unmounted or the VM powers off, unless the
 guest stops answering, or `start` is interrupted, and OpenVMM is terminated
 first. Each target
 must be an absolute, canonical path; `/`, `/etc`, `/run`, and `/run/nvx`, and
-the `/etc/machine-id`, `/proc`, `/sys`, `/dev`, `/.nvx-agent`, and
-`/run/nvx/time` trees, are reserved for the container runtime, which replaces
-`/etc/machine-id` with the workload's machine ID, creates `/run` and
+the `/etc/machine-id`, `/etc/resolv.conf`, `/proc`, `/sys`, `/dev`,
+`/.nvx-agent`, and `/run/nvx/time` trees, are reserved for the container
+runtime, which replaces `/etc/machine-id` with the workload's machine ID, keeps
+`/etc/resolv.conf` for the guest's resolver file, creates `/run` and
 `/run/nvx`, and binds its time state over `/run/nvx/time`.
 The guest refuses a target whose path crosses a symbolic link in a container
 layer, a target that a container layer holds as another kind of file than the

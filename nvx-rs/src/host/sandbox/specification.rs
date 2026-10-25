@@ -388,7 +388,15 @@ proptest! {
 
     #[test]
     fn reserved_mount_targets_are_refused(suffix in "[a-z][a-z0-9-]{0,20}") {
-        for tree in ["/proc", "/sys", "/dev", "/.nvx-agent", "/etc/machine-id", "/run/nvx/time"] {
+        for tree in [
+            "/proc",
+            "/sys",
+            "/dev",
+            "/.nvx-agent",
+            "/etc/machine-id",
+            "/etc/resolv.conf",
+            "/run/nvx/time",
+        ] {
             refused(validate_mount_target(tree));
             refused(validate_mount_target(&format!("{tree}/{suffix}")));
             let sibling = format!("{tree}-{suffix}");

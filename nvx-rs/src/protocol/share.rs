@@ -8,13 +8,16 @@
 /// The guest trees that the container runtime owns, which a share may neither be in nor contain:
 /// it mounts procfs, sysfs, and a private `/dev` over them, stages its tools under
 /// `/.nvx-agent`, binds the workload machine ID at `/etc/machine-id`, which it first replaces
-/// with a regular file, and binds its time ABI state over `/run/nvx/time`.
-pub const RESERVED_MOUNT_TARGETS: [&str; 6] = [
+/// with a regular file, binds the guest's resolver file at `/etc/resolv.conf`, which it first
+/// replaces with a regular file if it is a symbolic link, and binds its time ABI state over
+/// `/run/nvx/time`.
+pub const RESERVED_MOUNT_TARGETS: [&str; 7] = [
     "/proc",
     "/sys",
     "/dev",
     "/.nvx-agent",
     "/etc/machine-id",
+    "/etc/resolv.conf",
     "/run/nvx/time",
 ];
 
@@ -70,6 +73,7 @@ mod tests {
                 "/dev",
                 "/.nvx-agent",
                 "/etc/machine-id",
+                "/etc/resolv.conf",
                 "/run/nvx/time"
             ]
         );
@@ -87,6 +91,8 @@ mod tests {
             ("/.nvx-agent/tool", "/.nvx-agent"),
             ("/etc/machine-id", "/etc/machine-id"),
             ("/etc/machine-id/x", "/etc/machine-id"),
+            ("/etc/resolv.conf", "/etc/resolv.conf"),
+            ("/etc/resolv.conf/x", "/etc/resolv.conf"),
             ("/run/nvx/time", "/run/nvx/time"),
             ("/run/nvx/time/state", "/run/nvx/time"),
         ] {
@@ -110,6 +116,8 @@ mod tests {
             "/.nvx-agents",
             "/etc/app",
             "/etc/machine-ids",
+            "/etc/resolv.conf.d",
+            "/etc/resolvconf",
             "/run/app",
             "/run/nvx/state",
             "/run/nvx/timer",

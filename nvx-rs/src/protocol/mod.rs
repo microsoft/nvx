@@ -17,7 +17,8 @@
 //!   such as [`MAPS_TOKEN`].
 //! - [`cmdline`]: the kernel command line as Linux reads it, for the readers that need the
 //!   kernel's view of it: the parameters into which the kernel splits it, and the virtio-mmio
-//!   devices, of any type, that its `virtio_mmio.device` parameters describe.
+//!   devices, of any type, that its `virtio_mmio.device` parameters describe; and the guest's DNS
+//!   server, which OpenVMM's `virtnet_dns=` token names, with the resolver file that names it.
 //! - [`root`]: the boot tokens of a layered root, which name its image's format and identity and
 //!   its upper, with the host's renderer and the guest's parser.
 //! - [`export`]: the boot tokens of the host export, the aggregate virtio-fs device from which a

@@ -8,32 +8,42 @@
 //!   from an allowlist of 13, and the [`AccountMode`];
 //! - the hostname, `nvx-sandbox` unless the adapter names another;
 //! - the [`MachineId`] mode, the [`Publication`] state, the source of the time status, if any,
-//!   and the [`DeviceNode`]s of `/dev`.
+//!   the resolver file, if any, and the [`DeviceNode`]s of `/dev`.
 //!
 //! [`Entry::bind_runtime`] binds the runtime's files into the root once, for every execution
-//! that enters it later. [`Entry::prepare`] checks the inputs for one execution, and reads and
-//! checks the account in existing-account mode; [`Command::enter`] then has the child enter that
-//! execution, in launch stages of [`spawn`](super::spawn), in the order of [`LaunchStage`].
-//! Nothing here reads the kernel command line or a boot token, and nothing creates an account.
+//! that enters it later, and returns the [`RuntimeBinds`], which a caller removes before it tears
+//! the root down in the same mount namespace. [`Entry::prepare`] checks the inputs for one
+//! execution, and reads and checks the account in existing-account mode; [`Command::enter`] then
+//! has the child enter that execution, in launch stages of [`spawn`](super::spawn), in the order
+//! of [`LaunchStage`]. Nothing here reads the kernel command line or a boot token, and nothing
+//! creates an account.
 //!
 //! # The runtime's binds
 //!
 //! [`Entry::bind_runtime`] binds the file of a [generated](MachineId::Generated) machine ID over
-//! the root's `/etc/machine-id`, and the time status's directory at the root's `/run/nvx/time`,
-//! through [`mappings::bind`]: each is read-only, `nosuid`, and `nodev` before anything sees it,
-//! and the walk creates what the root lacks only on the root's own mount, through no symbolic
-//! link, and refuses a target of another kind than its source. A symbolic link at
-//! `/etc/machine-id` itself, which no bind can cover, is replaced with an empty file first. In
-//! [image](MachineId::Image) mode, the image's own `/etc/machine-id` is left alone. The time
-//! status's directory must hold only what any execution may use, since one of user ID 0 can
-//! open every file in it that user ID 0 owns, and hold its lock: the guest's time tools keep
-//! their locks and private records outside it.
+//! the root's `/etc/machine-id`, the time status's directory at the root's `/run/nvx/time`, and
+//! a [resolver](Entry::resolver) file, which names the guest's DNS servers, over the root's
+//! `/etc/resolv.conf`, through the walk and attach of [`mappings::bind`]: each is read-only,
+//! `nosuid`, and `nodev` before anything sees it, and the walk creates what the root lacks only
+//! on the root's own mount, through no symbolic link, and refuses a target of another kind than
+//! its source. A symbolic link at `/etc/machine-id` or `/etc/resolv.conf` itself, which no bind
+//! can cover, is replaced with an empty file first. In [image](MachineId::Image) mode, the
+//! image's own `/etc/machine-id` is left alone, and without a resolver file, so is the image's
+//! own `/etc/resolv.conf`. The time status's directory must hold only what any execution may
+//! use, since one of user ID 0 can open every file in it that user ID 0 owns, and hold its lock:
+//! the guest's time tools keep their locks and private records outside it.
 //!
 //! The binds are made in the caller's mount namespace, of which each execution's starts as a
 //! copy, so every execution that enters the root later sees them, and sees their sources as they
 //! change, such as a machine ID that the guest rewrites in place after a restore. They last as
-//! long as that namespace: a caller whose root is torn down in its own namespace after it, such
-//! as an agent that an init outlives, binds them in a mount namespace of its own.
+//! long as that namespace, unless [`RuntimeBinds::remove`] removes them, in reverse order. A
+//! root's teardown detaches no busy mount, so a caller that tears the root down in the namespace
+//! where it bound them removes them first. A caller whose root is torn down after it ends, such
+//! as an agent that an init outlives, may instead bind them in a mount namespace of its own,
+//! which ends with it, and drop them. A bind that fails has the call remove the binds that it
+//! made before it, and an [`Error::Rollback`] names any of them that stays mounted. A bind that a
+//! rename moved while the walk ran, and that the attach failed to detach, fails the call, and
+//! stays mounted wherever it went, as [`mappings::bind`] describes.
 //!
 //! # The execution
 //!
@@ -82,15 +92,20 @@
 //!
 //! use nvx::guest::entry::{Entry, Identity, MachineId};
 //! use nvx::guest::spawn::Command;
+//! use nvx::protocol::cmdline;
 //!
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! let machine_id = MachineId::generate("/run/nvx/workload-machine-id")?;
-//! let entry = Entry::new("/run/nvx/rootfs", Identity::new(65534, 65534))
+//! let mut entry = Entry::new("/run/nvx/rootfs", Identity::new(65534, 65534))
 //!     .hostname("sandbox")
 //!     .machine_id(machine_id)
 //!     .time_status("/run/nvx/time");
+//! // The guest's init wrote its resolver file from the DNS server that the command line names.
+//! if cmdline::dns_server(&std::fs::read("/proc/cmdline")?)?.is_some() {
+//!     entry = entry.resolver("/etc/resolv.conf");
+//! }
 //! // Once, before the first execution.
-//! entry.bind_runtime()?;
+//! let binds = entry.bind_runtime()?;
 //! let prepared = entry.prepare()?;
 //! let home = prepared.account().map(|account| account.home().to_vec());
 //! let mut spawned = Command::new(c"/bin/true".to_owned(), vec![c"true".to_owned()])
@@ -100,6 +115,8 @@
 //! let barrier = spawned.take_barrier().expect("the command has a barrier");
 //! // Place the child, by `spawned.id()`, in its cgroup; then:
 //! barrier.release()?;
+//! // Once the executions have ended, before the root's teardown in this mount namespace:
+//! binds.remove()?;
 //! # Ok(())
 //! # }
 //! ```
@@ -109,11 +126,16 @@ use std::io::{self, Read};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
-use super::mappings::{self, Access, Kind, Mapping, MappingError, SourceRoot, Step, TargetRoot};
+use super::mappings::{
+    self, Access, Kernel, Kind, Mapped, Mapping, MappingError, SourceRoot, Step, SystemKernel,
+    TargetRoot, TeardownError,
+};
 use super::parse::parse_decimal;
 #[cfg(doc)]
 use super::spawn::{Command, LaunchStage};
 use super::sys::{self, EntryChild, Errno, FileDescriptor, Mode, OpenFlags};
+#[cfg(doc)]
+use crate::protocol::cmdline::write_resolver;
 
 /// The hostname that an entry gives its execution unless the adapter names another.
 pub const DEFAULT_HOSTNAME: &str = "nvx-sandbox";
@@ -135,6 +157,8 @@ const MACHINE_ID_MODE: u32 = 0o444;
 const MACHINE_ID_TARGET: &str = "/etc/machine-id";
 /// Where [`Entry::bind_runtime`] binds the time status in the root.
 const TIME_STATUS_TARGET: &str = "/run/nvx/time";
+/// Where [`Entry::bind_runtime`] binds the resolver file in the root.
+const RESOLVER_TARGET: &str = "/etc/resolv.conf";
 
 /// The names of the Linux capabilities, by number.
 const CAPABILITY_NAMES: [&str; 41] = [
@@ -553,6 +577,8 @@ pub struct Entry {
     publication: Publication,
     /// The directory of the time status, if the executions see one.
     time_status: Option<PathBuf>,
+    /// The resolver file, if the executions see one.
+    resolver: Option<PathBuf>,
     /// The device nodes of `/dev`, as [`DeviceNode::bit`]s.
     devices: u8,
 }
@@ -560,7 +586,7 @@ pub struct Entry {
 impl Entry {
     /// Describes executions that enter the mount at `root`, an absolute path, as `identity`,
     /// with the hostname `nvx-sandbox`, the image's machine ID, published listeners, no time
-    /// status, and every [`DeviceNode`].
+    /// status, the image's resolver file, and every [`DeviceNode`].
     pub fn new(root: impl Into<PathBuf>, identity: Identity) -> Self {
         Self {
             root: root.into(),
@@ -569,6 +595,7 @@ impl Entry {
             machine_id: MachineId::Image,
             publication: Publication::Published,
             time_status: None,
+            resolver: None,
             devices: DeviceNode::ALL
                 .iter()
                 .fold(0, |devices, node| devices | node.bit()),
@@ -603,6 +630,19 @@ impl Entry {
     /// records outside it.
     pub fn time_status(mut self, source: impl Into<PathBuf>) -> Self {
         self.time_status = Some(source.into());
+        self
+    }
+
+    /// Has the executions see the regular file `source`, a resolver file in the format of
+    /// `/etc/resolv.conf` that names the guest's DNS servers, read-only at `/etc/resolv.conf`,
+    /// once [`bind_runtime`](Self::bind_runtime) has bound it. Without one, they see the image's
+    /// own `/etc/resolv.conf`.
+    ///
+    /// The file may be the one that the guest's init wrote from the `virtnet_dns=` token, or one
+    /// that [`write_resolver`] wrote. Every execution must be able to read it. The bind shows the
+    /// file as it is, so what its owner rewrites in place reaches every execution.
+    pub fn resolver(mut self, source: impl Into<PathBuf>) -> Self {
+        self.resolver = Some(source.into());
         self
     }
 
@@ -706,51 +746,143 @@ impl Entry {
     }
 
     /// Binds the runtime's files into the root, in the caller's mount namespace, for every
-    /// execution that enters the root later, as the [module](self) describes: the file of a
-    /// [generated](MachineId::Generated) machine ID over `/etc/machine-id`, then the
-    /// [time status](Self::time_status) at `/run/nvx/time`. An entry with neither binds nothing.
+    /// execution that enters the root later, as the [module](self) describes, and returns the
+    /// binds that it made: the file of a [generated](MachineId::Generated) machine ID over
+    /// `/etc/machine-id`, then the [time status](Self::time_status) at `/run/nvx/time`, then the
+    /// [resolver](Self::resolver) file over `/etc/resolv.conf`. An entry with none of them binds
+    /// nothing.
+    ///
+    /// The binds last as long as the caller's mount namespace, unless [`RuntimeBinds::remove`]
+    /// removes them, as a caller that tears the root down in that namespace does first. If a bind
+    /// fails, the call removes the binds that it made before it, in reverse order, and returns
+    /// the failure, or, if any of them stays mounted, an [`Error::Rollback`] that names them too.
     ///
     /// Each call binds again, over the earlier binds, so an adapter calls it once, before its
     /// first execution. It needs the privilege to mount, and Linux 6.8 or later.
-    pub fn bind_runtime(&self) -> Result<(), Error> {
+    pub fn bind_runtime(&self) -> Result<RuntimeBinds, Error> {
+        self.bind_runtime_with(&mut SystemKernel)
+    }
+
+    /// Implements [`bind_runtime`](Self::bind_runtime) with `kernel`.
+    pub(crate) fn bind_runtime_with(&self, kernel: &mut dyn Kernel) -> Result<RuntimeBinds, Error> {
         self.check()?;
-        let machine_id = match &self.machine_id {
-            MachineId::Image => None,
-            MachineId::Generated(path) => Some(path),
-        };
-        if machine_id.is_none() && self.time_status.is_none() {
-            return Ok(());
+        if self.machine_id == MachineId::Image
+            && self.time_status.is_none()
+            && self.resolver.is_none()
+        {
+            return Ok(RuntimeBinds {
+                root: None,
+                binds: Vec::new(),
+            });
         }
-        let root = TargetRoot::open(&self.root).map_err(Error::Root)?;
-        if let Some(path) = machine_id {
-            let bind = || bind_runtime_file(&root, path, MACHINE_ID_TARGET, Kind::File);
-            match bind() {
-                // No bind covers a link, so an empty file, which the bind creates, replaces it.
-                Err(MappingError::Link { path: link }) if link == Path::new(MACHINE_ID_TARGET) => {
-                    remove_machine_id_link(&self.root)
-                        .map_err(|_| Error::MachineId(MappingError::Link { path: link }))?;
-                    bind()
-                }
-                bound => bound,
-            }
-            .map_err(Error::MachineId)?;
+        let root = TargetRoot::open_with(kernel, &self.root).map_err(Error::Root)?;
+        let mut binds = Vec::new();
+        if let Err(error) = self.bind_each(kernel, &root, &mut binds) {
+            // The caller cannot remove the binds before the failure, which a teardown in this
+            // namespace would trip over, so it learns of any that stays.
+            return Err(match mappings::unbind_with(kernel, &root, &binds) {
+                Ok(()) => error,
+                Err(teardown) => Error::Rollback {
+                    error: Box::new(error),
+                    teardown,
+                },
+            });
+        }
+        Ok(RuntimeBinds {
+            root: Some(root),
+            binds,
+        })
+    }
+
+    /// Makes the binds of [`bind_runtime`](Self::bind_runtime) beneath `root`, the root's mount,
+    /// in order, with `kernel`, and adds each to `binds`, until one fails.
+    fn bind_each(
+        &self,
+        kernel: &mut dyn Kernel,
+        root: &TargetRoot,
+        binds: &mut Vec<Mapped>,
+    ) -> Result<(), Error> {
+        if let MachineId::Generated(source) = &self.machine_id {
+            let bound = bind_file(kernel, root, &self.root, source, MACHINE_ID_TARGET);
+            binds.push(bound.map_err(Error::MachineId)?);
         }
         if let Some(source) = &self.time_status {
-            bind_runtime_file(&root, source, TIME_STATUS_TARGET, Kind::Directory)
-                .map_err(Error::TimeStatus)?;
+            let bound =
+                bind_runtime_file(kernel, root, source, TIME_STATUS_TARGET, Kind::Directory);
+            binds.push(bound.map_err(Error::TimeStatus)?);
+        }
+        if let Some(source) = &self.resolver {
+            let bound = bind_file(kernel, root, &self.root, source, RESOLVER_TARGET);
+            binds.push(bound.map_err(Error::Resolver)?);
         }
         Ok(())
     }
 }
 
+/// The runtime's binds that [`Entry::bind_runtime`] made in the caller's mount namespace, in the
+/// order in which it made them.
+///
+/// A caller that tears the root down in that namespace [removes](Self::remove) them first: a
+/// teardown detaches no busy mount, and the root's mount is busy while they are on it. A caller
+/// whose namespace ends before the teardown, such as an agent that an init outlives, may drop
+/// them instead, which leaves them mounted. Until they are removed or dropped, they hold a
+/// descriptor of the root, which keeps its mount busy too.
+#[derive(Debug)]
+pub struct RuntimeBinds {
+    /// The root beneath which the binds were made, unless there are none.
+    root: Option<TargetRoot>,
+    /// The binds, in the order in which they were made.
+    binds: Vec<Mapped>,
+}
+
+impl RuntimeBinds {
+    /// Removes the binds, in reverse order: unmounts each that is still the topmost mount at its
+    /// target, by its name in its parent directory, without detaching a busy one, which needs
+    /// procfs at `/proc`. It attempts each, whatever failed before, and reports every one that it
+    /// failed to unmount, which stays mounted.
+    pub fn remove(self) -> Result<(), TeardownError> {
+        self.remove_with(&mut SystemKernel)
+    }
+
+    /// Implements [`remove`](Self::remove) with `kernel`.
+    pub(crate) fn remove_with(self, kernel: &mut dyn Kernel) -> Result<(), TeardownError> {
+        match &self.root {
+            Some(root) => mappings::unbind_with(kernel, root, &self.binds),
+            None => Ok(()),
+        }
+    }
+}
+
+/// Binds the regular file at `source` read-only over `target`, a file of the root's `/etc`,
+/// beneath `root`, the mount at `path`, with `kernel`, and returns the bind. A symbolic link at
+/// `target` itself, which no bind can cover, is first replaced with an empty file, which the bind
+/// creates.
+fn bind_file(
+    kernel: &mut dyn Kernel,
+    root: &TargetRoot,
+    path: &Path,
+    source: &Path,
+    target: &str,
+) -> Result<Mapped, MappingError> {
+    match bind_runtime_file(kernel, root, source, target, Kind::File) {
+        Err(MappingError::Link { path: link }) if link == Path::new(target) => {
+            remove_link(path, target).map_err(|_| MappingError::Link { path: link })?;
+            bind_runtime_file(kernel, root, source, target, Kind::File)
+        }
+        bound => bound,
+    }
+}
+
 /// Binds the file or directory at `path`, which must be of `kind`, read-only at `target` beneath
-/// `root`, through [`mappings::bind`] from a source root at `path`'s parent directory.
+/// `root`, with `kernel`, through the walk and attach of [`mappings::bind`] from a source root at
+/// `path`'s parent directory, and returns the bind.
 fn bind_runtime_file(
+    kernel: &mut dyn Kernel,
     root: &TargetRoot,
     path: &Path,
     target: &str,
     kind: Kind,
-) -> Result<(), MappingError> {
+) -> Result<Mapped, MappingError> {
     let source_error = |error: i32| MappingError::System {
         step: Step::Source,
         error,
@@ -763,7 +895,7 @@ fn bind_runtime_file(
     let mapping = Mapping::new(name, target, Access::ReadOnly)
         .map_err(|_| source_error(Errno::EINVAL as i32))?
         .with_kind(kind);
-    mappings::bind(root, &source, &mapping)
+    mappings::bind_with(kernel, root, &source, &mapping)
 }
 
 /// Returns the directory that holds the runtime file at `path`, the current directory for a
@@ -778,9 +910,11 @@ fn runtime_source(path: &Path) -> Option<(&Path, &std::ffi::OsStr)> {
     }
 }
 
-/// Removes the symbolic link at `/etc/machine-id` beneath `root`, reached through no other link
-/// and on the root's own mount.
-fn remove_machine_id_link(root: &Path) -> Result<(), Errno> {
+/// Removes the symbolic link at `target`, a file of `/etc` such as `/etc/machine-id`, beneath
+/// `root`, reached through no other link and on the root's own mount.
+fn remove_link(root: &Path, target: &str) -> Result<(), Errno> {
+    let name = target.strip_prefix("/etc/").ok_or(Errno::EINVAL)?;
+    let name = sys::c_string(name.as_bytes())?;
     let root = sys::path_c_string(root)?;
     let directory = sys::open(
         &root,
@@ -796,7 +930,7 @@ fn remove_machine_id_link(root: &Path) -> Result<(), Errno> {
     )?;
     let status = nix::sys::stat::fstatat(
         etc.borrowed(),
-        c"machine-id",
+        name.as_c_str(),
         nix::fcntl::AtFlags::AT_SYMLINK_NOFOLLOW,
     )?;
     if status.st_mode & nix::libc::S_IFMT != nix::libc::S_IFLNK {
@@ -804,7 +938,7 @@ fn remove_machine_id_link(root: &Path) -> Result<(), Errno> {
     }
     nix::unistd::unlinkat(
         etc.borrowed(),
-        c"machine-id",
+        name.as_c_str(),
         nix::unistd::UnlinkatFlags::NoRemoveDir,
     )
 }
@@ -976,6 +1110,20 @@ pub enum Error {
     /// [`Entry::bind_runtime`] cannot bind the time status's directory at the root's
     /// `/run/nvx/time`.
     TimeStatus(MappingError),
+    /// [`Entry::bind_runtime`] cannot bind the resolver file over the root's `/etc/resolv.conf`:
+    /// it is missing or not a regular file, the target cannot hold it, or the caller cannot
+    /// mount.
+    Resolver(MappingError),
+    /// [`Entry::bind_runtime`] failed to make a bind, and to remove some of the binds that it made
+    /// before it, which stay mounted, so that a teardown of the root in the caller's mount
+    /// namespace fails.
+    Rollback {
+        /// Why the bind failed: an [`Error::MachineId`], [`Error::TimeStatus`], or
+        /// [`Error::Resolver`].
+        error: Box<Error>,
+        /// The binds made before it that stay mounted.
+        teardown: TeardownError,
+    },
 }
 
 impl fmt::Display for Error {
@@ -1000,6 +1148,11 @@ impl fmt::Display for Error {
             Self::Account(error) => write!(formatter, "the account is unavailable: {error}"),
             Self::MachineId(error) => write!(formatter, "cannot bind the machine ID: {error}"),
             Self::TimeStatus(error) => write!(formatter, "cannot bind the time status: {error}"),
+            Self::Resolver(error) => write!(formatter, "cannot bind the resolver file: {error}"),
+            Self::Rollback { error, teardown } => write!(
+                formatter,
+                "{error}; the binds made before it stay mounted: {teardown}"
+            ),
         }
     }
 }
@@ -1008,8 +1161,9 @@ impl std::error::Error for Error {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Root(error) => Some(error),
-            Self::MachineId(error) | Self::TimeStatus(error) => Some(error),
+            Self::MachineId(error) | Self::TimeStatus(error) | Self::Resolver(error) => Some(error),
             Self::Account(error) => Some(error),
+            Self::Rollback { error, .. } => Some(error.as_ref()),
             _ => None,
         }
     }

@@ -529,6 +529,10 @@ fn plans_check_their_export_plan_for_the_container_root() {
             "its guest target /proc/self would cover the guest's /proc",
         ),
         (
+            |export| export.binds[1].target = "/etc/resolv.conf".to_owned(),
+            "its guest target /etc/resolv.conf would cover the guest's /etc/resolv.conf",
+        ),
+        (
             |export| export.binds[0].target = "workspace".to_owned(),
             "its guest target \"workspace\" is not absolute",
         ),

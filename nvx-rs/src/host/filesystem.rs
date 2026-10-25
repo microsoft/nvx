@@ -3139,6 +3139,10 @@ mod tests {
             &[at(&work, "/proc/self", true)],
             "would cover the guest's /proc",
         );
+        refused(
+            &[at(&config, "/etc/resolv.conf", true)],
+            "has the guest target /etc/resolv.conf, which would cover the guest's /etc/resolv.conf",
+        );
         // The same object read-only and read-write at two targets would let the guest write it.
         refused(
             &[at(&work, "/a", false), at(&work, "/b", true)],
@@ -3181,6 +3185,7 @@ mod tests {
             ("/.nvx-agent/tools", "/.nvx-agent"),
             ("/etc", "/etc"),
             ("/etc/machine-id", "/etc/machine-id"),
+            ("/etc/resolv.conf", "/etc/resolv.conf"),
             ("/run", "/run"),
             // The ancestors of the runtime's trees are reserved, as exact paths here.
             ("/run/nvx", "/run/nvx"),
@@ -3190,6 +3195,7 @@ mod tests {
         }
         for target in [
             "/etc/app",
+            "/etc/resolvconf",
             "/run/secrets",
             "/run/nvx/other",
             "/usr/local",

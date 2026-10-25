@@ -498,6 +498,9 @@ fn mount_target_validation_rejects_unsafe_and_reserved_targets() {
         ("/dev/shm", "/dev"),
         ("/.nvx-agent", "/.nvx-agent"),
         ("/.nvx-agent/tools", "/.nvx-agent"),
+        ("/etc/machine-id", "/etc/machine-id"),
+        ("/etc/resolv.conf", "/etc/resolv.conf"),
+        ("/etc/resolv.conf/x", "/etc/resolv.conf"),
     ] {
         assert_eq!(
             message(validate_mount_target(target)),
@@ -527,6 +530,7 @@ fn mount_target_validation_rejects_unsafe_and_reserved_targets() {
         "/workspace",
         "/procfs",
         "/etc/app",
+        "/etc/resolvconf",
         "/opt/hostedtoolcache",
         "/run/secrets",
         "/run/nvx/other",
