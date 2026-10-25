@@ -3,9 +3,10 @@
 
 use std::ffi::{CStr, CString};
 use std::fmt::{self, Display};
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::{Mutex, PoisonError};
 
+use super::api::Violation;
 use super::decoders::{self, SAMPLE_SIZE, TimeSample, TimeSampleError};
 use super::events::{EventSource, ViolationCode, format_event};
 use super::state::TimeState;
@@ -15,17 +16,19 @@ use crate::guest::sys::{
     ForkResult, Mode, MsrAccess, MsrFile, OpenFlags, Port, PortAccess, PortError, TimeValLike,
     kernel,
 };
+use crate::protocol::status;
 
-/// Statuses with which a fatal time-ABI failure stops the VM through the control port.
+/// Statuses with which a fatal time-ABI failure stops the VM through the control port, which
+/// `nvx::protocol::status` publishes for the host.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
 pub(crate) enum PowerOffStatus {
     /// A time-ABI conformance check failed.
-    Conformance = 193,
+    Conformance = status::TIME_CONFORMANCE,
     /// The runtime watcher observed a time-ABI violation.
-    Violation = 194,
+    Violation = status::TIME_VIOLATION,
     /// Restore-time repair could not complete safely.
-    Repair = 195,
+    Repair = status::TIME_REPAIR,
 }
 
 impl PowerOffStatus {
@@ -226,6 +229,11 @@ pub(crate) struct Runtime<'a> {
     pub(crate) ops: &'a dyn PrivilegedOps,
     /// Whether violations are reported instead of powering off the VM.
     report_only: bool,
+    /// Whether a violation that powers off the VM in enforcing mode fails the call instead, which
+    /// the runtime keeps the violation for.
+    strict: bool,
+    /// The first violation that the call reported in strict mode, which fails the call.
+    violation: Mutex<Option<Violation>>,
     /// Current VM generation.
     generation: AtomicU32,
     /// Whether an asynchronous child may have interrupted console output.
@@ -240,15 +248,40 @@ impl<'a> Runtime<'a> {
         Self {
             ops,
             report_only,
+            strict: false,
+            violation: Mutex::new(None),
             generation: AtomicU32::new(0),
             async_output: AtomicBool::new(false),
             report_lock: Mutex::new(()),
         }
     }
 
+    /// Returns the runtime in strict mode, unless it is report-only: a violation that powers off
+    /// the VM in enforcing mode is reported by its event alone, and the runtime keeps the first
+    /// such violation, with which the call fails, as [`take_violation`](Self::take_violation)
+    /// tells. The runtime then never powers off the VM.
+    pub(crate) fn strict(mut self) -> Self {
+        self.strict = !self.report_only;
+        self
+    }
+
     /// Returns whether conformance failures are report-only.
     pub(crate) fn report_only(&self) -> bool {
         self.report_only
+    }
+
+    /// Returns whether a violation fails the call instead of powering off the VM.
+    pub(crate) fn is_strict(&self) -> bool {
+        self.strict
+    }
+
+    /// Takes the first violation that the call reported in strict mode, which fails the call,
+    /// if any.
+    pub(crate) fn take_violation(&self) -> Option<Violation> {
+        self.violation
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take()
     }
 
     /// Returns the current VM generation.
@@ -336,16 +369,15 @@ impl<'a> Runtime<'a> {
         let _ = count_violation();
     }
 
-    /// Reports a conformance failure and powers off unless report-only.
+    /// Reports a conformance failure, and powers off unless report-only or strict.
     pub(crate) fn conformance_failure(&self, code: ViolationCode, phase: Phase, detail: &[u8]) {
         let _guard = self.report_lock.lock().ok();
         self.emit_event_unlocked(code, EventSource::Conformance, phase, detail);
-        if !self.report_only() {
-            self.ops.power_off(PowerOffStatus::Conformance);
-        }
+        self.stop(PowerOffStatus::Conformance, code, detail);
     }
 
-    /// Emits a fatal event and requests its typed power-off status.
+    /// Emits a fatal event and requests its typed power-off status, unless report-only or
+    /// strict.
     pub(crate) fn fail_fatal(
         &self,
         status: PowerOffStatus,
@@ -355,13 +387,11 @@ impl<'a> Runtime<'a> {
         detail: &[u8],
     ) {
         self.emit_event(code, source, phase, detail);
-        if !self.report_only() {
-            self.ops.power_off(status);
-        }
+        self.stop(status, code, detail);
     }
 
     /// Reports that restore-time repair failed, a fatal event of the restore phase, and powers off
-    /// with the repair status unless report-only.
+    /// with the repair status unless report-only or strict.
     pub(crate) fn repair_failure(&self, code: ViolationCode, detail: &[u8]) {
         self.fail_fatal(
             PowerOffStatus::Repair,
@@ -370,6 +400,20 @@ impl<'a> Runtime<'a> {
             Phase::Restore,
             detail,
         );
+    }
+
+    /// Stops the VM with `status` once its event reported the violation of `code`, with `detail`:
+    /// powers it off in enforcing mode, keeps the call's first violation in strict mode, and does
+    /// neither in report-only mode.
+    fn stop(&self, status: PowerOffStatus, code: ViolationCode, detail: &[u8]) {
+        if self.is_strict() {
+            self.violation
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .get_or_insert_with(|| Violation::new(status, code, detail));
+        } else if !self.report_only {
+            self.ops.power_off(status);
+        }
     }
 }
 
@@ -837,6 +881,7 @@ pub(crate) mod tests {
     use super::*;
     use crate::guest::sys::PortBackend;
     use crate::guest::sys::x86::msr;
+    use crate::guest::time::events::CheckId;
 
     /// Privileged operations that record their requests and replay canned port input.
     pub(crate) struct FakeOps {
@@ -1135,13 +1180,17 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn repair_failures_report_restore_events_and_power_off_unless_report_only() {
-        for (report_only, prefix, power) in [
-            (false, "NVX-TIME-ABI", PowerOffStatus::Repair.code()),
-            (true, "NVX-TIME-REPORT", 0),
+    fn repair_failures_report_restore_events_and_power_off_only_when_enforcing() {
+        for (report_only, strict, prefix, power) in [
+            (false, false, "NVX-TIME-ABI", PowerOffStatus::Repair.code()),
+            (false, true, "NVX-TIME-ABI", 0),
+            (true, false, "NVX-TIME-REPORT", 0),
+            (true, true, "NVX-TIME-REPORT", 0),
         ] {
             let ops = FakeOps::new([]);
             let runtime = Runtime::new(&ops, report_only);
+            let runtime = if strict { runtime.strict() } else { runtime };
+            assert_eq!(runtime.is_strict(), strict && !report_only);
             runtime.set_generation(4);
             runtime.repair_failure(ViolationCode::RepairSuppression, b"cannot restore");
             let line = String::from_utf8(ops.console.lock().unwrap().clone()).unwrap();
@@ -1158,7 +1207,64 @@ pub(crate) mod tests {
             let port: Vec<_> = line.bytes().map(|byte| (Port::PortbData, byte)).collect();
             assert_eq!(*ops.output.lock().unwrap(), port);
             assert_eq!(ops.power.load(Ordering::Relaxed), usize::from(power));
+            // A strict runtime keeps the violation instead, with enforcing mode's status.
+            let kept = runtime.take_violation();
+            if runtime.is_strict() {
+                let violation = kept.unwrap();
+                assert_eq!(
+                    (violation.status(), violation.code(), violation.detail()),
+                    (195, "G_REPAIR_SUPPRESSION", "cannot restore")
+                );
+            } else {
+                assert_eq!(kept, None);
+            }
         }
+    }
+
+    #[test]
+    fn a_strict_runtime_keeps_its_first_violation_and_never_powers_off() {
+        let ops = FakeOps::new([]);
+        let runtime = Runtime::new(&ops, false).strict();
+        runtime.conformance_failure(
+            ViolationCode::Conformance(CheckId::C12),
+            Phase::Boot,
+            b"first",
+        );
+        runtime.repair_failure(ViolationCode::RepairSuppression, b"second");
+        runtime.fail_fatal(
+            PowerOffStatus::Violation,
+            ViolationCode::RcuStall,
+            EventSource::Watcher,
+            Phase::Runtime,
+            b"third",
+        );
+        assert_eq!(ops.power.load(Ordering::Relaxed), 0);
+        let console = String::from_utf8(ops.console.lock().unwrap().clone()).unwrap();
+        assert_eq!(
+            console.matches("NVX-TIME-ABI-VIOLATION: ").count(),
+            3,
+            "{console}"
+        );
+        let violation = runtime.take_violation().unwrap();
+        assert_eq!(
+            (violation.status(), violation.code(), violation.detail()),
+            (193, "G_CONFORMANCE_C12", "first")
+        );
+        assert_eq!(runtime.take_violation(), None);
+        // The statuses are those that the protocol publishes for the host.
+        assert_eq!(
+            [
+                PowerOffStatus::Conformance,
+                PowerOffStatus::Violation,
+                PowerOffStatus::Repair
+            ]
+            .map(PowerOffStatus::code),
+            [
+                status::TIME_CONFORMANCE,
+                status::TIME_VIOLATION,
+                status::TIME_REPAIR
+            ]
+        );
     }
 
     #[test]

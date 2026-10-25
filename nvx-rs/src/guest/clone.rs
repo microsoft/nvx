@@ -71,18 +71,34 @@
 //!    the host gates its input until then, which hands the deferred time work to the time
 //!    daemon: the restore checks, the stall detectors' grace period and release, and the
 //!    wall-clock discipline's fast cadence. The caller starts the daemon with
-//!    [`TimeAbi::start_daemon`] at boot, before the capture, and supervises it. In enforcing
-//!    mode, a finish without a running daemon stops the VM, and in report-only mode, it runs the
-//!    work itself before it returns. The work may end after the clone is ready, and its failures
-//!    are fatal repair failures: the daemon reports them as violations of the time ABI, which
-//!    stop the VM in enforcing mode.
+//!    [`TimeAbi::start_daemon`] at boot, before the capture, and supervises it. A finish without
+//!    a running daemon fails with a violation of the time ABI's check C10, and in report-only
+//!    mode, it runs the work itself before it returns. The work may end after the clone is
+//!    ready, and its failures are fatal repair failures: the daemon reports them as violations
+//!    of the time ABI, which stop the VM, with the time ABI's status, unless the ABI is
+//!    report-only, since the daemon enforces it.
 //!
 //! It returns the [`Repaired`] clone: its new VM generation ID, its number of online CPUs, the
 //! size of its online memory blocks, and when it acknowledged the restore, which an activation
 //! checks against the resources that it expects. The repair records how far it got, so that it
 //! never adds a memory block twice, and runs the reseed and the finish at most once, whoever
 //! retries it: a failure at or after the reseed is final. It never touches the fence. A failure is
-//! a [`RepairError`], which names the [`RepairStage`] that failed and its [`RepairCause`].
+//! a [`RepairError`], which names the [`RepairStage`] that failed, its [`RepairCause`], and the
+//! repair's [`RepairProgress`], and selects the status with which the caller ends the VM,
+//! [`RepairError::status`], which `nvx::protocol::status` documents.
+//!
+//! # Strict mode
+//!
+//! The capture and the repair take the time ABI in strict mode, [`TimeAbi::strict`], unless the
+//! kernel command line makes it report-only: a violation of the ABI fails them, after its
+//! violation event, with [`TimeError::Violation`], whose
+//! [`status`](crate::guest::time::Violation::status) is the one with which the ABI would have
+//! stopped the VM, rather than stopping the VM, so that the caller owns the VM's exit status and
+//! its shutdown. A capture request fails so in a clone whose restore the time ABI could not
+//! repair, with 195, as a [`CaptureStage::Capture`] error, and a repair, with 195 or 193, as
+//! [`RepairError::status`] tells. The capture's preparation enforces the ABI, as
+//! `nvx-time pre-capture` does, and so does the time daemon: a violation of either stops the VM,
+//! unless the ABI is report-only.
 //!
 //! # Example
 //!
@@ -128,7 +144,14 @@
 //!         // A clone continues here, with its wall clock repaired. Its repair activates its
 //!         // memory, reseeds it, and acknowledges the restore, while its fence stays closed.
 //!         let (restore, fence) = restored.into_parts();
-//!         let repaired = clone::repair(restore)?;
+//!         let repaired = match clone::repair(restore) {
+//!             Ok(repaired) => repaired,
+//!             Err(error) => {
+//!                 // The agent ends the VM with the failure's status, after an error line.
+//!                 eprintln!("{error} ({})", error.progress());
+//!                 std::process::exit(error.status().into());
+//!             }
+//!         };
 //!         println!("{} CPUs, {} bytes of memory", repaired.cpus(), repaired.memory());
 //!         // The clone opens the fence once it may admit executions, such as once activated.
 //!         fence.open();
@@ -147,9 +170,10 @@
 //! its memory interface. They mount nothing and start no thread, and they start no process and
 //! collect no child's status, except a report-only finish without a running time daemon, which
 //! runs the deferred time work itself, in a child that it waits for, as
-//! [`TimeAbi::restore_finish`] tells. Apart from a violation of the time ABI in enforcing mode,
-//! which stops the VM as [`TimeAbi`] tells, they never power the VM off, so a caller that is not
-//! PID 1 keeps its own reaping, transport, and shutdown.
+//! [`TimeAbi::restore_finish`] tells. Apart from a violation of the time ABI in the capture's
+//! preparation, which stops the VM unless the ABI is report-only, as [strict
+//! mode](#strict-mode) tells, they never power the VM off, so a caller that is not PID 1 keeps
+//! its own reaping, transport, and shutdown.
 
 mod mounts;
 mod repair;
@@ -172,7 +196,7 @@ use super::time::{
 
 pub use self::mounts::{Mounted, Origin};
 pub use self::repair::{
-    RangeFault, Repair, RepairCause, RepairError, RepairStage, Repaired, repair,
+    RangeFault, Repair, RepairCause, RepairError, RepairProgress, RepairStage, Repaired, repair,
 };
 
 /// The most bytes of the mount table that a [`CapturePreparation`] reads: 1 MiB, the lines of
@@ -257,8 +281,9 @@ impl<F: AdmissionFence> CapturePreparation<F> {
     /// suppresses the stall detectors, then returns the barrier that holds them.
     ///
     /// The wait for the boot checks lasts 30 seconds at most. A capture check that fails reports
-    /// a violation of the time ABI, which stops the VM in enforcing mode; in report-only mode,
-    /// the preparation goes on, as `nvx-time pre-capture` does. A preparation that fails after it
+    /// a violation of the time ABI, which stops the VM unless the ABI is report-only, since the
+    /// preparation enforces it even in [strict mode](self#strict-mode); in report-only mode, the
+    /// preparation goes on, as `nvx-time pre-capture` does. A preparation that fails after it
     /// closed the fence opens it again, and leaves the detectors' settings as they were: when it
     /// suppressed some already, it restores their settings, and a failure to restore them is a
     /// [`CaptureStage::Release`] error. One after which the calling thread may still hold some of
@@ -267,7 +292,7 @@ impl<F: AdmissionFence> CapturePreparation<F> {
     pub fn prepare(self) -> Result<CaptureBarrier<F>, CaptureError> {
         let system = LiveSystem {
             paths: Paths::default(),
-            abi: TimeAbi::new(),
+            abi: live_abi(),
         };
         self.prepare_with(Box::new(system))
     }
@@ -365,10 +390,12 @@ impl<F: AdmissionFence> CaptureBarrier<F> {
     /// A failure to read the VM generation ID, before the request, opens the fence and restores
     /// the detectors' settings, as [`cancel`](Self::cancel) does. A request that fails restores
     /// the detectors' settings, but leaves the fence closed, since it may fail in a clone whose
-    /// restore it could not repair, where no execution may start. Either way, the caller ends
-    /// the VM, and a failure to restore the settings is a [`CaptureStage::Release`] error, unless
-    /// the calling thread may still hold some of the permission for the time ABI's ports, which
-    /// [`TimeError::PortRelease`] reports instead.
+    /// restore it could not repair, where no execution may start: there, the time ABI, in
+    /// [strict mode](self#strict-mode), fails it with the violation, [`TimeError::Violation`],
+    /// rather than stopping the VM. Either way, the caller ends the VM, with the violation's
+    /// status if it has one, and a failure to restore the settings is a [`CaptureStage::Release`]
+    /// error, unless the calling thread may still hold some of the permission for the time ABI's
+    /// ports, which [`TimeError::PortRelease`] reports instead.
     pub fn capture(mut self) -> Result<Captured<F>, CaptureError> {
         let generation_id = match self.system.generation_id() {
             Ok(generation_id) => generation_id,
@@ -578,8 +605,8 @@ pub enum CaptureCause {
     /// The stall detectors' settings are saved already, by a capture that is still pending, which
     /// restores them.
     Pending,
-    /// A call of the time ABI failed: a violation that a report-only call reports, or a failure of
-    /// its ports, its time state, or its entropy file.
+    /// A call of the time ABI failed: a violation that a strict or report-only call reports, or a
+    /// failure of its ports, its time state, or its entropy file.
     Time(TimeError),
 }
 
@@ -675,8 +702,14 @@ trait System: Send {
 struct LiveSystem {
     /// The directories of the kernel's interfaces.
     paths: Paths,
-    /// The time ABI, in the mode that the kernel command line selects.
+    /// The time ABI of [`live_abi`], whose preparation of a capture enforces the ABI all the same.
     abi: TimeAbi,
+}
+
+/// Returns the time ABI of the capture and of the repair: in strict mode, unless the kernel
+/// command line makes it report-only.
+fn live_abi() -> TimeAbi {
+    TimeAbi::new().strict()
 }
 
 impl System for LiveSystem {
