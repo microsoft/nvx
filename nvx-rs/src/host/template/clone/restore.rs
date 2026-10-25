@@ -1,9 +1,9 @@
 //! The restore sequence of a clone, from its launch, a [`Restoring`], to its sandbox's start,
 //! through the adapter's framing of the clone's control session, a [`CloneControl`]:
-//! [`Restoring::activate`] activates the clone, [`Activated::start`] starts its sandbox, and
-//! [`Started::commit`] commits its launch, as the documentation of [`Restoring::activate`]
-//! describes, while [`Activated::fail`] and [`Started::fail`] fail the clone for a step of the
-//! caller's own between them.
+//! [`Restoring::activate`] activates the clone, [`Activated::start`] sends its mapping table, if
+//! it has an export, then starts its sandbox, and [`Started::commit`] commits its launch, as the
+//! documentation of [`Restoring::activate`] describes, while [`Activated::fail`] and
+//! [`Started::fail`] fail the clone for a step of the caller's own between them.
 
 use std::fmt;
 use std::io;
@@ -23,7 +23,7 @@ use crate::host::session::{self, SessionError};
 use crate::host::store::Recovery;
 use crate::host::store::regular::{open_regular, read_at_most};
 use crate::host::supervisor::{Starting, Vmm};
-use crate::protocol::CAPABILITY_LEN;
+use crate::protocol::{CAPABILITY_LEN, HostMap};
 
 /// The restore-ready event that OpenVMM writes to a restore's `--restore-ready-path` once the
 /// restored VM has started, which [`Restoring::activate`] waits for.
@@ -40,9 +40,9 @@ pub const RESTORE_READY_EVENT: &[u8] = b"OPENVMM_RESTORE_READY_V1\n";
 pub const RESTORE_TO_READY_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// The default Ready-to-Start deadline of a clone's restore sequence: how long after the check of
-/// the clone's Ready its sandbox may start, which takes a few of the guest's answers, as the CI
-/// runs of [`RESTORE_TO_READY_TIMEOUT`] show. It is the test adapter's deadline of a session's
-/// answers.
+/// the clone's Ready its sandbox may start, which takes a few of the guest's answers, to the parts
+/// of its mapping table and to the start, as the CI runs of [`RESTORE_TO_READY_TIMEOUT`] show.
+/// It is the test adapter's deadline of a session's answers.
 pub const READY_TO_START_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// The most sessions in which [`Restoring::activate`] sends a clone's Activate: its first session,
@@ -116,9 +116,25 @@ pub trait CloneControl {
         deadline: Instant,
     ) -> Result<Option<ReadyActivation>, Self::Error>;
 
-    /// Starts the clone's sandbox over `session`, once the clone is ready: sends what the
-    /// framing sends before the start, such as the mappings that the record announces, then the
-    /// start, and waits until `deadline` for its confirmation.
+    /// Sends `table`, the clone's mapping table, which its record announces, over `session`, once
+    /// the clone is ready, as the framing sends a mapping table: in order, in as many requests as
+    /// it takes, each once the guest applied the one before; and waits until `deadline` for the
+    /// guest to apply every mapping. The restore sequence calls it only for a clone with an export,
+    /// whose table holds 1 to [`MAX_MAPPINGS`](crate::activation::MAX_MAPPINGS) mappings, as
+    /// [`ClonePlan::table`](super::ClonePlan::table) returns them, and never again in a session.
+    ///
+    /// Fails once the guest refused or failed a mapping, after which a guest starts no sandbox, as
+    /// does a guest that applied some of the table, and the framing sends no more of it, and once
+    /// the session failed: the sequence then ends the launch, and never starts the sandbox.
+    fn map(
+        &mut self,
+        session: &mut Self::Session,
+        table: &[HostMap],
+        deadline: Instant,
+    ) -> Result<(), Self::Error>;
+
+    /// Starts the clone's sandbox over `session`, once the clone is ready, and applied its mapping
+    /// table if it has one: sends the start, and waits until `deadline` for its confirmation.
     fn start(&mut self, session: &mut Self::Session, deadline: Instant) -> Result<(), Self::Error>;
 
     /// Returns whether `error`, with which [`attach`](Self::attach) or
@@ -127,6 +143,21 @@ pub trait CloneControl {
     /// guest's refusal or the passing of the deadline: a clone that answers no more in a lost
     /// session may still answer in another.
     fn lost(&self, error: &Self::Error) -> bool;
+
+    /// Returns whether `error`, with which [`map`](Self::map) failed, is the guest's refusal of
+    /// the clone's mapping table: its answer that it would not, or could not, apply a part of the
+    /// table, or one of its mappings, to the clone's root, which the request's mappings and image
+    /// decide, rather than a failure of the session or of the framing. The restore sequence
+    /// attributes such a failure to the request's mappings,
+    /// [`Evidence::InvalidMappings`](super::Evidence::InvalidMappings), whenever it came, and any
+    /// other to what the host saw of it, as [`Activated::start`] describes.
+    ///
+    /// No failure is, by default: a framing whose answers do not tell the guest's refusal of a
+    /// table leaves the provenance of its failures unknown.
+    fn refused(&self, error: &Self::Error) -> bool {
+        let _ = error;
+        false
+    }
 }
 
 impl<'s> Restoring<'s> {
@@ -165,9 +196,10 @@ impl<'s> Restoring<'s> {
     /// input; the Activate; and the Ready.
     ///
     /// Returns the [`Activated`] clone, whose Ready-to-Start deadline, `deadlines.start`, starts
-    /// at the check of its Ready, and whose sandbox [`Activated::start`] starts, after which
-    /// [`Started::commit`] commits the launch, as the cold boot of a sandbox commits its launch
-    /// once it checked its VM, with [`Starting::commit`].
+    /// at the check of its Ready, and whose sandbox [`Activated::start`] starts, once the clone
+    /// applied its mapping table, if it has an export, after which [`Started::commit`] commits the
+    /// launch, as the cold boot of a sandbox commits its launch once it checked its VM, with
+    /// [`Starting::commit`].
     ///
     /// # Retries
     ///
@@ -237,6 +269,7 @@ impl<'s> Restoring<'s> {
             record,
             capability,
             mut tracker,
+            table,
         } = self;
         let Some(deadline) = launched.checked_add(deadlines.ready) else {
             let fault = beyond_clock("restore-to-Ready", deadlines.ready);
@@ -279,14 +312,15 @@ impl<'s> Restoring<'s> {
             image,
             activation,
             tracker,
+            table,
         })
     }
 }
 
 /// A clone that its restore sequence activated, as [`Restoring::activate`] returns it: its guest
 /// answered the Activate of its record with a Ready that reports the record's activation, and
-/// awaits the start of its sandbox, which [`start`](Self::start) asks for, by the Ready-to-Start
-/// deadline, [`deadline`](Self::deadline).
+/// awaits its mapping table, if it has an export, and the start of its sandbox, which
+/// [`start`](Self::start) sends, by the Ready-to-Start deadline, [`deadline`](Self::deadline).
 ///
 /// It holds the adapter's session in which the clone answered, and the launch, uncommitted,
 /// through which it borrows the sandbox's locked store exclusively, as [`Starting`] does.
@@ -306,6 +340,9 @@ pub struct Activated<'s, S> {
     activation: ActivationRecord,
     /// How far the clone got, and how its failures are recorded.
     tracker: Tracker,
+    /// The clone's mapping table, which [`start`](Self::start) sends before the start: empty for
+    /// a clone without an export.
+    table: Vec<HostMap>,
 }
 
 impl<'s, S> Activated<'s, S> {
@@ -339,16 +376,31 @@ impl<'s, S> Activated<'s, S> {
     /// clone, whose launch the caller commits. The progress log records that the start was sent,
     /// then that it was confirmed.
     ///
-    /// The start is not sent again: a guest that started its sandbox refuses another start, so a
-    /// session that fails once the start was sent leaves the start unknown. A failure ends the
-    /// launch, as [`abandon`](Self::abandon) does, and fails with a [`CloneFailure`] at
-    /// [`Stage::Start`], as [`Restoring::activate`] does: with
+    /// A clone with an export first gets its mapping table, [`ClonePlan::table`], which its
+    /// record announces: [`CloneControl::map`] sends it in order, and returns once the guest
+    /// applied every mapping. Only then does the progress log record that the start was sent, and
+    /// [`CloneControl::start`] send it, which a clone without an export gets at once. Neither is
+    /// sent again: a guest that applied some mappings starts no sandbox, and a guest that started
+    /// its sandbox refuses another start, so a session that fails once the table or the start was
+    /// sent leaves the clone's state unknown.
+    ///
+    /// A failure of either, a partial or failed mapping table included, ends the launch, as
+    /// [`abandon`](Self::abandon) does, and fails with a [`CloneFailure`] at [`Stage::Start`], as
+    /// [`Restoring::activate`] does. A failure of the table leaves the clone's progress at
+    /// [`Progress::Ready`], since the progress log records the start only once the table is
+    /// applied, so that its record tells it from a failure of the start, whose progress is
+    /// [`Progress::Starting`]. The failure's evidence is the guest's refusal of the table,
+    /// [`Evidence::InvalidMappings`], once the adapter's framing tells it, as
+    /// [`CloneControl::refused`] does; otherwise it fails with
     /// [`ErrorKind::TimedOut`](crate::ErrorKind::TimedOut) once the deadline passed,
     /// [`Evidence::Timeout`], and with [`ErrorKind::Protocol`](crate::ErrorKind::Protocol)
     /// before, [`Evidence::Reset`] for a session that the adapter lost and
     /// [`Evidence::Protocol`] otherwise, unless OpenVMM's outcome report of a VMM that exited
     /// gives evidence that prevails; and with the host's evidence if the progress log cannot be
-    /// appended to.
+    /// appended to. None of these is the template's, so no failure of the table or of the start
+    /// quarantines the template's generation.
+    ///
+    /// [`ClonePlan::table`]: super::ClonePlan::table
     pub fn start<C: CloneControl<Session = S>>(
         self,
         control: &mut C,
@@ -360,52 +412,24 @@ impl<'s, S> Activated<'s, S> {
             image,
             activation,
             mut tracker,
+            table,
         } = self;
-        if let Err(fault) = tracker.reach(Progress::Starting) {
-            drop(session);
-            return Err(tracker.fail(starting, Stage::Start, fault));
-        }
-        let started = control.start(&mut session, deadline);
-        let fault = match started {
-            Ok(()) => match tracker.reach(Progress::Started) {
-                Ok(()) => {
-                    return Ok(Started {
-                        session,
-                        starting,
-                        image,
-                        activation,
-                        tracker,
-                    });
-                }
-                Err(fault) => fault,
-            },
-            Err(source) => {
-                let (evidence, error) = if Instant::now() >= deadline {
-                    (
-                        Evidence::Timeout,
-                        Error::timed_out(
-                            "the clone's sandbox did not start by its Ready-to-Start deadline",
-                        ),
-                    )
-                } else if control.lost(&source) {
-                    (
-                        Evidence::Reset,
-                        Error::protocol(
-                            "the clone's control session was lost: cannot start the clone's \
-                             sandbox",
-                        ),
-                    )
-                } else {
-                    (
-                        Evidence::Protocol,
-                        Error::protocol("cannot start the clone's sandbox"),
-                    )
-                };
-                Fault::new(evidence, error.with_source(source))
+        match order(control, &mut session, &mut tracker, &table, deadline) {
+            Ok(()) => Ok(Started {
+                session,
+                starting,
+                image,
+                activation,
+                tracker,
+            }),
+            // The one place where the order of a clone that is ready ends its launch: a mapping
+            // table that the guest did not apply in whole, a start that failed, or a progress log
+            // that could not record them.
+            Err(fault) => {
+                drop(session);
+                Err(tracker.fail(starting, Stage::Start, fault))
             }
-        };
-        drop(session);
-        Err(tracker.fail(starting, Stage::Start, fault))
+        }
     }
 
     /// Ends the launch, as [`Starting::abandon`] does, which terminates its VMM and ends the
@@ -419,7 +443,7 @@ impl<'s, S> Activated<'s, S> {
     }
 
     /// Fails the clone, once it is ready, for a step of the caller's own before the start of its
-    /// sandbox, such as one that maps a directory of the host into the clone, with `evidence`,
+    /// sandbox, such as one that prepares the host's side of the clone, with `evidence`,
     /// which attributes the failure as [the attribution of evidence](Evidence#attribution)
     /// describes, and `error`, and returns the failure: once the adapter's session has ended, it
     /// ends the launch as [`abandon`](Self::abandon) does, and records the failure at
@@ -448,7 +472,90 @@ impl<S> fmt::Debug for Activated<'_, S> {
             .field("deadline", &self.deadline)
             .field("image", &self.image)
             .field("activation", &self.activation)
+            .field("table", &self.table)
             .finish_non_exhaustive()
+    }
+}
+
+/// Runs the order of a clone that is ready, as [`Activated::start`] describes, over `session` of
+/// `control`, by `deadline`: sends the mapping table, `table`, if it has a mapping, then records in
+/// `tracker` that the start was sent, sends it, and records that it was confirmed. Returns the
+/// fault of the step that failed, which ends the order.
+fn order<C: CloneControl>(
+    control: &mut C,
+    session: &mut C::Session,
+    tracker: &mut Tracker,
+    table: &[HostMap],
+    deadline: Instant,
+) -> std::result::Result<(), Fault> {
+    if !table.is_empty() {
+        control
+            .map(session, table, deadline)
+            .map_err(|source| Step::Map.fault(control, source, deadline))?;
+    }
+    tracker.reach(Progress::Starting)?;
+    control
+        .start(session, deadline)
+        .map_err(|source| Step::Start.fault(control, source, deadline))?;
+    tracker.reach(Progress::Started)
+}
+
+/// A step of the order of a clone that is ready, which [`Activated::start`] takes in turn.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Step {
+    /// The mapping table, which [`CloneControl::map`] sends.
+    Map,
+    /// The start, which [`CloneControl::start`] sends.
+    Start,
+}
+
+impl Step {
+    /// Returns the fault of the step's failure with `source`, which `control` returned, by the
+    /// Ready-to-Start deadline `deadline`, as [`Activated::start`] attributes it: the guest's
+    /// refusal of the mapping table is the request's mappings, whenever it came, and any other
+    /// failure is what the host saw of it, the passing of the deadline, a lost session, or a
+    /// broken protocol.
+    fn fault<C: CloneControl>(self, control: &C, source: C::Error, deadline: Instant) -> Fault {
+        let (evidence, error) = if self == Self::Map && control.refused(&source) {
+            (
+                Evidence::InvalidMappings,
+                Error::protocol("the clone refused its mapping table"),
+            )
+        } else if Instant::now() >= deadline {
+            (
+                Evidence::Timeout,
+                Error::timed_out(match self {
+                    Self::Map => {
+                        "the clone did not apply its mapping table by its Ready-to-Start deadline"
+                    }
+                    Self::Start => {
+                        "the clone's sandbox did not start by its Ready-to-Start deadline"
+                    }
+                }),
+            )
+        } else if control.lost(&source) {
+            (
+                Evidence::Reset,
+                Error::protocol(match self {
+                    Self::Map => {
+                        "the clone's control session was lost: the clone did not apply its \
+                         mapping table"
+                    }
+                    Self::Start => {
+                        "the clone's control session was lost: cannot start the clone's sandbox"
+                    }
+                }),
+            )
+        } else {
+            (
+                Evidence::Protocol,
+                Error::protocol(match self {
+                    Self::Map => "the clone did not apply its mapping table",
+                    Self::Start => "cannot start the clone's sandbox",
+                }),
+            )
+        };
+        Fault::new(evidence, error.with_source(source))
     }
 }
 

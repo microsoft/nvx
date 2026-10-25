@@ -1,5 +1,5 @@
 //! How the [host's order](super#the-hosts-order) of a VM with a layered root fails, which
-//! [`ready`](super::ready), [`activate`](super::activate), and
+//! [`ready`](super::ready), [`activate`](super::activate), [`map_table`](super::map_table), and
 //! [`start_sandbox`](super::start_sandbox) return: an [`OrderError`].
 
 use std::fmt;

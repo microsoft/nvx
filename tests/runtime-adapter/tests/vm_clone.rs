@@ -104,9 +104,9 @@ use nvx::host::template::{
     Generation, HostTime, KEY_NAME, Lease, MAX_DOWNTIME_NS, MEMORY_BLOCK_SIZE, Outcome, Progress,
     RestoreDeadlines, SNAPSHOT_NAME, Stage, Store, Teardown,
 };
-use nvx::protocol::CAPABILITY_LEN;
 use nvx::protocol::root::ImageFormat;
 use nvx::protocol::status;
+use nvx::protocol::{CAPABILITY_LEN, HostMap};
 use nvx::uuid::Uuid;
 use runtime_adapter::GUEST_BUILD;
 use runtime_adapter::capture::DEFAULT_SCRATCH_LENGTH;
@@ -1039,6 +1039,15 @@ impl CloneControl for Early {
             Ok(message) => io::Error::other(format!("the clone answered {message:?}")),
             Err(error) => io::Error::other(error),
         })
+    }
+
+    fn map(
+        &mut self,
+        _session: &mut Client,
+        _table: &[HostMap],
+        _deadline: Instant,
+    ) -> io::Result<()> {
+        unreachable!("a clone that is never ready gets no mapping table")
     }
 
     fn start(&mut self, _session: &mut Client, _deadline: Instant) -> io::Result<()> {

@@ -1959,10 +1959,11 @@ fn unanswered(
 }
 
 /// Returns the adapter's order of a clone, with the guest agent's build `build`, which the restore
-/// sequence of a clone's start, and a reattach to it, take, the one place that makes it. A clone's
-/// record announces no mapping table: the adapter maps nothing into a clone.
+/// sequence of a clone's start, and a reattach to it, take, the one place that makes it. The
+/// sequence sends through it the clone's mapping table, which the clone's record announces if the
+/// clone has an export, and a reattach sends none.
 fn clone_order(build: &str) -> CloneOrder<'_> {
-    CloneOrder { build, table: &[] }
+    CloneOrder { build }
 }
 
 /// Ends a command whose clone, in the sandbox of `locked`, failed with `failure`, as NVX

@@ -148,6 +148,7 @@ impl Request {
             binding,
             policy_revision: DISTRO_POLICY_REVISION,
             scratch,
+            export: None,
             memory,
             workload: WorkloadView {
                 hostname: CLONE_HOSTNAME.as_bytes().to_vec(),
