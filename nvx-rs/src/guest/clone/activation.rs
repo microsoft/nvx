@@ -163,12 +163,14 @@ impl<F: AdmissionFence> Activation<F> {
             cpus: repaired.cpus(),
             memory: repaired.memory(),
         };
-        Self::of(resources, repaired.acknowledged_at(), fence, timeout, now)
+        Self::with_resources(resources, repaired.acknowledged_at(), fence, timeout, now)
     }
 
     /// Returns the activation of a clone that has `resources`, and whose repair acknowledged its
-    /// restore at `acknowledged_at`, if it did, as [`new`](Self::new) does.
-    fn of(
+    /// restore at `acknowledged_at`, if it did, as [`new`](Self::new) does with the resources and
+    /// the acknowledgement of a [`Repaired`] clone: for a caller that has them otherwise, such as
+    /// the tests of an adapter's framing, which run its session without a restore.
+    pub fn with_resources(
         resources: ExpectedResources,
         acknowledged_at: Option<Instant>,
         fence: F,

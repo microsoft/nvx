@@ -51,15 +51,66 @@
 //!
 //! The worker, and with it the VM, ends with 0 once the host stopped it, after a teardown that
 //! succeeded, with the stage's [exit status](RootStage::exit_status) once a stage failed, from 11
-//! for the configuration to 16 for the identity, and with [`SESSION_STATUS`] once its session
-//! failed or the broker closed it. Once the broker closed the stream at a record boundary, which
-//! may close only the broker's end, the worker drops its executions, and writes what it queued,
-//! as once the host stopped it.
+//! for the configuration to 16 for the identity, with [`SESSION_STATUS`] once its session failed
+//! or the broker closed it, and, in a clone, with the status of its activation's failure, from 50
+//! to 58, as the [section on clones](#clones) describes. Once the broker closed the stream at a
+//! record boundary, which may close only the broker's end, the worker drops its executions, and
+//! writes what it queued, as once the host stopped it.
 //!
 //! In a template's VM, whose kernel command line names the platform snapshot tier, the worker
 //! assembles no root: on x86_64, the guest agent reads the kernel command line before anything
 //! else with `crate::template::boot`, and the worker captures the VM instead, as the `capture`
-//! module describes.
+//! module describes, and then serves each clone that a restore of the snapshot starts, as the
+//! [next section](#clones) describes.
+//!
+//! # Clones
+//!
+//! A restore of a template's snapshot starts a clone, on x86_64, whose worker, the template's,
+//! repairs the restore, as the `capture` module describes, behind its fence of workload admission,
+//! which stays closed. The worker then serves the clone's session with `work_clone`, through the
+//! clone's activation, `nvx::guest::clone::Activation`, which the `activation` module drives:
+//!
+//! 1. The session that the template attached before its capture, and whose first epoch it
+//!    acknowledged, resumes on the same tty: the worker attaches none, and acknowledges the reset
+//!    that the restore queued, the only one that the clone reads, which ends the activation's
+//!    transport bootstrap and restricts the session.
+//! 2. The host sends one `Activate`, whose body is the canonical encoding of a clone's
+//!    `nvx::activation::ActivationRecord`. The activation decodes and checks it, and checks the
+//!    resources that it expects against those that the repair found, before anything has a side
+//!    effect.
+//! 3. The worker applies the record through `RootOperations::apply`, which runs
+//!    `nvx::guest::clone::apply`: it assembles the root from the template's devices, with the
+//!    record's image, upper, and overlay mode, and checks the account of the record's workload
+//!    identity, if it has one, in the assembled root, as the worker of a VM that boots cold does
+//!    for a root configuration. The template bootstrapped the guest for its root with its own
+//!    configuration before its capture, so the clone has its cgroups.
+//! 4. It completes the activation, which opens the fence, and answers `Ready`, which reports that
+//!    the activation applied, with the record's transaction, after the guest agent's build.
+//! 5. It then serves the host's order as after a cold boot: the mapping table that the record
+//!    announces, the start, the executions, the probes, and the stop. The record's workload
+//!    identity, if it has one, is the whole sandbox's, as a root configuration's is, so that
+//!    executions name none, and a clone's executions run in the cgroups of the template's
+//!    bootstrap.
+//!
+//! The application applies none of the record's other settings: its export, its network, its
+//! hostname, and its machine ID. Without an export, a clone refuses each part of a mapping table
+//! with `MapFailed`, as the worker of a VM that boots cold does without one.
+//!
+//! Until the clone is ready, its session takes nothing but that `Activate`: another reset, any
+//! other message, a `Stop` and a `Ping` included, an `Activate` that the activation refuses, and
+//! the passing of the activation's deadline, which ends `activation::ACTIVATION_TIMEOUT` after the
+//! repair's acknowledgement of the restore, fail the activation finally, as does an application
+//! that failed, which nothing retries. Once the clone is ready, the worker answers a retry of the
+//! same `Activate`, byte for byte, with the same `Ready`, without applying it again, and fails the
+//! activation on another. A failed activation ends the worker, and with it the VM, with the status
+//! of `nvx::protocol::status` of the failure's class, from 50 to 58, as
+//! `activation::failure_status` selects it, once the worker dropped its executions and wrote what
+//! it queued, for at most [`UNACTIVATED_DRAIN`], so that a stream that takes nothing, as once the
+//! broker failed, does not keep the clone from ending, and whatever the stream does then. A broker
+//! that closes the stream before the clone is ready ends it the same way, with
+//! [`SESSION_STATUS`], as [`Worked::Abandoned`] tells, and once the clone is ready, as the worker
+//! of a VM that boots cold ends. The worker of a VM that boots cold, which has no activation,
+//! refuses an `Activate` as it refuses any message that it does not take in its state.
 //!
 //! # The mapping table and the start
 //!
@@ -196,6 +247,8 @@
 //!   emptied once it collected the statuses of those programs.
 
 #[cfg(target_arch = "x86_64")]
+pub mod activation;
+#[cfg(target_arch = "x86_64")]
 pub mod capture;
 mod connection;
 pub mod entries;
@@ -219,8 +272,12 @@ use nix::poll::{self, PollFd, PollFlags, PollTimeout};
 use nix::sys::signal::{self, Signal};
 use nix::sys::wait::{self, Id, WaitPidFlag, WaitStatus};
 use nix::unistd::Pid;
+#[cfg(target_arch = "x86_64")]
+use nvx::activation::ActivationRecord;
 use nvx::gpt::Expected;
 use nvx::guest::cgroup::Layout;
+#[cfg(target_arch = "x86_64")]
+use nvx::guest::clone::{self, Activation, ApplyError, RootTemplate};
 use nvx::guest::entry::{self, Entry, Identity, Prepared, Publication};
 use nvx::guest::mappings::{Mapping, SourceRoot};
 use nvx::guest::nvxs::GuestConnectionError;
@@ -230,6 +287,8 @@ use nvx::guest::root::{
 };
 use nvx::guest::spawn::{self, Spawned};
 use nvx::protocol::export::HostExport;
+#[cfg(target_arch = "x86_64")]
+use nvx::protocol::nvxs::GuestSession;
 use nvx::protocol::root::{
     DISTRO_MMIO_BASE, ImageFormat, RootLayout, RootUpper, SCRATCH_MMIO_BASE,
 };
@@ -243,6 +302,10 @@ use crate::root::{
     DEFAULT_FIRST_PARTITION_BOUND, JournalPolicy, Listeners, OverlayMode, Ready, RootConfig,
     RootFailure, RootStage,
 };
+#[cfg(target_arch = "x86_64")]
+use activation::CloneState;
+#[cfg(target_arch = "x86_64")]
+use capture::Admission;
 use connection::{Connection, Received};
 use executions::{Executions, Sandbox};
 use order::Order;
@@ -250,6 +313,11 @@ use order::Order;
 /// The status with which the worker ends once its session failed or the broker closed it, and
 /// with which PID 1 ends the VM if a child cannot start or the worker's status cannot be collected.
 pub const SESSION_STATUS: u8 = 1;
+
+/// How long the worker waits for its stream, and then its tty, to take what it wrote once a
+/// clone's activation failed, or the broker closed the stream before the clone was ready: the
+/// clone then ends, and with it the VM, even if they take nothing, as once the broker failed.
+pub const UNACTIVATED_DRAIN: Duration = Duration::from_secs(1);
 
 /// The problem with which the worker answers a probe while it runs executions.
 pub const EXECUTING: &str = "the worker runs executions, and probes nothing until they end";
@@ -350,6 +418,22 @@ pub trait RootOperations: EntryOperations {
 
     /// Tears the assembled root down.
     fn teardown(&mut self) -> Result<(), String>;
+
+    /// Applies `record`, the record of the Activate that a clone's activation accepted, to the
+    /// clone, as `nvx::guest::clone::apply` does, with `template`, the inputs of the root's
+    /// assembly that the clone's template captured, and keeps the root that it assembled: in
+    /// place of a root configuration's [layout](Self::command_line), assembly, and account check.
+    /// The template's VM [bootstrapped](Self::bootstrap) the guest before its capture.
+    ///
+    /// Returns the identity in which every execution runs, that of the record's workload identity,
+    /// whose account the application checked in the assembled root, if the record has one. Fails
+    /// as `nvx::guest::clone::apply` does, with an [`ApplyError`].
+    #[cfg(target_arch = "x86_64")]
+    fn apply(
+        &mut self,
+        record: &ActivationRecord,
+        template: &RootTemplate,
+    ) -> Result<Option<Identity>, ApplyError>;
 }
 
 /// A mapping that [`RootOperations::map`] refused or failed to apply, once it applied those before
@@ -372,17 +456,33 @@ pub enum Worked {
     Failed(RootFailure),
     /// The broker closed the stream at a record boundary.
     Closed,
+    /// The broker closed the stream at a record boundary before a clone was ready, whose
+    /// activation can complete no more, which left the worker's fence of workload admission
+    /// closed.
+    Abandoned,
+    /// A clone's activation failed, finally: before the clone was ready, which left the worker's
+    /// fence of workload admission closed, or once it was ready.
+    Unactivated {
+        /// The status of `nvx::protocol::status` of the failure's class, with which the worker
+        /// ends.
+        status: u8,
+        /// The failure, as `nvx::guest::clone::ActivationFailure` describes it: the state in which
+        /// the activation failed, and its cause.
+        problem: String,
+    },
 }
 
 impl Worked {
     /// Returns the status with which the worker ends: 0 once the host stopped it, the stage's
-    /// [exit status](RootStage::exit_status) once a stage failed, and [`SESSION_STATUS`] once the
-    /// broker closed the stream.
+    /// [exit status](RootStage::exit_status) once a stage failed, [`SESSION_STATUS`] once the
+    /// broker closed the stream, before a clone was ready too, and the status of the failure's
+    /// class once a clone's activation failed, from 50 to 58.
     pub fn status(&self) -> u8 {
         match self {
             Self::Stopped => 0,
             Self::Failed(failure) => failure.stage().exit_status(),
-            Self::Closed => SESSION_STATUS,
+            Self::Closed | Self::Abandoned => SESSION_STATUS,
+            Self::Unactivated { status, .. } => *status,
         }
     }
 }
@@ -402,10 +502,134 @@ pub fn work<S: Read + Write + AsFd>(
     stream: S,
     operations: &mut dyn RootOperations,
 ) -> Result<Worked, ServeError> {
-    let mut connection = Connection::new(stream)?;
+    serve(Connection::new(stream)?, operations, Phase::Configuring)
+}
+
+/// Runs the session of a clone, which a restore of a template's snapshot started, on `stream`, the
+/// guest's end of the control session, which it makes nonblocking, with the root operations
+/// `operations`, as [`work`] does for a VM that boots cold, but through the clone's `activation`,
+/// as the [module documentation](self#clones) describes, until the host stops the worker, the
+/// activation fails, or the broker closes the stream.
+///
+/// `activation` is `nvx::guest::clone::Activation::new` of the clone that the worker repaired,
+/// behind the fence that its capture's barrier handed over closed, in its transport bootstrap.
+/// `session` is the guest's role of the session that the template's VM attached on the same tty
+/// before its capture, and whose first epoch it acknowledged, which the reset that the restore
+/// queued starts again: the worker attaches no session. `template` holds the inputs of the root's
+/// assembly that the template captured, with which the worker [applies](RootOperations::apply)
+/// the record of the host's `Activate`.
+///
+/// It ends as [`work`] does, and with [`Worked::Unactivated`] once the activation failed, or
+/// [`Worked::Abandoned`] once the broker closed the stream before the clone was ready, after which
+/// the worker drops its executions, which ends their programs, and writes what it queued, waiting
+/// while the stream takes none, for at most [`UNACTIVATED_DRAIN`], and whatever the stream does.
+#[cfg(target_arch = "x86_64")]
+pub fn work_clone<S: Read + Write + AsFd>(
+    stream: S,
+    session: GuestSession,
+    operations: &mut dyn RootOperations,
+    activation: Activation<Admission>,
+    template: RootTemplate,
+) -> Result<Worked, ServeError> {
+    let state = CloneState::new(activation, template);
+    serve(
+        Connection::resume(stream, session)?,
+        operations,
+        Phase::Clone(Box::new(state)),
+    )
+}
+
+/// Where the worker is in its order: before its root is ready, through a root configuration or a
+/// clone's activation, and once it is, as the [module documentation](self) describes.
+enum Phase {
+    /// The worker of a VM that boots cold awaits its root configuration.
+    Configuring,
+    /// The root is ready: the worker's order.
+    Ready(Order),
+    /// The worker of a clone takes the host's messages through the clone's activation, before the
+    /// clone is ready, and once it is, in its order then.
+    #[cfg(target_arch = "x86_64")]
+    Clone(Box<CloneState>),
+}
+
+impl Phase {
+    /// Takes the session's reset, which the connection acknowledged already, and returns how the
+    /// worker ends once the reset ended the session: once it failed a clone's activation.
+    fn reset(&mut self) -> Option<Worked> {
+        match self {
+            Self::Configuring | Self::Ready(_) => None,
+            #[cfg(target_arch = "x86_64")]
+            Self::Clone(state) => state.reset(),
+        }
+    }
+
+    /// Returns how the worker ends once the broker closed the stream at a record boundary:
+    /// [`Worked::Abandoned`] before a clone was ready, and [`Worked::Closed`] otherwise.
+    fn closed(&self) -> Worked {
+        match self {
+            Self::Configuring | Self::Ready(_) => Worked::Closed,
+            #[cfg(target_arch = "x86_64")]
+            Self::Clone(state) if !state.is_ready() => Worked::Abandoned,
+            #[cfg(target_arch = "x86_64")]
+            Self::Clone(_) => Worked::Closed,
+        }
+    }
+
+    /// Handles `message` at `now`, through `operations`, and hands a message about an execution to
+    /// `executions`, which queue what they answer on `connection`, and returns the worker's step.
+    fn handle<S: Read + Write + AsFd>(
+        &mut self,
+        operations: &mut dyn RootOperations,
+        executions: &mut Executions,
+        connection: &mut Connection<S>,
+        now: Instant,
+        message: Message,
+    ) -> Result<Step<Worked>, ServeError> {
+        match self {
+            Self::Configuring => {
+                let (step, ready) = configure_root(operations, executions, message)?;
+                if let Some(order) = ready {
+                    *self = Self::Ready(order);
+                }
+                Ok(step)
+            }
+            Self::Ready(order) => {
+                serve_root(operations, order, executions, connection, now, message)
+            }
+            #[cfg(target_arch = "x86_64")]
+            Self::Clone(state) => state.handle(operations, executions, connection, now, message),
+        }
+    }
+
+    /// Returns when the worker's session ends unless something happens, if it may: a clone's
+    /// activation's deadline, until the clone is ready.
+    fn deadline(&self) -> Option<Instant> {
+        match self {
+            Self::Configuring | Self::Ready(_) => None,
+            #[cfg(target_arch = "x86_64")]
+            Self::Clone(state) => state.deadline(),
+        }
+    }
+
+    /// Returns how the worker ends once its session's deadline passed: a clone's activation's,
+    /// before the clone was ready.
+    fn tick(&mut self) -> Option<Worked> {
+        match self {
+            Self::Configuring | Self::Ready(_) => None,
+            #[cfg(target_arch = "x86_64")]
+            Self::Clone(state) => state.tick(),
+        }
+    }
+}
+
+/// Runs the worker's session on `connection`, from `phase` on, with the root operations
+/// `operations`, as [`work`] and [`work_clone`] describe.
+fn serve<S: Read + Write + AsFd>(
+    mut connection: Connection<S>,
+    operations: &mut dyn RootOperations,
+    mut phase: Phase,
+) -> Result<Worked, ServeError> {
     let mut executions = Executions::new();
-    // The worker's order, once its root is ready.
-    let mut order = None;
     loop {
         connection.flush()?;
         while !connection.is_overloaded() {
@@ -417,11 +641,14 @@ pub fn work<S: Read + Write + AsFd>(
                     // the worker dropped its executions, which a stalled reader then holds back
                     // no more.
                     executions.clear();
-                    connection.finish()?;
-                    return Ok(Worked::Closed);
+                    return end(&mut connection, phase.closed());
                 }
                 Some(Received::Reset) => {
                     executions.reset(Instant::now());
+                    if let Some(worked) = phase.reset() {
+                        executions.clear();
+                        return end(&mut connection, worked);
+                    }
                     continue;
                 }
                 Some(Received::Message(message)) => message,
@@ -430,21 +657,7 @@ pub fn work<S: Read + Write + AsFd>(
             // launch that came before it takes nothing from the timers of an execution that it
             // starts.
             let now = Instant::now();
-            let step = match order.as_mut() {
-                Some(order) => serve_root(
-                    operations,
-                    order,
-                    &mut executions,
-                    &mut connection,
-                    now,
-                    message,
-                )?,
-                None => {
-                    let (step, ready) = configure_root(operations, &mut executions, message)?;
-                    order = ready;
-                    step
-                }
-            };
+            let step = phase.handle(operations, &mut executions, &mut connection, now, message)?;
             let (replies, ended) = match step {
                 Step::Continue(replies) => (replies, None),
                 Step::End(replies, worked) => (replies, Some(worked)),
@@ -453,12 +666,17 @@ pub fn work<S: Read + Write + AsFd>(
                 connection.send(reply)?;
             }
             if let Some(worked) = ended {
-                connection.finish()?;
-                return Ok(worked);
+                return end(&mut connection, worked);
             }
         }
         executions.run(Instant::now(), &mut connection)?;
         connection.credit()?;
+        // A clone's activation fails once its deadline passed before the clone was ready, whether
+        // the host sent anything or not.
+        if let Some(worked) = phase.tick() {
+            executions.clear();
+            return end(&mut connection, worked);
+        }
         // While records back up on the stream, the executions read no output, and may keep what
         // they read in their runners, which no descriptor tells: once a flush ends the backlog,
         // the next turn comes at once.
@@ -467,8 +685,27 @@ pub fn work<S: Read + Write + AsFd>(
         if backlogged && !connection.is_backlogged() {
             continue;
         }
-        wait(&connection, &executions)?;
+        wait(&connection, &executions, phase.deadline())?;
     }
+}
+
+/// Ends the session on `connection` as `worked` tells, once the worker dropped its executions:
+/// writes what the worker queued for the stream, waiting while the stream takes none, and returns
+/// `worked`. A clone that ends before it is ready, or whose activation failed, ends with its own
+/// status whatever its stream does: the worker waits for the stream for at most
+/// [`UNACTIVATED_DRAIN`], and a failure of the stream changes nothing.
+fn end<S: Read + Write + AsFd>(
+    connection: &mut Connection<S>,
+    worked: Worked,
+) -> Result<Worked, ServeError> {
+    match worked {
+        Worked::Abandoned | Worked::Unactivated { .. } => {
+            let now = Instant::now();
+            let _ = connection.finish(Some(now.checked_add(UNACTIVATED_DRAIN).unwrap_or(now)));
+        }
+        _ => connection.finish(None)?,
+    }
+    Ok(worked)
 }
 
 /// Runs the worker's session on the tty at `tty`, as [`work`] does, through
@@ -482,27 +719,34 @@ pub fn work_on_terminal(
     tty: &Path,
     operations: &mut dyn RootOperations,
 ) -> Result<Worked, ServeError> {
-    guest::on_terminal(tty, |_| {
-        let file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .custom_flags(OFlag::O_NOCTTY.bits())
-            .open(tty)
-            .map_err(|error| {
-                let problem = format!("cannot open {}: {error}", tty.display());
-                ServeError::Terminal(io::Error::new(error.kind(), problem))
-            })?;
-        work(file, operations)
-    })
+    guest::on_terminal(tty, |_| work(open_tty(tty)?, operations))
 }
 
-/// Waits until the session's stream or an execution's descriptor polls ready, or the earliest
-/// deadline of the executions passes; at once if the connection holds bytes that the worker
-/// takes next. The worker waits for the host's messages unless the connection is overloaded,
-/// and for the executions' output unless it is backlogged.
+/// Opens the tty at `tty` again, for reading and writing, without making it the controlling
+/// terminal, so that the open file that the worker makes nonblocking is its own, while
+/// [`guest::on_terminal`] holds the tty open in raw mode.
+///
+/// Fails with [`ServeError::Terminal`] if the tty cannot be opened.
+fn open_tty(tty: &Path) -> Result<File, ServeError> {
+    OpenOptions::new()
+        .read(true)
+        .write(true)
+        .custom_flags(OFlag::O_NOCTTY.bits())
+        .open(tty)
+        .map_err(|error| {
+            let problem = format!("cannot open {}: {error}", tty.display());
+            ServeError::Terminal(io::Error::new(error.kind(), problem))
+        })
+}
+
+/// Waits until the session's stream or an execution's descriptor polls ready, the earliest
+/// deadline of the executions passes, or `deadline`, the session's own, if it has one; at once if
+/// the connection holds bytes that the worker takes next. The worker waits for the host's messages
+/// unless the connection is overloaded, and for the executions' output unless it is backlogged.
 fn wait<S: Read + Write + AsFd>(
     connection: &Connection<S>,
     executions: &Executions,
+    deadline: Option<Instant>,
 ) -> Result<(), ServeError> {
     let overloaded = connection.is_overloaded();
     let mut events = PollFlags::empty();
@@ -514,10 +758,14 @@ fn wait<S: Read + Write + AsFd>(
     }
     let mut descriptors = vec![PollFd::new(connection.descriptor(), events)];
     executions.poll_descriptors(&mut descriptors, connection.is_backlogged());
+    let deadline = [executions.deadline(), deadline]
+        .into_iter()
+        .flatten()
+        .min();
     let timeout = if connection.has_input() && !overloaded {
         PollTimeout::ZERO
     } else {
-        match executions.deadline() {
+        match deadline {
             None => PollTimeout::NONE,
             Some(deadline) => {
                 let timeout = deadline.saturating_duration_since(Instant::now());
@@ -934,6 +1182,18 @@ impl RootOperations for LibraryRoot {
             Some(root) => root.teardown().map_err(|error| error.to_string()),
             None => Ok(()),
         }
+    }
+
+    /// Runs `nvx::guest::clone::apply`, and keeps the root that it assembled.
+    #[cfg(target_arch = "x86_64")]
+    fn apply(
+        &mut self,
+        record: &ActivationRecord,
+        template: &RootTemplate,
+    ) -> Result<Option<Identity>, ApplyError> {
+        let (root, identity) = clone::apply(record, template)?.into_parts();
+        self.root = Some(root);
+        Ok(identity)
     }
 }
 

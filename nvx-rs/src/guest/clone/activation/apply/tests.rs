@@ -202,7 +202,7 @@ impl Adapter {
             cpus: CPUS,
             memory: MEMORY,
         };
-        let activation = Activation::of(
+        let activation = Activation::with_resources(
             resources,
             Some(acknowledged),
             fence.clone(),

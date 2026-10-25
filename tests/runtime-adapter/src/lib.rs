@@ -49,7 +49,9 @@
 //! worker captures before it assembles any root, so that every clone of the snapshot attaches a
 //! root of its own, in [`template`] mode. The host program's `runtime-adapter-host create`
 //! captures such a VM through NVX's template store, which publishes the snapshot as a generation
-//! of a template, in the `capture` module.
+//! of a template, in the `capture` module. In each clone, the worker repairs the restore, then
+//! activates the clone with the host's `Activate`, whose record the guest library applies, answers
+//! `Ready` with the activation, and serves the host's order as after a cold boot.
 
 #[cfg(feature = "host")]
 pub mod capture;

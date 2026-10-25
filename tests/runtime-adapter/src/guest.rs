@@ -9,6 +9,9 @@
 use std::fmt;
 use std::io::{self, Read, Write};
 use std::path::Path;
+use std::sync::mpsc;
+use std::thread;
+use std::time::Duration;
 
 use nvx::guest::nvxs::{GuestConnection, GuestConnectionError};
 use nvx::guest::terminal::Terminal;
@@ -211,6 +214,20 @@ pub fn on_terminal<T>(
     path: &Path,
     run: impl FnOnce(&mut Terminal) -> Result<T, ServeError>,
 ) -> Result<T, ServeError> {
+    on_terminal_within(path, |terminal| run(terminal).map(|ran| (ran, None)))
+}
+
+/// Opens the tty at `path` as [`on_terminal`] does, and returns what `run` returns with it, but
+/// waits until the tty has sent what `run` wrote for at most the time that `run` returns beside
+/// its result, if it returns one: a thread of its own then waits for the tty, and holds it until
+/// the tty has sent everything, or the process ends, so that a tty that sends nothing does not
+/// keep the caller from ending.
+///
+/// It fails as [`on_terminal`] does.
+pub fn on_terminal_within<T>(
+    path: &Path,
+    run: impl FnOnce(&mut Terminal) -> Result<(T, Option<Duration>), ServeError>,
+) -> Result<T, ServeError> {
     let failed = |action: String| {
         move |error: io::Error| {
             ServeError::Terminal(io::Error::new(error.kind(), format!("{action}: {error}")))
@@ -221,9 +238,24 @@ pub fn on_terminal<T>(
     terminal
         .configure_raw()
         .map_err(failed(format!("cannot put {} in raw mode", path.display())))?;
-    let ran = run(&mut terminal)?;
+    let (ran, limit) = run(&mut terminal)?;
     // As NVX's managed agent does, a drain that fails is no failure of serving, which ended.
-    let _ = terminal.drain();
+    match limit {
+        None => {
+            let _ = terminal.drain();
+        }
+        Some(limit) => {
+            let (drained, done) = mpsc::channel();
+            let drain = move || {
+                let _ = terminal.drain();
+                let _ = drained.send(());
+            };
+            // Without a thread for it, the tty is not drained, which could take longer.
+            if thread::Builder::new().spawn(drain).is_ok() {
+                let _ = done.recv_timeout(limit);
+            }
+        }
+    }
     Ok(ran)
 }
 
