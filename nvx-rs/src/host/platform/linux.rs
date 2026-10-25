@@ -511,6 +511,54 @@ pub(crate) fn private_file_problem(_file: &File) -> io::Result<Option<String>> {
     Ok(None)
 }
 
+/// Returns why the directory `path`, a snapshot that OpenVMM published, is not private to the
+/// current user, if it is not, as [`check_owner_only_dir`] does: OpenVMM creates it with mode 0700,
+/// and its files with mode 0600.
+pub(crate) fn check_snapshot_dir(path: &Path) -> io::Result<Option<String>> {
+    check_owner_only_dir(path)
+}
+
+/// Returns why another user than the current one, or root, may change the file that `file` holds
+/// open, if one may: unless it belongs to the current user or to root, and grants neither its
+/// group nor others the permission to write it.
+pub(crate) fn foreign_writer_problem(file: &File) -> io::Result<Option<String>> {
+    let metadata = file.metadata()?;
+    Ok(foreign_writer(
+        metadata.uid(),
+        metadata.mode(),
+        sys::effective_ids().0,
+    ))
+}
+
+/// Returns why another user than `euid`, or root, may change a file that the user `uid` owns with
+/// the mode `mode`, if one may.
+pub(crate) fn foreign_writer(uid: u32, mode: u32, euid: u32) -> Option<String> {
+    let mode = mode & PERMISSION_BITS;
+    if uid != euid && uid != 0 {
+        Some(format!(
+            "belongs to user {uid}, neither the current user {euid} nor root"
+        ))
+    } else if mode & 0o022 != 0 {
+        Some(format!("is writable by other users (mode {mode:03o})"))
+    } else {
+        None
+    }
+}
+
+/// Lets the regular file that `file` holds open for writing take no space for the blocks that
+/// nobody writes: nothing to do on Linux, whose filesystems allocate no block that a file's
+/// extension leaves unwritten.
+pub(crate) fn make_sparse(_file: &File) -> io::Result<()> {
+    Ok(())
+}
+
+/// Renames `from` to `to` unless `to` exists, which it leaves as it is, failing with
+/// [`io::ErrorKind::AlreadyExists`]: `renameat2` with `RENAME_NOREPLACE`, which a filesystem that
+/// cannot rename without replacing refuses.
+pub(crate) fn rename_no_replace(from: &Path, to: &Path) -> io::Result<()> {
+    sys::rename_no_replace(from, to)
+}
+
 /// Gives the regular file `path` the mode `mode` if it belongs to the current user, and leaves
 /// anything else, which includes a symbolic link or a missing file, unchanged.
 ///

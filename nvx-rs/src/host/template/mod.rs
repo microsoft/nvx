@@ -20,6 +20,10 @@
 //!   sandbox's store: their payloads, which never change, and the versioned [`Index`] of them,
 //!   which names each by its [`StoreGeneration`](crate::activation::StoreGeneration), at a
 //!   location that the adapter chooses.
+//! - [`Store::create_template`] and [`Store::refresh_template`] capture a template of a class, in
+//!   the VM that its [`TemplatePlan`] describes, which the supervisor launches, and publish it as
+//!   a generation of the store; [`Store::recover_captures`] ends the captures that a crash
+//!   interrupted.
 //! - [`TimeContract::eligibility`] decides whether a clone may restore a capture at a host's
 //!   time, [`HostTime`], by the restore window of its time contract, apart from its
 //!   compatibility.
@@ -65,7 +69,8 @@ pub use self::manifest::{
 };
 pub use self::plan::{MEMORY_BLOCK_SIZE, SCRATCH_NAME, TemplatePlan, TemplateResources};
 pub use self::store::{
-    Acquired, GENERATIONS_NAME, Generation, INDEX_LOCK_NAME, INDEX_NAME, Index, KEY_NAME,
-    LEASES_NAME, Lease, LeaseId, MAX_GENERATIONS, Retirement, SNAPSHOT_NAME, STORE_FORMAT,
-    STORE_RECORD_NAME, StorageGeneration, Store, StoreId, TOMBSTONES_NAME,
+    Acquired, CAPTURE_RECORD_NAME, CAPTURES_NAME, Capture, Created, GENERATIONS_NAME, Generation,
+    INDEX_LOCK_NAME, INDEX_NAME, Index, KEY_NAME, LEASES_NAME, Lease, LeaseId, MAX_GENERATIONS,
+    Retirement, SNAPSHOT_NAME, STORE_FORMAT, STORE_RECORD_NAME, StorageGeneration, Store, StoreId,
+    TOMBSTONES_NAME, TRANSACTION_NAME,
 };

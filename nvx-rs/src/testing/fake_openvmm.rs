@@ -89,6 +89,42 @@
 //! its command line next to its snapshot, since it has no kernel. The outcome reports of sandboxes
 //! and of these runs take the form of OpenVMM's.
 //!
+//! The fake also runs the VMs of templates' captures, whose command lines have no
+//! `--microvm-lifecycle`, a `distro` layer and a `scratch` disk on sandbox block devices and no
+//! share, `--snapshot-destination`, `--snapshot-tier platform`,
+//! `--snapshot-block-identity generation` with a nonzero `--snapshot-generation-id` of 32
+//! hexadecimal digits, the options of a cold boot of a run with a `--memory-capacity` that is a
+//! multiple of 128 MiB, `nvx_sandbox=1` alone on the kernel command line, `--virtio-console none`,
+//! the control console with its capability on standard input, and an outcome report. The fake
+//! serves no control session of a capture, which the host opens none of. Like OpenVMM, it opens
+//! each block device itself, at its path, without following a link, and on Windows sharing only
+//! reads and deletion, so that its open fails while another handle may write the file; on Linux,
+//! a read lease, which no process may take of a file that a handle holds open for writing, finds
+//! such a handle. It records each device's role, path, and length, and whether it found a writer,
+//! in the blocks dump. It then backs the RAM with a sparse file beside the destination, and does
+//! what `fake-openvmm-capture.json` next to the kernel asks, a JSON object of these fields, each
+//! optional but `manifest`:
+//!
+//! - `manifest`: the manifest to publish, which the fake copies, since it reads none;
+//! - `stateLen`: the length of the saved state to publish, 0 by default;
+//! - `outcome`: `publish`, the default, which stages the snapshot beside the destination, with the
+//!   RAM as a hard link to the file that backed it, renames it to the destination, and reports
+//!   the capture's success; `fail`, a guest that fails with `status` before it captures;
+//!   `publish-then-fail`, a VMM that publishes the snapshot and then fails to tear the VM down,
+//!   which reports `teardown-failure` and exits with 1; `hang` and `publish-then-hang`, a VM that
+//!   never ends; and `crash`, a VMM that exits with 3, without a report;
+//! - `status`: the guest's status of `fail`, 1 by default;
+//! - `active`: a file that the fake creates as it starts, failing if it exists, which holds its
+//!   process ID, and which it removes as it ends, unless it is killed, so that a test sees whether
+//!   two captures overlapped, and which VMM a capture left;
+//! - `delayMs`: how long the guest boots before it captures, 0 by default;
+//! - `keepMemory`: whether the fake leaves the file that backed the RAM, as OpenVMM leaves it when
+//!   it ends abruptly.
+//!
+//! On Unix, the snapshot's directory and files are private to the current user, as OpenVMM's are;
+//! on Windows, they take the access of the destination's directory, while OpenVMM gives them its
+//! own, which the store's unit tests apply.
+//!
 //! Every `--mount-deny`, `--mount-allow`, and `--mount-write` path of a launch must exist in a
 //! shared directory. Like OpenVMM, the fake attributes each one to the share whose root contains
 //! it once it has resolved both, so a root that is relative to the working directory, as
@@ -130,6 +166,30 @@ const GUEST_FEATURES: GuestFeatures = GuestFeatures::from_bits(
 
 /// The guest directory at which the host mounts the aggregate export.
 const GUEST_EXPORT: &str = "/run/nvx/hostfs/root";
+
+/// Bytes in a MiB.
+const MIB: u64 = 1024 * 1024;
+
+/// The granularity of the RAM capacity of a capture's VM, which OpenVMM requires.
+const MEMORY_CAPACITY_ALIGNMENT: u64 = 128 * MIB;
+
+/// The size of a logical block of a sandbox block device, of which a capture's devices' lengths
+/// are multiples.
+const LOGICAL_BLOCK_SIZE: u64 = 512;
+
+/// Name of the scenario of a template's capture, next to the kernel.
+const CAPTURE_SCENARIO_NAME: &str = "fake-openvmm-capture.json";
+
+/// Prefix of the name of the file that backs the RAM of a capture's VM, beside the snapshot's
+/// destination, which the process ID of the VMM follows.
+const MEMORY_FILE_PREFIX: &str = ".openvmm-microvm-memory-";
+
+/// Name of the manifest of a snapshot.
+const SNAPSHOT_MANIFEST: &str = "manifest.bin";
+/// Name of the RAM of a snapshot.
+const SNAPSHOT_MEMORY: &str = "memory.bin";
+/// Name of the saved state of a snapshot.
+const SNAPSHOT_STATE: &str = "state.bin";
 
 /// `NAME=VALUE` variables in the order in which a workload's `environ` lists them.
 type Environment = Vec<(String, String)>;
@@ -198,6 +258,20 @@ enum Lifecycle {
     /// `nvx-rs run` boot, or restore from a snapshot, on the terminal, which OpenVMM runs until
     /// the guest shuts down.
     Run,
+    /// No lifecycle, sandbox block devices, and a snapshot destination: the VM of a template's
+    /// capture, which its guest captures, after which OpenVMM exits.
+    Capture,
+}
+
+/// The options of a template's capture.
+#[derive(Debug, Clone)]
+struct CaptureOptions {
+    /// The snapshot's destination, which must not exist.
+    destination: PathBuf,
+    /// The RAM, in bytes.
+    memory: u64,
+    /// The scenario of the capture, `fake-openvmm-capture.json` next to the kernel.
+    scenario: PathBuf,
 }
 
 /// Parsed OpenVMM-compatible command line and fake-specific test controls.
@@ -261,6 +335,8 @@ struct Options {
     workload: Vec<String>,
     /// The network policy of the command line, as OpenVMM summarizes it in its report.
     network: NetworkSummary,
+    /// The options of a template's capture, for [`Lifecycle::Capture`].
+    capture: Option<CaptureOptions>,
 }
 
 /// The network policy of a command line, as the `network_policy` section of OpenVMM's outcome
@@ -336,7 +412,12 @@ pub fn main() -> ExitCode {
     }
     thread::sleep(options.block_delay);
     // OpenVMM opens its disks as it builds the VM, and holds them until it exits.
-    let _blocks = match open_blocks(&options) {
+    let opened = if options.lifecycle == Lifecycle::Capture {
+        open_capture_blocks(&options)
+    } else {
+        open_blocks(&options)
+    };
+    let _blocks = match opened {
         Ok(blocks) => blocks,
         Err(message) => {
             eprintln!("{program}: {message}");
@@ -346,6 +427,7 @@ pub fn main() -> ExitCode {
     let ended = match options.lifecycle {
         Lifecycle::OneShot => Some(run_one_shot(&options)),
         Lifecycle::Run => Some(run_microvm(&options)),
+        Lifecycle::Capture => Some(run_capture(&options)),
         Lifecycle::Managed => None,
     };
     if let Some(status) = ended {
@@ -426,6 +508,141 @@ fn open_blocks(options: &Options) -> Result<Vec<fs::File>, String> {
     Ok(files)
 }
 
+/// What the fake found of a block device of a template's capture as it opened it.
+#[derive(serde::Serialize)]
+struct CheckedBlock {
+    /// Its role: `distro` or `scratch`.
+    role: String,
+    /// The path at which the fake opened it.
+    path: String,
+    /// Its length, in bytes.
+    length: u64,
+    /// Whether a handle through which a process could write the file was open as the fake opened
+    /// it, or `null` if the fake could not tell.
+    writers: Option<bool>,
+}
+
+/// Opens the block devices of a template's capture as OpenVMM opens them, at their paths: the
+/// `distro` layer read-only and the scratch disk for reading and writing, each without following
+/// a link, and on Windows sharing only reads and deletion. Checks that each is a regular file
+/// whose length is a nonzero multiple of 512 bytes, without reading it, and records in the blocks
+/// dump each one's role, path, and length, and whether a handle through which a process could
+/// write it was open. Returns the open files, which the caller holds until it exits.
+fn open_capture_blocks(options: &Options) -> Result<Vec<fs::File>, String> {
+    let mut files = Vec::new();
+    let mut checked = Vec::new();
+    for block in &options.blocks {
+        let failed = |error: io::Error| {
+            format!(
+                "cannot open the {} block device {}: {error}",
+                block.role,
+                block.path.display()
+            )
+        };
+        let (file, writers) = open_unshared(&block.path, !block.read_only).map_err(failed)?;
+        let metadata = file.metadata().map_err(failed)?;
+        let length = metadata.len();
+        if !metadata.is_file() || length == 0 || !length.is_multiple_of(LOGICAL_BLOCK_SIZE) {
+            return Err(format!(
+                "the {} block device {} is not a regular file whose length is a nonzero multiple \
+                 of {LOGICAL_BLOCK_SIZE} bytes",
+                block.role,
+                block.path.display()
+            ));
+        }
+        checked.push(CheckedBlock {
+            role: block.role.clone(),
+            path: block.path.display().to_string(),
+            length,
+            writers,
+        });
+        files.push(file);
+    }
+    let _ = fs::write(
+        &options.blocks_dump,
+        serde_json::to_vec(&checked).unwrap_or_default(),
+    );
+    Ok(files)
+}
+
+/// Opens the file `path` without following a link, for writing too if `write` is set, and returns
+/// it, with whether a handle through which a process could write it was open, as
+/// [`writers_of`] finds it.
+#[cfg(unix)]
+fn open_unshared(path: &Path, write: bool) -> io::Result<(fs::File, Option<bool>)> {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    let open = |write: bool| {
+        OpenOptions::new()
+            .read(true)
+            .write(write)
+            .custom_flags(nix::libc::O_NOFOLLOW)
+            .open(path)
+    };
+    let reader = open(false)?;
+    let writers = writers_of(&reader);
+    let file = if write { open(true)? } else { reader };
+    Ok((file, writers))
+}
+
+/// Opens the file `path` as OpenVMM opens a snapshot-capable block device on Windows: the file
+/// itself rather than the target of a reparse point, for writing too if `write` is set, sharing
+/// only reads and deletion. The open fails while another handle may write the file, so none was
+/// open once it succeeds, and none can be opened while the fake holds the file.
+#[cfg(windows)]
+fn open_unshared(path: &Path, write: bool) -> io::Result<(fs::File, Option<bool>)> {
+    use std::os::windows::fs::OpenOptionsExt;
+
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE, FILE_SHARE_READ,
+    };
+
+    let file = OpenOptions::new()
+        .read(true)
+        .write(write)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_DELETE)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)?;
+    Ok((file, Some(false)))
+}
+
+/// Returns whether a handle, of any process, holds the file that `reader` holds open for reading
+/// only open for writing: `Some(false)` once the fake has taken a read lease of the file, which
+/// Linux grants no process while a handle may write the file, and has given it up; and `None` if
+/// the file's file system grants no lease. A process that another started holds copies of the
+/// other's handles until it runs its program, so the fake tries again for a second.
+#[cfg(target_os = "linux")]
+fn writers_of(reader: &fs::File) -> Option<bool> {
+    use std::os::fd::AsRawFd;
+
+    use nix::libc::{EAGAIN, F_RDLCK, F_SETLEASE, F_UNLCK, fcntl};
+
+    let deadline = Instant::now() + Duration::from_secs(1);
+    loop {
+        // SAFETY: the descriptor is open for as long as `reader` is borrowed, and F_SETLEASE
+        // takes an integer.
+        if unsafe { fcntl(reader.as_raw_fd(), F_SETLEASE, F_RDLCK) } == 0 {
+            // SAFETY: as above.
+            unsafe { fcntl(reader.as_raw_fd(), F_SETLEASE, F_UNLCK) };
+            return Some(false);
+        }
+        if io::Error::last_os_error().raw_os_error() != Some(EAGAIN) {
+            return None;
+        }
+        if Instant::now() >= deadline {
+            return Some(true);
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
+/// Returns `None`: the fake cannot tell whether a handle of another process may write a file on
+/// Unix hosts other than Linux.
+#[cfg(all(unix, not(target_os = "linux")))]
+fn writers_of(_reader: &fs::File) -> Option<bool> {
+    None
+}
+
 /// Runs the entrypoint of a one-shot sandbox with its output on the fake's own, as OpenVMM runs
 /// the guest on its console, writes the outcome report, and returns the status with which
 /// OpenVMM exits: the workload's.
@@ -503,6 +720,259 @@ fn run_microvm(options: &Options) -> i32 {
     status
 }
 
+/// The scenario of a template's capture, `fake-openvmm-capture.json` next to the kernel, as the
+/// module's documentation describes it.
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct Scenario {
+    /// The manifest that the snapshot publishes.
+    manifest: PathBuf,
+    /// The length of the saved state that the snapshot publishes.
+    #[serde(default)]
+    state_len: u64,
+    /// What the capture does.
+    #[serde(default)]
+    outcome: CaptureOutcome,
+    /// The guest's status of [`CaptureOutcome::Fail`].
+    #[serde(default = "Scenario::default_status")]
+    status: i32,
+    /// The file that marks the capture active while it runs.
+    #[serde(default)]
+    active: Option<PathBuf>,
+    /// How long the guest boots before it captures, in milliseconds.
+    #[serde(default)]
+    delay_ms: u64,
+    /// Whether the fake leaves the file that backed the RAM.
+    #[serde(default)]
+    keep_memory: bool,
+}
+
+impl Scenario {
+    /// Returns the guest's status of a failure that the scenario does not set.
+    fn default_status() -> i32 {
+        1
+    }
+
+    /// Reads the scenario at `path`.
+    fn read(path: &Path) -> Result<Self, String> {
+        let bytes = fs::read(path)
+            .map_err(|error| format!("cannot read the scenario {}: {error}", path.display()))?;
+        serde_json::from_slice(&bytes)
+            .map_err(|error| format!("the scenario {} is malformed: {error}", path.display()))
+    }
+}
+
+/// What the VM of a template's capture does, as its scenario's `outcome` asks.
+#[derive(serde::Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+enum CaptureOutcome {
+    /// It publishes the snapshot, and reports the capture's success.
+    #[default]
+    Publish,
+    /// Its guest fails before it captures.
+    Fail,
+    /// It publishes the snapshot, and then fails to tear the VM down.
+    PublishThenFail,
+    /// It never ends.
+    Hang,
+    /// It publishes the snapshot, and then never ends.
+    PublishThenHang,
+    /// It crashes, without a report.
+    Crash,
+}
+
+/// The marker of a capture that runs, which its scenario's `active` names: created as the capture
+/// starts, which fails if the marker exists, and removed as the capture ends.
+struct Active(PathBuf);
+
+impl Active {
+    /// Marks the capture active at `path`, with the fake's process ID.
+    fn begin(path: &Path) -> Result<Self, String> {
+        fs::File::create_new(path)
+            .and_then(|mut marker| write!(marker, "{}", std::process::id()))
+            .map_err(|error| {
+                format!(
+                    "cannot mark the capture active at {}: {error}",
+                    path.display()
+                )
+            })?;
+        Ok(Self(path.to_owned()))
+    }
+}
+
+impl Drop for Active {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.0);
+    }
+}
+
+/// Runs the VM of a template's capture as OpenVMM runs it, and returns the status with which
+/// OpenVMM exits.
+///
+/// The fake reads the capability, backs the RAM with a sparse file beside the snapshot's
+/// destination, and, once the guest has booted for the scenario's delay, does what the scenario
+/// asks: it publishes the snapshot as [`publish_snapshot`] does, removes the file that backed the
+/// RAM, unless the scenario keeps it, and writes the outcome report of the capture. A capture whose
+/// guest fails reports `guest-exit` and exits with its status; a VMM that cannot publish the
+/// snapshot reports `vmm-failure`, and one that fails once it has published it,
+/// `teardown-failure`, both with 1; and a crash exits with 3, without a report, leaving the file
+/// that backed the RAM.
+fn run_capture(options: &Options) -> i32 {
+    let fail = |message: String| {
+        eprintln!("{}: {message}", options.program);
+        2
+    };
+    let Some(capture) = &options.capture else {
+        return fail("a capture has no capture options".to_owned());
+    };
+    if let Err(message) = read_capability() {
+        return fail(message);
+    }
+    let scenario = match Scenario::read(&capture.scenario) {
+        Ok(scenario) => scenario,
+        Err(message) => return fail(message),
+    };
+    let _active = match scenario.active.as_deref().map(Active::begin).transpose() {
+        Ok(active) => active,
+        Err(message) => return fail(message),
+    };
+    let directory = capture.destination.parent().unwrap_or(Path::new("."));
+    let memory = directory.join(format!("{MEMORY_FILE_PREFIX}{}", std::process::id()));
+    if let Err(error) = create_sparse(&memory, capture.memory) {
+        return fail(format!(
+            "cannot back the RAM with {}: {error}",
+            memory.display()
+        ));
+    }
+    thread::sleep(Duration::from_millis(scenario.delay_ms));
+    let (category, status) = match scenario.outcome {
+        CaptureOutcome::Crash => return 3,
+        CaptureOutcome::Hang => hang(),
+        CaptureOutcome::Fail => ("guest-exit", scenario.status),
+        publishing => {
+            if let Err(error) = publish_snapshot(capture, &scenario, &memory) {
+                eprintln!(
+                    "{}: cannot publish the snapshot {}: {error}",
+                    options.program,
+                    capture.destination.display()
+                );
+                ("vmm-failure", 1)
+            } else if publishing == CaptureOutcome::PublishThenHang {
+                hang()
+            } else if publishing == CaptureOutcome::PublishThenFail {
+                ("teardown-failure", 1)
+            } else {
+                ("success", 0)
+            }
+        }
+    };
+    if !scenario.keep_memory {
+        let _ = fs::remove_file(&memory);
+    }
+    write_report(options, "capture", category, status);
+    status
+}
+
+/// Never returns, as a VM that never ends.
+fn hang() -> ! {
+    loop {
+        thread::sleep(Duration::from_secs(3600));
+    }
+}
+
+/// Publishes the snapshot of a capture as OpenVMM publishes it: stages a copy of the scenario's
+/// manifest, a sparse saved state of the scenario's length, and the RAM, a hard link to the file
+/// `memory` that backed it, in a directory private to the current user beside the destination, and
+/// renames it to the destination, which must not exist.
+fn publish_snapshot(
+    capture: &CaptureOptions,
+    scenario: &Scenario,
+    memory: &Path,
+) -> io::Result<()> {
+    let destination = &capture.destination;
+    let name = destination
+        .file_name()
+        .ok_or_else(|| io::Error::other("the destination has no name"))?;
+    let staging = destination.with_file_name(format!(
+        ".{}.staging-{}-0-0",
+        name.to_string_lossy(),
+        std::process::id()
+    ));
+    create_private_dir(&staging)?;
+    let manifest = fs::read(&scenario.manifest)?;
+    create_private_file(&staging.join(SNAPSHOT_MANIFEST))?.write_all(&manifest)?;
+    create_sparse(&staging.join(SNAPSHOT_STATE), scenario.state_len)?;
+    fs::hard_link(memory, staging.join(SNAPSHOT_MEMORY))?;
+    if fs::symlink_metadata(destination).is_ok() {
+        return Err(io::Error::from(io::ErrorKind::AlreadyExists));
+    }
+    fs::rename(&staging, destination)
+}
+
+/// Creates the directory `path`, private to the current user on Unix; on Windows, it takes the
+/// access of its parent.
+fn create_private_dir(path: &Path) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+
+        fs::DirBuilder::new().mode(0o700).create(path)
+    }
+    #[cfg(not(unix))]
+    fs::create_dir(path)
+}
+
+/// Creates the file `path`, which must not exist, for writing, private to the current user on
+/// Unix; on Windows, it takes the access of its directory.
+fn create_private_file(path: &Path) -> io::Result<fs::File> {
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    options.open(path)
+}
+
+/// Creates the file `path`, which must not exist, as [`create_private_file`] does, as a sparse
+/// file of `length` bytes.
+fn create_sparse(path: &Path, length: u64) -> io::Result<()> {
+    let file = create_private_file(path)?;
+    #[cfg(windows)]
+    set_sparse(&file)?;
+    file.set_len(length)
+}
+
+/// Marks the file that `file` holds open for writing sparse, which NTFS otherwise allocates whole
+/// as the file is extended.
+#[cfg(windows)]
+fn set_sparse(file: &fs::File) -> io::Result<()> {
+    use std::os::windows::io::AsRawHandle;
+
+    use windows_sys::Win32::Foundation::HANDLE;
+    use windows_sys::Win32::System::IO::DeviceIoControl;
+
+    /// `FSCTL_SET_SPARSE`, in `winioctl.h`, which marks a file sparse without a buffer.
+    const FSCTL_SET_SPARSE: u32 = 0x0009_00c4;
+    let mut returned = 0;
+    // SAFETY: the handle is open for as long as `file` is borrowed, the control takes no input or
+    // output buffer, and the count's pointer is valid.
+    let set = unsafe {
+        DeviceIoControl(
+            file.as_raw_handle() as HANDLE,
+            FSCTL_SET_SPARSE,
+            std::ptr::null(),
+            0,
+            std::ptr::null_mut(),
+            0,
+            &mut returned,
+            std::ptr::null_mut(),
+        )
+    };
+    if set == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
 /// Returns the name of the running executable, such as `nvx-fake-openvmm`.
 fn program_name() -> String {
     std::env::args_os()
@@ -547,7 +1017,7 @@ fn parse(program: &str, arguments: &[String]) -> Result<Options, String> {
         "--host-loopback",
         "--host-loopback-forward",
     ];
-    // The options that only the microVMs of `nvx.py run` take.
+    // The options that only the microVMs of `nvx.py run` and of captures take.
     const RUN_VALUED: [&str; 7] = [
         "--processors",
         "--cpu-profile",
@@ -557,15 +1027,25 @@ fn parse(program: &str, arguments: &[String]) -> Result<Options, String> {
         "--restore-memory",
         "--restore-ready-path",
     ];
-    // `nvx.py run` boots or restores its microVM without a lifecycle, and is no sandbox.
+    // The options that only the VMs of templates' captures take.
+    const CAPTURE_VALUED: [&str; 4] = [
+        "--snapshot-destination",
+        "--snapshot-tier",
+        "--snapshot-block-identity",
+        "--snapshot-generation-id",
+    ];
+    // `nvx.py run` boots or restores its microVM without a lifecycle, and is no sandbox; a
+    // capture boots its VM without a lifecycle, with sandbox block devices.
     let mut option_arguments = arguments.iter();
     let mut run = true;
+    let mut capture = false;
     while let Some(argument) = option_arguments.next() {
         let name = argument.as_str();
         if name == "--microvm-lifecycle" || name == "--microvm-sandbox-block" {
             run = false;
         }
-        if VALUED.contains(&name) || RUN_VALUED.contains(&name) {
+        capture |= name == "--snapshot-destination";
+        if VALUED.contains(&name) || RUN_VALUED.contains(&name) || CAPTURE_VALUED.contains(&name) {
             let _ = option_arguments.next();
         }
     }
@@ -576,7 +1056,10 @@ fn parse(program: &str, arguments: &[String]) -> Result<Options, String> {
         let name = argument.as_str();
         if name == "--single-process" || name == "--microvm-control-auth-stdin" {
             flags.insert(name);
-        } else if VALUED.contains(&name) || (run && RUN_VALUED.contains(&name)) {
+        } else if VALUED.contains(&name)
+            || ((run || capture) && RUN_VALUED.contains(&name))
+            || (capture && CAPTURE_VALUED.contains(&name))
+        {
             let value = iterator
                 .next()
                 .ok_or_else(|| format!("{name} requires a value"))?;
@@ -598,7 +1081,12 @@ fn parse(program: &str, arguments: &[String]) -> Result<Options, String> {
     // The sandbox profile of `nvx.py sandbox` puts its layers and scratch disk on sandbox block
     // devices, and may run one-shot.
     let sandbox = values.contains_key("--microvm-sandbox-block");
-    let lifecycle = if run {
+    let lifecycle = if capture {
+        if values.contains_key("--microvm-lifecycle") {
+            return Err("a capture takes no --microvm-lifecycle".to_owned());
+        }
+        Lifecycle::Capture
+    } else if run {
         Lifecycle::Run
     } else {
         match single("--microvm-lifecycle")? {
@@ -611,7 +1099,7 @@ fn parse(program: &str, arguments: &[String]) -> Result<Options, String> {
         return Err("--single-process is required".to_owned());
     }
     let (endpoint, report) = match lifecycle {
-        Lifecycle::Managed => {
+        Lifecycle::Managed | Lifecycle::Capture => {
             expect("--virtio-console", "none")?;
             if !flags.contains("--microvm-control-auth-stdin") {
                 return Err("--microvm-control-auth-stdin is required".to_owned());
@@ -648,17 +1136,35 @@ fn parse(program: &str, arguments: &[String]) -> Result<Options, String> {
     if !["kvm", "mshv", "whp"].contains(&hypervisor) {
         return Err(format!("unsupported hypervisor {hypervisor}"));
     }
-    // A run uses the default workload identity of the guest, and records its command line next to
-    // the kernel of a cold boot or to the snapshot of a restore.
-    let (workload_uid, anchor, restore) = if run {
+    // A run, or a capture, uses the default workload identity of the guest, and records its
+    // command line next to the kernel of a cold boot or to the snapshot of a restore.
+    let (workload_uid, anchor, restore) = if run || capture {
         if values.contains_key("--microvm-workload-identity") {
-            return Err("a microVM run takes no --microvm-workload-identity".to_owned());
+            return Err(format!(
+                "{} takes no --microvm-workload-identity",
+                if capture {
+                    "a capture"
+                } else {
+                    "a microVM run"
+                }
+            ));
         }
         let (anchor, restore) = check_run_boot(&values)?;
+        if capture && restore.is_some() {
+            return Err("a capture boots its VM cold".to_owned());
+        }
         (65534, anchor, restore)
     } else {
         let (workload_uid, kernel) = check_boot(&values)?;
         (workload_uid, kernel, None)
+    };
+    let capture_options = if capture {
+        if !sandbox {
+            return Err("a capture takes sandbox block devices".to_owned());
+        }
+        Some(check_capture(&values, &anchor)?)
+    } else {
+        None
     };
     if let Some(report) = &report
         && report.exists()
@@ -684,48 +1190,72 @@ fn parse(program: &str, arguments: &[String]) -> Result<Options, String> {
         }
         let blocks =
             check_sandbox_blocks(values.get("--microvm-sandbox-block").into_iter().flatten())?;
-        let mut workload: Vec<String> = match token_values("nvx_entrypoint=").as_slice() {
-            [entrypoint] => vec![(*entrypoint).to_owned()],
-            _ => return Err("the kernel command line must set one nvx_entrypoint".to_owned()),
-        };
-        workload.extend(token_values("nvx_arg=").into_iter().map(str::to_owned));
-        if token_values("nvx_hostname=").len() != 1 {
-            return Err("the kernel command line must set one nvx_hostname".to_owned());
-        }
-        let (maps, children, share_targets) = match lifecycle {
-            // A managed sandbox's guest agent maps its shares from the export, as the mapping
-            // table of the host's `MAPS` requests orders.
-            Lifecycle::Managed => {
-                if values.contains_key("--mount") {
-                    return Err("a managed sandbox takes no --mount".to_owned());
-                }
-                if !token_values("nvx_share=").is_empty() {
-                    return Err("a managed sandbox takes no nvx_share=".to_owned());
-                }
-                let maps = mapping_count(&token_values(MAPS_TOKEN))?;
-                (maps, mapped_children(&values, maps)?, Vec::new())
+        if capture {
+            // A template's VM boots the invariant configuration alone, without a tenant.
+            if tokens != ["nvx_sandbox=1"] {
+                return Err("a capture's kernel command line is nvx_sandbox=1 alone".to_owned());
             }
-            // A one-shot sandbox's shell binds them at boot, as their tokens place them.
-            Lifecycle::OneShot => {
-                if !token_values(MAPS_TOKEN).is_empty() {
-                    return Err(format!("a one-shot sandbox takes no {MAPS_TOKEN}"));
+            let roles: BTreeSet<&str> = blocks.iter().map(|block| block.role.as_str()).collect();
+            if roles != BTreeSet::from(["distro", "scratch"]) {
+                return Err("a capture takes a distro layer and a scratch disk".to_owned());
+            }
+            for option in [
+                "--mount",
+                "--mount-aggregate",
+                "--mount-child",
+                "--mount-owner",
+            ] {
+                if values.contains_key(option) {
+                    return Err(format!("a capture takes no {option}"));
                 }
-                let (children, mut share_targets) = sandbox_shares(&values)?;
-                // The guest binds each directory child of an aggregate at the target of its
-                // `nvx_share=NAME,TARGET,ACCESS[,file]` token.
-                for share in token_values("nvx_share=") {
-                    match share.split(',').collect::<Vec<_>>().as_slice() {
-                        [_, target, _] => share_targets.push((*target).to_owned()),
-                        [_, _, _, "file"] => {}
-                        _ => return Err(format!("invalid nvx_share={share}")),
+            }
+            (0, Vec::new(), Vec::new(), Vec::new(), blocks)
+        } else {
+            let mut workload: Vec<String> = match token_values("nvx_entrypoint=").as_slice() {
+                [entrypoint] => vec![(*entrypoint).to_owned()],
+                _ => return Err("the kernel command line must set one nvx_entrypoint".to_owned()),
+            };
+            workload.extend(token_values("nvx_arg=").into_iter().map(str::to_owned));
+            if token_values("nvx_hostname=").len() != 1 {
+                return Err("the kernel command line must set one nvx_hostname".to_owned());
+            }
+            let (maps, children, share_targets) = match lifecycle {
+                // A managed sandbox's guest agent maps its shares from the export, as the mapping
+                // table of the host's `MAPS` requests orders.
+                Lifecycle::Managed => {
+                    if values.contains_key("--mount") {
+                        return Err("a managed sandbox takes no --mount".to_owned());
                     }
+                    if !token_values("nvx_share=").is_empty() {
+                        return Err("a managed sandbox takes no nvx_share=".to_owned());
+                    }
+                    let maps = mapping_count(&token_values(MAPS_TOKEN))?;
+                    (maps, mapped_children(&values, maps)?, Vec::new())
                 }
-                (0, children, share_targets)
-            }
-            // A sandbox block device makes a command line no run.
-            Lifecycle::Run => return Err("a microVM run takes no sandbox block device".to_owned()),
-        };
-        (maps, children, share_targets, workload, blocks)
+                // A one-shot sandbox's shell binds them at boot, as their tokens place them.
+                Lifecycle::OneShot => {
+                    if !token_values(MAPS_TOKEN).is_empty() {
+                        return Err(format!("a one-shot sandbox takes no {MAPS_TOKEN}"));
+                    }
+                    let (children, mut share_targets) = sandbox_shares(&values)?;
+                    // The guest binds each directory child of an aggregate at the target of its
+                    // `nvx_share=NAME,TARGET,ACCESS[,file]` token.
+                    for share in token_values("nvx_share=") {
+                        match share.split(',').collect::<Vec<_>>().as_slice() {
+                            [_, target, _] => share_targets.push((*target).to_owned()),
+                            [_, _, _, "file"] => {}
+                            _ => return Err(format!("invalid nvx_share={share}")),
+                        }
+                    }
+                    (0, children, share_targets)
+                }
+                // A sandbox block device makes a command line no run, and a capture was handled above.
+                Lifecycle::Run | Lifecycle::Capture => {
+                    return Err("a microVM run takes no sandbox block device".to_owned());
+                }
+            };
+            (maps, children, share_targets, workload, blocks)
+        }
     } else if run {
         // A run shares as a sandbox does, and its kernel command line is its user's.
         let (children, _) = sandbox_shares(&values)?;
@@ -843,6 +1373,7 @@ fn parse(program: &str, arguments: &[String]) -> Result<Options, String> {
         share_targets,
         workload,
         network: network_summary(&values),
+        capture: capture_options,
     })
 }
 
@@ -949,6 +1480,68 @@ fn check_run_boot(
         }
     }
     Ok((kernel, None))
+}
+
+/// Checks the options of a template's capture, besides those of its boot, and returns them: RAM
+/// and a RAM capacity in MiB, the capacity a multiple of 128 MiB no smaller than the RAM, a
+/// `--snapshot-destination` that does not exist, in an existing directory,
+/// `--snapshot-tier platform`, `--snapshot-block-identity generation`, and a
+/// `--snapshot-generation-id` of 32 hexadecimal digits that are not all zero. The scenario of the
+/// capture is next to `kernel`.
+fn check_capture(
+    values: &BTreeMap<&str, Vec<&str>>,
+    kernel: &Path,
+) -> Result<CaptureOptions, String> {
+    let bytes = |name: &str| {
+        let value = exactly_once(values, name)?;
+        value
+            .strip_suffix('M')
+            .and_then(|mebibytes| mebibytes.parse::<u64>().ok())
+            .and_then(|mebibytes| mebibytes.checked_mul(MIB))
+            .filter(|bytes| *bytes != 0)
+            .ok_or_else(|| format!("invalid {name} {value}"))
+    };
+    let memory = bytes("--memory")?;
+    let capacity = bytes("--memory-capacity")?;
+    if !capacity.is_multiple_of(MEMORY_CAPACITY_ALIGNMENT) || capacity < memory {
+        return Err(
+            "--memory-capacity must be a multiple of 128 MiB no smaller than --memory".to_owned(),
+        );
+    }
+    for (name, expected) in [
+        ("--snapshot-tier", "platform"),
+        ("--snapshot-block-identity", "generation"),
+    ] {
+        let value = exactly_once(values, name)?;
+        if value != expected {
+            return Err(format!("{name} must be {expected}, not {value}"));
+        }
+    }
+    let generation = exactly_once(values, "--snapshot-generation-id")?;
+    if generation.len() != 32
+        || !generation.bytes().all(|digit| digit.is_ascii_hexdigit())
+        || generation.bytes().all(|digit| digit == b'0')
+    {
+        return Err(format!("invalid --snapshot-generation-id {generation}"));
+    }
+    let destination = PathBuf::from(exactly_once(values, "--snapshot-destination")?);
+    if !destination.parent().is_some_and(Path::is_dir) {
+        return Err(format!(
+            "the directory of the snapshot destination {} does not exist",
+            destination.display()
+        ));
+    }
+    if fs::symlink_metadata(&destination).is_ok() {
+        return Err(format!(
+            "the snapshot destination {} exists",
+            destination.display()
+        ));
+    }
+    Ok(CaptureOptions {
+        destination,
+        memory,
+        scenario: kernel.with_file_name(CAPTURE_SCENARIO_NAME),
+    })
 }
 
 /// Checks the sandbox block devices of a sandbox: each layer, `ROLE:file:PATH,ro` with a role of
@@ -2138,6 +2731,254 @@ mod tests {
                 options.err(),
                 Some(format!("unsupported argument {option}")),
                 "{option}"
+            );
+        }
+    }
+
+    /// The command line of a template's capture, with `{dir}` in place of the directory of
+    /// [`parse_capture`].
+    const CAPTURE: &[&str] = &[
+        "--machine",
+        "microvm",
+        "--microvm-sandbox-block",
+        "distro:file:{dir}/placeholder,ro",
+        "--microvm-sandbox-block",
+        "scratch:file:{dir}/transaction/scratch.raw",
+        "--processors",
+        "2",
+        "--memory",
+        "512M",
+        "--memory-capacity",
+        "2048M",
+        "--snapshot-destination",
+        "{dir}/transaction/snapshot",
+        "--snapshot-tier",
+        "platform",
+        "--snapshot-block-identity",
+        "generation",
+        "--snapshot-generation-id",
+        "0123456789abcdef0123456789ABCDEF",
+        "--single-process",
+        "--hypervisor",
+        "kvm",
+        "--cpu-profile",
+        "auto",
+        "--kernel",
+        "{dir}/vmlinux",
+        "--initrd",
+        "{dir}/initramfs.cpio.gz",
+        "--cmdline",
+        "nvx_sandbox=1",
+        "--virtio-console",
+        "none",
+        "--microvm-control-console",
+        "listen={dir}/slot/control.sock",
+        "--microvm-control-auth-stdin",
+        "--microvm-report",
+        "{dir}/slot/outcome.json",
+    ];
+
+    /// Returns a directory with a kernel, an initramfs, a placeholder, and a transaction with a
+    /// scratch disk, and the parse of the command line that `arguments` gives with the path of
+    /// that directory in place of `{dir}`.
+    fn parse_capture(arguments: &[&str]) -> (tempfile::TempDir, Result<Options, String>) {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path();
+        fs::write(root.join("vmlinux"), b"kernel").unwrap();
+        fs::write(root.join("initramfs.cpio.gz"), b"initrd").unwrap();
+        fs::write(root.join("placeholder"), [0; 512]).unwrap();
+        fs::create_dir(root.join("transaction")).unwrap();
+        fs::write(root.join("transaction").join("scratch.raw"), [0; 512]).unwrap();
+        let directory = root.to_str().unwrap();
+        let arguments: Vec<String> = arguments
+            .iter()
+            .map(|argument| argument.replace("{dir}", directory))
+            .collect();
+        let options = parse("openvmm", &arguments);
+        (temporary, options)
+    }
+
+    /// Returns the command line of [`CAPTURE`] with `value` in place of the value of `option`.
+    fn capture_with(option: &str, value: &'static str) -> Vec<&'static str> {
+        let mut arguments = CAPTURE.to_vec();
+        let at = arguments.iter().position(|given| *given == option).unwrap();
+        arguments[at + 1] = value;
+        arguments
+    }
+
+    #[test]
+    fn captures_boot_their_template_cold_on_their_block_devices() {
+        let (temporary, options) = parse_capture(CAPTURE);
+        let options = options.unwrap();
+        let root = temporary.path();
+        assert_eq!(options.lifecycle, Lifecycle::Capture);
+        assert!(options.sandbox);
+        assert_eq!(options.restore, None);
+        let blocks: Vec<_> = options
+            .blocks
+            .iter()
+            .map(|block| (block.role.as_str(), block.path.clone(), block.read_only))
+            .collect();
+        assert_eq!(
+            blocks,
+            [
+                ("distro", root.join("placeholder"), true),
+                (
+                    "scratch",
+                    root.join("transaction").join("scratch.raw"),
+                    false
+                ),
+            ]
+        );
+        let capture = options.capture.as_ref().unwrap();
+        assert_eq!(
+            capture.destination,
+            root.join("transaction").join("snapshot")
+        );
+        assert_eq!(capture.memory, 512 * MIB);
+        assert_eq!(capture.scenario, root.join(CAPTURE_SCENARIO_NAME));
+        assert_eq!(
+            options.endpoint,
+            format!("{}/slot/control.sock", root.to_str().unwrap())
+        );
+        assert_eq!(
+            options.blocks_dump,
+            root.join("fake-openvmm-slot-blocks.json")
+        );
+        assert!(options.workload.is_empty());
+        assert!(options.children.is_empty());
+    }
+
+    #[test]
+    fn captures_refuse_what_a_template_does_not_take() {
+        let mut lifecycle = CAPTURE.to_vec();
+        lifecycle.extend(["--microvm-lifecycle", "managed"]);
+        let mut runtime = CAPTURE.to_vec();
+        runtime.extend([
+            "--microvm-sandbox-block",
+            "runtime:file:{dir}/placeholder,ro",
+        ]);
+        let mut aggregate = CAPTURE.to_vec();
+        aggregate.extend(["--mount-aggregate", "/run/nvx/shares"]);
+        let mut identity = CAPTURE.to_vec();
+        identity.extend(["--microvm-workload-identity", "1000:1000"]);
+        let mut unbounded = CAPTURE.to_vec();
+        let at = unbounded
+            .iter()
+            .position(|given| *given == "--memory-capacity")
+            .unwrap();
+        unbounded.drain(at..at + 2);
+        let mut without_blocks = CAPTURE.to_vec();
+        without_blocks.drain(2..6);
+        let invalid_generation = "invalid --snapshot-generation-id";
+        let capacity = "--memory-capacity must be a multiple of 128 MiB no smaller than --memory";
+        let cases: Vec<(Vec<&str>, String)> =
+            vec![
+            (
+                lifecycle,
+                "a capture takes no --microvm-lifecycle".to_owned(),
+            ),
+            (
+                runtime,
+                "a capture takes a distro layer and a scratch disk".to_owned(),
+            ),
+            (aggregate, "a capture takes no --mount-aggregate".to_owned()),
+            (
+                identity,
+                "a capture takes no --microvm-workload-identity".to_owned(),
+            ),
+            (
+                unbounded,
+                "--memory-capacity must be given exactly once".to_owned(),
+            ),
+            (
+                without_blocks,
+                "a capture takes sandbox block devices".to_owned(),
+            ),
+            (
+                capture_with("--memory-capacity", "2000M"),
+                capacity.to_owned(),
+            ),
+            (capture_with("--memory-capacity", "256M"), capacity.to_owned()),
+            (
+                capture_with("--snapshot-tier", "process"),
+                "--snapshot-tier must be platform, not process".to_owned(),
+            ),
+            (
+                capture_with("--snapshot-block-identity", "path"),
+                "--snapshot-block-identity must be generation, not path".to_owned(),
+            ),
+            (
+                capture_with("--snapshot-generation-id", "00000000000000000000000000000000"),
+                format!("{invalid_generation} 00000000000000000000000000000000"),
+            ),
+            (
+                capture_with("--snapshot-generation-id", "0123456789abcdef0123456789abcde"),
+                format!("{invalid_generation} 0123456789abcdef0123456789abcde"),
+            ),
+            (
+                capture_with("--snapshot-generation-id", "0123456789abcdef0123456789abcdeg"),
+                format!("{invalid_generation} 0123456789abcdef0123456789abcdeg"),
+            ),
+            (
+                capture_with("--cmdline", "nvx_sandbox=1 nvx_hostname=tenant"),
+                "a capture's kernel command line is nvx_sandbox=1 alone".to_owned(),
+            ),
+            (
+                capture_with("--snapshot-destination", "{dir}/transaction"),
+                "the snapshot destination {dir}/transaction exists".to_owned(),
+            ),
+            (
+                capture_with("--snapshot-destination", "{dir}/missing/snapshot"),
+                "the directory of the snapshot destination {dir}/missing/snapshot does not exist"
+                    .to_owned(),
+            ),
+            (
+                capture_with("--virtio-console", "stdio"),
+                "--virtio-console must be none, not stdio".to_owned(),
+            ),
+        ];
+        for (arguments, message) in cases {
+            let (temporary, options) = parse_capture(&arguments);
+            let message = message.replace("{dir}", temporary.path().to_str().unwrap());
+            assert_eq!(options.err(), Some(message), "{arguments:?}");
+        }
+    }
+
+    #[test]
+    fn capture_scenarios_take_defaults_and_refuse_unknown_fields() {
+        let scenario: Scenario = serde_json::from_str(r#"{"manifest": "manifest.bin"}"#).unwrap();
+        assert_eq!(scenario.manifest, Path::new("manifest.bin"));
+        assert_eq!(scenario.state_len, 0);
+        assert_eq!(scenario.outcome, CaptureOutcome::Publish);
+        assert_eq!(scenario.status, 1);
+        assert_eq!(scenario.active, None);
+        assert_eq!(scenario.delay_ms, 0);
+        assert!(!scenario.keep_memory);
+        let scenario: Scenario = serde_json::from_str(
+            r#"{"manifest": "m", "stateLen": 512, "outcome": "publish-then-hang", "status": 3,
+                "active": "a", "delayMs": 5, "keepMemory": true}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            (
+                scenario.state_len,
+                scenario.outcome,
+                scenario.status,
+                scenario.delay_ms,
+                scenario.keep_memory
+            ),
+            (512, CaptureOutcome::PublishThenHang, 3, 5, true)
+        );
+        assert_eq!(scenario.active.as_deref(), Some(Path::new("a")));
+        for refused in [
+            r#"{}"#,
+            r#"{"manifest": "m", "outcome": "succeed"}"#,
+            r#"{"manifest": "m", "memory": 1}"#,
+        ] {
+            assert!(
+                serde_json::from_str::<Scenario>(refused).is_err(),
+                "{refused}"
             );
         }
     }

@@ -45,7 +45,7 @@ pub(super) fn private_options() -> OpenOptions {
 ///
 /// On Unix, the umask may clear bits of the mode that the file is created with, even the
 /// current user's permission to read it, so the mode is set again through the new file.
-pub(super) fn create_new(path: &Path) -> io::Result<File> {
+pub(crate) fn create_new(path: &Path) -> io::Result<File> {
     let file = private_options().create_new(true).open(path)?;
     #[cfg(unix)]
     {

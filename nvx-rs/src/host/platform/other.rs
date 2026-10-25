@@ -132,6 +132,27 @@ pub(crate) fn private_file_problem(_file: &File) -> io::Result<Option<String>> {
     Err(unsupported())
 }
 
+/// Checks the directory `path`, a snapshot that OpenVMM published, as [`check_owner_only_dir`]
+/// does.
+pub(crate) fn check_snapshot_dir(path: &Path) -> io::Result<Option<String>> {
+    check_owner_only_dir(path)
+}
+
+/// Fails: this host cannot check who may change a file.
+pub(crate) fn foreign_writer_problem(_file: &File) -> io::Result<Option<String>> {
+    Err(unsupported())
+}
+
+/// Fails: this host makes no template's files.
+pub(crate) fn make_sparse(_file: &File) -> io::Result<()> {
+    Err(unsupported())
+}
+
+/// Fails: this host makes no template's files.
+pub(crate) fn rename_no_replace(_from: &Path, _to: &Path) -> io::Result<()> {
+    Err(unsupported())
+}
+
 /// Leaves the command as it is, unless it should inherit descriptors: this host cannot restrict
 /// what the command inherits, and fails with [`io::ErrorKind::Unsupported`] instead.
 pub(crate) fn detach(_command: &mut Command, inherit: &[Inherited<'_>]) -> io::Result<()> {

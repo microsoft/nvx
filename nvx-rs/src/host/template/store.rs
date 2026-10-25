@@ -1,6 +1,7 @@
 //! The store of templates, [`Store`]: its directory, its records, the namespaces of its
-//! generations, and their leases, tombstones, and retirement.
+//! generations, the captures that publish them, and their leases, tombstones, and retirement.
 
+mod capture;
 mod leases;
 #[cfg(test)]
 mod tests;
@@ -26,6 +27,7 @@ use crate::host::platform::{self, parse_hex_id};
 use crate::host::process::BootId;
 use crate::host::store::files::{open_lock, write_private};
 
+pub use self::capture::{CAPTURE_RECORD_NAME, CAPTURES_NAME, Capture, Created, TRANSACTION_NAME};
 pub use self::leases::{Acquired, LEASES_NAME, Lease, LeaseId, Retirement, TOMBSTONES_NAME};
 
 /// Version of the store's records: its identity record and its index.
@@ -298,12 +300,21 @@ impl Index {
 ///   index.lock             the lock that serializes the transactions of the index
 ///   generations/           the payloads of the generations, which never change once indexed
 ///     <G>/                 the payload of the store generation G
+///       capture.json       the record of the capture that made it
 ///       key.bin            the canonical encoding of its compatibility key
 ///       snapshot/          its snapshot, as OpenVMM published it
 ///   leases/                the records of the leases that the store granted
 ///     <L>.json             the record of the lease L
 ///   tombstones/            the tombstones of the generations that take no new leases
 ///     <G>.json             the tombstone of the store generation G
+///   captures/              the slots of the capture classes
+///     <C>/                 the slot of the classes whose identities start with the digits C,
+///                          a sandbox store whose launches are the classes' captures' VMs
+///       transaction/       the capture in progress, which becomes the payload of a generation
+///         capture.json     the record of the capture
+///         scratch.raw      the dormant scratch device, which the capture removes once checked
+///         snapshot/        the snapshot, once OpenVMM has published it
+///         key.bin          the template's key, once the capture has checked the snapshot
 /// ```
 ///
 /// # Identity
@@ -319,8 +330,8 @@ impl Index {
 /// of each that restores and their eligibility check without reading its payload: the identities
 /// of its key and of its capture class, its storage generation, and what its manifest records of
 /// the capture itself, its creation time, its time contract, and the lengths of its artifacts.
-/// The payload of a generation never changes once the index lists it: the canonical encoding of
-/// its key, which [`Store::read_key`] reads, and its snapshot. The index changes as generations
+/// The payload of a generation never changes once the index lists it: the record of its capture,
+/// the canonical encoding of its key, which [`Store::read_key`] reads, and its snapshot. The index changes as generations
 /// are published and retired, and the records of leases and tombstones as clones lease
 /// generations, and as generations are quarantined and retired.
 ///
@@ -348,6 +359,87 @@ impl Index {
 ///   generation share it.
 /// - The VM generation ID is 16 random bytes that each VM process draws, which tell the clones of
 ///   one generation apart. Their guests read it, and the store records none.
+///
+/// # Captures and publication
+///
+/// [`Store::create_template`] and [`Store::refresh_template`] capture templates of a
+/// [`CaptureClass`](crate::host::template::CaptureClass), and publish them as the store's
+/// generations: a creation serves the class with a generation that the store holds, if one is
+/// eligible, and captures one otherwise, while a refresh always captures. Each class has a slot in
+/// `captures/`, a sandbox store named by the first 16 hexadecimal digits of the class's identity,
+/// whose lifecycle lock serializes the captures of the class, and whose launch journal records
+/// each capture's VMM. A capture holds its slot's lock until its VM has ended, and takes the
+/// store's lock under it to publish, as the supervisor's
+/// [lock order](crate::host::supervisor#the-lock-order) allows.
+///
+/// A capture runs in a transaction, a directory private to the current user, in its slot, on the
+/// store's volume. It writes the record of the capture there, `capture.json`, which names the
+/// store, the class, and the [`StorageGeneration`] that it drew, and creates the template's
+/// dormant scratch device, a sparse file, then lowers the adapter's plan to a
+/// [`TemplatePlan`](crate::host::template::TemplatePlan), whose snapshot destination is in the
+/// transaction. It cold-boots the template's VM through
+/// [`supervisor::launch`](crate::host::supervisor::launch), in its slot, as a launch of its own,
+/// and waits for the VMM to exit: the guest captures itself, and OpenVMM publishes the snapshot
+/// at its destination, and exits.
+///
+/// ## Block devices by path
+///
+/// OpenVMM opens the block devices of a VM whose snapshot it captures, or restores, itself, at the
+/// paths that its command line names: without following a link, nor on Windows any other reparse
+/// point, and sharing only reads and deletion, so that its open fails while another handle may
+/// write the file. The host therefore hands OpenVMM the paths of these files, never handles, and
+/// checks the file at each path just before the VM starts:
+///
+/// - The directory that holds the VM's files, the capture's transaction, must be private to the
+///   current user.
+/// - The placeholder must pass its binding's check,
+///   [`DistroBinding::check`](crate::host::sandbox::distro::DistroBinding::check), of its
+///   identity and length, and then, at its path, be a regular file, not a link nor any other
+///   reparse point, that is the file that the check found, that belongs to the current user or to
+///   an administrator, and that no one else may change.
+/// - The scratch must be, at its path, the regular file of the template's length that the capture
+///   created, which no one else may change.
+///
+/// As the VM starts, the host holds no handle through which it could write either file: it closes
+/// the scratch once it has checked it, and holds only the placeholder that its binding's check
+/// opened for reading, which on Windows lets no one write it, until the VM has ended. The
+/// directories above the files must be ones that only the current user, or an administrator, may
+/// change, since OpenVMM resolves each path again. A restore of a clone, whose block devices
+/// OpenVMM also opens by their paths, takes the same rule.
+///
+/// ## What the VM leaves
+///
+/// Once the VMM has exited, and before anything is published, the capture checks that the VM's
+/// outcome report records the capture's success, and that the snapshot is a directory private to
+/// the current user, as OpenVMM creates it, whose manifest
+/// [`TemplateManifest::read`](crate::host::template::TemplateManifest::read) reads, whose artifacts
+/// are exactly its manifest, RAM, and saved state, each a regular file private to the current
+/// user, of the length that the manifest records, and whose key, [`TemplateKey::new`], is its
+/// class's. It then removes the scratch, and what OpenVMM left beside the snapshot, and writes the
+/// key, `key.bin`, which marks the transaction as checked, durably.
+///
+/// ## Two commits
+///
+/// A capture publishes its checked transaction under the store's lock, in two commits: it renames
+/// the transaction to the payload of the index's next store generation, which no rename
+/// replaces, and makes the rename durable; then it writes the index, which lists the generation,
+/// and makes it durable, with the store's own entry in its parent, which the store's creation
+/// does not sync. A payload at the index's next store generation is one whose publication a crash
+/// interrupted, which the next publication, or recovery, indexes first, once it has made the
+/// rename durable as the publication would have. Each capture completes these publications, and
+/// first drops from the index the generations whose payloads a crash lost, which then take none
+/// of the store's capacity, before it looks for a generation or counts the store's. A creation
+/// that serves a generation that the store holds makes the index, and the store's own entry,
+/// durable before it returns it, since the commit that listed it may have been interrupted.
+/// Publications leave the older generations, and their leases, untouched.
+///
+/// A capture that fails before it checks its transaction publishes nothing, and retires the
+/// transaction once its VMM has ended. One that a crash of the host interrupts is ended by the
+/// next capture of its class, or by [`Store::recover_captures`], which an adapter calls as it
+/// starts: each ends the slot's launch, as
+/// [`LockedStore::recover`](crate::host::store::LockedStore::recover) ends a sandbox's, and then
+/// publishes the transaction if the capture had checked it, once it has synced the transaction
+/// again, and retires it otherwise.
 ///
 /// # Leases, tombstones, and retirement
 ///
@@ -397,7 +489,10 @@ impl Index {
 /// store creates have mode 0700. On Windows, a directory that the store creates allows the user
 /// alone, through a protected access control list that its files inherit; one that it did not
 /// create may also allow SYSTEM and the Administrators group, as one under the user's profile
-/// does, and must pass entries on to the files created in it. The store refuses a record whose
+/// does, and must pass entries on to the files created in it. A snapshot's directory, which
+/// OpenVMM creates, need not: OpenVMM gives it, and each file that it publishes in it, a protected
+/// list of their own, which allows SYSTEM and the owner, and the directory's list already stops
+/// anyone else from creating a file in it. The store refuses a record whose
 /// own list allows anyone else. A directory or a file of the store that is a link, or on Windows
 /// any other reparse point, is refused, and so is a record that is not a regular file. The store
 /// names its files by their paths, so the directories above it must be ones that only the user,
@@ -591,16 +686,26 @@ impl Store {
     ///
     /// The directories of the generations, of the payload, and of the snapshot must each be
     /// private to the current user, and none of them a link, or on Windows any other reparse
-    /// point. Fails with [`ErrorKind::NotFound`] if the payload or its snapshot is missing.
+    /// point. The snapshot's directory is the one that OpenVMM published, which need not pass
+    /// access control entries on to the files created in it; see [Privacy](Store#privacy). Fails
+    /// with [`ErrorKind::NotFound`] if the payload or its snapshot is missing.
     pub fn snapshot_dir(&self, generation: &Generation) -> Result<PathBuf> {
         let payload = self.payload_dir(generation.generation);
         let snapshot = payload.join(SNAPSHOT_NAME);
         self.check_generations_dir()?;
-        for (path, what) in [
-            (&payload, "the payload of the generation"),
-            (&snapshot, "the snapshot of the generation"),
+        for (path, what, check) in [
+            (
+                &payload,
+                "the payload of the generation",
+                platform::check_owner_only_dir as fn(&Path) -> io::Result<Option<String>>,
+            ),
+            (
+                &snapshot,
+                "the snapshot of the generation",
+                platform::check_snapshot_dir,
+            ),
         ] {
-            let problem = platform::check_owner_only_dir(path).map_err(store_error(format!(
+            let problem = check(path).map_err(store_error(format!(
                 "cannot open {what} {}",
                 path.display()
             )))?;

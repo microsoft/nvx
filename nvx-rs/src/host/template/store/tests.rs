@@ -951,3 +951,32 @@ fn the_store_is_private_to_the_current_user() {
         );
     }
 }
+
+#[cfg(windows)]
+#[test]
+fn snapshots_that_openvmm_published_are_private_without_entries_for_their_files() {
+    let (_directory, store) = store();
+    let published = publish(&store, &ManifestSpec::template(), storage(1));
+    let payload = store.payload_dir(published.generation());
+    // OpenVMM gives a snapshot's directory, and each of its files, a protected list of their own,
+    // which allows SYSTEM and the owner, and passes nothing on to the files created in it.
+    let openvmm = "D:P(A;;FA;;;SY)(A;;FA;;;OW)";
+    let snapshot = payload.join(SNAPSHOT_NAME);
+    platform::set_access(&snapshot.join(MANIFEST_NAME), openvmm).unwrap();
+    platform::set_access(&snapshot, openvmm).unwrap();
+    assert_eq!(store.snapshot_dir(&published).unwrap(), snapshot);
+    // The host's own directories still pass entries on to the files created in them.
+    platform::set_access(&payload, openvmm).unwrap();
+    let error = store.snapshot_dir(&published).unwrap_err();
+    assert!(
+        error
+            .message()
+            .ends_with("passes no access control entries on to the files created in it"),
+        "{error}"
+    );
+    // A snapshot whose list allows anyone else is refused.
+    platform::set_access(&payload, "D:P(A;OICI;FA;;;OW)").unwrap();
+    platform::set_access(&snapshot, "D:P(A;;FA;;;SY)(A;;FA;;;OW)(A;;FR;;;WD)").unwrap();
+    let error = store.snapshot_dir(&published).unwrap_err();
+    assert!(error.message().ends_with("allows other users"), "{error}");
+}
