@@ -17,7 +17,9 @@ use crate::activation::{
     ActivationError, ActivationRecord, ExpectedResources, ReadyActivation, TransactionId,
 };
 
-pub use self::apply::{Applied, ApplyError, RootTemplate, apply};
+pub use self::apply::{
+    Applied, AppliedTeardownError, ApplyError, MACHINE_ID_FILE, RootTemplate, apply,
+};
 
 /// The activation of a repaired clone: the state machine, without I/O and independent of any
 /// framing, of the clone's control session, which takes the clone's configuration from the host
@@ -76,8 +78,9 @@ pub use self::apply::{Applied, ApplyError, RootTemplate, apply};
 ///     fn receive(&mut self, deadline: Option<Instant>) -> Option<Received>;
 ///     /// Acknowledges the session's reset, and abandons the earlier epoch's work.
 ///     fn acknowledge(&mut self);
-///     /// Keeps the clone's activated root, and the identity, if any, in which it runs every
-///     /// execution.
+///     /// Keeps the clone's activated root and workload: the identity, if any, in which it runs
+///     /// every execution, with the hostname of every execution, and the root, with the runtime's
+///     /// binds on it, which `Applied::teardown` removes before it tears the root down.
 ///     fn keep(&mut self, applied: Applied);
 ///     /// Sends Ready, which reports `activation` beside the agent's own identities, such as its
 ///     /// build.

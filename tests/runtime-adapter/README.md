@@ -591,10 +591,14 @@ credit that it needs, never keeps the others' output from the host.
   of the refusal, or that of the preparation or the spawn.
 - Each program enters the layered root through `nvx::guest::entry`, as a
   `worker::Entrance` describes it: in new mount, PID, and UTS namespaces, with
-  the root moved over `/`, the entry's default hostname, `nvx-sandbox`, the
-  image's own machine ID, and no time status, so that the entry binds nothing
-  into the root, and with the publication of listeners that the root
-  configuration names, published unless it names them unpublished. It runs as
+  the root moved over `/`, the sandbox's hostname, the entry's default,
+  `nvx-sandbox`, after a cold boot, and the record's in a clone, and no time
+  status, and with the publication of listeners that the root configuration
+  names, published unless it names them unpublished. After a cold boot, it sees
+  the image's own machine ID, so that the worker binds nothing into the root,
+  and in a clone, the machine ID that the record names, which the clone's
+  application bound for every execution if the record asks for a generated
+  one. It runs as
   the identity that exactly one source names: the sandbox's workload identity,
   with no supplementary groups or capabilities, or, in a sandbox without one,
   the identity that its start names, with its supplementary groups, its
@@ -781,16 +785,24 @@ after the repair's acknowledgement of the restore:
    reread the disk's partition table, so that the block devices of its
    partitions are the clone's disk's, not the template's placeholder's. The
    upper must be fresh: the assembly refuses one whose `upper` or `work`
-   directory exists and is not empty. It applies none of the record's other
-   settings: its export, its network, its hostname, and its machine ID.
+   directory exists and is not empty. If the record asks for a generated
+   machine ID, the application then generates one, once, after the repair's
+   reseed, in `nvx::guest::clone::MACHINE_ID_FILE` of the runtime directory,
+   and binds it read-only over the root's `/etc/machine-id`, in the worker's
+   mount namespace, for every execution; with the image's own machine ID, it
+   binds nothing. It applies none of the record's other settings: its export,
+   and its network.
 4. It completes the activation, which opens the fence, and answers `Ready`,
    which reports the activation after the guest agent's build.
 5. It then serves the host's order, as after a cold boot: the mapping table
    that the record announces, the start, the executions, the probes, and the
    stop. The record's workload identity, if it has one, is the whole
    sandbox's, as a root configuration's is: every execution runs as it, and a
-   start that names an identity is refused. Without an export, the clone
-   refuses each part of a mapping table with `MapFailed`.
+   start that names an identity is refused. Every execution takes the record's
+   hostname. Without an export, the clone refuses each part of a mapping table
+   with `MapFailed`. On the stop, the worker removes the application's binds,
+   which keep the root's mount busy, before it tears the root down, through
+   `nvx::guest::clone::Applied::teardown`.
 
 Until the clone is ready, its session takes nothing but that `Activate`:
 another reset, any other message, a `Stop` and a `Ping` included, an
@@ -839,7 +851,7 @@ ends with one of these statuses, after a diagnostic on standard error:
 | 52 | The `Activate`'s record does not decode, breaks a limit, or is a cold boot's |
 | 53 | The record expects other resources than the clone has |
 | 54 | The root's assembly failed, its upper not fresh among its causes, or the kernel did not reread the partition table of the record's GPT disk before it |
-| 55 | The image refuses the record's workload identity: it holds no account of the identity, or not its group, or its account databases cannot be read |
+| 55 | The clone's workload cannot be activated: the image refuses the record's workload identity, as it holds no account of the identity, or not its group, or its account databases cannot be read, or the machine ID that the record asks for cannot be generated, or the record's hostname or that machine ID cannot be set for every execution |
 | 58 | The worker's own order misused the activation: it completed an activation that did not run, or started the sandbox before the clone was ready, or again |
 | 193 | A conformance check of the time ABI failed in the clone's repair, such as the finish's, which needs a running time daemon |
 | 195 | The time ABI's part of the clone's repair failed, such as the validation of the restore packet, or the record of the restore |
@@ -1664,8 +1676,11 @@ epoch of its broker's first reset, and the clone's activation,
 `nvx::guest::clone::Activation::with_resources`, behind a closed fence. The fake
 root applies each record as `nvx::guest::clone::apply` does, without a root: for
 a GPT disk, it stands for the kernel's reread of the disk's partition table,
-which a test may fail, and it checks the account of the record's workload
-identity in the tests' directory of account databases. The tests cover:
+which a test may fail, it checks the account of the record's workload identity
+in the tests' directory of account databases, and it stands for the generation
+of a machine ID that the record asks for, and the setting of the record's
+hostname and machine ID for every execution, which a test may fail. The tests
+cover:
 
 - the reset that the restore queued, of another instance, which the worker
   acknowledges without an attachment, and the `Activate`, whose record it
@@ -1680,9 +1695,10 @@ identity in the tests' directory of account databases. The tests cover:
   nothing answered or applied;
 - a record that does not decode, a cold boot's, and one that expects other
   resources, which fail the activation with nothing applied, and a GPT disk
-  whose partition table the kernel does not reread, and a workload identity
-  whose account or group the image lacks, which fail its application, each
-  with the status of its class, and no `Ready`;
+  whose partition table the kernel does not reread, a workload identity whose
+  account or group the image lacks, a machine ID that cannot be generated, and
+  a hostname or machine ID that cannot be set, which fail its application,
+  each with the status of its class, and no `Ready`;
 - the activation's deadline, whether the restore's reset came or not, or part
   of an `Activate`, which the broker sends before the worker runs, so that the
   worker takes it at once, however late it runs: the deadline fails the
@@ -1705,7 +1721,8 @@ identity in the tests' directory of account databases. The tests cover:
   the activation with the status of the host's session;
 - the record's workload identity, as which every execution runs, while a start
   that names an identity is refused with `EINVAL`, as is a start that names
-  none once the record has none.
+  none once the record has none, and the record's hostname, which every
+  execution's entry takes.
 
 `tests/initramfs.rs` and `tests/runtime.rs` check, in the host-only
 configuration, on Linux and Windows:

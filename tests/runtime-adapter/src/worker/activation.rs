@@ -50,14 +50,21 @@ pub const ACTIVATION_TIMEOUT: Duration = Duration::from_secs(120);
 ///   than the repaired clone has;
 /// - [`ACTIVATION_ROOT`](status::ACTIVATION_ROOT): the root's assembly failed, the scratch's upper
 ///   is not fresh among its causes, or the kernel did not reread the partition table of the
-///   record's GPT disk before it, as [`ApplyError::Assembly`] and [`ApplyError::Gpt`] tell, or the
-///   application failed otherwise;
+///   record's GPT disk before it, as [`ApplyError::Assembly`] and [`ApplyError::Gpt`] tell, or
+///   the application failed otherwise, as this build of the adapter does not know;
 /// - [`ACTIVATION_WORKLOAD`](status::ACTIVATION_WORKLOAD): the image refuses the record's
-///   workload identity, as [`ApplyError::Account`] tells;
+///   workload identity, as [`ApplyError::Account`] tells, the machine ID that the record asks the
+///   guest to generate cannot be written, as [`ApplyError::MachineId`] tells, or the record's
+///   hostname or that machine ID cannot be set for every execution, as [`ApplyError::View`]
+///   tells;
 /// - [`ACTIVATION_ORDER`](status::ACTIVATION_ORDER): the worker's own order completed an
 ///   activation that did not run, or started the sandbox before the clone was ready, or again.
 ///
-/// A cause that this build of the adapter does not know ends it with `ACTIVATION_PROTOCOL`.
+/// The statuses of the export's and the network's classes,
+/// [`ACTIVATION_EXPORT`](status::ACTIVATION_EXPORT) and
+/// [`ACTIVATION_NETWORK`](status::ACTIVATION_NETWORK), are left to the activation of those
+/// settings. A cause that this build of the adapter does not know ends it with
+/// `ACTIVATION_PROTOCOL`.
 pub fn failure_status(failure: &ActivationFailure) -> u8 {
     match failure.cause() {
         ActivationCause::Expired => status::ACTIVATION_DEADLINE,
@@ -68,9 +75,11 @@ pub fn failure_status(failure: &ActivationFailure) -> u8 {
         ActivationCause::Record(_) | ActivationCause::Cold => status::ACTIVATION_RECORD,
         ActivationCause::Resources { .. } => status::ACTIVATION_RESOURCES,
         ActivationCause::Failed(error) => match error.downcast_ref::<ApplyError>() {
-            Some(ApplyError::Account { .. }) => status::ACTIVATION_WORKLOAD,
-            // The root's assembly, the reread of a GPT disk's partition table, and any other
-            // failure of the application.
+            Some(ApplyError::Gpt(_) | ApplyError::Assembly(_)) => status::ACTIVATION_ROOT,
+            Some(
+                ApplyError::Account { .. } | ApplyError::MachineId { .. } | ApplyError::View { .. },
+            ) => status::ACTIVATION_WORKLOAD,
+            // A failure of the application that this build does not know.
             _ => status::ACTIVATION_ROOT,
         },
         ActivationCause::Completion | ActivationCause::Start => status::ACTIVATION_ORDER,
@@ -184,8 +193,8 @@ impl CloneState {
     /// `operations`, with the template's inputs, completes the activation with the result, and
     /// returns the worker's step: `Ready`, which reports the activation, once the clone is ready,
     /// after which `executions` run in the cgroups that the template's bootstrap prepared, as the
-    /// record's workload identity, if it has one, and the worker's order awaits the record's
-    /// mappings; or the end, once the activation failed.
+    /// record's workload identity, if it has one, with the record's hostname, and the worker's
+    /// order awaits the record's mappings; or the end, once the activation failed.
     fn apply(
         &mut self,
         operations: &mut dyn RootOperations,
@@ -202,7 +211,9 @@ impl CloneState {
                 let identity = identity.map(|identity| (identity.uid(), identity.gid()));
                 // The executions' listeners are published, the entry's default, which refuses
                 // the most, as a root configuration that names no publication has them.
-                let sandbox = Sandbox::new(identity, Publication::Published);
+                let hostname = record.configuration().workload.hostname.clone();
+                let sandbox =
+                    Sandbox::new(identity, Publication::Published).with_hostname(hostname);
                 executions.run_in(operations.cgroups(), sandbox);
                 // A record announces at most `nvx::activation::MAX_MAPPINGS` mappings, which fit
                 // a `u32`.
@@ -242,6 +253,7 @@ fn unactivated(failure: &ActivationFailure) -> Worked {
 mod tests {
     use std::io;
     use std::num::NonZeroU64;
+    use std::path::PathBuf;
 
     use nvx::activation::{
         Configuration, ExpectedResources, Identity, Image, MachineIdMode, OverlayMode,
@@ -250,7 +262,7 @@ mod tests {
     };
     use nvx::guest::clone::AdmissionFence;
     use nvx::guest::entry;
-    use nvx::guest::root::{Error as RootError, Role};
+    use nvx::guest::root::{self, Assembly, Device, Error as RootError, Role};
     use nvx::protocol::root::DISTRO_MMIO_BASE;
 
     use super::*;
@@ -381,11 +393,38 @@ mod tests {
         });
         let root = activating().complete(now(), Err(reread.into()));
         cases.push((failed(root), status::ACTIVATION_ROOT));
+        // An assembly refuses a relative runtime directory before anything else.
+        let relative = Assembly {
+            runtime: PathBuf::from("run/nvx"),
+            distro: Device {
+                mmio: DISTRO_MMIO_BASE,
+                sectors: None,
+            },
+            image: root::Image::Erofs { uuid: None },
+            upper: root::Upper::Tmpfs,
+            overlay: root::OverlayMode::default(),
+            timeout: Duration::ZERO,
+        };
+        let assembly = ApplyError::Assembly(root::assemble(&relative).unwrap_err());
+        let root = activating().complete(now(), Err(assembly.into()));
+        cases.push((failed(root), status::ACTIVATION_ROOT));
         let refused = ApplyError::Account {
             error: entry::Error::Root(io::Error::other("no account")),
             teardown: None,
         };
         let workload = activating().complete(now(), Err(refused.into()));
+        cases.push((failed(workload), status::ACTIVATION_WORKLOAD));
+        let generated = ApplyError::MachineId {
+            error: io::ErrorKind::AlreadyExists.into(),
+            teardown: None,
+        };
+        let workload = activating().complete(now(), Err(generated.into()));
+        cases.push((failed(workload), status::ACTIVATION_WORKLOAD));
+        let view = ApplyError::View {
+            error: entry::Error::Hostname,
+            teardown: None,
+        };
+        let workload = activating().complete(now(), Err(view.into()));
         cases.push((failed(workload), status::ACTIVATION_WORKLOAD));
         let other = activating().complete(now(), Err("another failure of the application".into()));
         cases.push((failed(other), status::ACTIVATION_ROOT));

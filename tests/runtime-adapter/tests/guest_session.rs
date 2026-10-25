@@ -1124,6 +1124,13 @@ enum Operation {
     /// A clone's reread of its GPT disk's partition table, before its assembly.
     #[cfg(target_arch = "x86_64")]
     Reread,
+    /// A clone's generation of the machine ID that its record asks for, once its root's account
+    /// was checked.
+    #[cfg(target_arch = "x86_64")]
+    MachineId,
+    /// A clone's setting of its record's hostname and machine ID for every execution, last.
+    #[cfg(target_arch = "x86_64")]
+    View,
     /// The host export's mount.
     MountExport,
     /// A probe.
@@ -1335,13 +1342,16 @@ impl RootOperations for FakeRoot {
     /// kernel does while a partition is open if the test fails [`Operation::Reread`]; it then
     /// takes as long as the assembly, and checks the account of the record's workload identity,
     /// if it has one, in existing-account mode, in the [accounts' root](accounts), which stands for
-    /// the root that it assembled.
+    /// the root that it assembled. It then stands for the generation of the machine ID that the
+    /// record asks for, if any, and the setting of the record's hostname and machine ID for every
+    /// execution, which fail if the test fails [`Operation::MachineId`] and [`Operation::View`].
     #[cfg(target_arch = "x86_64")]
     fn apply(
         &mut self,
         record: &nvx::activation::ActivationRecord,
         template: &nvx::guest::clone::RootTemplate,
     ) -> Result<Option<entry::Identity>, nvx::guest::clone::ApplyError> {
+        use nvx::activation::MachineIdMode;
         use nvx::guest::clone::ApplyError;
         use nvx::guest::root::{DeviceStep, Error, Role};
 
@@ -1359,17 +1369,31 @@ impl RootOperations for FakeRoot {
             })?;
         }
         thread::sleep(self.assembly);
-        let Some(workload) = configuration.workload.identity else {
-            return Ok(None);
-        };
-        let identity = entry::Identity::new(workload.uid, workload.gid);
-        match entry::Entry::new(accounts(), identity.clone()).prepare() {
-            Ok(_) => Ok(Some(identity)),
-            Err(error) => Err(ApplyError::Account {
+        let workload = &configuration.workload;
+        let identity = workload
+            .identity
+            .map(|identity| entry::Identity::new(identity.uid, identity.gid));
+        if let Some(identity) = &identity
+            && let Err(error) = entry::Entry::new(accounts(), identity.clone()).prepare()
+        {
+            return Err(ApplyError::Account {
                 error,
                 teardown: None,
-            }),
+            });
         }
+        if workload.machine_id == MachineIdMode::Generated {
+            self.result(Operation::MachineId)
+                .map_err(|problem| ApplyError::MachineId {
+                    error: io::Error::other(problem),
+                    teardown: None,
+                })?;
+        }
+        self.result(Operation::View)
+            .map_err(|problem| ApplyError::View {
+                error: entry::Error::Root(io::Error::other(problem)),
+                teardown: None,
+            })?;
+        Ok(identity)
     }
 }
 
@@ -4330,13 +4354,17 @@ mod clones {
 
         // The application fails once the kernel refused to reread a GPT disk's partition table,
         // and refuses a workload identity whose account the image lacks, or whose primary group
-        // it lacks, before Ready.
+        // it lacks, a machine ID that it cannot generate, and a hostname or machine ID that it
+        // cannot set for every execution, before Ready.
         let gpt = changed(&clone, |configuration| {
             configuration.image = activation::Image::Gpt {
                 binding: activation::Identity::from_bytes([0x11; 32]),
                 disk_guid: None,
                 first_partition_bound: 1 << 20,
             };
+        });
+        let generated = changed(&clone, |configuration| {
+            configuration.workload.machine_id = MachineIdMode::Generated;
         });
         let cases = [
             (
@@ -4352,6 +4380,16 @@ mod clones {
             (
                 record(1, Some(ORPHAN)),
                 FakeRoot::booting(&layout()),
+                status::ACTIVATION_WORKLOAD,
+            ),
+            (
+                generated.clone(),
+                FakeRoot::failing(Operation::MachineId, "a machine ID exists already"),
+                status::ACTIVATION_WORKLOAD,
+            ),
+            (
+                generated,
+                FakeRoot::failing(Operation::View, "the image's machine ID is a directory"),
                 status::ACTIVATION_WORKLOAD,
             ),
         ];
@@ -4546,10 +4584,20 @@ mod clones {
         }
     }
 
+    /// Returns the entrance of a clone's execution as `identity`, with the hostname `hostname`,
+    /// its record's, and published listeners.
+    fn cloned(identity: entry::Identity, hostname: &[u8]) -> Entrance {
+        Entrance {
+            hostname: hostname.to_vec(),
+            ..entrance(identity)
+        }
+    }
+
     #[test]
-    fn a_clone_s_executions_run_as_the_workload_identity_of_its_record() {
+    fn a_clone_s_executions_run_as_the_workload_identity_and_with_the_hostname_of_its_record() {
         // The record's workload identity is the whole sandbox's, as a root configuration's is:
-        // every execution runs as it, and a start that names an identity is refused.
+        // every execution runs as it, and a start that names an identity is refused. Every
+        // execution's entry takes the record's hostname.
         let refused = LaunchFailure::new(0, Errno::EINVAL as i32);
         let workload = exec::Identity::new(WORKLOAD.0, WORKLOAD.1);
         let mut host = Host::activated(FakeRoot::booting(&layout()), &record(1, Some(WORKLOAD)));
@@ -4562,10 +4610,14 @@ mod clones {
         let (root, worked) = host.stop();
         assert_eq!(worked.unwrap(), Worked::Stopped);
         let identity = entry::Identity::new(WORKLOAD.0, WORKLOAD.1);
-        assert_eq!(entrances(&root), [entrance(identity.clone())]);
+        assert_eq!(entrances(&root), [cloned(identity.clone(), b"clone")]);
 
-        // Without one, each start names its own.
-        let mut host = Host::activated(FakeRoot::booting(&layout()), &record(1, None));
+        // Without one, each start names its own, and takes the hostname of a record that names
+        // another.
+        let renamed = changed(&record(1, None), |configuration| {
+            configuration.workload.hostname = b"another-clone".to_vec();
+        });
+        let mut host = Host::activated(FakeRoot::booting(&layout()), &renamed);
         host.start(start_of(1, shell("exit 0")), Vec::new());
         let named = start_of(2, shell("exit 0")).with_identity(workload);
         host.start(named, Vec::new());
@@ -4574,6 +4626,6 @@ mod clones {
         check_lossless(&host, 2, Status::Exited(0));
         let (root, worked) = host.stop();
         assert_eq!(worked.unwrap(), Worked::Stopped);
-        assert_eq!(entrances(&root), [entrance(identity)]);
+        assert_eq!(entrances(&root), [cloned(identity, b"another-clone")]);
     }
 }
