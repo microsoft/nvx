@@ -252,6 +252,18 @@ pub(crate) fn listen_ready(_socket_path: &Path) -> io::Result<(String, ReadyList
     Err(unsupported())
 }
 
+impl ReadyListener {
+    pub(crate) fn receive(
+        &mut self,
+        _pid: u32,
+        _received: &mut Vec<u8>,
+        _limit: usize,
+        _timeout: Duration,
+    ) -> io::Result<bool> {
+        Err(unsupported())
+    }
+}
+
 pub(crate) fn connect_endpoint(
     _endpoint: &str,
     _expected_pid: u32,
