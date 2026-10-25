@@ -551,6 +551,18 @@ impl Store {
             tests::storage(1),
         )
     }
+
+    /// Publishes a capture of `class` whose manifest `spec` encodes, as
+    /// [`publish_for_tests`](Self::publish_for_tests) does, for the tests of the other modules of
+    /// templates, and returns it.
+    #[cfg(any(target_os = "linux", windows))]
+    pub(super) fn publish_spec_for_tests(
+        &self,
+        class: &super::CaptureClass,
+        spec: &super::test_support::ManifestSpec,
+    ) -> Generation {
+        tests::publish_with(self, class, spec, tests::storage(1))
+    }
 }
 
 impl Store {

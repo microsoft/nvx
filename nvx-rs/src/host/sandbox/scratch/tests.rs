@@ -297,6 +297,68 @@ fn checks_claim_the_image_without_reading_it() {
     drop(staged.claim(&binding));
 }
 
+/// Returns the physical block size that OpenVMM presents for the file at `path`: the I/O block
+/// size of its filesystem on Linux, and 4096 bytes on Windows.
+fn physical_block_size(path: &Path) -> u32 {
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::fs::MetadataExt;
+
+        u32::try_from(fs::metadata(path).unwrap().blksize()).unwrap()
+    }
+    #[cfg(windows)]
+    {
+        let _ = path;
+        4096
+    }
+}
+
+#[test]
+fn checked_images_present_the_geometry_that_openvmm_reads_through_them() {
+    let staged = Staged::new();
+    let resize = |length: u64| {
+        OpenOptions::new()
+            .write(true)
+            .open(staged.image())
+            .unwrap()
+            .set_len(length)
+            .unwrap();
+    };
+    resize(1 << 20);
+    let binding = staged.bind();
+    let checked = staged.claim(&binding);
+    // It reads the metadata of what the check holds, which reads nothing, while the claim lasts.
+    assert_eq!(
+        checked.geometry().unwrap(),
+        BlockGeometry {
+            length: 1 << 20,
+            logical_block_size: 512,
+            physical_block_size: physical_block_size(&staged.image()),
+        }
+    );
+    assert_eq!(
+        failure(staged.check(&binding, Instant::now())),
+        claimed_failure(&staged.image())
+    );
+    drop(checked);
+    // OpenVMM attaches block devices of nonzero multiples of 512 bytes alone.
+    for length in [0, CONTENT.len() as u64, (1 << 20) + 1] {
+        resize(length);
+        let binding = staged.bind();
+        assert_eq!(
+            failure(staged.claim(&binding).geometry()),
+            (
+                ErrorKind::Unsupported,
+                format!(
+                    "the ext4 scratch image {} of {length} bytes cannot be attached: OpenVMM \
+                     attaches block devices of nonzero multiples of 512 bytes",
+                    shown(&staged.image())
+                )
+            )
+        );
+    }
+}
+
 #[test]
 fn a_claim_lasts_while_the_vmm_holds_the_image() {
     let staged = Staged::new();

@@ -269,6 +269,127 @@ fn the_staged_check_reads_no_content() {
     assert_eq!(verify_with(&layer, Access::READ).unwrap(), binding);
 }
 
+/// Returns the physical block size that OpenVMM presents for the file at `path`: the I/O block
+/// size of its filesystem on Linux, and 4096 bytes on Windows.
+fn physical_block_size(path: &Path) -> u32 {
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::fs::MetadataExt;
+
+        u32::try_from(fs::metadata(path).unwrap().blksize()).unwrap()
+    }
+    #[cfg(windows)]
+    {
+        let _ = path;
+        4096
+    }
+}
+
+#[test]
+fn checked_layers_present_the_geometry_that_openvmm_reads_through_them() {
+    let staged = Staged::new(false);
+    let image = staged.image();
+    let resize = |length: u64| {
+        OpenOptions::new()
+            .write(true)
+            .open(&image)
+            .unwrap()
+            .set_len(length)
+            .unwrap();
+    };
+    let check = |layer: &SandboxLayer| {
+        import_with(layer, PolicyVerdict::ACCEPTED, METADATA_ONLY)
+            .unwrap()
+            .check_with(layer, DISTRO_POLICY_REVISION, METADATA_ONLY)
+            .unwrap()
+    };
+    resize(8192);
+    let checked = check(&staged.layer());
+    let geometry = BlockGeometry {
+        length: 8192,
+        logical_block_size: 512,
+        physical_block_size: physical_block_size(&image),
+    };
+    // It reads the metadata of the checked file alone, which reads nothing.
+    assert_eq!(checked.geometry().unwrap(), geometry);
+    // The geometry is the checked file's, whatever later takes its path.
+    #[cfg(target_os = "linux")]
+    {
+        let replacement = staged.other("replacement.erofs");
+        fs::write(&replacement, [0; 4096]).unwrap();
+        fs::rename(&replacement, &image).unwrap();
+        assert_eq!(checked.geometry().unwrap(), geometry);
+    }
+    drop(checked);
+    // OpenVMM attaches block devices of nonzero multiples of 512 bytes alone.
+    let gpt = SandboxLayer::gpt(LayerRole::Distro, image.to_str().unwrap(), UUID);
+    for (layer, description) in [
+        (staged.layer(), "distro EROFS layer"),
+        (gpt, "distro GPT image"),
+    ] {
+        for length in [0, 8191] {
+            resize(length);
+            assert_eq!(
+                failure(check(&layer).geometry()),
+                (
+                    ErrorKind::Unsupported,
+                    format!(
+                        "the {description} {} of {length} bytes cannot be attached: OpenVMM \
+                         attaches block devices of nonzero multiples of 512 bytes",
+                        shown(&image)
+                    )
+                )
+            );
+        }
+    }
+}
+
+/// A layer on hugetlbfs, whose I/O block size is a huge page, presents physical blocks of 2 MiB.
+#[cfg(target_os = "linux")]
+#[test]
+fn layers_present_the_block_size_of_their_filesystem() {
+    use nix::sys::memfd::{MFdFlags, memfd_create};
+
+    const HUGE_PAGE: u64 = 2 * 1024 * 1024;
+    let flags = MFdFlags::MFD_CLOEXEC | MFdFlags::MFD_HUGETLB | MFdFlags::MFD_HUGE_2MB;
+    let huge = match memfd_create("nvx-geometry-test", flags) {
+        Ok(descriptor) => File::from(descriptor),
+        Err(error) => {
+            eprintln!("this host offers no file on hugetlbfs: {error}");
+            return;
+        }
+    };
+    if let Err(error) = huge.set_len(HUGE_PAGE) {
+        eprintln!("this host cannot size a file on hugetlbfs: {error}");
+        return;
+    }
+    let staged = Staged::new(false);
+    let image = staged.image();
+    let open = |path: &Path| {
+        if path == image {
+            huge.try_clone()
+        } else {
+            Err(io::Error::from(io::ErrorKind::NotFound))
+        }
+    };
+    let access = Access {
+        open: &open,
+        seal: &FileSeal::of,
+    };
+    let checked = import_with(&staged.layer(), PolicyVerdict::ACCEPTED, access)
+        .unwrap()
+        .check_with(&staged.layer(), DISTRO_POLICY_REVISION, access)
+        .unwrap();
+    assert_eq!(
+        checked.geometry().unwrap(),
+        BlockGeometry {
+            length: HUGE_PAGE,
+            logical_block_size: 512,
+            physical_block_size: HUGE_PAGE as u32,
+        }
+    );
+}
+
 /// Stages a layer, with a manifest if `manifest` is true, binds it by verification, applies
 /// `change`, and returns the failure of the check on a host where reads of content fail, with the
 /// staged layer.

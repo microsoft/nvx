@@ -281,6 +281,11 @@ impl SandboxUpper {
     pub fn scratch_path(&self) -> Option<&Path> {
         self.scratch.as_ref().map(PurePath::as_path)
     }
+
+    /// Returns the scratch image, as `pathlib` normalizes it, or `None` for a RAM upper.
+    pub(crate) fn pure_scratch_path(&self) -> Option<&PurePath> {
+        self.scratch.as_ref()
+    }
 }
 
 /// The network of a plan: the guest's static IPv4 address on its network, and the policy that

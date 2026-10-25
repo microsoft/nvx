@@ -10,7 +10,9 @@ use std::thread;
 use std::time::Duration;
 
 use super::*;
-use crate::host::store::{CAPABILITY_NAME, CONSOLE_NAME, LOG_NAME, OUTCOME_NAME, SOCKET_NAME};
+use crate::host::store::{
+    CAPABILITY_NAME, CLONE_SCRATCH_NAME, CONSOLE_NAME, LOG_NAME, OUTCOME_NAME, SOCKET_NAME,
+};
 use crate::host::test_support::released;
 
 /// The configuration record of these tests' caller.
@@ -321,6 +323,7 @@ fn a_removal_removes_the_store_the_callers_files_and_the_directory() {
         CAPABILITY_NAME,
         SOCKET_NAME,
         CLONE_BINDING_NAME,
+        CLONE_SCRATCH_NAME,
         BOOT,
         ".runtime.json.12345.tmp",
         ".sandbox.lock.7.tmp",
