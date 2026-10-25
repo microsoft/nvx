@@ -693,6 +693,72 @@ fn links_and_directories_under_the_names_of_the_sandboxs_store_are_refused() {
 }
 
 #[test]
+fn names_that_the_file_system_takes_for_those_of_the_stores_files_are_the_stores() {
+    let fixture = Fixture::new();
+    let (image, image_binding) = fixture.image("distro.erofs", IMAGE_LEN);
+    let mut acquired = fixture.acquire("sandbox");
+    let dir = acquired.locked.dir().to_owned();
+    let refusal = |what: &str, path: &Path, owned: &Path| {
+        (
+            ErrorKind::Unsupported,
+            format!(
+                "the {what} {} is {}, a file of the sandbox's store, which its transitions \
+                 replace or remove",
+                shown(path),
+                shown(owned)
+            ),
+        )
+    };
+    // Whether the file system takes the paths `a` and `b` for one file.
+    let same_file = |a: &Path, b: &Path| {
+        let identity = |path: &Path| {
+            File::open(path)
+                .and_then(|file| FileSeal::of(&file))
+                .map(|seal| (seal.device(), seal.file_id()))
+                .ok()
+        };
+        identity(a).is_some() && identity(a) == identity(b)
+    };
+    // An image under the name of one of the store's files in other letter cases is that file
+    // where the file system ignores case, as Windows' do, and another file where it does not.
+    for name in [CLONE_SCRATCH_NAME, LOG_NAME] {
+        let cased = dir.join(name.to_ascii_uppercase());
+        stage(&cased, IMAGE_LEN);
+        let binding = DistroBinding::import(&layer(&cased), PolicyVerdict::ACCEPTED).unwrap();
+        let owned = dir.join(name);
+        let same = same_file(&cased, &owned);
+        let result = fixture.plan(&mut acquired, &tmpfs_request(&cased, &binding), NO_CONTENT);
+        if same {
+            assert_eq!(failure(result), refusal("image", &cased, &owned));
+        } else {
+            drop(result.unwrap());
+        }
+        assert_eq!(fs::metadata(&cased).unwrap().len(), IMAGE_LEN);
+        fs::remove_file(&cased).unwrap();
+    }
+    // So is a scratch image, which a release would remove as the store's file where the file
+    // system takes it for that file, and keeps where it does not.
+    let sparse = sparse_path(&acquired);
+    let _ = fs::remove_file(&sparse);
+    let cased = dir.join(CLONE_SCRATCH_NAME.to_ascii_uppercase());
+    stage(&cased, SCRATCH_LEN);
+    let binding = ScratchBinding::bind(&cased).unwrap();
+    let request = scratch_request(&image, &image_binding, &cased, &binding);
+    let same = same_file(&cased, &sparse);
+    let result = fixture.plan(&mut acquired, &request, NO_CONTENT);
+    if same {
+        assert_eq!(failure(result), refusal("scratch image", &cased, &sparse));
+    } else {
+        drop(result.unwrap());
+        assert_eq!(
+            fixture.store.release(&mut acquired.locked).unwrap(),
+            Some(acquired.lease.clone())
+        );
+    }
+    assert_eq!(fs::metadata(&cased).unwrap().len(), SCRATCH_LEN);
+}
+
+#[test]
 fn templates_that_a_runtime_of_other_contracts_captured_are_refused() {
     // A store that a build of other boot or control contracts kept holds templates whose guests
     // this build cannot drive.
