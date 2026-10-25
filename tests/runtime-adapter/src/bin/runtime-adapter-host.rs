@@ -91,7 +91,31 @@
 //!   the VM left, and publishes the snapshot as its next generation. The command writes the
 //!   initramfs of the guest agent into a directory of its own in the system's temporary
 //!   directory, private to the current user, which it removes once the creation returns, and
-//!   prints the generation only once the store has committed it.
+//!   prints the generation only once the store has committed it. Once it served the generation,
+//!   the creation evicts the generations of the template's class that it supersedes: it retires
+//!   every other generation of the class that the store published before it, or that a tombstone
+//!   quarantines, and the tombstones that interrupted retirements left alone, whatever their
+//!   class; see `runtime_adapter::generations`. An eviction that fails leaves the rest for
+//!   the next one, and fails nothing that the creation served.
+//! - `runtime-adapter-host refresh STORE` takes the options of `create`, and captures a new
+//!   generation of the template, as `create` captures one, with `Store::refresh_template`, whether
+//!   or not the store holds an eligible generation of its class, then evicts the generations of
+//!   the class that the new one supersedes, as `create` does. No other command captures, and no
+//!   restore triggers a capture.
+//! - `runtime-adapter-host list STORE` reports each generation of the template store STORE, which
+//!   it opens, and does not create, in the order of their publication, from the store's index,
+//!   its tombstones, and the records of its leases alone: it reads no generation's payload, so it
+//!   loads no VM state, and hashes nothing, and it takes no lock. Its eligibility is at the host's
+//!   time; see `runtime_adapter::generations`.
+//! - `runtime-adapter-host inspect STORE GENERATION` reports the generation of STORE whose store
+//!   generation is GENERATION, a positive number, as `list` reports it, with its leases and the
+//!   metadata of its capture. It fails for a generation that the store does not hold.
+//! - `runtime-adapter-host remove STORE GENERATION` retires the generation GENERATION of STORE,
+//!   with `Store::retire`: it tombstones the generation first, so that it takes no new lease, and
+//!   deletes it once no lease of it remains, but never moves or deletes a generation that a clone
+//!   leases. While leases remain, it reports them, and leaves the generation tombstoned, which a
+//!   later `remove`, or the next eviction of its class, deletes once they drained. A generation
+//!   that the store no longer holds is retired already.
 //! - `runtime-adapter-host reattach STORE` reattaches to the VM of STORE, which an earlier process
 //!   launched and which it holds although it is not its child, attaches a new session to it, in
 //!   the session's next epoch, and exchanges a `Ping`, leaving the VM running.
@@ -200,11 +224,12 @@
 //!   before, and the epochs of a broker instance only advance, while a broker restored from a
 //!   snapshot has a new instance ID, so no command repeats the key of another's execution.
 //!
-//! Each command but `stage` takes NVX's artifacts from the directory that `NVX_ARTIFACTS_DIR`
-//! names, a repository checkout or an extracted release, and the VM's runtime identity from NVX's
-//! identity of them, with the guest agent's build that `--guest-build BUILD` names, this crate's
-//! version by default; see `runtime_adapter::runtime`. Reattach finds a VM that booted cold under
-//! another runtime identity mismatched, and then signals nothing: the VM keeps running.
+//! Each command but `stage`, `list`, `inspect`, and `remove`, which need no artifacts, takes NVX's
+//! artifacts from the directory that `NVX_ARTIFACTS_DIR` names, a repository checkout or an
+//! extracted release, and the VM's runtime identity from NVX's identity of them, with the guest
+//! agent's build that `--guest-build BUILD` names, this crate's version by default; see
+//! `runtime_adapter::runtime`. Reattach finds a VM that booted cold under another runtime identity
+//! mismatched, and then signals nothing: the VM keeps running.
 //!
 //! The sandbox of a clone holds the clone's lease, through whose path the commands that reattach
 //! take the sandbox's lock. They reattach to a clone with `nvx::host::template::reattach_clone`,
@@ -259,11 +284,17 @@
 //!   nothing;
 //! - `outcome`: the category and status code of the VM's outcome report, such as `success 0`;
 //! - `teardown`: whether the VM's teardown completed: `complete` or `incomplete`;
-//! - `created`: how `create` served the template: `captured`, with a generation that a capture
-//!   made and the store published, or `existing`, with one that the store held;
-//! - `generation`, `key`, and `class`: the store generation of the template that `create` served,
-//!   and the identities of its compatibility key and of its capture class, each 64 hexadecimal
-//!   digits, or the store generation that `start` leased;
+//! - `created`: how `create` or `refresh` served the template: `captured`, with a generation that
+//!   a capture made and the store published, which a refresh always prints, or `existing`, with
+//!   one that the store held;
+//! - `generation`, `key`, and `class`: the store generation of the template that `create` or
+//!   `refresh` served, or that `inspect` reports, and the identities of its compatibility key and
+//!   of its capture class, each 64 hexadecimal digits, or the store generation that `start`
+//!   leased;
+//! - `retired` and `draining`: the generations that the eviction of `create` or `refresh` retired,
+//!   each list separated by commas, or `none`: those of the class that it deleted, or found gone
+//!   already, with those whose interrupted retirement it completed, and those that leases keep,
+//!   tombstoned;
 //! - `lease`: the identity of the lease that `start` took, 32 hexadecimal digits;
 //! - `downtime` and `source`: the downtime of the leased generation's capture at the host's time,
 //!   in nanoseconds, and the clock that measured it: `monotonic`, the host's monotonic clock, on
@@ -282,7 +313,29 @@
 //!     `unresolved`;
 //!   - `code`: the code of the failure's error, such as `runtime-mismatch`;
 //! - `quarantined`: whether the command quarantined the generation of a clone that failed:
-//!   `yes`, for a failure of the template, or `no`.
+//!   `yes`, for a failure of the template, or `no`;
+//! - `store`: the identity of the template store that `list` or `inspect` read, 32 hexadecimal
+//!   digits;
+//! - `generations`: the store generations that `list` found, separated by commas, or `none`;
+//! - `generation.G.KEY`: what `list` found of the generation G, with the KEYs `key`, `class`,
+//!   `state`, `eligibility`, `reason`, and `leases`, which `inspect` prints of its generation;
+//! - `state`: `available`, or `tombstoned` once a tombstone quarantines the generation;
+//! - `eligibility` and `reason`: whether a clone may restore the generation at the host's time,
+//!   `eligible`, `early`, or `expired`, and NVX's reason, with the downtime of its capture;
+//! - `leases`: the identities of the generation's leases that the store's records list, each 32
+//!   hexadecimal digits, separated by commas, or `none`;
+//! - `lease.ID.sandbox` and `lease.ID.launch`: the directory of the sandbox that holds the lease ID,
+//!   with its links resolved, and the launch of its clone that the lease reserves;
+//! - `storage`: the storage generation of the capture, 32 hexadecimal digits;
+//! - `time.host`, `time.boot`, `time.clock`, `time.utc`, `time.monotonic`, and `time.lineage`: the
+//!   time contract of the capture: the identities of the host and of its boot that captured it,
+//!   each 32 hexadecimal digits, the host's monotonic clock, `linux-boottime` or
+//!   `windows-interrupt-time`, the anchor of the capture in UTC, in nanoseconds since the Unix
+//!   epoch, and by that clock, in nanoseconds, and its time lineage counter;
+//! - `length.state` and `length.memory`: the lengths of the snapshot's saved state and of its RAM,
+//!   in bytes;
+//! - `removed`: what `remove` did: `retired`, once the generation is gone, or `draining`, once it
+//!   tombstoned the generation, which the leases that it reports keep.
 //!
 //! Values escape `\`, newlines, and carriage returns as `\\`, `\n`, and `\r`, and each byte of a
 //! program's output that is not part of UTF-8 text as `\xHH`, with two hexadecimal digits.
@@ -300,6 +353,7 @@
 //! the guest reported that a stage of the root failed, and the VM ended with the stage's status
 //! and a complete teardown, with 5 when the step hook ends a command, with 6 when the guest failed
 //! a mapping of the table, and the VM stopped gracefully, with success and a complete teardown,
+//! with 7 when `remove` finds leases that keep the generation, which it tombstoned,
 //! with 8 when a clone failed, once nothing of it runs and the command released its lease, with 9
 //! when a clone failed, and its teardown is unresolved, so that the sandbox keeps the lease, and
 //! with 1, after a diagnostic on standard error, when they fail. Anything else is a usage error,
@@ -328,9 +382,9 @@ use nvx::host::session;
 use nvx::host::store::{CallerFiles, IdentityPart, LOG_NAME, LaunchId, LockedStore, SandboxStore};
 use nvx::host::supervisor::{self, Reattached, Starting, StopOutcome, Vmm, VmmCommand};
 use nvx::host::template::{
-    Acquired, CAPTURES_NAME, CloneControl, CloneFailure, ClonePlan, Created, DowntimeSource,
-    Eligibility, Evidence, FailureRecord, HostTime, Lease, ReattachedClone, RestoreDeadlines,
-    Store, TRANSACTION_NAME, reattach_clone,
+    Acquired, CAPTURES_NAME, Capture, CloneControl, CloneFailure, ClonePlan, Created,
+    DowntimeSource, Eligibility, Evidence, FailureRecord, HostTime, Lease, ReattachedClone,
+    RestoreDeadlines, Retirement, Store, TRANSACTION_NAME, reattach_clone,
 };
 use nvx::protocol::CAPABILITY_LEN;
 use nvx::protocol::root::ImageFormat;
@@ -343,6 +397,7 @@ use runtime_adapter::capture::{
 use runtime_adapter::clone::{CloneRecord, host_time_from_env};
 use runtime_adapter::exec::{self, AccountMode, HostExecution, Start};
 use runtime_adapter::frame::{MAX_BODY, Message};
+use runtime_adapter::generations::{self, Entry};
 use runtime_adapter::hook::{Step, StepHook};
 use runtime_adapter::host::{self, Client, ClientError, CloneOrder, Executions, OrderError};
 use runtime_adapter::initramfs;
@@ -353,7 +408,8 @@ use runtime_adapter::runtime::Runtime;
 use runtime_adapter::sharing::{HostFsSharing, Share};
 use runtime_adapter::staged::Staged;
 
-/// How long a command waits for the sandbox's lock.
+/// How long a command waits for the sandbox's lock, and `remove` and an eviction for the template
+/// store's lock to retire a generation.
 const LOCK_TIMEOUT: Duration = Duration::from_secs(10);
 /// How long a launch waits for the VM to boot, its guest agent to assemble a layered root, and to
 /// answer.
@@ -387,6 +443,9 @@ const ROOT_FAILED: u8 = 4;
 /// The exit status of a launch whose guest failed a mapping of the table, once the VM stopped
 /// gracefully, with success and a complete teardown.
 const TABLE_FAILED: u8 = 6;
+/// The exit status of a removal that found leases of the generation, which keep it, tombstoned,
+/// until their clones release them.
+const BUSY: u8 = 7;
 /// The exit status of a command whose clone failed, as NVX attributes and records the failure,
 /// once nothing of the clone runs: the failure's teardown is resolved, and the command released
 /// the clone's lease.
@@ -427,12 +486,14 @@ const USAGE: &str = concat!(
     "            [--workload-identity UID:GID] [--network FILE]\n",
     "            [--share HOST:TARGET[:ro]... [--deny PATH]... [--reserved TARGET]...",
     " [--share-root DIR]...]]\n",
-    "       runtime-adapter-host create STORE --guest-agent PATH --distro FORMAT:PATH",
+    "       runtime-adapter-host (create | refresh) STORE --guest-agent PATH --distro FORMAT:PATH",
     " --distro-identity UUID\n",
     "           [--hypervisor NAME] [--guest-build BUILD] [--cpu-profile PROFILE]",
     " [--processors N]\n",
     "           [--memory MIB] [--memory-capacity MIB] [--scratch-length BYTES]",
     " [--network FILE]\n",
+    "       runtime-adapter-host list STORE\n",
+    "       runtime-adapter-host (inspect | remove) STORE GENERATION\n",
     "       runtime-adapter-host (reattach | stop) STORE [--guest-build BUILD]",
     " [--template TEMPLATES]\n",
     "       runtime-adapter-host start STORE --template TEMPLATES --generation G",
@@ -484,7 +545,8 @@ enum Command {
         /// The step hook, for tests, if `RUNTIME_ADAPTER_STEP_HOOK` sets one.
         hook: Option<StepHook>,
     },
-    /// Serve a template from a template store, which captures one if it holds none.
+    /// Serve a template from a template store, which captures one if it holds none, or which a
+    /// refresh captures anyway.
     Create {
         /// The template store.
         store: PathBuf,
@@ -496,6 +558,27 @@ enum Command {
         guest_build: String,
         /// The template.
         template: Box<Template>,
+        /// Whether a generation that the store holds may serve the template, or a capture must.
+        serving: Serving,
+    },
+    /// Report the generations of a template store.
+    List {
+        /// The template store.
+        store: PathBuf,
+    },
+    /// Report a generation of a template store.
+    Inspect {
+        /// The template store.
+        store: PathBuf,
+        /// The generation's store generation.
+        generation: StoreGeneration,
+    },
+    /// Retire a generation of a template store.
+    Remove {
+        /// The template store.
+        store: PathBuf,
+        /// The generation's store generation.
+        generation: StoreGeneration,
     },
     /// Reattach to the VM, and stop it if asked.
     Reattach {
@@ -659,6 +742,29 @@ struct Template {
     network: Option<PathBuf>,
 }
 
+/// How `create` and `refresh` serve a template.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Serving {
+    /// `create`: with a generation of the template's class that the store holds, and that is
+    /// eligible at the host's time, or else with one that a capture makes.
+    Create,
+    /// `refresh`: with a generation that a capture makes, always.
+    Refresh,
+}
+
+impl Serving {
+    /// Serves the template that `capture` describes from `store`, as `self` says, waiting for the
+    /// capture's slot and the store's lock until `deadline`, which bounds a capture too.
+    fn serve(self, store: &Store, capture: &Capture, deadline: Instant) -> nvx::Result<Created> {
+        match self {
+            Self::Create => store.create_template(capture, HostTime::now, deadline),
+            Self::Refresh => store
+                .refresh_template(capture, deadline)
+                .map(Created::Captured),
+        }
+    }
+}
+
 /// The clone of `start`, as its options give it.
 struct CloneOptions {
     /// The template store.
@@ -764,7 +870,18 @@ fn main() -> ExitCode {
             hypervisor,
             guest_build,
             template,
-        } => create(&store, &guest_agent, hypervisor, &guest_build, &template),
+            serving,
+        } => create(
+            &store,
+            &guest_agent,
+            hypervisor,
+            &guest_build,
+            &template,
+            serving,
+        ),
+        Command::List { store } => list(&store),
+        Command::Inspect { store, generation } => inspect(&store, generation),
+        Command::Remove { store, generation } => remove(&store, generation),
         Command::Reattach {
             store,
             guest_build,
@@ -810,17 +927,22 @@ fn parse(arguments: Vec<OsString>) -> Result<Command, String> {
     };
     let name = match name.to_str() {
         Some(
-            name @ ("stage" | "launch" | "create" | "reattach" | "stop" | "start" | "probe"
-            | "exec"),
+            name @ ("stage" | "launch" | "create" | "refresh" | "list" | "inspect" | "remove"
+            | "reattach" | "stop" | "start" | "probe" | "exec"),
         ) => name.to_owned(),
         _ => return Err(format!("unknown command {name:?}")),
     };
     let store = PathBuf::from(arguments.next().ok_or_else(|| match name.as_str() {
-        "create" => "create needs a template store".to_owned(),
+        "create" | "refresh" | "list" | "inspect" | "remove" => {
+            format!("{name} needs a template store")
+        }
         _ => format!("{name} needs a sandbox store"),
     })?);
     if name == "exec" {
         return parse_exec(store, arguments);
+    }
+    if matches!(name.as_str(), "list" | "inspect" | "remove") {
+        return parse_generations(&name, store, arguments);
     }
     let mut options = Options::default();
     let mut probes = Vec::new();
@@ -914,10 +1036,16 @@ fn parse(arguments: Vec<OsString>) -> Result<Command, String> {
                 hook: StepHook::from_env()?,
             }
         }
-        "create" => {
-            let guest_agent = options.guest_agent.ok_or("create needs --guest-agent")?;
-            let (format, distro) = options.distro.ok_or("create needs --distro")?;
-            let identity = options.identity.ok_or("create needs --distro-identity")?;
+        "create" | "refresh" => {
+            let guest_agent = options
+                .guest_agent
+                .ok_or_else(|| format!("{name} needs --guest-agent"))?;
+            let (format, distro) = options
+                .distro
+                .ok_or_else(|| format!("{name} needs --distro"))?;
+            let identity = options
+                .identity
+                .ok_or_else(|| format!("{name} needs --distro-identity"))?;
             let memory = options
                 .memory
                 .unwrap_or(u64::from(DEFAULT_MEMORY_MIB) * MIB);
@@ -939,6 +1067,11 @@ fn parse(arguments: Vec<OsString>) -> Result<Command, String> {
                     scratch_length: options.scratch_length.unwrap_or(DEFAULT_SCRATCH_LENGTH),
                     network: options.network,
                 }),
+                serving: if name == "refresh" {
+                    Serving::Refresh
+                } else {
+                    Serving::Create
+                },
             }
         }
         "start" => {
@@ -1008,7 +1141,9 @@ fn parse_option(
             .into_string()
             .map_err(|value| format!("the value {value:?} of {option} is not Unicode"))
     };
-    match (name, option) {
+    // A refresh takes the options of a creation.
+    let command = if name == "refresh" { "create" } else { name };
+    match (command, option) {
         ("launch" | "create", "--guest-agent") if options.guest_agent.is_none() => {
             options.guest_agent = Some(PathBuf::from(value));
         }
@@ -1289,6 +1424,47 @@ fn parse_exec(
         store,
         guest_build: guest_build.unwrap_or_else(|| GUEST_BUILD.to_owned()),
         executions,
+    })
+}
+
+/// Parses the arguments of `list`, `inspect`, or `remove`, the command `name`, after its template
+/// store `store`: none for `list`, and the store generation of a generation, a positive number,
+/// for `inspect` and `remove`, or says why they are not the command's.
+fn parse_generations(
+    name: &str,
+    store: PathBuf,
+    mut arguments: impl Iterator<Item = OsString>,
+) -> Result<Command, String> {
+    let unexpected = |argument: &OsString| match argument.to_str() {
+        Some(option) if option.starts_with("--") => {
+            format!("unexpected option {option:?} of {name}")
+        }
+        _ => format!("unexpected argument {argument:?} of {name}"),
+    };
+    let generation = match (name, arguments.next()) {
+        ("list", None) => None,
+        ("list", Some(argument)) => return Err(unexpected(&argument)),
+        (_, None) => return Err(format!("{name} needs a generation")),
+        (_, Some(argument)) if argument.to_str().is_some_and(|text| text.starts_with("--")) => {
+            return Err(unexpected(&argument));
+        }
+        (_, Some(argument)) => {
+            let generation = argument
+                .to_str()
+                .and_then(|text| text.parse::<NonZeroU64>().ok())
+                .ok_or_else(|| {
+                    format!("{name} takes a generation, a positive number, not {argument:?}")
+                })?;
+            Some(StoreGeneration::new(generation))
+        }
+    };
+    if let Some(argument) = arguments.next() {
+        return Err(unexpected(&argument));
+    }
+    Ok(match (name, generation) {
+        ("inspect", Some(generation)) => Command::Inspect { store, generation },
+        ("remove", Some(generation)) => Command::Remove { store, generation },
+        _ => Command::List { store },
     })
 }
 
@@ -1647,14 +1823,17 @@ fn echo_body() -> Vec<u8> {
 /// Serves a template of the guest agent `guest_agent`, of the build `guest_build`, which
 /// `template` describes, on `hypervisor`, or else the one that
 /// `nvx::Hypervisor::from_env_or_default` selects, from the template store `store`, which it
-/// creates if needed: a generation of the template's class that the store holds, and that is
-/// eligible at the host's time, or one that a capture makes, which the store publishes.
+/// creates if needed: for `create`, a generation of the template's class that the store holds,
+/// and that is eligible at the host's time, or one that a capture makes, which the store
+/// publishes, and for `refresh`, one that a capture makes, whatever the store holds, as `serving`
+/// says. It then evicts the generations of the class that the one it served supersedes.
 fn create(
     store: &Path,
     guest_agent: &Path,
     hypervisor: Option<Hypervisor>,
     guest_build: &str,
     template: &Template,
+    serving: Serving,
 ) -> Result<ExitCode, String> {
     // A network that the plan refuses fails the creation before it needs NVX's artifacts or the
     // store.
@@ -1714,8 +1893,8 @@ fn create(
     // A class that no capture takes fails before the store is created.
     let class = capture.class.identity().map_err(|error| describe(&error))?;
     let store = Store::create(&store).map_err(|error| describe(&error))?;
-    let created = store
-        .create_template(&capture, HostTime::now, Instant::now() + CAPTURE_TIMEOUT)
+    let created = serving
+        .serve(&store, &capture, Instant::now() + CAPTURE_TIMEOUT)
         .map_err(|error| {
             // The store names the slot of a class by the first digits of its identity, and keeps
             // the log of the VMM of the class's latest capture there once the capture's launch
@@ -1746,7 +1925,139 @@ fn create(
     println!("generation={}", generation.generation());
     println!("key={}", generation.key());
     println!("class={}", generation.class());
+    // The store has committed the generation, which the eviction never undoes: one that fails
+    // leaves the generations that it did not retire to the next eviction of the class.
+    match generations::evict(&store, generation, Instant::now() + LOCK_TIMEOUT) {
+        Ok(eviction) => {
+            println!("retired={}", store_generations(&eviction.retired));
+            println!("draining={}", store_generations(&eviction.draining));
+        }
+        Err(error) => eprintln!(
+            "runtime-adapter-host: the store serves the generation {}, but cannot retire the \
+             generations of its class that it supersedes: {}",
+            generation.generation(),
+            describe(&error)
+        ),
+    }
     Ok(ExitCode::SUCCESS)
+}
+
+/// Returns the store generations `generations`, separated by commas, or `none` without one.
+fn store_generations(generations: &[StoreGeneration]) -> String {
+    joined(generations.iter().map(StoreGeneration::to_string))
+}
+
+/// Returns `items`, separated by commas, or `none` without one.
+fn joined(items: impl Iterator<Item = String>) -> String {
+    let joined = items.collect::<Vec<_>>().join(",");
+    if joined.is_empty() {
+        "none".to_owned()
+    } else {
+        joined
+    }
+}
+
+/// Reports the generations of the template store `store`, which it opens, in the order of their
+/// publication, with their eligibility at the host's time, from the store's records alone: it
+/// reads no generation's payload, and takes no lock.
+fn list(store: &Path) -> Result<ExitCode, String> {
+    let store = Store::open(store).map_err(|error| describe(&error))?;
+    let now = HostTime::now().map_err(|error| describe(&error))?;
+    let entries = generations::entries(&store, &now).map_err(|error| describe(&error))?;
+    println!("store={}", store.id());
+    let listed: Vec<_> = entries
+        .iter()
+        .map(|entry| entry.generation.generation())
+        .collect();
+    println!("generations={}", store_generations(&listed));
+    for entry in &entries {
+        print_entry(
+            &format!("generation.{}.", entry.generation.generation()),
+            entry,
+        );
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+/// Reports the generation `generation` of the template store `store`, which it opens, as `list`
+/// reports it, with its leases and the metadata of its capture.
+fn inspect(store: &Path, generation: StoreGeneration) -> Result<ExitCode, String> {
+    let store = Store::open(store).map_err(|error| describe(&error))?;
+    let now = HostTime::now().map_err(|error| describe(&error))?;
+    let entry = generations::entry(&store, generation, &now).map_err(|error| describe(&error))?;
+    println!("store={}", store.id());
+    println!("generation={generation}");
+    print_entry("", &entry);
+    print_leases(&entry.leases);
+    let indexed = &entry.generation;
+    println!("storage={}", indexed.storage_generation());
+    let time = indexed.time();
+    let host: String = time
+        .host_id
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    println!("time.host={host}");
+    println!("time.boot={}", time.boot_id);
+    println!("time.clock={}", time.host_clock.as_str());
+    println!("time.utc={}", time.capture_utc_ns);
+    println!("time.monotonic={}", time.capture_monotonic_ns);
+    println!("time.lineage={}", time.lineage);
+    println!("length.state={}", indexed.state_len());
+    println!("length.memory={}", indexed.memory_len());
+    Ok(ExitCode::SUCCESS)
+}
+
+/// Prints what `list` and `inspect` report of the generation of `entry`, each key after `prefix`.
+fn print_entry(prefix: &str, entry: &Entry) {
+    let generation = &entry.generation;
+    println!("{prefix}key={}", generation.key());
+    println!("{prefix}class={}", generation.class());
+    println!("{prefix}state={}", entry.state.name());
+    let eligibility = match entry.eligibility {
+        Eligibility::Eligible(_) => "eligible",
+        Eligibility::Early { .. } => "early",
+        Eligibility::Expired(_) => "expired",
+    };
+    println!("{prefix}eligibility={eligibility}");
+    println!("{prefix}reason={}", escape(&entry.eligibility.to_string()));
+    let leases = entry.leases.iter().map(|lease| lease.id().to_string());
+    println!("{prefix}leases={}", joined(leases));
+}
+
+/// Prints the sandbox and the launch of each of `leases`.
+fn print_leases(leases: &[Lease]) {
+    for lease in leases {
+        let id = lease.id();
+        println!(
+            "lease.{id}.sandbox={}",
+            escape(&lease.sandbox().to_string_lossy())
+        );
+        println!("lease.{id}.launch={}", lease.launch());
+    }
+}
+
+/// Retires the generation `generation` of the template store `store`, which it opens: it
+/// tombstones the generation, and deletes it once no lease of it remains. Ends with [`BUSY`] once
+/// it reported the leases that keep the generation.
+fn remove(store: &Path, generation: StoreGeneration) -> Result<ExitCode, String> {
+    let store = Store::open(store).map_err(|error| describe(&error))?;
+    let retirement = store
+        .retire(generation, Some(Instant::now() + LOCK_TIMEOUT))
+        .map_err(|error| describe(&error))?;
+    match retirement {
+        Retirement::Retired => {
+            println!("removed=retired");
+            Ok(ExitCode::SUCCESS)
+        }
+        Retirement::Draining(leases) => {
+            println!("removed=draining");
+            let ids = leases.iter().map(|lease| lease.id().to_string());
+            println!("leases={}", joined(ids));
+            print_leases(&leases);
+            Ok(ExitCode::from(BUSY))
+        }
+    }
 }
 
 /// A directory private to the current user, which a command creates in the system's temporary

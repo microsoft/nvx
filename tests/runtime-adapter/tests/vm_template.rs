@@ -16,6 +16,15 @@
 //! any VM starts, and the host program refuses a class that no capture takes before it creates the
 //! store.
 //!
+//! Other scenarios run the host program's operations on the generations of a store: `refresh`,
+//! which captures a generation of a class whose store holds an eligible one already, and retires
+//! those that the new one supersedes, `list` and `inspect`, which report what the store records of
+//! its generations, and `remove`, which retires one. A clone's lease, which a test takes through
+//! NVX's store, as a clone's start does, but without launching anything, keeps a generation that a
+//! refresh supersedes, or that a removal retires, tombstoned, with its payload, until the clone
+//! releases it: a removal reports busy, with status 7, until then, and the next removal, or the
+//! next eviction of the class, deletes it.
+//!
 //! The tests boot VMs, so they are ignored. They read what the `common` module lists, and take the
 //! placeholder from its fixtures.
 //!
@@ -30,18 +39,22 @@ use std::env;
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, File};
 use std::io;
+use std::num::NonZeroU64;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
-use nvx::Hypervisor;
+use nvx::activation::StoreGeneration;
 use nvx::host::artifacts::Artifacts;
-use nvx::host::store::{LOG_NAME, SandboxStore};
+use nvx::host::store::{CallerFiles, LOG_NAME, SandboxStore};
 use nvx::host::template::{
-    CAPTURE_RECORD_NAME, CAPTURES_NAME, GENERATIONS_NAME, KEY_NAME, MANIFEST_NAME,
+    CAPTURE_RECORD_NAME, CAPTURES_NAME, GENERATIONS_NAME, HostTime, KEY_NAME, Lease, MANIFEST_NAME,
     MEMORY_BLOCK_SIZE, SNAPSHOT_NAME, Store, TRANSACTION_NAME,
 };
 use nvx::protocol::cmdline::{self, Parameter};
+use nvx::{ErrorCode, Hypervisor};
 use runtime_adapter::GUEST_BUILD;
 use runtime_adapter::capture::{DEFAULT_SCRATCH_LENGTH, LOGICAL_BLOCK_SIZE};
+use runtime_adapter::probe::escape;
 use runtime_adapter::runtime::Runtime;
 use runtime_adapter::template::is_platform_token;
 use serde_json::{Value, json};
@@ -50,6 +63,10 @@ use common::{Fixtures, Printed, Sandbox};
 
 /// The exit status of the host program's command that failed, after a diagnostic.
 const FAILED: i32 = 1;
+/// The exit status of a removal that found leases that keep the generation.
+const BUSY: i32 = 7;
+/// How long a test waits for the template store's lock, and for the lock of a clone's sandbox.
+const LOCK_TIMEOUT: Duration = Duration::from_secs(10);
 /// Bytes in a mebibyte.
 const MIB: u64 = 1024 * 1024;
 /// The RAM of a template, unless the scenario names another, and its capacity, which the host
@@ -213,9 +230,10 @@ impl Templates {
         }
     }
 
-    /// Creates `template` in the store, checks that the creation exits with `status`, and returns
-    /// what it printed.
-    fn create(&mut self, template: &Template, status: i32) -> Printed {
+    /// Returns the options of a creation or a refresh of `template`, which name its placeholder,
+    /// and the network that it writes to a file of the test's, if any, and the processors, the
+    /// RAM, its capacity, and the length of the scratch that the template names.
+    fn options(&self, template: &Template) -> Vec<OsString> {
         let mut distro = OsString::from("erofs:");
         distro.push(&self.placeholder);
         let mut options = vec![
@@ -243,8 +261,30 @@ impl Templates {
             fs::write(&file, form.to_string()).unwrap();
             options.extend([OsString::from("--network"), file.into_os_string()]);
         }
+        options
+    }
+
+    /// Creates `template` in the store, checks that the creation exits with `status`, and returns
+    /// what it printed.
+    fn create(&mut self, template: &Template, status: i32) -> Printed {
+        let options = self.options(template);
         let options: Vec<&OsStr> = options.iter().map(OsString::as_os_str).collect();
         self.sandbox.create(&options, status)
+    }
+
+    /// Refreshes `template` in the store, checks that the refresh exits with `status`, and returns
+    /// what it printed.
+    fn refresh(&mut self, template: &Template, status: i32) -> Printed {
+        let options = self.options(template);
+        let options: Vec<&OsStr> = options.iter().map(OsString::as_os_str).collect();
+        self.sandbox.refresh(&options, status)
+    }
+
+    /// Runs the host program's `command` on the store, with `arguments`, checks that it exits
+    /// with `status`, and returns what it printed.
+    fn run(&mut self, command: &str, arguments: &[&str], status: i32) -> Printed {
+        let arguments: Vec<&OsStr> = arguments.iter().map(OsStr::new).collect();
+        self.sandbox.run(command, &arguments, status)
     }
 
     /// Returns the template store, which a creation created.
@@ -524,6 +564,377 @@ fn a_class_that_no_capture_takes_is_refused_before_the_store() {
         ..Template::new(Network::None)
     };
     templates.create(&template, FAILED);
+    let stderr = templates.sandbox.stderr();
+    assert!(stderr.contains("needs 1, 2, 4, or 8 of each"), "{stderr}");
+    assert!(!templates.sandbox.store.exists());
+}
+
+/// Returns the store generation `number`.
+fn generation(number: u64) -> StoreGeneration {
+    StoreGeneration::new(NonZeroU64::new(number).unwrap())
+}
+
+/// Leases the generation `number` of the store of `templates` to the clone of the sandbox `name`,
+/// a directory of the test's own, which it provisions, as a clone's start leases one, but without
+/// launching anything, and returns the lease.
+fn lease(templates: &Templates, number: u64, name: &str) -> Lease {
+    let sandbox = templates.sandbox.root.join(name);
+    SandboxStore::create(&sandbox).unwrap();
+    let now = HostTime::now().unwrap();
+    let deadline = Some(Instant::now() + LOCK_TIMEOUT);
+    // The acquisition returns the sandbox's lock too, which the lease outlasts.
+    templates
+        .store()
+        .acquire(
+            generation(number),
+            &sandbox,
+            &CallerFiles::none(),
+            &now,
+            deadline,
+        )
+        .unwrap()
+        .lease
+}
+
+/// Releases `lease`, as the teardown of its clone does once the clone's VM has exited, under the
+/// lock of its sandbox, which it takes through the lease's path.
+fn release(templates: &Templates, lease: &Lease) {
+    let sandbox = SandboxStore::open(lease.sandbox()).unwrap();
+    let mut locked = sandbox.lock(Some(Instant::now() + LOCK_TIMEOUT)).unwrap();
+    let released = templates.store().release(&mut locked).unwrap();
+    assert_eq!(released.as_ref(), Some(lease));
+}
+
+/// Returns `leases` in the order of their identities, in which the store lists them.
+fn ordered<'a>(leases: &[&'a Lease]) -> Vec<&'a Lease> {
+    let mut leases = leases.to_vec();
+    leases.sort_by_key(|lease| lease.id());
+    leases
+}
+
+/// Returns the identities of `leases`, separated by commas, or `none` without one, as the host
+/// program prints them.
+fn lease_ids(leases: &[&Lease]) -> String {
+    let ids: Vec<String> = ordered(leases)
+        .iter()
+        .map(|lease| lease.id().to_string())
+        .collect();
+    if ids.is_empty() {
+        "none".to_owned()
+    } else {
+        ids.join(",")
+    }
+}
+
+/// Checks that `printed` holds the sandbox and the launch of each of `leases`, as `inspect` and
+/// `remove` print them.
+fn assert_leases(printed: &Printed, leases: &[&Lease]) {
+    for lease in leases {
+        let id = lease.id();
+        assert_eq!(
+            printed[format!("lease.{id}.sandbox").as_str()],
+            escape(lease.sandbox().to_str().unwrap()),
+            "{printed:?}"
+        );
+        assert_eq!(
+            printed[format!("lease.{id}.launch").as_str()],
+            lease.launch().to_string(),
+            "{printed:?}"
+        );
+    }
+}
+
+/// Checks that the store of `templates` indexes exactly the generations `numbers`, and holds their
+/// payloads alone.
+fn assert_held(templates: &Templates, numbers: &[u64]) {
+    let index = templates.store().index().unwrap();
+    let indexed: Vec<u64> = index
+        .generations()
+        .iter()
+        .map(|generation| generation.generation().get().get())
+        .collect();
+    assert_eq!(indexed, numbers);
+    let mut payloads: Vec<u64> = names(&templates.sandbox.store.join(GENERATIONS_NAME))
+        .iter()
+        .map(|name| name.parse().unwrap())
+        .collect();
+    payloads.sort_unstable();
+    assert_eq!(payloads, numbers);
+}
+
+/// Checks that `printed`, what a creation or a refresh printed, says that its eviction retired
+/// the generations `retired`, and left the generations `draining` to their leases.
+fn assert_evicted(printed: &Printed, retired: &str, draining: &str) {
+    assert_eq!(printed["retired"], retired, "{printed:?}");
+    assert_eq!(printed["draining"], draining, "{printed:?}");
+}
+
+/// Checks that what `printed` says of the generation `number` of the store of `templates`, each
+/// key after `prefix`, as `list` and `inspect` print it, is what the store records: its key, its
+/// class, the state `state`, its eligibility at the host's time, and the leases `leases`.
+fn assert_entry(
+    templates: &Templates,
+    printed: &Printed,
+    prefix: &str,
+    number: u64,
+    state: &str,
+    leases: &[&Lease],
+) {
+    let index = templates.store().index().unwrap();
+    let indexed = index.get(generation(number)).unwrap();
+    let value = |key: &str| printed[format!("{prefix}{key}").as_str()].clone();
+    assert_eq!(value("key"), indexed.key().to_string(), "{printed:?}");
+    assert_eq!(value("class"), indexed.class().to_string(), "{printed:?}");
+    assert_eq!(value("state"), state, "{printed:?}");
+    // The capture just happened, on this host.
+    assert_eq!(value("eligibility"), "eligible", "{printed:?}");
+    let reason = value("reason");
+    assert!(
+        reason.starts_with("eligible, after a downtime of ")
+            && reason.ends_with(" ns by the host's monotonic clock"),
+        "{reason}"
+    );
+    assert_eq!(value("leases"), lease_ids(leases), "{printed:?}");
+}
+
+/// Checks that `listed`, what `list` printed, reports the generations of the store of `templates`,
+/// each the store generation, the state, and the leases of one of `expected`, and nothing else.
+fn assert_listed(templates: &Templates, listed: &Printed, expected: &[(u64, &str, &[&Lease])]) {
+    assert_eq!(
+        listed["store"],
+        templates.store().id().to_string(),
+        "{listed:?}"
+    );
+    let numbers: Vec<String> = expected
+        .iter()
+        .map(|(number, ..)| number.to_string())
+        .collect();
+    let generations = if numbers.is_empty() {
+        "none".to_owned()
+    } else {
+        numbers.join(",")
+    };
+    assert_eq!(listed["generations"], generations, "{listed:?}");
+    for (number, state, leases) in expected {
+        let prefix = format!("generation.{number}.");
+        assert_entry(templates, listed, &prefix, *number, state, leases);
+    }
+    // The store and its generations, then six keys of each.
+    assert_eq!(listed.len(), 2 + 6 * expected.len(), "{listed:?}");
+}
+
+/// Checks that `inspected`, what `inspect` printed of the generation `number` of the store of
+/// `templates`, reports it as the store records it, with the state `state` and the leases
+/// `leases`, and the metadata of its capture, and nothing else.
+fn assert_inspected(
+    templates: &Templates,
+    inspected: &Printed,
+    number: u64,
+    state: &str,
+    leases: &[&Lease],
+) {
+    let store = templates.store();
+    assert_eq!(inspected["store"], store.id().to_string(), "{inspected:?}");
+    assert_eq!(inspected["generation"], number.to_string(), "{inspected:?}");
+    assert_entry(templates, inspected, "", number, state, leases);
+    assert_leases(inspected, leases);
+    let index = store.index().unwrap();
+    let indexed = index.get(generation(number)).unwrap();
+    let time = indexed.time();
+    let host: String = time
+        .host_id
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    let now = HostTime::now().unwrap();
+    // The capture's time contract names this host, its boot, and its clock.
+    assert_eq!(time.host_id, now.host_id);
+    assert_eq!(time.boot_id, now.boot_id);
+    for (key, value) in [
+        ("storage", indexed.storage_generation().to_string()),
+        ("time.host", host),
+        ("time.boot", time.boot_id.to_string()),
+        ("time.clock", now.clock.as_str().to_owned()),
+        ("time.utc", time.capture_utc_ns.to_string()),
+        ("time.monotonic", time.capture_monotonic_ns.to_string()),
+        ("time.lineage", time.lineage.to_string()),
+        ("length.state", indexed.state_len().to_string()),
+        ("length.memory", indexed.memory_len().to_string()),
+    ] {
+        assert_eq!(inspected[key], value, "{key}: {inspected:?}");
+    }
+    // The store and the generation, six keys of its entry, two of each lease, and nine of the
+    // capture's metadata.
+    assert_eq!(
+        inspected.len(),
+        2 + 6 + 2 * leases.len() + 9,
+        "{inspected:?}"
+    );
+}
+
+/// Checks that `removed`, what `remove` printed, says `outcome`, `retired` or `draining`, with
+/// the leases `leases` that keep a draining generation, and nothing else.
+fn assert_removed(removed: &Printed, outcome: &str, leases: &[&Lease]) {
+    assert_eq!(removed["removed"], outcome, "{removed:?}");
+    if outcome == "draining" {
+        assert_eq!(removed["leases"], lease_ids(leases), "{removed:?}");
+        assert_leases(removed, leases);
+        assert_eq!(removed.len(), 2 + 2 * leases.len(), "{removed:?}");
+    } else {
+        assert!(leases.is_empty());
+        assert_eq!(removed.len(), 1, "{removed:?}");
+    }
+}
+
+#[test]
+#[ignore = "boots VMs; see the module documentation for what they need"]
+fn a_refresh_captures_and_retires_the_generations_that_it_supersedes() {
+    let mut templates = Templates::new("tpl-refresh");
+    let template = Template::new(Network::None);
+    let created = templates.create(&template, 0);
+    assert_captured(&templates, &created, &template);
+    assert_evicted(&created, "none", "none");
+
+    // The store's one generation, which no clone leases, as the store records it.
+    let listed = templates.run("list", &[], 0);
+    assert_listed(&templates, &listed, &[(1, "available", &[])]);
+    let inspected = templates.run("inspect", &["1"], 0);
+    assert_inspected(&templates, &inspected, 1, "available", &[]);
+
+    // A refresh captures a new generation of the class, although the store holds an eligible one,
+    // and retires the one that it supersedes, which no lease keeps.
+    let refreshed = templates.refresh(&template, 0);
+    assert_eq!(refreshed["created"], "captured", "{refreshed:?}");
+    assert_eq!(refreshed["generation"], "2", "{refreshed:?}");
+    assert_eq!(refreshed["class"], created["class"], "{refreshed:?}");
+    assert_evicted(&refreshed, "1", "none");
+    assert_held(&templates, &[2]);
+    templates.run("inspect", &["1"], FAILED);
+    let stderr = templates.sandbox.stderr();
+    assert!(
+        stderr.contains("no longer holds a generation 1"),
+        "{stderr}"
+    );
+
+    // A refresh that supersedes a generation that a clone leases leaves it, tombstoned, with its
+    // payload, to the clone.
+    let leased = lease(&templates, 2, "clone");
+    let refreshed = templates.refresh(&template, 0);
+    assert_eq!(refreshed["generation"], "3", "{refreshed:?}");
+    assert_evicted(&refreshed, "none", "2");
+    assert_held(&templates, &[2, 3]);
+    let listed = templates.run("list", &[], 0);
+    assert_listed(
+        &templates,
+        &listed,
+        &[(2, "tombstoned", &[&leased]), (3, "available", &[])],
+    );
+    let inspected = templates.run("inspect", &["2"], 0);
+    assert_inspected(&templates, &inspected, 2, "tombstoned", &[&leased]);
+
+    // Once the clone released it, the next creation of the class serves the latest generation,
+    // without a capture, and its eviction deletes the one that drained.
+    release(&templates, &leased);
+    let existing = templates.create(&template, 0);
+    assert_eq!(existing["created"], "existing", "{existing:?}");
+    assert_eq!(existing["generation"], "3", "{existing:?}");
+    assert_evicted(&existing, "2", "none");
+    assert_held(&templates, &[3]);
+    assert!(templates.store().tombstones().unwrap().is_empty());
+}
+
+#[test]
+#[ignore = "boots VMs; see the module documentation for what they need"]
+fn a_removal_reports_busy_while_leases_keep_the_generation() {
+    let mut templates = Templates::new("tpl-remove");
+    let template = Template::new(Network::None);
+    let created = templates.create(&template, 0);
+    assert_captured(&templates, &created, &template);
+    let first = lease(&templates, 1, "first");
+    let second = lease(&templates, 1, "second");
+    let leases = ordered(&[&first, &second]);
+    let listed = templates.run("list", &[], 0);
+    assert_listed(&templates, &listed, &[(1, "available", &leases)]);
+    let inspected = templates.run("inspect", &["1"], 0);
+    assert_inspected(&templates, &inspected, 1, "available", &leases);
+
+    // The removal tombstones the generation first, and reports busy, with the leases that keep
+    // it, and its payload, in the store.
+    let removed = templates.run("remove", &["1"], BUSY);
+    assert_removed(&removed, "draining", &leases);
+    let store = templates.store();
+    assert_eq!(store.tombstones().unwrap(), [generation(1)]);
+    assert_held(&templates, &[1]);
+    let index = store.index().unwrap();
+    let indexed = index.get(generation(1)).unwrap();
+    let snapshot = store.snapshot_dir(indexed).unwrap();
+    assert!(snapshot.join(MANIFEST_NAME).is_file());
+    let listed = templates.run("list", &[], 0);
+    assert_listed(&templates, &listed, &[(1, "tombstoned", &leases)]);
+
+    // The generation takes no new lease, and no selection takes it, while its leases keep
+    // working.
+    let sandbox = templates.sandbox.root.join("third");
+    SandboxStore::create(&sandbox).unwrap();
+    let now = HostTime::now().unwrap();
+    let deadline = Some(Instant::now() + LOCK_TIMEOUT);
+    let refused = store
+        .acquire(
+            generation(1),
+            &sandbox,
+            &CallerFiles::none(),
+            &now,
+            deadline,
+        )
+        .unwrap_err();
+    assert_eq!(refused.code(), ErrorCode::TemplateTombstoned, "{refused}");
+    assert_eq!(store.select(indexed.key(), &now).unwrap(), None);
+
+    // A creation of the class then captures a new generation, which the store holds no eligible
+    // one of, and leaves the tombstoned one to its leases.
+    let recreated = templates.create(&template, 0);
+    assert_eq!(recreated["created"], "captured", "{recreated:?}");
+    assert_eq!(recreated["generation"], "2", "{recreated:?}");
+    assert_evicted(&recreated, "none", "1");
+    assert_held(&templates, &[1, 2]);
+
+    // The removal reports busy while any lease remains, and deletes the generation once the last
+    // one is released.
+    release(&templates, &first);
+    let removed = templates.run("remove", &["1"], BUSY);
+    assert_removed(&removed, "draining", &[&second]);
+    assert_held(&templates, &[1, 2]);
+    release(&templates, &second);
+    let removed = templates.run("remove", &["1"], 0);
+    assert_removed(&removed, "retired", &[]);
+    assert_held(&templates, &[2]);
+    assert!(templates.store().tombstones().unwrap().is_empty());
+
+    // A removal of a generation that the store no longer holds finds it retired already, and one
+    // of a generation that the store never published fails.
+    let removed = templates.run("remove", &["1"], 0);
+    assert_removed(&removed, "retired", &[]);
+    templates.run("remove", &["3"], FAILED);
+    let stderr = templates.sandbox.stderr();
+    assert!(stderr.contains("holds no generation 3"), "{stderr}");
+
+    // A generation that no lease keeps goes at once.
+    let removed = templates.run("remove", &["2"], 0);
+    assert_removed(&removed, "retired", &[]);
+    assert_held(&templates, &[]);
+    let listed = templates.run("list", &[], 0);
+    assert_listed(&templates, &listed, &[]);
+}
+
+#[test]
+#[ignore = "needs NVX's artifacts; see the module documentation"]
+fn a_refresh_refuses_a_class_that_no_capture_takes_before_the_store() {
+    let mut templates = Templates::new("tpl-rclass");
+    let template = Template {
+        processors: Some(3),
+        ..Template::new(Network::None)
+    };
+    templates.refresh(&template, FAILED);
     let stderr = templates.sandbox.stderr();
     assert!(stderr.contains("needs 1, 2, 4, or 8 of each"), "{stderr}");
     assert!(!templates.sandbox.store.exists());
