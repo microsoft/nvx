@@ -578,7 +578,7 @@ pub fn plan(request: &ExportRequest<'_>) -> Result<Option<ExportPlan>> {
             .then_with(|| left.target.cmp(&right.target))
     });
     if request.owner == Owner::Caller {
-        check_caller_roots(&children)?;
+        check_caller_roots(&children, unsupported_inspection)?;
     }
     let plan = ExportPlan {
         children,
@@ -1241,16 +1241,18 @@ fn writable_part(root: &Path, mapped: &[Mapped<'_>], write: &[PolicyPath]) -> Wr
 }
 
 /// Refuses an exported directory or file that belongs to UID 0 or GID 0, to which the caller
-/// owner would squash guest root.
-fn check_caller_roots(children: &[ExportChild]) -> Result<()> {
+/// owner would squash guest root, and fails as `uninspected` returns for one whose owner cannot be
+/// read, with its path and the failure.
+fn check_caller_roots(
+    children: &[ExportChild],
+    uninspected: fn(&Path, std::io::Error) -> Error,
+) -> Result<()> {
     #[cfg(unix)]
     for child in children {
         use std::os::unix::fs::MetadataExt;
 
-        let metadata = fs::metadata(&child.root).map_err(|error| {
-            Error::unsupported(format!("cannot inspect {}", child.root.display()))
-                .with_source(error)
-        })?;
+        let metadata =
+            fs::metadata(&child.root).map_err(|error| uninspected(&child.root, error))?;
         if metadata.uid() == 0 || metadata.gid() == 0 {
             return Err(Error::unsupported(format!(
                 "the caller owner squashes guest root to the owner of each exported directory or \
@@ -1260,8 +1262,42 @@ fn check_caller_roots(children: &[ExportChild]) -> Result<()> {
         }
     }
     #[cfg(not(unix))]
-    let _ = children;
+    let _ = (children, uninspected);
     Ok(())
+}
+
+/// Returns the failure of a plan that cannot inspect `path`, with `error`, which refuses the
+/// request.
+fn unsupported_inspection(path: &Path, error: std::io::Error) -> Error {
+    Error::unsupported(format!("cannot inspect {}", path.display())).with_source(error)
+}
+
+/// Returns the failure of [`ExportPlan::verify`] for `path`, which no longer names the host object
+/// that the plan found there.
+fn changed_object(path: &Path) -> Error {
+    Error::other(format!(
+        "{} no longer names the host object it named at provision; deprovision the sandbox and \
+         provision it again",
+        path.display()
+    ))
+}
+
+/// Returns the failure of [`ExportPlan::verify`] that cannot inspect `path`, an object that the
+/// plan found, with `error`: a path that no longer reaches the object, as the host sees it, whose
+/// object went, a component of which is no longer a directory, or that the host may no longer
+/// search or open, names it no longer, [`changed_object`], and any other failure is the host's
+/// own, which shows nothing of the object.
+fn uninspected(path: &Path, error: std::io::Error) -> Error {
+    if matches!(
+        error.kind(),
+        std::io::ErrorKind::NotFound
+            | std::io::ErrorKind::NotADirectory
+            | std::io::ErrorKind::PermissionDenied
+    ) {
+        changed_object(path).with_source(error)
+    } else {
+        Error::io(format!("cannot inspect {}", path.display())).with_source(error)
+    }
 }
 
 /// Explains why a mapped host directory, given in canonical form, cannot be exported, or returns
@@ -1629,11 +1665,14 @@ impl ExportPlan {
     /// would otherwise grant the whole directory, and a workload that may write a directory could
     /// rename a denied or mapped object inside it and put a decoy at its path, so the next start
     /// would hide or bind the decoy instead; these fail with
-    /// [`ErrorKind::Other`](crate::ErrorKind::Other). With the caller owner, the host must be a
-    /// Linux host, and no exported directory or file may belong to UID 0 or GID 0; these fail with
-    /// [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported). Run it while the VM is stopped,
-    /// so that no workload can race with it; OpenVMM checks each child's kind again when it opens
-    /// it.
+    /// [`ErrorKind::Other`](crate::ErrorKind::Other), as does a path that no longer reaches its
+    /// object, as the host sees it: one whose object went, one a component of which is no longer a
+    /// directory, and one that the host may no longer search or open. With the caller owner, the
+    /// host must be a Linux host, and no exported directory or file may belong to UID 0 or GID 0;
+    /// these fail with [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported). Any other
+    /// failure to inspect an object, which shows nothing of the object, fails with
+    /// [`ErrorKind::Io`](crate::ErrorKind::Io), with its cause. Run it while the VM is stopped, so
+    /// that no workload can race with it; OpenVMM checks each child's kind again when it opens it.
     pub fn verify(&self) -> Result<()> {
         for bind in self.binds.iter().filter(|bind| bind.read_only) {
             let (child, path) = self.bound(bind)?;
@@ -1651,23 +1690,14 @@ impl ExportPlan {
                 )));
             }
         }
-        let changed = |path: &Path| {
-            Err(Error::other(format!(
-                "{} no longer names the host object it named at provision; deprovision the \
-                 sandbox and provision it again",
-                path.display()
-            )))
-        };
         for child in &self.children {
-            let kind_matches = fs::symlink_metadata(&child.root).is_ok_and(|metadata| {
-                if child.file {
-                    metadata.is_file()
-                } else {
-                    metadata.is_dir()
-                }
-            });
+            let kind_matches = match fs::symlink_metadata(&child.root) {
+                Ok(metadata) if child.file => metadata.is_file(),
+                Ok(metadata) => metadata.is_dir(),
+                Err(error) => return Err(uninspected(&child.root, error)),
+            };
             if !kind_matches {
-                return changed(&child.root);
+                return Err(changed_object(&child.root));
             }
         }
         for bind in &self.binds {
@@ -1677,7 +1707,8 @@ impl ExportPlan {
             let (_, path) = self.bound(bind)?;
             match platform::file_identity(&path) {
                 Ok((device, index)) if (FileIdentity { device, index }) == expected => {}
-                _ => return changed(&path),
+                Ok(_) => return Err(changed_object(&path)),
+                Err(error) => return Err(uninspected(&path, error)),
             }
         }
         for child in &self.children {
@@ -1687,7 +1718,8 @@ impl ExportPlan {
                 };
                 match platform::file_identity(path) {
                     Ok((device, index)) if (FileIdentity { device, index }) == *expected => {}
-                    _ => return changed(path),
+                    Ok(_) => return Err(changed_object(path)),
+                    Err(error) => return Err(uninspected(path, error)),
                 }
             }
         }
@@ -1695,7 +1727,7 @@ impl ExportPlan {
             if cfg!(windows) {
                 return Err(Error::unsupported(CALLER_OWNER_ON_WINDOWS));
             }
-            check_caller_roots(&self.children)?;
+            check_caller_roots(&self.children, uninspected)?;
         }
         Ok(())
     }
@@ -2942,6 +2974,65 @@ mod tests {
         fs::remove_dir(base.join("tools")).unwrap();
         fs::write(base.join("tools"), b"").unwrap();
         assert_eq!(mapping.verify().unwrap_err().kind(), ErrorKind::Other);
+    }
+
+    /// A path that no longer reaches its object names it no longer, but any other failure to
+    /// inspect an object shows nothing of it, so it is the host's own, with its cause.
+    #[test]
+    fn objects_that_cannot_be_inspected_fail_verification_by_what_the_failure_shows() {
+        let directory = root();
+        let base = directory.path();
+        let policy = FilesystemPolicy {
+            readwrite_paths: vec![base.join("work"), base.join("work/src")],
+            denied_paths: vec![base.join("work/src/secret")],
+            ..FilesystemPolicy::default()
+        };
+        let mapping = plan(&policy).unwrap().unwrap();
+        mapping.verify().unwrap();
+        // A pinned object at a name that the host's file system cannot hold.
+        let mut unnamed = mapping.clone();
+        let pinned = unnamed
+            .binds
+            .iter()
+            .position(|bind| bind.identity.is_some())
+            .unwrap();
+        unnamed.binds[pinned].source = "n".repeat(300);
+        let (_, path) = unnamed.bound(&unnamed.binds[1]).unwrap();
+        let error = unnamed.verify().unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::Io, "{error}");
+        assert_eq!(
+            error.message(),
+            format!("cannot inspect {}", path.display())
+        );
+        let source = std::error::Error::source(&error).unwrap();
+        assert!(
+            source.downcast_ref::<std::io::Error>().is_some(),
+            "{source}"
+        );
+        // A pinned object that went.
+        fs::remove_dir(base.join("work/src/secret")).unwrap();
+        let error = mapping.verify().unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::Other, "{error}");
+        assert!(error.message().contains("no longer names"), "{error}");
+        // How the host failed to inspect an object tells whether its path still reaches it.
+        let path = base.join("work");
+        for (kind, expected) in [
+            (std::io::ErrorKind::NotFound, ErrorKind::Other),
+            (std::io::ErrorKind::NotADirectory, ErrorKind::Other),
+            (std::io::ErrorKind::PermissionDenied, ErrorKind::Other),
+            (std::io::ErrorKind::StorageFull, ErrorKind::Io),
+            (std::io::ErrorKind::OutOfMemory, ErrorKind::Io),
+            (std::io::ErrorKind::InvalidFilename, ErrorKind::Io),
+            (std::io::ErrorKind::Other, ErrorKind::Io),
+        ] {
+            let error = uninspected(&path, kind.into());
+            assert_eq!(error.kind(), expected, "{kind:?}");
+            let source = std::error::Error::source(&error).unwrap();
+            assert_eq!(
+                source.downcast_ref::<std::io::Error>().unwrap().kind(),
+                kind
+            );
+        }
     }
 
     /// A recorded plan with a read-only bind in a part of a child that the guest may write, which

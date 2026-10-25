@@ -3,10 +3,11 @@
 //! sends its restore-ready event as its plan says, and a [`FakeControl`] in place of the adapter's
 //! framing: the wait for the event, and the connection only once it came; the Activate of the
 //! sandbox's record, byte for byte, as the first request of each session; the check of the
-//! activation that Ready reports; the start; the sessions that replace those that the adapter lost,
-//! after a reset of the session, say, and the clone that ended once it took that reset before it
-//! was ready; and the deadlines. The crashes of the sequence's caller are among the launch's
-//! tests.
+//! activation that Ready reports; the mapping table of a clone with an export, and the end of the
+//! launch at a partial or failed table; the start; the sessions that replace those that the
+//! adapter lost, after a reset of the session, say, and the clone that ended once it took that
+//! reset before it was ready; and the deadlines. The crashes of the sequence's caller are among
+//! the launch's tests.
 
 use std::cell::RefCell;
 use std::collections::VecDeque;
@@ -52,6 +53,12 @@ enum Call {
         record: Vec<u8>,
         deadline: Instant,
     },
+    /// A mapping table in a session, by the deadline.
+    Map {
+        session: usize,
+        table: Vec<HostMap>,
+        deadline: Instant,
+    },
     /// A start in a session, by the deadline.
     Start { session: usize, deadline: Instant },
 }
@@ -69,24 +76,41 @@ enum Answer {
     Silent,
 }
 
-/// A failure of a [`FakeControl`]: one that lost its session, or another.
+/// A failure of a [`FakeControl`]: one that lost its session, the guest's refusal of a mapping
+/// table, or another.
 #[derive(Debug)]
 struct Failure {
     /// Whether the failure lost the session.
     lost: bool,
+    /// Whether the failure is the guest's refusal of a mapping table, which the framing tells.
+    table: bool,
 }
 
 impl Failure {
     /// The loss of the session, as its reset or the end of its stream are.
-    const LOST: Self = Self { lost: true };
+    const LOST: Self = Self {
+        lost: true,
+        table: false,
+    };
     /// Another failure, which keeps the session, as the guest's refusal does.
-    const REFUSED: Self = Self { lost: false };
+    const REFUSED: Self = Self {
+        lost: false,
+        table: false,
+    };
+    /// The guest's refusal of a mapping table, which keeps the session, and which the framing
+    /// tells, as [`CloneControl::refused`] does.
+    const TABLE: Self = Self {
+        lost: false,
+        table: true,
+    };
 }
 
 impl fmt::Display for Failure {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(if self.lost {
             "the fake framing lost its session"
+        } else if self.table {
+            "the fake guest refused its mapping table"
         } else {
             "the fake guest refused"
         })
@@ -104,10 +128,10 @@ struct FakeSession {
 }
 
 /// The adapter's framing of the tests: it attaches a session to each connection that the sequence
-/// makes, numbered from 1, answers each Activate as the next of its `activates` says, and each
-/// start as the next of its `starts` says, as [`Answer::Done`] does once they run out, and records
-/// each call. Its `on_activate` runs at each Activate, with the session's number, before the
-/// answer.
+/// makes, numbered from 1, answers each Activate as the next of its `activates` says, each mapping
+/// table as the next of its `maps` says, and each start as the next of its `starts` says, as
+/// [`Answer::Done`] does once they run out, and records each call. Its `on_activate` runs at each
+/// Activate, with the session's number, before the answer.
 #[derive(Default)]
 struct FakeControl<'a> {
     /// The calls, in order.
@@ -116,6 +140,11 @@ struct FakeControl<'a> {
     sessions: usize,
     /// How it answers the next Activates.
     activates: VecDeque<Answer>,
+    /// How its guest answers the next mapping tables: how many of a table's mappings it applies,
+    /// in order, at most all, and its answer.
+    maps: VecDeque<(usize, Answer)>,
+    /// The mappings that its guest applied, in order.
+    applied: Vec<HostMap>,
     /// How it answers the next starts.
     starts: VecDeque<Answer>,
     /// What runs at each Activate.
@@ -148,13 +177,13 @@ impl<'a> FakeControl<'a> {
             .iter()
             .filter_map(|call| match call {
                 Call::Attach { deadline, .. } | Call::Activate { deadline, .. } => Some(*deadline),
-                Call::Start { .. } => None,
+                Call::Map { .. } | Call::Start { .. } => None,
             })
             .collect()
     }
 
     /// Checks that each session of the framing attached, then sent an Activate first, in its
-    /// order, and that the starts came last, in the last session.
+    /// order, and that the mapping tables and the starts came last, in the last session.
     fn assert_activates_first(&self) {
         let mut session = 0;
         let mut pending = false;
@@ -174,7 +203,10 @@ impl<'a> FakeControl<'a> {
                     assert!(pending && *number == session, "{:?}", self.calls);
                     pending = false;
                 }
-                Call::Start {
+                Call::Map {
+                    session: number, ..
+                }
+                | Call::Start {
                     session: number, ..
                 } => {
                     assert!(!pending && *number == session, "{:?}", self.calls);
@@ -242,6 +274,23 @@ impl CloneControl for FakeControl<'_> {
         answered(answer, Some(ready), deadline)
     }
 
+    fn map(
+        &mut self,
+        session: &mut FakeSession,
+        table: &[HostMap],
+        deadline: Instant,
+    ) -> Result<(), Failure> {
+        self.calls.push(Call::Map {
+            session: session.number,
+            table: table.to_vec(),
+            deadline,
+        });
+        let (applied, answer) = self.maps.pop_front().unwrap_or((table.len(), Answer::Done));
+        self.applied
+            .extend_from_slice(&table[..applied.min(table.len())]);
+        answered(answer, Confirmed, deadline).map(|_| ())
+    }
+
     fn start(&mut self, session: &mut FakeSession, deadline: Instant) -> Result<(), Failure> {
         self.calls.push(Call::Start {
             session: session.number,
@@ -253,6 +302,10 @@ impl CloneControl for FakeControl<'_> {
 
     fn lost(&self, error: &Failure) -> bool {
         error.lost
+    }
+
+    fn refused(&self, error: &Failure) -> bool {
+        error.table
     }
 }
 
@@ -304,7 +357,19 @@ fn launch_ending<'a>(
     end: End,
 ) -> (Restoring<'a>, Launched) {
     let request = tmpfs_request(&image.0, &image.1);
-    let plan = fixture.plan(acquired, &request, NO_CONTENT).unwrap();
+    launch_request(fixture, acquired, &request, vmm, end)
+}
+
+/// Launches the clone of `acquired` as [`launch`] does, as `request` asks, whose failures end the
+/// launch with `end`.
+fn launch_request<'a>(
+    fixture: &Fixture,
+    acquired: &'a mut Acquired,
+    request: &CloneRequest,
+    vmm: &mut VmmDir,
+    end: End,
+) -> (Restoring<'a>, Launched) {
+    let plan = fixture.plan(acquired, request, NO_CONTENT).unwrap();
     let runtime = plan.key().runtime().clone();
     let dir = vmm.path().to_owned();
     let made = RefCell::new(None);
@@ -1219,4 +1284,240 @@ fn a_caller_fails_a_ready_or_started_clone_with_its_own_evidence_as_the_sequence
         fixture.store.tombstones().unwrap(),
         [failure.record().template.generation]
     );
+}
+
+#[test]
+fn a_clone_with_an_export_gets_its_mapping_table_once_ready_and_its_start_once_it_applied_it() {
+    let (fixture, image) = fixture();
+    let export = fixture.data_export("data");
+    let request = with_export(tmpfs_request(&image.0, &image.1), &export);
+    let mut acquired = fixture.acquire("exported");
+    let mut vmm = vmm_with("flush");
+    let (restoring, _) = launch_request(
+        &fixture,
+        &mut acquired,
+        &request,
+        &mut vmm,
+        Hooks::LAUNCH.end,
+    );
+    let mut control = FakeControl::default();
+    let activated = restoring
+        .activate(&mut control, RestoreDeadlines::default())
+        .unwrap();
+    let deadline = activated.deadline();
+    let started = activated.start(&mut control).unwrap();
+    // In the session in which the clone answered, the table follows its Ready, in order, and the
+    // start follows once the guest applied every mapping, both by the Ready-to-Start deadline.
+    control.assert_activates_first();
+    assert_eq!(
+        control.calls[2..],
+        [
+            Call::Map {
+                session: 1,
+                table: data_table().to_vec(),
+                deadline,
+            },
+            Call::Start {
+                session: 1,
+                deadline,
+            },
+        ]
+    );
+    assert_eq!(control.applied, data_table());
+    let (running, _) = started.commit().unwrap();
+    let locked = &mut acquired.locked;
+    assert_eq!(
+        running.terminate(locked, TIMEOUT).unwrap(),
+        StopOutcome::Forced
+    );
+    assert_eq!(
+        fixture.store.release(locked).unwrap(),
+        Some(acquired.lease.clone())
+    );
+
+    // A clone without an export gets its start at once.
+    let mut acquired = fixture.acquire("plain");
+    let mut vmm = vmm_with("flush");
+    let (restoring, _) = launch(&fixture, &mut acquired, &image, &mut vmm);
+    assert!(restoring.table.is_empty());
+    let mut control = FakeControl::default();
+    let activated = restoring
+        .activate(&mut control, RestoreDeadlines::default())
+        .unwrap();
+    let deadline = activated.deadline();
+    let started = activated.start(&mut control).unwrap();
+    assert_eq!(
+        control.calls[2..],
+        [Call::Start {
+            session: 1,
+            deadline,
+        }]
+    );
+    assert!(control.applied.is_empty());
+    drop(started.abandon().unwrap());
+    assert_launch_ended(&fixture, &mut acquired, &vmm);
+}
+
+#[test]
+fn a_partial_or_failed_mapping_table_ends_the_launch_and_its_sandbox_never_starts() {
+    let (fixture, image) = fixture();
+    let export = fixture.data_export("data");
+    let request = with_export(tmpfs_request(&image.0, &image.1), &export);
+    let deadlines = RestoreDeadlines {
+        start: SHORT,
+        ..RestoreDeadlines::default()
+    };
+    let refused = "the clone refused its mapping table";
+    let failed = "the clone did not apply its mapping table";
+    let lost = "the clone's control session was lost: the clone did not apply its mapping table";
+    let late = "the clone did not apply its mapping table by its Ready-to-Start deadline";
+    // A guest that refuses the table once it applied some of it, or none of it, as the request's
+    // mappings decide; a failure of the framing that tells no refusal; a session lost once the
+    // table was sent; and a guest that never answers.
+    let cases = [
+        (
+            "partial",
+            1,
+            Answer::Fail(Failure::TABLE),
+            (ErrorKind::Protocol, refused),
+            Evidence::InvalidMappings,
+        ),
+        (
+            "refused",
+            0,
+            Answer::Fail(Failure::TABLE),
+            (ErrorKind::Protocol, refused),
+            Evidence::InvalidMappings,
+        ),
+        (
+            "failed",
+            1,
+            Answer::Fail(Failure::REFUSED),
+            (ErrorKind::Protocol, failed),
+            Evidence::Protocol,
+        ),
+        (
+            "lost",
+            1,
+            Answer::Fail(Failure::LOST),
+            (ErrorKind::Protocol, lost),
+            Evidence::Reset,
+        ),
+        (
+            "silent",
+            0,
+            Answer::Silent,
+            (ErrorKind::TimedOut, late),
+            Evidence::Timeout,
+        ),
+    ];
+    // The progress log records the start only once the guest applied the whole table, so each
+    // failure is recorded at the start's stage, with the clone's progress still at its Ready.
+    let ready = (Stage::Start, Progress::Ready);
+    for (name, applied, answer, (kind, message), evidence) in cases {
+        let mut acquired = fixture.acquire(name);
+        let mut vmm = vmm_with("flush");
+        let (restoring, _) = launch_request(
+            &fixture,
+            &mut acquired,
+            &request,
+            &mut vmm,
+            Hooks::LAUNCH.end,
+        );
+        let mut control = FakeControl::default();
+        let source = match &answer {
+            Answer::Fail(failure) => failure.to_string(),
+            _ => Failure::REFUSED.to_string(),
+        };
+        control.maps.push_back((applied, answer));
+        let activated = restoring.activate(&mut control, deadlines).unwrap();
+        let deadline = activated.deadline();
+        let error = activated.start(&mut control).unwrap_err();
+        assert_eq!(error.kind(), kind, "{name}: {error}");
+        assert_eq!(error.message(), message, "{name}");
+        let failed = std::error::Error::source(&error).unwrap().to_string();
+        assert_eq!(failed, source, "{name}");
+        if kind == ErrorKind::TimedOut {
+            assert!(Instant::now() >= deadline, "{name}");
+        }
+        // The table was sent once, in the session in which the clone answered, and no start, nor
+        // another session, followed it.
+        assert_eq!(control.sessions, 1, "{name}");
+        assert_eq!(
+            control.calls[2..],
+            [Call::Map {
+                session: 1,
+                table: data_table().to_vec(),
+                deadline,
+            }],
+            "{name}"
+        );
+        assert_eq!(control.applied, data_table()[..applied], "{name}");
+        // The launch ended, through the VMM's verified identity, and the sandbox records the
+        // failure, which is never the template's, so that none quarantines its generation.
+        assert_failed(&error, &acquired, ready, evidence, Teardown::Terminated);
+        assert!(!error.outcome().quarantines(), "{name}");
+        assert_launch_ended(&fixture, &mut acquired, &vmm);
+    }
+
+    // The guest's refusal of the table is the request's whenever it came, even past the deadline.
+    let mut acquired = fixture.acquire("late");
+    let mut vmm = vmm_with("flush");
+    let (restoring, _) = launch_request(
+        &fixture,
+        &mut acquired,
+        &request,
+        &mut vmm,
+        Hooks::LAUNCH.end,
+    );
+    let mut control = FakeControl::default();
+    control.maps.push_back((0, Answer::Fail(Failure::TABLE)));
+    let passed = RestoreDeadlines {
+        start: Duration::ZERO,
+        ..RestoreDeadlines::default()
+    };
+    let activated = restoring.activate(&mut control, passed).unwrap();
+    let error = activated.start(&mut control).unwrap_err();
+    assert_eq!(
+        (error.kind(), error.message()),
+        (ErrorKind::Protocol, refused)
+    );
+    assert_failed(
+        &error,
+        &acquired,
+        ready,
+        Evidence::InvalidMappings,
+        Teardown::Terminated,
+    );
+    assert_launch_ended(&fixture, &mut acquired, &vmm);
+
+    // The guest ended the clone's VM as its table failed, with the status of an export that does
+    // not mount: no start was sent, so no workload ran, and the status is evidence, which prevails
+    // over the loss of the session.
+    let mut acquired = fixture.acquire("status");
+    let mut vmm = vmm_with("flush report:guest-exit:56");
+    let (restoring, _) = launch_request(
+        &fixture,
+        &mut acquired,
+        &request,
+        &mut vmm,
+        Hooks::LAUNCH.end,
+    );
+    let mut control = FakeControl::default();
+    control.maps.push_back((0, Answer::Fail(Failure::LOST)));
+    let activated = restoring
+        .activate(&mut control, RestoreDeadlines::default())
+        .unwrap();
+    vmm.end_and_wait();
+    let error = activated.start(&mut control).unwrap_err();
+    assert_eq!(error.message(), lost);
+    assert_failed(
+        &error,
+        &acquired,
+        ready,
+        Evidence::InvalidMappings,
+        Teardown::Exited,
+    );
+    assert_eq!(error.record().status, Some(56));
+    assert_launch_ended(&fixture, &mut acquired, &vmm);
 }

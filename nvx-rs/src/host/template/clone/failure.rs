@@ -95,8 +95,12 @@ pub enum Evidence {
     /// that the guest refused, as its
     /// [`ACTIVATION_RECORD`](crate::protocol::status::ACTIVATION_RECORD) tells.
     InvalidActivate,
-    /// The request's mappings are invalid: the guest cannot mount the host export that they map,
-    /// as its [`ACTIVATION_EXPORT`](crate::protocol::status::ACTIVATION_EXPORT) tells.
+    /// The request's mappings are invalid: an export that no clone takes, such as one of more
+    /// than one directory or of a file, or one that overlaps the template store; an export whose
+    /// read-only mappings the host cannot keep read-only, or whose objects are no longer those
+    /// that its plan found, a missing one included; a mapping table that the guest refused, as
+    /// the adapter's framing tells; or a host export that the guest cannot mount, as its
+    /// [`ACTIVATION_EXPORT`](crate::protocol::status::ACTIVATION_EXPORT) tells.
     InvalidMappings,
     /// The request's image is one that the template cannot serve, as a diagnostic tells. No
     /// clone's restore keeps the guest's diagnostics yet, so the guest's status alone,
@@ -314,8 +318,8 @@ pub enum Stage {
     /// The clone's repair and activation, from the restore-ready event until the check of the
     /// clone's Ready.
     Activation,
-    /// The start of the clone's sandbox, from the check of its Ready until the start's
-    /// confirmation.
+    /// The start of the clone's sandbox, from the check of its Ready, through the mapping table of
+    /// a clone with an export, until the start's confirmation.
     Start,
     /// The commit of the clone's launch.
     Commit,
@@ -371,9 +375,11 @@ pub enum Progress {
     Acknowledged,
     /// The Activate of the clone's record was sent.
     Activating,
-    /// The clone's Ready was checked: the clone is activated, with the record's transaction.
+    /// The clone's Ready was checked: the clone is activated, with the record's transaction. A
+    /// clone with an export gets its mapping table at this step, before the start.
     Ready,
-    /// The start of the clone's sandbox was sent.
+    /// The start of the clone's sandbox was sent, once the guest applied the whole mapping table
+    /// of a clone with an export.
     Starting,
     /// The start was confirmed: the clone's sandbox started.
     Started,

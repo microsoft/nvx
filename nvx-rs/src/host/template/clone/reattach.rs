@@ -77,7 +77,9 @@ pub enum ReattachedClone<S> {
 ///   sandbox's activation record, byte for byte, which must still be the canonical encoding of a
 ///   record of the restore of the lease's generation: the clone answers with the Ready that it
 ///   answered once, and the reattach checks the configuration identity and the transaction ID
-///   that it reports, which [`ReattachedClone::Live`] returns with the session. A check that
+///   that it reports, which [`ReattachedClone::Live`] returns with the session. The clone's launch
+///   committed once the clone applied its mapping table, if it has one, and started its sandbox,
+///   so the reattach sends neither again, and no launch that it ends gets either. A check that
 ///   fails, by the evidence that the restore sequence gives it, ends the VMM through its verified
 ///   identity, as [`Vmm::terminate`] does within `bound`, and the clone fails at
 ///   [`Stage::Reattach`].

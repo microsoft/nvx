@@ -3,10 +3,11 @@
 //! clone's guest applies in place of the configuration that its template captured, as
 //! [`nvx::activation`](crate::activation) describes it.
 //!
-//! A record names the bindings of the clone's image and scratch image by their identities: the
-//! SHA-256 digest of a domain of each kind of binding and of the binding's serde form, which its
-//! callers record. The digest covers a few hundred bytes of the binding's metadata, never the
-//! content of a file.
+//! A record names the bindings of the clone's image and scratch image, and the plan of its export,
+//! by their identities: the SHA-256 digest of a domain of each kind of object and of the object's
+//! serde form, which its callers record. The digest covers metadata alone, a few hundred bytes of
+//! a binding, and the host paths and guest targets of an export plan, never the content of a
+//! file.
 
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -14,10 +15,11 @@ use sha2::{Digest, Sha256};
 use super::CloneRequest;
 use super::failure::{Attribute, Evidence, Fault};
 use crate::activation::{
-    ActivationRecord, Configuration, ExpectedResources, Identity, Image, Network, Publication,
-    RestoreSection, TransactionId, Upper,
+    ActivationRecord, Configuration, ExpectedResources, Export, ExportKind, Identity, Image,
+    Network, Publication, RestoreSection, TransactionId, Upper,
 };
 use crate::error::{Error, Result};
+use crate::host::filesystem::ExportPlan;
 use crate::host::sandbox::distro::{DistroBinding, DistroFormat};
 use crate::host::sandbox::scratch::ScratchBinding;
 use crate::host::template::key::TemplateKey;
@@ -31,6 +33,10 @@ const DISTRO_DOMAIN: &[u8] = b"nvx distro binding\0";
 /// [`DISTRO_DOMAIN`] does for an image's.
 const SCRATCH_DOMAIN: &[u8] = b"nvx scratch binding\0";
 
+/// What the identity of an export plan digests before the plan's serde form, as
+/// [`DISTRO_DOMAIN`] does for an image's binding.
+const EXPORT_DOMAIN: &[u8] = b"nvx export plan\0";
+
 /// Returns the activation record of the clone that `request` asks for, of the template whose key
 /// is `key`, which `lease` leases, with a fresh transaction ID.
 ///
@@ -43,7 +49,9 @@ const SCRATCH_DOMAIN: &[u8] = b"nvx scratch binding\0";
 /// - the upper: a tmpfs, or the scratch, with the identity of its binding and the request's
 ///   journal policy;
 /// - the request's overlay mode and workload view;
-/// - no export, and so no mappings;
+/// - the export, if the request has one: a directory, which stage 1's rule allows a clone alone,
+///   with the identity of its plan, and the number of its mappings, the plan's binds, from 1 to
+///   [`MAX_MAPPINGS`](crate::activation::MAX_MAPPINGS); or no export, and no mappings;
 /// - the network of the template's NIC, if it has one: the identity of the policy that OpenVMM
 ///   enforces there, the digest that OpenVMM computed and the template's key records; the DNS
 ///   server with which the template's guest configured its resolver at boot, which the template's
@@ -60,8 +68,8 @@ const SCRATCH_DOMAIN: &[u8] = b"nvx scratch binding\0";
 /// UID or GID is 0, [`Evidence::InvalidActivate`]; with [`ErrorKind::Io`](crate::ErrorKind::Io)
 /// for a key whose command line names its DNS server in a form that OpenVMM does not write, as
 /// [`TemplateKey::dns_server`] finds it, [`Evidence::MalformedGeneration`]; and with
-/// [`ErrorKind::Other`](crate::ErrorKind::Other) if the transaction ID cannot be drawn, or a
-/// binding's identity computed, the host's evidence.
+/// [`ErrorKind::Other`](crate::ErrorKind::Other) if the transaction ID cannot be drawn, or the
+/// identity of a binding or of the export's plan computed, the host's evidence.
 pub(super) fn build(
     request: &CloneRequest,
     lease: &Lease,
@@ -91,12 +99,22 @@ pub(super) fn build(
             .network()
             .and_then(|network| network.proxy_url()),
     });
+    let (export, mappings) = match &request.export {
+        None => (None, 0),
+        Some(plan) => (
+            Some(Export {
+                kind: ExportKind::Directory,
+                plan: export_identity(plan).on_host()?,
+            }),
+            plan.binds.len(),
+        ),
+    };
     let configuration = Configuration {
         image,
         upper,
         overlay: request.overlay,
-        export: None,
-        mappings: 0,
+        export,
+        mappings,
         network,
         workload: request.workload.clone(),
         resources: ExpectedResources {
@@ -129,23 +147,31 @@ pub(super) fn gpt_refused() -> Error {
 /// Returns the identity of `binding`, the binding of a clone's image, as the [module](self)
 /// describes it.
 pub(super) fn distro_identity(binding: &DistroBinding) -> Result<Identity> {
-    identity(DISTRO_DOMAIN, binding, "image")
+    identity(DISTRO_DOMAIN, binding, "binding of the clone's image")
 }
 
 /// Returns the identity of `binding`, the binding of a clone's scratch image, as the
 /// [module](self) describes it.
 pub(super) fn scratch_identity(binding: &ScratchBinding) -> Result<Identity> {
-    identity(SCRATCH_DOMAIN, binding, "scratch image")
+    identity(
+        SCRATCH_DOMAIN,
+        binding,
+        "binding of the clone's scratch image",
+    )
 }
 
-/// Returns the SHA-256 digest of `domain` and of the serde form of `binding`, the binding of a
-/// clone's file, which messages call `what`.
-fn identity(domain: &[u8], binding: &impl Serialize, what: &str) -> Result<Identity> {
-    let form = serde_json::to_vec(binding).map_err(|error| {
-        Error::other(format!(
-            "cannot write the binding of the clone's {what} in its serde form"
-        ))
-        .with_source(error)
+/// Returns the identity of `plan`, the plan of a clone's export, as the [module](self) describes
+/// it: it covers the export's whole shape, its directories and files, their policies, the binds,
+/// and the owner.
+pub(super) fn export_identity(plan: &ExportPlan) -> Result<Identity> {
+    identity(EXPORT_DOMAIN, plan, "plan of the clone's export")
+}
+
+/// Returns the SHA-256 digest of `domain` and of the serde form of `object`, a clone's binding or
+/// export plan, which messages call `what`.
+fn identity(domain: &[u8], object: &impl Serialize, what: &str) -> Result<Identity> {
+    let form = serde_json::to_vec(object).map_err(|error| {
+        Error::other(format!("cannot write the {what} in its serde form")).with_source(error)
     })?;
     let digest = Sha256::new()
         .chain_update(domain)
