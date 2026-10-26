@@ -41,6 +41,22 @@
 //! - A clone whose generated machine ID the guest cannot bind, since its image holds a regular
 //!   file `etc`, ends before it is ready, with the status of the workload's view, while a clone of
 //!   the image that keeps the image's own machine ID, which needs no bind, starts.
+//! - A clone maps its export beneath its root once it is ready, before its sandbox starts: one
+//!   host directory, the export's root, which NVX binds to the template's dormant filesystem slot,
+//!   and whose mappings, the directory's own, from an empty source, and those of paths inside it,
+//!   each keep their access, show what the host holds, but for a path that the start hides, and
+//!   take what the guest, and the clone's workload, write through the writable ones alone. The
+//!   clone's record names the export by the identity of its plan, with the number of its
+//!   mappings.
+//! - Clones of one generation at once see only their own exports: each its own directory, or two
+//!   the same one, which their records name by the same identity, and a clone without an export
+//!   none, whose restore leaves the slot dormant. A clone mounts its export read-write, even where
+//!   every mapping is read-only, mount tables list the bind of a generated machine ID below the
+//!   root beside the mappings, and the bind holds even against the guest's root.
+//! - A start refuses an export that the template's dormant filesystem slot cannot bind before any
+//!   VMM starts, as a failure of the request: one of two directories, and one of a file.
+//! - A clone whose guest fails a mapping of its table ends before its sandbox starts, nothing of
+//!   it runs, and the host's directory stays as it was.
 //! - A clone runs its executions as its record's workload identity, once it is ready: the repair
 //!   acknowledged the restore before the clone took its reset, the host's first message came
 //!   after that, and the clone's Ready, its start, and its first execution came in that order.
@@ -75,7 +91,7 @@
 
 mod common;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, File};
@@ -86,9 +102,13 @@ use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
-use nvx::activation::{MachineIdMode, ReadyActivation, StoreGeneration};
+use nvx::activation::{
+    ActivationRecord, Configuration, ExportKind, MachineIdMode, ReadyActivation, StoreGeneration,
+};
 use nvx::exec::{Key, Limits, Timers, Window};
 use nvx::host::artifacts::Artifacts;
+#[cfg(target_os = "linux")]
+use nvx::host::filesystem::GUEST_EXPORT;
 use nvx::host::platform::Transport;
 use nvx::host::process::{BootId, Process};
 use nvx::host::store::{CallerFiles, LOG_NAME, SandboxStore};
@@ -162,6 +182,66 @@ fi
 echo "marker $(cat /marker 2>/dev/null || echo absent)"
 printf '%s' "$1" > /marker
 "#;
+/// The directory of a template's sandbox that holds the host directories that the scenario's
+/// clones export, the one host directory that their starts authorize.
+const EXPORTS: &str = "exports";
+/// The directories of the host directory that a clone exports in full, with the
+/// [`EXPORT_SHARES`]: `dir`, which holds the empty directory `inner`, and `out`.
+const EXPORT_DIRECTORIES: [&str; 3] = ["dir", "dir/inner", "out"];
+/// The files of the host directory that a clone exports in full, each a path in it, with
+/// components separated by `/`, and its contents.
+const EXPORT_FILES: [(&str, &str); 4] = [
+    ("dir/marker", "marker"),
+    ("dir/secret", "secret"),
+    ("file.txt", "file"),
+    ("out/marker", "marker"),
+];
+/// The shares of a clone that exports a host directory in full, each a path in it, `.` for the
+/// directory itself, and its target in the root, with `:ro` for a read-only share: the directory,
+/// read-only, with the read-write directory `dir/inner` inside it, at the target that it has
+/// there, the read-only file `file.txt`, and the read-write directory `out`. The plan exports the
+/// directory alone, the export's root, whose mapping comes from an empty source, and the start
+/// hides `dir/secret`.
+const EXPORT_SHARES: [(&str, &str); 4] = [
+    (".", "/srv/maps:ro"),
+    ("dir/inner", "/srv/maps/dir/inner"),
+    ("file.txt", "/srv/file.txt:ro"),
+    ("out", "/srv/out"),
+];
+/// The `map` probe of the [`EXPORT_SHARES`]: each target, and the hidden file.
+const MAP_EXPORT: &str = "map maps=srv/maps inner=srv/maps/dir/inner file=srv/file.txt \
+                          out=srv/out secret=srv/maps/dir/secret";
+/// The mappings of the [`EXPORT_SHARES`], in the order in which the guest applied them, which the
+/// root's mount table keeps: by the depth of their targets, then by their targets.
+const EXPORT_MOUNTS: &str = "/srv/file.txt,/srv/maps,/srv/out,/srv/maps/dir/inner";
+/// The program of the executions that show what a clone's workload finds of the
+/// [`EXPORT_SHARES`], `/bin/sh -c EXPORTED sh`, which prints, a line each: the contents of
+/// `/srv/maps/dir/marker` and of `/srv/file.txt`, `read PATH TEXT`, or `read PATH refused` for one
+/// that cannot be read; whether the hidden `/srv/maps/dir/secret` could be read, `secret read`,
+/// or not, `secret refused`; the names in `/srv/maps/dir`, each followed by a comma, `listing
+/// NAMES`; and for each of `/srv/maps`, `/srv/maps/dir/inner`, and `/srv/out`, whether a write of
+/// the new file `workload` in it succeeded, `write DIRECTORY written`, or not, `write DIRECTORY
+/// refused`.
+const EXPORTED: &str = r#"for path in /srv/maps/dir/marker /srv/file.txt; do
+    if text=$(cat "$path" 2>/dev/null); then
+        echo "read $path $text"
+    else
+        echo "read $path refused"
+    fi
+done
+if cat /srv/maps/dir/secret >/dev/null 2>&1; then echo "secret read"; else echo "secret refused"; fi
+echo "listing $(ls /srv/maps/dir | tr '\n' ',')"
+for directory in /srv/maps /srv/maps/dir/inner /srv/out; do
+    if { printf '%s' workload > "$directory/workload"; } 2>/dev/null; then
+        echo "write $directory written"
+    else
+        echo "write $directory refused"
+    fi
+done
+"#;
+/// The `map` probe of the clones that share one host directory at `/srv/data`: the directory, and
+/// its file `marker`.
+const MAP_DATA: &str = "map data=srv/data marker=srv/data/marker";
 /// The placeholder of the template of the scenarios of GPT disks: a disk of two layers, whose
 /// partitions start at multiples of 1 MiB.
 const PLACEHOLDER: Disk = Disk {
@@ -352,6 +432,16 @@ impl Template {
         &sandbox
             .expect("the sandbox lasts until the template drops")
             .store
+    }
+
+    /// Returns the directory of the template's sandbox, which holds the template store, the
+    /// platform's directory, and the directory of the host directories that the scenario's clones
+    /// export, [`EXPORTS`].
+    fn root(&self) -> &Path {
+        let sandbox = self.sandbox.as_ref();
+        &sandbox
+            .expect("the sandbox lasts until the template drops")
+            .root
     }
 
     /// Returns the template store.
@@ -572,6 +662,12 @@ impl Cloned {
     /// Checks that the start started the clone, as the [module documentation](self) describes,
     /// leasing the generation, and recorded its VM, which runs.
     fn assert_started(&self) {
+        self.assert_mapped(0);
+    }
+
+    /// Checks that the start started the clone, as [`assert_started`](Self::assert_started) does,
+    /// once its guest applied `mapped` mappings of its export, none for a clone without one.
+    fn assert_mapped(&self, mapped: usize) {
         let started = &self.started;
         assert_eq!(started["generation"], GENERATION.to_string(), "{started:?}");
         let lease = &started["lease"];
@@ -580,10 +676,11 @@ impl Cloned {
             "{started:?}"
         );
         started["downtime"].parse::<u64>().unwrap();
+        let mapped = mapped.to_string();
         let facts = ["root", "build", "table", "mapped", "sandbox"].map(|key| &started[key]);
         assert_eq!(
             facts,
-            ["ready", GUEST_BUILD, "applied", "0", "started"],
+            ["ready", GUEST_BUILD, "applied", mapped.as_str(), "started"],
             "{started:?}"
         );
         let record = self.sandbox.record().expect("the start recorded its VM");
@@ -705,6 +802,66 @@ impl Cloned {
             marker: value(marker, "marker"),
         }
     }
+
+    /// Runs `script` with `/bin/sh -c` in the clone's root, as user ID 0, checks that it exited
+    /// with status 0, and wrote nothing to its standard error, and returns the lines that it
+    /// printed.
+    fn script(&mut self, script: &str) -> Vec<String> {
+        let program = ["/bin/sh", "-c", script, "sh"];
+        let ran = self.exec(&[&["--identity", "0:0", "--"][..], &program].concat());
+        let facts = ["launch", "status", "stderr"].map(|key| &ran[&format!("exec.1.{key}")]);
+        assert_eq!(facts, ["started", "exit 0", ""], "{ran:?}");
+        // The host program escapes each line feed, and each backslash, which none of the lines
+        // holds.
+        ran["exec.1.stdout"]
+            .strip_suffix("\\n")
+            .filter(|lines| !lines.contains("\\\\"))
+            .unwrap_or_else(|| panic!("{ran:?}"))
+            .split("\\n")
+            .map(str::to_owned)
+            .collect()
+    }
+
+    /// Returns the configuration of the clone's activation record, which NVX keeps in the clone's
+    /// sandbox, in its canonical encoding, while the clone holds its lease.
+    fn configuration(&self) -> Configuration {
+        let store = SandboxStore::open(&self.sandbox.store).unwrap();
+        let encoded = fs::read(store.clone_activation_path()).unwrap();
+        let record = ActivationRecord::decode(&encoded).unwrap();
+        record.configuration().clone()
+    }
+
+    /// Checks the arguments with which NVX started the clone's VMM, on Linux, where the test, as
+    /// root, reads them: one `--mount`, which binds the directory of `export`, as the plan
+    /// resolved it, to the template's dormant filesystem slot, with the access `mode`, or none,
+    /// for a clone without an export, whose restore leaves the slot dormant. Elsewhere, NVX's own
+    /// tests of a clone's launch check the arguments, through a fake VMM.
+    fn assert_vmm_mount(&self, export: Option<(&Export, &str)>) {
+        #[cfg(target_os = "linux")]
+        {
+            let pid = &self.started["pid"];
+            let command_line = fs::read(format!("/proc/{pid}/cmdline")).unwrap();
+            let arguments = command_line
+                .split(|byte| *byte == 0)
+                .map(|argument| String::from_utf8_lossy(argument).into_owned())
+                .collect::<Vec<_>>();
+            let mounts = arguments
+                .windows(2)
+                .filter(|pair| pair[0] == "--mount")
+                .map(|pair| pair[1].as_str())
+                .collect::<Vec<_>>();
+            let expected = export
+                .map(|(export, mode)| {
+                    let directory = fs::canonicalize(&export.root).unwrap();
+                    format!("{GUEST_EXPORT},{},{mode}", directory.display())
+                })
+                .into_iter()
+                .collect::<Vec<_>>();
+            assert_eq!(mounts, expected, "{arguments:?}");
+        }
+        #[cfg(not(target_os = "linux"))]
+        let _ = export;
+    }
 }
 
 /// What an execution of [`VIEW`] found in a clone's root.
@@ -720,6 +877,102 @@ struct View {
     write: String,
     /// What the root's `/marker` held, or `absent`.
     marker: String,
+}
+
+/// A host directory that a scenario's clones export, in the [`EXPORTS`] of the template's
+/// sandbox, beside the template store, which neither holds the other.
+struct Export {
+    /// The directory.
+    root: PathBuf,
+}
+
+impl Export {
+    /// Writes the directory `name` in the [`EXPORTS`] of the sandbox of `template`, with `files`,
+    /// each a path in it, with components separated by `/`, and its contents, and the empty
+    /// `directories`.
+    fn write(
+        template: &Template,
+        name: &str,
+        files: &[(&str, &str)],
+        directories: &[&str],
+    ) -> Self {
+        let export = Self {
+            root: template.root().join(EXPORTS).join(name),
+        };
+        fs::create_dir_all(&export.root).unwrap();
+        for directory in directories {
+            fs::create_dir_all(export.path(directory)).unwrap();
+        }
+        for (file, contents) in files {
+            let path = export.path(file);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, contents).unwrap();
+        }
+        export
+    }
+
+    /// Returns the host path of `path`, a path in the directory, with components separated by
+    /// `/`, or `.` for the directory itself.
+    fn path(&self, path: &str) -> PathBuf {
+        path.split('/')
+            .filter(|name| *name != ".")
+            .fold(self.root.clone(), |host, name| host.join(name))
+    }
+
+    /// Returns the options of a start that shares each of `shares` with the clone's root, a path
+    /// in the directory, `.` for the directory itself, and its target, with `:ro` for a read-only
+    /// share, hides each of `denied`, paths in the directory, and authorizes the [`EXPORTS`].
+    fn options(&self, shares: &[(&str, &str)], denied: &[&str]) -> Vec<String> {
+        let mut options = Vec::new();
+        for (path, target) in shares {
+            let share = format!("{}:{target}", self.path(path).display());
+            options.extend(["--share".to_owned(), share]);
+        }
+        for path in denied {
+            options.extend(["--deny".to_owned(), self.path(path).display().to_string()]);
+        }
+        let exports = self.root.parent().unwrap();
+        options.extend(["--share-root".to_owned(), exports.display().to_string()]);
+        options
+    }
+
+    /// Returns what the directory holds, at any depth: each path in it, with components separated
+    /// by `/`, and a file's contents, or `None` for a directory.
+    fn tree(&self) -> BTreeMap<String, Option<String>> {
+        let mut found = BTreeMap::new();
+        let mut pending = vec![(self.root.clone(), String::new())];
+        while let Some((path, prefix)) = pending.pop() {
+            for entry in fs::read_dir(&path).unwrap() {
+                let entry = entry.unwrap();
+                let name = format!("{prefix}{}", entry.file_name().to_str().unwrap());
+                if entry.file_type().unwrap().is_dir() {
+                    pending.push((entry.path(), format!("{name}/")));
+                    found.insert(name, None);
+                } else {
+                    found.insert(name, Some(fs::read_to_string(entry.path()).unwrap()));
+                }
+            }
+        }
+        found
+    }
+}
+
+/// Returns the tree of a directory that holds the directories `directories`, and `files`, each a
+/// path in it, with components separated by `/`, and its contents, as [`Export::tree`] lists it.
+fn tree_of(directories: &[&str], files: &[(&str, &str)]) -> BTreeMap<String, Option<String>> {
+    let mut tree = BTreeMap::new();
+    for directory in directories {
+        tree.insert((*directory).to_owned(), None);
+    }
+    for (file, contents) in files {
+        tree.insert((*file).to_owned(), Some((*contents).to_owned()));
+    }
+    tree
+}
+
+/// Returns the options of a mount, as the `map` probe gives them.
+fn mount_options(options: &str) -> BTreeSet<&str> {
+    options.split(',').collect()
 }
 
 /// Returns the scratch image of a clone over one, in the clone's sandbox, `sandbox`, in a
@@ -2064,4 +2317,365 @@ fn start_in(sandbox: &mut Sandbox, template: &Template, templates: &Path) -> Pri
         OsStr::new("ram"),
     ];
     sandbox.run("start", &options, 0)
+}
+
+#[test]
+#[ignore = "boots VMs; see the module documentation for what they need"]
+fn a_clone_maps_its_export_beneath_its_root_before_its_sandbox_starts() {
+    let template = Template::create("cl-export");
+    let export = Export::write(&template, "full", &EXPORT_FILES, &EXPORT_DIRECTORIES);
+    let shares = export.options(&EXPORT_SHARES, &["dir/secret"]);
+    let options = shares.iter().map(String::as_str).collect::<Vec<_>>();
+    let start = StartOf {
+        upper: Upper::Scratch,
+        options: &options,
+        ..StartOf::default()
+    };
+    let mut clone = template.start("cl-export-1", start, 0);
+    clone.assert_mapped(EXPORT_SHARES.len());
+
+    // The clone's record names the export, a directory, by the identity of its plan, and the
+    // number of its mappings, which the restore sequence sent once the clone was ready. NVX bound
+    // the directory to the template's dormant filesystem slot, read-write, since some of the
+    // mappings are.
+    let configuration = clone.configuration();
+    let recorded = configuration.export.expect("the record names the export");
+    assert_eq!(recorded.kind, ExportKind::Directory);
+    assert_eq!(configuration.mappings, EXPORT_SHARES.len());
+    clone.assert_vmm_mount(Some((&export, "rw")));
+
+    // The export, mounted once, read-write, without set-user-ID programs or devices, below a
+    // directory of the runtime's that only root may enter, and the table's mappings below the
+    // root, and nothing else, in their order, as a launch's: each with its access, `nosuid`, and
+    // `nodev`, the guest writing the writable ones alone, the one inside a read-only mapping
+    // included, each showing what the host holds, but the file that the start hides. The guest
+    // created the missing targets in the upper, empty, but none inside another mapping.
+    let facts = clone.probe(&[MAP_EXPORT]);
+    let fact = |key: &str| facts[&format!("map.{key}")].as_str();
+    assert_eq!(
+        (fact("export.count"), fact("export.type")),
+        ("1", "virtiofs")
+    );
+    let options = mount_options(fact("export.options"));
+    assert!(
+        options.is_superset(&BTreeSet::from(["rw", "nosuid", "nodev"])),
+        "{options:?}"
+    );
+    assert_eq!((fact("hostfs.mode"), fact("hostfs.owner")), ("0700", "0:0"));
+    assert_eq!(fact("mounts"), EXPORT_MOUNTS);
+    for (name, access, kind, write, upper) in [
+        ("maps", "ro", "directory", "refused", "directory"),
+        ("inner", "rw", "directory", "allowed", "absent"),
+        ("file", "ro", "file 4", "refused", "file 0"),
+        ("out", "rw", "directory", "allowed", "directory"),
+    ] {
+        let options = mount_options(fact(&format!("{name}.options")));
+        for flag in [access, "nosuid", "nodev"] {
+            assert!(options.contains(flag), "{name}: {options:?}");
+        }
+        let found = ["kind", "write", "upper"].map(|key| fact(&format!("{name}.{key}")));
+        assert_eq!(found, [kind, write, upper], "{name}");
+    }
+    assert_eq!(fact("maps.entries"), "dir,file.txt,out");
+    assert_eq!(fact("inner.entries"), "");
+    assert_eq!(fact("file.read"), "file");
+    assert_eq!(fact("out.entries"), "marker");
+    let secret = ["options", "kind", "upper"].map(|key| fact(&format!("secret.{key}")));
+    assert_eq!(secret, ["none", "denied", "absent"]);
+    assert_eq!(fact("latched"), "no");
+
+    // The clone's workload finds the same, as user ID 0: the files that the mappings show, but
+    // not the hidden one, and the writable mappings alone take what it writes.
+    assert_eq!(
+        clone.script(EXPORTED),
+        [
+            "read /srv/maps/dir/marker marker",
+            "read /srv/file.txt file",
+            "secret refused",
+            "listing inner,marker,",
+            "write /srv/maps refused",
+            "write /srv/maps/dir/inner written",
+            "write /srv/out written",
+        ]
+    );
+
+    // The host's directory holds what the guest wrote through the writable mappings, and nothing
+    // else changed, before the stop, which tears the root down, and after it.
+    let mut expected = tree_of(&EXPORT_DIRECTORIES, &EXPORT_FILES);
+    for (file, contents) in [
+        ("dir/inner/written", "runtime-adapter"),
+        ("dir/inner/workload", "workload"),
+        ("out/written", "runtime-adapter"),
+        ("out/workload", "workload"),
+    ] {
+        expected.insert(file.to_owned(), Some(contents.to_owned()));
+    }
+    assert_eq!(export.tree(), expected);
+    clone.stop();
+    assert_eq!(export.tree(), expected);
+    assert!(template.leases().is_empty());
+    assert_payload(&template, false);
+}
+
+#[test]
+#[ignore = "boots VMs; see the module documentation for what they need"]
+fn clones_at_once_see_only_their_own_exports() {
+    let template = Template::create("cl-exports");
+    let own = Export::write(&template, "own", &[("marker", "own")], &[]);
+    let common = Export::write(&template, "common", &[("marker", "common")], &[]);
+    let writable = own.options(&[(".", "/srv/data")], &[]);
+    let mut generated = writable.iter().map(String::as_str).collect::<Vec<_>>();
+    generated.extend(["--machine-id", "generated"]);
+    let read_only = common.options(&[(".", "/srv/data:ro")], &[]);
+    let read_only = read_only.iter().map(String::as_str).collect::<Vec<_>>();
+    // Four clones of one generation at once: one with a read-write export of its own and a
+    // generated machine ID, two over the same read-only export, over a scratch image and in RAM,
+    // and one without an export.
+    let starts = [
+        (
+            "cl-own",
+            StartOf {
+                options: &generated,
+                ..StartOf::default()
+            },
+        ),
+        (
+            "cl-common",
+            StartOf {
+                upper: Upper::Scratch,
+                options: &read_only,
+                ..StartOf::default()
+            },
+        ),
+        (
+            "cl-common-2",
+            StartOf {
+                options: &read_only,
+                ..StartOf::default()
+            },
+        ),
+        ("cl-none", StartOf::default()),
+    ];
+    let mut clones = starts.map(|(name, start)| template.start(name, start, 0));
+    let [with_own, with_common, with_same, without] = &mut clones;
+    for clone in [&*with_own, &*with_common, &*with_same] {
+        clone.assert_mapped(1);
+    }
+    without.assert_started();
+
+    // Each record names its clone's export, a directory, by the identity of its plan, which the
+    // clones of the same export share, and one mapping; the clone without an export has none, and
+    // no mapping, and NVX restored it with no `--mount`, which leaves the template's filesystem
+    // slot dormant. NVX bound each directory to the slot with the access that its mapping needs.
+    let exported = |clone: &Cloned| {
+        let configuration = clone.configuration();
+        let export = configuration
+            .export
+            .map(|export| (export.kind, export.plan));
+        (export, configuration.mappings)
+    };
+    let (own_export, own_mappings) = exported(with_own);
+    let (common_export, common_mappings) = exported(with_common);
+    let (own_export, common_export) = (own_export.unwrap(), common_export.unwrap());
+    assert_eq!((own_export.0, own_mappings), (ExportKind::Directory, 1));
+    assert_eq!(
+        (common_export.0, common_mappings),
+        (ExportKind::Directory, 1)
+    );
+    assert_ne!(own_export.1, common_export.1);
+    assert_eq!(exported(with_same), (Some(common_export), 1));
+    assert_eq!(exported(without), (None, 0));
+    with_own.assert_vmm_mount(Some((&own, "rw")));
+    with_common.assert_vmm_mount(Some((&common, "ro")));
+    with_same.assert_vmm_mount(Some((&common, "ro")));
+    without.assert_vmm_mount(None);
+
+    // Each clone with an export mounted it read-write, even where every mapping of its table is
+    // read-only, as a cold launch's would not be, since OpenVMM keeps the export's access, and each
+    // mapping carries its own. Below the root, beside its mapping, the mount table shows the bind
+    // of a generated machine ID. Each shows its own directory, and takes what its access allows.
+    for (clone, marker, access, write, mounts) in [
+        (
+            &mut *with_own,
+            "own",
+            "rw",
+            "allowed",
+            "/etc/machine-id,/srv/data",
+        ),
+        (&mut *with_common, "common", "ro", "refused", "/srv/data"),
+        (&mut *with_same, "common", "ro", "refused", "/srv/data"),
+    ] {
+        let facts = clone.probe(&[MAP_DATA]);
+        let fact = |key: &str| facts[&format!("map.{key}")].as_str();
+        assert_eq!(fact("export.count"), "1", "{facts:?}");
+        let options = mount_options(fact("export.options"));
+        assert!(
+            options.is_superset(&BTreeSet::from(["rw", "nosuid", "nodev"])),
+            "{facts:?}"
+        );
+        assert_eq!(fact("mounts"), mounts, "{facts:?}");
+        assert!(
+            mount_options(fact("data.options")).contains(access),
+            "{facts:?}"
+        );
+        let data = ["kind", "entries", "write"].map(|key| fact(&format!("data.{key}")));
+        assert_eq!(data, ["directory", "marker", write], "{facts:?}");
+        let size = format!("file {}", marker.len());
+        let found = ["kind", "read"].map(|key| fact(&format!("marker.{key}")));
+        assert_eq!(found, [size.as_str(), marker], "{facts:?}");
+    }
+    // The clone without an export mounted none, and maps nothing.
+    let facts = without.probe(&[MAP_DATA]);
+    let fact = |key: &str| facts[&format!("map.{key}")].as_str();
+    assert_eq!(fact("export.count"), "0", "{facts:?}");
+    assert!(!facts.contains_key("map.export.type"), "{facts:?}");
+    assert_eq!(fact("hostfs.mode"), "absent", "{facts:?}");
+    assert_eq!(fact("mounts"), "", "{facts:?}");
+    let found = ["data.options", "data.kind", "marker.kind"].map(fact);
+    assert_eq!(found, ["none", "absent", "absent"], "{facts:?}");
+
+    // The read-only bind of the generated machine ID holds even against the guest's root: the
+    // helper of the `entries` probe, which writes the root's own machine ID first, finds its file
+    // system read-only.
+    with_own
+        .sandbox
+        .run("probe", &[OsStr::new("entries")], FAILED);
+    let stderr = with_own.sandbox.stderr();
+    assert!(stderr.contains("Read-only file system"), "{stderr}");
+
+    // The host's directories hold what the clone of the writable export wrote, and nothing else.
+    let written = [("marker", "own"), ("written", "runtime-adapter")];
+    assert_eq!(own.tree(), tree_of(&[], &written));
+    assert_eq!(common.tree(), tree_of(&[], &[("marker", "common")]));
+    for clone in &mut clones {
+        clone.stop();
+    }
+    assert!(template.leases().is_empty());
+    assert_payload(&template, false);
+}
+
+#[test]
+#[ignore = "boots VMs; see the module documentation for what they need"]
+fn a_start_refuses_an_export_that_a_dormant_filesystem_slot_cannot_bind_before_any_vmm_starts() {
+    let template = Template::create("cl-unbound");
+    let one = Export::write(&template, "one", &[("marker", "one")], &[]);
+    let two = Export::write(&template, "two", &[("marker", "two")], &[]);
+    // Two directories, neither inside the other, which the plan exports as two children of an
+    // aggregate export, and a file alone, which the plan exports as its one child.
+    let mut several = one.options(&[(".", "/srv/one")], &[]);
+    several.extend([
+        "--share".to_owned(),
+        format!("{}:/srv/two", two.root.display()),
+    ]);
+    let file = one.options(&[("marker", "/srv/marker:ro")], &[]);
+    let slot = "the export of a clone binds one directory to its template's dormant filesystem \
+                slot, but its export plan exports";
+    for (name, options, problem) in [
+        (
+            "cl-several",
+            several,
+            format!("{slot} 2 directories and files"),
+        ),
+        ("cl-file", file, format!("{slot} the file ")),
+    ] {
+        let options = options.iter().map(String::as_str).collect::<Vec<_>>();
+        let start = StartOf {
+            options: &options,
+            ..StartOf::default()
+        };
+        let refused = template.start(name, start, CLONE_FAILED);
+        refused.assert_refused(&problem);
+        let printed = &refused.started;
+        assert_eq!(
+            failure(printed),
+            [
+                "request",
+                "invalid-mappings",
+                "plan",
+                "planned",
+                "none",
+                "no-vm"
+            ],
+            "{printed:?}"
+        );
+        assert_eq!(printed["quarantined"], "no", "{printed:?}");
+    }
+    assert!(template.leases().is_empty());
+    assert_eq!(one.tree(), tree_of(&[], &[("marker", "one")]));
+    assert_eq!(two.tree(), tree_of(&[], &[("marker", "two")]));
+    assert_payload(&template, false);
+}
+
+#[test]
+#[ignore = "boots VMs; see the module documentation for what they need"]
+fn a_clone_whose_mapping_fails_ends_before_its_sandbox_starts() {
+    let template = Template::create("cl-mapfail");
+    let export = Export::write(&template, "data", &[("out/marker", "marker")], &["out"]);
+    // The table's second mapping, after the directory's own, puts the directory `out` onto
+    // `/usr/lib/os-release`, a file of NVX's Ubuntu image, which the guest refuses once it
+    // applied the first.
+    let shares = export.options(
+        &[(".", "/srv/maps:ro"), ("out", "/usr/lib/os-release")],
+        &[],
+    );
+    let options = shares.iter().map(String::as_str).collect::<Vec<_>>();
+    let start = StartOf {
+        upper: Upper::Scratch,
+        options: &options,
+        ..StartOf::default()
+    };
+    let failed = template.start("cl-mapfail-1", start, CLONE_FAILED);
+    let printed = &failed.started;
+
+    // The clone was ready, but the restore sequence sent no start once its guest failed the
+    // table: the failure is the start's, at the clone's Ready, by the evidence of the protocol,
+    // since the guest's refusal does not tell the request's mappings from a failure of its own.
+    // The clone order asked the guest to stop, which tears the root down, and NVX then ended the
+    // launch at once, which found the VM exited, with the guest's success, or terminated it,
+    // whether or not OpenVMM had reported the guest's success yet.
+    assert!(printed.contains_key("pid"), "{printed:?}");
+    assert_eq!(
+        (printed["root"].as_str(), printed["build"].as_str()),
+        ("ready", GUEST_BUILD)
+    );
+    for key in ["table", "mapped", "sandbox"] {
+        assert!(!printed.contains_key(key), "{printed:?}");
+    }
+    let [outcome, evidence, stage, progress, status, teardown] = failure(printed);
+    assert_eq!(
+        [outcome, evidence, stage, progress],
+        ["unknown", "protocol", "start", "ready"],
+        "{printed:?}"
+    );
+    assert!(
+        matches!(
+            (status, teardown),
+            ("0", "exited" | "terminated") | ("none", "terminated")
+        ),
+        "{printed:?}"
+    );
+    let stderr = failed.sandbox.stderr();
+    // The guest applied the directory's own mapping, the table's first, and refused the second:
+    // the guest's own report, which no other failure of the table prints.
+    assert!(
+        stderr.contains(
+            "the clone did not apply its mapping table: the mapping table failed after 1 \
+             mapping: "
+        ),
+        "{stderr}"
+    );
+    // Nothing of the clone runs: the failure quarantined nothing, and the start released the
+    // lease, with the records of the clone's launch.
+    assert_eq!(printed["quarantined"], "no", "{printed:?}");
+    assert_eq!(printed["released"], printed["lease"], "{printed:?}");
+    assert!(failed.sandbox.record().is_none());
+    let store = SandboxStore::open(&failed.sandbox.store).unwrap();
+    assert!(CloneRecords::read(&store).unwrap().is_none());
+    assert!(template.leases().is_empty());
+    // The guest wrote nothing to the host's directory.
+    assert_eq!(
+        export.tree(),
+        tree_of(&["out"], &[("out/marker", "marker")])
+    );
+    assert_payload(&template, false);
 }
