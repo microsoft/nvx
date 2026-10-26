@@ -353,9 +353,9 @@ impl ClonePlan {
     ///   that acquired the lease, before the launch that it reserves began,
     ///   [`Evidence::HostFailure`];
     /// - with [`ErrorKind::Unsupported`] for an export whose directory, by the path that its plan
-    ///   resolved, lies inside the template store's directory, [`Store::dir`], or holds it, which
-    ///   the plan compares without reading anything, and so without resolving the store's own
-    ///   path, [`Evidence::InvalidMappings`];
+    ///   resolved, lies inside the template store's directory, [`Store::dir`], by the path that
+    ///   it resolves to, or holds it, [`Evidence::InvalidMappings`], and with [`ErrorKind::Io`] if
+    ///   the store's directory cannot be resolved, the host's evidence;
     /// - with [`ErrorKind::NotFound`] if the store no longer indexes the leased generation, and as
     ///   [`Store::index`] fails, the host's evidence; with [`ErrorKind::Io`] if it indexes it with
     ///   another key than the lease names, [`Evidence::MalformedGeneration`]; and as
@@ -470,8 +470,20 @@ impl ClonePlan {
         let Acquired { lease, locked } = acquired;
         check_lease(store, lease, locked).attribute(Evidence::HostFailure)?;
         if let Some(export) = &export {
+            // The plan resolved the export's paths, so the store's path is resolved as well, so
+            // that no other spelling of it hides an overlap.
+            let dir = store.dir();
+            let resolved = filesystem::canonicalize(dir)
+                .map_err(|error| {
+                    Error::io(format!(
+                        "cannot resolve the template store {}",
+                        dir.display()
+                    ))
+                    .with_source(error)
+                })
+                .on_host()?;
             export
-                .check_outside(store.dir())
+                .check_outside(&resolved)
                 .attribute(Evidence::InvalidMappings)?;
         }
         let generation = store

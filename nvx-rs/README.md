@@ -657,7 +657,7 @@ from the template's RAM to its capacity; the clone's image, which the check of
 its `DistroBinding` opens; its upper, either the caller's scratch image, which
 the check of its `ScratchBinding` claims, and which nothing formats, copies, or
 reads, or for an upper in RAM a fresh sparse file, `clone-scratch.raw` in the
-sandbox's directory, which the release removes; its export, if it has one, an `ExportPlan` that `filesystem::plan` made for the container root, which must export exactly one directory, since the template's dormant filesystem slot binds one directory and no file, and which must not overlap the template store, by the paths that the plan resolved; and a fresh capability.
+sandbox's directory, which the release removes; its export, if it has one, an `ExportPlan` that `filesystem::plan` made for the container root, which must export exactly one directory, since the template's dormant filesystem slot binds one directory and no file, and which must not overlap the template store, by the paths that the plan and the store's directory resolve to; and a fresh capability.
 
 It builds the clone's activation record, `ClonePlan::activation`, which the
 clone's guest applies in place of the configuration that the template captured,
