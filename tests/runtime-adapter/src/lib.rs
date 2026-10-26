@@ -9,7 +9,8 @@
 //!   messages about a layered [`root`], its [`probe`]s, and [`exec`]utions, and the kernel command
 //!   line and statuses of its [`template`] mode;
 //! - host-only, with the `host` feature: the host API too, and the host program, in the `host`,
-//!   `runtime`, `initramfs`, `layered`, and `hook` modules and the `runtime-adapter-host` binary;
+//!   `runtime`, `initramfs`, `layered`, `capture`, and `hook` modules and the
+//!   `runtime-adapter-host` binary;
 //! - guest-only, with the `guest` feature: the guest API too, and the guest agent, in the `guest`
 //!   and `worker` modules and the `runtime-adapter-guest` binary, a static
 //!   `x86_64-unknown-linux-musl` executable.
@@ -46,12 +47,16 @@
 //!
 //! A VM whose kernel command line names the platform snapshot tier is a template's, which the
 //! worker captures before it assembles any root, so that every clone of the snapshot attaches a
-//! root of its own, in [`template`] mode. In each clone, the worker repairs the restore, then
+//! root of its own, in [`template`] mode. The host program's `runtime-adapter-host create`
+//! captures such a VM through NVX's template store, which publishes the snapshot as a generation
+//! of a template, in the `capture` module. In each clone, the worker repairs the restore, then
 //! activates the clone with the host's `Activate`, whose record the guest library applies, answers
 //! `Ready` with the activation, and serves the host's order as after a cold boot. On the host, the
 //! `host` module's clone order is the framing through which the restore sequence of
 //! `nvx::host::template` activates a clone and starts its sandbox.
 
+#[cfg(feature = "host")]
+pub mod capture;
 pub mod exec;
 pub mod frame;
 #[cfg(all(feature = "guest", target_os = "linux"))]

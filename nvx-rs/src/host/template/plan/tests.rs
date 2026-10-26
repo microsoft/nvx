@@ -11,6 +11,7 @@ use crate::host::network::{EgressRule, ForwardProtocol, LoopbackForward, Network
 use crate::host::sandbox::distro::{BINDING_VERSION, DISTRO_POLICY_REVISION};
 use crate::host::sandbox::{SandboxDistro, SandboxNetwork, SandboxSettings};
 use crate::host::seal::SEAL_VERSION;
+use crate::protocol::cmdline;
 use crate::protocol::root::RootImage;
 use crate::uuid::Uuid;
 
@@ -555,6 +556,13 @@ fn the_command_line_holds_only_tokens_of_openvmms_platform_allowlist() {
         }
         for token in &tokens {
             assert!(openvmm::admits(token), "{token} of {template:?}");
+            // OpenVMM splits the command line at ASCII whitespace, and the kernel at its own,
+            // which also holds the vertical tab and 0xa0: no token holds either, so both split
+            // the command line into the same tokens.
+            assert!(
+                token.is_ascii() && !token.bytes().any(cmdline::is_space),
+                "{token:?} of {template:?}"
+            );
         }
         // The command line of the template's devices names the root of its plan, which a clone
         // binds, and which the allowlist refuses: the template's replaces it.

@@ -551,7 +551,7 @@ pub fn with_proxy(mut start: Start, plan: &SandboxPlan) -> Start {
 ///
 /// OpenVMM runs in the sandbox's store, so the plan names the images by absolute paths, which it
 /// normalizes as `pathlib` does.
-fn plan(
+pub(crate) fn plan(
     distro: &Path,
     format: ImageFormat,
     identity: Uuid,

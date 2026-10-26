@@ -68,6 +68,30 @@
 //!   with the stage's status. If the guest fails a mapping, the launch sends no more of the table,
 //!   nor `Start`, asks the guest agent to stop, which tears down the root, waits for the VM to
 //!   end, abandons it, and checks that the VM ended with success and a complete teardown.
+//! - `runtime-adapter-host create STORE --guest-agent PATH --distro FORMAT:PATH --distro-identity
+//!   UUID [--hypervisor NAME] [--cpu-profile PROFILE] [--processors N] [--memory MIB]
+//!   [--memory-capacity MIB] [--scratch-length BYTES] [--network FILE]` serves a template of the
+//!   guest agent PATH from the template store STORE, an `nvx::host::template::Store`, which it
+//!   creates if needed: a generation of the template's class that the store holds, and that is
+//!   eligible at the host's time, or else a new one, which the store captures and publishes, with
+//!   `Store::create_template`. The options choose the class; see `runtime_adapter::capture`. The
+//!   placeholder is the raw file PATH, an EROFS filesystem, `erofs`, or a GPT disk, `gpt`, with
+//!   the identity UUID, a trusted artifact of the platform, whose length is the capacity of every
+//!   clone's image. The template's VM runs on the hypervisor NAME, as a launch's does, with the CPU
+//!   profile PROFILE, `auto` by default, N processors, 1 by default, all online at boot, MIB
+//!   mebibytes of RAM, 256 by default, and a RAM capacity of MIB mebibytes, its RAM by default, to
+//!   which a restore may expand it, and a dormant scratch of BYTES bytes, 64 MiB by default. It has
+//!   one NIC under the policy of the network FILE, which the creation reads as a launch reads its
+//!   network, unless the policy lets nothing through, and none without a network. The creation
+//!   reads the network before anything else, then stages the placeholder as `stage` stages an
+//!   image, verifying it explicitly, which hashes it only when a manifest is beside it, and checks
+//!   the class before it creates the store. A capture boots the template's VM through NVX's
+//!   supervisor, with the guest agent in place of NVX's agents, which captures the VM before it
+//!   assembles any root, in template mode; see `runtime_adapter::template`. The store checks what
+//!   the VM left, and publishes the snapshot as its next generation. The command writes the
+//!   initramfs of the guest agent into a directory of its own in the system's temporary
+//!   directory, private to the current user, which it removes once the creation returns, and
+//!   prints the generation only once the store has committed it.
 //! - `runtime-adapter-host reattach STORE` reattaches to the VM of STORE, which an earlier process
 //!   launched and which it holds although it is not its child, attaches a new session to it, in
 //!   the session's next epoch, and exchanges a `Ping`, leaving the VM running.
@@ -140,7 +164,12 @@
 //!   - `stdout` and `stderr`: the program's standard output and error;
 //! - `stopped`: how the stop ended: `graceful`, `forced`, or `timed-out`;
 //! - `outcome`: the category and status code of the VM's outcome report, such as `success 0`;
-//! - `teardown`: whether the VM's teardown completed: `complete` or `incomplete`.
+//! - `teardown`: whether the VM's teardown completed: `complete` or `incomplete`;
+//! - `created`: how `create` served the template: `captured`, with a generation that a capture
+//!   made and the store published, or `existing`, with one that the store held;
+//! - `generation`, `key`, and `class`: the store generation of the template that `create` served,
+//!   and the identities of its compatibility key and of its capture class, each 64 hexadecimal
+//!   digits.
 //!
 //! Values escape `\`, newlines, and carriage returns as `\\`, `\n`, and `\r`, and each byte of a
 //! program's output that is not part of UTF-8 text as `\xHH`, with two hexadecimal digits.
@@ -160,23 +189,29 @@
 use std::env;
 use std::error::Error;
 use std::ffi::OsString;
+use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
 use nvx::exec::{Cause, Key, Limits, Outcome, Status, Stream, Timers, Window};
-use nvx::host::artifacts::Artifacts;
+use nvx::host::artifacts::{Artifacts, absolute};
 use nvx::host::instance::generate_capability;
-use nvx::host::launch::LaunchSpec;
+use nvx::host::launch::{DEFAULT_MEMORY_MIB, LaunchSpec};
 use nvx::host::report;
 use nvx::host::session;
-use nvx::host::store::{IdentityPart, LaunchId, LockedStore, SandboxStore};
+use nvx::host::store::{IdentityPart, LOG_NAME, LaunchId, LockedStore, SandboxStore};
 use nvx::host::supervisor::{self, Reattached, Starting, StopOutcome, Vmm, VmmCommand};
+use nvx::host::template::{CAPTURES_NAME, Created, HostTime, Store, TRANSACTION_NAME};
 use nvx::protocol::CAPABILITY_LEN;
 use nvx::protocol::root::ImageFormat;
 use nvx::uuid::Uuid;
 use nvx::{ErrorKind, Hypervisor};
 use runtime_adapter::GUEST_BUILD;
+use runtime_adapter::capture::{
+    DEFAULT_CPU_PROFILE, DEFAULT_PROCESSORS, DEFAULT_SCRATCH_LENGTH, Request,
+};
 use runtime_adapter::exec::{self, AccountMode, HostExecution, Start};
 use runtime_adapter::frame::{MAX_BODY, Message};
 use runtime_adapter::hook::{Step, StepHook};
@@ -201,9 +236,20 @@ const SESSION_TIMEOUT: Duration = Duration::from_secs(30);
 const STOP_TIMEOUT: Duration = Duration::from_secs(30);
 /// How long a stop waits for a VM that it terminated to exit.
 const FORCED_TIMEOUT: Duration = Duration::from_secs(10);
-/// The name of the initramfs that boots the guest agent, which the launch writes into the
-/// sandbox's store.
+/// The name of the initramfs that boots the guest agent, which a launch writes into the sandbox's
+/// store, and a creation into a private directory of its own.
 const INITRAMFS_NAME: &str = "runtime-adapter.cpio.gz";
+/// How long a creation waits for the slot of the template's class and for the template store's
+/// lock, and for a capture, which boots the template's VM and writes its RAM.
+const CAPTURE_TIMEOUT: Duration = Duration::from_secs(120);
+/// The prefix of the name of the directory, private to the current user, into which a creation
+/// writes the initramfs of a capture's VM, in the system's temporary directory.
+const CAPTURE_DIRECTORY_PREFIX: &str = "runtime-adapter-template-";
+/// The hexadecimal digits of the identity of a capture class that name its slot in a template
+/// store, as the store documents its layout.
+const SLOT_NAME_LEN: usize = 16;
+/// Bytes in a mebibyte, the unit of `create`'s `--memory` and `--memory-capacity`.
+const MIB: u64 = 1024 * 1024;
 /// The exit status of a command that finds the VM mismatched.
 const MISMATCHED: u8 = 3;
 /// The exit status of a command whose guest reported that a stage of the root failed, once the VM
@@ -240,6 +286,12 @@ const USAGE: &str = concat!(
     "            [--workload-identity UID:GID] [--network FILE]\n",
     "            [--share HOST:TARGET[:ro]... [--deny PATH]... [--reserved TARGET]...",
     " [--share-root DIR]...]]\n",
+    "       runtime-adapter-host create STORE --guest-agent PATH --distro FORMAT:PATH",
+    " --distro-identity UUID\n",
+    "           [--hypervisor NAME] [--guest-build BUILD] [--cpu-profile PROFILE]",
+    " [--processors N]\n",
+    "           [--memory MIB] [--memory-capacity MIB] [--scratch-length BYTES]",
+    " [--network FILE]\n",
     "       runtime-adapter-host (reattach | stop) STORE [--guest-build BUILD]\n",
     "       runtime-adapter-host probe STORE PROBE... [--guest-build BUILD]\n",
     "       runtime-adapter-host exec STORE [--guest-build BUILD] EXECUTION [';' EXECUTION]...\n",
@@ -279,6 +331,19 @@ enum Command {
         layered: Option<Box<Layered>>,
         /// The step hook, for tests, if `RUNTIME_ADAPTER_STEP_HOOK` sets one.
         hook: Option<StepHook>,
+    },
+    /// Serve a template from a template store, which captures one if it holds none.
+    Create {
+        /// The template store.
+        store: PathBuf,
+        /// The guest agent's executable.
+        guest_agent: PathBuf,
+        /// The hypervisor, unless `nvx::Hypervisor::from_env_or_default` selects it.
+        hypervisor: Option<Hypervisor>,
+        /// The guest agent's build.
+        guest_build: String,
+        /// The template.
+        template: Box<Template>,
     },
     /// Reattach to the VM, and stop it if asked.
     Reattach {
@@ -404,6 +469,28 @@ struct Layered {
     network: Option<PathBuf>,
 }
 
+/// The template of `create`, as its options give it.
+struct Template {
+    /// The placeholder.
+    distro: PathBuf,
+    /// The placeholder's format.
+    format: ImageFormat,
+    /// The identity that the guest would expect of the placeholder.
+    identity: Uuid,
+    /// The CPU profile.
+    cpu_profile: String,
+    /// The processors, all online at boot.
+    processors: u32,
+    /// The RAM, in bytes.
+    memory: u64,
+    /// The RAM capacity, in bytes.
+    memory_capacity: u64,
+    /// The length of the dormant scratch, in bytes.
+    scratch_length: u64,
+    /// The file of the template's network, if it has one.
+    network: Option<PathBuf>,
+}
+
 /// The options of a command.
 #[derive(Default)]
 struct Options {
@@ -433,6 +520,16 @@ struct Options {
     shares: Shares,
     /// `--network`.
     network: Option<PathBuf>,
+    /// `--cpu-profile`.
+    cpu_profile: Option<String>,
+    /// `--processors`.
+    processors: Option<u32>,
+    /// `--memory`, in bytes.
+    memory: Option<u64>,
+    /// `--memory-capacity`, in bytes.
+    memory_capacity: Option<u64>,
+    /// `--scratch-length`.
+    scratch_length: Option<u64>,
 }
 
 fn main() -> ExitCode {
@@ -474,6 +571,13 @@ fn main() -> ExitCode {
             layered.as_deref(),
             hook.as_ref(),
         ),
+        Command::Create {
+            store,
+            guest_agent,
+            hypervisor,
+            guest_build,
+            template,
+        } => create(&store, &guest_agent, hypervisor, &guest_build, &template),
         Command::Reattach {
             store,
             guest_build,
@@ -504,16 +608,15 @@ fn parse(arguments: Vec<OsString>) -> Result<Command, String> {
         return Ok(Command::Report);
     };
     let name = match name.to_str() {
-        Some(name @ ("stage" | "launch" | "reattach" | "stop" | "probe" | "exec")) => {
+        Some(name @ ("stage" | "launch" | "create" | "reattach" | "stop" | "probe" | "exec")) => {
             name.to_owned()
         }
         _ => return Err(format!("unknown command {name:?}")),
     };
-    let store = PathBuf::from(
-        arguments
-            .next()
-            .ok_or_else(|| format!("{name} needs a sandbox store"))?,
-    );
+    let store = PathBuf::from(arguments.next().ok_or_else(|| match name.as_str() {
+        "create" => "create needs a template store".to_owned(),
+        _ => format!("{name} needs a sandbox store"),
+    })?);
     if name == "exec" {
         return parse_exec(store, arguments);
     }
@@ -619,6 +722,33 @@ fn parse(arguments: Vec<OsString>) -> Result<Command, String> {
                 hook: StepHook::from_env()?,
             }
         }
+        "create" => {
+            let guest_agent = options.guest_agent.ok_or("create needs --guest-agent")?;
+            let (format, distro) = options.distro.ok_or("create needs --distro")?;
+            let identity = options.identity.ok_or("create needs --distro-identity")?;
+            let memory = options
+                .memory
+                .unwrap_or(u64::from(DEFAULT_MEMORY_MIB) * MIB);
+            Command::Create {
+                store,
+                guest_agent,
+                hypervisor: options.hypervisor,
+                guest_build,
+                template: Box::new(Template {
+                    distro,
+                    format,
+                    identity,
+                    cpu_profile: options
+                        .cpu_profile
+                        .unwrap_or_else(|| DEFAULT_CPU_PROFILE.to_owned()),
+                    processors: options.processors.unwrap_or(DEFAULT_PROCESSORS),
+                    memory,
+                    memory_capacity: options.memory_capacity.unwrap_or(memory),
+                    scratch_length: options.scratch_length.unwrap_or(DEFAULT_SCRATCH_LENGTH),
+                    network: options.network,
+                }),
+            }
+        }
         "probe" if probes.is_empty() => return Err("probe needs a probe".to_owned()),
         "probe" => Command::Probe {
             store,
@@ -647,14 +777,14 @@ fn parse_option(
             .map_err(|value| format!("the value {value:?} of {option} is not Unicode"))
     };
     match (name, option) {
-        ("launch", "--guest-agent") if options.guest_agent.is_none() => {
+        ("launch" | "create", "--guest-agent") if options.guest_agent.is_none() => {
             options.guest_agent = Some(PathBuf::from(value));
         }
-        ("launch", "--hypervisor") if options.hypervisor.is_none() => {
+        ("launch" | "create", "--hypervisor") if options.hypervisor.is_none() => {
             let hypervisor = text(value)?.parse().map_err(|error| describe(&error))?;
             options.hypervisor = Some(hypervisor);
         }
-        ("launch" | "stage", "--distro") if options.distro.is_none() => {
+        ("launch" | "stage" | "create", "--distro") if options.distro.is_none() => {
             let value = text(value)?;
             let distro = value.split_once(':').and_then(|(format, path)| {
                 let format = ImageFormat::from_name(format)?;
@@ -664,7 +794,7 @@ fn parse_option(
                 format!("--distro takes FORMAT:PATH, with the format erofs or gpt, not {value:?}")
             })?);
         }
-        ("launch" | "stage", "--distro-identity") if options.identity.is_none() => {
+        ("launch" | "stage" | "create", "--distro-identity") if options.identity.is_none() => {
             let value = text(value)?;
             let identity = Uuid::parse(&value)
                 .ok_or_else(|| format!("--distro-identity takes a UUID, not {value:?}"))?;
@@ -731,8 +861,35 @@ fn parse_option(
         ("launch", "--deny") => options.shares.denied.push(PathBuf::from(value)),
         ("launch", "--reserved") => options.shares.reserved.push(text(value)?),
         ("launch", "--share-root") => options.shares.roots.push(PathBuf::from(value)),
-        ("launch", "--network") if options.network.is_none() => {
+        ("launch" | "create", "--network") if options.network.is_none() => {
             options.network = Some(PathBuf::from(value));
+        }
+        ("create", "--cpu-profile") if options.cpu_profile.is_none() => {
+            options.cpu_profile = Some(text(value)?);
+        }
+        ("create", "--processors") if options.processors.is_none() => {
+            let value = text(value)?;
+            let processors = value
+                .parse::<u32>()
+                .ok()
+                .filter(|processors| *processors > 0);
+            options.processors =
+                Some(processors.ok_or_else(|| {
+                    format!("--processors takes a positive number, not {value:?}")
+                })?);
+        }
+        ("create", "--memory") if options.memory.is_none() => {
+            options.memory = Some(mebibytes(option, &text(value)?)?);
+        }
+        ("create", "--memory-capacity") if options.memory_capacity.is_none() => {
+            options.memory_capacity = Some(mebibytes(option, &text(value)?)?);
+        }
+        ("create", "--scratch-length") if options.scratch_length.is_none() => {
+            let value = text(value)?;
+            let length = value.parse::<u64>().ok().filter(|length| *length > 0);
+            options.scratch_length = Some(length.ok_or_else(|| {
+                format!("--scratch-length takes a positive number of bytes, not {value:?}")
+            })?);
         }
         (_, "--guest-build") if name != "stage" && options.guest_build.is_none() => {
             options.guest_build = Some(text(value)?);
@@ -868,6 +1025,17 @@ fn numbers<T>(value: &str, parse: impl Fn(&str) -> Option<T>) -> Option<Vec<T>> 
     value.split(',').map(parse).collect()
 }
 
+/// Returns the bytes of `value`, the value of `option`, a positive number of mebibytes, or says why
+/// it is not one.
+fn mebibytes(option: &str, value: &str) -> Result<u64, String> {
+    value
+        .parse::<u64>()
+        .ok()
+        .filter(|mebibytes| *mebibytes > 0)
+        .and_then(|mebibytes| mebibytes.checked_mul(MIB))
+        .ok_or_else(|| format!("{option} takes a positive number of MiB, not {value:?}"))
+}
+
 /// Stages the image `distro`, in `format`, of which the guest expects `identity`, and the ext4
 /// scratch image `scratch`, if any, in the sandbox store `store`, which it creates if needed.
 fn stage(
@@ -967,6 +1135,8 @@ fn launch(
     );
     let mut deadline = Instant::now() + START_TIMEOUT;
     let launch_id = LaunchId::generate().map_err(|error| describe(&error))?;
+    // The command borrows the prepared launch, whose checked files OpenVMM inherits, so it is
+    // built where the launch takes it.
     let starting = supervisor::launch(
         &mut locked,
         &launch_id,
@@ -1190,6 +1360,154 @@ fn binding_error(error: &nvx::Error) -> String {
 /// value, which spans several of the session's records, each way.
 fn echo_body() -> Vec<u8> {
     (0..=u8::MAX).cycle().take(MAX_BODY).collect()
+}
+
+/// Serves a template of the guest agent `guest_agent`, of the build `guest_build`, which
+/// `template` describes, on `hypervisor`, or else the one that
+/// `nvx::Hypervisor::from_env_or_default` selects, from the template store `store`, which it
+/// creates if needed: a generation of the template's class that the store holds, and that is
+/// eligible at the host's time, or one that a capture makes, which the store publishes.
+fn create(
+    store: &Path,
+    guest_agent: &Path,
+    hypervisor: Option<Hypervisor>,
+    guest_build: &str,
+    template: &Template,
+) -> Result<ExitCode, String> {
+    // A network that the plan refuses fails the creation before it needs NVX's artifacts or the
+    // store.
+    let network = template
+        .network
+        .as_deref()
+        .map(read_network)
+        .transpose()
+        .map_err(|error| describe(&error))?;
+    let hypervisor = match hypervisor {
+        Some(hypervisor) => hypervisor,
+        None => Hypervisor::from_env_or_default().map_err(|error| describe(&error))?,
+    };
+    let runtime = runtime(guest_build)?;
+    runtime
+        .artifacts
+        .probe()
+        .map_err(|error| describe(&error))?;
+    let request = Request {
+        distro: template.distro.clone(),
+        format: template.format,
+        identity: template.identity,
+        hypervisor,
+        cpu_profile: template.cpu_profile.clone(),
+        processors: template.processors,
+        memory: template.memory,
+        memory_capacity: template.memory_capacity,
+        scratch_length: template.scratch_length,
+        network,
+    };
+    // The placeholder is staged as `stage` stages an image: its explicit verification may hash it,
+    // which no capture does.
+    let staged = Staged::stage(&request.distro, request.format, request.identity, None)
+        .map_err(|error| describe(&error))?;
+    // The VM boots the initramfs from a directory that only the current user may access, as a
+    // launch's VM boots it from the sandbox's store, so that no one else may change it first.
+    let directory = TemporaryDirectory::new(CAPTURE_DIRECTORY_PREFIX)?;
+    let initramfs = directory.path().join(INITRAMFS_NAME);
+    initramfs::write(&runtime.artifacts.initrd, guest_agent, &initramfs)
+        .map_err(|error| format!("cannot write the initramfs of the guest agent: {error}"))?;
+    // The capture creates the dormant scratch in the store, on the file system of its directory,
+    // or, before the store exists, of its parent's.
+    let store = absolute(store).map_err(|error| describe(&error))?;
+    let scratch = match store.parent() {
+        Some(parent) if !store.is_dir() => parent.to_owned(),
+        _ => store.clone(),
+    };
+    let capture = request
+        .capture(
+            staged.distro.binding,
+            &runtime,
+            guest_build,
+            &initramfs,
+            &scratch,
+        )
+        .map_err(|error| describe(&error))?;
+    // A class that no capture takes fails before the store is created.
+    let class = capture.class.identity().map_err(|error| describe(&error))?;
+    let store = Store::create(&store).map_err(|error| describe(&error))?;
+    let created = store
+        .create_template(&capture, HostTime::now, Instant::now() + CAPTURE_TIMEOUT)
+        .map_err(|error| {
+            // The store names the slot of a class by the first digits of its identity, and keeps
+            // the log of the VMM of the class's latest capture there once the capture's launch
+            // has ended, and in the capture's transaction until then.
+            let slot = store
+                .dir()
+                .join(CAPTURES_NAME)
+                .join(&class.to_string()[..SLOT_NAME_LEN]);
+            let logs = [
+                slot.join(TRANSACTION_NAME).join(LOG_NAME),
+                slot.join(LOG_NAME),
+            ];
+            match logs.into_iter().find(|log| log.is_file()) {
+                Some(log) => format!(
+                    "{}; see the VMM's log of the class's latest capture {}",
+                    describe(&error),
+                    log.display()
+                ),
+                None => describe(&error),
+            }
+        })?;
+    let how = match &created {
+        Created::Existing(_) => "existing",
+        Created::Captured(_) => "captured",
+    };
+    let generation = created.generation();
+    println!("created={how}");
+    println!("generation={}", generation.generation());
+    println!("key={}", generation.key());
+    println!("class={}", generation.class());
+    Ok(ExitCode::SUCCESS)
+}
+
+/// A directory private to the current user, which a command creates in the system's temporary
+/// directory, with a name of its own, and removes with everything in it once it drops it, as
+/// `create` does with the initramfs of a capture's VM.
+struct TemporaryDirectory(PathBuf);
+
+impl TemporaryDirectory {
+    /// Creates a directory in the system's temporary directory, whose name starts with `prefix`,
+    /// then the process ID, and which nothing had, private to the current user as NVX makes the
+    /// directory of a sandbox store, with `SandboxStore::create`: no one else may create, change,
+    /// or replace a file in it.
+    fn new(prefix: &str) -> Result<Self, String> {
+        let parent = env::temp_dir();
+        let pid = std::process::id();
+        for attempt in 0..u32::MAX {
+            let path = parent.join(format!("{prefix}{pid}-{attempt}"));
+            match fs::symlink_metadata(&path) {
+                Ok(_) => continue,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => return Err(format!("cannot open {}: {error}", path.display())),
+            }
+            // NVX refuses a directory that someone else created at the path meanwhile, unless it
+            // is private to the current user, as it refuses such a sandbox store.
+            SandboxStore::create(&path).map_err(|error| describe(&error))?;
+            return Ok(Self(path));
+        }
+        Err(format!(
+            "every name of a directory of {prefix}{pid}- is taken in {}",
+            parent.display()
+        ))
+    }
+
+    /// Returns the directory's path.
+    fn path(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for TemporaryDirectory {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
 }
 
 /// Reattaches to the VM of the sandbox store `store`, with the guest agent's build `guest_build`,
