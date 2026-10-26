@@ -192,13 +192,24 @@ impl System for RealSystem {
 
     fn bind_runtime(&mut self, entry: &Entry) -> Result<(), Errno> {
         sys::enter_private_mount_namespace()?;
-        entry.bind_runtime().map_err(|error| match error {
-            entry::Error::Root(error) => sys::errno_of(&error),
-            entry::Error::MachineId(error) | entry::Error::TimeStatus(error) => {
-                Errno::from_raw(error.raw_os_error())
-            }
-            _ => Errno::EINVAL,
-        })
+        // The binds end with the agent's mount namespace, before the init agent unmounts the
+        // root, so the agent leaves them mounted.
+        entry
+            .bind_runtime()
+            .map(drop)
+            .map_err(|error| runtime_errno(&error))
+    }
+}
+
+/// Returns the errno of a failure of [`Entry::bind_runtime`], that of the bind that failed.
+fn runtime_errno(error: &entry::Error) -> Errno {
+    match error {
+        entry::Error::Root(error) => sys::errno_of(error),
+        entry::Error::MachineId(error)
+        | entry::Error::TimeStatus(error)
+        | entry::Error::Resolver(error) => Errno::from_raw(error.raw_os_error()),
+        entry::Error::Rollback { error, .. } => runtime_errno(error),
+        _ => Errno::EINVAL,
     }
 }
 

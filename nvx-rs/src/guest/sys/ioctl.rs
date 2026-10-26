@@ -57,6 +57,13 @@ nix::ioctl_none!(
     97
 );
 
+nix::ioctl_none!(
+    /// Rereads a disk's partition table: Linux `BLKRRPART`, `_IO(0x12, 95)`.
+    blkrrpart,
+    0x12,
+    95
+);
+
 nix::ioctl_read_bad!(
     /// Reads a block device's logical block size: Linux `BLKSSZGET`, `_IO(0x12, 104)`, which
     /// writes an `int` although its number declares no argument.
@@ -113,6 +120,19 @@ pub(crate) fn reseed_random(
 pub(crate) fn flush_block_buffers(descriptor: &FileDescriptor) -> Result<(), Errno> {
     // SAFETY: `BLKFLSBUF` reads no argument.
     unsafe { blkflsbuf(descriptor.raw()) }?;
+    Ok(())
+}
+
+/// Asks Linux to reread the partition table of the disk whose whole-disk block device
+/// `descriptor` opened, as `blockdev --rereadpt` does: the kernel drops the disk's cached buffers
+/// and the block devices of its partitions, reads the table from the device, and creates the
+/// block devices of the partitions that it finds, whose nodes devtmpfs creates, before the request
+/// returns. It needs `CAP_SYS_ADMIN`, and fails with `EBUSY` while one of the disk's partitions is
+/// open, as a mounted one is, and with `EINVAL` on a partition, or on a disk that the kernel does
+/// not partition.
+pub(crate) fn reread_partition_table(descriptor: &FileDescriptor) -> Result<(), Errno> {
+    // SAFETY: `BLKRRPART` reads no argument.
+    unsafe { blkrrpart(descriptor.raw()) }?;
     Ok(())
 }
 
@@ -179,6 +199,22 @@ mod tests {
     fn the_buffer_flush_ioctl_number_matches_linux() {
         // `BLKFLSBUF` in linux/fs.h.
         assert_eq!(nix::request_code_none!(0x12, 97) as u32, 0x1261);
+    }
+
+    #[test]
+    fn the_partition_table_reread_ioctl_number_matches_linux() {
+        // `BLKRRPART` in linux/fs.h.
+        assert_eq!(nix::request_code_none!(0x12, 95) as u32, 0x125f);
+    }
+
+    #[test]
+    fn a_partition_table_reread_fails_on_other_files() {
+        use crate::guest::sys::{Mode, OpenFlags, open, path_c_string};
+
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let path = path_c_string(file.path()).unwrap();
+        let descriptor = open(&path, OpenFlags::O_RDONLY, Mode::empty()).unwrap();
+        assert_eq!(reread_partition_table(&descriptor), Err(Errno::ENOTTY));
     }
 
     #[test]

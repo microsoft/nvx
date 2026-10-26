@@ -2,8 +2,10 @@
 //!
 //! The launch tests run each entry without privileges: the child starts without new namespaces
 //! and skips the system calls of every entry stage, but fails the one that a test names, so that
-//! each stage reports its own failure. The tests whose names start with `privileged_` run the
-//! entry for real, and only where the test process may mount, as root does.
+//! each stage reports its own failure. The runtime binds' tests run on the root operations' fake
+//! kernel, which simulates mounts by their unique IDs. The tests whose names start with
+//! `privileged_` run the entry, and the runtime's binds, for real, and only where the test
+//! process may mount, as root does.
 
 use std::ffi::CString;
 use std::io::Read;
@@ -11,8 +13,10 @@ use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::PermissionsExt;
 
 use super::*;
+use crate::guest::root::{Call, FakeKernel, Operation, attach_calls};
 use crate::guest::spawn::{Command, LaunchFailure, LaunchStage};
 use crate::guest::sys::{ChildStatus, Simulation};
+use crate::protocol::cmdline::write_resolver;
 
 /// The passwd database of the tests' roots.
 const PASSWD_DATABASE: &[u8] = b"root:x:0:0:root:/root:/bin/sh\n\
@@ -526,8 +530,11 @@ fn a_generated_machine_id_has_mode_0444_whatever_the_umask() {
 fn runtime_binds_need_a_mount_root_unless_there_are_none() {
     let root = root_with(None, None);
     let identity = || Identity::new(1, 1).account(AccountMode::Numeric);
-    // The image's machine ID and no time status bind nothing, so any root does.
-    Entry::new(root.path(), identity()).bind_runtime().unwrap();
+    // The image's machine ID and resolver file, and no time status, bind nothing, so any root
+    // does, and there is nothing to remove.
+    let binds = Entry::new(root.path(), identity()).bind_runtime().unwrap();
+    assert!(binds.root.is_none() && binds.binds.is_empty());
+    binds.remove().unwrap();
     let machine_id = MachineId::generate(root.path().join("machine-id")).unwrap();
     let result = Entry::new(root.path(), identity())
         .machine_id(machine_id)
@@ -540,12 +547,238 @@ fn runtime_binds_need_a_mount_root_unless_there_are_none() {
         .time_status(root.path().join("etc"))
         .bind_runtime();
     assert!(matches!(result, Err(Error::Root(_))), "{result:?}");
+    let result = Entry::new(root.path(), identity())
+        .resolver(root.path().join("machine-id"))
+        .bind_runtime();
+    assert!(matches!(result, Err(Error::Root(_))), "{result:?}");
     // The inputs are checked first.
     let result = Entry::new(root.path(), identity())
         .hostname("")
         .time_status(root.path().join("etc"))
         .bind_runtime();
     assert!(matches!(result, Err(Error::Hostname)), "{result:?}");
+}
+
+/// A root, `root`, on a mount of the fake kernel's, with an empty `etc`, and the sources of the
+/// runtime's files, in `sources`: a generated machine ID, `machine-id`, the time status's
+/// directory, `time`, and a resolver file that names `10.0.0.1`, `resolv.conf`, below a
+/// temporary directory.
+struct RuntimeFixture {
+    /// The temporary directory, which the fixture holds only so that dropping it removes it.
+    _directory: tempfile::TempDir,
+    /// The root.
+    root: PathBuf,
+    /// The directory of the sources.
+    sources: PathBuf,
+    /// The fake kernel.
+    kernel: FakeKernel,
+}
+
+impl RuntimeFixture {
+    fn new() -> Self {
+        let directory = tempfile::tempdir().unwrap();
+        let base = directory.path().canonicalize().unwrap();
+        let root = base.join("root");
+        let sources = base.join("sources");
+        std::fs::create_dir_all(root.join("etc")).unwrap();
+        std::fs::create_dir_all(sources.join("time")).unwrap();
+        MachineId::generate(sources.join("machine-id")).unwrap();
+        let resolver = std::fs::File::create(sources.join("resolv.conf")).unwrap();
+        write_resolver(resolver, "10.0.0.1".parse().unwrap()).unwrap();
+        let kernel = FakeKernel::default();
+        kernel.add_mount(&root);
+        Self {
+            _directory: directory,
+            root,
+            sources,
+            kernel,
+        }
+    }
+
+    /// Returns the entry of the root, of user ID 0 in numeric-account mode, with every runtime
+    /// file of the sources.
+    fn entry(&self) -> Entry {
+        Entry::new(
+            &self.root,
+            Identity::new(0, 0).account(AccountMode::Numeric),
+        )
+        .machine_id(MachineId::Generated(self.sources.join("machine-id")))
+        .time_status(self.sources.join("time"))
+        .resolver(self.sources.join("resolv.conf"))
+    }
+
+    /// Returns the mount points of the runtime's targets in the root, in the order of the binds.
+    fn points(&self) -> [PathBuf; 3] {
+        ["etc/machine-id", "run/nvx/time", "etc/resolv.conf"].map(|target| self.root.join(target))
+    }
+
+    /// Returns the mount points as the fake kernel records them, in reverse order.
+    fn removals(&self, points: &[PathBuf]) -> Vec<String> {
+        points
+            .iter()
+            .rev()
+            .map(|point| point.display().to_string())
+            .collect()
+    }
+}
+
+#[test]
+fn runtime_binds_are_made_in_order_and_removed_in_reverse() {
+    let fixture = RuntimeFixture::new();
+    // The image's resolver file is a link, as a resolver daemon's image has, which no bind
+    // covers; it gives way to an empty file, and its target is left alone.
+    let outside = fixture.sources.join("stub-resolv.conf");
+    std::fs::write(&outside, b"nameserver 127.0.0.53\n").unwrap();
+    std::os::unix::fs::symlink(&outside, fixture.root.join("etc/resolv.conf")).unwrap();
+    let binds = fixture
+        .entry()
+        .bind_runtime_with(&mut fixture.kernel.clone())
+        .unwrap();
+    let points = fixture.points();
+    let expected: Vec<Call> = ["machine-id", "time", "resolv.conf"]
+        .iter()
+        .zip(&points)
+        .flat_map(|(source, point)| {
+            attach_calls(&fixture.sources.join(source), point, Access::ReadOnly)
+        })
+        .collect();
+    assert_eq!(fixture.kernel.calls(), expected);
+    for (bind, point) in binds.binds.iter().zip(&points) {
+        assert_eq!(fixture.root.join(bind.target()), *point);
+        assert!(fixture.kernel.mount_at(point).is_some(), "{point:?}");
+    }
+    let replaced = std::fs::symlink_metadata(fixture.root.join("etc/resolv.conf")).unwrap();
+    assert!(replaced.is_file() && replaced.len() == 0);
+    assert_eq!(replaced.permissions().mode() & 0o7777, 0o644);
+    assert_eq!(std::fs::read(&outside).unwrap(), b"nameserver 127.0.0.53\n");
+    // Their removal takes them off, last first.
+    binds.remove_with(&mut fixture.kernel.clone()).unwrap();
+    assert_eq!(fixture.kernel.unmounts(), fixture.removals(&points));
+    assert!(
+        points
+            .iter()
+            .all(|point| fixture.kernel.mount_at(point).is_none())
+    );
+}
+
+#[test]
+fn a_failed_runtime_bind_removes_the_binds_before_it() {
+    // A missing resolver file, after the machine ID and the time status.
+    let fixture = RuntimeFixture::new();
+    let points = fixture.points();
+    let result = fixture
+        .entry()
+        .resolver(fixture.sources.join("missing"))
+        .bind_runtime_with(&mut fixture.kernel.clone());
+    assert!(
+        matches!(
+            &result,
+            Err(Error::Resolver(MappingError::System { step: Step::Source, error }))
+                if *error == Errno::ENOENT as i32
+        ),
+        "{result:?}"
+    );
+    assert_eq!(fixture.kernel.unmounts(), fixture.removals(&points[..2]));
+    assert!(
+        points
+            .iter()
+            .all(|point| fixture.kernel.mount_at(point).is_none())
+    );
+    // A target of another kind for the time status, after the machine ID.
+    let fixture = RuntimeFixture::new();
+    let points = fixture.points();
+    std::fs::create_dir_all(fixture.root.join("run/nvx")).unwrap();
+    std::fs::write(fixture.root.join("run/nvx/time"), b"").unwrap();
+    let result = fixture
+        .entry()
+        .bind_runtime_with(&mut fixture.kernel.clone());
+    assert!(
+        matches!(result, Err(Error::TimeStatus(MappingError::TargetKind))),
+        "{result:?}"
+    );
+    assert_eq!(fixture.kernel.unmounts(), fixture.removals(&points[..1]));
+    assert_eq!(fixture.kernel.mount_at(&points[0]), None);
+    // A failure of the first bind leaves nothing to remove.
+    let fixture = RuntimeFixture::new();
+    std::fs::create_dir(fixture.root.join("etc/machine-id")).unwrap();
+    let result = fixture
+        .entry()
+        .bind_runtime_with(&mut fixture.kernel.clone());
+    assert!(
+        matches!(result, Err(Error::MachineId(MappingError::TargetKind))),
+        "{result:?}"
+    );
+    assert!(fixture.kernel.calls().is_empty());
+}
+
+#[test]
+fn a_failed_runtime_bind_names_the_binds_before_it_that_stay() {
+    // A missing resolver file, after the machine ID and the time status, whose bind is busy.
+    let fixture = RuntimeFixture::new();
+    let points = fixture.points();
+    fixture
+        .kernel
+        .fail(Operation::Unmount, &points[1], Errno::EBUSY);
+    let error = fixture
+        .entry()
+        .resolver(fixture.sources.join("missing"))
+        .bind_runtime_with(&mut fixture.kernel.clone())
+        .unwrap_err();
+    let Error::Rollback {
+        error: failure,
+        teardown,
+    } = &error
+    else {
+        panic!("{error:?}");
+    };
+    assert!(
+        matches!(
+            failure.as_ref(),
+            Error::Resolver(MappingError::System { step: Step::Source, error: code })
+                if *code == Errno::ENOENT as i32
+        ),
+        "{failure:?}"
+    );
+    let stayed: Vec<&Path> = teardown
+        .failures()
+        .iter()
+        .map(|stayed| stayed.target())
+        .collect();
+    assert_eq!(stayed, [Path::new("/run/nvx/time")]);
+    assert_eq!(
+        error.to_string(),
+        format!("{failure}; the binds made before it stay mounted: {teardown}")
+    );
+    assert!(std::error::Error::source(&error).is_some());
+    // The rollback attempts each bind, so the machine ID's is removed all the same.
+    assert_eq!(fixture.kernel.unmounts(), fixture.removals(&points[..2]));
+    assert!(fixture.kernel.mount_at(&points[1]).is_some());
+    assert!(fixture.kernel.mount_at(&points[0]).is_none());
+}
+
+#[test]
+fn a_runtime_bind_that_stays_is_reported() {
+    let fixture = RuntimeFixture::new();
+    let binds = fixture
+        .entry()
+        .bind_runtime_with(&mut fixture.kernel.clone())
+        .unwrap();
+    let points = fixture.points();
+    fixture
+        .kernel
+        .fail(Operation::Unmount, &points[2], Errno::EBUSY);
+    let error = binds.remove_with(&mut fixture.kernel.clone()).unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        format!(
+            "failed to unmount the mapping at /etc/resolv.conf: failed to unmount the mapping: {}",
+            io::Error::from_raw_os_error(Errno::EBUSY as i32)
+        )
+    );
+    // The others are removed all the same.
+    assert_eq!(fixture.kernel.unmounts(), fixture.removals(&points));
+    assert!(fixture.kernel.mount_at(&points[2]).is_some());
+    assert!(fixture.kernel.mount_at(&points[0]).is_none());
 }
 
 #[test]
@@ -571,23 +804,31 @@ fn runtime_sources_are_the_directories_beside_their_files() {
 }
 
 #[test]
-fn only_a_link_at_the_machine_id_is_removed() {
+fn only_a_link_at_a_runtime_file_of_etc_is_removed() {
+    for target in [MACHINE_ID_TARGET, RESOLVER_TARGET] {
+        let root = root_with(None, None);
+        let link = root.path().join(target.trim_start_matches('/'));
+        let outside = tempfile::NamedTempFile::new().unwrap();
+        std::os::unix::fs::symlink(outside.path(), &link).unwrap();
+        remove_link(root.path(), target).unwrap();
+        assert!(std::fs::symlink_metadata(&link).is_err());
+        assert!(outside.path().exists());
+        assert_eq!(remove_link(root.path(), target), Err(Errno::ENOENT));
+        std::fs::write(&link, b"image\n").unwrap();
+        assert_eq!(remove_link(root.path(), target), Err(Errno::EEXIST));
+        assert_eq!(std::fs::read(&link).unwrap(), b"image\n");
+        // A link on the way to it is not followed.
+        let linked = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink(root.path().join("etc"), linked.path().join("etc")).unwrap();
+        assert_eq!(remove_link(linked.path(), target), Err(Errno::ELOOP));
+        assert_eq!(std::fs::read(&link).unwrap(), b"image\n");
+    }
+    // Only a file of `/etc` is a runtime file there.
     let root = root_with(None, None);
-    let target = root.path().join("etc/machine-id");
-    let outside = tempfile::NamedTempFile::new().unwrap();
-    std::os::unix::fs::symlink(outside.path(), &target).unwrap();
-    remove_machine_id_link(root.path()).unwrap();
-    assert!(std::fs::symlink_metadata(&target).is_err());
-    assert!(outside.path().exists());
-    assert_eq!(remove_machine_id_link(root.path()), Err(Errno::ENOENT));
-    std::fs::write(&target, b"image\n").unwrap();
-    assert_eq!(remove_machine_id_link(root.path()), Err(Errno::EEXIST));
-    assert_eq!(std::fs::read(&target).unwrap(), b"image\n");
-    // A link on the way to it is not followed.
-    let linked = tempfile::tempdir().unwrap();
-    std::os::unix::fs::symlink(root.path().join("etc"), linked.path().join("etc")).unwrap();
-    assert_eq!(remove_machine_id_link(linked.path()), Err(Errno::ELOOP));
-    assert_eq!(std::fs::read(&target).unwrap(), b"image\n");
+    assert_eq!(
+        remove_link(root.path(), TIME_STATUS_TARGET),
+        Err(Errno::EINVAL)
+    );
 }
 
 #[test]
@@ -828,6 +1069,7 @@ for set in CapInh CapPrm CapEff CapBnd CapAmb NoNewPrivs; do echo "$set=$(field 
 echo "pid=$$"
 echo "hostname=$(cat /proc/sys/kernel/hostname)"
 echo "machine-id=$(cat /etc/machine-id)"
+echo "resolver=$(cat /etc/resolv.conf)"
 echo "time=$(cat /run/nvx/time/state)"
 echo "dev=$(cd /dev && echo *)"
 echo "pts=$(ls -A /dev/pts)"
@@ -980,6 +1222,7 @@ fn check_view(output: &str, machine_id: &str) {
     assert_eq!(value(output, "CapAmb"), "0000000000000000", "{output}");
     assert_eq!(value(output, "hostname"), "entry-test", "{output}");
     assert_eq!(value(output, "machine-id"), machine_id, "{output}");
+    assert_eq!(value(output, "resolver"), "nameserver 10.0.0.1", "{output}");
     assert_eq!(value(output, "time"), "time-state", "{output}");
     assert_eq!(
         value(output, "dev"),
@@ -1003,6 +1246,7 @@ fn check_view(output: &str, machine_id: &str) {
         ("/dev/pts", &["nosuid", "noexec"]),
         ("/dev/shm", &["nosuid", "nodev"]),
         ("/etc/machine-id", &["ro", "nosuid", "nodev"]),
+        ("/etc/resolv.conf", &["ro", "nosuid", "nodev"]),
         ("/run/nvx/time", &["ro", "nosuid", "nodev"]),
     ] {
         let options = mount_options(output, point);
@@ -1025,9 +1269,21 @@ fn check_view(output: &str, machine_id: &str) {
     }
 }
 
+/// Returns the mount points below `path`, not `path` itself, in the caller's mount namespace.
+fn mounts_below(path: &Path) -> Vec<PathBuf> {
+    let table = std::fs::read_to_string("/proc/self/mountinfo").unwrap();
+    table
+        .lines()
+        .filter_map(|line| line.split(' ').nth(4))
+        .map(PathBuf::from)
+        .filter(|point| point.starts_with(path) && point != path)
+        .collect()
+}
+
 /// Checks that [`Entry::bind_runtime`] refuses what it cannot bind into `root`, the privileged
 /// entries' mounted root, from the sources in `base`, and leaves the root as it was.
 fn check_runtime_binds(base: &Path, root: &Path) {
+    let mounts = mounts_below(root);
     let entry = || Entry::new(root, Identity::new(0, 0).account(AccountMode::Numeric));
     let generated = |path: PathBuf| {
         entry()
@@ -1053,6 +1309,11 @@ fn check_runtime_binds(base: &Path, root: &Path) {
         matches!(result, Err(Error::TimeStatus(MappingError::SourceKind))),
         "{result:?}"
     );
+    let result = entry().resolver(base.join("time")).bind_runtime();
+    assert!(
+        matches!(result, Err(Error::Resolver(MappingError::SourceKind))),
+        "{result:?}"
+    );
     // A target that the image holds as another kind, or below a link, is refused.
     std::fs::create_dir(root.join("etc/machine-id")).unwrap();
     let result = generated(base.join("machine-id"));
@@ -1069,6 +1330,22 @@ fn check_runtime_binds(base: &Path, root: &Path) {
         "{result:?}"
     );
     std::fs::remove_file(root.join("run")).unwrap();
+    // A failure after the first binds removes them.
+    std::fs::create_dir(root.join("etc/resolv.conf")).unwrap();
+    let result = entry()
+        .machine_id(MachineId::Generated(base.join("machine-id")))
+        .time_status(base.join("time"))
+        .resolver(base.join("resolv.conf"))
+        .bind_runtime();
+    assert!(
+        matches!(result, Err(Error::Resolver(MappingError::TargetKind))),
+        "{result:?}"
+    );
+    std::fs::remove_dir(root.join("etc/resolv.conf")).unwrap();
+    assert_eq!(mounts_below(root), mounts);
+    // What the walk created stays, but for the machine ID's file, which the caller's test puts a
+    // link in place of.
+    std::fs::remove_file(root.join("etc/machine-id")).unwrap();
 }
 
 /// Checks that an execution of `entry`, whose root is the privileged entries' mounted `root`,
@@ -1195,25 +1472,37 @@ fn privileged_entries_see_their_own_view_and_identity() {
                 let id = std::fs::read_to_string(base.path().join("machine-id")).unwrap();
                 std::fs::create_dir(base.path().join("time")).unwrap();
                 std::fs::write(base.path().join("time/state"), "time-state\n").unwrap();
+                let resolver = std::fs::File::create(base.path().join("resolv.conf")).unwrap();
+                write_resolver(resolver, "10.0.0.1".parse().unwrap()).unwrap();
                 let entry = |identity: Identity| {
                     Entry::new(&root, identity)
                         .hostname("entry-test")
                         .machine_id(machine_id.clone())
                         .time_status(base.path().join("time"))
+                        .resolver(base.path().join("resolv.conf"))
                 };
                 check_runtime_binds(base.path(), &root);
-                // The image's link at the machine ID, which no bind covers, gives way to an empty
-                // file, and its target is left alone.
+                // The image's links at the machine ID and at the resolver file, which no bind
+                // covers, give way to empty files, and their targets are left alone.
                 std::fs::write(base.path().join("outside"), "outside\n").unwrap();
                 std::os::unix::fs::symlink(
                     base.path().join("outside"),
                     root.join("etc/machine-id"),
                 )
                 .unwrap();
+                std::os::unix::fs::symlink(
+                    base.path().join("outside"),
+                    root.join("etc/resolv.conf"),
+                )
+                .unwrap();
                 entry(Identity::new(65534, 65534)).bind_runtime().unwrap();
                 assert_eq!(
                     std::fs::read_to_string(root.join("etc/machine-id")).unwrap(),
                     id
+                );
+                assert_eq!(
+                    std::fs::read_to_string(root.join("etc/resolv.conf")).unwrap(),
+                    "nameserver 10.0.0.1\n"
                 );
                 assert_eq!(
                     std::fs::read_to_string(base.path().join("outside")).unwrap(),
@@ -1280,6 +1569,89 @@ fn privileged_entries_see_their_own_view_and_identity() {
                 for escape in values(&output, "escape") {
                     assert_eq!(escape, "refused");
                 }
+            });
+            sys::exit_immediately(u8::from(outcome.is_err()));
+        }
+        sys::ForkResult::Parent(child) => {
+            assert_eq!(sys::wait(child), Some(ChildStatus::Exited(0)));
+        }
+    }
+}
+
+#[test]
+fn privileged_runtime_binds_are_removed_before_a_teardown() {
+    if crate::guest::managed_agent::isolate_process_test(
+        "NVX_ENTRY_TEARDOWN_TEST_CHILD",
+        "guest::entry::tests::privileged_runtime_binds_are_removed_before_a_teardown",
+    ) {
+        return;
+    }
+    if !sys::holds_capability(sys::CAP_SYS_ADMIN).unwrap() {
+        return;
+    }
+    // As for the entries' own test, a child of the harness's process makes the calls.
+    match sys::fork_isolated_test().unwrap() {
+        sys::ForkResult::Child => {
+            let outcome = std::panic::catch_unwind(|| {
+                use nix::sys::statvfs::{FsFlags, statvfs};
+
+                sys::enter_private_mount_namespace().unwrap();
+                let directory = tempfile::tempdir().unwrap();
+                let base = directory.path().canonicalize().unwrap();
+                // A root that is a mount of its own, as a layered root's overlay is, whose
+                // resolver file is a link, as a resolver daemon's image has.
+                let root = base.join("root");
+                std::fs::create_dir(&root).unwrap();
+                let point = sys::path_c_string(&root).unwrap();
+                sys::mount(
+                    Some(c"tmpfs"),
+                    &point,
+                    Some(c"tmpfs"),
+                    sys::MountFlags::empty(),
+                    Some(c"mode=0755"),
+                )
+                .unwrap();
+                std::fs::create_dir(root.join("etc")).unwrap();
+                std::os::unix::fs::symlink(
+                    "../run/resolver/resolv.conf",
+                    root.join("etc/resolv.conf"),
+                )
+                .unwrap();
+                let machine_id = MachineId::generate(base.join("machine-id")).unwrap();
+                std::fs::create_dir(base.join("time")).unwrap();
+                let resolver = std::fs::File::create(base.join("resolv.conf")).unwrap();
+                write_resolver(resolver, "fd00::a00:1".parse().unwrap()).unwrap();
+                let binds = Entry::new(&root, Identity::new(0, 0).account(AccountMode::Numeric))
+                    .machine_id(machine_id)
+                    .time_status(base.join("time"))
+                    .resolver(base.join("resolv.conf"))
+                    .bind_runtime()
+                    .unwrap();
+                // Each bind is read-only, `nosuid`, and `nodev`.
+                let targets = ["etc/machine-id", "run/nvx/time", "etc/resolv.conf"]
+                    .map(|target| root.join(target));
+                assert_eq!(mounts_below(&root), targets);
+                for target in &targets {
+                    let flags = statvfs(target).unwrap().flags();
+                    assert!(
+                        flags.contains(FsFlags::ST_RDONLY | FsFlags::ST_NOSUID | FsFlags::ST_NODEV),
+                        "{}: {flags:?}",
+                        target.display()
+                    );
+                }
+                assert_eq!(
+                    std::fs::read_to_string(root.join("etc/resolv.conf")).unwrap(),
+                    "nameserver fd00::a00:1\n"
+                );
+                // A teardown that finds them fails, since it detaches no busy mount.
+                assert_eq!(sys::unmount(&point), Err(Errno::EBUSY));
+                binds.remove().unwrap();
+                assert!(mounts_below(&root).is_empty());
+                // The image's link gave way to an empty file, which stays.
+                let replaced = std::fs::symlink_metadata(root.join("etc/resolv.conf")).unwrap();
+                assert!(replaced.is_file() && replaced.len() == 0);
+                // Once they are removed, the teardown succeeds.
+                sys::unmount(&point).unwrap();
             });
             sys::exit_immediately(u8::from(outcome.is_err()));
         }

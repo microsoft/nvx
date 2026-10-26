@@ -81,8 +81,8 @@
 //! - holds no `\`, `=`, or `,`;
 //! - is not where a container runtime mounts or binds in the root, as
 //!   [`protocol::share`](crate::protocol::share) lists them for the host and the guest: `/proc`,
-//!   `/sys`, `/dev`, `/.nvx-agent`, `/etc/machine-id`, `/run/nvx/time`, or below them, nor `/etc`,
-//!   `/run`, or `/run/nvx`, below which it mounts;
+//!   `/sys`, `/dev`, `/.nvx-agent`, `/etc/machine-id`, `/etc/resolv.conf`, `/run/nvx/time`, or
+//!   below them, nor `/etc`, `/run`, or `/run/nvx`, below which it mounts;
 //! - and is not another share's or mapping's target, nor inside one, nor holds one.
 //!
 //! The root's [`Mapper`] then attaches the shares beneath the overlay's descriptor, as
@@ -293,6 +293,9 @@ pub enum DeviceStep {
     Open,
     /// Reading the status of the node of a GPT disk's partition.
     Status,
+    /// Rereading the partition table of the GPT disk on it, which a clone asks of the kernel before
+    /// it assembles its root.
+    Reread,
 }
 
 impl fmt::Display for DeviceStep {
@@ -305,6 +308,7 @@ impl fmt::Display for DeviceStep {
             Self::Access => "read the access mode of",
             Self::Open => "open",
             Self::Status => "read the status of",
+            Self::Reread => "reread the partition table of",
         })
     }
 }
@@ -342,8 +346,9 @@ pub enum Image {
     },
     /// A GPT disk, whose partition table an assembly reads and checks through
     /// [`guest::gpt::read_disk`](super::gpt::read_disk), and whose partitions it uses as the
-    /// kernel created them when it found the disk: it neither compares them with the table nor
-    /// asks the kernel to reread it. Its first partition holds opaque bytes, which the assembly
+    /// kernel created them when it found the disk, or when it last reread the table, as a clone
+    /// asks of it before its assembly: the assembly neither compares them with the table nor asks
+    /// the kernel to reread it. Its first partition holds opaque bytes, which the assembly
     /// returns through [`Root::first_partition`], and never probes or mounts. Each later
     /// partition, from partition 2 on, holds a layer, an ext4 file system that the assembly
     /// mounts at `layers/pN`, for the partition's number N, `ro,nosuid,nodev`, with
@@ -484,14 +489,64 @@ impl OverlayMode {
 ///
 /// A failure unmounts what the assembly mounted, as [`Root::teardown`] does, and reports both.
 pub fn assemble(assembly: &Assembly) -> Result<Root, AssemblyError> {
-    assemble_with(Box::new(SystemKernel), &Paths::default(), assembly)
+    assemble_with(
+        Box::new(SystemKernel),
+        &Paths::default(),
+        assembly,
+        Contents::Kept,
+    )
 }
 
-/// Implements [`assemble`] with `kernel`, and with the kernel's interfaces at `paths`.
+/// Assembles the root of `assembly` as [`assemble`] does, but with a fresh upper, as a clone's
+/// application asks: once it mounted the upper, and before it creates either directory, it
+/// refuses the upper's `upper` or `work` directory if it exists and is not empty, with
+/// [`Error::NotFresh`]. A cold sandbox's scratch keeps its upper across boots, but a clone's
+/// root must start as its image alone, since the overlay would show what an earlier root wrote.
+/// A tmpfs, which the assembly mounts empty, always passes.
+///
+/// The check is bounded, and reads no file's content: of each directory, it reads the status,
+/// and at most one entry besides `.` and `..`, and it opens nothing below it.
+pub(crate) fn assemble_fresh(assembly: &Assembly) -> Result<Root, AssemblyError> {
+    assemble_with(
+        Box::new(SystemKernel),
+        &Paths::default(),
+        assembly,
+        Contents::Fresh,
+    )
+}
+
+/// Asks the kernel to reread the partition table of the GPT disk on the distro device that the
+/// VMM attached at `distro`'s MMIO window, once the device appeared, polling for it as an
+/// assembly does, for as long as `timeout` allows. A clone's application asks this before it
+/// assembles a root of the disk: the kernel then drops the block devices of the partitions that
+/// it created when it found the template's placeholder, and creates those of the clone's disk,
+/// and devtmpfs their nodes, from the same read-only bytes that the assembly reads and checks
+/// next, as at a cold boot. It checks nothing else of the device, which the assembly checks.
+///
+/// It needs `CAP_SYS_ADMIN`, and the kernel refuses it while one of the disk's partitions is
+/// open, as a mounted one is.
+pub(crate) fn reread_partitions(distro: Device, timeout: Duration) -> Result<(), Error> {
+    block::reread(&mut SystemKernel, &Paths::default(), distro, timeout).map(drop)
+}
+
+/// What an assembly accepts in the upper's `upper` and `work` directories, which it creates
+/// unless they exist.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Contents {
+    /// Whatever they hold, which the root keeps, as [`assemble`] accepts: a cold sandbox's
+    /// scratch keeps its upper across boots.
+    Kept,
+    /// Nothing: each must be missing or empty, as [`assemble_fresh`] requires.
+    Fresh,
+}
+
+/// Implements [`assemble`] with `kernel`, and with the kernel's interfaces at `paths`, accepting
+/// the upper's `contents`.
 fn assemble_with(
     kernel: Box<dyn Kernel>,
     paths: &Paths,
     assembly: &Assembly,
+    contents: Contents,
 ) -> Result<Root, AssemblyError> {
     let runtime = assembly.runtime.as_os_str().as_bytes();
     if below_its_root(&assembly.runtime, true).is_none()
@@ -520,7 +575,7 @@ fn assemble_with(
         latched: false,
         reservation: None,
     };
-    match root.mount_layers(paths, assembly) {
+    match root.mount_layers(paths, assembly, contents) {
         Ok(()) => Ok(root),
         Err(error) => Err(AssemblyError {
             error,
@@ -664,8 +719,13 @@ impl Root {
         self.unmount()
     }
 
-    /// Implements [`assemble`]'s steps after the first.
-    fn mount_layers(&mut self, paths: &Paths, assembly: &Assembly) -> Result<(), Error> {
+    /// Implements [`assemble`]'s steps after the first, accepting the upper's `contents`.
+    fn mount_layers(
+        &mut self,
+        paths: &Paths,
+        assembly: &Assembly,
+        contents: Contents,
+    ) -> Result<(), Error> {
         let runtime = self.runtime.clone();
         fs::create_dir_all(&runtime).map_err(|error| Error::MountPoint {
             path: runtime.clone(),
@@ -817,6 +877,11 @@ impl Root {
             }
         };
         self.upper = Some((mount, upper_point));
+        if contents == Contents::Fresh {
+            for directory in [&upper, &work] {
+                check_fresh(directory)?;
+            }
+        }
         for directory in [&upper, &work] {
             create_scratch_directory(directory).map_err(|error| Error::MountPoint {
                 path: directory.clone(),
@@ -1249,6 +1314,37 @@ fn create_scratch_directory(path: &Path) -> io::Result<()> {
     Ok(())
 }
 
+/// Refuses the upper's directory `path`, its `upper` or `work`, if it exists and is not empty, as
+/// a fresh upper's may not be, and anything there but a directory, a symbolic link included, as
+/// [`create_directory`] does. It reads the status of `path`, and, of a directory, at most one
+/// entry besides `.` and `..`, in whichever order the file system lists them; it opens nothing
+/// below it.
+fn check_fresh(path: &Path) -> Result<(), Error> {
+    let failed = |error: io::Error| Error::MountPoint {
+        path: path.to_owned(),
+        error,
+    };
+    match fs::symlink_metadata(path) {
+        Ok(status) if status.is_dir() => {}
+        Ok(_) => return Err(failed(Errno::ENOTDIR.into())),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(failed(error)),
+    }
+    match fs::read_dir(path).and_then(holds_entry) {
+        Ok(false) => Ok(()),
+        Ok(true) => Err(Error::NotFresh {
+            path: path.to_owned(),
+        }),
+        Err(error) => Err(failed(error)),
+    }
+}
+
+/// Returns whether the directory listing `entries`, which lists no `.` or `..`, holds an entry,
+/// from its first alone.
+fn holds_entry<T>(mut entries: impl Iterator<Item = io::Result<T>>) -> io::Result<bool> {
+    entries.next().transpose().map(|entry| entry.is_some())
+}
+
 /// A mount of a layered root.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 #[non_exhaustive]
@@ -1468,6 +1564,13 @@ pub enum Error {
         /// The device's node.
         device: PathBuf,
     },
+    /// The upper's `upper` or `work` directory exists and is not empty, which an assembly that
+    /// requires a fresh upper refuses, as a clone's application does, whose root must start as its
+    /// image alone.
+    NotFresh {
+        /// The directory.
+        path: PathBuf,
+    },
     /// The overlay's options are longer than [`MOUNT_OPTIONS_LIMIT`]: its lower directories, with
     /// the runtime directory's path, are too many or too long for one mount.
     OverlayOptions {
@@ -1626,6 +1729,11 @@ impl fmt::Display for Error {
                 formatter,
                 "the scratch device {} has an ext4 journal, which the assembly forbids",
                 device.display()
+            ),
+            Self::NotFresh { path } => write!(
+                formatter,
+                "the upper's directory {} is not empty, but the upper must be fresh",
+                path.display()
             ),
             Self::OverlayOptions { length } => write!(
                 formatter,

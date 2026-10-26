@@ -511,6 +511,7 @@ fn reserved_targets_and_their_ancestors_are_refused() {
         "/.nvx-agent/tool",
         "/etc",
         "/etc/machine-id",
+        "/etc/resolv.conf",
         "/run",
         "/run/nvx",
         "/run/nvx/time/x",
@@ -524,6 +525,7 @@ fn reserved_targets_and_their_ancestors_are_refused() {
     for target in [
         "/etc/app",
         "/etc/machine-ids",
+        "/etc/resolvconf",
         "/procs",
         "/run/app",
         "/workspace",
@@ -925,6 +927,82 @@ fn a_runtime_bind_skips_the_checks_of_a_host_mapping_but_not_the_walk() {
     // A bind is not a mapping that a mapper tracks.
     let mapper = Mapper::new(fixture.root(), Reserved::container_root());
     assert_eq!(mapper.targets().len(), 0);
+}
+
+#[test]
+fn runtime_binds_unbind_in_reverse_order_and_report_each_failure() {
+    let fixture = Fixture::new();
+    let root = fixture.root();
+    let source = fixture.source();
+    let bind_all = || {
+        [
+            ("file.txt", "/etc/machine-id"),
+            ("dir", "/run/nvx/time"),
+            ("file.txt", "/etc/resolv.conf"),
+        ]
+        .map(|(source_path, target)| {
+            let mapping = mapping(source_path, target, Access::ReadOnly);
+            bind_with(&mut fixture.kernel(), &root, &source, &mapping).unwrap()
+        })
+    };
+    let points = [
+        "root/etc/resolv.conf",
+        "root/run/nvx/time",
+        "root/etc/machine-id",
+    ]
+    .map(|point| fixture.path(point));
+    // Each bind is the mount at its target, which the unbind takes off, last first.
+    let binds = bind_all();
+    assert_eq!(
+        binds.iter().map(Mapped::target).collect::<Vec<_>>(),
+        ["etc/machine-id", "run/nvx/time", "etc/resolv.conf"].map(Path::new)
+    );
+    for (bind, point) in binds.iter().rev().zip(&points) {
+        assert_eq!(fixture.kernel.mount_at(point), Some(bind.mount));
+    }
+    unbind_with(&mut fixture.kernel(), &root, &binds).unwrap();
+    assert_eq!(
+        fixture.kernel.unmounts(),
+        points.clone().map(|point| point.display().to_string())
+    );
+    assert!(
+        points
+            .iter()
+            .all(|point| fixture.kernel.mount_at(point).is_none())
+    );
+    // Each is attempted, whatever failed before, and one that is busy, or that another mount
+    // covers, stays and is reported.
+    let binds = bind_all();
+    fixture
+        .kernel
+        .fail(Operation::Unmount, &points[0], Errno::EBUSY);
+    let covering = fixture.kernel.add_mount(&points[1]);
+    let unmounts = fixture.kernel.unmounts().len();
+    let error = unbind_with(&mut fixture.kernel(), &root, &binds).unwrap_err();
+    assert_eq!(
+        error.failures(),
+        [
+            UnmountFailure {
+                target: "/etc/resolv.conf".into(),
+                error: failed(Step::Unmount, Errno::EBUSY),
+            },
+            UnmountFailure {
+                target: "/run/nvx/time".into(),
+                error: MappingError::Moved { mounted: true },
+            },
+        ]
+    );
+    assert_eq!(
+        fixture.kernel.unmounts()[unmounts..],
+        [&points[0], &points[2]].map(|point| point.display().to_string())
+    );
+    assert_eq!(fixture.kernel.mount_at(&points[0]), Some(binds[2].mount));
+    assert_eq!(fixture.kernel.mount_at(&points[1]), Some(covering));
+    assert_eq!(fixture.kernel.mount_at(&points[2]), None);
+    // No binds, nothing to unbind.
+    let calls = fixture.kernel.calls().len();
+    unbind_with(&mut fixture.kernel(), &root, &[]).unwrap();
+    assert_eq!(fixture.kernel.calls().len(), calls);
 }
 
 #[test]
