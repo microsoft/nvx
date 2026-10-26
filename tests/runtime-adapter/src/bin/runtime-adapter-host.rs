@@ -98,19 +98,24 @@
 //! - `runtime-adapter-host start STORE --template TEMPLATES --generation G --distro FORMAT:PATH
 //!   --distro-identity UUID --upper (scratch:PATH | ram) [--memory MIB] [--workload-identity
 //!   UID:GID] [--overlay-mode MODE] [--scratch-journal POLICY] [--first-partition-bound BYTES]
-//!   [--machine-id (image | generated)] [SHARES]` starts a clone of the generation G of the
-//!   template store TEMPLATES, an `nvx::host::template::Store`, in the sandbox store STORE, which
-//!   it creates if needed; see `runtime_adapter::clone`. SHARES, as `launch` takes them, share
+//!   [--machine-id (image | generated)] [--network FILE] [SHARES]` starts a clone of the
+//!   generation G of the template store TEMPLATES, an `nvx::host::template::Store`, in the sandbox
+//!   store STORE, which it creates if needed; see `runtime_adapter::clone`. The clone's VM has the
+//!   network of the file FILE, if given, which the command reads first, as `launch` reads its
+//!   network: it must be the template's, the guest's address and the policy of the template's NIC,
+//!   which every restore of the template attaches, or for a template without a NIC none, or one
+//!   that lets nothing through. SHARES, as `launch` takes them, share
 //!   host paths with the clone's root: the command plans their export as a launch does, with
-//!   NVX's `filesystem::plan`, and refuses shares that it cannot export before anything else. It
-//!   then reads the generation from the store's index, and, unless MIB mebibytes are given, its
-//!   compatibility key, whose RAM is then the clone's memory target, before it needs NVX's
-//!   artifacts. A key that cannot be read is left to NVX's plan, which reads it again, and
+//!   NVX's `filesystem::plan`, and refuses shares that it cannot export before anything but its
+//!   network. It then reads the generation from the store's index, and, unless MIB mebibytes are
+//!   given, its compatibility key, whose RAM is then the clone's memory target, before it needs
+//!   NVX's artifacts. A key that cannot be read is left to NVX's plan, which reads it again, and
 //!   attributes the failure, to the generation or to the host, as it does for every clone. The
 //!   store then leases the generation to the sandbox, at the host's time, with `Store::acquire`,
 //!   which refuses a generation that a tombstone quarantines, or that is not eligible then, and
 //!   NVX's `ClonePlan` checks the clone against the generation, from the metadata of its files
-//!   alone: its image, the raw file PATH, an EROFS filesystem, `erofs`, or a GPT disk, `gpt`, of
+//!   alone: its network, which must be the one that the template's key records, its image, the
+//!   raw file PATH, an EROFS filesystem, `erofs`, or a GPT disk, `gpt`, of
 //!   which the guest expects the identity UUID, of the length of the template's placeholder,
 //!   whatever the placeholder's format, its upper, the ext4 scratch image PATH, of the geometry of
 //!   the template's scratch, or RAM, with the bindings that STORE stages for the images, as
@@ -128,8 +133,13 @@
 //!   identity UID:GID, if given, as which every execution runs, whose account the guest checks in
 //!   the clone's root before it is ready, the overlay mode MODE and the scratch's journal policy
 //!   POLICY, as a launch takes them, for a GPT disk, the bound BYTES of its first partition, 64
-//!   KiB unless given, as a launch's guest takes it by default, and the export, by the identity of
-//!   its plan, with the number of its mappings. Every execution of the clone sees the hostname
+//!   KiB unless given, as a launch's guest takes it by default, the export, by the identity of
+//!   its plan, with the number of its mappings, and for a template with a NIC its network: the
+//!   identity of its policy, the DNS server with which the template's guest configured its
+//!   resolver at boot, if any, whose address the clone's guest writes to a resolver file that it
+//!   binds read-only over the root's `/etc/resolv.conf`, and the URL of the policy's proxy, if
+//!   any, which every execution then finds in its environment, as a launch's executions do. Every
+//!   execution of the clone sees the hostname
 //!   `runtime-adapter`, and the machine ID that `--machine-id` chooses: the image's own, `image`,
 //!   by default, or one that the guest generates once for the clone, `generated`, which a
 //!   read-only bind holds at `/etc/machine-id`. The guest refuses a first partition larger than
@@ -431,7 +441,8 @@ const USAGE: &str = concat!(
     " [--memory MIB]\n",
     "           [--workload-identity UID:GID] [--overlay-mode MODE]",
     " [--scratch-journal POLICY]\n",
-    "           [--first-partition-bound BYTES] [--machine-id (image | generated)]\n",
+    "           [--first-partition-bound BYTES] [--machine-id (image | generated)]",
+    " [--network FILE]\n",
     "           [--share HOST:TARGET[:ro]... [--deny PATH]... [--reserved TARGET]...",
     " [--share-root DIR]...]\n",
     "       runtime-adapter-host probe STORE PROBE... [--guest-build BUILD]\n",
@@ -654,8 +665,11 @@ struct CloneOptions {
     templates: PathBuf,
     /// The generation of the template store that the clone leases.
     generation: StoreGeneration,
-    /// The clone's image, upper, memory target, and settings.
+    /// The clone's image, upper, memory target, and settings, without its network.
     request: runtime_adapter::clone::Request,
+    /// The file of the clone's network, if it has one, which the start reads first, as a launch
+    /// reads its network.
+    network: Option<PathBuf>,
 }
 
 /// The options of a command.
@@ -958,7 +972,9 @@ fn parse(arguments: Vec<OsString>) -> Result<Command, String> {
                         first_partition_bound: options.first_partition_bound,
                         machine_id: options.machine_id.unwrap_or(MachineIdMode::Image),
                         sharing: options.sharing,
+                        network: None,
                     },
+                    network: options.network,
                 }),
                 time: host_time_from_env()?,
             }
@@ -1094,7 +1110,7 @@ fn parse_option(
         ("launch" | "start", "--deny") => options.sharing.add_denied(value),
         ("launch" | "start", "--reserved") => options.sharing.add_reserved(text(value)?),
         ("launch" | "start", "--share-root") => options.sharing.add_root(value),
-        ("launch" | "create", "--network") if options.network.is_none() => {
+        ("launch" | "create" | "start", "--network") if options.network.is_none() => {
             options.network = Some(PathBuf::from(value));
         }
         ("create", "--cpu-profile") if options.cpu_profile.is_none() => {
@@ -1785,11 +1801,23 @@ fn start(
     clone: &CloneOptions,
     time: Option<HostTime>,
 ) -> Result<ExitCode, String> {
+    // A network that the plan refuses fails the start before anything else, as it fails a launch.
+    // NVX's plan of the clone then requires the template's network of it.
+    let network = clone
+        .network
+        .as_deref()
+        .map(read_network)
+        .transpose()
+        .map_err(|error| describe(&error))?;
+    let request = runtime_adapter::clone::Request {
+        network,
+        ..clone.request.clone()
+    };
     // A request that the adapter's plan refuses, shares that it cannot export, and a generation
     // that the template store does not hold, fail the start before it needs NVX's artifacts or
     // the sandbox's store.
-    let plan = clone.request.plan().map_err(|error| describe(&error))?;
-    let export = clone.request.export().map_err(|error| describe(&error))?;
+    let plan = request.plan().map_err(|error| describe(&error))?;
+    let export = request.export().map_err(|error| describe(&error))?;
     let templates = Store::open(&clone.templates).map_err(|error| describe(&error))?;
     let generation = templates
         .index()
@@ -1838,7 +1866,7 @@ fn start(
     }
     let clone = CloneLaunch {
         templates: &templates,
-        request: &clone.request,
+        request: &request,
         plan,
         export,
         memory,
@@ -1873,7 +1901,7 @@ struct CloneLaunch<'a> {
     templates: &'a Store,
     /// The clone, as the command's options give it.
     request: &'a runtime_adapter::clone::Request,
-    /// The adapter's plan of the clone's image over its upper.
+    /// The adapter's plan of the clone's image over its upper, with its network.
     plan: nvx::host::sandbox::SandboxPlan,
     /// The export of the host paths that the clone shares with its root, if any.
     export: Option<ExportPlan>,

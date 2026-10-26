@@ -1,26 +1,34 @@
 //! The host program's `start` refuses options that do not make a start, and a clock fixture that is
-//! not a host's time, as usage errors, and shares that it cannot export, a generation that the
-//! template store does not hold, or a template store that does not exist, before it needs NVX's
-//! artifacts or creates the sandbox's store. A clone's record names its template store and its
-//! generation, which a stop reads back, beside the plan that the other commands read, a clone's
-//! request carries the export of its shares, and a host's time keeps its text form, the form of
-//! the clock fixture. The tests need no hypervisor.
+//! not a host's time, as usage errors, and a network that the plan refuses, shares that it cannot
+//! export, a generation that the template store does not hold, or a template store that does not
+//! exist, before it needs NVX's artifacts or creates the sandbox's store. A clone's record names its
+//! template store and its generation, which a stop reads back, beside the plan that the other
+//! commands read, with the clone's network, whose proxy an execution of the clone then finds at
+//! the URL that NVX's activation record names, a clone's request carries the export of its shares,
+//! and a host's time keeps its text form, the form of the clock fixture. The tests need no
+//! hypervisor.
 #![cfg(feature = "host")]
 
 use std::fs;
 use std::num::NonZeroU64;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
+use std::time::Duration;
 
 use nvx::activation::{MachineIdMode, StoreGeneration};
+use nvx::exec::{Key, Limits, Timers, Window};
 use nvx::host::artifacts::Artifacts;
+use nvx::host::sandbox::SandboxNetwork;
 use nvx::host::template::{HostClock, HostTime, Store};
 use nvx::protocol::root::ImageFormat;
 use nvx::uuid::Uuid;
 use runtime_adapter::clone::{
     CLONE_MODE, CloneRecord, HOST_TIME_VARIABLE, Request, host_time_text, parse_host_time,
 };
-use runtime_adapter::layered::{Bindings, LaunchRecord, RECORD_FORMAT, RECORD_NAME};
+use runtime_adapter::exec::Start;
+use runtime_adapter::layered::{
+    Bindings, LaunchRecord, PROXY_VARIABLES, RECORD_FORMAT, RECORD_NAME, read_network, with_proxy,
+};
 use runtime_adapter::root::DEFAULT_FIRST_PARTITION_BOUND;
 use runtime_adapter::sharing::{HostFsSharing, Share};
 use runtime_adapter::staged::Staged;
@@ -155,6 +163,17 @@ fn the_host_program_refuses_options_that_do_not_make_a_start() {
             "unexpected option \"--template\" of start",
         ),
         (
+            with(&[
+                "--upper",
+                "ram",
+                "--network",
+                "network.json",
+                "--network",
+                "other.json",
+            ]),
+            "unexpected option \"--network\" of start",
+        ),
+        (
             with(&["--upper", "ram", "extra"]),
             "unexpected argument \"extra\" of start",
         ),
@@ -210,11 +229,10 @@ fn the_host_program_refuses_options_that_do_not_make_a_start() {
         ),
     ];
     // Each option that a start does not take.
-    let others: [(&str, &str); 6] = [
+    let others: [(&str, &str); 5] = [
         ("--guest-agent", "agent"),
         ("--hypervisor", "whp"),
         ("--runtime-dir", "/run/a"),
-        ("--network", "network.json"),
         ("--cpu-profile", "auto"),
         ("--memory-capacity", "512"),
     ];
@@ -398,6 +416,7 @@ fn a_clone_s_record_names_its_template_store_and_generation_beside_its_plan() {
         first_partition_bound: None,
         machine_id: MachineIdMode::Image,
         sharing: HostFsSharing::default(),
+        network: None,
     };
     let plan = request.plan().unwrap();
     let staged = Staged::stage(&distro, ImageFormat::Erofs, identity(), Some(&scratch)).unwrap();
@@ -488,6 +507,7 @@ fn a_clone_s_request_takes_the_staged_bindings_and_the_guest_s_defaults() {
         first_partition_bound: None,
         machine_id: MachineIdMode::Image,
         sharing: HostFsSharing::default(),
+        network: None,
     };
     let plan = request.plan().unwrap();
     let staged = Staged::stage(&distro, ImageFormat::Erofs, identity(), Some(&scratch)).unwrap();
@@ -690,6 +710,174 @@ fn a_start_refuses_shares_that_it_cannot_export_before_anything_else() {
         assert!(stderr.contains(&problem), "{arguments:?}: {stderr}");
         assert!(!stderr.contains("template store"), "{stderr}");
         assert!(!stderr.contains("usage:"), "{stderr}");
+        assert!(!store.exists(), "the start created the sandbox's store");
+        assert!(!templates.exists());
+    }
+}
+
+/// Returns the serde form of a network of a guest at `192.0.2.2/24` whose one way out is a proxy
+/// at port 3128 of host loopback, with the scheme `http`.
+fn proxied() -> Value {
+    json!({
+        "guestNetwork": "192.0.2.2/24",
+        "egress": "deny",
+        "allow": {"name": "egress.allow", "rules": []},
+        "deny": {"name": "egress.deny", "rules": []},
+        "ingress": "deny",
+        "hostLoopback": "deny",
+        "hostLoopbackForwards": [],
+        "proxy": {"port": 3128, "scheme": "http"},
+    })
+}
+
+/// Writes the network `form` at `path`, and reads it back as a start reads its network.
+fn written_network(path: &Path, form: &Value) -> SandboxNetwork {
+    fs::write(path, form.to_string()).unwrap();
+    read_network(path).unwrap()
+}
+
+/// Returns the start of an execution of `/usr/bin/env` with the environment `A=1`.
+fn printing() -> Start {
+    let limits = Limits::new(16 * 1024, Window::frames(4), Window::frames(8)).unwrap();
+    let timers = Timers::new(Duration::from_secs(1), Duration::from_secs(5));
+    Start::new(Key::new(1, 2), limits, timers, ["/usr/bin/env"]).with_environment(["A=1"])
+}
+
+#[test]
+fn a_clone_s_plan_request_and_record_carry_its_network() {
+    let directory = directory("clone-network");
+    let distro = image(directory.join("distro.erofs"), 4096);
+    let network = written_network(&directory.join("proxied.json"), &proxied());
+    let request = Request {
+        distro: distro.clone(),
+        format: ImageFormat::Erofs,
+        identity: identity(),
+        scratch: None,
+        memory: None,
+        workload_identity: None,
+        overlay_mode: None,
+        scratch_journal: None,
+        first_partition_bound: None,
+        machine_id: MachineIdMode::Image,
+        sharing: HostFsSharing::default(),
+        network: Some(network.clone()),
+    };
+
+    // The adapter's plan has the network, and NVX's request of the clone has the plan, whose
+    // network NVX's plan compares with the template's, and whose proxy's URL NVX's activation
+    // record of the clone names.
+    let plan = request.plan().unwrap();
+    assert_eq!(plan.network(), Some(&network));
+    let url = plan.proxy_url().expect("the network has a proxy");
+    assert_eq!(url, "http://192.0.2.1:3128");
+    let staged = Staged::stage(&distro, ImageFormat::Erofs, identity(), None).unwrap();
+    let bindings = staged.bindings(&plan);
+    let clone = request
+        .clone_request(plan.clone(), None, &bindings, 512 << 20)
+        .unwrap();
+    assert_eq!(clone.adapter, plan);
+    assert_eq!(
+        clone.adapter.network().and_then(SandboxNetwork::proxy_url),
+        Some(url.clone())
+    );
+
+    // The clone's record keeps the plan, with its network, so an execution of the clone finds the
+    // proxy's URL that the activation record names in each of the proxy's variables, after its
+    // own entries, as an execution of a launch does.
+    let sandbox = directory.join("store");
+    fs::create_dir(&sandbox).unwrap();
+    let templates = directory.join("templates");
+    let record = CloneRecord {
+        template: &templates,
+        generation: StoreGeneration::new(NonZeroU64::new(1).unwrap()),
+        kernel_command_line: "nvx_sandbox=1 nvx_snapshot_tier=platform",
+        plan: &plan,
+        bindings: &bindings,
+    };
+    record.write(&sandbox).unwrap();
+    let read = LaunchRecord::read_plan(&sandbox).unwrap().unwrap();
+    assert_eq!(read, plan);
+    let expected = std::iter::once("A=1".to_owned())
+        .chain(PROXY_VARIABLES.map(|variable| format!("{variable}={url}")))
+        .map(String::into_bytes)
+        .collect::<Vec<_>>();
+    assert_eq!(with_proxy(printing(), &read).environment, expected);
+
+    // A network without a proxy, and no network, give an execution no proxy's settings.
+    let mut open = proxied();
+    open["egress"] = json!("allow");
+    open["proxy"] = Value::Null;
+    let open = Request {
+        network: Some(written_network(&directory.join("open.json"), &open)),
+        ..request.clone()
+    };
+    let none = Request {
+        network: None,
+        ..request
+    };
+    for request in [open, none] {
+        let plan = request.plan().unwrap();
+        assert_eq!(plan.network(), request.network.as_ref());
+        assert_eq!(plan.proxy_url(), None);
+        assert_eq!(with_proxy(printing(), &plan), printing());
+    }
+}
+
+#[test]
+fn a_start_refuses_a_network_that_the_plan_refuses_before_anything_else() {
+    // The start reads its network before it plans its image, which does not exist, or the export
+    // of its shares, which it cannot export, reads the template store, which does not exist, or
+    // needs NVX's artifacts, which the commands do not name, and before it creates the sandbox's
+    // store.
+    let directory = directory("start-unnetworked");
+    let templates = directory.join("templates");
+    let store = directory.join("store");
+    let distro = format!("erofs:{}", directory.join("missing.erofs").display());
+    let share = format!("{}:/srv/data", directory.join("missing").display());
+    let missing = directory.join("missing.json");
+    let refused = directory.join("refused.json");
+    let mut form = proxied();
+    form["egress"] = json!("allow");
+    fs::write(&refused, form.to_string()).unwrap();
+    let cases = [
+        (
+            &missing,
+            format!("cannot read the network {}", missing.display()),
+        ),
+        (
+            &refused,
+            format!(
+                "the network {} is refused: a network proxy needs egress denied by default",
+                refused.display()
+            ),
+        ),
+    ];
+    for (network, problem) in cases {
+        let arguments = [
+            "start",
+            store.to_str().unwrap(),
+            "--template",
+            templates.to_str().unwrap(),
+            "--generation",
+            "1",
+            "--distro",
+            &distro,
+            "--distro-identity",
+            IDENTITY,
+            "--upper",
+            "ram",
+            "--share",
+            &share,
+            "--network",
+            network.to_str().unwrap(),
+        ];
+        let output = host(&arguments, None);
+        assert_eq!(output.status.code(), Some(1), "{arguments:?}: {output:?}");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains(&problem), "{arguments:?}: {stderr}");
+        for other in ["template store", "--share", "missing.erofs", "usage:"] {
+            assert!(!stderr.contains(other), "{other}: {stderr}");
+        }
         assert!(!store.exists(), "the start created the sandbox's store");
         assert!(!templates.exists());
     }
