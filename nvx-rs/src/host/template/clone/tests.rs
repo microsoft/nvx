@@ -44,6 +44,9 @@ const SCRATCH_LEN: u64 = 2 * MIB;
 const MEMORY: u64 = 512 * MIB;
 /// The template's RAM capacity, in bytes, as [`ManifestSpec::template`] records it.
 const MEMORY_CAPACITY: u64 = 2048 * MIB;
+/// The bound of the first partition of the tests' GPT disks, which the record of a clone of an
+/// EROFS layer leaves out.
+const FIRST_PARTITION_BOUND: u64 = 64 * 1024;
 /// Nanoseconds in a second.
 const SECOND: u64 = 1_000_000_000;
 
@@ -161,10 +164,15 @@ fn layer(path: &Path) -> SandboxLayer {
     SandboxLayer::new(LayerRole::Distro, path.to_str().unwrap(), UUID)
 }
 
+/// Returns the distro GPT disk at `path`, whose disk GUID is [`UUID`].
+fn gpt_layer(path: &Path) -> SandboxLayer {
+    SandboxLayer::gpt(LayerRole::Distro, path.to_str().unwrap(), UUID)
+}
+
 /// Returns the request of a clone of the image at `image`, which `binding` binds, over an upper in
 /// RAM, with the template's RAM as its memory target, and the settings of [`workload`], for
 /// untrusted lowers, and with a journal policy, [`Journal::Forbidden`], that its record leaves
-/// out.
+/// out, and for a GPT disk, the bound [`FIRST_PARTITION_BOUND`].
 fn tmpfs_request(image: &Path, binding: &DistroBinding) -> CloneRequest {
     CloneRequest {
         adapter: SandboxPlan::adapter(
@@ -178,6 +186,7 @@ fn tmpfs_request(image: &Path, binding: &DistroBinding) -> CloneRequest {
         workload: workload(),
         overlay: OverlayMode::UntrustedLowers,
         journal: Journal::Forbidden,
+        first_partition_bound: FIRST_PARTITION_BOUND,
     }
 }
 
@@ -347,6 +356,15 @@ impl Fixture {
         let path = self.path("images", name);
         stage(&path, length);
         let binding = DistroBinding::import(&layer(&path), PolicyVerdict::ACCEPTED).unwrap();
+        (path, binding)
+    }
+
+    /// Stages the GPT disk `name` of `length` bytes, whose disk GUID is [`UUID`], as
+    /// [`image`](Self::image) stages an EROFS layer, and returns its path and its binding.
+    fn gpt_image(&self, name: &str, length: u64) -> (PathBuf, DistroBinding) {
+        let path = self.path("images", name);
+        stage(&path, length);
+        let binding = DistroBinding::import(&gpt_layer(&path), PolicyVerdict::ACCEPTED).unwrap();
         (path, binding)
     }
 
@@ -1128,6 +1146,25 @@ fn images_of_another_length_or_geometry_are_refused() {
             )
         );
     }
+    // A GPT disk has the placeholder's length too.
+    let (gpt, gpt_binding) = fixture.gpt_image("other.gpt", IMAGE_LEN + 512);
+    let plan = fixture.plan(
+        &mut acquired,
+        &tmpfs_request(&gpt, &gpt_binding),
+        NO_CONTENT,
+    );
+    assert_eq!(
+        refused(plan, Evidence::SuppliedLength),
+        (
+            ErrorKind::Unsupported,
+            format!(
+                "the image {} is {} bytes long, not the {IMAGE_LEN} bytes of the template's \
+                 placeholder",
+                shown(&gpt),
+                IMAGE_LEN + 512
+            )
+        )
+    );
     assert_untouched(&acquired);
 
     // A template whose placeholder presented physical blocks of another size serves no image of
@@ -1437,6 +1474,39 @@ fn requests_that_no_clone_takes_are_refused_before_anything_is_opened() {
             "the image {} is not the erofs layer with identity {UUID} that its distro binding \
              names",
             shown(&image)
+        )
+    );
+    // An image of another format than the one that the binding names, either way.
+    let identity = Some(Uuid::parse(UUID).unwrap());
+    let as_gpt = CloneRequest {
+        adapter: SandboxPlan::adapter(
+            SandboxDistro::new(image.to_str().unwrap(), RootImage::gpt(identity)),
+            SandboxUpper::RAM,
+        ),
+        ..tmpfs.clone()
+    };
+    assert_eq!(
+        refusal(&as_gpt, Evidence::InvalidFormat),
+        format!(
+            "the image {} is not the erofs layer with identity {UUID} that its distro binding \
+             names",
+            shown(&image)
+        )
+    );
+    let (gpt, gpt_binding) = fixture.gpt_image("distro.gpt", IMAGE_LEN);
+    let as_erofs = CloneRequest {
+        adapter: SandboxPlan::adapter(
+            SandboxDistro::new(gpt.to_str().unwrap(), RootImage::erofs(identity)),
+            SandboxUpper::RAM,
+        ),
+        binding: gpt_binding,
+        ..tmpfs.clone()
+    };
+    assert_eq!(
+        refusal(&as_erofs, Evidence::InvalidFormat),
+        format!(
+            "the image {} is not the gpt layer with identity {UUID} that its distro binding names",
+            shown(&gpt)
         )
     );
     // Paths that OpenVMM would not open as the plan checks them.
@@ -1795,6 +1865,47 @@ fn the_activation_record_of_a_clone_on_a_scratch_image_names_its_binding_and_jou
 }
 
 #[test]
+fn the_activation_record_of_a_gpt_clone_names_its_disk_and_the_bound_of_its_first_partition() {
+    let fixture = Fixture::new();
+    let (image, binding) = fixture.gpt_image("distro.gpt", IMAGE_LEN);
+    let (scratch, scratch_binding) = fixture.scratch("scratch.ext4", SCRATCH_LEN);
+    let mut acquired = fixture.acquire("sandbox");
+    let gpt = |first_partition_bound| Image::Gpt {
+        binding: digest_of(b"nvx distro binding\0", &binding),
+        disk_guid: Some(Uuid::parse(UUID).unwrap()),
+        first_partition_bound,
+    };
+    // A GPT disk of the placeholder's geometry serves over RAM and over a scratch image, as an
+    // EROFS layer does, and its plan reads none of its content: the guest reads and checks the
+    // disk's partition table as it assembles the root.
+    for request in [
+        tmpfs_request(&image, &binding),
+        scratch_request(&image, &binding, &scratch, &scratch_binding),
+    ] {
+        let plan = fixture.plan(&mut acquired, &request, NO_CONTENT).unwrap();
+        assert_eq!(plan.image().path().to_str().unwrap(), shown(&image));
+        assert_eq!(
+            plan.image().geometry().unwrap(),
+            geometry(IMAGE_LEN, fixture.physical)
+        );
+        let mut byte = [0];
+        assert!(plan.image().file().read(&mut byte).is_err());
+        let configuration = plan.activation().configuration();
+        assert_eq!(configuration.image, gpt(FIRST_PARTITION_BOUND));
+        assert_eq!(configuration.workload, workload());
+    }
+    // The record keeps the request's bound, whatever it is from 1 on.
+    for bound in [1, u64::MAX] {
+        let request = CloneRequest {
+            first_partition_bound: bound,
+            ..tmpfs_request(&image, &binding)
+        };
+        let plan = fixture.plan(&mut acquired, &request, NO_CONTENT).unwrap();
+        assert_eq!(plan.activation().configuration().image, gpt(bound));
+    }
+}
+
+#[test]
 fn the_activation_record_of_a_clone_of_a_template_with_a_nic_names_its_policy_and_dns_server() {
     let fixture = Fixture::with(|class, spec, physical| {
         *class = network_class();
@@ -1920,27 +2031,28 @@ fn settings_that_no_activation_record_holds_are_refused_before_anything_is_creat
         );
         assert_untouched(&acquired);
     }
-    // A GPT image, whose binding names it, is refused before anything is opened.
-    let path = fixture.path("images", "distro.gpt");
-    stage(&path, IMAGE_LEN);
-    let gpt = SandboxLayer::gpt(LayerRole::Distro, path.to_str().unwrap(), UUID);
-    let gpt_binding = DistroBinding::import(&gpt, PolicyVerdict::ACCEPTED).unwrap();
-    let gpt_request = CloneRequest {
-        adapter: SandboxPlan::adapter(
-            SandboxDistro::new(path.to_str().unwrap(), bound_image(&gpt_binding).unwrap()),
-            SandboxUpper::RAM,
-        ),
-        binding: gpt_binding,
-        ..request.clone()
+    // A GPT disk's first-partition bound of 0, which an EROFS layer's record leaves out.
+    let (path, gpt_binding) = fixture.gpt_image("distro.gpt", IMAGE_LEN);
+    let unbounded = CloneRequest {
+        first_partition_bound: 0,
+        ..tmpfs_request(&path, &gpt_binding)
     };
-    let plan = fixture.plan(&mut acquired, &gpt_request, NO_CONTENT);
-    let (kind, message) = refused(plan, Evidence::InvalidFormat);
-    assert_eq!(kind, ErrorKind::Unsupported, "{message}");
-    assert!(
-        message.starts_with("the image of a clone must be an EROFS layer"),
-        "{message}"
+    let plan = fixture.plan(&mut acquired, &unbounded, NO_CONTENT);
+    assert_eq!(
+        refused(plan, Evidence::InvalidActivate),
+        (
+            ErrorKind::Unsupported,
+            "no clone activates with the settings of the request: the bound of a GPT disk's first \
+             partition is 0"
+                .to_owned()
+        )
     );
     assert_untouched(&acquired);
+    let erofs = CloneRequest {
+        first_partition_bound: 0,
+        ..request.clone()
+    };
+    drop(fixture.plan(&mut acquired, &erofs, NO_CONTENT).unwrap());
     drop(fixture.plan(&mut acquired, &request, NO_CONTENT).unwrap());
 }
 

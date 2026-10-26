@@ -2,10 +2,10 @@
 //! NVX's template store leases to a sandbox, as `runtime-adapter-host start` asks.
 //!
 //! A [`Request`] holds what the host program's options choose of a clone: its image, an EROFS
-//! layer of the length of the template's placeholder, its upper, on an ext4 scratch image or in
-//! RAM, its memory target, the workload identity as which its executions run, its overlay mode,
-//! and its scratch's journal policy. [`Request::plan`] plans the image over the upper as a launch
-//! plans a layered root, and [`Request::clone_request`] returns NVX's
+//! layer or a GPT disk of the length of the template's placeholder, its upper, on an ext4 scratch
+//! image or in RAM, its memory target, the workload identity as which its executions run, its
+//! overlay mode, and its scratch's journal policy. [`Request::plan`] plans the image over the
+//! upper as a launch plans a layered root, and [`Request::clone_request`] returns NVX's
 //! `nvx::host::template::CloneRequest` of it, with the bindings that the sandbox's store stages
 //! for its images, as `layered::Staged` records them: staging hashes, and a start never does.
 //! NVX's `ClonePlan` then checks the request against the leased generation before any VMM starts,
@@ -39,7 +39,7 @@ use nvx::{Error, Result};
 use serde_json::{Value, json};
 
 use crate::layered::{Bindings, RECORD_FORMAT, RECORD_NAME, invalid, plan, unstaged, write_record};
-use crate::root::{JournalPolicy, OverlayMode};
+use crate::root::{DEFAULT_FIRST_PARTITION_BOUND, JournalPolicy, OverlayMode};
 
 /// The mode of a clone's [record](CloneRecord).
 pub const CLONE_MODE: &str = "clone";
@@ -102,7 +102,8 @@ impl Request {
     /// The record of the clone's activation names the workload identity, if any, the
     /// [`CLONE_HOSTNAME`], the image's own machine ID, the overlay's mode, and the scratch's
     /// journal policy, each the guest's default unless the request names it, as a root
-    /// configuration's are.
+    /// configuration's are, and for a GPT disk, the bound of its first partition that a launch's
+    /// guest takes by default, [`DEFAULT_FIRST_PARTITION_BOUND`].
     ///
     /// Fails with [`ErrorKind::Unavailable`](nvx::ErrorKind::Unavailable) if the store stages no
     /// binding for the image, or for the scratch image of an upper on one, at its path.
@@ -148,6 +149,7 @@ impl Request {
             },
             overlay,
             journal,
+            first_partition_bound: DEFAULT_FIRST_PARTITION_BOUND,
         })
     }
 }

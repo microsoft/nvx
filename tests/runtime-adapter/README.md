@@ -1377,16 +1377,20 @@ of the class's latest capture, when the class's slot keeps one.
 `runtime-adapter-host start` starts a clone of a generation of a template store
 in a sandbox store, through NVX's public API, `nvx::host::template`. Its
 library side, `clone`, holds what the command's options choose of the clone,
-`clone::Request`: its image, an EROFS layer of the length of the template's
-placeholder, its upper, on an ext4 scratch image or in RAM, its memory target,
-the template's RAM unless given, the workload identity as which its executions
-run, its overlay mode, and its scratch's journal policy. `Request::plan` plans
-the image over the upper as a launch plans a layered root, and
-`Request::clone_request` returns NVX's `CloneRequest` of it, with the bindings
-that the sandbox's store stages for the images, as `stage` stages them, so the
-start hashes nothing. The clone's activation record names the image's own
-machine ID, the hostname `runtime-adapter`, and the guest's defaults of the
-other settings, unless the request names them.
+`clone::Request`: its image, an EROFS layer or a GPT disk of the length of the
+template's placeholder, its upper, on an ext4 scratch image or in RAM, its
+memory target, the template's RAM unless given, the workload identity as which
+its executions run, its overlay mode, and its scratch's journal policy.
+`Request::plan` plans the image over the upper as a launch plans a layered
+root, and `Request::clone_request` returns NVX's `CloneRequest` of it, with the
+bindings that the sandbox's store stages for the images, as `stage` stages
+them, so the start hashes nothing. The clone's activation record names the
+image's own machine ID, the hostname `runtime-adapter`, and the guest's
+defaults of the other settings, unless the request names them; for a GPT disk,
+it bounds the first partition by 64 KiB, as a launch's guest does by default.
+The guest of a GPT clone rereads the disk's partition table before it
+assembles the root, since its kernel created the partitions of the template's
+placeholder.
 
 The command first reads the generation from the store's index, and its
 compatibility key, before it needs NVX's artifacts. The store then leases the
@@ -1567,7 +1571,9 @@ the directory that `NVX_ARTIFACTS_DIR` names, and the guest agent's build from
   starts a [clone](#clones) of the generation G of the template store
   TEMPLATES in the sandbox store STORE, which it creates if needed, and whose
   `stage` staged its images, which no one else may change: the image PATH, an
-  EROFS file system, `erofs`, of which the guest expects the identity UUID,
+  EROFS file system, `erofs`, or a GPT disk, `gpt`, of which the guest expects
+  the identity UUID, the file system's UUID or the disk's GUID, of the length of
+  the template's placeholder, whatever the placeholder's format,
   over the ext4 scratch image PATH, or RAM, with a memory target of MIB mebibytes, the template's RAM by default,
   the workload identity UID:GID, if given, as which every execution runs, and
   whose account the guest checks before the clone is ready, and the overlay
