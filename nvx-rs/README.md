@@ -54,10 +54,11 @@ nvx-rs/
 │   │                the typed calls through which it runs the time ABI's steps and the reseed
 │   └── bin/         nvx-rs, nvx-fake-openvmm, and the guest binaries
 ├── tests/           fake-OpenVMM, CLI, NVXS session, process-supervision, checked-handoff, store,
-│                    and guest-binary tests, the CLI's scenario tests and their harness, in cli/,
-│                    the store's record fixtures, the hand-written sandbox configurations of every
-│                    format, and the cases of the export and root boot tokens, in fixtures/, and
-│                    the conformance vectors of the wire formats, in vectors/
+│                    host-modules, and guest-binary tests, the CLI's scenario tests and their
+│                    harness, in cli/, the store's record fixtures, the hand-written sandbox
+│                    configurations of every format, and the cases of the export and root boot
+│                    tokens, in fixtures/, and the conformance vectors of the wire formats, in
+│                    vectors/
 ├── build.rs         bundled-release staging
 └── artifacts.json   the NVX release that the `bundled` feature stages
 ```
@@ -1117,7 +1118,12 @@ The process-supervision test crashes orchestrator processes at each step of a
 launch through the supervisor, reattaches to the VMM stand-ins that they leave
 behind and stops them, and checks that a VMM inherits only its standard streams
 and the descriptors or handles that it is allowed while another thread spawns
-processes. The tests of `nvx::exec` drive a runner and a peer through a
+processes. The host-modules test reads the crate's sources, and fails if the
+production code of the children of `nvx::host`, outside comments and
+`cfg(test)` code, references them in a cycle; it lists each cycle, with a
+reference along each of its edges. So the children stack in layers, each above
+the children that it references, which the test prints with `--nocapture`.
+The tests of `nvx::exec` drive a runner and a peer through a
 simulated workload, transport, and sink on a clock of their own, and, on Linux,
 the tests of `nvx::guest::exec::binding` drive real programs through them, two
 at once in one loop, one of them with a stalled sink; run as root, one of them
