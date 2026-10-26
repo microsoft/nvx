@@ -97,10 +97,10 @@
 //!   the session's next epoch, and exchanges a `Ping`, leaving the VM running.
 //! - `runtime-adapter-host start STORE --template TEMPLATES --generation G --distro FORMAT:PATH
 //!   --distro-identity UUID --upper (scratch:PATH | ram) [--memory MIB] [--workload-identity
-//!   UID:GID] [--overlay-mode MODE] [--scratch-journal POLICY] [--first-partition-bound BYTES]`
-//!   starts a clone of the generation G of the template store TEMPLATES, an
-//!   `nvx::host::template::Store`, in the sandbox store STORE, which it creates if needed; see
-//!   `runtime_adapter::clone`. It reads the generation from the store's index, and its
+//!   UID:GID] [--overlay-mode MODE] [--scratch-journal POLICY] [--first-partition-bound BYTES]
+//!   [--machine-id (image | generated)]` starts a clone of the generation G of the template store
+//!   TEMPLATES, an `nvx::host::template::Store`, in the sandbox store STORE, which it creates if
+//!   needed; see `runtime_adapter::clone`. It reads the generation from the store's index, and its
 //!   compatibility key, whose RAM is the clone's memory target unless MIB mebibytes are given,
 //!   before it needs NVX's artifacts. The store then leases the generation to the sandbox, at the
 //!   host's time, with `Store::acquire`, which refuses a generation that a tombstone quarantines,
@@ -120,7 +120,10 @@
 //!   record: the workload identity UID:GID, if given, as which every execution runs, whose account
 //!   the guest checks in the clone's root before it is ready, and the overlay mode MODE and the
 //!   scratch's journal policy POLICY, as a launch takes them, and for a GPT disk, the bound BYTES
-//!   of its first partition, 64 KiB unless given, as a launch's guest takes it by default. The
+//!   of its first partition, 64 KiB unless given, as a launch's guest takes it by default. Every
+//!   execution of the clone sees the hostname `runtime-adapter`, and the machine ID that
+//!   `--machine-id` chooses: the image's own, `image`, by default, or one that the guest generates
+//!   once for the clone, `generated`, which a read-only bind holds at `/etc/machine-id`. The
 //!   guest refuses a first partition larger than BYTES, and an upper that is not fresh, whose
 //!   `upper` or `work` directory on the scratch image exists and is not empty, as an earlier
 //!   clone's would be, before the clone is ready. Once the clone is ready, the command starts its
@@ -283,7 +286,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
-use nvx::activation::StoreGeneration;
+use nvx::activation::{MachineIdMode, StoreGeneration};
 use nvx::exec::{Cause, Key, Limits, Outcome, Status, Stream, Timers, Window};
 use nvx::host::artifacts::{Artifacts, absolute};
 use nvx::host::instance::generate_capability;
@@ -403,7 +406,7 @@ const USAGE: &str = concat!(
     " [--memory MIB]\n",
     "           [--workload-identity UID:GID] [--overlay-mode MODE]",
     " [--scratch-journal POLICY]\n",
-    "           [--first-partition-bound BYTES]\n",
+    "           [--first-partition-bound BYTES] [--machine-id (image | generated)]\n",
     "       runtime-adapter-host probe STORE PROBE... [--guest-build BUILD]\n",
     "       runtime-adapter-host exec STORE [--guest-build BUILD] EXECUTION [';' EXECUTION]...\n",
     "           EXECUTION: [--identity UID:GID [--groups GID,...] [--capabilities N,...]",
@@ -653,6 +656,8 @@ struct Options {
     scratch_journal: Option<JournalPolicy>,
     /// `--first-partition-bound`.
     first_partition_bound: Option<u64>,
+    /// `--machine-id`.
+    machine_id: Option<MachineIdMode>,
     /// `--workload-identity`.
     workload_identity: Option<(u32, u32)>,
     /// `--share`, `--deny`, `--reserved`, and `--share-root`, in order.
@@ -924,6 +929,7 @@ fn parse(arguments: Vec<OsString>) -> Result<Command, String> {
                         overlay_mode: options.overlay_mode,
                         scratch_journal: options.scratch_journal,
                         first_partition_bound: options.first_partition_bound,
+                        machine_id: options.machine_id.unwrap_or(MachineIdMode::Image),
                     },
                 }),
                 time: host_time_from_env()?,
@@ -1021,6 +1027,19 @@ fn parse_option(
             options.first_partition_bound = Some(bound.ok_or_else(|| {
                 format!("--first-partition-bound takes a positive number of bytes, not {value:?}")
             })?);
+        }
+        ("start", "--machine-id") if options.machine_id.is_none() => {
+            let value = text(value)?;
+            let mode = match value.as_str() {
+                "image" => MachineIdMode::Image,
+                "generated" => MachineIdMode::Generated,
+                _ => {
+                    return Err(format!(
+                        "--machine-id takes image or generated, not {value:?}"
+                    ));
+                }
+            };
+            options.machine_id = Some(mode);
         }
         ("launch" | "start", "--workload-identity") if options.workload_identity.is_none() => {
             let value = text(value)?;

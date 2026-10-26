@@ -33,6 +33,14 @@
 //!   an execution. The sandbox records the failure until the release of its lease.
 //! - A clone refuses a scratch image whose upper is not fresh, as an earlier clone left it, and
 //!   ends before it is ready.
+//! - Clones at once each keep a root of their own, and every execution of a clone sees its
+//!   hostname and its machine ID: one that its guest generated, distinct in each clone, the same
+//!   in each of the clone's executions, which a read-only bind holds at `/etc/machine-id`, or the
+//!   image's own, which the guest leaves alone, so that what an execution writes there, the
+//!   clone's later executions see.
+//! - A clone whose generated machine ID the guest cannot bind, since its image holds a regular
+//!   file `etc`, ends before it is ready, with the status of the workload's view, while a clone of
+//!   the image that keeps the image's own machine ID, which needs no bind, starts.
 //! - A clone runs its executions as its record's workload identity, once it is ready: the repair
 //!   acknowledged the restore before the clone took its reset, the host's first message came
 //!   after that, and the clone's Ready, its start, and its first execution came in that order.
@@ -78,7 +86,7 @@ use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
-use nvx::activation::{ReadyActivation, StoreGeneration};
+use nvx::activation::{MachineIdMode, ReadyActivation, StoreGeneration};
 use nvx::exec::{Key, Limits, Timers, Window};
 use nvx::host::artifacts::Artifacts;
 use nvx::host::platform::Transport;
@@ -95,7 +103,7 @@ use nvx::protocol::status;
 use nvx::uuid::Uuid;
 use runtime_adapter::GUEST_BUILD;
 use runtime_adapter::capture::DEFAULT_SCRATCH_LENGTH;
-use runtime_adapter::clone::{HOST_TIME_VARIABLE, Request, host_time_text};
+use runtime_adapter::clone::{CLONE_HOSTNAME, HOST_TIME_VARIABLE, Request, host_time_text};
 use runtime_adapter::exec::{HostMessage, Start};
 use runtime_adapter::frame::Message;
 use runtime_adapter::host::Client;
@@ -134,6 +142,26 @@ const HOUR_NS: u64 = 3_600_000_000_000;
 /// The error number with which the guest refuses an execution that names an identity in a
 /// sandbox that has its own: `EINVAL`.
 const EINVAL: i32 = 22;
+/// The machine ID that each execution of [`VIEW`] writes to a clone's `/etc/machine-id`.
+const WRITTEN_MACHINE_ID: &str = "0f1e2d3c4b5a69788796a5b4c3d2e1f0";
+/// The program of the executions that show a clone's view of its root, `/bin/sh -c VIEW sh
+/// MARKER ID`, which prints, a line each: the hostname, `hostname NAME`; the machine ID at
+/// `/etc/machine-id`, or `absent`, `machine-id ID`; the options of each mount there, `bind
+/// OPTIONS`; whether a write of ID there succeeded, `write written`, or not, `write refused`; and
+/// what the root's `/marker` holds, or `absent`, `marker TEXT`. Then it writes MARKER to `/marker`.
+const VIEW: &str = r#"echo "hostname $(uname -n)"
+echo "machine-id $(cat /etc/machine-id 2>/dev/null || echo absent)"
+while read -r _ _ _ _ point options _; do
+    if [ "$point" = /etc/machine-id ]; then echo "bind $options"; fi
+done < /proc/self/mountinfo
+if { printf '%s\n' "$2" > /etc/machine-id; } 2>/dev/null; then
+    echo "write written"
+else
+    echo "write refused"
+fi
+echo "marker $(cat /marker 2>/dev/null || echo absent)"
+printf '%s' "$1" > /marker
+"#;
 /// The placeholder of the template of the scenarios of GPT disks: a disk of two layers, whose
 /// partitions start at multiples of 1 MiB.
 const PLACEHOLDER: Disk = Disk {
@@ -146,6 +174,7 @@ const PLACEHOLDER: Disk = Disk {
     alignment: 2048,
     first_size: 4096,
     first: b"\xffthe placeholder's first partition",
+    top: &[],
 };
 /// A clone's GPT disk of one layer, whose partitions start at multiples of 2 MiB, with a larger
 /// first partition than the placeholder's: its layer's partition starts where none of the
@@ -159,6 +188,7 @@ const ONE_LAYER: Disk = Disk {
     alignment: 4096,
     first_size: 8192,
     first: b"\xfe\0one layer\x80",
+    top: &[],
 };
 /// A clone's GPT disk of three layers, whose partitions start at multiples of 640 KiB, with the
 /// largest first partition: its layers' partitions start where none of the placeholder's do, nor
@@ -174,12 +204,26 @@ const THREE_LAYERS: Disk = Disk {
     alignment: 1280,
     first_size: 12288,
     first: b"\xfd\tthree layers\xc3",
+    top: &[],
+};
+/// A clone's GPT disk of one layer whose top directory holds a regular file `etc`, below which
+/// nothing can be bound at `/etc/machine-id`.
+const ETC_FILE: Disk = Disk {
+    guid: "c3d5e7f9-1a2b-4c3d-8e4f-5a6b7c8d9e00",
+    partitions: &[
+        "c3d5e7f9-1a2b-4c3d-8e4f-5a6b7c8d9e01",
+        "c3d5e7f9-1a2b-4c3d-8e4f-5a6b7c8d9e02",
+    ],
+    alignment: 2048,
+    first_size: 4096,
+    first: b"\xfcetc is a file",
+    top: &[("etc", b"not a directory\n")],
 };
 
 /// A GPT disk of the scenarios, of the length of the platform's image, which
 /// [`Template::of_disk`] captures as the template's placeholder, or [`Template::disk`] writes for
 /// a clone. Its partitions follow each other, each at a multiple of its alignment: its first
-/// partition, then a layer, an empty [`small_layer`], in each of the others.
+/// partition, then a layer, a [`small_layer`], in each of the others, empty but the top one.
 struct Disk {
     /// The disk's GUID, which the guest expects of it.
     guid: &'static str,
@@ -193,20 +237,27 @@ struct Disk {
     /// The bytes that its first partition holds, before NUL bytes: those that the guest returns,
     /// which end in neither a NUL byte nor whitespace.
     first: &'static [u8],
+    /// The regular files in the top directory of its top layer, each a name and its bytes.
+    top: &'static [(&'static str, &'static [u8])],
 }
 
 impl Disk {
     /// Writes the disk at `path`, of `length` bytes, a file that no one else may change.
     fn write(&self, path: &Path, length: u64) {
-        let layer = small_layer(&[], &[]);
+        let (layer, top) = (small_layer(&[], &[]), small_layer(self.top, &[]));
         let partitions = self
             .partitions
             .iter()
             .enumerate()
             .map(|(index, guid)| {
-                let (size, contents) = match index {
-                    0 => (self.first_size, self.first),
-                    _ => (u64::try_from(layer.len()).unwrap(), layer.as_slice()),
+                let contents = match index {
+                    0 => self.first,
+                    _ if index + 1 == self.partitions.len() => top.as_slice(),
+                    _ => layer.as_slice(),
+                };
+                let size = match index {
+                    0 => self.first_size,
+                    _ => u64::try_from(contents.len()).unwrap(),
                 };
                 Partition {
                     guid,
@@ -619,6 +670,56 @@ impl Cloned {
     fn scratch(&self) -> PathBuf {
         scratch_image(&self.sandbox)
     }
+
+    /// Runs [`VIEW`] in the clone's root, as user ID 0, which writes `marker` to the root's
+    /// `/marker` last, and returns what it found.
+    fn view(&mut self, marker: &str) -> View {
+        let program = ["/bin/sh", "-c", VIEW, "sh", marker, WRITTEN_MACHINE_ID];
+        let ran = self.exec(&[&["--identity", "0:0", "--"][..], &program].concat());
+        let facts = ["launch", "status", "stderr"].map(|key| &ran[&format!("exec.1.{key}")]);
+        assert_eq!(facts, ["started", "exit 0", ""], "{ran:?}");
+        // The host program escapes each line feed, and each backslash, which none of the lines
+        // holds.
+        let lines = ran["exec.1.stdout"]
+            .strip_suffix("\\n")
+            .filter(|lines| !lines.contains("\\\\"))
+            .unwrap_or_else(|| panic!("{ran:?}"))
+            .split("\\n")
+            .collect::<Vec<_>>();
+        let value = |line: &str, key: &str| {
+            let value = line
+                .strip_prefix(key)
+                .and_then(|rest| rest.strip_prefix(' '));
+            value
+                .unwrap_or_else(|| panic!("{key} in {ran:?}"))
+                .to_owned()
+        };
+        let [hostname, machine_id, binds @ .., write, marker] = lines.as_slice() else {
+            panic!("{ran:?}");
+        };
+        View {
+            hostname: value(hostname, "hostname"),
+            machine_id: value(machine_id, "machine-id"),
+            binds: binds.iter().map(|line| value(line, "bind")).collect(),
+            write: value(write, "write"),
+            marker: value(marker, "marker"),
+        }
+    }
+}
+
+/// What an execution of [`VIEW`] found in a clone's root.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct View {
+    /// The hostname.
+    hostname: String,
+    /// The machine ID at `/etc/machine-id`, or `absent`.
+    machine_id: String,
+    /// The options of each mount at `/etc/machine-id`.
+    binds: Vec<String>,
+    /// Whether a write of [`WRITTEN_MACHINE_ID`] at `/etc/machine-id` was `written` or `refused`.
+    write: String,
+    /// What the root's `/marker` held, or `absent`.
+    marker: String,
 }
 
 /// Returns the scratch image of a clone over one, in the clone's sandbox, `sandbox`, in a
@@ -819,6 +920,23 @@ fn assert_overlay(facts: &Printed, upper: Upper<'_>, trusted: bool, identifier: 
     );
 }
 
+/// Checks that an execution of [`VIEW`] found a machine ID that the clone's guest generated: 32
+/// lowercase hexadecimal digits, which one bind holds at `/etc/machine-id`, read-only, without
+/// set-user-ID programs or devices, so that the execution's write there was refused.
+fn assert_generated(view: &View) {
+    let id = &view.machine_id;
+    let digit = |byte: u8| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte);
+    assert!(id.len() == 32 && id.bytes().all(digit), "{view:?}");
+    let [options] = view.binds.as_slice() else {
+        panic!("one bind holds the machine ID: {view:?}");
+    };
+    let options = options.split(',').collect::<Vec<_>>();
+    for flag in ["ro", "nosuid", "nodev"] {
+        assert!(options.contains(&flag), "{flag} in {view:?}");
+    }
+    assert_eq!(view.write, "refused", "{view:?}");
+}
+
 /// Checks the events of a clone's activation that its `activation` probe found: the repair
 /// acknowledged the restore, and the clone took its reset, the host's first message, its Ready,
 /// and its start, in that order, after the acknowledgement. Returns when each came, in
@@ -945,6 +1063,7 @@ fn refuses_early(template: &Template, early: Message) {
         overlay_mode: None,
         scratch_journal: None,
         first_partition_bound: None,
+        machine_id: MachineIdMode::Image,
     };
     let plan = request.plan().unwrap();
     let staged = Staged::read(&sandbox.store).unwrap().unwrap();
@@ -1372,6 +1491,106 @@ fn a_clone_refuses_a_scratch_image_whose_upper_an_earlier_clone_used() {
     };
     let ended = template.start("cl-u", start, CLONE_FAILED);
     ended.assert_unactivated(&template, "unusable-root", status::ACTIVATION_ROOT);
+    assert_payload(&template, false);
+}
+
+#[test]
+#[ignore = "boots VMs; see the module documentation for what they need"]
+fn clones_at_once_keep_their_own_uppers_and_machine_ids() {
+    let template = Template::create("cl-view");
+    // Three clones at once: two whose guests generate their machine IDs, over a scratch image and
+    // in RAM, and one in RAM that keeps the image's own.
+    let generated = ["--machine-id", "generated"];
+    let starts = [
+        ("cl-s", Upper::Scratch, &generated[..]),
+        ("cl-r", Upper::Ram, &generated[..]),
+        ("cl-i", Upper::Ram, &[][..]),
+    ];
+    let mut clones = starts.map(|(name, upper, options)| {
+        let start = StartOf {
+            upper,
+            options,
+            ..StartOf::default()
+        };
+        let cloned = template.start(name, start, 0);
+        cloned.assert_started();
+        (name, cloned)
+    });
+    assert_eq!(template.leases().len(), clones.len());
+
+    // Each clone's first execution sees the clone's hostname, and a root of the clone's own,
+    // without the marker that the executions before it left in the other clones' roots.
+    let firsts = clones.each_mut().map(|(name, cloned)| {
+        let view = cloned.view(name);
+        let seen = [view.hostname.as_str(), view.marker.as_str()];
+        assert_eq!(seen, [CLONE_HOSTNAME, "absent"], "{view:?}");
+        view
+    });
+    let [scratch, ram, image] = &firsts;
+    assert_generated(scratch);
+    assert_generated(ram);
+    assert_ne!(scratch.machine_id, ram.machine_id);
+    // The guest leaves the image's own machine ID alone: the Ubuntu image has none, and an
+    // execution may write one.
+    let image_view = (
+        image.machine_id.as_str(),
+        image.binds.len(),
+        image.write.as_str(),
+    );
+    assert_eq!(image_view, ("absent", 0, "written"), "{image:?}");
+
+    // A later execution of each clone sees the machine ID that its first saw, or, with the image's
+    // own, the one that its first wrote, and its first's marker.
+    for ((name, cloned), first) in clones.iter_mut().zip(&firsts) {
+        let machine_id = match first.binds.as_slice() {
+            [] => WRITTEN_MACHINE_ID,
+            _ => first.machine_id.as_str(),
+        };
+        let expected = View {
+            machine_id: machine_id.to_owned(),
+            marker: (*name).to_owned(),
+            ..first.clone()
+        };
+        assert_eq!(cloned.view(name), expected);
+    }
+    for (_, cloned) in &mut clones {
+        cloned.stop();
+    }
+    assert!(template.leases().is_empty());
+    assert_payload(&template, false);
+}
+
+#[test]
+#[ignore = "boots VMs; see the module documentation for what they need"]
+fn a_clone_whose_view_cannot_be_set_ends_before_it_is_ready() {
+    // The template of the EROFS image serves clones of a GPT disk of its length too.
+    let template = Template::create("cl-noview");
+    let disk = template.disk("etc.gpt", &ETC_FILE);
+    let image = Some(Image::Gpt(&ETC_FILE, &disk));
+
+    // With the image's own machine ID, the guest binds nothing in the root, so a clone of a disk
+    // whose top layer holds a regular file `etc` starts.
+    let start = StartOf {
+        image,
+        ..StartOf::default()
+    };
+    let mut cloned = template.start("cl-n", start, 0);
+    cloned.assert_started();
+    let facts = cloned.probe(&["devices", "mounts", "contents", "first-partition"]);
+    assert_gpt_root(&facts, &ETC_FILE, Upper::Ram);
+    cloned.stop();
+
+    // A generated machine ID, which the guest binds at `/etc/machine-id`, cannot be bound below a
+    // file, so a clone of the disk that asks for one ends before it is ready, with the status of
+    // the workload's view, which attributes the failure to the request's invalid settings.
+    let options = ["--machine-id", "generated"];
+    let start = StartOf {
+        image,
+        options: &options,
+        ..StartOf::default()
+    };
+    let ended = template.start("cl-n", start, CLONE_FAILED);
+    ended.assert_unactivated(&template, "invalid-settings", status::ACTIVATION_WORKLOAD);
     assert_payload(&template, false);
 }
 

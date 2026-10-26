@@ -1380,15 +1380,18 @@ library side, `clone`, holds what the command's options choose of the clone,
 `clone::Request`: its image, an EROFS layer or a GPT disk of the length of the
 template's placeholder, its upper, on an ext4 scratch image or in RAM, its
 memory target, the template's RAM unless given, the workload identity as which
-its executions run, its overlay mode, its scratch's journal policy, and the
-bound of a GPT disk's first partition. `Request::plan` plans the image over the
-upper as a launch plans a layered root, and `Request::clone_request` returns
-NVX's `CloneRequest` of it, with the bindings that the sandbox's store stages
-for the images, as `stage` stages them, so the start hashes nothing. The
-clone's activation record names the image's own machine ID, the hostname
-`runtime-adapter`, and the guest's defaults of the other settings, unless the
-request names them; for a GPT disk, the bound of its first partition is 64 KiB
-unless the request names one, as a launch's guest takes it by default.
+its executions run, its overlay mode, its scratch's journal policy, the bound
+of a GPT disk's first partition, and the machine ID that its executions see.
+`Request::plan` plans the image over the upper as a launch plans a layered
+root, and `Request::clone_request` returns NVX's `CloneRequest` of it, with the
+bindings that the sandbox's store stages for the images, as `stage` stages
+them, so the start hashes nothing. The clone's activation record names the
+hostname `runtime-adapter`, which every execution sees, the image's own machine
+ID, unless the request asks for one that the guest generates once for the
+clone, which a read-only bind holds at the root's `/etc/machine-id` for every
+execution, and the guest's defaults of the other settings, unless the request
+names them; for a GPT disk, the bound of its first partition is 64 KiB unless
+the request names one, as a launch's guest takes it by default.
 The guest of a GPT clone rereads the disk's partition table before it
 assembles the root, since its kernel created the partitions of the template's
 placeholder.
@@ -1568,7 +1571,7 @@ the directory that `NVX_ARTIFACTS_DIR` names, and the guest agent's build from
   its record again, and releases the lease of a clone that ended, through the
   template store TEMPLATES, if given, in place of the one that the clone's
   record names.
-- `start STORE --template TEMPLATES --generation G --distro FORMAT:PATH --distro-identity UUID --upper (scratch:PATH | ram) [--memory MIB] [--workload-identity UID:GID] [--overlay-mode MODE] [--scratch-journal POLICY] [--first-partition-bound BYTES]`
+- `start STORE --template TEMPLATES --generation G --distro FORMAT:PATH --distro-identity UUID --upper (scratch:PATH | ram) [--memory MIB] [--workload-identity UID:GID] [--overlay-mode MODE] [--scratch-journal POLICY] [--first-partition-bound BYTES] [--machine-id (image | generated)]`
   starts a [clone](#clones) of the generation G of the template store
   TEMPLATES in the sandbox store STORE, which it creates if needed, and whose
   `stage` staged its images, which no one else may change: the image PATH, an
@@ -1580,7 +1583,10 @@ the directory that `NVX_ARTIFACTS_DIR` names, and the guest agent's build from
   every execution runs, and whose account the guest checks before the clone is
   ready, the overlay mode MODE and the scratch's journal policy POLICY, as a
   launch takes them, and for a GPT disk, the bound BYTES of its first
-  partition, 64 KiB by default, as a launch's guest takes it.
+  partition, 64 KiB by default, as a launch's guest takes it. Every execution
+  of the clone sees the hostname `runtime-adapter`, and the machine ID that
+  `--machine-id` chooses: the image's own, `image`, by default, or one that the
+  guest generates once for the clone, `generated`.
   Once the restore sequence started the clone's sandbox, it exchanges a `Ping`
   and the longest `Echo` with the guest agent, commits the launch, and exits,
   leaving the VM running, and the sandbox holding the lease. A clone that
@@ -2047,9 +2053,9 @@ Windows, without a hypervisor:
 - the command lines of `start` that the host program refuses, each with status
   2: missing options, a generation that is not a positive number, a scratch's
   journal policy for an upper in RAM, a first-partition bound for an EROFS
-  image, invalid values, and the options of other commands, and the options of
-  `start` that other commands do not take, with a clock fixture that is not a
-  host's time too;
+  image, invalid values, an option given twice, and the options of other
+  commands, and the options of `start` that other commands do not take, with a
+  clock fixture that is not a host's time too;
 - a start whose template store does not exist, or does not hold the
   generation, and whose image the plan refuses, each with status 1 before it
   needs NVX's artifacts or creates the sandbox's store;
@@ -2409,8 +2415,8 @@ and starts its clones, each in a sandbox store of its own, over a copy of the
 scratch template, which no one else may change either, or in RAM. The GPT disks
 of a template's placeholder and of the clones, which the test writes with
 `tests/common/gpt.rs`, as `tests/vm_layered.rs` writes its own, hold their
-first partition, then empty layers, at partitions that differ from one disk to
-another:
+first partition, then layers, empty but for one disk's regular file `etc`, at
+partitions that differ from one disk to another:
 
 | Test | Clones | Expects |
 | --- | --- | --- |
@@ -2419,6 +2425,8 @@ another:
 | `a_start_refuses_what_the_template_cannot_serve_before_any_vmm_starts` | An image 4 KiB longer, one 4 KiB shorter, and one 100 bytes longer, than the placeholder, a scratch image of twice the template's scratch, memory targets of 2 GiB and of 320 MiB, unstaged images, and a generation that the store does not hold | For those that NVX's plan refuses, status 8, with NVX's reason, and the record of a failure of the request, at the plan, without a VM, by the evidence of a length that the request supplied, of the image's geometry, which OpenVMM cannot attach, or of invalid targets, which quarantines nothing; for the others, status 1, without a record; any lease released, and no VMM's log or record in the sandbox |
 | `a_clone_whose_activation_fails_ends_before_it_is_ready` | A scratch image of zeros, a journal that the record forbids, a workload identity whose account the image lacks, and, through NVX's restore sequence, a ping, a start, or the start of an execution before the `Activate` | Status 8, no `Ready`, and the record of a failure, at the activation, once the VM exited: of the request, by the evidence of an unusable root, with the guest's status 54, or of invalid settings, with 55, or, before the `Activate`, of an unknown cause, by the protocol's, with 51, which the sandbox records until the release; nothing quarantined, and the lease released, with the records |
 | `a_clone_refuses_a_scratch_image_whose_upper_an_earlier_clone_used` | Over a scratch image, in whose root the `contents` probe writes a file, then over a copy of that scratch image once the first clone stopped | The first started; then status 8, since the copy's upper is not fresh, and the record of a failure of the request, at the activation, once the VM exited, by the evidence of an unusable root, with the guest's status 54; nothing quarantined, and the lease released, with the records |
+| `clones_at_once_keep_their_own_uppers_and_machine_ids` | Three at once: over a scratch image and in RAM, each with a generated machine ID, and in RAM with the image's own; two executions in each, as user ID 0, that write a marker in the root, and try to write `/etc/machine-id` | In every execution, the hostname `runtime-adapter`, and no marker of another clone; a generated machine ID that differs between the clones, the same in each execution of a clone, held by one bind that is read-only, `nosuid`, and `nodev`, and that the write cannot change; with the image's own machine ID, none, since the image has none, no bind, and in the later execution, the ID that the first wrote; then each stop releases its lease |
+| `a_clone_whose_view_cannot_be_set_ends_before_it_is_ready` | Of a template of the EROFS image, a GPT disk whose layer holds a regular file `etc`, with the image's own machine ID, then with a generated one | The first started, with the disk's root; then status 8, since no bind can hold the machine ID below a file, and the record of a failure of the request, at the activation, once the VM exited, by the evidence of invalid settings, with the guest's status 55; nothing quarantined, and the lease released, with the records |
 | `a_clone_runs_its_executions_as_its_workload_identity_once_it_is_ready` | Over a scratch image, as nobody | An execution that runs as nobody, one that names an identity refused with `EINVAL`, and the first execution after the clone's start |
 | `a_generation_is_eligible_by_the_clock_of_its_capture` | At the host's time, then with clock fixtures: UTC a day behind, another boot an hour after the capture by UTC, and the restore window passed by each clock, or UTC before the capture | The host's monotonic clock on the boot of the capture, whatever UTC says, UTC after a reboot, with the fixture's downtime, and the store's refusal without a lease outside the window |
 | `a_clone_reads_no_more_of_its_disks_than_its_root_needs` | Over a scratch image, and in RAM | Less than an eighth of each disk read once the clone is ready, and each disk's whole length once the guest read it to its end |
