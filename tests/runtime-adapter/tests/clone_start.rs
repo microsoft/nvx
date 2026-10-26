@@ -1,12 +1,12 @@
 //! The host program's `start` refuses options that do not make a start, and a clock fixture that is
-//! not a host's time, as usage errors, and a network that the plan refuses, shares that it cannot
-//! export, a generation that the template store does not hold, or a template store that does not
-//! exist, before it needs NVX's artifacts or creates the sandbox's store. A clone's record names its
-//! template store and its generation, which a stop reads back, beside the plan that the other
-//! commands read, with the clone's network, whose proxy an execution of the clone then finds at
-//! the URL that NVX's activation record names, a clone's request carries the export of its shares,
-//! and a host's time keeps its text form, the form of the clock fixture. The tests need no
-//! hypervisor.
+//! not a host's time, as usage errors, a network that the plan refuses and shares that it cannot
+//! export, and a selection that names no template, of a template store that does not exist, or of
+//! a generation that the store does not hold, with the refusal's record and its own status, before
+//! it needs NVX's artifacts or creates the sandbox's store. A clone's record names its template
+//! store and its generation, which a stop reads back, beside the plan that the other commands
+//! read, with the clone's network, whose proxy an execution of the clone then finds at the URL
+//! that NVX's activation record names, a clone's request carries the export of its shares, and a
+//! host's time keeps its text form, the form of the clock fixture. The tests need no hypervisor.
 #![cfg(feature = "host")]
 
 use std::fs;
@@ -300,8 +300,15 @@ fn a_start_refuses_a_generation_that_the_template_store_does_not_hold_before_any
         ];
         host(&arguments, None)
     };
-    let failed = |output: &Output, problem: &str| {
-        assert_eq!(output.status.code(), Some(1), "{output:?}");
+    let refused = |output: &Output, evidence: &str, problem: &str| {
+        assert_eq!(output.status.code(), Some(10), "{output:?}");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let record = format!(
+            "failure.outcome=no-template\nfailure.evidence={evidence}\nfailure.stage=selection\n\
+             failure.progress=none\nfailure.status=none\nfailure.teardown=no-vm\n\
+             failure.code=not-found\n"
+        );
+        assert_eq!(stdout, record);
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(stderr.contains(problem), "{stderr}");
         assert!(!stderr.contains("usage:"), "{stderr}");
@@ -310,9 +317,9 @@ fn a_start_refuses_a_generation_that_the_template_store_does_not_hold_before_any
 
     // No template store.
     let output = start(&templates, "1");
-    failed(&output, "cannot open the template store");
+    refused(&output, "no-store", "cannot open the template store");
 
-    // A template store that holds no generation.
+    // A template store that never published a generation.
     Store::create(&templates).unwrap();
     for generation in ["1", "2"] {
         let output = start(&templates, generation);
@@ -320,7 +327,7 @@ fn a_start_refuses_a_generation_that_the_template_store_does_not_hold_before_any
             "the template store {} holds no generation {generation}",
             Store::open(&templates).unwrap().dir().display()
         );
-        failed(&output, &problem);
+        refused(&output, "unpublished", &problem);
     }
 
     // An image that the plan refuses fails the start before the store is read.

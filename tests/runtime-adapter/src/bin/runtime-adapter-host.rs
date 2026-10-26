@@ -186,7 +186,12 @@
 //!   agent that does not answer the `Ping` or the `Echo` fails the clone so, through
 //!   `Started::fail`, as the restore sequence attributes the failures of its sessions. A start
 //!   that fails otherwise, at a step of the adapter's own before the clone's launch, releases the
-//!   lease.
+//!   lease. A selection that the template store refuses ends the start before it leases anything,
+//!   with the refusal's record, in the form of a failure's: a template store that does not exist,
+//!   and a generation that the store never published, or no longer holds, name no template; a
+//!   generation whose capture the restore window of its time contract no longer admits at the
+//!   host's time is expired; and one that a tombstone quarantines, or whose capture is after the
+//!   host's time, is ineligible.
 //! - `runtime-adapter-host stop STORE` reattaches and attaches as `reattach` does, then stops the
 //!   VM: it asks the guest agent to stop, which first tears down a layered root, waits for the VM
 //!   to exit, and checks the VM's outcome report. A VM whose guest agent does not confirm the stop
@@ -300,18 +305,24 @@
 //!   in nanoseconds, and the clock that measured it: `monotonic`, the host's monotonic clock, on
 //!   the host's boot that captured the template, or `utc` otherwise;
 //! - `released`: the identity of the lease that a stop, or a start that failed, released;
-//! - `failure.KEY`: the record of a clone's failure, with these KEYs:
+//! - `failure.KEY`: the record of a clone's failure, or of a start's selection that the template
+//!   store refused, with these KEYs:
 //!   - `outcome`: what the failure is attributed to: `request`, `staging`, `host`, `unknown`,
-//!     `template`, or `repair`;
-//!   - `evidence`: what the host saw of it, which attributes it, such as `supplied-length`;
+//!     `template`, or `repair`, or, for a refused selection, `no-template`, `expired`, or
+//!     `ineligible`;
+//!   - `evidence`: what the host saw of it, which attributes it, such as `supplied-length`, or,
+//!     for a refused selection, `no-store`, `unpublished`, or `retired`, of no template,
+//!     `expired`, or `tombstone` or `early`, of an ineligible generation;
 //!   - `stage`: where the clone failed: `plan`, `launch`, `restore`, `activation`, `start`,
-//!     `commit`, `run`, or `reattach`;
-//!   - `progress`: the step that the clone reached, as `progress` spells it;
+//!     `commit`, `run`, or `reattach`, or `selection` for a refused selection;
+//!   - `progress`: the step that the clone reached, as `progress` spells it, or `none` for a
+//!     refused selection;
 //!   - `status`: the status with which the guest ended the VM, as OpenVMM's outcome report gives
 //!     it, or `none`;
 //!   - `teardown`: how the teardown that followed ended: `no-vm`, `exited`, `terminated`, or
 //!     `unresolved`;
-//!   - `code`: the code of the failure's error, such as `runtime-mismatch`;
+//!   - `code`: the code of the failure's error, such as `runtime-mismatch`, or `not-found`,
+//!     `template-tombstoned`, or `template-ineligible` for a refused selection;
 //! - `quarantined`: whether the command quarantined the generation of a clone that failed:
 //!   `yes`, for a failure of the template, or `no`;
 //! - `store`: the identity of the template store that `list` or `inspect` read, 32 hexadecimal
@@ -355,10 +366,11 @@
 //! a mapping of the table, and the VM stopped gracefully, with success and a complete teardown,
 //! with 7 when `remove` finds leases that keep the generation, which it tombstoned,
 //! with 8 when a clone failed, once nothing of it runs and the command released its lease, with 9
-//! when a clone failed, and its teardown is unresolved, so that the sandbox keeps the lease, and
-//! with 1, after a diagnostic on standard error, when they fail. Anything else is a usage error,
-//! with status 2, as is a value of `RUNTIME_ADAPTER_STEP_HOOK` that sets no step hook, or of
-//! `RUNTIME_ADAPTER_HOST_TIME` that is not a host's time.
+//! when a clone failed, and its teardown is unresolved, so that the sandbox keeps the lease, with
+//! 10 when the template store refused a start's selection, so that the start leased and launched
+//! nothing, and with 1, after a diagnostic on standard error, when they fail. Anything else is a
+//! usage error, with status 2, as is a value of `RUNTIME_ADAPTER_STEP_HOOK` that sets no step hook,
+//! or of `RUNTIME_ADAPTER_HOST_TIME` that is not a host's time.
 
 use std::env;
 use std::error::Error;
@@ -383,13 +395,13 @@ use nvx::host::store::{CallerFiles, IdentityPart, LOG_NAME, LaunchId, LockedStor
 use nvx::host::supervisor::{self, Reattached, Starting, StopOutcome, Vmm, VmmCommand};
 use nvx::host::template::{
     Acquired, CAPTURES_NAME, Capture, CloneControl, CloneFailure, ClonePlan, Created,
-    DowntimeSource, Eligibility, Evidence, FailureRecord, HostTime, Lease, ReattachedClone,
-    RestoreDeadlines, Retirement, Store, TRANSACTION_NAME, reattach_clone,
+    DowntimeSource, Eligibility, Evidence, FailureRecord, Generation, HostTime, Lease,
+    ReattachedClone, RestoreDeadlines, Retirement, Store, TRANSACTION_NAME, reattach_clone,
 };
 use nvx::protocol::CAPABILITY_LEN;
 use nvx::protocol::root::ImageFormat;
 use nvx::uuid::Uuid;
-use nvx::{ErrorKind, Hypervisor};
+use nvx::{ErrorCode, ErrorKind, Hypervisor};
 use runtime_adapter::GUEST_BUILD;
 use runtime_adapter::capture::{
     DEFAULT_CPU_PROFILE, DEFAULT_PROCESSORS, DEFAULT_SCRATCH_LENGTH, Request,
@@ -454,6 +466,10 @@ const CLONE_FAILED: u8 = 8;
 /// VM of the clone may still run, or NVX could not record the failure before it ended the VM, and
 /// the sandbox keeps the clone's lease, and NVX's records of its launch, for a later reattach.
 const CLONE_UNRESOLVED: u8 = 9;
+/// The exit status of a start whose template store refused its selection: the store does not
+/// exist, or does not hold the generation, or the generation is expired or ineligible at the
+/// host's time, so that the start leased and launched nothing.
+const SELECTION_REFUSED: u8 = 10;
 // The timers and limits of `exec` below are values chosen for tests that make a valid
 // configuration, within the limits that the guest and the host allow: chunks of at most
 // `exec::MAX_CHUNK` bytes, at most `worker::MAX_EXECUTION_MEMORY` bytes held in the guest for
@@ -2124,24 +2140,34 @@ fn start(
         network,
         ..clone.request.clone()
     };
-    // A request that the adapter's plan refuses, shares that it cannot export, and a generation
-    // that the template store does not hold, fail the start before it needs NVX's artifacts or
-    // the sandbox's store.
+    // A request that the adapter's plan refuses, shares that it cannot export, and a selection
+    // that the template store refuses as it names no template, fail the start before it needs
+    // NVX's artifacts or the sandbox's store.
     let plan = request.plan().map_err(|error| describe(&error))?;
     let export = request.export().map_err(|error| describe(&error))?;
-    let templates = Store::open(&clone.templates).map_err(|error| describe(&error))?;
-    let generation = templates
-        .index()
-        .map_err(|error| describe(&error))?
-        .get(clone.generation)
-        .cloned()
-        .ok_or_else(|| {
-            format!(
-                "the template store {} holds no generation {}",
-                templates.dir().display(),
-                clone.generation
-            )
-        })?;
+    let templates = match Store::open(&clone.templates) {
+        Ok(templates) => templates,
+        Err(error) if error.kind() == ErrorKind::NotFound => {
+            return Ok(selection_refused(Refusal::NoTemplate("no-store"), &error));
+        }
+        Err(error) => return Err(describe(&error)),
+    };
+    let index = templates.index().map_err(|error| describe(&error))?;
+    let Some(generation) = index.get(clone.generation).cloned() else {
+        // The store never assigns a store generation twice, so one before its next publication's
+        // was published, and retired since.
+        let evidence = if clone.generation < index.next_generation() {
+            "retired"
+        } else {
+            "unpublished"
+        };
+        let error = nvx::Error::not_found(format!(
+            "the template store {} holds no generation {}",
+            templates.dir().display(),
+            clone.generation
+        ));
+        return Ok(selection_refused(Refusal::NoTemplate(evidence), &error));
+    };
     // The clone's memory target is the request's, or else the template's RAM, which the
     // generation's key gives. A key that cannot be read gives none: NVX's plan reads the key
     // again, once the store leased the generation, and attributes the failure, to the generation
@@ -2160,15 +2186,22 @@ fn start(
         None => HostTime::now().map_err(|error| describe(&error))?,
     };
     let sandbox = SandboxStore::create(store).map_err(|error| describe(&error))?;
-    let mut acquired = templates
-        .acquire(
-            generation.generation(),
-            sandbox.dir(),
-            &CallerFiles::none(),
-            &now,
-            Some(Instant::now() + LOCK_TIMEOUT),
-        )
-        .map_err(|error| describe(&error))?;
+    let acquired = templates.acquire(
+        generation.generation(),
+        sandbox.dir(),
+        &CallerFiles::none(),
+        &now,
+        Some(Instant::now() + LOCK_TIMEOUT),
+    );
+    let mut acquired = match acquired {
+        Ok(acquired) => acquired,
+        Err(error) => {
+            return match Refusal::of(&error, &generation, &now) {
+                Some(refusal) => Ok(selection_refused(refusal, &error)),
+                None => Err(describe(&error)),
+            };
+        }
+    };
     println!("generation={}", generation.generation());
     println!("lease={}", acquired.lease.id());
     if let Eligibility::Eligible(downtime) = generation.eligibility(&now) {
@@ -2195,6 +2228,65 @@ fn start(
             }
         }
     }
+}
+
+/// Why a template store refused the selection of a start, as the start reports it: its outcome,
+/// with the evidence that attributes it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Refusal {
+    /// The selection names no template: the store does not exist, `no-store`, or never published
+    /// the generation, `unpublished`, or retired it, `retired`.
+    NoTemplate(&'static str),
+    /// The restore window of the time contract of the generation's capture no longer admits it at
+    /// the host's time.
+    Expired,
+    /// The generation takes no new clone: a tombstone quarantines it, `tombstone`, or its capture
+    /// is after the host's time, `early`.
+    Ineligible(&'static str),
+}
+
+impl Refusal {
+    /// Returns why the store refused, with `error`, to lease `generation` at the host's time `now`,
+    /// or `None` if the error is not a refusal of the selection: the store no longer holds the
+    /// generation, which it retired since the start read its index, a tombstone quarantines it, or
+    /// it is not eligible at `now`, as `Generation::eligibility` decides it. A sandbox that is not
+    /// provisioned, whose error is of the kind `NotFound` too, is not a refusal of the selection.
+    fn of(error: &nvx::Error, generation: &Generation, now: &HostTime) -> Option<Self> {
+        match error.code() {
+            ErrorCode::TemplateTombstoned => Some(Self::Ineligible("tombstone")),
+            ErrorCode::TemplateIneligible => Some(match generation.eligibility(now) {
+                Eligibility::Expired(_) => Self::Expired,
+                _ => Self::Ineligible("early"),
+            }),
+            ErrorCode::NotFound => Some(Self::NoTemplate("retired")),
+            _ => None,
+        }
+    }
+
+    /// Returns the outcome and the evidence of the refusal, as its record spells them.
+    fn names(self) -> (&'static str, &'static str) {
+        match self {
+            Self::NoTemplate(evidence) => ("no-template", evidence),
+            Self::Expired => ("expired", "expired"),
+            Self::Ineligible(evidence) => ("ineligible", evidence),
+        }
+    }
+}
+
+/// Ends a start whose template store refused its selection, as `refusal` says, with `error`, which
+/// leased and launched nothing: prints the refusal's record, as [`print_clone_failure`] prints a
+/// failure's, at the stage `selection`, and returns the exit status [`SELECTION_REFUSED`].
+fn selection_refused(refusal: Refusal, error: &nvx::Error) -> ExitCode {
+    let (outcome, evidence) = refusal.names();
+    println!("failure.outcome={outcome}");
+    println!("failure.evidence={evidence}");
+    println!("failure.stage=selection");
+    println!("failure.progress=none");
+    println!("failure.status=none");
+    println!("failure.teardown=no-vm");
+    println!("failure.code={}", error.code());
+    eprintln!("runtime-adapter-host: {}", describe(error));
+    ExitCode::from(SELECTION_REFUSED)
 }
 
 /// How the launch of a clone failed, once the store leased its generation.

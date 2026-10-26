@@ -31,7 +31,8 @@
 //!   refuses, a memory target beyond its capacity or of a part of a block. The start then releases
 //!   the lease, as it does once the adapter refuses images that the sandbox does not stage. A
 //!   generation whose key is gone fails the plan too, as the template's failure, and the start
-//!   quarantines it through its tombstone.
+//!   quarantines it through its tombstone, so that the store refuses a later start's selection of
+//!   it, as ineligible.
 //! - A clone whose activation fails ends before it is ready, with the status of the failure's
 //!   class, which attributes the failure, and the VMM's exit: a scratch image that holds no ext4
 //!   file system, a journal that the clone's record forbids, a workload identity whose account the
@@ -74,9 +75,12 @@
 //! - A clone whose VM ends without a word of its guest once a stop found it running fails, as NVX
 //!   attributes the loss of its status, before the stop, which stops nothing, releases its lease:
 //!   the template still serves clones.
-//! - A tombstone quarantines the generation of a running clone: the generation takes no new lease,
-//!   while the clone keeps running, reattaches, stops, and releases its lease, and the generation's
-//!   snapshot stays as the capture left it.
+//! - A tombstone quarantines the generation of a running clone: the store refuses the selection of
+//!   the generation for a new clone, as ineligible, while the clone keeps running, reattaches,
+//!   stops, and releases its lease, and the generation's snapshot stays as the capture left it.
+//! - A selection that names no template leases nothing, with the record of the store's refusal: a
+//!   template store that does not exist, a generation that the store never published, and one that
+//!   `remove` retired.
 //! - A start that ended once the store leased the generation, before it recorded the clone,
 //!   leaves a lease whose template store no record names, or only the record of an earlier clone,
 //!   of another template: a stop keeps it, and only its own template store, which `--template`
@@ -85,8 +89,8 @@
 //!   sandbox at the lease's path, which holds another lease, or none.
 //! - The store checks the generation's eligibility at the host's time: on the boot that captured
 //!   the template, by the host's monotonic clock, whatever UTC says, and after a reboot by UTC,
-//!   which clock fixtures stand for. It refuses a generation that is no longer, or not yet,
-//!   eligible, without a lease.
+//!   which clock fixtures stand for. It refuses the selection of a generation that is no longer
+//!   eligible, as expired, or not yet, as ineligible, without a lease, with the refusal's record.
 //! - A clone reads no more of its disks on its restore than its root needs, which a read of each
 //!   disk to its end shows the guest's statistics count.
 //! - A clone's time settles after it is ready, with no violation, after the downtime that the
@@ -184,6 +188,9 @@ const FAILED: i32 = 1;
 /// The exit status of a command whose clone failed, once nothing of the clone runs, and the
 /// command released its lease.
 const CLONE_FAILED: i32 = 8;
+/// The exit status of a start whose template store refused its selection, which leased and
+/// launched nothing.
+const SELECTION_REFUSED: i32 = 10;
 /// The guest agent's build of a host program of another runtime.
 const ANOTHER_BUILD: &str = "another-build";
 /// Bytes in a mebibyte.
@@ -861,7 +868,7 @@ impl Template {
         let generation = GENERATION.to_string();
         let mut options = vec![
             OsStr::new("--template"),
-            self.dir().as_os_str(),
+            start.templates.unwrap_or(self.dir()).as_os_str(),
             OsStr::new("--generation"),
             OsStr::new(&generation),
             OsStr::new("--distro"),
@@ -947,6 +954,8 @@ enum Image<'a> {
 /// What a scenario asks of the start of a clone.
 #[derive(Default)]
 struct StartOf<'a> {
+    /// The template store, or the template's by default.
+    templates: Option<&'a Path>,
     /// The image, or the platform's image by default.
     image: Option<Image<'a>>,
     /// The upper.
@@ -1258,6 +1267,23 @@ impl Cloned {
             .split(|byte| *byte == 0)
             .map(|argument| String::from_utf8_lossy(argument).into_owned())
             .collect()
+    }
+
+    /// Checks that the template store refused the start's selection before the start leased
+    /// anything, as the record that the start printed says: the refusal's `outcome` and
+    /// `evidence`, at the selection, without a VM, the code `code` of NVX's error, and no lease,
+    /// generation, or quarantine, and as [`assert_refused`](Self::assert_refused) checks it, with
+    /// a diagnostic that says `problem`.
+    fn assert_selection_refused(&self, outcome: &str, evidence: &str, code: &str, problem: &str) {
+        let started = &self.started;
+        assert_eq!(
+            failure(started),
+            [outcome, evidence, "selection", "none", "none", "no-vm"],
+            "{started:?}"
+        );
+        assert_eq!(started["failure.code"], code, "{started:?}");
+        assert_eq!(started.len(), 7, "{started:?}");
+        self.assert_refused(problem);
     }
 }
 
@@ -2089,8 +2115,19 @@ fn a_start_refuses_what_the_template_cannot_serve_before_any_vmm_starts() {
         OsStr::new("--upper"),
         OsStr::new("ram"),
     ];
-    let printed = sandbox.run("start", &options, FAILED);
-    assert!(printed.is_empty(), "{printed:?}");
+    // The store never published another generation: the selection names no template.
+    let printed = sandbox.run("start", &options, SELECTION_REFUSED);
+    let record = [
+        "no-template",
+        "unpublished",
+        "selection",
+        "none",
+        "none",
+        "no-vm",
+    ];
+    assert_eq!(failure(&printed), record, "{printed:?}");
+    assert_eq!(printed["failure.code"], "not-found", "{printed:?}");
+    assert_eq!(printed.len(), 7, "{printed:?}");
     assert!(sandbox.stderr().contains("holds no generation 2"));
     sandbox.assert_unlaunched();
 
@@ -2121,11 +2158,13 @@ fn a_start_refuses_what_the_template_cannot_serve_before_any_vmm_starts() {
     refused.assert_refused(" is missing");
     assert!(template.leases().is_empty());
     assert_eq!(template.store().tombstones().unwrap(), [GENERATION]);
-    let quarantined = template.start("cl-r", StartOf::default(), FAILED);
-    assert!(quarantined.started.is_empty(), "{:?}", quarantined.started);
-    quarantined.assert_refused(&format!(
-        "a tombstone quarantines the generation {GENERATION} of the template store"
-    ));
+    let quarantined = template.start("cl-r", StartOf::default(), SELECTION_REFUSED);
+    quarantined.assert_selection_refused(
+        "ineligible",
+        "tombstone",
+        "template-tombstoned",
+        &format!("a tombstone quarantines the generation {GENERATION} of the template store"),
+    );
 }
 
 #[test]
@@ -2392,13 +2431,15 @@ fn a_generation_is_eligible_by_the_clock_of_its_capture() {
     assert_eq!(printed["source"], "utc", "{printed:?}");
     assert_eq!(printed["downtime"], HOUR_NS.to_string());
 
-    // A generation that is no longer eligible, or not yet, takes no lease.
+    // A generation that is no longer eligible, or not yet, takes no lease: the store refuses the
+    // selection of an expired generation, and of one whose capture is after the host's time.
     let cases = [
         (
             HostTime {
                 monotonic_ns: contract.capture_monotonic_ns + MAX_DOWNTIME_NS + 1,
                 ..now
             },
+            ["expired", "expired"],
             "is no longer eligible: after a downtime of",
             "by the host's monotonic clock",
         ),
@@ -2407,6 +2448,7 @@ fn a_generation_is_eligible_by_the_clock_of_its_capture() {
                 utc_ns: contract.capture_utc_ns + MAX_DOWNTIME_NS + 1,
                 ..rebooted
             },
+            ["expired", "expired"],
             "is no longer eligible: after a downtime of",
             "by UTC",
         ),
@@ -2415,19 +2457,19 @@ fn a_generation_is_eligible_by_the_clock_of_its_capture() {
                 utc_ns: contract.capture_utc_ns - 1,
                 ..rebooted
             },
+            ["ineligible", "early"],
             "is not eligible yet: by UTC",
             "1 ns before the anchor of the capture",
         ),
     ];
-    for (time, state, measured) in cases {
+    for (time, [outcome, evidence], state, measured) in cases {
         let start = StartOf {
             time: Some(time),
             ..StartOf::default()
         };
-        let refused = template.start("cl-k", start, FAILED);
-        assert!(refused.started.is_empty(), "{:?}", refused.started);
+        let refused = template.start("cl-k", start, SELECTION_REFUSED);
         let generation = format!("the generation {GENERATION} of the template store");
-        refused.assert_refused(&generation);
+        refused.assert_selection_refused(outcome, evidence, "template-ineligible", &generation);
         let stderr = refused.sandbox.stderr();
         assert!(
             stderr.contains(state) && stderr.contains(measured),
@@ -2723,12 +2765,15 @@ fn a_tombstone_leaves_the_running_clone_of_its_generation_to_its_lease() {
     store.tombstone(GENERATION, Some(deadline)).unwrap();
     assert_eq!(store.tombstones().unwrap(), [GENERATION]);
 
-    // The generation takes no new lease.
-    let refused = template.start("cl-n", StartOf::default(), FAILED);
-    assert!(refused.started.is_empty(), "{:?}", refused.started);
-    refused.assert_refused(&format!(
-        "a tombstone quarantines the generation {GENERATION} of the template store"
-    ));
+    // The generation takes no new lease: the store refuses the selection of a quarantined
+    // generation as ineligible.
+    let refused = template.start("cl-n", StartOf::default(), SELECTION_REFUSED);
+    refused.assert_selection_refused(
+        "ineligible",
+        "tombstone",
+        "template-tombstoned",
+        &format!("a tombstone quarantines the generation {GENERATION} of the template store"),
+    );
 
     // The clone keeps running on its lease: it reattaches, serves its order, and stops, which
     // releases the lease.
@@ -2840,6 +2885,45 @@ fn the_lease_of_a_start_that_ended_before_its_record_is_released_through_its_tem
     assert!(another.leases().is_empty());
     assert_payload(&template, false);
     assert_payload(&another, false);
+}
+
+#[test]
+#[ignore = "boots VMs; see the module documentation for what they need"]
+fn a_selection_that_names_no_template_leases_nothing() {
+    let mut template = Template::create("cl-none");
+
+    // A template store that does not exist.
+    let sandbox = template
+        .sandbox
+        .as_mut()
+        .expect("the template keeps its sandbox");
+    let missing = sandbox.root.join("missing");
+    let start = StartOf {
+        templates: Some(&missing),
+        ..StartOf::default()
+    };
+    let refused = template.start("cl-m", start, SELECTION_REFUSED);
+    refused.assert_selection_refused(
+        "no-template",
+        "no-store",
+        "not-found",
+        "cannot open the template store",
+    );
+    assert!(!missing.exists());
+
+    // A generation that the store retired, once no lease kept it.
+    let sandbox = template
+        .sandbox
+        .as_mut()
+        .expect("the template keeps its sandbox");
+    let removed = sandbox.run("remove", &[OsStr::new("1")], 0);
+    assert_eq!(removed["removed"], "retired", "{removed:?}");
+    let refused = template.start("cl-m", StartOf::default(), SELECTION_REFUSED);
+    let problem = format!("holds no generation {GENERATION}");
+    refused.assert_selection_refused("no-template", "retired", "not-found", &problem);
+    let store = template.store();
+    assert!(store.index().unwrap().generations().is_empty());
+    assert!(store.leases(GENERATION).unwrap().is_empty());
 }
 
 /// Leases the generation of `template` to the store of `sandbox`, through NVX's store, as a start
