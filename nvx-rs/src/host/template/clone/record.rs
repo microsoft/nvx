@@ -12,6 +12,7 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 
 use super::CloneRequest;
+use super::failure::{Attribute, Evidence, Fault};
 use crate::activation::{
     ActivationRecord, Configuration, ExpectedResources, Identity, Image, Network, Publication,
     RestoreSection, TransactionId, Upper,
@@ -53,33 +54,34 @@ const SCRATCH_DOMAIN: &[u8] = b"nvx scratch binding\0";
 ///   online, and the request's memory target.
 ///
 /// Fails with [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported) for a request whose image
-/// is not an EROFS layer, and for a configuration that no record holds, as
-/// [`Configuration::check`] finds it, such as a hostname that is empty or longer than
+/// is not an EROFS layer, [`Evidence::InvalidFormat`], and for a configuration that no record
+/// holds, as [`Configuration::check`] finds it, such as a hostname that is empty or longer than
 /// [`MAX_HOSTNAME_BYTES`](crate::activation::MAX_HOSTNAME_BYTES), or a workload identity whose
-/// UID or GID is 0; with [`ErrorKind::Io`](crate::ErrorKind::Io) for a key whose command line
-/// names its DNS server in a form that OpenVMM does not write, as [`TemplateKey::dns_server`]
-/// finds it; and with [`ErrorKind::Other`](crate::ErrorKind::Other) if the transaction ID cannot
-/// be drawn.
+/// UID or GID is 0, [`Evidence::InvalidActivate`]; with [`ErrorKind::Io`](crate::ErrorKind::Io)
+/// for a key whose command line names its DNS server in a form that OpenVMM does not write, as
+/// [`TemplateKey::dns_server`] finds it, [`Evidence::MalformedGeneration`]; and with
+/// [`ErrorKind::Other`](crate::ErrorKind::Other) if the transaction ID cannot be drawn, or a
+/// binding's identity computed, the host's evidence.
 pub(super) fn build(
     request: &CloneRequest,
     lease: &Lease,
     key: &TemplateKey,
-) -> Result<ActivationRecord> {
+) -> std::result::Result<ActivationRecord, Fault> {
     let image = match request.binding.format() {
         DistroFormat::Erofs => Image::Erofs {
-            binding: distro_identity(&request.binding)?,
+            binding: distro_identity(&request.binding).on_host()?,
             uuid: request.adapter.distro().image().identity,
         },
-        DistroFormat::Gpt => return Err(gpt_refused()),
+        DistroFormat::Gpt => return Err(Fault::new(Evidence::InvalidFormat, gpt_refused())),
     };
     let upper = match &request.scratch {
         None => Upper::Tmpfs,
         Some(binding) => Upper::Scratch {
-            binding: scratch_identity(binding)?,
+            binding: scratch_identity(binding).on_host()?,
             journal: request.journal,
         },
     };
-    let dns = key.dns_server()?;
+    let dns = key.dns_server().attribute(Evidence::MalformedGeneration)?;
     let network = key.network_policy_digest().map(|policy| Network {
         policy: Identity::from_bytes(policy),
         dns,
@@ -103,13 +105,16 @@ pub(super) fn build(
         },
     };
     let restore = RestoreSection {
-        transaction: transaction()?,
+        transaction: transaction().on_host()?,
         template: lease.template(),
     };
     ActivationRecord::new(Some(restore), configuration).map_err(|error| {
-        Error::unsupported(format!(
-            "no clone activates with the settings of the request: {error}"
-        ))
+        Fault::new(
+            Evidence::InvalidActivate,
+            Error::unsupported(format!(
+                "no clone activates with the settings of the request: {error}"
+            )),
+        )
     })
 }
 

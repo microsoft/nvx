@@ -790,8 +790,9 @@ impl Store {
     }
 
     /// Checks that the directory of the generations is private to the current user, and not a
-    /// link.
-    fn check_generations_dir(&self) -> Result<()> {
+    /// link, as every read of a generation does, so that a clone's plan tells a store whose
+    /// directory fails it, the host's, from a generation that is malformed.
+    pub(super) fn check_generations_dir(&self) -> Result<()> {
         let path = self.dir.join(GENERATIONS_NAME);
         let what = "the generations of the template store";
         let problem = platform::check_owner_only_dir(&path).map_err(store_error(format!(

@@ -4,9 +4,16 @@
 
 use std::ffi::{OsStr, OsString};
 use std::fmt;
+use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
+use super::failure::{
+    Attribute, CloneFailure, Evidence, FailureRecord, Fault, Progress, Stage, Teardown,
+    host_evidence,
+};
+use super::records::{End, ProgressLog, Recorder, Tracker, abandon};
 use super::{ClonePlan, CloneUpper, MIB};
 use crate::activation::ActivationRecord;
 use crate::error::{Error, Result};
@@ -40,6 +47,8 @@ pub(super) struct Hooks<'a> {
     pub(super) command: &'a dyn for<'h> Fn(VmmCommand<'h>) -> VmmCommand<'h>,
     /// Fails the launch at a point, as a test asks.
     pub(super) interrupt: &'a dyn Fn(Point) -> Result<()>,
+    /// Ends the launch of a clone that failed after its VMM was spawned.
+    pub(super) end: End,
 }
 
 impl Hooks<'static> {
@@ -47,6 +56,7 @@ impl Hooks<'static> {
     pub(super) const LAUNCH: Self = Self {
         command: &unchanged,
         interrupt: &uninterrupted,
+        end: abandon,
     };
 }
 
@@ -71,24 +81,32 @@ impl ClonePlan {
     /// launch does.
     ///
     /// The launch first checks, without writing anything, that `acquired` holds the plan's lease,
-    /// under the lock that acquired it, before the launch that it reserves began, and that the
+    /// under the lock that acquired it, before the launch that it reserves began, that the
     /// sandbox's clone binding records the lease: the acquisition made the binding durable, and no
-    /// VMM of the clone starts without it. It then:
+    /// VMM of the clone starts without it, and that the sandbox records no failure of the clone:
+    /// a lease's clone fails once, and the record of its failure lasts until the release, even
+    /// for a launch that failed before it began, which leaves the lock's reservation. It then:
     ///
-    /// 1. Writes the clone's activation record, in its canonical encoding, as the file
+    /// 1. Creates the clone's progress log,
+    ///    [`CLONE_PROGRESS_NAME`](crate::host::store::CLONE_PROGRESS_NAME) in the sandbox's
+    ///    directory, in place of one that an earlier launch left, to which the launch and the
+    ///    restore sequence append each step that the clone reaches, without syncing it, as
+    ///    [`CloneRecords`](super::CloneRecords) describes.
+    /// 2. Writes the clone's activation record, in its canonical encoding, as the file
     ///    [`CLONE_ACTIVATION_NAME`](crate::host::store::CLONE_ACTIVATION_NAME) in the sandbox's
     ///    directory, in place of one that an earlier launch left, before the VMM starts: the
     ///    record, with the transaction ID of its restore section, is the one that the clone
     ///    activates with, which the caller, or a caller that takes the sandbox over after a
     ///    crash, reads there again and resends unchanged.
-    /// 2. Listens at the endpoint of the VMM's restore-ready event, which OpenVMM connects to once
+    /// 3. Listens at the endpoint of the VMM's restore-ready event, which OpenVMM connects to once
     ///    it has prepared the restore, before the restored VM runs, and which must exist before
     ///    the VMM starts: on Linux, the socket
     ///    [`RESTORE_READY_NAME`](crate::host::store::RESTORE_READY_NAME) in the sandbox's
     ///    directory, in place of one that an earlier launch left; on Windows, a named pipe whose
     ///    name the launch draws at random.
-    /// 3. Runs [`supervisor::launch`] as the launch that the lease reserves, which begins it with
-    ///    the store's launch journal, starts the VMM, and records its identity.
+    /// 4. Runs [`supervisor::launch`] as the launch that the lease reserves, which begins it with
+    ///    the store's launch journal, starts the VMM, and records its identity in the journal,
+    ///    which holds the spawn until the progress log records it with the restore-ready event.
     ///
     /// The VMM restores the generation's snapshot in place, in the generation's payload, which it
     /// only reads, and which the launch neither copies nor changes, so any number of clones
@@ -127,36 +145,49 @@ impl ClonePlan {
     /// [Crashes](crate::host::supervisor#crashes) describes, removing the control socket that the
     /// VMM, if it started, left beside the snapshot.
     ///
-    /// Fails, and starts no VMM, checking in this order:
+    /// Fails with a [`CloneFailure`] at [`Stage::Launch`], whose evidence is the host's for a
+    /// failure of its own operations, as [`ClonePlan::new`] describes it, checking in this order:
     ///
-    /// - with [`ErrorKind::Other`](crate::ErrorKind::Other) if `acquired` holds another lease
-    ///   than the plan's, under another lock than the one that acquired it, or after the launch
-    ///   that it reserves began, and if the sandbox's clone binding does not record the plan's
-    ///   lease, and as [`Lease::of`] fails, before anything is written;
-    /// - with [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported) for a runtime identity
-    ///   other than the template's;
-    /// - on Linux, with [`ErrorKind::Other`](crate::ErrorKind::Other) if the control socket that
-    ///   the lease reserves is not beside the plan's snapshot, as for a plan and a lease that
-    ///   name the template store by different directories; with
+    /// - before anything is written, and so recording nothing, as a plan does: with
+    ///   [`ErrorKind::Other`](crate::ErrorKind::Other) if `acquired` holds another lease than the
+    ///   plan's, under another lock than the one that acquired it, or after the launch that it
+    ///   reserves began, if the sandbox's clone binding does not record the plan's lease, and if
+    ///   the sandbox records a failure of the clone, [`Evidence::HostFailure`], and as
+    ///   [`Lease::of`] fails, or the record of a failure cannot be examined, the host's evidence;
+    ///   with
+    ///   [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported) for a runtime identity other
+    ///   than the template's, [`Evidence::RuntimeMismatch`]; on Linux, with
+    ///   [`ErrorKind::Other`](crate::ErrorKind::Other) if the control socket that the lease
+    ///   reserves is not beside the plan's snapshot, as for a plan and a lease that name the
+    ///   template store by different directories, [`Evidence::HostFailure`], with
     ///   [`ErrorKind::Io`](crate::ErrorKind::Io) if the generation's payload cannot be resolved
-    ///   or opened, or is not a directory of the current user with mode 0700, as OpenVMM requires
-    ///   of the directory of a control socket; and with
+    ///   or opened, the host's evidence, or is not a directory of the current user with mode
+    ///   0700, as OpenVMM requires of the directory of a control socket,
+    ///   [`Evidence::MalformedGeneration`], and with
     ///   [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported) if the path of the control
     ///   socket, with or without the payload's links resolved, or of the restore-ready socket, is
-    ///   not shorter than 108 bytes, as a Unix socket's address requires;
-    /// - with [`ErrorKind::Unavailable`](crate::ErrorKind::Unavailable) for an `openvmm` whose
-    ///   path cannot be resolved;
-    /// - with [`ErrorKind::Io`](crate::ErrorKind::Io) if the activation record cannot be written,
-    ///   or the endpoint of the restore-ready event cannot be opened;
-    /// - and as [`supervisor::launch`] fails, which ends the launch.
+    ///   not shorter than 108 bytes, as a Unix socket's address requires,
+    ///   [`Evidence::EndpointBind`]; with [`ErrorKind::Unavailable`](crate::ErrorKind::Unavailable)
+    ///   for an `openvmm` whose path cannot be resolved, the host's evidence; and if the progress
+    ///   log cannot be created, the host's evidence;
+    /// - once the progress log exists, recording the failure in the sandbox, as the
+    ///   [failures](CloneFailure) of a clone's launch are: with
+    ///   [`ErrorKind::Io`](crate::ErrorKind::Io) if the activation record cannot be written, the
+    ///   host's evidence, or the endpoint of the restore-ready event cannot be opened,
+    ///   [`Evidence::EndpointBind`] unless the host ran out of a resource; and as
+    ///   [`supervisor::launch`] fails, which ends the launch, the host's evidence, with the
+    ///   teardown [`Teardown::NoVm`] before the spawn of the VMM, [`Teardown::Terminated`] once
+    ///   the launch ended the VMM that it spawned through its handle, and
+    ///   [`Teardown::Unresolved`] for a launch that could not be ended, whose journal remains.
     ///
-    /// A launch that fails leaves the clone's files that it wrote for the release.
+    /// A launch that fails leaves the clone's files that it wrote, and the record of its failure,
+    /// for the release.
     pub fn launch<'s>(
         self,
         acquired: &'s mut Acquired,
         openvmm: &Path,
         runtime: &RuntimeIdentity,
-    ) -> Result<Restoring<'s>> {
+    ) -> Result<Restoring<'s>, CloneFailure> {
         self.launch_with(acquired, openvmm, runtime, Hooks::LAUNCH)
     }
 
@@ -167,12 +198,29 @@ impl ClonePlan {
         openvmm: &Path,
         runtime: &RuntimeIdentity,
         hooks: Hooks<'_>,
-    ) -> Result<Restoring<'s>> {
+    ) -> Result<Restoring<'s>, CloneFailure> {
         // The restore-to-Ready deadline of the clone's restore sequence starts here.
         let launched = Instant::now();
         let Acquired { lease, locked } = acquired;
-        self.check_launch(lease, locked, runtime)?;
-        let openvmm = artifacts::absolute(openvmm)?;
+        let planned = self.lease.clone();
+        let transaction = self.activation.restore().map(|restore| restore.transaction);
+        // Until the launch writes a file, the sandbox may not be the clone's, so its failure is
+        // recorded nowhere.
+        let unrecorded = |fault: Fault| {
+            let record = FailureRecord::new(
+                &planned,
+                transaction,
+                (Stage::Launch, Progress::Planned),
+                fault.evidence,
+                None,
+                Teardown::NoVm,
+                &fault.error,
+            );
+            CloneFailure::new(fault.error, record)
+        };
+        self.check_launch(lease, locked, runtime)
+            .map_err(unrecorded)?;
+        let openvmm = artifacts::absolute(openvmm).on_host().map_err(unrecorded)?;
         let Self {
             lease: _,
             generation: _,
@@ -185,18 +233,38 @@ impl ClonePlan {
             capability,
             devices,
         } = self;
-        let devices = device_arguments(&devices)?;
+        let devices = device_arguments(&devices)
+            .attribute(Evidence::InvalidSettings)
+            .map_err(unrecorded)?;
+        let log = ProgressLog::create(&locked.clone_progress_path(), lease.launch())
+            .on_host()
+            .map_err(unrecorded)?;
+        let recorder = Recorder::new(lease.clone(), transaction, locked);
+        let mut tracker = Tracker::new(recorder, log, hooks.end);
+        let unspawned =
+            |tracker: &Tracker, fault: Fault| tracker.record(Stage::Launch, fault, Teardown::NoVm);
         let record = locked.clone_activation_path();
-        write_private(&record, &activation.encode())?;
+        write_private(&record, &activation.encode())
+            .on_host()
+            .map_err(|fault| unspawned(&tracker, fault))?;
         let (ready, listener) =
             platform::listen_ready(&locked.restore_ready_path()).map_err(|error| {
-                Error::io(format!(
-                    "cannot listen for the restore-ready event of the clone in {}",
-                    locked.dir().display()
-                ))
-                .with_source(error)
+                let fault = Fault::host(
+                    Error::io(format!(
+                        "cannot listen for the restore-ready event of the clone in {}",
+                        locked.dir().display()
+                    ))
+                    .with_source(error),
+                );
+                let fault = match fault.evidence {
+                    Evidence::HostFailure => Fault::new(Evidence::EndpointBind, fault.error),
+                    _ => fault,
+                };
+                unspawned(&tracker, fault)
             })?;
-        (hooks.interrupt)(Point::Prepared)?;
+        (hooks.interrupt)(Point::Prepared)
+            .on_host()
+            .map_err(|fault| unspawned(&tracker, fault))?;
         // On Windows, this closes the claim's handle, and keeps the image's guard.
         let claim = match upper {
             CloneUpper::Scratch(checked) => Some(checked.into_file()),
@@ -208,8 +276,15 @@ impl ClonePlan {
         let claim = match claim {
             Some(mut file) => {
                 crate::host::sys::move_above_standard_streams(&mut file).map_err(|error| {
-                    Error::io("cannot pass the claim of the clone's scratch image to its VMM")
-                        .with_source(error)
+                    unspawned(
+                        &tracker,
+                        Fault::host(
+                            Error::io(
+                                "cannot pass the claim of the clone's scratch image to its VMM",
+                            )
+                            .with_source(error),
+                        ),
+                    )
                 })?;
                 Some(file)
             }
@@ -225,17 +300,37 @@ impl ClonePlan {
         };
         let dir = locked.dir().to_owned();
         let inherit: Vec<Inherited<'_>> = claim.iter().map(Inherited::new).collect();
-        let starting =
-            supervisor::launch(locked, lease.launch(), runtime, &capability, |endpoint| {
+        let starting = supervisor::launch_reporting(
+            locked,
+            lease.launch(),
+            runtime,
+            &capability,
+            |endpoint| {
                 (hooks.interrupt)(Point::Begun)?;
                 let mut command = VmmCommand::new(&openvmm, restore.arguments(endpoint), &dir);
                 command.inherit = inherit;
                 Ok((hooks.command)(command))
-            });
+            },
+            |error, _| tracker.pending(Stage::Launch, host_evidence(error), error),
+        );
         // The VMM holds the claim, if it started.
         drop(claim);
+        let starting = match starting {
+            Ok(starting) => starting,
+            Err(failure) => {
+                let teardown = match (failure.unended, failure.spawned) {
+                    (Some(reason), _) => Teardown::Unresolved(reason),
+                    (None, true) => Teardown::Terminated,
+                    (None, false) => Teardown::NoVm,
+                };
+                return Err(tracker.record(Stage::Launch, Fault::host(failure.error), teardown));
+            }
+        };
+        // The launch's journal records the spawn, which the progress log records with the next
+        // step.
+        tracker.advance(Progress::Spawned);
         Ok(Restoring {
-            starting: starting?,
+            starting,
             launched,
             ready,
             listener,
@@ -243,6 +338,7 @@ impl ClonePlan {
             activation,
             record,
             capability,
+            tracker,
         })
     }
 
@@ -255,37 +351,72 @@ impl ClonePlan {
         lease: &Lease,
         locked: &LockedStore,
         runtime: &RuntimeIdentity,
-    ) -> Result<()> {
+    ) -> Result<(), Fault> {
         let planned = &self.lease;
         if lease != planned
             || locked.dir() != planned.sandbox()
             || locked.reserved() != Some(planned.launch())
         {
-            return Err(Error::other(format!(
-                "a clone is launched under the lock that acquired the lease of its plan, {}, \
-                 before the launch that the lease reserves begins, but the lock of the sandbox in \
-                 {} holds the lease {}, and reserves no launch {} of it",
-                planned.id(),
-                locked.dir().display(),
-                lease.id(),
-                planned.launch()
-            )));
+            return Err(Fault::new(
+                Evidence::HostFailure,
+                Error::other(format!(
+                    "a clone is launched under the lock that acquired the lease of its plan, {}, \
+                     before the launch that the lease reserves begins, but the lock of the \
+                     sandbox in {} holds the lease {}, and reserves no launch {} of it",
+                    planned.id(),
+                    locked.dir().display(),
+                    lease.id(),
+                    planned.launch()
+                )),
+            ));
         }
-        if Lease::of(locked)?.as_ref() != Some(planned) {
-            return Err(Error::other(format!(
-                "the sandbox in {} records no clone binding of the lease {}, which its \
-                 acquisition makes durable before any VMM of the clone starts",
-                locked.dir().display(),
-                planned.id()
-            )));
+        if Lease::of(locked).on_host()?.as_ref() != Some(planned) {
+            return Err(Fault::new(
+                Evidence::HostFailure,
+                Error::other(format!(
+                    "the sandbox in {} records no clone binding of the lease {}, which its \
+                     acquisition makes durable before any VMM of the clone starts",
+                    locked.dir().display(),
+                    planned.id()
+                )),
+            ));
+        }
+        // A launch that failed before it began leaves the lock's reservation, but the record of
+        // its failure, which no launch removes, ends the clone's launches until the release.
+        let failure = locked.clone_failure_path();
+        match fs::symlink_metadata(&failure) {
+            Ok(_) => {
+                return Err(Fault::new(
+                    Evidence::HostFailure,
+                    Error::other(format!(
+                        "the clone of the lease {} failed, as {} records: a lease's clone fails \
+                         once, and the release of the lease ends it",
+                        planned.id(),
+                        failure.display()
+                    )),
+                ));
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(Fault::host(
+                    Error::io(format!(
+                        "cannot examine the record of a failure of the clone {}",
+                        failure.display()
+                    ))
+                    .with_source(error),
+                ));
+            }
         }
         if runtime != self.key.runtime() {
-            return Err(Error::unsupported(format!(
-                "the template's generation {} restores under the runtime that captured it, {:?}, \
-                 not under {runtime:?}",
-                self.generation.generation(),
-                self.key.runtime()
-            )));
+            return Err(Fault::new(
+                Evidence::RuntimeMismatch,
+                Error::unsupported(format!(
+                    "the template's generation {} restores under the runtime that captured it, \
+                     {:?}, not under {runtime:?}",
+                    self.generation.generation(),
+                    self.key.runtime()
+                )),
+            ));
         }
         if cfg!(target_os = "linux")
             && let Some(socket) = locked.reserved_socket()
@@ -303,20 +434,25 @@ impl ClonePlan {
     /// the current user with mode 0700, which the payload of a generation is, and listens at the
     /// socket's path with the parent's links resolved, while the host connects at the path that it
     /// recorded: each must be shorter than 108 bytes, as a Unix socket's address requires.
-    fn check_sockets(&self, socket: &Path, ready: &Path) -> Result<()> {
+    fn check_sockets(&self, socket: &Path, ready: &Path) -> Result<(), Fault> {
         let (Some(payload), Some(name)) = (socket.parent(), socket.file_name()) else {
-            return Err(Error::other(format!(
-                "the control socket {} of the clone's VMM names no directory",
-                socket.display()
-            )));
+            return Err(Fault::new(
+                Evidence::HostFailure,
+                Error::other(format!(
+                    "the control socket {} of the clone's VMM names no directory",
+                    socket.display()
+                )),
+            ));
         };
         let resolve = |path: &Path| {
             filesystem::canonicalize(path).map_err(|error| {
-                Error::io(format!(
-                    "cannot resolve the payload of the generation {}",
-                    path.display()
-                ))
-                .with_source(error)
+                Fault::host(
+                    Error::io(format!(
+                        "cannot resolve the payload of the generation {}",
+                        path.display()
+                    ))
+                    .with_source(error),
+                )
             })
         };
         let canonical = resolve(payload)?;
@@ -326,33 +462,44 @@ impl ClonePlan {
             None => false,
         };
         if !beside {
-            return Err(Error::other(format!(
-                "the control socket {} of the clone's VMM, which its lease reserves, is not beside \
-                 the snapshot {} of its plan, where OpenVMM requires it",
-                socket.display(),
-                self.snapshot.display()
-            )));
+            return Err(Fault::new(
+                Evidence::HostFailure,
+                Error::other(format!(
+                    "the control socket {} of the clone's VMM, which its lease reserves, is not \
+                     beside the snapshot {} of its plan, where OpenVMM requires it",
+                    socket.display(),
+                    self.snapshot.display()
+                )),
+            ));
         }
         let problem = platform::check_store_dir(payload).map_err(|error| {
-            Error::io(format!(
-                "cannot open the payload of the generation {}",
-                payload.display()
-            ))
-            .with_source(error)
+            Fault::host(
+                Error::io(format!(
+                    "cannot open the payload of the generation {}",
+                    payload.display()
+                ))
+                .with_source(error),
+            )
         })?;
         if let Some(problem) = problem {
-            return Err(Error::io(format!(
-                "the payload of the generation {} {problem}",
-                payload.display()
-            )));
+            return Err(Fault::new(
+                Evidence::MalformedGeneration,
+                Error::io(format!(
+                    "the payload of the generation {} {problem}",
+                    payload.display()
+                )),
+            ));
         }
         for path in [socket, &canonical.join(name), ready] {
             if path.as_os_str().len() >= SOCKET_PATH_LIMIT {
-                return Err(Error::unsupported(format!(
-                    "the path of the socket {} of a clone's launch must be shorter than \
-                     {SOCKET_PATH_LIMIT} bytes, as a Unix socket's address requires",
-                    path.display()
-                )));
+                return Err(Fault::new(
+                    Evidence::EndpointBind,
+                    Error::unsupported(format!(
+                        "the path of the socket {} of a clone's launch must be shorter than \
+                         {SOCKET_PATH_LIMIT} bytes, as a Unix socket's address requires",
+                        path.display()
+                    )),
+                ));
             }
         }
         Ok(())
@@ -452,6 +599,8 @@ pub struct Restoring<'s> {
     pub(super) record: PathBuf,
     /// The capability of the launch.
     pub(super) capability: [u8; CAPABILITY_LEN],
+    /// How far the clone got, and how its failures are recorded.
+    pub(super) tracker: Tracker,
 }
 
 impl<'s> Restoring<'s> {

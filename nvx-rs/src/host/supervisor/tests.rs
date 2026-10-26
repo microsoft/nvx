@@ -460,7 +460,8 @@ fn a_vmm_that_cannot_be_examined_is_indeterminate_and_keeps_its_record() {
     let hidden = |_: &ProcessRef| -> io::Result<Option<Process>> {
         Err(io::Error::new(io::ErrorKind::PermissionDenied, "hidden"))
     };
-    let Reattached::Indeterminate(reason) = reattach_with(&mut locked, &runtime(), hidden).unwrap()
+    let Reattached::Indeterminate(reason) =
+        reattach_with(&mut locked, &runtime(), hidden, |_| {}).unwrap()
     else {
         panic!("a VMM that cannot be examined was classified");
     };
@@ -623,7 +624,8 @@ fn a_clone_whose_vmm_cannot_be_examined_keeps_its_lease() {
     let hidden = |_: &ProcessRef| -> io::Result<Option<Process>> {
         Err(io::Error::new(io::ErrorKind::PermissionDenied, "hidden"))
     };
-    let Reattached::Indeterminate(reason) = reattach_with(&mut locked, &runtime(), hidden).unwrap()
+    let Reattached::Indeterminate(reason) =
+        reattach_with(&mut locked, &runtime(), hidden, |_| {}).unwrap()
     else {
         panic!("a VMM that cannot be examined was classified");
     };
