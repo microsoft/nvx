@@ -131,6 +131,16 @@
 //!   `/etc/resolv.conf`.
 //! - A clone of a template with a NIC maps its export once it is ready, below the binds of its
 //!   resolver configuration and of a generated machine ID.
+//! - A run of a clone of a proxy-only network gives its execution the URL of the network's proxy,
+//!   as the executions of a started clone find it, and a run of another network, which NVX's plan
+//!   refuses before any VMM starts, once the preflight staged the clone's images, runs nothing.
+//! - A run's execution finds the run's shares beneath the clone's root, since the restore
+//!   sequence mapped them before the clone's sandbox started, and the host's directory keeps what
+//!   it wrote through them once the run tore the clone down.
+//! - A run whose clone's VM ends without a word of its guest during the execution ends with the
+//!   status of the clone's failure, as NVX attributes the loss of its status, after the
+//!   execution's diagnostic, once its stop, which stops nothing, released the lease: the template
+//!   still serves clones.
 //!
 //! The tests boot VMs, so they are ignored. They read what the `common` module lists, and take
 //! the template's image and the scratch template from its fixtures.
@@ -191,7 +201,7 @@ use runtime_adapter::staged::Staged;
 use serde_json::{Value, json};
 
 use common::gpt::{self, Contents, Layout, Partition, hexadecimal, small_layer};
-use common::{Fixtures, Printed, Sandbox};
+use common::{Fixtures, Printed, Sandbox, Started};
 
 /// The exit status of the host program's command that failed, after a diagnostic.
 const FAILED: i32 = 1;
@@ -845,9 +855,8 @@ impl Template {
     }
 
     /// Runs the host program's `command`, `start` or `run`, of a clone in a new sandbox of the
-    /// scenario `name`, as `start` asks, with the arguments `execution` after the start's options,
-    /// checks that it exits with `status`, and returns the clone. Before a start, the sandbox's
-    /// store stages the clone's images, unless `start` says otherwise.
+    /// scenario `name`, as [`begin_in`](Self::begin_in) begins it, checks that it exits with
+    /// `status`, and returns the clone.
     fn clone_in(
         &self,
         name: &str,
@@ -856,6 +865,26 @@ impl Template {
         execution: &[&str],
         status: i32,
     ) -> Cloned {
+        let (sandbox, started) = self.begin_in(name, command, start, execution);
+        let started = sandbox.finish(started, status);
+        Cloned {
+            sandbox,
+            started,
+            ran: command == "run",
+        }
+    }
+
+    /// Begins the host program's `command`, `start` or `run`, of a clone in a new sandbox of the
+    /// scenario `name`, as `start` asks, with the arguments `execution` after the start's options,
+    /// and returns the sandbox, with the command, which may still run. Before a start, the
+    /// sandbox's store stages the clone's images, unless `start` says otherwise.
+    fn begin_in(
+        &self,
+        name: &str,
+        command: &str,
+        start: &StartOf<'_>,
+        execution: &[&str],
+    ) -> (Sandbox, Started) {
         let mut sandbox = Sandbox::new(name);
         let (distro, identity) = match start.image {
             None => (erofs(&self.image), self.identity.as_str()),
@@ -924,12 +953,7 @@ impl Template {
             .map(|time| (HOST_TIME_VARIABLE, time.as_os_str()))
             .collect();
         let started = sandbox.start(command, &options, &environment);
-        let started = sandbox.finish(started, status);
-        Cloned {
-            sandbox,
-            started,
-            ran: run,
-        }
+        (sandbox, started)
     }
 }
 
@@ -1044,9 +1068,15 @@ impl Cloned {
     /// preflight staged the clone's images, it started the clone as a start does, leasing the
     /// generation, and it stopped the clone as a stop does, which released the lease.
     fn assert_ran(&self) {
+        self.assert_ran_mapped(0);
+    }
+
+    /// Checks that the run ran the clone, as [`assert_ran`](Self::assert_ran) does, once the
+    /// clone's guest applied `mapped` mappings of its export, none for a clone without one.
+    fn assert_ran_mapped(&self, mapped: usize) {
         let ran = &self.started;
         assert_eq!(ran["preflight"], "staged", "{ran:?}");
-        assert_clone_started(ran, 0);
+        assert_clone_started(ran, mapped);
         ran["pid"].parse::<u32>().unwrap();
         self.assert_stopped(ran);
     }
@@ -1481,6 +1511,12 @@ fn mount_options(options: &str) -> BTreeSet<&str> {
 /// directory of the sandbox's own.
 fn scratch_image(sandbox: &Sandbox) -> PathBuf {
     sandbox.root.join("images").join("scratch.ext4")
+}
+
+/// Returns what `printed`, what an `exec` or a run printed, says of its first execution: how it
+/// started, how it ended, and its standard output and error, as the host program escapes them.
+fn execution_facts(printed: &Printed) -> [&str; 4] {
+    ["launch", "status", "stdout", "stderr"].map(|key| printed[&format!("exec.1.{key}")].as_str())
 }
 
 /// Checks that `started`, what a start, or a run, printed, says that it started a clone of the
@@ -3864,5 +3900,176 @@ fn a_clone_of_a_template_with_a_nic_maps_its_export_beside_its_resolver() {
     let written = [("marker", "data"), ("written", "runtime-adapter")];
     assert_eq!(export.tree(), tree_of(&[], &written));
     assert!(template.leases().is_empty());
+    assert_payload(&template, false);
+}
+
+#[test]
+#[ignore = "boots VMs; see the module documentation for what they need"]
+fn a_run_in_a_template_of_a_network_finds_its_policy_s_proxy() {
+    let template = Template::in_network("cl-runnet", Network::Proxy);
+    let own = template.network_options(Network::Proxy, GUEST_NETWORK);
+    let own = own.iter().map(String::as_str).collect::<Vec<_>>();
+    let url = Network::Proxy.proxy().expect("the network has a proxy");
+    let execution = [
+        "--identity",
+        "0:0",
+        "--env",
+        "FIRST=1",
+        "--",
+        "/usr/bin/env",
+    ];
+
+    // The run's execution finds the URL of the proxy of its clone's network in each of the proxy's
+    // variables, after its own entries, as the executions of a started clone find it, from the
+    // plan of the run's network, then the run tears the clone down.
+    let start = StartOf {
+        options: &own,
+        ..StartOf::default()
+    };
+    let ran = template.run("cl-rn", start, &execution, 0);
+    ran.assert_ran();
+    let proxies = PROXY_VARIABLES
+        .map(|variable| format!("{variable}={url}\\n"))
+        .concat();
+    let environment = format!("FIRST=1\\n{proxies}");
+    assert_eq!(
+        execution_facts(&ran.started),
+        ["started", "exit 0", environment.as_str(), ""],
+        "{:?}",
+        ran.started
+    );
+    assert!(template.leases().is_empty());
+
+    // A run of a network that lets nothing through, which attaches no NIC, finds no template
+    // there: NVX's plan refuses its clone once the preflight staged the images, and the store
+    // leased the generation, before any VMM starts, and the run runs nothing.
+    let deny = template.network_options(Network::Deny, GUEST_NETWORK);
+    let deny = deny.iter().map(String::as_str).collect::<Vec<_>>();
+    let start = StartOf {
+        options: &deny,
+        ..StartOf::default()
+    };
+    let refused = template.run("cl-rn", start, &execution, CLONE_FAILED);
+    let printed = &refused.started;
+    assert_eq!(printed["preflight"], "staged", "{printed:?}");
+    refused.assert_unserved(
+        "the template's generation 1 has a NIC, whose network every clone of it restores, but \
+         the adapter's plan of the clone has none",
+    );
+    assert!(
+        !printed
+            .keys()
+            .any(|key| key.starts_with("exec.") || key == "stopped"),
+        "{printed:?}"
+    );
+    assert!(template.leases().is_empty());
+    assert_payload(&template, false);
+}
+
+#[test]
+#[ignore = "boots VMs; see the module documentation for what they need"]
+fn a_run_s_execution_finds_its_shares_beneath_the_root() {
+    let template = Template::create("cl-runexp");
+    let export = Export::write(&template, "data", &[("marker", "data")], &[]);
+    let shares = export.options(&[(".", "/srv/data")], &[]);
+    let options = shares.iter().map(String::as_str).collect::<Vec<_>>();
+    let start = StartOf {
+        upper: Upper::Scratch,
+        options: &options,
+        ..StartOf::default()
+    };
+
+    // The execution, as user ID 0, reads the host's file through the share, which the restore
+    // sequence mapped beneath the clone's root before the clone's sandbox started, and writes
+    // another one through it.
+    let script = "cat /srv/data/marker; printf run > /srv/data/written";
+    let execution = ["--identity", "0:0", "--", "/bin/sh", "-c", script];
+    let ran = template.run("cl-re", start, &execution, 0);
+    ran.assert_ran_mapped(1);
+    assert_eq!(
+        execution_facts(&ran.started),
+        ["started", "exit 0", "data", ""],
+        "{:?}",
+        ran.started
+    );
+
+    // Once the run tore the clone down, the host's directory holds what the execution wrote.
+    let written = [("marker", "data"), ("written", "run")];
+    assert_eq!(export.tree(), tree_of(&[], &written));
+    assert!(template.leases().is_empty());
+    assert_payload(&template, false);
+}
+
+#[test]
+#[ignore = "boots VMs; see the module documentation for what they need"]
+fn a_run_whose_clone_s_vm_exits_during_its_execution_ends_with_the_clone_s_failure() {
+    let template = Template::create("cl-runlost");
+    let export = Export::write(&template, "data", &[], &[]);
+    let shares = export.options(&[(".", "/srv/data")], &[]);
+    let options = shares.iter().map(String::as_str).collect::<Vec<_>>();
+    let start = StartOf {
+        upper: Upper::Scratch,
+        options: &options,
+        ..StartOf::default()
+    };
+
+    // The execution, as user ID 0, tells the host through the share that it runs, then waits,
+    // while the clone's VMM ends without a word of its guest, as a crash of the VMM would end it.
+    let script = "printf running > /srv/data/running; exec sleep 600";
+    let execution = ["--identity", "0:0", "--", "/bin/sh", "-c", script];
+    let (sandbox, mut running) = template.begin_in("cl-rl", "run", &start, &execution);
+    let marker = export.path("running");
+    assert_eq!(sandbox.paused(&mut running, &marker), "running");
+    let vmm = sandbox.vmm().expect("the clone's VMM runs");
+    vmm.kill().unwrap();
+    assert!(
+        vmm.wait(Instant::now() + Duration::from_secs(10)).unwrap(),
+        "the clone's VMM still runs"
+    );
+
+    // The execution fails to run, and the run's stop stops nothing: the clone's VM ended without
+    // its holder, with no report of the guest's own end, so the clone fails, as NVX attributes the
+    // loss of its status, which quarantines nothing, and the run ends with the status of the
+    // clone's failure, after the execution's diagnostic, once it released the lease.
+    let ended = sandbox.finish(running, CLONE_FAILED);
+    assert_eq!(ended["preflight"], "staged", "{ended:?}");
+    assert_clone_started(&ended, 1);
+    assert_eq!(ended["stopped"], "exited", "{ended:?}");
+    assert_eq!(
+        failure(&ended),
+        [
+            "unknown",
+            "lost-status",
+            "run",
+            "committed",
+            "none",
+            "exited"
+        ],
+        "{ended:?}"
+    );
+    assert_eq!(ended["failure.code"], "exited");
+    assert_eq!(ended["quarantined"], "no");
+    assert_eq!(ended["released"], ended["lease"], "{ended:?}");
+    assert!(
+        !ended.keys().any(|key| key.starts_with("exec.")),
+        "{ended:?}"
+    );
+    let stderr = sandbox.stderr();
+    for diagnostic in [
+        "the executions failed",
+        "without an outcome report of the guest's own end",
+    ] {
+        assert!(stderr.contains(diagnostic), "{stderr}");
+    }
+    assert!(sandbox.record().is_none());
+    let store = SandboxStore::open(&sandbox.store).unwrap();
+    assert!(CloneRecords::read(&store).unwrap().is_none());
+    assert!(template.leases().is_empty());
+    assert!(template.store().tombstones().unwrap().is_empty());
+
+    // The template still serves clones.
+    let mut another = template.start("cl-rm", StartOf::default(), 0);
+    another.assert_started();
+    another.stop();
     assert_payload(&template, false);
 }
