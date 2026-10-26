@@ -296,6 +296,23 @@ fn export_plan(
     filesystem::plan(&request).unwrap().unwrap()
 }
 
+/// Returns another spelling of the existing directory `directory`, which names it, but which
+/// differs from the path that resolves it: through a directory in it and its `..` on Unix, where
+/// an absolute path keeps its `..` components, and with the verbatim prefix on Windows.
+fn alias(directory: &Path) -> PathBuf {
+    #[cfg(windows)]
+    {
+        let resolved = filesystem::canonicalize(directory).unwrap();
+        PathBuf::from(format!(r"\\?\{}", resolved.display()))
+    }
+    #[cfg(not(windows))]
+    {
+        let inner = directory.join("alias");
+        fs::create_dir(&inner).unwrap();
+        inner.join("..")
+    }
+}
+
 /// Returns the mapping table of these tests' exports, [`Fixture::data_export`]: the exported
 /// directory itself, the export's root, which an empty source names, and the directory `work` in
 /// it, by its path there, without the index of a child.
@@ -592,6 +609,29 @@ fn created_link(linked: io::Result<()>) -> bool {
             false
         }
         Err(error) => panic!("cannot create a symbolic link: {error}"),
+    }
+}
+
+/// Links `link` to the directory `target`: a symbolic link on Unix, and a junction on Windows,
+/// which any user may create.
+fn link_dir(target: &Path, link: &Path) {
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(target, link).unwrap();
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        use std::process::{Command, Stdio};
+
+        let status = Command::new("cmd")
+            .raw_arg(format!(
+                "/C mklink /J \"{}\" \"{}\"",
+                link.display(),
+                target.display()
+            ))
+            .stdout(Stdio::null())
+            .status()
+            .unwrap();
+        assert!(status.success(), "cannot link {}", link.display());
     }
 }
 
@@ -2634,20 +2674,14 @@ fn exports_that_a_dormant_filesystem_slot_does_not_bind_are_refused_before_anyth
 
 #[test]
 fn exports_that_overlap_the_template_store_are_refused_before_anything_is_opened() {
-    // The plan compares the paths that the export's plan resolved with the store's, as the store
-    // names it, without reading anything: this store's path is resolved.
-    let fixture = Fixture::in_store(
-        |directory| {
-            filesystem::canonicalize(directory)
-                .unwrap()
-                .join("templates")
-        },
-        |_, _, _| {},
-    );
+    // The plan compares the paths that the export's plan resolved with the store's, resolved as
+    // well: this store's path names its directory in another spelling than its resolved one.
+    let fixture = Fixture::in_store(|directory| alias(directory).join("templates"), |_, _, _| {});
     let (image, binding) = fixture.image("distro.erofs", IMAGE_LEN);
     let mut acquired = fixture.acquire("sandbox");
     let request = tmpfs_request(&image, &binding);
-    let store = fixture.store.dir().to_owned();
+    let store = filesystem::canonicalize(fixture.store.dir()).unwrap();
+    assert_ne!(store, fixture.store.dir());
     let payload = fixture.store.payload_dir(fixture.generation.generation());
     // The store's directory, the payload of a generation inside it, and a directory that holds
     // the store, which a guest could reach the payload through, and write it if writable.
@@ -2675,6 +2709,172 @@ fn exports_that_overlap_the_template_store_are_refused_before_anything_is_opened
     }
     // A directory beside the store is no part of it.
     let export = fixture.data_export("data");
+    let request = with_export(request, &export);
+    drop(fixture.plan(&mut acquired, &request, NO_CONTENT).unwrap());
+}
+
+#[test]
+fn exports_that_let_the_guest_turn_the_template_store_s_path_are_refused() {
+    // The store's path leads through two links: `share/link`, to `hop/next`, which links to
+    // `private`, which holds the store. Neither directory of a link holds any part of the store,
+    // but a guest that could write in either could replace its link, and turn the path, by which
+    // the host reaches the store, and OpenVMM the snapshots in it, elsewhere.
+    let fixture = Fixture::in_store(
+        |directory| {
+            for name in ["share", "hop", "private"] {
+                fs::create_dir(directory.join(name)).unwrap();
+            }
+            fs::create_dir(directory.join("share").join("work")).unwrap();
+            let next = directory.join("hop").join("next");
+            link_dir(&directory.join("private"), &next);
+            let link = directory.join("share").join("link");
+            link_dir(&next, &link);
+            link.join("templates")
+        },
+        |_, _, _| {},
+    );
+    let (image, binding) = fixture.image("distro.erofs", IMAGE_LEN);
+    let mut acquired = fixture.acquire("sandbox");
+    let request = tmpfs_request(&image, &binding);
+    let resolved = |name: &str| filesystem::canonicalize(&fixture.directory.path().join(name));
+    let (share, hop) = (resolved("share").unwrap(), resolved("hop").unwrap());
+    // The store's path resolves outside both directories, so no export of either overlaps it.
+    let store = filesystem::canonicalize(fixture.store.dir()).unwrap();
+    assert_eq!(store, resolved("private").unwrap().join("templates"));
+    // A writable export of either directory.
+    for dir in [&share, &hop] {
+        let export = export_plan(&[(dir, "/data", false)], &[], &[]);
+        let request = with_export(request.clone(), &export);
+        let plan = fixture.plan(&mut acquired, &request, NO_CONTENT);
+        assert_eq!(
+            refused(plan, Evidence::InvalidMappings),
+            (
+                ErrorKind::Unsupported,
+                format!(
+                    "the export of a clone cannot let its guest write in {}, through which the \
+                     path of the template store {} leads, since the guest could then turn that \
+                     path elsewhere, or keep the host from following it",
+                    dir.display(),
+                    fixture.store.dir().display()
+                )
+            )
+        );
+        assert_untouched(&acquired);
+    }
+    // A read-only export of the directory of a link, and one in which the guest writes only a
+    // directory beside the link, leave the link as it is.
+    let work = share.join("work");
+    for mappings in [
+        &[(share.as_path(), "/data", true)][..],
+        &[
+            (share.as_path(), "/data", true),
+            (work.as_path(), "/work", false),
+        ],
+    ] {
+        let export = export_plan(mappings, &[], &[]);
+        let request = with_export(request.clone(), &export);
+        drop(fixture.plan(&mut acquired, &request, NO_CONTENT).unwrap());
+    }
+}
+
+#[test]
+fn exports_that_let_the_guest_block_the_template_store_s_path_are_refused() {
+    // The store's path leads through `traverse` and its `..`, which Unix looks up in `traverse`:
+    // a guest that could write there could make it unsearchable, and keep the host from the
+    // store. Windows resolves `..` from the path's text, and never looks in `traverse`.
+    let fixture = Fixture::in_store(
+        |directory| {
+            for name in ["traverse", "private"] {
+                fs::create_dir(directory.join(name)).unwrap();
+            }
+            fs::create_dir(directory.join("traverse").join("work")).unwrap();
+            directory
+                .join("traverse")
+                .join("..")
+                .join("private")
+                .join("templates")
+        },
+        |_, _, _| {},
+    );
+    let (image, binding) = fixture.image("distro.erofs", IMAGE_LEN);
+    let mut acquired = fixture.acquire("sandbox");
+    let request = tmpfs_request(&image, &binding);
+    let traverse = filesystem::canonicalize(&fixture.directory.path().join("traverse")).unwrap();
+    // A writable export of the directory.
+    let export = export_plan(&[(&traverse, "/data", false)], &[], &[]);
+    let writable = with_export(request.clone(), &export);
+    let plan = fixture.plan(&mut acquired, &writable, NO_CONTENT);
+    if cfg!(windows) {
+        drop(plan.unwrap());
+    } else {
+        assert_eq!(
+            refused(plan, Evidence::InvalidMappings),
+            (
+                ErrorKind::Unsupported,
+                format!(
+                    "the export of a clone cannot let its guest write in {}, through which the \
+                     path of the template store {} leads, since the guest could then turn that \
+                     path elsewhere, or keep the host from following it",
+                    traverse.display(),
+                    fixture.store.dir().display()
+                )
+            )
+        );
+        assert_untouched(&acquired);
+    }
+    // A read-only export of the directory, and one in which the guest writes only a directory
+    // in it, leave the directory as it is.
+    let work = traverse.join("work");
+    for mappings in [
+        &[(traverse.as_path(), "/data", true)][..],
+        &[
+            (traverse.as_path(), "/data", true),
+            (work.as_path(), "/work", false),
+        ],
+    ] {
+        let export = export_plan(mappings, &[], &[]);
+        let request = with_export(request.clone(), &export);
+        drop(fixture.plan(&mut acquired, &request, NO_CONTENT).unwrap());
+    }
+}
+
+#[test]
+fn exports_that_hold_the_sandbox_s_directory_are_refused() {
+    // The host writes the clone's records in the sandbox's directory, by their paths, so a guest
+    // that could reach the directory could change them, or replace it with a link, and turn the
+    // host's writes elsewhere, into a leased snapshot, say.
+    let fixture = Fixture::new();
+    let (image, binding) = fixture.image("distro.erofs", IMAGE_LEN);
+    let mut acquired = fixture.acquire("sandbox");
+    let request = tmpfs_request(&image, &binding);
+    let sandbox = acquired.lease.sandbox().to_owned();
+    // The sandbox's directory, writable, and the directory that holds it, read-only.
+    for (dir, read_only) in [
+        (sandbox.clone(), false),
+        (sandbox.parent().unwrap().to_owned(), true),
+    ] {
+        let export = export_plan(&[(&dir, "/data", read_only)], &[], &[]);
+        let request = with_export(request.clone(), &export);
+        let plan = fixture.plan(&mut acquired, &request, NO_CONTENT);
+        assert_eq!(
+            refused(plan, Evidence::InvalidMappings),
+            (
+                ErrorKind::Unsupported,
+                format!(
+                    "the export of a clone cannot share {}, which holds the directory of the \
+                     clone's sandbox {}, in which the host writes the clone's records",
+                    dir.display(),
+                    sandbox.display()
+                )
+            )
+        );
+        assert_untouched(&acquired);
+    }
+    // A directory inside the sandbox's, among the caller's files, holds none of the host's
+    // records.
+    let shared = sandbox.join("shared");
+    fs::create_dir(&shared).unwrap();
+    let export = export_plan(&[(&shared, "/data", false)], &[], &[]);
     let request = with_export(request, &export);
     drop(fixture.plan(&mut acquired, &request, NO_CONTENT).unwrap());
 }

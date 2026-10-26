@@ -660,8 +660,20 @@ reads, or for an upper in RAM a fresh sparse file, `clone-scratch.raw` in the
 sandbox's directory, which the release removes; its export, if it has one, an
 `ExportPlan` that `filesystem::plan` made for the container root, which must
 export exactly one directory, since the template's dormant filesystem slot binds
-one directory and no file, and which must not overlap the template store, by the
-paths that the plan resolved; and a fresh capability.
+one directory and no file, and which must neither overlap the template store, by
+the paths that the plan and the store's directory resolve to, nor let the guest
+write in a directory through which the store's path leads, links included, since
+the host reaches the store, and OpenVMM its snapshots, by that path, nor be or
+hold the directory of the clone's sandbox, in which the host writes the clone's
+records, checks of paths that leave two rules to whoever names the export, as
+they leave the directories above the store: the export must not reach the store
+through an alias of it that an administrator configures, such as a bind mount or
+a mount point of the store, or of a directory above or inside it, a loopback
+share, or a hard link of a payload, nor lie inside a directory that a writable
+export of another sandbox or clone holds, since OpenVMM resolves an export's
+path again at each launch and restore, so that the directories above the
+export's directory must be ones that no guest may change, as those above a
+clone's block devices must; and a fresh capability.
 
 It builds the clone's activation record, `ClonePlan::activation`, which the
 clone's guest applies in place of the configuration that the template captured,
