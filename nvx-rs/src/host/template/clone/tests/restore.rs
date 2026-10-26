@@ -25,6 +25,9 @@ use crate::host::store::{CLONE_ACTIVATION_NAME, Recovery};
 use crate::host::supervisor::{Starting, StopOutcome};
 use crate::host::template::clone::launch::Hooks;
 use crate::host::template::clone::records::{End, read_failure};
+use crate::protocol::{
+    APP_HEADER_LEN, OUTER_MAX_PAYLOAD, decode_maps_payload, encode_maps_payloads,
+};
 
 /// How long a VMM whose plan delays its event waits before it sends it.
 const DELAY: Duration = Duration::from_millis(300);
@@ -53,7 +56,8 @@ enum Call {
         record: Vec<u8>,
         deadline: Instant,
     },
-    /// A mapping table in a session, by the deadline.
+    /// A mapping table in a session, by the deadline, as the guest decodes the `MAPS` payloads in
+    /// which the framing encodes it.
     Map {
         session: usize,
         table: Vec<HostMap>,
@@ -129,9 +133,10 @@ struct FakeSession {
 
 /// The adapter's framing of the tests: it attaches a session to each connection that the sequence
 /// makes, numbered from 1, answers each Activate as the next of its `activates` says, each mapping
-/// table as the next of its `maps` says, and each start as the next of its `starts` says, as
-/// [`Answer::Done`] does once they run out, and records each call. Its `on_activate` runs at each
-/// Activate, with the session's number, before the answer.
+/// table, which it encodes in `MAPS` payloads that its guest decodes, as the next of its `maps`
+/// says, and each start as the next of its `starts` says, as [`Answer::Done`] does once they run
+/// out, and records each call. Its `on_activate` runs at each Activate, with the session's number,
+/// before the answer.
 #[derive(Default)]
 struct FakeControl<'a> {
     /// The calls, in order.
@@ -280,14 +285,24 @@ impl CloneControl for FakeControl<'_> {
         table: &[HostMap],
         deadline: Instant,
     ) -> Result<(), Failure> {
+        // The framing sends the table in `MAPS` payloads, which the guest decodes.
+        let parts = encode_maps_payloads(table, OUTER_MAX_PAYLOAD - APP_HEADER_LEN)
+            .expect("the framing encodes the clone's table");
+        let decoded: Vec<HostMap> = parts
+            .iter()
+            .flat_map(|part| decode_maps_payload(part).unwrap().maps)
+            .collect();
+        let (applied, answer) = self
+            .maps
+            .pop_front()
+            .unwrap_or((decoded.len(), Answer::Done));
+        self.applied
+            .extend_from_slice(&decoded[..applied.min(decoded.len())]);
         self.calls.push(Call::Map {
             session: session.number,
-            table: table.to_vec(),
+            table: decoded,
             deadline,
         });
-        let (applied, answer) = self.maps.pop_front().unwrap_or((table.len(), Answer::Done));
-        self.applied
-            .extend_from_slice(&table[..applied.min(table.len())]);
         answered(answer, Confirmed, deadline).map(|_| ())
     }
 
@@ -1308,7 +1323,10 @@ fn a_clone_with_an_export_gets_its_mapping_table_once_ready_and_its_start_once_i
     let started = activated.start(&mut control).unwrap();
     // In the session in which the clone answered, the table follows its Ready, in order, and the
     // start follows once the guest applied every mapping, both by the Ready-to-Start deadline.
+    // The table's first mapping, the exported directory itself, keeps its empty source through
+    // the `MAPS` payloads that carry it.
     control.assert_activates_first();
+    assert_eq!(data_table()[0].source, "");
     assert_eq!(
         control.calls[2..],
         [

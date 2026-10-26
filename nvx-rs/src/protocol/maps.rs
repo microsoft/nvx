@@ -3,7 +3,10 @@
 //!
 //! A payload holds the index of its first entry (`u32`) and its number of entries (`u32`),
 //! followed by the entries. Each entry holds its flags (`u16`), the lengths of its source and
-//! target (`u16` each), and then both.
+//! target (`u16` each), and then both. A source names a path relative to the guest's mount of the
+//! host's export, and an empty source names the export's root itself, which is how the table of a
+//! directory export maps the whole directory. NVX's managed agent, whose export is an aggregate,
+//! whose root lists its children, refuses an empty source.
 
 use super::{ProtocolError, u16_at, u32_at, violation};
 
@@ -21,7 +24,8 @@ pub const MAP_READ_ONLY: u16 = 1 << 0;
 /// One bind mount of the host mapping table.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HostMap {
-    /// Path of the mapped object relative to the guest's mount of the export, `/`-separated.
+    /// Path of the mapped object relative to the guest's mount of the export, `/`-separated, or
+    /// empty for the export's root itself.
     pub source: String,
     /// Absolute guest path at which the guest agent mounts it.
     pub target: String,
@@ -35,9 +39,10 @@ pub struct HostMap {
 /// A payload holds the index of its first entry and its number of entries, so the guest agent
 /// applies the entries in order and only up to the number that the kernel command line
 /// announced. Each entry holds its flags, the lengths of its source and target, and then both.
-/// The guest agent requires 1 to [`MAX_HOST_MAPPINGS`] entries, each with a relative source and
-/// an absolute target of at most [`MAX_MAP_PATH_BYTES`] without NUL bytes, whose `/`-separated
-/// components are neither empty, `.`, nor `..`.
+/// The guest agent requires 1 to [`MAX_HOST_MAPPINGS`] entries, each with a source that is empty,
+/// for the export's root, or relative, and an absolute target, each of at most
+/// [`MAX_MAP_PATH_BYTES`] without NUL bytes, whose `/`-separated components are neither empty,
+/// `.`, nor `..`.
 pub fn encode_maps_payloads(maps: &[HostMap], limit: usize) -> Result<Vec<Vec<u8>>, ProtocolError> {
     if maps.is_empty() || maps.len() > MAX_HOST_MAPPINGS {
         return Err(violation(format!(
@@ -50,9 +55,9 @@ pub fn encode_maps_payloads(maps: &[HostMap], limit: usize) -> Result<Vec<Vec<u8
     for (index, map) in maps.iter().enumerate() {
         if !acceptable(map.source.as_bytes(), map.target.as_bytes()) {
             return Err(violation(format!(
-                "a host mapping needs a relative source and an absolute target of at most \
-                 {MAX_MAP_PATH_BYTES} bytes without NUL characters or empty, `.`, or `..` \
-                 components"
+                "a host mapping needs a source that is empty, for the export's root, or relative, \
+                 and an absolute target, each of at most {MAX_MAP_PATH_BYTES} bytes without NUL \
+                 characters or empty, `.`, or `..` components"
             )));
         }
         let (source, target) = (map.source.as_bytes(), map.target.as_bytes());
@@ -98,7 +103,7 @@ pub struct MapsPayload {
 /// One host mapping as the guest reads it, without imposing UTF-8 on Linux paths.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GuestHostMap {
-    /// Path relative to the guest's mount of the aggregate export.
+    /// Path relative to the guest's mount of the export, or empty for the export's root itself.
     pub source: Vec<u8>,
     /// Absolute path at which the guest bind-mounts the source.
     pub target: Vec<u8>,
@@ -223,10 +228,11 @@ fn truncated() -> ProtocolError {
     violation("the host mapping request is truncated")
 }
 
-/// Whether the guest agent accepts the paths of a mapping: a relative `source` and an absolute
-/// `target` of at most [`MAX_MAP_PATH_BYTES`] without NUL characters, whose `/`-separated
-/// components are neither empty, `.`, nor `..`. UTF-8 text follows these rules as its bytes, in
-/// which `/` and NUL occur only as themselves.
+/// Whether the guest agent accepts the paths of a mapping: a `source` that is empty, for the
+/// export's root itself, or relative, and an absolute `target`, each of at most
+/// [`MAX_MAP_PATH_BYTES`] without NUL characters, whose `/`-separated components are neither
+/// empty, `.`, nor `..`. UTF-8 text follows these rules as its bytes, in which `/` and NUL occur
+/// only as themselves.
 fn acceptable(source: &[u8], target: &[u8]) -> bool {
     let normal = |components: &[u8]| {
         !components.is_empty()
@@ -237,6 +243,6 @@ fn acceptable(source: &[u8], target: &[u8]) -> bool {
     [source, target]
         .iter()
         .all(|path| path.len() <= MAX_MAP_PATH_BYTES && !path.contains(&0))
-        && normal(source)
+        && (source.is_empty() || normal(source))
         && target.strip_prefix(b"/").is_some_and(normal)
 }
