@@ -11,7 +11,7 @@ use std::num::NonZeroU64;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
-use nvx::activation::StoreGeneration;
+use nvx::activation::{MachineIdMode, StoreGeneration};
 use nvx::host::artifacts::Artifacts;
 use nvx::host::template::{HostClock, HostTime, Store};
 use nvx::protocol::root::ImageFormat;
@@ -134,6 +134,21 @@ fn the_host_program_refuses_options_that_do_not_make_a_start() {
             "--first-partition-bound takes a positive number of bytes, not \"0\"",
         ),
         (
+            with(&["--upper", "ram", "--machine-id", "random"]),
+            "--machine-id takes image or generated, not \"random\"",
+        ),
+        (
+            with(&[
+                "--upper",
+                "ram",
+                "--machine-id",
+                "image",
+                "--machine-id",
+                "generated",
+            ]),
+            "unexpected option \"--machine-id\" of start",
+        ),
+        (
             with(&["--upper", "ram", "--template", "other"]),
             "unexpected option \"--template\" of start",
         ),
@@ -148,6 +163,10 @@ fn the_host_program_refuses_options_that_do_not_make_a_start() {
         (
             vec!["probe", "store", "memory", "--template", "templates"],
             "unexpected option \"--template\" of probe",
+        ),
+        (
+            vec!["launch", "store", "--machine-id", "generated"],
+            "unexpected option \"--machine-id\" of launch",
         ),
         (
             vec!["create", "store", "--generation", "1"],
@@ -350,6 +369,7 @@ fn a_clone_s_record_names_its_template_store_and_generation_beside_its_plan() {
         overlay_mode: None,
         scratch_journal: None,
         first_partition_bound: None,
+        machine_id: MachineIdMode::Image,
     };
     let plan = request.plan().unwrap();
     let staged = Staged::stage(&distro, ImageFormat::Erofs, identity(), Some(&scratch)).unwrap();
@@ -438,6 +458,7 @@ fn a_clone_s_request_takes_the_staged_bindings_and_the_guest_s_defaults() {
         overlay_mode: None,
         scratch_journal: None,
         first_partition_bound: None,
+        machine_id: MachineIdMode::Image,
     };
     let plan = request.plan().unwrap();
     let staged = Staged::stage(&distro, ImageFormat::Erofs, identity(), Some(&scratch)).unwrap();
@@ -455,10 +476,7 @@ fn a_clone_s_request_takes_the_staged_bindings_and_the_guest_s_defaults() {
         nvx::host::sandbox::distro::DISTRO_POLICY_REVISION
     );
     assert_eq!(clone.workload.hostname, b"runtime-adapter");
-    assert_eq!(
-        clone.workload.machine_id,
-        nvx::activation::MachineIdMode::Image
-    );
+    assert_eq!(clone.workload.machine_id, MachineIdMode::Image);
     assert_eq!(clone.workload.identity, None);
     assert_eq!(clone.overlay, nvx::activation::OverlayMode::TrustedLowers);
     assert_eq!(clone.journal, nvx::activation::Journal::Allowed);
@@ -470,6 +488,7 @@ fn a_clone_s_request_takes_the_staged_bindings_and_the_guest_s_defaults() {
         overlay_mode: Some(runtime_adapter::root::OverlayMode::UntrustedLowers),
         scratch_journal: Some(runtime_adapter::root::JournalPolicy::Forbidden),
         first_partition_bound: Some(4096),
+        machine_id: MachineIdMode::Generated,
         ..request.clone()
     };
     let clone = named
@@ -482,6 +501,8 @@ fn a_clone_s_request_takes_the_staged_bindings_and_the_guest_s_defaults() {
             gid: 65533
         })
     );
+    assert_eq!(clone.workload.hostname, b"runtime-adapter");
+    assert_eq!(clone.workload.machine_id, MachineIdMode::Generated);
     assert_eq!(clone.overlay, nvx::activation::OverlayMode::UntrustedLowers);
     assert_eq!(clone.journal, nvx::activation::Journal::Forbidden);
     assert_eq!(clone.first_partition_bound, 4096);

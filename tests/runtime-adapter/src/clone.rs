@@ -4,7 +4,8 @@
 //! A [`Request`] holds what the host program's options choose of a clone: its image, an EROFS
 //! layer or a GPT disk of the length of the template's placeholder, its upper, on an ext4 scratch
 //! image or in RAM, its memory target, the workload identity as which its executions run, its
-//! overlay mode, its scratch's journal policy, and the bound of a GPT disk's first partition.
+//! overlay mode, its scratch's journal policy, the bound of a GPT disk's first partition, and the
+//! machine ID that its executions see, the image's own or one that its guest generates.
 //! [`Request::plan`] plans the image over the upper as a launch plans a layered root, and
 //! [`Request::clone_request`] returns NVX's `nvx::host::template::CloneRequest` of it, with the
 //! bindings that the sandbox's store stages for its images, as `staged::Staged` records them:
@@ -46,8 +47,8 @@ use crate::staged::invalid;
 pub const CLONE_MODE: &str = "clone";
 
 /// The hostname that a clone's activation record names. The guest leaves the hostname to the
-/// activation of the workload's view, as it leaves the machine ID, which the record keeps as the
-/// image's own.
+/// activation of the workload's view, which sets it for every execution, as it sets the machine
+/// ID that the record names.
 pub const CLONE_HOSTNAME: &str = "runtime-adapter";
 
 /// The variable from which `runtime-adapter-host start` takes the host's time, for tests, in the
@@ -80,6 +81,9 @@ pub struct Request {
     /// The most bytes that the first partition of a GPT disk may hold, or `None` for
     /// [`DEFAULT_FIRST_PARTITION_BOUND`], the default of a launch's guest.
     pub first_partition_bound: Option<u64>,
+    /// The machine ID that the clone's executions see: the image's own, as a launch's do, or one
+    /// that the clone's guest generates.
+    pub machine_id: MachineIdMode,
 }
 
 impl Request {
@@ -104,7 +108,7 @@ impl Request {
     /// `staged::Staged::bindings` finds them, and the memory target `memory`, in bytes.
     ///
     /// The record of the clone's activation names the workload identity, if any, the
-    /// [`CLONE_HOSTNAME`], the image's own machine ID, the overlay's mode, and the scratch's
+    /// [`CLONE_HOSTNAME`], the request's machine ID, the overlay's mode, and the scratch's
     /// journal policy, each the guest's default unless the request names it, as a root
     /// configuration's are, and the bound of a GPT disk's first partition, the default of a
     /// launch's guest, [`DEFAULT_FIRST_PARTITION_BOUND`], unless the request names one. The record
@@ -147,7 +151,7 @@ impl Request {
             memory,
             workload: WorkloadView {
                 hostname: CLONE_HOSTNAME.as_bytes().to_vec(),
-                machine_id: MachineIdMode::Image,
+                machine_id: self.machine_id,
                 identity: self
                     .workload_identity
                     .map(|(uid, gid)| WorkloadIdentity { uid, gid }),
