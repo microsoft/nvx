@@ -239,7 +239,7 @@ pub use self::record::{
 use super::filesystem::FileIdentity;
 use super::platform;
 use super::process::{BootId, Process, ProcessRef};
-use super::supervisor::Launched;
+use super::spawn::Launched;
 use crate::error::{Error, ErrorCode, ErrorKind, Result};
 use crate::protocol::CAPABILITY_LEN;
 

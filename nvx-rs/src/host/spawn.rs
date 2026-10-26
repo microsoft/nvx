@@ -73,11 +73,11 @@ impl VmmCommand<'_> {
 ///
 /// Record the VMM's identity right after the spawn, with
 /// [`Launch::record_process`](crate::host::store::Launch::record_process), as
-/// [`launch`](super::launch) does. Fails with [`io::ErrorKind::InvalidInput`] on Linux for a
-/// descriptor of a standard stream, 0 to 2, or one that is not close-on-exec, and on Windows for
-/// a batch file, which Windows would run through `cmd.exe` with arguments that it reads as shell
-/// syntax; and with [`io::ErrorKind::Unsupported`] for any descriptor or handle on hosts other
-/// than Linux and Windows.
+/// [`launch`](crate::host::supervisor::launch) does. Fails with [`io::ErrorKind::InvalidInput`] on
+/// Linux for a descriptor of a standard stream, 0 to 2, or one that is not close-on-exec, and on
+/// Windows for a batch file, which Windows would run through `cmd.exe` with arguments that it
+/// reads as shell syntax; and with [`io::ErrorKind::Unsupported`] for any descriptor or handle on
+/// hosts other than Linux and Windows.
 pub fn spawn(
     command: &VmmCommand<'_>,
     capability: &[u8; CAPABILITY_LEN],

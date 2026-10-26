@@ -96,17 +96,16 @@
 //! recovery of a launch that did not record its VMM, the process that recovery verified to be that
 //! VMM. It never signals a process that reuses a recorded ID.
 
-mod child;
 #[cfg(test)]
 mod tests;
 
 use std::io;
 use std::time::{Duration, Instant};
 
-pub use self::child::{Launched, VmmCommand, spawn};
 use super::launch::timeout_problem;
 pub use super::platform::inherit::Inherited;
 use super::process::{Process, ProcessRef};
+pub use super::spawn::{Launched, VmmCommand, spawn};
 use super::store::{
     IdentityCheck, IdentityPart, Launch, LaunchJournal, LockedStore, Recovery, RuntimeIdentity,
     RuntimeRecord, SandboxStore,

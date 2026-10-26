@@ -18,7 +18,8 @@
 //! - [`supervisor`] launches a sandbox's VMM through the store's journal, passing it only the
 //!   descriptors or handles that the caller allows, stops it through the caller's graceful step,
 //!   with a bounded forced step on request, and reattaches to it after the orchestrator restarts
-//!   within the same host boot.
+//!   within the same host boot. The private `spawn` module, whose items `supervisor` re-exports,
+//!   starts the VMM detached, with no other descriptor or handle of the caller's.
 //! - [`session`] speaks NVX's control protocol, `NVXC`, over [`nvxs`], which runs the host's role
 //!   of the NVXS session for it and for any other application protocol, over a platform
 //!   transport. [`platform`] holds the primitives of Linux and Windows hosts. Other hosts compile
@@ -61,6 +62,7 @@ pub mod report;
 pub mod sandbox;
 pub mod seal;
 pub mod session;
+mod spawn;
 pub mod store;
 pub mod supervisor;
 #[cfg(unix)]
