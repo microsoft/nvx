@@ -68,11 +68,12 @@ const SPARSE_WHAT: &str = "scratch device of the clone";
 /// scratch image of an upper on one, and the memory target, which [`ClonePlan::new`] checks
 /// against the generation, and the settings of the clone's activation that the template does not
 /// fix, which the clone's [activation record](ClonePlan::activation) names: the workload's view
-/// of its VM, the overlay's mode, and the journal policy of a scratch image.
+/// of its VM, the overlay's mode, the journal policy of a scratch image, and the bound of a GPT
+/// disk's first partition.
 #[derive(Debug, Clone)]
 pub struct CloneRequest {
     /// The adapter's plan, which [`SandboxPlan::adapter`] makes, of the clone's image, its
-    /// `distro`, an EROFS layer, over its upper: in RAM, a tmpfs, as
+    /// `distro`, an EROFS layer or a GPT disk, over its upper: in RAM, a tmpfs, as
     /// [`SandboxUpper::RAM`](crate::host::sandbox::SandboxUpper::RAM) plans it, or on the
     /// caller's scratch image. Its network is the one of the template's NIC, which every restore
     /// of the template attaches, or none for a template without a NIC: on the NIC's guest
@@ -101,6 +102,10 @@ pub struct CloneRequest {
     /// Whether the filesystem of the scratch image of an upper on one may have a journal. An
     /// upper in RAM has none, so the record of a clone in RAM leaves the policy out.
     pub journal: Journal,
+    /// The most bytes that the first partition of a GPT disk may hold, at least 1, which the
+    /// guest checks as it reads the disk's partition table. An EROFS layer has no partitions, so
+    /// the record of a clone of one leaves the bound out.
+    pub first_partition_bound: u64,
 }
 
 /// The upper of a clone's plan, with the file of the clone's `scratch` block device, which every
@@ -132,13 +137,16 @@ pub enum CloneUpper {
 /// compares with those that the template recorded. The plan checks each of the clone's inputs as
 /// OpenVMM will find it, and holds what the checks opened:
 ///
-/// - The image, the clone's `distro`, must pass the check of its binding,
-///   [`DistroBinding::check`], and present the geometry of the template's placeholder, as its
-///   key records it: the placeholder's length, and the same logical and physical block sizes,
-///   which [`CheckedDistro::geometry`] reads through the checked file. At its path, it must be a
-///   regular file, not a link, nor on Windows any other reparse point, that is the file that the
-///   check found, that belongs to the current user or to an administrator, and that no one else
-///   may change. The plan holds the file that the check opened, for reading alone.
+/// - The image, the clone's `distro`, an EROFS layer or a GPT disk, as its binding names it, must
+///   pass the check of its binding, [`DistroBinding::check`], and present the geometry of the
+///   template's placeholder, as its key records it: the placeholder's length, and the same logical
+///   and physical block sizes, which [`CheckedDistro::geometry`] reads through the checked file,
+///   whatever the placeholder's format. At its path, it must be a regular file, not a link, nor on
+///   Windows any other reparse point, that is the file that the check found, that belongs to the
+///   current user or to an administrator, and that no one else may change. The plan holds the
+///   file that the check opened, for reading alone. As at a cold launch, the guest reads and
+///   checks a GPT disk's partition table, with `nvx::gpt`, before it assembles the root, so the
+///   plan reads none of it.
 /// - Neither the image nor a scratch image may be a file that the sandbox's store owns, by any
 ///   path, through a link among its directories, say, or a hard link: the store's transitions
 ///   replace or remove its files, as a plan replaces the file of the scratch device of a clone in
@@ -176,8 +184,8 @@ pub enum CloneUpper {
 /// - The activation record, which the clone's guest applies in place of the configuration that
 ///   the template captured, names the restore, with a fresh transaction ID, the clone's image,
 ///   upper, and settings, the template's network, and the resources that the clone must have,
-///   as [`activation`](Self::activation) describes. Its image must be an EROFS layer, and its
-///   settings must keep the limits of a record, as [`Configuration::check`] checks them.
+///   as [`activation`](Self::activation) describes. Its settings must keep the limits of a
+///   record, as [`Configuration::check`] checks them.
 /// - The capability is fresh: the plan draws it for the clone's launch, [`launch`](Self::launch).
 ///
 /// The plan's checks read the metadata of the clone's files, never their content.
@@ -222,6 +230,7 @@ pub enum CloneUpper {
 ///     },
 ///     overlay: OverlayMode::UntrustedLowers,
 ///     journal: Journal::Allowed,
+///     first_partition_bound: 64 * 1024,
 /// };
 /// let deadline = Instant::now() + Duration::from_secs(5);
 /// let plan = ClonePlan::new(store, &mut acquired, &request, deadline)?;
@@ -307,15 +316,13 @@ impl ClonePlan {
     ///
     /// - with [`ErrorKind::Unsupported`] for a request that no clone takes: a plan of the sandbox
     ///   profile, with workload settings and its shares, [`Evidence::InvalidSettings`]; a plan
-    ///   whose image is not the format and identity that the binding names, as for a binding
-    ///   whose identity is not a UUID in its canonical text, and an image that is a GPT disk, of
-    ///   which this build restores no clone, since a clone's guest assembles its root only from an
-    ///   EROFS layer, [`Evidence::InvalidFormat`]; an image or a scratch image whose path is
-    ///   relative, which OpenVMM would resolve against the directory in which it runs, holds a
-    ///   comma or a semicolon, which OpenVMM's block device options would split, or whose name
-    ///   ends in `.vhd`, `.vhdx`, `.vmgs`, or `.iso`, which OpenVMM would not attach as a raw
-    ///   image, and an upper on a scratch image without the image's binding, or one in RAM with a
-    ///   binding, [`Evidence::InvalidSettings`];
+    ///   whose image is not the format and identity that the binding names, as for a binding whose
+    ///   identity is not a UUID in its canonical text, [`Evidence::InvalidFormat`]; an image or a
+    ///   scratch image whose path is relative, which OpenVMM would resolve against the directory in
+    ///   which it runs, holds a comma or a semicolon, which OpenVMM's block device options would
+    ///   split, or whose name ends in `.vhd`, `.vhdx`, `.vmgs`, or `.iso`, which OpenVMM would not
+    ///   attach as a raw image, and an upper on a scratch image without the image's binding, or one
+    ///   in RAM with a binding, [`Evidence::InvalidSettings`];
     /// - with [`ErrorKind::Other`] for a lease of another store, and a lock that is not the one
     ///   that acquired the lease, before the launch that it reserves began,
     ///   [`Evidence::HostFailure`];
@@ -342,7 +349,8 @@ impl ClonePlan {
     ///   guest's resolver in another form than OpenVMM writes: more than once, without a NIC, or
     ///   other than as one IP address in its canonical spelling, [`Evidence::MalformedGeneration`];
     /// - with [`ErrorKind::Unsupported`] for settings that no activation record holds, as
-    ///   [`Configuration::check`] finds them, such as a hostname that is empty, longer than
+    ///   [`Configuration::check`] finds them, such as a GPT disk's first-partition bound of 0, a
+    ///   hostname that is empty, longer than
     ///   [`MAX_HOSTNAME_BYTES`](crate::activation::MAX_HOSTNAME_BYTES), or holds a NUL, and a
     ///   workload identity whose UID or GID is 0, [`Evidence::InvalidActivate`], and with
     ///   [`ErrorKind::Other`] if the transaction ID of the clone's restore cannot be drawn, the
@@ -557,16 +565,18 @@ impl ClonePlan {
     /// Ready reports.
     ///
     /// The record holds the restore section, with the restore's transaction ID, 16 random bytes
-    /// that the plan drew, and the template that the [lease](Lease::template) names; the image,
-    /// an EROFS layer, with the identity of its binding and the UUID that the guest expects of its
-    /// filesystem, if the adapter's plan names one; the upper, a tmpfs, or the scratch image, with
-    /// the identity of its binding and the request's journal policy; the request's overlay mode
-    /// and workload view; no export; the network of the template's NIC, if it has one, with the
-    /// identity of the policy that OpenVMM enforces there, as the template's key records it, the
-    /// DNS server with which the template's guest configured its resolver at boot, if the
-    /// template's [command line](TemplateKey::command_line) names one, unpublished listeners, and
-    /// the URL of the policy's proxy as the guest sees it, if any; and the template's processors,
-    /// all online, and the memory target, as the resources that the clone must have.
+    /// that the plan drew, and the template that the [lease](Lease::template) names; the image, in
+    /// the format that its binding names, with the identity of its binding: an EROFS layer, with
+    /// the UUID that the guest expects of its filesystem, or a GPT disk, with the GUID that the
+    /// guest expects of the disk, each if the adapter's plan names one, and the request's bound of
+    /// the disk's first partition; the upper, a tmpfs, or the scratch image, with the identity of
+    /// its binding and the request's journal policy; the request's overlay mode and workload view;
+    /// no export; the network of the template's NIC, if it has one, with the identity of the
+    /// policy that OpenVMM enforces there, as the template's key records it, the DNS server with
+    /// which the template's guest configured its resolver at boot, if the template's
+    /// [command line](TemplateKey::command_line) names one, unpublished listeners, and the URL of
+    /// the policy's proxy as the guest sees it, if any; and the template's processors, all
+    /// online, and the memory target, as the resources that the clone must have.
     ///
     /// The identity of a binding is the SHA-256 digest of a domain of its kind and of its serde
     /// form, a few hundred bytes of metadata: the plan reads no content to compute it.
@@ -634,9 +644,6 @@ fn check_request(request: &CloneRequest) -> Result<(), Fault> {
                 binding.identity()
             )),
         ));
-    }
-    if matches!(binding.format(), DistroFormat::Gpt) {
-        return Err(Fault::new(Evidence::InvalidFormat, record::gpt_refused()));
     }
     check_disk_path(distro.path(), "image").attribute(Evidence::InvalidSettings)?;
     match (adapter.upper().scratch_path(), &request.scratch) {
