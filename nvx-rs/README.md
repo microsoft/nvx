@@ -589,17 +589,23 @@ other `Invariants`.
 
 `TemplateKey::new` checks that the capture made the machine that its class
 requested, and derives the template's compatibility key, from metadata alone:
-the runtime and contract versions through which its clones are restored, and the
+the runtime and contract versions through which its clones are restored, the
 backend, CPU profile and effective CPUID, topology, rates, resources, kernel
-command line, disks, and devices of its machine. A capture's own metadata, such
-as its time anchor and host, stays out of the key.
+command line, disks, and devices of its machine, and its network, as its class
+lowered it to OpenVMM's arguments, the guest's address and the policy of its
+NIC, which every restore of the template passes unchanged, so that a template
+serves the clones of its network policy alone. A capture's own metadata, such as
+its time anchor and host, stays out of the key.
 
 A key and a class each have one canonical, versioned encoding, whose
 domain-separated SHA-256 digest is its identity, a `KeyIdentity`, which converts
 to and from the `nvx::activation::Identity` by which a clone's activation record
 names its template's key, or a `ClassIdentity`; the
 [conformance vectors](tests/vectors/README.md) of version 1,
-`tests/vectors/template-key-v1.txt`, pin the key's encoding and identity.
+`tests/vectors/template-key-v1.txt`, pin both encodings and identities. The
+key's encoding, version 1, includes the template's network and has not been
+released, so a template store that an earlier build created is not supported:
+delete it and create a new one. There is no migration.
 
 `Store` keeps the generations of templates that a host published, apart from
 every sandbox's store, at a location that the adapter chooses: a private
@@ -648,32 +654,31 @@ and no launch.
 `ClonePlan::new` plans a clone under the lock that acquired its lease, before
 the launch that the lease reserves, from metadata alone: the leased generation,
 its key, which must speak the current contracts, the boot and control contracts
-of the runtime that captured it included, and its snapshot; a network exactly
-when the template has a NIC, on the guest network of that NIC, whose address
-OpenVMM restores from the snapshot, and under the policy of that NIC, which
-OpenVMM checks as it restores it, since the key names the policy only by
-OpenVMM's identity of it; a memory target in whole blocks of `MEMORY_BLOCK_SIZE`
-from the template's RAM to its capacity; the clone's image, which the check of
-its `DistroBinding` opens; its upper, either the caller's scratch image, which
-the check of its `ScratchBinding` claims, and which nothing formats, copies, or
-reads, or for an upper in RAM a fresh sparse file, `clone-scratch.raw` in the
-sandbox's directory, which the release removes; its export, if it has one, an
-`ExportPlan` that `filesystem::plan` made for the container root, which must
-export exactly one directory, since the template's dormant filesystem slot binds
-one directory and no file, and which must neither overlap the template store, by
-the paths that the plan and the store's directory resolve to, nor let the guest
-write in a directory through which the store's path leads, links included, since
-the host reaches the store, and OpenVMM its snapshots, by that path, nor be or
-hold the directory of the clone's sandbox, in which the host writes the clone's
-records, checks of paths that leave two rules to whoever names the export, as
-they leave the directories above the store: the export must not reach the store
-through an alias of it that an administrator configures, such as a bind mount or
-a mount point of the store, or of a directory above or inside it, a loopback
-share, or a hard link of a payload, nor lie inside a directory that a writable
-export of another sandbox or clone holds, since OpenVMM resolves an export's
-path again at each launch and restore, so that the directories above the
-export's directory must be ones that no guest may change, as those above a
-clone's block devices must; and a fresh capability.
+of the runtime that captured it included, and its snapshot; the template's
+network exactly, as its key records it, or none for a template without a NIC, so
+that a template serves the clones of its network policy, at its guest's address,
+which OpenVMM restores from the snapshot, alone; a memory target in whole blocks
+of `MEMORY_BLOCK_SIZE` from the template's RAM to its capacity; the clone's
+image, which the check of its `DistroBinding` opens; its upper, either the
+caller's scratch image, which the check of its `ScratchBinding` claims, and
+which nothing formats, copies, or reads, or for an upper in RAM a fresh sparse
+file, `clone-scratch.raw` in the sandbox's directory, which the release removes;
+its export, if it has one, an `ExportPlan` that `filesystem::plan` made for the
+container root, which must export exactly one directory, since the template's
+dormant filesystem slot binds one directory and no file, and which must neither
+overlap the template store, by the paths that the plan and the store's directory
+resolve to, nor let the guest write in a directory through which the store's
+path leads, links included, since the host reaches the store, and OpenVMM its
+snapshots, by that path, nor be or hold the directory of the clone's sandbox, in
+which the host writes the clone's records, checks of paths that leave two rules
+to whoever names the export, as they leave the directories above the store: the
+export must not reach the store through an alias of it that an administrator
+configures, such as a bind mount or a mount point of the store, or of a
+directory above or inside it, a loopback share, or a hard link of a payload, nor
+lie inside a directory that a writable export of another sandbox or clone holds,
+since OpenVMM resolves an export's path again at each launch and restore, so
+that the directories above the export's directory must be ones that no guest may
+change, as those above a clone's block devices must; and a fresh capability.
 
 It builds the clone's activation record, `ClonePlan::activation`, which the
 clone's guest applies in place of the configuration that the template captured,
@@ -710,10 +715,11 @@ writes the clone's activation record in its canonical encoding,
 `clone-activation.bin`, from which a caller resends it unchanged; it listens for
 the VMM's restore-ready event, at the socket `restore.sock` on Linux, and at a
 named pipe of a random name on Windows; and it runs `supervisor::launch` with
-OpenVMM's restore of the clone's devices, its export bound to the dormant slot,
-`--mount` with the directory, and its hidden, re-exposed, and writable paths and
-its owner, `--restore-snapshot` with the generation's snapshot in place, which
-no clone copies or changes, so that clones of one generation restore it at once,
+OpenVMM's restore of the clone's devices and of the template's network, as its
+key records it, unchanged, its export bound to the dormant slot, `--mount` with
+the directory, and its hidden, re-exposed, and writable paths and its owner,
+`--restore-snapshot` with the generation's snapshot in place, which no clone
+copies or changes, so that clones of one generation restore it at once,
 `--restore-memory` with the memory target, and `--restore-ready-path`, under the
 template's backend, CPU profile, and processors, with a boot console that
 discards its output, as cold boots have, and the control console, but no kernel,

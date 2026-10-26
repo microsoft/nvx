@@ -6,7 +6,6 @@ use std::collections::HashSet;
 use super::address::Family;
 use super::arguments::guest_subnet;
 use super::lowering::Rule;
-#[cfg(feature = "cli")]
 use super::rule::parse_port;
 use super::{Access, MAX_LOOPBACK_FORWARDS, NetworkPolicy};
 use crate::error::{Error, Result};
@@ -86,7 +85,6 @@ impl LoopbackForward {
     ///
     /// Fails with [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported) and a message that
     /// starts with `value`.
-    #[cfg(feature = "cli")]
     pub(crate) fn parse(value: &str) -> Result<Self> {
         let refused = |reason: &str| Err(Error::unsupported(format!("{value}: {reason}")));
         let fields: Vec<&str> = value.split(':').collect();

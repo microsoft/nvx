@@ -5,7 +5,10 @@ use std::collections::HashSet;
 
 use super::*;
 use crate::ErrorCode;
-use crate::host::network::{Access, EgressRule, NetworkPolicy};
+use crate::host::network::{
+    Access, Destination, EgressRule, ForwardProtocol, NetworkPolicy, NetworkProxy, Protocol,
+    ProxyScheme,
+};
 use crate::host::template::test_support::{
     self as support, MIB, ManifestSpec, artifact, network_class,
 };
@@ -242,6 +245,18 @@ fn each_part_of_the_key_changes_it() {
         ("policy encoding", |_, spec| {
             spec.network().policy_encoding_version = 3;
         }),
+        // The network, as the class lowered it: another policy makes another key, even where the
+        // manifest is the same, as OpenVMM's identity of the policy would not be.
+        ("egress rule", |class, _| {
+            let policy =
+                NetworkPolicy::new(Access::Allow).with_deny(EgressRule::to("192.0.2.0/24"));
+            class.network = Some(SandboxNetwork::new("10.0.0.2/24", policy).unwrap());
+        }),
+        ("egress default", |class, _| {
+            let policy =
+                NetworkPolicy::new(Access::Deny).with_allow(EgressRule::to("192.0.2.0/24"));
+            class.network = Some(SandboxNetwork::new("10.0.0.2/24", policy).unwrap());
+        }),
         ("invariant setting", |class, _| {
             class.invariants = Invariants::new()
                 .with("isolation.seccomp", "strict")
@@ -363,6 +378,63 @@ fn a_key_holds_what_its_capture_made() {
     assert!(!key(&support::class(), &ManifestSpec::template()).has_network());
     assert_eq!(made.filesystem_tag(), "microvm");
     assert_eq!(made.invariants(), &Invariants::new());
+    assert_eq!(
+        made.network_arguments(),
+        class.network.unwrap().openvmm_arguments().unwrap()
+    );
+}
+
+#[test]
+fn a_key_holds_the_network_that_its_class_lowered() {
+    // A NIC's network attaches the guest at its address, then enforces its policy.
+    assert_eq!(
+        network_key().network_arguments(),
+        [
+            "--net",
+            "10.0.0.2/24",
+            "--network-profile",
+            "portable",
+            "--network-egress",
+            "allow",
+            "--network-ingress",
+            "deny",
+            "--host-loopback",
+            "deny",
+        ]
+    );
+    let proxy = NetworkProxy::new(3128).with_scheme(ProxyScheme::Http);
+    let proxied = CaptureClass {
+        network: Some(
+            SandboxNetwork::new("10.0.0.2/24", NetworkPolicy::proxy_only(proxy)).unwrap(),
+        ),
+        ..network_class()
+    };
+    let made = key(&proxied, &ManifestSpec::with_network());
+    assert_eq!(made.network_arguments()[..2], ["--net", "10.0.0.2/24"]);
+    assert_eq!(
+        made.network_arguments()[made.network_arguments().len() - 2..],
+        ["--network-proxy", "10.0.0.1:3128"]
+    );
+    assert_ne!(made.identity(), network_key().identity());
+    // A template without a NIC holds no network, the identity of the network that lets nothing
+    // through, whether its class has no network or one that attaches no NIC.
+    let none = key(&support::class(), &ManifestSpec::template());
+    assert!(none.network_arguments().is_empty());
+    let closed = CaptureClass {
+        network: Some(
+            SandboxNetwork::new("10.0.0.2/24", NetworkPolicy::new(Access::Deny)).unwrap(),
+        ),
+        ..support::class()
+    };
+    assert_eq!(key(&closed, &ManifestSpec::template()), none);
+    assert_eq!(
+        closed.identity().unwrap(),
+        support::class().identity().unwrap()
+    );
+    // Each key reads back with its network.
+    for made in [network_key(), made, none] {
+        assert_eq!(TemplateKey::from_bytes(&made.to_bytes()).unwrap(), made);
+    }
 }
 
 #[test]
@@ -707,6 +779,15 @@ fn key_refusal(bytes: &[u8], code: ErrorCode) -> String {
 
 #[test]
 fn other_encodings_of_a_key_are_refused() {
+    // Every key ends with its network, a list that is empty for a template without a NIC: bytes
+    // without that list decode as no key, and as no key of a template without a NIC either.
+    let closed = key(&support::class(), &ManifestSpec::template()).to_bytes();
+    let (unlisted, count) = closed.split_at(closed.len() - 4);
+    assert_eq!(count, [0; 4]);
+    assert_eq!(
+        key_refusal(unlisted, ErrorCode::Io),
+        "the template key is malformed: the network is truncated"
+    );
     let key = network_key();
     let bytes = key.to_bytes();
     for version in [0u16, 2, u16::MAX] {
@@ -740,6 +821,10 @@ fn other_encodings_of_a_key_are_refused() {
 #[test]
 fn keys_of_machines_that_no_manifest_describes_are_refused() {
     type KeyChange = fn(&mut TemplateKey);
+    // A network that no policy of a guest at the NIC's address lowers to, though it attaches the
+    // NIC: every clone's plan would mismatch it, whatever its network.
+    const UNLOWERED: &str = "the network is not the arguments to which a network policy of a \
+                             guest at 10.0.0.2/24 lowers";
     let cases: &[(KeyChange, &str)] = &[
         (
             |key| key.machine.command_line.push_str(" quiet"),
@@ -773,6 +858,75 @@ fn keys_of_machines_that_no_manifest_describes_are_refused() {
             |key| key.machine.cpu.revision = 0,
             "the machine has the invalid CPU profile vendor",
         ),
+        (
+            |key| key.network.clear(),
+            "the network does not attach the machine's NIC at 10.0.0.2/24",
+        ),
+        (
+            |key| key.network[1] = "10.0.0.3/24".to_owned(),
+            "the network does not attach the machine's NIC at 10.0.0.2/24",
+        ),
+        (
+            |key| drop(key.network.drain(..2)),
+            "the network does not attach the machine's NIC at 10.0.0.2/24",
+        ),
+        // The address alone.
+        (|key| key.network.truncate(2), UNLOWERED),
+        // Ingress before egress, which no lowering orders so.
+        (
+            |key| {
+                key.network.swap(4, 6);
+                key.network.swap(5, 7);
+            },
+            UNLOWERED,
+        ),
+        // Another profile than OpenVMM's portable one.
+        (|key| key.network[3] = "strict".to_owned(), UNLOWERED),
+        // A rule that OpenVMM would not read.
+        (
+            |key| {
+                key.network
+                    .extend(["--network-egress-allow", "nowhere"].map(str::to_owned));
+            },
+            UNLOWERED,
+        ),
+        // A rule that a lowering would write in another form.
+        (
+            |key| {
+                key.network
+                    .extend(["--network-egress-deny", "192.0.2.7/24"].map(str::to_owned));
+            },
+            UNLOWERED,
+        ),
+        // An option without its value.
+        (
+            |key| key.network.push("--network-egress-deny".to_owned()),
+            UNLOWERED,
+        ),
+        // An option that no lowering writes.
+        (
+            |key| {
+                key.network
+                    .extend(["--network-dns", "10.0.0.1"].map(str::to_owned));
+            },
+            UNLOWERED,
+        ),
+        // The address twice.
+        (
+            |key| {
+                key.network
+                    .extend(["--net", "10.0.0.2/24"].map(str::to_owned))
+            },
+            UNLOWERED,
+        ),
+        // A proxy, which a policy that allows egress cannot have.
+        (
+            |key| {
+                key.network
+                    .extend(["--network-proxy", "10.0.0.1:3128"].map(str::to_owned));
+            },
+            UNLOWERED,
+        ),
     ];
     for (change, expected) in cases {
         let mut changed = network_key();
@@ -783,6 +937,13 @@ fn keys_of_machines_that_no_manifest_describes_are_refused() {
             "{message:?} lacks {expected:?}"
         );
     }
+    // A network for a machine without a NIC.
+    let mut changed = key(&support::class(), &ManifestSpec::template());
+    changed.network = network_key().network;
+    assert_eq!(
+        key_refusal(&changed.to_bytes(), ErrorCode::Io),
+        "the template key is malformed: the network attaches a NIC that the machine does not have"
+    );
     // Invariant settings out of the order of their names, which a key never writes.
     let mut class = network_class();
     class.invariants = Invariants::new()
@@ -790,12 +951,18 @@ fn keys_of_machines_that_no_manifest_describes_are_refused() {
         .unwrap()
         .with("b", "2")
         .unwrap();
-    let mut bytes = key(&class, &ManifestSpec::with_network()).to_bytes();
-    let len = bytes.len();
+    let made = key(&class, &ManifestSpec::with_network());
+    let mut bytes = made.to_bytes();
+    // The settings end where the network, which follows them, starts.
+    let mut network = Writer::default();
+    network.list(made.network_arguments(), |writer, argument| {
+        writer.text(argument)
+    });
+    let end = bytes.len() - network.finish().len();
     let tail = [
         1, 0, 0, 0, b'b', 1, 0, 0, 0, b'2', 1, 0, 0, 0, b'a', 1, 0, 0, 0, b'1',
     ];
-    bytes[len - tail.len()..].copy_from_slice(&tail);
+    bytes[end - tail.len()..end].copy_from_slice(&tail);
     assert_eq!(
         key_refusal(&bytes, ErrorCode::Io),
         "the template key is malformed: the invariant settings are not in the strict order of \
@@ -808,6 +975,67 @@ fn keys_of_machines_that_no_manifest_describes_are_refused() {
         key_refusal(&bytes, ErrorCode::Io).contains("artifact identity"),
         "{bytes:?}"
     );
+}
+
+#[test]
+fn keys_read_back_the_network_of_each_policy() {
+    let excluded = EgressRule {
+        to: vec![Destination {
+            cidr: "192.0.2.0/24".to_owned(),
+            except: vec!["192.0.2.0/24".to_owned()],
+        }],
+        ports: Vec::new(),
+    };
+    let mut open = NetworkPolicy::new(Access::Allow);
+    open.ingress = Access::Allow;
+    open.host_loopback = HostLoopback::Outbound;
+    let mut forwarded = NetworkPolicy::new(Access::Allow)
+        .with_deny(EgressRule::to("2001:db8::/32").on_port(Protocol::Udp, 53));
+    forwarded.host_loopback = HostLoopback::Allow;
+    forwarded.host_loopback_forwards = vec![
+        LoopbackForward {
+            protocol: ForwardProtocol::Tcp,
+            host_port: 8080,
+            guest_port: 80,
+        },
+        LoopbackForward {
+            protocol: ForwardProtocol::Udp,
+            host_port: 5353,
+            guest_port: 53,
+        },
+    ];
+    let policies = [
+        open,
+        NetworkPolicy::new(Access::Deny)
+            .with_allow(EgressRule::to("192.0.2.0/24").on_port(Protocol::Tcp, 443))
+            .with_allow(EgressRule::to("198.51.100.7").on_port_range(Protocol::Udp, 5000, 5010))
+            .with_allow(EgressRule::to("::/0").on_protocol(Protocol::Icmp))
+            .with_deny(EgressRule::to("192.0.2.7")),
+        forwarded,
+        NetworkPolicy::proxy_only(NetworkProxy::new(3128).with_scheme(ProxyScheme::Https)),
+        // A closed policy whose allow rule excepts its whole destination, which lowers to no
+        // OpenVMM rule, attaches its NIC all the same, with no allow rule, with or without deny
+        // rules: its arguments read back as a policy that lets nothing through.
+        NetworkPolicy::new(Access::Deny).with_allow(excluded.clone()),
+        NetworkPolicy::new(Access::Deny)
+            .with_allow(excluded)
+            .with_deny(EgressRule::to("198.51.100.0/24")),
+    ];
+    for policy in policies {
+        let network = SandboxNetwork::new("10.0.0.2/24", policy).unwrap();
+        let lowered = network.openvmm_arguments().unwrap();
+        let class = CaptureClass {
+            network: Some(network),
+            ..network_class()
+        };
+        let made = key(&class, &ManifestSpec::with_network());
+        assert_eq!(made.network_arguments(), lowered);
+        assert_eq!(
+            TemplateKey::from_bytes(&made.to_bytes()).unwrap(),
+            made,
+            "{lowered:?}"
+        );
+    }
 }
 
 #[test]
@@ -1028,7 +1256,7 @@ fn the_conformance_vectors_decode_and_encode() {
         );
     }
     let invalid = vectors("INVALID_KEY");
-    assert_eq!(invalid.len(), 23);
+    assert_eq!(invalid.len(), 34);
     for (name, bytes, _) in invalid {
         let error = TemplateKey::from_bytes(&bytes).expect_err(name);
         assert_eq!(error.code(), ErrorCode::Io, "{name}: {error}");

@@ -41,6 +41,30 @@ pub fn openvmm_arguments(
     let Some(policy) = policy else {
         return Ok(Vec::new());
     };
+    lower_policy(policy, guest_network, false)
+}
+
+/// Returns the OpenVMM options of `policy` for a guest at `guest_network`, as
+/// [`openvmm_arguments`] renders them, but those of an attached network device for a policy that
+/// lets nothing through too, for which [`openvmm_arguments`] attaches none: the options of the
+/// same policy with one more allow rule that lowers to no OpenVMM rule, such as one that excepts
+/// its whole destination, and which [`openvmm_arguments`] renders with a device.
+///
+/// Fails as [`openvmm_arguments`] does.
+pub(crate) fn attached_arguments(
+    policy: &NetworkPolicy,
+    guest_network: &str,
+) -> Result<Vec<String>> {
+    lower_policy(policy, guest_network, true)
+}
+
+/// Returns the OpenVMM options of `policy` for a guest at `guest_network`, as
+/// [`openvmm_arguments`] renders them, and, if `attached`, as [`attached_arguments`] does.
+fn lower_policy(
+    policy: &NetworkPolicy,
+    guest_network: &str,
+    attached: bool,
+) -> Result<Vec<String>> {
     if let Some(proxy) = &policy.proxy {
         return proxy_arguments(policy, proxy, guest_network);
     }
@@ -62,7 +86,8 @@ pub fn openvmm_arguments(
              shorter, which leaves an address at which OpenVMM presents host peers to the guest"
         )));
     }
-    if policy.egress == Access::Deny
+    if !attached
+        && policy.egress == Access::Deny
         && policy.allow.rules.is_empty()
         && policy.ingress == Access::Deny
         && policy.host_loopback == HostLoopback::Deny

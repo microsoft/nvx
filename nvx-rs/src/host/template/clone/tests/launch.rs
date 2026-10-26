@@ -1019,6 +1019,7 @@ fn a_clone_of_a_template_with_a_nic_restores_its_policy_without_its_address() {
     let request = with_network(tmpfs_request(&image, &binding), Some(attached.clone()));
     let plan = fixture.plan(&mut acquired, &request, NO_CONTENT).unwrap();
     let runtime = plan.key().runtime().clone();
+    let template = plan.key().network_arguments().to_vec();
     let mut vmm = VmmDir::new();
     let dir = vmm.path().to_owned();
     let made = RefCell::new(None);
@@ -1031,9 +1032,11 @@ fn a_clone_of_a_template_with_a_nic_restores_its_policy_without_its_address() {
         .launch_with(&mut acquired, Path::new(OPENVMM), &runtime, hooks)
         .unwrap();
     vmm.reference = Some(restoring.starting().process().reference().clone());
-    // The devices end with the arguments of the network's policy, without the guest's address,
-    // which OpenVMM takes from the snapshot, and refuses beside it.
+    // The devices end with the template's network, as its key records it, the arguments of the
+    // network's policy, without the guest's address, which OpenVMM takes from the snapshot, and
+    // refuses beside it.
     let mut policy = attached.openvmm_arguments().unwrap();
+    assert_eq!(template, policy);
     assert_eq!(policy[..2], ["--net", "10.0.0.2/24"]);
     policy.drain(..2);
     let arguments = made.take().unwrap().arguments;
