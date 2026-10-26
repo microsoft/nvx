@@ -256,12 +256,17 @@ pub(crate) fn teardown(system: &mut impl System, mappings: &mut HostMappings) ->
 }
 
 /// Returns the library's mapping of one decoded entry, which the decoder's path rules let
-/// through unchanged.
+/// through unchanged, and refuses an entry of the export's root, which an empty source names: the
+/// decoder and the library take it for the root of a directory export, but the agent's export is
+/// an aggregate, whose root lists its children, which the agent never maps.
 ///
 /// The paths are the decoder's buffers, which it bounds: it refuses a payload of more than
 /// `MAX_HOST_MAPPINGS` entries before it allocates them, and a source or target of more than
 /// `MAX_MAP_PATH_BYTES` bytes.
 fn mapping_of(entry: GuestHostMap) -> Result<Mapping, InvalidMapping> {
+    if entry.source.is_empty() {
+        return Err(InvalidMapping::Source);
+    }
     let path = |bytes: Vec<u8>| PathBuf::from(OsString::from_vec(bytes));
     let access = if entry.read_only {
         Access::ReadOnly
@@ -565,7 +570,6 @@ mod tests {
                 &[good, (b"0/src", target.as_os_str().as_bytes(), 2)],
                 None,
             ),
-            payload(0, &[good, (b"", target.as_os_str().as_bytes(), 0)], None),
             [payload(0, &[good], None), vec![0]].concat(),
             payload(0, &[good], Some(2)),
             payload(0, &[], Some(0)),
@@ -580,6 +584,41 @@ mod tests {
         assert!(system.kernel.calls().is_empty());
         assert_eq!(mappings.applied, 0);
         assert!(!target.exists());
+    }
+
+    #[test]
+    fn the_root_of_the_export_is_refused_though_it_decodes() {
+        // An empty source names the export's root, which a directory export maps, but the
+        // agent's export is an aggregate, whose root lists its children: the agent refuses the
+        // table that holds one, as it refuses a malformed one, and mounts none of it.
+        let (_temporary, mut system, mut mappings, guest) = setup(2);
+        let (first, root) = (guest.join("first"), guest.join("root"));
+        let request = payload(
+            0,
+            &[
+                (b"0/src", first.as_os_str().as_bytes(), 0),
+                (b"", root.as_os_str().as_bytes(), protocol::MAP_READ_ONLY),
+            ],
+            None,
+        );
+        let decoded = protocol::decode_guest_maps_payload(&request).unwrap();
+        assert!(decoded.maps[1].source.is_empty());
+        assert!(matches!(
+            apply_request(&mut system, &mut mappings, &request),
+            Err(MappingError::Invalid)
+        ));
+        assert!(system.kernel.calls().is_empty());
+        assert_eq!((mappings.applied, mappings.failed), (0, false));
+        assert!(!first.exists() && !root.exists());
+        // So does a sandbox agent, whose export is an aggregate too.
+        let (_temporary, mut system, mut mappings, rootfs) = sandbox(1);
+        let request = payload(0, &[(b"", b"/workspace", 0)], None);
+        assert!(matches!(
+            apply_request(&mut system, &mut mappings, &request),
+            Err(MappingError::Invalid)
+        ));
+        assert!(system.kernel.calls().is_empty());
+        assert!(!rootfs.join("workspace").exists());
     }
 
     #[test]
@@ -664,7 +703,7 @@ mod tests {
     }
 
     #[test]
-    fn every_entry_that_the_decoder_accepts_becomes_a_library_mapping() {
+    fn every_entry_that_the_decoder_accepts_but_the_export_s_root_becomes_a_library_mapping() {
         assert_eq!(
             crate::guest::mappings::MAX_PATH_BYTES,
             protocol::MAX_MAP_PATH_BYTES
@@ -680,12 +719,15 @@ mod tests {
                     protocol::MAP_READ_ONLY,
                 ),
                 (b"0/\xff", b"/\xfe", 0),
+                (b"", b"/root", 0),
             ],
             None,
         ))
         .unwrap();
-        let converted = request
-            .maps
+        let mut entries = request.maps;
+        let root = entries.pop().unwrap();
+        assert_eq!(mapping_of(root), Err(InvalidMapping::Source));
+        let converted = entries
             .into_iter()
             .map(mapping_of)
             .collect::<Result<Vec<_>, _>>()
