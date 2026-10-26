@@ -436,7 +436,7 @@ pub(crate) fn unicode(path: &Path) -> Result<&str> {
 
 /// Returns the error of a launch whose `what`, its image or its scratch image, at `path`, the
 /// sandbox's store does not stage.
-fn unstaged(what: &str, path: &Path) -> Error {
+pub(crate) fn unstaged(what: &str, path: &Path) -> Error {
     Error::unavailable(format!(
         "the sandbox's store stages no {what} at {}",
         path.display()
@@ -510,14 +510,16 @@ pub(crate) fn write_record(path: &Path, record: &Value) -> Result<()> {
 /// ```
 ///
 /// The `mode` is `layered`, or `blockless` for a VM without a layered root, whose `plan`,
-/// `bindings`, and `rootConfiguration` are `null`. The `plan` is the persisted form of the VM's
-/// `SandboxPlan`, which [`read_plan`](Self::read_plan) reads back, whose `network` keeps the VM's
-/// network, in the form that [`read_network`] reads, or `null` without one. The `bindings` are
-/// those that the launch checked, which the store stages for the plan's images, as
-/// [`Staged::bindings`](crate::staged::Staged::bindings) finds them, in the serde forms of NVX's
-/// `DistroBinding` and `ScratchBinding`; the scratch image's is `null` for an upper in RAM, which
-/// has no scratch image. The `rootConfiguration` is the encoding of the root configuration that the
-/// host sends, as it sends it, whether or not the guest accepts it.
+/// `bindings`, and `rootConfiguration` are `null`, or `clone` for a clone's record, which
+/// [`CloneRecord`](crate::clone::CloneRecord) writes, with the members of a layered root's, but a
+/// `rootConfiguration` of `null`, and the template that the clone leases. The `plan` is the
+/// persisted form of the VM's `SandboxPlan`, which [`read_plan`](Self::read_plan) reads back,
+/// whose `network` keeps the VM's network, in the form that [`read_network`] reads, or `null`
+/// without one. The `bindings` are those that the launch checked, which the store stages for the
+/// plan's images, as [`Staged::bindings`](crate::staged::Staged::bindings) finds them, in the serde
+/// forms of NVX's `DistroBinding` and `ScratchBinding`; the scratch image's is `null` for an upper
+/// in RAM, which has no scratch image. The `rootConfiguration` is the encoding of the root
+/// configuration that the host sends, as it sends it, whether or not the guest accepts it.
 #[derive(Clone, Copy, Debug)]
 pub struct LaunchRecord<'a> {
     /// The VM's kernel command line.

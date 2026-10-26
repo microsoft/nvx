@@ -206,7 +206,7 @@ impl Facts {
 }
 
 /// Returns whether `key` is a valid key of a fact: lowercase ASCII letters, digits, `.`, and `-`.
-fn valid_key(key: &str) -> bool {
+pub(crate) fn valid_key(key: &str) -> bool {
     !key.is_empty()
         && key.bytes().all(|byte| {
             byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'.' || byte == b'-'

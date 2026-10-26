@@ -185,7 +185,7 @@ fn the_hook_pauses_a_launch_at_each_of_its_steps() {
     let staged = Staged::read(&sandbox.store).unwrap().unwrap();
     let scratch_binding = staged.scratch.unwrap().binding;
 
-    for step in Step::ALL {
+    for step in Step::LAUNCH {
         let pause = sandbox.root.join(format!("{step}.pause"));
         let hook = hook(step, Action::Pause(pause.clone()));
         let mut launch = sandbox.start_launch(&images, &[(STEP_HOOK, &hook)]);

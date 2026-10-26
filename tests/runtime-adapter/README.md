@@ -225,6 +225,10 @@ the root, of normal components, and the other probes take no arguments:
 | `rename DIRECTORY` | It renames DIRECTORY, a directory of the layers, to `.runtime-adapter-renamed` at the top of the root, and back if it can: `outcome` is `allowed`, `refused` once the overlay refused it with `EXDEV`, or `failed: PROBLEM` |
 | `fill` | It writes a file in the root until the upper is full, then removes it, and writes a file there again: the upper's size, `total`, and the bytes available in it before, `available`; the bytes that it wrote, `written`; the error that ended the writes, `error`: `ENOSPC` once the upper was full, or the problem; what the second file holds, `after`; and the guest's memory, `memory`, in bytes |
 | `devices` | The guest's disks, the block devices that a device backs: `disks`, each as `NAME:SECTORS:ACCESS`, its size in 512-byte sectors and its access mode, `ro` or `rw`, in the order of their names, separated by spaces |
+| `reads` | The sectors that the guest read from each of its disks, by the disk's statistics: `disks`, each as `NAME:SECTORS`, in 512-byte sectors, in the order of their names, separated by spaces |
+| `read-disks` | It reads each of the guest's disks from its start to its end, through the page cache: `disks`, each as `NAME:BYTES`, the bytes that it read, in the order of their names, separated by spaces |
+| `memory` | The guest's memory: the size of its memory blocks, `block-size`, how many are online, `blocks`, and their bytes, `online`, and the memory that the kernel manages, `total`, each in bytes |
+| `time` | The guest's time state, `/run/nvx/time/state`, which NVX's time daemon keeps: each line `KEY=VALUE` as a fact, with each `_` of its key as `-`, in order, leaving out a key that no fact may have, and a repeated one |
 | `first-partition` | The bytes of the first partition of a GPT disk that the assembly returned, without their trailing padding: how many, `length`, and the bytes, `bytes`, in hexadecimal, or `none` for both for an EROFS image |
 | `cgroups` | The file system at the cgroups' parent, `parent.type`, and its `parent.subtree-control`; whether each cgroup exists, `agent.exists` and `workload.exists`; `agent.memory.low`, `workload.memory.max`, and `workload.pids.max`; the number of processes in each, `agent.processes` and `workload.processes`; and `user-namespaces`, the guest's limit of user namespaces, or `unavailable` without them |
 | `processes` | For PID 1, `pid1`, the worker, `worker`, and PID 1's unrelated child, `sibling`: `NAME.pid`, and while the process exists, `NAME.state`, `NAME.ppid`, `NAME.root`, `NAME.cgroup`, `NAME.command`, and `NAME.namespaces`: `same` if it shares PID 1's, or the ones that differ |
@@ -233,6 +237,19 @@ the root, of normal components, and the other probes take no arguments:
 A value that a probe cannot read is `absent` if its file does not exist, and
 otherwise `unreadable: PROBLEM`. A new check of a root is a new probe in this
 table.
+
+The worker of a clone also answers the probe `activation`, which takes no
+arguments, itself, at any time once the clone is ready, executions running or
+not, with when the events of the clone's activation and order happened, in
+microseconds after the repair's acknowledgement of the restore: whether the
+repair acknowledged the restore, `acknowledged`, `yes`, or `none` for a restore
+whose host did not gate its input until the acknowledgement; and when the clone
+took the reset that the restore queued, `reset`, when the host's first message
+came, `message`, which must be the clone's `Activate`, when the clone was
+ready, `ready`, when its sandbox started, `started`, and when the start of the
+host's first execution came, `execution`. Each event is `none` until it
+happened, `before` if it happened before the acknowledgement, and `unknown`
+without one. The worker of a VM that boots cold runs no such probe.
 
 The probes of `worker::mapping` inspect the mappings beneath the root, and map
 from the host export, as an adapter maps the host paths of its sandboxes. `map`
@@ -799,7 +816,9 @@ after the repair's acknowledgement of the restore:
    stop. The record's workload identity, if it has one, is the whole
    sandbox's, as a root configuration's is: every execution runs as it, and a
    start that names an identity is refused. Without an export, the clone
-   refuses each part of a mapping table with `MapFailed`.
+   refuses each part of a mapping table with `MapFailed`. It also answers the
+   [`activation` probe](#probes), with when the events of its activation and
+   order happened after the repair's acknowledgement of the restore.
 
 Until the clone is ready, its session takes nothing but that `Activate`:
 another reset, any other message, a `Stop` and a `Ping` included, an
@@ -1255,27 +1274,28 @@ guest's listeners, through publication or a forward.
 
 ### The step hook
 
-For tests, `launch` takes a step hook, `hook::StepHook`, from the variable
-`RUNTIME_ADAPTER_STEP_HOOK`, which pauses the launch at a named step, so that a
-test can act between two steps, or exits the launch there without unwinding,
-as a crash would end it:
+For tests, `launch`, `reattach`, and `stop` take a step hook, `hook::StepHook`,
+from the variable `RUNTIME_ADAPTER_STEP_HOOK`, which pauses the command at a
+named step, so that a test can act between two steps, or exits the command
+there without unwinding, as a crash would end it:
 
 - `STEP:pause:PATH` creates the file PATH, which holds the step's name, and
-  waits until the file is gone, then goes on: the launch leaves the time that
-  it waited out of its deadline, so that a test may pause it for as long as it
+  waits until the file is gone, then goes on: a launch leaves the time that it
+  waited out of its deadline, so that a test may pause it for as long as it
   needs;
-- `STEP:exit` exits at once with status 5: the launch ends nothing that it
+- `STEP:exit` exits at once with status 5: the command ends nothing that it
   started, such as the VMM, and the system releases what it holds, such as its
   descriptors or handles, and their locks.
 
-The steps of a launch, in order, are:
+The steps of a launch, in order, then that of a command that reattaches, are:
 
-| Step | Where the launch is |
+| Step | Where the command is |
 | --- | --- |
 | `checked` | It has checked the bindings of its images, and the export of its shares, if any, and holds the checked files, which claim the scratch image, but has begun nothing in the store, and spawned nothing. A launch without a layered root reaches it too. |
 | `spawned` | The VMM runs, and the launch's journal records it, but the launch has not connected to the VM. |
 | `ready` | The guest agent, of the build that the host ships, has assembled the layered root, and the launch has released the checked files, but has sent neither the mapping table nor `Start`. |
 | `commit` | The guest has started the sandbox, if the VM has a layered root, the guest agent has answered, and the launch is about to commit: its journal still records the VMM, which no runtime record names yet. |
+| `found` | `reattach` or `stop` has found the VM running, and holds it, under the sandbox's lock, with the session in which a clone answered the `Activate` of its record again, if the VM is a clone's, but has sent the guest agent nothing more, and stopped nothing. |
 
 A value that names no step or action is a usage error. Without the variable,
 the hook does nothing.
@@ -1330,6 +1350,117 @@ command refuses a class that no capture takes, such as one of 3 processors,
 before it creates the store. A capture that fails leaves the store's
 generations as they were, and the command's diagnostic names the log of the VMM
 of the class's latest capture, when the class's slot keeps one.
+
+### Clones
+
+`runtime-adapter-host start` starts a clone of a generation of a template store
+in a sandbox store, through NVX's public API, `nvx::host::template`. Its
+library side, `clone`, holds what the command's options choose of the clone,
+`clone::Request`: its image, an EROFS layer of the length of the template's
+placeholder, its upper, on an ext4 scratch image or in RAM, its memory target,
+the template's RAM unless given, the workload identity as which its executions
+run, its overlay mode, and its scratch's journal policy. `Request::plan` plans
+the image over the upper as a launch plans a layered root, and
+`Request::clone_request` returns NVX's `CloneRequest` of it, with the bindings
+that the sandbox's store stages for the images, as `stage` stages them, so the
+start hashes nothing. The clone's activation record names the image's own
+machine ID, the hostname `runtime-adapter`, and the guest's defaults of the
+other settings, unless the request names them.
+
+The command first reads the generation from the store's index, and, unless the
+request names the clone's memory target, its compatibility key, whose RAM the
+target is then, before it needs NVX's artifacts. A key that cannot be read is
+left to NVX's plan, which reads it again, and attributes the failure, to a
+malformed generation, which quarantines it, or to the host, as it does for
+every clone. The store then leases the generation to the sandbox,
+`Store::acquire`, at the host's time, which it refuses for a generation that a
+tombstone quarantines, or that is not eligible then, by the monotonic clock of
+the host's boot that captured the template, and by UTC otherwise. For tests,
+the host's time may come from the variable `RUNTIME_ADAPTER_HOST_TIME`, as a
+clock fixture, such as another boot's, in the form that `clone::host_time_text`
+writes:
+`host=HOST,boot=BOOT,clock=CLOCK,monotonic=NANOSECONDS,utc=NANOSECONDS`, with
+the identities of the host and of its boot, 32 lowercase hexadecimal digits
+each, the clock as a manifest spells it, `linux-boottime` or
+`windows-interrupt-time`, and the readings of the monotonic clock and of UTC.
+It affects the store's check alone: OpenVMM's restore samples the host's own
+time.
+
+NVX's `ClonePlan` then checks the clone against the generation from the
+metadata of its files alone, under the sandbox's lock, which the lease holds:
+the bindings of its images, which no one else may change, the geometry of its
+image, which must be the placeholder's, its length included, and that of its
+scratch image, which must be the template's scratch's, and its memory target,
+whole blocks of 128 MiB, from the template's RAM to its capacity. A clone that
+the template cannot serve fails there, before any VMM starts. The command then records the clone in the
+sandbox's store, as `clone::CloneRecord`, in the format of a launch's
+[record](#layered-roots), in the mode `clone`, with the template's kernel
+command line, the plan and the bindings, so that `probe` and `exec` read the
+plan back, no root configuration, and the template store and the generation, so
+that a later stop finds the store whose lease it releases. OpenVMM restores the
+generation's snapshot in place, through NVX's supervisor, as the launch that the
+lease reserves, and the restore sequence activates the clone through the
+adapter's clone order, `host::CloneOrder`, which sends the clone's activation
+record in an `Activate`, checks the guest agent's build in its `Ready`, and
+sends `Start`, with no mapping table: the command maps nothing into a clone.
+
+A clone that fails, from its plan to its commit, fails with NVX's
+`CloneFailure`, which attributes the failure, by the evidence that the host saw
+of it, such as a length that the request supplied, or a status with which the
+guest ended the VM, to the request, the staging of its files, the host, the
+template, or a cause that the evidence does not show, and which, from the
+clone's launch on, records it in the sandbox's store, with the stage at which
+the clone failed, how far it got, and how the teardown that followed ended. The
+command prints the failure's record, then releases the lease, `Store::release`,
+which removes the records with it, once the failure's teardown is resolved, and
+nothing of the clone runs: the clone had no VM, its VM exited, or NVX
+terminated it. A failure whose teardown is unresolved, such as that of a commit,
+or one that NVX could not record before it ended the clone's VM, leaves the
+lease, and the records, to a later reattach. Once it released the
+sandbox's lock, which comes after the template store's in NVX's lock order, the
+command quarantines the generation through its tombstone,
+`CloneFailure::quarantine`, for a failure of the template alone. A guest agent
+that does not answer the command's `Ping` or `Echo` once the clone's sandbox
+started fails the clone so, through `Started::fail`, which ends the launch,
+with the evidence that NVX's restore sequence gives the failures of its own
+sessions: the passing of the deadline, the loss of the session, or a failure
+of the protocol. A start that fails otherwise, at a step of the adapter's own
+before the clone's launch, such as the read of the images that the sandbox
+stages, releases the lease, since nothing of the clone runs.
+
+The commands that reattach take the lock of a clone's sandbox through the path
+of its lease, which they read under the lock, as a release requires. A sandbox
+that holds a lease must not move: they refuse one whose lease names another
+path, at which no sandbox holds the same lease, as the lease of a sandbox that
+moved does, rather than take another sandbox there for it. They then reattach
+to the clone with NVX's `reattach_clone`, in a new session of the adapter's
+clone order, in which the guest agent answers the `Activate` of the clone's
+record again, with the `Ready` that it answered once, and which they then use
+as `reattach` attaches one. The reattach ends a clone that runs under another
+runtime identity, without a word to its guest, or that fails the check of its
+`Ready`, through its verified process identity, and finishes the record of an
+earlier failure of the clone, whose teardown it resolves if it can. The
+command then releases the lease of a clone whose VM ended without a failure,
+and fails; ends as `start` does for a clone that failed; and keeps the lease
+and the records, and fails, for a clone whose state cannot be determined. A
+stop of a clone releases the lease once the store verified that the VM exited,
+and the clone's records, which the release removes, told how the clone ended,
+as `reattach_clone` reads them: a VM that had exited when the stop began ended
+without its holder, as NVX's `Vmm::stop_unless_exited`, which then stops
+nothing, tells by keeping the runtime record of its launch, and the stop ends
+as the other commands do for a clone that they find so, while a VM that the
+guest ended, once the stop began, with a status that is evidence of a failure,
+such as its repair's, failed, which ends the stop as it ends `start`.
+The commands release a lease through the template store that the clone's
+record names, once the lease is of it. A sandbox whose start ended before it
+recorded the clone holds a lease of a template store that no record names: it
+records no clone, or an earlier clone's, which a release leaves, of another
+template store perhaps. `reattach` and `stop` then release it with
+`--template TEMPLATES`, through the template store TEMPLATES, in place of the
+record's, which the release refuses unless the lease is of it.
+A tombstone of the generation refuses new leases of it, and leaves those that
+sandboxes hold to their clones, which reattach, stop, and release them as
+before.
 
 ### Commands
 
@@ -1416,19 +1547,42 @@ the directory that `NVX_ARTIFACTS_DIR` names, and the guest agent's build from
   the network before anything else, as a launch does, and checks the class
   before it creates the store, then prints the generation once the store has
   committed it.
-- `reattach STORE` takes the sandbox's lock, and reattaches to its VM, which
+- `reattach STORE [--template TEMPLATES]` takes the sandbox's lock, and
+  reattaches to its VM, which
   another process launched, and which it holds, although the VM is not its
   child, through its verified process identity. It reads the capability from
   the store, attaches a new session, in the session's next epoch, exchanges a
-  `Ping`, and exits, leaving the VM running.
-- `stop STORE` reattaches and attaches as `reattach` does, then stops the VM:
+  `Ping`, and exits, leaving the VM running. It reattaches to a
+  [clone](#clones) in the session in which the clone answers the `Activate` of
+  its record again, and releases the lease of a clone that ended, through the
+  template store TEMPLATES, if given, in place of the one that the clone's
+  record names.
+- `start STORE --template TEMPLATES --generation G --distro FORMAT:PATH --distro-identity UUID --upper (scratch:PATH | ram) [--memory MIB] [--workload-identity UID:GID] [--overlay-mode MODE] [--scratch-journal POLICY]`
+  starts a [clone](#clones) of the generation G of the template store
+  TEMPLATES in the sandbox store STORE, which it creates if needed, and whose
+  `stage` staged its images, which no one else may change: the image PATH, an
+  EROFS file system, `erofs`, of which the guest expects the identity UUID,
+  over the ext4 scratch image PATH, or RAM, with a memory target of MIB mebibytes, the template's RAM by default,
+  the workload identity UID:GID, if given, as which every execution runs, and
+  whose account the guest checks before the clone is ready, and the overlay
+  mode MODE and the scratch's journal policy POLICY, as a launch takes them.
+  Once the restore sequence started the clone's sandbox, it exchanges a `Ping`
+  and the longest `Echo` with the guest agent, commits the launch, and exits,
+  leaving the VM running, and the sandbox holding the lease. A clone that
+  fails, such as one whose activation failed before it was ready, and whose VM
+  ended with the status of the failure's class, from 50 to 58, ends as
+  [Clones](#clones) describes, with the record of its failure.
+- `stop STORE [--template TEMPLATES]` reattaches and attaches as `reattach`
+  does, then stops the VM:
   the adapter's `Stop`, which the guest agent confirms with `Stopped` before it
   ends the VM, is the stop's graceful step. It waits for the VM to exit, and
   checks the VM's outcome report: a success, with status 0 and a complete
   teardown. A VM whose guest agent does not confirm the stop is terminated, and
   the stop fails. The worker of a layered root tears the root down before it
   confirms, and reports a teardown that failed first: the stop then checks
-  that the VM ended with the teardown's status instead.
+  that the VM ended with the teardown's status instead. A stop of a clone
+  releases its lease once the VM exited, and the clone's records told how it
+  ended, as [Clones](#clones) describes.
 - `probe STORE PROBE...` reattaches and attaches as `reattach` does, then runs
   each PROBE in the VM's layered root, in order, and prints the facts that it
   found. A PROBE is the text of a [probe](#probes): its name, then its
@@ -1449,9 +1603,9 @@ the directory that `NVX_ARTIFACTS_DIR` names, and the guest agent's build from
   DIR, or `/`, with exactly the environment of its `--env` entries, then, if
   the VM's [network](#networks) has a proxy, the proxy's URL as the guest sees
   it in `http_proxy`, `https_proxy`, `HTTP_PROXY`, and `HTTPS_PROXY`, unless
-  the entries name any of them. Before it attaches, the command checks that the
-  framing still carries each start with the proxy's URL, and runs none of the
-  executions if one no longer fits. It runs for at most a minute, with 16 KiB
+  the entries name any of them. Before it starts any execution, the command
+  checks that the framing still carries each start with the proxy's URL, and
+  runs none of the executions if one no longer fits. It runs for at most a minute, with 16 KiB
   chunks and the credit of 4 of them for its input and 8 for its output, which
   its standard output and error share. The command keeps at most 16 MiB of each
   stream, and cancels an execution whose stream would exceed them. Execution N,
@@ -1461,11 +1615,16 @@ the directory that `NVX_ARTIFACTS_DIR` names, and the guest agent's build from
   broker instance only advance, while a broker restored from a snapshot has a
   new instance ID, so no command repeats the key of another's execution.
 
-`reattach`, `stop`, `probe`, and `exec` find a VM that another runtime identity
-launched mismatched, and then signal nothing: the VM keeps running. The commands
-print what they find as `KEY=VALUE` lines: `reattached` (`live`, `mismatched`,
-`exited`, or `indeterminate`), `differences` (the parts of the runtime identity
-in which a mismatched VM differs), `pid` (the VMM's process ID), `instance` and
+`reattach`, `stop`, `probe`, and `exec` find a VM that booted cold under
+another runtime identity mismatched, and then signal nothing: the VM keeps
+running. They end a clone that runs under another, as [Clones](#clones)
+describes. The commands print what they find as `KEY=VALUE` lines: `reattached`
+(`live`, `mismatched`, `exited`, or `indeterminate`, and of a clone, `live`,
+`ended`, `failed`, or `indeterminate`), `differences` (the parts of the runtime
+identity in which a mismatched VM differs), `progress` (the step that a clone,
+which ended, reached, from `planned`, `launching`, `spawned`, `event`,
+`acknowledged`, `activating`, `ready`, `starting`, and `started` to
+`committed`), `pid` (the VMM's process ID), `instance` and
 `epoch` (the identity of the session that they attached to), `root` (`ready` or
 `failed`: how the guest answered the root configuration, or `failed` when a stop
 finds that the root's teardown failed), `build` (the build of the guest agent
@@ -1479,25 +1638,48 @@ the probe named PROBE found), `exec.N.KEY` (what execution N did: its `launch`,
 `signal NUMBER`, or `none`; the `cause` for which a side ended it, such as
 `timed-out`, or `none`; the streams that it `truncated`, such as
 `stdout,stderr`, or `none`; whether it `settled`, `reusable` or `fenced`; and
-its `stdout` and `stderr`), `stopped` (`graceful`, `forced`, or `timed-out`),
+its `stdout` and `stderr`), `stopped` (`graceful`, `forced`, or `timed-out`, or
+`exited` once a clone's VM, which the command found running, had exited when
+the stop began, which stopped nothing),
 `outcome` (such as `success 0`, or `guest-exit 14` once the assembly failed),
 `teardown` (`complete` or `incomplete`: whether the VMM's teardown of the VM
 completed, which the outcome report records apart from the root's), `created`
 (`captured` once a capture made the template's generation, or `existing` once
 the store held it), `generation` (the generation's number in the template
-store), and `key` and `class` (the identities of its compatibility key and of
-its capture class, in hexadecimal). Values
+store, which `create` served or `start` leased), `key` and `class` (the
+identities of its compatibility key and of its capture class, in hexadecimal),
+`lease` (the identity of the lease that `start` took, 32 hexadecimal digits),
+`downtime` and `source` (the downtime of the leased generation's capture at the
+host's time, in nanoseconds, and the clock that measured it, `monotonic` or
+`utc`), `released` (the identity of the lease that a stop, or a start that
+failed, released), `failure.KEY` (the record of a clone's failure: its
+`outcome`, what the failure is attributed to, `request`, `staging`, `host`,
+`unknown`, `template`, or `repair`; its `evidence`, what the host saw of it,
+which attributes it, such as `supplied-length`; its `stage`, where the clone
+failed, `plan`, `launch`, `restore`, `activation`, `start`, `commit`, `run`, or
+`reattach`; its `progress`, the step that the clone reached, as `progress`
+spells it; its `status`, the status with which the guest ended the VM, as the
+VM's outcome report gives it, or `none`; its `teardown`, how the teardown that
+followed ended, `no-vm`, `exited`, `terminated`, or `unresolved`; and its
+`code`, the code of the failure's error, such as `runtime-mismatch`), and
+`quarantined` (whether the command quarantined the generation of a clone that
+failed: `yes`, for a failure of the template, or `no`). Values
 escape `\`, newlines, and carriage returns as `\\`, `\n`, and `\r`, and each
 byte of a program's output that is not part of UTF-8 text as `\xHH`. The
 commands exit with 0 once they did what they were asked, `exec` once every
-execution finished, whatever its outcome, with 3 when they find the VM
-mismatched, with 4 when the guest reported that a stage of the root failed, and
-the VM ended with the stage's status and a complete teardown, with 5 when the
-[step hook](#the-step-hook) ended a launch, with 6 when the guest failed a
-mapping of the table, and the VM stopped gracefully, with a success and a
-complete teardown, and with 1, after a diagnostic on standard error, when they
-fail. Without arguments, the program reports the contract that it was built
-against.
+execution finished, whatever its outcome, with 3 when they find a VM that
+booted cold mismatched, with 4 when the guest reported that a stage of the root
+failed, and the VM ended with the stage's status and a complete teardown, with
+5 when the [step hook](#the-step-hook) ended a command, with 6 when the guest
+failed a mapping of the table, and the VM stopped gracefully, with a success
+and a complete teardown, with 8 when a clone failed, once nothing of it runs
+and the command released its lease, with 9 when a clone failed, and its
+teardown is unresolved, so that the sandbox keeps the lease, and with 1, after
+a diagnostic on standard error, when they
+fail. A value of `RUNTIME_ADAPTER_HOST_TIME` that is not a host's time is a
+usage error, as is a value of `RUNTIME_ADAPTER_STEP_HOOK` that sets no step
+hook, with status 2. Without arguments, the program reports the contract that
+it was built against.
 
 ## Tests
 
@@ -1839,7 +2021,31 @@ The tests cover:
   the activation with the status of the host's session;
 - the record's workload identity, as which every execution runs, while a start
   that names an identity is refused with `EINVAL`, as is a start that names
-  none once the record has none.
+  none once the record has none;
+- the `activation` probe, which the worker answers itself, with no root
+  operation, executions running or not: the restore's reset, the host's first
+  message, the clone's `Ready`, and its start, in that order, after the
+  repair's acknowledgement, and the start of the first execution after them.
+
+`tests/clone_start.rs` checks, in the host-only configuration, on Linux and
+Windows, without a hypervisor:
+
+- the command lines of `start` that the host program refuses, each with status
+  2: missing options, a generation that is not a positive number, a scratch's
+  journal policy for an upper in RAM, invalid values, and the options of other
+  commands, and the options of `start` that other commands do not take, with a
+  clock fixture that is not a host's time too;
+- a start whose template store does not exist, or does not hold the
+  generation, and whose image the plan refuses, each with status 1 before it
+  needs NVX's artifacts or creates the sandbox's store;
+- the text form of a host's time, which `RUNTIME_ADAPTER_HOST_TIME` takes,
+  written and read back on both clocks, and the texts that are none;
+- a clone's record: its JSON, with the plan that `layered::LaunchRecord`
+  reads back, the template store and the generation that a stop reads, a
+  launch's record that is no clone's, and records that a reader refuses;
+- NVX's request of a clone, with the staged bindings, the memory target, and
+  the guest's defaults or the request's settings, and the images that the
+  sandbox's store does not stage, which it refuses.
 
 `tests/initramfs.rs` and `tests/runtime.rs` check, in the host-only
 configuration, on Linux and Windows:
@@ -1942,10 +2148,11 @@ and Windows:
 Windows, the [step hook](#the-step-hook): the values of
 `RUNTIME_ADAPTER_STEP_HOOK` that set it, with each step and action, a path with
 colons, and those that set none, which the host program refuses with status
-2; and a pause, which does nothing, and pauses for no time, at another step,
-creates its file with its step's name at its own, waits until the file is
-gone, on Windows until a pending deletion of the file completes, and says how
-long it paused, and which a file that is there already fails.
+2 for `launch`, `reattach`, and `stop`; and a pause, which does nothing, and
+pauses for no time, at another step, creates its file with its step's name at
+its own, waits until the file is gone, on Windows until a pending deletion of
+the file completes, and says how long it paused, and which a file that is
+there already fails.
 
 `tests/vm_steps.rs` checks the step hook on a real hypervisor, in the
 host-only configuration, with NVX's Ubuntu EROFS image over a copy of the
@@ -1961,9 +2168,9 @@ scratch template:
 - a launch that the hook ends at `checked`, with status 5, which leaves nothing
   of a launch in the store, and whose exit released the scratch image's claim,
   since the next launch takes it;
-- a launch paused at each step in turn, at which the store holds what the step
-  says, and the scratch image's claim is held at `checked`, and which then
-  goes on, and is stopped.
+- a launch paused at each of its steps in turn, at which the store holds what
+  the step says, and the scratch image's claim is held at `checked`, and which
+  then goes on, and is stopped.
 
 `tests/vm_restart.rs` checks the restart of an orchestrator, on a real
 hypervisor, in the host-only configuration:
@@ -2179,10 +2386,40 @@ transaction and records no launch, and a second creation prints `existing`,
 with the same generation, key, and class, without a capture: the slot's log of
 the VMM stays as the capture left it.
 
+### Clone scenarios
+
+`tests/vm_clone.rs` starts [clones](#clones) of templates on a real hypervisor,
+in the host-only configuration, through `runtime-adapter-host start`. Each test
+captures a template of its own, of 1 processor and 256 MiB of RAM with a
+capacity of 1 GiB, in a template store of its own, of a copy of NVX's Ubuntu
+EROFS image that a directory of the platform holds, which the clones stage as
+their image, and starts its clones, each in a sandbox store of its own, over a
+copy of the scratch template, which no one else may change either, or in RAM:
+
+| Test | Clones | Expects |
+| --- | --- | --- |
+| `one_generation_serves_clones_of_each_upper_and_memory_target` | Two at once, over a scratch image at 256 MiB, and in RAM at 512 MiB with untrusted lowers, then one over a scratch image at 1 GiB | Each started, by the host's monotonic clock, with its own lease, which the store lists with the clone's sandbox, its memory target online, its upper, overlay mode, and image's contents, and the events of its activation in order; a stop releases each lease; the generation's snapshot unchanged, and its payload with nothing but the capture's files once the clones stopped |
+| `a_start_refuses_what_the_template_cannot_serve_before_any_vmm_starts` | An image 4 KiB longer, one 4 KiB shorter, and one 100 bytes longer, than the placeholder, a scratch image of twice the template's scratch, memory targets of 2 GiB and of 320 MiB, unstaged images, and a generation that the store does not hold, then the generation once its key is gone | For those that NVX's plan refuses, status 8, with NVX's reason, and the record of a failure of the request, at the plan, without a VM, by the evidence of a length that the request supplied, of the image's geometry, which OpenVMM cannot attach, or of invalid targets, which quarantines nothing; for the others, status 1, without a record; any lease released, and no VMM's log or record in the sandbox; for the generation without its key, status 8, and the record of a failure of the template, at the plan, by the evidence of a malformed generation, which quarantines the generation, so that a later start fails without a lease |
+| `a_clone_whose_activation_fails_ends_before_it_is_ready` | A scratch image of zeros, a journal that the record forbids, a workload identity whose account the image lacks, and, through NVX's restore sequence, a ping, a start, or the start of an execution before the `Activate` | Status 8, no `Ready`, and the record of a failure, at the activation, once the VM exited: of the request, by the evidence of an unusable root, with the guest's status 54, or of invalid settings, with 55, or, before the `Activate`, of an unknown cause, by the protocol's, with 51, which the sandbox records until the release; nothing quarantined, and the lease released, with the records |
+| `a_clone_runs_its_executions_as_its_workload_identity_once_it_is_ready` | Over a scratch image, as nobody | An execution that runs as nobody, one that names an identity refused with `EINVAL`, and the first execution after the clone's start |
+| `a_generation_is_eligible_by_the_clock_of_its_capture` | At the host's time, then with clock fixtures: UTC a day behind, another boot an hour after the capture by UTC, and the restore window passed by each clock, or UTC before the capture | The host's monotonic clock on the boot of the capture, whatever UTC says, UTC after a reboot, with the fixture's downtime, and the store's refusal without a lease outside the window |
+| `a_clone_reads_no_more_of_its_disks_than_its_root_needs` | Over a scratch image, and in RAM | Less than an eighth of each disk read once the clone is ready, and each disk's whole length once the guest read it to its end |
+| `a_clone_s_time_settles_after_it_is_ready` | In RAM | The time daemon's restore check `ok`, after the restore's generation, without a violation, after a downtime that the host's monotonic clock measured, and a clone that still serves |
+| `each_command_reattaches_to_the_clone_from_a_new_process` | Over a scratch image, then `reattach`, `probe`, `exec`, and `reattach` again, each from a new process | The launch's records, committed, with the clone's VM and no failure; each command `live`, with the clone's VMM, in a new session of the same broker, in a later epoch; the events of the activation as they were; an execution as nobody; and a stop that releases the lease, with the records |
+| `a_host_program_of_another_runtime_ends_the_clone_through_its_verified_identity` | In RAM, then a `reattach` with another guest agent's build | Status 8, `reattached=failed`, without a session, and the record of a failure of the host, at the reattach, by the evidence of the runtime's mismatch, once NVX terminated the VMM, which quarantines nothing; the lease released, with the records; then another clone that starts and stops |
+| `a_clone_whose_vm_exits_once_a_stop_found_it_fails_before_its_lease_is_released` | In RAM, then a `stop` that the step hook pauses at `found`, while the test terminates the clone's VMM | Status 8, `reattached=live` and `stopped=exited`, and the record of a failure of an unknown cause, at the run, by the evidence of the clone's lost status, without a status of the guest's, once the VM exited, which quarantines nothing; the lease released, with the records; then another clone that starts and stops |
+| `a_tombstone_leaves_the_running_clone_of_its_generation_to_its_lease` | Over a scratch image, then a tombstone of its generation, through NVX's store | A start that the tombstone refuses, without a lease; the running clone, which reattaches, probes, runs an execution, and stops, which releases its lease; and the generation's snapshot unchanged |
+| `the_lease_of_a_start_that_ended_before_its_record_is_released_through_its_template_store` | In RAM, in a sandbox that NVX's store leased a generation to, as a start that ended before it recorded the clone leaves it: first moved, with another sandbox at its lease's path, which holds a lease of its own, then none; then in place, without a record of a clone, then with the record of an earlier clone, of another template | For the moved sandbox, a `stop` and a `reattach` that refuse it, since the sandbox at its lease's path does not hold its lease, and leave that sandbox's lease; in place, a stop that finds the clone `ended` at `planned`, and keeps the lease, whose template store no record names; a stop with another template store, which the release refuses; a `reattach` or a `stop` with `--template` naming the lease's own, which releases it; and a start and a stop in the sandbox after each |
+
+A test that fails keeps its template's directory, with the template store and
+the platform's image, as long as it keeps the directory of a clone that leases
+the template, whose VM might still run.
+
 ### Running the VM tests
 
 The VM tests, `tests/vm_restart.rs`, `tests/vm_steps.rs`,
-`tests/vm_layered.rs`, and `tests/vm_template.rs`, share their sandboxes and
+`tests/vm_layered.rs`, `tests/vm_template.rs`, and `tests/vm_clone.rs`, share
+their sandboxes and
 the fixtures of their layered roots through `tests/common`. A test that fails
 ends the VM that it left running, and the host program that it left paused,
 and keeps the sandbox's directory, whose path it prints, unless it can confirm
@@ -2228,8 +2465,8 @@ configuration. A change to the adapter is a test input of CI's
 NVX microVM tests. Their
 [workflow](../../.github/workflows/run-nvx-microvm-tests.yml) builds the
 host-only configuration on each backend, in the jobs that run the guest and
-sandbox steps, and runs its ignored tests, the adapter's VM scenarios and
-template captures, with `NVX_HYPERVISOR` naming the backend,
+sandbox steps, and runs its ignored tests, the adapter's VM scenarios, template
+captures, and clones, with `NVX_HYPERVISOR` naming the backend,
 `NVX_ARTIFACTS_DIR` the checkout, into which the job downloaded NVX's
 artifacts, their provenance, and the fixtures of the layered scenarios with
 the guest artifacts, as NVX's own layered scenarios take them, and
