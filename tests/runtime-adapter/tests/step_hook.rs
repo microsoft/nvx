@@ -1,7 +1,7 @@
 //! The host program's step hook, for tests: the values of `RUNTIME_ADAPTER_STEP_HOOK` that set it,
 //! and those that the host program refuses, and a pause, which waits until its file is gone, on
 //! Windows until a pending deletion of the file completes, and says how long it paused. The tests
-//! need no hypervisor; the VM tests pause launches with the hook, and end them.
+//! need no hypervisor; the VM tests pause launches and stops with the hook, and end them.
 #![cfg(feature = "host")]
 
 use std::ffi::OsStr;
@@ -18,6 +18,11 @@ use runtime_adapter::hook::{Action, HOOK_EXIT, STEP_HOOK, Step, StepHook};
 fn a_step_hook_names_a_step_and_what_it_does_there() {
     assert_eq!(
         Step::ALL.map(Step::as_str),
+        ["checked", "spawned", "ready", "commit", "found"]
+    );
+    // A launch reaches each step but that of a command that reattaches, in order.
+    assert_eq!(
+        Step::LAUNCH.map(Step::as_str),
         ["checked", "spawned", "ready", "commit"]
     );
     // Each step, with each action, reads back as it is written.
@@ -49,7 +54,7 @@ fn a_step_hook_names_a_step_and_what_it_does_there() {
     for (value, problem) in [
         (
             "",
-            "names the step \"\", not one of checked, spawned, ready, commit",
+            "names the step \"\", not one of checked, spawned, ready, commit, found",
         ),
         ("checkd:exit", "names the step \"checkd\""),
         ("Checked:exit", "names the step \"Checked\""),
@@ -170,21 +175,32 @@ fn a_pause_waits_until_the_deletion_of_its_file_completes() {
 }
 
 #[test]
-fn the_host_program_refuses_a_launch_whose_step_hook_it_cannot_read() {
-    for (value, problem) in [
-        ("nowhere:exit", "names the step \"nowhere\""),
-        ("ready:pause", "takes STEP:pause:PATH or STEP:exit"),
-    ] {
-        let output = Command::new(env!("CARGO_BIN_EXE_runtime-adapter-host"))
-            .args(["launch", "store", "--guest-agent", "agent"])
-            .env(STEP_HOOK, value)
-            .output()
-            .unwrap();
-        assert_eq!(output.status.code(), Some(2), "{value:?}: {output:?}");
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        assert!(
-            stderr.contains(problem) && stderr.contains("usage: runtime-adapter-host"),
-            "{value:?}: {stderr}"
-        );
+fn the_host_program_refuses_a_command_whose_step_hook_it_cannot_read() {
+    let commands: [&[&str]; 3] = [
+        &["launch", "store", "--guest-agent", "agent"],
+        &["reattach", "store"],
+        &["stop", "store"],
+    ];
+    for command in commands {
+        for (value, problem) in [
+            ("nowhere:exit", "names the step \"nowhere\""),
+            ("ready:pause", "takes STEP:pause:PATH or STEP:exit"),
+        ] {
+            let output = Command::new(env!("CARGO_BIN_EXE_runtime-adapter-host"))
+                .args(command)
+                .env(STEP_HOOK, value)
+                .output()
+                .unwrap();
+            assert_eq!(
+                output.status.code(),
+                Some(2),
+                "{command:?} {value:?}: {output:?}"
+            );
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(
+                stderr.contains(problem) && stderr.contains("usage: runtime-adapter-host"),
+                "{command:?} {value:?}: {stderr}"
+            );
+        }
     }
 }

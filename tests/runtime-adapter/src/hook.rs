@@ -1,6 +1,7 @@
-//! The host program's step hook, for tests: at a named [`Step`] of a launch, it pauses the
-//! program, so that a test can act between two steps, as when it replaces a staged image once the
-//! launch has checked it, or it exits the program without unwinding, as a crash would end it there.
+//! The host program's step hook, for tests: at a named [`Step`] of a launch, or of a command that
+//! reattaches to a VM, it pauses the program, so that a test can act between two steps, as when it
+//! replaces a staged image once the launch has checked it, or ends a clone's VM once a stop found
+//! it, or it exits the program without unwinding, as a crash would end it there.
 //!
 //! The variable [`STEP_HOOK`] names the step, and what the hook does at it, its [`Action`]:
 //!
@@ -12,8 +13,9 @@
 //!   the system releases when a process exits, such as its descriptors or handles, and their
 //!   locks.
 //!
-//! Without the variable, the hook does nothing. `runtime-adapter-host launch` reads it, and refuses
-//! a value that names no step or action, as it refuses a command line that is not a command.
+//! Without the variable, the hook does nothing. `runtime-adapter-host launch`, `reattach`, and
+//! `stop` read it, and refuse a value that names no step or action, as they refuse a command line
+//! that is not a command.
 
 use std::env;
 use std::ffi::OsStr;
@@ -32,8 +34,8 @@ pub const HOOK_EXIT: u8 = 5;
 /// How often a paused program checks whether its pause file is gone.
 const PAUSE_POLL: Duration = Duration::from_millis(10);
 
-/// A named step of a launch, at which the step hook acts: right after what the launch has done by
-/// then, and before what it does next.
+/// A named step of a launch, or of a command that reattaches to a VM, at which the step hook acts:
+/// right after what the command has done by then, and before what it does next.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Step {
     /// `checked`: the launch has checked the bindings of its images, and the export of its shares,
@@ -52,11 +54,26 @@ pub enum Step {
     /// has answered, and the launch is about to commit, so its journal still records the VMM,
     /// which no runtime record names yet.
     Commit,
+    /// `found`: `reattach` or `stop` has found the sandbox's VM running, and holds it, under the
+    /// sandbox's lock, with the session in which a clone answered the Activate of its record
+    /// again, if the VM is a clone's, but has sent the guest agent nothing more, and stopped
+    /// nothing.
+    Found,
 }
 
 impl Step {
-    /// The steps, in the order in which a launch reaches them.
-    pub const ALL: [Self; 4] = [Self::Checked, Self::Spawned, Self::Ready, Self::Commit];
+    /// The steps of a launch, in the order in which it reaches them.
+    pub const LAUNCH: [Self; 4] = [Self::Checked, Self::Spawned, Self::Ready, Self::Commit];
+
+    /// The steps: those of a launch, in the order in which it reaches them, then that of a command
+    /// that reattaches.
+    pub const ALL: [Self; 5] = [
+        Self::Checked,
+        Self::Spawned,
+        Self::Ready,
+        Self::Commit,
+        Self::Found,
+    ];
 
     /// Returns the step's name.
     pub const fn as_str(self) -> &'static str {
@@ -65,6 +82,7 @@ impl Step {
             Self::Spawned => "spawned",
             Self::Ready => "ready",
             Self::Commit => "commit",
+            Self::Found => "found",
         }
     }
 

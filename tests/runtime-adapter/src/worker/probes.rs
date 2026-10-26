@@ -9,6 +9,10 @@
 //! | `rename DIRECTORY` | It renames DIRECTORY, a directory of the layers, to `.runtime-adapter-renamed` at the top of the root, and back if it can: `outcome` is `allowed`, `refused` once the overlay refused it with `EXDEV`, or `failed: PROBLEM` |
 //! | `fill` | It writes a file in the root until the upper is full, then removes it, and writes a file there again: the upper's size, `total`, and the bytes available in it before, `available`, in bytes; the bytes that it wrote, `written`; the error that ended the writes, `error`: `ENOSPC` once the upper was full, or the problem; what the second file holds, `after`; and the guest's memory, `memory`, in bytes |
 //! | `devices` | The guest's disks, the block devices that a device backs: `disks`, each as `NAME:SECTORS:ACCESS`, its size in 512-byte sectors and its access mode, `ro` or `rw`, in the order of their names, separated by spaces |
+//! | `reads` | The sectors that the guest read from each of its disks, by the disk's statistics: `disks`, each as `NAME:SECTORS`, in 512-byte sectors, in the order of their names, separated by spaces |
+//! | `read-disks` | It reads each of the guest's disks from its start to its end, through the page cache: `disks`, each as `NAME:BYTES`, the bytes that it read, in the order of their names, separated by spaces |
+//! | `memory` | The guest's memory: the size of its memory blocks, `block-size`, how many are online, `blocks`, and their bytes, `online`, and the memory that the kernel manages, `total`, each in bytes |
+//! | `time` | The guest's time state, [`TIME_STATE`], which NVX's time service keeps: each line `KEY=VALUE` as a fact, with each `_` of its key as `-`, in order, leaving out a key that no fact may have, and a repeated one |
 //! | `first-partition` | The bytes of the first partition of a GPT disk that the assembly returned, without their trailing padding: how many, `length`, and the bytes, `bytes`, in hexadecimal, or `none` for both for an EROFS image |
 //! | `cgroups` | The file system at the cgroups' parent, `parent.type`, and its `parent.subtree-control`; whether each cgroup exists, `agent.exists` and `workload.exists`; `agent.memory.low`, `workload.memory.max`, and `workload.pids.max`; the number of processes in each, `agent.processes` and `workload.processes`; and `user-namespaces`, the guest's limit of user namespaces, or `unavailable` without them |
 //! | `processes` | For PID 1, `pid1`, the worker, `worker`, and PID 1's unrelated child, `sibling`: `NAME.pid`, and while the process exists, `NAME.state`, `NAME.ppid`, `NAME.root`, `NAME.cgroup`, `NAME.command`, and `NAME.namespaces`: `same` if it shares PID 1's, or the ones that differ |
@@ -17,11 +21,13 @@
 //! FILE and DIRECTORY are relative paths in the root, of normal components, and the other probes take
 //! no arguments. A value that a probe cannot read is `absent` if its file does not exist, and
 //! otherwise `unreadable: PROBLEM`. The probes of the mappings beneath the root, and of the host
-//! export that they come from, are those of the [`mapping`](super::mapping) module.
+//! export that they come from, are those of the [`mapping`](super::mapping) module. The worker of
+//! a clone also answers the probe of the clone's activation, `activation::ACTIVATION_PROBE`, as
+//! the `activation` module describes.
 
 use std::ffi::OsString;
 use std::fs::{self, File};
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::os::unix::ffi::OsStringExt;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Component, Path, PathBuf};
@@ -29,7 +35,7 @@ use std::path::{Component, Path, PathBuf};
 use nix::errno::Errno;
 use nix::sys::statvfs;
 
-use crate::probe::{Facts, Probe};
+use crate::probe::{Facts, Probe, valid_key};
 
 /// The file that the `contents` probe writes at the top of the root.
 pub const PROBE_FILE: &str = ".runtime-adapter-probe";
@@ -46,10 +52,18 @@ const FILL_CHUNK: usize = 1 << 20;
 /// How many bytes the `fill` probe writes beyond those available in the upper before it stops,
 /// which a file system that keeps its size never takes.
 const FILL_SLACK: u64 = 16 << 20;
-/// The guest's memory information, whose `MemTotal` the `fill` probe reports.
+/// The guest's memory information, whose `MemTotal` the `fill` and `memory` probes report.
 const MEMORY_INFORMATION: &str = "/proc/meminfo";
+/// The guest's memory blocks, of which the `memory` probe counts those online.
+const MEMORY_BLOCKS: &str = "/sys/devices/system/memory";
 /// The guest's block devices.
 const BLOCK_DEVICES: &str = "/sys/block";
+/// The directory of the guest's device nodes, through which the `read-disks` probe reads its disks.
+const DEVICE_NODES: &str = "/dev";
+/// How many bytes the `read-disks` probe reads at a time.
+const READ_CHUNK: usize = 1 << 20;
+/// The guest's time state, which the `time` probe reports.
+pub const TIME_STATE: &str = "/run/nvx/time/state";
 /// The mount table of the worker's mount namespace.
 pub(super) const MOUNTINFO: &str = "/proc/self/mountinfo";
 /// The guest's limit of user namespaces, which only a kernel with user namespaces has.
@@ -122,6 +136,10 @@ pub fn run(probe: &Probe, context: &Context<'_>, held: &mut Vec<File>) -> Result
         "rename",
         "fill",
         "devices",
+        "reads",
+        "read-disks",
+        "memory",
+        "time",
         "first-partition",
         "cgroups",
         "processes",
@@ -143,6 +161,10 @@ pub fn run(probe: &Probe, context: &Context<'_>, held: &mut Vec<File>) -> Result
         ("rename", Some(directory)) => rename(context, directory),
         ("fill", _) => fill(context),
         ("devices", _) => devices(),
+        ("reads", _) => reads(),
+        ("read-disks", _) => read_disks(),
+        ("memory", _) => memory(),
+        ("time", _) => time(),
         ("first-partition", _) => Ok(first_partition(context)),
         ("cgroups", _) => cgroups(context),
         ("processes", _) => processes(context),
@@ -331,26 +353,142 @@ fn fill(context: &Context<'_>) -> io::Result<Facts> {
 
 /// Runs the `devices` probe.
 fn devices() -> io::Result<Facts> {
-    let mut disks = Vec::new();
-    for entry in fs::read_dir(BLOCK_DEVICES)? {
-        let directory = entry?.path();
-        // A disk that a device backs, rather than a loop or RAM device.
-        if !directory.join("device").exists() {
-            continue;
-        }
-        let name = directory.file_name().unwrap_or_default().to_string_lossy();
+    let mut found = Vec::new();
+    for (name, directory) in disks()? {
         let access = match read(&directory.join("ro")).as_str() {
             "0" => "rw".to_owned(),
             "1" => "ro".to_owned(),
             other => other.to_owned(),
         };
         let sectors = read(&directory.join("size"));
-        disks.push(format!("{name}:{sectors}:{access}"));
+        found.push(format!("{name}:{sectors}:{access}"));
+    }
+    let mut facts = Facts::new();
+    facts.push("disks", found.join(" "));
+    Ok(facts)
+}
+
+/// Runs the `reads` probe.
+fn reads() -> io::Result<Facts> {
+    let mut found = Vec::new();
+    for (name, directory) in disks()? {
+        let stat = read(&directory.join("stat"));
+        let sectors = sectors_read(&stat).map_or(stat, |sectors| sectors.to_string());
+        found.push(format!("{name}:{sectors}"));
+    }
+    let mut facts = Facts::new();
+    facts.push("disks", found.join(" "));
+    Ok(facts)
+}
+
+/// Runs the `read-disks` probe.
+fn read_disks() -> io::Result<Facts> {
+    let mut found = Vec::new();
+    let mut chunk = vec![0; READ_CHUNK];
+    for (name, _) in disks()? {
+        let path = Path::new(DEVICE_NODES).join(&name);
+        let mut disk = File::open(&path).map_err(|error| {
+            io::Error::new(
+                error.kind(),
+                format!("cannot open {}: {error}", path.display()),
+            )
+        })?;
+        let mut bytes = 0u64;
+        loop {
+            match disk.read(&mut chunk) {
+                Ok(0) => break,
+                Ok(count) => bytes += count as u64,
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+                Err(error) => {
+                    let problem = format!("cannot read {}: {error}", path.display());
+                    return Err(io::Error::new(error.kind(), problem));
+                }
+            }
+        }
+        found.push(format!("{name}:{bytes}"));
+    }
+    let mut facts = Facts::new();
+    facts.push("disks", found.join(" "));
+    Ok(facts)
+}
+
+/// Runs the `memory` probe.
+fn memory() -> io::Result<Facts> {
+    let blocks = Path::new(MEMORY_BLOCKS);
+    let text = fs::read_to_string(blocks.join("block_size_bytes"))?;
+    let block_size = u64::from_str_radix(text.trim(), 16).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("{MEMORY_BLOCKS}/block_size_bytes holds no block size: {text:?}"),
+        )
+    })?;
+    let mut online = 0u64;
+    for entry in fs::read_dir(blocks)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let block = name
+            .to_str()
+            .and_then(|name| name.strip_prefix("memory"))
+            .is_some_and(|number| !number.is_empty() && number.bytes().all(|b| b.is_ascii_digit()));
+        if block && read(&entry.path().join("online")) == "1" {
+            online += 1;
+        }
+    }
+    let total = fs::read_to_string(MEMORY_INFORMATION)?;
+    let total = memory_total(&total).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("{MEMORY_INFORMATION} has no MemTotal in kB"),
+        )
+    })?;
+    let mut facts = Facts::new();
+    facts.push("block-size", block_size.to_string());
+    facts.push("blocks", online.to_string());
+    facts.push("online", online.saturating_mul(block_size).to_string());
+    facts.push("total", total.to_string());
+    Ok(facts)
+}
+
+/// Runs the `time` probe.
+fn time() -> io::Result<Facts> {
+    Ok(time_facts(&fs::read_to_string(TIME_STATE)?))
+}
+
+/// Returns the facts of the guest's time state `state`, as the `time` probe reports them.
+fn time_facts(state: &str) -> Facts {
+    let mut facts = Facts::new();
+    for line in state.lines() {
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        let key = key.replace('_', "-");
+        if valid_key(&key) && facts.get(&key).is_none() {
+            facts.push(key, value);
+        }
+    }
+    facts
+}
+
+/// Returns the guest's disks, the block devices that a device backs, rather than loop or RAM
+/// devices, each with its directory of [`BLOCK_DEVICES`], in the order of their names.
+fn disks() -> io::Result<Vec<(String, PathBuf)>> {
+    let mut disks = Vec::new();
+    for entry in fs::read_dir(BLOCK_DEVICES)? {
+        let directory = entry?.path();
+        if !directory.join("device").exists() {
+            continue;
+        }
+        let name = directory.file_name().unwrap_or_default().to_string_lossy();
+        disks.push((name.into_owned(), directory));
     }
     disks.sort();
-    let mut facts = Facts::new();
-    facts.push("disks", disks.join(" "));
-    Ok(facts)
+    Ok(disks)
+}
+
+/// Returns the sectors read of a block device's statistics, `/sys/block/NAME/stat`, its third
+/// field.
+fn sectors_read(stat: &str) -> Option<u64> {
+    stat.split_whitespace().nth(2)?.parse().ok()
 }
 
 /// Runs the `first-partition` probe.
@@ -737,6 +875,13 @@ rw,lowerdir=/run/a\\040b/layers/distro,metacopy=on,xino=on
             run(&with_argument, &context, &mut held),
             Err("the first-partition probe takes no arguments".to_owned())
         );
+        for name in ["reads", "read-disks", "memory", "time"] {
+            let with_argument = Probe::parse(&format!("{name} vda")).unwrap();
+            assert_eq!(
+                run(&with_argument, &context, &mut held),
+                Err(format!("the {name} probe takes no arguments"))
+            );
+        }
         for (text, problem) in [
             ("copy-up", "the copy-up probe takes one argument"),
             ("rename a b", "the rename probe takes one argument"),
@@ -769,6 +914,33 @@ rw,lowerdir=/run/a\\040b/layers/distro,metacopy=on,xino=on
             Ok(Path::new("usr/lib/os-release"))
         );
         assert!(held.is_empty());
+    }
+
+    #[test]
+    fn the_sectors_read_are_the_third_field_of_a_disk_s_statistics() {
+        let stat = "     163        0     8530      120        0        0        0        0 \
+                    0      168      120        0        0        0        0        0        0";
+        assert_eq!(sectors_read(stat), Some(8530));
+        assert_eq!(sectors_read("1 2"), None);
+        assert_eq!(sectors_read("1 2 x"), None);
+        assert_eq!(sectors_read("1 2 -3"), None);
+        assert_eq!(sectors_read("absent"), None);
+    }
+
+    #[test]
+    fn the_time_state_s_lines_are_facts_with_their_keys_in_the_facts_form() {
+        let state = "version=1\nrestore_status=ok\nlast_downtime_source=monotonic\n\
+                     Bad_Key=x\nempty=\nrestore_status=fail\nno value\nlast_step_ns=-2\n";
+        let facts = time_facts(state);
+        let expected = [
+            ("version", "1"),
+            ("restore-status", "ok"),
+            ("last-downtime-source", "monotonic"),
+            ("empty", ""),
+            ("last-step-ns", "-2"),
+        ];
+        assert_eq!(facts.iter().collect::<Vec<_>>(), expected);
+        assert!(time_facts("").is_empty());
     }
 
     #[test]
