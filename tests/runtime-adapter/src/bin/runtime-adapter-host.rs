@@ -97,21 +97,22 @@
 //!   the session's next epoch, and exchanges a `Ping`, leaving the VM running.
 //! - `runtime-adapter-host start STORE --template TEMPLATES --generation G --distro FORMAT:PATH
 //!   --distro-identity UUID --upper (scratch:PATH | ram) [--memory MIB] [--workload-identity
-//!   UID:GID] [--overlay-mode MODE] [--scratch-journal POLICY]` starts a clone of the generation G
-//!   of the template store TEMPLATES, an `nvx::host::template::Store`, in the sandbox store STORE,
-//!   which it creates if needed; see `runtime_adapter::clone`. It reads the generation from the
-//!   store's index, and, unless MIB mebibytes are given, its compatibility key, whose RAM is then
-//!   the clone's memory target, before it needs NVX's artifacts. A key that cannot be read is left
-//!   to NVX's plan, which reads it again, and attributes the failure, to the generation or to the
-//!   host, as it does for every clone. The store then leases the generation to
-//!   the sandbox, at the host's time, with `Store::acquire`, which refuses a generation that a
-//!   tombstone quarantines, or that is not eligible then, and NVX's `ClonePlan` checks the clone
-//!   against the generation, from the metadata of its files alone: its image, the raw file PATH,
-//!   an EROFS filesystem, `erofs`, or a GPT disk, `gpt`, of which the guest expects the identity
-//!   UUID, of the length of the template's placeholder, whatever the placeholder's format, its
-//!   upper, the ext4 scratch image PATH, of the geometry of the template's scratch, or RAM, with
-//!   the bindings that STORE stages for the images, as `stage` stages them, and its memory target,
-//!   in whole blocks, from the template's RAM to its capacity.
+//!   UID:GID] [--overlay-mode MODE] [--scratch-journal POLICY] [--first-partition-bound BYTES]`
+//!   starts a clone of the generation G of the template store TEMPLATES, an
+//!   `nvx::host::template::Store`, in the sandbox store STORE, which it creates if needed; see
+//!   `runtime_adapter::clone`. It reads the generation from the store's index, and, unless MIB
+//!   mebibytes are given, its compatibility key, whose RAM is then the clone's memory target,
+//!   before it needs NVX's artifacts. A key that cannot be read is left to NVX's plan, which reads
+//!   it again, and attributes the failure, to the generation or to the host, as it does for every
+//!   clone. The store then leases the generation to the sandbox, at the host's time, with
+//!   `Store::acquire`, which refuses a generation that a tombstone quarantines, or that is not
+//!   eligible then, and NVX's `ClonePlan` checks the clone against the generation, from the
+//!   metadata of its files alone: its image, the raw file PATH, an EROFS filesystem, `erofs`, or a
+//!   GPT disk, `gpt`, of which the guest expects the identity UUID, of the length of the template's
+//!   placeholder, whatever the placeholder's format, its upper, the ext4 scratch image PATH, of the
+//!   geometry of the template's scratch, or RAM, with the bindings that STORE stages for the
+//!   images, as `stage` stages them, and its memory target, in whole blocks, from the template's
+//!   RAM to its capacity.
 //!   A request that the template cannot serve fails there, before any VMM starts. The command
 //!   records the clone in STORE, with the template store and the generation; see
 //!   `runtime_adapter::clone::CloneRecord`. OpenVMM then restores the generation's snapshot in
@@ -120,10 +121,14 @@
 //!   adapter's clone order, `runtime_adapter::host::CloneOrder`, with the clone's activation
 //!   record: the workload identity UID:GID, if given, as which every execution runs, whose account
 //!   the guest checks in the clone's root before it is ready, and the overlay mode MODE and the
-//!   scratch's journal policy POLICY, as a launch takes them. Once the clone is ready, the command
-//!   starts its sandbox, exchanges a `Ping` and the longest `Echo` with the guest agent, commits
-//!   the launch, and exits, leaving the VM running, and the sandbox holding the lease, which a stop
-//!   releases. A clone that fails, from its plan to its commit, fails with NVX's
+//!   scratch's journal policy POLICY, as a launch takes them, and for a GPT disk, the bound BYTES
+//!   of its first partition, 64 KiB unless given, as a launch's guest takes it by default. The
+//!   guest refuses a first partition larger than BYTES, and an upper that is not fresh, whose
+//!   `upper` or `work` directory on the scratch image exists and is not empty, as an earlier
+//!   clone's would be, before the clone is ready. Once the clone is ready, the command starts its
+//!   sandbox, exchanges a `Ping` and the longest `Echo` with the guest agent, commits the launch,
+//!   and exits, leaving the VM running, and the sandbox holding the lease, which a stop releases.
+//!   A clone that fails, from its plan to its commit, fails with NVX's
 //!   `nvx::host::template::CloneFailure`, which attributes the failure by its evidence, and records
 //!   it in STORE from the clone's launch on: the command prints the failure's record, releases the
 //!   lease once the failure's teardown is resolved, and nothing of the clone runs, or keeps it, and
@@ -410,6 +415,7 @@ const USAGE: &str = concat!(
     " [--memory MIB]\n",
     "           [--workload-identity UID:GID] [--overlay-mode MODE]",
     " [--scratch-journal POLICY]\n",
+    "           [--first-partition-bound BYTES]\n",
     "       runtime-adapter-host probe STORE PROBE... [--guest-build BUILD]\n",
     "       runtime-adapter-host exec STORE [--guest-build BUILD] EXECUTION [';' EXECUTION]...\n",
     "           EXECUTION: [--identity UID:GID [--groups GID,...] [--capabilities N,...]",
@@ -920,6 +926,9 @@ fn parse(arguments: Vec<OsString>) -> Result<Command, String> {
             if scratch.is_none() && options.scratch_journal.is_some() {
                 return Err("--scratch-journal needs --upper scratch:PATH".to_owned());
             }
+            if format == ImageFormat::Erofs && options.first_partition_bound.is_some() {
+                return Err("--first-partition-bound needs --distro gpt:PATH".to_owned());
+            }
             Command::Start {
                 store,
                 guest_build,
@@ -935,6 +944,7 @@ fn parse(arguments: Vec<OsString>) -> Result<Command, String> {
                         workload_identity: options.workload_identity,
                         overlay_mode: options.overlay_mode,
                         scratch_journal: options.scratch_journal,
+                        first_partition_bound: options.first_partition_bound,
                     },
                 }),
                 time: host_time_from_env()?,
@@ -1025,7 +1035,9 @@ fn parse_option(
             })?;
             options.scratch_journal = Some(policy);
         }
-        ("launch", "--first-partition-bound") if options.first_partition_bound.is_none() => {
+        ("launch" | "start", "--first-partition-bound")
+            if options.first_partition_bound.is_none() =>
+        {
             let value = text(value)?;
             let bound = value.parse::<u64>().ok().filter(|bound| *bound > 0);
             options.first_partition_bound = Some(bound.ok_or_else(|| {

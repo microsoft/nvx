@@ -4,12 +4,12 @@
 //! A [`Request`] holds what the host program's options choose of a clone: its image, an EROFS
 //! layer or a GPT disk of the length of the template's placeholder, its upper, on an ext4 scratch
 //! image or in RAM, its memory target, the workload identity as which its executions run, its
-//! overlay mode, and its scratch's journal policy. [`Request::plan`] plans the image over the
-//! upper as a launch plans a layered root, and [`Request::clone_request`] returns NVX's
-//! `nvx::host::template::CloneRequest` of it, with the bindings that the sandbox's store stages
-//! for its images, as `staged::Staged` records them: staging hashes, and a start never does.
-//! NVX's `ClonePlan` then checks the request against the leased generation before any VMM starts,
-//! from the metadata of the clone's files alone.
+//! overlay mode, its scratch's journal policy, and the bound of a GPT disk's first partition.
+//! [`Request::plan`] plans the image over the upper as a launch plans a layered root, and
+//! [`Request::clone_request`] returns NVX's `nvx::host::template::CloneRequest` of it, with the
+//! bindings that the sandbox's store stages for its images, as `staged::Staged` records them:
+//! staging hashes, and a start never does. NVX's `ClonePlan` then checks the request against the
+//! leased generation before any VMM starts, from the metadata of the clone's files alone.
 //!
 //! A clone's [record](CloneRecord) names the template store and the generation that the clone
 //! leases, beside the plan and the bindings, as the record of a launch names what it launched, so
@@ -77,6 +77,9 @@ pub struct Request {
     /// Whether the scratch may have a journal, or `None` for the guest's default, which allows
     /// one.
     pub scratch_journal: Option<JournalPolicy>,
+    /// The most bytes that the first partition of a GPT disk may hold, or `None` for
+    /// [`DEFAULT_FIRST_PARTITION_BOUND`], the default of a launch's guest.
+    pub first_partition_bound: Option<u64>,
 }
 
 impl Request {
@@ -103,8 +106,9 @@ impl Request {
     /// The record of the clone's activation names the workload identity, if any, the
     /// [`CLONE_HOSTNAME`], the image's own machine ID, the overlay's mode, and the scratch's
     /// journal policy, each the guest's default unless the request names it, as a root
-    /// configuration's are, and for a GPT disk, the bound of its first partition that a launch's
-    /// guest takes by default, [`DEFAULT_FIRST_PARTITION_BOUND`].
+    /// configuration's are, and the bound of a GPT disk's first partition, the default of a
+    /// launch's guest, [`DEFAULT_FIRST_PARTITION_BOUND`], unless the request names one. The record
+    /// of a clone of an EROFS layer leaves the bound out.
     ///
     /// Fails with [`ErrorKind::Unavailable`](nvx::ErrorKind::Unavailable) if the store stages no
     /// binding for the image, or for the scratch image of an upper on one, at its path.
@@ -150,7 +154,9 @@ impl Request {
             },
             overlay,
             journal,
-            first_partition_bound: DEFAULT_FIRST_PARTITION_BOUND,
+            first_partition_bound: self
+                .first_partition_bound
+                .unwrap_or(DEFAULT_FIRST_PARTITION_BOUND),
         })
     }
 }

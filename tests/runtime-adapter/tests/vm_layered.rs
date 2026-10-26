@@ -53,8 +53,6 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use nvx::exec::{Key, Limits, Timers, Window};
-use nvx::gpt::{Disk, Expected, ExpectedPartition};
-use nvx::uuid::Uuid;
 use runtime_adapter::GUEST_BUILD;
 use runtime_adapter::exec::Start;
 use runtime_adapter::frame::MAX_BODY;
@@ -65,6 +63,9 @@ use runtime_adapter::root::{
 use runtime_adapter::staged::STAGED_NAME;
 use serde_json::{Value, json};
 
+use common::gpt::{
+    self, Contents, LAYER_BLOCK, LAYER_BLOCKS, Layout, Partition, hexadecimal, small_layer,
+};
 use common::{Fixtures, Printed, Sandbox};
 
 /// The exit status of the host program's command that failed, after a diagnostic.
@@ -90,8 +91,6 @@ const PARTITION_GUIDS: [&str; 3] = [
     "0b7e4a2c-5d16-4f83-a9c0-1e2d3f4a5b62",
     "0b7e4a2c-5d16-4f83-a9c0-1e2d3f4a5b63",
 ];
-/// The type GUID of every partition of the scenarios' GPT disks: Linux's file system data.
-const LINUX_DATA: &str = "0fc63daf-8483-4772-8e79-3d69d8477de4";
 /// The size of the first partition of the scenarios' GPT disks, in bytes.
 const FIRST_PARTITION_SIZE: u64 = 4096;
 /// The bytes of the first partition that the guest returns: bytes that are not UTF-8, with a NUL
@@ -109,13 +108,6 @@ const LAYER_FILE: &str = "layer-file";
 const LAYER_FILE_SIZE: usize = 2500;
 /// The directory that the top layer of the scenarios' GPT disks holds.
 const LAYER_DIRECTORY: &str = "layer-directory";
-/// The size of a block of the layer that [`small_layer`] writes, in bytes.
-const LAYER_BLOCK: usize = 1024;
-/// The number of blocks of that layer: 128 KiB.
-const LAYER_BLOCKS: usize = 128;
-/// The number of inodes of that layer, of which the first ten are reserved, as in every ext2 file
-/// system, and the second is its top directory.
-const LAYER_INODES: usize = 16;
 /// The directory of a scenario's sandbox that holds the host directories and the file that a
 /// mapping table shares, as [`write_sources`] writes them.
 const SOURCES: &str = "sources";
@@ -2110,9 +2102,8 @@ fn tree(directory: &Path) -> BTreeMap<String, Option<String>> {
     found
 }
 
-/// Writes the GPT disk of the scenarios at `path`, as UEFI lays out a disk, with a protective MBR,
-/// the primary GPT header and its array of 128 entries, and the backup array and header at the
-/// disk's end, of its partitions in this order, each aligned to [`ALIGNMENT`]:
+/// Writes the GPT disk of the scenarios at `path`, with [`gpt::write_disk`], of its partitions in
+/// this order, each aligned to [`ALIGNMENT`]:
 ///
 /// 1. the first partition, of [`FIRST_PARTITION_SIZE`] bytes, which holds [`FIRST_PARTITION`],
 ///    then [`FIRST_PARTITION_PADDING`], then NUL bytes;
@@ -2121,15 +2112,10 @@ fn tree(directory: &Path) -> BTreeMap<String, Option<String>> {
 /// 3. the top layer, a [`small_layer`] that holds [`LAYER_FILE`] and [`LAYER_DIRECTORY`], with
 ///    the corruption or journal that `top_layer` names.
 ///
-/// Then checks the disk as the guest's assembly does, through `nvx::gpt`, with the GUIDs and
-/// sizes that it wrote.
+/// Then checks that the first partition holds [`FIRST_PARTITION`] without its padding, as the
+/// guest returns it.
 fn write_gpt_disk(path: &Path, template: &Path, top_layer: TopLayer) {
     let template_size = fs::metadata(template).unwrap().len();
-    assert_eq!(
-        template_size % SECTOR,
-        0,
-        "the scratch template is whole sectors"
-    );
     let contents = b"runtime-adapter "
         .iter()
         .copied()
@@ -2143,274 +2129,31 @@ fn write_gpt_disk(path: &Path, template: &Path, top_layer: TopLayer) {
         TopLayer::CyclicJournal => add_cyclic_journal(&mut top, false),
         TopLayer::NeedsRecovery => add_cyclic_journal(&mut top, true),
     }
-    let sizes = [
-        FIRST_PARTITION_SIZE,
-        template_size,
-        u64::try_from(top.len()).unwrap(),
+    let first = [FIRST_PARTITION, FIRST_PARTITION_PADDING].concat();
+    let partitions = [
+        Partition {
+            guid: PARTITION_GUIDS[0],
+            size: FIRST_PARTITION_SIZE,
+            contents: Contents::Bytes(&first),
+        },
+        Partition {
+            guid: PARTITION_GUIDS[1],
+            size: template_size,
+            contents: Contents::File(template),
+        },
+        Partition {
+            guid: PARTITION_GUIDS[2],
+            size: u64::try_from(top.len()).unwrap(),
+            contents: Contents::Bytes(&top),
+        },
     ];
-    let mut extents = Vec::new();
-    let mut next = ALIGNMENT;
-    for size in sizes {
-        let last = next + size / SECTOR - 1;
-        extents.push((next, last));
-        next = (last + 1).next_multiple_of(ALIGNMENT);
-    }
-    // The backup array's 32 sectors and the backup header end the disk, after the usable sectors.
-    let sectors = next + ALIGNMENT;
-    let (first_usable, last_usable) = (34_u64, sectors - 34);
-    let (backup_entries, backup_header) = (sectors - 33, sectors - 1);
-    let guid = |text: &str| Uuid::parse(text).unwrap().to_bytes_le();
-
-    let mut entries = vec![0; 128 * 128];
-    for (entry, ((first, last), unique)) in entries
-        .chunks_exact_mut(128)
-        .zip(extents.iter().zip(PARTITION_GUIDS))
-    {
-        entry[0..16].copy_from_slice(&guid(LINUX_DATA));
-        entry[16..32].copy_from_slice(&guid(unique));
-        entry[32..40].copy_from_slice(&first.to_le_bytes());
-        entry[40..48].copy_from_slice(&last.to_le_bytes());
-    }
-    let entries_crc = crc32(&entries);
-    let header = |own: u64, alternate: u64, array: u64| {
-        let mut header = vec![0; 92];
-        header[0..8].copy_from_slice(b"EFI PART");
-        header[8..12].copy_from_slice(&0x0001_0000_u32.to_le_bytes());
-        header[12..16].copy_from_slice(&92_u32.to_le_bytes());
-        header[24..32].copy_from_slice(&own.to_le_bytes());
-        header[32..40].copy_from_slice(&alternate.to_le_bytes());
-        header[40..48].copy_from_slice(&first_usable.to_le_bytes());
-        header[48..56].copy_from_slice(&last_usable.to_le_bytes());
-        header[56..72].copy_from_slice(&guid(DISK_GUID));
-        header[72..80].copy_from_slice(&array.to_le_bytes());
-        header[80..84].copy_from_slice(&128_u32.to_le_bytes());
-        header[84..88].copy_from_slice(&128_u32.to_le_bytes());
-        header[88..92].copy_from_slice(&entries_crc.to_le_bytes());
-        let crc = crc32(&header);
-        header[16..20].copy_from_slice(&crc.to_le_bytes());
-        header
+    let layout = Layout {
+        guid: DISK_GUID,
+        partitions: &partitions,
+        alignment: ALIGNMENT,
+        length: None,
     };
-    // The protective MBR: one record of type 0xEE, from LBA 1 over the rest of the disk, with the
-    // addresses that UEFI gives it.
-    let mut mbr = vec![0; 512];
-    let protective = u32::try_from(sectors - 1).unwrap_or(u32::MAX);
-    mbr[446..450].copy_from_slice(&[0x00, 0x00, 0x02, 0x00]);
-    mbr[450..454].copy_from_slice(&[0xee, 0xff, 0xff, 0xff]);
-    mbr[454..458].copy_from_slice(&1_u32.to_le_bytes());
-    mbr[458..462].copy_from_slice(&protective.to_le_bytes());
-    mbr[510..512].copy_from_slice(&[0x55, 0xaa]);
-
-    let mut disk = File::create(path).unwrap();
-    disk.set_len(sectors * SECTOR).unwrap();
-    let parts = [
-        (0, mbr),
-        (1, header(1, backup_header, 2)),
-        (2, entries.clone()),
-        (backup_entries, entries),
-        (backup_header, header(backup_header, 1, backup_entries)),
-        (
-            extents[0].0,
-            [FIRST_PARTITION, FIRST_PARTITION_PADDING].concat(),
-        ),
-        (extents[2].0, top),
-    ];
-    for (sector, bytes) in parts {
-        disk.seek(SeekFrom::Start(sector * SECTOR)).unwrap();
-        disk.write_all(&bytes).unwrap();
-    }
-    disk.seek(SeekFrom::Start(extents[1].0 * SECTOR)).unwrap();
-    io::copy(&mut File::open(template).unwrap(), &mut disk).unwrap();
-    disk.sync_all().unwrap();
-    drop(disk);
-
-    let disk = File::open(path).unwrap();
-    let partitions = PARTITION_GUIDS
-        .iter()
-        .zip(sizes)
-        .map(|(unique, size)| {
-            ExpectedPartition::new()
-                .unique_guid(Uuid::parse(unique).unwrap())
-                .size(size)
-        })
-        .collect();
-    let expected = Expected::new()
-        .disk_guid(Uuid::parse(DISK_GUID).unwrap())
-        .partitions(partitions);
-    let read = Disk::read(&disk, 512, sectors * SECTOR, &expected).unwrap();
-    let first_partition = read
-        .read_first_partition(&disk, usize::try_from(FIRST_PARTITION_SIZE).unwrap())
-        .unwrap();
-    assert_eq!(first_partition, FIRST_PARTITION);
-}
-
-/// Returns a small file system in the ext2 format, of [`LAYER_BLOCKS`] blocks of [`LAYER_BLOCK`]
-/// bytes, which the kernel's ext4 driver mounts as an ext4 file system without features: its top
-/// directory holds the regular `files`, each a name and its bytes, of at most 12 blocks each,
-/// then the empty `directories`, each with mode 0755, and at most [`LAYER_INODES`] inodes in all.
-///
-/// Block 1 holds the superblock, 2 the group descriptor, 3 and 4 the block and inode bitmaps, 5
-/// and 6 the inode table, 7 the top directory, and the blocks after them the files' bytes and the
-/// directories.
-fn small_layer(files: &[(&str, &[u8])], directories: &[&str]) -> Vec<u8> {
-    /// Writes `value` at `offset` of `image`, in little-endian order.
-    fn put<const N: usize>(image: &mut [u8], offset: usize, value: [u8; N]) {
-        image[offset..offset + N].copy_from_slice(&value);
-    }
-    /// Writes the inode `number` of `image`, of `mode`, `size` bytes, and `links` links, whose data
-    /// is in `blocks`, at most the 12 that an inode addresses directly.
-    fn inode(
-        image: &mut [u8],
-        number: usize,
-        mode: u16,
-        size: usize,
-        links: usize,
-        blocks: &[usize],
-    ) {
-        assert!(
-            blocks.len() <= 12,
-            "an inode of the layer addresses 12 blocks"
-        );
-        let offset = 5 * LAYER_BLOCK + (number - 1) * 128;
-        put(image, offset, mode.to_le_bytes());
-        put(
-            image,
-            offset + 4,
-            u32::try_from(size).unwrap().to_le_bytes(),
-        );
-        put(
-            image,
-            offset + 26,
-            u16::try_from(links).unwrap().to_le_bytes(),
-        );
-        // The number of 512-byte sectors that the data takes.
-        let sectors = u32::try_from(blocks.len() * LAYER_BLOCK / 512).unwrap();
-        put(image, offset + 28, sectors.to_le_bytes());
-        for (index, block) in blocks.iter().enumerate() {
-            let block = u32::try_from(*block).unwrap();
-            put(image, offset + 40 + 4 * index, block.to_le_bytes());
-        }
-    }
-    /// Writes the directory `entries` into `block` of `image`, each an inode, a name, and a file
-    /// type, the last of which spans the rest of the block.
-    fn directory(image: &mut [u8], block: usize, entries: &[(usize, &str, u8)]) {
-        let (mut offset, end) = (block * LAYER_BLOCK, (block + 1) * LAYER_BLOCK);
-        for (index, (inode, name, kind)) in entries.iter().enumerate() {
-            let length = if index + 1 == entries.len() {
-                end - offset
-            } else {
-                (8 + name.len()).next_multiple_of(4)
-            };
-            put(image, offset, u32::try_from(*inode).unwrap().to_le_bytes());
-            put(
-                image,
-                offset + 4,
-                u16::try_from(length).unwrap().to_le_bytes(),
-            );
-            image[offset + 6] = u8::try_from(name.len()).unwrap();
-            image[offset + 7] = *kind;
-            image[offset + 8..offset + 8 + name.len()].copy_from_slice(name.as_bytes());
-            offset += length;
-        }
-    }
-    /// Sets the bits `bits` of the bitmap in `block` of `image`.
-    fn set(image: &mut [u8], block: usize, bits: std::ops::Range<usize>) {
-        for bit in bits {
-            image[block * LAYER_BLOCK + bit / 8] |= 1 << (bit % 8);
-        }
-    }
-
-    let (top, regular, directory_type) = (2, 1, 2);
-    let mut image = vec![0; LAYER_BLOCK * LAYER_BLOCKS];
-    // The first block and the first inode that are free.
-    let (mut block, mut number) = (8, 11);
-    let mut entries = vec![(top, ".", directory_type), (top, "..", directory_type)];
-    for (name, bytes) in files {
-        let blocks = (block..block + bytes.len().div_ceil(LAYER_BLOCK)).collect::<Vec<_>>();
-        image[block * LAYER_BLOCK..block * LAYER_BLOCK + bytes.len()].copy_from_slice(bytes);
-        inode(&mut image, number, 0o100_644, bytes.len(), 1, &blocks);
-        entries.push((number, *name, regular));
-        block += blocks.len();
-        number += 1;
-    }
-    for name in directories {
-        directory(
-            &mut image,
-            block,
-            &[(number, ".", directory_type), (top, "..", directory_type)],
-        );
-        inode(&mut image, number, 0o040_755, LAYER_BLOCK, 2, &[block]);
-        entries.push((number, *name, directory_type));
-        block += 1;
-        number += 1;
-    }
-    directory(&mut image, 7, &entries);
-    inode(
-        &mut image,
-        top,
-        0o040_755,
-        LAYER_BLOCK,
-        2 + directories.len(),
-        &[7],
-    );
-    assert!(
-        block <= LAYER_BLOCKS && number <= LAYER_INODES + 1,
-        "the layer is too small"
-    );
-
-    // The bitmaps of the used blocks, from block 1, and inodes, from inode 1, whose bits past the
-    // last block and inode are set, as `mke2fs` sets them.
-    set(&mut image, 3, 0..block - 1);
-    set(&mut image, 3, LAYER_BLOCKS - 1..LAYER_BLOCK * 8);
-    set(&mut image, 4, 0..number - 1);
-    set(&mut image, 4, LAYER_INODES..LAYER_BLOCK * 8);
-    let free_blocks = LAYER_BLOCKS - block;
-    let free_inodes = LAYER_INODES + 1 - number;
-
-    // The superblock: one group of blocks, inodes of 128 bytes, the first of them not reserved,
-    // 11, and only the `filetype` feature.
-    let superblock = LAYER_BLOCK;
-    for (offset, value) in [
-        (0x00, LAYER_INODES),
-        (0x04, LAYER_BLOCKS),
-        (0x0c, free_blocks),
-        (0x10, free_inodes),
-        (0x14, 1),
-        (0x20, LAYER_BLOCK * 8),
-        (0x24, LAYER_BLOCK * 8),
-        (0x28, LAYER_INODES),
-        (0x4c, 1),
-        (0x54, 11),
-        (0x60, 0x2),
-    ] {
-        let value = u32::try_from(value).unwrap();
-        put(&mut image, superblock + offset, value.to_le_bytes());
-    }
-    for (offset, value) in [
-        (0x36, 0xffff),
-        (0x38, 0xef53),
-        (0x3a, 1),
-        (0x3c, 1),
-        (0x58, 128),
-    ] {
-        put(&mut image, superblock + offset, u16::to_le_bytes(value));
-    }
-    let uuid = Uuid::parse("2d4e6f80-91a2-4b3c-8d5e-6f708192a3b4").unwrap();
-    image[superblock + 0x68..superblock + 0x78].copy_from_slice(uuid.as_bytes());
-
-    // The group descriptor: where the bitmaps and the inode table are, and what is free.
-    let descriptor = 2 * LAYER_BLOCK;
-    for (offset, value) in [(0x00, 3), (0x04, 4), (0x08, 5)] {
-        put(&mut image, descriptor + offset, u32::to_le_bytes(value));
-    }
-    for (offset, value) in [
-        (0x0c, free_blocks),
-        (0x0e, free_inodes),
-        (0x10, 1 + directories.len()),
-    ] {
-        let value = u16::try_from(value).unwrap();
-        put(&mut image, descriptor + offset, value.to_le_bytes());
-    }
-    image
+    assert_eq!(gpt::write_disk(path, &layout), FIRST_PARTITION);
 }
 
 /// Corrupts `layer`, a [`small_layer`]: its top directory's inode, inode 2, loses its mode, while
@@ -2488,26 +2231,6 @@ fn add_cyclic_journal(layer: &mut Vec<u8>, needs_recovery: bool) {
             block[offset..offset + 4].copy_from_slice(&value.to_be_bytes());
         }
     }
-}
-
-/// Returns the CRC-32 of `bytes`, which GPT's headers and entry arrays hold: of the reflected
-/// polynomial 0xEDB88320, from all ones, inverted.
-fn crc32(bytes: &[u8]) -> u32 {
-    !bytes.iter().fold(!0, |crc, byte| {
-        (0..8).fold(crc ^ u32::from(*byte), |crc: u32, _| {
-            (crc >> 1) ^ (0xedb8_8320 & (crc & 1).wrapping_neg())
-        })
-    })
-}
-
-/// Returns `bytes` in lowercase hexadecimal, as the `first-partition` probe reports them.
-fn hexadecimal(bytes: &[u8]) -> String {
-    const DIGITS: &[u8; 16] = b"0123456789abcdef";
-    bytes
-        .iter()
-        .flat_map(|byte| [byte >> 4, byte & 0xf])
-        .map(|digit| char::from(DIGITS[usize::from(digit)]))
-        .collect()
 }
 
 /// The capabilities that an entry allows, by their names in the cases of the `entries` probe, each
