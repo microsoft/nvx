@@ -1110,4 +1110,43 @@ mod tests {
         assert!(elapsed < Duration::from_secs(1), "{elapsed:?}");
         assert!(process.wait(Instant::now()).unwrap().unwrap());
     }
+
+    #[test]
+    fn a_restore_ready_client_that_closed_before_its_connection_was_accepted_is_read_to_its_end() {
+        let pid = std::process::id();
+        let receive_all = |listener: &mut ReadyListener| {
+            let mut received = Vec::new();
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while listener
+                .receive(pid, &mut received, 64, Duration::from_millis(50))
+                .unwrap()
+            {
+                assert!(Instant::now() < deadline, "the endpoint did not close");
+            }
+            received
+        };
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("ready.sock");
+        // A client that sent nothing, as a VMM that fails as it starts, and one that sent its
+        // event, each closed before the listener accepted their connection: what they sent
+        // remains to read, and then the end of the connection.
+        for sent in [&b""[..], b"the event\n"] {
+            let (endpoint, mut listener) = listen_ready(&path).unwrap();
+            let mut client = UnixStream::connect(&endpoint).unwrap();
+            std::io::Write::write_all(&mut client, sent).unwrap();
+            drop(client);
+            assert_eq!(receive_all(&mut listener), sent);
+        }
+        // A client that closes once the listener accepted its connection.
+        let (endpoint, mut listener) = listen_ready(&path).unwrap();
+        let client = UnixStream::connect(&endpoint).unwrap();
+        let mut received = Vec::new();
+        assert!(
+            listener
+                .receive(pid, &mut received, 64, Duration::from_millis(50))
+                .unwrap()
+        );
+        drop(client);
+        assert_eq!(receive_all(&mut listener), b"");
+    }
 }

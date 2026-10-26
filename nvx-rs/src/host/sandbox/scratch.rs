@@ -257,6 +257,12 @@ impl ScratchBinding {
         self.length
     }
 
+    /// Returns the binding's version, which a [check](Self::check) requires to be
+    /// [`SCRATCH_BINDING_VERSION`].
+    pub(crate) fn version(&self) -> u32 {
+        self.version
+    }
+
     /// Returns the binding of the image that `seal` seals.
     fn of(seal: &FileSeal) -> Self {
         Self {

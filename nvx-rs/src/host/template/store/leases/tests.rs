@@ -18,8 +18,8 @@ use crate::activation::TemplateReference;
 use crate::host::process::{Process, ProcessRef};
 use crate::host::store::files::write_private;
 use crate::host::store::{
-    CLONE_ACTIVATION_NAME, CLONE_SCRATCH_NAME, FORMAT, LOCK_NAME, LaunchState, RESTORE_READY_NAME,
-    RUNTIME_NAME, Recovery, RuntimeIdentity,
+    CLONE_ACTIVATION_NAME, CLONE_FAILURE_NAME, CLONE_PROGRESS_NAME, CLONE_SCRATCH_NAME, FORMAT,
+    LOCK_NAME, LaunchState, RESTORE_READY_NAME, RUNTIME_NAME, Recovery, RuntimeIdentity,
 };
 use crate::host::supervisor::{self, Reattached, StopOutcome, VmmCommand};
 use crate::host::template::eligibility::MAX_DOWNTIME_NS;
@@ -819,6 +819,8 @@ fn a_release_makes_the_removal_of_its_binding_durable_before_it_removes_its_reco
     let kept = [
         CLONE_SCRATCH_NAME,
         CLONE_ACTIVATION_NAME,
+        CLONE_PROGRESS_NAME,
+        CLONE_FAILURE_NAME,
         RESTORE_READY_NAME,
     ];
     let synced = RefCell::new(Vec::new());
@@ -1242,6 +1244,8 @@ fn a_release_ends_the_lease_of_the_sandbox_whose_lock_it_holds_whatever_its_path
     let kept = [
         CLONE_SCRATCH_NAME,
         CLONE_ACTIVATION_NAME,
+        CLONE_PROGRESS_NAME,
+        CLONE_FAILURE_NAME,
         RESTORE_READY_NAME,
     ];
     for sandbox in [&leased_sandbox, &other] {

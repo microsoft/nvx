@@ -2,6 +2,7 @@
 //! binding: regular files that are not links, which they read within a bound, and the identity of
 //! a file that a template module holds open.
 
+use std::fmt;
 use std::fs::{File, OpenOptions};
 use std::io::{self, Read};
 use std::path::Path;
@@ -9,9 +10,29 @@ use std::path::Path;
 use crate::host::seal::FileSeal;
 use crate::host::{filesystem, platform};
 
+/// Why a read of this module refused a file for what the file is, as [`is_refused`] tells.
+#[derive(Debug)]
+struct Refused(String);
+
+impl fmt::Display for Refused {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for Refused {}
+
+/// Returns whether `error` is one with which a read of this module refused a file for what the
+/// file is, rather than an operation of the host's that failed: a link, or a file that is not a
+/// regular file, which [`open_regular`] and [`open_regular_in`] refuse, and a file that holds
+/// more than its bound, which [`read_at_most`] refuses.
+pub(crate) fn is_refused(error: &io::Error) -> bool {
+    error.get_ref().is_some_and(|inner| inner.is::<Refused>())
+}
+
 /// Returns the error of a file that is a link, or not a regular file.
 fn not_regular() -> io::Error {
-    io::Error::other("it is a link, or not a regular file")
+    io::Error::other(Refused("it is a link, or not a regular file".to_owned()))
 }
 
 /// Returns whether `error`, with which an open or a removal of the file at `path` failed, means
@@ -99,9 +120,9 @@ pub(crate) fn read_at_most(file: File, limit: u64, what: &str) -> io::Result<Vec
     let mut bytes = Vec::new();
     file.take(limit + 1).read_to_end(&mut bytes)?;
     if bytes.len() as u64 > limit {
-        return Err(io::Error::other(format!(
+        return Err(io::Error::other(Refused(format!(
             "it holds more than the {limit} bytes that {what} may hold"
-        )));
+        ))));
     }
     Ok(bytes)
 }

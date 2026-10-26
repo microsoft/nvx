@@ -337,6 +337,12 @@ impl DistroBinding {
         self.policy
     }
 
+    /// Returns the binding's version, which a [check](Self::check) requires to be
+    /// [`BINDING_VERSION`].
+    pub(crate) fn version(&self) -> u32 {
+        self.version
+    }
+
     /// Returns the binding of `layer`, with the seals of its image and manifest and `policy`.
     fn new(
         layer: &SandboxLayer,

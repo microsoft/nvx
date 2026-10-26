@@ -369,8 +369,11 @@ impl Store {
     /// launch: the file of the scratch device of a clone whose upper is in RAM,
     /// [`CLONE_SCRATCH_NAME`](crate::host::store::CLONE_SCRATCH_NAME), which the clone's
     /// [plan](crate::host::template::ClonePlan) created, the clone's activation record,
-    /// [`CLONE_ACTIVATION_NAME`](crate::host::store::CLONE_ACTIVATION_NAME), and the socket of
-    /// its restore-ready event, [`RESTORE_READY_NAME`](crate::host::store::RESTORE_READY_NAME);
+    /// [`CLONE_ACTIVATION_NAME`](crate::host::store::CLONE_ACTIVATION_NAME), the socket of its
+    /// restore-ready event, [`RESTORE_READY_NAME`](crate::host::store::RESTORE_READY_NAME), and
+    /// its records, which last as long as the lease, its progress log,
+    /// [`CLONE_PROGRESS_NAME`](crate::host::store::CLONE_PROGRESS_NAME), and the record of its
+    /// failure, [`CLONE_FAILURE_NAME`](crate::host::store::CLONE_FAILURE_NAME);
     /// then, on Linux, the control socket of the clone's VMM, `<launch>.sock` in the leased
     /// generation's payload, after the launch that the lease reserved, whose absence it makes
     /// durable; then the clone binding, and once their removal is durable, the lease's record in
