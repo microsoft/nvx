@@ -594,8 +594,8 @@ fn payloads_are_checked_as_they_are_read() {
     let payload = store.payload_dir(published.generation());
     let key = payload.join(KEY_NAME);
     let bytes = fs::read(&key).unwrap();
-    // A key that is not a key's canonical encoding is refused as such.
-    write_private(&key, &[2, 0]).unwrap();
+    // A key of another version, as an earlier build wrote it, is refused as such.
+    write_private(&key, &[1, 0]).unwrap();
     let error = store.read_key(&published).unwrap_err();
     assert_eq!(error.code(), ErrorCode::FormatUnsupported, "{error}");
     assert!(

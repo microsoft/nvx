@@ -35,7 +35,7 @@ use std::time::Instant;
 
 use self::export::DirectoryExport;
 use self::failure::{Attribute, Fault, host_evidence};
-use super::key::TemplateKey;
+use super::key::{RefusedVersion, TemplateKey};
 use super::manifest::BlockGeometry;
 use super::plan::MEMORY_BLOCK_SIZE;
 use super::store::{Acquired, Generation, Lease, Store};
@@ -82,12 +82,10 @@ pub struct CloneRequest {
     /// The adapter's plan, which [`SandboxPlan::adapter`] makes, of the clone's image, its
     /// `distro`, an EROFS layer or a GPT disk, over its upper: in RAM, a tmpfs, as
     /// [`SandboxUpper::RAM`](crate::host::sandbox::SandboxUpper::RAM) plans it, or on the
-    /// caller's scratch image. Its network is the one of the template's NIC, which every restore
-    /// of the template attaches, or none for a template without a NIC: on the NIC's guest
-    /// network, which [`ClonePlan::new`] checks, and under the NIC's policy, which OpenVMM checks
-    /// as it restores the NIC, since the template's key names the policy only by OpenVMM's
-    /// identity of it. OpenVMM refuses to restore a clone under another policy, which ends its
-    /// launch once it began.
+    /// caller's scratch image. Its network must be the template's, which every restore of the
+    /// template attaches unchanged: the network that the template's class lowered to OpenVMM's
+    /// arguments, as its key records it, [`TemplateKey::network_arguments`], or for a template
+    /// without a NIC none, or one that lets nothing through, which attaches none either.
     pub adapter: SandboxPlan,
     /// The binding of the image.
     pub binding: DistroBinding,
@@ -195,6 +193,15 @@ pub enum CloneUpper {
 ///   the checked image, and with it the claim. Nothing reads, formats, or copies the image.
 /// - The memory target must be whole blocks of [`MEMORY_BLOCK_SIZE`], and of the template's own
 ///   memory blocks, from the template's RAM to its RAM capacity.
+/// - The network of the adapter's plan must be the template's: lowered to OpenVMM's arguments, as
+///   [`SandboxNetwork::openvmm_arguments`](crate::host::sandbox::SandboxNetwork::openvmm_arguments)
+///   lowers it, it must be the network that the template's key records,
+///   [`TemplateKey::network_arguments`], the guest's address and the policy of the template's NIC,
+///   or none for a template without a NIC. A template serves the clones of its network policy
+///   alone, and the restore passes the template's network unchanged, as the key records it, so no
+///   clone has ingress, host-loopback access to its listeners, or forwards, which no template's
+///   policy allows: a template's capture refuses a policy that allows ingress, or host-loopback
+///   access both ways, which forwards need.
 /// - The export, if the request has one, must be a plan that [`filesystem::plan`] could have made
 ///   for the container root, as [`ExportPlan::check`] finds it, of exactly one child, a
 ///   directory: a template's filesystem slot is dormant, and a restore binds one directory to it,
@@ -304,8 +311,8 @@ pub struct ClonePlan {
     activation: ActivationRecord,
     /// The capability of the clone's launch.
     capability: [u8; CAPABILITY_LEN],
-    /// The clone's devices, which its restore attaches: the adapter's plan of its image and
-    /// network, over the file of its `scratch` block device.
+    /// The clone's devices, which its restore attaches with the template's network: the adapter's
+    /// plan of its image, over the file of its `scratch` block device.
     devices: SandboxPlan,
     /// The clone's export, which its restore binds to the template's dormant filesystem slot, if
     /// it has one.
@@ -386,18 +393,21 @@ impl ClonePlan {
     ///   another key than the lease names, [`Evidence::MalformedGeneration`]; and as
     ///   [`Store::read_key`] and [`Store::snapshot_dir`] fail, once the store's directory of
     ///   generations passed their check, whose failure is the host's: the host's evidence for an
-    ///   I/O error, [`Evidence::IncompatibleHost`] for a key of another encoding version than this
-    ///   build reads, with [`ErrorCode::FormatUnsupported`], which a build that reads it may
+    ///   I/O error, [`Evidence::IncompatibleHost`] for a key of a later encoding version than
+    ///   this build reads, with [`ErrorCode::FormatUnsupported`], which a build that reads it may
     ///   serve, and [`Evidence::MalformedGeneration`] for a generation whose payload, key, or
     ///   snapshot is missing, is not private to the current user, or is malformed, as a key that
     ///   [`Store::read_key`] refuses for what it is: a link, a file that is not a regular file, or
-    ///   one that holds more than a key may;
+    ///   one that holds more than a key may, and for one whose key is of an earlier version, as an
+    ///   earlier build wrote it, which this build neither reads nor migrates, with
+    ///   [`ErrorCode::FormatUnsupported`], so that a quarantine lets its class capture again;
     /// - with [`ErrorKind::Unsupported`] for a request that the template cannot serve: a template
     ///   whose key names other contracts than this build speaks, the boot and control contracts
-    ///   of the runtime that captured it included, [`Evidence::IncompatibleHost`]; a plan with a
-    ///   network for a template without a NIC, without one for a template with a NIC, or with
-    ///   another guest network than the template's NIC, whose address OpenVMM restores from the
-    ///   snapshot, [`Evidence::InvalidSettings`]; and a memory target that is not whole blocks of
+    ///   of the runtime that captured it included, [`Evidence::IncompatibleHost`]; a plan whose
+    ///   network is not the template's, as the template's key records it,
+    ///   [`TemplateKey::network_arguments`]: a network for a template without a NIC, none for a
+    ///   template with a NIC, or one with another guest address or policy than the template's NIC,
+    ///   [`Evidence::InvalidSettings`]; and a memory target that is not whole blocks of
     ///   [`MEMORY_BLOCK_SIZE`] and of the template's memory blocks, from the template's RAM to its
     ///   RAM capacity, [`Evidence::InvalidTargets`];
     /// - with [`ErrorKind::Io`] for a template whose command line names the DNS server of its
@@ -709,15 +719,16 @@ impl fmt::Debug for ClonePlan {
 }
 
 /// Returns the devices of the clone of `request`, whose upper is `upper`: the adapter's plan of its
-/// image and network, over the file of its `scratch` block device, which every restore attaches,
-/// the sparse file of an upper in RAM included.
+/// image, over the file of its `scratch` block device, which every restore attaches, the sparse
+/// file of an upper in RAM included. The restore attaches the template's network, which its key
+/// records, rather than the plan's, which the plan's check found to be the same.
 fn devices_of(request: &CloneRequest, upper: &CloneUpper) -> SandboxPlan {
     let adapter = &request.adapter;
     let scratch = match upper {
         CloneUpper::Tmpfs { path } => SandboxUpper::scratch_at(paths::normalized(path)),
         CloneUpper::Scratch(_) => adapter.upper().clone(),
     };
-    SandboxPlan::adapter(adapter.distro().clone(), scratch).with_network(adapter.network().cloned())
+    SandboxPlan::adapter(adapter.distro().clone(), scratch)
 }
 
 /// Refuses a request that no clone takes, as [`ClonePlan::new`] describes, without reading or
@@ -779,17 +790,22 @@ fn check_request(request: &CloneRequest) -> Result<Option<DirectoryExport>, Faul
 
 /// Returns the fault of `error`, with which the template store's read of the key or of the
 /// snapshot of the leased generation failed, once the store's directory of generations passed its
-/// check: the host's, which cannot restore the template, for a key of another encoding version
+/// check: the host's, which cannot restore the template, for a key of a later encoding version
 /// than this build reads, as [`TemplateKey::from_bytes`] refuses it with
 /// [`ErrorCode::FormatUnsupported`], since a build that reads it may serve the generation; the
-/// generation's, which is malformed, for a payload, a key, or a snapshot that is missing, that is
-/// not private to the current user, or that is not one that the store writes, such as a key that
-/// the read refuses for what it is, as [`is_refused`] tells: a link, a file that is not a regular
-/// file, or one that holds more than a key may; and the host's for any other I/O error among the
-/// error's sources.
+/// generation's, which is malformed, for a key of an earlier version, which this build neither
+/// reads nor migrates, so that a quarantine lets its class capture again, and for a payload, a
+/// key, or a snapshot that is missing, that is not private to the current user, or that is not
+/// one that the store writes, such as a key that the read refuses for what it is, as
+/// [`is_refused`] tells: a link, a file that is not a regular file, or one that holds more than a
+/// key may; and the host's for any other I/O error among the error's sources.
 fn generation_fault(error: Error) -> Fault {
     if error.code() == ErrorCode::FormatUnsupported {
-        return Fault::new(Evidence::IncompatibleHost, error);
+        let evidence = match RefusedVersion::of(&error) {
+            Some(version) if version < TemplateKey::VERSION => Evidence::MalformedGeneration,
+            _ => Evidence::IncompatibleHost,
+        };
+        return Fault::new(evidence, error);
     }
     let mut source = std::error::Error::source(&error);
     while let Some(cause) = source {
@@ -923,43 +939,35 @@ fn check_template(
             )),
         ));
     }
-    // A network that OpenVMM attaches no device for is no NIC, as a capture class's.
-    let attached = match request.adapter.network() {
-        None => false,
-        Some(network) => !network
+    // A template serves the clones of its own network alone: the guest's address and the policy of
+    // its NIC, which every restore passes unchanged, or no NIC, which a network that lets nothing
+    // through attaches no more than none does.
+    let requested = match request.adapter.network() {
+        None => Vec::new(),
+        Some(network) => network
             .openvmm_arguments()
-            .attribute(Evidence::InvalidSettings)?
-            .is_empty(),
+            .attribute(Evidence::InvalidSettings)?,
     };
-    if attached != key.has_network() {
+    let template = key.network_arguments();
+    if requested != template {
+        let problem = match (requested.is_empty(), template.is_empty()) {
+            (false, true) => format!(
+                "the adapter's plan of a clone attaches a network, but the template's \
+                 generation {name} has no NIC"
+            ),
+            (true, false) => format!(
+                "the template's generation {name} has a NIC, whose network every clone of it \
+                 restores, but the adapter's plan of the clone has none"
+            ),
+            _ => format!(
+                "the network of the adapter's plan of a clone is not the one that the template's \
+                 generation {name} restores its NIC with: a template serves the clones of its \
+                 own network policy, at its own guest's address, alone"
+            ),
+        };
         return Err(Fault::new(
             Evidence::InvalidSettings,
-            Error::unsupported(if attached {
-                format!(
-                    "the adapter's plan of a clone attaches a network, but the template's \
-                     generation {name} has no NIC"
-                )
-            } else {
-                format!(
-                    "the template's generation {name} has a NIC, which its clones restore with \
-                     the network of the adapter's plan, but the plan has none"
-                )
-            }),
-        ));
-    }
-    // OpenVMM restores the guest's address on the NIC from the snapshot, and a clone's launch
-    // drops the plan's, so the plan must name the template's.
-    if let Some(network) = request.adapter.network().filter(|_| attached)
-        && let Some(template) = key.guest_network()
-        && network.guest_network() != template
-    {
-        return Err(Fault::new(
-            Evidence::InvalidSettings,
-            Error::unsupported(format!(
-                "the adapter's plan of a clone gives its guest the network {}, but the template's \
-                 generation {name} restores its NIC on {template}, from its snapshot",
-                network.guest_network()
-            )),
+            Error::unsupported(problem),
         ));
     }
     let memory = request.memory;

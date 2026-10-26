@@ -130,10 +130,11 @@ impl ClonePlan {
     /// The VMM's arguments are those of the clone's devices: the microVM machine, the clone's
     /// image as the read-only `distro` block device and the file of its `scratch` block device,
     /// which OpenVMM opens at their paths, as [Block devices by
-    /// path](crate::host::template::Store#block-devices-by-path) describes, and the policy of the
-    /// template's NIC, if it has one, without the guest's address, which OpenVMM takes from the
-    /// snapshot. The clone's export, if it has one, follows, bound to the template's dormant
-    /// filesystem slot: `--mount` with
+    /// path](crate::host::template::Store#block-devices-by-path) describes, and the template's
+    /// network, as its key records it, [`TemplateKey::network_arguments`], the policy of the
+    /// template's NIC, unchanged, if it has one, without `--net` and the guest's address, which
+    /// OpenVMM takes from the snapshot. The clone's export, if it has one, follows, bound to the
+    /// template's dormant filesystem slot: `--mount` with
     /// [`GUEST_EXPORT`](crate::host::filesystem::GUEST_EXPORT), the exported directory, and its
     /// mode, `rw` if a mapping writes it, and `ro` otherwise, then its hidden, re-exposed, and
     /// writable paths, and the caller owner, as its [plan](ClonePlan::export) holds them; without
@@ -282,7 +283,7 @@ impl ClonePlan {
             devices,
             export,
         } = self;
-        let mut devices = device_arguments(&devices)
+        let mut devices = device_arguments(&devices, &key)
             .attribute(Evidence::InvalidSettings)
             .map_err(unrecorded)?;
         let table = match &export {
@@ -648,24 +649,21 @@ fn check_sparse(path: &Path, scratch: BlockGeometry) -> Result<(), Fault> {
     )
 }
 
-/// Returns OpenVMM's arguments of the devices of a clone's restore, `devices`: those that
-/// [`SandboxPlan::openvmm_arguments`] renders, without `--net` and the guest's address, which
-/// OpenVMM takes from the snapshot, and refuses beside it. The options of the network's policy
-/// stay: OpenVMM compares the policy that they name with the one of the snapshot's NIC, and
-/// refuses to restore under another, so the plan must keep its template NIC's policy, as
-/// [`CloneRequest::adapter`](super::CloneRequest::adapter) says, and a plan of another one fails
-/// closed, ending the launch.
-fn device_arguments(devices: &SandboxPlan) -> Result<Vec<String>> {
+/// Returns OpenVMM's arguments of the devices of a clone's restore: those of the clone's devices,
+/// `devices`, which [`SandboxPlan::openvmm_arguments`] renders, then the template's network, as
+/// `key` records it, [`TemplateKey::network_arguments`], without `--net` and the guest's address,
+/// which OpenVMM takes from the snapshot, and refuses beside it.
+fn device_arguments(devices: &SandboxPlan, key: &TemplateKey) -> Result<Vec<String>> {
     let mut arguments = devices.openvmm_arguments()?;
-    if let Some(at) = arguments.iter().position(|argument| argument == "--net") {
-        arguments.drain(at..(at + 2).min(arguments.len()));
-    }
+    // A key's network attaches its NIC first, with `--net` and the guest's address.
+    arguments.extend_from_slice(key.network_arguments().get(2..).unwrap_or_default());
     Ok(arguments)
 }
 
 /// What OpenVMM's arguments of a clone's restore name besides its control endpoint.
 struct Restore<'a> {
-    /// The arguments of the clone's devices, as [`device_arguments`] renders them.
+    /// The arguments of the clone's devices and of the template's network, as
+    /// [`device_arguments`] renders them.
     devices: Vec<String>,
     /// The generation's key.
     key: &'a TemplateKey,

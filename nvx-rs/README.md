@@ -589,17 +589,16 @@ other `Invariants`.
 
 `TemplateKey::new` checks that the capture made the machine that its class
 requested, and derives the template's compatibility key, from metadata alone:
-the runtime and contract versions through which its clones are restored, and the
+the runtime and contract versions through which its clones are restored, the
 backend, CPU profile and effective CPUID, topology, rates, resources, kernel
-command line, disks, and devices of its machine. A capture's own metadata, such
+command line, disks, and devices of its machine, and its network, as its class lowered it to OpenVMM's arguments, the guest's address and the policy of its NIC, which every restore of the template passes unchanged, so that a template serves the clones of its network policy alone. A capture's own metadata, such
 as its time anchor and host, stays out of the key.
 
 A key and a class each have one canonical, versioned encoding, whose
 domain-separated SHA-256 digest is its identity, a `KeyIdentity`, which converts
 to and from the `nvx::activation::Identity` by which a clone's activation record
 names its template's key, or a `ClassIdentity`; the
-[conformance vectors](tests/vectors/README.md) of version 1,
-`tests/vectors/template-key-v1.txt`, pin the key's encoding and identity.
+[conformance vectors](tests/vectors/README.md) of version 2 of a key's encoding, which adds the template's network to version 1, `tests/vectors/template-key-v2.txt`, and of version 1 of a class's, `tests/vectors/template-key-v1.txt`, pin the encodings and identities; a key of another version, as an earlier build wrote it, is neither read nor migrated, and a clone of its generation fails as a malformed generation, which quarantines it.
 
 `Store` keeps the generations of templates that a host published, apart from
 every sandbox's store, at a location that the adapter chooses: a private
@@ -648,11 +647,10 @@ and no launch.
 `ClonePlan::new` plans a clone under the lock that acquired its lease, before
 the launch that the lease reserves, from metadata alone: the leased generation,
 its key, which must speak the current contracts, the boot and control contracts
-of the runtime that captured it included, and its snapshot; a network exactly
-when the template has a NIC, on the guest network of that NIC, whose address
-OpenVMM restores from the snapshot, and under the policy of that NIC, which
-OpenVMM checks as it restores it, since the key names the policy only by
-OpenVMM's identity of it; a memory target in whole blocks of `MEMORY_BLOCK_SIZE`
+of the runtime that captured it included, and its snapshot; the template's
+network exactly, as its key records it, or none for a template without a NIC,
+so that a template serves the clones of its network policy, at its guest's
+address, alone; a memory target in whole blocks of `MEMORY_BLOCK_SIZE`
 from the template's RAM to its capacity; the clone's image, which the check of
 its `DistroBinding` opens; its upper, either the caller's scratch image, which
 the check of its `ScratchBinding` claims, and which nothing formats, copies, or
@@ -686,7 +684,7 @@ under its lease, and, with `ExportPlan::verify`, that the objects of its export,
 record in its canonical encoding, `clone-activation.bin`, from which a caller
 resends it unchanged; it listens for the VMM's restore-ready event, at the
 socket `restore.sock` on Linux, and at a named pipe of a random name on Windows;
-and it runs `supervisor::launch` with OpenVMM's restore of the clone's devices,
+and it runs `supervisor::launch` with OpenVMM's restore of the clone's devices and of the template's network, as its key records it, unchanged,
 its export bound to the dormant slot, `--mount` with the directory, and its hidden, re-exposed, and writable paths and its owner, `--restore-snapshot` with the generation's snapshot in place, which no clone
 copies or changes, so that clones of one generation restore it at once,
 `--restore-memory` with the memory target, and `--restore-ready-path`, under the

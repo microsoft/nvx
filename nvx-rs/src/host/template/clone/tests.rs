@@ -19,7 +19,9 @@ use crate::activation::{
     Publication, Upper, WorkloadIdentity,
 };
 use crate::host::filesystem;
-use crate::host::network::{Access as NetworkAccess, NetworkPolicy, NetworkProxy, ProxyScheme};
+use crate::host::network::{
+    Access as NetworkAccess, EgressRule, NetworkPolicy, NetworkProxy, ProxyScheme,
+};
 use crate::host::paths;
 use crate::host::sandbox::distro::{DISTRO_POLICY_REVISION, PolicyVerdict};
 use crate::host::sandbox::scratch::CLAIM_RELEASE_WAIT;
@@ -1274,14 +1276,33 @@ fn images_that_their_binding_does_not_authorize_and_malformed_generations_are_re
     let failure = fixture.plan(&mut acquired, &stale, NO_CONTENT).unwrap_err();
     assert!(!failure.quarantine(&fixture.store, None).unwrap());
     assert_untouched(&acquired);
-    // A generation whose key is gone is malformed: a failure of the template, whose generation it
-    // quarantines through its tombstone, once the sandbox's lock is released, as the lock order
-    // asks.
+    // A generation whose key is of another version, as an earlier build wrote it, is malformed for
+    // this build, which neither reads nor migrates it: a failure of the template, which a
+    // quarantine takes out of service, so that its class captures a template again.
     let generation = fixture.generation.generation();
     let key = fixture
         .store
         .payload_dir(generation)
         .join(crate::host::template::KEY_NAME);
+    let mut earlier = fs::read(&key).unwrap();
+    earlier[..2].copy_from_slice(&1u16.to_le_bytes());
+    crate::host::store::files::write_private(&key, &earlier).unwrap();
+    let failure = fixture
+        .plan(&mut acquired, &request, NO_CONTENT)
+        .unwrap_err();
+    assert_eq!(
+        (failure.record().evidence, failure.outcome(), failure.code()),
+        (
+            Evidence::MalformedGeneration,
+            Outcome::Template,
+            ErrorCode::FormatUnsupported
+        ),
+        "{failure}"
+    );
+    assert_untouched(&acquired);
+    // A generation whose key is gone is malformed: a failure of the template, whose generation it
+    // quarantines through its tombstone, once the sandbox's lock is released, as the lock order
+    // asks.
     fs::remove_file(key).unwrap();
     let failure = fixture
         .plan(&mut acquired, &request, NO_CONTENT)
@@ -2048,30 +2069,41 @@ fn networks_that_the_template_does_not_have_are_refused() {
         (
             ErrorKind::Unsupported,
             format!(
-                "the template's generation {generation} has a NIC, which its clones restore with \
-                 the network of the adapter's plan, but the plan has none"
+                "the template's generation {generation} has a NIC, whose network every clone of \
+                 it restores, but the adapter's plan of the clone has none"
             )
         )
     );
     assert_untouched(&acquired);
-    // OpenVMM restores the guest's address on the NIC from the snapshot, so a plan of another
-    // address, or of another prefix, is refused.
-    for other in ["10.0.0.3/24", "10.0.0.2/16"] {
-        let moved = with_network(
-            request.clone(),
-            Some(SandboxNetwork::new(other, NetworkPolicy::new(NetworkAccess::Allow)).unwrap()),
-        );
+    // Nor does it serve the clones of another policy, nor of its policy at another address or
+    // prefix, though OpenVMM restores the guest's address from the snapshot: a template serves
+    // the clones of its own network alone.
+    let proxy = NetworkProxy::new(3128).with_scheme(ProxyScheme::Http);
+    for other in [
+        network(NetworkAccess::Allow)
+            .policy()
+            .clone()
+            .with_deny(EgressRule::to("192.0.2.0/24")),
+        NetworkPolicy::new(NetworkAccess::Deny).with_allow(EgressRule::to("192.0.2.0/24")),
+        NetworkPolicy::proxy_only(proxy),
+    ]
+    .map(|policy| SandboxNetwork::new("10.0.0.2/24", policy).unwrap())
+    .into_iter()
+    .chain(["10.0.0.3/24", "10.0.0.2/16"].map(|address| {
+        SandboxNetwork::new(address, NetworkPolicy::new(NetworkAccess::Allow)).unwrap()
+    })) {
+        let other = with_network(request.clone(), Some(other));
         assert_eq!(
             refused(
-                fixture.plan(&mut acquired, &moved, NO_CONTENT),
+                fixture.plan(&mut acquired, &other, NO_CONTENT),
                 Evidence::InvalidSettings
             ),
             (
                 ErrorKind::Unsupported,
                 format!(
-                    "the adapter's plan of a clone gives its guest the network {other}, but the \
-                     template's generation {generation} restores its NIC on 10.0.0.2/24, from its \
-                     snapshot"
+                    "the network of the adapter's plan of a clone is not the one that the \
+                     template's generation {generation} restores its NIC with: a template serves \
+                     the clones of its own network policy, at its own guest's address, alone"
                 )
             )
         );
@@ -2383,13 +2415,26 @@ fn the_activation_record_of_a_clone_of_a_template_with_a_nic_names_its_policy_an
         plan.activation().configuration().network.as_ref(),
         Some(&expected)
     );
-    drop(plan);
-    // A proxy's URL is the one that the guest sees, at its gateway.
+    drop((plan, acquired, fixture));
+    // A proxy's URL is the one that the guest sees, at its gateway, for a clone of a template
+    // whose policy has the proxy.
     let proxy = NetworkProxy::new(3128).with_scheme(ProxyScheme::Http);
-    let proxied = with_network(
-        tmpfs_request(&image, &binding),
-        Some(SandboxNetwork::new("10.0.0.2/24", NetworkPolicy::proxy_only(proxy)).unwrap()),
-    );
+    let proxied = SandboxNetwork::new("10.0.0.2/24", NetworkPolicy::proxy_only(proxy)).unwrap();
+    let fixture = Fixture::with(|class, spec, physical| {
+        *class = CaptureClass {
+            network: Some(proxied.clone()),
+            ..network_class()
+        };
+        *spec = ManifestSpec::with_network();
+        let (distro, scratch) = (
+            geometry(IMAGE_LEN, physical),
+            geometry(SCRATCH_LEN, physical),
+        );
+        set_geometries(class, spec, distro, scratch);
+    });
+    let (image, binding) = fixture.image("distro.erofs", IMAGE_LEN);
+    let mut acquired = fixture.acquire("sandbox");
+    let proxied = with_network(tmpfs_request(&image, &binding), Some(proxied));
     let plan = fixture.plan(&mut acquired, &proxied, NO_CONTENT).unwrap();
     assert_eq!(
         plan.activation().configuration().network,

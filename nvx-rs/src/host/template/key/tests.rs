@@ -5,7 +5,7 @@ use std::collections::HashSet;
 
 use super::*;
 use crate::ErrorCode;
-use crate::host::network::{Access, EgressRule, NetworkPolicy};
+use crate::host::network::{Access, EgressRule, NetworkPolicy, NetworkProxy, ProxyScheme};
 use crate::host::template::test_support::{
     self as support, MIB, ManifestSpec, artifact, network_class,
 };
@@ -242,6 +242,18 @@ fn each_part_of_the_key_changes_it() {
         ("policy encoding", |_, spec| {
             spec.network().policy_encoding_version = 3;
         }),
+        // The network, as the class lowered it: another policy makes another key, even where the
+        // manifest is the same, as OpenVMM's identity of the policy would not be.
+        ("egress rule", |class, _| {
+            let policy =
+                NetworkPolicy::new(Access::Allow).with_deny(EgressRule::to("192.0.2.0/24"));
+            class.network = Some(SandboxNetwork::new("10.0.0.2/24", policy).unwrap());
+        }),
+        ("egress default", |class, _| {
+            let policy =
+                NetworkPolicy::new(Access::Deny).with_allow(EgressRule::to("192.0.2.0/24"));
+            class.network = Some(SandboxNetwork::new("10.0.0.2/24", policy).unwrap());
+        }),
         ("invariant setting", |class, _| {
             class.invariants = Invariants::new()
                 .with("isolation.seccomp", "strict")
@@ -363,6 +375,63 @@ fn a_key_holds_what_its_capture_made() {
     assert!(!key(&support::class(), &ManifestSpec::template()).has_network());
     assert_eq!(made.filesystem_tag(), "microvm");
     assert_eq!(made.invariants(), &Invariants::new());
+    assert_eq!(
+        made.network_arguments(),
+        class.network.unwrap().openvmm_arguments().unwrap()
+    );
+}
+
+#[test]
+fn a_key_holds_the_network_that_its_class_lowered() {
+    // A NIC's network attaches the guest at its address, then enforces its policy.
+    assert_eq!(
+        network_key().network_arguments(),
+        [
+            "--net",
+            "10.0.0.2/24",
+            "--network-profile",
+            "portable",
+            "--network-egress",
+            "allow",
+            "--network-ingress",
+            "deny",
+            "--host-loopback",
+            "deny",
+        ]
+    );
+    let proxy = NetworkProxy::new(3128).with_scheme(ProxyScheme::Http);
+    let proxied = CaptureClass {
+        network: Some(
+            SandboxNetwork::new("10.0.0.2/24", NetworkPolicy::proxy_only(proxy)).unwrap(),
+        ),
+        ..network_class()
+    };
+    let made = key(&proxied, &ManifestSpec::with_network());
+    assert_eq!(made.network_arguments()[..2], ["--net", "10.0.0.2/24"]);
+    assert_eq!(
+        made.network_arguments()[made.network_arguments().len() - 2..],
+        ["--network-proxy", "10.0.0.1:3128"]
+    );
+    assert_ne!(made.identity(), network_key().identity());
+    // A template without a NIC holds no network, the identity of the network that lets nothing
+    // through, whether its class has no network or one that attaches no NIC.
+    let none = key(&support::class(), &ManifestSpec::template());
+    assert!(none.network_arguments().is_empty());
+    let closed = CaptureClass {
+        network: Some(
+            SandboxNetwork::new("10.0.0.2/24", NetworkPolicy::new(Access::Deny)).unwrap(),
+        ),
+        ..support::class()
+    };
+    assert_eq!(key(&closed, &ManifestSpec::template()), none);
+    assert_eq!(
+        closed.identity().unwrap(),
+        support::class().identity().unwrap()
+    );
+    // Each key reads back with its network.
+    for made in [network_key(), made, none] {
+        assert_eq!(TemplateKey::from_bytes(&made.to_bytes()).unwrap(), made);
+    }
 }
 
 #[test]
@@ -684,7 +753,7 @@ fn keys_read_back_from_their_canonical_encoding() {
         key(&support::class(), &ManifestSpec::template()),
     ] {
         let bytes = made.to_bytes();
-        assert_eq!(&bytes[..2], &[1, 0]);
+        assert_eq!(&bytes[..2], &[2, 0]);
         let read = TemplateKey::from_bytes(&bytes).unwrap();
         assert_eq!(read, made);
         assert_eq!(read.to_bytes(), bytes);
@@ -709,13 +778,13 @@ fn key_refusal(bytes: &[u8], code: ErrorCode) -> String {
 fn other_encodings_of_a_key_are_refused() {
     let key = network_key();
     let bytes = key.to_bytes();
-    for version in [0u16, 2, u16::MAX] {
+    for version in [0u16, 1, 3, u16::MAX] {
         let mut other = bytes.clone();
         other[..2].copy_from_slice(&version.to_le_bytes());
         assert_eq!(
             key_refusal(&other, ErrorCode::FormatUnsupported),
             format!(
-                "the template key has encoding version {version}; this build reads version 1 \
+                "the template key has encoding version {version}; this build reads version 2 \
                  only"
             )
         );
@@ -773,6 +842,18 @@ fn keys_of_machines_that_no_manifest_describes_are_refused() {
             |key| key.machine.cpu.revision = 0,
             "the machine has the invalid CPU profile vendor",
         ),
+        (
+            |key| key.network.clear(),
+            "the network does not attach the machine's NIC at 10.0.0.2/24",
+        ),
+        (
+            |key| key.network[1] = "10.0.0.3/24".to_owned(),
+            "the network does not attach the machine's NIC at 10.0.0.2/24",
+        ),
+        (
+            |key| drop(key.network.drain(..2)),
+            "the network does not attach the machine's NIC at 10.0.0.2/24",
+        ),
     ];
     for (change, expected) in cases {
         let mut changed = network_key();
@@ -783,6 +864,13 @@ fn keys_of_machines_that_no_manifest_describes_are_refused() {
             "{message:?} lacks {expected:?}"
         );
     }
+    // A network for a machine without a NIC.
+    let mut changed = key(&support::class(), &ManifestSpec::template());
+    changed.network = network_key().network;
+    assert_eq!(
+        key_refusal(&changed.to_bytes(), ErrorCode::Io),
+        "the template key is malformed: the network attaches a NIC that the machine does not have"
+    );
     // Invariant settings out of the order of their names, which a key never writes.
     let mut class = network_class();
     class.invariants = Invariants::new()
@@ -790,12 +878,18 @@ fn keys_of_machines_that_no_manifest_describes_are_refused() {
         .unwrap()
         .with("b", "2")
         .unwrap();
-    let mut bytes = key(&class, &ManifestSpec::with_network()).to_bytes();
-    let len = bytes.len();
+    let made = key(&class, &ManifestSpec::with_network());
+    let mut bytes = made.to_bytes();
+    // The settings end where the network, which follows them, starts.
+    let mut network = Writer::default();
+    network.list(made.network_arguments(), |writer, argument| {
+        writer.text(argument)
+    });
+    let end = bytes.len() - network.finish().len();
     let tail = [
         1, 0, 0, 0, b'b', 1, 0, 0, 0, b'2', 1, 0, 0, 0, b'a', 1, 0, 0, 0, b'1',
     ];
-    bytes[len - tail.len()..].copy_from_slice(&tail);
+    bytes[end - tail.len()..end].copy_from_slice(&tail);
     assert_eq!(
         key_refusal(&bytes, ErrorCode::Io),
         "the template key is malformed: the invariant settings are not in the strict order of \
@@ -911,8 +1005,12 @@ fn identities_have_a_text_form() {
     );
 }
 
-/// The conformance vectors of version 1 of the canonical encodings of keys and classes.
-const VECTORS: &str = include_str!("../../../../tests/vectors/template-key-v1.txt");
+/// The conformance vectors of version 2 of the canonical encoding of keys.
+const VECTORS: &str = include_str!("../../../../tests/vectors/template-key-v2.txt");
+
+/// The conformance vectors of version 1 of the canonical encodings of keys and classes, whose
+/// classes version 2 of a key leaves as they are.
+const VECTORS_V1: &str = include_str!("../../../../tests/vectors/template-key-v1.txt");
 
 /// The versions of the contracts that the vectors hold.
 const VECTOR_CONTRACTS: Contracts = Contracts {
@@ -923,10 +1021,9 @@ const VECTOR_CONTRACTS: Contracts = Contracts {
     activation: 1,
 };
 
-/// Returns each vector of `kind`: its name, its bytes, and its values.
-fn vectors(kind: &str) -> Vec<(&'static str, Vec<u8>, Vec<&'static str>)> {
-    VECTORS
-        .lines()
+/// Returns each vector of `kind` in the vectors `file`: its name, its bytes, and its values.
+fn vectors(file: &'static str, kind: &str) -> Vec<(&'static str, Vec<u8>, Vec<&'static str>)> {
+    file.lines()
         .filter(|line| !line.is_empty() && !line.starts_with('#'))
         .filter_map(|line| {
             let mut fields = line.split('|');
@@ -986,7 +1083,7 @@ fn vector_spec(name: &str) -> ManifestSpec {
 
 #[test]
 fn the_conformance_vectors_decode_and_encode() {
-    let keys = vectors("KEY");
+    let keys = vectors(VECTORS, "KEY");
     let names: Vec<&str> = keys.iter().map(|(name, ..)| *name).collect();
     assert_eq!(names, ["TEMPLATE", "NETWORK", "HOST_PROFILE", "MINIMAL"]);
     for (name, bytes, values) in keys {
@@ -1005,7 +1102,7 @@ fn the_conformance_vectors_decode_and_encode() {
             assert_eq!(derived, key, "{name}");
         }
     }
-    let classes = vectors("CLASS");
+    let classes = vectors(VECTORS_V1, "CLASS");
     let names: Vec<&str> = classes.iter().map(|(name, ..)| *name).collect();
     assert_eq!(names, ["TEMPLATE", "NETWORK"]);
     for (name, bytes, values) in classes {
@@ -1017,8 +1114,17 @@ fn the_conformance_vectors_decode_and_encode() {
             "{name}"
         );
     }
-    let versions = vectors("INVALID_KEY_VERSION");
-    assert_eq!(versions.len(), 3);
+    let versions = vectors(VECTORS, "INVALID_KEY_VERSION");
+    assert_eq!(versions.len(), 8);
+    // The keys of version 1 are among them, as an earlier build wrote them.
+    let earlier: Vec<Vec<u8>> = vectors(VECTORS_V1, "KEY")
+        .into_iter()
+        .map(|(_, bytes, _)| bytes)
+        .collect();
+    assert_eq!(earlier.len(), 4);
+    for bytes in &earlier {
+        assert!(versions.iter().any(|(_, refused, _)| refused == bytes));
+    }
     for (name, bytes, _) in versions {
         let error = TemplateKey::from_bytes(&bytes).expect_err(name);
         assert_eq!(
@@ -1027,8 +1133,8 @@ fn the_conformance_vectors_decode_and_encode() {
             "{name}: {error}"
         );
     }
-    let invalid = vectors("INVALID_KEY");
-    assert_eq!(invalid.len(), 23);
+    let invalid = vectors(VECTORS, "INVALID_KEY");
+    assert_eq!(invalid.len(), 28);
     for (name, bytes, _) in invalid {
         let error = TemplateKey::from_bytes(&bytes).expect_err(name);
         assert_eq!(error.code(), ErrorCode::Io, "{name}: {error}");
