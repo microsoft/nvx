@@ -736,6 +736,7 @@ mod tests {
             b"/dev/shm",
             b"/.nvx-agent",
             b"/etc/machine-id",
+            b"/etc/resolv.conf",
             b"/run/nvx/time/state",
             b"/run/nvx",
             b"/run",

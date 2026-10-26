@@ -1,11 +1,20 @@
-//! Tests of the kernel command line as Linux reads it. The expectations follow Linux 6.18:
-//! `lib/cmdline.c`, `kernel/params.c`, `lib/vsprintf.c`, `lib/kstrtox.c`, and
-//! `drivers/virtio/virtio_mmio.c`.
+//! Tests of the kernel command line as Linux reads it, and of the DNS server that OpenVMM names in
+//! it. The expectations follow Linux 6.18: `lib/cmdline.c`, `kernel/params.c`, `lib/vsprintf.c`,
+//! `lib/kstrtox.c`, and `drivers/virtio/virtio_mmio.c`; and, for the DNS server, OpenVMM's
+//! rendering and reading of its `virtnet_dns=` token, `openvmm_defs::microvm`'s
+//! `command_line_fragment_with` and `microvm_command_line_dns_server`, whose vectors they take.
 
 use super::*;
 
 /// The MMIO base of the scratch block device of a layered root.
 const SCRATCH: u64 = 0xd000_6000;
+
+/// The network tokens that OpenVMM renders for the guest `10.0.0.2/24`, with the IPv6 identity
+/// that it derives from it, before and after the place of a `virtnet_dns=` token.
+const NETWORK: (&str, &str) = (
+    "virtnet_ip=10.0.0.2 virtnet_mask=255.255.255.0 virtnet_gw=10.0.0.1",
+    "virtnet_ip6=fd00::a00:2/120 virtnet_gw6=fd00::a00:1",
+);
 
 /// Checks that the kernel splits `command_line` into the parameters `expected`.
 fn assert_parameters(command_line: &[u8], expected: &[(&str, Option<&str>)]) {
@@ -227,4 +236,137 @@ fn devices_come_from_the_parameters_that_the_kernel_reads() {
         ]
     );
     assert_eq!(virtio_mmio_devices(b"").count(), 0);
+}
+
+#[test]
+fn the_dns_server_is_read_as_openvmm_renders_it() {
+    let ipv4: IpAddr = "10.0.0.1".parse().unwrap();
+    let ipv6: IpAddr = "fd00::a00:1".parse().unwrap();
+    // OpenVMM names either gateway, in its canonical text, or none, among its network tokens, and
+    // the kernel appends a newline to `/proc/cmdline`.
+    let (before, after) = NETWORK;
+    for (dns, expected) in [
+        (" virtnet_dns=10.0.0.1", Some(ipv4)),
+        (" virtnet_dns=fd00::a00:1", Some(ipv6)),
+        ("", None),
+    ] {
+        let command_line = format!("console=hvc0 {before}{dns} {after}\n");
+        assert_eq!(
+            dns_server(command_line.as_bytes()),
+            Ok(expected),
+            "{command_line}"
+        );
+    }
+    // A token is one that starts with `virtnet_dns=` between ASCII whitespace, without quoting,
+    // as OpenVMM splits the command line, and past a `--`, where the kernel stops.
+    for command_line in [
+        &b"virtnet_dns=10.0.0.1"[..],
+        b"a\tvirtnet_dns=10.0.0.1\nb",
+        b"a\x0cvirtnet_dns=10.0.0.1\rb",
+        b"quiet -- virtnet_dns=10.0.0.1",
+        b"\"a virtnet_dns=10.0.0.1",
+    ] {
+        assert_eq!(
+            dns_server(command_line),
+            Ok(Some(ipv4)),
+            "{}",
+            command_line.escape_ascii()
+        );
+    }
+    for command_line in [
+        &b""[..],
+        b"virtnet_dns",
+        b"virtnet_dns =10.0.0.1",
+        b"virtnet-dns=10.0.0.1",
+        b"VIRTNET_DNS=10.0.0.1",
+        b"xvirtnet_dns=10.0.0.1",
+        b"\"virtnet_dns=10.0.0.1\"",
+        b"a=virtnet_dns=10.0.0.1",
+    ] {
+        assert_eq!(
+            dns_server(command_line),
+            Ok(None),
+            "{}",
+            command_line.escape_ascii()
+        );
+    }
+}
+
+#[test]
+fn the_dns_server_is_one_address_in_one_token() {
+    // OpenVMM's refusals of the token itself, and the spellings that it never renders: its reader
+    // refuses each of them too. A vertical tab or a no-break space ends a parameter for the kernel,
+    // but not a token for OpenVMM.
+    for command_line in [
+        &b"virtnet_dns=fd00:0::a00:1"[..],
+        b"virtnet_dns=010.0.0.1",
+        b"virtnet_dns=10.0.0.1,fd00::a00:1",
+        b"virtnet_dns=10.0.0.1 virtnet_dns=fd00::a00:1",
+        b"virtnet_dns=10.0.0.1 virtnet_dns=10.0.0.1",
+        b"virtnet_dns=10.0.0.1 virtnet_dns=",
+        b"virtnet_dns=bad virtnet_dns=10.0.0.1",
+        b"virtnet_dns=",
+        b"virtnet_dns= 10.0.0.1",
+        b"virtnet_dns=FD00::A00:1",
+        b"virtnet_dns=fd00::0a00:1",
+        b"virtnet_dns=10.0.0.1:53",
+        b"virtnet_dns=[fd00::a00:1]",
+        b"virtnet_dns=fd00::a00:1%eth0",
+        b"virtnet_dns=10.0.0.1/24",
+        b"virtnet_dns=10.0.0",
+        b"virtnet_dns=\"10.0.0.1\"",
+        b"virtnet_dns=10.0.0.1\x0b",
+        b"virtnet_dns=10.0.0.1\xa0",
+        b"virtnet_dns=gateway",
+    ] {
+        assert!(
+            dns_server(command_line).is_err(),
+            "{}",
+            command_line.escape_ascii()
+        );
+    }
+    assert_eq!(
+        dns_server(b"virtnet_dns=10.0.0.1 virtnet_dns=fd00::a00:1")
+            .unwrap_err()
+            .message(),
+        "the virtnet_dns kernel parameter is repeated"
+    );
+    assert_eq!(
+        dns_server(b"quiet virtnet_dns=010.0.0.1\xa0")
+            .unwrap_err()
+            .message(),
+        "the virtnet_dns kernel parameter must name one IPv4 or IPv6 address as OpenVMM renders \
+         it, not '010.0.0.1\\xa0'"
+    );
+}
+
+#[test]
+fn a_resolver_file_names_the_server_as_the_init_writes_it() {
+    for (server, file) in [
+        ("10.0.0.1", "nameserver 10.0.0.1\n"),
+        ("fd00::a00:1", "nameserver fd00::a00:1\n"),
+        // An address in another spelling is written in its canonical text.
+        ("fd00:0:0::0a00:1", "nameserver fd00::a00:1\n"),
+    ] {
+        let server: IpAddr = server.parse().unwrap();
+        let mut written = Vec::new();
+        write_resolver(&mut written, server).unwrap();
+        assert_eq!(String::from_utf8(written).unwrap(), file);
+        // The text is the one that the reader takes from OpenVMM's token.
+        let command_line = format!("{DNS_TOKEN}{}", file["nameserver ".len()..].trim_end());
+        assert_eq!(dns_server(command_line.as_bytes()), Ok(Some(server)));
+    }
+    // The writer's failure is the call's.
+    struct Full;
+    impl io::Write for Full {
+        fn write(&mut self, _: &[u8]) -> io::Result<usize> {
+            Err(io::Error::other("the disk is full"))
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+    let error = write_resolver(Full, "10.0.0.1".parse().unwrap()).unwrap_err();
+    assert_eq!(error.to_string(), "the disk is full");
 }

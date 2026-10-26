@@ -104,7 +104,8 @@ pub(crate) use filesystem::{
     read_line, read_number, unmount, write_file, write_number,
 };
 pub(crate) use ioctl::{
-    block_device_size, console_pending, flush_block_buffers, logical_block_size, reseed_random,
+    block_device_size, console_pending, flush_block_buffers, logical_block_size,
+    reread_partition_table, reseed_random,
 };
 pub(crate) use mapping::MemoryMapping;
 #[cfg(target_arch = "x86_64")]

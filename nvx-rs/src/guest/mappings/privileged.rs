@@ -362,7 +362,13 @@ fn kinds_nested_targets_and_reserved_targets_are_checked() {
             "{target}"
         );
     }
-    for target in ["/etc", "/etc/machine-id", "/proc/x", "/dev"] {
+    for target in [
+        "/etc",
+        "/etc/machine-id",
+        "/etc/resolv.conf",
+        "/proc/x",
+        "/dev",
+    ] {
         assert_eq!(
             scene.refusal(Reserved::container_root(), "dir", target),
             MappingError::Reserved,

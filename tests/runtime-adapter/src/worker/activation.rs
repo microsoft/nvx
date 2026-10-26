@@ -71,11 +71,20 @@ pub const ACTIVATION_PROBE: &str = "activation";
 ///   breaks a limit, or is a cold boot's;
 /// - [`ACTIVATION_RESOURCES`](status::ACTIVATION_RESOURCES): the record expects other resources
 ///   than the repaired clone has;
-/// - [`ACTIVATION_ROOT`](status::ACTIVATION_ROOT): the root's assembly failed, or the record's
-///   image is a GPT disk, which a clone does not assemble yet, as
-///   [`ApplyError::Assembly`] and [`ApplyError::Gpt`] tell, or the application failed otherwise;
+/// - [`ACTIVATION_ROOT`](status::ACTIVATION_ROOT): the root's assembly failed, the scratch's upper
+///   is not fresh among its causes, or the kernel did not reread the partition table of the
+///   record's GPT disk before it, as [`ApplyError::Assembly`] and [`ApplyError::Gpt`] tell, or
+///   the application failed otherwise, as this build of the adapter does not know;
 /// - [`ACTIVATION_WORKLOAD`](status::ACTIVATION_WORKLOAD): the image refuses the record's
-///   workload identity, as [`ApplyError::Account`] tells;
+///   workload identity, as [`ApplyError::Account`] tells, the machine ID that the record asks the
+///   guest to generate cannot be written, as [`ApplyError::MachineId`] tells, or the record's
+///   hostname or that machine ID cannot be set for every execution, as [`ApplyError::View`]
+///   tells;
+/// - [`ACTIVATION_EXPORT`](status::ACTIVATION_EXPORT): the host export of the record cannot be
+///   mounted, as [`ApplyError::Export`] tells;
+/// - [`ACTIVATION_NETWORK`](status::ACTIVATION_NETWORK): the resolver file that names the DNS
+///   server of the record's network cannot be written or set for every execution, as
+///   [`ApplyError::Network`] tells;
 /// - [`ACTIVATION_ORDER`](status::ACTIVATION_ORDER): the worker's own order completed an
 ///   activation that did not run, or started the sandbox before the clone was ready, or again.
 ///
@@ -90,8 +99,13 @@ pub fn failure_status(failure: &ActivationFailure) -> u8 {
         ActivationCause::Record(_) | ActivationCause::Cold => status::ACTIVATION_RECORD,
         ActivationCause::Resources { .. } => status::ACTIVATION_RESOURCES,
         ActivationCause::Failed(error) => match error.downcast_ref::<ApplyError>() {
-            Some(ApplyError::Account { .. }) => status::ACTIVATION_WORKLOAD,
-            // The root's assembly, a GPT image, and any other failure of the application.
+            Some(ApplyError::Gpt(_) | ApplyError::Assembly(_)) => status::ACTIVATION_ROOT,
+            Some(
+                ApplyError::Account { .. } | ApplyError::MachineId { .. } | ApplyError::View { .. },
+            ) => status::ACTIVATION_WORKLOAD,
+            Some(ApplyError::Export { .. }) => status::ACTIVATION_EXPORT,
+            Some(ApplyError::Network { .. }) => status::ACTIVATION_NETWORK,
+            // A failure of the application that this build does not know.
             _ => status::ACTIVATION_ROOT,
         },
         ActivationCause::Completion | ActivationCause::Start => status::ACTIVATION_ORDER,
@@ -224,8 +238,8 @@ impl CloneState {
     /// `operations`, with the template's inputs, completes the activation with the result, and
     /// returns the worker's step: `Ready`, which reports the activation, once the clone is ready,
     /// after which `executions` run in the cgroups that the template's bootstrap prepared, as the
-    /// record's workload identity, if it has one, and the worker's order awaits the record's
-    /// mappings; or the end, once the activation failed.
+    /// record's workload identity, if it has one, with the record's hostname, and the worker's
+    /// order awaits the record's mappings; or the end, once the activation failed.
     fn apply(
         &mut self,
         operations: &mut dyn RootOperations,
@@ -243,7 +257,9 @@ impl CloneState {
                 let identity = identity.map(|identity| (identity.uid(), identity.gid()));
                 // The executions' listeners are published, the entry's default, which refuses
                 // the most, as a root configuration that names no publication has them.
-                let sandbox = Sandbox::new(identity, Publication::Published);
+                let hostname = record.configuration().workload.hostname.clone();
+                let sandbox =
+                    Sandbox::new(identity, Publication::Published).with_hostname(hostname);
                 executions.run_in(operations.cgroups(), sandbox);
                 // A record announces at most `nvx::activation::MAX_MAPPINGS` mappings, which fit
                 // a `u32`.
@@ -350,15 +366,20 @@ fn unactivated(failure: &ActivationFailure) -> Worked {
 mod tests {
     use std::io;
     use std::num::NonZeroU64;
+    use std::path::PathBuf;
 
     use nvx::activation::{
         Configuration, ExpectedResources, Identity, Image, MachineIdMode, OverlayMode,
         RestoreSection, StoreGeneration, TemplateReference, TransactionId, Upper, WorkloadIdentity,
         WorkloadView,
     };
-    use nvx::guest::clone::AdmissionFence;
+    use nvx::guest::clone::{AdmissionFence, NetworkError};
     use nvx::guest::entry;
+    use nvx::guest::mappings::MappingError;
+    use nvx::guest::root::{self, Assembly, Device, Error as RootError, Role};
+    use nvx::protocol::root::DISTRO_MMIO_BASE;
 
+    use super::super::capture::FILESYSTEM_TAG;
     use super::*;
 
     /// The resources of the clones of the tests.
@@ -480,8 +501,28 @@ mod tests {
         more.input(now(), ActivationInput::Reset).unwrap();
         let failure = failed(more.input(now(), ActivationInput::Activate(&bytes)));
         cases.push((failure, status::ACTIVATION_RESOURCES));
-        // The application: of the root, of the workload, and any other.
-        let root = activating().complete(now(), Err(ApplyError::Gpt.into()));
+        // The application: of the root, of the workload, of the export, of the network, and any
+        // other.
+        let reread = ApplyError::Gpt(RootError::Missing {
+            role: Role::Distro,
+            mmio: DISTRO_MMIO_BASE,
+        });
+        let root = activating().complete(now(), Err(reread.into()));
+        cases.push((failed(root), status::ACTIVATION_ROOT));
+        // An assembly refuses a relative runtime directory before anything else.
+        let relative = Assembly {
+            runtime: PathBuf::from("run/nvx"),
+            distro: Device {
+                mmio: DISTRO_MMIO_BASE,
+                sectors: None,
+            },
+            image: root::Image::Erofs { uuid: None },
+            upper: root::Upper::Tmpfs,
+            overlay: root::OverlayMode::default(),
+            timeout: Duration::ZERO,
+        };
+        let assembly = ApplyError::Assembly(root::assemble(&relative).unwrap_err());
+        let root = activating().complete(now(), Err(assembly.into()));
         cases.push((failed(root), status::ACTIVATION_ROOT));
         let refused = ApplyError::Account {
             error: entry::Error::Root(io::Error::other("no account")),
@@ -489,6 +530,41 @@ mod tests {
         };
         let workload = activating().complete(now(), Err(refused.into()));
         cases.push((failed(workload), status::ACTIVATION_WORKLOAD));
+        let generated = ApplyError::MachineId {
+            error: io::ErrorKind::AlreadyExists.into(),
+            teardown: None,
+        };
+        let workload = activating().complete(now(), Err(generated.into()));
+        cases.push((failed(workload), status::ACTIVATION_WORKLOAD));
+        let view = ApplyError::View {
+            error: entry::Error::Hostname,
+            teardown: None,
+        };
+        let workload = activating().complete(now(), Err(view.into()));
+        cases.push((failed(workload), status::ACTIVATION_WORKLOAD));
+        let unmounted = ApplyError::Export {
+            error: RootError::Mount {
+                mount: root::Mount::Export {
+                    tag: FILESYSTEM_TAG.to_owned(),
+                },
+                error: io::ErrorKind::NotFound.into(),
+            },
+            teardown: None,
+        };
+        let export = activating().complete(now(), Err(unmounted.into()));
+        cases.push((failed(export), status::ACTIVATION_EXPORT));
+        let unwritten = ApplyError::Network {
+            error: NetworkError::Write(io::ErrorKind::AlreadyExists.into()),
+            teardown: None,
+        };
+        let network = activating().complete(now(), Err(unwritten.into()));
+        cases.push((failed(network), status::ACTIVATION_NETWORK));
+        let unbound = ApplyError::Network {
+            error: NetworkError::Bind(entry::Error::Resolver(MappingError::TargetKind)),
+            teardown: None,
+        };
+        let network = activating().complete(now(), Err(unbound.into()));
+        cases.push((failed(network), status::ACTIVATION_NETWORK));
         let other = activating().complete(now(), Err("another failure of the application".into()));
         cases.push((failed(other), status::ACTIVATION_ROOT));
         // The worker's own order.
@@ -511,15 +587,14 @@ mod tests {
                 }
             );
         }
-        // Every class that the adapter's clones reach has its status; the export's and the
-        // network's are left to the activation of those settings.
+        // Every class that the adapter's clones reach has its status.
         let mut statuses = cases
             .iter()
             .map(|(failure, _)| failure_status(failure))
             .collect::<Vec<_>>();
         statuses.sort_unstable();
         statuses.dedup();
-        assert_eq!(statuses, [50, 51, 52, 53, 54, 55, 58]);
+        assert_eq!(statuses, [50, 51, 52, 53, 54, 55, 56, 57, 58]);
         assert!(
             statuses
                 .iter()
