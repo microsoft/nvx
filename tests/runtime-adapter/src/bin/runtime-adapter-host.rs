@@ -107,10 +107,11 @@
 //!   the sandbox, at the host's time, with `Store::acquire`, which refuses a generation that a
 //!   tombstone quarantines, or that is not eligible then, and NVX's `ClonePlan` checks the clone
 //!   against the generation, from the metadata of its files alone: its image, the raw file PATH,
-//!   an EROFS filesystem, `erofs`, of which the guest expects the identity UUID, of the length of
-//!   the template's placeholder, its upper, the ext4 scratch image PATH, of the geometry of the
-//!   template's scratch, or RAM, with the bindings that STORE stages for the images, as `stage`
-//!   stages them, and its memory target, in whole blocks, from the template's RAM to its capacity.
+//!   an EROFS filesystem, `erofs`, or a GPT disk, `gpt`, of which the guest expects the identity
+//!   UUID, of the length of the template's placeholder, whatever the placeholder's format, its
+//!   upper, the ext4 scratch image PATH, of the geometry of the template's scratch, or RAM, with
+//!   the bindings that STORE stages for the images, as `stage` stages them, and its memory target,
+//!   in whole blocks, from the template's RAM to its capacity.
 //!   A request that the template cannot serve fails there, before any VMM starts. The command
 //!   records the clone in STORE, with the template store and the generation; see
 //!   `runtime_adapter::clone::CloneRecord`. OpenVMM then restores the generation's snapshot in

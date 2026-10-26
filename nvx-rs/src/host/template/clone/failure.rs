@@ -82,8 +82,7 @@ pub enum Evidence {
     /// have, as the guest's
     /// [`ACTIVATION_RESOURCES`](crate::protocol::status::ACTIVATION_RESOURCES) tells.
     InvalidTargets,
-    /// The request's image is of a format that no clone restores, a GPT disk, or is not of the
-    /// format and identity that its binding names.
+    /// The request's image is not of the format and identity that its binding names.
     InvalidFormat,
     /// The request's settings are invalid: a plan that no clone takes, a path that OpenVMM would
     /// not open as checked, a network that the template's NIC does not match, an image or a

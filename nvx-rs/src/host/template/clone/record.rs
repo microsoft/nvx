@@ -38,8 +38,10 @@ const SCRATCH_DOMAIN: &[u8] = b"nvx scratch binding\0";
 ///
 /// - the restore section: a transaction ID of 16 random bytes, and the template that `lease`
 ///   names, its generation and the identity of its key;
-/// - the image: an EROFS layer, the identity of its binding, and the UUID of its filesystem,
-///   which the adapter's plan names, as the binding does;
+/// - the image, in the format that its binding names: an EROFS layer, with the identity of its
+///   binding and the UUID of its filesystem, or a GPT disk, with the identity of its binding, the
+///   GUID of the disk, and the request's bound of its first partition; the adapter's plan names
+///   the UUID or the GUID, as the binding does;
 /// - the upper: a tmpfs, or the scratch, with the identity of its binding and the request's
 ///   journal policy;
 /// - the request's overlay mode and workload view;
@@ -53,9 +55,9 @@ const SCRATCH_DOMAIN: &[u8] = b"nvx scratch binding\0";
 /// - the expected resources: the template's processors, all of which a template's VM keeps
 ///   online, and the request's memory target.
 ///
-/// Fails with [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported) for a request whose image
-/// is not an EROFS layer, [`Evidence::InvalidFormat`], and for a configuration that no record
-/// holds, as [`Configuration::check`] finds it, such as a hostname that is empty or longer than
+/// Fails with [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported) for a configuration that
+/// no record holds, as [`Configuration::check`] finds it, such as a GPT disk's first-partition
+/// bound of 0, a hostname that is empty or longer than
 /// [`MAX_HOSTNAME_BYTES`](crate::activation::MAX_HOSTNAME_BYTES), or a workload identity whose
 /// UID or GID is 0, [`Evidence::InvalidActivate`]; with [`ErrorKind::Io`](crate::ErrorKind::Io)
 /// for a key whose command line names its DNS server in a form that OpenVMM does not write, as
@@ -67,12 +69,18 @@ pub(super) fn build(
     lease: &Lease,
     key: &TemplateKey,
 ) -> std::result::Result<ActivationRecord, Fault> {
+    let binding = distro_identity(&request.binding).on_host()?;
+    let expected = request.adapter.distro().image().identity;
     let image = match request.binding.format() {
         DistroFormat::Erofs => Image::Erofs {
-            binding: distro_identity(&request.binding).on_host()?,
-            uuid: request.adapter.distro().image().identity,
+            binding,
+            uuid: expected,
         },
-        DistroFormat::Gpt => return Err(Fault::new(Evidence::InvalidFormat, gpt_refused())),
+        DistroFormat::Gpt => Image::Gpt {
+            binding,
+            disk_guid: expected,
+            first_partition_bound: request.first_partition_bound,
+        },
     };
     let upper = match &request.scratch {
         None => Upper::Tmpfs,
@@ -116,14 +124,6 @@ pub(super) fn build(
             )),
         )
     })
-}
-
-/// Returns the error of a request whose image is a GPT disk, which no clone restores yet.
-pub(super) fn gpt_refused() -> Error {
-    Error::unsupported(
-        "the image of a clone must be an EROFS layer: this build restores no clone of a GPT \
-         image",
-    )
 }
 
 /// Returns the identity of `binding`, the binding of a clone's image, as the [module](self)
