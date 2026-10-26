@@ -20,6 +20,7 @@ use runtime_adapter::clone::{
     CLONE_MODE, CloneRecord, HOST_TIME_VARIABLE, Request, host_time_text, parse_host_time,
 };
 use runtime_adapter::layered::{Bindings, LaunchRecord, RECORD_FORMAT, RECORD_NAME, Staged};
+use runtime_adapter::root::DEFAULT_FIRST_PARTITION_BOUND;
 use serde_json::{Value, json};
 
 /// The identity that the tests' images have.
@@ -124,6 +125,14 @@ fn the_host_program_refuses_options_that_do_not_make_a_start() {
             "--overlay-mode takes trusted-lowers or untrusted-lowers",
         ),
         (
+            with(&["--upper", "ram", "--first-partition-bound", "4096"]),
+            "--first-partition-bound needs --distro gpt:PATH",
+        ),
+        (
+            with(&["--upper", "ram", "--first-partition-bound", "0"]),
+            "--first-partition-bound takes a positive number of bytes, not \"0\"",
+        ),
+        (
             with(&["--upper", "ram", "--template", "other"]),
             "unexpected option \"--template\" of start",
         ),
@@ -153,11 +162,10 @@ fn the_host_program_refuses_options_that_do_not_make_a_start() {
         ),
     ];
     // Each option that a start does not take.
-    let others: [(&str, &str); 8] = [
+    let others: [(&str, &str); 7] = [
         ("--guest-agent", "agent"),
         ("--hypervisor", "whp"),
         ("--runtime-dir", "/run/a"),
-        ("--first-partition-bound", "4096"),
         ("--share", "a:/b"),
         ("--network", "network.json"),
         ("--cpu-profile", "auto"),
@@ -340,6 +348,7 @@ fn a_clone_s_record_names_its_template_store_and_generation_beside_its_plan() {
         workload_identity: Some((1000, 1000)),
         overlay_mode: None,
         scratch_journal: None,
+        first_partition_bound: None,
     };
     let plan = request.plan().unwrap();
     let staged = Staged::stage(&distro, ImageFormat::Erofs, identity(), Some(&scratch)).unwrap();
@@ -427,6 +436,7 @@ fn a_clone_s_request_takes_the_staged_bindings_and_the_guest_s_defaults() {
         workload_identity: None,
         overlay_mode: None,
         scratch_journal: None,
+        first_partition_bound: None,
     };
     let plan = request.plan().unwrap();
     let staged = Staged::stage(&distro, ImageFormat::Erofs, identity(), Some(&scratch)).unwrap();
@@ -451,12 +461,14 @@ fn a_clone_s_request_takes_the_staged_bindings_and_the_guest_s_defaults() {
     assert_eq!(clone.workload.identity, None);
     assert_eq!(clone.overlay, nvx::activation::OverlayMode::TrustedLowers);
     assert_eq!(clone.journal, nvx::activation::Journal::Allowed);
+    assert_eq!(clone.first_partition_bound, DEFAULT_FIRST_PARTITION_BOUND);
 
     // A request that names its settings.
     let named = Request {
         workload_identity: Some((65534, 65533)),
         overlay_mode: Some(runtime_adapter::root::OverlayMode::UntrustedLowers),
         scratch_journal: Some(runtime_adapter::root::JournalPolicy::Forbidden),
+        first_partition_bound: Some(4096),
         ..request.clone()
     };
     let clone = named
@@ -471,6 +483,7 @@ fn a_clone_s_request_takes_the_staged_bindings_and_the_guest_s_defaults() {
     );
     assert_eq!(clone.overlay, nvx::activation::OverlayMode::UntrustedLowers);
     assert_eq!(clone.journal, nvx::activation::Journal::Forbidden);
+    assert_eq!(clone.first_partition_bound, 4096);
 
     // An image, or a scratch image, that the store does not stage.
     for (bindings, what) in [
