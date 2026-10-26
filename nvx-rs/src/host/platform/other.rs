@@ -5,7 +5,7 @@ use std::process::Command;
 use std::time::{Duration, Instant};
 
 use super::Transport;
-use crate::host::supervisor::Inherited;
+use super::inherit::Inherited;
 use crate::hypervisor::Hypervisor;
 
 #[cfg(all(feature = "cli", unix))]

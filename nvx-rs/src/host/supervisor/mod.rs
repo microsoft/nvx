@@ -103,8 +103,9 @@ mod tests;
 use std::io;
 use std::time::{Duration, Instant};
 
-pub use self::child::{Inherited, Launched, VmmCommand, spawn};
+pub use self::child::{Launched, VmmCommand, spawn};
 use super::launch::timeout_problem;
+pub use super::platform::inherit::Inherited;
 use super::process::{Process, ProcessRef};
 use super::store::{
     IdentityCheck, IdentityPart, Launch, LaunchJournal, LockedStore, Recovery, RuntimeIdentity,

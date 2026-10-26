@@ -5,12 +5,6 @@ use std::ffi::OsString;
 use std::fmt;
 use std::fs::File;
 use std::io::{self, Write};
-#[cfg(not(any(unix, windows)))]
-use std::marker::PhantomData;
-#[cfg(unix)]
-use std::os::fd::{AsFd, BorrowedFd};
-#[cfg(windows)]
-use std::os::windows::io::{AsHandle, BorrowedHandle};
 use std::path::PathBuf;
 #[cfg(not(windows))]
 use std::process::{Child, Command, Stdio};
@@ -22,95 +16,11 @@ use std::time::Duration;
 use std::time::Instant;
 
 use crate::host::platform;
+use crate::host::platform::inherit::Inherited;
 #[cfg(not(windows))]
 use crate::host::process::POLL_INTERVAL;
 use crate::host::process::{BootId, KILL_TIMEOUT, Process, ProcessRef};
 use crate::protocol::CAPABILITY_LEN;
-
-/// The descriptor of the caller that an [`Inherited`] borrows.
-#[cfg(unix)]
-type Borrowed<'a> = BorrowedFd<'a>;
-/// The handle of the caller that an [`Inherited`] borrows.
-#[cfg(windows)]
-type Borrowed<'a> = BorrowedHandle<'a>;
-/// What an [`Inherited`] would borrow on a host without descriptors or handles, which has none.
-#[cfg(not(any(unix, windows)))]
-#[derive(Debug, Clone, Copy)]
-struct Borrowed<'a>(std::convert::Infallible, PhantomData<&'a ()>);
-
-/// A descriptor (Unix) or handle (Windows) of the caller, such as that of an open [`File`], that a
-/// VMM inherits under the number that it has in the caller, which the caller can therefore name in
-/// the VMM's arguments.
-///
-/// [`spawn`] passes the VMM these and its standard streams, and nothing else of the caller's:
-///
-/// - On Linux, the descriptor must be close-on-exec in the caller, as Rust opens its files, and
-///   stays so: only the VMM's own process clears the flag, between its fork and its exec, so no
-///   process that another thread spawns meanwhile inherits it. A spawn refuses a descriptor that
-///   is not close-on-exec, since any process that the caller spawns would inherit it. The VMM
-///   opens it again as `/proc/self/fd/N`, which `proc_path` returns.
-/// - On Windows, the handle joins the explicit list of handles that the VMM inherits, and is
-///   inheritable only while the VMM is created, after which the spawn restores its earlier
-///   inheritability. Spawns that allow handles take that window one at a time, so several may
-///   allow the same handle. A process that another thread creates in that window without such a
-///   list, as `std::process::Command` does, can inherit it too.
-///
-/// Other hosts fail a spawn that passes any.
-#[derive(Debug, Clone, Copy)]
-pub struct Inherited<'a>(Borrowed<'a>);
-
-impl<'a> Inherited<'a> {
-    /// Names the descriptor of `object`, such as a [`File`].
-    #[cfg(unix)]
-    pub fn new(object: &'a impl AsFd) -> Self {
-        Self(object.as_fd())
-    }
-
-    /// Names the handle of `object`, such as a [`File`].
-    #[cfg(windows)]
-    pub fn new(object: &'a impl AsHandle) -> Self {
-        Self(object.as_handle())
-    }
-}
-
-#[cfg(target_os = "linux")]
-impl Inherited<'_> {
-    /// Returns the path through which the VMM opens the descriptor again: `/proc/self/fd/N`,
-    /// where `N` is its number in the caller and in the VMM.
-    pub fn proc_path(&self) -> PathBuf {
-        use std::os::fd::AsRawFd;
-
-        PathBuf::from(format!("/proc/self/fd/{}", self.0.as_raw_fd()))
-    }
-}
-
-#[cfg(unix)]
-impl<'a> From<BorrowedFd<'a>> for Inherited<'a> {
-    fn from(descriptor: BorrowedFd<'a>) -> Self {
-        Self(descriptor)
-    }
-}
-
-#[cfg(windows)]
-impl<'a> From<BorrowedHandle<'a>> for Inherited<'a> {
-    fn from(handle: BorrowedHandle<'a>) -> Self {
-        Self(handle)
-    }
-}
-
-#[cfg(unix)]
-impl AsFd for Inherited<'_> {
-    fn as_fd(&self) -> BorrowedFd<'_> {
-        self.0
-    }
-}
-
-#[cfg(windows)]
-impl AsHandle for Inherited<'_> {
-    fn as_handle(&self) -> BorrowedHandle<'_> {
-        self.0
-    }
-}
 
 /// How [`spawn`] starts a VMM: its executable, arguments, and working directory, whether it
 /// leaves the caller's job object on Windows, and the descriptors or handles of the caller that it
@@ -407,7 +317,7 @@ fn status_value(status: std::process::ExitStatus) -> i64 {
 #[cfg(all(test, target_os = "linux"))]
 mod tests {
     use std::fs;
-    use std::os::fd::{AsRawFd, RawFd};
+    use std::os::fd::{AsFd, AsRawFd, BorrowedFd, RawFd};
     use std::path::Path;
 
     use nix::fcntl::{FcntlArg, FdFlag, fcntl};

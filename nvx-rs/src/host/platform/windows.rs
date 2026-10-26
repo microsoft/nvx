@@ -61,7 +61,7 @@ use windows_sys::Win32::System::Threading::{
 };
 
 use super::Transport;
-use crate::host::supervisor::Inherited;
+use super::inherit::Inherited;
 use crate::hypervisor::Hypervisor;
 
 /// Whether this host can run NVX microVMs.

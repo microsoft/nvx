@@ -9,7 +9,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use super::Transport;
-use crate::host::supervisor::Inherited;
+use super::inherit::Inherited;
 use crate::host::sys::{self, Errno, PidFd};
 use crate::hypervisor::Hypervisor;
 

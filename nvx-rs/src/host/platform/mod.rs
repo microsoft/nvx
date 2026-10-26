@@ -14,6 +14,7 @@ use std::time::Duration;
 use crate::error::{Error, Result};
 use crate::hypervisor::Hypervisor;
 
+pub(crate) mod inherit;
 #[cfg(target_os = "linux")]
 /// Linux implementations of host process, socket, and hypervisor primitives.
 mod linux;
