@@ -90,7 +90,9 @@
 //!    announces, the start, the executions, the probes, and the stop. The record's workload
 //!    identity, if it has one, is the whole sandbox's, as a root configuration's is, so that
 //!    executions name none, and a clone's executions run in the cgroups of the template's
-//!    bootstrap.
+//!    bootstrap. It also answers the probe `activation::ACTIVATION_PROBE`, with when the events of
+//!    the clone's activation and order happened, after the repair's acknowledgement of the
+//!    restore.
 //!
 //! The application applies none of the record's other settings: its export, its network, its
 //! hostname, and its machine ID. Without an export, a clone refuses each part of a mapping table
@@ -517,7 +519,9 @@ pub fn work<S: Read + Write + AsFd>(
 /// before its capture, and whose first epoch it acknowledged, which the reset that the restore
 /// queued starts again: the worker attaches no session. `template` holds the inputs of the root's
 /// assembly that the template captured, with which the worker [applies](RootOperations::apply)
-/// the record of the host's `Activate`.
+/// the record of the host's `Activate`. `acknowledged` is when the repair acknowledged the
+/// restore, `nvx::guest::clone::Repaired::acknowledged_at`, if it did, from which the
+/// `activation::ACTIVATION_PROBE` reports the events of the clone.
 ///
 /// It ends as [`work`] does, and with [`Worked::Unactivated`] once the activation failed, or
 /// [`Worked::Abandoned`] once the broker closed the stream before the clone was ready, after which
@@ -530,8 +534,9 @@ pub fn work_clone<S: Read + Write + AsFd>(
     operations: &mut dyn RootOperations,
     activation: Activation<Admission>,
     template: RootTemplate,
+    acknowledged: Option<Instant>,
 ) -> Result<Worked, ServeError> {
-    let state = CloneState::new(activation, template);
+    let state = CloneState::new(activation, template, acknowledged);
     serve(
         Connection::resume(stream, session)?,
         operations,

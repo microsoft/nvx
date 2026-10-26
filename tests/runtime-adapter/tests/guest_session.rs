@@ -3963,7 +3963,7 @@ mod clones {
     use nvx::protocol::nvxs::{GuestEvent, GuestSession};
     use nvx::protocol::status;
     use runtime_adapter::worker::UNACTIVATED_DRAIN;
-    use runtime_adapter::worker::activation::ACTIVATION_TIMEOUT;
+    use runtime_adapter::worker::activation::{ACTIVATION_PROBE, ACTIVATION_TIMEOUT};
     use runtime_adapter::worker::capture::{self, Admission};
 
     use super::*;
@@ -4034,12 +4034,11 @@ mod clones {
 
     /// Returns the activation of a clone that the worker repaired, with [`RESOURCES`], behind the
     /// worker's fence, which the capture's barrier handed over closed, and whose deadline ends
-    /// `timeout` from now, as from the repair's acknowledgement of the restore.
-    fn repaired(timeout: Duration) -> Activation<Admission> {
+    /// `timeout` after `acknowledged`, as from the repair's acknowledgement of the restore.
+    fn repaired(acknowledged: Instant, timeout: Duration) -> Activation<Admission> {
         let mut fence = Admission::default();
         fence.close().unwrap();
-        let now = Instant::now();
-        Activation::with_resources(RESOURCES, Some(now), fence, timeout, now)
+        Activation::with_resources(RESOURCES, Some(acknowledged), fence, timeout, acknowledged)
     }
 
     /// Returns the inputs of the assembly of the clones' roots that their template captured:
@@ -4088,13 +4087,22 @@ mod clones {
     }
 
     /// Runs a clone's worker in a thread, with the root operations `root`, on `guest`, the guest's
-    /// end of the stream, and returns the thread, as [`start_clone`] does.
+    /// end of the stream, and returns the thread, as [`start_clone`] does. The clone's repair
+    /// acknowledged the restore now.
     fn run_clone(guest: UnixStream, root: FakeRoot, timeout: Duration) -> Working {
         let session = captured_session();
-        let activation = repaired(timeout);
+        let acknowledged = Instant::now();
+        let activation = repaired(acknowledged, timeout);
         thread::spawn(move || {
             let mut root = root;
-            let worked = worker::work_clone(guest, session, &mut root, activation, template());
+            let worked = worker::work_clone(
+                guest,
+                session,
+                &mut root,
+                activation,
+                template(),
+                Some(acknowledged),
+            );
             (root, worked)
         })
     }
@@ -4550,5 +4558,56 @@ mod clones {
         let (root, worked) = host.stop();
         assert_eq!(worked.unwrap(), Worked::Stopped);
         assert_eq!(entrances(&root), [entrance(identity)]);
+    }
+
+    /// Returns the facts of the guest's `report`.
+    fn reported(report: &Message) -> Facts {
+        let Message::Report(body) = report else {
+            panic!("the guest did not report: {report:?}");
+        };
+        Facts::decode(body).unwrap()
+    }
+
+    /// Returns the microseconds after the acknowledgement of the restore that the clone's `facts`
+    /// report for its event `name`.
+    fn after(facts: &Facts, name: &str) -> u64 {
+        let value = facts.get(name);
+        value
+            .and_then(|value| value.parse().ok())
+            .unwrap_or_else(|| panic!("the clone's {name} is {value:?}: {facts:?}"))
+    }
+
+    #[test]
+    fn a_clone_reports_when_its_events_happened_after_the_acknowledgement() {
+        // The worker answers the probe of the clone's activation itself, with no root operation,
+        // executions running or not: the restore's reset came after the repair's acknowledgement,
+        // then the host's first message, the clone's Activate, then its Ready and its start, and
+        // no execution yet.
+        let record = record(1, Some(WORKLOAD));
+        let mut host = Host::activated(FakeRoot::booting(&layout()), &record);
+        let probe = Message::Probe(ACTIVATION_PROBE.as_bytes().to_vec());
+        host.send(std::slice::from_ref(&probe));
+        host.run_until(|host| !host.replies.is_empty());
+        let facts = reported(&host.replies.remove(0));
+        assert_eq!(facts.get("acknowledged"), Some("yes"));
+        assert_eq!(facts.get("execution"), Some("none"));
+        let events = ["reset", "message", "ready", "started"].map(|name| after(&facts, name));
+        assert!(events.is_sorted(), "{facts:?}");
+
+        // The start of the first execution came once the sandbox started.
+        host.start(start_of(1, shell("sleep 1")), Vec::new());
+        host.send(&[probe]);
+        host.run_until(|host| !host.replies.is_empty());
+        let facts = reported(&host.replies.remove(0));
+        assert!(after(&facts, "execution") >= events[3], "{facts:?}");
+        host.run_until(|host| host.outcome(1).is_some());
+        check_lossless(&host, 1, Status::Exited(0));
+        let (root, worked) = host.stop();
+        assert_eq!(worked.unwrap(), Worked::Stopped);
+        assert!(
+            !root.calls.iter().any(|call| matches!(call, Call::Probe(_))),
+            "{:?}",
+            root.calls
+        );
     }
 }

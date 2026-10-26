@@ -6,6 +6,23 @@
 //!
 //! The activation's failures are final, and end the worker, and with it the VM, with the status of
 //! `nvx::protocol::status` that [`failure_status`] selects by the failure's class.
+//!
+//! The worker of a clone also answers the [`ACTIVATION_PROBE`] once the clone is ready, at any
+//! time, executions running or not, with when the events of the clone's activation and order
+//! happened, in microseconds after the repair's acknowledgement of the restore, before which the
+//! host's input must not reach the clone:
+//!
+//! - `acknowledged`: `yes` once the repair acknowledged the restore, and `none` for a restore
+//!   whose host did not gate its input until the acknowledgement, whose repair acknowledged
+//!   nothing;
+//! - `reset`: when the clone took the reset that the restore queued;
+//! - `message`: when the host's first message came, which must be the clone's `Activate`;
+//! - `ready`: when the clone was ready, once the record applied;
+//! - `started`: when the clone's sandbox started;
+//! - `execution`: when the start of the host's first execution came.
+//!
+//! Each event is `none` until it happened, `before` if it happened before the acknowledgement, and
+//! `unknown` without one.
 
 use std::io::{Read, Write};
 use std::os::fd::AsFd;
@@ -27,6 +44,7 @@ use super::{RootOperations, Worked, serve_root};
 use crate::GUEST_BUILD;
 use crate::frame::Message;
 use crate::guest::{ServeError, Step};
+use crate::probe::{Facts, Probe};
 use crate::root::Ready;
 
 /// How long a clone's activation may take, from the repair's acknowledgement of the restore until
@@ -34,6 +52,11 @@ use crate::root::Ready;
 /// application of the record to wait for each block device as long as the template's
 /// configuration allows. A clone that the host did not activate by then ends.
 pub const ACTIVATION_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// The probe that the worker of a clone answers with when the events of the clone's activation and
+/// order happened, as the [module documentation](self) describes, and which the worker of a VM
+/// that boots cold does not run.
+pub const ACTIVATION_PROBE: &str = "activation";
 
 /// Returns the status with which the worker of a clone, and with it the VM, ends once the clone's
 /// activation failed with `failure`: the status of `nvx::protocol::status` of the failure's
@@ -85,16 +108,27 @@ pub(super) struct CloneState {
     template: RootTemplate,
     /// The worker's order, once the clone is ready.
     order: Option<Order>,
+    /// When the events of the clone's activation and order happened.
+    timeline: Timeline,
 }
 
 impl CloneState {
     /// Returns the state of the clone whose activation is `activation`, in its transport
-    /// bootstrap, and whose template captured `template`.
-    pub(super) fn new(activation: Activation<Admission>, template: RootTemplate) -> Self {
+    /// bootstrap, whose template captured `template`, and whose repair acknowledged the restore at
+    /// `acknowledged`, if it did.
+    pub(super) fn new(
+        activation: Activation<Admission>,
+        template: RootTemplate,
+        acknowledged: Option<Instant>,
+    ) -> Self {
         Self {
             activation,
             template,
             order: None,
+            timeline: Timeline {
+                acknowledged,
+                ..Timeline::default()
+            },
         }
     }
 
@@ -103,9 +137,9 @@ impl CloneState {
     /// clone is ready, as when the host attaches again. Returns how the worker ends once the reset
     /// failed the activation: another reset before the clone is ready.
     pub(super) fn reset(&mut self) -> Option<Worked> {
-        let action = self
-            .activation
-            .input(Instant::now(), ActivationInput::Reset);
+        let now = Instant::now();
+        self.timeline.reset.get_or_insert(now);
+        let action = self.activation.input(now, ActivationInput::Reset);
         action.err().map(|failure| unactivated(&failure))
     }
 
@@ -134,8 +168,9 @@ impl CloneState {
     /// Before the clone is ready, the activation takes an `Activate`, whose record it hands back
     /// once it accepted it, and which the worker applies then, through `operations`, and fails on
     /// any other message. The worker answers an `Activate` that the activation completed with
-    /// `Ready`, which reports the activation, as it answers a retry once the clone is ready. Once
-    /// the activation failed, the worker drops its executions, and ends.
+    /// `Ready`, which reports the activation, as it answers a retry once the clone is ready, and
+    /// the [`ACTIVATION_PROBE`] itself. Once the activation failed, the worker drops its
+    /// executions, and ends.
     pub(super) fn handle<S: Read + Write + AsFd>(
         &mut self,
         operations: &mut dyn RootOperations,
@@ -144,6 +179,7 @@ impl CloneState {
         now: Instant,
         message: Message,
     ) -> Result<Step<Worked>, ServeError> {
+        self.timeline.message.get_or_insert(now);
         let input = match &message {
             Message::Activate(record) => ActivationInput::Activate(record),
             _ => ActivationInput::Request,
@@ -156,17 +192,23 @@ impl CloneState {
             ActivationAction::Apply(record) => self.apply(operations, executions, &record),
             ActivationAction::Ready(activation) => Step::Continue(vec![ready(activation)]),
             ActivationAction::Serve => {
+                if let Some(answer) = self.timeline.answer(&message) {
+                    return Ok(Step::Continue(vec![answer]));
+                }
+                if matches!(message, Message::ExecStart(_)) {
+                    self.timeline.execution.get_or_insert(now);
+                }
                 let order = self
                     .order
                     .as_mut()
                     .expect("a ready activation has the worker's order");
                 let started = order.is_started();
                 let step = serve_root(operations, order, executions, connection, now, message)?;
-                if !started
-                    && order.is_started()
-                    && let Err(failure) = self.activation.start()
-                {
-                    return Ok(self.end(executions, &failure));
+                if !started && order.is_started() {
+                    self.timeline.started = Some(now);
+                    if let Err(failure) = self.activation.start() {
+                        return Ok(self.end(executions, &failure));
+                    }
                 }
                 step
             }
@@ -197,6 +239,7 @@ impl CloneState {
         };
         match self.activation.complete(Instant::now(), result) {
             Ok(activation) => {
+                self.timeline.ready = Some(Instant::now());
                 let identity = identity.map(|identity| (identity.uid(), identity.gid()));
                 // The executions' listeners are published, the entry's default, which refuses
                 // the most, as a root configuration that names no publication has them.
@@ -225,6 +268,73 @@ impl CloneState {
 fn ready(activation: ReadyActivation) -> Message {
     let ready = Ready::new(GUEST_BUILD).expect("this crate's version is a build");
     Message::Ready(ready.with_activation(activation).encode())
+}
+
+/// When the events of a clone's activation and order happened, which the [`ACTIVATION_PROBE`]
+/// reports, as the [module documentation](self) describes.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct Timeline {
+    /// When the repair acknowledged the restore, if it did.
+    acknowledged: Option<Instant>,
+    /// When the clone took the reset that the restore queued.
+    reset: Option<Instant>,
+    /// When the host's first message came.
+    message: Option<Instant>,
+    /// When the clone was ready.
+    ready: Option<Instant>,
+    /// When the clone's sandbox started.
+    started: Option<Instant>,
+    /// When the start of the host's first execution came.
+    execution: Option<Instant>,
+}
+
+impl Timeline {
+    /// Returns the worker's answer to `message` if it is the [`ACTIVATION_PROBE`]: the timeline's
+    /// [facts](Self::facts), or the problem of a probe with arguments.
+    fn answer(&self, message: &Message) -> Option<Message> {
+        let Message::Probe(body) = message else {
+            return None;
+        };
+        let probe = Probe::decode(body).ok()?;
+        if probe.name() != ACTIVATION_PROBE {
+            return None;
+        }
+        Some(if probe.arguments().is_empty() {
+            Message::Report(self.facts().encode())
+        } else {
+            let problem = format!("the {ACTIVATION_PROBE} probe takes no arguments");
+            Message::ProbeFailed(problem.into_bytes())
+        })
+    }
+
+    /// Returns the timeline's facts, as the [module documentation](self) describes them.
+    fn facts(&self) -> Facts {
+        let mut facts = Facts::new();
+        let acknowledged = if self.acknowledged.is_some() {
+            "yes"
+        } else {
+            "none"
+        };
+        facts.push("acknowledged", acknowledged);
+        let events = [
+            ("reset", self.reset),
+            ("message", self.message),
+            ("ready", self.ready),
+            ("started", self.started),
+            ("execution", self.execution),
+        ];
+        for (name, at) in events {
+            let value = match (self.acknowledged, at) {
+                (_, None) => "none".to_owned(),
+                (None, Some(_)) => "unknown".to_owned(),
+                (Some(acknowledged), Some(at)) => at
+                    .checked_duration_since(acknowledged)
+                    .map_or("before".to_owned(), |after| after.as_micros().to_string()),
+            };
+            facts.push(name, value);
+        }
+        facts
+    }
 }
 
 /// Returns how the worker ends once the activation failed with `failure`: with its
@@ -424,5 +534,65 @@ mod tests {
         let template = template_config();
         assert!(ACTIVATION_TIMEOUT >= 2 * template.device_timeout);
         assert_eq!(root_template(&template).timeout, template.device_timeout);
+    }
+
+    #[test]
+    fn the_activation_probe_reports_the_clone_s_events_after_the_acknowledgement() {
+        let acknowledged = Instant::now();
+        let after = |micros| acknowledged + Duration::from_micros(micros);
+        let timeline = Timeline {
+            acknowledged: Some(acknowledged),
+            reset: Some(after(10)),
+            message: Some(after(250)),
+            ready: Some(after(4_000)),
+            started: Some(after(4_100)),
+            execution: None,
+        };
+        let mut expected = Facts::new();
+        let facts = [
+            ("acknowledged", "yes"),
+            ("reset", "10"),
+            ("message", "250"),
+            ("ready", "4000"),
+            ("started", "4100"),
+            ("execution", "none"),
+        ];
+        for (key, value) in facts {
+            expected.push(key, value);
+        }
+        assert_eq!(timeline.facts(), expected);
+        let probe = Message::Probe(ACTIVATION_PROBE.as_bytes().to_vec());
+        let report = Message::Report(expected.encode());
+        assert_eq!(timeline.answer(&probe), Some(report));
+        let with_argument = Message::Probe(b"activation now".to_vec());
+        let problem = b"the activation probe takes no arguments".to_vec();
+        assert_eq!(
+            timeline.answer(&with_argument),
+            Some(Message::ProbeFailed(problem))
+        );
+        // The probes of the root, and other messages, are the order's.
+        for message in [
+            Message::Probe(b"mounts".to_vec()),
+            Message::Probe(b"activations".to_vec()),
+            Message::Ping,
+        ] {
+            assert_eq!(timeline.answer(&message), None, "{message:?}");
+        }
+
+        // An event before the acknowledgement, and a timeline without one.
+        let early = Timeline {
+            acknowledged: Some(after(100)),
+            ..timeline
+        };
+        assert_eq!(early.facts().get("reset"), Some("before"));
+        assert_eq!(early.facts().get("message"), Some("150"));
+        let unacknowledged = Timeline {
+            acknowledged: None,
+            ..timeline
+        };
+        let facts = unacknowledged.facts();
+        assert_eq!(facts.get("acknowledged"), Some("none"));
+        assert_eq!(facts.get("reset"), Some("unknown"));
+        assert_eq!(facts.get("execution"), Some("none"));
     }
 }
