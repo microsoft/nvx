@@ -55,9 +55,10 @@
 //! `host` module's clone order is the framing through which the restore sequence of
 //! `nvx::host::template` activates a clone and starts its sandbox, and the host program's
 //! `runtime-adapter-host start` starts a clone of a generation in a sandbox of its own, which
-//! leases the generation, in the `clone` module. The host program's `refresh` captures a new
-//! generation, `list` and `inspect` report the store's generations, and `remove` retires one, in
-//! the `generations` module, which also decides which generations the host program evicts.
+//! leases the generation, in the `clone` module. Its `run` runs one execution in such a clone,
+//! then tears the clone down. The host program's `refresh` captures a new generation, `list` and
+//! `inspect` report the store's generations, and `remove` retires one, in the `generations`
+//! module, which also decides which generations the host program evicts.
 
 #[cfg(feature = "host")]
 pub mod capture;

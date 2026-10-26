@@ -120,7 +120,9 @@ impl From<ClientError> for ExecutionsError {
 /// guest's messages to the executions, and theirs to the guest, until every execution finished.
 /// A driver runs one batch: it starts every execution before it runs them, and none after. The
 /// guest may still send messages about the executions of a run that gave up on one or failed, so
-/// a later batch takes an attachment of its own, as each command of the host program does.
+/// a later batch takes an attachment of its own, as each command of the host program does, and a
+/// stop in the same attachment skips them, as [`Client::stop_skipping`] does with
+/// [`is_about`](Self::is_about).
 ///
 /// One thread runs them all: each receive waits at most until the earliest timer of the
 /// executions, which so fires in time whatever the guest sends, and the guest's messages about one
@@ -251,6 +253,20 @@ impl Executions {
         self.executions
             .values()
             .all(|execution| execution.outcome().is_some())
+    }
+
+    /// Returns whether `message` is one of the guest's messages about an execution that the driver
+    /// started, of its key, whose body decodes: one that the guest may still send once the driver
+    /// finished the execution without it, as when it gave up waiting for the execution's outcome,
+    /// or once its run failed.
+    pub fn is_about(&self, message: &Message) -> bool {
+        let Some(Ok(decoded)) = GuestMessage::decode(message) else {
+            return false;
+        };
+        let key = decoded.key();
+        self.executions
+            .get(&key.id())
+            .is_some_and(|execution| execution.start().key == key)
     }
 
     /// Hands the guest's `message` to the host's side of its execution at `now`.

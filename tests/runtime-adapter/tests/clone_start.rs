@@ -2,11 +2,15 @@
 //! not a host's time, as usage errors, a network that the plan refuses and shares that it cannot
 //! export, and a selection that names no template, of a template store that does not exist, or of
 //! a generation that the store does not hold, with the refusal's record and its own status, before
-//! it needs NVX's artifacts or creates the sandbox's store. A clone's record names its template
-//! store and its generation, which a stop reads back, beside the plan that the other commands
-//! read, with the clone's network, whose proxy an execution of the clone then finds at the URL
-//! that NVX's activation record names, a clone's request carries the export of its shares, and a
-//! host's time keeps its text form, the form of the clock fixture. The tests need no hypervisor.
+//! it needs NVX's artifacts or creates the sandbox's store. Its `run` refuses options that do not
+//! make a run, an execution's included, as usage errors, an image that the plan refuses before it
+//! stages anything, and a selection that names no template once its preflight staged the clone's
+//! images, as a start refuses it. A clone's record names its template store and its generation,
+//! which a stop reads back, beside the plan that the other commands read, with the clone's
+//! network, whose proxy an execution of the clone then finds at the URL that NVX's activation
+//! record names, a clone's request carries the export of its shares,
+//! and a host's time keeps its text form, the form of the clock fixture. The tests need no
+//! hypervisor.
 #![cfg(feature = "host")]
 
 use std::fs;
@@ -19,7 +23,8 @@ use nvx::activation::{MachineIdMode, StoreGeneration};
 use nvx::exec::{Key, Limits, Timers, Window};
 use nvx::host::artifacts::Artifacts;
 use nvx::host::sandbox::SandboxNetwork;
-use nvx::host::template::{HostClock, HostTime, Store};
+use nvx::host::store::SandboxStore;
+use nvx::host::template::{HostClock, HostTime, Lease, Store};
 use nvx::protocol::root::ImageFormat;
 use nvx::uuid::Uuid;
 use runtime_adapter::clone::{
@@ -352,6 +357,195 @@ fn a_start_refuses_a_generation_that_the_template_store_does_not_hold_before_any
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(!stderr.contains("template store"), "{stderr}");
     assert!(!store.exists());
+}
+
+#[test]
+fn the_host_program_refuses_options_that_do_not_make_a_run() {
+    let run = [
+        "run",
+        "store",
+        "--template",
+        "templates",
+        "--generation",
+        "1",
+        "--distro",
+        "erofs:image",
+        "--distro-identity",
+        IDENTITY,
+        "--upper",
+        "ram",
+    ];
+    let program = ["--", "/bin/true"];
+    let with = |options: &[&'static str]| [&run[..], options, &program[..]].concat();
+    let before = |end: usize| [&run[..end], &program[..]].concat();
+    // The options of a start and of an execution come in any order before `--`, and the
+    // execution's program and its arguments are every argument after it.
+    let cases: Vec<(Vec<&str>, &str)> = vec![
+        (vec!["run"], "run needs a sandbox store"),
+        (
+            vec!["run", "store"],
+            "run needs `-- PROGRAM` after its options",
+        ),
+        (run.to_vec(), "run needs `-- PROGRAM` after its options"),
+        (
+            [&run[..], &["--"][..]].concat(),
+            "run needs a program after `--`",
+        ),
+        (before(2), "run needs --template"),
+        (before(4), "run needs --generation"),
+        (before(6), "run needs --distro"),
+        (before(8), "run needs --distro-identity"),
+        (before(10), "run needs --upper"),
+        (
+            with(&["--scratch-journal", "forbidden"]),
+            "--scratch-journal needs --upper scratch:PATH",
+        ),
+        (
+            with(&["--generation", "2"]),
+            "unexpected option \"--generation\" of run",
+        ),
+        (with(&["--groups", "1"]), "--groups needs --identity"),
+        (
+            with(&["--capabilities", "0"]),
+            "--capabilities needs --identity",
+        ),
+        (with(&["--numeric"]), "--numeric needs --identity"),
+        (
+            with(&["--identity", "1000"]),
+            "--identity takes UID:GID, not \"1000\"",
+        ),
+        (
+            with(&["--cwd", "tmp"]),
+            "names a working directory that is not absolute",
+        ),
+        (
+            with(&["--env", "=value"]),
+            "has an environment entry that is not NAME=VALUE",
+        ),
+        (
+            with(&["--cwd", "/a", "--cwd", "/b"]),
+            "unexpected option \"--cwd\" of run",
+        ),
+        (with(&["extra"]), "unexpected argument \"extra\" of run"),
+        (vec!["run", "store", "--env"], "\"--env\" needs a value"),
+        (
+            vec!["start", "store", "--identity", "1000:1000"],
+            "unexpected option \"--identity\" of start",
+        ),
+    ];
+    // Each option that a run does not take.
+    let others: [(&str, &str); 5] = [
+        ("--guest-agent", "agent"),
+        ("--hypervisor", "whp"),
+        ("--runtime-dir", "/run/a"),
+        ("--cpu-profile", "auto"),
+        ("--memory-capacity", "512"),
+    ];
+    let others = others.map(|(option, value)| {
+        (
+            with(&[option, value]),
+            format!("unexpected option \"{option}\" of run"),
+        )
+    });
+    let cases = cases
+        .into_iter()
+        .map(|(arguments, problem)| (arguments, problem.to_owned()))
+        .chain(others);
+    for (arguments, problem) in cases {
+        let output = host(&arguments, None);
+        assert_eq!(output.status.code(), Some(2), "{arguments:?}: {output:?}");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains(&problem) && stderr.contains("usage: runtime-adapter-host"),
+            "{arguments:?}: {stderr}"
+        );
+    }
+
+    // A clock fixture that is not a host's time is a usage error too, of a run that the options
+    // make.
+    let output = host(&with(&[]), Some("now"));
+    assert_eq!(output.status.code(), Some(2), "{output:?}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains(&format!("{HOST_TIME_VARIABLE} takes host=HOST,boot=BOOT")),
+        "{stderr}"
+    );
+}
+
+#[test]
+fn a_run_refuses_a_selection_that_names_no_template_once_its_preflight_staged_the_images() {
+    // The run's preflight stages the clone's images in the sandbox's store, which it creates,
+    // then the start reads the template store's index before it needs NVX's artifacts, which the
+    // commands do not name.
+    let directory = directory("run-unindexed");
+    let distro = image(directory.join("distro.erofs"), 4096);
+    let distro = format!("erofs:{}", distro.display());
+    let templates = directory.join("templates");
+    let store = directory.join("store");
+    let run = |templates: &Path, generation: &str, distro: &str| {
+        let arguments = [
+            "run",
+            store.to_str().unwrap(),
+            "--template",
+            templates.to_str().unwrap(),
+            "--generation",
+            generation,
+            "--distro",
+            distro,
+            "--distro-identity",
+            IDENTITY,
+            "--upper",
+            "ram",
+            "--identity",
+            "65534:65534",
+            "--",
+            "/bin/true",
+        ];
+        host(&arguments, None)
+    };
+
+    // An image that the plan refuses fails the run before it stages anything.
+    let missing = format!("erofs:{}", directory.join("missing.erofs").display());
+    let output = run(&templates, "1", &missing);
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!stderr.contains("template store"), "{stderr}");
+    assert!(!store.exists());
+
+    let refused = |output: &Output, evidence: &str, problem: &str| {
+        assert_eq!(output.status.code(), Some(10), "{output:?}");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let record = format!(
+            "preflight=staged\nfailure.outcome=no-template\nfailure.evidence={evidence}\n\
+             failure.stage=selection\nfailure.progress=none\nfailure.status=none\n\
+             failure.teardown=no-vm\nfailure.code=not-found\n"
+        );
+        assert_eq!(stdout, record);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains(problem), "{stderr}");
+        assert!(!stderr.contains("usage:"), "{stderr}");
+        let sandbox = SandboxStore::open(&store).unwrap();
+        assert!(Staged::read(sandbox.dir()).unwrap().is_some());
+        assert!(Lease::of(&sandbox).unwrap().is_none());
+        assert!(sandbox.runtime().unwrap().is_none());
+    };
+
+    // No template store.
+    let output = run(&templates, "1", &distro);
+    refused(&output, "no-store", "cannot open the template store");
+    assert!(!templates.exists());
+
+    // A template store that never published a generation.
+    Store::create(&templates).unwrap();
+    for generation in ["1", "2"] {
+        let output = run(&templates, generation, &distro);
+        let problem = format!(
+            "the template store {} holds no generation {generation}",
+            Store::open(&templates).unwrap().dir().display()
+        );
+        refused(&output, "unpublished", &problem);
+    }
 }
 
 #[test]

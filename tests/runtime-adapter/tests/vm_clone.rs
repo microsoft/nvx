@@ -1,7 +1,7 @@
 //! The host program starts clones of templates on a real hypervisor, through public APIs only: VMs
 //! that a restore of a generation of a template store starts, in place, which the store leases to
 //! a sandbox, and which the guest agent's clone mode activates, as `runtime-adapter-host start`
-//! asks.
+//! and `run` ask.
 //!
 //! Each scenario captures a [`Template`] of its own, with 256 MiB of RAM, of a capacity of
 //! 1 GiB, in a template store of its own, as `vm_template` does, of the platform's copy of the
@@ -81,6 +81,16 @@
 //! - A selection that names no template leases nothing, with the record of the store's refusal: a
 //!   template store that does not exist, a generation that the store never published, and one that
 //!   `remove` retired.
+//! - A run runs one execution in its clone, then tears the clone down, in one command: its
+//!   preflight stages the clone's images, it starts the clone as a start does, runs the execution
+//!   in the clone's root, with the environment and the working directory that its start names, as
+//!   the clone's workload identity, whatever its program's status, and stops the clone, which
+//!   releases the lease. An execution that the guest refuses leaves the run to tear the clone down
+//!   as well.
+//! - A run whose clone does not start runs nothing: once the preflight staged the clone's images,
+//!   the store refuses a selection that names no template, or of a generation whose restore window
+//!   passed, without a lease, and a clone whose activation fails ends the run with the record of
+//!   its failure, once its VM exited, and the lease released.
 //! - A start that ended once the store leased the generation, before it recorded the clone,
 //!   leaves a lease whose template store no record names, or only the record of an earlier clone,
 //!   of another template: a stop keeps it, and only its own template store, which `--template`
@@ -822,6 +832,30 @@ impl Template {
     /// Starts a clone in a new sandbox of the scenario `name`, as `start` asks, checks that the
     /// start exits with `status`, and returns the clone.
     fn start(&self, name: &str, start: StartOf<'_>, status: i32) -> Cloned {
+        self.clone_in(name, "start", &start, &[], status)
+    }
+
+    /// Runs one execution, of `execution`, its options and its program, in a clone in a new
+    /// sandbox of the scenario `name`, as `run` asks, with the start's options of `start`, checks
+    /// that the run exits with `status`, and returns the clone, as the run left it. The run's
+    /// preflight stages the clone's images.
+    fn run(&self, name: &str, start: StartOf<'_>, execution: &[&str], status: i32) -> Cloned {
+        assert!(!start.unstaged, "a run stages its clone's images");
+        self.clone_in(name, "run", &start, execution, status)
+    }
+
+    /// Runs the host program's `command`, `start` or `run`, of a clone in a new sandbox of the
+    /// scenario `name`, as `start` asks, with the arguments `execution` after the start's options,
+    /// checks that it exits with `status`, and returns the clone. Before a start, the sandbox's
+    /// store stages the clone's images, unless `start` says otherwise.
+    fn clone_in(
+        &self,
+        name: &str,
+        command: &str,
+        start: &StartOf<'_>,
+        execution: &[&str],
+        status: i32,
+    ) -> Cloned {
         let mut sandbox = Sandbox::new(name);
         let (distro, identity) = match start.image {
             None => (erofs(&self.image), self.identity.as_str()),
@@ -853,7 +887,8 @@ impl Template {
             _ => prefixed("scratch:", &scratch),
         };
         let identity = OsStr::new(identity);
-        if !start.unstaged {
+        let run = command == "run";
+        if !run && !start.unstaged {
             let mut staging = vec![
                 OsStr::new("--distro"),
                 &distro,
@@ -879,14 +914,22 @@ impl Template {
             &upper,
         ];
         options.extend(start.options.iter().map(OsStr::new));
-        let time = start.time.map(|time| OsString::from(host_time_text(&time)));
+        options.extend(execution.iter().map(OsStr::new));
+        let time = start
+            .time
+            .as_ref()
+            .map(|time| OsString::from(host_time_text(time)));
         let environment: Vec<(&str, &OsStr)> = time
             .iter()
             .map(|time| (HOST_TIME_VARIABLE, time.as_os_str()))
             .collect();
-        let started = sandbox.start("start", &options, &environment);
+        let started = sandbox.start(command, &options, &environment);
         let started = sandbox.finish(started, status);
-        Cloned { sandbox, started }
+        Cloned {
+            sandbox,
+            started,
+            ran: run,
+        }
     }
 }
 
@@ -969,12 +1012,15 @@ struct StartOf<'a> {
     unstaged: bool,
 }
 
-/// A clone of a scenario's template, in a sandbox of its own, as its start left it.
+/// A clone of a scenario's template, in a sandbox of its own, as its start, or its run, left it.
 struct Cloned {
     /// The clone's sandbox.
     sandbox: Sandbox,
-    /// What the start printed.
+    /// What the start, or the run, printed.
     started: Printed,
+    /// Whether a run, whose preflight staged the clone's images, rather than a start, started
+    /// the clone.
+    ran: bool,
 }
 
 impl Cloned {
@@ -988,23 +1034,21 @@ impl Cloned {
     /// once its guest applied `mapped` mappings of its export, none for a clone without one.
     fn assert_mapped(&self, mapped: usize) {
         let started = &self.started;
-        assert_eq!(started["generation"], GENERATION.to_string(), "{started:?}");
-        let lease = &started["lease"];
-        assert!(
-            lease.len() == 32 && lease.bytes().all(|byte| byte.is_ascii_hexdigit()),
-            "{started:?}"
-        );
-        started["downtime"].parse::<u64>().unwrap();
-        let mapped = mapped.to_string();
-        let facts = ["root", "build", "table", "mapped", "sandbox"].map(|key| &started[key]);
-        assert_eq!(
-            facts,
-            ["ready", GUEST_BUILD, "applied", mapped.as_str(), "started"],
-            "{started:?}"
-        );
+        assert_clone_started(started, mapped);
         let record = self.sandbox.record().expect("the start recorded its VM");
         assert_eq!(started["pid"], record.process().pid.to_string());
         assert!(!started.contains_key("released"), "{started:?}");
+    }
+
+    /// Checks that the run ran the clone, as the [module documentation](self) describes: its
+    /// preflight staged the clone's images, it started the clone as a start does, leasing the
+    /// generation, and it stopped the clone as a stop does, which released the lease.
+    fn assert_ran(&self) {
+        let ran = &self.started;
+        assert_eq!(ran["preflight"], "staged", "{ran:?}");
+        assert_clone_started(ran, 0);
+        ran["pid"].parse::<u32>().unwrap();
+        self.assert_stopped(ran);
     }
 
     /// Runs `probes` in the clone's root, and returns what they found, each fact as
@@ -1030,6 +1074,13 @@ impl Cloned {
     /// clone's lease.
     fn stop(&mut self) {
         let stopped = self.sandbox.run("stop", &[], 0);
+        self.assert_stopped(&stopped);
+    }
+
+    /// Checks that `stopped`, what a stop, or a run, printed, says that the clone stopped
+    /// gracefully, with a success and a complete teardown, and released its lease, which the
+    /// sandbox no longer holds, and that the sandbox records no VM.
+    fn assert_stopped(&self, stopped: &Printed) {
         let facts = ["stopped", "outcome", "teardown"].map(|key| &stopped[key]);
         assert_eq!(facts, ["graceful", "success 0", "complete"], "{stopped:?}");
         assert_eq!(stopped["released"], self.started["lease"], "{stopped:?}");
@@ -1272,8 +1323,8 @@ impl Cloned {
     /// Checks that the template store refused the start's selection before the start leased
     /// anything, as the record that the start printed says: the refusal's `outcome` and
     /// `evidence`, at the selection, without a VM, the code `code` of NVX's error, and no lease,
-    /// generation, or quarantine, and as [`assert_refused`](Self::assert_refused) checks it, with
-    /// a diagnostic that says `problem`.
+    /// generation, or quarantine, after the preflight of a run, and as
+    /// [`assert_refused`](Self::assert_refused) checks it, with a diagnostic that says `problem`.
     fn assert_selection_refused(&self, outcome: &str, evidence: &str, code: &str, problem: &str) {
         let started = &self.started;
         assert_eq!(
@@ -1282,7 +1333,13 @@ impl Cloned {
             "{started:?}"
         );
         assert_eq!(started["failure.code"], code, "{started:?}");
-        assert_eq!(started.len(), 7, "{started:?}");
+        let printed = if self.ran {
+            assert_eq!(started["preflight"], "staged", "{started:?}");
+            8
+        } else {
+            7
+        };
+        assert_eq!(started.len(), printed, "{started:?}");
         self.assert_refused(problem);
     }
 }
@@ -1424,6 +1481,27 @@ fn mount_options(options: &str) -> BTreeSet<&str> {
 /// directory of the sandbox's own.
 fn scratch_image(sandbox: &Sandbox) -> PathBuf {
     sandbox.root.join("images").join("scratch.ext4")
+}
+
+/// Checks that `started`, what a start, or a run, printed, says that it started a clone of the
+/// template's generation, with a lease of its own, at a downtime, whose guest agent, of the
+/// host's build, assembled its root, applied `mapped` mappings of its export, none for a clone
+/// without one, and started its sandbox.
+fn assert_clone_started(started: &Printed, mapped: usize) {
+    assert_eq!(started["generation"], GENERATION.to_string(), "{started:?}");
+    let lease = &started["lease"];
+    assert!(
+        lease.len() == 32 && lease.bytes().all(|byte| byte.is_ascii_hexdigit()),
+        "{started:?}"
+    );
+    started["downtime"].parse::<u64>().unwrap();
+    let mapped = mapped.to_string();
+    let facts = ["root", "build", "table", "mapped", "sandbox"].map(|key| &started[key]);
+    assert_eq!(
+        facts,
+        ["ready", GUEST_BUILD, "applied", mapped.as_str(), "started"],
+        "{started:?}"
+    );
 }
 
 /// Stages the platform's copy of the fixtures' Ubuntu EROFS image in the directory `platform`,
@@ -2924,6 +3002,149 @@ fn a_selection_that_names_no_template_leases_nothing() {
     let store = template.store();
     assert!(store.index().unwrap().generations().is_empty());
     assert!(store.leases(GENERATION).unwrap().is_empty());
+}
+
+#[test]
+#[ignore = "boots VMs; see the module documentation for what they need"]
+fn a_run_runs_one_execution_in_its_clone_then_tears_the_clone_down() {
+    let template = Template::create("cl-run");
+    // The execution's program, its arguments, its environment, and its working directory reach
+    // the guest in its start, and it runs in the clone's root, the Ubuntu image's, as the clone's
+    // workload identity. The run ends with success whatever the program's status.
+    let options = ["--workload-identity", NOBODY];
+    let start = StartOf {
+        upper: Upper::Scratch,
+        options: &options,
+        ..StartOf::default()
+    };
+    let script = ". /etc/os-release; echo \"$GREETING $ID $(id -u) $(pwd)\"; echo done >&2; exit 3";
+    let execution = [
+        "--env",
+        "GREETING=hello",
+        "--cwd",
+        "/tmp",
+        "--",
+        "/bin/sh",
+        "-c",
+        script,
+    ];
+    let ran = template.run("cl-r", start, &execution, 0);
+    ran.assert_ran();
+    let printed = &ran.started;
+    let facts = [
+        "launch",
+        "status",
+        "cause",
+        "truncated",
+        "settled",
+        "stdout",
+        "stderr",
+    ]
+    .map(|key| &printed[&format!("exec.1.{key}")]);
+    assert_eq!(
+        facts,
+        [
+            "started",
+            "exit 3",
+            "none",
+            "none",
+            "reusable",
+            "hello ubuntu 65534 /tmp\\n",
+            "done\\n"
+        ],
+        "{printed:?}"
+    );
+    assert!(template.leases().is_empty());
+
+    // An execution that the guest refuses before its program starts, one that names an identity
+    // in a clone that runs as its own, leaves the run to tear the clone down as well.
+    let start = StartOf {
+        options: &options,
+        ..StartOf::default()
+    };
+    let execution = ["--identity", "1000:1000", "--", "/bin/true"];
+    let ran = template.run("cl-r", start, &execution, 0);
+    ran.assert_ran();
+    let printed = &ran.started;
+    let launch = format!("failed 0 {EINVAL}");
+    let facts = ["launch", "status", "settled"].map(|key| &printed[&format!("exec.1.{key}")]);
+    assert_eq!(facts, [launch.as_str(), "none", "fenced"], "{printed:?}");
+    assert!(template.leases().is_empty());
+    assert_payload(&template, false);
+}
+
+#[test]
+#[ignore = "boots VMs; see the module documentation for what they need"]
+fn a_run_whose_clone_does_not_start_runs_nothing() {
+    let template = Template::create("cl-norun");
+    let execution = ["--identity", NOBODY, "--", "/bin/true"];
+
+    // The store refuses a selection that names no template, and one of a generation whose restore
+    // window passed, once the run's preflight staged the clone's images.
+    let sandbox = template
+        .sandbox
+        .as_ref()
+        .expect("the template keeps its sandbox");
+    let missing = sandbox.root.join("missing");
+    let start = StartOf {
+        templates: Some(&missing),
+        ..StartOf::default()
+    };
+    let refused = template.run("cl-n", start, &execution, SELECTION_REFUSED);
+    refused.assert_selection_refused(
+        "no-template",
+        "no-store",
+        "not-found",
+        "cannot open the template store",
+    );
+    assert!(!missing.exists());
+    let contract = template.generation().time().clone();
+    let expired = HostTime {
+        monotonic_ns: contract.capture_monotonic_ns + MAX_DOWNTIME_NS + 1,
+        ..HostTime::now().unwrap()
+    };
+    let start = StartOf {
+        time: Some(expired),
+        ..StartOf::default()
+    };
+    let refused = template.run("cl-n", start, &execution, SELECTION_REFUSED);
+    let generation = format!("the generation {GENERATION} of the template store");
+    refused.assert_selection_refused("expired", "expired", "template-ineligible", &generation);
+
+    // A clone whose activation fails ends the run before its execution, with the record of the
+    // failure, once the VM exited, and the lease released.
+    let start = StartOf {
+        upper: Upper::Zeros,
+        ..StartOf::default()
+    };
+    let failed = template.run("cl-n", start, &execution, CLONE_FAILED);
+    let printed = &failed.started;
+    assert_eq!(printed["preflight"], "staged", "{printed:?}");
+    assert!(printed.contains_key("pid"), "{printed:?}");
+    let status = status::ACTIVATION_ROOT.to_string();
+    assert_eq!(
+        failure(printed),
+        [
+            "request",
+            "unusable-root",
+            "activation",
+            "activating",
+            status.as_str(),
+            "exited"
+        ],
+        "{printed:?}"
+    );
+    assert_eq!(printed["quarantined"], "no");
+    assert_eq!(printed["released"], printed["lease"], "{printed:?}");
+    assert!(
+        !printed
+            .keys()
+            .any(|key| key.starts_with("exec.") || key == "stopped"),
+        "{printed:?}"
+    );
+    assert!(failed.sandbox.record().is_none());
+    assert!(template.leases().is_empty());
+    assert_payload(&template, false);
 }
 
 /// Leases the generation of `template` to the store of `sandbox`, through NVX's store, as a start

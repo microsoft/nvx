@@ -16,8 +16,9 @@
 //! after a later reset, the end of the stream, or a failure of the transport, whose successor sends
 //! the same record, and the failures that are final. The broker's guest also runs the runners of
 //! NVX's execution engine for the executions that the host program's driver runs, so that the tests
-//! cover the driver's output, credit, outcomes, and timers, the refusals that end its run, and a
-//! guest that stops reading.
+//! cover the driver's output, credit, outcomes, and timers, the refusals that end its run, a guest
+//! that stops reading, and a stop that skips the guest's late messages about the executions that
+//! the driver gave up on.
 #![cfg(feature = "host")]
 
 use std::collections::{BTreeMap, VecDeque};
@@ -2644,4 +2645,92 @@ fn the_driver_s_sends_wait_for_a_guest_that_stops_reading_until_the_deadline_of_
         ran.err()
     );
     assert_ended(&mut client);
+}
+
+#[test]
+fn a_stop_skips_the_guest_s_late_messages_about_the_executions_that_the_driver_gave_up_on() {
+    // The execution's timeout passes while the guest sends nothing, so the driver gives up on it,
+    // and finishes it without the guest's messages about it, which arrive once the host stops the
+    // guest agent in the same attachment.
+    let timed = Timers::new(Duration::from_millis(50), Duration::from_millis(100))
+        .timeout(Duration::from_millis(200));
+    let key = Key::new(1, 1);
+    let start = Start::new(key, limits(), timed, ["/bin/program"]);
+    let given_up = || {
+        let (mut broker, client) = attached(FIRST, usize::MAX);
+        let running = run(client, vec![start.clone()], deadline());
+        // The start, the credit of the output's pool, then the cancellation.
+        broker.messages(3);
+        let (client, executions) = joined(running);
+        let executions = executions.unwrap();
+        let outcome = executions.get(1).unwrap().outcome().unwrap();
+        assert_eq!(outcome.status(), None);
+        (broker, client, executions)
+    };
+    let late = [
+        GuestMessage::Output(key, Stream::Stdout, b"late").encode(),
+        GuestMessage::End(key, Stream::Stdout).encode(),
+        GuestMessage::Terminal(key, Outcome::new(Some(Status::Exited(0)))).encode(),
+    ];
+    let teardown = || RootFailure::new(RootStage::Teardown, "busy");
+
+    // The guest's late messages, then `Stopped`, and, in records of 7 bytes, late messages before
+    // and after a teardown that failed, which the stop returns.
+    let cases = [
+        ([&late[..], &[Message::Stopped]].concat(), None),
+        (
+            [
+                &late[..1],
+                &[Message::RootFailed(teardown().encode())],
+                &late[1..],
+                &[Message::Stopped],
+            ]
+            .concat(),
+            Some(teardown()),
+        ),
+    ];
+    for ((replies, expected), size) in cases.into_iter().zip([OUTER_MAX_PAYLOAD, 7]) {
+        let (mut broker, client, executions) = given_up();
+        let stopping = spawn(client, move |client| {
+            client.stop_skipping(deadline(), |message| executions.is_about(message))
+        });
+        assert_eq!(broker.messages(1), [Message::Stop]);
+        broker.send_data(&encode(&replies), size);
+        let (_, stopped) = joined(stopping);
+        assert_eq!(stopped.unwrap(), expected);
+    }
+
+    // `stop` takes the first late message for its answer, and neither skips a message about an
+    // execution that the driver did not start, of another ID, or of its ID in another epoch: each
+    // ends the client.
+    let others = [
+        GuestMessage::Terminal(Key::new(2, 1), Outcome::new(Some(Status::Exited(0)))).encode(),
+        GuestMessage::Started(Key::new(1, 2)).encode(),
+    ];
+    let cases = [(false, late[0].clone())]
+        .into_iter()
+        .chain(others.into_iter().map(|other| (true, other)));
+    for (skipping, reply) in cases {
+        let (mut broker, client, executions) = given_up();
+        let stopping = spawn(client, move |client| {
+            if skipping {
+                client.stop_skipping(deadline(), |message| executions.is_about(message))
+            } else {
+                client.stop(deadline())
+            }
+        });
+        assert_eq!(broker.messages(1), [Message::Stop]);
+        broker.send_data(
+            &encode(&[reply.clone(), Message::Stopped]),
+            OUTER_MAX_PAYLOAD,
+        );
+        let (mut client, stopped) = joined(stopping);
+        let error = stopped.unwrap_err();
+        let kinds = (Message::Stop.kind(), reply.kind());
+        assert!(
+            matches!(error, ClientError::Reply { request, reply } if (request, reply) == kinds),
+            "{skipping}: {error:?}"
+        );
+        assert_ended(&mut client);
+    }
 }
