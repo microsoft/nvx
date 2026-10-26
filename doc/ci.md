@@ -1858,9 +1858,14 @@ anything, it checks that each platform's package ships `bin/openvmm`, which
 `nvx-rs download` installs, and `bin/nvx-rs`, or their `.exe` forms on Windows.
 
 Each `nvx-microvm-guests-{kvm,mshv,whp}` job builds the runtime adapter's
-host-only configuration on its backend and runs its ignored tests, its VM
-scenarios, with `NVX_HYPERVISOR` naming the backend. Through NVX's
-supervisor, the adapter's host program
+host-only configuration on its backend and runs its consolidated suite, the
+[stage scenarios](../tests/runtime-adapter/README.md#stage-scenarios), with
+`scripts/nvx.py test-runtime-adapter`, which names the backend in
+`NVX_HYPERVISOR`. The command runs each scenario that
+`tests/runtime-adapter/scenarios.txt` names, by name, its VM scenarios
+included, which are the adapter's ignored tests, and fails once a scenario is
+renamed, added, or gone, or does not run and pass. Through NVX's supervisor,
+the adapter's host program
 launches a VM of the job's artifacts, whose initramfs runs the adapter's guest
 agent in place of NVX's agents, with the runtime identity that the artifacts'
 build provenance gives. Later processes reattach to the VM, as after a restart
@@ -1872,7 +1877,9 @@ where the guest agent's worker, outside PID 1, assembles the root through
 beneath it, through the root and through `nvx::guest::mappings` with reserved
 targets of its own, and those that the mapper refuses, and that a failed
 assembly, an invalid root configuration, and a failed teardown each reach the
-host program with the stage that failed, and still end the VM cleanly. The
+host program with the stage that failed, and still end the VM cleanly. Its
+template and clone scenarios capture templates, and start and run their
+clones. The
 Linux jobs build the guest agent, a static musl executable, first, and the
 Windows job takes the one that `distro-artifacts` builds on Linux, as it takes
 the Ubuntu and Azure Linux images. The adapter's other tests, including those

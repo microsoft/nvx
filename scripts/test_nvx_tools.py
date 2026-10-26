@@ -59,6 +59,7 @@ from nvx_tools import (  # noqa: E402
     openvmm_test_shards,
     performance,
     release,
+    runtime_adapter_tests,
     shard_plans,
     ubuntu,
 )
@@ -6998,6 +6999,8 @@ class CiConfigurationTests(unittest.TestCase):
             "openvmm-test-cache-key": set[str](),
             "check-openvmm-tests": set[str](),
             "reuse-openvmm-tests": set[str](),
+            # The runtime adapter's VM scenarios boot what nvx finds.
+            "test-runtime-adapter": kernel_alpine,
             # A sandbox boots the Alpine control initramfs under its layers.
             "sandbox": kernel_alpine,
         }
@@ -7051,9 +7054,6 @@ class CiConfigurationTests(unittest.TestCase):
                 else:
                     self.assertIn(command, commands)
                     files |= commands[command]
-            # The runtime adapter's hypervisor scenarios boot what nvx finds.
-            if "cargo test" in script:
-                files |= kernel_alpine
             return files
 
         def holds(condition: object, context: Mapping[str, object]) -> bool:
@@ -8375,10 +8375,11 @@ class CiConfigurationTests(unittest.TestCase):
                         )
 
     def test_ci_change_classification_runs_microvm_tests_for_the_runtime_adapter(self):
-        # The microVM jobs run the runtime adapter's scenarios on every backend,
-        # so a change to the adapter alone runs them. Neither OpenVMM suite
-        # builds or boots the adapter, and neither the benchmarks nor the
-        # packages use it, so a pull request skips the platform jobs.
+        # The microVM jobs run the runtime adapter's suite on every backend, so
+        # a change to the adapter, its suite, or the command that runs it alone
+        # runs them. Neither OpenVMM suite builds or boots the adapter, and
+        # neither the benchmarks nor the packages use it, so a pull request
+        # skips the platform jobs.
         workflow = (
             BuildConstants.REPO_ROOT
             / ".github"
@@ -8391,19 +8392,21 @@ class CiConfigurationTests(unittest.TestCase):
                     workflow, "test", f"Run runtime adapter scenarios on {system}"
                 )
                 self.assertIn("!inputs.debug-kernel", hook)
-                self.assertIn("working-directory: tests/runtime-adapter\n", hook)
-                self.assertIn("NVX_HYPERVISOR: ${{ inputs.backend }}\n", hook)
-                self.assertIn(
-                    "run: cargo test --locked --features host -- --ignored", hook
-                )
+                self.assertIn("nvx.py test-runtime-adapter\n", hook)
+                self.assertIn('--backend "${{ inputs.backend }}"\n', hook)
         adapter = (
             "tests/runtime-adapter/Cargo.toml",
             "tests/runtime-adapter/Cargo.lock",
             "tests/runtime-adapter/src/lib.rs",
             "tests/runtime-adapter/src/bin/runtime-adapter-guest.rs",
             "tests/runtime-adapter/tests/independent_build.rs",
+            "tests/runtime-adapter/scenarios.txt",
         )
-        for changed_files in (*((path,) for path in adapter), adapter):
+        for changed_files in (
+            *((path,) for path in adapter),
+            adapter,
+            ("scripts/nvx_tools/runtime_adapter_tests.py",),
+        ):
             with self.subTest(changed_files=changed_files):
                 changes = ci.classify_ci_changes("pull_request", changed_files)
                 self.assertEqual(
@@ -8437,7 +8440,7 @@ class CiConfigurationTests(unittest.TestCase):
         self.assertIn(
             "### NVX microVM tests: run\nInputs changed: "
             "`tests/runtime-adapter/Cargo.toml`, `tests/runtime-adapter/Cargo.lock`, "
-            "`tests/runtime-adapter/src/lib.rs`, and 2 more.\n",
+            "`tests/runtime-adapter/src/lib.rs`, and 3 more.\n",
             summary,
         )
         self.assertIn("### Platform benchmarks: skip\nNo input changed.\n", summary)
@@ -8486,18 +8489,20 @@ class CiConfigurationTests(unittest.TestCase):
         self.assertIn("name: runtime-adapter-guest\n", download)
         self.assertIn("path: build/runtime-adapter\n", download)
         for system, setup, guest_agent in (
-            ("Linux", linux_build, f"${{{{ github.workspace }}}}/{agent}"),
+            ("Linux", linux_build, agent),
             (
                 "Windows",
                 download,
-                "${{ github.workspace }}\\build\\runtime-adapter\\runtime-adapter-guest",
+                "build\\runtime-adapter\\runtime-adapter-guest",
             ),
         ):
             with self.subTest(system=system):
                 name = f"Run runtime adapter scenarios on {system}"
                 hook = step("test", name)
-                self.assertIn("NVX_ARTIFACTS_DIR: ${{ github.workspace }}\n", hook)
-                self.assertIn(f"RUNTIME_ADAPTER_GUEST: {guest_agent}\n", hook)
+                # The command takes NVX's artifacts from the checkout, into which
+                # the job downloaded them.
+                self.assertNotIn("NVX_ARTIFACTS_DIR", hook)
+                self.assertIn(f"--guest-agent {guest_agent}\n", hook)
                 self.assertLess(
                     microvm_workflow.index(setup),
                     microvm_workflow.index(f"      - name: {name}\n"),
@@ -20703,6 +20708,331 @@ class StaticElfTests(unittest.TestCase):
                 nvx.main(["check-static-elf", str(static), str(dynamic)]), 1
             )
         self.assertIn("not static executables", error.getvalue())
+
+
+class RuntimeAdapterSuiteTests(unittest.TestCase):
+    def _scenarios(self, text: str) -> Path:
+        """Writes `text` as the scenarios of an adapter, and returns their path."""
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        path = Path(temporary.name) / "scenarios.txt"
+        path.write_text(text, encoding="utf-8")
+        return path
+
+    def _run(
+        self,
+        path: Path,
+        listings: Mapping[tuple[str, str], str],
+        *,
+        targets: Mapping[str, str] | None = None,
+        check_only: bool = False,
+        artifacts: str | None = None,
+    ) -> tuple[int, list[tuple[list[str], dict[str, str]]], str, str]:
+        """Runs the handler on the scenarios at `path`, for an adapter whose Cargo
+        metadata holds the test targets `targets`, by name with their sources, and
+        whose targets list the tests of `listings`, by target and by the first of
+        libtest's arguments, and pass each run of named tests, with `artifacts` in
+        `NVX_ARTIFACTS_DIR`, or without it. Returns the handler's status, the runs, and
+        what it printed to its standard output and error."""
+        if targets is None:
+            targets = {name: f"tests/{name}.rs" for name in ("vm_a", "unit", "other")}
+        package = {
+            "name": "runtime-adapter",
+            "targets": [
+                {"name": "runtime_adapter", "kind": ["lib"], "src_path": "src/lib.rs"},
+                {"name": "runtime-adapter-host", "kind": ["bin"], "src_path": "h.rs"},
+                *(
+                    {"name": name, "kind": ["test"], "src_path": source}
+                    for name, source in targets.items()
+                ),
+            ],
+        }
+        metadata = json.dumps({"packages": [package]})
+        runs: list[tuple[list[str], dict[str, str]]] = []
+
+        def fake_listing(
+            command: list[str], environment: dict[str, str]
+        ) -> subprocess.CompletedProcess[str]:
+            if command[1] == "metadata":
+                return subprocess.CompletedProcess(command, 0, metadata, "")
+            target = (
+                command[command.index("--test") + 1] if "--test" in command else "lib"
+            )
+            first = command[command.index("--") + 1]
+            return subprocess.CompletedProcess(
+                command, 0, listings[(target, first)], ""
+            )
+
+        def fake_streamed(
+            command: list[str], environment: dict[str, str]
+        ) -> tuple[str, int]:
+            runs.append((command, environment))
+            names = command[command.index("--exact") + 1 :]
+            output = "".join(f"test {name} ... ok\n" for name in names)
+            return f"{output}\ntest result: ok. {len(names)} passed; 0 failed;\n", 0
+
+        guest = path.parent / "runtime-adapter-guest"
+        guest.write_bytes(b"")
+        args = argparse.Namespace(
+            backend="kvm", cargo="cargo", check_only=check_only, guest_agent=guest
+        )
+        scenarios = runtime_adapter_tests.read_scenarios(path)
+        with (
+            patch.object(
+                runtime_adapter_tests, "read_scenarios", return_value=scenarios
+            ),
+            patch.object(runtime_adapter_tests, "ADAPTER_DIRECTORY", path.parent),
+            patch.object(runtime_adapter_tests, "validate_openvmm_test_backend"),
+            patch.object(runtime_adapter_tests, "listing", fake_listing),
+            patch.object(runtime_adapter_tests, "streamed", fake_streamed),
+            patch.dict(os.environ),
+            contextlib.redirect_stdout(io.StringIO()) as stdout,
+            contextlib.redirect_stderr(io.StringIO()) as stderr,
+        ):
+            os.environ.pop("NVX_ARTIFACTS_DIR", None)
+            if artifacts is not None:
+                os.environ["NVX_ARTIFACTS_DIR"] = artifacts
+            status = runtime_adapter_tests.command_test_runtime_adapter(args)
+        return status, runs, stdout.getvalue(), stderr.getvalue()
+
+    def test_cli_registers_the_suite(self):
+        args = nvx.parse_args(["test-runtime-adapter", "--backend", "kvm"])
+
+        self.assertEqual(args.backend, "kvm")
+        self.assertEqual(args.cargo, "cargo")
+        self.assertFalse(args.check_only)
+        self.assertEqual(args.guest_agent, runtime_adapter_tests.GUEST_AGENT)
+        self.assertIs(args.handler, runtime_adapter_tests.command_test_runtime_adapter)
+
+    def test_ci_runs_the_suite_by_name_on_each_backend(self):
+        workflow = (
+            BuildConstants.REPO_ROOT
+            / ".github"
+            / "workflows"
+            / "run-nvx-microvm-tests.yml"
+        ).read_text(encoding="utf-8")
+
+        self.assertEqual(workflow.count("nvx.py test-runtime-adapter"), 2)
+        self.assertIn("python3 scripts/nvx.py test-runtime-adapter", workflow)
+        self.assertIn("python scripts\\nvx.py test-runtime-adapter", workflow)
+        self.assertNotIn("cargo test --locked --features host -- --ignored", workflow)
+
+    def test_scenarios_name_targets_and_tests_in_the_order_of_their_lines(self):
+        path = self._scenarios("# The suite.\n\nvm_a b  # last\nunit x\nvm_a a\n")
+
+        self.assertEqual(
+            runtime_adapter_tests.read_scenarios(path),
+            [
+                runtime_adapter_tests.Target("vm_a", ("b", "a")),
+                runtime_adapter_tests.Target("unit", ("x",)),
+            ],
+        )
+
+    def test_scenarios_refuse_other_lines(self):
+        for text, problem in (
+            ("vm_a\n", r":1: expected a target and a test, not 'vm_a'"),
+            ("unit x\nvm_a a b\n", r":2: expected a target and a test"),
+            ("vm_a a\nvm_a a\n", r":2: vm_a a is named twice"),
+            ("# Nothing yet.\n", r"names no scenario"),
+        ):
+            with (
+                self.subTest(text=text),
+                self.assertRaisesRegex(common.ScriptError, problem),
+            ):
+                runtime_adapter_tests.read_scenarios(self._scenarios(text))
+
+    def test_the_adapter_s_readme_lists_its_scenarios(self):
+        targets = runtime_adapter_tests.read_scenarios()
+        named = [(target.name, test) for target in targets for test in target.tests]
+        self.assertLessEqual(
+            {"vm_clone", "vm_template", "vm_layered", "template_operations"},
+            {target.name for target in targets},
+        )
+        readme = (runtime_adapter_tests.ADAPTER_DIRECTORY / "README.md").read_text(
+            encoding="utf-8"
+        )
+        section = re.split(r"\n#+ ", readme.split("\n### Stage scenarios\n", 1)[1])[0]
+        rows = re.findall(r"^\| `(\w+)` \| `(\w+)` \|", section, re.MULTILINE)
+
+        self.assertEqual(rows, named)
+
+    def test_libtest_s_terse_list_names_the_tests(self):
+        self.assertEqual(
+            runtime_adapter_tests.listed_tests("a: test\nb::c: test\nd: bench\n"),
+            ["a", "b::c"],
+        )
+
+    def test_naming_problems_name_missing_and_unnamed_tests(self):
+        target = runtime_adapter_tests.Target("vm_a", ("a", "gone"))
+
+        self.assertEqual(
+            runtime_adapter_tests.naming_problems(target, ["gone", "a"]), []
+        )
+        self.assertEqual(
+            runtime_adapter_tests.naming_problems(target, ["a", "new"]),
+            ["vm_a has no test gone", "vm_a has the test new, which no scenario names"],
+        )
+
+    def test_a_run_passes_once_each_scenario_ran_and_passed(self):
+        target = runtime_adapter_tests.Target("vm_a", ("a", "b"))
+        output = (
+            "running 2 tests\n"
+            "test b ... ok\n"
+            "test a has been running for over 60 seconds\n"
+            "test a ... ok\n\n"
+            "test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; "
+            "3 filtered out; finished in 9.00s\n"
+        )
+
+        self.assertEqual(runtime_adapter_tests.run_problems(target, output, 0), [])
+
+    def test_a_run_fails_once_a_scenario_failed_or_did_not_run(self):
+        target = runtime_adapter_tests.Target("vm_a", ("a", "b"))
+        result = "test result: {}. {} passed; {} failed; 0 ignored; 0 measured; "
+        for output, status, problems in (
+            (
+                f"test a ... ok\ntest b ... FAILED\n\n{result.format('FAILED', 1, 1)}",
+                101,
+                ["vm_a b: FAILED", "vm_a passed 1 tests, not 2"],
+            ),
+            (
+                f"test a ... ok\n\n{result.format('ok', 1, 0)}4 filtered out\n",
+                0,
+                ["vm_a b did not run", "vm_a passed 1 tests, not 2"],
+            ),
+            (
+                f"running 0 tests\n\n{result.format('ok', 0, 0)}5 filtered out\n",
+                0,
+                [
+                    "vm_a a did not run",
+                    "vm_a b did not run",
+                    "vm_a passed 0 tests, not 2",
+                ],
+            ),
+            (
+                f"test a ... ok\ntest b ... ok\n\n{result.format('ok', 2, 0)}\n",
+                1,
+                ["the tests of vm_a exited with status 1"],
+            ),
+            ("error: could not compile `runtime-adapter`\n", 101, None),
+        ):
+            with self.subTest(output=output):
+                found = runtime_adapter_tests.run_problems(target, output, status)
+                if problems is None:
+                    self.assertIn("vm_a passed 0 tests, not 2", found)
+                else:
+                    self.assertEqual(found, problems)
+
+    def test_the_handler_checks_the_names_then_runs_each_target_by_name(self):
+        path = self._scenarios("vm_a a\nvm_a b\nunit x\n")
+        listings = {
+            ("vm_a", "--list"): "a: test\nb: test\n",
+            ("unit", "--list"): "x: test\n",
+            ("lib", "--ignored"): "",
+            ("other", "--ignored"): "",
+        }
+
+        status, runs, stdout, stderr = self._run(path, listings)
+
+        self.assertEqual(status, 0, stderr)
+        self.assertEqual(
+            [command for command, _ in runs],
+            [
+                runtime_adapter_tests.cargo_test(
+                    "cargo", "vm_a", "--include-ignored", "--exact", "a", "b"
+                ),
+                runtime_adapter_tests.cargo_test(
+                    "cargo", "unit", "--include-ignored", "--exact", "x"
+                ),
+            ],
+        )
+        environment = runs[0][1]
+        self.assertEqual(environment["NVX_HYPERVISOR"], "kvm")
+        self.assertEqual(
+            environment["NVX_ARTIFACTS_DIR"], os.fspath(BuildConstants.REPO_ROOT)
+        )
+        self.assertEqual(
+            Path(environment["RUNTIME_ADAPTER_GUEST"]),
+            (path.parent / "runtime-adapter-guest").resolve(),
+        )
+        self.assertIn("the 3 scenarios of 2 targets passed on kvm", stdout)
+
+        # A check runs nothing, and needs neither a hypervisor nor the guest agent.
+        status, runs, stdout, _ = self._run(path, listings, check_only=True)
+        self.assertEqual((status, runs), (0, []))
+        self.assertIn("3 scenarios name exactly the tests of 2 targets", stdout)
+
+    def test_the_handler_takes_a_relative_directory_of_artifacts_from_the_caller(self):
+        path = self._scenarios("unit x\n")
+        listings = {
+            ("unit", "--list"): "x: test\n",
+            ("lib", "--ignored"): "",
+            ("vm_a", "--ignored"): "",
+            ("other", "--ignored"): "",
+        }
+        for artifacts, expected in (
+            # Cargo runs the tests in the adapter's directory, not the caller's.
+            ("relative", Path("relative").resolve()),
+            (os.fspath(path.parent), path.parent.resolve()),
+            # NVX takes an empty directory for none, and the command this checkout.
+            ("", BuildConstants.REPO_ROOT),
+        ):
+            with self.subTest(artifacts=artifacts):
+                status, runs, _, stderr = self._run(path, listings, artifacts=artifacts)
+                self.assertEqual(status, 0, stderr)
+                self.assertEqual(Path(runs[0][1]["NVX_ARTIFACTS_DIR"]), expected)
+
+    def test_the_handler_runs_nothing_once_the_names_are_not_the_tests(self):
+        path = self._scenarios("vm_a a\nvm_a gone\ngone x\n")
+        listings = {
+            ("vm_a", "--list"): "a: test\nnew: test\n",
+            ("lib", "--ignored"): "unit::vm: test\n",
+            ("other", "--ignored"): "vm: test\n",
+            ("vm_dir", "--ignored"): "vm: test\n",
+        }
+        targets = {
+            "vm_a": "tests/vm_a.rs",
+            "other": "tests/other.rs",
+            # Cargo also builds a directory of the tests directory with a main.rs.
+            "vm_dir": "tests/vm_dir/main.rs",
+        }
+
+        status, runs, _, stderr = self._run(path, listings, targets=targets)
+
+        self.assertEqual((status, runs), (1, []))
+        for problem in (
+            "vm_a has no test gone",
+            "vm_a has the test new, which no scenario names",
+            "gone is not a test target of the adapter",
+            "the library has the ignored test unit::vm, which no scenario names",
+            "other has the ignored test vm, which no scenario names",
+            "vm_dir has the ignored test vm, which no scenario names",
+        ):
+            self.assertIn(problem, stderr)
+
+    def test_the_handler_refuses_an_adapter_that_cargo_does_not_describe(self):
+        path = self._scenarios("vm_a a\n")
+        for status, output, problem in (
+            (101, "", "cannot read the adapter's targets"),
+            (0, json.dumps({"packages": []}), "has no package runtime-adapter"),
+        ):
+
+            def fake_listing(
+                command: list[str],
+                environment: dict[str, str],
+                status: int = status,
+                output: str = output,
+            ) -> subprocess.CompletedProcess[str]:
+                return subprocess.CompletedProcess(command, status, output, "error")
+
+            with (
+                self.subTest(problem=problem),
+                patch.object(runtime_adapter_tests, "listing", fake_listing),
+                self.assertRaisesRegex(common.ScriptError, problem),
+            ):
+                runtime_adapter_tests.suite_problems(
+                    runtime_adapter_tests.read_scenarios(path), "cargo", {}
+                )
 
 
 class BenchmarkTests(unittest.TestCase):

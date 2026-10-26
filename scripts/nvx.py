@@ -105,6 +105,9 @@ from nvx_tools.release import (
     package_release,
     verify_source_tree,
 )
+from nvx_tools.runtime_adapter_tests import (
+    configure_parser as configure_runtime_adapter_test_parser,
+)
 from nvx_tools.shard_plans import parse_shard
 from nvx_tools.time_abi import (
     benchmark_cpu_profile_refusal,
@@ -866,6 +869,12 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help="qualify this host for the NVX time ABI",
     )
     configure_doctor_parser(doctor)
+
+    runtime_adapter_tests = subparsers.add_parser(
+        "test-runtime-adapter",
+        help="run the runtime adapter's consolidated suite by name on a real hypervisor",
+    )
+    configure_runtime_adapter_test_parser(runtime_adapter_tests)
 
     adversarial_tests = subparsers.add_parser(
         "test-adversarial",

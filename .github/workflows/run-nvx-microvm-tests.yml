@@ -1274,19 +1274,23 @@ jobs:
           Invoke-Nvx sandbox deprovision --state-dir $state
           Remove-Item -Recurse -Force $share, $scratch
 
-      # The runtime adapter's hypervisor scenarios on this backend: the ignored
-      # tests of its host-only configuration, which read the backend through
-      # `nvx::Hypervisor::from_env_or_default`. Its host program launches VMs
-      # of the artifacts above, with the runtime identity that their build
-      # provenance gives, whose initramfs runs the adapter's guest agent in
-      # place of NVX's agents. Later processes of the host program reattach to
-      # a VM, as after a restart of the orchestrator, and stop it. The layered
-      # scenarios boot the Ubuntu EROFS image over a copy of the scratch
-      # template, from the guest artifacts, as the sandbox steps above do, and
-      # the guest agent's worker assembles the root outside PID 1. The guest
-      # agent is a static musl executable: Linux builds it, and Windows takes
-      # the one that distro-artifacts builds on Linux, as it takes the Ubuntu
-      # and Azure Linux images.
+      # The runtime adapter's consolidated suite on this backend: each scenario
+      # that tests/runtime-adapter/scenarios.txt names, by name, in its
+      # host-only configuration, whose VM scenarios are its ignored tests and
+      # read the backend through `nvx::Hypervisor::from_env_or_default`. The
+      # command fails once a scenario names a test that its target does not
+      # have, a named target has a test that no scenario names, the library or
+      # another target has an ignored test, or a named test does not run and
+      # pass. Its host program launches VMs of the artifacts above, with the
+      # runtime identity that their build provenance gives, whose initramfs runs
+      # the adapter's guest agent in place of NVX's agents. Later processes of
+      # the host program reattach to a VM, as after a restart of the
+      # orchestrator, and stop it. The layered scenarios boot the Ubuntu EROFS
+      # image over a copy of the scratch template, from the guest artifacts, as
+      # the sandbox steps above do, and the guest agent's worker assembles the
+      # root outside PID 1. The guest agent is a static musl executable: Linux
+      # builds it, and Windows takes the one that distro-artifacts builds on
+      # Linux, as it takes the Ubuntu and Azure Linux images.
       - name: Build the runtime adapter's guest agent on Linux
         if: runner.os != 'Windows' && inputs.guests-and-sandboxes && !inputs.debug-kernel
         shell: bash
@@ -1298,12 +1302,10 @@ jobs:
       - name: Run runtime adapter scenarios on Linux
         if: runner.os != 'Windows' && inputs.guests-and-sandboxes && !inputs.debug-kernel
         shell: bash
-        working-directory: tests/runtime-adapter
-        env:
-          NVX_HYPERVISOR: ${{ inputs.backend }}
-          NVX_ARTIFACTS_DIR: ${{ github.workspace }}
-          RUNTIME_ADAPTER_GUEST: ${{ github.workspace }}/tests/runtime-adapter/target/x86_64-unknown-linux-musl/release/runtime-adapter-guest
-        run: cargo test --locked --features host -- --ignored
+        run: >-
+          python3 scripts/nvx.py test-runtime-adapter
+          --backend "${{ inputs.backend }}"
+          --guest-agent tests/runtime-adapter/target/x86_64-unknown-linux-musl/release/runtime-adapter-guest
 
       - name: Download the runtime adapter's guest agent on Windows
         if: runner.os == 'Windows' && inputs.guests-and-sandboxes && !inputs.debug-kernel
@@ -1315,12 +1317,10 @@ jobs:
       - name: Run runtime adapter scenarios on Windows
         if: runner.os == 'Windows' && inputs.guests-and-sandboxes && !inputs.debug-kernel
         shell: powershell
-        working-directory: tests/runtime-adapter
-        env:
-          NVX_HYPERVISOR: ${{ inputs.backend }}
-          NVX_ARTIFACTS_DIR: ${{ github.workspace }}
-          RUNTIME_ADAPTER_GUEST: ${{ github.workspace }}\build\runtime-adapter\runtime-adapter-guest
-        run: cargo test --locked --features host -- --ignored
+        run: >-
+          python scripts\nvx.py test-runtime-adapter
+          --backend "${{ inputs.backend }}"
+          --guest-agent build\runtime-adapter\runtime-adapter-guest
 
       - name: Upload NVX microVM failure logs
         if: failure()

@@ -119,8 +119,9 @@ mechanics, such as the conformance vectors of the control protocol, belong in
 `nvx`. Tests of what an independent adapter observes through
 the public API of `nvx` alone, such as its own framing over the control
 session between the host and the guest, belong in the
-[runtime adapter](../tests/runtime-adapter/README.md), whose ignored tests the
-microVM jobs run on each backend. [Continuous integration](ci.md)
+[runtime adapter](../tests/runtime-adapter/README.md), whose consolidated
+suite the microVM jobs run on each backend with
+`scripts/nvx.py test-runtime-adapter --backend BACKEND`. [Continuous integration](ci.md)
 describes what the OpenVMM VMM tests and the NVX microVM suite cover.
 
 ## Test expectations

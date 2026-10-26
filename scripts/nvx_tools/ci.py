@@ -262,8 +262,9 @@ BENCHMARK_INPUT_PATHS = re.compile(
     r"scripts/nvx_tools/(?!(adversarial|adversarial_broker|adversarial_executor|"
     r"crate_release|create_linux_source_archive|managed_exec_tests|"
     r"microvm_durations|microvm_shards|microvm_tests|nightly_ci|"
-    r"openvmm_process|openvmm_test_shards|sandbox_lifecycle_tests|"
-    r"sandbox_proxy_tests|sandbox_ram_upper_tests|shard_plans)\.py$|"
+    r"openvmm_process|openvmm_test_shards|runtime_adapter_tests|"
+    r"sandbox_lifecycle_tests|sandbox_proxy_tests|sandbox_ram_upper_tests|"
+    r"shard_plans)\.py$|"
     r"(microvm|openvmm_test)_shards\.json$|adversarial_cases/|"
     r"microvm_test_scripts/))"
 )

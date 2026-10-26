@@ -438,6 +438,7 @@ is authorized for the organization when it enforces single sign-on.
 | `test-microvm` | Run NVX Linux and device correctness tests through OpenVMM. |
 | `plan-microvm-shards` | Split the default microVM suite into shards of balanced scenario durations for CI. |
 | `doctor` | Qualify this host for the NVX time ABI. |
+| `test-runtime-adapter` | Run the runtime adapter's consolidated suite by name on a real hypervisor. |
 | `test-adversarial` | Run a brokered Copilot-driven adversarial campaign. |
 | `build` | Build the guest artifacts and OpenVMM. |
 | `benchmark` | Run the OpenVMM-native benchmark coordinator. |
@@ -1265,6 +1266,34 @@ check and the subset that CI runs.
 | `--probe-dir PATH` | `$RUNNER_TOOL_CACHE/nvx-host-time-probe`, or `build/host-time-probe` | Select the cache directory for the host probe, which the doctor builds with `rustc`. |
 | `--summary PATH` | none | Append a Markdown summary, for example to `$GITHUB_STEP_SUMMARY`. |
 | `--timeout SECONDS` | `120` | Set the seconds allowed for each probe or guest. `H4` gets its sampling window on top. |
+
+### `test-runtime-adapter`
+
+```text
+python3 scripts/nvx.py test-runtime-adapter
+    --backend {kvm,mshv,whp}
+    [--guest-agent PATH]
+    [--check-only]
+    [--cargo CARGO]
+```
+
+Runs the consolidated suite of the [runtime adapter](../tests/runtime-adapter/README.md),
+the [stage scenarios](../tests/runtime-adapter/README.md#stage-scenarios) that
+`tests/runtime-adapter/scenarios.txt` names, against a real hypervisor. Each
+line of that file names one of the adapter's test targets, then one of its
+tests. The command first checks that the lines name exactly the tests of their
+targets, and that neither the adapter's library nor another target has an
+ignored test, as the adapter's VM scenarios are, so that a scenario that is
+renamed, added, or gone fails it rather than drop out of the suite. It then
+runs each target's scenarios by
+name, in the adapter's host-only configuration, the ignored ones with the
+others, with the backend in `NVX_HYPERVISOR`, NVX's artifacts from the
+directory that `NVX_ARTIFACTS_DIR` names, from the current directory if it is
+relative, or this checkout unless it names one, and the adapter's guest agent
+from `--guest-agent` (default
+`tests/runtime-adapter/target/x86_64-unknown-linux-musl/release/runtime-adapter-guest`),
+and fails unless each of them ran and passed. `--check-only` checks the names
+alone, and needs neither a hypervisor nor the guest agent.
 
 ### `test-adversarial`
 
