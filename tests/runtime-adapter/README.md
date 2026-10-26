@@ -1654,9 +1654,13 @@ before.
 tears the clone down. Its preflight, which it reports with `preflight=staged`,
 stages the clone's images in the sandbox's store, as `stage` stages them,
 verifying the image, which hashes it only when a manifest is beside it, before
-the clone's start, which hashes nothing. The command first checks that the
-guest takes the execution's start, so a start that it would refuse fails the
-command before it stages anything. It then starts the clone as `start` does,
+the clone's start, which hashes nothing. The command first reads the clone's
+network, and plans the clone and the export of its shares, as `start` does,
+then checks that the guest takes the execution's start, with the URL of the
+proxy of the clone's network, if any, in its environment, as `exec` gives it to
+an execution of a clone, so a network, an image, shares, or a start that it
+would refuse fail the command before it stages anything. It then starts the
+clone as `start` does,
 at the host's time, or the one that `RUNTIME_ADAPTER_HOST_TIME` gives, and ends
 as a start ends once the template store refuses the selection, or the clone
 fails, with the record of the refusal or of the failure. Once the clone runs,
@@ -1665,7 +1669,9 @@ activation assembled, through `host::Executions`, in the session of the
 adapter's clone order in which the clone's sandbox started, as `exec` runs
 one. The program, its arguments, and its environment reach the guest in the
 execution's start, through the guest agent's execution control, never in the
-template's boot tokens. Then, whatever the execution did, the command stops the
+template's boot tokens. The execution finds the clone's shares beneath the
+root, since the restore sequence maps them before the clone's sandbox starts.
+Then, whatever the execution did, the command stops the
 clone as `stop` does, and releases the lease once the store verified that the
 VM exited: a run leaves no clone running, and no lease held, unless its stop
 timed out. The stop takes the same session, in which it skips the guest's
@@ -1873,18 +1879,20 @@ Each command of `runtime-adapter-host` but `stage`, `list`, `inspect`, and
   number. The guest refuses a key that it heard of before, and the epochs of a
   broker instance only advance, while a broker restored from a snapshot has a
   new instance ID, so no command repeats the key of another's execution.
-- `run STORE --template TEMPLATES --generation G --distro FORMAT:PATH --distro-identity UUID --upper (scratch:PATH | ram) [--memory MIB] [--workload-identity UID:GID] [--overlay-mode MODE] [--scratch-journal POLICY] EXECUTION`
+- `run STORE --template TEMPLATES --generation G --distro FORMAT:PATH --distro-identity UUID --upper (scratch:PATH | ram) [--memory MIB] [--workload-identity UID:GID] [--overlay-mode MODE] [--scratch-journal POLICY] [--first-partition-bound BYTES] [--machine-id (image | generated)] [--network FILE] [SHARES] EXECUTION`
   runs one EXECUTION, one of `exec`'s, in a [clone](#clones) of the generation
   G of the template store TEMPLATES, in the sandbox store STORE, which it
   creates if needed, then tears the clone down, as
   [running a clone](#running-a-clone) describes. The execution's options may
   come among the start's, in any order, and its PROGRAM and ARGs are every
-  argument after `--`. Its preflight stages the clone's images in STORE, as
-  `stage` stages them, and prints `preflight=staged`. It then starts the clone
-  as `start` does, runs the execution in the clone's root as `exec` runs one,
-  and prints its output and outcome once it finished. Then it stops the clone
-  as `stop` does, whatever the execution did, which releases the lease once the
-  VM exited.
+  argument after `--`. It first plans the clone as `start` does, with its
+  network and its shares, and checks the execution's start, with the URL of
+  the network's proxy, if any. Its preflight then stages the clone's images in
+  STORE, as `stage` stages them, and prints `preflight=staged`. It then starts
+  the clone as `start` does, runs the execution in the clone's root as `exec`
+  runs one, and prints its output and outcome once it finished. Then it stops
+  the clone as `stop` does, whatever the execution did, which releases the
+  lease once the VM exited.
 
 `reattach`, `stop`, `probe`, and `exec` find a VM that booted cold under
 another runtime identity mismatched, and then signal nothing: the VM keeps
@@ -2377,9 +2385,13 @@ Windows, without a hypervisor:
   shares, which it cannot export, and the template store, which does not exist;
 - the command lines of `run` that the host program refuses, each with status
   2: missing options, a missing `--` or program, the qualifiers of an identity
-  without one, an execution's start that the guest would refuse, invalid
-  values, arguments before `--`, and the options of other commands, with a
-  clock fixture that is not a host's time too;
+  without one, an execution's start that the guest would refuse, a
+  first-partition bound for an EROFS image, a share's options without a share,
+  invalid values, an option given twice, arguments before `--`, and the options
+  of other commands, with a clock fixture that is not a host's time too;
+- a run whose network cannot be read, or is one that the plan refuses, or whose
+  shares it cannot export, with status 1, before it stages anything or creates
+  the sandbox's store;
 - a run whose image the plan refuses, with status 1, before it stages anything
   or creates the sandbox's store, and runs whose template store does not exist,
   or does not hold the generation, each with status 10 and the preflight's

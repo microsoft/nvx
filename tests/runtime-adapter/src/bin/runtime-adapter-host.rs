@@ -230,24 +230,30 @@
 //!   snapshot has a new instance ID, so no command repeats the key of another's execution.
 //! - `runtime-adapter-host run STORE --template TEMPLATES --generation G --distro FORMAT:PATH
 //!   --distro-identity UUID --upper (scratch:PATH | ram) [--memory MIB] [--workload-identity
-//!   UID:GID] [--overlay-mode MODE] [--scratch-journal POLICY] EXECUTION` runs one execution in a
-//!   clone of the generation G of the template store TEMPLATES, in the sandbox store STORE, which
-//!   it creates if needed, then tears the clone down. The EXECUTION is one of `exec`'s, whose
+//!   UID:GID] [--overlay-mode MODE] [--scratch-journal POLICY] [--first-partition-bound BYTES]
+//!   [--machine-id (image | generated)] [--network FILE] [SHARES] EXECUTION` runs one execution in
+//!   a clone of the generation G of the template store TEMPLATES, in the sandbox store STORE,
+//!   which it creates if needed, then tears the clone down. The EXECUTION is one of `exec`'s, whose
 //!   options may come among the start's, in any order, and whose PROGRAM and ARGs are every
-//!   argument after `--`. The command first checks that the guest takes the execution's start.
-//!   Its preflight then stages the clone's images in STORE, as `stage` stages them, which verifies
-//!   the image, and hashes it only when a manifest is beside it, and prints that it did, before
-//!   the clone's start, which hashes nothing. It starts the clone as `start` does, and ends as a
-//!   start ends once the template store refuses the selection, or the clone fails. It runs the
-//!   execution in the clone's root, as `exec` runs one, through the guest agent's execution
-//!   control, in the session in which the clone's sandbox started, so that the program, its
-//!   arguments, and its environment reach the guest in the execution's start, never in the
-//!   template's boot tokens, and prints its output and outcome once it finished. Then it stops
-//!   the clone, as `stop` does, whatever the execution did, which releases the lease once the VM
-//!   exited. The stop takes the same session, in which it skips the guest's messages about the
-//!   execution that may still arrive once the command finished it without them, as when it gave
-//!   up waiting for its outcome. It holds the sandbox's lock, which the lease took, until then, so
-//!   no other command reattaches to the clone meanwhile.
+//!   argument after `--`. The command first reads the clone's network, and plans the clone and the
+//!   export of its shares, as `start` does, then checks that the guest takes the execution's
+//!   start, with the URL of the proxy of the clone's network, if any, in its environment, as
+//!   `exec` gives it to an execution of a clone, so that none of them fails the command once it
+//!   staged anything. Its preflight then stages the clone's images in STORE, as `stage` stages
+//!   them, which verifies the image, and hashes it only when a manifest is beside it, and prints
+//!   that it did, before the clone's start, which hashes nothing. It starts the clone as `start`
+//!   does, and ends as a start ends once the template store refuses the selection, or the clone
+//!   fails. It runs the execution in the clone's root, as `exec` runs one, through the guest
+//!   agent's execution control, in the session in which the clone's sandbox started, so that the
+//!   program, its arguments, and its environment reach the guest in the execution's start, never
+//!   in the template's boot tokens, and prints its output and outcome once it finished. The
+//!   execution finds the clone's shares beneath the root, since the restore sequence maps them
+//!   before the clone's sandbox starts. Then it stops the clone, as `stop` does, whatever the
+//!   execution did, which releases the lease once the VM exited. The stop takes the same session,
+//!   in which it skips the guest's messages about the execution that may still arrive once the
+//!   command finished it without them, as when it gave up waiting for its outcome. It holds the
+//!   sandbox's lock, which the lease took, until then, so no other command reattaches to the clone
+//!   meanwhile.
 //!
 //! Each command but `stage`, `list`, `inspect`, and `remove`, which need no artifacts, takes NVX's
 //! artifacts from the directory that `NVX_ARTIFACTS_DIR` names, a repository checkout or an
@@ -841,7 +847,7 @@ impl Serving {
     }
 }
 
-/// The clone of `start`, as its options give it.
+/// The clone of `start` or `run`, as its options give it.
 struct CloneOptions {
     /// The template store.
     templates: PathBuf,
@@ -852,6 +858,44 @@ struct CloneOptions {
     /// The file of the clone's network, if it has one, which the start reads first, as a launch
     /// reads its network.
     network: Option<PathBuf>,
+}
+
+impl CloneOptions {
+    /// Reads the clone's network, if it has one, as a launch reads its network, then plans the
+    /// clone's layered root, with that network, and the export of the clone's shares, if it has
+    /// any, as a launch plans its own, or says why it cannot: a network that the plan refuses,
+    /// then an image, or shares, that it refuses. It needs nothing but the options, and the files
+    /// that they name, and creates nothing. NVX's plan of the clone then requires the template's
+    /// network of it.
+    fn plan(&self) -> Result<PlannedClone, String> {
+        let network = self
+            .network
+            .as_deref()
+            .map(read_network)
+            .transpose()
+            .map_err(|error| describe(&error))?;
+        let request = runtime_adapter::clone::Request {
+            network,
+            ..self.request.clone()
+        };
+        let plan = request.plan().map_err(|error| describe(&error))?;
+        let export = request.export().map_err(|error| describe(&error))?;
+        Ok(PlannedClone {
+            request,
+            plan,
+            export,
+        })
+    }
+}
+
+/// The clone of `start` or `run`, as [`CloneOptions::plan`] planned it.
+struct PlannedClone {
+    /// The clone's image, upper, memory target, settings, and network.
+    request: runtime_adapter::clone::Request,
+    /// The adapter's plan of the clone's image over its upper, with its network.
+    plan: SandboxPlan,
+    /// The export of the host paths that the clone shares with its root, if any.
+    export: Option<ExportPlan>,
 }
 
 /// The options of a command.
@@ -1358,8 +1402,8 @@ fn parse_option(
     Ok(())
 }
 
-/// Says why the options of `sharing`, of a launch or a start, are not a command's: `--deny`,
-/// `--reserved`, or `--share-root` without a `--share`.
+/// Says why the options of `sharing`, of a launch, a start, or a run, are not a command's:
+/// `--deny`, `--reserved`, or `--share-root` without a `--share`.
 fn check_shares(sharing: &HostFsSharing) -> Result<(), String> {
     let options = [
         ("--deny", !sharing.denied().is_empty()),
@@ -2294,12 +2338,17 @@ fn start(
     clone: &CloneOptions,
     time: Option<HostTime>,
 ) -> Result<ExitCode, String> {
+    // A network that the plan refuses fails the start before anything else, as it fails a launch,
+    // then an image, or shares, that it refuses.
+    let planned = clone.plan()?;
     // The clone keeps running once the command lets go of its VM, its session, and its sandbox's
     // lock, as once a launch committed.
-    Ok(match start_clone(store, guest_build, clone, time)? {
-        Ok(_running) => ExitCode::SUCCESS,
-        Err(status) => status,
-    })
+    Ok(
+        match start_clone(store, guest_build, clone, planned, time)? {
+            Ok(_running) => ExitCode::SUCCESS,
+            Err(status) => status,
+        },
+    )
 }
 
 /// A clone that [`start_clone`] started, whose launch it committed, and which runs.
@@ -2316,35 +2365,26 @@ struct Running {
     client: Client,
 }
 
-/// Starts a clone of the generation of the template store that `clone` names, as it asks, in the
-/// sandbox store `store`, which it creates if needed, with the guest agent's build `guest_build`,
-/// at the host's time `time`, or at the time that `HostTime::now` samples without one, and prints
-/// what it did. Returns the clone, which runs, once it committed the clone's launch, or the status
-/// with which the command ends otherwise: once the template store refused the selection, or the
-/// clone failed, as [`clone_failed`] ends it.
+/// Starts a clone of the generation of the template store that `clone` names, as `planned`, its
+/// plan, asks, in the sandbox store `store`, which it creates if needed, with the guest agent's
+/// build `guest_build`, at the host's time `time`, or at the time that `HostTime::now` samples
+/// without one, and prints what it did. Returns the clone, which runs, once it committed the
+/// clone's launch, or the status with which the command ends otherwise: once the template store
+/// refused the selection, or the clone failed, as [`clone_failed`] ends it.
 fn start_clone(
     store: &Path,
     guest_build: &str,
     clone: &CloneOptions,
+    planned: PlannedClone,
     time: Option<HostTime>,
 ) -> Result<Result<Running, ExitCode>, String> {
-    // A network that the plan refuses fails the start before anything else, as it fails a launch.
-    // NVX's plan of the clone then requires the template's network of it.
-    let network = clone
-        .network
-        .as_deref()
-        .map(read_network)
-        .transpose()
-        .map_err(|error| describe(&error))?;
-    let request = runtime_adapter::clone::Request {
-        network,
-        ..clone.request.clone()
-    };
-    // A request that the adapter's plan refuses, shares that it cannot export, and a selection
-    // that the template store refuses as it names no template, fail the start before it needs
-    // NVX's artifacts or the sandbox's store.
-    let plan = request.plan().map_err(|error| describe(&error))?;
-    let export = request.export().map_err(|error| describe(&error))?;
+    let PlannedClone {
+        request,
+        plan,
+        export,
+    } = planned;
+    // A selection that the template store refuses as it names no template fails the start before
+    // it needs NVX's artifacts or the sandbox's store.
     let templates = match Store::open(&clone.templates) {
         Ok(templates) => templates,
         Err(error) if error.kind() == ErrorKind::NotFound => {
@@ -3260,7 +3300,10 @@ fn run_executions(
 /// guest agent's build `guest_build`, at the host's time `time`, or at the time that
 /// `HostTime::now` samples without one, then tears the clone down, and prints what it did.
 ///
-/// Its preflight stages the clone's images in the sandbox, as `stage` does, which verifies the
+/// It first plans the clone as `start` does, with its network and the export of its shares, and
+/// checks that the guest takes the execution's start, with the URL of the proxy of the clone's
+/// network, if any, in its environment, as `exec` gives it to an execution of a clone. Its
+/// preflight then stages the clone's images in the sandbox, as `stage` does, which verifies the
 /// image, and prints `preflight=staged`. It then starts the clone, as `start` does, and ends as a
 /// start ends once the template store refuses the selection, or the clone fails. It runs the
 /// execution in the clone's root, as `exec` runs one, through the guest agent's execution control,
@@ -3283,10 +3326,11 @@ fn run(
     execution: &Execution,
     time: Option<HostTime>,
 ) -> Result<ExitCode, String> {
-    // A start that the guest would refuse fails the command before it stages anything.
-    let plan = clone.request.plan().map_err(|error| describe(&error))?;
-    let starts = starts_of(std::slice::from_ref(execution), Some(&plan))?;
-    let request = &clone.request;
+    // A network, an image, or shares that the plan refuses, and a start that the guest would
+    // refuse, fail the command before it stages anything.
+    let planned = clone.plan()?;
+    let starts = starts_of(std::slice::from_ref(execution), Some(&planned.plan))?;
+    let request = &planned.request;
     stage(
         store,
         &request.distro,
@@ -3301,7 +3345,7 @@ fn run(
         locked,
         vmm,
         mut client,
-    } = match start_clone(store, guest_build, clone, time)? {
+    } = match start_clone(store, guest_build, clone, planned, time)? {
         Ok(running) => running,
         Err(status) => return Ok(status),
     };

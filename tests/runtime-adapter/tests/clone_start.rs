@@ -401,6 +401,19 @@ fn the_host_program_refuses_options_that_do_not_make_a_run() {
             "--scratch-journal needs --upper scratch:PATH",
         ),
         (
+            with(&["--first-partition-bound", "4096"]),
+            "--first-partition-bound needs --distro gpt:PATH",
+        ),
+        (
+            with(&["--machine-id", "random"]),
+            "--machine-id takes image or generated, not \"random\"",
+        ),
+        (with(&["--deny", "/srv"]), "--deny needs --share"),
+        (
+            with(&["--network", "a.json", "--network", "b.json"]),
+            "unexpected option \"--network\" of run",
+        ),
+        (
             with(&["--generation", "2"]),
             "unexpected option \"--generation\" of run",
         ),
@@ -545,6 +558,77 @@ fn a_run_refuses_a_selection_that_names_no_template_once_its_preflight_staged_th
             Store::open(&templates).unwrap().dir().display()
         );
         refused(&output, "unpublished", &problem);
+    }
+}
+
+#[test]
+fn a_run_refuses_a_network_or_shares_that_the_plan_refuses_before_it_stages_anything() {
+    // A run reads its network, then plans the export of its shares, as a start does, before its
+    // preflight stages anything, or it reads the template store, which does not exist.
+    let directory = directory("run-unplanned");
+    let distro = image(directory.join("distro.erofs"), 4096);
+    let distro = format!("erofs:{}", distro.display());
+    let templates = directory.join("templates");
+    let store = directory.join("store");
+    let sources = directory.join("sources");
+    let outside = directory.join("outside");
+    for path in [&sources, &outside] {
+        fs::create_dir(path).unwrap();
+    }
+    let missing = directory.join("missing.json");
+    let refused = directory.join("refused.json");
+    let mut form = proxied();
+    form["egress"] = json!("allow");
+    fs::write(&refused, form.to_string()).unwrap();
+    let (sources, outside) = (sources.to_str().unwrap(), outside.to_str().unwrap());
+    let unshared = format!("{outside}:/srv/data");
+    let cases = [
+        (
+            vec!["--network", missing.to_str().unwrap()],
+            format!("cannot read the network {}", missing.display()),
+        ),
+        (
+            vec!["--network", refused.to_str().unwrap()],
+            format!(
+                "the network {} is refused: a network proxy needs egress denied by default",
+                refused.display()
+            ),
+        ),
+        (
+            vec!["--share-root", sources, "--share", &unshared],
+            format!(
+                "--share entry {outside} lies outside the host directories that --share-root \
+                 authorizes"
+            ),
+        ),
+    ];
+    for (options, problem) in cases {
+        let mut arguments = vec![
+            "run",
+            store.to_str().unwrap(),
+            "--template",
+            templates.to_str().unwrap(),
+            "--generation",
+            "1",
+            "--distro",
+            &distro,
+            "--distro-identity",
+            IDENTITY,
+            "--upper",
+            "ram",
+        ];
+        arguments.extend(options);
+        arguments.extend(["--identity", "65534:65534", "--", "/bin/true"]);
+        let output = host(&arguments, None);
+        assert_eq!(output.status.code(), Some(1), "{arguments:?}: {output:?}");
+        assert_eq!(String::from_utf8_lossy(&output.stdout), "", "{output:?}");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains(&problem), "{arguments:?}: {stderr}");
+        for other in ["template store", "usage:"] {
+            assert!(!stderr.contains(other), "{other}: {stderr}");
+        }
+        assert!(!store.exists(), "the run created the sandbox's store");
+        assert!(!templates.exists());
     }
 }
 
