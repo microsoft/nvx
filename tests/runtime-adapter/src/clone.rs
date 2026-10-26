@@ -4,13 +4,17 @@
 //! A [`Request`] holds what the host program's options choose of a clone: its image, an EROFS
 //! layer or a GPT disk of the length of the template's placeholder, its upper, on an ext4 scratch
 //! image or in RAM, its memory target, the workload identity as which its executions run, its
-//! overlay mode, its scratch's journal policy, the bound of a GPT disk's first partition, and the
-//! machine ID that its executions see, the image's own or one that its guest generates.
-//! [`Request::plan`] plans the image over the upper as a launch plans a layered root, and
-//! [`Request::clone_request`] returns NVX's `nvx::host::template::CloneRequest` of it, with the
+//! overlay mode, its scratch's journal policy, the bound of a GPT disk's first partition, the
+//! machine ID that its executions see, the image's own or one that its guest generates, and the
+//! host paths that it shares with its root, as a launch shares them, `layered::Shares`.
+//! [`Request::plan`] plans the image over the upper as a launch plans a layered root,
+//! [`Request::export`] plans the export of the shares as a launch plans it, and
+//! [`Request::clone_request`] returns NVX's `nvx::host::template::CloneRequest` of both, with the
 //! bindings that the sandbox's store stages for its images, as `layered::Staged` records them:
 //! staging hashes, and a start never does. NVX's `ClonePlan` then checks the request against the
-//! leased generation before any VMM starts, from the metadata of the clone's files alone.
+//! leased generation before any VMM starts, from the metadata of the clone's files alone, and
+//! takes only an export of one directory, which the clone's restore binds to the template's
+//! dormant filesystem slot.
 //!
 //! A clone's [record](CloneRecord) names the template store and the generation that the clone
 //! leases, beside the plan and the bindings, as the record of a launch names what it launched, so
@@ -30,6 +34,7 @@ use nvx::activation::{
     Journal, MachineIdMode, OverlayMode as RecordOverlay, StoreGeneration, WorkloadIdentity,
     WorkloadView,
 };
+use nvx::host::filesystem::ExportPlan;
 use nvx::host::process::BootId;
 use nvx::host::sandbox::SandboxPlan;
 use nvx::host::sandbox::distro::DISTRO_POLICY_REVISION;
@@ -39,7 +44,9 @@ use nvx::uuid::Uuid;
 use nvx::{Error, Result};
 use serde_json::{Value, json};
 
-use crate::layered::{Bindings, RECORD_FORMAT, RECORD_NAME, invalid, plan, unstaged, write_record};
+use crate::layered::{
+    Bindings, RECORD_FORMAT, RECORD_NAME, Shares, invalid, plan, unstaged, write_record,
+};
 use crate::root::{DEFAULT_FIRST_PARTITION_BOUND, JournalPolicy, OverlayMode};
 
 /// The mode of a clone's [record](CloneRecord).
@@ -83,6 +90,8 @@ pub struct Request {
     /// The machine ID that the clone's executions see: the image's own, as a launch's do, or one
     /// that the clone's guest generates.
     pub machine_id: MachineIdMode,
+    /// The host paths that the clone shares with its root, as a launch shares them, if any.
+    pub shares: Shares,
 }
 
 impl Request {
@@ -102,9 +111,22 @@ impl Request {
         )
     }
 
-    /// Returns NVX's request of the clone of `plan`, the [plan](Self::plan) of this request, with
-    /// the bindings that the sandbox's store stages for its images, `bindings`, as
-    /// `layered::Staged::bindings` finds them, and the memory target `memory`, in bytes.
+    /// Plans the export of the host paths that the clone shares with its root, as a launch plans
+    /// it, with `layered::Shares::plan`, or returns `None` for a clone that shares none, whose
+    /// restore leaves the template's filesystem slot dormant.
+    ///
+    /// Fails as `Shares::plan` does, such as for a share outside every host directory that the
+    /// adapter authorizes. The plan of an export that the template's dormant filesystem slot
+    /// cannot bind, of more than one directory or file, or of a file, is NVX's `ClonePlan` to
+    /// refuse.
+    pub fn export(&self) -> Result<Option<ExportPlan>> {
+        self.shares.plan()
+    }
+
+    /// Returns NVX's request of the clone of `plan`, the [plan](Self::plan) of this request, and
+    /// of `export`, the [export](Self::export) of its shares, if any, with the bindings that the
+    /// sandbox's store stages for its images, `bindings`, as `layered::Staged::bindings` finds
+    /// them, and the memory target `memory`, in bytes.
     ///
     /// The record of the clone's activation names the workload identity, if any, the
     /// [`CLONE_HOSTNAME`], the request's machine ID, the overlay's mode, and the scratch's
@@ -118,6 +140,7 @@ impl Request {
     pub fn clone_request(
         &self,
         plan: SandboxPlan,
+        export: Option<ExportPlan>,
         bindings: &Bindings,
         memory: u64,
     ) -> Result<CloneRequest> {
@@ -147,7 +170,7 @@ impl Request {
             binding,
             policy_revision: DISTRO_POLICY_REVISION,
             scratch,
-            export: None,
+            export,
             memory,
             workload: WorkloadView {
                 hostname: CLONE_HOSTNAME.as_bytes().to_vec(),

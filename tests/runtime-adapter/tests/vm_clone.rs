@@ -107,7 +107,7 @@ use runtime_adapter::clone::{CLONE_HOSTNAME, HOST_TIME_VARIABLE, Request, host_t
 use runtime_adapter::exec::{HostMessage, Start};
 use runtime_adapter::frame::Message;
 use runtime_adapter::host::Client;
-use runtime_adapter::layered::Staged;
+use runtime_adapter::layered::{Shares, Staged};
 use runtime_adapter::root::DEFAULT_RUNTIME;
 use runtime_adapter::runtime::Runtime;
 
@@ -1073,12 +1073,13 @@ fn refuses_early(template: &Template, early: Message) {
         scratch_journal: None,
         first_partition_bound: None,
         machine_id: MachineIdMode::Image,
+        shares: Shares::default(),
     };
     let plan = request.plan().unwrap();
     let staged = Staged::read(&sandbox.store).unwrap().unwrap();
     let key = store.read_key(&template.generation()).unwrap();
     let clone = request
-        .clone_request(plan.clone(), &staged.bindings(&plan), key.memory())
+        .clone_request(plan.clone(), None, &staged.bindings(&plan), key.memory())
         .unwrap();
     let now = HostTime::now().unwrap();
     let mut acquired = store
