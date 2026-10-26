@@ -1994,6 +1994,45 @@ fn a_clone_s_order_ends_its_table_at_a_mapping_that_the_guest_fails_and_stops_th
 }
 
 #[test]
+fn a_clone_s_order_maps_the_root_of_its_export_with_an_empty_source() {
+    // The table of a directory export maps the directory itself with an empty source, which the
+    // order sends in its part, as the guest decodes it, and which the guest applies.
+    let table = vec![
+        mapping("", "/data", true),
+        mapping("work", "/data/work", false),
+    ];
+    let parts = encode_maps(&table).unwrap();
+    assert_eq!(parts.len(), 1);
+    let decoded = decode_maps(&parts[0]).unwrap();
+    assert_eq!(decoded.first, 0);
+    assert_eq!(
+        decoded
+            .maps
+            .iter()
+            .map(|map| (map.source.as_slice(), map.target.as_slice(), map.read_only))
+            .collect::<Vec<_>>(),
+        [
+            (b"".as_slice(), b"/data".as_slice(), true),
+            (b"work".as_slice(), b"/data/work".as_slice(), false),
+        ]
+    );
+    let (mut broker, client) = attached(FIRST, usize::MAX);
+    // The table follows the clone's `Ready`, which answers its record.
+    let activation = activating(client);
+    broker.expect(Message::Activate(activation_record()), &clone_ready());
+    let (client, activated) = joined(activation);
+    assert_eq!(activated.unwrap(), Some(clone_activation()));
+    let mapping = spawn(client, move |client| {
+        clone_order().map(client, &table, deadline())
+    });
+    broker.expect(Message::Maps(parts[0].clone()), &Message::Mapped);
+    let (client, mapped) = joined(mapping);
+    mapped.unwrap();
+    drop(client);
+    assert!(broker.read().is_none(), "the host sent more");
+}
+
+#[test]
 fn a_clone_s_session_that_ends_after_its_bootstrap_is_lost_and_the_next_takes_the_same_record() {
     let next = Identity { epoch: 2, ..FIRST };
     // The broker resets the session, which a broker announces, or ends its stream, as OpenVMM's

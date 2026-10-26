@@ -51,6 +51,10 @@ EXEC|EMPTY_ENVIRONMENT|00000000010001000200000000000000080000002f62696e2f656e76|
 MAPS|ONE_ENTRY|0000000001000000000001000200302f77|0|1|RW|0|/w
 MAPS|TWO_ENTRIES|0000000002000000000001000200302f77010005000400312f6120622f742f78|0|2|RW|0|/w|RO|1/a b|/t/x
 MAPS|CONTINUED|0300000001000000000001000200352f77|3|1|RW|5|/w
+# An empty source, which names the export's root itself, as the table of a directory export maps
+# the whole directory. It was the rejection vector EMPTY_SOURCE until then; README.md's rules say
+# why it could move.
+MAPS|ROOT_SOURCE|00000000010000000000000002002f77|0|1|RW||/w
 
 # Every feature of version 1. Bit 1 is retired, and no guest sets it.
 FEATURES|ALL|7d000000|0x7d
@@ -63,9 +67,8 @@ INVALID_MAPS|TOO_MANY_ENTRIES|0000000001100000
 INVALID_MAPS|TRAILING_BYTE|0000000001000000000001000200302f7700
 # An unknown flag.
 INVALID_MAPS|UNKNOWN_FLAG|0000000001000000020001000200302f77
-# Sources that are empty, have a `.` or `..` component, or hold a NUL byte, and one that is not
-# UTF-8, which only decoders that require UTF-8 refuse, before a target that is missing.
-INVALID_MAPS|EMPTY_SOURCE|00000000010000000000000002002f77
+# Sources that have a `.` or `..` component, or hold a NUL byte, and one that is not UTF-8, which
+# only decoders that require UTF-8 refuse, before a target that is missing.
 INVALID_MAPS|DOT_SOURCE|00000000010000000000010002002e2f77
 INVALID_MAPS|DOT_DOT_SOURCE|0000000001000000000004000200302f2e2e2f77
 INVALID_MAPS|NUL_SOURCE|0000000001000000000001000200002f77

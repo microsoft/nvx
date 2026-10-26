@@ -739,14 +739,15 @@ nothing else.
 
 `Activated::start` then sends the clone's mapping table, if it has an export,
 through `CloneControl::map`, in order, from paths in the exported directory,
-which name no child's index, and starts the sandbox once the guest applied every
-mapping, both by a Ready-to-Start deadline from the check of Ready,
-`READY_TO_START_TIMEOUT`, 30 seconds by default, never sending either again, and
-`Started::commit` commits the launch, which writes its runtime record. A
-failure, a partial or failed mapping table included, ends the launch as
-`Starting::abandon` does; a crash before the commit leaves the launch's journal,
-whose recovery ends the VMM, while the lease lasts until the release, and a
-crash after it leaves a VM that reattaches, and keeps its lease while it runs.
+which name no child's index, with an empty source for the directory itself, and
+starts the sandbox once the guest applied every mapping, both by a
+Ready-to-Start deadline from the check of Ready, `READY_TO_START_TIMEOUT`, 30
+seconds by default, never sending either again, and `Started::commit` commits
+the launch, which writes its runtime record. A failure, a partial or failed
+mapping table included, ends the launch as `Starting::abandon` does; a crash
+before the commit leaves the launch's journal, whose recovery ends the VMM,
+while the lease lasts until the release, and a crash after it leaves a VM that
+reattaches, and keeps its lease while it runs.
 
 A failure of a clone is a `CloneFailure`, whose `Evidence` attributes it to an
 `Outcome`, at a `Stage`, once the clone got as far as its `Progress`: the
@@ -959,8 +960,10 @@ descriptor of a `TargetRoot`, the root of a mount of a whole file system, which
 overlay or a guest's `/`, from a `SourceRoot`, such as the guest's mount of the
 host's export.
 
-A `Mapping` names a relative source, an absolute target, its `Access`, and
-optionally the `Kind` that its source must have.
+A `Mapping` names a relative source, or an empty one for the source root itself,
+such as a directory export's root, which the mapper opens as `.` beneath it with
+the same flags, an absolute target, its `Access`, and optionally the `Kind` that
+its source must have.
 
 The mapper opens each component with `openat2`, through no symbolic link or
 magic link, creates what a target lacks only on the root's own mounts, which
@@ -982,7 +985,9 @@ failure.
 
 Linux 6.8 or later. NVX's managed agent applies its host mapping table through
 it, beneath `/` in direct mode and beneath the container's assembled root in
-sandbox mode, and a layered `Root` its live shares and mappings.
+sandbox mode, and refuses an empty source, since its export is an aggregate,
+whose root lists its children; a layered `Root` applies its live shares and
+mappings through it.
 
 ### `nvx::guest::nvxs`
 

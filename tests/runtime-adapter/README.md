@@ -182,9 +182,10 @@ table of the part's first mapping, then the number of its mappings, each a
 little-endian `u32`, then each mapping: its flags, a little-endian `u16` that
 is 1 for a read-only mapping and 0 otherwise, then the lengths of its source
 and its target, each a little-endian `u16`, then the source, a path relative
-to the guest's mount of the host's export, and the target, an absolute path
-in the root. `root::encode_maps` splits a table into parts of at most 256 KiB,
-and an empty table into none. `root::decode_maps` reads a part with
+to the guest's mount of the host's export, or empty for the export's root
+itself, and the target, an absolute path in the root. `root::encode_maps`
+splits a table into parts of at most 256 KiB, and an empty table into none.
+`root::decode_maps` reads a part with
 `nvx::protocol::decode_guest_maps_payload`, which takes the paths as bytes, as
 Linux does, and refuses what that decoder refuses, a part without a mapping,
 and a part that would end the table past 4,096 mappings.
