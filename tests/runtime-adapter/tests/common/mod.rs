@@ -12,6 +12,8 @@
 // Each test crate uses its own part of this module.
 #![allow(dead_code)]
 
+pub(crate) mod gpt;
+
 use std::collections::BTreeMap;
 use std::convert::Infallible;
 use std::env;
