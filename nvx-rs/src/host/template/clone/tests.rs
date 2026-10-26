@@ -275,6 +275,23 @@ fn export_plan(
     filesystem::plan(&request).unwrap().unwrap()
 }
 
+/// Returns another spelling of the existing directory `directory`, which names it, but which
+/// differs from the path that resolves it: through a directory in it and its `..` on Unix, where
+/// an absolute path keeps its `..` components, and with the verbatim prefix on Windows.
+fn alias(directory: &Path) -> PathBuf {
+    #[cfg(windows)]
+    {
+        let resolved = filesystem::canonicalize(directory).unwrap();
+        PathBuf::from(format!(r"\\?\{}", resolved.display()))
+    }
+    #[cfg(not(windows))]
+    {
+        let inner = directory.join("alias");
+        fs::create_dir(&inner).unwrap();
+        inner.join("..")
+    }
+}
+
 /// Returns the mapping table of these tests' exports, [`Fixture::data_export`]: the exported
 /// directory itself, the export's root, which an empty source names, and the directory `work` in
 /// it, by its path there, without the index of a child.
@@ -2307,20 +2324,14 @@ fn exports_that_a_dormant_filesystem_slot_does_not_bind_are_refused_before_anyth
 
 #[test]
 fn exports_that_overlap_the_template_store_are_refused_before_anything_is_opened() {
-    // The plan compares the paths that the export's plan resolved with the store's, as the store
-    // names it, without reading anything: this store's path is resolved.
-    let fixture = Fixture::in_store(
-        |directory| {
-            filesystem::canonicalize(directory)
-                .unwrap()
-                .join("templates")
-        },
-        |_, _, _| {},
-    );
+    // The plan compares the paths that the export's plan resolved with the store's, resolved as
+    // well: this store's path names its directory in another spelling than its resolved one.
+    let fixture = Fixture::in_store(|directory| alias(directory).join("templates"), |_, _, _| {});
     let (image, binding) = fixture.image("distro.erofs", IMAGE_LEN);
     let mut acquired = fixture.acquire("sandbox");
     let request = tmpfs_request(&image, &binding);
-    let store = fixture.store.dir().to_owned();
+    let store = filesystem::canonicalize(fixture.store.dir()).unwrap();
+    assert_ne!(store, fixture.store.dir());
     let payload = fixture.store.payload_dir(fixture.generation.generation());
     // The store's directory, the payload of a generation inside it, and a directory that holds
     // the store, which a guest could reach the payload through, and write it if writable.

@@ -62,10 +62,12 @@ impl DirectoryExport {
     /// or its snapshot.
     ///
     /// The check reads nothing: it compares the directory's path, as the plan resolved it, with
-    /// the store's, [`Store::dir`](crate::host::template::Store::dir), as the store names it,
-    /// which the check does not resolve, so it does not find an overlap that only the store's
-    /// resolved path shows, through a link, or on Windows another letter case or a short name.
-    /// Fails with [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported) for such an export.
+    /// `store`, which the caller resolved as [`filesystem::canonicalize`] resolves the plan's
+    /// paths, so that no link, and on Windows no other letter case, short name, or verbatim
+    /// prefix, hides an overlap. Fails with
+    /// [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported) for such an export.
+    ///
+    /// [`filesystem::canonicalize`]: crate::host::filesystem::canonicalize
     pub(super) fn check_outside(&self, store: &Path) -> Result<()> {
         for child in &self.plan.children {
             if child.root.starts_with(store) || store.starts_with(&child.root) {
