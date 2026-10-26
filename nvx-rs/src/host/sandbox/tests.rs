@@ -6,6 +6,7 @@ use std::path::PathBuf;
 use super::*;
 use crate::ErrorKind;
 use crate::host::filesystem::{Bind, ExportChild, FileIdentity, Owner};
+use crate::host::paths;
 use crate::protocol::root::{RootLayout, RootUpper};
 
 const DISTRO: &str = "distro,distro.erofs,11111111-1111-1111-1111-111111111111";

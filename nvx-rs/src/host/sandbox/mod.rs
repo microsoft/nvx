@@ -66,8 +66,8 @@ pub use self::plan::{
 };
 pub use self::prepared::PreparedLaunch;
 use crate::error::{Error, ErrorCode, Result};
+use crate::host::artifacts::require_existing;
 use crate::host::filesystem::ExportPlan;
-use crate::host::paths;
 use crate::net::is_valid_hostname;
 use crate::protocol::cmdline;
 use crate::protocol::root::RootImage;
@@ -152,26 +152,6 @@ pub(crate) fn has_kernel_separator(value: &str) -> bool {
 /// [`Path::components`] reads them.
 pub fn require_file(path: &Path, description: &str) -> Result<()> {
     require_existing(path, description, ErrorCode::Unavailable)
-}
-
-/// Checks that an artifact that a launch runs, such as the OpenVMM executable, is a regular
-/// file, as [`require_file`] does, but fails with [`ErrorCode::ArtifactMissing`].
-pub(crate) fn require_artifact(path: &Path, description: &str) -> Result<()> {
-    require_existing(path, description, ErrorCode::ArtifactMissing)
-}
-
-/// Checks that `path` is a regular file, as [`require_file`] does, and fails with `code`.
-fn require_existing(path: &Path, description: &str, code: ErrorCode) -> Result<()> {
-    if path.is_file() {
-        return Ok(());
-    }
-    Err(Error::new(
-        code,
-        format!(
-            "{description} not found: {}",
-            paths::normalized(path).display()
-        ),
-    ))
 }
 
 /// Refuses a disk path that OpenVMM's `--microvm-sandbox-block` value could not hold: one with

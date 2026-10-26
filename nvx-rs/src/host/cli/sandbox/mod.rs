@@ -31,7 +31,7 @@ use super::network::{NativeRules, NetworkOptions};
 use super::shell::format_command;
 use super::{Exit, Result, output};
 use crate::ErrorCode;
-use crate::host::artifacts::{Guest, KERNEL_NAME};
+use crate::host::artifacts::{Guest, KERNEL_NAME, require_artifact};
 use crate::host::network::{
     Access, EgressRule, EgressRules, HostLoopback, LoopbackForward, NetworkPolicy, NetworkProxy,
 };
@@ -48,7 +48,7 @@ use crate::host::sandbox::scratch::{CLAIM_RELEASE_WAIT, ScratchBinding};
 use crate::host::sandbox::{
     DEFAULT_ENTRYPOINT, DEFAULT_HOSTNAME, DEFAULT_WORKLOAD_IDENTITY, PIDS_MAX_LIMIT,
     PreparedLaunch, SandboxLaunch, SandboxLayer, SandboxNetwork, SandboxPlan, SandboxSettings,
-    parse_workload_identity, require_artifact,
+    parse_workload_identity,
 };
 use crate::host::store::RuntimeIdentity;
 use crate::host::supervisor::Inherited;

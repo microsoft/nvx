@@ -37,8 +37,8 @@ use serde_json::Value;
 
 use crate::contract;
 use crate::error::{Error, ErrorCode, Result};
+use crate::host::paths;
 use crate::host::platform;
-use crate::host::sandbox::require_artifact;
 use crate::host::store::{ArtifactIdentity, RuntimeIdentity};
 
 /// Name of the release manifest at the root of a release archive or repository checkout.
@@ -871,6 +871,28 @@ fn provenance_identity(path: &Path, what: &str, field: &str) -> Result<ArtifactI
 fn required(path: PathBuf, description: &str) -> Result<PathBuf> {
     require_artifact(&path, description)?;
     Ok(path)
+}
+
+/// Checks that an artifact that a launch runs, such as the OpenVMM executable, is a regular
+/// file, as [`require_existing`] does, and fails with [`ErrorCode::ArtifactMissing`].
+pub(crate) fn require_artifact(path: &Path, description: &str) -> Result<()> {
+    require_existing(path, description, ErrorCode::ArtifactMissing)
+}
+
+/// Checks that `path` is a regular file, following links, as `require_file` of `nvx.py` does,
+/// and fails with `code` and the message `{description} not found: {path}`, with `path` spelled
+/// with its components alone, as [`Path::components`] reads them.
+pub(crate) fn require_existing(path: &Path, description: &str, code: ErrorCode) -> Result<()> {
+    if path.is_file() {
+        return Ok(());
+    }
+    Err(Error::new(
+        code,
+        format!(
+            "{description} not found: {}",
+            paths::normalized(path).display()
+        ),
+    ))
 }
 
 /// The paths of the artifacts of an [`ArtifactDir`], which serialize as a JSON object such as:

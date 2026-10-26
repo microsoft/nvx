@@ -31,7 +31,7 @@ use super::sandbox::{
 use super::shell::format_command;
 use super::{Exit, Result, check_interrupt, output};
 use crate::ErrorCode;
-use crate::host::artifacts::Guest;
+use crate::host::artifacts::{Guest, require_artifact};
 use crate::host::sandbox::mount::{
     AGGREGATE_MOUNT_TARGET, MountKind, MountOwner, POLICY_KINDS, PolicyKind,
     aggregate_child_argument, aggregate_child_name, aggregate_command_line_fragment,
@@ -39,7 +39,7 @@ use crate::host::sandbox::mount::{
     require_mount_owner_supported,
 };
 use crate::host::sandbox::options::validate_run_share_targets;
-use crate::host::sandbox::{SANDBOX_COMMAND_LINE_MAX_SIZE, has_kernel_separator, require_artifact};
+use crate::host::sandbox::{SANDBOX_COMMAND_LINE_MAX_SIZE, has_kernel_separator};
 
 /// The usage and help of the parser.
 pub(super) const SYNTAX: Syntax = Syntax {
