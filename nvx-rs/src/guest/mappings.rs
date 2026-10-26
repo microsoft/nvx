@@ -16,11 +16,13 @@
 //! `RESOLVE_NO_MAGICLINKS`: a symbolic link or a magic link at any component, the last
 //! included, is refused, and no path leads above the root. It opens a source beneath its root
 //! the same way, in one call, and with `RESOLVE_NO_XDEV` too, so that a source is on its root's
-//! mount. A target root is the root of a mount, and that mount, like each that the caller adds
-//! with [`TargetRoot::add_mount`], shows its whole file system, which `statmount` tells, rather
-//! than being a bind of a directory below that file system's root: no rename, through it or
-//! another mount of its file system, can move a file out of it, so nothing that the walk opened
-//! on one of the root's own mounts leaves the root, whatever is renamed meanwhile.
+//! mount. An empty source names the source root itself, such as the root of a directory export,
+//! which it opens as `.` beneath the root, with the same flags. A target root is the root of a
+//! mount, and that mount, like each that the caller adds with [`TargetRoot::add_mount`], shows its
+//! whole file system, which `statmount` tells, rather than being a bind of a directory below that
+//! file system's root: no rename, through it or another mount of its file system, can move a file
+//! out of it, so nothing that the walk opened on one of the root's own mounts leaves the root,
+//! whatever is renamed meanwhile.
 //!
 //! # Creation
 //!
@@ -97,9 +99,10 @@
 //! mapper that is dropped leaves its mappings mounted.
 //!
 //! NVX's managed agent applies its host mapping table through a mapper beneath its own root, `/`,
-//! from its mount of the host's export. A layered [`Root`](super::root::Root) mounts its live
-//! shares, and the mappings that its caller applies, through one, which its teardown unmounts
-//! first.
+//! from its mount of the host's export, an aggregate, whose root, which lists the aggregate's
+//! children, it never maps: it refuses an empty source. A layered [`Root`](super::root::Root)
+//! mounts its live shares, and the mappings that its caller applies, through one, which its
+//! teardown unmounts first.
 //!
 //! ```no_run
 //! use std::path::Path;
@@ -227,8 +230,9 @@ impl fmt::Display for Kind {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum InvalidMapping {
-    /// The source is not a relative path of at most [`MAX_PATH_BYTES`] bytes without NUL bytes,
-    /// whose components are neither empty, `.`, nor `..`.
+    /// The source is neither empty, for the source root itself, nor a relative path of at most
+    /// [`MAX_PATH_BYTES`] bytes without NUL bytes, whose components are neither empty, `.`, nor
+    /// `..`.
     Source,
     /// The target is not an absolute path of at most [`MAX_PATH_BYTES`] bytes without NUL bytes,
     /// whose components after the leading `/` are neither empty, `.`, nor `..`.
@@ -238,7 +242,7 @@ pub enum InvalidMapping {
 impl fmt::Display for InvalidMapping {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         let (path, form) = match self {
-            Self::Source => ("source", "a relative"),
+            Self::Source => ("source", "empty, for its root, or a relative"),
             Self::Target => ("target", "an absolute"),
         };
         write!(
@@ -269,19 +273,20 @@ pub struct Mapping {
 impl Mapping {
     /// Describes the mapping of `source`, a path relative to the source root, at `target`, an
     /// absolute path as seen from the target root, with `access`: for example `0/workspace` at
-    /// `/workspace`. The target takes the kind of the source, whatever it is, unless
-    /// [`with_kind`](Self::with_kind) asks for one.
+    /// `/workspace`. An empty `source` names the source root itself, such as the root of a
+    /// directory export, whose whole directory the mapping then maps. The target takes the kind of
+    /// the source, whatever it is, unless [`with_kind`](Self::with_kind) asks for one.
     ///
     /// Each path holds at most [`MAX_PATH_BYTES`] bytes, no NUL byte, and no empty, `.`, or `..`
-    /// component, so that it names a path below its root; [`InvalidMapping`] tells which one does
-    /// not. Other bytes need not be UTF-8.
+    /// component, so that it names a path below its root, or, for an empty source, the root
+    /// itself; [`InvalidMapping`] tells which one does not. Other bytes need not be UTF-8.
     pub fn new(
         source: impl Into<PathBuf>,
         target: impl Into<PathBuf>,
         access: Access,
     ) -> Result<Self, InvalidMapping> {
         let source = source.into();
-        if below_its_root(&source, false).is_none() {
+        if !source.as_os_str().is_empty() && below_its_root(&source, false).is_none() {
             return Err(InvalidMapping::Source);
         }
         let target = below_its_root(&target.into(), true)
@@ -301,7 +306,7 @@ impl Mapping {
         self
     }
 
-    /// Returns the source, relative to the source root.
+    /// Returns the source, relative to the source root: empty for the source root itself.
     pub fn source(&self) -> &Path {
         &self.source
     }
@@ -1118,12 +1123,20 @@ fn attach(
     }
 }
 
-/// Opens `path` beneath `source`, and returns it and its kind, which must be a mapping's.
+/// Opens `path` beneath `source`, or the source root itself for an empty `path`, and returns it
+/// and its kind, which must be a mapping's.
 fn open_source(
     kernel: &mut dyn Kernel,
     source: &SourceRoot,
     path: &Path,
 ) -> Result<(FileDescriptor, Kind), MappingError> {
+    // `openat2` resolves no empty path, so the root itself is `.` beneath it, which the same
+    // resolution confines to the root's own mount, as it does every other source.
+    let path = if path.as_os_str().is_empty() {
+        Path::new(".")
+    } else {
+        path
+    };
     let opened = sys::path_c_string(path).and_then(|path| {
         let descriptor = kernel.open_beneath(
             &source.directory,

@@ -1874,13 +1874,9 @@ fn clone_ready() -> Message {
     Message::Ready(ready().with_activation(clone_activation()).encode())
 }
 
-/// Returns the order of a clone of the guest agent's build that the host program ships, with no
-/// mapping.
+/// Returns the order of a clone of the guest agent's build that the host program ships.
 fn clone_order() -> CloneOrder<'static> {
-    CloneOrder {
-        build: GUEST_BUILD,
-        table: &[],
-    }
+    CloneOrder { build: GUEST_BUILD }
 }
 
 /// Runs the first step of a clone's order with `client` in a thread: sends [`activation_record`] in an
@@ -1917,19 +1913,20 @@ fn a_clone_s_order_sends_its_record_first_then_starts_its_sandbox_as_after_a_col
     let (client, activated) = joined(activation);
     assert_eq!(activated.unwrap(), Some(clone_activation()));
 
-    // Then the table, in its parts, each once the guest applied the one before, and `Start`.
+    // Then the table that the restore sequence gives the order, in its parts, each once the guest
+    // applied the one before, and `Start`, which the sequence asks for once the table succeeded.
     let table = long_table();
     let parts = encode_maps(&table).unwrap();
-    let starting = spawn(client, move |client| {
-        let mut order = CloneOrder {
-            build: GUEST_BUILD,
-            table: &table,
-        };
-        order.start(client, deadline())
+    let mapping = spawn(client, move |client| {
+        clone_order().map(client, &table, deadline())
     });
     for part in parts {
         broker.expect(Message::Maps(part), &Message::Mapped);
     }
+    let (client, mapped) = joined(mapping);
+    mapped.unwrap();
+    broker.assert_quiet();
+    let starting = spawn(client, |client| clone_order().start(client, deadline()));
     broker.expect(Message::Start, &Message::Started);
     let (client, started) = joined(starting);
     started.unwrap();
@@ -1950,6 +1947,80 @@ fn a_clone_s_order_sends_its_record_first_then_starts_its_sandbox_as_after_a_col
     let readiness = joined(activation).1.unwrap();
     assert_eq!(readiness.build(), GUEST_BUILD);
     assert_eq!(readiness.activation(), Some(clone_activation()));
+}
+
+#[test]
+fn a_clone_s_order_ends_its_table_at_a_mapping_that_the_guest_fails_and_stops_the_guest() {
+    // As after a cold boot, the guest fails a part of the table, once it applied the mappings
+    // before it: the order sends no more of the table, and asks the guest to stop, and the restore
+    // sequence, which the failure ends, sends no `Start`.
+    let table = long_table();
+    let parts = encode_maps(&table).unwrap();
+    assert!(parts.len() > 2);
+    let (mut broker, client) = attached(FIRST, usize::MAX);
+    let mapping = spawn(client, move |client| {
+        clone_order().map(client, &table, deadline())
+    });
+    broker.expect(Message::Maps(parts[0].clone()), &Message::Mapped);
+    let applied = decode_maps(&parts[1]).unwrap().first;
+    let failure = MapFailure::new(applied, "the target is not a directory");
+    broker.expect(
+        Message::Maps(parts[1].clone()),
+        &Message::MapFailed(failure.encode()),
+    );
+    assert_eq!(broker.messages(1), [Message::Stop]);
+    broker.send_data(&encode(&[Message::Stopped]), OUTER_MAX_PAYLOAD);
+    let (client, mapped) = joined(mapping);
+    let error = mapped.unwrap_err();
+    let OrderError::Mapping {
+        failure: found,
+        stop,
+    } = &error
+    else {
+        panic!("{error:?}");
+    };
+    assert_eq!(*found, failure);
+    assert!(matches!(stop, Ok(None)), "{stop:?}");
+    // The guest's refusal of the table keeps the session, but does not tell whether the request's
+    // mappings failed it, so the order takes it for no refusal of the request's.
+    assert!(!clone_order().lost(&error));
+    assert!(!clone_order().refused(&error));
+    drop(client);
+    assert!(broker.read().is_none(), "the host sent more");
+}
+
+#[test]
+fn a_clone_s_order_maps_the_root_of_its_export_with_an_empty_source() {
+    // The table of a directory export maps the directory itself with an empty source, which the
+    // order sends in its part, as the guest decodes it, and which the guest applies.
+    let table = vec![
+        mapping("", "/data", true),
+        mapping("work", "/data/work", false),
+    ];
+    let parts = encode_maps(&table).unwrap();
+    assert_eq!(parts.len(), 1);
+    let decoded = decode_maps(&parts[0]).unwrap();
+    assert_eq!(decoded.first, 0);
+    assert_eq!(
+        decoded
+            .maps
+            .iter()
+            .map(|map| (map.source.as_slice(), map.target.as_slice(), map.read_only))
+            .collect::<Vec<_>>(),
+        [
+            (b"".as_slice(), b"/data".as_slice(), true),
+            (b"work".as_slice(), b"/data/work".as_slice(), false),
+        ]
+    );
+    let (mut broker, client) = attached(FIRST, usize::MAX);
+    let mapping = spawn(client, move |client| {
+        clone_order().map(client, &table, deadline())
+    });
+    broker.expect(Message::Maps(parts[0].clone()), &Message::Mapped);
+    let (client, mapped) = joined(mapping);
+    mapped.unwrap();
+    drop(client);
+    assert!(broker.read().is_none(), "the host sent more");
 }
 
 #[test]

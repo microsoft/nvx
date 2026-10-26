@@ -181,9 +181,10 @@ table of the part's first mapping, then the number of its mappings, each a
 little-endian `u32`, then each mapping: its flags, a little-endian `u16` that
 is 1 for a read-only mapping and 0 otherwise, then the lengths of its source
 and its target, each a little-endian `u16`, then the source, a path relative
-to the guest's mount of the host's export, and the target, an absolute path
-in the root. `root::encode_maps` splits a table into parts of at most 256 KiB,
-and an empty table into none. `root::decode_maps` reads a part with
+to the guest's mount of the host's export, or empty for the export's root
+itself, and the target, an absolute path in the root. `root::encode_maps`
+splits a table into parts of at most 256 KiB, and an empty table into none.
+`root::decode_maps` reads a part with
 `nvx::protocol::decode_guest_maps_payload`, which takes the paths as bytes, as
 Linux does, and refuses what that decoder refuses, a part without a mapping,
 and a part that would end the table past 4,096 mappings.
@@ -1029,19 +1030,26 @@ template's capture kept, as it activates the clone. Its first step is
 `host::activate` instead of `host::ready`: it sends the clone's activation
 record in an `Activate`, the first request of the session, and waits for
 `Ready`, whose build it checks as `host::ready` does, and which reports the
-clone's activation. Then `host::start_sandbox` runs as after a cold boot.
-`host::CloneOrder` runs both
-steps as the framing of the restore sequence of `nvx::host::template`, which
-checks the activation against the record, and which replaces a session that
-the order takes for lost: one that a reset of the broker, the end of its
-stream, or a failure of the transport ended while the host attached or
-awaited `Ready`. A clone that was ready answers the same record, byte for
-byte, with the same `Ready` in the new session, and one that took the reset
-before it was ready has ended. OpenVMM's broker ends the stream both to end an
-attachment and to refuse one, so the order takes such a refusal for a lost
-session too, whose retries the sequence's limit of sessions bounds. Any other
-failure is final: a refusal that the broker sends, a deadline that passed,
-another build, and a message that breaks the framing.
+clone's activation. The table and `Start` then follow as after a cold boot, in
+two steps: `host::map_table` sends the table as `host::start_sandbox` does,
+and ends the order in the same way at a part that the guest fails, and
+`Client::start` sends `Start`. `host::CloneOrder` runs these steps as the
+framing of the restore sequence of `nvx::host::template`, which checks the
+activation against the record, sends the table only for a clone with an
+export, and `Start` only once the guest applied every mapping, and which
+replaces a session that the order takes for lost: one that a reset of the
+broker, the end of its stream, or a failure of the transport ended while the
+host attached or awaited `Ready`. A clone that was ready answers the same
+record, byte for byte, with the same `Ready` in the new session, and one that
+took the reset before it was ready has ended. OpenVMM's broker ends the stream
+both to end an attachment and to refuse one, so the order takes such a refusal
+for a lost session too, whose retries the sequence's limit of sessions bounds.
+Any other failure is final: a refusal that the broker sends, a deadline that
+passed, another build, and a message that breaks the framing. The guest's
+`MapFailed` does not tell whether the request's mappings or a failure of the
+guest's own failed the table, so the sequence attributes it, as any other
+failure of the table, to what the host saw of it: a broken protocol, unless the
+deadline passed or the session was lost.
 
 ## VMs
 

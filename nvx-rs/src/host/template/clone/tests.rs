@@ -1,7 +1,7 @@
-//! Tests of the plans of clones: the checks of their images, uppers, and memory targets against
-//! the generation that they lease, which read no content, the claims of their scratch images, and
-//! the sparse scratch device of an upper in RAM; in [`launch`], of their launches; and in
-//! [`restore`], of their restore sequences.
+//! Tests of the plans of clones: the checks of their images, uppers, exports, and memory targets
+//! against the generation that they lease, which read no content, the claims of their scratch
+//! images, and the sparse scratch device of an upper in RAM; in [`launch`], of their launches; and
+//! in [`restore`], of their restore sequences.
 
 mod launch;
 mod restore;
@@ -15,8 +15,8 @@ use sha2::{Digest, Sha256};
 use super::*;
 use crate::ErrorCode;
 use crate::activation::{
-    Configuration, ExpectedResources, Identity, Image, MachineIdMode, Network, Publication, Upper,
-    WorkloadIdentity,
+    Configuration, ExpectedResources, Export, ExportKind, Identity, Image, MachineIdMode, Network,
+    Publication, Upper, WorkloadIdentity,
 };
 use crate::host::filesystem;
 use crate::host::network::{Access as NetworkAccess, NetworkPolicy, NetworkProxy, ProxyScheme};
@@ -182,6 +182,7 @@ fn tmpfs_request(image: &Path, binding: &DistroBinding) -> CloneRequest {
         binding: binding.clone(),
         policy_revision: DISTRO_POLICY_REVISION,
         scratch: None,
+        export: None,
         memory: MEMORY,
         workload: workload(),
         overlay: OverlayMode::UntrustedLowers,
@@ -233,6 +234,63 @@ fn with_network(request: CloneRequest, network: Option<SandboxNetwork>) -> Clone
 /// Returns the network of a guest at `10.0.0.2/24` under a policy whose default is `access`.
 fn network(access: NetworkAccess) -> SandboxNetwork {
     SandboxNetwork::new("10.0.0.2/24", NetworkPolicy::new(access)).unwrap()
+}
+
+/// Returns the request `request` with the export `export`.
+fn with_export(request: CloneRequest, export: &ExportPlan) -> CloneRequest {
+    CloneRequest {
+        export: Some(export.clone()),
+        ..request
+    }
+}
+
+/// Plans the export of `mappings`, host paths each at its guest target, read-only or not, for the
+/// container root, as an adapter's sandbox plans it, with the paths `denied` hidden, and the paths
+/// `allowed` inside them shown again.
+fn export_plan(
+    mappings: &[(&Path, &str, bool)],
+    denied: &[PathBuf],
+    allowed: &[PathBuf],
+) -> ExportPlan {
+    let mappings: Vec<filesystem::Mapping<'_>> = mappings
+        .iter()
+        .map(|&(path, target, read_only)| filesystem::Mapping {
+            name: "mappings",
+            path,
+            target: filesystem::Target::Guest(target),
+            read_only,
+        })
+        .collect();
+    let request = filesystem::ExportRequest {
+        denied: filesystem::PathList {
+            name: "denied",
+            paths: denied,
+        },
+        allowed: filesystem::PathList {
+            name: "allowed",
+            paths: allowed,
+        },
+        ..filesystem::ExportRequest::new(&mappings, filesystem::ReservedTargets::CONTAINER_ROOT)
+    };
+    filesystem::plan(&request).unwrap().unwrap()
+}
+
+/// Returns the mapping table of these tests' exports, [`Fixture::data_export`]: the exported
+/// directory itself, the export's root, which an empty source names, and the directory `work` in
+/// it, by its path there, without the index of a child.
+fn data_table() -> [HostMap; 2] {
+    [
+        HostMap {
+            source: String::new(),
+            target: "/data".to_owned(),
+            read_only: true,
+        },
+        HostMap {
+            source: "work".to_owned(),
+            target: "/work".to_owned(),
+            read_only: false,
+        },
+    ]
 }
 
 /// Returns the kind and the message of the error of `result`, a clone's plan that failed with
@@ -374,6 +432,29 @@ impl Fixture {
         stage(&path, length);
         let binding = ScratchBinding::bind(&path).unwrap();
         (path, binding)
+    }
+
+    /// Creates the directory `name` among the exported directories, with the directories `inside`
+    /// it, and returns its path, with its links resolved, as an export plan names it.
+    fn exported(&self, name: &str, inside: &[&str]) -> PathBuf {
+        let dir = self.path("exports", name);
+        fs::create_dir_all(&dir).unwrap();
+        for path in inside {
+            fs::create_dir_all(dir.join(path)).unwrap();
+        }
+        filesystem::canonicalize(&dir).unwrap()
+    }
+
+    /// Plans the export of the exported directory `name`, which the guest reads at `/data`, and
+    /// in which it writes the directory `work`, at `/work`, as [`data_table`] maps them: one
+    /// directory, whose writes the plan narrows to `work`.
+    fn data_export(&self, name: &str) -> ExportPlan {
+        let data = self.exported(name, &["work"]);
+        export_plan(
+            &[(&data, "/data", true), (&data.join("work"), "/work", false)],
+            &[],
+            &[],
+        )
     }
 
     /// Provisions the sandbox `name`, and returns its directory, with its links resolved, as a
@@ -2103,5 +2184,215 @@ fn only_a_path_that_no_longer_names_its_supplied_file_is_the_request_s() {
             .starts_with("the image cannot be used: "),
         "{}",
         fault.error
+    );
+}
+
+#[test]
+fn a_clone_with_an_export_records_its_plan_and_maps_from_its_directory() {
+    let fixture = Fixture::new();
+    let (image, binding) = fixture.image("distro.erofs", IMAGE_LEN);
+    let mut acquired = fixture.acquire("sandbox");
+    let export = fixture.data_export("data");
+    let request = with_export(tmpfs_request(&image, &binding), &export);
+    let plan = fixture.plan(&mut acquired, &request, NO_CONTENT).unwrap();
+    assert_eq!(plan.export(), Some(&export));
+    // The record names the export, a directory, by the identity of its plan, and announces its
+    // mappings, the plan's binds.
+    let configuration = plan.activation().configuration();
+    assert_eq!(
+        configuration.export,
+        Some(Export {
+            kind: ExportKind::Directory,
+            plan: digest_of(b"nvx export plan\0", &export),
+        })
+    );
+    assert_eq!(configuration.mappings, export.binds.len());
+    // The directory is the export's root, so the table's sources name paths in it, without the
+    // child's index that an aggregate's table holds.
+    assert_eq!(plan.table(), data_table());
+    let aggregate: Vec<String> = export
+        .guest_table()
+        .into_iter()
+        .map(|mapping| mapping.source)
+        .collect();
+    assert_eq!(aggregate, ["0", "0/work"]);
+    // The identity covers the whole plan: another directory's is another.
+    drop(plan);
+    let other = fixture.data_export("other");
+    let request = with_export(tmpfs_request(&image, &binding), &other);
+    let plan = fixture.plan(&mut acquired, &request, NO_CONTENT).unwrap();
+    let recorded = plan.activation().configuration().export.unwrap();
+    assert_eq!(recorded.plan, digest_of(b"nvx export plan\0", &other));
+    assert_ne!(recorded.plan, digest_of(b"nvx export plan\0", &export));
+    // A clone without mappings has no export, and its record none, so its template's slot stays
+    // dormant.
+    drop(plan);
+    let request = tmpfs_request(&image, &binding);
+    let plan = fixture.plan(&mut acquired, &request, NO_CONTENT).unwrap();
+    assert_eq!(plan.export(), None);
+    assert!(plan.table().is_empty());
+    let configuration = plan.activation().configuration();
+    assert_eq!((&configuration.export, configuration.mappings), (&None, 0));
+}
+
+#[test]
+fn exports_that_a_dormant_filesystem_slot_does_not_bind_are_refused_before_anything_is_opened() {
+    let fixture = Fixture::new();
+    let (image, binding) = fixture.image("distro.erofs", IMAGE_LEN);
+    let mut acquired = fixture.acquire("sandbox");
+    let request = tmpfs_request(&image, &binding);
+    let mut refusal = |export: &ExportPlan| {
+        let request = with_export(request.clone(), export);
+        let plan = fixture.plan(&mut acquired, &request, NO_CONTENT);
+        let (kind, message) = refused(plan, Evidence::InvalidMappings);
+        assert_eq!(kind, ErrorKind::Unsupported, "{message}");
+        message
+    };
+    // Two directories, which only an aggregate exports.
+    let one = fixture.exported("one", &[]);
+    let two = fixture.exported("two", &[]);
+    let both = export_plan(&[(&one, "/one", false), (&two, "/two", true)], &[], &[]);
+    assert_eq!(both.children.len(), 2);
+    assert_eq!(
+        refusal(&both),
+        "the export of a clone binds one directory to its template's dormant filesystem slot, \
+         but its export plan exports 2 directories and files"
+    );
+    // A file, which OpenVMM exports alone only in an aggregate.
+    let file = fixture.path("exports", "file.txt");
+    fs::write(&file, b"file").unwrap();
+    let file = filesystem::canonicalize(&file).unwrap();
+    let alone = export_plan(&[(&file, "/file.txt", true)], &[], &[]);
+    assert!(alone.children[0].file);
+    assert_eq!(
+        refusal(&alone),
+        format!(
+            "the export of a clone binds one directory to its template's dormant filesystem \
+             slot, but its export plan exports the file {}",
+            file.display()
+        )
+    );
+    // Mappings without an export, and an export without mappings.
+    let export = fixture.data_export("data");
+    let unexported = ExportPlan {
+        children: Vec::new(),
+        ..export.clone()
+    };
+    assert_eq!(
+        refusal(&unexported),
+        "the recorded export plan is invalid: it exports 0 directories and files, but OpenVMM \
+         exports from 1 to 256"
+    );
+    let unmapped = ExportPlan {
+        binds: Vec::new(),
+        ..export.clone()
+    };
+    assert_eq!(
+        refusal(&unmapped),
+        "the recorded export plan is invalid: it maps 0 paths, but a sandbox maps from 1 to 4096"
+    );
+    // A plan that maps a target that the container root keeps for itself.
+    let mut reserved = export.clone();
+    reserved.binds[1].target = "/proc/work".to_owned();
+    let message = refusal(&reserved);
+    assert!(
+        message.starts_with("the recorded export plan is invalid"),
+        "{message}"
+    );
+    // None of them opened anything, and the plan of one directory serves a clone.
+    assert_untouched(&acquired);
+    let request = with_export(request, &export);
+    drop(fixture.plan(&mut acquired, &request, NO_CONTENT).unwrap());
+}
+
+#[test]
+fn exports_that_overlap_the_template_store_are_refused_before_anything_is_opened() {
+    // The plan compares the paths that the export's plan resolved with the store's, as the store
+    // names it, without reading anything: this store's path is resolved.
+    let fixture = Fixture::in_store(
+        |directory| {
+            filesystem::canonicalize(directory)
+                .unwrap()
+                .join("templates")
+        },
+        |_, _, _| {},
+    );
+    let (image, binding) = fixture.image("distro.erofs", IMAGE_LEN);
+    let mut acquired = fixture.acquire("sandbox");
+    let request = tmpfs_request(&image, &binding);
+    let store = fixture.store.dir().to_owned();
+    let payload = fixture.store.payload_dir(fixture.generation.generation());
+    // The store's directory, the payload of a generation inside it, and a directory that holds
+    // the store, which a guest could reach the payload through, and write it if writable.
+    for (dir, read_only) in [
+        (store.clone(), true),
+        (payload, false),
+        (fixture.directory.path().to_owned(), true),
+    ] {
+        let export = export_plan(&[(&dir, "/data", read_only)], &[], &[]);
+        let request = with_export(request.clone(), &export);
+        let plan = fixture.plan(&mut acquired, &request, NO_CONTENT);
+        assert_eq!(
+            refused(plan, Evidence::InvalidMappings),
+            (
+                ErrorKind::Unsupported,
+                format!(
+                    "the export of a clone cannot share {}, which overlaps the template store {}, \
+                     whose leased payloads nothing may change",
+                    export.children[0].root.display(),
+                    store.display()
+                )
+            )
+        );
+        assert_untouched(&acquired);
+    }
+    // A directory beside the store is no part of it.
+    let export = fixture.data_export("data");
+    let request = with_export(request, &export);
+    drop(fixture.plan(&mut acquired, &request, NO_CONTENT).unwrap());
+}
+
+#[test]
+fn the_export_of_a_clone_binds_its_directory_with_its_policy_and_owner() {
+    let fixture = Fixture::new();
+    let data = fixture.exported("data", &["work", "secret/shown"]);
+    let (work, secret) = (data.join("work"), data.join("secret"));
+    let shown = secret.join("shown");
+    let mount = |mode: &str| format!("{},{},{mode}", filesystem::GUEST_EXPORT, data.display());
+    let text = |path: &Path| path.to_str().unwrap().to_owned();
+    // A directory that the guest reads, but for the directory that it writes in it, and that
+    // hides a directory, but for a directory in it: the guest writes only `work`.
+    let mut export = export_plan(
+        &[(&data, "/data", true), (&work, "/work", false)],
+        std::slice::from_ref(&secret),
+        std::slice::from_ref(&shown),
+    );
+    let directory = DirectoryExport::new(&export).unwrap();
+    assert_eq!(directory.plan(), &export);
+    assert_eq!(
+        directory.arguments(),
+        [
+            "--mount".to_owned(),
+            mount("rw"),
+            "--mount-deny".to_owned(),
+            text(&secret),
+            "--mount-allow".to_owned(),
+            text(&shown),
+            "--mount-write".to_owned(),
+            text(&work),
+        ]
+    );
+    // An export whose operations run as the guest's caller says so last.
+    export.owner = filesystem::Owner::Caller;
+    let arguments = DirectoryExport::new(&export).unwrap().arguments();
+    assert_eq!(
+        arguments[arguments.len() - 2..],
+        ["--mount-owner", "caller"]
+    );
+    // A directory that the guest only reads is bound read-only.
+    let read_only = export_plan(&[(&data, "/data", true)], &[], &[]);
+    assert_eq!(
+        DirectoryExport::new(&read_only).unwrap().arguments(),
+        ["--mount".to_owned(), mount("ro")]
     );
 }

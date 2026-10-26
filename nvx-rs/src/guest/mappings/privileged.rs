@@ -4,8 +4,9 @@
 //! `cargo test --all-features -- --ignored guest::mappings::privileged`, as root.
 //!
 //! They cover what the fake kernel cannot: symbolic links and magic links at every component, a
-//! rename race during the walk, kinds, a target inside another mapping, reserved targets, a
-//! mapping that covers the root of one of the root's own mounts until the teardown, what a mapper
+//! rename race during the walk, kinds, a target inside another mapping, reserved targets, the
+//! source root itself, which an empty source maps as a copy of its own mount alone, a mapping
+//! that covers the root of one of the root's own mounts until the teardown, what a mapper
 //! creates, which a workload that is not root enters whatever the umask or a default ACL, a
 //! read-only mapping that is never visible writable, even briefly, a teardown's unmounts, from a
 //! thread with a descriptor table of its own too, and the roots of binds of directories below
@@ -378,6 +379,60 @@ fn kinds_nested_targets_and_reserved_targets_are_checked() {
     assert!(!root.join("run").exists() && !root.join("etc").exists());
     mapper.teardown().unwrap();
     assert!(mounts_below(&root).is_empty());
+}
+
+#[test]
+#[ignore = "needs root and Linux 6.8 or later"]
+fn an_empty_source_maps_a_copy_of_the_source_root_s_own_mount() {
+    let Some(scene) = Scene::new() else {
+        return;
+    };
+    let (root, export) = (scene.path("root"), scene.path("export"));
+    // A file system mounted below the source root, and a link in it.
+    let inner = export.join("dir/inner");
+    sys::mount(
+        Some(c"tmpfs"),
+        &sys::path_c_string(&inner).unwrap(),
+        Some(c"tmpfs"),
+        MountFlags::empty(),
+        Some(c"mode=0755"),
+    )
+    .unwrap();
+    fs::write(inner.join("below"), b"below").unwrap();
+    std::os::unix::fs::symlink("dir", export.join("link")).unwrap();
+    let mut mapper = scene.mapper(Reserved::default());
+    let whole = Mapping::new("", "/whole", Access::ReadOnly).unwrap();
+    mapper.apply(&scene.source(), &[whole]).unwrap();
+    // The target is the root of a copy of the source root's own mount, read-only, `nosuid`, and
+    // `nodev`, which shows the whole export, but not the file system mounted below it.
+    let mapped = root.join("whole");
+    let (mount, mount_root) = mount_of(&mapped);
+    assert!(mount_root);
+    assert_ne!(mount, mount_of(&export).0);
+    assert_eq!(fs::read(mapped.join("file.txt")).unwrap(), b"file");
+    assert_eq!(fs::read(mapped.join("dir/marker")).unwrap(), b"host");
+    assert_eq!(fs::read_dir(mapped.join("dir/inner")).unwrap().count(), 0);
+    let flags = statvfs(&mapped).unwrap().flags();
+    assert!(flags.contains(FsFlags::ST_RDONLY | FsFlags::ST_NOSUID | FsFlags::ST_NODEV));
+    let written = fs::write(mapped.join("new"), b"guest").unwrap_err();
+    assert_eq!(written.raw_os_error(), Some(Errno::EROFS as i32));
+    assert_eq!(mounts_below(&root), [mapped]);
+    // Every other source still opens through no link, and on the source root's own mount.
+    let refused = |error: Errno| MappingError::System {
+        step: Step::Source,
+        error: error as i32,
+    };
+    assert_eq!(
+        scene.refusal(Reserved::default(), "link", "/link"),
+        refused(Errno::ELOOP)
+    );
+    assert_eq!(
+        scene.refusal(Reserved::default(), "dir/inner", "/inner"),
+        refused(Errno::EXDEV)
+    );
+    mapper.teardown().unwrap();
+    assert!(mounts_below(&root).is_empty());
+    assert!(!export.join("new").exists());
 }
 
 #[test]

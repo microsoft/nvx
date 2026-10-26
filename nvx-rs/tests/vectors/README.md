@@ -61,6 +61,12 @@ the key that the vector's bytes decode to.
   its own, such as `nvxc-v2.txt` for the exec v2 of
   [microsoft/nvx#623](https://github.com/microsoft/nvx/issues/623), and the
   bytes of an earlier version that it refuses become its rejection vectors.
+  Version 1 has one exception: `MAPS|ROOT_SOURCE` of `nvxc-v1.txt` was the
+  rejection vector `INVALID_MAPS|EMPTY_SOURCE` until an empty source came to
+  name the export's root. Only the clone of a template whose export is a
+  directory sends one, to the template's own guest, which deploys with the
+  host and whose build the template's key names, so the C agent of earlier
+  releases, which refuses it, never receives one.
 - The bytes come from the protocol's definition, never from the code that they
   check, and so do the values of each vector.
 

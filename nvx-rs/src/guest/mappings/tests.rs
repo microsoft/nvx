@@ -1133,17 +1133,22 @@ fn mappings_name_paths_below_their_roots() {
         Access::ReadOnly,
     )
     .unwrap();
+    // An empty source names the source root itself.
+    let root = Mapping::new("", "/target", Access::ReadOnly).unwrap();
+    assert_eq!(root.source(), Path::new(""));
     let too_long = format!("{longest}a");
     for source in [
-        "",
+        "/",
         "/0",
         ".",
         "..",
+        "./",
         "a/../b",
         "a/./b",
         "a//b",
         "a/",
         "a\0b",
+        "\0",
         too_long.as_str(),
     ] {
         assert_eq!(
@@ -1196,6 +1201,73 @@ fn mappings_name_paths_below_their_roots() {
              NUL bytes or empty, `.`, or `..` components"
         )
     );
+    assert_eq!(
+        InvalidMapping::Source.to_string(),
+        format!(
+            "a mapping source must be empty, for its root, or a relative path of at most \
+             {MAX_PATH_BYTES} bytes without NUL bytes or empty, `.`, or `..` components"
+        )
+    );
+}
+
+#[test]
+fn an_empty_source_maps_the_source_root_itself_from_beneath_it() {
+    let fixture = Fixture::new();
+    fs::write(fixture.path("root/plain"), b"").unwrap();
+    // The source root itself, which the mapper opens as `.` beneath it, is copied alone and
+    // restricted before it is attached, as any directory below it is.
+    let mut mapper = fixture.mapper(Reserved::default());
+    let whole = mapping("", "/whole", Access::ReadOnly);
+    fixture.apply(&mut mapper, &[whole]).unwrap();
+    assert_eq!(
+        fixture.kernel.calls(),
+        attach_calls(
+            &fixture.path("export"),
+            &fixture.path("root/whole"),
+            Access::ReadOnly
+        )
+    );
+    assert!(fixture.path("root/whole").is_dir());
+    mapper.teardown_with(&mut fixture.kernel()).unwrap();
+    // It is a directory, which goes only onto a directory, and only where a mapping of a
+    // directory may go.
+    let calls = fixture.kernel.calls();
+    let refusal = |mapping: Mapping| fixture.refusal(Reserved::default(), mapping);
+    let read_only = Access::ReadOnly;
+    assert_eq!(
+        refusal(mapping("", "/plain", read_only)),
+        MappingError::TargetKind
+    );
+    let file = mapping("", "/file", read_only).with_kind(Kind::File);
+    assert_eq!(refusal(file), MappingError::SourceKind);
+    assert_eq!(
+        refusal(mapping("", "/run/nvx", read_only)),
+        MappingError::Reserved
+    );
+    // Every other source is still opened through no link, and on the root's mount, once a mount
+    // below the root shows up, beneath which the root itself still opens.
+    fixture.kernel.add_mount(fixture.path("export/dir"));
+    assert_eq!(
+        refusal(mapping("link", "/link", read_only)),
+        failed(Step::Source, Errno::ELOOP)
+    );
+    assert_eq!(
+        refusal(mapping("dir", "/crossed", read_only)),
+        failed(Step::Source, Errno::EXDEV)
+    );
+    assert_eq!(fixture.kernel.calls(), calls);
+    let mut mapper = fixture.mapper(Reserved::default());
+    let again = mapping("", "/again", Access::ReadWrite);
+    fixture.apply(&mut mapper, &[again]).unwrap();
+    let attached: Vec<Call> = calls
+        .into_iter()
+        .chain(attach_calls(
+            &fixture.path("export"),
+            &fixture.path("root/again"),
+            Access::ReadWrite,
+        ))
+        .collect();
+    assert_eq!(fixture.kernel.calls(), attached);
 }
 
 #[test]
