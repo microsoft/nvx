@@ -1121,3 +1121,141 @@ fn a_launch_that_cannot_be_ended_keeps_its_records_and_its_lease_until_a_reattac
     assert!(control.calls.is_empty());
     assert_launch_ended(&fixture, &mut acquired, &vmm);
 }
+
+#[test]
+fn a_caller_fails_a_ready_or_started_clone_with_its_own_evidence_as_the_sequence_fails_one() {
+    let (fixture, image) = fixture();
+    let ready = (Stage::Start, Progress::Ready);
+    // A step of the caller's own, such as one that maps a directory of the host into the clone,
+    // fails once the clone is ready, which the request's mappings attribute to the request.
+    let mut acquired = fixture.acquire("ready");
+    let mut vmm = vmm_with("flush");
+    let (restoring, _) = launch(&fixture, &mut acquired, &image, &mut vmm);
+    let mut control = FakeControl::default();
+    let activated = restoring
+        .activate(&mut control, RestoreDeadlines::default())
+        .unwrap();
+    let mapping = "the test's mapping names no directory of the host";
+    let failure = activated.fail(Evidence::InvalidMappings, Error::unsupported(mapping));
+    assert_eq!(failure.kind(), ErrorKind::Unsupported, "{failure}");
+    assert_eq!(failure.message(), mapping);
+    let mappings = Evidence::InvalidMappings;
+    assert_failed(&failure, &acquired, ready, mappings, Teardown::Terminated);
+    assert_eq!(failure.outcome(), Outcome::Request);
+    assert_launch_ended(&fixture, &mut acquired, &vmm);
+    // A check of the caller's own fails once the clone's sandbox started, before the commit.
+    let mut acquired = fixture.acquire("started");
+    let mut vmm = vmm_with("flush");
+    let (restoring, _) = launch(&fixture, &mut acquired, &image, &mut vmm);
+    let mut control = FakeControl::default();
+    let activated = restoring
+        .activate(&mut control, RestoreDeadlines::default())
+        .unwrap();
+    let started = activated.start(&mut control).unwrap();
+    let failure = started.fail(Evidence::HostFailure, Error::io("the test's check failed"));
+    let commit = (Stage::Commit, Progress::Started);
+    let host = Evidence::HostFailure;
+    assert_failed(&failure, &acquired, commit, host, Teardown::Terminated);
+    assert_eq!(failure.outcome(), Outcome::Host);
+    assert_launch_ended(&fixture, &mut acquired, &vmm);
+    // The guest ended the clone's VM with the status of a failed repair as the caller's step
+    // failed: the status prevails, as over the sequence's own failures.
+    let mut acquired = fixture.acquire("repair");
+    let mut vmm = vmm_with("flush report:guest-exit:195");
+    let (restoring, _) = launch(&fixture, &mut acquired, &image, &mut vmm);
+    let mut control = FakeControl::default();
+    let activated = restoring
+        .activate(&mut control, RestoreDeadlines::default())
+        .unwrap();
+    vmm.end_and_wait();
+    let failure = activated.fail(Evidence::InvalidMappings, Error::unsupported(mapping));
+    let repair = Evidence::RepairStatus;
+    assert_failed(&failure, &acquired, ready, repair, Teardown::Exited);
+    assert_eq!(failure.record().status, Some(195));
+    assert_launch_ended(&fixture, &mut acquired, &vmm);
+    // Evidence of the template, such as a defect of the generation that the caller diagnosed,
+    // shows the provenance that the status alone leaves to establish: it prevails, and the record
+    // holds the status beside it. The failure quarantines the generation once the sandbox's lock
+    // is released, as the lock order asks.
+    let mut acquired = fixture.acquire("defect");
+    let mut vmm = vmm_with("flush report:guest-exit:195");
+    let (restoring, _) = launch(&fixture, &mut acquired, &image, &mut vmm);
+    let mut control = FakeControl::default();
+    let activated = restoring
+        .activate(&mut control, RestoreDeadlines::default())
+        .unwrap();
+    vmm.end_and_wait();
+    let defect = "the test diagnosed a defect of the generation's repair";
+    let failure = activated.fail(Evidence::TemplateDefect, Error::other(defect));
+    let template = Evidence::TemplateDefect;
+    assert_failed(&failure, &acquired, ready, template, Teardown::Exited);
+    assert_eq!(
+        (failure.outcome(), failure.record().status),
+        (Outcome::Template, Some(195))
+    );
+    assert_launch_ended(&fixture, &mut acquired, &vmm);
+    drop(acquired);
+    assert!(failure.quarantine(&fixture.store, None).unwrap());
+    assert_eq!(
+        fixture.store.tombstones().unwrap(),
+        [failure.record().template.generation]
+    );
+}
+
+#[test]
+fn a_diagnosis_too_long_for_a_record_keeps_its_ends_and_its_evidence_through_a_reattach() {
+    let (fixture, image) = fixture();
+    let mut acquired = fixture.acquire("diagnosis");
+    let mut vmm = vmm_with("flush report:guest-exit:195");
+    let (restoring, _) = launch(&fixture, &mut acquired, &image, &mut vmm);
+    let mut control = FakeControl::default();
+    let activated = restoring
+        .activate(&mut control, RestoreDeadlines::default())
+        .unwrap();
+    vmm.end_and_wait();
+    // The caller's diagnosis of a defect of the generation is longer than a record keeps: JSON
+    // takes six bytes for each of its control characters, the most that a character takes.
+    let (first, last) = (
+        "the test's diagnosis begins",
+        "and the test's diagnosis ends",
+    );
+    let defect = format!("{first}{}{last}", "\u{1}".repeat(64 * 1024));
+    let failure = activated.fail(Evidence::TemplateDefect, Error::other(defect.clone()));
+    // The failure's error keeps the diagnosis whole, and its record, which the sandbox keeps,
+    // its ends.
+    assert_eq!(failure.message(), defect);
+    let record = failure.record();
+    let ready = (Stage::Start, Progress::Ready);
+    assert_eq!(
+        (
+            (record.stage, record.progress),
+            record.evidence,
+            &record.teardown
+        ),
+        (ready, Evidence::TemplateDefect, &Teardown::Exited)
+    );
+    assert!(record.message.starts_with(first) && record.message.ends_with(last));
+    assert!(record.message.chars().count() < defect.chars().count());
+    let records = CloneRecords::read(&acquired.locked).unwrap().unwrap();
+    assert_eq!(records.failure.as_ref(), Some(record));
+    // A reattach finds the failure as it was recorded, with the template's evidence, which
+    // quarantines the generation once the sandbox's lock is released.
+    let mut control = FakeControl::default();
+    let reattached = reattach_clone(
+        &mut acquired.locked,
+        &runtime_of(&fixture),
+        &mut control,
+        Instant::now() + TIMEOUT,
+        TIMEOUT,
+    )
+    .unwrap();
+    let again = failed(reattached);
+    assert_eq!(again.record(), record);
+    assert_launch_ended(&fixture, &mut acquired, &vmm);
+    drop(acquired);
+    assert!(again.quarantine(&fixture.store, None).unwrap());
+    assert_eq!(
+        fixture.store.tombstones().unwrap(),
+        [record.template.generation]
+    );
+}

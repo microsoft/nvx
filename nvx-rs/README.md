@@ -739,14 +739,16 @@ geometry, which the host's staging takes instead once the caller proves it,
 bound, resource exhaustion, a host that cannot restore the template, another
 runtime, or a failure of its own operations; unknown, for a lost status, a
 timeout, a reset, a forced kill, or a broken protocol; the template, for a
-malformed generation, which alone quarantines the generation, through its
+malformed generation, or a defect of its capture or repair that a diagnosis
+attributes to it, the only outcome that quarantines the generation, through its
 tombstone, `CloneFailure::quarantine`; and the repair stage, for a status of the
 clone's repair alone.
 
 OpenVMM's outcome report gives the status with which the guest ended the clone's
-VM, which `status_evidence` attributes, and which prevails over what the host
-saw: a status of the repair at any point, and one of the activation before the
-start was sent.
+VM, which `status_evidence` attributes, and which prevails over what the host or
+the caller saw, but not over evidence of the template, which shows the
+provenance that a status alone leaves to establish: a status of the repair at
+any point, and one of the activation before the start was sent.
 
 A VMM that exits before its restore-ready event, as OpenVMM does once it cannot
 restore the snapshot, after it closed the event's endpoint, which the sequence
@@ -768,6 +770,11 @@ the progress, and the teardown: no VM, an exit or a termination that the host
 verified, or an unresolved one, which keeps the launch's journal or runtime
 record, and the lease; a release removes both, and a sandbox that boots cold
 writes neither.
+
+A step or a check of the caller's own that fails once the clone is ready, or
+once its sandbox started, fails the clone with the caller's evidence through
+`Activated::fail` or `Started::fail`, which end the launch and record the
+failure as the sequence's own failures do.
 
 `reattach_clone` takes a clone over after the caller of its launch restarted: it
 reattaches by the identity of its VMM's process, checks a committed clone in a

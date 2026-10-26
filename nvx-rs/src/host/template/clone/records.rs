@@ -29,12 +29,15 @@
 //! record outlasts a crash of the host, as the clone's binding does. Like the store's records, the
 //! record, and the directory that a write syncs, are named by their paths: the directories above
 //! the sandbox's must be ones that only the current user, or an administrator, may change, as the
-//! [store](crate::host::store) requires of them. A record of another format
-//! fails rather than being read. The failure of a VMM that
-//! exited before its restore-ready event reads the end of the launch's log for the line with
-//! which OpenVMM reported the error that ended it, which the record's message keeps, and whose
-//! time ABI code may attribute the failure, as [the attribution of
-//! evidence](Evidence#attribution) describes.
+//! [store](crate::host::store) requires of them. The record keeps at most
+//! 8192 characters of the failure's message, and 1024 of the reason of an unresolved teardown: of
+//! a longer text, as the diagnosis of a caller that fails the clone may be, its first and its last
+//! characters, with an ellipsis between them, so that a read, which takes at most 64 KiB of a
+//! record, takes every record that a failure writes. A record of another format fails rather
+//! than being read. The failure of a VMM that exited before its restore-ready event reads the end
+//! of the launch's log for the line with which OpenVMM reported the error that ended it, which the
+//! record's message keeps, and whose time ABI code may attribute the failure, as [the attribution
+//! of evidence](Evidence#attribution) describes.
 //!
 //! A release of the clone's lease removes both, as it removes the clone's other files, so that
 //! the records of a clone last as long as its lease, which a failure whose teardown is unresolved
@@ -79,9 +82,25 @@ const PROGRESS_FORMAT: u32 = 1;
 /// of its steps, take a few hundred.
 const MAX_PROGRESS_BYTES: u64 = 4096;
 
-/// The most bytes of the record of a clone's failure that a read takes: the message of an error,
-/// which it holds, takes at most a few kilobytes.
+/// The most bytes of the record of a clone's failure that a read takes: more than any record that
+/// a failure writes takes, whose texts [`bounded`] bounds, as [`MAX_MESSAGE_CHARS`] and
+/// [`MAX_REASON_CHARS`] tell.
 const MAX_FAILURE_BYTES: u64 = 64 * 1024;
+
+/// The most characters of the message of a failure's error that the record of the failure keeps,
+/// as [`bounded`] keeps them: the diagnosis of a caller that fails a clone, as
+/// [`Activated::fail`](super::Activated::fail) and [`Started::fail`](super::Started::fail) take
+/// it, may be longer.
+const MAX_MESSAGE_CHARS: usize = 8 * 1024;
+
+/// The most characters of the reason of an unresolved teardown that the record of a failure keeps,
+/// as [`bounded`] keeps them.
+const MAX_REASON_CHARS: usize = 1024;
+
+// JSON takes at most six bytes for a character, as for `\u0001`, and the other fields of a record
+// take less than a kilobyte, so that a read takes every record that a failure writes.
+const _: () =
+    assert!(6 * (MAX_MESSAGE_CHARS + MAX_REASON_CHARS) + 1024 <= MAX_FAILURE_BYTES as usize);
 
 /// What messages call the progress log of a clone.
 const PROGRESS_WHAT: &str = "clone progress log";
@@ -351,8 +370,9 @@ impl Recorder {
     /// loss of a VMM that exited before its restore-ready event takes the line of OpenVMM's fatal
     /// error that the VMM's log ends with, as [`diagnosed`](Self::diagnosed) does, and the
     /// evidence of a status of the guest's, which OpenVMM's outcome report gives once the VMM has
-    /// exited, as [`observed`](Self::observed) reads it, prevails over the fault's, as
-    /// [`reported`](Self::reported) gives it.
+    /// exited, as [`observed`](Self::observed) reads it, and as [`reported`](Self::reported)
+    /// gives it, prevails over the fault's, unless the fault's is the template's, as
+    /// [`failure::prevailing`] decides.
     fn attribute(
         &self,
         progress: Progress,
@@ -365,7 +385,8 @@ impl Recorder {
             _ => self.observed(),
         };
         let (reported, status) = self.reported(report, progress);
-        (reported.unwrap_or(fault.evidence), status, fault.error)
+        let evidence = failure::prevailing(fault.evidence, reported);
+        (evidence, status, fault.error)
     }
 
     /// Returns `fault`, of the clone that got as far as `progress`, which is the loss of a VMM
@@ -423,8 +444,8 @@ impl Recorder {
     /// error, for the loss of a VMM that exited before its restore-ready event, as
     /// [`diagnosed`](Self::diagnosed) adds it, and the guest's status in OpenVMM's outcome
     /// report, which the record does not hold, whose evidence, as [`reported`](Self::reported)
-    /// gives it, prevails, as in [`record`](Self::record). Writes the record in place of the
-    /// earlier one, if they differ, and returns the failure.
+    /// gives it, prevails as [`failure::prevailing`] decides, as in [`record`](Self::record).
+    /// Writes the record in place of the earlier one, if they differ, and returns the failure.
     pub(super) fn resolve(&self, mut earlier: FailureRecord, teardown: Teardown) -> CloneFailure {
         let error = earlier.error();
         if earlier.teardown == teardown {
@@ -434,7 +455,7 @@ impl Recorder {
         let mut evidence = fault.evidence;
         if earlier.status.is_none() && teardown != Teardown::NoVm {
             let (reported, status) = self.reported(self.observed(), earlier.progress);
-            evidence = reported.unwrap_or(evidence);
+            evidence = failure::prevailing(evidence, reported);
             earlier.status = status;
         }
         if evidence != earlier.evidence {
@@ -446,9 +467,11 @@ impl Recorder {
         self.write(fault.error, earlier)
     }
 
-    /// Writes `record`, the record of the failure of `error`, in place of the sandbox's record,
-    /// and returns the failure, whose error says so if the record could not be written.
+    /// Writes `record`, the record of the failure of `error`, in place of the sandbox's record, and
+    /// returns the failure, with the record as the sandbox keeps it, as [`kept`] returns it, whose
+    /// error says so if the record could not be written.
     pub(super) fn write(&self, error: Error, record: FailureRecord) -> CloneFailure {
+        let record = kept(record);
         let error = match write_failure(&self.failure, &record) {
             Ok(()) => error,
             Err(failed) => amended(
@@ -676,7 +699,8 @@ struct Recorded {
 }
 
 impl Recorded {
-    /// Returns the JSON form of `record`.
+    /// Returns the JSON form of `record`, as the sandbox keeps it, with texts that [`kept`]
+    /// bounds.
     fn new(record: &FailureRecord) -> Self {
         Self {
             format: FAILURE_FORMAT,
@@ -695,11 +719,11 @@ impl Recorded {
             outcome: record.outcome,
             teardown: record.teardown.as_str().to_owned(),
             unresolved: match &record.teardown {
-                Teardown::Unresolved(reason) => Some(reason.clone()),
+                Teardown::Unresolved(reason) => Some(bounded(reason, MAX_REASON_CHARS)),
                 _ => None,
             },
             code: record.code.as_str().to_owned(),
-            message: record.message.clone(),
+            message: bounded(&record.message, MAX_MESSAGE_CHARS),
         }
     }
 
@@ -760,9 +784,10 @@ impl Recorded {
     }
 }
 
-/// Replaces the record of a clone's failure at `path` with `record`, atomically, and durably: once
-/// the record is in place, it syncs the record's directory, as [`sync_dir`] does, and fails if the
-/// sync does, though the record is in place then.
+/// Replaces the record of a clone's failure at `path` with `record`, as the sandbox keeps it, as
+/// [`kept`] returns it, atomically, and durably: once the record is in place, it syncs the
+/// record's directory, as [`sync_dir`] does, and fails if the sync does, though the record is in
+/// place then.
 pub(super) fn write_failure(path: &Path, record: &FailureRecord) -> Result<()> {
     write_failure_with(path, record, &sync_dir)
 }
@@ -783,6 +808,35 @@ fn write_failure_with(
         Some(dir) if !dir.as_os_str().is_empty() => sync(dir),
         _ => sync(Path::new(".")),
     }
+}
+
+/// Returns `record` as the sandbox keeps it: with at most [`MAX_MESSAGE_CHARS`] characters of its
+/// message, and [`MAX_REASON_CHARS`] of the reason of its teardown, if it is unresolved, as
+/// [`bounded`] keeps them.
+fn kept(mut record: FailureRecord) -> FailureRecord {
+    record.message = bounded(&record.message, MAX_MESSAGE_CHARS);
+    if let Teardown::Unresolved(reason) = &mut record.teardown {
+        *reason = bounded(reason, MAX_REASON_CHARS);
+    }
+    record
+}
+
+/// Returns `text`, or, if it has more than `max` characters, `max` of them: its first ones and its
+/// last ones, about as many of each, with an ellipsis between them in place of those that it
+/// leaves out, so that the message of an error keeps what it begins with, and the messages of its
+/// sources, which end it.
+fn bounded(text: &str, max: usize) -> String {
+    let count = text.chars().count();
+    if count <= max {
+        return text.to_owned();
+    }
+    let first = (max - 1) / 2;
+    let last = max - 1 - first;
+    text.chars()
+        .take(first)
+        .chain(std::iter::once('…'))
+        .chain(text.chars().skip(count - last))
+        .collect()
 }
 
 /// Reads the record of a clone's failure at `path`, or returns `None` if it does not exist.
@@ -1203,6 +1257,32 @@ mod tests {
         let error = write_failure_with(&path, &terminated, &refused).unwrap_err();
         assert_eq!(error.message(), "the test's sync failed");
         assert_eq!(read_failure(&path).unwrap(), Some(terminated));
+    }
+
+    #[test]
+    fn a_failure_record_keeps_the_ends_of_texts_too_long_for_a_read_to_take() {
+        // A text keeps its first and its last characters, which it counts as characters.
+        assert_eq!(bounded("abcdef", 6), "abcdef");
+        assert_eq!(bounded("abcdefg", 6), "ab…efg");
+        assert_eq!(bounded("ééééééé", 4), "é…éé");
+        let (_directory, private) = private_dir();
+        let path = private.join(CLONE_FAILURE_NAME);
+        // JSON takes six bytes for each of these control characters, the most that a character
+        // takes, so that each text, whole, would take more than a read takes.
+        let filler = "\u{1}".repeat(64 * 1024);
+        let mut written = failure(Teardown::Unresolved(format!("why{filler}so")));
+        written.message = format!("start{filler}end");
+        write_failure(&path, &written).unwrap();
+        assert!(fs::metadata(&path).unwrap().len() <= MAX_FAILURE_BYTES);
+        let read = read_failure(&path).unwrap().unwrap();
+        assert_eq!(read, kept(written));
+        assert_eq!(read.message.chars().count(), MAX_MESSAGE_CHARS);
+        assert!(read.message.starts_with("start\u{1}") && read.message.ends_with("\u{1}end"));
+        let Teardown::Unresolved(reason) = &read.teardown else {
+            panic!("{:?}", read.teardown);
+        };
+        assert_eq!(reason.chars().count(), MAX_REASON_CHARS);
+        assert!(reason.starts_with("why\u{1}") && reason.ends_with("\u{1}so"));
     }
 
     #[test]

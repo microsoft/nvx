@@ -97,7 +97,8 @@ pub enum ReattachedClone<S> {
 ///   [`ReattachedClone::Ended`] otherwise. One that cannot be examined is
 ///   [`ReattachedClone::Indeterminate`].
 ///
-/// The evidence of a status of the guest's prevails, as in the restore sequence. A failure is
+/// The evidence of a status of the guest's prevails over any but the template's, as in the restore
+/// sequence, and as [the attribution of evidence](Evidence#attribution) describes. A failure is
 /// recorded in the sandbox, as the restore sequence records it: before the reattach ends a VMM of
 /// the clone, recovers an interrupted launch, or clears the runtime record of a VM that exited,
 /// with its teardown [pending](Teardown::Pending), and again once the teardown ended. A clone

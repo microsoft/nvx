@@ -2,7 +2,8 @@
 //! through the adapter's framing of the clone's control session, a [`CloneControl`]:
 //! [`Restoring::activate`] activates the clone, [`Activated::start`] starts its sandbox, and
 //! [`Started::commit`] commits its launch, as the documentation of [`Restoring::activate`]
-//! describes.
+//! describes, while [`Activated::fail`] and [`Started::fail`] fail the clone for a step of the
+//! caller's own between them.
 
 use std::fmt;
 use std::io;
@@ -416,6 +417,27 @@ impl<'s, S> Activated<'s, S> {
         drop(session);
         starting.abandon()
     }
+
+    /// Fails the clone, once it is ready, for a step of the caller's own before the start of its
+    /// sandbox, such as one that maps a directory of the host into the clone, with `evidence`,
+    /// which attributes the failure as [the attribution of evidence](Evidence#attribution)
+    /// describes, and `error`, and returns the failure: once the adapter's session has ended, it
+    /// ends the launch as [`abandon`](Self::abandon) does, and records the failure at
+    /// [`Stage::Start`], before its teardown and once its teardown ended, as the restore sequence
+    /// records its own failures, so that a status of the guest's that is evidence, which
+    /// OpenVMM's outcome report gives once the VMM has exited, prevails over `evidence`, unless
+    /// `evidence` is of the template, such as a defect of the generation that the caller
+    /// diagnosed, whose record then holds the status beside it.
+    pub fn fail(self, evidence: Evidence, error: Error) -> CloneFailure {
+        let Self {
+            session,
+            starting,
+            tracker,
+            ..
+        } = self;
+        drop(session);
+        tracker.fail(starting, Stage::Start, Fault::new(evidence, error))
+    }
 }
 
 impl<S> fmt::Debug for Activated<'_, S> {
@@ -432,7 +454,7 @@ impl<S> fmt::Debug for Activated<'_, S> {
 
 /// A clone whose sandbox started, as [`Activated::start`] returns it, whose launch the caller
 /// [commits](Self::commit), once it checked anything else that it requires of a launch, or
-/// [abandons](Self::abandon).
+/// [abandons](Self::abandon), or [fails](Self::fail), if a check of its own failed.
 ///
 /// It holds the adapter's session, and the launch, as [`Activated`] does. Dropping it abandons the
 /// launch, as [`abandon`](Self::abandon) does, ignoring failures; a crash of the caller leaves the
@@ -514,6 +536,20 @@ impl<'s, S> Started<'s, S> {
         } = self;
         drop(session);
         starting.abandon()
+    }
+
+    /// Fails the clone, once its sandbox started, for a check of the caller's own before the
+    /// commit of its launch, with `evidence` and `error`, as [`Activated::fail`] does, at
+    /// [`Stage::Commit`].
+    pub fn fail(self, evidence: Evidence, error: Error) -> CloneFailure {
+        let Self {
+            session,
+            starting,
+            tracker,
+            ..
+        } = self;
+        drop(session);
+        tracker.fail(starting, Stage::Commit, Fault::new(evidence, error))
     }
 }
 
