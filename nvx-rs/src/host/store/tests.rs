@@ -410,6 +410,8 @@ fn the_files_that_a_clone_kept_of_its_launch_go_and_nothing_else() {
     for path in [
         store.clone_scratch_path(),
         store.clone_activation_path(),
+        store.clone_progress_path(),
+        store.clone_failure_path(),
         store.restore_ready_path(),
         store.log_path(),
         store.binding_path(),

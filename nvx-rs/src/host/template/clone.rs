@@ -7,11 +7,19 @@
 #[cfg(all(test, any(target_os = "linux", windows)))]
 mod tests;
 
+mod failure;
 mod launch;
+mod reattach;
 mod record;
+mod records;
 mod restore;
 
+pub use self::failure::{
+    CloneFailure, Evidence, FailureRecord, Outcome, Progress, Stage, Teardown, status_evidence,
+};
 pub use self::launch::Restoring;
+pub use self::reattach::{ReattachedClone, reattach_clone};
+pub use self::records::{CloneRecords, FAILURE_FORMAT};
 pub use self::restore::{
     Activated, CloneControl, MAX_ACTIVATION_SESSIONS, READY_TO_START_TIMEOUT, RESTORE_READY_EVENT,
     RESTORE_TO_READY_TIMEOUT, RestoreDeadlines, Started,
@@ -23,18 +31,21 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
+use self::failure::{Attribute, Fault, host_evidence};
 use super::key::TemplateKey;
 use super::manifest::BlockGeometry;
 use super::plan::MEMORY_BLOCK_SIZE;
 use super::store::{Acquired, Generation, Lease, Store};
 use crate::activation::{ActivationRecord, Journal, OverlayMode, WorkloadView};
 use crate::contract;
-use crate::error::{Error, ErrorKind, Result};
+use crate::error::{Error, ErrorCode, ErrorKind, Result};
 use crate::host::filesystem;
 use crate::host::instance::generate_capability;
 use crate::host::paths;
 use crate::host::platform;
-use crate::host::sandbox::distro::{self, CheckedDistro, DistroBinding, DistroFormat};
+use crate::host::sandbox::distro::{
+    self, CheckedDistro, DistroBinding, DistroFormat, PolicyResult,
+};
 use crate::host::sandbox::plan::bound_image;
 use crate::host::sandbox::scratch::{self, CheckedScratch, ScratchBinding};
 use crate::host::sandbox::{
@@ -43,7 +54,7 @@ use crate::host::sandbox::{
 };
 use crate::host::store::LockedStore;
 use crate::host::store::files::{create_new, remove_if_present};
-use crate::host::store::regular::{identity_of, open_regular, was_removed};
+use crate::host::store::regular::{identity_of, is_refused, open_regular, was_removed};
 use crate::protocol::CAPABILITY_LEN;
 
 /// Bytes in a mebibyte, the unit in which messages give the size of memory blocks.
@@ -286,59 +297,94 @@ impl ClonePlan {
     /// snapshot, [`Store::snapshot_dir`], then checks the clone's files, as the [type](Self)
     /// describes.
     ///
-    /// Fails, and holds nothing, keeping no file that it created, checking in this order:
+    /// Fails with a [`CloneFailure`] at [`Stage::Plan`], and holds nothing, keeping no file that
+    /// it created. The failure's record holds the evidence of the check that failed, as below, no
+    /// transaction, and no VM, [`Teardown::NoVm`], and the plan records it nowhere: the caller
+    /// holds it, and releases the lease. The evidence of a failure of the host's own operations is
+    /// [`Evidence::ResourceExhaustion`] if an I/O error among the error's sources says that the
+    /// host ran out of storage, memory, or descriptors, and [`Evidence::HostFailure`] otherwise.
+    /// The plan checks in this order:
     ///
     /// - with [`ErrorKind::Unsupported`] for a request that no clone takes: a plan of the sandbox
-    ///   profile, with workload settings and its shares; a plan whose image is not the format and
-    ///   identity that the binding names, as for a binding whose identity is not a UUID in its
-    ///   canonical text; an image that is a GPT disk, of which this build restores no clone, since
-    ///   a clone's guest assembles its root only from an EROFS layer; an image or a scratch image
-    ///   whose path is relative, which OpenVMM would resolve against the directory in which it
-    ///   runs, holds a comma or a semicolon, which OpenVMM's block device options would split, or
-    ///   whose name ends in `.vhd`, `.vhdx`, `.vmgs`, or `.iso`, which OpenVMM would not attach as
-    ///   a raw image; and an upper on a scratch image without the image's binding, or one in RAM
-    ///   with a binding;
+    ///   profile, with workload settings and its shares, [`Evidence::InvalidSettings`]; a plan
+    ///   whose image is not the format and identity that the binding names, as for a binding
+    ///   whose identity is not a UUID in its canonical text, and an image that is a GPT disk, of
+    ///   which this build restores no clone, since a clone's guest assembles its root only from an
+    ///   EROFS layer, [`Evidence::InvalidFormat`]; an image or a scratch image whose path is
+    ///   relative, which OpenVMM would resolve against the directory in which it runs, holds a
+    ///   comma or a semicolon, which OpenVMM's block device options would split, or whose name
+    ///   ends in `.vhd`, `.vhdx`, `.vmgs`, or `.iso`, which OpenVMM would not attach as a raw
+    ///   image, and an upper on a scratch image without the image's binding, or one in RAM with a
+    ///   binding, [`Evidence::InvalidSettings`];
     /// - with [`ErrorKind::Other`] for a lease of another store, and a lock that is not the one
-    ///   that acquired the lease, before the launch that it reserves began;
-    /// - with [`ErrorKind::NotFound`] if the store no longer indexes the leased generation, with
-    ///   [`ErrorKind::Io`] if it indexes it with another key than the lease names, and as
-    ///   [`Store::index`], [`Store::read_key`], and [`Store::snapshot_dir`] fail;
+    ///   that acquired the lease, before the launch that it reserves began,
+    ///   [`Evidence::HostFailure`];
+    /// - with [`ErrorKind::NotFound`] if the store no longer indexes the leased generation, and as
+    ///   [`Store::index`] fails, the host's evidence; with [`ErrorKind::Io`] if it indexes it with
+    ///   another key than the lease names, [`Evidence::MalformedGeneration`]; and as
+    ///   [`Store::read_key`] and [`Store::snapshot_dir`] fail, once the store's directory of
+    ///   generations passed their check, whose failure is the host's: the host's evidence for an
+    ///   I/O error, [`Evidence::IncompatibleHost`] for a key of another encoding version than this
+    ///   build reads, with [`ErrorCode::FormatUnsupported`], which a build that reads it may
+    ///   serve, and [`Evidence::MalformedGeneration`] for a generation whose payload, key, or
+    ///   snapshot is missing, is not private to the current user, or is malformed, as a key that
+    ///   [`Store::read_key`] refuses for what it is: a link, a file that is not a regular file, or
+    ///   one that holds more than a key may;
     /// - with [`ErrorKind::Unsupported`] for a request that the template cannot serve: a template
     ///   whose key names other contracts than this build speaks, the boot and control contracts
-    ///   of the runtime that captured it included; a plan with a network for a template without a
-    ///   NIC, without one for a template with a NIC, or with another guest network than the
-    ///   template's NIC, whose address OpenVMM restores from the snapshot; and a memory target
-    ///   that is not whole blocks of [`MEMORY_BLOCK_SIZE`] and of the template's memory blocks,
-    ///   from the template's RAM to its RAM capacity;
+    ///   of the runtime that captured it included, [`Evidence::IncompatibleHost`]; a plan with a
+    ///   network for a template without a NIC, without one for a template with a NIC, or with
+    ///   another guest network than the template's NIC, whose address OpenVMM restores from the
+    ///   snapshot, [`Evidence::InvalidSettings`]; and a memory target that is not whole blocks of
+    ///   [`MEMORY_BLOCK_SIZE`] and of the template's memory blocks, from the template's RAM to its
+    ///   RAM capacity, [`Evidence::InvalidTargets`];
     /// - with [`ErrorKind::Io`] for a template whose command line names the DNS server of its
     ///   guest's resolver in another form than OpenVMM writes: more than once, without a NIC, or
-    ///   other than as one IP address in its canonical spelling;
+    ///   other than as one IP address in its canonical spelling, [`Evidence::MalformedGeneration`];
     /// - with [`ErrorKind::Unsupported`] for settings that no activation record holds, as
     ///   [`Configuration::check`] finds them, such as a hostname that is empty, longer than
     ///   [`MAX_HOSTNAME_BYTES`](crate::activation::MAX_HOSTNAME_BYTES), or holds a NUL, and a
-    ///   workload identity whose UID or GID is 0, and with [`ErrorKind::Other`] if the
-    ///   transaction ID of the clone's restore cannot be drawn;
+    ///   workload identity whose UID or GID is 0, [`Evidence::InvalidActivate`], and with
+    ///   [`ErrorKind::Other`] if the transaction ID of the clone's restore cannot be drawn, the
+    ///   host's evidence;
     /// - with [`ErrorKind::Unavailable`] for a link or a directory under a name that the sandbox's
-    ///   store owns, and with [`ErrorKind::Io`] if the store's files cannot be listed or examined;
-    /// - as [`DistroBinding::check`] and [`CheckedDistro::geometry`] fail, with
-    ///   [`ErrorKind::Unsupported`] for an image of another geometry than the template's
-    ///   placeholder, its length included, with [`ErrorKind::Unavailable`] for an image that is
-    ///   not, at its path, the regular file that the check found, of the current user or an
-    ///   administrator, and that no one else may change, and with [`ErrorKind::Unsupported`] for
-    ///   an image that is a file of the sandbox's store;
+    ///   store owns, and with [`ErrorKind::Io`] if the store's files cannot be listed or examined,
+    ///   the host's evidence;
+    /// - as [`DistroBinding::check`] and [`CheckedDistro::geometry`] fail: with
+    ///   [`ErrorKind::Unavailable`] for a binding that holds a verdict of another revision of the
+    ///   distro policy than the request accepts, [`Evidence::StaleBinding`], and with
+    ///   [`ErrorKind::Unsupported`] for one whose verdict rejects the image,
+    ///   [`Evidence::AuthorizationDenied`]; with [`ErrorKind::Unavailable`] for an image that
+    ///   changed, was replaced, or went since its binding was made, or whose manifest did, and for
+    ///   an image that is not, at its path, the regular file that the check found, of the current
+    ///   user or an administrator, and that no one else may change,
+    ///   [`Evidence::SuppliedIdentity`], and with [`ErrorKind::Io`] if the image cannot be opened
+    ///   at its path otherwise, or identified or examined once open, the host's evidence; with
+    ///   [`ErrorKind::Unsupported`] for an image of another length than the template's
+    ///   placeholder, [`Evidence::SuppliedLength`], or of other block sizes, or of a geometry that
+    ///   OpenVMM refuses, [`Evidence::SuppliedGeometry`]; and with
+    ///   [`ErrorKind::Unsupported`] for an image that is a file of the sandbox's store,
+    ///   [`Evidence::InvalidSettings`];
     /// - for an upper in RAM, with [`ErrorKind::Unsupported`] for a sandbox whose path holds a
-    ///   comma or a semicolon, or whose filesystem presents another geometry than the template's
-    ///   scratch, and with [`ErrorKind::Io`] if the sparse file cannot be created, sized, or
-    ///   checked;
+    ///   comma or a semicolon, [`Evidence::HostFailure`], or whose filesystem presents another
+    ///   geometry than the template's scratch, [`Evidence::IncompatibleHost`], and with
+    ///   [`ErrorKind::Io`] if the sparse file cannot be created, sized, or checked, the host's
+    ///   evidence;
     /// - for an upper on a scratch image, with [`ErrorKind::Io`] if the image's location cannot be
-    ///   compared with the template store's directory, or its names cannot be counted, as
-    ///   [`ScratchBinding::check`] and [`CheckedScratch::geometry`] fail, with
-    ///   [`ErrorKind::Unsupported`] for an image of another geometry than the template's scratch,
-    ///   its length included, with [`ErrorKind::Unavailable`] for an image that is not, at its
-    ///   path, the regular file that the check found, of the current user or an administrator,
-    ///   and that no one else may change, and with [`ErrorKind::Unsupported`] for an image that
-    ///   is a file of the sandbox's store, or that is in the template store's directory, as the
-    ///   files of its snapshots are, or has another name.
+    ///   compared with the template store's directory, or its names cannot be counted, the host's
+    ///   evidence, and as [`ScratchBinding::check`] and [`CheckedScratch::geometry`] fail: with
+    ///   [`ErrorKind::TimedOut`] and [`ErrorCode::ScratchClaimed`] for an image that another
+    ///   launch still claims, [`Evidence::UnusableScratch`]; with [`ErrorKind::Unavailable`] for an
+    ///   image that changed, was replaced, or went since its binding was made, or that is not, at
+    ///   its path, the regular file that the check found, of the current user or an administrator,
+    ///   and that no one else may change, [`Evidence::SuppliedIdentity`], and with
+    ///   [`ErrorKind::Io`] if the image cannot be opened at its path otherwise, or identified or
+    ///   examined once open, the host's evidence; with [`ErrorKind::Unsupported`] for an image of
+    ///   another length than the template's scratch, [`Evidence::SuppliedLength`], or of other
+    ///   block sizes, [`Evidence::SuppliedGeometry`]; and with [`ErrorKind::Unsupported`] for an
+    ///   image that is a file of the sandbox's store, or that is in the template store's
+    ///   directory, as the files of its snapshots are, or has another name, or whose path is not
+    ///   Unicode, [`Evidence::InvalidSettings`].
     ///
     /// [`Configuration::check`]: crate::activation::Configuration::check
     pub fn new(
@@ -346,7 +392,7 @@ impl ClonePlan {
         acquired: &mut Acquired,
         request: &CloneRequest,
         deadline: Instant,
-    ) -> Result<Self> {
+    ) -> Result<Self, CloneFailure> {
         Self::new_with(store, acquired, request, deadline, Access::CHECKED)
     }
 
@@ -357,43 +403,78 @@ impl ClonePlan {
         request: &CloneRequest,
         deadline: Instant,
         access: Access<'_>,
-    ) -> Result<Self> {
+    ) -> Result<Self, CloneFailure> {
+        let lease = acquired.lease.clone();
+        Self::plan(store, acquired, request, deadline, access).map_err(|fault| {
+            let record = FailureRecord::new(
+                &lease,
+                None,
+                (Stage::Plan, Progress::Planned),
+                fault.evidence,
+                None,
+                Teardown::NoVm,
+                &fault.error,
+            );
+            CloneFailure::new(fault.error, record)
+        })
+    }
+
+    /// Plans a clone as [`new`](Self::new) does, reaching its files through `access`, and
+    /// returns the fault of the check that failed.
+    fn plan(
+        store: &Store,
+        acquired: &mut Acquired,
+        request: &CloneRequest,
+        deadline: Instant,
+        access: Access<'_>,
+    ) -> Result<Self, Fault> {
         check_request(request)?;
         let Acquired { lease, locked } = acquired;
-        check_lease(store, lease, locked)?;
+        check_lease(store, lease, locked).attribute(Evidence::HostFailure)?;
         let generation = store
-            .index()?
+            .index()
+            .on_host()?
             .get(lease.generation())
             .cloned()
             .ok_or_else(|| {
-                Error::new(
-                    ErrorKind::NotFound,
-                    format!(
-                        "the template store {} holds no generation {}, which the lease {} names",
-                        store.dir().display(),
-                        lease.generation(),
-                        lease.id()
+                Fault::new(
+                    Evidence::HostFailure,
+                    Error::new(
+                        ErrorKind::NotFound,
+                        format!(
+                            "the template store {} holds no generation {}, which the lease {} \
+                             names",
+                            store.dir().display(),
+                            lease.generation(),
+                            lease.id()
+                        ),
                     ),
                 )
             })?;
         if generation.key() != lease.key() {
-            return Err(Error::io(format!(
-                "the generation {} of the template store {} has the key {}, not the key {} that \
-                 the lease {} names",
-                generation.generation(),
-                store.dir().display(),
-                generation.key(),
-                lease.key(),
-                lease.id()
-            )));
+            return Err(Fault::new(
+                Evidence::MalformedGeneration,
+                Error::io(format!(
+                    "the generation {} of the template store {} has the key {}, not the key {} \
+                     that the lease {} names",
+                    generation.generation(),
+                    store.dir().display(),
+                    generation.key(),
+                    lease.key(),
+                    lease.id()
+                )),
+            ));
         }
-        let key = store.read_key(&generation)?;
-        let snapshot = store.snapshot_dir(&generation)?;
+        // A store whose directory of generations is not private fails every generation: the
+        // host's, not the generation's.
+        store.check_generations_dir().on_host()?;
+        let key = store.read_key(&generation).map_err(generation_fault)?;
+        let snapshot = store.snapshot_dir(&generation).map_err(generation_fault)?;
         check_template(request, &key, &generation)?;
         let activation = record::build(request, lease, &key)?;
-        let owned = StoreFiles::of(locked)?;
+        let owned = StoreFiles::of(locked).on_host()?;
         let image = check_image(request, &key, &owned, access)?;
-        let capability = generate_capability()?;
+        let capability = generate_capability().on_host()?;
         let upper = match (request.adapter.upper().scratch_path(), &request.scratch) {
             (Some(path), Some(binding)) => CloneUpper::Scratch(check_scratch(
                 path,
@@ -530,39 +611,78 @@ fn devices_of(request: &CloneRequest, upper: &CloneUpper) -> SandboxPlan {
 
 /// Refuses a request that no clone takes, as [`ClonePlan::new`] describes, without reading or
 /// opening anything.
-fn check_request(request: &CloneRequest) -> Result<()> {
+fn check_request(request: &CloneRequest) -> Result<(), Fault> {
     let adapter = &request.adapter;
     if adapter.settings().is_some() {
-        return Err(Error::unsupported(
-            "a clone restores an adapter's plan, not a plan of the sandbox profile, whose \
-             workload settings no template holds",
+        return Err(Fault::new(
+            Evidence::InvalidSettings,
+            Error::unsupported(
+                "a clone restores an adapter's plan, not a plan of the sandbox profile, whose \
+                 workload settings no template holds",
+            ),
         ));
     }
     let distro = adapter.distro();
     let binding = &request.binding;
-    if bound_image(binding)? != distro.image() {
-        return Err(Error::unsupported(format!(
-            "the image {} is not the {} layer with identity {} that its distro binding names",
-            distro.path().display(),
-            binding.format(),
-            binding.identity()
-        )));
+    if bound_image(binding).attribute(Evidence::InvalidFormat)? != distro.image() {
+        return Err(Fault::new(
+            Evidence::InvalidFormat,
+            Error::unsupported(format!(
+                "the image {} is not the {} layer with identity {} that its distro binding names",
+                distro.path().display(),
+                binding.format(),
+                binding.identity()
+            )),
+        ));
     }
     if matches!(binding.format(), DistroFormat::Gpt) {
-        return Err(record::gpt_refused());
+        return Err(Fault::new(Evidence::InvalidFormat, record::gpt_refused()));
     }
-    check_disk_path(distro.path(), "image")?;
+    check_disk_path(distro.path(), "image").attribute(Evidence::InvalidSettings)?;
     match (adapter.upper().scratch_path(), &request.scratch) {
-        (Some(path), Some(_)) => check_disk_path(path, "scratch image"),
+        (Some(path), Some(_)) => {
+            check_disk_path(path, "scratch image").attribute(Evidence::InvalidSettings)
+        }
         (None, None) => Ok(()),
-        (Some(path), None) => Err(Error::unsupported(format!(
-            "the upper of a clone on the scratch image {} needs the image's scratch binding",
-            path.display()
-        ))),
-        (None, Some(_)) => Err(Error::unsupported(
-            "the upper of a clone in RAM takes no scratch binding",
+        (Some(path), None) => Err(Fault::new(
+            Evidence::InvalidSettings,
+            Error::unsupported(format!(
+                "the upper of a clone on the scratch image {} needs the image's scratch binding",
+                path.display()
+            )),
+        )),
+        (None, Some(_)) => Err(Fault::new(
+            Evidence::InvalidSettings,
+            Error::unsupported("the upper of a clone in RAM takes no scratch binding"),
         )),
     }
+}
+
+/// Returns the fault of `error`, with which the template store's read of the key or of the
+/// snapshot of the leased generation failed, once the store's directory of generations passed its
+/// check: the host's, which cannot restore the template, for a key of another encoding version
+/// than this build reads, as [`TemplateKey::from_bytes`] refuses it with
+/// [`ErrorCode::FormatUnsupported`], since a build that reads it may serve the generation; the
+/// generation's, which is malformed, for a payload, a key, or a snapshot that is missing, that is
+/// not private to the current user, or that is not one that the store writes, such as a key that
+/// the read refuses for what it is, as [`is_refused`] tells: a link, a file that is not a regular
+/// file, or one that holds more than a key may; and the host's for any other I/O error among the
+/// error's sources.
+fn generation_fault(error: Error) -> Fault {
+    if error.code() == ErrorCode::FormatUnsupported {
+        return Fault::new(Evidence::IncompatibleHost, error);
+    }
+    let mut source = std::error::Error::source(&error);
+    while let Some(cause) = source {
+        if let Some(io) = cause.downcast_ref::<io::Error>()
+            && io.kind() != io::ErrorKind::NotFound
+            && !is_refused(io)
+        {
+            return Fault::new(host_evidence(&error), error);
+        }
+        source = cause.source();
+    }
+    Fault::new(Evidence::MalformedGeneration, error)
 }
 
 /// Refuses the path of the file of a clone's block device, which messages call `what`, that
@@ -612,7 +732,7 @@ fn check_template(
     request: &CloneRequest,
     key: &TemplateKey,
     generation: &Generation,
-) -> Result<()> {
+) -> Result<(), Fault> {
     let name = generation.generation();
     // The key's contracts are those through which its clones are restored; the runtime's are
     // those through which this build boots and drives the guest that the template holds.
@@ -622,28 +742,37 @@ fn check_template(
         || runtime.control_contract != contract::CONTROL_CONTRACT_REVISION
         || runtime.control_session != contract::CONTROL_SESSION_PROTOCOL_VERSION
     {
-        return Err(Error::unsupported(format!(
-            "the template's generation {name} speaks other contracts than this build, which \
-             restores none of its clones"
-        )));
+        return Err(Fault::new(
+            Evidence::IncompatibleHost,
+            Error::unsupported(format!(
+                "the template's generation {name} speaks other contracts than this build, which \
+                 restores none of its clones"
+            )),
+        ));
     }
     // A network that OpenVMM attaches no device for is no NIC, as a capture class's.
     let attached = match request.adapter.network() {
         None => false,
-        Some(network) => !network.openvmm_arguments()?.is_empty(),
+        Some(network) => !network
+            .openvmm_arguments()
+            .attribute(Evidence::InvalidSettings)?
+            .is_empty(),
     };
     if attached != key.has_network() {
-        return Err(Error::unsupported(if attached {
-            format!(
-                "the adapter's plan of a clone attaches a network, but the template's generation \
-                 {name} has no NIC"
-            )
-        } else {
-            format!(
-                "the template's generation {name} has a NIC, which its clones restore with the \
-                 network of the adapter's plan, but the plan has none"
-            )
-        }));
+        return Err(Fault::new(
+            Evidence::InvalidSettings,
+            Error::unsupported(if attached {
+                format!(
+                    "the adapter's plan of a clone attaches a network, but the template's \
+                     generation {name} has no NIC"
+                )
+            } else {
+                format!(
+                    "the template's generation {name} has a NIC, which its clones restore with \
+                     the network of the adapter's plan, but the plan has none"
+                )
+            }),
+        ));
     }
     // OpenVMM restores the guest's address on the NIC from the snapshot, and a clone's launch
     // drops the plan's, so the plan must name the template's.
@@ -651,11 +780,14 @@ fn check_template(
         && let Some(template) = key.guest_network()
         && network.guest_network() != template
     {
-        return Err(Error::unsupported(format!(
-            "the adapter's plan of a clone gives its guest the network {}, but the template's \
-             generation {name} restores its NIC on {template}, from its snapshot",
-            network.guest_network()
-        )));
+        return Err(Fault::new(
+            Evidence::InvalidSettings,
+            Error::unsupported(format!(
+                "the adapter's plan of a clone gives its guest the network {}, but the template's \
+                 generation {name} restores its NIC on {template}, from its snapshot",
+                network.guest_network()
+            )),
+        ));
     }
     let memory = request.memory;
     let block = key.memory_block_size();
@@ -664,15 +796,18 @@ fn check_template(
         || !memory.is_multiple_of(MEMORY_BLOCK_SIZE)
         || !memory.is_multiple_of(block)
     {
-        return Err(Error::unsupported(format!(
-            "a clone of the template's generation {name} cannot restore with {memory} bytes of \
-             RAM: its memory target must be whole blocks of {} MiB, and of the template's memory \
-             blocks of {block} bytes, from the template's {} bytes of RAM to its capacity of {} \
-             bytes",
-            MEMORY_BLOCK_SIZE / MIB,
-            key.memory(),
-            key.memory_capacity()
-        )));
+        return Err(Fault::new(
+            Evidence::InvalidTargets,
+            Error::unsupported(format!(
+                "a clone of the template's generation {name} cannot restore with {memory} bytes \
+                 of RAM: its memory target must be whole blocks of {} MiB, and of the template's \
+                 memory blocks of {block} bytes, from the template's {} bytes of RAM to its \
+                 capacity of {} bytes",
+                MEMORY_BLOCK_SIZE / MIB,
+                key.memory(),
+                key.memory_capacity()
+            )),
+        ));
     }
     Ok(())
 }
@@ -686,29 +821,54 @@ fn check_image(
     key: &TemplateKey,
     owned: &StoreFiles,
     access: Access<'_>,
-) -> Result<CheckedDistro> {
+) -> Result<CheckedDistro, Fault> {
     let path = request.adapter.distro().path();
     let shown = path.display();
-    let refused = |problem: String| Error::unavailable(format!("the image {shown} {problem}"));
-    let text = path
-        .to_str()
-        .ok_or_else(|| refused("has a path that is not valid Unicode".to_owned()))?;
+    let text = path.to_str().ok_or_else(|| {
+        Fault::new(
+            Evidence::InvalidSettings,
+            Error::unavailable(format!(
+                "the image {shown} has a path that is not valid Unicode"
+            )),
+        )
+    })?;
     let binding = &request.binding;
     let layer = match binding.format() {
         DistroFormat::Erofs => SandboxLayer::new(LayerRole::Distro, text, binding.identity()),
         DistroFormat::Gpt => SandboxLayer::gpt(LayerRole::Distro, text, binding.identity()),
     };
-    let checked = binding.check_with(&layer, request.policy_revision, access.distro)?;
+    let policy = binding.policy();
+    let checked = binding
+        .check_with(&layer, request.policy_revision, access.distro)
+        .map_err(|error| {
+            // The check refuses a stale binding, then one whose verdict rejects the image, before
+            // it opens anything.
+            let evidence = if binding.version() != distro::BINDING_VERSION
+                || policy.revision != request.policy_revision
+            {
+                Evidence::StaleBinding
+            } else if policy.result != PolicyResult::Accepted {
+                Evidence::AuthorizationDenied
+            } else {
+                binding_evidence(&error)
+            };
+            Fault::new(evidence, error)
+        })?;
+    let geometry = checked.geometry().map_err(supplied_geometry_fault)?;
     check_geometry(
-        checked.geometry()?,
+        geometry,
         key.distro(),
         &format!("the image {shown}"),
         "placeholder",
+        Mismatch::SUPPLIED,
     )?;
-    let identity = identity_of(checked.file())
-        .map_err(|error| refused(format!("cannot be identified: {error}")))?;
-    check_at_path(path, identity, refused)?;
-    owned.check(identity, "image", path)?;
+    let identity = identity_of(checked.file()).map_err(|error| {
+        Fault::host(Error::io(format!("the image {shown} cannot be identified")).with_source(error))
+    })?;
+    check_at_path(path, identity, &format!("the image {shown}"))?;
+    owned
+        .check(identity, "image", path)
+        .attribute(Evidence::InvalidSettings)?;
     Ok(checked)
 }
 
@@ -725,21 +885,38 @@ fn check_scratch(
     (owned, store): (&StoreFiles, &Store),
     deadline: Instant,
     access: Access<'_>,
-) -> Result<CheckedScratch> {
+) -> Result<CheckedScratch, Fault> {
     let shown = path.display();
-    let checked = binding.check_with(path, deadline, access.scratch)?;
+    let checked = binding
+        .check_with(path, deadline, access.scratch)
+        .map_err(|error| {
+            let evidence = if binding.version() != scratch::SCRATCH_BINDING_VERSION {
+                Evidence::StaleBinding
+            } else if error.code() == ErrorCode::ScratchClaimed {
+                // Another launch holds the image, which is not fresh for this clone.
+                Evidence::UnusableScratch
+            } else {
+                binding_evidence(&error)
+            };
+            Fault::new(evidence, error)
+        })?;
+    let geometry = checked.geometry().map_err(supplied_geometry_fault)?;
     check_geometry(
-        checked.geometry()?,
+        geometry,
         key.scratch(),
         &format!("the scratch image {shown}"),
         "scratch",
+        Mismatch::SUPPLIED,
     )?;
-    let refused =
-        |problem: String| Error::unavailable(format!("the scratch image {shown} {problem}"));
-    let identity = identity_of(checked.file())
-        .map_err(|error| refused(format!("cannot be identified: {error}")))?;
-    check_at_path(path, identity, refused)?;
-    owned.check(identity, "scratch image", path)?;
+    let identity = identity_of(checked.file()).map_err(|error| {
+        Fault::host(
+            Error::io(format!("the scratch image {shown} cannot be identified")).with_source(error),
+        )
+    })?;
+    check_at_path(path, identity, &format!("the scratch image {shown}"))?;
+    owned
+        .check(identity, "scratch image", path)
+        .attribute(Evidence::InvalidSettings)?;
     check_outside_store(&checked, store, path)?;
     check_single_name(&checked, path)?;
     Ok(checked)
@@ -754,26 +931,33 @@ fn check_scratch(
 /// file into the store's directory, so one outside it stays outside it. The location resolves the
 /// aliases that the file system makes, links and junctions on the way and directories held open,
 /// but not a mount or a network share that exposes the store's directories elsewhere, which
-/// [`ClonePlan`] leaves to the system's administration.
-fn check_outside_store(checked: &CheckedScratch, store: &Store, path: &Path) -> Result<()> {
+/// [`ClonePlan`] leaves to the system's administration. The request supplied the image, so its
+/// refusal is invalid settings, while the failure to locate it is the host's.
+fn check_outside_store(checked: &CheckedScratch, store: &Store, path: &Path) -> Result<(), Fault> {
     let failed = |error: io::Error| {
-        Error::io(format!(
-            "cannot compare the location of the scratch image {} with the template store in {}",
-            path.display(),
-            store.dir().display()
-        ))
-        .with_source(error)
+        Fault::host(
+            Error::io(format!(
+                "cannot compare the location of the scratch image {} with the template store in \
+                 {}",
+                path.display(),
+                store.dir().display()
+            ))
+            .with_source(error),
+        )
     };
     let location = location_of(checked.file()).map_err(failed)?;
     if is_within(&location, store.dir()).map_err(failed)? {
-        return Err(Error::unsupported(format!(
-            "the scratch image {} is {}, in the directory of the template store {}, where its \
-             captures write the snapshots that every clone of a generation restores in place: a \
-             clone's scratch image must be outside it",
-            path.display(),
-            location.display(),
-            store.dir().display()
-        )));
+        return Err(Fault::new(
+            Evidence::InvalidSettings,
+            Error::unsupported(format!(
+                "the scratch image {} is {}, in the directory of the template store {}, where its \
+                 captures write the snapshots that every clone of a generation restores in \
+                 place: a clone's scratch image must be outside it",
+                path.display(),
+                location.display(),
+                store.dir().display()
+            )),
+        ));
     }
     Ok(())
 }
@@ -825,24 +1009,52 @@ fn location_of(file: &File) -> io::Result<PathBuf> {
 /// Refuses the clone's scratch image at `path`, which `checked` holds open, unless it has a single
 /// name: another name, a hard link, could make it a file of a snapshot that the clone's guest then
 /// writes, of one of the store's generations or captures, or of another store, which the image's
-/// location does not show.
-fn check_single_name(checked: &CheckedScratch, path: &Path) -> Result<()> {
+/// location does not show. The request supplied the image, so its refusal is invalid settings,
+/// while the failure to count its names is the host's.
+fn check_single_name(checked: &CheckedScratch, path: &Path) -> Result<(), Fault> {
     let links = platform::link_count(checked.file()).map_err(|error| {
-        Error::io(format!(
-            "cannot count the names of the scratch image {}",
-            path.display()
-        ))
-        .with_source(error)
+        Fault::host(
+            Error::io(format!(
+                "cannot count the names of the scratch image {}",
+                path.display()
+            ))
+            .with_source(error),
+        )
     })?;
     if links > 1 {
-        return Err(Error::unsupported(format!(
-            "the scratch image {} has {links} names, but a clone's scratch image must have a \
-             single name: another, a hard link, could make it a file of a snapshot, which every \
-             clone of its generation restores in place",
-            path.display()
-        )));
+        return Err(Fault::new(
+            Evidence::InvalidSettings,
+            Error::unsupported(format!(
+                "the scratch image {} has {links} names, but a clone's scratch image must have a \
+                 single name: another, a hard link, could make it a file of a snapshot, which \
+                 every clone of its generation restores in place",
+                path.display()
+            )),
+        ));
     }
     Ok(())
+}
+
+/// Returns the evidence of `error`, with which the check of the binding of a file that the request
+/// supplied failed, past the binding's own version and verdict: a file that changed, was replaced,
+/// or went since its binding was made, a supplied file of the wrong identity; a path that the
+/// check refuses, invalid settings; and any other failure, the host's.
+fn binding_evidence(error: &Error) -> Evidence {
+    match error.kind() {
+        ErrorKind::Unavailable => Evidence::SuppliedIdentity,
+        ErrorKind::Unsupported => Evidence::InvalidSettings,
+        _ => host_evidence(error),
+    }
+}
+
+/// Returns the fault of `error`, with which the geometry of a file that the request supplied
+/// cannot be read: a geometry that OpenVMM refuses, a supplied file of the wrong geometry, and any
+/// other failure, the host's.
+fn supplied_geometry_fault(error: Error) -> Fault {
+    match error.kind() {
+        ErrorKind::Unsupported => Fault::new(Evidence::SuppliedGeometry, error),
+        _ => Fault::host(error),
+    }
 }
 
 /// The regular files that the store of a sandbox owns, with their identities, which no image or
@@ -928,34 +1140,53 @@ impl StoreFiles {
 /// the capture of a template checks its own, as [`ClonePlan`] describes. Returns its path, once
 /// the file is closed. It removes the file if any step fails, its creation included, which can
 /// fail once it made the file, as a file that cannot be made sparse does.
-fn create_scratch(locked: &LockedStore, key: &TemplateKey, access: Access<'_>) -> Result<PathBuf> {
+fn create_scratch(
+    locked: &LockedStore,
+    key: &TemplateKey,
+    access: Access<'_>,
+) -> Result<PathBuf, Fault> {
     let path = locked.clone_scratch_path();
     let shown = path.display();
-    reject_disk_path(&path, &shown.to_string())?;
+    reject_disk_path(&path, &shown.to_string()).attribute(Evidence::HostFailure)?;
     let failed = |error: io::Error| {
-        Error::io(format!("cannot create the {SPARSE_WHAT} {shown}")).with_source(error)
+        Fault::host(
+            Error::io(format!("cannot create the {SPARSE_WHAT} {shown}")).with_source(error),
+        )
     };
     let created = (|| {
         let file = (access.create)(&path).map_err(&failed)?;
         let scratch = key.scratch();
         file.set_len(scratch.length).map_err(&failed)?;
+        let geometry =
+            block_geometry(&file, &path, SPARSE_WHAT).map_err(|error| match error.kind() {
+                // The sandbox's filesystem presents a geometry that OpenVMM refuses.
+                ErrorKind::Unsupported => Fault::new(Evidence::IncompatibleHost, error),
+                _ => Fault::host(error),
+            })?;
         check_geometry(
-            block_geometry(&file, &path, SPARSE_WHAT)?,
+            geometry,
             scratch,
             &format!("the {SPARSE_WHAT} {shown}, in the sandbox's filesystem,"),
             "scratch",
+            Mismatch::HOST,
         )?;
         let identity = identity_of(&file).map_err(&failed)?;
         drop(file);
-        check_at_path(&path, identity, |problem| {
-            Error::io(format!("the {SPARSE_WHAT} {shown} {problem}"))
+        // The host made the file, so what its path shows of it is the host's.
+        check_at_path(&path, identity, &format!("the {SPARSE_WHAT} {shown}")).map_err(|fault| {
+            let (_, message, source) = fault.error.into_parts();
+            let error = Error::io(message);
+            Fault::host(match source {
+                Some(source) => error.with_source(source),
+                None => error,
+            })
         })
     })();
     match created {
         Ok(()) => Ok(path),
-        Err(error) => {
+        Err(fault) => {
             let _ = remove_if_present(&path);
-            Err(error)
+            Err(fault)
         }
     }
 }
@@ -973,54 +1204,119 @@ fn create_sparse(path: &Path) -> io::Result<File> {
     Ok(file)
 }
 
+/// The evidence of a file of a clone's block device whose geometry is not the one that the
+/// template's device presented.
+#[derive(Clone, Copy)]
+struct Mismatch {
+    /// The evidence of another length.
+    length: Evidence,
+    /// The evidence of other block sizes.
+    blocks: Evidence,
+}
+
+impl Mismatch {
+    /// A file that the request supplied.
+    const SUPPLIED: Self = Self {
+        length: Evidence::SuppliedLength,
+        blocks: Evidence::SuppliedGeometry,
+    };
+
+    /// The sparse file of an upper in RAM, which the plan sizes as the template's scratch, and
+    /// whose block sizes the sandbox's filesystem presents: the host's.
+    const HOST: Self = Self {
+        length: Evidence::IncompatibleHost,
+        blocks: Evidence::IncompatibleHost,
+    };
+}
+
 /// Refuses `found`, the geometry of the file of a clone's block device, which messages call
-/// `what`, unless it is `expected`, the geometry that the template's `device` presented.
+/// `what`, unless it is `expected`, the geometry that the template's `device` presented, with the
+/// evidence that `mismatch` gives.
 fn check_geometry(
     found: BlockGeometry,
     expected: BlockGeometry,
     what: &str,
     device: &str,
-) -> Result<()> {
+    mismatch: Mismatch,
+) -> Result<(), Fault> {
     if found.length != expected.length {
-        return Err(Error::unsupported(format!(
-            "{what} is {} bytes long, not the {} bytes of the template's {device}",
-            found.length, expected.length
-        )));
+        return Err(Fault::new(
+            mismatch.length,
+            Error::unsupported(format!(
+                "{what} is {} bytes long, not the {} bytes of the template's {device}",
+                found.length, expected.length
+            )),
+        ));
     }
     if found != expected {
-        return Err(Error::unsupported(format!(
-            "{what} presents logical blocks of {} bytes and physical blocks of {} bytes, but the \
-             template's {device} presented {} and {} bytes",
-            found.logical_block_size,
-            found.physical_block_size,
-            expected.logical_block_size,
-            expected.physical_block_size
-        )));
+        return Err(Fault::new(
+            mismatch.blocks,
+            Error::unsupported(format!(
+                "{what} presents logical blocks of {} bytes and physical blocks of {} bytes, but \
+                 the template's {device} presented {} and {} bytes",
+                found.logical_block_size,
+                found.physical_block_size,
+                expected.logical_block_size,
+                expected.physical_block_size
+            )),
+        ));
     }
     Ok(())
 }
 
-/// Checks the file at `path` as OpenVMM will open it, by its path: a regular file, not a link,
-/// nor on Windows any other reparse point, whose identity is `expected`, the identity of the file
-/// that a check found, and that no one but the current user, or an administrator, may change.
-/// Fails with the error that `refused` makes of the problem that it found.
-fn check_at_path(
-    path: &Path,
-    expected: (u64, u128),
-    refused: impl Fn(String) -> Error,
-) -> Result<()> {
-    let file = open_regular(path).map_err(|error| refused(format!("cannot be used: {error}")))?;
-    let identity =
-        identity_of(&file).map_err(|error| refused(format!("cannot be identified: {error}")))?;
+/// Checks the file at `path`, which messages call `what`, as OpenVMM will open it, by its path: a
+/// regular file, not a link, nor on Windows any other reparse point, whose identity is
+/// `expected`, the identity of the file that a check found, and that no one but the current user,
+/// or an administrator, may change.
+///
+/// Fails with [`ErrorKind::Unavailable`] and [`Evidence::SuppliedIdentity`] for a path that no
+/// longer names that file: one whose file went, a component of which is no longer a directory,
+/// that the current user may no longer open, or that names a link, a file that is not regular, or
+/// another file, and for a file that others may change; and with [`ErrorKind::Io`] and the host's
+/// evidence if the file cannot be opened at its path otherwise, as when the host runs out of
+/// descriptors, or if the file that it opened cannot be identified or examined.
+fn check_at_path(path: &Path, expected: (u64, u128), what: &str) -> Result<(), Fault> {
+    let refused = |problem: String| {
+        Fault::new(
+            Evidence::SuppliedIdentity,
+            Error::unavailable(format!("{what} {problem}")),
+        )
+    };
+    let failed = |action: &str, error: io::Error| {
+        Fault::host(Error::io(format!("{what} cannot be {action}")).with_source(error))
+    };
+    let file = open_regular(path).map_err(|error| {
+        if path_refused(&error) {
+            refused(format!("cannot be used: {error}"))
+        } else {
+            failed("opened", error)
+        }
+    })?;
+    let identity = identity_of(&file).map_err(|error| failed("identified", error))?;
     if identity != expected {
         return Err(refused(
             "changed while it was checked: its path names another file".to_owned(),
         ));
     }
-    if let Some(problem) = platform::foreign_writer_problem(&file)
-        .map_err(|error| refused(format!("cannot be checked: {error}")))?
+    if let Some(problem) =
+        platform::foreign_writer_problem(&file).map_err(|error| failed("checked", error))?
     {
         return Err(refused(problem));
     }
     Ok(())
+}
+
+/// Returns whether `error`, with which [`open_regular`] failed to open a file that a request
+/// supplied at its path, says that the path no longer names the file that a check found: the
+/// file went, a component of the path is no longer a directory, the current user may no longer
+/// open it, or the open refused a link or a file that is not regular, a failure that the system
+/// does not report. Any other failure is the host's.
+fn path_refused(error: &io::Error) -> bool {
+    error.raw_os_error().is_none()
+        || matches!(
+            error.kind(),
+            io::ErrorKind::NotFound
+                | io::ErrorKind::NotADirectory
+                | io::ErrorKind::PermissionDenied
+        )
 }

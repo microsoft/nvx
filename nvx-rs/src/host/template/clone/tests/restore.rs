@@ -13,14 +13,17 @@ use std::collections::VecDeque;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use super::launch::{OPENVMM, TIMEOUT, VmmDir, complete_snapshot, fake_vmm};
+use super::launch::{
+    OPENVMM, TIMEOUT, VmmDir, assert_recorded, complete_snapshot, failed, fake_vmm, runtime_of,
+};
 use super::*;
 use crate::activation::{ReadyActivation, RestoreSection, TransactionId};
 use crate::host::platform::Transport;
-use crate::host::process::Process;
+use crate::host::process::{BootId, Process};
 use crate::host::store::{CLONE_ACTIVATION_NAME, Recovery};
-use crate::host::supervisor::StopOutcome;
+use crate::host::supervisor::{Starting, StopOutcome};
 use crate::host::template::clone::launch::Hooks;
+use crate::host::template::clone::records::{End, read_failure};
 
 /// How long a VMM whose plan delays its event waits before it sends it.
 const DELAY: Duration = Duration::from_millis(300);
@@ -289,6 +292,17 @@ fn launch<'a>(
     image: &(PathBuf, DistroBinding),
     vmm: &mut VmmDir,
 ) -> (Restoring<'a>, Launched) {
+    launch_ending(fixture, acquired, image, vmm, Hooks::LAUNCH.end)
+}
+
+/// Launches the clone as [`launch`] does, whose failures end the launch with `end`.
+fn launch_ending<'a>(
+    fixture: &Fixture,
+    acquired: &'a mut Acquired,
+    image: &(PathBuf, DistroBinding),
+    vmm: &mut VmmDir,
+    end: End,
+) -> (Restoring<'a>, Launched) {
     let request = tmpfs_request(&image.0, &image.1);
     let plan = fixture.plan(acquired, &request, NO_CONTENT).unwrap();
     let runtime = plan.key().runtime().clone();
@@ -297,6 +311,7 @@ fn launch<'a>(
     let command = fake_vmm(&dir, &made);
     let hooks = Hooks {
         command: &command,
+        end,
         ..Hooks::LAUNCH
     };
     let before = Instant::now();
@@ -342,6 +357,25 @@ fn assert_launch_ended(fixture: &Fixture, acquired: &mut Acquired, vmm: &VmmDir)
     assert_eq!(
         fixture.store.release(locked).unwrap(),
         Some(acquired.lease.clone())
+    );
+}
+
+/// Checks that `failure`, of the clone of `acquired`, failed at `stage`, once the clone got as far
+/// as `progress`, with `evidence`, and the teardown `teardown`, as [`assert_recorded`] does.
+fn assert_failed(
+    failure: &CloneFailure,
+    acquired: &Acquired,
+    at: (Stage, Progress),
+    evidence: Evidence,
+    teardown: Teardown,
+) {
+    assert_recorded(
+        failure,
+        &acquired.lease,
+        &acquired.locked,
+        at,
+        evidence,
+        teardown,
     );
 }
 
@@ -417,6 +451,26 @@ fn a_clone_is_activated_once_its_restore_is_ready_then_started_and_committed() {
     );
     let (running, session) = started.commit().unwrap();
     assert_eq!(session.number, 1);
+    // The progress log records each step, the spawn and the acknowledgment with the steps that
+    // follow them at once, after a first line that names the launch and the current boot of the
+    // host, and the sandbox's records show the committed clone.
+    let log = fs::read_to_string(acquired.locked.clone_progress_path()).unwrap();
+    assert_eq!(
+        log,
+        format!(
+            "nvx-clone-progress 1 {} {}\nspawned\nevent\nacknowledged\nactivating\nready\n\
+             starting\nstarted\ncommitted\n",
+            acquired.lease.launch(),
+            BootId::current().unwrap()
+        )
+    );
+    let records = CloneRecords::read(&acquired.locked).unwrap().unwrap();
+    assert_eq!(
+        (records.progress, records.failure, records.journal),
+        (Progress::Committed, None, None)
+    );
+    assert_eq!(records.lease, acquired.lease);
+    assert_eq!(records.runtime, acquired.locked.runtime().unwrap());
     // The runtime record names the VM, whose lease lasts as long as it runs.
     let locked = &mut acquired.locked;
     let recorded = locked.runtime().unwrap().unwrap();
@@ -471,6 +525,9 @@ fn a_ready_that_does_not_report_the_record_s_activation_ends_the_launch() {
         );
         // One session, which the host ended, and no start.
         assert_eq!(control.calls.len(), 2, "{name}: {:?}", control.calls);
+        let ready = (Stage::Activation, Progress::Activating);
+        let terminated = Teardown::Terminated;
+        assert_failed(&error, &acquired, ready, Evidence::Protocol, terminated);
         assert_launch_ended(&fixture, &mut acquired, &vmm);
     }
 }
@@ -542,6 +599,13 @@ fn a_retry_never_sends_another_record_nor_takes_another_activation() {
     assert!(error.message().contains("no longer holds"), "{error}");
     assert_eq!(control.sessions, 1);
     assert_eq!(control.records(), [&original.encode()[..]]);
+    // The host's own record changed: the record of the failure names the launch's transaction.
+    let record = error.record();
+    assert_eq!(
+        (record.evidence, record.outcome, record.stage),
+        (Evidence::HostFailure, Outcome::Host, Stage::Activation)
+    );
+    assert_eq!(record.transaction, Some(restore.transaction));
     assert_launch_ended(&fixture, &mut acquired, &vmm);
 
     // The Ready of the retry reports another transaction.
@@ -558,6 +622,14 @@ fn a_retry_never_sends_another_record_nor_takes_another_activation() {
         .unwrap_err();
     assert_eq!(error.kind(), ErrorKind::Protocol, "{error}");
     assert_eq!(control.sessions, 2);
+    let ready = (Stage::Activation, Progress::Activating);
+    assert_failed(
+        &error,
+        &acquired,
+        ready,
+        Evidence::Protocol,
+        Teardown::Terminated,
+    );
     assert_launch_ended(&fixture, &mut acquired, &vmm);
 }
 
@@ -576,6 +648,14 @@ fn only_lost_sessions_are_replaced_and_only_so_many_times() {
     assert_eq!(error.kind(), ErrorKind::Protocol, "{error}");
     assert_eq!(error.message(), "cannot activate it");
     assert_eq!(control.sessions, 1);
+    let ready = (Stage::Activation, Progress::Activating);
+    assert_failed(
+        &error,
+        &acquired,
+        ready,
+        Evidence::Protocol,
+        Teardown::Terminated,
+    );
     assert_launch_ended(&fixture, &mut acquired, &vmm);
 
     // A session lost again and again ends the sequence once the last of its sessions is lost.
@@ -591,6 +671,13 @@ fn only_lost_sessions_are_replaced_and_only_so_many_times() {
     assert!(error.message().contains("was lost"), "{error}");
     control.assert_activates_first();
     assert_eq!(control.sessions, MAX_ACTIVATION_SESSIONS);
+    assert_failed(
+        &error,
+        &acquired,
+        ready,
+        Evidence::Reset,
+        Teardown::Terminated,
+    );
     assert_launch_ended(&fixture, &mut acquired, &vmm);
 }
 
@@ -611,6 +698,15 @@ fn a_clone_that_took_the_reset_of_a_lost_session_before_its_ready_ends_the_retri
     assert_eq!(error.kind(), ErrorKind::Exited, "{error}");
     assert_eq!(control.sessions, 1);
     drop(control);
+    // The clone's status was lost with its VMM, which ended without a report.
+    let ready = (Stage::Activation, Progress::Activating);
+    assert_failed(
+        &error,
+        &acquired,
+        ready,
+        Evidence::LostStatus,
+        Teardown::Exited,
+    );
     assert_launch_ended(&fixture, &mut acquired, &vmm);
 }
 
@@ -631,6 +727,14 @@ fn the_restore_to_ready_deadline_runs_from_the_launch_through_every_step() {
     assert_eq!(error.kind(), ErrorKind::TimedOut, "{error}");
     assert!(launched.before.elapsed() >= SHORT);
     assert!(control.calls.is_empty());
+    let restore = (Stage::Restore, Progress::Spawned);
+    assert_failed(
+        &error,
+        &acquired,
+        restore,
+        Evidence::Timeout,
+        Teardown::Terminated,
+    );
     assert_launch_ended(&fixture, &mut acquired, &vmm);
 
     // A clone that never answers its Activate, after a late event: the attachment and the
@@ -650,6 +754,14 @@ fn the_restore_to_ready_deadline_runs_from_the_launch_through_every_step() {
         launched.assert_deadline(deadline, deadlines.ready);
     }
     assert!(launched.before.elapsed() >= deadlines.ready);
+    let ready = (Stage::Activation, Progress::Activating);
+    assert_failed(
+        &error,
+        &acquired,
+        ready,
+        Evidence::Timeout,
+        Teardown::Terminated,
+    );
     assert_launch_ended(&fixture, &mut acquired, &vmm);
 }
 
@@ -681,6 +793,14 @@ fn the_ready_to_start_deadline_runs_from_the_ready_and_a_start_is_never_resent()
             deadline: start
         })
     );
+    let starting = (Stage::Start, Progress::Starting);
+    assert_failed(
+        &error,
+        &acquired,
+        starting,
+        Evidence::Timeout,
+        Teardown::Terminated,
+    );
     assert_launch_ended(&fixture, &mut acquired, &vmm);
 
     // A start that fails, even in a lost session, is not sent again.
@@ -698,6 +818,13 @@ fn the_ready_to_start_deadline_runs_from_the_ready_and_a_start_is_never_resent()
         .filter(|call| matches!(call, Call::Start { .. }))
         .count();
     assert_eq!((control.sessions, starts), (1, 1));
+    assert_failed(
+        &error,
+        &acquired,
+        starting,
+        Evidence::Reset,
+        Teardown::Terminated,
+    );
     assert_launch_ended(&fixture, &mut acquired, &vmm);
 }
 
@@ -705,14 +832,59 @@ fn the_ready_to_start_deadline_runs_from_the_ready_and_a_start_is_never_resent()
 fn a_vmm_that_exits_or_sends_anything_but_its_event_ends_the_launch() {
     let (fixture, image) = fixture();
     // A VMM that exits before its event, as OpenVMM does once it cannot restore the snapshot, ends
-    // the wait at once; another version of the event, and part of it, are refused.
+    // the wait at once, and loses the clone's status, unless OpenVMM's fatal error tells that the
+    // host cannot present the template's CPU or time; another version of the event, and part of
+    // it, are refused, and the VMM that sent them is terminated.
     let cases = [
-        ("exit", ErrorKind::Exited),
-        ("other flush", ErrorKind::Protocol),
-        ("partial flush", ErrorKind::Protocol),
+        (
+            "exit",
+            "exit",
+            ErrorKind::Exited,
+            Evidence::LostStatus,
+            Teardown::Exited,
+        ),
+        (
+            "incompatible",
+            "exit fatal:E_TSC_RATE_TOLERANCE",
+            ErrorKind::Exited,
+            Evidence::IncompatibleHost,
+            Teardown::Exited,
+        ),
+        (
+            "contract",
+            "exit fatal:E_MANIFEST_TIME",
+            ErrorKind::Exited,
+            Evidence::LostStatus,
+            Teardown::Exited,
+        ),
+        // OpenVMM connects the event's endpoint before it launches its VM worker, whose launch
+        // fails on a host that cannot present the template's CPU or time: it closes the endpoint
+        // without the event, and reports its error only as it exits, which the wait awaits.
+        (
+            "closed",
+            "close fatal:E_TSC_RATE_TOLERANCE",
+            ErrorKind::Exited,
+            Evidence::IncompatibleHost,
+            Teardown::Exited,
+        ),
+        (
+            "other",
+            "other flush",
+            ErrorKind::Protocol,
+            Evidence::Protocol,
+            Teardown::Terminated,
+        ),
+        (
+            "partial",
+            "partial flush",
+            ErrorKind::Protocol,
+            Evidence::Protocol,
+            Teardown::Terminated,
+        ),
     ];
-    for (plan, kind) in cases {
-        let mut acquired = fixture.acquire(&plan.replace(' ', "-"));
+    let restore = (Stage::Restore, Progress::Spawned);
+    for (name, plan, kind, evidence, teardown) in cases {
+        let mut acquired = fixture.acquire(name);
         let mut vmm = vmm_with(plan);
         let (restoring, launched) = launch(&fixture, &mut acquired, &image, &mut vmm);
         let mut control = FakeControl::default();
@@ -722,6 +894,17 @@ fn a_vmm_that_exits_or_sends_anything_but_its_event_ends_the_launch() {
         assert_eq!(error.kind(), kind, "{plan}: {error}");
         assert!(launched.before.elapsed() < TIMEOUT, "{plan}");
         assert!(control.calls.is_empty(), "{plan}");
+        assert_failed(&error, &acquired, restore, evidence, teardown);
+        // The record keeps the line of OpenVMM's fatal error, and not the warning before it.
+        let fatal = plan
+            .split_whitespace()
+            .find_map(|word| word.strip_prefix("fatal:"));
+        if let Some(code) = fatal {
+            let line =
+                format!("OpenVMM reported: fatal error: [{code}] failed to launch vm worker");
+            assert!(error.message().ends_with(&line), "{error}");
+            assert!(error.record().message.ends_with(&line), "{error}");
+        }
         assert_launch_ended(&fixture, &mut acquired, &vmm);
     }
 
@@ -742,6 +925,199 @@ fn a_vmm_that_exits_or_sends_anything_but_its_event_ends_the_launch() {
     let source = std::error::Error::source(&error).unwrap().to_string();
     assert!(source.contains("not the VMM"), "{source}");
     assert!(control.calls.is_empty());
+    assert_failed(
+        &error,
+        &acquired,
+        restore,
+        Evidence::Protocol,
+        Teardown::Terminated,
+    );
     assert_launch_ended(&fixture, &mut acquired, &vmm);
     assert!(!acquired.locked.dir().join(CLONE_ACTIVATION_NAME).exists());
+}
+
+#[test]
+fn a_status_with_which_the_guest_ended_the_clone_s_vm_attributes_its_failure() {
+    let (fixture, image) = fixture();
+    let ready = (Stage::Activation, Progress::Activating);
+    let starting = (Stage::Start, Progress::Starting);
+    // Each VMM ends as its clone awaits its Ready, or once the start of its sandbox was sent, with
+    // OpenVMM's outcome report, which the failure's record reads once the VMM has exited.
+    let cases = [
+        // The guest's activation could not assemble the clone's root, which only the request's
+        // image and upper make, before any workload ran.
+        (
+            "root",
+            "guest-exit:54",
+            ready,
+            Evidence::UnusableRoot,
+            Some(54),
+        ),
+        // A repair's status is evidence of the repair stage at any point.
+        (
+            "repair",
+            "guest-exit:195",
+            ready,
+            Evidence::RepairStatus,
+            Some(195),
+        ),
+        (
+            "late-repair",
+            "guest-exit:195",
+            starting,
+            Evidence::RepairStatus,
+            Some(195),
+        ),
+        // Once the start was sent, a workload may have ended its VM with any status, so the loss
+        // of the session is all that the host knows.
+        (
+            "late-root",
+            "guest-exit:54",
+            starting,
+            Evidence::Reset,
+            Some(54),
+        ),
+        // A failure of the VMM tells nothing of the guest.
+        ("vmm", "vmm-failure:1", ready, Evidence::LostStatus, None),
+    ];
+    for (name, report, at, evidence, status) in cases {
+        let mut acquired = fixture.acquire(name);
+        let mut vmm = vmm_with(&format!("flush report:{report}"));
+        let (restoring, _) = launch(&fixture, &mut acquired, &image, &mut vmm);
+        let error = if at == starting {
+            let mut control = FakeControl::default();
+            control.starts.push_back(Answer::Fail(Failure::LOST));
+            let activated = restoring
+                .activate(&mut control, RestoreDeadlines::default())
+                .unwrap();
+            vmm.end_and_wait();
+            activated.start(&mut control).unwrap_err()
+        } else {
+            let ending = &vmm;
+            let mut control = FakeControl::activating([Answer::Fail(Failure::LOST)]);
+            control.on_activate = Some(Box::new(move |_| ending.end_and_wait()));
+            restoring
+                .activate(&mut control, RestoreDeadlines::default())
+                .unwrap_err()
+        };
+        assert_failed(&error, &acquired, at, evidence, Teardown::Exited);
+        assert_eq!(error.record().status, status, "{name}");
+        assert_launch_ended(&fixture, &mut acquired, &vmm);
+    }
+}
+
+thread_local! {
+    /// The path of the record of a failure that [`ended_once_recorded`] reads, and the record that
+    /// it read there.
+    static RECORDED: RefCell<Option<(PathBuf, Option<FailureRecord>)>> = const { RefCell::new(None) };
+}
+
+/// Ends a launch as [`Starting::abandon`] does, once it read the record of the failure at the path
+/// in [`RECORDED`], as the teardown begins, which a crash of the caller during the teardown would
+/// leave.
+fn ended_once_recorded(starting: Starting<'_>) -> Result<Recovery> {
+    RECORDED.with_borrow_mut(|recorded| {
+        let (path, record) = recorded.as_mut().expect("the test names the record's path");
+        *record = read_failure(path).unwrap();
+    });
+    starting.abandon()
+}
+
+#[test]
+fn a_failure_is_recorded_before_its_teardown_and_again_once_the_teardown_ended() {
+    let (fixture, image) = fixture();
+    let mut acquired = fixture.acquire("sandbox");
+    RECORDED.set(Some((acquired.locked.clone_failure_path(), None)));
+    let mut vmm = vmm_with("other flush");
+    let (restoring, _) = launch_ending(
+        &fixture,
+        &mut acquired,
+        &image,
+        &mut vmm,
+        ended_once_recorded,
+    );
+    let mut control = FakeControl::default();
+    let error = restoring
+        .activate(&mut control, RestoreDeadlines::default())
+        .unwrap_err();
+    // As the teardown began, the sandbox recorded the failure, with its teardown pending.
+    let (_, pending) = RECORDED.take().unwrap();
+    let pending = pending.expect("the failure was recorded before its teardown");
+    let restore = (Stage::Restore, Progress::Spawned);
+    assert_eq!(
+        (pending.stage, pending.progress, pending.evidence),
+        (restore.0, restore.1, Evidence::Protocol)
+    );
+    assert_eq!(pending.teardown, Teardown::Pending);
+    assert_eq!(pending.message, error.record().message);
+    // Once the teardown ended, the record holds its outcome.
+    assert_failed(
+        &error,
+        &acquired,
+        restore,
+        Evidence::Protocol,
+        Teardown::Terminated,
+    );
+    assert_launch_ended(&fixture, &mut acquired, &vmm);
+}
+
+/// Why [`kept`] keeps a launch.
+const KEPT: &str = "the test keeps the launch";
+
+/// Ends no launch of a clone that failed: keeps its journal and its VMM, as a launch whose VMM's
+/// identity or exit is indeterminate keeps them.
+fn kept(starting: Starting<'_>) -> Result<Recovery> {
+    // Nothing of the launch ends: its journal and its VMM outlive it, as a crash leaves them.
+    std::mem::forget(starting);
+    Ok(Recovery::Indeterminate(KEPT.to_owned()))
+}
+
+#[test]
+fn a_launch_that_cannot_be_ended_keeps_its_records_and_its_lease_until_a_reattach_ends_it() {
+    let (fixture, image) = fixture();
+    let mut acquired = fixture.acquire("sandbox");
+    let mut vmm = vmm_with("flush");
+    let (restoring, _) = launch_ending(&fixture, &mut acquired, &image, &mut vmm, kept);
+    let mut control = FakeControl::activating([Answer::Fail(Failure::REFUSED)]);
+    let error = restoring
+        .activate(&mut control, RestoreDeadlines::default())
+        .unwrap_err();
+    let ready = (Stage::Activation, Progress::Activating);
+    let unresolved = Teardown::Unresolved(KEPT.to_owned());
+    assert_failed(&error, &acquired, ready, Evidence::Protocol, unresolved);
+    let unended = format!("; the launch could not be ended, and remains for recovery: {KEPT}");
+    assert!(error.message().ends_with(&unended), "{error}");
+    // The journal remains, and with it the lease, which no release ends, and the clone's records.
+    let reference = vmm.reference.clone().unwrap();
+    let locked = &mut acquired.locked;
+    let refusal = fixture.store.release(locked).unwrap_err();
+    assert_eq!(refusal.code(), ErrorCode::SandboxRunning, "{refusal}");
+    let records = CloneRecords::read(locked).unwrap().unwrap();
+    assert_eq!(records.journal.unwrap().process(), Some(&reference));
+    assert!(Process::open(&reference).unwrap().is_some());
+    // A reattach ends the launch through its VMM's verified identity: the record keeps the
+    // failure's stage, evidence, and original outcome, with the teardown that resolved it.
+    let mut control = FakeControl::default();
+    let reattached = reattach_clone(
+        locked,
+        &runtime_of(&fixture),
+        &mut control,
+        Instant::now() + TIMEOUT,
+        TIMEOUT,
+    )
+    .unwrap();
+    let resolved = failed(reattached);
+    assert_failed(
+        &resolved,
+        &acquired,
+        ready,
+        Evidence::Protocol,
+        Teardown::Terminated,
+    );
+    assert_eq!(
+        (resolved.code(), resolved.message()),
+        (error.code(), error.record().message.as_str())
+    );
+    assert!(control.calls.is_empty());
+    assert_launch_ended(&fixture, &mut acquired, &vmm);
 }
