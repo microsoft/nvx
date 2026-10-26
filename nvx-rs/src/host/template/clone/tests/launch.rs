@@ -2486,6 +2486,37 @@ fn a_reattach_finishes_an_earlier_failure_with_what_the_clone_s_vmm_left_as_it_e
         assert_eq!(failure.record().status, Some(195), "{earlier:?}");
         assert_eq!(failure.message(), "the test's clone reset its session");
         crashed.releases(&mut locked);
+        // One of the template, such as a defect of the generation that the caller diagnosed,
+        // which the status does not override: the record holds the status beside it.
+        let crashed = Crashed::at_with("launched", "report:guest-exit:195");
+        let mut locked = crashed.lock();
+        let defect = Error::other("the test diagnosed a defect of the generation's repair");
+        let at = (restore, transaction_of(&locked));
+        let teardown = earlier.clone();
+        record_earlier(
+            &crashed.lease,
+            &locked,
+            at,
+            (Evidence::TemplateDefect, teardown),
+            &defect,
+        );
+        crashed.vmm.end_and_wait();
+        let failure = failed(crashed.take_over(&mut locked, &crashed.runtime, &mut control));
+        let (lease, template) = (&crashed.lease, Evidence::TemplateDefect);
+        assert_recorded(
+            &failure,
+            lease,
+            &locked,
+            restore,
+            template,
+            Teardown::Exited,
+        );
+        assert_eq!(
+            (failure.outcome(), failure.record().status),
+            (Outcome::Template, Some(195)),
+            "{earlier:?}"
+        );
+        crashed.releases(&mut locked);
         // One whose VMM exited before its restore-ready event, with OpenVMM's error, which tells
         // that this host cannot present the template's CPU, once its record was written.
         let crashed = Crashed::at_with("launched", "close fatal:E_CPU_GENERATION");

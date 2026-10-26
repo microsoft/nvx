@@ -51,8 +51,12 @@ use crate::protocol::status;
 ///   before the start of the clone's sandbox was sent, and none after;
 /// - no other status is evidence.
 ///
-/// A status that is evidence prevails over what the host saw of the same end: the loss of the
-/// session, the passing of a deadline, or the VMM's exit only show that the clone ended.
+/// A status that is evidence prevails over what the host or the caller saw of the same end: the
+/// loss of the session, the passing of a deadline, or the VMM's exit only show that the clone
+/// ended, and a step that fails as the guest ends the clone may fail because it ended. It does not
+/// prevail over evidence of the template, a check of the generation or a diagnosis that attributes
+/// a defect to it, which shows the provenance that the status alone leaves to establish, and the
+/// failure's record holds the status beside it.
 ///
 /// The host sees the failures of OpenVMM itself through the line with which OpenVMM reports the
 /// error that ended it, which the launch's log keeps, and which leads with the error's time ABI
@@ -439,7 +443,9 @@ pub enum Teardown {
     /// Whether the clone's VMM still runs cannot be determined, for the reason that this gives:
     /// its identity or its exit is indeterminate. The launch's journal or the runtime record
     /// remains, and with it the clone's lease, which a release refuses to end until a reattach
-    /// resolves the teardown.
+    /// resolves the teardown. A record that the clone's sandbox keeps holds at most 1024
+    /// characters of the reason, as it holds at most 8192 of the
+    /// [message](FailureRecord::message).
     Unresolved(String),
     /// The teardown had not ended when the failure was recorded: the record that a failure writes
     /// before its teardown, so that a crash of the caller during the teardown leaves it, which the
@@ -525,7 +531,9 @@ pub struct FailureRecord {
     pub teardown: Teardown,
     /// The code of the failure's error.
     pub code: ErrorCode,
-    /// The message of the failure's error, followed by the messages of its sources.
+    /// The message of the failure's error, followed by the messages of its sources. A record that
+    /// the clone's sandbox keeps holds at most 8192 of its characters: of a longer message, as a
+    /// caller's diagnosis may be, its first and its last ones, with an ellipsis between them.
     pub message: String,
 }
 
@@ -833,6 +841,17 @@ pub(super) fn reported(
     };
     let evidence = status.and_then(|status| status_evidence(status, progress));
     (evidence, status)
+}
+
+/// Returns the evidence of a failure whose step saw `evidence`, once the guest's status, which
+/// ended the clone's VM, is `reported`, as [`reported`] gives it, as [the attribution of
+/// evidence](Evidence#attribution) describes: the status's evidence prevails, unless `evidence`
+/// is of the template, whose provenance the status alone does not show.
+pub(super) fn prevailing(evidence: Evidence, reported: Option<Evidence>) -> Evidence {
+    match reported {
+        Some(reported) if evidence.outcome() != Outcome::Template => reported,
+        _ => evidence,
+    }
 }
 
 /// The start of the line with which OpenVMM reports, on its standard error, which the launch's log
@@ -1157,6 +1176,30 @@ mod tests {
             reported(Some(&report("guest-exit", 256)), Progress::Spawned),
             (None, None)
         );
+    }
+
+    #[test]
+    fn a_status_prevails_over_what_was_seen_of_the_same_end_but_not_over_the_template_s_evidence() {
+        let template = [Evidence::MalformedGeneration, Evidence::TemplateDefect];
+        for evidence in ALL {
+            // Without a status that is evidence, what the step saw stands.
+            assert_eq!(prevailing(evidence, None), evidence, "{evidence}");
+            for reported in [
+                Evidence::RepairStatus,
+                Evidence::UnusableRoot,
+                Evidence::Timeout,
+            ] {
+                let prevailed = prevailing(evidence, Some(reported));
+                // A check of the generation, or a diagnosis that attributes a defect to it, shows
+                // the provenance that the status alone leaves to establish.
+                let expected = if template.contains(&evidence) {
+                    evidence
+                } else {
+                    reported
+                };
+                assert_eq!(prevailed, expected, "{evidence} {reported}");
+            }
+        }
     }
 
     #[test]
