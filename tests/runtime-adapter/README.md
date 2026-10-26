@@ -1251,7 +1251,8 @@ and its directories and files, and the paths that the guest could move inside
 the parts that it may write, still name what they named when the export was
 planned. Once the guest is ready, the launch sends the table,
 `LayeredLaunch::table`, in the [host's order](#the-hosts-order): each mapping
-before those inside its target.
+before those inside its target. A [clone's](#clones) start takes the same
+shares, whose export NVX binds to the template's dormant filesystem slot.
 
 ### Networks
 
@@ -1402,9 +1403,12 @@ library side, `clone`, holds what the command's options choose of the clone,
 template's placeholder, its upper, on an ext4 scratch image or in RAM, its
 memory target, the template's RAM unless given, the workload identity as which
 its executions run, its overlay mode, its scratch's journal policy, the bound
-of a GPT disk's first partition, and the machine ID that its executions see.
+of a GPT disk's first partition, the machine ID that its executions see, and
+the host paths that it shares with its root, as a launch's
+[shares](#shares).
 `Request::plan` plans the image over the upper as a launch plans a layered
-root, and `Request::clone_request` returns NVX's `CloneRequest` of it, with the
+root, `Request::export` plans the export of the shares as a launch plans it,
+and `Request::clone_request` returns NVX's `CloneRequest` of both, with the
 bindings that the sandbox's store stages for the images, as `stage` stages
 them, so the start hashes nothing. The clone's activation record names the
 hostname `runtime-adapter`, which every execution sees, the image's own machine
@@ -1417,18 +1421,19 @@ The guest of a GPT clone rereads the disk's partition table before it
 assembles the root, since its kernel created the partitions of the template's
 placeholder.
 
-The command first reads the generation from the store's index, and, unless the
-request names the clone's memory target, its compatibility key, whose RAM the
-target is then, before it needs NVX's artifacts. A key that cannot be read is
-left to NVX's plan, which reads it again, and attributes the failure, to a
-malformed generation, which quarantines it, or to the host, as it does for
-every clone. The store then leases the generation to the sandbox,
-`Store::acquire`, at the host's time, which it refuses for a generation that a
-tombstone quarantines, or that is not eligible then, by the monotonic clock of
-the host's boot that captured the template, and by UTC otherwise. For tests,
-the host's time may come from the variable `RUNTIME_ADAPTER_HOST_TIME`, as a
-clock fixture, such as another boot's, in the form that `clone::host_time_text`
-writes:
+The command first plans the export of the clone's shares, if it has any, and
+refuses those that it cannot export, as a launch refuses them, then reads the
+generation from the store's index, and, unless the request names the clone's
+memory target, its compatibility key, whose RAM the target is then, before it
+needs NVX's artifacts. A key that cannot be read is left to NVX's plan, which
+reads it again, and attributes the failure, to a malformed generation, which
+quarantines it, or to the host, as it does for every clone. The store then
+leases the generation to the sandbox, `Store::acquire`, at the host's time,
+which it refuses for a generation that a tombstone quarantines, or that is not
+eligible then, by the monotonic clock of the host's boot that captured the
+template, and by UTC otherwise. For tests, the host's time may come from the
+variable `RUNTIME_ADAPTER_HOST_TIME`, as a clock fixture, such as another
+boot's, in the form that `clone::host_time_text` writes:
 `host=HOST,boot=BOOT,clock=CLOCK,monotonic=NANOSECONDS,utc=NANOSECONDS`, with
 the identities of the host and of its boot, 32 lowercase hexadecimal digits
 each, the clock as a manifest spells it, `linux-boottime` or
@@ -1440,19 +1445,37 @@ NVX's `ClonePlan` then checks the clone against the generation from the
 metadata of its files alone, under the sandbox's lock, which the lease holds:
 the bindings of its images, which no one else may change, the geometry of its
 image, which must be the placeholder's, its length included, and that of its
-scratch image, which must be the template's scratch's, and its memory target,
-whole blocks of 128 MiB, from the template's RAM to its capacity. A clone that
+scratch image, which must be the template's scratch's, its memory target,
+whole blocks of 128 MiB, from the template's RAM to its capacity, and its
+export, if it has one: the template's filesystem slot, which its capture left
+dormant, binds one directory, so the export must have exactly one, the
+export's root, with any other shares inside it, and the directory may neither
+lie inside the template store's directory nor hold it, so that no clone
+reaches the payload of a generation. A clone that
 the template cannot serve fails there, before any VMM starts. The command then records the clone in the
 sandbox's store, as `clone::CloneRecord`, in the format of a launch's
 [record](#layered-roots), in the mode `clone`, with the template's kernel
 command line, the plan and the bindings, so that `probe` and `exec` read the
 plan back, no root configuration, and the template store and the generation, so
-that a later stop finds the store whose lease it releases. OpenVMM restores the
+that a later stop finds the store whose lease it releases. Once NVX checked
+the export again, with `ExportPlan::verify`, OpenVMM restores the
 generation's snapshot in place, through NVX's supervisor, as the launch that the
-lease reserves, and the restore sequence activates the clone through the
+lease reserves, with the export's directory on the template's filesystem slot,
+and the restore sequence activates the clone through the
 adapter's clone order, `host::CloneOrder`, which sends the clone's activation
-record in an `Activate`, checks the guest agent's build in its `Ready`, and
-sends `Start`, with no mapping table: the command maps nothing into a clone.
+record in an `Activate`, checks the guest agent's build in its `Ready`, sends
+the export's mapping table, which the record announces, in order, as a launch
+sends its own, and then `Start`. The record names the export by the identity of
+its plan, and the table holds its mappings, of the directory itself, from an
+empty source, and of the paths inside it. A clone without shares has no
+export: its restore leaves the slot dormant, its record announces no mapping,
+and the sequence sends no table. If the guest fails a mapping, the sequence
+sends no more of the table, nor `Start`, and the clone fails, once the clone
+order asked the guest to stop, which tears down the root. The guest's
+`MapFailed` does not tell the request's mappings from a failure of its own, so
+the clone order takes it for neither, and NVX attributes the failure to what
+the host saw of it: a broken protocol, unless the deadline passed or the
+session was lost.
 
 A clone that fails, from its plan to its commit, fails with NVX's
 `CloneFailure`, which attributes the failure, by the evidence that the host saw
@@ -1607,7 +1630,7 @@ the directory that `NVX_ARTIFACTS_DIR` names, and the guest agent's build from
   its record again, and releases the lease of a clone that ended, through the
   template store TEMPLATES, if given, in place of the one that the clone's
   record names.
-- `start STORE --template TEMPLATES --generation G --distro FORMAT:PATH --distro-identity UUID --upper (scratch:PATH | ram) [--memory MIB] [--workload-identity UID:GID] [--overlay-mode MODE] [--scratch-journal POLICY] [--first-partition-bound BYTES] [--machine-id (image | generated)]`
+- `start STORE --template TEMPLATES --generation G --distro FORMAT:PATH --distro-identity UUID --upper (scratch:PATH | ram) [--memory MIB] [--workload-identity UID:GID] [--overlay-mode MODE] [--scratch-journal POLICY] [--first-partition-bound BYTES] [--machine-id (image | generated)] [SHARES]`
   starts a [clone](#clones) of the generation G of the template store
   TEMPLATES in the sandbox store STORE, which it creates if needed, and whose
   `stage` staged its images, which no one else may change: the image PATH, an
@@ -1622,8 +1645,12 @@ the directory that `NVX_ARTIFACTS_DIR` names, and the guest agent's build from
   partition, 64 KiB by default, as a launch's guest takes it. Every execution
   of the clone sees the hostname `runtime-adapter`, and the machine ID that
   `--machine-id` chooses: the image's own, `image`, by default, or one that the
-  guest generates once for the clone, `generated`.
-  Once the restore sequence started the clone's sandbox, it exchanges a `Ping`
+  guest generates once for the clone, `generated`. SHARES, as `launch` takes
+  them, share host paths with the clone's root: the start refuses those that it
+  cannot export before anything else, and NVX's plan those that the
+  template's filesystem slot cannot bind, as [Clones](#clones) describes.
+  Once the restore sequence sent the clone's mapping table, if it has one, and
+  started the clone's sandbox, it exchanges a `Ping`
   and the longest `Echo` with the guest agent, commits the launch, and exits,
   leaving the VM running, and the sandbox holding the lease. A clone that
   fails, such as one whose activation failed before it was ready, and whose VM
@@ -2104,20 +2131,25 @@ Windows, without a hypervisor:
 - the command lines of `start` that the host program refuses, each with status
   2: missing options, a generation that is not a positive number, a scratch's
   journal policy for an upper in RAM, a first-partition bound for an EROFS
-  image, invalid values, an option given twice, and the options of other
-  commands, and the options of `start` that other commands do not take, with a
-  clock fixture that is not a host's time too;
+  image, invalid values, an option given twice, a share's options without a
+  share, and the options of other commands, and the options of `start` that
+  other commands do not take, with a clock fixture that is not a host's time
+  too;
 - a start whose template store does not exist, or does not hold the
-  generation, and whose image the plan refuses, each with status 1 before it
-  needs NVX's artifacts or creates the sandbox's store;
+  generation, whose image the plan refuses, and whose shares it cannot export,
+  each with status 1 before it needs NVX's artifacts or creates the sandbox's
+  store, and the shares before it reads the template store;
 - the text form of a host's time, which `RUNTIME_ADAPTER_HOST_TIME` takes,
   written and read back on both clocks, and the texts that are none;
 - a clone's record: its JSON, with the plan that `layered::LaunchRecord`
   reads back, the template store and the generation that a stop reads, a
   launch's record that is no clone's, and records that a reader refuses;
 - NVX's request of a clone, with the staged bindings, the memory target, and
-  the guest's defaults or the request's settings, and the images that the
-  sandbox's store does not stage, which it refuses.
+  the guest's defaults or the request's settings, the images that the
+  sandbox's store does not stage, which it refuses, and the export of the
+  request's shares: none without shares, and with them, one directory, the
+  root of a read-only share, holding a read-write one, mapped from an empty
+  source and from its path.
 
 `tests/initramfs.rs` and `tests/runtime.rs` check, in the host-only
 configuration, on Linux and Windows:

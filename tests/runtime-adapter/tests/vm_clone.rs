@@ -117,6 +117,7 @@ use runtime_adapter::hook::{Action, STEP_HOOK, Step, StepHook};
 use runtime_adapter::host::Client;
 use runtime_adapter::root::DEFAULT_RUNTIME;
 use runtime_adapter::runtime::Runtime;
+use runtime_adapter::sharing::HostFsSharing;
 use runtime_adapter::staged::Staged;
 
 use common::gpt::{self, Contents, Layout, Partition, hexadecimal, small_layer};
@@ -1081,12 +1082,13 @@ fn refuses_early(template: &Template, early: Message) {
         scratch_journal: None,
         first_partition_bound: None,
         machine_id: MachineIdMode::Image,
+        sharing: HostFsSharing::default(),
     };
     let plan = request.plan().unwrap();
     let staged = Staged::read(&sandbox.store).unwrap().unwrap();
     let key = store.read_key(&template.generation()).unwrap();
     let clone = request
-        .clone_request(plan.clone(), &staged.bindings(&plan), key.memory())
+        .clone_request(plan.clone(), None, &staged.bindings(&plan), key.memory())
         .unwrap();
     let now = HostTime::now().unwrap();
     let mut acquired = store
