@@ -324,8 +324,9 @@ impl Recorder {
     /// loss of a VMM that exited before its restore-ready event takes the line of OpenVMM's fatal
     /// error that the VMM's log ends with, as [`diagnosed`](Self::diagnosed) does, and the
     /// evidence of a status of the guest's, which OpenVMM's outcome report gives once the VMM has
-    /// exited, as [`observed`](Self::observed) reads it, prevails over the fault's, as
-    /// [`reported`](Self::reported) gives it.
+    /// exited, as [`observed`](Self::observed) reads it, and as [`reported`](Self::reported)
+    /// gives it, prevails over the fault's, unless the fault's is the template's, as
+    /// [`failure::prevailing`] decides.
     fn attribute(
         &self,
         progress: Progress,
@@ -338,7 +339,8 @@ impl Recorder {
             _ => self.observed(),
         };
         let (reported, status) = self.reported(report, progress);
-        (reported.unwrap_or(fault.evidence), status, fault.error)
+        let evidence = failure::prevailing(fault.evidence, reported);
+        (evidence, status, fault.error)
     }
 
     /// Returns `fault`, of the clone that got as far as `progress`, which is the loss of a VMM
@@ -396,8 +398,8 @@ impl Recorder {
     /// error, for the loss of a VMM that exited before its restore-ready event, as
     /// [`diagnosed`](Self::diagnosed) adds it, and the guest's status in OpenVMM's outcome
     /// report, which the record does not hold, whose evidence, as [`reported`](Self::reported)
-    /// gives it, prevails, as in [`record`](Self::record). Writes the record in place of the
-    /// earlier one, if they differ, and returns the failure.
+    /// gives it, prevails as [`failure::prevailing`] decides, as in [`record`](Self::record).
+    /// Writes the record in place of the earlier one, if they differ, and returns the failure.
     pub(super) fn resolve(&self, mut earlier: FailureRecord, teardown: Teardown) -> CloneFailure {
         let error = earlier.error();
         if earlier.teardown == teardown {
@@ -407,7 +409,7 @@ impl Recorder {
         let mut evidence = fault.evidence;
         if earlier.status.is_none() && teardown != Teardown::NoVm {
             let (reported, status) = self.reported(self.observed(), earlier.progress);
-            evidence = reported.unwrap_or(evidence);
+            evidence = failure::prevailing(evidence, reported);
             earlier.status = status;
         }
         if evidence != earlier.evidence {
