@@ -36,9 +36,9 @@
 //!   against its binding, its upper, in RAM or on the caller's scratch image, which it claims, its
 //!   memory target against the template, and its export, if it has one, a plan of one directory,
 //!   which the template's dormant filesystem slot binds, and refuses a request that the template
-//!   cannot serve, such as an image of another length or block geometry than the template's
-//!   placeholder, a network other than the template's, which its key records, or an export of
-//!   several directories or of a file, before any VMM starts.
+//!   cannot serve, such as an image longer than the template's placeholder, the capacity of every
+//!   clone's image, or of other block sizes, a network other than the template's, which its key
+//!   records, or an export of several directories or of a file, before any VMM starts.
 //! - [`ClonePlan::launch`] launches the clone, as the launch that its lease reserves, once the
 //!   objects of its export are still those that its plan found: OpenVMM restores the generation's
 //!   snapshot in place with the clone's devices and export, and the clone's activation record
