@@ -408,7 +408,6 @@ fn the_files_that_a_clone_kept_of_its_launch_go_and_nothing_else() {
     let (_directory, store) = store();
     let locked = store.lock(None).unwrap();
     for path in [
-        store.clone_scratch_path(),
         store.clone_activation_path(),
         store.clone_progress_path(),
         store.clone_failure_path(),

@@ -654,8 +654,7 @@ address, alone; a memory target in whole blocks of `MEMORY_BLOCK_SIZE`
 from the template's RAM to its capacity; the clone's image, which the check of
 its `DistroBinding` opens; its upper, either the caller's scratch image, which
 the check of its `ScratchBinding` claims, and which nothing formats, copies, or
-reads, or for an upper in RAM a fresh sparse file, `clone-scratch.raw` in the
-sandbox's directory, which the release removes; its export, if it has one, an `ExportPlan` that `filesystem::plan` made for the container root, which must export exactly one directory, since the template's dormant filesystem slot binds one directory and no file, and which must neither overlap the template store, by the paths that the plan and the store's directory resolve to, nor let the guest write in a directory through which the store's path leads, links included, since the host reaches the store, and OpenVMM its snapshots, by that path, nor be or hold the directory of the clone's sandbox, in which the host writes the clone's records, checks of paths that leave two rules to whoever names the export, as they leave the directories above the store: the export must not reach the store through an alias of it that an administrator configures, such as a bind mount or a mount point of the store, or of a directory above or inside it, a loopback share, or a hard link of a payload, nor lie inside a directory that a writable export of another sandbox or clone holds, since OpenVMM resolves an export's path again at each launch and restore, so that the directories above the export's directory must be ones that no guest may change, as those above a clone's block devices must; and a fresh capability.
+reads, or RAM, whose restore declares the template's scratch absent, so that OpenVMM attaches it with no file and the plan creates none; its export, if it has one, an `ExportPlan` that `filesystem::plan` made for the container root, which must export exactly one directory, since the template's dormant filesystem slot binds one directory and no file, and which must neither overlap the template store, by the paths that the plan and the store's directory resolve to, nor let the guest write in a directory through which the store's path leads, links included, since the host reaches the store, and OpenVMM its snapshots, by that path, nor be or hold the directory of the clone's sandbox, in which the host writes the clone's records, checks of paths that leave two rules to whoever names the export, as they leave the directories above the store: the export must not reach the store through an alias of it that an administrator configures, such as a bind mount or a mount point of the store, or of a directory above or inside it, a loopback share, or a hard link of a payload, nor lie inside a directory that a writable export of another sandbox or clone holds, since OpenVMM resolves an export's path again at each launch and restore, so that the directories above the export's directory must be ones that no guest may change, as those above a clone's block devices must; and a fresh capability.
 
 It builds the clone's activation record, `ClonePlan::activation`, which the
 clone's guest applies in place of the configuration that the template captured,
@@ -668,12 +667,12 @@ records it, unpublished listeners, and the guest's proxy URL; and the template's
 processors and the memory target. The identity of a binding or of an export plan is the SHA-256 digest of
 a domain and of its serde form, never of a file's content.
 
-The image and the scratch device must present the `BlockGeometry` of the
-template's, which a restore compares, and be, at the paths by which OpenVMM
+The image must present the logical and physical block sizes of the template's placeholder and be no longer than it, since a restore presents every clone's image at the placeholder's length, its capacity, and reads zeros past the end of a shorter image, while a scratch image must present the `BlockGeometry` of the
+template's scratch, its length included, which a restore compares; both must be, at the paths by which OpenVMM
 opens them, the regular files that the checks found, which are not links or
 other reparse points, and which no one else may change. Neither the image nor a
 scratch image may be a file that the sandbox's store owns, such as
-`clone-scratch.raw`, its log, or its records, by any path, since the store's
+its log or its records, by any path, since the store's
 transitions replace or remove them, and a link or a directory under one of the
 store's names is refused.
 
@@ -703,8 +702,7 @@ claim's handle, which OpenVMM's open of the image would refuse.
 A payload holds the sockets of its clones only while they lease it: the VMM
 removes its socket as it exits, a stop or a recovery removes the one that an
 abrupt exit leaves, and the release makes the socket's absence durable before
-the lease ends, and removes the record and `restore.sock`, as it removes
-`clone-scratch.raw`.
+the lease ends, and removes the record and `restore.sock`.
 
 `Restoring::activate` then runs the clone's restore sequence through the
 adapter's framing of its control session, a `CloneControl`, by a

@@ -52,11 +52,9 @@ use crate::host::sandbox::distro::{
 use crate::host::sandbox::plan::bound_image;
 use crate::host::sandbox::scratch::{self, CheckedScratch, ScratchBinding};
 use crate::host::sandbox::{
-    LayerRole, SandboxLayer, SandboxPlan, SandboxUpper, block_geometry, reject_container_path,
-    reject_disk_path,
+    LayerRole, SandboxLayer, SandboxPlan, reject_container_path, reject_disk_path,
 };
 use crate::host::store::LockedStore;
-use crate::host::store::files::{create_new, remove_if_present};
 use crate::host::store::regular::{identity_of, is_refused, open_regular, was_removed};
 use crate::protocol::{CAPABILITY_LEN, HostMap};
 
@@ -66,9 +64,6 @@ const MIB: u64 = 1024 * 1024;
 /// The most links that [`path_directories`] follows in a path, more than a Linux host, 40, or a
 /// Windows host, 63, follows in one.
 const MAX_PATH_LINKS: usize = 64;
-
-/// How messages name the file of the `scratch` block device of a clone whose upper is in RAM.
-const SPARSE_WHAT: &str = "scratch device of the clone";
 
 /// What the clone of a sandbox restores of the generation of a template that it leased: the
 /// adapter's plan of the clone's image and upper, the binding of the image, the binding of the
@@ -120,19 +115,14 @@ pub struct CloneRequest {
     pub first_partition_bound: u64,
 }
 
-/// The upper of a clone's plan, with the file of the clone's `scratch` block device, which every
-/// restore of a template attaches in place of the template's scratch.
+/// The upper of a clone's plan, which decides how the clone's restore attaches the template's
+/// `scratch` block device.
 #[derive(Debug)]
 pub enum CloneUpper {
-    /// An upper in RAM, a tmpfs, which leaves the `scratch` block device unused: its file is a
-    /// sparse file of the template's scratch length,
-    /// [`CLONE_SCRATCH_NAME`](crate::host::store::CLONE_SCRATCH_NAME) in the sandbox's directory,
-    /// which the plan created, and which [`Store::release`] removes once the clone's VM has
-    /// exited, as a [removal](crate::host::store#removal) of the sandbox does.
-    Tmpfs {
-        /// The sparse file.
-        path: PathBuf,
-    },
+    /// An upper in RAM, a tmpfs, which leaves the `scratch` block device unused: the restore
+    /// declares the device absent, and OpenVMM attaches it with no file, at the geometry that the
+    /// template recorded, as [`ClonePlan::launch`] describes, so the plan creates no file for it.
+    Tmpfs,
     /// An upper on the caller's scratch image, which the plan checked and claimed: the claim
     /// lasts as long as the checked image, as [`ScratchBinding::check`] describes.
     Scratch(CheckedScratch),
@@ -144,34 +134,39 @@ pub enum CloneUpper {
 /// that acquired the lease, before the clone's launch.
 ///
 /// A restore of a template attaches the template's two block devices, its `distro` and its
-/// `scratch`, with files of the clone's, which OpenVMM opens itself, by their paths, as
-/// [Block devices by path](Store#block-devices-by-path) describes, and whose geometries it
-/// compares with those that the template recorded. The plan checks each of the clone's inputs as
-/// OpenVMM will find it, and holds what the checks opened:
+/// `scratch`, at the geometries that the template recorded, as OpenVMM presents them: the
+/// `distro`, the clone's image, at the placeholder's, the capacity of every clone's image, over an
+/// image that may be shorter, whose blocks past its end read as zeros, and the `scratch` at the
+/// template's scratch, over the clone's scratch image, of exactly that geometry, for an upper on
+/// one, or with no file, for an upper in RAM, whose restore declares it absent. OpenVMM opens the
+/// clone's files itself, by their paths, as [Block devices by path](Store#block-devices-by-path)
+/// describes. The plan checks each of the clone's inputs as OpenVMM will find it, and holds what
+/// the checks opened:
 ///
 /// - The image, the clone's `distro`, an EROFS layer or a GPT disk, as its binding names it, must
-///   pass the check of its binding, [`DistroBinding::check`], and present the geometry of the
-///   template's placeholder, as its key records it: the placeholder's length, and the same logical
-///   and physical block sizes, which [`CheckedDistro::geometry`] reads through the checked file,
-///   whatever the placeholder's format. At its path, it must be a regular file, not a link, nor on
-///   Windows any other reparse point, that is the file that the check found, that belongs to the
-///   current user or to an administrator, and that no one else may change. The plan holds the
-///   file that the check opened, for reading alone. As at a cold launch, the guest reads and
-///   checks a GPT disk's partition table, with `nvx::gpt`, before it assembles the root, so the
-///   plan reads none of it.
+///   pass the check of its binding, [`DistroBinding::check`], and fit the capacity of the
+///   template's placeholder, as its key records it, [`TemplateKey::distro`]: no longer than the
+///   placeholder, with the same logical and physical block sizes, which
+///   [`CheckedDistro::geometry`] reads through the checked file, whatever the placeholder's
+///   format. On Linux, a file's physical block size is the I/O block size of its filesystem, so
+///   the image must lie on a filesystem of the placeholder's. At its path, it must be a regular
+///   file, not a link, nor on Windows any other reparse point, that is the file that the check
+///   found, that belongs to the current user or to an administrator, and that no one else may
+///   change. The plan holds the file that the check opened, for reading alone. Nothing resizes,
+///   pads, or writes the image. As at a cold launch, the guest reads and checks a GPT disk's
+///   partition table, with `nvx::gpt`, before it assembles the root, so the plan reads none of
+///   it: of a disk shorter than the capacity, `nvx::gpt` requires only that its backup header lie
+///   inside the capacity, as it does at the disk's end.
 /// - Neither the image nor a scratch image may be a file that the sandbox's store owns, by any
 ///   path, through a link among its directories, say, or a hard link: the store's transitions
-///   replace or remove its files, as a plan replaces the file of the scratch device of a clone in
-///   RAM, [`CLONE_SCRATCH_NAME`](crate::host::store::CLONE_SCRATCH_NAME), a launch its log, and a
-///   release the clone binding. The store creates nothing but regular files under its names, and
-///   its control socket, so the plan also refuses a link or a directory under one of them,
-///   through which the path of an image could pass.
+///   replace or remove its files, as a launch replaces its log and the clone's activation record,
+///   and a release removes the clone binding. The store creates nothing but regular files under
+///   its names, and its control socket, so the plan also refuses a link or a directory under one
+///   of them, through which the path of an image could pass.
 /// - An upper in RAM, a tmpfs, leaves the `scratch` block device unused, which the restore
-///   attaches all the same: the plan creates its file,
-///   [`CLONE_SCRATCH_NAME`](crate::host::store::CLONE_SCRATCH_NAME) in the sandbox's directory, a
-///   sparse file of the template's scratch length, private to the current user, in place of one
-///   that an earlier clone of the sandbox left, and closes it. The filesystem of the sandbox's
-///   directory must present the template's scratch geometry.
+///   attaches all the same, since the template's guest negotiated it: the restore declares it
+///   absent, and OpenVMM attaches it with no file, as [`launch`](Self::launch) describes. The plan
+///   creates nothing for it.
 /// - An upper on the caller's scratch image must pass the check of its binding,
 ///   [`ScratchBinding::check`], which checks the image's identity, kind, and length and claims it
 ///   for the clone, and present the geometry of the template's scratch, its length included,
@@ -319,17 +314,14 @@ pub struct ClonePlan {
     export: Option<DirectoryExport>,
 }
 
-/// How a plan reaches the clone's files: as the checks of their bindings reach them, and as it
-/// creates the file of the `scratch` block device of an upper in RAM; or, in tests, through opens
-/// that read no content, or that reach files on filesystems of other block sizes.
+/// How a plan reaches the clone's files: as the checks of their bindings reach them, or, in tests,
+/// through opens that read no content, or that reach files on filesystems of other block sizes.
 #[derive(Clone, Copy)]
 struct Access<'a> {
     /// How the check of the image's binding reaches the image.
     distro: distro::Access<'a>,
     /// How the check of the scratch image's binding reaches the image.
     scratch: scratch::Access<'a>,
-    /// Creates the file of the `scratch` block device of an upper in RAM, open for writing.
-    create: &'a dyn Fn(&Path) -> io::Result<File>,
 }
 
 impl Access<'static> {
@@ -337,7 +329,6 @@ impl Access<'static> {
     const CHECKED: Self = Self {
         distro: distro::Access::GUARDED,
         scratch: scratch::Access::WRITABLE,
-        create: &create_sparse,
     };
 }
 
@@ -348,18 +339,18 @@ impl ClonePlan {
     ///
     /// The plan is made under the lock that acquired the lease, which `acquired` holds, before the
     /// launch that the lease reserves, [`Lease::launch`], which the caller then runs under the
-    /// same lock, with [`launch`](Self::launch): the sandbox records no VM and no launch, so no VM of an earlier clone holds a
-    /// file that the plan replaces. It takes `acquired` exclusively while it plans, since it may
-    /// create a file in the sandbox's directory, as the transitions of a sandbox's store take its
-    /// lock, and borrows nothing of it once it returns. It reads the generation's key,
+    /// same lock, with [`launch`](Self::launch), while the sandbox records no VM and no launch. It
+    /// takes `acquired` exclusively while it plans, as the transitions of a sandbox's store take
+    /// its lock, since it checks the files of the sandbox's store, and borrows nothing of it once
+    /// it returns. It creates nothing in the sandbox's directory. It reads the generation's key,
     /// [`Store::read_key`], without computing its identity again, and checks the generation's
     /// snapshot, [`Store::snapshot_dir`], then checks the clone's files, as the [type](Self)
     /// describes.
     ///
-    /// Fails with a [`CloneFailure`] at [`Stage::Plan`], and holds nothing, keeping no file that
-    /// it created. The failure's record holds the evidence of the check that failed, as below, no
-    /// transaction, and no VM, [`Teardown::NoVm`], and the plan records it nowhere: the caller
-    /// holds it, and releases the lease. The evidence of a failure of the host's own operations is
+    /// Fails with a [`CloneFailure`] at [`Stage::Plan`], and holds nothing. The failure's record
+    /// holds the evidence of the check that failed, as below, no transaction, and no VM,
+    /// [`Teardown::NoVm`], and the plan records it nowhere: the caller holds it, and releases the
+    /// lease. The evidence of a failure of the host's own operations is
     /// [`Evidence::ResourceExhaustion`] if an I/O error among the error's sources says that the
     /// host ran out of storage, memory, or descriptors, and [`Evidence::HostFailure`] otherwise.
     /// The plan checks in this order:
@@ -431,16 +422,11 @@ impl ClonePlan {
     ///   user or an administrator, and that no one else may change,
     ///   [`Evidence::SuppliedIdentity`], and with [`ErrorKind::Io`] if the image cannot be opened
     ///   at its path otherwise, or identified or examined once open, the host's evidence; with
-    ///   [`ErrorKind::Unsupported`] for an image of another length than the template's
-    ///   placeholder, [`Evidence::SuppliedLength`], or of other block sizes, or of a geometry that
-    ///   OpenVMM refuses, [`Evidence::SuppliedGeometry`]; and with
-    ///   [`ErrorKind::Unsupported`] for an image that is a file of the sandbox's store,
-    ///   [`Evidence::InvalidSettings`];
-    /// - for an upper in RAM, with [`ErrorKind::Unsupported`] for a sandbox whose path holds a
-    ///   comma or a semicolon, [`Evidence::HostFailure`], or whose filesystem presents another
-    ///   geometry than the template's scratch, [`Evidence::IncompatibleHost`], and with
-    ///   [`ErrorKind::Io`] if the sparse file cannot be created, sized, or checked, the host's
-    ///   evidence;
+    ///   [`ErrorKind::Unsupported`] for an image of other block sizes than the template's
+    ///   placeholder, or of a geometry that OpenVMM refuses, [`Evidence::SuppliedGeometry`], or
+    ///   longer than the placeholder, the capacity of the template's clones' images,
+    ///   [`Evidence::SuppliedLength`]; and with [`ErrorKind::Unsupported`] for an image that is a
+    ///   file of the sandbox's store, [`Evidence::InvalidSettings`];
     /// - for an upper on a scratch image, with [`ErrorKind::Io`] if the image's location cannot be
     ///   compared with the template store's directory, or its names cannot be counted, the host's
     ///   evidence, and as [`ScratchBinding::check`] and [`CheckedScratch::geometry`] fail: with
@@ -576,11 +562,9 @@ impl ClonePlan {
                 deadline,
                 access,
             )?),
-            _ => CloneUpper::Tmpfs {
-                path: create_scratch(locked, &key, access)?,
-            },
+            _ => CloneUpper::Tmpfs,
         };
-        let devices = devices_of(request, &upper);
+        let devices = devices_of(request);
         Ok(Self {
             lease: lease.clone(),
             generation,
@@ -624,18 +608,19 @@ impl ClonePlan {
         &self.image
     }
 
-    /// Returns the clone's upper, with the file of its `scratch` block device.
+    /// Returns the clone's upper, which decides how its restore attaches the `scratch` block
+    /// device.
     pub fn upper(&self) -> &CloneUpper {
         &self.upper
     }
 
     /// Returns the file of the clone's `scratch` block device, which OpenVMM opens at this path:
-    /// the sparse file [`CLONE_SCRATCH_NAME`](crate::host::store::CLONE_SCRATCH_NAME) in the
-    /// sandbox's directory for an upper in RAM, and the caller's scratch image otherwise.
-    pub fn scratch_path(&self) -> &Path {
+    /// the caller's scratch image, or `None` for an upper in RAM, whose restore declares the
+    /// device absent.
+    pub fn scratch_path(&self) -> Option<&Path> {
         match &self.upper {
-            CloneUpper::Tmpfs { path } => path,
-            CloneUpper::Scratch(checked) => checked.path(),
+            CloneUpper::Tmpfs => None,
+            CloneUpper::Scratch(checked) => Some(checked.path()),
         }
     }
 
@@ -716,17 +701,13 @@ impl fmt::Debug for ClonePlan {
     }
 }
 
-/// Returns the devices of the clone of `request`, whose upper is `upper`: the adapter's plan of its
-/// image, over the file of its `scratch` block device, which every restore attaches, the sparse
-/// file of an upper in RAM included. The restore attaches the template's network, which its key
-/// records, rather than the plan's, which the plan's check found to be the same.
-fn devices_of(request: &CloneRequest, upper: &CloneUpper) -> SandboxPlan {
+/// Returns the devices of the clone of `request`: the adapter's plan of its image over its upper,
+/// which renders the `scratch` block device of an upper on a scratch image alone, since the
+/// restore declares that of an upper in RAM absent. The restore attaches the template's network,
+/// which its key records, rather than the plan's, which the plan's check found to be the same.
+fn devices_of(request: &CloneRequest) -> SandboxPlan {
     let adapter = &request.adapter;
-    let scratch = match upper {
-        CloneUpper::Tmpfs { path } => SandboxUpper::scratch_at(paths::normalized(path)),
-        CloneUpper::Scratch(_) => adapter.upper().clone(),
-    };
-    SandboxPlan::adapter(adapter.distro().clone(), scratch)
+    SandboxPlan::adapter(adapter.distro().clone(), adapter.upper().clone())
 }
 
 /// Refuses a request that no clone takes, as [`ClonePlan::new`] describes, without reading or
@@ -987,9 +968,9 @@ fn check_template(
 }
 
 /// Checks the image of `request` against its binding, through `access`, and then its geometry,
-/// against the placeholder's that `key` records, the image at its path, and that it is none of
-/// `owned`, the files of the sandbox's store, as [`ClonePlan`] describes, and returns the file
-/// that the binding's check opened.
+/// against the capacity of the placeholder that `key` records, the image at its path, and that it
+/// is none of `owned`, the files of the sandbox's store, as [`ClonePlan`] describes, and returns
+/// the file that the binding's check opened.
 fn check_image(
     request: &CloneRequest,
     key: &TemplateKey,
@@ -1029,13 +1010,7 @@ fn check_image(
             Fault::new(evidence, error)
         })?;
     let geometry = checked.geometry().map_err(supplied_geometry_fault)?;
-    check_geometry(
-        geometry,
-        key.distro(),
-        &format!("the image {shown}"),
-        "placeholder",
-        Mismatch::SUPPLIED,
-    )?;
+    check_capacity(geometry, key.distro(), &format!("the image {shown}"))?;
     let identity = identity_of(checked.file()).map_err(|error| {
         Fault::host(Error::io(format!("the image {shown} cannot be identified")).with_source(error))
     })?;
@@ -1080,7 +1055,6 @@ fn check_scratch(
         key.scratch(),
         &format!("the scratch image {shown}"),
         "scratch",
-        Mismatch::SUPPLIED,
     )?;
     let identity = identity_of(checked.file()).map_err(|error| {
         Fault::host(
@@ -1237,9 +1211,9 @@ struct StoreFiles(Vec<(PathBuf, (u64, u128))>);
 
 impl StoreFiles {
     /// Returns the regular files that the store of the sandbox of `locked` owns now, as
-    /// [`LockedStore::owned_entries`] lists its entries: its files, among them the file of the
-    /// scratch device of a clone in RAM, which a plan replaces, its log, which a launch replaces,
-    /// and the clone binding, which a release removes, and its temporary files.
+    /// [`LockedStore::owned_entries`] lists its entries: its files, among them its log and the
+    /// clone's activation record, which a launch replaces, and the clone binding, which a release
+    /// removes, and its temporary files.
     ///
     /// The store creates nothing but regular files under its names, and its control socket, so a
     /// link or a directory among its entries is refused: the path of an image could pass through
@@ -1308,123 +1282,62 @@ impl StoreFiles {
     }
 }
 
-/// Creates the file of the `scratch` block device of a clone whose upper is in RAM, in the
-/// sandbox of `locked`, through `access`: a sparse file of the length of the template's scratch,
-/// which `key` records, whose geometry must be the scratch's, and which is checked at its path as
-/// the capture of a template checks its own, as [`ClonePlan`] describes. Returns its path, once
-/// the file is closed. It removes the file if any step fails, its creation included, which can
-/// fail once it made the file, as a file that cannot be made sparse does.
-fn create_scratch(
-    locked: &LockedStore,
-    key: &TemplateKey,
-    access: Access<'_>,
-) -> Result<PathBuf, Fault> {
-    let path = locked.clone_scratch_path();
-    let shown = path.display();
-    reject_disk_path(&path, &shown.to_string()).attribute(Evidence::HostFailure)?;
-    let failed = |error: io::Error| {
-        Fault::host(
-            Error::io(format!("cannot create the {SPARSE_WHAT} {shown}")).with_source(error),
-        )
-    };
-    let created = (|| {
-        let file = (access.create)(&path).map_err(&failed)?;
-        let scratch = key.scratch();
-        file.set_len(scratch.length).map_err(&failed)?;
-        let geometry =
-            block_geometry(&file, &path, SPARSE_WHAT).map_err(|error| match error.kind() {
-                // The sandbox's filesystem presents a geometry that OpenVMM refuses.
-                ErrorKind::Unsupported => Fault::new(Evidence::IncompatibleHost, error),
-                _ => Fault::host(error),
-            })?;
-        check_geometry(
-            geometry,
-            scratch,
-            &format!("the {SPARSE_WHAT} {shown}, in the sandbox's filesystem,"),
-            "scratch",
-            Mismatch::HOST,
-        )?;
-        let identity = identity_of(&file).map_err(&failed)?;
-        drop(file);
-        // The host made the file, so what its path shows of it is the host's.
-        check_at_path(&path, identity, &format!("the {SPARSE_WHAT} {shown}")).map_err(|fault| {
-            let (_, message, source) = fault.error.into_parts();
-            let error = Error::io(message);
-            Fault::host(match source {
-                Some(source) => error.with_source(source),
-                None => error,
-            })
-        })
-    })();
-    match created {
-        Ok(()) => Ok(path),
-        Err(fault) => {
-            let _ = remove_if_present(&path);
-            Err(fault)
-        }
+/// Refuses `found`, the geometry of a clone's image, which messages call `what`, unless it fits
+/// `capacity`, the geometry of the template's placeholder, which a restore presents over the
+/// image: of other block sizes, [`Evidence::SuppliedGeometry`], or longer,
+/// [`Evidence::SuppliedLength`]. A shorter image fills the capacity's first blocks, and the
+/// restore reads zeros past its end.
+fn check_capacity(found: BlockGeometry, capacity: BlockGeometry, what: &str) -> Result<(), Fault> {
+    check_blocks(found, capacity, what, "placeholder")?;
+    if found.length > capacity.length {
+        return Err(Fault::new(
+            Evidence::SuppliedLength,
+            Error::unsupported(format!(
+                "{what} is {} bytes long, longer than the template's placeholder, whose {} bytes \
+                 are the capacity of every clone's image",
+                found.length, capacity.length
+            )),
+        ));
     }
+    Ok(())
 }
 
-/// Creates the file of the `scratch` block device of a clone whose upper is in RAM at `path`, a
-/// sparse file private to the current user, open for writing, in place of one that an earlier
-/// clone of the sandbox left.
-fn create_sparse(path: &Path) -> io::Result<File> {
-    match fs::remove_file(path) {
-        Err(error) if error.kind() != io::ErrorKind::NotFound => return Err(error),
-        _ => {}
-    }
-    let file = create_new(path)?;
-    platform::make_sparse(&file)?;
-    Ok(file)
-}
-
-/// The evidence of a file of a clone's block device whose geometry is not the one that the
-/// template's device presented.
-#[derive(Clone, Copy)]
-struct Mismatch {
-    /// The evidence of another length.
-    length: Evidence,
-    /// The evidence of other block sizes.
-    blocks: Evidence,
-}
-
-impl Mismatch {
-    /// A file that the request supplied.
-    const SUPPLIED: Self = Self {
-        length: Evidence::SuppliedLength,
-        blocks: Evidence::SuppliedGeometry,
-    };
-
-    /// The sparse file of an upper in RAM, which the plan sizes as the template's scratch, and
-    /// whose block sizes the sandbox's filesystem presents: the host's.
-    const HOST: Self = Self {
-        length: Evidence::IncompatibleHost,
-        blocks: Evidence::IncompatibleHost,
-    };
-}
-
-/// Refuses `found`, the geometry of the file of a clone's block device, which messages call
-/// `what`, unless it is `expected`, the geometry that the template's `device` presented, with the
-/// evidence that `mismatch` gives.
+/// Refuses `found`, the geometry of the file of a clone's block device that the request supplied,
+/// which messages call `what`, unless it is `expected`, the geometry that the template's `device`
+/// presented: of another length, [`Evidence::SuppliedLength`], or of other block sizes,
+/// [`Evidence::SuppliedGeometry`].
 fn check_geometry(
     found: BlockGeometry,
     expected: BlockGeometry,
     what: &str,
     device: &str,
-    mismatch: Mismatch,
 ) -> Result<(), Fault> {
     if found.length != expected.length {
         return Err(Fault::new(
-            mismatch.length,
+            Evidence::SuppliedLength,
             Error::unsupported(format!(
                 "{what} is {} bytes long, not the {} bytes of the template's {device}",
                 found.length, expected.length
             )),
         ));
     }
-    if found != expected {
+    check_blocks(found, expected, what, device)
+}
+
+/// Refuses `found`, the geometry of the file of a clone's block device that the request supplied,
+/// which messages call `what`, unless it presents the logical and physical block sizes of
+/// `expected`, the geometry that the template's `device` presented, [`Evidence::SuppliedGeometry`].
+fn check_blocks(
+    found: BlockGeometry,
+    expected: BlockGeometry,
+    what: &str,
+    device: &str,
+) -> Result<(), Fault> {
+    if found.logical_block_size != expected.logical_block_size
+        || found.physical_block_size != expected.physical_block_size
+    {
         return Err(Fault::new(
-            mismatch.blocks,
+            Evidence::SuppliedGeometry,
             Error::unsupported(format!(
                 "{what} presents logical blocks of {} bytes and physical blocks of {} bytes, but \
                  the template's {device} presented {} and {} bytes",

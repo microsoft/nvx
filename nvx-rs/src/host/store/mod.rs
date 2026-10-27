@@ -16,8 +16,6 @@
 //!   outcome.json           the VMM's outcome report of the latest launch
 //!   .tmpXXXXXX             the outcome report while the VMM writes it, which it then publishes
 //!   clone.json             the binding of a clone to the generation of a template that it leases
-//!   clone-scratch.raw      the file of the scratch device of a clone whose upper is in RAM, a
-//!                          sparse file that the clone's plan creates
 //!   clone-activation.bin   the activation record of a clone, which its launch writes
 //!   clone-progress.log     the progress log of a clone's launch and restore sequence
 //!   clone-failure.json     the record of a clone's failure
@@ -296,14 +294,6 @@ pub const OUTCOME_NAME: &str = "outcome.json";
 /// removes once its VM has exited. A [removal](self#removal) of the sandbox removes it first, and
 /// makes its absence durable before the sandbox goes.
 pub const CLONE_BINDING_NAME: &str = "clone.json";
-/// Name of the file of the `scratch` block device of a clone whose upper is in RAM, which the
-/// clone's restore attaches in place of the template's scratch, and which the guest leaves
-/// unused: a sparse file of the template's scratch length, which
-/// [`template::ClonePlan::new`](crate::host::template::ClonePlan::new) creates under the lease,
-/// replacing one that an earlier clone of the sandbox left, and which
-/// [`template::Store::release`](crate::host::template::Store::release) removes once the clone's VM
-/// has exited, as a [removal](self#removal) of the sandbox does.
-pub const CLONE_SCRATCH_NAME: &str = "clone-scratch.raw";
 /// Name of the activation record of a clone, in its canonical encoding, which the clone's launch,
 /// [`template::ClonePlan::launch`](crate::host::template::ClonePlan::launch), writes before it
 /// spawns the clone's VMM, so that the restore activates the clone with that record and its
@@ -334,8 +324,7 @@ pub const CLONE_FAILURE_NAME: &str = "clone-failure.json";
 /// The files that the clone of a sandbox keeps of its launch, which a release removes once the
 /// clone's VM has exited, as a [removal](self#removal) of the sandbox does, before the clone
 /// binding.
-const CLONE_FILE_NAMES: [&str; 5] = [
-    CLONE_SCRATCH_NAME,
+const CLONE_FILE_NAMES: [&str; 4] = [
     CLONE_ACTIVATION_NAME,
     RESTORE_READY_NAME,
     CLONE_PROGRESS_NAME,
@@ -345,7 +334,7 @@ const CLONE_FILE_NAMES: [&str; 5] = [
 /// temporary file named `.NAME.NUMBER.tmp` beside it only if the replacement was interrupted, and
 /// a VMM that is killed while it writes its outcome report leaves the file in which it stages it;
 /// see [the report staging file](self#the-report-staging-file).
-pub const FILE_NAMES: [&str; 14] = [
+pub const FILE_NAMES: [&str; 13] = [
     LOCK_NAME,
     JOURNAL_NAME,
     RUNTIME_NAME,
@@ -355,7 +344,6 @@ pub const FILE_NAMES: [&str; 14] = [
     CONSOLE_NAME,
     OUTCOME_NAME,
     CLONE_BINDING_NAME,
-    CLONE_SCRATCH_NAME,
     CLONE_ACTIVATION_NAME,
     RESTORE_READY_NAME,
     CLONE_PROGRESS_NAME,
@@ -550,12 +538,6 @@ impl SandboxStore {
     /// it leases, [`CLONE_BINDING_NAME`].
     pub fn binding_path(&self) -> PathBuf {
         self.path(CLONE_BINDING_NAME)
-    }
-
-    /// Returns the path of the file of the scratch device of a clone whose upper is in RAM,
-    /// [`CLONE_SCRATCH_NAME`].
-    pub fn clone_scratch_path(&self) -> PathBuf {
-        self.path(CLONE_SCRATCH_NAME)
     }
 
     /// Returns the path of the activation record of a clone, [`CLONE_ACTIVATION_NAME`].
@@ -835,15 +817,14 @@ impl LockedStore {
 
     /// Removes what the clone of the sandbox kept of its launch in the sandbox's directory, whose
     /// VM has exited, through `directory`, the handle of the directory that
-    /// [`open_dir`](Self::open_dir) returned: the file of its scratch device,
-    /// [`CLONE_SCRATCH_NAME`], its activation record, [`CLONE_ACTIVATION_NAME`], the socket of its
-    /// restore-ready event, [`RESTORE_READY_NAME`], its progress log, [`CLONE_PROGRESS_NAME`], and
-    /// the record of its failure, [`CLONE_FAILURE_NAME`]. A release, as a [removal](self#removal)
-    /// does, removes them before the clone binding, whose removal, once durable, makes theirs
-    /// durable too, since all are entries of the sandbox's directory. A file whose deletion is
-    /// pending, as a Windows file system without POSIX deletion leaves a removed file that another
-    /// handle holds, is removed already, so that a release that failed once it removed the file can
-    /// be retried.
+    /// [`open_dir`](Self::open_dir) returned: its activation record, [`CLONE_ACTIVATION_NAME`],
+    /// the socket of its restore-ready event, [`RESTORE_READY_NAME`], its progress log,
+    /// [`CLONE_PROGRESS_NAME`], and the record of its failure, [`CLONE_FAILURE_NAME`]. A release,
+    /// as a [removal](self#removal) does, removes them before the clone binding, whose removal,
+    /// once durable, makes theirs durable too, since all are entries of the sandbox's directory. A
+    /// file whose deletion is pending, as a Windows file system without POSIX deletion leaves a
+    /// removed file that another handle holds, is removed already, so that a release that failed
+    /// once it removed the file can be retried.
     pub(crate) fn remove_clone_files(&self, directory: &platform::Directory) -> Result<()> {
         for name in CLONE_FILE_NAMES {
             directory.remove_file(name).map_err(io_error(format!(

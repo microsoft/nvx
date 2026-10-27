@@ -368,9 +368,7 @@ impl Store {
     /// the reservation of the launch that `locked` holds, if it acquired the lease, so that one
     /// that fails part of the way, once it removed files that a launch of the clone's plan needs,
     /// leaves no launch that the lock may begin. It then removes what the clone kept of its
-    /// launch: the file of the scratch device of a clone whose upper is in RAM,
-    /// [`CLONE_SCRATCH_NAME`](crate::host::store::CLONE_SCRATCH_NAME), which the clone's
-    /// [plan](crate::host::template::ClonePlan) created, the clone's activation record,
+    /// launch: the clone's activation record,
     /// [`CLONE_ACTIVATION_NAME`](crate::host::store::CLONE_ACTIVATION_NAME), the socket of its
     /// restore-ready event, [`RESTORE_READY_NAME`](crate::host::store::RESTORE_READY_NAME), and
     /// its records, which last as long as the lease, its progress log,
@@ -462,15 +460,13 @@ impl Store {
         checked();
         // A plan of the clone launches under the reservation that the lease's acquisition left in
         // the lock, which the release ends before it removes anything, so that a release that
-        // fails once it removed the clone's files, such as the scratch device's file of an upper
-        // in RAM, leaves no launch that the lock may begin.
+        // fails once it removed the clone's files leaves no launch that the lock may begin.
         locked.reserve(None);
         // The clone's VM has exited, and the sandbox launches nothing else under the lease, so no
-        // VM holds the scratch device's file of a RAM upper, or listens at the clone's control
-        // socket. The binding's removal makes the removal of the clone's files durable too, since
-        // all are entries of the sandbox's directory, but not that of the socket, an entry of the
-        // leased generation's payload, which must be durable before the lease ends, so that a
-        // generation whose leases have drained holds no clone's socket.
+        // VM listens at the clone's control socket. The binding's removal makes the removal of the
+        // clone's files durable too, since all are entries of the sandbox's directory, but not that
+        // of the socket, an entry of the leased generation's payload, which must be durable before
+        // the lease ends, so that a generation whose leases have drained holds no clone's socket.
         locked.remove_clone_files(&directory)?;
         if let Some(payload) = &payload {
             self.remove_clone_socket(&lease, payload, sync_payload)?;

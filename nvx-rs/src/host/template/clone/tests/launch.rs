@@ -22,8 +22,8 @@ use crate::host::process::{BootId, Process, ProcessRef};
 use crate::host::store::files::{sync_dir, write_private};
 use crate::host::store::{
     CLONE_ACTIVATION_NAME, CLONE_BINDING_NAME, CLONE_FAILURE_NAME, CLONE_PROGRESS_NAME,
-    CLONE_SCRATCH_NAME, JOURNAL_NAME, LaunchState, LockedStore, OUTCOME_NAME, RESTORE_READY_NAME,
-    Recovery, RuntimeIdentity, RuntimeRecord,
+    JOURNAL_NAME, LaunchState, LockedStore, OUTCOME_NAME, RESTORE_READY_NAME, Recovery,
+    RuntimeIdentity, RuntimeRecord,
 };
 use crate::host::supervisor::{self, Reattached, StopOutcome, Vmm, VmmCommand};
 use crate::host::template::Retirement;
@@ -186,7 +186,6 @@ fn assert_unlaunched(fixture: &Fixture, acquired: &Acquired) {
 /// leaves for its release.
 pub(super) fn assert_released(sandbox: &Path) {
     for name in [
-        CLONE_SCRATCH_NAME,
         CLONE_ACTIVATION_NAME,
         CLONE_PROGRESS_NAME,
         CLONE_FAILURE_NAME,
@@ -751,9 +750,10 @@ fn a_clone_restores_its_leased_snapshot_with_its_devices_and_activation_record()
     );
     assert_eq!(made.working_dir, sandbox);
     assert_eq!(made.inherited, 0);
-    // It restores the generation's snapshot in place, with the clone's devices: its image, and
-    // the sparse file of its `scratch` block device. On Linux, its control console listens beside
-    // the snapshot, at the socket that the lease reserved, named after the launch.
+    // It restores the generation's snapshot in place, with the clone's devices: its image, and its
+    // `scratch` block device, which an upper in RAM declares absent, so that OpenVMM attaches it
+    // with no file. On Linux, its control console listens beside the snapshot, at the socket that
+    // the lease reserved, named after the launch.
     let endpoint = restoring.starting().endpoint().to_owned();
     let ready = restoring.ready_endpoint().to_owned();
     let socket = fixture.store.clone_socket_path(&lease);
@@ -778,7 +778,6 @@ fn a_clone_restores_its_leased_snapshot_with_its_devices_and_activation_record()
     }
     assert_eq!(restoring.starting().journal().endpoint(), endpoint);
     let distro = format!("distro:file:{},ro", shown(&image));
-    let scratch = format!("scratch:file:{}", shown(&sandbox.join(CLONE_SCRATCH_NAME)));
     let (profile, processors) = (key.cpu_profile(), key.processors().to_string());
     let listen = format!("listen={endpoint}");
     let report = sandbox.join(OUTCOME_NAME);
@@ -787,8 +786,7 @@ fn a_clone_restores_its_leased_snapshot_with_its_devices_and_activation_record()
         "microvm",
         "--microvm-sandbox-block",
         &distro,
-        "--microvm-sandbox-block",
-        &scratch,
+        "--restore-absent-scratch",
         "--single-process",
         "--hypervisor",
         key.hypervisor().as_str(),
@@ -1034,7 +1032,8 @@ fn a_clone_of_a_template_with_a_nic_restores_its_policy_without_its_address() {
     vmm.reference = Some(restoring.starting().process().reference().clone());
     // The devices end with the template's network, as its key records it, the arguments of the
     // network's policy, without the guest's address, which OpenVMM takes from the snapshot, and
-    // refuses beside it.
+    // refuses beside it: after the image, and the clone's scratch, which its upper in RAM
+    // declares absent.
     let mut policy = attached.openvmm_arguments().unwrap();
     assert_eq!(template, policy);
     assert_eq!(policy[..2], ["--net", "10.0.0.2/24"]);
@@ -1044,7 +1043,8 @@ fn a_clone_of_a_template_with_a_nic_restores_its_policy_without_its_address() {
         .iter()
         .position(|argument| argument == "--single-process")
         .unwrap();
-    assert_eq!(arguments[6..devices], policy);
+    assert_eq!(arguments[4], "--restore-absent-scratch");
+    assert_eq!(arguments[5..devices], policy);
     assert!(!arguments.iter().any(|argument| argument == "--net"));
 }
 
@@ -1073,11 +1073,20 @@ fn a_clone_on_a_scratch_image_passes_its_claim_to_its_vmm() {
     vmm.reference = Some(reference.clone());
     vmm.started();
     // The VMM opens the image at its path, as the `scratch` block device, and inherits the one
-    // descriptor or handle that holds the claim, which no argument names.
+    // descriptor or handle that holds the claim, which no argument names. The scratch is not
+    // absent.
     let made = made.take().unwrap();
     assert_eq!(made.inherited, 1);
     let device = format!("scratch:file:{}", shown(&scratch));
     assert!(made.arguments.contains(&device), "{:?}", made.arguments);
+    assert!(
+        !made
+            .arguments
+            .iter()
+            .any(|argument| argument == "--restore-absent-scratch"),
+        "{:?}",
+        made.arguments
+    );
     // On Windows, no handle that may write the image is open any more, so OpenVMM's open, which
     // shares no writing, succeeds.
     #[cfg(windows)]
@@ -1132,8 +1141,9 @@ fn a_clone_with_an_export_binds_it_to_its_template_s_dormant_filesystem_slot() {
     let reference = restoring.starting().process().reference().clone();
     vmm.reference = Some(reference.clone());
     vmm.started();
-    // The export follows the clone's block devices: its directory on the dormant slot, writable,
-    // since the guest writes a directory in it, to which the export narrows the guest's writes.
+    // The clone in RAM declares its scratch absent, and the export follows the clone's block
+    // device: its directory on the dormant slot, writable, since the guest writes a directory in
+    // it, to which the export narrows the guest's writes.
     let data = &export.children[0].root;
     let mount = format!("{},{},rw", filesystem::GUEST_EXPORT, data.display());
     let work = data.join("work");
@@ -1143,8 +1153,9 @@ fn a_clone_with_an_export_binds_it_to_its_template_s_dormant_filesystem_slot() {
         .position(|argument| argument == "--single-process")
         .unwrap();
     assert_eq!(
-        arguments[6..devices],
+        arguments[4..devices],
         [
+            "--restore-absent-scratch",
             "--mount",
             mount.as_str(),
             "--mount-write",
@@ -1361,33 +1372,6 @@ fn a_clone_launches_only_as_the_launch_that_its_durable_binding_reserves() {
         message.starts_with(&format!(
             "the template's generation {} restores under the runtime that captured it",
             fixture.generation.generation()
-        )),
-        "{message}"
-    );
-    assert_unlaunched(&fixture, &first);
-    // Nor a plan in RAM whose scratch device's file a later plan of the clone, which failed,
-    // removed: OpenVMM would find no file at the path of its scratch device.
-    let stale = fixture.plan(&mut first, &request, NO_CONTENT).unwrap();
-    let failing = Access {
-        create: &|path: &Path| -> io::Result<File> {
-            fs::remove_file(path)?;
-            Err(io::Error::other("the disk failed"))
-        },
-        ..NO_CONTENT
-    };
-    assert!(fixture.plan(&mut first, &request, failing).is_err());
-    let sparse = first.locked.clone_scratch_path();
-    assert!(!exists(&sparse));
-    let (kind, message) = refused_at(
-        stale.launch_with(&mut first, openvmm, &runtime, hooks),
-        Stage::Launch,
-        Evidence::HostFailure,
-    );
-    assert_eq!(kind, ErrorKind::Unavailable, "{message}");
-    assert!(
-        message.starts_with(&format!(
-            "the scratch device of the clone {}, which the clone's plan created, cannot be opened",
-            sparse.display()
         )),
         "{message}"
     );

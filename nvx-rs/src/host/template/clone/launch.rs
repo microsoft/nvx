@@ -14,20 +14,18 @@ use super::failure::{
     host_evidence,
 };
 use super::records::{End, ProgressLog, Recorder, Tracker, abandon};
-use super::{ClonePlan, CloneUpper, MIB, Mismatch, SPARSE_WHAT, check_geometry};
+use super::{ClonePlan, CloneUpper, MIB};
 use crate::activation::ActivationRecord;
 use crate::error::{Error, ErrorKind, Result};
 use crate::host::artifacts;
 use crate::host::filesystem;
 use crate::host::platform::{self, ReadyListener};
+use crate::host::sandbox::SandboxPlan;
 use crate::host::sandbox::distro::CheckedDistro;
-use crate::host::sandbox::{SandboxPlan, block_geometry};
 use crate::host::store::files::write_private;
-use crate::host::store::regular::open_regular;
 use crate::host::store::{LockedStore, Recovery, RuntimeIdentity};
 use crate::host::supervisor::{self, Inherited, Starting, VmmCommand};
 use crate::host::template::key::TemplateKey;
-use crate::host::template::manifest::BlockGeometry;
 use crate::host::template::store::{Acquired, Lease, SOCKET_PATH_LIMIT};
 use crate::protocol::{CAPABILITY_LEN, HostMap};
 
@@ -128,9 +126,14 @@ impl ClonePlan {
     /// pipe, as every launch does. [`Starting::endpoint`] returns it.
     ///
     /// The VMM's arguments are those of the clone's devices: the microVM machine, the clone's
-    /// image as the read-only `distro` block device and the file of its `scratch` block device,
-    /// which OpenVMM opens at their paths, as [Block devices by
-    /// path](crate::host::template::Store#block-devices-by-path) describes, and the template's
+    /// image as the read-only `distro` block device, which OpenVMM opens at its path, as [Block
+    /// devices by path](crate::host::template::Store#block-devices-by-path) describes, and presents
+    /// at the capacity that the template's placeholder fixed, reading zeros past the end of a
+    /// shorter image; for an upper on a scratch image, the image as the `scratch` block device,
+    /// which OpenVMM opens alike, and for an upper in RAM, `--restore-absent-scratch`, which
+    /// declares the template's scratch absent, so that OpenVMM attaches it with no file, at the
+    /// geometry that the template recorded, as the template's guest negotiated it: its reads return
+    /// zeros and its writes fail, and the clone's guest never uses it; and the template's
     /// network, as its key records it, [`TemplateKey::network_arguments`], the policy of the
     /// template's NIC, unchanged, if it has one, without `--net` and the guest's address, which
     /// OpenVMM takes from the snapshot. The clone's export, if it has one, follows, bound to the
@@ -327,7 +330,7 @@ impl ClonePlan {
         // On Windows, this closes the claim's handle, and keeps the image's guard.
         let claim = match upper {
             CloneUpper::Scratch(checked) => Some(checked.into_file()),
-            CloneUpper::Tmpfs { .. } => None,
+            CloneUpper::Tmpfs => None,
         };
         // No spawn passes a descriptor of a standard stream, on which the claim is if the caller
         // had closed that stream: it moves above them, with its open file description.
@@ -415,9 +418,8 @@ impl ClonePlan {
 
     /// Refuses a launch of the plan through `lease` and `locked` that is not the one that the
     /// plan's lease reserves, or whose binding the sandbox does not record, one under `runtime`
-    /// that the template does not take, one of a plan in RAM whose scratch device's file is gone,
-    /// and one of an export whose host objects changed since its plan found them, as
-    /// [`launch`](Self::launch) describes, without writing anything.
+    /// that the template does not take, and one of an export whose host objects changed since its
+    /// plan found them, as [`launch`](Self::launch) describes, without writing anything.
     fn check_launch(
         &self,
         lease: &Lease,
@@ -489,9 +491,6 @@ impl ClonePlan {
                     self.key.runtime()
                 )),
             ));
-        }
-        if let CloneUpper::Tmpfs { path } = &self.upper {
-            check_sparse(path, self.key.scratch())?;
         }
         if cfg!(target_os = "linux")
             && let Some(socket) = locked.reserved_socket()
@@ -620,41 +619,16 @@ impl ClonePlan {
     }
 }
 
-/// Refuses the file of the `scratch` block device of a clone whose upper is in RAM, at `path`,
-/// which the clone's plan created, unless it is still a regular file that presents the template's
-/// scratch geometry, `scratch`: OpenVMM opens it by its path, and a later plan under the same
-/// acquisition replaces it, or removes it if that plan fails. The file is the host's, as is the
-/// evidence of its refusal.
-fn check_sparse(path: &Path, scratch: BlockGeometry) -> Result<(), Fault> {
-    let shown = path.display();
-    let file = open_regular(path).map_err(|error| {
-        Fault::host(
-            Error::unavailable(format!(
-                "the {SPARSE_WHAT} {shown}, which the clone's plan created, cannot be opened, as \
-                 when a later plan of the clone replaced it and failed"
-            ))
-            .with_source(error),
-        )
-    })?;
-    check_geometry(
-        block_geometry(&file, path, SPARSE_WHAT).map_err(|error| match error.kind() {
-            // The sandbox's filesystem presents a geometry that OpenVMM refuses.
-            crate::ErrorKind::Unsupported => Fault::new(Evidence::IncompatibleHost, error),
-            _ => Fault::host(error),
-        })?,
-        scratch,
-        &format!("the {SPARSE_WHAT} {shown}"),
-        "scratch",
-        Mismatch::HOST,
-    )
-}
-
 /// Returns OpenVMM's arguments of the devices of a clone's restore: those of the clone's devices,
-/// `devices`, which [`SandboxPlan::openvmm_arguments`] renders, then the template's network, as
-/// `key` records it, [`TemplateKey::network_arguments`], without `--net` and the guest's address,
-/// which OpenVMM takes from the snapshot, and refuses beside it.
+/// `devices`, which [`SandboxPlan::openvmm_arguments`] renders, with `--restore-absent-scratch`
+/// for an upper in RAM, whose plan renders no `scratch` block device, then the template's network,
+/// as `key` records it, [`TemplateKey::network_arguments`], without `--net` and the guest's
+/// address, which OpenVMM takes from the snapshot, and refuses beside it.
 fn device_arguments(devices: &SandboxPlan, key: &TemplateKey) -> Result<Vec<String>> {
     let mut arguments = devices.openvmm_arguments()?;
+    if devices.upper().scratch_path().is_none() {
+        arguments.push("--restore-absent-scratch".to_owned());
+    }
     // A key's network attaches its NIC first, with `--net` and the guest's address.
     arguments.extend_from_slice(key.network_arguments().get(2..).unwrap_or_default());
     Ok(arguments)
