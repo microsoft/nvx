@@ -413,7 +413,8 @@ fn a_removal_is_refused_while_a_vm_or_a_launch_is_recorded() {
     }
 }
 
-/// Writes the files that a clone keeps of its launch in the sandbox `dir`, its binding included.
+/// Writes the files that a clone keeps of its launch in the sandbox `dir`, its binding included,
+/// and the file of the scratch device that an earlier version left for a clone in RAM.
 fn write_clone_files(dir: &Path) {
     for name in [
         CLONE_BINDING_NAME,

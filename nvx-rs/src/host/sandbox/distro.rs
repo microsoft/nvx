@@ -223,9 +223,10 @@ impl CheckedDistro {
     /// its `st_blksize`, on Linux, of 4096 bytes on Windows, and of the logical block size on
     /// other hosts, which must be a power of two of at least 512 bytes.
     ///
-    /// It reads the file's metadata alone. A restore of a template compares the geometry of each
-    /// of its block devices with the one that the template recorded, so the image of a clone must
-    /// present the geometry of the template's `distro`, as
+    /// It reads the file's metadata alone. A restore of a template presents its `distro` at the
+    /// geometry that the template recorded, the capacity of every clone's image, over an image
+    /// that may be shorter, so the image of a clone must be no longer than the template's
+    /// `distro`, with the same logical and physical block sizes, as
     /// [`ClonePlan`](crate::host::template::ClonePlan) checks before the clone's launch.
     ///
     /// Fails with [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported) for a length or a

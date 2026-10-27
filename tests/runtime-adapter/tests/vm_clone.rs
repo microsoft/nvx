@@ -5,7 +5,7 @@
 //!
 //! Each scenario captures a [`Template`] of its own, with 256 MiB of RAM, of a capacity of
 //! 1 GiB, in a template store of its own, as `vm_template` does, of the platform's copy of the
-//! fixtures' Ubuntu EROFS image, or of a GPT [`Disk`] of the image's length, without a NIC unless
+//! fixtures' Ubuntu EROFS image, or of a GPT [`Disk`] longer than the image, without a NIC unless
 //! the scenario gives it a [`Network`], with the guest at `192.0.2.2/24`, and starts its
 //! clones, each in a sandbox store of its own, which stages the clone's images, as a launch's
 //! does: that copy, or a GPT disk, and for a clone over a scratch image, a copy of the scratch
@@ -23,16 +23,21 @@
 //!   and than each other's. The guest of a GPT clone rereads its disk's partition table before it
 //!   assembles the root, since its kernel created the partitions of the placeholder, so each
 //!   clone's root stacks its own disk's layers, from the partitions that its disk's table names.
-//!   A disk whose first partition is larger than the clone's bound ends the clone before it is
-//!   ready.
+//!   The placeholder is longer than the platform's image, so every clone's image is shorter than
+//!   the capacity that its restore presents: the platform's image, a GPT disk of its length, and
+//!   one as short as its layout allows. The guest reads each image's device to the capacity's end,
+//!   past the image's. The restore of a clone in RAM declares the template's scratch absent, so no
+//!   file backs the clone's scratch device, which the guest still finds, and reads to its end, at
+//!   the template's scratch length. A disk whose first partition is larger than the clone's bound
+//!   ends the clone before it is ready.
 //! - The store and NVX's plan refuse a clone that the template cannot serve before any VMM starts,
-//!   each a failure of the request, as NVX attributes it by its evidence, with no VM: an image or a
-//!   scratch image of another length than the template's, an image of a geometry that OpenVMM
-//!   refuses, a memory target beyond its capacity or of a part of a block. The start then releases
-//!   the lease, as it does once the adapter refuses images that the sandbox does not stage. A
-//!   generation whose key is gone fails the plan too, as the template's failure, and the start
-//!   quarantines it through its tombstone, so that the store refuses a later start's selection of
-//!   it, as ineligible.
+//!   each a failure of the request, as NVX attributes it by its evidence, with no VM: an image of
+//!   either format longer than the template's placeholder, a scratch image of another length than
+//!   the template's scratch, an image of a geometry that OpenVMM refuses, a memory target beyond
+//!   its capacity or of a part of a block. The start then releases the lease, as it does once the
+//!   adapter refuses images that the sandbox does not stage. A generation whose key is gone fails
+//!   the plan too, as the template's failure, and the start quarantines it through its tombstone,
+//!   so that the store refuses a later start's selection of it, as ineligible.
 //! - A clone whose activation fails ends before it is ready, with the status of the failure's
 //!   class, which attributes the failure, and the VMM's exit: a scratch image that holds no ext4
 //!   file system, a journal that the clone's record forbids, a workload identity whose account the
@@ -358,6 +363,10 @@ const DNS_REACH: &str = "server=$(sed -n 's/^nameserver //p' /etc/resolv.conf); 
 const REACH: &str = "gateway=$1; shift; for target in \"$@\"; do \
     nc -z -w 2 \"$gateway\" \"${target#*:}\" </dev/null >/dev/null 2>&1; \
     echo \"${target%%:*} $?\"; done";
+/// How much longer than the platform's image the GPT placeholder that [`Template::of_disk`]
+/// captures is, so that the image of each of the template's clones, the platform's image or a GPT
+/// disk of its length or shorter, is shorter than the capacity that the clone's restore presents.
+const PLACEHOLDER_SLACK: u64 = 16 * MIB;
 /// The placeholder of the template of the scenarios of GPT disks: a disk of two layers, whose
 /// partitions start at multiples of 1 MiB.
 const PLACEHOLDER: Disk = Disk {
@@ -416,10 +425,11 @@ const ETC_FILE: Disk = Disk {
     top: &[("etc", b"not a directory\n")],
 };
 
-/// A GPT disk of the scenarios, of the length of the platform's image, which
-/// [`Template::of_disk`] captures as the template's placeholder, or [`Template::disk`] writes for
-/// a clone. Its partitions follow each other, each at a multiple of its alignment: its first
-/// partition, then a layer, a [`small_layer`], in each of the others, empty but the top one.
+/// A GPT disk of the scenarios, which [`Template::of_disk`] captures as the template's
+/// placeholder, longer than the platform's image, or [`Template::disk`] writes for a clone, of the
+/// image's length or shorter. Its partitions follow each other, each at a multiple of its
+/// alignment: its first partition, then a layer, a [`small_layer`], in each of the others, empty
+/// but the top one.
 struct Disk {
     /// The disk's GUID, which the guest expects of it.
     guid: &'static str,
@@ -438,8 +448,10 @@ struct Disk {
 }
 
 impl Disk {
-    /// Writes the disk at `path`, of `length` bytes, a file that no one else may change.
-    fn write(&self, path: &Path, length: u64) {
+    /// Writes the disk at `path`, of `length` bytes, or, for `None`, as short as its layout
+    /// allows, its partitions and its backup array and header alone, a file that no one else may
+    /// change.
+    fn write(&self, path: &Path, length: Option<u64>) {
         let (layer, top) = (small_layer(&[], &[]), small_layer(self.top, &[]));
         let partitions = self
             .partitions
@@ -466,7 +478,7 @@ impl Disk {
             guid: self.guid,
             partitions: &partitions,
             alignment: self.alignment,
-            length: Some(length),
+            length,
         };
         assert_eq!(gpt::write_disk(path, &layout), self.first);
     }
@@ -676,7 +688,7 @@ fn write_network(directory: &Path, network: Network, guest: &str) -> PathBuf {
 
 /// The template of a scenario: the generation that a template store of its own captured, in the
 /// scenario's sandbox, of the platform's copy of the fixtures' Ubuntu EROFS image, or of a GPT
-/// [`Disk`] of its length, with [`TEMPLATE_MEMORY`] MiB of RAM, of a capacity of
+/// [`Disk`] longer than it, with [`TEMPLATE_MEMORY`] MiB of RAM, of a capacity of
 /// [`TEMPLATE_CAPACITY`] MiB, and a NIC exactly when its [`Network`] lets something through.
 struct Template {
     /// The scenario's sandbox, whose store is the template store, until the template drops.
@@ -686,6 +698,9 @@ struct Template {
     image: PathBuf,
     /// The image's identity.
     identity: String,
+    /// The placeholder's length, in bytes: the capacity of every clone's image, which a restore
+    /// presents over it.
+    capacity: u64,
     /// The fixtures.
     fixtures: Fixtures,
 }
@@ -702,8 +717,8 @@ impl Template {
     }
 
     /// Creates the sandbox of the scenario `name`, stages the platform's copy of the image, and
-    /// captures the template of the GPT disk `placeholder`, of the image's length, which the
-    /// platform stages beside it, as [`create`](Self::create) does.
+    /// captures the template of the GPT disk `placeholder`, [`PLACEHOLDER_SLACK`] longer than the
+    /// image, which the platform stages beside it, as [`create`](Self::create) does.
     fn of_disk(name: &str, placeholder: &Disk) -> Self {
         Self::capture(name, Some(placeholder), None)
     }
@@ -716,21 +731,25 @@ impl Template {
     }
 
     /// Creates the sandbox of the scenario `name`, stages the platform's copy of the image, and
-    /// captures the template of the GPT disk `placeholder`, if any, and of the image otherwise,
-    /// with the network `network`, if any, with the guest at [`GUEST_NETWORK`].
+    /// captures the template of the GPT disk `placeholder`, if any, [`PLACEHOLDER_SLACK`] longer
+    /// than the image, and of the image otherwise, with the network `network`, if any, with the
+    /// guest at [`GUEST_NETWORK`].
     fn capture(name: &str, placeholder: Option<&Disk>, network: Option<Network>) -> Self {
         let mut sandbox = Sandbox::new(name);
         let fixtures = Fixtures::find();
         let image = stage_platform(&sandbox.root.join("platform"), &fixtures);
-        let (distro, identity) = match placeholder {
-            None => (erofs(&image), fixtures.identity.as_str()),
+        let length = fs::metadata(&image).unwrap().len();
+        let (distro, identity, capacity) = match placeholder {
+            None => (erofs(&image), fixtures.identity.as_str(), length),
             Some(disk) => {
                 let path = image.with_file_name("placeholder.gpt");
-                disk.write(&path, fs::metadata(&image).unwrap().len());
-                (prefixed("gpt:", &path), disk.guid)
+                let capacity = length + PLACEHOLDER_SLACK;
+                disk.write(&path, Some(capacity));
+                (prefixed("gpt:", &path), disk.guid, capacity)
             }
         };
-        let (memory, capacity) = (TEMPLATE_MEMORY.to_string(), TEMPLATE_CAPACITY.to_string());
+        let memory = TEMPLATE_MEMORY.to_string();
+        let memory_capacity = TEMPLATE_CAPACITY.to_string();
         let network = network.map(|network| write_network(&sandbox.root, network, GUEST_NETWORK));
         let mut options = vec![
             OsStr::new("--distro"),
@@ -740,7 +759,7 @@ impl Template {
             OsStr::new("--memory"),
             OsStr::new(&memory),
             OsStr::new("--memory-capacity"),
-            OsStr::new(&capacity),
+            OsStr::new(&memory_capacity),
         ];
         if let Some(network) = &network {
             options.extend([OsStr::new("--network"), network.as_os_str()]);
@@ -752,6 +771,7 @@ impl Template {
             identity: fixtures.identity.clone(),
             sandbox: Some(sandbox),
             image,
+            capacity,
             fixtures,
         }
     }
@@ -814,8 +834,14 @@ impl Template {
     /// Writes the GPT disk `disk`, of the length of the platform's image, which a clone restores
     /// in place of the template's placeholder, beside the image, at `name`, and returns its path.
     fn disk(&self, name: &str, disk: &Disk) -> PathBuf {
+        self.disk_of(name, disk, Some(fs::metadata(&self.image).unwrap().len()))
+    }
+
+    /// Writes the GPT disk `disk`, of `length` bytes, or, for `None`, as short as its layout
+    /// allows, as [`disk`](Self::disk) does, and returns its path.
+    fn disk_of(&self, name: &str, disk: &Disk, length: Option<u64>) -> PathBuf {
         let path = self.image.with_file_name(name);
-        disk.write(&path, fs::metadata(&self.image).unwrap().len());
+        disk.write(&path, length);
         path
     }
 
@@ -1338,6 +1364,44 @@ impl Cloned {
         let _ = policy;
     }
 
+    /// Checks the arguments with which NVX started the clone's VMM, on Linux, as
+    /// [`assert_vmm_mount`](Self::assert_vmm_mount) does, for a clone over `upper`: the image as
+    /// the `distro` sandbox block device, then, over a scratch image, the image as the `scratch`
+    /// one, or, in RAM, none, but `--restore-absent-scratch`, which declares the template's
+    /// scratch absent, so that OpenVMM attaches it with no file.
+    fn assert_vmm_scratch(&self, upper: Upper<'_>) {
+        #[cfg(target_os = "linux")]
+        {
+            let arguments = self.vmm_arguments();
+            let roles = arguments
+                .windows(2)
+                .filter(|pair| pair[0] == "--microvm-sandbox-block")
+                .map(|pair| pair[1].split(':').next().unwrap_or_default())
+                .collect::<Vec<_>>();
+            let absent = arguments
+                .iter()
+                .any(|argument| argument == "--restore-absent-scratch");
+            let expected = match upper {
+                Upper::Ram => (vec!["distro"], true),
+                _ => (vec!["distro", "scratch"], false),
+            };
+            assert_eq!((roles, absent), expected, "{arguments:?}");
+        }
+        #[cfg(not(target_os = "linux"))]
+        let _ = upper;
+    }
+
+    /// Checks that no file of the clone's sandbox is as long as the template's scratch, so that
+    /// none backs the scratch device of a clone in RAM, whose restore declares the template's
+    /// scratch absent.
+    fn assert_scratch_unbacked(&self) {
+        let long = files_below(&self.sandbox.root)
+            .into_iter()
+            .filter(|(_, length, _)| *length >= DEFAULT_SCRATCH_LENGTH)
+            .collect::<Vec<_>>();
+        assert!(long.is_empty(), "{long:?}");
+    }
+
     /// Returns the arguments with which NVX started the clone's VMM, which the test, as root,
     /// reads on Linux.
     #[cfg(target_os = "linux")]
@@ -1601,20 +1665,20 @@ fn names(path: &Path) -> Vec<String> {
     names
 }
 
-/// Returns each file below the directory `snapshot`, by its path in it, with its length and its
+/// Returns each file below the directory `directory`, by its path in it, with its length and its
 /// modification time.
-fn snapshot_files(snapshot: &Path) -> Vec<(PathBuf, u64, SystemTime)> {
+fn files_below(directory: &Path) -> Vec<(PathBuf, u64, SystemTime)> {
     let mut files = Vec::new();
-    let mut directories = vec![snapshot.to_owned()];
-    while let Some(directory) = directories.pop() {
-        for entry in fs::read_dir(&directory).unwrap() {
+    let mut directories = vec![directory.to_owned()];
+    while let Some(below) = directories.pop() {
+        for entry in fs::read_dir(&below).unwrap() {
             let entry = entry.unwrap();
             let metadata = entry.metadata().unwrap();
             if metadata.is_dir() {
                 directories.push(entry.path());
                 continue;
             }
-            let path = entry.path().strip_prefix(snapshot).unwrap().to_owned();
+            let path = entry.path().strip_prefix(directory).unwrap().to_owned();
             files.push((path, metadata.len(), metadata.modified().unwrap()));
         }
     }
@@ -1795,6 +1859,34 @@ fn disks(fact: &str) -> BTreeMap<String, u64> {
         .collect()
 }
 
+/// Checks the disks of a clone, as its `devices` and `read-disks` probes found them: its image's,
+/// read-only, at `capacity`, the length of the template's placeholder, and its scratch device,
+/// writable, at the template's scratch length, each of which the guest read to its end, whatever
+/// the length of the image, and whether a file backs the scratch device.
+fn assert_capacity(facts: &Printed, capacity: u64) {
+    let read = disks(&facts["read-disks.disks"]);
+    let mut found = facts["devices.disks"]
+        .split(' ')
+        .map(|disk| {
+            let parts = disk.split(':').collect::<Vec<_>>();
+            let &[name, sectors, access] = parts.as_slice() else {
+                panic!("{disk:?} in {facts:?}");
+            };
+            let length = sectors.parse::<u64>().unwrap() * SECTOR;
+            (access, length, read.get(name).copied())
+        })
+        .collect::<Vec<_>>();
+    found.sort_unstable();
+    assert_eq!(
+        found,
+        [
+            ("ro", capacity, Some(capacity)),
+            ("rw", DEFAULT_SCRATCH_LENGTH, Some(DEFAULT_SCRATCH_LENGTH))
+        ],
+        "{facts:?}"
+    );
+}
+
 /// Returns a boot of this host other than `boot`.
 fn other_boot(boot: BootId) -> BootId {
     let text = boot.to_string();
@@ -1963,7 +2055,7 @@ fn limits() -> Limits {
 fn one_generation_serves_clones_of_each_upper_and_memory_target() {
     let template = Template::create("cl-reuse");
     let snapshot = template.payload().join(SNAPSHOT_NAME);
-    let captured = snapshot_files(&snapshot);
+    let captured = files_below(&snapshot);
 
     // Two clones at once: one over a scratch image, at the template's RAM, which trusts its
     // lowers, as the guest does by default, and one in RAM, at twice the template's RAM, which
@@ -2044,16 +2136,19 @@ fn one_generation_serves_clones_of_each_upper_and_memory_target() {
 
     // The clones changed nothing of the generation's snapshot, which they restored in place, and
     // left nothing in its payload.
-    assert_eq!(snapshot_files(&snapshot), captured);
+    assert_eq!(files_below(&snapshot), captured);
     assert_payload(&template, false);
 }
 
 #[test]
 #[ignore = "boots VMs; see the module documentation for what they need"]
 fn one_generation_serves_clones_of_either_format_over_either_upper() {
+    // The placeholder is longer than the platform's image, so every clone's image is shorter than
+    // the capacity that its restore presents: the platform's image, a GPT disk of its length, and
+    // one as short as its layout allows.
     let template = Template::of_disk("cl-gpt", &PLACEHOLDER);
     let one = template.disk("one.gpt", &ONE_LAYER);
-    let three = template.disk("three.gpt", &THREE_LAYERS);
+    let three = template.disk_of("three.gpt", &THREE_LAYERS, None);
 
     // At once: the platform's image over a scratch image and in RAM, and two GPT disks, of other
     // layouts than the placeholder's and than each other's, one in RAM, and one over a scratch
@@ -2090,13 +2185,27 @@ fn one_generation_serves_clones_of_either_format_over_either_upper() {
     assert_eq!(template.leases().len(), clones.len());
     assert_payload(&template, true);
     for (image, upper, cloned) in &mut clones {
-        let facts = cloned.probe(&["devices", "mounts", "contents", "first-partition"]);
+        let probes = [
+            "devices",
+            "mounts",
+            "contents",
+            "first-partition",
+            "read-disks",
+        ];
+        let facts = cloned.probe(&probes);
         match image {
             Some(Image::Gpt(disk, _)) => assert_gpt_root(&facts, disk, *upper),
             _ => {
                 assert_root(&facts, *upper, true);
                 assert_eq!(facts["first-partition.length"], "none", "{facts:?}");
             }
+        }
+        // The restore presents the capacity over each image, and the template's scratch over the
+        // scratch image, or, in RAM, with no file.
+        assert_capacity(&facts, template.capacity);
+        cloned.assert_vmm_scratch(*upper);
+        if *upper == Upper::Ram {
+            cloned.assert_scratch_unbacked();
         }
     }
     for (_, _, cloned) in &mut clones {
@@ -2124,11 +2233,14 @@ fn a_start_refuses_what_the_template_cannot_serve_before_any_vmm_starts() {
     let template = Template::create("cl-refuse");
     let length = fs::metadata(&template.image).unwrap().len();
     let longer = template.variant("longer.erofs", length + 4096);
-    let shorter = template.variant("shorter.erofs", length - 4096);
+    let longer_disk = template.disk_of("longer.gpt", &ONE_LAYER, Some(length + 4096));
     // OpenVMM attaches block devices of whole 512-byte sectors alone.
     let ragged = template.variant("ragged.erofs", length + 100);
     let placeholder = |found: u64| {
-        format!("is {found} bytes long, not the {length} bytes of the template's placeholder")
+        format!(
+            "is {found} bytes long, longer than the template's placeholder, whose {length} bytes \
+             are the capacity of every clone's image"
+        )
     };
     let resized = 2 * DEFAULT_SCRATCH_LENGTH;
     let beyond = ["--memory", "2048"];
@@ -2144,12 +2256,12 @@ fn a_start_refuses_what_the_template_cannot_serve_before_any_vmm_starts() {
         ),
         (
             StartOf {
-                image: Some(Image::Erofs(&shorter)),
+                image: Some(Image::Gpt(&ONE_LAYER, &longer_disk)),
                 upper: Upper::Scratch,
                 ..StartOf::default()
             },
             "supplied-length",
-            placeholder(length - 4096),
+            placeholder(length + 4096),
         ),
         (
             StartOf {
@@ -2867,7 +2979,7 @@ fn a_clone_whose_vm_exits_once_a_stop_found_it_fails_before_its_lease_is_release
 fn a_tombstone_leaves_the_running_clone_of_its_generation_to_its_lease() {
     let template = Template::create("cl-tomb");
     let snapshot = template.payload().join(SNAPSHOT_NAME);
-    let captured = snapshot_files(&snapshot);
+    let captured = files_below(&snapshot);
     let start = StartOf {
         upper: Upper::Scratch,
         ..StartOf::default()
@@ -2901,7 +3013,7 @@ fn a_tombstone_leaves_the_running_clone_of_its_generation_to_its_lease() {
     assert!(template.leases().is_empty());
 
     // The tombstone changed nothing of the generation's snapshot.
-    assert_eq!(snapshot_files(&snapshot), captured);
+    assert_eq!(files_below(&snapshot), captured);
     assert_payload(&template, false);
 }
 

@@ -2,7 +2,7 @@
 //! NVX's template store leases to a sandbox, as `runtime-adapter-host start` asks.
 //!
 //! A [`Request`] holds what the host program's options choose of a clone: its image, an EROFS
-//! layer or a GPT disk of the length of the template's placeholder, its upper, on an ext4 scratch
+//! layer or a GPT disk no longer than the template's placeholder, its upper, on an ext4 scratch
 //! image or in RAM, its memory target, the workload identity as which its executions run, its
 //! overlay mode, its scratch's journal policy, the bound of a GPT disk's first partition, the
 //! machine ID that its executions see, the image's own or one that its guest generates, the host
@@ -68,7 +68,8 @@ const CLOCKS: [HostClock; 2] = [HostClock::LinuxBoottime, HostClock::WindowsInte
 /// What the host program asks of a clone.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Request {
-    /// The image, which the guest expects of the template's placeholder's length.
+    /// The image, which the guest expects no longer than the template's placeholder, whose length
+    /// is the capacity that the clone's restore presents.
     pub distro: PathBuf,
     /// The image's format.
     pub format: ImageFormat,

@@ -841,7 +841,8 @@ fn a_release_makes_the_removal_of_its_binding_durable_before_it_removes_its_reco
     let payload = store.payload_dir(generation);
     let socket = store.clone_socket_path(&lease);
     // Each sync notes its directory, and whether any file that the clone kept of its launch, the
-    // control socket of its VMM included, the binding, and the record existed then.
+    // control socket of its VMM and the scratch file that an earlier version left for a clone in
+    // RAM included, the binding, and the record existed then.
     let kept = [
         CLONE_SCRATCH_NAME,
         CLONE_ACTIVATION_NAME,
@@ -897,9 +898,9 @@ fn a_release_makes_the_removal_of_its_binding_durable_before_it_removes_its_reco
     assert!(!record.exists());
     assert!(fs::symlink_metadata(&socket).is_err());
     // A release under the lock that acquired the lease ends the lock's reservation before it
-    // removes the clone's files, such as the scratch device's file of an upper in RAM, which a
-    // launch of the clone's plan needs, so that one that fails after their removal leaves no
-    // launch to begin.
+    // removes the clone's files, such as the record of its failure, which ends the clone's
+    // launches until the release, so that one that fails after their removal leaves no launch to
+    // begin.
     let Acquired {
         lease: again,
         mut locked,
@@ -913,8 +914,8 @@ fn a_release_makes_the_removal_of_its_binding_durable_before_it_removes_its_reco
         )
         .unwrap();
     assert_eq!(locked.reserved(), Some(again.launch()));
-    let scratch = sandbox.join(CLONE_SCRATCH_NAME);
-    fs::write(&scratch, b"").unwrap();
+    let failure = sandbox.join(CLONE_FAILURE_NAME);
+    fs::write(&failure, b"").unwrap();
     // A release that cannot make the socket's removal durable keeps the binding, and the lease.
     if cfg!(unix) {
         let error = store
@@ -932,7 +933,7 @@ fn a_release_makes_the_removal_of_its_binding_durable_before_it_removes_its_reco
         assert_eq!(cause(&error), "the disk failed");
         assert_eq!(binding(&sandbox), Some(again.clone()));
         assert_eq!(locked.reserved(), None);
-        assert!(fs::symlink_metadata(&scratch).is_err());
+        assert!(fs::symlink_metadata(&failure).is_err());
     }
     // A release that cannot make the binding's removal durable keeps the record, which a
     // retirement removes once no binding names it.
@@ -942,7 +943,7 @@ fn a_release_makes_the_removal_of_its_binding_durable_before_it_removes_its_reco
         })
         .unwrap_err();
     assert_eq!(locked.reserved(), None);
-    assert!(fs::symlink_metadata(&scratch).is_err());
+    assert!(fs::symlink_metadata(&failure).is_err());
     drop(locked);
     assert_eq!(
         error.message(),

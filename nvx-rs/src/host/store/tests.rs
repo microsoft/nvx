@@ -408,7 +408,8 @@ fn the_files_that_a_clone_kept_of_its_launch_go_and_nothing_else() {
     let (_directory, store) = store();
     let locked = store.lock(None).unwrap();
     for path in [
-        store.clone_scratch_path(),
+        // The file of the scratch device that an earlier version left for a clone in RAM.
+        store.dir().join(CLONE_SCRATCH_NAME),
         store.clone_activation_path(),
         store.clone_progress_path(),
         store.clone_failure_path(),

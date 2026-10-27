@@ -140,9 +140,10 @@
 //!   NVX's `ClonePlan` checks the clone against the generation, from the metadata of its files
 //!   alone: its network, which must be the one that the template's key records, its image, the
 //!   raw file PATH, an EROFS filesystem, `erofs`, or a GPT disk, `gpt`, of
-//!   which the guest expects the identity UUID, of the length of the template's placeholder,
-//!   whatever the placeholder's format, its upper, the ext4 scratch image PATH, of the geometry of
-//!   the template's scratch, or RAM, with the bindings that STORE stages for the images, as
+//!   which the guest expects the identity UUID, no longer than the template's placeholder,
+//!   whatever the placeholder's format, and of its block sizes, its upper, the ext4 scratch image
+//!   PATH, of the geometry of the template's scratch, or RAM, which needs no file, with the
+//!   bindings that STORE stages for the images, as
 //!   `stage` stages them, its memory target, in whole blocks, from the template's RAM to its
 //!   capacity, and its export, if it has one, which must export exactly one directory, which
 //!   neither lies inside the template store's directory nor holds it: the export's root, which
