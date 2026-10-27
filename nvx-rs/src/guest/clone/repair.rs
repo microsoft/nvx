@@ -20,7 +20,7 @@ use crate::guest::parse::{parse_decimal, parse_hexadecimal};
 use crate::guest::reseed::{self, ReseedError, Seed};
 use crate::guest::root::Paths;
 use crate::guest::sys;
-use crate::guest::time::{MemoryRange, Restore, RestoreFinish, TimeAbi, TimeError};
+use crate::guest::time::{CpuSet, MemoryRange, Restore, RestoreFinish, TimeAbi, TimeError};
 use crate::protocol::status;
 
 /// The memory block size of the snapshot ABI, 128 MiB, to which a restore's memory ranges are
@@ -43,8 +43,15 @@ const PROBE_FILE: &str = "probe";
 const BLOCK_PREFIX: &str = "memory";
 /// The state of a memory block, such as `online` or `offline`, in the block's directory.
 const STATE_FILE: &str = "state";
+/// The directory of the kernel's CPUs, below sysfs.
+const CPUS: &str = "devices/system/cpu";
 /// The CPUs that are online, as a CPU list, below sysfs.
 const ONLINE_CPUS: &str = "devices/system/cpu/online";
+/// The name of a CPU's directory, which the CPU's number follows, in the directory of the CPUs.
+const CPU_PREFIX: &str = "cpu";
+/// The state of a CPU, `1` online and `0` offline, in the CPU's directory, to which `1` is
+/// written to bring the CPU online.
+const CPU_ONLINE_FILE: &str = "online";
 /// The state of a memory block that is online.
 const ONLINE: &[u8] = b"online";
 
@@ -58,16 +65,17 @@ pub fn repair(restore: Restore) -> Result<Repaired, RepairError> {
 }
 
 /// The repair of a clone that a restore started, of the [`Restore`] that the clone's capture
-/// returned, as the [module](super) describes: its memory target, its reseed, and its finish,
-/// with the acknowledgement that the host awaits.
+/// returned, as the [module](super) describes: its processor target, its memory target, its
+/// reseed, and its finish, with the acknowledgement that the host awaits.
 ///
 /// [`run`](Self::run) records how far the repair got, so that the repair never adds a memory
 /// block twice, never reseeds twice, and never finishes the restore twice, whoever retries it:
 ///
 /// - Until the memory target is active, a failed attempt may be retried, and the next one
-///   repeats the checks and adds or onlines only the memory blocks that are not online yet. The
-///   first attempt derives the end of the RAM that the clone captured, before it adds any memory
-///   block, and every later one keeps it.
+///   repeats the checks, brings online only the CPUs of the processor target that are not online
+///   yet, and adds or onlines only the memory blocks that are not online yet. The first attempt
+///   records the CPUs that are online before it brings any online, and derives the end of the RAM
+///   that the clone captured, before it adds any memory block, and every later one keeps both.
 /// - The reseed and the finish run at most once. A failure of either is final: every later call
 ///   returns its error again.
 /// - Once the repair completed, every later call returns the same [`Repaired`].
@@ -84,6 +92,9 @@ pub struct Repair {
     seed: Option<Seed>,
     /// Where the repair resumes.
     state: State,
+    /// The number of CPUs that were online before the repair brought any online, a prefix of the
+    /// CPUs, which its first attempt that reads them records.
+    captured_cpus: Option<u32>,
     /// The memory blocks that the repair added and onlined, across its attempts.
     activations: Activations,
     /// How far the repair got, which its errors report.
@@ -112,6 +123,7 @@ impl Repair {
             restore,
             seed,
             state: State::Memory { captured: None },
+            captured_cpus: None,
             activations: Activations::default(),
             progress: RepairProgress::default(),
             system,
@@ -123,12 +135,14 @@ impl Repair {
     ///
     /// A failure names its [`RepairStage`], its [`RepairCause`], and the repair's
     /// [`RepairProgress`]. One before the reseed may be retried, and changes nothing that a retry
-    /// undoes: a refused restore or memory target adds no memory block, and a failed activation
-    /// leaves the blocks that it added and onlined, which a retry counts as done. The reseed and
-    /// the finish run at most once, so a failure of either, or of a finish that never returned,
-    /// such as after a panic, is final, and every later call returns that error again. A failed
-    /// finish may have acknowledged the restore already. Once the repair completed, every later
-    /// call returns the same [`Repaired`], without another step.
+    /// undoes: a refused restore or processor target brings no CPU online and adds no memory
+    /// block, a refused memory target adds no memory block, although the activation of the
+    /// processor target before it may have brought CPUs online, and a failed activation leaves
+    /// the CPUs that it brought online and the blocks that it added and onlined, which a retry
+    /// counts as done. The reseed and the finish run at most once, so a failure of either, or of a
+    /// finish that never returned, such as after a panic, is final, and every later call returns
+    /// that error again. A failed finish may have acknowledged the restore already. Once the
+    /// repair completed, every later call returns the same [`Repaired`], without another step.
     pub fn run(&mut self) -> Result<Repaired, RepairError> {
         self.resume().map_err(|error| RepairError {
             progress: self.progress,
@@ -160,8 +174,8 @@ impl Repair {
         }
     }
 
-    /// Checks the restore and the online CPUs, and activates the memory target: the steps before
-    /// the reseed, which a failure leaves to a retry.
+    /// Checks the restore, and activates the processor and memory targets: the steps before the
+    /// reseed, which a failure leaves to a retry.
     fn activate(&mut self) -> Result<Resources, RepairError> {
         if self.restore.finished() {
             return Err(RepairError::new(
@@ -172,26 +186,58 @@ impl Repair {
         if self.seed.is_none() {
             return Err(RepairError::new(RepairStage::Restore, RepairCause::NoSeed));
         }
-        let cpus = self
-            .check_processors()
+        let (cpus, new_cpus) = self
+            .activate_processors()
             .map_err(|cause| RepairError::new(RepairStage::Processors, cause))?;
         let memory = self
             .activate_memory()
             .map_err(|cause| RepairError::new(RepairStage::Memory, cause))?;
-        Ok(Resources { cpus, memory })
+        Ok(Resources {
+            cpus,
+            new_cpus,
+            memory,
+        })
     }
 
-    /// Returns the number of online CPUs, which must be a prefix of the CPUs, and must meet the
-    /// restore's processor target, if it has one, since the repair brings no CPU online.
-    fn check_processors(&mut self) -> Result<u32, RepairCause> {
-        let text = self.system.online_cpus().map_err(RepairCause::Io)?;
-        let online = online_prefix(&text).ok_or_else(|| RepairCause::OnlineCpus(lossy(&text)))?;
-        if let Some(target) = self.restore.processor_target()
-            && u32::from(target) != online
-        {
+    /// Activates the restore's processor target, if it has one, and returns the number of online
+    /// CPUs, which must be a prefix of the CPUs, with the CPUs that the repair brought online.
+    ///
+    /// A target below the CPUs that are online is refused, since the repair takes no CPU
+    /// offline. The repair brings online each CPU of the target's prefix that is offline, through
+    /// sysfs, as `nvx-snapshot` does, then verifies that the online CPUs are the target's prefix.
+    /// The CPUs that it brought online are those of the prefix beyond the ones that were online
+    /// before its first attempt, which the clone captured.
+    fn activate_processors(&mut self) -> Result<(u32, CpuSet), RepairCause> {
+        let online = self.online_cpus()?;
+        let captured = *self.captured_cpus.get_or_insert(online);
+        let Some(target) = self.restore.processor_target() else {
+            return Ok((online, CpuSet::new()));
+        };
+        let count = u32::from(target);
+        if count < online {
             return Err(RepairCause::ProcessorTarget { target, online });
         }
-        Ok(online)
+        for cpu in online..count {
+            self.system.online_cpu(cpu).map_err(RepairCause::Io)?;
+        }
+        let text = self.system.online_cpus().map_err(RepairCause::Io)?;
+        if online_prefix(&text) != Some(count) {
+            return Err(RepairCause::Activation {
+                target,
+                online: lossy(&text),
+            });
+        }
+        // A processor target is at most 8 CPUs, which the time ABI covers.
+        let new_cpus = (captured..count).fold(CpuSet::new(), |cpus, cpu| {
+            cpus.with(cpu as usize).unwrap_or(cpus)
+        });
+        Ok((count, new_cpus))
+    }
+
+    /// Returns the number of online CPUs, which must be a prefix of the CPUs.
+    fn online_cpus(&mut self) -> Result<u32, RepairCause> {
+        let text = self.system.online_cpus().map_err(RepairCause::Io)?;
+        online_prefix(&text).ok_or_else(|| RepairCause::OnlineCpus(lossy(&text)))
     }
 
     /// Activates the restore's memory target, if it has one, and returns the memory size of the
@@ -272,10 +318,11 @@ impl Repair {
     }
 
     /// Finishes the restore, with the acknowledgement if the host gates its input until then,
-    /// once, and returns the repaired clone, which has `resources`.
+    /// once, and returns the repaired clone, which has `resources`. The finish records the CPUs
+    /// that the repair brought online, which the time ABI's restore checks check too.
     fn finish(&mut self, resources: Resources) -> Result<Repaired, RepairError> {
         let acknowledge = self.restore.acknowledgement_required();
-        let mut finish = RestoreFinish::new();
+        let mut finish = RestoreFinish::new().new_cpus(resources.new_cpus);
         if acknowledge {
             finish = finish.acknowledge();
         }
@@ -338,6 +385,8 @@ enum State {
 struct Resources {
     /// The number of online CPUs.
     cpus: u32,
+    /// The CPUs that the repair brought online.
+    new_cpus: CpuSet,
     /// The memory size of the online memory blocks, in bytes.
     memory: u64,
 }
@@ -477,7 +526,8 @@ impl fmt::Display for RepairProgress {
 pub enum RepairStage {
     /// Checking that the restore holds its seed, and that its capture did not finish it.
     Restore,
-    /// Checking the online CPUs against the restore's processor target.
+    /// Checking the online CPUs, bringing those of the restore's processor target online, and
+    /// verifying them.
     Processors,
     /// Checking the restore's memory target, adding and onlining its memory blocks, and
     /// verifying them.
@@ -494,7 +544,7 @@ impl fmt::Display for RepairStage {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(match self {
             Self::Restore => "check the restore",
-            Self::Processors => "check the online CPUs",
+            Self::Processors => "activate the processor target",
             Self::Memory => "activate the memory target",
             Self::Reseed => "reseed the kernel's random number generator",
             Self::Finish => "finish the restore",
@@ -547,13 +597,21 @@ pub enum RepairCause {
     Finished,
     /// The online CPUs, as the kernel lists them, are not a prefix of the CPUs, such as `0-3`.
     OnlineCpus(String),
-    /// The restore asks for another number of online CPUs, which needs CPUs brought online,
-    /// which the repair doesn't do.
+    /// The restore asks for fewer online CPUs than are online, which the repair doesn't take
+    /// offline.
     ProcessorTarget {
         /// The number of online CPUs that the restore asks for.
         target: u8,
         /// The number of online CPUs.
         online: u32,
+    },
+    /// The online CPUs are not the processor target's prefix of the CPUs once the repair brought
+    /// those of the target online.
+    Activation {
+        /// The number of online CPUs that the restore asks for.
+        target: u8,
+        /// The online CPUs, as the kernel lists them.
+        online: String,
     },
     /// The kernel's memory block size, which it writes in hexadecimal, is not 128 MiB, as the
     /// restore's memory target needs, or is malformed.
@@ -604,6 +662,10 @@ impl fmt::Display for RepairCause {
             Self::ProcessorTarget { target, online } => write!(
                 formatter,
                 "the restore asks for {target} online CPUs, and {online} are online"
+            ),
+            Self::Activation { target, online } => write!(
+                formatter,
+                "the online CPUs are {online} once the first {target} were brought online"
             ),
             Self::BlockSize(size) => write!(
                 formatter,
@@ -855,6 +917,9 @@ trait RepairSystem: Send {
     /// Reads the CPUs that are online, as the kernel lists them.
     fn online_cpus(&mut self) -> io::Result<Vec<u8>>;
 
+    /// Brings the CPU `cpu` online.
+    fn online_cpu(&mut self, cpu: u32) -> io::Result<()>;
+
     /// Reads the memory block size, which the kernel writes in hexadecimal.
     fn block_size(&mut self) -> io::Result<Vec<u8>>;
 
@@ -901,6 +966,16 @@ impl LiveSystem {
 impl RepairSystem for LiveSystem {
     fn online_cpus(&mut self) -> io::Result<Vec<u8>> {
         read(&self.paths.sys.join(ONLINE_CPUS))
+    }
+
+    fn online_cpu(&mut self, cpu: u32) -> io::Result<()> {
+        let path = self
+            .paths
+            .sys
+            .join(CPUS)
+            .join(format!("{CPU_PREFIX}{cpu}"))
+            .join(CPU_ONLINE_FILE);
+        write(&path, b"1\n")
     }
 
     fn block_size(&mut self) -> io::Result<Vec<u8>> {

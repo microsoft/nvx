@@ -30,6 +30,8 @@ const OFFLINE_STATE: &[u8] = b"offline\n";
 enum Call {
     /// The online CPUs were read.
     OnlineCpus,
+    /// The CPU of this number was brought online.
+    OnlineCpu(u32),
     /// The memory block size was read.
     BlockSize,
     /// The memory blocks were listed.
@@ -69,13 +71,18 @@ impl Calls {
 /// A system that records its calls, except its reads of the blocks' states, with CPUs, memory
 /// blocks, a reseed, and a time ABI that a test chooses: by default, two online CPUs, 128 MiB
 /// memory blocks, the four online blocks of a clone that captured 512 MiB of RAM, and a reseed
-/// and a finish that succeed. It opens no file and draws no randomness: it keeps its blocks in
-/// ordered maps, which draw no random keys, as hashed maps would.
+/// and a finish that succeed. Bringing online the CPU that follows a prefix of online CPUs
+/// extends the prefix. It opens no file and draws no randomness: it keeps its blocks in ordered
+/// maps, which draw no random keys, as hashed maps would.
 struct FakeSystem {
     /// The log.
     calls: Calls,
     /// The online CPUs, as the kernel lists them.
-    cpus: &'static [u8],
+    cpus: Vec<u8>,
+    /// The error numbers with which the next onlining of each CPU fails, once.
+    cpu_failures: BTreeMap<u32, Errno>,
+    /// A CPU that the kernel leaves offline when it is brought online.
+    stuck_cpu: Option<u32>,
     /// The memory block size, as the kernel writes it.
     block_size: &'static [u8],
     /// The state of each memory block that the kernel has, by the block's number.
@@ -110,7 +117,9 @@ impl FakeSystem {
     fn new(calls: &Calls) -> Self {
         Self {
             calls: calls.clone(),
-            cpus: b"0-1\n",
+            cpus: b"0-1\n".to_vec(),
+            cpu_failures: BTreeMap::new(),
+            stuck_cpu: None,
             block_size: b"8000000\n",
             blocks: (0..4).map(|block| (block, ONLINE_STATE)).collect(),
             add_failures: BTreeMap::new(),
@@ -139,7 +148,18 @@ impl FakeSystem {
 impl RepairSystem for FakeSystem {
     fn online_cpus(&mut self) -> io::Result<Vec<u8>> {
         self.calls.push(Call::OnlineCpus);
-        Ok(self.cpus.to_vec())
+        Ok(self.cpus.clone())
+    }
+
+    fn online_cpu(&mut self, cpu: u32) -> io::Result<()> {
+        self.calls.push(Call::OnlineCpu(cpu));
+        if let Some(errno) = self.cpu_failures.remove(&cpu) {
+            return Err(errno.into());
+        }
+        if self.stuck_cpu != Some(cpu) && online_prefix(&self.cpus) == Some(cpu) {
+            self.cpus = format!("0-{cpu}\n").into_bytes();
+        }
+        Ok(())
     }
 
     fn block_size(&mut self) -> io::Result<Vec<u8>> {
@@ -267,6 +287,12 @@ fn changes(calls: Vec<Call>) -> Vec<Call> {
         .collect()
 }
 
+/// Returns the set of `cpus`.
+fn cpu_set(cpus: impl IntoIterator<Item = usize>) -> CpuSet {
+    cpus.into_iter()
+        .fold(CpuSet::new(), |set, cpu| set.with(cpu).unwrap())
+}
+
 #[test]
 fn a_clone_is_reseeded_then_acknowledged_once_and_reentry_returns_the_same_clone() {
     let calls = Calls::default();
@@ -320,6 +346,10 @@ struct Deferring {
 impl RepairSystem for Deferring {
     fn online_cpus(&mut self) -> io::Result<Vec<u8>> {
         self.system.online_cpus()
+    }
+
+    fn online_cpu(&mut self, cpu: u32) -> io::Result<()> {
+        self.system.online_cpu(cpu)
     }
 
     fn block_size(&mut self) -> io::Result<Vec<u8>> {
@@ -699,11 +729,15 @@ fn each_failure_class_ends_the_clone_with_a_status_of_its_own() {
     ));
     // The processors.
     let mut unlisted = system();
-    unlisted.cpus = b"1-3\n";
+    unlisted.cpus = b"1-3\n".to_vec();
     let error = failure(restore(), unlisted);
     cases.push(("online CPUs", error, status::REPAIR_PROCESSORS));
-    let error = failure(restore().with_processor_target(4), system());
+    let error = failure(restore().with_processor_target(1), system());
     cases.push(("a processor target", error, status::REPAIR_PROCESSORS));
+    let mut stuck_cpu = system();
+    stuck_cpu.stuck_cpu = Some(3);
+    let error = failure(restore().with_processor_target(4), stuck_cpu);
+    cases.push(("an offline CPU", error, status::REPAIR_PROCESSORS));
     // The memory target, which the repair refuses before it adds any memory block.
     let mut wide = system();
     wide.block_size = b"40000000\n";
@@ -888,17 +922,20 @@ fn a_block_counts_once_the_repair_finds_it_added_or_online() {
 }
 
 /// Checks that the repair of a clone whose kernel lists the online CPUs `cpus`, and whose restore
-/// has the processor target `target`, if any, counts `online` CPUs.
-fn counts(cpus: &'static [u8], target: Option<u8>, online: u32) {
+/// has the processor target `target`, if any, counts `online` CPUs, and finishes the restore
+/// with `new_cpus`, the CPUs that it brought online.
+fn counts(cpus: &'static [u8], target: Option<u8>, online: u32, new_cpus: CpuSet) {
     let calls = Calls::default();
     let mut system = FakeSystem::new(&calls);
-    system.cpus = cpus;
+    system.cpus = cpus.to_vec();
     let restore = match target {
         Some(target) => restore().with_processor_target(target),
         None => restore(),
     };
     let repaired = repairing(restore, system).run().unwrap();
     assert_eq!(repaired.cpus(), online, "{cpus:?}");
+    let finish = RestoreFinish::new().acknowledge().new_cpus(new_cpus);
+    assert_eq!(calls.take().last(), Some(&Call::Finish(finish)), "{cpus:?}");
 }
 
 /// Checks that the repair of a clone whose kernel lists the online CPUs `cpus`, and whose restore
@@ -906,7 +943,7 @@ fn counts(cpus: &'static [u8], target: Option<u8>, online: u32) {
 fn refuses_cpus(cpus: &'static [u8], target: Option<u8>, cause: &RepairCause) {
     let calls = Calls::default();
     let mut system = FakeSystem::new(&calls);
-    system.cpus = cpus;
+    system.cpus = cpus.to_vec();
     let restore = match target {
         Some(target) => restore().with_processor_target(target),
         None => restore(),
@@ -918,19 +955,151 @@ fn refuses_cpus(cpus: &'static [u8], target: Option<u8>, cause: &RepairCause) {
 }
 
 #[test]
-fn the_online_cpus_must_be_a_prefix_that_meets_the_processor_target() {
-    counts(b"0\n", None, 1);
-    counts(b"0-3\n", None, 4);
-    counts(b"0-3\n", Some(4), 4);
-    // The repair brings no CPU online, nor takes one offline.
+fn the_online_cpus_must_be_a_prefix_that_the_processor_target_does_not_undercut() {
+    counts(b"0\n", None, 1, CpuSet::new());
+    counts(b"0-3\n", None, 4, CpuSet::new());
+    counts(b"0-3\n", Some(4), 4, CpuSet::new());
+    // The repair takes no CPU offline.
     let cause = |target, online| RepairCause::ProcessorTarget { target, online };
-    refuses_cpus(b"0-3\n", Some(8), &cause(8, 4));
     refuses_cpus(b"0-3\n", Some(2), &cause(2, 4));
+    refuses_cpus(b"0-7\n", Some(1), &cause(1, 8));
     let lists: [&'static [u8]; 4] = [b"0-1,3\n", b"1-3\n", b"0-\n", b"\n"];
     for cpus in lists {
         let listed = String::from_utf8_lossy(cpus.strip_suffix(b"\n").unwrap()).into_owned();
-        refuses_cpus(cpus, None, &RepairCause::OnlineCpus(listed));
+        refuses_cpus(cpus, None, &RepairCause::OnlineCpus(listed.clone()));
+        refuses_cpus(cpus, Some(8), &RepairCause::OnlineCpus(listed));
     }
+}
+
+#[test]
+fn a_processor_target_brings_the_offline_cpus_of_its_prefix_online_and_finishes_with_them() {
+    counts(b"0\n", Some(2), 2, cpu_set([1]));
+    counts(b"0-1\n", Some(8), 8, cpu_set(2..8));
+    // The repair brings each CPU online in order, before the memory target, and verifies them.
+    let calls = Calls::default();
+    let mut system = FakeSystem::new(&calls);
+    system.cpus = b"0\n".to_vec();
+    let target = restore().with_processor_target(4);
+    let repaired = repairing(target, system).run().unwrap();
+    assert_eq!(repaired.cpus(), 4);
+    let mut expected = vec![
+        Call::OnlineCpus,
+        Call::OnlineCpu(1),
+        Call::OnlineCpu(2),
+        Call::OnlineCpu(3),
+        Call::OnlineCpus,
+        Call::BlockSize,
+    ];
+    let mut finished = finishing();
+    finished[3] = Call::Finish(RestoreFinish::new().acknowledge().new_cpus(cpu_set(1..4)));
+    expected.extend(finished);
+    assert_eq!(calls.take(), expected);
+}
+
+#[test]
+fn a_retry_brings_online_only_the_cpus_that_are_not_and_reports_every_new_one() {
+    let calls = Calls::default();
+    let mut system = FakeSystem::new(&calls);
+    system.cpus = b"0\n".to_vec();
+    system.cpu_failures.insert(2, Errno::EBUSY);
+    let mut repair = repairing(restore().with_processor_target(4), system);
+    // The first attempt brought CPU 1 online before CPU 2 failed.
+    let error = repair.run().unwrap_err();
+    assert_eq!(error.stage(), RepairStage::Processors);
+    assert!(matches!(
+        error.cause(),
+        RepairCause::Io(error) if error.raw_os_error() == Some(Errno::EBUSY as i32)
+    ));
+    assert_eq!(error.status(), status::REPAIR_PROCESSORS);
+    assert_eq!(
+        changes(calls.take()),
+        [Call::OnlineCpu(1), Call::OnlineCpu(2)]
+    );
+    // The retry brings CPUs 2 and 3 online, and the finish names the three that the repair
+    // brought online.
+    assert_eq!(repair.run().unwrap().cpus(), 4);
+    let calls = changes(calls.take());
+    assert_eq!(calls[..2], [Call::OnlineCpu(2), Call::OnlineCpu(3)]);
+    let finish = RestoreFinish::new().acknowledge().new_cpus(cpu_set(1..4));
+    assert_eq!(calls.last(), Some(&Call::Finish(finish)));
+}
+
+#[test]
+fn a_cpu_that_stays_offline_fails_the_activation_of_the_processor_target() {
+    let calls = Calls::default();
+    let mut system = FakeSystem::new(&calls);
+    system.stuck_cpu = Some(2);
+    let error = failure(restore().with_processor_target(4), system);
+    assert_eq!(error.stage(), RepairStage::Processors);
+    assert_eq!(
+        error.to_string(),
+        "failed to activate the processor target: the online CPUs are 0-1 once the first 4 \
+         were brought online"
+    );
+    // The repair went no further.
+    assert_eq!(
+        calls.take(),
+        [
+            Call::OnlineCpus,
+            Call::OnlineCpu(2),
+            Call::OnlineCpu(3),
+            Call::OnlineCpus
+        ]
+    );
+}
+
+#[test]
+fn a_memory_target_that_fails_after_the_processor_target_leaves_its_cpus_online() {
+    // A refused memory target adds no memory block, but the processor target before it is
+    // active already, and stays so.
+    let calls = Calls::default();
+    let mut system = FakeSystem::new(&calls);
+    system.cpus = b"0\n".to_vec();
+    system.block_size = b"40000000\n";
+    let targets = restore()
+        .with_processor_target(2)
+        .with_memory_target(&[(512 * MIB, 512 * MIB)]);
+    let error = repairing(targets, system).run().unwrap_err();
+    assert_eq!(error.stage(), RepairStage::Memory);
+    assert_eq!(error.status(), status::REPAIR_MEMORY_TARGET);
+    assert_eq!(
+        calls.take(),
+        [
+            Call::OnlineCpus,
+            Call::OnlineCpu(1),
+            Call::OnlineCpus,
+            Call::BlockSize
+        ]
+    );
+
+    // A retry after a failed activation of the memory target brings no CPU online again, and the
+    // finish names every CPU that the repair brought online.
+    let mut system = FakeSystem::new(&calls);
+    system.cpus = b"0\n".to_vec();
+    system.add_failures.insert(512 * MIB, Errno::EIO);
+    let targets = restore()
+        .with_processor_target(4)
+        .with_memory_target(&[(512 * MIB, 128 * MIB)]);
+    let mut repair = repairing(targets, system);
+    let error = repair.run().unwrap_err();
+    assert_eq!(error.status(), status::REPAIR_MEMORY);
+    assert_eq!(
+        changes(calls.take()),
+        [
+            Call::OnlineCpu(1),
+            Call::OnlineCpu(2),
+            Call::OnlineCpu(3),
+            Call::MemoryBlocks,
+            Call::Add(512 * MIB)
+        ]
+    );
+    let repaired = repair.run().unwrap();
+    assert_eq!((repaired.cpus(), repaired.memory()), (4, 640 * MIB));
+    let mut expected = activations([4]);
+    let mut finished = finishing();
+    finished[3] = Call::Finish(RestoreFinish::new().acknowledge().new_cpus(cpu_set(1..4)));
+    expected.extend(finished);
+    assert_eq!(changes(calls.take()), expected);
 }
 
 #[test]
@@ -994,12 +1163,12 @@ fn errors_name_their_stage_and_their_cause() {
             RepairError::new(
                 RepairStage::Processors,
                 RepairCause::ProcessorTarget {
-                    target: 8,
+                    target: 2,
                     online: 4,
                 },
             ),
-            "failed to check the online CPUs: the restore asks for 8 online CPUs, and 4 are \
-             online",
+            "failed to activate the processor target: the restore asks for 2 online CPUs, and 4 \
+             are online",
         ),
         (
             RepairError::new(RepairStage::Restore, RepairCause::NoSeed),
@@ -1081,7 +1250,9 @@ fn write_file(path: &Path, contents: &str) {
 fn the_live_system_reads_and_writes_the_kernel_s_cpu_and_memory_interfaces() {
     let root = tempfile::tempdir().unwrap();
     let memory = root.path().join(MEMORY_BLOCKS);
+    let cpus = root.path().join(CPUS);
     write_file(&root.path().join(ONLINE_CPUS), "0-3\n");
+    write_file(&cpus.join("cpu4/online"), "");
     write_file(&memory.join(BLOCK_SIZE_FILE), "8000000\n");
     write_file(&memory.join(PROBE_FILE), "");
     write_file(&memory.join("memory0/state"), "online\n");
@@ -1100,6 +1271,15 @@ fn the_live_system_reads_and_writes_the_kernel_s_cpu_and_memory_interfaces() {
         abi: TimeAbi::report_only(),
     };
     assert_eq!(system.online_cpus().unwrap(), b"0-3\n");
+    // Bringing a CPU online writes its new state, as `nvx-snapshot` does; a CPU without a state
+    // file cannot be brought online, and the error names the file.
+    system.online_cpu(4).unwrap();
+    assert_eq!(fs::read(cpus.join("cpu4/online")).unwrap(), b"1\n");
+    let error = system.online_cpu(5).unwrap_err();
+    assert_eq!(error.kind(), io::ErrorKind::NotFound);
+    assert!(!cpus.join("cpu5/online").exists());
+    let named = format!("{}: ", cpus.join("cpu5/online").display());
+    assert!(error.to_string().starts_with(&named), "{error}");
     assert_eq!(system.block_size().unwrap(), b"8000000\n");
     assert_eq!(system.memory_blocks().unwrap(), [0, 2, 12]);
     assert_eq!(system.block_state(12).unwrap().unwrap(), b"offline\n");

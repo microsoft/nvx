@@ -1207,17 +1207,19 @@ may fail in a clone whose restore it could not repair. Each failure is a
 `CaptureError`, with its `CaptureStage` and `CaptureCause`.
 
 `repair`, or a `Repair` that the caller may retry, repairs the clone of a
-`Restore` next: it checks that the online CPUs are a prefix that meets the
-restore's processor target, since it brings no CPU online; with a memory target,
-it checks, before it adds any memory block, that the kernel's block size is 128
-MiB and that the restore's ranges continue the captured RAM in logical order,
-with no gap, overlap, or range in the MMIO aperture, while the host bounds the
-target by the snapshot's capacity, then adds and onlines the blocks through
-sysfs, as `nvx-snapshot` does, and verifies them; it reseeds the kernel's random
-number generator with the `Seed`, having drawn no randomness before, and drops
-it; and it finishes the restore through `TimeAbi::restore_finish`, with the
-acknowledgement when the host gates its input until then, which hands the
-deferred time work to the time daemon that the caller supervises.
+`Restore` next: it checks that the online CPUs are a prefix that the restore's
+processor target does not undercut, brings the target's other CPUs online
+through sysfs, and verifies them; with a memory target, it checks, before it
+adds any memory block, that the kernel's block size is 128 MiB and that the
+restore's ranges continue the captured RAM in logical order, with no gap,
+overlap, or range in the MMIO aperture, while the host bounds the target by the
+snapshot's capacity, then adds and onlines the blocks through sysfs, as
+`nvx-snapshot` does, and verifies them; it reseeds the kernel's random number
+generator with the `Seed`, having drawn no randomness before, and drops it; and
+it finishes the restore through `TimeAbi::restore_finish`, with the CPUs that
+the restore brought online and the acknowledgement when the host gates its input
+until then, which hands the deferred time work to the time daemon that the
+caller supervises.
 
 It returns the `Repaired` clone, with its generation ID, its online CPUs and
 memory, and when it acknowledged the restore, and never touches the fence. It
