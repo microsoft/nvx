@@ -25,8 +25,13 @@ pub const MEMORY_BLOCK_SIZE: u64 = 128 * MIB;
 /// file of the template's scratch length, which the template does not keep.
 pub const SCRATCH_NAME: &str = "scratch.raw";
 
-/// The kernel command line of a template's VM.
+/// The kernel command line of a template's VM, with which the guest's init hands the VM to its
+/// sandbox control.
 const COMMAND_LINE: &str = "nvx_sandbox=1";
+
+/// The kernel command-line parameter that limits the processors that the guest brings online at
+/// boot, and with which OpenVMM records them as the template's processors online at boot.
+const BOOT_PROCESSORS: &str = "maxcpus";
 
 /// The snapshot tier of a template's capture: OpenVMM's clone point of the invariant
 /// configuration alone.
@@ -40,16 +45,22 @@ const BLOCK_IDENTITY: &str = "generation";
 /// length is a multiple.
 const LOGICAL_BLOCK_SIZE: u64 = 512;
 
-/// The resources of a template's VM: its processors, all online at boot, and its RAM, with the
-/// capacity to which a restore may expand it.
+/// The resources of a template's VM: its processors, of which a prefix is online at boot, and its
+/// RAM, with the capacity to which a restore may expand it.
 ///
-/// A template boots with every one of its processors online, so its clones restore with all of
-/// them, and it serves clones of its processor count alone. [`TemplatePlan::new`] checks the
-/// resources.
+/// A template's VM has the processors of the largest of its clones, its processor capacity, of
+/// which the first, those online at boot, are online when it is captured. A restore brings a
+/// prefix of the others online, so that one template serves clones of each processor count from
+/// those online at boot to its capacity. A template whose processors are all online at boot
+/// serves clones of its capacity alone. [`TemplatePlan::new`] checks the resources.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct TemplateResources {
-    /// The processors, all online at boot: 1, 2, 4, or 8.
+    /// The processor capacity: 1, 2, 4, or 8.
     pub processors: u32,
+    /// The processors online at boot: 1, 2, 4, or 8, at most [`processors`](Self::processors).
+    /// Fewer than the capacity limit those that the guest brings online at boot, as the
+    /// [kernel command line](TemplatePlan::kernel_command_line) says.
+    pub boot_processors: u32,
     /// The RAM at boot, in bytes: a nonzero multiple of [`MEMORY_BLOCK_SIZE`].
     pub memory: u64,
     /// The RAM capacity, in bytes, to which a restore may expand the RAM: a multiple of
@@ -77,21 +88,26 @@ pub struct TemplateResources {
 ///   template whose clones have no network. The policy allows neither ingress nor host-loopback
 ///   access both ways, which its forwards need: through them, OpenVMM publishes the guest's
 ///   listeners as live host attachments, which no snapshot holds.
-/// - Its [`TemplateResources`]: its processors, all online at boot, and its RAM, with the capacity
-///   to which a restore may expand it, OpenVMM's `--memory-capacity`.
+/// - Its [`TemplateResources`]: its processor capacity, of which those online at boot are online
+///   when it is captured, and its RAM, with the capacity to which a restore may expand it,
+///   OpenVMM's `--memory-capacity`.
 ///
 /// # The kernel command line
 ///
 /// OpenVMM keeps the effective kernel command line of a template, which its
 /// [key](super::TemplateKey) holds and every clone restores, and refuses a capture whose command
 /// line holds a token outside the allowlist of its platform tier. The template's own command line
-/// is `nvx_sandbox=1`, with which the guest's init hands the VM to its sandbox control. OpenVMM
-/// writes the other tokens itself, each on the allowlist: the early console, console, reboot, and
-/// panic settings, `nr_cpus=` with the processors, `nvx_snapshot_tier=platform`, the virtio
-/// devices and the control tty that the guest discovers, and the NIC's addresses. The arguments
-/// name no workload identity, lifecycle, share, or published listener, for which OpenVMM would
-/// write other tokens. The command line therefore holds no image identity, hostname, share,
-/// proxy, entrypoint, or other tenant data.
+/// is `nvx_sandbox=1`, with which the guest's init hands the VM to its sandbox control, and for a
+/// template that boots with fewer processors online than its capacity, `maxcpus=` with the
+/// processors online at boot, which limits those that the guest brings online at boot, and which
+/// OpenVMM records as the template's, so that each restore may bring a prefix of the others
+/// online. OpenVMM writes the other tokens itself, each on the allowlist: the early console,
+/// console, reboot, and panic settings, `nr_cpus=` with the processor capacity,
+/// `nvx_snapshot_tier=platform`, the virtio devices and the control tty that the guest discovers,
+/// and the NIC's addresses. The arguments name no workload identity, lifecycle, share, or
+/// published listener, for which OpenVMM would write other tokens. The command line therefore
+/// holds no image identity, hostname, share, proxy, entrypoint, or other tenant data, and every
+/// clone of the template has the same.
 ///
 /// # The capture
 ///
@@ -127,7 +143,8 @@ pub struct TemplateResources {
 /// #     generation: StorageGeneration,
 /// # ) -> nvx::Result<()> {
 /// let resources = TemplateResources {
-///     processors: 2,
+///     processors: 4,
+///     boot_processors: 1,
 ///     memory: 4 * MEMORY_BLOCK_SIZE,
 ///     memory_capacity: 16 * MEMORY_BLOCK_SIZE,
 /// };
@@ -151,6 +168,8 @@ pub struct TemplatePlan {
     scratch_length: u64,
     /// The processors and RAM.
     resources: TemplateResources,
+    /// The kernel command line of the capture's VM.
+    command_line: String,
     /// The capture's transaction directory, spelled with its components alone.
     transaction: PathBuf,
     /// The snapshot's destination in the transaction directory.
@@ -180,7 +199,8 @@ impl TemplatePlan {
     /// which OpenVMM would not attach as a raw image; a placeholder whose binding records
     /// a length, or a scratch length, that is not a nonzero multiple of the 512 bytes of the
     /// logical blocks that OpenVMM presents;
-    /// processors other than 1, 2, 4, or 8; RAM or a RAM capacity that is not a nonzero multiple
+    /// processors other than 1, 2, 4, or 8, or processors online at boot other than 1, 2, 4, or
+    /// 8, or more than the processors; RAM or a RAM capacity that is not a nonzero multiple
     /// of [`MEMORY_BLOCK_SIZE`], or a capacity below the RAM; a network policy that allows ingress,
     /// or host-loopback access both ways; and a transaction directory that is not valid Unicode,
     /// that is relative, which OpenVMM would resolve against the directory in which it runs, or
@@ -249,11 +269,22 @@ impl TemplatePlan {
         let destination = transaction.join(SNAPSHOT_NAME);
         let plan = SandboxPlan::adapter(distro.clone(), SandboxUpper::scratch_at(scratch))
             .with_network(adapter.network().cloned());
+        // A template whose processors are all online at boot needs no limit, and records none,
+        // as OpenVMM records none without the parameter.
+        let command_line = if resources.boot_processors < resources.processors {
+            format!(
+                "{COMMAND_LINE} {BOOT_PROCESSORS}={}",
+                resources.boot_processors
+            )
+        } else {
+            COMMAND_LINE.to_owned()
+        };
         Ok(Self {
             plan,
             binding: binding.clone(),
             scratch_length,
             resources,
+            command_line,
             transaction,
             destination,
             generation,
@@ -310,8 +341,10 @@ impl TemplatePlan {
         self.generation
     }
 
-    /// Returns the kernel command line of the capture's VM, `nvx_sandbox=1`, which the caller
-    /// passes as OpenVMM's `--cmdline`, alone.
+    /// Returns the kernel command line of the capture's VM, which the caller passes as OpenVMM's
+    /// `--cmdline`, alone: `nvx_sandbox=1`, then, for a template that boots with fewer processors
+    /// online than its capacity, `maxcpus=` with the processors online at boot, as
+    /// [The kernel command line](Self#the-kernel-command-line) describes.
     ///
     /// It takes the place of the command line of [`plan`](Self::plan), which
     /// [`SandboxPlan::kernel_command_line`] and a [`PreparedLaunch`] render: that one names the
@@ -320,7 +353,7 @@ impl TemplatePlan {
     ///
     /// [`PreparedLaunch`]: crate::host::sandbox::PreparedLaunch
     pub fn kernel_command_line(&self) -> &str {
-        COMMAND_LINE
+        &self.command_line
     }
 
     /// Returns OpenVMM's arguments of the capture: those of its devices, as
@@ -342,10 +375,11 @@ impl TemplatePlan {
         Ok(arguments)
     }
 
-    /// Returns OpenVMM's arguments of the capture besides those of its devices: `--processors`,
-    /// `--memory` and `--memory-capacity` in MiB, and the capture's options,
-    /// `--snapshot-destination`, `--snapshot-tier platform`,
-    /// `--snapshot-block-identity generation`, and `--snapshot-generation-id`.
+    /// Returns OpenVMM's arguments of the capture besides those of its devices: `--processors`
+    /// with the processor capacity, `--memory` and `--memory-capacity` in MiB, and the capture's
+    /// options, `--snapshot-destination`, `--snapshot-tier platform`,
+    /// `--snapshot-block-identity generation`, and `--snapshot-generation-id`. The processors
+    /// online at boot are the kernel command line's.
     ///
     /// A caller that renders the arguments of the devices itself adds these to them.
     pub fn capture_arguments(&self) -> Vec<String> {
@@ -353,6 +387,7 @@ impl TemplatePlan {
             processors,
             memory,
             memory_capacity,
+            ..
         } = self.resources;
         [
             ("--processors", processors.to_string()),
@@ -378,18 +413,25 @@ fn is_block_length(length: u64) -> bool {
     length != 0 && length.is_multiple_of(LOGICAL_BLOCK_SIZE)
 }
 
-/// Refuses `resources` that no template's VM has: processors other than 1, 2, 4, or 8, and RAM or
-/// a RAM capacity that is not a nonzero multiple of [`MEMORY_BLOCK_SIZE`], or a capacity below
-/// the RAM.
+/// Refuses `resources` that no template's VM has: processors other than 1, 2, 4, or 8, processors
+/// online at boot other than 1, 2, 4, or 8, or more than the processors, and RAM or a RAM capacity
+/// that is not a nonzero multiple of [`MEMORY_BLOCK_SIZE`], or a capacity below the RAM.
 fn check_resources(resources: &TemplateResources) -> Result<()> {
     let TemplateResources {
         processors,
+        boot_processors,
         memory,
         memory_capacity,
     } = *resources;
     if !PROCESSOR_COUNTS.contains(&processors) {
         return Err(Error::unsupported(format!(
             "a template's VM has 1, 2, 4, or 8 processors, not {processors}"
+        )));
+    }
+    if !PROCESSOR_COUNTS.contains(&boot_processors) || boot_processors > processors {
+        return Err(Error::unsupported(format!(
+            "a template's VM boots with 1, 2, 4, or 8 of its {processors} processors online, not \
+             {boot_processors}"
         )));
     }
     if memory == 0

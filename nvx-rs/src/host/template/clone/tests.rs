@@ -1,7 +1,7 @@
-//! Tests of the plans of clones: the checks of their images, uppers, exports, and memory targets
-//! against the generation that they lease, which read no content, the claims of their scratch
-//! images, and the uppers in RAM, whose scratch devices their restores declare absent; in
-//! [`launch`], of their launches; and in [`restore`], of their restore sequences.
+//! Tests of the plans of clones: the checks of their images, uppers, exports, and processor and
+//! memory targets against the generation that they lease, which read no content, the claims of
+//! their scratch images, and the uppers in RAM, whose scratch devices their restores declare
+//! absent; in [`launch`], of their launches; and in [`restore`], of their restore sequences.
 
 mod launch;
 mod restore;
@@ -44,6 +44,8 @@ const CONFIG: &str = "config.json";
 const IMAGE_LEN: u64 = 4 * MIB;
 /// The length of the template's scratch, and of the staged scratch images: a huge page of 2 MiB.
 const SCRATCH_LEN: u64 = 2 * MIB;
+/// The template's processors, all online at boot, as [`ManifestSpec::template`] records them.
+const PROCESSORS: u32 = 2;
 /// The template's RAM, in bytes, as [`ManifestSpec::template`] records it.
 const MEMORY: u64 = 512 * MIB;
 /// The template's RAM capacity, in bytes, as [`ManifestSpec::template`] records it.
@@ -176,6 +178,17 @@ fn files() -> CallerFiles {
     CallerFiles::new(CONFIG).unwrap()
 }
 
+/// Gives the template of `class`, whose capture `spec` describes, a capacity of `processors`
+/// processors, of which `boot` are online at boot, as a capture records them.
+fn set_processors(class: &mut CaptureClass, spec: &mut ManifestSpec, processors: u32, boot: u32) {
+    class.processors = processors;
+    class.boot_processors = boot;
+    spec.vp_count = processors;
+    let contract = spec.contract();
+    contract.topology = (1, 1, processors, 1, (0..processors).collect());
+    contract.boot_online_vp_count = boot;
+}
+
 /// Returns `path` as messages show it.
 fn shown(path: &Path) -> String {
     paths::normalized(path).display().to_string()
@@ -192,8 +205,8 @@ fn gpt_layer(path: &Path) -> SandboxLayer {
 }
 
 /// Returns the request of a clone of the image at `image`, which `binding` binds, over an upper in
-/// RAM, with the template's RAM as its memory target, and the settings of [`workload`], for
-/// untrusted lowers, and with a journal policy, [`Journal::Forbidden`], that its record leaves
+/// RAM, with the template's processors and RAM as its targets, and the settings of [`workload`],
+/// for untrusted lowers, and with a journal policy, [`Journal::Forbidden`], that its record leaves
 /// out, and for a GPT disk, the bound [`FIRST_PARTITION_BOUND`].
 fn tmpfs_request(image: &Path, binding: &DistroBinding) -> CloneRequest {
     CloneRequest {
@@ -205,6 +218,7 @@ fn tmpfs_request(image: &Path, binding: &DistroBinding) -> CloneRequest {
         policy_revision: DISTRO_POLICY_REVISION,
         scratch: None,
         export: None,
+        processors: PROCESSORS,
         memory: MEMORY,
         workload: workload(),
         overlay: OverlayMode::UntrustedLowers,
@@ -1759,6 +1773,72 @@ fn memory_targets_are_whole_blocks_from_the_templates_ram_to_its_capacity() {
 }
 
 #[test]
+fn processor_targets_are_counts_from_the_templates_processors_online_at_boot_to_its_capacity() {
+    let refusal = |generation: &str, processors: u32, boot: u32, capacity: u32| {
+        (
+            ErrorKind::Unsupported,
+            format!(
+                "a clone of the template's generation {generation} cannot restore with a \
+                 processor target of {processors}: a target must be 1, 2, 4, or 8, from the \
+                 template's processors online at boot, {boot}, to its capacity, {capacity}"
+            ),
+        )
+    };
+    // A template that boots with 2 of its 8 processors online serves each supported count from 2
+    // to 8.
+    let fixture = Fixture::with(|class, spec, _| set_processors(class, spec, 8, 2));
+    let (image, binding) = fixture.image("distro.erofs", IMAGE_LEN);
+    let mut acquired = fixture.acquire("sandbox");
+    let generation = fixture.generation.generation().to_string();
+    for processors in [0, 1, 3, 6, 16, u32::MAX] {
+        let request = CloneRequest {
+            processors,
+            ..tmpfs_request(&image, &binding)
+        };
+        assert_eq!(
+            refused(
+                fixture.plan(&mut acquired, &request, NO_CONTENT),
+                Evidence::InvalidTargets
+            ),
+            refusal(&generation, processors, 2, 8)
+        );
+    }
+    assert_untouched(&acquired);
+    for processors in [2, 4, 8] {
+        let request = CloneRequest {
+            processors,
+            ..tmpfs_request(&image, &binding)
+        };
+        let plan = fixture.plan(&mut acquired, &request, NO_CONTENT).unwrap();
+        assert_eq!(plan.processors(), processors);
+        assert_eq!(plan.activation().configuration().resources.cpus, processors);
+    }
+    // A template whose processors are all online at boot records none online at boot, and serves
+    // its capacity alone.
+    let fixture = Fixture::new();
+    let (image, binding) = fixture.image("distro.erofs", IMAGE_LEN);
+    let mut acquired = fixture.acquire("sandbox");
+    let generation = fixture.generation.generation().to_string();
+    for processors in [1, 4] {
+        let request = CloneRequest {
+            processors,
+            ..tmpfs_request(&image, &binding)
+        };
+        assert_eq!(
+            refused(
+                fixture.plan(&mut acquired, &request, NO_CONTENT),
+                Evidence::InvalidTargets
+            ),
+            refusal(&generation, processors, PROCESSORS, PROCESSORS)
+        );
+    }
+    let plan = fixture
+        .plan(&mut acquired, &tmpfs_request(&image, &binding), NO_CONTENT)
+        .unwrap();
+    assert_eq!(plan.processors(), PROCESSORS);
+}
+
+#[test]
 fn requests_that_no_clone_takes_are_refused_before_anything_is_opened() {
     let fixture = Fixture::new();
     let (image, binding) = fixture.image("distro.erofs", IMAGE_LEN);
@@ -2151,7 +2231,7 @@ fn the_activation_record_of_a_clone_in_ram_names_its_restore_image_and_settings(
             network: None,
             workload: workload(),
             resources: ExpectedResources {
-                cpus: plan.key().processors(),
+                cpus: PROCESSORS,
                 memory: MEMORY,
             },
         }

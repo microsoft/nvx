@@ -565,9 +565,9 @@ template's capture, without I/O: the placeholder `distro`, which its
 over a dormant scratch device, the sparse file `SCRATCH_NAME` in the capture's
 transaction directory, with the dormant filesystem slot, and no NIC or one under
 the template's policy, which allows neither ingress nor host-loopback access
-both ways; `TemplateResources`, with every processor online at boot, and RAM and
+both ways; `TemplateResources`, with the processors, 1, 2, 4, or 8, and those online at boot, as many or fewer, and RAM and
 a `--memory-capacity` in blocks of `MEMORY_BLOCK_SIZE`; the kernel command line
-`nvx_sandbox=1`, so that the capture's whole command line holds tokens of
+`nvx_sandbox=1`, with `maxcpus=` and the processors online at boot when they are fewer, so that the capture's whole command line holds tokens of
 OpenVMM's platform allowlist alone, and no tenant data, which the tests check
 with a copy of the allowlist's source; and the capture's options,
 `--snapshot-tier platform`, a `--snapshot-destination`, `SNAPSHOT_NAME` in the
@@ -584,7 +584,7 @@ identity is unbound, a fresh scratch, and the dormant filesystem slot.
 
 `CaptureClass` holds the invariant inputs of a capture, known before it: the
 runtime, the guest's build, the backend, the requested CPU profile, the
-processors and RAM, the geometries of the disks, the network, and the adapter's
+processors, those online at boot, and RAM, the geometries of the disks, the network, and the adapter's
 other `Invariants`.
 
 `TemplateKey::new` checks that the capture made the machine that its class
@@ -650,7 +650,7 @@ its key, which must speak the current contracts, the boot and control contracts
 of the runtime that captured it included, and its snapshot; the template's
 network exactly, as its key records it, or none for a template without a NIC,
 so that a template serves the clones of its network policy, at its guest's
-address, alone; a memory target in whole blocks of `MEMORY_BLOCK_SIZE`
+address, alone; a processor target of 1, 2, 4, or 8 from the template's processors online at boot to its capacity; a memory target in whole blocks of `MEMORY_BLOCK_SIZE`
 from the template's RAM to its capacity; the clone's image, which the check of
 its `DistroBinding` opens; its upper, either the caller's scratch image, which
 the check of its `ScratchBinding` claims, and which nothing formats, copies, or
@@ -663,8 +663,7 @@ the checked inputs: a restore section with a fresh transaction ID of 16 random
 bytes and the lease's `TemplateReference`; the image, an EROFS layer or a GPT disk, as its binding names it, with its
 binding's identity and the filesystem UUID or disk GUID that the adapter's plan expects of it, and for a GPT disk the bound of its first partition, whose partition table the guest checks with `nvx::gpt` as at a cold launch; a tmpfs, or the scratch image's binding identity with the
 journal policy; the export, a directory, with its plan's identity, and its mappings, the plan's binds, from 1 to 4,096, or no export and no mappings, which leaves the slot dormant; the template NIC's policy identity, as its key
-records it, unpublished listeners, and the guest's proxy URL; and the template's
-processors and the memory target. The identity of a binding or of an export plan is the SHA-256 digest of
+records it, unpublished listeners, and the guest's proxy URL; and the processor and memory targets. The identity of a binding or of an export plan is the SHA-256 digest of
 a domain and of its serde form, never of a file's content.
 
 The image must present the logical and physical block sizes of the template's placeholder and be no longer than it, since a restore presents every clone's image at the placeholder's length, its capacity, and reads zeros past the end of a shorter image, while a scratch image must present the `BlockGeometry` of the
@@ -686,7 +685,7 @@ socket `restore.sock` on Linux, and at a named pipe of a random name on Windows;
 and it runs `supervisor::launch` with OpenVMM's restore of the clone's devices, with `--restore-absent-scratch` for a clone in RAM, and of the template's network, as its key records it, unchanged,
 its export bound to the dormant slot, `--mount` with the directory, and its hidden, re-exposed, and writable paths and its owner, `--restore-snapshot` with the generation's snapshot in place, which no clone
 copies or changes, so that clones of one generation restore it at once,
-`--restore-memory` with the memory target, and `--restore-ready-path`, under the
+`--restore-memory` with the memory target, `--restore-processors` with the processor target, for a template whose processors were not all online at boot, and `--restore-ready-path`, under the
 template's backend, CPU profile, and processors, with a boot console that
 discards its output, as cold boots have, and the control console, but no kernel,
 initramfs, command line, or guest address, which the snapshot fixes.
