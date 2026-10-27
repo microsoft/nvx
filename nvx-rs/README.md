@@ -890,7 +890,9 @@ one-shot runs, which run `/bin/echo`, `/bin/sleep`, `/bin/true`, or
 status. It also runs the microVMs of `nvx-rs run`, without a guest: a cold
 boot, or the restore of a snapshot directory, prints that it booted or restored
 the microVM, writes an outcome report if asked, and exits with status 0, and a
-restore whose snapshot directory is missing fails with status 1. Kernel
+restore whose snapshot directory is missing fails with status 1. Like OpenVMM,
+it refuses with status 2 a restore with `--net`, whose NIC keeps the addressing
+that its snapshot saved, and a cold boot with `--network-profile` alone. Kernel
 command-line tokens make it fail: `fake_exit_on_start=STATUS`,
 `fake_exit_status=STATUS`, `fake_guest_features=MASK`, and
 `fake_legacy_guest=1`, among others; see `nvx::testing::fake_openvmm`. Like

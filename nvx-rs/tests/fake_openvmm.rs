@@ -641,6 +641,29 @@ fn runs_boot_or_restore_a_microvm_on_the_terminal() {
         text(&output.stderr),
         "nvx-fake-openvmm: a restore takes no --memory\n"
     );
+
+    // As OpenVMM does, a restore takes the network profile and policy of a snapshot that has a NIC
+    // without `--net`, whose addressing the snapshot saved, and refuses `--net`.
+    let networked = [
+        "--restore-snapshot",
+        &snapshot,
+        "--network-profile",
+        "portable",
+        "--network-egress",
+        "deny",
+    ];
+    let output = run_microvm(root, &networked);
+    assert_eq!(output.status.code(), Some(0), "{}", text(&output.stderr));
+    assert_eq!(
+        text(&output.stdout),
+        "nvx-fake-openvmm: restored the microVM\n"
+    );
+    let output = run_microvm(root, &[&networked[..], &["--net", "10.0.0.2/24"]].concat());
+    assert_eq!(output.status.code(), Some(2));
+    assert_eq!(
+        text(&output.stderr),
+        "nvx-fake-openvmm: restore takes microVM network addressing from saved state\n"
+    );
 }
 
 #[test]
