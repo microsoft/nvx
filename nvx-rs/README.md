@@ -683,7 +683,7 @@ under its lease, and, with `ExportPlan::verify`, that the objects of its export,
 record in its canonical encoding, `clone-activation.bin`, from which a caller
 resends it unchanged; it listens for the VMM's restore-ready event, at the
 socket `restore.sock` on Linux, and at a named pipe of a random name on Windows;
-and it runs `supervisor::launch` with OpenVMM's restore of the clone's devices and of the template's network, as its key records it, unchanged,
+and it runs `supervisor::launch` with OpenVMM's restore of the clone's devices, with `--restore-absent-scratch` for a clone in RAM, and of the template's network, as its key records it, unchanged,
 its export bound to the dormant slot, `--mount` with the directory, and its hidden, re-exposed, and writable paths and its owner, `--restore-snapshot` with the generation's snapshot in place, which no clone
 copies or changes, so that clones of one generation restore it at once,
 `--restore-memory` with the memory target, and `--restore-ready-path`, under the

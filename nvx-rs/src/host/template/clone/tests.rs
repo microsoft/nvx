@@ -1494,7 +1494,8 @@ fn images_no_longer_than_the_placeholder_are_served_and_longer_ones_refused() {
             )
         );
     }
-    // OpenVMM attaches no block device of another length, however short.
+    // OpenVMM attaches no block device whose length is not a nonzero multiple of 512 bytes, however
+    // short.
     for length in [0, IMAGE_LEN - 1, IMAGE_LEN + 1] {
         let (image, failed) = refusal(length, false, Evidence::SuppliedGeometry);
         assert_eq!(
