@@ -440,6 +440,41 @@ fn run_launches() -> Vec<Launch> {
             status: 4,
             network: NO_NETWORK,
         }),
+        // A restore passes the network profile and policy of a snapshot that has a NIC without
+        // `--net`, which OpenVMM refuses on a restore.
+        launch(
+            "run: restore of a networked snapshot",
+            run(&[
+                "--restore-snapshot",
+                "{root/snapshot}",
+                "--network-profile",
+                "portable",
+                "--network-egress",
+                "deny",
+                "--network-egress-allow",
+                "10.0.0.0/8:tcp:443",
+                "--host-loopback",
+                "deny",
+                "--outcome-report",
+                "{root/reports/openvmm-run.json}",
+            ]),
+            restore()
+                .with("--network-profile", ["portable"])
+                .with("--network-egress", ["deny"])
+                .with("--network-egress-allow", ["10.0.0.0/8:tcp:443"])
+                .with("--host-loopback", ["deny"])
+                .with("--microvm-report", ["{root/reports/openvmm-run.json}"]),
+            0,
+            restored,
+        )
+        .with_file(SNAPSHOT)
+        .recorded_in(Some("fake-openvmm-reports.json"))
+        .reporting(Report {
+            path: "reports/openvmm-run.json",
+            category: "success",
+            status: 0,
+            network: ("applied", "rules", 1, 0, "deny"),
+        }),
         launch(
             "run: network outcome report",
             run(&[

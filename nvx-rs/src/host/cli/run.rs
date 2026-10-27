@@ -7,6 +7,11 @@
 //! `nvx.py run` with their names, defaults, types, and choices, and ends a usage error with
 //! status 2.
 //!
+//! A cold boot takes `--net` and `--network-profile` together. A restore takes the addressing of
+//! its NIC from the snapshot, as OpenVMM does, so it refuses `--net`, and passes
+//! `--network-profile` alone, which OpenVMM requires, with the network policy that the snapshot
+//! was captured with, to restore a snapshot that has a NIC.
+//!
 //! Its shares differ from those of `sandbox`. `--mount-deny`, `--mount-allow`, and `--mount-write`
 //! name host paths, which OpenVMM attributes to the share that holds them, and which must be
 //! absolute with several shares or a shared file. One directory share uses `--mount`, several
@@ -287,14 +292,21 @@ fn push(command: &mut Vec<String>, name: &str, value: impl Into<String>) {
     command.push(value.into());
 }
 
-/// Checks `options` in the order of `command_run`, before anything that it looks up.
+/// Checks `options` in the order of `command_run`, before anything that it looks up, except that
+/// a restore refuses `--net` and takes `--network-profile` alone.
 fn check(options: &Options) -> Result {
     let refused = |message: String| Err(Exit::error(ErrorCode::Unsupported, message));
     let network = &options.network;
-    if network.net.is_some() != network.network_profile.is_some() {
+    let restore = options.restore_snapshot.is_some();
+    if restore && network.net.is_some() {
+        return refused(
+            "--net is not accepted for restore; the snapshot already fixes the network addressing"
+                .to_owned(),
+        );
+    }
+    if !restore && network.net.is_some() != network.network_profile.is_some() {
         return refused("--net and --network-profile must be specified together".to_owned());
     }
-    let restore = options.restore_snapshot.is_some();
     for (given, option) in [
         (options.restore_ready_path.is_some(), "--restore-ready-path"),
         (options.restore_processors.is_some(), "--restore-processors"),

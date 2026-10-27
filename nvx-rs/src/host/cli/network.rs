@@ -118,8 +118,9 @@ impl NetworkOptions {
     }
 
     /// Appends the OpenVMM options of these network options and `rules` to `command`, as
-    /// `_extend_network_arguments` does, for `run`; `sandbox` lowers them through its typed network
-    /// policy instead.
+    /// `_extend_network_arguments` does, for `run`, except that `--network-profile` goes without
+    /// `--net` too, as a restore passes it; `sandbox` lowers them through its typed network policy
+    /// instead.
     pub(crate) fn extend_arguments(&self, command: &mut Vec<String>, rules: &NativeRules) {
         let mut push = |name: &str, value: &str| {
             command.push(name.to_owned());
@@ -127,10 +128,9 @@ impl NetworkOptions {
         };
         if let Some(net) = &self.net {
             push("--net", net);
-            push(
-                "--network-profile",
-                self.network_profile.unwrap_or_default(),
-            );
+        }
+        if let Some(profile) = self.network_profile {
+            push("--network-profile", profile);
         }
         if let Some(egress) = self.network_egress {
             push("--network-egress", egress);

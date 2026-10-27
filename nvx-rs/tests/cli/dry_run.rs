@@ -900,6 +900,63 @@ fn run_dry_runs() -> Vec<DryRun> {
             run(&["--network-egress", "deny"]),
             cold_boot().with("--network-egress", ["deny"]),
         ),
+        // A restore takes the addressing of its NIC from the snapshot, so it passes the profile
+        // and the policy without `--net`.
+        dry_run(
+            "run: restore of a networked snapshot",
+            run(&[
+                "--restore-snapshot",
+                "{root/snapshot}",
+                "--network-profile",
+                "portable",
+            ]),
+            restore().with("--network-profile", ["portable"]),
+        ),
+        dry_run(
+            "run: restore with a network policy",
+            run(&[
+                "--restore-snapshot",
+                "{root/snapshot}",
+                "--network-profile",
+                "portable",
+                "--network-egress",
+                "deny",
+                "--network-egress-allow",
+                "10.0.0.0/8:tcp:443",
+                "--network-egress-deny",
+                "10.1.0.0/16",
+                "--host-loopback",
+                "deny",
+                "--network-proxy",
+                "10.0.0.1:3128",
+            ]),
+            restore()
+                .with("--network-profile", ["portable"])
+                .with("--network-egress", ["deny"])
+                .with("--network-egress-allow", ["10.0.0.0/8:tcp:443"])
+                .with("--network-egress-deny", ["10.1.0.0/16"])
+                .with("--host-loopback", ["deny"])
+                .with("--network-proxy", ["10.0.0.1:3128"]),
+        ),
+        dry_run(
+            "run: restore with an egress policy file",
+            run(&[
+                "--restore-snapshot",
+                "{root/snapshot}",
+                "--network-profile",
+                "portable",
+                "--network-egress",
+                "deny",
+                "--network-egress-policy-file",
+                "{root/policy.json}",
+            ]),
+            restore()
+                .with("--network-profile", ["portable"])
+                .with("--network-egress", ["deny"])
+                .with("--network-egress-allow", COMPILED_ALLOW)
+                .with("--network-egress-deny", COMPILED_DENY),
+        )
+        .with_file("policy.json", POLICY),
         dry_run(
             "run: host loopback forward",
             run(&["--host-loopback-forward", "tcp:8080:80"]),

@@ -608,17 +608,24 @@ message.
 
 `nvx-rs run` ([Usage](../doc/usage.md#run)) has the options, with their names,
 defaults, and value checks, and the checks, messages, outputs, and exit
-statuses of the `nvx.py run` that it replaced. It prints `>> COMMAND`,
-OpenVMM's command line, quoted as `sandbox run` quotes it, and unless
-`--dry-run` is given, it runs OpenVMM with the standard streams, so that the
-guest's console and the terminal settings that OpenVMM restores behave as
-they do for OpenVMM itself, and exits with OpenVMM's status.
+statuses of the `nvx.py run` that it replaced, except as
+[Other differences from nvx.py](#other-differences-from-nvxpy) lists. It
+prints `>> COMMAND`, OpenVMM's command line, quoted as `sandbox run` quotes
+it, and unless `--dry-run` is given, it runs OpenVMM with the standard
+streams, so that the guest's console and the terminal settings that OpenVMM
+restores behave as they do for OpenVMM itself, and exits with OpenVMM's
+status.
 
 - A cold boot runs the kernel and the initramfs of `--guest`, `alpine` by
   default, with `--memory-mib` or else the guest's default, 128 MiB for Alpine
   and 512 MiB for Ubuntu and Azure Linux, which `Guest::default_memory_mib`
   gives. `--restore-snapshot` restores a snapshot instead, without them, and
   with the `--restore-*` options, which need it.
+- A cold boot takes `--net` and `--network-profile` together. A restore takes
+  the addressing of its NIC from the snapshot, as OpenVMM does, so it refuses
+  `--net`, and passes `--network-profile` alone, which OpenVMM requires, with
+  the network policy that the snapshot was captured with, to restore a
+  snapshot that has a NIC.
 - One directory `--mount` is OpenVMM's `--mount`. Several, or a shared file,
   are the children of an aggregate at `/run/nvx/shares`, whose guest targets
   must be absolute, must not overlap, and must survive the kernel command line,
@@ -879,6 +886,11 @@ guest agents of NVX advertise bits 0, 4, and 6 in sandbox mode.
   of `run`'s standard handles and the scratch image's claim alone.
 - `start` and `exec` refuse, and `stop` terminates, a VM that another runtime
   identity started; see [Runtime identity](#runtime-identity).
+- `run --restore-snapshot` refuses `--net`, whose addressing a restored NIC
+  takes from the snapshot, and passes `--network-profile` without it, as
+  OpenVMM requires to restore a snapshot that has a NIC. `nvx.py run` took the
+  two only together, so it could not restore such a snapshot: OpenVMM refused
+  its `--net`, or required the `--network-profile` that it omitted.
 
 ### Test hooks
 
