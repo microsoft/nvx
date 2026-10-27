@@ -30,11 +30,14 @@
 //! Settlement goes through the cgroup that the execution's options name, if any, in the scope
 //! that they give: once the program's status is known, the binding kills the cgroup's processes,
 //! and reports the execution settled once the cgroup is empty, which it checks at most every 10
-//! ms. From then on, the cgroup is the caller's again: neither the execution nor its drop kills
-//! the cgroup's processes, so the caller may reuse the cgroup once the outcome is reusable,
-//! whether or not it dropped the binding. A zombie still occupies the cgroup until its parent
-//! collects it, so a caller whose executions' orphans it adopts, such as a PID 1, collects their
-//! statuses between its calls.
+//! ms with [`ExecutionCgroup::is_occupied`](crate::guest::cgroup::ExecutionCgroup::is_occupied),
+//! from the `pids.current` of the cgroup that the scope covers. From then on, the cgroup is the
+//! caller's again: neither the execution nor its drop kills the cgroup's processes, so the caller
+//! may reuse the cgroup once the outcome is reusable, whether or not it dropped the binding.
+//! `pids.current` counts a zombie until its parent collects it, so a caller whose executions'
+//! orphans it adopts, such as a PID 1, collects their statuses between its calls. `cgroup.procs`
+//! and the `populated` entry of `cgroup.events`, by contrast, drop a process as soon as it exits,
+//! so a caller that watches those files can see the cgroup empty before the execution settles.
 //! Without a cgroup, nothing proves that the program's descendants are gone, so the execution
 //! never settles, and is fenced: the runner then gives up on the output streams that a process
 //! may still hold the settlement time and the grace after the program's end, while it waits as

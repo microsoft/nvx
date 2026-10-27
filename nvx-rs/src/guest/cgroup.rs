@@ -279,7 +279,8 @@ impl ExecutionCgroup {
 
     /// Returns the placement that makes a [spawned](super::spawn::Command::cgroup) child join
     /// the execution's cgroup before its program runs, so that the program and its descendants
-    /// start in it.
+    /// start in it. The child joins in one of its own launch stages, so the cgroup may not hold
+    /// it until its launch reports: see [`Command::cgroup`](super::spawn::Command::cgroup).
     pub fn placement(&self) -> io::Result<Cgroup> {
         Cgroup::open_in(&self.directories.execution)
     }
@@ -296,6 +297,9 @@ impl ExecutionCgroup {
     ///
     /// It reads `pids.current`, which must be one canonical decimal and a newline: another form
     /// is `EPROTO`, and one of more than 31 bytes `EOVERFLOW`.
+    ///
+    /// A child that the caller spawned with the cgroup's [`placement`](Self::placement) and whose
+    /// launch has yet to report may not be in the cgroup yet: the check does not see it then.
     pub fn is_occupied(&self, scope: Scope) -> io::Result<bool> {
         let descriptor = open_file(self.directory(scope), PIDS_CURRENT, OpenFlags::O_RDONLY)?;
         let mut buffer = [0u8; COUNT_CAPACITY];
@@ -322,6 +326,9 @@ impl ExecutionCgroup {
     /// Kills every process in `scope` with `SIGKILL`, through `cgroup.kill`, which also kills a
     /// process that one of them forks meanwhile. It does not wait for them to end: see
     /// [`settle`](Self::settle).
+    ///
+    /// A child that the caller spawned with the cgroup's [`placement`](Self::placement) and whose
+    /// launch has yet to report may not be in the cgroup yet: the kill does not reach it then.
     pub fn kill(&self, scope: Scope) -> io::Result<()> {
         write_in(self.directory(scope), KILL, b"1")
     }
