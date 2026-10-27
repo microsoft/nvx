@@ -60,8 +60,8 @@ const EXPORT_DOMAIN: &[u8] = b"nvx export plan\0";
 ///   command line names, [`TemplateKey::dns_server`], if it names one; unpublished listeners,
 ///   since a template's policy allows neither ingress nor host-loopback access both ways; and the
 ///   URL of the policy's proxy as the guest sees it, if it has one;
-/// - the expected resources: the template's processors, all of which a template's VM keeps
-///   online, and the request's memory target.
+/// - the expected resources: the request's processor target, which the restore brings online, and
+///   its memory target.
 ///
 /// Fails with [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported) for a configuration that
 /// no record holds, as [`Configuration::check`] finds it, such as a GPT disk's first-partition
@@ -126,7 +126,7 @@ pub(super) fn build(
         network,
         workload: request.workload.clone(),
         resources: ExpectedResources {
-            cpus: key.processors(),
+            cpus: request.processors,
             memory: request.memory,
         },
     };

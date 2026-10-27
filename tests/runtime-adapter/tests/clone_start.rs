@@ -133,6 +133,14 @@ fn the_host_program_refuses_options_that_do_not_make_a_start() {
             "--memory takes a positive number of MiB, not \"0\"",
         ),
         (
+            with(&["--upper", "ram", "--processors", "0"]),
+            "--processors takes a positive number, not \"0\"",
+        ),
+        (
+            with(&["--upper", "ram", "--boot-processors", "1"]),
+            "unexpected option \"--boot-processors\" of start",
+        ),
+        (
             with(&["--upper", "ram", "--workload-identity", "0:1000"]),
             "--workload-identity takes UID:GID, two numbers from 1 to 4294967294",
         ),
@@ -694,6 +702,7 @@ fn a_clone_s_record_names_its_template_store_and_generation_beside_its_plan() {
         format: ImageFormat::Erofs,
         identity: identity(),
         scratch: Some(scratch.clone()),
+        processors: None,
         memory: None,
         workload_identity: Some((1000, 1000)),
         overlay_mode: None,
@@ -785,6 +794,7 @@ fn a_clone_s_request_takes_the_staged_bindings_and_the_guest_s_defaults() {
         format: ImageFormat::Erofs,
         identity: identity(),
         scratch: Some(scratch.clone()),
+        processors: None,
         memory: None,
         workload_identity: None,
         overlay_mode: None,
@@ -797,15 +807,15 @@ fn a_clone_s_request_takes_the_staged_bindings_and_the_guest_s_defaults() {
     let plan = request.plan().unwrap();
     let staged = Staged::stage(&distro, ImageFormat::Erofs, identity(), Some(&scratch)).unwrap();
     let bindings = staged.bindings(&plan);
-    let memory = 512 << 20;
+    let (processors, memory) = (2, 512 << 20);
     let clone = request
-        .clone_request(plan.clone(), None, &bindings, memory)
+        .clone_request(plan.clone(), None, &bindings, processors, memory)
         .unwrap();
     assert_eq!(clone.adapter, plan);
     assert_eq!(clone.binding, staged.distro.binding);
     assert_eq!(clone.scratch, Some(staged.scratch.unwrap().binding));
     assert_eq!(clone.export, None);
-    assert_eq!(clone.memory, memory);
+    assert_eq!((clone.processors, clone.memory), (processors, memory));
     assert_eq!(
         clone.policy_revision,
         nvx::host::sandbox::distro::DISTRO_POLICY_REVISION
@@ -827,7 +837,7 @@ fn a_clone_s_request_takes_the_staged_bindings_and_the_guest_s_defaults() {
         ..request.clone()
     };
     let clone = named
-        .clone_request(plan.clone(), None, &bindings, memory)
+        .clone_request(plan.clone(), None, &bindings, processors, memory)
         .unwrap();
     assert_eq!(
         clone.workload.identity,
@@ -854,7 +864,7 @@ fn a_clone_s_request_takes_the_staged_bindings_and_the_guest_s_defaults() {
         ),
     ] {
         let error = request
-            .clone_request(plan.clone(), None, &bindings, memory)
+            .clone_request(plan.clone(), None, &bindings, processors, memory)
             .unwrap_err();
         assert_eq!(error.kind(), nvx::ErrorKind::Unavailable, "{what}");
         assert!(
@@ -872,12 +882,18 @@ fn a_clone_s_request_takes_the_staged_bindings_and_the_guest_s_defaults() {
     };
     let plan = in_ram.plan().unwrap();
     let error = in_ram
-        .clone_request(plan.clone(), None, &Bindings::default(), memory)
+        .clone_request(plan.clone(), None, &Bindings::default(), processors, memory)
         .unwrap_err();
     assert_eq!(error.kind(), nvx::ErrorKind::Unavailable);
     let staged = Staged::stage(&distro, ImageFormat::Erofs, identity(), None).unwrap();
     let clone = in_ram
-        .clone_request(plan.clone(), None, &staged.bindings(&plan), memory)
+        .clone_request(
+            plan.clone(),
+            None,
+            &staged.bindings(&plan),
+            processors,
+            memory,
+        )
         .unwrap();
     assert_eq!(clone.scratch, None);
     assert_eq!(clone.adapter, plan);
@@ -911,6 +927,7 @@ fn a_clone_s_request_takes_the_staged_bindings_and_the_guest_s_defaults() {
             plan.clone(),
             Some(export.clone()),
             &staged.bindings(&plan),
+            processors,
             memory,
         )
         .unwrap();
@@ -1038,6 +1055,7 @@ fn a_clone_s_plan_request_and_record_carry_its_network() {
         format: ImageFormat::Erofs,
         identity: identity(),
         scratch: None,
+        processors: None,
         memory: None,
         workload_identity: None,
         overlay_mode: None,
@@ -1058,7 +1076,7 @@ fn a_clone_s_plan_request_and_record_carry_its_network() {
     let staged = Staged::stage(&distro, ImageFormat::Erofs, identity(), None).unwrap();
     let bindings = staged.bindings(&plan);
     let clone = request
-        .clone_request(plan.clone(), None, &bindings, 512 << 20)
+        .clone_request(plan.clone(), None, &bindings, 1, 512 << 20)
         .unwrap();
     assert_eq!(clone.adapter, plan);
     assert_eq!(

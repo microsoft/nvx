@@ -12,6 +12,7 @@
 //! | `reads` | The sectors that the guest read from each of its disks, by the disk's statistics: `disks`, each as `NAME:SECTORS`, in 512-byte sectors, in the order of their names, separated by spaces |
 //! | `read-disks` | It reads each of the guest's disks from its start to its end, through the page cache: `disks`, each as `NAME:BYTES`, the bytes that it read, in the order of their names, separated by spaces |
 //! | `memory` | The guest's memory: the size of its memory blocks, `block-size`, how many are online, `blocks`, and their bytes, `online`, and the memory that the kernel manages, `total`, each in bytes |
+//! | `processors` | The guest's CPUs, as the kernel lists them: those that are online, `online`, present, `present`, and possible, `possible`; and the CPUs that the restore of a clone brought online, as the time ABI's record of the restore names them, `restored`, `none` for none, or `absent` without a record |
 //! | `time` | The guest's time state, [`TIME_STATE`], which NVX's time service keeps: each line `KEY=VALUE` as a fact, with each `_` of its key as `-`, in order, leaving out a key that no fact may have, and a repeated one |
 //! | `first-partition` | The bytes of the first partition of a GPT disk that the assembly returned, without their trailing padding: how many, `length`, and the bytes, `bytes`, in hexadecimal, or `none` for both for an EROFS image |
 //! | `cgroups` | The file system at the cgroups' parent, `parent.type`, and its `parent.subtree-control`; whether each cgroup exists, `agent.exists` and `workload.exists`; `agent.memory.low`, `workload.memory.max`, and `workload.pids.max`; the number of processes in each, `agent.processes` and `workload.processes`; and `user-namespaces`, the guest's limit of user namespaces, or `unavailable` without them |
@@ -56,6 +57,11 @@ const FILL_SLACK: u64 = 16 << 20;
 const MEMORY_INFORMATION: &str = "/proc/meminfo";
 /// The guest's memory blocks, of which the `memory` probe counts those online.
 const MEMORY_BLOCKS: &str = "/sys/devices/system/memory";
+/// The guest's CPUs, which the `processors` probe lists.
+const CPUS: &str = "/sys/devices/system/cpu";
+/// The time ABI's record of the restore of a clone, whose `new_cpus=` line names the CPUs that the
+/// restore brought online.
+const TIME_RESTORE: &str = "/run/nvx/time-restore";
 /// The guest's block devices.
 const BLOCK_DEVICES: &str = "/sys/block";
 /// The directory of the guest's device nodes, through which the `read-disks` probe reads its disks.
@@ -139,6 +145,7 @@ pub fn run(probe: &Probe, context: &Context<'_>, held: &mut Vec<File>) -> Result
         "reads",
         "read-disks",
         "memory",
+        "processors",
         "time",
         "first-partition",
         "cgroups",
@@ -164,6 +171,7 @@ pub fn run(probe: &Probe, context: &Context<'_>, held: &mut Vec<File>) -> Result
         ("reads", _) => reads(),
         ("read-disks", _) => read_disks(),
         ("memory", _) => memory(),
+        ("processors", _) => Ok(processors()),
         ("time", _) => time(),
         ("first-partition", _) => Ok(first_partition(context)),
         ("cgroups", _) => cgroups(context),
@@ -447,6 +455,34 @@ fn memory() -> io::Result<Facts> {
     facts.push("online", online.saturating_mul(block_size).to_string());
     facts.push("total", total.to_string());
     Ok(facts)
+}
+
+/// Runs the `processors` probe.
+fn processors() -> Facts {
+    let cpus = Path::new(CPUS);
+    let mut facts = Facts::new();
+    for list in ["online", "present", "possible"] {
+        facts.push(list, read(&cpus.join(list)));
+    }
+    let restored = match fs::read_to_string(TIME_RESTORE) {
+        Ok(record) => restored_cpus(&record),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => "absent".to_owned(),
+        Err(error) => format!("unreadable: {error}"),
+    };
+    facts.push("restored", restored);
+    facts
+}
+
+/// Returns the CPUs that the time ABI's record of a restore, `record`, names as the CPUs that the
+/// restore brought online, after `new_cpus=`, or `unreadable: PROBLEM` for a record without them.
+fn restored_cpus(record: &str) -> String {
+    record
+        .lines()
+        .find_map(|line| line.strip_prefix("new_cpus="))
+        .map_or_else(
+            || "unreadable: the record names no new CPUs".to_owned(),
+            str::to_owned,
+        )
 }
 
 /// Runs the `time` probe.
@@ -875,7 +911,7 @@ rw,lowerdir=/run/a\\040b/layers/distro,metacopy=on,xino=on
             run(&with_argument, &context, &mut held),
             Err("the first-partition probe takes no arguments".to_owned())
         );
-        for name in ["reads", "read-disks", "memory", "time"] {
+        for name in ["reads", "read-disks", "memory", "processors", "time"] {
             let with_argument = Probe::parse(&format!("{name} vda")).unwrap();
             assert_eq!(
                 run(&with_argument, &context, &mut held),
@@ -977,5 +1013,15 @@ rw,lowerdir=/run/a\\040b/layers/distro,metacopy=on,xino=on
         expected.push("bytes", "none");
         assert_eq!(run(&probe, &context, &mut held), Ok(expected));
         assert_eq!(hexadecimal(&[0x0f, 0xa0, 0x5c]), "0fa05c");
+    }
+
+    #[test]
+    fn the_cpus_that_a_restore_brought_online_are_those_of_its_record() {
+        assert_eq!(restored_cpus("generation=3\nnew_cpus=1-3\n"), "1-3");
+        assert_eq!(restored_cpus("generation=3\nnew_cpus=none\n"), "none");
+        assert_eq!(
+            restored_cpus("generation=3\n"),
+            "unreadable: the record names no new CPUs"
+        );
     }
 }

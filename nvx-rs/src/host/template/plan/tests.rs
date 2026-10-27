@@ -200,10 +200,12 @@ fn networks() -> Vec<Option<SandboxNetwork>> {
     ]
 }
 
-/// Returns the resources of `processors`, with 512 MiB of RAM and a capacity of 2 GiB.
+/// Returns the resources of `processors`, all online at boot, with 512 MiB of RAM and a capacity
+/// of 2 GiB.
 fn resources(processors: u32) -> TemplateResources {
     TemplateResources {
         processors,
+        boot_processors: processors,
         memory: 512 * MIB,
         memory_capacity: 2 * GIB,
     }
@@ -271,20 +273,29 @@ fn template(adapter: SandboxPlan) -> TemplatePlan {
 }
 
 /// Returns the templates of every format of placeholder, of adapters' plans over a clone's scratch
-/// and over RAM, of every network of [`networks`], and of every processor count.
+/// and over RAM, of every network of [`networks`], and of every processor count, with every count
+/// up to it online at boot.
 fn every_template() -> Vec<TemplatePlan> {
     let mut templates = Vec::new();
     for (format, image) in [("erofs", erofs()), ("gpt", gpt())] {
         for upper in [SandboxUpper::scratch(CLONE_SCRATCH), SandboxUpper::RAM] {
             for network in networks() {
                 for processors in PROCESSOR_COUNTS {
-                    let inputs = Inputs {
-                        adapter: adapter_with(image, upper.clone(), network.clone()),
-                        binding: binding_of(format, IDENTITY, GIB),
-                        resources: resources(processors),
-                        ..Inputs::default()
-                    };
-                    templates.push(inputs.lower().unwrap());
+                    for boot_processors in PROCESSOR_COUNTS
+                        .into_iter()
+                        .filter(|boot| *boot <= processors)
+                    {
+                        let inputs = Inputs {
+                            adapter: adapter_with(image, upper.clone(), network.clone()),
+                            binding: binding_of(format, IDENTITY, GIB),
+                            resources: TemplateResources {
+                                boot_processors,
+                                ..resources(processors)
+                            },
+                            ..Inputs::default()
+                        };
+                        templates.push(inputs.lower().unwrap());
+                    }
                 }
             }
         }
@@ -394,6 +405,7 @@ fn templates_render_their_devices_resources_and_capture_options() {
     let inputs = Inputs {
         resources: TemplateResources {
             processors: 8,
+            boot_processors: 8,
             memory: MEMORY_BLOCK_SIZE,
             memory_capacity: MEMORY_BLOCK_SIZE,
         },
@@ -450,6 +462,32 @@ fn templates_keep_the_placeholder_and_the_files_of_their_capture_in_its_transact
 }
 
 #[test]
+fn templates_limit_their_processors_online_at_boot_on_their_command_line() {
+    // A template whose processors are all online at boot sets no limit, and OpenVMM records none.
+    for processors in PROCESSOR_COUNTS {
+        let template = Inputs {
+            resources: resources(processors),
+            ..Inputs::default()
+        }
+        .lower()
+        .unwrap();
+        assert_eq!(template.kernel_command_line(), "nvx_sandbox=1");
+    }
+    // One that boots with fewer online limits them, and keeps its capacity.
+    let inputs = Inputs {
+        resources: TemplateResources {
+            boot_processors: 2,
+            ..resources(8)
+        },
+        ..Inputs::default()
+    };
+    let template = inputs.lower().unwrap();
+    assert_eq!(template.kernel_command_line(), "nvx_sandbox=1 maxcpus=2");
+    assert_eq!(value(&template.capture_arguments(), "--processors"), "8");
+    assert_eq!(template.resources(), inputs.resources);
+}
+
+#[test]
 fn the_upper_of_an_adapters_plan_is_a_clones_and_no_part_of_its_template() {
     let over_scratch = template(adapter(None));
     let over_ram = template(adapter_with(erofs(), SandboxUpper::RAM, None));
@@ -491,6 +529,7 @@ fn openvmms_platform_allowlist_admits_its_tokens_and_refuses_tenant_data() {
         "nvx_config=0xd0010000,65536",
         "nvx_snapshot_tier=platform",
         "nr_cpus=8",
+        "maxcpus=1",
         "nvx_control_tty=hvc2",
         "virtio_mmio.device=0x1000@0xd0001000:6",
         "virtnet_ip=10.0.0.2",
@@ -757,6 +796,23 @@ fn templates_refuse_what_no_capture_takes() {
             format!("a template's VM has 1, 2, 4, or 8 processors, not {processors}")
         );
     }
+    // Processors online at boot other than 1, 2, 4, and 8, or more than the processors.
+    for (processors, boot_processors) in [(2, 0), (8, 3), (2, 4), (8, 16), (8, u32::MAX)] {
+        let inputs = Inputs {
+            resources: TemplateResources {
+                boot_processors,
+                ..resources(processors)
+            },
+            ..Inputs::default()
+        };
+        assert_eq!(
+            refusal(inputs.lower()),
+            format!(
+                "a template's VM boots with 1, 2, 4, or 8 of its {processors} processors online, \
+                 not {boot_processors}"
+            )
+        );
+    }
     // RAM and capacities that are not whole blocks, and capacities below the RAM.
     for (memory, memory_capacity) in [
         (0, 0),
@@ -769,6 +825,7 @@ fn templates_refuse_what_no_capture_takes() {
         let inputs = Inputs {
             resources: TemplateResources {
                 processors: 2,
+                boot_processors: 2,
                 memory,
                 memory_capacity,
             },
@@ -906,12 +963,13 @@ fn templates_check_their_inputs_in_order() {
         scratch_length: 0,
         resources: TemplateResources {
             processors: 3,
+            boot_processors: 3,
             memory: 0,
             memory_capacity: 0,
         },
         transaction: "templates".to_owned(),
     };
-    let steps: [(&str, Fix); 11] = [
+    let steps: [(&str, Fix); 12] = [
         ("a template lowers an adapter's plan", |inputs| {
             inputs.adapter = adapter_at("placeholder.vhd", gpt(), SandboxUpper::RAM, listening());
         }),
@@ -940,6 +998,9 @@ fn templates_check_their_inputs_in_order() {
         }),
         ("processors, not 3", |inputs| {
             inputs.resources.processors = 2
+        }),
+        ("of its 2 processors online, not 3", |inputs| {
+            inputs.resources.boot_processors = 1
         }),
         ("needs nonzero RAM", |inputs| {
             inputs.resources = resources(2)

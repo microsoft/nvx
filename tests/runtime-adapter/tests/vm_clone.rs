@@ -18,6 +18,13 @@
 //!   memory target from the template's RAM to its capacity, which the guest has online. The store
 //!   leases the generation to each, a stop releases it, and the clones change nothing of the
 //!   generation's snapshot, and leave nothing in its payload.
+//! - One generation of a template of 4 processors, one of them online at boot, serves clones of
+//!   each processor count from that one to its capacity: a clone takes the template's processors
+//!   online at boot by default, and the restore of each other target brings the rest of its prefix
+//!   online, which the guest has online, and which the time ABI's record of the restore names.
+//!   NVX's plan refuses a count that a microVM cannot have, and one beyond the capacity, before
+//!   any VMM starts. The generation of a template that boots with 2 of its 4 processors online
+//!   refuses a clone of 1, and serves those of 2, its default, and 4.
 //! - One generation serves clones of either format over either upper, at once: the platform's
 //!   EROFS image, and GPT disks of other layouts than the template's placeholder, a GPT disk too,
 //!   and than each other's. The guest of a GPT clone rereads its disk's partition table before it
@@ -731,10 +738,35 @@ impl Template {
     }
 
     /// Creates the sandbox of the scenario `name`, stages the platform's copy of the image, and
+    /// captures the template of the image with a capacity of `processors` processors, of which
+    /// `boot` are online at boot, or the host program's default, as [`create`](Self::create)
+    /// does.
+    fn of_processors(name: &str, processors: u32, boot: Option<u32>) -> Self {
+        let processors = processors.to_string();
+        let boot = boot.map(|boot| boot.to_string());
+        let mut options = vec!["--processors", processors.as_str()];
+        options.extend(
+            boot.iter()
+                .flat_map(|boot| ["--boot-processors", boot.as_str()]),
+        );
+        Self::captured(name, None, None, &options)
+    }
+
+    /// Creates the sandbox of the scenario `name`, stages the platform's copy of the image, and
     /// captures the template of the GPT disk `placeholder`, if any, [`PLACEHOLDER_SLACK`] longer
     /// than the image, and of the image otherwise, with the network `network`, if any, with the
     /// guest at [`GUEST_NETWORK`].
     fn capture(name: &str, placeholder: Option<&Disk>, network: Option<Network>) -> Self {
+        Self::captured(name, placeholder, network, &[])
+    }
+
+    /// Captures the template as [`capture`](Self::capture) does, with the options `extra` too.
+    fn captured(
+        name: &str,
+        placeholder: Option<&Disk>,
+        network: Option<Network>,
+        extra: &[&str],
+    ) -> Self {
         let mut sandbox = Sandbox::new(name);
         let fixtures = Fixtures::find();
         let image = stage_platform(&sandbox.root.join("platform"), &fixtures);
@@ -764,6 +796,7 @@ impl Template {
         if let Some(network) = &network {
             options.extend([OsStr::new("--network"), network.as_os_str()]);
         }
+        options.extend(extra.iter().map(OsStr::new));
         let created = sandbox.create(&options, 0);
         assert_eq!(created["created"], "captured", "{created:?}");
         assert_eq!(created["generation"], GENERATION.to_string(), "{created:?}");
@@ -1971,6 +2004,7 @@ fn refuses_early(template: &Template, early: Message) {
         format: ImageFormat::Erofs,
         identity: Uuid::parse(&template.identity).unwrap(),
         scratch: None,
+        processors: None,
         memory: None,
         workload_identity: None,
         overlay_mode: None,
@@ -1984,7 +2018,13 @@ fn refuses_early(template: &Template, early: Message) {
     let staged = Staged::read(&sandbox.store).unwrap().unwrap();
     let key = store.read_key(&template.generation()).unwrap();
     let clone = request
-        .clone_request(plan.clone(), None, &staged.bindings(&plan), key.memory())
+        .clone_request(
+            plan.clone(),
+            None,
+            &staged.bindings(&plan),
+            key.processors(),
+            key.memory(),
+        )
         .unwrap();
     let now = HostTime::now().unwrap();
     let mut acquired = store
@@ -2138,6 +2178,122 @@ fn one_generation_serves_clones_of_each_upper_and_memory_target() {
     // left nothing in its payload.
     assert_eq!(files_below(&snapshot), captured);
     assert_payload(&template, false);
+}
+
+/// Checks that a clone's `processors` probe found the CPUs `online` online, of the possible CPUs
+/// `possible`, and that the restore brought the CPUs `restored` online, `none` for none.
+fn assert_processors(facts: &Printed, online: &str, possible: &str, restored: &str) {
+    let found = ["online", "possible", "restored"].map(|key| &facts[&format!("processors.{key}")]);
+    assert_eq!(found, [online, possible, restored], "{facts:?}");
+}
+
+#[test]
+#[ignore = "boots VMs; see the module documentation for what they need"]
+fn one_generation_serves_clones_of_each_processor_count_from_its_boot_online_count_to_its_capacity()
+{
+    // A template of 4 processors, one of them online at boot, the host program's default.
+    let template = Template::of_processors("cl-cpus", 4, None);
+    let snapshot = template.payload().join(SNAPSHOT_NAME);
+    let captured = files_below(&snapshot);
+    // A clone takes the processors online at boot by default, which its restore brings none
+    // online of, and the restore of each other target brings the rest of its prefix online.
+    for (options, online, restored) in [
+        (&[][..], "0", "none"),
+        (&["--processors", "2"][..], "0-1", "1"),
+        (&["--processors", "4"][..], "0-3", "1-3"),
+    ] {
+        let start = StartOf {
+            options,
+            ..StartOf::default()
+        };
+        let mut cloned = template.start("cl-n", start, 0);
+        cloned.assert_started();
+        let facts = cloned.probe(&["processors", "activation"]);
+        assert_processors(&facts, online, "0-3", restored);
+        assert_timeline(&facts);
+        cloned.stop();
+    }
+    assert!(template.leases().is_empty());
+
+    // A count that a microVM cannot have, and one beyond the template's capacity, are refused
+    // before any VMM starts.
+    for target in ["3", "8"] {
+        let options = ["--processors", target];
+        let start = StartOf {
+            options: &options,
+            ..StartOf::default()
+        };
+        let refused = template.start("cl-n", start, CLONE_FAILED);
+        assert_eq!(
+            failure(&refused.started),
+            [
+                "request",
+                "invalid-targets",
+                "plan",
+                "planned",
+                "none",
+                "no-vm"
+            ],
+            "{target}: {:?}",
+            refused.started
+        );
+        assert_eq!(refused.started["quarantined"], "no");
+        refused.assert_refused(&format!(
+            "cannot restore with a processor target of {target}: a target must be 1, 2, 4, or 8, \
+             from the template's processors online at boot, 1, to its capacity, 4"
+        ));
+        assert!(template.leases().is_empty());
+    }
+    assert_eq!(files_below(&snapshot), captured);
+    assert_payload(&template, false);
+}
+
+#[test]
+#[ignore = "boots VMs; see the module documentation for what they need"]
+fn a_generation_refuses_clones_of_fewer_processors_than_its_template_booted_with() {
+    let template = Template::of_processors("cl-boot", 4, Some(2));
+    let options = ["--processors", "1"];
+    let start = StartOf {
+        options: &options,
+        ..StartOf::default()
+    };
+    let refused = template.start("cl-m", start, CLONE_FAILED);
+    assert_eq!(
+        failure(&refused.started),
+        [
+            "request",
+            "invalid-targets",
+            "plan",
+            "planned",
+            "none",
+            "no-vm"
+        ],
+        "{:?}",
+        refused.started
+    );
+    refused.assert_refused(
+        "cannot restore with a processor target of 1: a target must be 1, 2, 4, or 8, from the \
+         template's processors online at boot, 2, to its capacity, 4",
+    );
+    assert!(template.leases().is_empty());
+
+    // Its clones take its 2 processors online at boot by default, and the restore of a larger
+    // target brings online the CPUs beyond them.
+    for (options, online, restored) in [
+        (&[][..], "0-1", "none"),
+        (&["--processors", "4"][..], "0-3", "2-3"),
+    ] {
+        let start = StartOf {
+            options,
+            ..StartOf::default()
+        };
+        let mut cloned = template.start("cl-m", start, 0);
+        cloned.assert_started();
+        let facts = cloned.probe(&["processors"]);
+        assert_processors(&facts, online, "0-3", restored);
+        cloned.stop();
+    }
+    assert!(template.leases().is_empty());
 }
 
 #[test]

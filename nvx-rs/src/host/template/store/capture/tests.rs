@@ -473,6 +473,47 @@ fn captures_publish_generations_that_creations_then_serve() {
 }
 
 #[test]
+fn captures_limit_the_processors_that_their_class_keeps_offline_at_boot() {
+    let mut bench = Bench::new();
+    bench.capture.class.processors = 4;
+    bench.capture.class.boot_processors = 1;
+    // OpenVMM records the processors online at boot that the command line limits.
+    let mut spec = ManifestSpec::template();
+    spec.vp_count = 4;
+    let contract = spec.contract();
+    contract.topology = (1, 1, 4, 1, vec![0, 1, 2, 3]);
+    contract.boot_online_vp_count = 1;
+    let emulation = Emulation {
+        manifest: Some(spec),
+        ..Emulation::capture()
+    };
+    let arguments = RefCell::new(Vec::new());
+    let run = |locked: &mut LockedStore, vm: &Vm<'_>| {
+        let command = vm.command("control", Path::new("outcome.json"), locked.dir())?;
+        arguments.replace(command.arguments);
+        emulation.run(locked, vm)
+    };
+    let created = bench.serve_with(Some(&|| Ok(after(1))), &run, &uninterrupted, false);
+    let Created::Captured(generation) = created.unwrap() else {
+        panic!("the first creation of a class captures it");
+    };
+    // The VM has the class's processors, and boots with those that it keeps online.
+    let arguments: Vec<String> = arguments
+        .take()
+        .into_iter()
+        .map(|argument| argument.into_string().unwrap())
+        .collect();
+    let value = |option: &str| {
+        let at = arguments.iter().position(|given| given == option).unwrap();
+        arguments[at + 1].as_str()
+    };
+    assert_eq!(value("--processors"), "4");
+    assert_eq!(value("--cmdline"), "nvx_sandbox=1 maxcpus=1");
+    let key = bench.store.read_key(&generation).unwrap();
+    assert_eq!((key.processors(), key.boot_processors()), (4, 1));
+}
+
+#[test]
 fn refreshes_leave_older_generations_and_their_leases_untouched() {
     let bench = Bench::new();
     let first = bench.refresh(&Emulation::capture()).unwrap();

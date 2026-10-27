@@ -39,7 +39,7 @@ use nvx::protocol::cmdline::{self, Parameter};
 /// `nvx_sandbox=1`, `nvx_config=0xd0010000,65536`, [`PLATFORM_TIER`], and the control tty's token,
 /// `nvx_control_tty=hvc2`, whole, and the tokens that start with `nr_cpus=`, `maxcpus=`,
 /// `virtio_mmio.device=`, `virtnet_ip=`, `virtnet_mask=`, `virtnet_gw=`, `virtnet_dns=`,
-/// `virtnet_ip6=`, or `virtnet_gw6=`, whose values OpenVMM writes.
+/// `virtnet_ip6=`, or `virtnet_gw6=`, whose values OpenVMM writes or checks.
 ///
 /// It is OpenVMM's own check, `platform_command_line_token_is_invariant` of
 /// `openvmm_helpers::snapshot::microvm`, compiled from the excerpts of OpenVMM's sources that

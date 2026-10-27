@@ -16,8 +16,8 @@ use nvx::host::store::{ArtifactIdentity, RuntimeIdentity};
 use nvx::protocol::root::{ImageFormat, RootImage};
 use nvx::uuid::Uuid;
 use runtime_adapter::capture::{
-    DEFAULT_CPU_PROFILE, DEFAULT_PROCESSORS, DEFAULT_SCRATCH_LENGTH, LOGICAL_BLOCK_SIZE, Request,
-    geometry,
+    DEFAULT_BOOT_PROCESSORS, DEFAULT_CPU_PROFILE, DEFAULT_PROCESSORS, DEFAULT_SCRATCH_LENGTH,
+    LOGICAL_BLOCK_SIZE, Request, geometry,
 };
 use runtime_adapter::layered::read_network;
 use runtime_adapter::runtime::Runtime;
@@ -83,6 +83,7 @@ fn template(distro: &Path, network: Option<SandboxNetwork>) -> Request {
         hypervisor: Hypervisor::Kvm,
         cpu_profile: DEFAULT_CPU_PROFILE.to_owned(),
         processors: DEFAULT_PROCESSORS,
+        boot_processors: DEFAULT_BOOT_PROCESSORS,
         memory: 256 * MIB,
         memory_capacity: 256 * MIB,
         scratch_length: DEFAULT_SCRATCH_LENGTH,
@@ -152,7 +153,7 @@ fn a_capture_takes_its_class_and_inputs_from_the_request() {
     assert_eq!(capture.artifacts.initrd, initramfs);
 
     // The class: the runtime, the guest agent's build, the machine that the request asks for,
-    // with every processor online at boot, the geometries that OpenVMM presents, and the network.
+    // with its processors online at boot, the geometries that OpenVMM presents, and the network.
     let class = &capture.class;
     assert_eq!(class.runtime, runtime.identity);
     assert_eq!(class.guest_build.as_str(), "runtime-adapter-guest/build");
@@ -179,11 +180,31 @@ fn a_capture_takes_its_class_and_inputs_from_the_request() {
     assert!(class.invariants.is_empty());
     let with_nic = class.identity().unwrap();
 
-    // Every processor is online at boot, whatever the request's number, and the network names
-    // the class: one without a network is another.
+    // A template keeps the processors online at boot that the request names, 1 by default, the
+    // fewest that its clones take, whatever its capacity, and the network names the class: one
+    // without a network is another.
     let mut more = template(&distro, None);
     more.processors = 4;
     more.memory_capacity = 512 * MIB;
+    let capture = more
+        .capture(
+            staged.distro.binding.clone(),
+            &runtime,
+            "build",
+            &initramfs,
+            &directory,
+        )
+        .unwrap();
+    assert_eq!(
+        (capture.class.processors, capture.class.boot_processors),
+        (4, 1)
+    );
+    assert_eq!(capture.class.memory_capacity, 512 * MIB);
+    assert_eq!(capture.adapter.network(), None);
+    assert_eq!(capture.class.network, None);
+    assert_ne!(capture.class.identity().unwrap(), with_nic);
+    let fewer = capture.class.identity().unwrap();
+    more.boot_processors = 2;
     let capture = more
         .capture(
             staged.distro.binding,
@@ -195,12 +216,9 @@ fn a_capture_takes_its_class_and_inputs_from_the_request() {
         .unwrap();
     assert_eq!(
         (capture.class.processors, capture.class.boot_processors),
-        (4, 4)
+        (4, 2)
     );
-    assert_eq!(capture.class.memory_capacity, 512 * MIB);
-    assert_eq!(capture.adapter.network(), None);
-    assert_eq!(capture.class.network, None);
-    assert_ne!(capture.class.identity().unwrap(), with_nic);
+    assert_ne!(capture.class.identity().unwrap(), fewer);
 
     // OpenVMM presents logical blocks of 512 bytes.
     let presented = geometry(&distro, 4096).unwrap();

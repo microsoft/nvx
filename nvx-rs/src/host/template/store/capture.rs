@@ -91,16 +91,16 @@ const CAPTURES_WHAT: &str = "the captures of the template store";
 /// network, the binding of the placeholder, and the artifacts that run its VM, which
 /// [`Store::create_template`] and [`Store::refresh_template`] capture.
 ///
-/// The adapter's plan is lowered as [`TemplatePlan::new`] lowers it, with the processors and RAM
-/// of the class, and a scratch of the class's scratch length; its upper is no part of the
-/// template. The class and the plan must describe one VM: a class whose processors are all online
-/// at boot, a placeholder whose binding records the class's `distro` length, and a network of the
-/// plan that lowers to the OpenVMM arguments of the class's network.
+/// The adapter's plan is lowered as [`TemplatePlan::new`] lowers it, with the processors, those
+/// online at boot among them, and RAM of the class, and a scratch of the class's scratch length;
+/// its upper is no part of the template. The class and the plan must describe one VM: a
+/// placeholder whose binding records the class's `distro` length, and a network of the plan that
+/// lowers to the OpenVMM arguments of the class's network.
 #[derive(Debug, Clone)]
 pub struct Capture {
     /// The class of the capture, which names its slot, and from which the capture takes its
-    /// backend, its CPU profile, its processors, its RAM, its scratch length, and the runtime
-    /// identity of its launch.
+    /// backend, its CPU profile, its processors and those online at boot, its RAM, its scratch
+    /// length, and the runtime identity of its launch.
     pub class: CaptureClass,
     /// The adapter's plan, which [`SandboxPlan::adapter`] makes, of the placeholder `distro` and
     /// the template's network.
@@ -208,7 +208,7 @@ fn uninterrupted(_: Point) -> Result<()> {
 struct Inputs {
     /// The identity of the class.
     class: ClassIdentity,
-    /// The template's processors and RAM, from the class.
+    /// The template's processors, those online at boot among them, and RAM, from the class.
     resources: TemplateResources,
     /// The artifacts, as absolute paths.
     artifacts: Artifacts,
@@ -218,21 +218,13 @@ impl Inputs {
     /// Checks the inputs of `capture`, without reading or opening anything, and returns what the
     /// capture takes of them.
     ///
-    /// Fails with [`ErrorKind::Unsupported`] as [`CaptureClass::identity`] fails, and for a class
-    /// whose processors are not all online at boot, a placeholder whose binding records another
-    /// length than the class's `distro`, and a plan whose network lowers to other arguments than
-    /// the class's; and with [`ErrorKind::Unavailable`] for an artifact whose path cannot be
-    /// resolved.
+    /// Fails with [`ErrorKind::Unsupported`] as [`CaptureClass::identity`] fails, and for a
+    /// placeholder whose binding records another length than the class's `distro`, and a plan
+    /// whose network lowers to other arguments than the class's; and with
+    /// [`ErrorKind::Unavailable`] for an artifact whose path cannot be resolved.
     fn check(capture: &Capture) -> Result<Self> {
         let class = &capture.class;
         let identity = class.identity()?;
-        if class.boot_processors != class.processors {
-            return Err(Error::unsupported(format!(
-                "a template boots with all of its processors online, but its class has {} \
-                 processors, {} online at boot",
-                class.processors, class.boot_processors
-            )));
-        }
         let length = capture.binding.image().length();
         if length != class.distro.length {
             return Err(Error::unsupported(format!(
@@ -261,6 +253,7 @@ impl Inputs {
             class: identity,
             resources: TemplateResources {
                 processors: class.processors,
+                boot_processors: class.boot_processors,
                 memory: class.memory,
                 memory_capacity: class.memory_capacity,
             },
