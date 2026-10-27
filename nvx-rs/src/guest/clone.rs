@@ -51,8 +51,11 @@
 //! runs one once. [`Repair::run`], in order:
 //!
 //! 1. checks that the restore holds its seed, and that its capture did not finish it;
-//! 2. reads the online CPUs, which must be a prefix of the CPUs, and refuses a processor target
-//!    that they don't meet already: the repair brings no CPU online;
+//! 2. reads the online CPUs, which must be a prefix of the CPUs, those that the clone captured
+//!    online. With a processor target, which may not be below them, it brings each CPU of the
+//!    target's prefix that is offline online, through sysfs, as `nvx-snapshot` does, and verifies
+//!    that the online CPUs are the target's prefix. Those are CPUs that the VM has had since its
+//!    boot, offline until then, so no device is plugged;
 //! 3. with a memory target, checks it before it adds any memory block: the kernel's memory block
 //!    size must be 128 MiB, and the restore's ranges, aligned to it, must continue the RAM that
 //!    the clone captured, in logical order: the first starts where the blocks that the kernel
@@ -68,24 +71,25 @@
 //!    [`reseed::reseed`](crate::guest::reseed::reseed), then drops the seed, which zeroes its
 //!    bytes. Nothing before draws randomness, from `getrandom` or from `/dev/urandom`;
 //! 5. finishes the restore through [`TimeAbi::restore_finish`], with the acknowledgement when
-//!    the host gates its input until then, which hands the deferred time work to the time
-//!    daemon: the restore checks, the stall detectors' grace period and release, and the
-//!    wall-clock discipline's fast cadence. The caller starts the daemon with
-//!    [`TimeAbi::start_daemon`] at boot, before the capture, and supervises it. A finish without
-//!    a running daemon fails with a violation of the time ABI's check C10, and in report-only
-//!    mode, it runs the work itself before it returns. The work may end after the clone is
-//!    ready, and its failures are fatal repair failures: the daemon reports them as violations
-//!    of the time ABI, which stop the VM, with the time ABI's status, unless the ABI is
-//!    report-only, since the daemon enforces it.
+//!    the host gates its input until then, and the CPUs that it brought online, which hands the
+//!    deferred time work to the time daemon: the restore checks, of the new CPUs too, the stall
+//!    detectors' grace period and release, and the wall-clock discipline's fast cadence. The
+//!    caller starts the daemon with [`TimeAbi::start_daemon`] at boot, before the capture, and
+//!    supervises it. A finish without a running daemon fails with a violation of the time ABI's
+//!    check C10, and in report-only mode, it runs the work itself before it returns. The work
+//!    may end after the clone is ready, and its failures are fatal repair failures: the daemon
+//!    reports them as violations of the time ABI, which stop the VM, with the time ABI's status,
+//!    unless the ABI is report-only, since the daemon enforces it.
 //!
 //! It returns the [`Repaired`] clone: its new VM generation ID, its number of online CPUs, the
 //! size of its online memory blocks, and when it acknowledged the restore, which an activation
 //! checks against the resources that it expects. The repair records how far it got, so that it
-//! never adds a memory block twice, and runs the reseed and the finish at most once, whoever
-//! retries it: a failure at or after the reseed is final. It never touches the fence. A failure is
-//! a [`RepairError`], which names the [`RepairStage`] that failed, its [`RepairCause`], and the
-//! repair's [`RepairProgress`], and selects the status with which the caller ends the VM,
-//! [`RepairError::status`], which `nvx::protocol::status` documents.
+//! never brings a CPU online twice nor adds a memory block twice, and runs the reseed and the
+//! finish at most once, whoever retries it: a failure at or after the reseed is final. It never
+//! touches the fence. A failure is a [`RepairError`], which names the [`RepairStage`] that
+//! failed, its [`RepairCause`], and the repair's [`RepairProgress`], and selects the status with
+//! which the caller ends the VM, [`RepairError::status`], which `nvx::protocol::status`
+//! documents.
 //!
 //! # Strict mode
 //!
@@ -256,14 +260,14 @@
 //! reseed needs `CAP_SYS_ADMIN`. The capture reads the mount table of the caller's mount
 //! namespace, which must be the one where the guest mounts its devices, such as its initial
 //! namespace, and the repair reads the kernel's CPU and memory interfaces in sysfs, and writes
-//! its memory interface. They mount nothing and start no thread, and they start no process and
-//! collect no child's status, except a report-only finish without a running time daemon, which
-//! runs the deferred time work itself, in a child that it waits for, as
-//! [`TimeAbi::restore_finish`] tells. Apart from a violation of the time ABI in the capture's
-//! preparation, which stops the VM unless the ABI is report-only, as [strict
-//! mode](#strict-mode) tells, they never power the VM off, so a caller that is not PID 1 keeps
-//! its own reaping, transport, and shutdown. The activation needs no privilege, and makes no
-//! system call: of the clone, it changes only the caller's fence, which it opens. Its
+//! the states of the CPUs that it brings online and its memory interface. They mount nothing and
+//! start no thread, and they start no process and collect no child's status, except a
+//! report-only finish without a running time daemon, which runs the deferred time work itself,
+//! in a child that it waits for, as [`TimeAbi::restore_finish`] tells. Apart from a violation of
+//! the time ABI in the capture's preparation, which stops the VM unless the ABI is report-only,
+//! as [strict mode](#strict-mode) tells, they never power the VM off, so a caller that is not
+//! PID 1 keeps its own reaping, transport, and shutdown. The activation needs no privilege, and
+//! makes no system call: of the clone, it changes only the caller's fence, which it opens. Its
 //! application, [`apply`](fn@apply), needs the guest's root user, in the guest's initial mount
 //! namespace, as [`root::assemble`] does: for a GPT disk, it asks the kernel to reread the disk's
 //! partition table, which needs `CAP_SYS_ADMIN`; it mounts the root, reads the account databases
