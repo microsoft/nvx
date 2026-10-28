@@ -5,7 +5,9 @@ use std::collections::HashSet;
 
 use super::*;
 use crate::ErrorCode;
-use crate::host::network::{Access, EgressRule, NetworkPolicy, NetworkProxy, ProxyScheme};
+use crate::host::network::{
+    Access, EgressRule, ForwardProtocol, NetworkPolicy, NetworkProxy, Protocol, ProxyScheme,
+};
 use crate::host::template::test_support::{
     self as support, MIB, ManifestSpec, artifact, network_class,
 };
@@ -809,6 +811,10 @@ fn other_encodings_of_a_key_are_refused() {
 #[test]
 fn keys_of_machines_that_no_manifest_describes_are_refused() {
     type KeyChange = fn(&mut TemplateKey);
+    // A network that no policy of a guest at the NIC's address lowers to, though it attaches the
+    // NIC: every clone's plan would mismatch it, whatever its network.
+    const UNLOWERED: &str = "the network is not the arguments to which a network policy of a \
+                             guest at 10.0.0.2/24 lowers";
     let cases: &[(KeyChange, &str)] = &[
         (
             |key| key.machine.command_line.push_str(" quiet"),
@@ -853,6 +859,65 @@ fn keys_of_machines_that_no_manifest_describes_are_refused() {
         (
             |key| drop(key.network.drain(..2)),
             "the network does not attach the machine's NIC at 10.0.0.2/24",
+        ),
+        // The address alone.
+        (|key| key.network.truncate(2), UNLOWERED),
+        // Ingress before egress, which no lowering orders so.
+        (
+            |key| {
+                key.network.swap(4, 6);
+                key.network.swap(5, 7);
+            },
+            UNLOWERED,
+        ),
+        // Another profile than OpenVMM's portable one.
+        (|key| key.network[3] = "strict".to_owned(), UNLOWERED),
+        // A policy that lets nothing through, which attaches no NIC.
+        (|key| key.network[5] = "deny".to_owned(), UNLOWERED),
+        // A rule that OpenVMM would not read.
+        (
+            |key| {
+                key.network
+                    .extend(["--network-egress-allow", "nowhere"].map(str::to_owned));
+            },
+            UNLOWERED,
+        ),
+        // A rule that a lowering would write in another form.
+        (
+            |key| {
+                key.network
+                    .extend(["--network-egress-deny", "192.0.2.7/24"].map(str::to_owned));
+            },
+            UNLOWERED,
+        ),
+        // An option without its value.
+        (
+            |key| key.network.push("--network-egress-deny".to_owned()),
+            UNLOWERED,
+        ),
+        // An option that no lowering writes.
+        (
+            |key| {
+                key.network
+                    .extend(["--network-dns", "10.0.0.1"].map(str::to_owned));
+            },
+            UNLOWERED,
+        ),
+        // The address twice.
+        (
+            |key| {
+                key.network
+                    .extend(["--net", "10.0.0.2/24"].map(str::to_owned))
+            },
+            UNLOWERED,
+        ),
+        // A proxy, which a policy that allows egress cannot have.
+        (
+            |key| {
+                key.network
+                    .extend(["--network-proxy", "10.0.0.1:3128"].map(str::to_owned));
+            },
+            UNLOWERED,
         ),
     ];
     for (change, expected) in cases {
@@ -902,6 +967,53 @@ fn keys_of_machines_that_no_manifest_describes_are_refused() {
         key_refusal(&bytes, ErrorCode::Io).contains("artifact identity"),
         "{bytes:?}"
     );
+}
+
+#[test]
+fn keys_read_back_the_network_of_each_policy() {
+    let mut open = NetworkPolicy::new(Access::Allow);
+    open.ingress = Access::Allow;
+    open.host_loopback = HostLoopback::Outbound;
+    let mut forwarded = NetworkPolicy::new(Access::Allow)
+        .with_deny(EgressRule::to("2001:db8::/32").on_port(Protocol::Udp, 53));
+    forwarded.host_loopback = HostLoopback::Allow;
+    forwarded.host_loopback_forwards = vec![
+        LoopbackForward {
+            protocol: ForwardProtocol::Tcp,
+            host_port: 8080,
+            guest_port: 80,
+        },
+        LoopbackForward {
+            protocol: ForwardProtocol::Udp,
+            host_port: 5353,
+            guest_port: 53,
+        },
+    ];
+    let policies = [
+        open,
+        NetworkPolicy::new(Access::Deny)
+            .with_allow(EgressRule::to("192.0.2.0/24").on_port(Protocol::Tcp, 443))
+            .with_allow(EgressRule::to("198.51.100.7").on_port_range(Protocol::Udp, 5000, 5010))
+            .with_allow(EgressRule::to("::/0").on_protocol(Protocol::Icmp))
+            .with_deny(EgressRule::to("192.0.2.7")),
+        forwarded,
+        NetworkPolicy::proxy_only(NetworkProxy::new(3128).with_scheme(ProxyScheme::Https)),
+    ];
+    for policy in policies {
+        let network = SandboxNetwork::new("10.0.0.2/24", policy).unwrap();
+        let lowered = network.openvmm_arguments().unwrap();
+        let class = CaptureClass {
+            network: Some(network),
+            ..network_class()
+        };
+        let made = key(&class, &ManifestSpec::with_network());
+        assert_eq!(made.network_arguments(), lowered);
+        assert_eq!(
+            TemplateKey::from_bytes(&made.to_bytes()).unwrap(),
+            made,
+            "{lowered:?}"
+        );
+    }
 }
 
 #[test]
@@ -1134,7 +1246,7 @@ fn the_conformance_vectors_decode_and_encode() {
         );
     }
     let invalid = vectors(VECTORS, "INVALID_KEY");
-    assert_eq!(invalid.len(), 28);
+    assert_eq!(invalid.len(), 30);
     for (name, bytes, _) in invalid {
         let error = TemplateKey::from_bytes(&bytes).expect_err(name);
         assert_eq!(error.code(), ErrorCode::Io, "{name}: {error}");

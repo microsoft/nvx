@@ -2,10 +2,8 @@
 //! the parsing of the rules of an action into the rules that the lowering takes.
 
 use super::lowering::{self, PortValue, Rule, RuleProtocol};
-#[cfg(feature = "cli")]
 use crate::error::Error;
 use crate::error::Result;
-#[cfg(feature = "cli")]
 use crate::net::cidr;
 
 /// Allow or deny decision of a network posture.
@@ -141,7 +139,6 @@ impl EgressRule {
     ///
     /// Fails with [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported) and a message that
     /// starts with `value`.
-    #[cfg(feature = "cli")]
     pub(crate) fn parse_native(value: &str) -> Result<Self> {
         let refused = |reason: &str| Err(Error::unsupported(format!("{value}: {reason}")));
         let (destination, selector) = split_native_rule(value);
@@ -203,7 +200,6 @@ impl EgressRule {
 /// splits it: an IPv4 address holds no `:`, so its first `:` starts the selector; a network with a
 /// prefix ends at the first `:` after its `/`; and an IPv6 address without a prefix ends at the
 /// last `:` that leaves an IPv6 address before it, since protocol names are not hexadecimal.
-#[cfg(feature = "cli")]
 fn split_native_rule(value: &str) -> (&str, Option<&str>) {
     let split_at = |index: usize| (&value[..index], Some(&value[index + 1..]));
     if let Some(slash) = value.find('/') {

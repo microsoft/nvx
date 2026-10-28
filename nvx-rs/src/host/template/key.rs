@@ -18,7 +18,10 @@ use super::manifest::{
 use crate::activation;
 use crate::contract;
 use crate::error::{Error, Result};
-use crate::host::network::{MAX_LOOPBACK_FORWARDS, MAX_RULES};
+use crate::host::network::{
+    Access, EgressRule, HostLoopback, LoopbackForward, MAX_LOOPBACK_FORWARDS, MAX_RULES,
+    NetworkPolicy, NetworkProxy,
+};
 use crate::host::platform::parse_hex32;
 use crate::host::sandbox::SandboxNetwork;
 use crate::host::sandbox::mount::MOUNT_TAG;
@@ -906,8 +909,9 @@ impl TemplateKey {
     /// Reads a key from its canonical encoding, as [`to_bytes`](Self::to_bytes) writes it.
     ///
     /// The bytes must be the key's one encoding, of version [`VERSION`](Self::VERSION), with no
-    /// value of another form than a key derived from a manifest has, a network that attaches the
-    /// machine's NIC, if it has one, and none otherwise, and no byte left over.
+    /// value of another form than a key derived from a manifest has, a network that is the
+    /// arguments to which a network of a guest at the address of the machine's NIC lowers, if it
+    /// has one, and none otherwise, and no byte left over.
     ///
     /// Fails with [`ErrorCode::FormatUnsupported`](crate::ErrorCode::FormatUnsupported) for a key
     /// of another version, such as one that an earlier build wrote, which this build neither reads
@@ -1237,10 +1241,15 @@ impl fmt::Display for RefusedVersion {
 
 impl std::error::Error for RefusedVersion {}
 
-/// Checks that `network`, the texts of OpenVMM's arguments of a key's network, attach the NIC
-/// `nic` of the key's machine, as every network that [`SandboxNetwork::openvmm_arguments`] lowers
-/// starts, with `--net` and the guest's address and prefix length, or are none for a machine
-/// without a NIC.
+/// Checks that `network`, the texts of OpenVMM's arguments of a key's network, are those of a
+/// network of the NIC `nic` of the key's machine, or none for a machine without a NIC: exactly the
+/// arguments to which [`SandboxNetwork::openvmm_arguments`] lowers a network of a guest at the
+/// NIC's address and prefix length, which start with `--net` and that address.
+///
+/// The check reads the policy back from the arguments, as `nvx-rs sandbox` reads its network
+/// options, and lowers it again, which renders a lowering unchanged. A key whose network no
+/// policy lowers to is thus malformed, rather than the network of a template that every clone's
+/// plan mismatches.
 fn check_network(nic: Option<&Nic>, network: &[String]) -> Result<(), CanonicalError> {
     let Some(nic) = nic else {
         return if network.is_empty() {
@@ -1253,11 +1262,71 @@ fn check_network(nic: Option<&Nic>, network: &[String]) -> Result<(), CanonicalE
     };
     let address = format!("{}/{}", nic.ipv4, nic.prefix_length);
     match network {
-        [option, attached, ..] if option == "--net" && *attached == address => Ok(()),
-        _ => Err(CanonicalError::new(format!(
-            "the network does not attach the machine's NIC at {address}"
-        ))),
+        [option, attached, ..] if option == "--net" && *attached == address => {}
+        _ => {
+            return Err(CanonicalError::new(format!(
+                "the network does not attach the machine's NIC at {address}"
+            )));
+        }
     }
+    let lowered = crate::net::guest_gateway(&address)
+        .and_then(|gateway| read_policy(&network[2..], gateway))
+        .and_then(|policy| crate::host::network::openvmm_arguments(Some(&policy), &address).ok());
+    if lowered.as_deref() == Some(network) {
+        Ok(())
+    } else {
+        Err(CanonicalError::new(format!(
+            "the network is not the arguments to which a network policy of a guest at {address} \
+             lowers"
+        )))
+    }
+}
+
+/// Reads `arguments`, the options of OpenVMM that follow a network's `--net` and its value, with
+/// their values, for a guest whose gateway is `gateway`, into the policy that they name, as
+/// `nvx-rs sandbox` reads its network options: the rules of each action as OpenVMM reads its
+/// native rules, and, without `--host-loopback`, the host-loopback access that OpenVMM keeps by
+/// default. Returns `None` for an option that no lowering writes, or a value that it does not
+/// take; the caller compares the policy's lowering with the arguments.
+fn read_policy(arguments: &[String], gateway: Ipv4Addr) -> Option<NetworkPolicy> {
+    let options = arguments.chunks_exact(2);
+    if !options.remainder().is_empty() {
+        return None;
+    }
+    let access = |value: &str| match value {
+        "allow" => Some(Access::Allow),
+        "deny" => Some(Access::Deny),
+        _ => None,
+    };
+    let mut policy = NetworkPolicy::new(Access::Deny);
+    policy.host_loopback = HostLoopback::Outbound;
+    for option in options {
+        let [name, value] = option else {
+            return None;
+        };
+        match name.as_str() {
+            "--network-profile" => {}
+            "--network-egress" => policy.egress = access(value)?,
+            "--network-ingress" => policy.ingress = access(value)?,
+            "--host-loopback" => policy.host_loopback = access(value)?.into(),
+            "--network-egress-allow" => policy
+                .allow
+                .rules
+                .push(EgressRule::parse_native(value).ok()?),
+            "--network-egress-deny" => policy
+                .deny
+                .rules
+                .push(EgressRule::parse_native(value).ok()?),
+            "--host-loopback-forward" => policy
+                .host_loopback_forwards
+                .push(LoopbackForward::parse(value).ok()?),
+            "--network-proxy" => {
+                policy.proxy = Some(NetworkProxy::parse_endpoint(value, gateway).ok()?);
+            }
+            _ => return None,
+        }
+    }
+    Some(policy)
 }
 
 #[cfg(test)]
