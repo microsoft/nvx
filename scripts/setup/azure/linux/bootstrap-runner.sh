@@ -117,7 +117,7 @@ disks=profile.get("dataDisks")
 if not isinstance(disks,list) or not disks:
     raise SystemExit("Azure compute metadata has no managed data disks")
 safe={
-    "vmSize":field(metadata,"vmSize",r"Standard_[A-Za-z0-9_]{1,80}"),
+    "vmSize":field(metadata,"vmSize",r"Standard_[A-Za-z0-9_-]{1,80}"),
     "storageProfile":{
         "osDisk":safe_disk(profile.get("osDisk")),
         "dataDisks":[safe_disk(disk,True) for disk in disks],

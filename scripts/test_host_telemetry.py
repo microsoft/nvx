@@ -107,6 +107,17 @@ class AzureProvenanceTests(unittest.TestCase):
     def setUp(self) -> None:
         host_telemetry._azure_vm_provenance.cache_clear()
         self.addCleanup(host_telemetry._azure_vm_provenance.cache_clear)
+        snapshots = tempfile.TemporaryDirectory()
+        self.addCleanup(snapshots.cleanup)
+        for name in (
+            "WINDOWS_AZURE_METADATA_SNAPSHOT",
+            "LINUX_AZURE_METADATA_SNAPSHOT",
+        ):
+            snapshot_patch = patch.object(
+                host_telemetry, name, Path(snapshots.name) / name / "compute.json"
+            )
+            snapshot_patch.start()
+            self.addCleanup(snapshot_patch.stop)
 
     def test_keeps_only_vm_size_and_disk_performance_settings(self):
         provenance = host_telemetry.azure_compute_provenance(IMDS_COMPUTE)

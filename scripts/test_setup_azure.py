@@ -272,6 +272,13 @@ class PackageTests(unittest.TestCase):
         )
         for private in ("private-tag", "private-user-data", config["vmssName"]):
             self.assertNotIn(private, snapshot)
+        metadata["vmSize"] = "Standard_E8-4s_v5"
+        self.assertEqual(
+            json.loads(self.execute_linux(1, config, Opener()).splitlines()[2])[
+                "vmSize"
+            ],
+            metadata["vmSize"],
+        )
         invalid_metadata: tuple[dict[str, object], ...] = (
             {"vmSize": "invalid-size"},
             {"storageProfile": {"dataDisks": []}},
