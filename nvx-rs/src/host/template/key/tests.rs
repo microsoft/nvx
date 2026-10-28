@@ -755,7 +755,7 @@ fn keys_read_back_from_their_canonical_encoding() {
         key(&support::class(), &ManifestSpec::template()),
     ] {
         let bytes = made.to_bytes();
-        assert_eq!(&bytes[..2], &[2, 0]);
+        assert_eq!(&bytes[..2], &[1, 0]);
         let read = TemplateKey::from_bytes(&bytes).unwrap();
         assert_eq!(read, made);
         assert_eq!(read.to_bytes(), bytes);
@@ -778,15 +778,24 @@ fn key_refusal(bytes: &[u8], code: ErrorCode) -> String {
 
 #[test]
 fn other_encodings_of_a_key_are_refused() {
+    // Every key ends with its network, a list that is empty for a template without a NIC: bytes
+    // without that list decode as no key, and as no key of a template without a NIC either.
+    let closed = key(&support::class(), &ManifestSpec::template()).to_bytes();
+    let (unlisted, count) = closed.split_at(closed.len() - 4);
+    assert_eq!(count, [0; 4]);
+    assert_eq!(
+        key_refusal(unlisted, ErrorCode::Io),
+        "the template key is malformed: the network is truncated"
+    );
     let key = network_key();
     let bytes = key.to_bytes();
-    for version in [0u16, 1, 3, u16::MAX] {
+    for version in [0u16, 2, u16::MAX] {
         let mut other = bytes.clone();
         other[..2].copy_from_slice(&version.to_le_bytes());
         assert_eq!(
             key_refusal(&other, ErrorCode::FormatUnsupported),
             format!(
-                "the template key has encoding version {version}; this build reads version 2 \
+                "the template key has encoding version {version}; this build reads version 1 \
                  only"
             )
         );
@@ -1117,12 +1126,8 @@ fn identities_have_a_text_form() {
     );
 }
 
-/// The conformance vectors of version 2 of the canonical encoding of keys.
-const VECTORS: &str = include_str!("../../../../tests/vectors/template-key-v2.txt");
-
-/// The conformance vectors of version 1 of the canonical encodings of keys and classes, whose
-/// classes version 2 of a key leaves as they are.
-const VECTORS_V1: &str = include_str!("../../../../tests/vectors/template-key-v1.txt");
+/// The conformance vectors of version 1 of the canonical encodings of keys and classes.
+const VECTORS: &str = include_str!("../../../../tests/vectors/template-key-v1.txt");
 
 /// The versions of the contracts that the vectors hold.
 const VECTOR_CONTRACTS: Contracts = Contracts {
@@ -1133,9 +1138,10 @@ const VECTOR_CONTRACTS: Contracts = Contracts {
     activation: 1,
 };
 
-/// Returns each vector of `kind` in the vectors `file`: its name, its bytes, and its values.
-fn vectors(file: &'static str, kind: &str) -> Vec<(&'static str, Vec<u8>, Vec<&'static str>)> {
-    file.lines()
+/// Returns each vector of `kind`: its name, its bytes, and its values.
+fn vectors(kind: &str) -> Vec<(&'static str, Vec<u8>, Vec<&'static str>)> {
+    VECTORS
+        .lines()
         .filter(|line| !line.is_empty() && !line.starts_with('#'))
         .filter_map(|line| {
             let mut fields = line.split('|');
@@ -1195,7 +1201,7 @@ fn vector_spec(name: &str) -> ManifestSpec {
 
 #[test]
 fn the_conformance_vectors_decode_and_encode() {
-    let keys = vectors(VECTORS, "KEY");
+    let keys = vectors("KEY");
     let names: Vec<&str> = keys.iter().map(|(name, ..)| *name).collect();
     assert_eq!(names, ["TEMPLATE", "NETWORK", "HOST_PROFILE", "MINIMAL"]);
     for (name, bytes, values) in keys {
@@ -1214,7 +1220,7 @@ fn the_conformance_vectors_decode_and_encode() {
             assert_eq!(derived, key, "{name}");
         }
     }
-    let classes = vectors(VECTORS_V1, "CLASS");
+    let classes = vectors("CLASS");
     let names: Vec<&str> = classes.iter().map(|(name, ..)| *name).collect();
     assert_eq!(names, ["TEMPLATE", "NETWORK"]);
     for (name, bytes, values) in classes {
@@ -1226,17 +1232,8 @@ fn the_conformance_vectors_decode_and_encode() {
             "{name}"
         );
     }
-    let versions = vectors(VECTORS, "INVALID_KEY_VERSION");
-    assert_eq!(versions.len(), 8);
-    // The keys of version 1 are among them, as an earlier build wrote them.
-    let earlier: Vec<Vec<u8>> = vectors(VECTORS_V1, "KEY")
-        .into_iter()
-        .map(|(_, bytes, _)| bytes)
-        .collect();
-    assert_eq!(earlier.len(), 4);
-    for bytes in &earlier {
-        assert!(versions.iter().any(|(_, refused, _)| refused == bytes));
-    }
+    let versions = vectors("INVALID_KEY_VERSION");
+    assert_eq!(versions.len(), 3);
     for (name, bytes, _) in versions {
         let error = TemplateKey::from_bytes(&bytes).expect_err(name);
         assert_eq!(
@@ -1245,8 +1242,8 @@ fn the_conformance_vectors_decode_and_encode() {
             "{name}: {error}"
         );
     }
-    let invalid = vectors(VECTORS, "INVALID_KEY");
-    assert_eq!(invalid.len(), 30);
+    let invalid = vectors("INVALID_KEY");
+    assert_eq!(invalid.len(), 34);
     for (name, bytes, _) in invalid {
         let error = TemplateKey::from_bytes(&bytes).expect_err(name);
         assert_eq!(error.code(), ErrorCode::Io, "{name}: {error}");

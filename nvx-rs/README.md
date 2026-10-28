@@ -598,7 +598,7 @@ A key and a class each have one canonical, versioned encoding, whose
 domain-separated SHA-256 digest is its identity, a `KeyIdentity`, which converts
 to and from the `nvx::activation::Identity` by which a clone's activation record
 names its template's key, or a `ClassIdentity`; the
-[conformance vectors](tests/vectors/README.md) of version 2 of a key's encoding, which adds the template's network to version 1, `tests/vectors/template-key-v2.txt`, and of version 1 of a class's, `tests/vectors/template-key-v1.txt`, pin the encodings and identities; a key of another version, as an earlier build wrote it, is neither read nor migrated, and a clone of its generation fails as a malformed generation, which quarantines it.
+[conformance vectors](tests/vectors/README.md) of version 1, `tests/vectors/template-key-v1.txt`, pin both encodings and identities. The key's encoding, version 1, includes the template's network and has not been released, so a template store that an earlier build created is not supported: delete it and create a new one. There is no migration.
 
 `Store` keeps the generations of templates that a host published, apart from
 every sandbox's store, at a location that the adapter chooses: a private

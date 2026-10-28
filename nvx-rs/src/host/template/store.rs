@@ -723,13 +723,10 @@ impl Store {
                 )
             })?;
         TemplateKey::from_bytes(&bytes).map_err(|error| {
-            let code = error.code();
-            let (_, message, source) = error.into_parts();
-            let error = Error::new(code, format!("cannot read {}: {message}", path.display()));
-            match source {
-                Some(source) => error.with_source(source),
-                None => error,
-            }
+            Error::new(
+                error.code(),
+                format!("cannot read {}: {}", path.display(), error.message()),
+            )
         })
     }
 

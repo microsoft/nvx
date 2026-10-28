@@ -590,9 +590,12 @@ pub struct TemplateKey {
 }
 
 impl TemplateKey {
-    /// Version of the canonical encoding of a key, its first two bytes. Version 2 adds the
-    /// network, as the class lowered it, to version 1's.
-    pub const VERSION: u16 = 2;
+    /// Version of the canonical encoding of a key, its first two bytes.
+    ///
+    /// Version 1 holds the template's network. It has not been released, so a template store that
+    /// an earlier build created is not supported: delete it and create a new one. There is no
+    /// migration.
+    pub const VERSION: u16 = 1;
 
     /// Most bytes of a key's canonical encoding: what the largest key that a manifest of at most
     /// [`MAX_MANIFEST_LEN`](super::MAX_MANIFEST_LEN) bytes can describe takes, with the most
@@ -892,8 +895,6 @@ impl TemplateKey {
     /// 8. Network: the texts of OpenVMM's arguments to which the class lowered the network, a list,
     ///    empty for a template without a NIC, and otherwise starting with `--net` and the NIC's
     ///    IPv4 address and prefix length, `ADDRESS/PREFIX`.
-    ///
-    /// Version 2 is version 1 and its eighth part, the network.
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut writer = Writer::default();
         writer.u16(Self::VERSION);
@@ -914,9 +915,8 @@ impl TemplateKey {
     /// has one, and none otherwise, and no byte left over.
     ///
     /// Fails with [`ErrorCode::FormatUnsupported`](crate::ErrorCode::FormatUnsupported) for a key
-    /// of another version, such as one that an earlier build wrote, which this build neither reads
-    /// nor migrates, and with [`ErrorKind::Io`](crate::ErrorKind::Io) for bytes that are not such
-    /// a key.
+    /// of another version, and with [`ErrorKind::Io`](crate::ErrorKind::Io) for bytes that are
+    /// not such a key.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
         if bytes.len() > Self::MAX_LEN {
             return Err(Error::io(format!(
@@ -937,8 +937,7 @@ impl TemplateKey {
                      only",
                     Self::VERSION
                 ),
-            )
-            .with_source(RefusedVersion(version)));
+            ));
         }
         let read = |reader: &mut Reader<'_>| -> Result<Self, CanonicalError> {
             let runtime = read_runtime(reader)?;
@@ -1210,36 +1209,6 @@ fn read_machine(reader: &mut Reader<'_>) -> Result<(Machine, String), CanonicalE
     }
     Ok((machine, tag))
 }
-
-/// The encoding version of a template key that [`TemplateKey::from_bytes`] refused, which its
-/// failure keeps as its source, so that a reader tells a key that an earlier build wrote, which
-/// this build neither reads nor migrates, from a later build's, which a build that reads it may
-/// serve.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct RefusedVersion(pub(crate) u16);
-
-impl RefusedVersion {
-    /// Returns the version of the key whose refusal `error` reports among its sources, if
-    /// [`TemplateKey::from_bytes`] refused the key for its version.
-    pub(crate) fn of(error: &Error) -> Option<u16> {
-        let mut source = std::error::Error::source(error);
-        while let Some(cause) = source {
-            if let Some(refused) = cause.downcast_ref::<Self>() {
-                return Some(refused.0);
-            }
-            source = cause.source();
-        }
-        None
-    }
-}
-
-impl fmt::Display for RefusedVersion {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(formatter, "a template key of encoding version {}", self.0)
-    }
-}
-
-impl std::error::Error for RefusedVersion {}
 
 /// Checks that `network`, the texts of OpenVMM's arguments of a key's network, are those of a
 /// network of the NIC `nic` of the key's machine, or none for a machine without a NIC: exactly the

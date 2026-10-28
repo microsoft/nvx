@@ -35,7 +35,7 @@ use std::time::Instant;
 
 use self::export::DirectoryExport;
 use self::failure::{Attribute, Fault, host_evidence};
-use super::key::{RefusedVersion, TemplateKey};
+use super::key::TemplateKey;
 use super::manifest::BlockGeometry;
 use super::plan::MEMORY_BLOCK_SIZE;
 use super::store::{Acquired, Generation, Lease, Store};
@@ -393,14 +393,12 @@ impl ClonePlan {
     ///   another key than the lease names, [`Evidence::MalformedGeneration`]; and as
     ///   [`Store::read_key`] and [`Store::snapshot_dir`] fail, once the store's directory of
     ///   generations passed their check, whose failure is the host's: the host's evidence for an
-    ///   I/O error, [`Evidence::IncompatibleHost`] for a key of a later encoding version than
-    ///   this build reads, with [`ErrorCode::FormatUnsupported`], which a build that reads it may
+    ///   I/O error, [`Evidence::IncompatibleHost`] for a key of another encoding version than this
+    ///   build reads, with [`ErrorCode::FormatUnsupported`], which a build that reads it may
     ///   serve, and [`Evidence::MalformedGeneration`] for a generation whose payload, key, or
     ///   snapshot is missing, is not private to the current user, or is malformed, as a key that
     ///   [`Store::read_key`] refuses for what it is: a link, a file that is not a regular file, or
-    ///   one that holds more than a key may, and for one whose key is of an earlier version, as an
-    ///   earlier build wrote it, which this build neither reads nor migrates, with
-    ///   [`ErrorCode::FormatUnsupported`], so that a quarantine lets its class capture again;
+    ///   one that holds more than a key may;
     /// - with [`ErrorKind::Unsupported`] for a request that the template cannot serve: a template
     ///   whose key names other contracts than this build speaks, the boot and control contracts
     ///   of the runtime that captured it included, [`Evidence::IncompatibleHost`]; a plan whose
@@ -790,22 +788,17 @@ fn check_request(request: &CloneRequest) -> Result<Option<DirectoryExport>, Faul
 
 /// Returns the fault of `error`, with which the template store's read of the key or of the
 /// snapshot of the leased generation failed, once the store's directory of generations passed its
-/// check: the host's, which cannot restore the template, for a key of a later encoding version
+/// check: the host's, which cannot restore the template, for a key of another encoding version
 /// than this build reads, as [`TemplateKey::from_bytes`] refuses it with
 /// [`ErrorCode::FormatUnsupported`], since a build that reads it may serve the generation; the
-/// generation's, which is malformed, for a key of an earlier version, which this build neither
-/// reads nor migrates, so that a quarantine lets its class capture again, and for a payload, a
-/// key, or a snapshot that is missing, that is not private to the current user, or that is not
-/// one that the store writes, such as a key that the read refuses for what it is, as
-/// [`is_refused`] tells: a link, a file that is not a regular file, or one that holds more than a
-/// key may; and the host's for any other I/O error among the error's sources.
+/// generation's, which is malformed, for a payload, a key, or a snapshot that is missing, that is
+/// not private to the current user, or that is not one that the store writes, such as a key that
+/// the read refuses for what it is, as [`is_refused`] tells: a link, a file that is not a regular
+/// file, or one that holds more than a key may; and the host's for any other I/O error among the
+/// error's sources.
 fn generation_fault(error: Error) -> Fault {
     if error.code() == ErrorCode::FormatUnsupported {
-        let evidence = match RefusedVersion::of(&error) {
-            Some(version) if version < TemplateKey::VERSION => Evidence::MalformedGeneration,
-            _ => Evidence::IncompatibleHost,
-        };
-        return Fault::new(evidence, error);
+        return Fault::new(Evidence::IncompatibleHost, error);
     }
     let mut source = std::error::Error::source(&error);
     while let Some(cause) = source {

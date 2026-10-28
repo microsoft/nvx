@@ -80,9 +80,8 @@
 //! - A list is its count, a `u32`, then its items in order.
 //!
 //! [`TemplateKey::from_bytes`] refuses any other encoding, and bytes left after it. The vectors in
-//! `tests/vectors/template-key-v2.txt` fix version 2 of a key's encoding, which adds the
-//! template's network, as its class lowered it, to version 1, and those in
-//! `tests/vectors/template-key-v1.txt` fix version 1 of a key's encoding and of a class's.
+//! `tests/vectors/template-key-v1.txt` fix version 1 of a key's encoding, which holds the
+//! template's network, as its class lowered it, and of a class's.
 
 mod canonical;
 mod clone;

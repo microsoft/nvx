@@ -1276,33 +1276,14 @@ fn images_that_their_binding_does_not_authorize_and_malformed_generations_are_re
     let failure = fixture.plan(&mut acquired, &stale, NO_CONTENT).unwrap_err();
     assert!(!failure.quarantine(&fixture.store, None).unwrap());
     assert_untouched(&acquired);
-    // A generation whose key is of another version, as an earlier build wrote it, is malformed for
-    // this build, which neither reads nor migrates it: a failure of the template, which a
-    // quarantine takes out of service, so that its class captures a template again.
+    // A generation whose key is gone is malformed: a failure of the template, whose generation it
+    // quarantines through its tombstone, once the sandbox's lock is released, as the lock order
+    // asks.
     let generation = fixture.generation.generation();
     let key = fixture
         .store
         .payload_dir(generation)
         .join(crate::host::template::KEY_NAME);
-    let mut earlier = fs::read(&key).unwrap();
-    earlier[..2].copy_from_slice(&1u16.to_le_bytes());
-    crate::host::store::files::write_private(&key, &earlier).unwrap();
-    let failure = fixture
-        .plan(&mut acquired, &request, NO_CONTENT)
-        .unwrap_err();
-    assert_eq!(
-        (failure.record().evidence, failure.outcome(), failure.code()),
-        (
-            Evidence::MalformedGeneration,
-            Outcome::Template,
-            ErrorCode::FormatUnsupported
-        ),
-        "{failure}"
-    );
-    assert_untouched(&acquired);
-    // A generation whose key is gone is malformed: a failure of the template, whose generation it
-    // quarantines through its tombstone, once the sandbox's lock is released, as the lock order
-    // asks.
     fs::remove_file(key).unwrap();
     let failure = fixture
         .plan(&mut acquired, &request, NO_CONTENT)

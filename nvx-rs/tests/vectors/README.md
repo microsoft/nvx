@@ -12,8 +12,7 @@ yet breaks those peers. Only bytes that no codec produced catch such a change.
 | [`nvxc-v1.txt`](nvxc-v1.txt) | Version 1 of the control protocol: `NVXC` frames, their `EXEC`, `MAPS`, and features payloads, and `NVXS` records of NVX's host and guest |
 | [`nvxl-v1.txt`](nvxl-v1.txt) | Version 1 of the `NVXL` listener announcement |
 | [`activation-v1.txt`](activation-v1.txt) | Version 1 of the activation record of a layered root, and what Ready reports about an activation |
-| [`template-key-v1.txt`](template-key-v1.txt) | Version 1 of the canonical encodings of a template's compatibility key, which version 2 replaces, and of a capture class, with their identities |
-| [`template-key-v2.txt`](template-key-v2.txt) | Version 2 of the canonical encoding of a template's compatibility key, version 1's and the template's network as its capture class lowered it, with its identities; the keys of version 1 are among its rejection vectors |
+| [`template-key-v1.txt`](template-key-v1.txt) | Version 1 of the canonical encodings of a template's compatibility key, which holds the template's network as its capture class lowered it, and of a capture class, with their identities |
 | [`openvmm/`](openvmm) | OpenVMM's vectors and cases of the `NVXS` session, and the excerpts of its sources that define the kernel command-line tokens of its platform tier, unchanged |
 
 [4.4 Host-Guest Control Interface](../../../doc/design/4.4-host-guest-control-interface.md)
@@ -24,10 +23,9 @@ describe the protocols, and the documentation of `nvx::activation`, in
 
 ## Line format
 
-`nvxc-v1.txt`, `nvxl-v1.txt`, `activation-v1.txt`, `template-key-v1.txt`, and
-`template-key-v2.txt` share one line format. A line that starts with `#` is a
-comment, and an empty line is ignored. Every other line is one vector, whose
-fields `|` separates:
+`nvxc-v1.txt`, `nvxl-v1.txt`, `activation-v1.txt`, and `template-key-v1.txt`
+share one line format. A line that starts with `#` is a comment, and an empty
+line is ignored. Every other line is one vector, whose fields `|` separates:
 
 ```text
 KIND|NAME|BYTES|VALUE|...
@@ -52,11 +50,10 @@ must encode the values to exactly its bytes. A kind whose name starts with
 `INVALID_` has no values: every decoder must refuse the bytes of its vectors.
 
 A key or a class holds too many values for one line, so the value of each
-vector of `template-key-v1.txt` and `template-key-v2.txt` is its identity, and
-each file's header names the captures whose keys and classes the vectors
-encode. The tests of `nvx::host::template` derive each key of version 2 from
-its capture, and check that it is the key that the vector's bytes decode to,
-and check each class of version 1 the same way.
+vector of `template-key-v1.txt` is its identity, and the file's header names
+the captures whose keys and classes the vectors encode. The tests of
+`nvx::host::template` derive each key from its capture, and check that it is
+the key that the vector's bytes decode to.
 
 ## Rules
 
@@ -64,12 +61,16 @@ and check each class of version 1 the same way.
   its own, such as `nvxc-v2.txt` for the exec v2 of
   [microsoft/nvx#623](https://github.com/microsoft/nvx/issues/623), and the
   bytes of an earlier version that it refuses become its rejection vectors.
-  Version 1 has one exception: `MAPS|ROOT_SOURCE` of `nvxc-v1.txt` was the
+  Version 1 has two exceptions. `MAPS|ROOT_SOURCE` of `nvxc-v1.txt` was the
   rejection vector `INVALID_MAPS|EMPTY_SOURCE` until an empty source came to
   name the export's root. Only the clone of a template whose export is a
   directory sends one, to the template's own guest, which deploys with the
   host and whose build the template's key names, so the C agent of earlier
-  releases, which refuses it, never receives one.
+  releases, which refuses it, never receives one. And the keys of
+  `template-key-v1.txt` came to end with the template's network in place: the
+  key's encoding has not been released, so a template store that an earlier
+  build created is not supported, and is deleted and created again, since
+  nothing migrates it.
 - The bytes come from the protocol's definition, never from the code that they
   check, and so do the values of each vector.
 
