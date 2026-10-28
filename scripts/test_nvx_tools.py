@@ -37,6 +37,7 @@ from unittest.mock import MagicMock, call, patch
 import yaml
 
 sys.path.insert(0, str(Path(__file__).parent))
+import check_markdown_links  # noqa: E402
 import nvx  # noqa: E402
 from nvx_tools import (  # noqa: E402
     archive,
@@ -2038,6 +2039,42 @@ class NvxRsTests(unittest.TestCase):
         for code, status in usage:
             with self.subTest(code=code):
                 self.assertEqual(status, "2" if code.startswith("argument-") else "1")
+
+    def test_readme_gives_each_module_a_short_row_and_a_section(self):
+        # The module table of nvx-rs/README.md says in one line, of at most 200
+        # characters, what each module is for, and links to the module's
+        # section after the table, which holds the module's details.
+        readme = nvx_rs.DIRECTORY / "README.md"
+        lines = readme.read_text(encoding="utf-8").splitlines()
+        table = lines.index("| Module | Purpose |")
+        rows: list[str] = []
+        for line in lines[table + 2 :]:
+            if not line.startswith("|"):
+                break
+            rows.append(line)
+        sections = {
+            line.removeprefix("### "): index
+            for index, line in enumerate(lines)
+            if line.startswith("### ")
+        }
+        self.assertGreater(len(rows), 40)
+        for row in rows:
+            link = row.split(" | ")[0].removeprefix("| ")
+            with self.subTest(module=link):
+                self.assertLessEqual(
+                    len(row), 200, "a module's details go in its section"
+                )
+                match = re.fullmatch(r"\[(.+)\]\(#(.+)\)", link)
+                assert match is not None, "a row links to its module's section"
+                module, anchor = match.group(1), match.group(2)
+                self.assertGreater(
+                    sections.get(module, table),
+                    table,
+                    "the module's section follows the table",
+                )
+                self.assertEqual(
+                    anchor, check_markdown_links.github_slug(module.replace("`", ""))
+                )
 
     @unittest.skipUnless(
         os.environ.get("NVX_RS"), "set NVX_RS to an nvx-rs executable to run"
