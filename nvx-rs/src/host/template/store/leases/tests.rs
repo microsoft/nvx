@@ -285,26 +285,52 @@ fn acquisitions_refuse_what_they_cannot_lease_and_lease_nothing() {
         assert_eq!(error.code(), ErrorCode::TemplateIneligible, "{error}");
         assert!(error.message().contains(condition), "{error}");
     }
-    // On Unix, a payload that is not a directory of the current user with mode 0700, which a
+    // On Linux, a payload that is not a directory of the current user with mode 0700, which a
     // launch of the clone requires, and through which a release ends the lease: it opens the
-    // payload for reading, and removes the clone's socket from it.
-    #[cfg(unix)]
+    // payload for reading, and removes the clone's socket from it. A user other than root cannot
+    // open a payload of mode 0300 for reading at all.
+    #[cfg(target_os = "linux")]
     {
         use std::os::unix::fs::PermissionsExt;
 
         let payload = store.payload_dir(generation);
+        let unopened = format!(
+            "cannot open the payload of the generation {}",
+            payload.display()
+        );
         for mode in [0o300, 0o500] {
             fs::set_permissions(&payload, fs::Permissions::from_mode(mode)).unwrap();
             let error = refusal(&store, generation, &sandbox, &now);
             fs::set_permissions(&payload, fs::Permissions::from_mode(0o700)).unwrap();
             assert_eq!(error.kind(), ErrorKind::Io, "{error}");
-            assert_eq!(
-                error.message(),
-                format!(
-                    "the payload of the generation {} has mode {mode:o}, not the mode 700 that \
-                     the directory of a control socket must have",
-                    payload.display()
-                )
+            let refused = format!(
+                "the payload of the generation {} has mode {mode:o}, not the mode 700 that the \
+                 directory of a control socket must have",
+                payload.display()
+            );
+            assert!(
+                error.message() == refused || (mode == 0o300 && error.message() == unopened),
+                "{error}"
+            );
+        }
+        // A link in the place of the store's directory, of the directory of the generations, or of
+        // the payload, even to a directory that holds the same files: a release, which follows
+        // none of them, could not open the payload.
+        let root = store.dir().to_owned();
+        let generations = payload.parent().unwrap().to_owned();
+        let elsewhere = directory.path().join("elsewhere");
+        for linked in [&root, &generations, &payload] {
+            fs::rename(linked, &elsewhere).unwrap();
+            std::os::unix::fs::symlink(&elsewhere, linked).unwrap();
+            let error = refusal(&store, generation, &sandbox, &now);
+            fs::remove_file(linked).unwrap();
+            fs::rename(&elsewhere, linked).unwrap();
+            assert_eq!(error.kind(), ErrorKind::Io, "{error}");
+            assert_eq!(error.message(), unopened, "{error}");
+            let source = std::error::Error::source(&error).unwrap().to_string();
+            assert!(
+                source.ends_with("is a link, or not a directory"),
+                "{source}"
             );
         }
     }

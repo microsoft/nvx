@@ -784,6 +784,17 @@ impl Directory {
     pub(crate) fn sync(&self) -> io::Result<()> {
         self.0.sync_all()
     }
+
+    /// Returns why the directory cannot hold a sandbox store, as [`check_store_dir`] returns it for
+    /// a path, if it cannot: unless it belongs to the current user with mode 0700.
+    pub(crate) fn store_dir_problem(&self) -> io::Result<Option<String>> {
+        let metadata = self.0.metadata()?;
+        Ok(store_dir_problem(
+            metadata.uid(),
+            metadata.mode(),
+            sys::effective_ids().0,
+        ))
+    }
 }
 
 /// Claims a launch's fresh log, which `file` holds open.
