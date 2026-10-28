@@ -11,8 +11,8 @@ use std::time::Duration;
 
 use super::*;
 use crate::host::store::{
-    CAPABILITY_NAME, CLONE_ACTIVATION_NAME, CLONE_FAILURE_NAME, CLONE_PROGRESS_NAME, CONSOLE_NAME,
-    LOG_NAME, OUTCOME_NAME, RESTORE_READY_NAME, SOCKET_NAME,
+    CAPABILITY_NAME, CLONE_ACTIVATION_NAME, CLONE_FAILURE_NAME, CLONE_PROGRESS_NAME,
+    CLONE_SCRATCH_NAME, CONSOLE_NAME, LOG_NAME, OUTCOME_NAME, RESTORE_READY_NAME, SOCKET_NAME,
 };
 use crate::host::test_support::released;
 
@@ -324,6 +324,7 @@ fn a_removal_removes_the_store_the_callers_files_and_the_directory() {
         CAPABILITY_NAME,
         SOCKET_NAME,
         CLONE_BINDING_NAME,
+        CLONE_SCRATCH_NAME,
         CLONE_ACTIVATION_NAME,
         CLONE_PROGRESS_NAME,
         CLONE_FAILURE_NAME,
@@ -412,10 +413,12 @@ fn a_removal_is_refused_while_a_vm_or_a_launch_is_recorded() {
     }
 }
 
-/// Writes the files that a clone keeps of its launch in the sandbox `dir`, its binding included.
+/// Writes the files that a clone keeps of its launch in the sandbox `dir`, its binding included,
+/// and the file of the scratch device that an earlier version left for a clone in RAM.
 fn write_clone_files(dir: &Path) {
     for name in [
         CLONE_BINDING_NAME,
+        CLONE_SCRATCH_NAME,
         CLONE_ACTIVATION_NAME,
         CLONE_PROGRESS_NAME,
         CLONE_FAILURE_NAME,
@@ -540,6 +543,7 @@ fn linked_entries(more: &[&str]) -> Vec<String> {
         CLONE_BINDING_NAME,
         CLONE_FAILURE_NAME,
         CLONE_PROGRESS_NAME,
+        CLONE_SCRATCH_NAME,
         CONFIG,
         LOCK_NAME,
         RESTORE_READY_NAME,

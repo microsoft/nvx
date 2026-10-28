@@ -18,8 +18,8 @@ use crate::activation::TemplateReference;
 use crate::host::process::{Process, ProcessRef};
 use crate::host::store::files::write_private;
 use crate::host::store::{
-    CLONE_ACTIVATION_NAME, CLONE_FAILURE_NAME, CLONE_PROGRESS_NAME, FORMAT, LOCK_NAME, LaunchState,
-    RESTORE_READY_NAME, RUNTIME_NAME, Recovery, RuntimeIdentity,
+    CLONE_ACTIVATION_NAME, CLONE_FAILURE_NAME, CLONE_PROGRESS_NAME, CLONE_SCRATCH_NAME, FORMAT,
+    LOCK_NAME, LaunchState, RESTORE_READY_NAME, RUNTIME_NAME, Recovery, RuntimeIdentity,
 };
 use crate::host::supervisor::{self, Reattached, StopOutcome, VmmCommand};
 use crate::host::template::eligibility::MAX_DOWNTIME_NS;
@@ -841,8 +841,10 @@ fn a_release_makes_the_removal_of_its_binding_durable_before_it_removes_its_reco
     let payload = store.payload_dir(generation);
     let socket = store.clone_socket_path(&lease);
     // Each sync notes its directory, and whether any file that the clone kept of its launch, the
-    // control socket of its VMM included, the binding, and the record existed then.
+    // control socket of its VMM and the scratch file that an earlier version left for a clone in
+    // RAM included, the binding, and the record existed then.
     let kept = [
+        CLONE_SCRATCH_NAME,
         CLONE_ACTIVATION_NAME,
         CLONE_PROGRESS_NAME,
         CLONE_FAILURE_NAME,
@@ -1266,6 +1268,7 @@ fn a_release_ends_the_lease_of_the_sandbox_whose_lock_it_holds_whatever_its_path
     let lease = leased(&store, &published, &leased_sandbox);
     let other_lease = leased(&store, &published, &other);
     let kept = [
+        CLONE_SCRATCH_NAME,
         CLONE_ACTIVATION_NAME,
         CLONE_PROGRESS_NAME,
         CLONE_FAILURE_NAME,

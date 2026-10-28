@@ -368,7 +368,9 @@ impl Store {
     /// the reservation of the launch that `locked` holds, if it acquired the lease, so that one
     /// that fails part of the way, once it removed files that a launch of the clone's plan needs,
     /// leaves no launch that the lock may begin. It then removes what the clone kept of its
-    /// launch: the clone's activation record,
+    /// launch: the file of the scratch device that an earlier version created for a clone in RAM,
+    /// [`CLONE_SCRATCH_NAME`](crate::host::store::CLONE_SCRATCH_NAME), if one remains, the clone's
+    /// activation record,
     /// [`CLONE_ACTIVATION_NAME`](crate::host::store::CLONE_ACTIVATION_NAME), the socket of its
     /// restore-ready event, [`RESTORE_READY_NAME`](crate::host::store::RESTORE_READY_NAME), and
     /// its records, which last as long as the lease, its progress log,
