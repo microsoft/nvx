@@ -1344,3 +1344,25 @@ fn run_share_targets_bind_from_an_aggregate() {
     // Unlike a sandbox target, a run target has no length limit.
     validate_run_share_targets(&[&format!("/{}", "x".repeat(5000))]).unwrap();
 }
+
+/// A cold boot renders each target into an `nvx_share=` token. Linux would split that token at a
+/// byte that it reads as whitespace, and a quote would make it read the rest of the command line,
+/// with the virtio-mmio devices that OpenVMM describes after it, as part of the token.
+#[test]
+fn run_share_targets_remain_one_kernel_token() {
+    // U+00A0, U+00E0, and U+0120 end in the byte 0xa0 in UTF-8, which Linux reads as whitespace.
+    for separator in [
+        '\0', '\t', '\n', '\u{b}', '\u{c}', '\r', ' ', '"', '\u{a0}', '\u{e0}', '\u{120}',
+        '\u{3000}', '\u{1c}',
+    ] {
+        let target = format!("/data{separator}x");
+        assert_eq!(
+            message(validate_run_share_targets(&[&target, "/logs"])),
+            format!(
+                "invalid --mount target {target:?}: with several shares, or a shared file, each target \
+                 must be an absolute non-root path without empty, dot, or parent components, \
+                 whitespace, control characters, quotes, '\\', '=', or ','",
+            )
+        );
+    }
+}

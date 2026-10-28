@@ -1120,6 +1120,27 @@ fn run_refusals() -> Vec<Refusal> {
             ]),
             &["--mount target", "\"/a\\\"b\""],
         ),
+        // U+00E0 is C3 A0 in UTF-8, and Linux reads 0xa0 as whitespace, so it would split the
+        // target's nvx_share= token.
+        refusal(
+            "run: target with a byte that Linux reads as whitespace",
+            "unsupported",
+            run_dry(&[
+                "--mount",
+                "/voil\u{e0},{root/share}",
+                "--mount",
+                "/b,{root/share2}",
+            ]),
+            &["--mount target", "\"/voil\u{e0}\"", targets],
+        ),
+        // The target of one directory share reaches the kernel command line in OpenVMM's
+        // virtfs_dir= token.
+        refusal(
+            "run: quoted target of one share",
+            "unsupported",
+            run_dry(&["--mount", "/a\"b,{root/share}"]),
+            &["--mount target", "\"/a\\\"b\"", "one kernel token"],
+        ),
         refusal(
             "run: target with a dot component",
             "unsupported",
