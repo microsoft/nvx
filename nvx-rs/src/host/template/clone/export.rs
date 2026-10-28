@@ -71,6 +71,12 @@ impl DirectoryExport {
     /// Windows no other letter case, short name, or verbatim prefix, hides an overlap. Fails with
     /// [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported) for such an export.
     ///
+    /// Since the check compares the paths that the export and the store resolve to, an alias of
+    /// the store that an administrator configures is outside it, as the directories above the
+    /// store are: a bind mount or a mount point of the store, or of a directory above or inside
+    /// it, a loopback share, or a hard link of a payload. Whoever names an export must not name
+    /// such an alias, nor a directory that holds one.
+    ///
     /// [`filesystem::canonicalize`]: crate::host::filesystem::canonicalize
     pub(super) fn check_outside(
         &self,

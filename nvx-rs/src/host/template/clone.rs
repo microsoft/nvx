@@ -185,10 +185,17 @@ pub enum CloneUpper {
 ///   directory: a template's filesystem slot is dormant, and a restore binds one directory to it,
 ///   which is then the export's root, in which the sources of the plan's binds name their paths
 ///   without the child's index, as the mapping table, [`table`](Self::table), sends them. The
-///   directory may neither lie inside the template store's directory nor hold it, by the path
-///   that the plan resolved, so that no guest reaches the payload of a generation through it. The
-///   launch checks the plan's host objects again, with [`ExportPlan::verify`], before it restores
-///   the clone. A request without an export leaves the slot dormant.
+///   directory may neither lie inside the template store's directory nor hold it, by the paths
+///   that the plan and the store's directory resolve to, so that no guest reaches the payload of
+///   a generation through it, nor let the guest write in a directory through which the store's
+///   path leads, links and `..` included, since the host reaches the store, and OpenVMM its
+///   snapshots, by that path. These checks compare paths, so an alias of the store that an
+///   administrator configures is outside them, as the directories above the store are: a bind
+///   mount or a mount point of the store, or of a directory above or inside it, a loopback
+///   share, or a hard link of a payload. Whoever names an export must not name such an alias,
+///   nor a directory that holds one. The launch checks the plan's host objects again, with
+///   [`ExportPlan::verify`], before it restores the clone. A request without an export leaves
+///   the slot dormant.
 /// - The activation record, which the clone's guest applies in place of the configuration that
 ///   the template captured, names the restore, with a fresh transaction ID, the clone's image,
 ///   upper, export, and settings, the template's network, and the resources that the clone must
