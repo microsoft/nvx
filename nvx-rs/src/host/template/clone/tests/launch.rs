@@ -19,6 +19,7 @@ use crate::activation::{ReadyActivation, StoreGeneration, TransactionId};
 use crate::host::artifacts;
 use crate::host::platform::Transport;
 use crate::host::process::{BootId, Process, ProcessRef};
+use crate::host::store::files::write_private;
 use crate::host::store::{
     CLONE_ACTIVATION_NAME, CLONE_BINDING_NAME, CLONE_FAILURE_NAME, CLONE_PROGRESS_NAME,
     CLONE_SCRATCH_NAME, JOURNAL_NAME, LaunchState, LockedStore, OUTCOME_NAME, RESTORE_READY_NAME,
@@ -1324,6 +1325,34 @@ fn a_clone_whose_launch_failed_before_it_began_launches_no_more_until_its_releas
     assert!(!path.exists());
 }
 
+#[test]
+fn a_failure_that_a_reattach_records_before_any_launch_shows_no_report_of_an_earlier_vm() {
+    // A reattach before any launch of the clone that cannot read the record of a failure, as a
+    // transient error of the host may keep it from reading one, records a failure of its own, at
+    // the plan, with no VM: the report that an earlier VM of the sandbox left, which no launch
+    // removed, stays none of the clone's.
+    let fixture = Fixture::new();
+    let runtime = runtime_of(&fixture);
+    let mut acquired = fixture.acquire("sandbox");
+    let locked = &mut acquired.locked;
+    fs::write(locked.outcome_path(), guest_exit(195)).unwrap();
+    write_private(&locked.clone_failure_path(), b"not a record").unwrap();
+    let mut control = ReattachControl::answering(Some);
+    let deadline = Instant::now() + TIMEOUT;
+    let reattached = reattach_clone(locked, &runtime, &mut control, deadline, TIMEOUT).unwrap();
+    let failure = failed(reattached);
+    assert_eq!(
+        (failure.record().progress, &failure.record().teardown),
+        (Progress::Planned, &Teardown::NoVm)
+    );
+    let records = CloneRecords::read(locked).unwrap().unwrap();
+    assert_eq!(records.failure.as_ref(), Some(failure.record()));
+    assert_eq!(
+        (records.progress, records.report),
+        (Progress::Planned, None)
+    );
+}
+
 /// Returns the message of the refusal of a clone's launch whose socket at `path` would not fit a
 /// Unix socket's address.
 #[cfg(target_os = "linux")]
@@ -2185,6 +2214,68 @@ fn a_reattach_ends_a_clone_that_it_may_not_keep_through_its_verified_identity() 
     );
     assert_eq!(control.records.len(), 1);
     assert!(locked.runtime().unwrap().is_none());
+    crashed.releases(&mut locked);
+}
+
+#[test]
+fn a_reattach_fails_a_clone_whose_record_of_a_failure_cannot_be_read() {
+    let reattach = (Stage::Reattach, Progress::Committed);
+    let host = Evidence::HostFailure;
+    // A record that is malformed, and one of a format that this build does not read: the clone
+    // failed, so the reattach sends its guest nothing, and ends its VM through its verified
+    // identity, though its Ready would match its activation record.
+    let unreadable: [(&[u8], ErrorCode); 2] = [
+        (b"not a record", ErrorCode::Io),
+        (br#"{"format": 99}"#, ErrorCode::FormatUnsupported),
+    ];
+    for (bytes, code) in unreadable {
+        let crashed = Crashed::at("committed");
+        let mut locked = crashed.lock();
+        write_private(&locked.clone_failure_path(), bytes).unwrap();
+        let mut control = ReattachControl::answering(Some);
+        let failure = failed(crashed.take_over(&mut locked, &crashed.runtime, &mut control));
+        assert_eq!(failure.code(), code, "{failure}");
+        let (lease, terminated) = (&crashed.lease, Teardown::Terminated);
+        assert_recorded(&failure, lease, &locked, reattach, host, terminated);
+        assert!(control.capabilities.is_empty());
+        assert!(locked.runtime().unwrap().is_none());
+        crashed.releases(&mut locked);
+    }
+    // A clone whose VM exited with a status that is no evidence of a failure failed all the same.
+    let crashed = Crashed::at_with("committed", "report:guest-exit:3");
+    crashed.vmm.end_and_wait();
+    let mut locked = crashed.lock();
+    write_private(&locked.clone_failure_path(), b"not a record").unwrap();
+    let mut control = ReattachControl::answering(Some);
+    let failure = failed(crashed.take_over(&mut locked, &crashed.runtime, &mut control));
+    let (lease, exited) = (&crashed.lease, Teardown::Exited);
+    assert_recorded(&failure, lease, &locked, reattach, host, exited);
+    assert_eq!(failure.record().status, Some(3));
+    assert!(control.capabilities.is_empty());
+    crashed.releases(&mut locked);
+    // A clone whose VM cannot be examined failed all the same, with its teardown unresolved, which
+    // a later reattach resolves.
+    let crashed = Crashed::at("committed");
+    let mut locked = crashed.lock();
+    write_private(&locked.clone_failure_path(), b"not a record").unwrap();
+    let mut control = ReattachControl::answering(Some);
+    let reason = "the test cannot examine the VM";
+    let reattached = reattach_clone_with(
+        &mut locked,
+        &crashed.runtime,
+        &mut control,
+        Instant::now() + TIMEOUT,
+        TIMEOUT,
+        |_, _, _| Ok(Reattached::Indeterminate(reason.to_owned())),
+    )
+    .unwrap();
+    let failure = failed(reattached);
+    let (lease, unresolved) = (&crashed.lease, Teardown::Unresolved(reason.to_owned()));
+    assert_recorded(&failure, lease, &locked, reattach, host, unresolved);
+    let failure = failed(crashed.take_over(&mut locked, &crashed.runtime, &mut control));
+    let terminated = Teardown::Terminated;
+    assert_recorded(&failure, lease, &locked, reattach, host, terminated);
+    assert!(control.capabilities.is_empty());
     crashed.releases(&mut locked);
 }
 

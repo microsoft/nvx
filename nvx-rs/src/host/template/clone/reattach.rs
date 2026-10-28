@@ -48,8 +48,9 @@ pub enum ReattachedClone<S> {
     /// The clone failed, as the record of its failure in its sandbox tells, which the reattach
     /// found, or wrote: the launch of a caller that crashed, which the reattach ended; a VM that
     /// exited once its launch committed, with a status of the guest's that is evidence, or
-    /// without a report of the guest's own end; a check of the clone that failed; or a VM that
-    /// runs under another runtime identity. The failure's teardown tells whether a VM of the
+    /// without a report of the guest's own end; a check of the clone that failed; a VM that
+    /// runs under another runtime identity; or a record of a failure of the clone that cannot be
+    /// read, which the record that the reattach wrote replaces. The failure's teardown tells whether a VM of the
     /// clone may still run: until it is resolved, the sandbox keeps the store's records of the VM,
     /// and with them the clone's lease, for a later reattach.
     Failed(CloneFailure),
@@ -117,11 +118,15 @@ pub enum ReattachedClone<S> {
 /// of the generation leaves the clone's reattach, as its run, as it is. It signals no process that
 /// it has not verified. The progress log and the record of a failure only inform it: one that
 /// cannot be read is none, so that the reattach still ends the clone's VM, and a failure that the
-/// reattach records replaces it. A clone that launched, whose progress log, which its launch
-/// created before it began, and appends to without a sync, cannot be read, is missing, or was
-/// written during another boot of the host, whose crash may have lost its last lines, may have
-/// run its workload: a status of the guest's is then attributed as once the start of the clone's
-/// sandbox was sent.
+/// reattach records replaces it. A record of a failure that cannot be read still tells that the
+/// clone launched, and failed, so the reattach returns no VM of the clone, and finds the clone
+/// neither ended nor indeterminate: it fails the clone at [`Stage::Reattach`] with the error of
+/// the record's read, the host's evidence, once it ended a VMM of the clone that runs, as it ends
+/// one that it may not keep, or with its teardown unresolved for one that cannot be examined. A
+/// clone that launched, whose progress log, which its launch created before it began, and appends
+/// to without a sync, cannot be read, is missing, or was written during another boot of the host,
+/// whose crash may have lost its last lines, may have run its workload: a status of the guest's
+/// is then attributed as once the start of the clone's sandbox was sent.
 ///
 /// Fails with [`ErrorKind::Other`](crate::ErrorKind::Other) if the sandbox holds no clone
 /// binding, whose VM reattaches as any sandbox's does, with
@@ -186,7 +191,13 @@ pub(super) fn reattach_clone_with<C: CloneControl>(
     let committed = runtime_record
         .as_ref()
         .filter(|record| record.launch() == launch);
-    let earlier = read_failure(&locked.clone_failure_path()).unwrap_or(None);
+    // A record of a failure that cannot be read is none below, but tells that the clone launched,
+    // and failed: the reattach fails the clone that it would keep, find ended, or find
+    // indeterminate, and the failure that it records replaces the record.
+    let (earlier, unreadable) = match read_failure(&locked.clone_failure_path()) {
+        Ok(earlier) => (earlier, None),
+        Err(error) => (None, Some(error)),
+    };
     let logged = read_progress(&locked.clone_progress_path(), launch).unwrap_or(None);
     // The launch of a clone creates its progress log before it begins, and before it records a
     // failure, and appends to it without a sync, so the log of a clone that launched tells how
@@ -195,8 +206,11 @@ pub(super) fn reattach_clone_with<C: CloneControl>(
     // the log's last lines, and a workload may then have run in the clone. A log that can be read
     // tells that the clone launched as well as the store's records do, which a stop of its VM
     // clears, and a release alone removes it.
-    let launched =
-        journal.is_some() || committed.is_some() || earlier.is_some() || logged.is_some();
+    let launched = journal.is_some()
+        || committed.is_some()
+        || earlier.is_some()
+        || unreadable.is_some()
+        || logged.is_some();
     let certain = logged.is_some_and(|logged| logged.is_certain(BootId::current().ok()));
     let uncertain = launched && !certain;
     let logged = logged.map(|logged| logged.progress);
@@ -270,9 +284,12 @@ pub(super) fn reattach_clone_with<C: CloneControl>(
     };
     match reattached {
         Reattached::Live(vmm) => {
-            let checked = activation.and_then(|activation| {
-                check_activation(locked, &lease, &vmm, control, activation, deadline, started)
-            });
+            let checked = match unreadable {
+                Some(error) => Err(unreadable_failure(error)),
+                None => activation.and_then(|activation| {
+                    check_activation(locked, &lease, &vmm, control, activation, deadline, started)
+                }),
+            };
             match checked {
                 Ok(session) => Ok(ReattachedClone::Live {
                     vmm: Box::new(vmm),
@@ -305,10 +322,20 @@ pub(super) fn reattach_clone_with<C: CloneControl>(
             failed(fault, progress.stage(), Teardown::of(Ok(recovery)))
         }
         Reattached::Exited { record, .. } => {
-            match exit_fault(&recorder, progress, record.is_some()) {
-                Some((fault, _)) => failed(fault, progress.stage(), Teardown::Exited),
+            let fault = exit_fault(&recorder, progress, record.is_some());
+            match (fault, unreadable) {
+                (Some((fault, _)), _) => failed(fault, progress.stage(), Teardown::Exited),
+                // A VM of the clone ran only once its launch spawned it, as in `exit_fault`.
+                (None, Some(error)) => {
+                    let teardown = if progress >= Progress::Spawned {
+                        Teardown::Exited
+                    } else {
+                        Teardown::NoVm
+                    };
+                    failed(unreadable_failure(error), Stage::Reattach, teardown)
+                }
                 // A report is of the clone's VM only once its launch began, as in `exit_fault`.
-                None => Ok(ReattachedClone::Ended {
+                (None, None) => Ok(ReattachedClone::Ended {
                     progress,
                     report: (progress >= Progress::Spawned)
                         .then(|| recorder.observed().cloned())
@@ -318,7 +345,14 @@ pub(super) fn reattach_clone_with<C: CloneControl>(
         }
         Reattached::Indeterminate(reason) => {
             if locked.journal()?.is_none() {
-                return Ok(ReattachedClone::Indeterminate(reason));
+                return match unreadable {
+                    Some(error) => failed(
+                        unreadable_failure(error),
+                        Stage::Reattach,
+                        Teardown::Unresolved(reason),
+                    ),
+                    None => Ok(ReattachedClone::Indeterminate(reason)),
+                };
             }
             // The launch that a crash of its caller interrupted cannot be ended yet.
             let fault = Fault::new(Evidence::LostStatus, interrupted(progress));
@@ -498,4 +532,15 @@ fn mismatched(differences: &[IdentityPart]) -> Error {
             parts.join(", ")
         ),
     )
+}
+
+/// Returns the fault of a clone whose sandbox holds a record of a failure that cannot be read, as
+/// `error` tells: the record still shows that the clone failed, so the reattach keeps none of it,
+/// with the host's evidence.
+fn unreadable_failure(error: Error) -> Fault {
+    Fault::host(amended(
+        error,
+        "; a clone whose sandbox records a failure failed for good, so the reattach keeps no VM \
+         of it",
+    ))
 }
