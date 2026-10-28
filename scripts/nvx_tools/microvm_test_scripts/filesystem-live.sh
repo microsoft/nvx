@@ -46,6 +46,22 @@ elif exchange /mnt/share/exchange-dir-a /mnt/share/exchange-dir-b; then
 else
     at_a=A at_b=B
 fi
+# A process dirties a page of a host file through a shared mapping, which it
+# holds until its input ends. Nothing else opens the file before the capture,
+# which writes the page back, so the host reads the guest's write and no
+# restore writes the page over the host's later changes. The sleep holds the
+# mapping process's input open until it is killed.
+mkfifo /tmp/nvx-mapping-input /tmp/nvx-mapping-output
+sleep 3600 >/tmp/nvx-mapping-input &
+mapping_input=$!
+nvx-device-io map /mnt/share/mapped-page NVX-GUEST-MAPPED \
+    </tmp/nvx-mapping-input >/tmp/nvx-mapping-output &
+mapping=$!
+IFS= read -r mapped </tmp/nvx-mapping-output || fail 48
+case "$mapped" in
+    *'"operation":"map"'*) ;;
+    *) fail 49 ;;
+esac
 echo NVX-FILESYSTEM-LIVE-BEFORE
 nvx-snapshot
 printf NVX-HANDLE-AFTER >&3
@@ -63,5 +79,11 @@ exec 4<&- 5<&- 6<&- 7<&- 8<&- 9<&-
 [ "$(cat /mnt/share/exchange-b)" = "NVX-EXCHANGE-$at_b" ] || fail 45
 [ "$(cat /mnt/share/exchange-dir-a/entry)" = "NVX-EXCHANGE-DIR-$at_a" ] || fail 46
 [ "$(cat /mnt/share/exchange-dir-b/entry)" = "NVX-EXCHANGE-DIR-$at_b" ] || fail 47
+# The restore holds the mapped page clean, so unmapping it writes nothing, and
+# the file keeps what the host wrote after the capture.
+kill "$mapping_input"
+wait "$mapping" || fail 50
+wait "$mapping_input" || :
+[ "$(cat /mnt/share/mapped-page)" != NVX-GUEST-MAPPED ] || fail 51
 echo NVX-FILESYSTEM-LIVE-AFTER
 nvx-exit 0

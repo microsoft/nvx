@@ -73,6 +73,31 @@ impl MemoryMapping {
         true
     }
 
+    /// Copies `bytes` into the mapping at `offset`.
+    ///
+    /// Returns `false` without writing unless every byte lies inside the mapping. The mapping is
+    /// writable by construction.
+    #[cfg(target_arch = "x86_64")]
+    pub(crate) fn write_bytes(&mut self, offset: usize, bytes: &[u8]) -> bool {
+        if offset
+            .checked_add(bytes.len())
+            .is_none_or(|end| end > self.length.get())
+        {
+            return false;
+        }
+        let address = self.address.expect("owned mapping has an address");
+        // SAFETY: the checked range lies inside this writable mapping, which no reference
+        // aliases, and `bytes` cannot overlap it, because this type lends out no view of it.
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                bytes.as_ptr(),
+                address.as_ptr().cast::<u8>().add(offset),
+                bytes.len(),
+            );
+        }
+        true
+    }
+
     /// Unmaps this mapping and reports the kernel error, if any.
     pub(crate) fn unmap(mut self) -> Result<(), Errno> {
         let address = self.address.take().expect("mapping is owned");

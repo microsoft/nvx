@@ -1,23 +1,31 @@
-//! `nvx-device-io`: the benchmark helper that measures file and UDP round-trip I/O.
+//! `nvx-device-io`: the benchmark helper that measures file and UDP round-trip I/O, and that
+//! dirties a file's shared mapping for the microVM scenarios.
 //!
 //! - `file PATH read|write DURATION SIZE direct|buffered create|existing` reads or writes
 //!   page-aligned 4096-byte blocks of PATH, at deterministic pseudo-random offsets within its
 //!   first SIZE bytes, until DURATION milliseconds have passed.
 //! - `network IPV4 PORT DURATION` sends 64-byte UDP datagrams to an echo server until DURATION
 //!   milliseconds have passed, and counts those that come back within 100 ms.
+//! - `map PATH TEXT` maps the first bytes of the existing regular file PATH shared and
+//!   read-write, closes the file, and writes the nonempty TEXT at its start through the mapping
+//!   alone, so that the kernel holds the written pages dirty until it writes them back. It then
+//!   holds the mapping until standard input ends, and unmaps it.
 //!
 //! Each mode prints one JSON line with its operation count, bytes per operation, and elapsed
-//! monotonic nanoseconds. The program exits with 0, 2 for a usage error, 3 when it cannot open,
-//! connect, size, or time, 4 when a transfer or send is incomplete, or 255 when it cannot print
-//! the result. It prints nothing else.
+//! monotonic nanoseconds; `map` prints its line once its write is done, before it holds the
+//! mapping. The program exits with 0, 2 for a usage error, 3 when it cannot open, connect, size,
+//! map, or time, 4 when a transfer or send is incomplete, a file is shorter than TEXT, or reading
+//! standard input or unmapping fails, or 255 when it cannot print the result. It prints nothing
+//! else.
 
 use std::ffi::{CStr, CString};
 use std::io::Write;
 use std::net::{Ipv4Addr, SocketAddrV4};
+use std::num::NonZeroUsize;
 use std::process::ExitCode;
 
 use super::status::{CommandError, run_main};
-use super::sys::{self, Mode, OpenFlags};
+use super::sys::{self, Errno, MemoryMapping, Mode, OpenFlags};
 
 /// Size and required alignment of each file transfer.
 const BLOCK_SIZE: usize = 4096;
@@ -62,12 +70,22 @@ struct NetworkBenchmark {
     duration_ms: u64,
 }
 
-/// Benchmark that the command line selects.
+/// Parsed `map PATH TEXT` write through a shared mapping.
+struct MappedWrite<'a> {
+    /// Path of the file.
+    path: &'a CStr,
+    /// Nonempty bytes to write at the start of the file.
+    text: &'a [u8],
+}
+
+/// Benchmark, or mapped write, that the command line selects.
 enum Benchmark<'a> {
     /// File benchmark.
     File(FileBenchmark<'a>),
     /// UDP echo benchmark.
     Network(NetworkBenchmark),
+    /// Write through a shared mapping, which the program holds until its input ends.
+    Map(MappedWrite<'a>),
 }
 
 /// Operations that a timed loop completed, and the time that it took.
@@ -80,11 +98,23 @@ struct Measurement {
 
 /// Runs `nvx-device-io` with the process's arguments; see the module documentation.
 pub fn main() -> ExitCode {
-    run_main(|args| run(args, &mut sys::DirectStdout))
+    run_main(|args| {
+        run(
+            args,
+            &mut sys::DirectStdout,
+            &mut sys::discard_standard_input,
+        )
+    })
 }
 
-/// Parses and runs one benchmark, and prints its result to `out`.
-fn run(args: &[CString], out: &mut dyn Write) -> Result<(), CommandError> {
+/// Parses and runs one benchmark, and prints its result to `out`. A mapped write calls `hold`
+/// after it prints, and holds the mapping until `hold` returns, which `main` makes the end of
+/// standard input.
+fn run(
+    args: &[CString],
+    out: &mut dyn Write,
+    hold: &mut dyn FnMut() -> Result<(), Errno>,
+) -> Result<(), CommandError> {
     let (device, operation, bytes_per_operation, measurement) =
         match parse(args).ok_or(CommandError::Usage)? {
             Benchmark::File(benchmark) => {
@@ -97,6 +127,7 @@ fn run(args: &[CString], out: &mut dyn Write) -> Result<(), CommandError> {
                 PAYLOAD_SIZE,
                 measure_network(&benchmark)?,
             ),
+            Benchmark::Map(write) => return write_mapped(&write, out, hold),
         };
     let line = result_line(
         device,
@@ -154,6 +185,13 @@ fn parse(args: &[CString]) -> Option<Benchmark<'_>> {
             peer: SocketAddrV4::new(address, port as u16),
             duration_ms,
         }));
+    }
+    if mode == b"map" {
+        let [_, _, path, text] = args else {
+            return None;
+        };
+        let text = text.as_bytes();
+        return (!text.is_empty()).then_some(Benchmark::Map(MappedWrite { path, text }));
     }
     None
 }
@@ -344,6 +382,50 @@ fn measure_network(benchmark: &NetworkBenchmark) -> Result<Measurement, CommandE
     })
 }
 
+/// Writes the text at the start of the file through a shared mapping, prints the result line,
+/// and holds the mapping until `hold` returns, then unmaps it.
+///
+/// Only the mapping holds the file while the write dirties its pages: the kernel writes a FUSE
+/// file's dirty pages back when a descriptor of it closes, as it does when its mapping goes, so
+/// the descriptor closes before the write. A failed print or hold drops the mapping.
+fn write_mapped(
+    write: &MappedWrite<'_>,
+    out: &mut dyn Write,
+    hold: &mut dyn FnMut() -> Result<(), Errno>,
+) -> Result<(), CommandError> {
+    let length = NonZeroUsize::new(write.text.len()).ok_or(CommandError::Usage)?;
+    let mut mapping = map_file(write.path, length)?;
+    let started = start()?;
+    if !mapping.write_bytes(0, write.text) {
+        return Err(CommandError::Transfer);
+    }
+    let elapsed_ns = now().wrapping_sub(started);
+    let line = result_line("file", "map", 1, length.get() as u64, elapsed_ns);
+    out.write_all(&line).map_err(|_| CommandError::Output)?;
+    hold().map_err(|_| CommandError::Transfer)?;
+    mapping.unmap().map_err(|_| CommandError::Transfer)
+}
+
+/// Maps the first `length` bytes of the regular file at `path` shared and read-write. The file's
+/// descriptor closes when this returns, and the mapping keeps the file open.
+fn map_file(path: &CStr, length: NonZeroUsize) -> Result<MemoryMapping, CommandError> {
+    let file = sys::open(
+        path,
+        OpenFlags::O_RDWR | OpenFlags::O_CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(|_| CommandError::Setup)?;
+    let (regular, size) = sys::file_size(&file).map_err(|_| CommandError::Setup)?;
+    if !regular {
+        return Err(CommandError::Setup);
+    }
+    // Touching a mapped page past the end of the file would raise SIGBUS.
+    if size < length.get() as u64 {
+        return Err(CommandError::Transfer);
+    }
+    MemoryMapping::shared_read_write(&file, length, 0).map_err(|_| CommandError::Setup)
+}
+
 /// Returns the newline-terminated JSON result, truncated to the C program's 384-byte buffer.
 fn result_line(
     device: &str,
@@ -372,6 +454,11 @@ mod tests {
     /// Returns the command line of `nvx-device-io` with `arguments`.
     fn args(arguments: &[&str]) -> Vec<CString> {
         command_line("nvx-device-io", arguments)
+    }
+
+    /// Stands for the input that ends a mapped write's hold, which a benchmark never waits for.
+    fn never_holds() -> Result<(), Errno> {
+        panic!("only a mapped write holds its mapping")
     }
 
     #[test]
@@ -484,6 +571,19 @@ mod tests {
     }
 
     #[test]
+    fn parses_mapped_writes() {
+        let map = args(&["map", "/f", "NVX-TEXT"]);
+        let Some(Benchmark::Map(parsed)) = parse(&map) else {
+            panic!("not a mapped write");
+        };
+        assert_eq!((parsed.path, parsed.text), (c"/f", &b"NVX-TEXT"[..]));
+        assert!(parse(&args(&["map", "/f", ""])).is_none());
+        assert!(parse(&args(&["map", "/f"])).is_none());
+        assert!(parse(&args(&["map", "/f", "NVX-TEXT", "extra"])).is_none());
+        assert!(parse(&args(&["Map", "/f", "NVX-TEXT"])).is_none());
+    }
+
+    #[test]
     fn offsets_follow_the_c_generator() {
         let mut offsets = Offsets::new(256);
         let first: Vec<u64> = (0..4).map(|_| offsets.next_offset()).collect();
@@ -529,7 +629,7 @@ mod tests {
         let path = file.to_str().unwrap();
         let mut out = Vec::new();
         let write = ["file", path, "write", "1", "8192", "buffered", "create"];
-        let status = ExitStatus::from(run(&args(&write), &mut out));
+        let status = ExitStatus::from(run(&args(&write), &mut out, &mut never_holds));
         assert_eq!(status, ExitStatus::Success);
         let line = String::from_utf8(out).unwrap();
         assert!(
@@ -543,21 +643,92 @@ mod tests {
         assert_eq!(fs::metadata(&file).unwrap().len(), 8192);
 
         let read = ["file", path, "read", "1", "8192", "buffered", "existing"];
-        let status = ExitStatus::from(run(&args(&read), &mut Failing(sys::Errno::ENOSPC)));
+        let status = ExitStatus::from(run(
+            &args(&read),
+            &mut Failing(sys::Errno::ENOSPC),
+            &mut never_holds,
+        ));
         assert_eq!(status, ExitStatus::OutputFailure);
 
         let missing = directory.path().join("missing");
         let mut arguments = read;
         arguments[1] = missing.to_str().unwrap();
-        let status = ExitStatus::from(run(&args(&arguments), &mut Vec::new()));
+        let status = ExitStatus::from(run(&args(&arguments), &mut Vec::new(), &mut never_holds));
         assert_eq!(status, ExitStatus::SetupFailure);
 
         // An empty file cannot transfer a block.
         fs::write(&missing, b"").unwrap();
         arguments[4] = "4096";
         let mut out = Vec::new();
-        let status = ExitStatus::from(run(&args(&arguments), &mut out));
+        let status = ExitStatus::from(run(&args(&arguments), &mut out, &mut never_holds));
         assert_eq!(status, ExitStatus::TransferFailure);
         assert!(out.is_empty());
+    }
+
+    #[test]
+    fn writes_through_a_held_mapping_and_reports_each_failure() {
+        let directory = tempfile::tempdir().unwrap();
+        let file = directory.path().join("mapped");
+        fs::write(&file, vec![b'.'; 2 * BLOCK_SIZE]).unwrap();
+        let path = file.to_str().unwrap();
+        let mut out = Vec::new();
+        let mut held = false;
+        let status = ExitStatus::from(run(
+            &args(&["map", path, "NVX-MAPPED"]),
+            &mut out,
+            &mut || {
+                // The page cache already holds the write while the mapping is held.
+                assert!(fs::read(&file).unwrap().starts_with(b"NVX-MAPPED."));
+                held = true;
+                Ok(())
+            },
+        ));
+        assert_eq!(status, ExitStatus::Success);
+        assert!(held);
+        let line = String::from_utf8(out).unwrap();
+        assert!(
+            line.starts_with(
+                "{\"device\":\"file\",\"operation\":\"map\",\"operations\":1,\
+                 \"bytes_per_operation\":10,\"elapsed_ns\":"
+            ) && line.ends_with("}\n"),
+            "{line}"
+        );
+        let contents = fs::read(&file).unwrap();
+        assert_eq!(contents.len(), 2 * BLOCK_SIZE);
+        assert!(contents.starts_with(b"NVX-MAPPED."));
+
+        // A mapped write that cannot print its result never holds the mapping, and one whose
+        // hold fails reports an incomplete transfer.
+        let status = ExitStatus::from(run(
+            &args(&["map", path, "NVX"]),
+            &mut Failing(Errno::ENOSPC),
+            &mut never_holds,
+        ));
+        assert_eq!(status, ExitStatus::OutputFailure);
+        let status = ExitStatus::from(run(
+            &args(&["map", path, "NVX"]),
+            &mut Vec::new(),
+            &mut || Err(Errno::EIO),
+        ));
+        assert_eq!(status, ExitStatus::TransferFailure);
+
+        // A missing file and a directory cannot map, and a file shorter than the text cannot
+        // take it.
+        for (target, expected) in [
+            (directory.path().join("missing"), ExitStatus::SetupFailure),
+            (directory.path().to_path_buf(), ExitStatus::SetupFailure),
+        ] {
+            let arguments = ["map", target.to_str().unwrap(), "NVX"];
+            let mut out = Vec::new();
+            let status = ExitStatus::from(run(&args(&arguments), &mut out, &mut never_holds));
+            assert_eq!((status, out), (expected, Vec::new()), "{target:?}");
+        }
+        let short = directory.path().join("short");
+        fs::write(&short, b"NVX").unwrap();
+        let arguments = ["map", short.to_str().unwrap(), "NVX-MAPPED"];
+        let mut out = Vec::new();
+        let status = ExitStatus::from(run(&args(&arguments), &mut out, &mut never_holds));
+        assert_eq!((status, out), (ExitStatus::TransferFailure, Vec::new()));
+        assert_eq!(fs::read(&short).unwrap(), b"NVX");
     }
 }

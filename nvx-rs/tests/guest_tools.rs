@@ -438,6 +438,10 @@ fn device_io_usage() {
         &["network", "127.0.0.1", "65536", "1"],
         &["network", "127.0.0.256", "1", "1"],
         &["network", "127.0.0.1", "1", "0"],
+        &["map"],
+        &["map", "f"],
+        &["map", "f", ""],
+        &["map", "f", "NVX", "extra"],
     ] {
         assert_eq!(device_io(arguments, 2), None, "{arguments:?}");
     }
@@ -479,6 +483,60 @@ fn device_io_measures_a_file() {
     fs::write(&missing, b"").unwrap();
     arguments[4] = "4096".to_owned();
     assert_eq!(device_io(&arguments, 4), None);
+}
+
+#[test]
+#[cfg(target_arch = "x86_64")]
+fn device_io_holds_a_mapped_write_until_its_input_ends() {
+    use std::io::BufRead;
+
+    let directory = tempfile::tempdir().unwrap();
+    let file = directory.path().join("mapped");
+    fs::write(&file, vec![b'.'; 4096]).unwrap();
+    let mut child = {
+        let _spawning = SPAWNING.read().unwrap();
+        Command::new(binary("nvx-device-io"))
+            .args(["map", file.to_str().unwrap(), "NVX-MAPPED"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap()
+    };
+    let mut line = String::new();
+    io::BufReader::new(child.stdout.as_mut().unwrap())
+        .read_line(&mut line)
+        .unwrap();
+    let result: serde_json::Value = serde_json::from_str(&line).unwrap();
+    assert_eq!(result["device"], "file", "{line}");
+    assert_eq!(result["operation"], "map", "{line}");
+    assert_eq!(result["operations"], 1, "{line}");
+    assert_eq!(result["bytes_per_operation"], 10, "{line}");
+    // The program prints once it has written, and then holds the mapping until its input ends.
+    assert!(child.try_wait().unwrap().is_none());
+    assert!(fs::read(&file).unwrap().starts_with(b"NVX-MAPPED."));
+    drop(child.stdin.take());
+    let output = child.wait_with_output().unwrap();
+    assert_eq!(
+        (output.status.code(), output.stdout, output.stderr),
+        (Some(0), Vec::new(), Vec::new())
+    );
+    let contents = fs::read(&file).unwrap();
+    assert_eq!(contents.len(), 4096);
+    assert!(contents.starts_with(b"NVX-MAPPED."));
+
+    // A missing file cannot map, and a file shorter than the text cannot take it.
+    let missing = directory.path().join("missing");
+    assert_eq!(
+        device_io(["map", missing.to_str().unwrap(), "NVX"], 3),
+        None
+    );
+    fs::write(&missing, b"NV").unwrap();
+    assert_eq!(
+        device_io(["map", missing.to_str().unwrap(), "NVX"], 4),
+        None
+    );
+    assert_eq!(fs::read(&missing).unwrap(), b"NV");
 }
 
 #[test]

@@ -217,6 +217,15 @@ mount the share, read the file that the host wrote, and write one that the
 host then reads, and the restore may not change the snapshot. Until OpenVMM's
 virtio-fs queue workers waited for the gate to release (#904), the clone's
 mount succeeded but its first read never returned.
+The `filesystem-snapshot` scenario's blockless capture of a live share covers
+the write-back of shared mappings (#555). A guest process dirties a page of a
+file in the share through a shared mapping with `nvx-device-io map` and holds
+the mapping through the capture, so the page reaches the host only through the
+guest agents' write-back: after the capture, the host file must hold the
+guest's write. The host then changes the file in place before each of two
+restores, and each restored guest, which unmaps the page and reads the file,
+must leave the host's change in place: a capture that kept the page dirty
+would make every restore write the guest's capture-time data back.
 
 At the end of a passing run, `test-microvm` prints one `NVX-TIME-ABI-EVIDENCE:`
 line and adds it to the GitHub job summary, because CI keeps the guest logs only

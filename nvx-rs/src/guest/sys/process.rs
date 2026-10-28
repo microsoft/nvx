@@ -750,6 +750,22 @@ impl Write for DirectStdout {
     }
 }
 
+/// Reads standard input until its end and discards what it reads, retrying interruptions.
+///
+/// It reads standard input with direct `read` calls, past the standard library's buffer, which
+/// therefore stays empty.
+#[cfg(target_arch = "x86_64")]
+pub(crate) fn discard_standard_input() -> Result<(), Errno> {
+    let mut buffer = [0_u8; 512];
+    loop {
+        match nix::unistd::read(io::stdin(), &mut buffer) {
+            Ok(0) => return Ok(()),
+            Ok(_) | Err(Errno::EINTR) => {}
+            Err(error) => return Err(error),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::io::{Seek, Write};
