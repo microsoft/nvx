@@ -59,7 +59,11 @@ pub struct CloneRequest {
     /// `distro`, an EROFS layer, over its upper: in RAM, a tmpfs, as
     /// [`SandboxUpper::RAM`](crate::host::sandbox::SandboxUpper::RAM) plans it, or on the
     /// caller's scratch image. Its network is the one of the template's NIC, which every restore
-    /// of the template attaches, or none for a template without a NIC.
+    /// of the template attaches, or none for a template without a NIC: on the NIC's guest
+    /// network, which [`ClonePlan::new`] checks, and under the NIC's policy, which OpenVMM checks
+    /// as it restores the NIC, since the template's key names the policy only by OpenVMM's
+    /// identity of it. OpenVMM refuses to restore a clone under another policy, which ends its
+    /// launch once it began.
     pub adapter: SandboxPlan,
     /// The binding of the image.
     pub binding: DistroBinding,
@@ -297,9 +301,10 @@ impl ClonePlan {
     /// - with [`ErrorKind::Unsupported`] for a request that the template cannot serve: a template
     ///   whose key names other contracts than this build speaks, the boot and control contracts
     ///   of the runtime that captured it included; a plan with a network for a template without a
-    ///   NIC, or without one for a template with a NIC; and a memory target that is not whole
-    ///   blocks of [`MEMORY_BLOCK_SIZE`] and of the template's memory blocks, from the template's
-    ///   RAM to its RAM capacity;
+    ///   NIC, without one for a template with a NIC, or with another guest network than the
+    ///   template's NIC, whose address OpenVMM restores from the snapshot; and a memory target
+    ///   that is not whole blocks of [`MEMORY_BLOCK_SIZE`] and of the template's memory blocks,
+    ///   from the template's RAM to its RAM capacity;
     /// - with [`ErrorKind::Io`] for a template whose command line names the DNS server of its
     ///   guest's resolver in another form than OpenVMM writes: more than once, without a NIC, or
     ///   other than as one IP address in its canonical spelling;
@@ -634,6 +639,18 @@ fn check_template(
                  network of the adapter's plan, but the plan has none"
             )
         }));
+    }
+    // OpenVMM restores the guest's address on the NIC from the snapshot, and a clone's launch
+    // drops the plan's, so the plan must name the template's.
+    if let Some(network) = request.adapter.network().filter(|_| attached)
+        && let Some(template) = key.guest_network()
+        && network.guest_network() != template
+    {
+        return Err(Error::unsupported(format!(
+            "the adapter's plan of a clone gives its guest the network {}, but the template's \
+             generation {name} restores its NIC on {template}, from its snapshot",
+            network.guest_network()
+        )));
     }
     let memory = request.memory;
     let block = key.memory_block_size();

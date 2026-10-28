@@ -635,13 +635,15 @@ and no launch.
 the launch that the lease reserves, from metadata alone: the leased generation,
 its key, which must speak the current contracts, the boot and control contracts
 of the runtime that captured it included, and its snapshot; a network exactly
-when the template has a NIC; a memory target in whole blocks of
-`MEMORY_BLOCK_SIZE` from the template's RAM to its capacity; the clone's image,
-which the check of its `DistroBinding` opens; its upper, either the caller's
-scratch image, which the check of its `ScratchBinding` claims, and which nothing
-formats, copies, or reads, or for an upper in RAM a fresh sparse file,
-`clone-scratch.raw` in the sandbox's directory, which the release removes; and a
-fresh capability.
+when the template has a NIC, on the guest network of that NIC, whose address
+OpenVMM restores from the snapshot, and under the policy of that NIC, which
+OpenVMM checks as it restores it, since the key names the policy only by
+OpenVMM's identity of it; a memory target in whole blocks of `MEMORY_BLOCK_SIZE`
+from the template's RAM to its capacity; the clone's image, which the check of
+its `DistroBinding` opens; its upper, either the caller's scratch image, which
+the check of its `ScratchBinding` claims, and which nothing formats, copies, or
+reads, or for an upper in RAM a fresh sparse file, `clone-scratch.raw` in the
+sandbox's directory, which the release removes; and a fresh capability.
 
 It builds the clone's activation record, `ClonePlan::activation`, which the
 clone's guest applies in place of the configuration that the template captured,

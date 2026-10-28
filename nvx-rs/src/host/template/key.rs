@@ -366,6 +366,12 @@ fn cpu_profile_problem(profile: &str) -> Option<String> {
     })
 }
 
+/// Returns the guest's network on `nic`, its IPv4 address and prefix length, in the canonical form
+/// of a [`SandboxNetwork`].
+fn guest_network_of(nic: &Nic) -> String {
+    format!("{}/{}", nic.ipv4, nic.prefix_length)
+}
+
 /// The invariant inputs of a template's capture, known before it: what a template's adapter
 /// requests, and the class of the templates that the capture makes.
 ///
@@ -664,10 +670,7 @@ impl TemplateKey {
             .filter(|_| attached)
             .map(|network| network.guest_network().to_owned());
         // A network that `SandboxNetwork` accepts has the canonical form that this writes.
-        let found_network = machine
-            .nic
-            .as_ref()
-            .map(|nic| format!("{}/{}", nic.ipv4, nic.prefix_length));
+        let found_network = machine.nic.as_ref().map(guest_network_of);
         if found_network != requested_network {
             let describe = |network: Option<String>| network.unwrap_or_else(|| "none".to_owned());
             return mismatch(
@@ -761,6 +764,13 @@ impl TemplateKey {
     /// Returns whether the template has a NIC.
     pub fn has_network(&self) -> bool {
         self.machine.nic.is_some()
+    }
+
+    /// Returns the guest's network on the template's NIC, its IPv4 address and prefix length, in
+    /// the canonical form of a [`SandboxNetwork`], such as `10.0.0.2/24`, which OpenVMM restores
+    /// from the snapshot with the NIC, or `None` for a template without a NIC.
+    pub(crate) fn guest_network(&self) -> Option<String> {
+        self.machine.nic.as_ref().map(guest_network_of)
     }
 
     /// Returns the SHA-256 digest of the canonical encoding of the network policy that OpenVMM

@@ -1591,6 +1591,26 @@ fn networks_that_the_template_does_not_have_are_refused() {
         )
     );
     assert_untouched(&acquired);
+    // OpenVMM restores the guest's address on the NIC from the snapshot, so a plan of another
+    // address, or of another prefix, is refused.
+    for other in ["10.0.0.3/24", "10.0.0.2/16"] {
+        let moved = with_network(
+            request.clone(),
+            Some(SandboxNetwork::new(other, NetworkPolicy::new(NetworkAccess::Allow)).unwrap()),
+        );
+        assert_eq!(
+            failure(fixture.plan(&mut acquired, &moved, NO_CONTENT)),
+            (
+                ErrorKind::Unsupported,
+                format!(
+                    "the adapter's plan of a clone gives its guest the network {other}, but the \
+                     template's generation {generation} restores its NIC on 10.0.0.2/24, from its \
+                     snapshot"
+                )
+            )
+        );
+        assert_untouched(&acquired);
+    }
     let attached = with_network(request, Some(network(NetworkAccess::Allow)));
     drop(fixture.plan(&mut acquired, &attached, NO_CONTENT).unwrap());
 }

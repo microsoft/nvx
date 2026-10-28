@@ -418,7 +418,11 @@ fn check_sparse(path: &Path, scratch: BlockGeometry) -> Result<()> {
 
 /// Returns OpenVMM's arguments of the devices of a clone's restore, `devices`: those that
 /// [`SandboxPlan::openvmm_arguments`] renders, without `--net` and the guest's address, which
-/// OpenVMM takes from the snapshot, and refuses beside it.
+/// OpenVMM takes from the snapshot, and refuses beside it. The options of the network's policy
+/// stay: OpenVMM compares the policy that they name with the one of the snapshot's NIC, and
+/// refuses to restore under another, so the plan must keep its template NIC's policy, as
+/// [`CloneRequest::adapter`](super::CloneRequest::adapter) says, and a plan of another one fails
+/// closed, ending the launch.
 fn device_arguments(devices: &SandboxPlan) -> Result<Vec<String>> {
     let mut arguments = devices.openvmm_arguments()?;
     if let Some(at) = arguments.iter().position(|argument| argument == "--net") {
