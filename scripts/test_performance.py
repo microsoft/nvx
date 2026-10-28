@@ -462,6 +462,62 @@ def validate_attempt(source: Path, log: Path) -> int:
         )
 
 
+# 256 MiB restores of the Linux/MSHV platform job of CI run 37212738981: a host
+# stall delayed the warmup and the first six samples and failed the gate (#345).
+STALLED_RESTORE_MS = [
+    85.689,
+    74.955,
+    69.875,
+    72.078,
+    107.193,
+    47.428,
+    37.112,
+    37.751,
+    36.336,
+    36.276,
+]
+# 512 MiB restores of CI run 39844925001 on azure-mshv-4: only the last two
+# samples escaped the stall, so only the gap limit sees it.
+LATE_RECOVERY_RESTORE_MS = [66.6, 68.9, 82.1, 65.9, 66.7, 64.2, 63.8, 62.6, 44.0, 43.2]
+# The rerun of CI run 37212738981's 256 MiB restores.
+STABLE_RESTORE_MS = [37.2, 36.5, 36.5, 35.6, 36.2, 36.4, 35.7, 35.7, 37.1, 36.6]
+# 256 MiB restores of CI run 38296918379 on azure-kvm-2. Both modes are usual
+# on the KVM runners.
+BIMODAL_KVM_RESTORE_MS = [58.9, 29.1, 59.6, 28.8, 26.9, 54.2, 61.8, 26.1, 59.1, 64.9]
+
+
+def shell_snapshot_log(restores: dict[int, Sequence[float]]) -> str:
+    """Render shell-snapshot.log as the harness writes it: each series' sample
+    lines precede the section that summarizes it."""
+    output = io.StringIO()
+    with contextlib.redirect_stdout(output):
+        for memory_mib, restored in restores.items():
+            for index, value in enumerate(restored, 1):
+                print(f"  sample {index}/{len(restored)}: {value:.3f} ms")
+            cold = [300.0 + index for index in range(len(restored))]
+            benchmark._print_shell_snapshot_summary(memory_mib, cold, restored)
+    return output.getvalue()
+
+
+def shell_snapshot_restore_log(restores: dict[int, Sequence[float]]) -> str:
+    """Render shell-snapshot-restore.log as the restore-only suite writes it."""
+    lines: list[str] = []
+    for memory_mib, restored in restores.items():
+        lines.extend(
+            f"  sample {index}/{len(restored)}: {value:.3f} ms"
+            for index, value in enumerate(restored, 1)
+        )
+        lines.extend(
+            (
+                f"== {memory_mib} MiB ==",
+                benchmark._format_shell_snapshot_line("snapshot restore", restored),
+                benchmark._format_restore_samples_line(restored),
+                "",
+            )
+        )
+    return "\n".join(lines)
+
+
 def git_repository(path: Path) -> Callable[..., str]:
     """Initialize a git repository at ``path`` and return a git runner for it."""
 
@@ -1035,6 +1091,359 @@ class PerformanceTests(unittest.TestCase):
 
         self.assertEqual(status, 2)
         self.assertIn("does not match platform", stderr.getvalue())
+
+    def test_restore_samples_come_from_the_section_of_their_series(self):
+        # Each series' sample lines precede its section, inside the previous
+        # one; only the listed samples belong to a section.
+        log = shell_snapshot_log(
+            {
+                128: STABLE_RESTORE_MS,
+                256: STALLED_RESTORE_MS,
+                512: LATE_RECOVERY_RESTORE_MS,
+            }
+        )
+
+        self.assertEqual(
+            performance._shell_snapshot_restore_samples(log, "shell-snapshot.log"),
+            {
+                128: STABLE_RESTORE_MS,
+                256: STALLED_RESTORE_MS,
+                512: LATE_RECOVERY_RESTORE_MS,
+            },
+        )
+        # Logs that passed through Windows tools keep CRLF line ends.
+        self.assertEqual(
+            performance._shell_snapshot_restore_samples(
+                log.replace("\n", "\r\n"), "shell-snapshot.log"
+            )[256],
+            STALLED_RESTORE_MS,
+        )
+        self.assertEqual(
+            performance._parse_shell_snapshot(log)["shell_snapshot_restore_256_mib"],
+            ("ms", "lower", 58.7),
+        )
+        self.assertEqual(
+            performance._shell_snapshot_restore_samples(
+                SHELL_SNAPSHOT_RESTORE_LOG, "shell-snapshot-restore.log"
+            ),
+            {512: [6.8, 6.9, 7.0, 7.1, 7.2]},
+        )
+
+    def test_validate_workload_rejects_restore_series_that_a_stall_split(self):
+        cases = (
+            (
+                "stalled-first-half",
+                "linux-mshv-virtual-machine",
+                "shell-snapshot.log",
+                STALLED_RESTORE_MS,
+                r"unstable shell-snapshot restore at \S*shell-snapshot\.log "
+                r"\(256 MiB\): p50 58\.651 ms is 58\.0% above p25 37\.112 ms "
+                r"\(limit 25\.0%\); rerun on an idle host",
+            ),
+            (
+                "late-recovery",
+                "windows-whp-virtual-machine",
+                "shell-snapshot-restore.log",
+                LATE_RECOVERY_RESTORE_MS,
+                r"unstable shell-snapshot restore at \S*shell-snapshot-restore\.log "
+                r"\(256 MiB\): samples split 2/8 between 44\.000 ms and "
+                r"62\.600 ms \(42\.3% gap, limit 25\.0%\)",
+            ),
+            (
+                "bimodal-on-mshv",
+                "linux-mshv-baremetal",
+                "shell-snapshot-restore.log",
+                BIMODAL_KVM_RESTORE_MS,
+                r"\(256 MiB\): p50 56\.550 ms is 96\.4% above p25 28\.800 ms",
+            ),
+            (
+                "stable",
+                "windows-whp-baremetal",
+                "shell-snapshot.log",
+                STABLE_RESTORE_MS,
+                None,
+            ),
+            # KVM's restore series aren't guarded, stalled or not.
+            (
+                "stalled-on-kvm",
+                "linux-kvm-virtual-machine",
+                "shell-snapshot.log",
+                STALLED_RESTORE_MS,
+                None,
+            ),
+            (
+                "bimodal-on-kvm",
+                "linux-kvm-virtual-machine",
+                "shell-snapshot-restore.log",
+                BIMODAL_KVM_RESTORE_MS,
+                None,
+            ),
+        )
+        for name, platform, filename, restored, error_pattern in cases:
+            with (
+                self.subTest(name=name),
+                tempfile.TemporaryDirectory() as temporary,
+                contextlib.redirect_stdout(io.StringIO()) as stdout,
+            ):
+                logs = Path(temporary)
+                render = (
+                    shell_snapshot_log
+                    if filename == "shell-snapshot.log"
+                    else shell_snapshot_restore_log
+                )
+                (logs / filename).write_text(
+                    render({128: STABLE_RESTORE_MS, 256: restored}), encoding="utf-8"
+                )
+                if error_pattern is None:
+                    performance.validate_workload_stability(platform, logs)
+                    if platform.startswith("linux-kvm"):
+                        self.assertIn("SKIP:", stdout.getvalue())
+                    else:
+                        self.assertIn(
+                            "are stable (2 with at least 10 samples checked)",
+                            stdout.getvalue(),
+                        )
+                else:
+                    with self.assertRaisesRegex(
+                        performance.UnstablePerformanceError, error_pattern
+                    ):
+                        performance.validate_workload_stability(platform, logs)
+
+    def test_validate_workload_reports_every_unstable_restore_series(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            logs = Path(temporary)
+            (logs / "shell-snapshot.log").write_text(
+                shell_snapshot_log(
+                    {
+                        128: STABLE_RESTORE_MS,
+                        256: STALLED_RESTORE_MS,
+                        512: LATE_RECOVERY_RESTORE_MS,
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with self.assertRaises(performance.UnstablePerformanceError) as context:
+                performance.validate_workload_stability(
+                    "linux-mshv-virtual-machine", logs
+                )
+
+        errors = str(context.exception).splitlines()
+        self.assertEqual(len(errors), 2)
+        self.assertIn("(256 MiB): p50 58.651 ms", errors[0])
+        self.assertIn("(512 MiB): samples split 2/8", errors[1])
+
+    def test_restore_guard_rejects_invalid_logs(self):
+        stable = shell_snapshot_restore_log({512: STABLE_RESTORE_MS})
+        samples_line = benchmark._format_restore_samples_line(STABLE_RESTORE_MS)
+        cases = (
+            (
+                "unlisted",
+                stable.replace(samples_line + "\n", ""),
+                r"missing restore samples in \S*shell-snapshot-restore\.log "
+                r"\(512 MiB\)",
+            ),
+            # A log cut off before its first section has no series to accept.
+            (
+                "sectionless",
+                stable.split("== 512 MiB ==", maxsplit=1)[0],
+                r"missing memory sections in \S*shell-snapshot-restore\.log",
+            ),
+            (
+                "zero",
+                shell_snapshot_restore_log({512: [0.0] * 10}),
+                r"non-positive restore sample in \S*shell-snapshot-restore\.log "
+                r"\(512 MiB\)",
+            ),
+            (
+                "short",
+                stable.replace(samples_line, samples_line.replace("37.200, ", "")),
+                r"lists 9 restore samples, but its summary counts 10",
+            ),
+            (
+                "other-series",
+                stable.replace(
+                    samples_line,
+                    benchmark._format_restore_samples_line(STALLED_RESTORE_MS),
+                ),
+                r"lists restore samples with median 58\.651 ms, but its summary "
+                r"reports 36\.5 ms",
+            ),
+            (
+                "malformed",
+                stable.replace(samples_line, samples_line.replace("37.100", "slow")),
+                r"malformed restore samples",
+            ),
+            (
+                "unsummarized",
+                stable.replace("snapshot restore    : median", "restore median"),
+                r"missing snapshot restore summary",
+            ),
+        )
+        for name, log, error_pattern in cases:
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as temporary:
+                logs = Path(temporary)
+                (logs / "shell-snapshot-restore.log").write_text(log, encoding="utf-8")
+
+                with self.assertRaisesRegex(
+                    performance.PerformanceError, error_pattern
+                ) as context:
+                    performance.validate_workload_stability(
+                        "linux-mshv-virtual-machine", logs
+                    )
+                # Malformed input is invalid, never a reason to remeasure.
+                self.assertNotIsInstance(
+                    context.exception, performance.UnstablePerformanceError
+                )
+
+        with tempfile.TemporaryDirectory() as temporary:
+            logs = Path(temporary)
+            with self.assertRaisesRegex(
+                performance.PerformanceError, r"no shell-snapshot restore log found"
+            ):
+                performance.validate_workload_stability(
+                    "linux-mshv-virtual-machine", logs
+                )
+            (logs / "shell-snapshot.log").write_text(
+                SHELL_SNAPSHOT_LOG, encoding="utf-8"
+            )
+            with self.assertRaisesRegex(
+                performance.PerformanceError, r"unsupported OpenVMM benchmark platform"
+            ):
+                performance.validate_workload_stability("linux-unknown", logs)
+            # Fewer samples than the guard needs may go unlisted.
+            unlisted = re.sub(r"(?m)^ *restore samples .*\n", "", SHELL_SNAPSHOT_LOG)
+            (logs / "shell-snapshot.log").write_text(unlisted, encoding="utf-8")
+            with contextlib.redirect_stdout(io.StringIO()) as stdout:
+                performance.validate_workload_stability(
+                    "linux-mshv-virtual-machine", logs
+                )
+            self.assertIn("(0 with at least 10 samples checked)", stdout.getvalue())
+
+    def test_validate_workload_uses_temporary_failure_exit_code(self):
+        unlisted = re.sub(
+            r"(?m)^ *restore samples .*\n",
+            "",
+            shell_snapshot_restore_log({512: STABLE_RESTORE_MS}),
+        )
+        for name, log, expected_status, expected_output in (
+            (
+                "stable",
+                shell_snapshot_restore_log({512: STABLE_RESTORE_MS}),
+                0,
+                "are stable",
+            ),
+            (
+                "unstable",
+                shell_snapshot_restore_log({512: STALLED_RESTORE_MS}),
+                75,
+                "ERROR: unstable shell-snapshot restore",
+            ),
+            ("invalid", unlisted, 2, "ERROR: missing restore samples"),
+        ):
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as temporary:
+                logs = Path(temporary)
+                (logs / "shell-snapshot-restore.log").write_text(log, encoding="utf-8")
+                stdout, stderr = io.StringIO(), io.StringIO()
+
+                with (
+                    contextlib.redirect_stdout(stdout),
+                    contextlib.redirect_stderr(stderr),
+                ):
+                    status = nvx.main(
+                        [
+                            "performance",
+                            "validate-workload",
+                            "--platform",
+                            "windows-whp-virtual-machine",
+                            "--input-dir",
+                            str(logs),
+                        ]
+                    )
+
+                self.assertEqual(status, expected_status)
+                self.assertIn(expected_output, stdout.getvalue() + stderr.getvalue())
+
+    def test_collection_rejects_unstable_restore_series_on_guarded_backends(self):
+        for platform, guarded in (
+            ("linux-mshv-virtual-machine", True),
+            ("windows-whp-virtual-machine", True),
+            ("linux-kvm-virtual-machine", False),
+        ):
+            backend = performance.OPENVMM_BACKENDS[platform]
+            # The one-vCPU suite and the higher-vCPU restore-only suite.
+            for processors in (1, 8):
+                with (
+                    self.subTest(platform=platform, processors=processors),
+                    tempfile.TemporaryDirectory() as temporary,
+                    contextlib.redirect_stdout(io.StringIO()),
+                ):
+                    root = Path(temporary)
+                    logs = root / "logs"
+                    logs.mkdir()
+                    if processors == 1:
+                        (logs / "cold-start.log").write_text(
+                            COLD_START_LOG, encoding="utf-8"
+                        )
+                        (logs / "virtfs.log").write_text(VIRTFS_LOG, encoding="utf-8")
+                        (logs / "shell-snapshot.log").write_text(
+                            shell_snapshot_log(
+                                {
+                                    128: STABLE_RESTORE_MS,
+                                    256: STALLED_RESTORE_MS,
+                                    512: STABLE_RESTORE_MS,
+                                }
+                            ),
+                            encoding="utf-8",
+                        )
+                        options: dict[str, Any] = {"require_shell_snapshot": True}
+                    else:
+                        (logs / "shell-snapshot-restore.log").write_text(
+                            shell_snapshot_restore_log({512: STALLED_RESTORE_MS}),
+                            encoding="utf-8",
+                        )
+                        (logs / performance.BENCHMARK_METADATA_FILENAME).write_text(
+                            json.dumps(
+                                {
+                                    "platform": platform,
+                                    "backend": backend,
+                                    "microvm_abi_version": 2,
+                                    "processors": 8,
+                                    "warmups": 1,
+                                    "measured_runs": 10,
+                                    "shell_memories_mib": [512],
+                                }
+                            ),
+                            encoding="utf-8",
+                        )
+                        options = {"require_shell_snapshot_restore_512": True}
+                    results = root / "results"
+
+                    if guarded:
+                        with self.assertRaisesRegex(
+                            performance.UnstablePerformanceError,
+                            r"unstable shell-snapshot restore .* 58\.0% above p25",
+                        ):
+                            performance.collect_results(
+                                platform, "abc123", logs, results, **options
+                            )
+                        self.assertFalse(results.exists())
+                    else:
+                        result_path = performance.collect_results(
+                            platform, "abc123", logs, results, **options
+                        )
+                        stalled = (
+                            "shell_snapshot_restore_256_mib"
+                            if processors == 1
+                            else "shell_snapshot_restore_512_mib"
+                        )
+                        self.assertIn(
+                            (stalled, 58.7),
+                            [
+                                (result.metric, result.p50)
+                                for result in performance.read_results(result_path)
+                            ],
+                        )
 
     def test_validate_openvmm_records_every_attempt_outcome(self):
         invalid = lifecycle_document("whp")

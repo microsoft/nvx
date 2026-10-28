@@ -487,6 +487,16 @@ Each memory section of `shell-snapshot.log`, and of `shell-snapshot-restore.log`
 restore-only suite, lists the retained restore samples in measurement order after the restore
 summary.
 
+On MSHV and WHP, collection rejects a restore series of at least ten samples that a transient
+host stall split, with the limits that guard snapshot generation: a p50 more than 25% above p25,
+or a gap of more than 25% between adjacent sorted samples with at least two samples on each side.
+Such a series must list its samples, and the list must match the summary's count and median.
+`performance validate-workload` applies the same check without collecting, so that a caller can
+remeasure the series. KVM restore series are exempt: the KVM CI runners restore a snapshot in two
+modes about twice apart, so 1,933 of the 6,192 KVM restore series that CI measured from
+2026-10-04 to 2026-10-27 exceed those limits without a stall, against 4 of 6,144 on MSHV and 2 of
+5,646 on WHP (#345).
+
 ### Snapshot lifecycle profile
 
 This diagnostic suite captures a fresh snapshot at each selected memory size, then restores that

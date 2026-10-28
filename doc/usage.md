@@ -1513,6 +1513,8 @@ metrics; CI merges them into a 34-metric one-vCPU result.
 records. The `--lifecycle-input` file must be a byte-identical copy of exactly
 one valid logged attempt, or collection fails before it writes a CSV; the
 command names that attempt.
+On MSHV and WHP, collection also fails before it writes a CSV when a
+shell-snapshot restore series fails the check of `validate-workload`.
 `--summary` writes the p50 table plus lifecycle min/max/sample-count and RSS
 diagnostics, the benchmark host provenance, and any snapshot-generation storage
 telemetry. With `--lifecycle-attempt-log`, it also lists every attempt, marks
@@ -1540,6 +1542,25 @@ malformed or incomplete inputs exit with status 2. `--attempt-log` appends
 the input's path, SHA-256 digest, outcome (`valid`, `unstable`, or
 `invalid`), exit status, and error to a JSON attempt log, creating it on the
 first attempt.
+
+#### `performance validate-workload`
+
+```text
+python3 scripts/nvx.py performance validate-workload
+    --platform PLATFORM
+    --input-dir PATH
+```
+
+Checks the shell-snapshot restore series in the `shell-snapshot.log` and
+`shell-snapshot-restore.log` of a workload output directory without writing a
+CSV, so that callers can remeasure a series that a transient host stall split
+before they collect it. On MSHV and WHP, a series of at least ten samples must
+list them in its log, and it fails the check when its p50 is more than 25% above
+p25 or a gap of more than 25% separates its sorted samples with at least two on
+each side; the command reports every such series. KVM restore series are not
+checked, as [Shell snapshot](benchmarks.md#shell-snapshot) explains. A failed
+check exits with status 75; a missing log, a malformed or inconsistent sample
+list, or an unsupported platform exits with status 2.
 
 #### `performance collect-openvmm`
 
