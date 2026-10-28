@@ -162,12 +162,12 @@
 <!-- nvx::host&#45;&gt;nvx::error -->
 <g id="edge16" class="edge">
 <title>nvx::host&#45;&gt;nvx::error</title>
-<g id="a_edge16"><a xlink:title="nvx::host uses nvx::error: 63 pairs of modules">
+<g id="a_edge16"><a xlink:title="nvx::host uses nvx::error: 74 pairs of modules">
 <path fill="none" stroke="#8b5cf6" d="M339.15,-149.91C326.91,-140.05 310.54,-128.55 294,-122 285.13,-118.49 275.28,-116.07 265.68,-114.42"/>
 <polygon fill="#8b5cf6" stroke="#8b5cf6" points="265.86,-112.15 259.08,-113.4 265.16,-116.64 265.86,-112.15"/>
 </a>
 </g>
-<text text-anchor="middle" x="288.5" y="-125" font-family="Liberation Sans,Arial,Helvetica,sans-serif" font-size="10.00" fill="#52677d">63</text>
+<text text-anchor="middle" x="288.5" y="-125" font-family="Liberation Sans,Arial,Helvetica,sans-serif" font-size="10.00" fill="#52677d">74</text>
 </g>
 <!-- nvx::host&#45;&gt;nvx::hypervisor -->
 <g id="edge17" class="edge">
