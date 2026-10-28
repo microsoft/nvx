@@ -4,6 +4,17 @@
 //! it, as root, when the kernel command line carries `virtnet_ingress=allow`
 //! or `virtnet_ingress=host-loopback`.
 //!
+//! A clone of a template restores the template's NIC, which the template
+//! captured under a policy that publishes nothing, so its init started no
+//! announcer, with a policy of its own, which may publish the clone's
+//! listeners. The clone's application then starts the announcer itself, with
+//! [`Announcer::start`]: as root, it binds the announcer's UDP socket to a
+//! privileged source port, and runs `nvx-ingress inherit GATEWAY_IPV4`, which
+//! announces from that socket, its standard input, rather than from one of its
+//! own. A failure to bind the socket, or to run the program, is the start's
+//! own, before the clone is ready, and the caller watches the announcer that
+//! started, since the clone's listeners go unannounced once it ended.
+//!
 //! Every 100 ms it reads the kernel's socket tables. A TCP socket in the
 //! LISTEN state is a listener, and so is an unconnected UDP socket that
 //! persists for a second, which skips short-lived client sockets, such as
@@ -44,7 +55,10 @@ use super::parse;
 use super::status::{CommandError, run_main};
 use super::sys::{self, Errno, FileDescriptor, Mode, OpenFlags};
 
+pub use announcer::{Announcer, PROGRAM, StartError};
+
 mod address;
+mod announcer;
 mod collect;
 mod diag;
 mod encode;
@@ -171,35 +185,55 @@ struct UdpSocket {
     inode: u64,
 }
 
-/// Runs `nvx-ingress` with the process's arguments. Test mode exits with 0 after the last
-/// snapshot, or with 1 when a snapshot fails. The announcer runs until it fails, and exits with 1
-/// when it cannot open or bind its socket, or with 2 for a usage error.
+/// Runs `nvx-ingress` with the process's arguments: `GATEWAY_IPV4`, the announcer, from a socket
+/// of its own; `inherit GATEWAY_IPV4`, the announcer, from the socket that it inherited as its
+/// standard input, which must be an IPv4 datagram socket bound to a privileged source port from
+/// 512 to 1023; or `test DIRECTORY`. Test mode exits with 0 after the last snapshot, or with 1
+/// when a snapshot fails. The announcer runs until it fails, and exits with 1 when it cannot open
+/// or bind its socket, or take the one that it inherited, or with 2 for a usage error.
 pub fn main() -> ExitCode {
     run_main(|args| run(args, &mut sys::Stdout::new(), &mut io::stderr()))
 }
 
 /// Runs test mode or the announcer, as `args` select.
 fn run(args: &[CString], out: &mut dyn Write, err: &mut dyn Write) -> Result<(), CommandError> {
-    match args {
+    let announced = match args {
         [_, mode, directory] if mode.as_bytes() == b"test" => {
-            test_mode::run(directory, out).map_err(|_| CommandError::Operation)
+            return test_mode::run(directory, out).map_err(|_| CommandError::Operation);
         }
-        [_, gateway] => match sender::run(gateway) {
-            Ok(()) => Ok(()),
-            Err(sender::Error::InvalidGateway) => Err(usage(err)),
-            Err(error) => {
-                error.report(err);
-                Err(CommandError::Operation)
-            }
-        },
-        _ => Err(usage(err)),
+        [_, mode, gateway] if mode.as_bytes() == b"inherit" => sender::run_inherited(gateway),
+        [_, gateway] => sender::run(gateway),
+        _ => return Err(usage(err)),
+    };
+    match announced {
+        Ok(()) => Ok(()),
+        Err(sender::Error::InvalidGateway) => Err(usage(err)),
+        Err(error) => {
+            error.report(err);
+            Err(CommandError::Operation)
+        }
     }
 }
 
 /// Prints the usage message and returns the usage error.
 fn usage(err: &mut dyn Write) -> CommandError {
-    sys::report(err, &[b"usage: nvx-ingress GATEWAY_IPV4\n"]);
+    sys::report(err, &[b"usage: nvx-ingress [inherit] GATEWAY_IPV4\n"]);
     CommandError::Usage
+}
+
+/// Binds a socket, through `bind`, to the highest free privileged source port, from
+/// [`FIRST_SOURCE_PORT`] down to [`LAST_SOURCE_PORT`], and returns it, or `None` if every one of
+/// them is in use. Only a port in use moves the search to the next one: any other failure of
+/// `bind` is the search's.
+fn bind_privileged(mut bind: impl FnMut(u16) -> Result<(), Errno>) -> Result<Option<u16>, Errno> {
+    for port in (LAST_SOURCE_PORT..=FIRST_SOURCE_PORT).rev() {
+        match bind(port) {
+            Ok(()) => return Ok(Some(port)),
+            Err(Errno::EADDRINUSE) => {}
+            Err(errno) => return Err(errno),
+        }
+    }
+    Ok(None)
 }
 
 /// Returns `root` followed by `suffix`, a path that starts with `/`, if the C program's

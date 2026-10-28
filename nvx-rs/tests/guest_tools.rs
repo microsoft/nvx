@@ -81,11 +81,26 @@ where
     I: IntoIterator<Item = S>,
     S: AsRef<OsStr>,
 {
+    run_with_input(name, arguments, Stdio::null(), timeout)
+}
+
+/// Runs the guest binary `name` with `arguments` as [`run_within`] does, but with `stdin` as its
+/// standard input.
+fn run_with_input<I, S>(
+    name: &str,
+    arguments: I,
+    stdin: Stdio,
+    timeout: Duration,
+) -> (Option<i32>, Vec<u8>, Vec<u8>)
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
     let mut child = {
         let _spawning = SPAWNING.read().unwrap();
         Command::new(binary(name))
             .args(arguments)
-            .stdin(Stdio::null())
+            .stdin(stdin)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
@@ -1032,15 +1047,20 @@ fn ingress_test_mode_preserves_udp_settling_between_snapshots() {
 
 #[test]
 fn ingress_rejects_bad_invocations_and_test_snapshots() {
-    let usage = b"usage: nvx-ingress GATEWAY_IPV4\n".to_vec();
-    assert_eq!(
-        run("nvx-ingress", std::iter::empty::<&str>()),
-        (Some(2), Vec::new(), usage.clone())
-    );
-    assert_eq!(
-        run("nvx-ingress", ["not-an-ipv4-address"]),
-        (Some(2), Vec::new(), usage)
-    );
+    let usage = b"usage: nvx-ingress [inherit] GATEWAY_IPV4\n".to_vec();
+    for arguments in [
+        &[][..],
+        &["not-an-ipv4-address"],
+        &["inherit"],
+        &["inherit", "not-an-ipv4-address"],
+        &["inherit", "127.0.0.1", "extra"],
+    ] {
+        assert_eq!(
+            run("nvx-ingress", arguments),
+            (Some(2), Vec::new(), usage.clone()),
+            "{arguments:?}"
+        );
+    }
 
     let directory = tempfile::tempdir().unwrap();
     assert_eq!(
@@ -1072,6 +1092,59 @@ fn ingress_rejects_bad_invocations_and_test_snapshots() {
     assert_eq!(
         run("nvx-ingress", [OsStr::new("test"), &overlong]),
         (Some(1), Vec::new(), Vec::new())
+    );
+}
+
+#[test]
+fn ingress_inherits_only_an_ipv4_datagram_socket_bound_to_a_privileged_source_port() {
+    // The announcer that a clone starts announces from the socket that it inherits as its
+    // standard input, which only root can bind to a privileged source port, from which alone the
+    // gateway takes announcements: it refuses any other at once, before it scans anything.
+    let refused = |stdin: Stdio, expected: String| {
+        assert_eq!(
+            run_with_input(
+                "nvx-ingress",
+                ["inherit", "127.0.0.1"],
+                stdin,
+                Duration::from_secs(10)
+            ),
+            (Some(1), Vec::new(), expected.into_bytes())
+        );
+    };
+    let unprivileged = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+    let port = unprivileged.local_addr().unwrap().port();
+    assert!(port >= 1024, "{port}");
+    refused(
+        Stdio::from(std::os::fd::OwnedFd::from(unprivileged)),
+        format!(
+            "nvx-ingress: the inherited socket's port {port} is not a privileged source port\n"
+        ),
+    );
+    let unbound = nix::sys::socket::socket(
+        nix::sys::socket::AddressFamily::Inet,
+        nix::sys::socket::SockType::Datagram,
+        nix::sys::socket::SockFlag::empty(),
+        None,
+    )
+    .unwrap();
+    refused(
+        Stdio::from(unbound),
+        "nvx-ingress: the inherited socket's port 0 is not a privileged source port\n".to_owned(),
+    );
+    let stream = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    refused(
+        Stdio::from(std::os::fd::OwnedFd::from(stream)),
+        format!(
+            "nvx-ingress: inherited socket: {}\n",
+            Errno::EPROTOTYPE.desc()
+        ),
+    );
+    refused(
+        Stdio::null(),
+        format!(
+            "nvx-ingress: inherited socket: {}\n",
+            Errno::ENOTSOCK.desc()
+        ),
     );
 }
 
