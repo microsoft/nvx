@@ -97,7 +97,9 @@ pub enum ReattachedClone<S> {
 ///   evidence, as a status of the clone's repair is at any point, and with
 ///   [`Evidence::LostStatus`] if no report of the guest's own end tells why it exited, and
 ///   [`ReattachedClone::Ended`] otherwise. One that cannot be examined is
-///   [`ReattachedClone::Indeterminate`].
+///   [`ReattachedClone::Indeterminate`]. A VM that its holder's stop ended, which cleared its
+///   runtime record, lost no status, but one whose VMM had exited before the stop began is one
+///   that exited, as above, since [`Vmm::stop_unless_exited`] keeps its record.
 ///
 /// The evidence of a status of the guest's prevails over any but the template's, as in the restore
 /// sequence, and as [the attribution of evidence](Evidence#attribution) describes. A failure is
@@ -373,8 +375,9 @@ pub(super) fn reattach_clone_with<C: CloneControl>(
 /// `progress`, and whose VM exited, as OpenVMM's outcome report, which
 /// [`Recorder::observed`] reads, tells, with the guest's status, or `None` if the VM ended
 /// without a failure: a status of the guest's that is evidence, as [`Recorder::reported`] gives
-/// it, or, for a VM that exited `unheld`, which the reattach found exited, the loss of the clone's
-/// status, if no report of the guest's own end tells why.
+/// it, or, for a VM that exited `unheld`, whose runtime record the reattach found, as
+/// [`Vmm::stop_unless_exited`] keeps that of a VMM that had exited before the stop began, the loss
+/// of the clone's status, if no report of the guest's own end tells why.
 fn exit_fault(
     recorder: &Recorder,
     progress: Progress,
@@ -388,8 +391,9 @@ fn exit_fault(
     let (evidence, status) = recorder.reported(recorder.observed(), progress);
     let evidence = match evidence {
         Some(evidence) => evidence,
-        // Only a VM that exited unheld ends without telling why: its holder's stop ends one
-        // otherwise.
+        // Only a VM that exited unheld, whose runtime record the reattach found, ends without
+        // telling why: its holder's stop ends one otherwise, and clears the record, but keeps that
+        // of one that had exited before the stop began, as `Vmm::stop_unless_exited` does.
         None if unheld && status.is_none() => Evidence::LostStatus,
         None => return None,
     };

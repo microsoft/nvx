@@ -157,12 +157,12 @@ impl Scripted {
     }
 
     /// Stops the VMM with `forced`, and with a graceful step that fails with `graceful_error` if
-    /// it is given.
-    fn stop(
+    /// it is given, unless it had exited, as [`Vmm::stop_unless_exited`] does.
+    fn stop_unless_exited(
         &self,
         forced: Option<Duration>,
         graceful_error: Option<&'static str>,
-    ) -> Result<Stopped<&'static str>> {
+    ) -> Result<Option<Stopped<&'static str>>> {
         let deadline = Instant::now() + Duration::from_secs(60);
         stop_process(self, 7, deadline, forced, || {
             self.note("graceful");
@@ -171,6 +171,17 @@ impl Scripted {
             }
             graceful_error.map_or(Ok(()), Err)
         })
+    }
+
+    /// Stops the VMM, which runs as the stop begins, as
+    /// [`stop_unless_exited`](Self::stop_unless_exited) does.
+    fn stop(
+        &self,
+        forced: Option<Duration>,
+        graceful_error: Option<&'static str>,
+    ) -> Result<Stopped<&'static str>> {
+        let stopped = self.stop_unless_exited(forced, graceful_error)?;
+        Ok(stopped.expect("the VMM had exited before the stop began"))
     }
 
     /// Returns the operations of the stop.
@@ -298,8 +309,10 @@ fn a_failed_graceful_step_is_kept_and_not_waited_out() {
 fn a_vmm_that_exited_already_skips_the_graceful_step() {
     let vmm = Scripted::default();
     vmm.exited.set(true);
-    let stopped = vmm.stop(Some(Duration::from_secs(10)), None).unwrap();
-    assert_eq!(stopped.outcome, StopOutcome::Graceful);
+    let stopped = vmm
+        .stop_unless_exited(Some(Duration::from_secs(10)), None)
+        .unwrap();
+    assert!(stopped.is_none(), "{stopped:?}");
     assert_eq!(vmm.operations(), ["check"]);
 }
 
@@ -523,9 +536,17 @@ fn stops_check_their_store_and_forced_bound_before_anything_else() {
         .stop(&mut other.lock(None).unwrap(), Instant::now(), None, never)
         .unwrap_err();
     assert_eq!(error.kind(), ErrorKind::Other);
+    let error = vmm
+        .stop_unless_exited(&mut other.lock(None).unwrap(), Instant::now(), None, never)
+        .unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::Other);
     for bound in [Duration::ZERO, MAX_TIMEOUT + Duration::from_secs(1)] {
         let error = vmm
             .stop(&mut locked, Instant::now(), Some(bound), never)
+            .unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::Unsupported, "{bound:?}");
+        let error = vmm
+            .stop_unless_exited(&mut locked, Instant::now(), Some(bound), never)
             .unwrap_err();
         assert_eq!(error.kind(), ErrorKind::Unsupported, "{bound:?}");
     }
@@ -671,6 +692,81 @@ fn a_clone_whose_forced_teardown_fails_keeps_its_lease_until_one_ends_its_vmm() 
         vmm.terminate_with(&mut locked, bound, &dying).unwrap(),
         StopOutcome::Forced
     );
+    assert!(locked.runtime().unwrap().is_none());
+    assert_eq!(templates.release(&mut locked).unwrap(), Some(lease));
+}
+
+#[test]
+fn only_a_stop_unless_exited_keeps_the_record_of_a_vmm_that_had_exited() {
+    let (_directory, templates, lease, mut locked) = committed_clone(&this_process());
+    let Reattached::Live(vmm) = reattach(&mut locked, &runtime()).unwrap() else {
+        panic!("the clone's VMM was not reattached");
+    };
+    // This test process stands for the VMM, which these stops reach only through a stand-in,
+    // which exited once its holder found it running, before the stops began.
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let forced = Some(Duration::from_secs(10));
+    let never = |_: &Vmm, _: Instant| -> std::result::Result<(), ()> {
+        panic!("a stop ran the graceful step of a VMM that had exited")
+    };
+    let exited = Scripted::default();
+    exited.exited.set(true);
+    // The stop takes no step, and keeps the record, which tells a reattach that the VM exited
+    // unheld, and with it the lease.
+    let stopped = vmm
+        .stop_unless_exited_with(&mut locked, deadline, forced, never, &exited)
+        .unwrap();
+    assert!(stopped.is_none(), "{stopped:?}");
+    assert_eq!(exited.operations(), ["check"]);
+    assert_eq!(locked.runtime().unwrap().as_ref(), Some(vmm.record()));
+    refuses_release(&templates, &mut locked, &lease);
+    // A stop that ends such a VM as one that it stopped clears the record, so the release ends
+    // the lease.
+    let stopped = vmm
+        .stop_with(&mut locked, deadline, forced, never, &exited)
+        .unwrap();
+    assert_eq!(stopped.outcome, StopOutcome::Graceful);
+    assert!(stopped.graceful_error.is_none());
+    assert_eq!(exited.operations(), ["check", "check"]);
+    assert!(locked.runtime().unwrap().is_none());
+    assert_eq!(templates.release(&mut locked).unwrap(), Some(lease));
+}
+
+#[test]
+fn a_stop_unless_exited_stops_a_running_vmm_as_a_stop_does() {
+    let (_directory, templates, lease, mut locked) = committed_clone(&this_process());
+    let Reattached::Live(vmm) = reattach(&mut locked, &runtime()).unwrap() else {
+        panic!("the clone's VMM was not reattached");
+    };
+    // This test process stands for the VMM, which these stops reach only through stand-ins.
+    let deadline = Instant::now() + Duration::from_secs(60);
+    // One that outlives the stop keeps its record, and the lease.
+    let survivor = Scripted::default();
+    let stopped = vmm
+        .stop_unless_exited_with(
+            &mut locked,
+            deadline,
+            None,
+            |_, _| Ok::<_, ()>(()),
+            &survivor,
+        )
+        .unwrap()
+        .expect("the stop of a VMM that runs");
+    assert_eq!(stopped.outcome, StopOutcome::TimedOut);
+    assert_eq!(survivor.operations(), ["check", "wait"]);
+    refuses_release(&templates, &mut locked, &lease);
+    // One that heeds the graceful step exits through the stop, which clears its record.
+    let heeding = Scripted::default();
+    let shut_down = |_: &Vmm, _: Instant| {
+        heeding.exited.set(true);
+        Ok::<_, ()>(())
+    };
+    let stopped = vmm
+        .stop_unless_exited_with(&mut locked, deadline, None, shut_down, &heeding)
+        .unwrap()
+        .expect("the stop of a VMM that runs");
+    assert_eq!(stopped.outcome, StopOutcome::Graceful);
+    assert_eq!(heeding.operations(), ["check", "wait"]);
     assert!(locked.runtime().unwrap().is_none());
     assert_eq!(templates.release(&mut locked).unwrap(), Some(lease));
 }

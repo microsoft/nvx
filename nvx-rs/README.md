@@ -536,6 +536,10 @@ explicit handle list.
 event until a deadline, and takes a bounded forced step through the VMM's
 verified identity only on request.
 
+`Vmm::stop_unless_exited` stops the VM the same way only if its VMM still runs
+as the stop begins, and otherwise stops nothing and keeps the runtime record of
+its launch, so that `reattach` finds that the VM exited without its holder.
+
 `Vmm::terminate` takes that forced step alone, within the caller's bound, for a
 VM whose guest the caller must not ask anything, such as one of another runtime
 identity.
