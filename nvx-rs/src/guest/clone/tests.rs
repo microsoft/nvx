@@ -12,6 +12,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use super::mounts::{self, DeviceNumber};
 use super::*;
+use crate::guest::reseed::Seed;
 use crate::guest::sys::{Errno, PortError};
 
 /// The base address of the distro device's MMIO window.
@@ -299,7 +300,9 @@ impl System for FakeSystem {
         self.calls.push(Call::Capture(request));
         match self.outcome {
             Outcome::Continued => Ok(CaptureOutcome::Continued),
-            Outcome::Restored => Ok(CaptureOutcome::Restored(Restore::to(RESTORED))),
+            Outcome::Restored => Ok(CaptureOutcome::Restored(
+                Restore::to(RESTORED).holding(seed()),
+            )),
             Outcome::Fails => Err(TimeError::StateUnavailable),
             Outcome::PortRelease => Err(PortError::Revoke(Errno::ENOMEM).into()),
         }
@@ -363,13 +366,16 @@ fn preparation_calls() -> Vec<Call> {
     ]
 }
 
-/// Returns the platform tier's request of a capture of the template.
+/// Returns the platform tier's request of a capture of the template, in the in-memory mode.
 fn platform_request() -> CaptureRequest {
-    CaptureRequest::new(
-        ScratchPolicy::Fresh,
-        GENERATION,
-        PathBuf::from("/run/nvx/restore-entropy"),
-    )
+    CaptureRequest::in_memory(ScratchPolicy::Fresh, GENERATION)
+}
+
+/// Returns the seed of the clone, whose bytes start with its new VM generation ID.
+fn seed() -> Seed {
+    let mut bytes = [0x5a; Seed::LENGTH];
+    bytes[..GenerationId::LENGTH].copy_from_slice(&RESTORED.to_bytes());
+    Seed::from_bytes(bytes)
 }
 
 #[test]
@@ -800,18 +806,22 @@ fn a_restored_clone_gets_the_fence_closed_with_the_detectors_suppressed() {
         [Call::GenerationId, Call::Capture(platform_request())]
     );
     assert_eq!(clone.restore().generation_id(), RESTORED);
-    assert_eq!(clone.entropy_path(), Path::new("/run/nvx/restore-entropy"));
-    let (restore, mut fence) = clone.into_parts();
+    let (mut restore, mut fence) = clone.into_parts();
     assert_eq!(
         format!("{restore:?}"),
-        format!("{:?}", Restore::to(RESTORED))
+        format!("{:?}", Restore::to(RESTORED).holding(seed()))
+    );
+    // The restore holds the clone's seed, for repair to take.
+    assert_eq!(
+        restore.take_seed().map(|seed| seed.generation_id()),
+        Some(RESTORED)
     );
     assert_eq!(calls.take(), Vec::<Call>::new());
     // A preparation behind another handle of the fence cannot close it, so it opens nothing.
     let error = prepare(fence.handle(), FakeSystem::new(&calls)).unwrap_err();
     assert_eq!(error.stage(), CaptureStage::Fence);
     assert_eq!(calls.take(), Vec::<Call>::new());
-    // The caller opens the fence once repair acknowledged the restore.
+    // The caller opens the fence once the clone may admit executions, after its repair.
     fence.open();
     assert_eq!(calls.take(), [Call::Open]);
 

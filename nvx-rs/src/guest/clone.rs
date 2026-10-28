@@ -1,5 +1,6 @@
 //! Templates and clones in the guest: the capture of a template's guest before its root's
-//! assembly, for a guest init or agent, whether or not it is PID 1.
+//! assembly, and the repair of each clone that a restore of its snapshot starts, for a guest init
+//! or agent, whether or not it is PID 1.
 //!
 //! A platform template is a VM whose snapshot holds no tenant's root, so that every clone that a
 //! restore of the snapshot starts can attach its own image, upper, and export. Its guest captures
@@ -21,18 +22,20 @@
 //!
 //! It returns an owned [`CaptureBarrier`], which holds the fence closed and the detectors
 //! suppressed. [`CaptureBarrier::capture`] reads the VM generation ID, and requests the capture
-//! through [`TimeAbi::capture`] with the platform tier's request, which keeps no scratch. It
+//! through [`TimeAbi::capture`] with the platform tier's request, which keeps no scratch, in the
+//! in-memory mode, so that no file holds the fresh entropy that a restore hands each clone. It
 //! returns how the capture ended:
 //!
 //! - [`Captured::Continued`]: the VM continued without a restore, and the barrier opened the
 //!   fence, then restored the detectors' settings.
 //! - [`Captured::Restored`]: a restore of the snapshot started this VM, a clone whose wall clock
-//!   the time ABI repaired. Nothing else may run before repair acknowledges the restore, so the
-//!   fence stays closed: [`Restored::into_parts`] hands it to the caller, which opens it once
-//!   repair acknowledged the restore, or later. The detectors stay suppressed until the
-//!   restore's finish, [`TimeAbi::restore_finish`], hands their release to the time daemon. The
-//!   caller repairs the clone next, from the [`Restored`] restore. OpenVMM ends a platform
-//!   template's VM once its capture commits, so only clones return with this outcome.
+//!   the time ABI repaired, and whose [`Restore`] holds that entropy as its seed. Nothing else may
+//!   run before the clone's repair acknowledges the restore, so the fence stays closed:
+//!   [`Restored::into_parts`] hands it to the caller, which keeps it closed through the repair,
+//!   and opens it once the clone may admit executions, such as once it is activated. The
+//!   detectors stay suppressed until the repair finishes the restore, which hands their release
+//!   to the time daemon. OpenVMM ends a platform template's VM once its capture commits, so only
+//!   clones return with this outcome.
 //!
 //! [`CaptureBarrier::cancel`] opens the fence, then restores the detectors' settings, and so does
 //! a barrier that is dropped, which ignores a failure. A capture that fails restores the
@@ -41,13 +44,53 @@
 //! fails releases what it took. A failure is a [`CaptureError`], which names the
 //! [`CaptureStage`] that failed and its [`CaptureCause`].
 //!
+//! # Repair
+//!
+//! A clone repairs its restore next, before anything else runs, with a [`Repair`] of the
+//! [`Restore`] that [`Restored::into_parts`] hands over, or with [`repair`](fn@repair), which
+//! runs one once. [`Repair::run`], in order:
+//!
+//! 1. checks that the restore holds its seed, and that its capture did not finish it;
+//! 2. reads the online CPUs, which must be a prefix of the CPUs, and refuses a processor target
+//!    that they don't meet already: the repair brings no CPU online;
+//! 3. with a memory target, checks it before it adds any memory block: the kernel's memory block
+//!    size must be 128 MiB, and the restore's ranges, aligned to it, must continue the RAM that
+//!    the clone captured, in logical order: the first starts where the blocks that the kernel
+//!    had before the activation end, and low RAM, which ends at 3 GiB, continues as high RAM at
+//!    4 GiB, so that there is at most one range of each, and none enters the MMIO aperture
+//!    between them. The host bounds the target by the snapshot's RAM capacity, of which the
+//!    guest has no record: OpenVMM's restore refuses a target above it, in
+//!    `validate_restore_memory_target`, as the host's plan of the clone does before its launch.
+//!    The repair then adds each block of the ranges that the kernel lacks, through its memory
+//!    probe interface, onlines each that is not online, and verifies that it is, as
+//!    `nvx-snapshot` does;
+//! 4. reseeds the kernel's random number generator with the seed, through
+//!    [`reseed::reseed`](crate::guest::reseed::reseed), then drops the seed, which zeroes its
+//!    bytes. Nothing before draws randomness, from `getrandom` or from `/dev/urandom`;
+//! 5. finishes the restore through [`TimeAbi::restore_finish`], with the acknowledgement when
+//!    the host gates its input until then, which hands the deferred time work to the time
+//!    daemon: the restore checks, the stall detectors' grace period and release, and the
+//!    wall-clock discipline's fast cadence. The caller starts the daemon with
+//!    [`TimeAbi::start_daemon`] at boot, before the capture, and supervises it. In enforcing
+//!    mode, a finish without a running daemon stops the VM, and in report-only mode, it runs the
+//!    work itself before it returns. The work may end after the clone is ready, and its failures
+//!    are fatal repair failures: the daemon reports them as violations of the time ABI, which
+//!    stop the VM in enforcing mode.
+//!
+//! It returns the [`Repaired`] clone: its new VM generation ID, its number of online CPUs, the
+//! size of its online memory blocks, and when it acknowledged the restore, which an activation
+//! checks against the resources that it expects. The repair records how far it got, so that it
+//! never adds a memory block twice, and runs the reseed and the finish at most once, whoever
+//! retries it: a failure at or after the reseed is final. It never touches the fence. A failure is
+//! a [`RepairError`], which names the [`RepairStage`] that failed and its [`RepairCause`].
+//!
+//! # Example
+//!
 //! ```no_run
 //! use std::io;
 //!
-//! use nvx::guest::clone::{AdmissionFence, CapturePreparation, Captured, Devices};
-//! use nvx::guest::reseed::{self, Seed};
+//! use nvx::guest::clone::{self, AdmissionFence, CapturePreparation, Captured, Devices};
 //! use nvx::guest::root::Device;
-//! use nvx::guest::time::{RestoreFinish, TimeAbi};
 //! use nvx::protocol::root::{DISTRO_MMIO_BASE, SCRATCH_MMIO_BASE};
 //!
 //! /// The agent's admission of executions, which it checks before it starts one.
@@ -71,6 +114,7 @@
 //! }
 //!
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! // At boot, the agent started the time daemon with `TimeAbi::start_daemon`, and supervises it.
 //! let mut admission = Admission { open: true };
 //! let devices = Devices {
 //!     distro: Device { mmio: DISTRO_MMIO_BASE, sectors: None },
@@ -81,15 +125,12 @@
 //! match barrier.capture()? {
 //!     Captured::Continued => println!("the VM continued without a restore"),
 //!     Captured::Restored(restored) => {
-//!         // A clone continues here, with its wall clock repaired. It finishes the restore, and
-//!         // acknowledges it if the restore needs that, before its fence opens.
-//!         reseed::reseed(&Seed::read(restored.entropy_path())?)?;
+//!         // A clone continues here, with its wall clock repaired. Its repair activates its
+//!         // memory, reseeds it, and acknowledges the restore, while its fence stays closed.
 //!         let (restore, fence) = restored.into_parts();
-//!         let mut finish = RestoreFinish::new();
-//!         if restore.acknowledgement_required() {
-//!             finish = finish.acknowledge();
-//!         }
-//!         TimeAbi::new().restore_finish(finish)?;
+//!         let repaired = clone::repair(restore)?;
+//!         println!("{} CPUs, {} bytes of memory", repaired.cpus(), repaired.memory());
+//!         // The clone opens the fence once it may admit executions, such as once activated.
 //!         fence.open();
 //!     }
 //! }
@@ -97,14 +138,21 @@
 //! # }
 //! ```
 //!
-//! The operations need the guest's root user and the privileges of the time ABI's calls. They
-//! read the mount table of the caller's mount namespace, which must be the one where the guest
-//! mounts its devices, such as its initial namespace. They mount nothing, start no process or
-//! thread, and collect no child's status. Apart from a violation of the time ABI in enforcing
-//! mode, which stops the VM as [`TimeAbi`] tells, they never power the VM off, so a caller that is
-//! not PID 1 keeps its own reaping, transport, and shutdown.
+//! # Privileges and effects
+//!
+//! The operations need the guest's root user and the privileges of the time ABI's calls, and the
+//! reseed needs `CAP_SYS_ADMIN`. The capture reads the mount table of the caller's mount
+//! namespace, which must be the one where the guest mounts its devices, such as its initial
+//! namespace, and the repair reads the kernel's CPU and memory interfaces in sysfs, and writes
+//! its memory interface. They mount nothing and start no thread, and they start no process and
+//! collect no child's status, except a report-only finish without a running time daemon, which
+//! runs the deferred time work itself, in a child that it waits for, as
+//! [`TimeAbi::restore_finish`] tells. Apart from a violation of the time ABI in enforcing mode,
+//! which stops the VM as [`TimeAbi`] tells, they never power the VM off, so a caller that is not
+//! PID 1 keeps its own reaping, transport, and shutdown.
 
 mod mounts;
+mod repair;
 #[cfg(test)]
 mod tests;
 
@@ -123,6 +171,9 @@ use super::time::{
 };
 
 pub use self::mounts::{Mounted, Origin};
+pub use self::repair::{
+    RangeFault, Repair, RepairCause, RepairError, RepairStage, Repaired, repair,
+};
 
 /// The most bytes of the mount table that a [`CapturePreparation`] reads: 1 MiB, the lines of
 /// thousands of mounts. It refuses a longer table, rather than check a part of it.
@@ -133,8 +184,6 @@ const MOUNT_TABLE: &str = "self/mountinfo";
 /// The directory of the block devices' sysfs entries, below sysfs, which names each by its
 /// device number, `MAJ:MIN`.
 const BLOCK_DEVICES: &str = "dev/block";
-/// The file to which a restore writes its fresh entropy, in the time ABI's runtime directory.
-const ENTROPY_PATH: &str = "/run/nvx/restore-entropy";
 
 /// The caller's fence of workload admission, which its agent checks before it starts each
 /// execution: while the fence is closed, no execution starts.
@@ -304,8 +353,8 @@ pub struct CaptureBarrier<F: AdmissionFence> {
 
 impl<F: AdmissionFence> CaptureBarrier<F> {
     /// Requests the capture: reads the VM generation ID, then requests a capture through
-    /// [`TimeAbi::capture`] with the platform tier's request, which keeps no scratch, and returns
-    /// how it ended.
+    /// [`TimeAbi::capture`] with the platform tier's request, which keeps no scratch, in the
+    /// in-memory mode, and returns how it ended.
     ///
     /// A VM that continues without a restore gets [`Captured::Continued`], once the barrier
     /// opened the fence and restored the detectors' settings; a failure to restore them is a
@@ -329,11 +378,9 @@ impl<F: AdmissionFence> CaptureBarrier<F> {
                 return Err(self.fail(error));
             }
         };
-        let request = CaptureRequest::new(
-            ScratchPolicy::Fresh,
-            generation_id,
-            PathBuf::from(ENTROPY_PATH),
-        );
+        // The restore holds its fresh entropy as its seed, which no file holds, until repair
+        // takes it.
+        let request = CaptureRequest::in_memory(ScratchPolicy::Fresh, generation_id);
         let outcome = match self.system.capture(request) {
             Ok(outcome) => outcome,
             Err(error) => {
@@ -350,7 +397,7 @@ impl<F: AdmissionFence> CaptureBarrier<F> {
             }
             CaptureOutcome::Restored(restore) => {
                 // The time daemon restores the detectors' settings once repair finishes the
-                // restore, and the caller opens the fence once repair acknowledged it.
+                // restore, and the caller keeps the fence closed through repair.
                 self.suppressed = false;
                 let fence = self
                     .fence
@@ -443,8 +490,9 @@ impl<F> fmt::Debug for Captured<F> {
 /// A clone's restore, which [`CaptureBarrier::capture`] returns for repair to take next, with
 /// the caller's fence, which stays closed until the caller opens it.
 ///
-/// No execution may start before repair acknowledged the restore, so the caller opens the fence
-/// only then, or later. Dropping it leaves the fence closed.
+/// No execution may start before the clone's repair acknowledged the restore, and repair never
+/// opens the fence: the caller opens it once the clone may admit executions, such as once it is
+/// activated. Dropping it leaves the fence closed.
 pub struct Restored<F> {
     /// The restore that the time ABI repaired, as its restore packet describes it.
     restore: Restore,
@@ -459,14 +507,9 @@ impl<F> Restored<F> {
         &self.restore
     }
 
-    /// Returns the file to which the restore wrote its fresh entropy, 64 bytes that start with the
-    /// new VM generation ID, and that only root may read: `/run/nvx/restore-entropy`. The caller
-    /// reseeds from it, then removes it.
-    pub fn entropy_path(&self) -> &'static Path {
-        Path::new(ENTROPY_PATH)
-    }
-
-    /// Returns the restore that the time ABI repaired, and the caller's fence, still closed.
+    /// Returns the restore that the time ABI repaired, which holds the restore's fresh entropy as
+    /// its seed, for [`repair`](fn@repair) or a [`Repair`] to take, and the caller's fence, still
+    /// closed.
     pub fn into_parts(self) -> (Restore, F) {
         (self.restore, self.fence)
     }

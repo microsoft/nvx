@@ -13,7 +13,10 @@
 //! [`gpt`], through which it reads the partition table of a GPT disk that the kernel attached as
 //! a block device; and, on x86-64, `clone`, through which a template's guest prepares for and
 //! requests a snapshot's capture before its root's assembly, behind the caller's fence of
-//! workload admission, with nothing mounted from the devices that its clones replace.
+//! workload admission, with nothing mounted from the devices that its clones replace, and
+//! through which each clone that a restore of the snapshot starts repairs its restore: it
+//! activates the restore's memory target, reseeds the kernel's random number generator, and
+//! finishes the restore, with its acknowledgement.
 //!
 //! Each other module holds one program, and the crate's binary of the same name runs its `main`.
 //! Two of them also offer their steps as typed calls, which any guest init or agent runs in its

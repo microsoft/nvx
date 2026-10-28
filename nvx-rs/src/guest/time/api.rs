@@ -596,6 +596,47 @@ impl Restore {
             seed: None,
         }
     }
+
+    /// Returns the restore with `seed`, as a capture in the in-memory mode returns it.
+    pub(crate) fn holding(mut self, seed: Seed) -> Self {
+        self.seed = Some(seed);
+        self
+    }
+
+    /// Returns the restore with the host's input gated until the guest acknowledges it.
+    pub(crate) fn gated(mut self) -> Self {
+        self.flags |= decoders::PACKET_ACK_REQUIRED;
+        self
+    }
+
+    /// Returns the restore that asks for `count` online processors.
+    pub(crate) fn with_processor_target(mut self, count: u8) -> Self {
+        self.online_vp_count = count;
+        self
+    }
+
+    /// Returns the restore with a memory target, whose expansion ranges are `ranges`, each a
+    /// start and a length.
+    pub(crate) fn with_memory_target(mut self, ranges: &[(u64, u64)]) -> Self {
+        self.flags |= decoders::PACKET_MEMORY_TARGET;
+        self.with_memory_ranges(ranges)
+    }
+
+    /// Returns the restore that lists `ranges`, each a start and a length, whatever its flags
+    /// select.
+    pub(crate) fn with_memory_ranges(mut self, ranges: &[(u64, u64)]) -> Self {
+        self.memory_ranges = ranges
+            .iter()
+            .map(|&(start, length)| MemoryRange { start, length })
+            .collect();
+        self
+    }
+
+    /// Returns the restore as one that its capture finished.
+    pub(crate) fn finished_by_capture(mut self) -> Self {
+        self.finished = true;
+        self
+    }
 }
 
 /// A range of guest physical memory that a restore adds.

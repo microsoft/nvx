@@ -115,6 +115,8 @@ pub(crate) use port::PortBackend;
 pub(crate) use port::{PORT_DEVICE, Port};
 #[cfg(target_arch = "x86_64")]
 pub(crate) use port::{PortAccess, PortError, check_released, power_off, probe_port};
+#[cfg(all(test, target_arch = "x86_64"))]
+pub(crate) use process::forbid_system_calls;
 pub(crate) use process::set_command_name;
 #[cfg(target_arch = "x86_64")]
 pub(crate) use process::syscall_process_id;

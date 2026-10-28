@@ -473,40 +473,96 @@ pub(crate) fn continue_traced(process: ProcessId) {
 /// that it starts from now on, through a seccomp filter that allows every other call, for a test
 /// that runs in a process of its own, since no filter can be removed. It first sets the thread's
 /// `no_new_privs`, without which a filter needs privileges.
-///
-/// libc's `prctl` is used because `nix` does not wrap seccomp.
 #[cfg(test)]
 pub(crate) fn deny_system_call(number: nix::libc::c_long) {
-    use nix::libc::{self, c_ulong, sock_filter};
+    use nix::libc;
 
-    let statement = |code: u32, if_equal: u8, otherwise: u8, k: u32| sock_filter {
-        // Every BPF code fits 16 bits.
-        code: code as u16,
-        jt: if_equal,
-        jf: otherwise,
-        k,
-    };
     // The filter loads the call's number, the first word of the kernel's `seccomp_data`, and
     // returns `EPERM` for `number`, or allows the call.
     let mut filter = [
-        statement(libc::BPF_LD | libc::BPF_W | libc::BPF_ABS, 0, 0, 0),
+        filter_statement(libc::BPF_LD | libc::BPF_W | libc::BPF_ABS, 0, 0, 0),
         // A system call number fits 32 bits.
-        statement(
+        filter_statement(
             libc::BPF_JMP | libc::BPF_JEQ | libc::BPF_K,
             0,
             1,
             number as u32,
         ),
-        statement(
+        filter_statement(
             libc::BPF_RET | libc::BPF_K,
             0,
             0,
             libc::SECCOMP_RET_ERRNO | libc::EPERM as u32,
         ),
-        statement(libc::BPF_RET | libc::BPF_K, 0, 0, libc::SECCOMP_RET_ALLOW),
+        filter_statement(libc::BPF_RET | libc::BPF_K, 0, 0, libc::SECCOMP_RET_ALLOW),
     ];
+    install_seccomp_filter(&mut filter);
+}
+
+/// Ends the calling process with `SIGSYS` at the first of the system calls `numbers` that the
+/// calling thread, or a process that it starts from now on, makes, through a seccomp filter that
+/// allows every other call, for a test that runs in a process of its own, since no filter can be
+/// removed. It first sets the thread's `no_new_privs`, without which a filter needs privileges.
+#[cfg(all(test, target_arch = "x86_64"))]
+pub(crate) fn forbid_system_calls(numbers: &[nix::libc::c_long]) {
+    use nix::libc;
+
+    let count = u8::try_from(numbers.len()).expect("a filter's jump spans at most 255 statements");
+    // The filter loads the call's number, then compares it with each of `numbers`: a match jumps
+    // past the other comparisons and the allowance, to the end of the process.
+    let mut filter = vec![filter_statement(
+        libc::BPF_LD | libc::BPF_W | libc::BPF_ABS,
+        0,
+        0,
+        0,
+    )];
+    for (compared, &number) in (0..count).zip(numbers) {
+        // A system call number fits 32 bits.
+        filter.push(filter_statement(
+            libc::BPF_JMP | libc::BPF_JEQ | libc::BPF_K,
+            count - compared,
+            0,
+            number as u32,
+        ));
+    }
+    filter.push(filter_statement(
+        libc::BPF_RET | libc::BPF_K,
+        0,
+        0,
+        libc::SECCOMP_RET_ALLOW,
+    ));
+    filter.push(filter_statement(
+        libc::BPF_RET | libc::BPF_K,
+        0,
+        0,
+        libc::SECCOMP_RET_KILL_PROCESS,
+    ));
+    install_seccomp_filter(&mut filter);
+}
+
+/// Returns the classic BPF statement of a seccomp filter with the operation `code`, the jumps
+/// `if_equal` and `otherwise` of a comparison, and the operand `k`.
+#[cfg(test)]
+fn filter_statement(code: u32, if_equal: u8, otherwise: u8, k: u32) -> nix::libc::sock_filter {
+    nix::libc::sock_filter {
+        // Every BPF code fits 16 bits.
+        code: code as u16,
+        jt: if_equal,
+        jf: otherwise,
+        k,
+    }
+}
+
+/// Sets the calling thread's `no_new_privs`, then installs `filter` as a seccomp filter of the
+/// thread, which passes to the processes that it starts.
+///
+/// libc's `prctl` is used because `nix` does not wrap seccomp.
+#[cfg(test)]
+fn install_seccomp_filter(filter: &mut [nix::libc::sock_filter]) {
+    use nix::libc::{self, c_ulong};
+
     let program = libc::sock_fprog {
-        len: filter.len() as u16,
+        len: u16::try_from(filter.len()).expect("a filter has fewer than 65,536 statements"),
         filter: filter.as_mut_ptr(),
     };
     // SAFETY: `PR_SET_NO_NEW_PRIVS` reads only its integer arguments.
@@ -520,7 +576,7 @@ pub(crate) fn deny_system_call(number: nix::libc::c_long) {
         )
     };
     assert_eq!(result, 0, "PR_SET_NO_NEW_PRIVS: {}", Errno::last());
-    // SAFETY: the program names its four statements, which the kernel copies before it returns.
+    // SAFETY: the program names its statements, which the kernel copies before it returns.
     let result = unsafe {
         libc::prctl(
             libc::PR_SET_SECCOMP,
