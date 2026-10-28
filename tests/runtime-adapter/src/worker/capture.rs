@@ -105,6 +105,7 @@ pub fn root_template(config: &RootConfig) -> RootTemplate {
         },
         timeout: config.device_timeout,
         filesystem_tag: FILESYSTEM_TAG.to_owned(),
+        gateway: None,
     }
 }
 

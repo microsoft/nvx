@@ -556,6 +556,56 @@ fn the_dns_server_is_one_address_in_one_token() {
 }
 
 #[test]
+fn the_gateway_is_one_ipv4_address_in_one_token_as_openvmm_renders_it() {
+    // OpenVMM names the IPv4 gateway of a guest with a NIC among its network tokens, and its IPv6
+    // gateway with another token, and the kernel appends a newline to `/proc/cmdline`.
+    let (before, after) = NETWORK;
+    let command_line = format!("console=hvc0 {before} virtnet_dns=10.0.0.1 {after}\n");
+    assert_eq!(
+        gateway(command_line.as_bytes()),
+        Ok(Some(Ipv4Addr::new(10, 0, 0, 1)))
+    );
+    for command_line in [
+        &b""[..],
+        b"console=hvc0 virtnet_gw6=fd00::a00:1",
+        b"virtnet_gw",
+        b"xvirtnet_gw=10.0.0.1",
+    ] {
+        assert_eq!(
+            gateway(command_line),
+            Ok(None),
+            "{}",
+            command_line.escape_ascii()
+        );
+    }
+    for command_line in [
+        &b"virtnet_gw="[..],
+        b"virtnet_gw=010.0.0.1",
+        b"virtnet_gw=10.0.0.1/24",
+        b"virtnet_gw=10.0.0.1,10.0.0.2",
+        b"virtnet_gw=10.0.0.1 virtnet_gw=10.0.0.1",
+        b"virtnet_gw=10.0.0.1\xa0",
+    ] {
+        assert!(
+            gateway(command_line).is_err(),
+            "{}",
+            command_line.escape_ascii()
+        );
+    }
+    assert_eq!(
+        gateway(b"virtnet_gw=10.0.0.1 virtnet_gw=10.0.0.2")
+            .unwrap_err()
+            .message(),
+        "the virtnet_gw kernel parameter is repeated"
+    );
+    assert_eq!(
+        gateway(b"virtnet_gw=fd00::a00:1").unwrap_err().message(),
+        "the virtnet_gw kernel parameter must name one IPv4 address as OpenVMM renders it, not \
+         'fd00::a00:1'"
+    );
+}
+
+#[test]
 fn a_resolver_file_names_the_server_as_the_init_writes_it() {
     for (server, file) in [
         ("10.0.0.1", "nameserver 10.0.0.1\n"),

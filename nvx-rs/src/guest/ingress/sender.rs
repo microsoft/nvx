@@ -1,4 +1,5 @@
-//! Binds the privileged UDP source port and runs the live scan/send loop.
+//! Binds the privileged UDP source port, or takes the socket that the announcer inherited bound to
+//! one, and runs the live scan/send loop.
 
 use std::ffi::CStr;
 use std::io::Write;
@@ -9,6 +10,7 @@ use std::time::Duration;
 use super::collect::{self, Collector, DiagnosticInput, IPV6_DUAL_STACK_BY_DEFAULT};
 use super::{
     ANNOUNCEMENT_PORT, FIRST_SOURCE_PORT, LAST_SOURCE_PORT, REFRESH_INTERVAL_MS, SCAN_INTERVAL_MS,
+    bind_privileged,
 };
 use crate::guest::sys::{self, Errno};
 
@@ -26,6 +28,9 @@ trait System {
     fn open_socket(&mut self) -> Result<(), Errno>;
     /// Binds the owned socket to one candidate privileged port.
     fn bind(&mut self, port: u16) -> Result<(), Errno>;
+    /// Takes the socket that the process inherited as its standard input, and returns the port
+    /// to which it is bound.
+    fn inherit_socket(&mut self) -> Result<u16, Errno>;
     /// Reads the monotonic clock in milliseconds.
     fn now_ms(&mut self) -> u64;
     /// Collects the announcement for one scan.
@@ -75,6 +80,13 @@ impl System for RealSystem {
             .bind_any(port)
     }
 
+    fn inherit_socket(&mut self) -> Result<u16, Errno> {
+        let socket = sys::UdpSocket::inherited(sys::take_inherited_descriptor(c"0")?)?;
+        let port = socket.port()?;
+        self.socket = Some(socket);
+        Ok(port)
+    }
+
     /// Returns the C program's whole milliseconds of the monotonic clock, or 0 if the clock
     /// fails, which Linux's monotonic clock does not.
     fn now_ms(&mut self) -> u64 {
@@ -118,6 +130,12 @@ pub(super) enum Error {
     /// Every privileged source port from `FIRST_SOURCE_PORT` down to `LAST_SOURCE_PORT` was
     /// already in use.
     NoPrivilegedPort,
+    /// The standard input that the announcer inherited is not an IPv4 datagram socket, or the
+    /// port to which it is bound cannot be read.
+    Inherited(Errno),
+    /// The socket that the announcer inherited is bound to a port outside `LAST_SOURCE_PORT` to
+    /// `FIRST_SOURCE_PORT`, or to none, 0, from which the gateway would take no announcement.
+    UnprivilegedPort(u16),
 }
 
 impl Error {
@@ -132,16 +150,44 @@ impl Error {
             Self::NoPrivilegedPort => {
                 sys::report(err, &[b"nvx-ingress: no privileged source port is free\n"])
             }
+            Self::Inherited(errno) => report_errno(err, b"nvx-ingress: inherited socket: ", errno),
+            Self::UnprivilegedPort(port) => sys::report(
+                err,
+                &[
+                    b"nvx-ingress: the inherited socket's port ",
+                    port.to_string().as_bytes(),
+                    b" is not a privileged source port\n",
+                ],
+            ),
         }
     }
 }
 
-/// Parses the gateway and runs the live sender forever.
+/// Where the sender's socket comes from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Source {
+    /// The sender opens its socket, and binds it to the highest free privileged source port.
+    Bound,
+    /// The sender takes the socket that it inherited as its standard input, which its starter
+    /// bound to a privileged source port.
+    Inherited,
+}
+
+/// Parses the gateway and runs the live sender forever, from a socket of its own.
 pub(super) fn run(gateway: &CStr) -> Result<(), Error> {
     let Some(destination) = parse_gateway(gateway) else {
         return Err(Error::InvalidGateway);
     };
-    run_with(&mut RealSystem::new(), destination, None)
+    run_with(&mut RealSystem::new(), destination, Source::Bound, None)
+}
+
+/// Parses the gateway and runs the live sender forever, from the socket that it inherited as its
+/// standard input, bound to a privileged source port.
+pub(super) fn run_inherited(gateway: &CStr) -> Result<(), Error> {
+    let Some(destination) = parse_gateway(gateway) else {
+        return Err(Error::InvalidGateway);
+    };
+    run_with(&mut RealSystem::new(), destination, Source::Inherited, None)
 }
 
 /// Parses `text` as the C program's `inet_pton(AF_INET, ...)` did: as four decimal octets of at
@@ -151,16 +197,29 @@ fn parse_gateway(text: &CStr) -> Option<Ipv4Addr> {
     text.to_str().ok()?.parse().ok()
 }
 
-/// Runs the sender against an injectable system, optionally stopping after a test scan count.
+/// Runs the sender against an injectable system, with a socket from `source`, optionally stopping
+/// after a test scan count.
 fn run_with(
     system: &mut impl System,
     destination: Ipv4Addr,
+    source: Source,
     scan_limit: Option<usize>,
 ) -> Result<(), Error> {
     system.ignore_signals();
     let ipv6_dual_stack = system.ipv6_dual_stack();
-    system.open_socket().map_err(Error::Socket)?;
-    let own_port = bind_privileged_port(system)?;
+    let own_port = match source {
+        Source::Bound => {
+            system.open_socket().map_err(Error::Socket)?;
+            bind_privileged_port(system)?
+        }
+        Source::Inherited => {
+            let port = system.inherit_socket().map_err(Error::Inherited)?;
+            if !(LAST_SOURCE_PORT..=FIRST_SOURCE_PORT).contains(&port) {
+                return Err(Error::UnprivilegedPort(port));
+            }
+            port
+        }
+    };
 
     let mut last_payload = Vec::new();
     let mut last_sent = 0_u64;
@@ -182,18 +241,12 @@ fn run_with(
     }
 }
 
-/// Binds the system's socket to the highest free privileged source port, from
-/// `FIRST_SOURCE_PORT` down to `LAST_SOURCE_PORT`, and returns it. Only a port in use moves the
-/// search to the next one.
+/// Binds the system's socket to the highest free privileged source port, as [`bind_privileged`]
+/// does, and returns it.
 fn bind_privileged_port(system: &mut impl System) -> Result<u16, Error> {
-    for port in (LAST_SOURCE_PORT..=FIRST_SOURCE_PORT).rev() {
-        match system.bind(port) {
-            Ok(()) => return Ok(port),
-            Err(Errno::EADDRINUSE) => {}
-            Err(errno) => return Err(Error::Bind(errno)),
-        }
-    }
-    Err(Error::NoPrivilegedPort)
+    bind_privileged(|port| system.bind(port))
+        .map_err(Error::Bind)?
+        .ok_or(Error::NoPrivilegedPort)
 }
 
 /// Writes one diagnostic that describes `errno` with `nix`'s text.
@@ -217,6 +270,10 @@ mod tests {
         ipv6_dual_stack: bool,
         /// Optional socket-creation failure.
         socket_error: Option<Errno>,
+        /// The port of the inherited socket, or the failure to take it.
+        inherited: Result<u16, Errno>,
+        /// Whether the sender took its inherited socket.
+        took_inherited: bool,
         /// Scripted candidate-port bind outcomes.
         bind_results: VecDeque<Result<(), Errno>>,
         /// Bind outcome after the scripted queue is empty.
@@ -244,6 +301,8 @@ mod tests {
                 ignored_signals: false,
                 ipv6_dual_stack: true,
                 socket_error: None,
+                inherited: Err(Errno::ENOTSOCK),
+                took_inherited: false,
                 bind_results: VecDeque::new(),
                 default_bind: Ok(()),
                 bound_ports: Vec::new(),
@@ -273,6 +332,11 @@ mod tests {
         fn bind(&mut self, port: u16) -> Result<(), Errno> {
             self.bound_ports.push(port);
             self.bind_results.pop_front().unwrap_or(self.default_bind)
+        }
+
+        fn inherit_socket(&mut self) -> Result<u16, Errno> {
+            self.took_inherited = true;
+            self.inherited
         }
 
         fn now_ms(&mut self) -> u64 {
@@ -350,7 +414,7 @@ mod tests {
         system.bind_results =
             VecDeque::from([Err(Errno::EADDRINUSE), Err(Errno::EADDRINUSE), Ok(())]);
         assert_eq!(
-            run_with(&mut system, loopback_destination(), Some(1)),
+            run_with(&mut system, loopback_destination(), Source::Bound, Some(1)),
             Ok(())
         );
         assert!(system.ignored_signals);
@@ -381,8 +445,8 @@ mod tests {
                 system.bind_results.push_back(Err(error));
             }
             let mut err = Vec::new();
-            let failure =
-                run_with(&mut system, loopback_destination(), Some(1)).expect_err("must fail");
+            let failure = run_with(&mut system, loopback_destination(), Source::Bound, Some(1))
+                .expect_err("must fail");
             failure.report(&mut err);
             let errno = socket_error.or(bind_error).unwrap();
             let mut expected = prefix.to_vec();
@@ -399,8 +463,8 @@ mod tests {
         let mut system = FakeSystem::one_scan();
         system.default_bind = Err(Errno::EADDRINUSE);
         let mut err = Vec::new();
-        let failure =
-            run_with(&mut system, loopback_destination(), Some(1)).expect_err("must fail");
+        let failure = run_with(&mut system, loopback_destination(), Source::Bound, Some(1))
+            .expect_err("must fail");
         failure.report(&mut err);
         assert_eq!(system.bound_ports.len(), 512);
         assert_eq!(
@@ -408,6 +472,71 @@ mod tests {
             (Some(&FIRST_SOURCE_PORT), Some(&LAST_SOURCE_PORT))
         );
         assert_eq!(err, b"nvx-ingress: no privileged source port is free\n");
+    }
+
+    /// Verifies that the sender takes the socket that it inherited, bound to a privileged source
+    /// port, rather than opening and binding one, and refuses one of another port or none.
+    #[test]
+    fn an_inherited_socket_is_taken_only_at_a_privileged_source_port() {
+        for port in [LAST_SOURCE_PORT, 700, FIRST_SOURCE_PORT] {
+            let mut system = FakeSystem::one_scan();
+            system.socket_error = Some(Errno::EMFILE);
+            system.default_bind = Err(Errno::EACCES);
+            system.inherited = Ok(port);
+            assert_eq!(
+                run_with(
+                    &mut system,
+                    loopback_destination(),
+                    Source::Inherited,
+                    Some(1)
+                ),
+                Ok(())
+            );
+            assert!(system.took_inherited && system.ignored_signals);
+            assert!(system.bound_ports.is_empty());
+            assert_eq!(system.collections, [(port, 100, true)]);
+            assert_eq!(system.sends, [b"packet".to_vec()]);
+        }
+        for (inherited, expected) in [
+            (
+                Ok(0),
+                b"nvx-ingress: the inherited socket's port 0 is not a privileged source port\n"
+                    .to_vec(),
+            ),
+            (
+                Ok(511),
+                b"nvx-ingress: the inherited socket's port 511 is not a privileged source port\n"
+                    .to_vec(),
+            ),
+            (
+                Ok(1024),
+                b"nvx-ingress: the inherited socket's port 1024 is not a privileged source port\n"
+                    .to_vec(),
+            ),
+            (
+                Err(Errno::ENOTSOCK),
+                [
+                    &b"nvx-ingress: inherited socket: "[..],
+                    Errno::ENOTSOCK.desc().as_bytes(),
+                    b"\n",
+                ]
+                .concat(),
+            ),
+        ] {
+            let mut system = FakeSystem::one_scan();
+            system.inherited = inherited;
+            let failure = run_with(
+                &mut system,
+                loopback_destination(),
+                Source::Inherited,
+                Some(1),
+            )
+            .expect_err("must fail");
+            let mut err = Vec::new();
+            failure.report(&mut err);
+            assert_eq!(err, expected, "{inherited:?}");
+            assert!(system.bound_ports.is_empty() && system.sends.is_empty());
+        }
     }
 
     /// Verifies retry-after-failure, changed-payload, and periodic refresh sends.
@@ -424,7 +553,7 @@ mod tests {
         ]);
         system.send_results = VecDeque::from([false, true, true, true]);
         assert_eq!(
-            run_with(&mut system, loopback_destination(), Some(5)),
+            run_with(&mut system, loopback_destination(), Source::Bound, Some(5)),
             Ok(())
         );
         assert_eq!(

@@ -1,8 +1,9 @@
 //! Tests of the application of a clone's activation record, through a fake system, which records
 //! every call of the application, and whose assembly returns a temporary directory that stands
 //! for the root, the image's view through the overlay, whose account databases the application
-//! reads and checks for real, and which generates no machine ID, writes no resolver file, and
-//! mounts, binds, and unmounts nothing; and, with the clone's activation, through an adapter of
+//! reads and checks for real, and which generates no machine ID, writes no resolver file, starts
+//! no announcer, and mounts, binds, and unmounts nothing; and, with the clone's activation,
+//! through an adapter of
 //! the tests' own, which takes what the host sends, applies the record of the Activate that the
 //! activation accepted through the fake system, and spawns an execution for each request that
 //! the activation serves.
@@ -75,6 +76,8 @@ const HOSTNAME: &[u8] = b"clone";
 const DNS: IpAddr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
 /// The endpoint of the proxy of the tests' networks.
 const PROXY: &str = "http://10.0.0.1:3128";
+/// The IPv4 gateway of the tests' template's NIC.
+const GATEWAY: Ipv4Addr = Ipv4Addr::new(10, 0, 0, 1);
 
 /// Returns whether a failure's cause is the one that a test expects.
 type Expected = fn(&ActivationCause) -> bool;
@@ -105,6 +108,10 @@ enum Effect {
     /// The application wrote a resolver file that names this DNS server to a new file at this
     /// path.
     Resolver(PathBuf, IpAddr),
+    /// The application started the announcer of the workload's listeners, to this gateway.
+    Announce(Ipv4Addr),
+    /// The announcer of the workload's listeners was stopped.
+    Stop,
     /// The application bound the runtime's files of this view into the root, for every
     /// execution.
     Bind(View),
@@ -135,6 +142,9 @@ struct FakeSystem {
     unmountable: bool,
     /// The kind of the error with which each write of a resolver file fails, if it does.
     unwritable: Option<io::ErrorKind>,
+    /// The error with which each start of the announcer of the workload's listeners fails, if it
+    /// does.
+    unannounced: Option<fn() -> StartError>,
     /// The error with which each bind of the runtime's files fails, if it does, as when the
     /// image's `/etc/machine-id` or `/etc/resolv.conf` is a directory.
     unbindable: Option<fn() -> entry::Error>,
@@ -161,6 +171,7 @@ impl FakeSystem {
             generating: None,
             unmountable: false,
             unwritable: None,
+            unannounced: None,
             unbindable: None,
             stuck: false,
             effects: Vec::new(),
@@ -219,6 +230,15 @@ impl FakeSystem {
         }
     }
 
+    /// Returns a system whose image holds the tests' account databases, and each of whose starts
+    /// of the announcer of the workload's listeners fails with the error that `error` returns.
+    fn unannounced(error: fn() -> StartError) -> Self {
+        Self {
+            unannounced: Some(error),
+            ..Self::new()
+        }
+    }
+
     /// Returns a system whose image holds the tests' account databases, and each of whose binds
     /// of the runtime's files fails with the error that `error` returns, once the entry checked
     /// its inputs.
@@ -254,6 +274,7 @@ impl System for FakeSystem {
     type Root = PathBuf;
     type Export = ();
     type Binds = ();
+    type Announcer = Ipv4Addr;
 
     fn reread(
         &mut self,
@@ -339,6 +360,19 @@ impl System for FakeSystem {
         }
     }
 
+    fn announce(&mut self, gateway: Ipv4Addr) -> Result<Ipv4Addr, StartError> {
+        self.effects.push(Effect::Announce(gateway));
+        match self.unannounced {
+            Some(error) => Err(error()),
+            None => Ok(gateway),
+        }
+    }
+
+    fn stop(&mut self, announcer: Ipv4Addr) {
+        assert_eq!(announcer, GATEWAY);
+        self.effects.push(Effect::Stop);
+    }
+
     fn bind(&mut self, root: &PathBuf, view: &View) -> Result<(), entry::Error> {
         assert_eq!(*root, self.root());
         self.effects.push(Effect::Bind(view.clone()));
@@ -406,8 +440,9 @@ struct Adapter {
     system: FakeSystem,
     /// What the application activated: the root, the export's root, if any, the runtime's binds
     /// on the root, the identity in which every execution runs, if any, the workload's hostname
-    /// and machine ID, the resolver file, if any, and the proxy's endpoint, if any.
-    applied: Option<Activated<PathBuf, (), ()>>,
+    /// and machine ID, the resolver file, if any, the proxy's endpoint, if any, and the gateway of
+    /// the announcer of the workload's listeners, if any.
+    applied: Option<Activated<PathBuf, (), (), Ipv4Addr>>,
     /// What the adapter's latest Ready reported.
     ready: Option<ReadyActivation>,
 }
@@ -490,7 +525,8 @@ impl Adapter {
 }
 
 /// Returns the tests' template: its runtime directory, its devices at NVX's MMIO windows, with
-/// the sizes that they must have, its timeout, and its host filesystem device's tag.
+/// the sizes that they must have, its timeout, its host filesystem device's tag, and its NIC's
+/// gateway.
 fn template() -> RootTemplate {
     RootTemplate {
         runtime: PathBuf::from(RUNTIME),
@@ -504,6 +540,7 @@ fn template() -> RootTemplate {
         },
         timeout: DEVICE_TIMEOUT,
         filesystem_tag: TAG.to_owned(),
+        gateway: Some(GATEWAY),
     }
 }
 
@@ -645,8 +682,17 @@ fn network(dns: Option<IpAddr>, proxy: Option<&str>) -> Network {
     }
 }
 
+/// Returns a network as [`network`] does, but without published listeners.
+fn unpublished(dns: Option<IpAddr>, proxy: Option<&str>) -> Network {
+    Network {
+        publication: Publication::Unpublished,
+        ..network(dns, proxy)
+    }
+}
+
 /// Returns the record of the tests' Activate, as [`with_generated_id`] returns it, but with an
-/// aggregate export, of three mappings, and a network that names [`DNS`] and [`PROXY`].
+/// aggregate export, of three mappings, and a network that names [`DNS`] and [`PROXY`], and
+/// publishes the workload's listeners.
 fn with_everything() -> ActivationRecord {
     let mut configuration = with_generated_id().configuration().clone();
     configuration.export = Some(export(ExportKind::Aggregate));
@@ -698,7 +744,7 @@ fn activated(
     system: &FakeSystem,
     identity: Option<Identity>,
     machine_id: MachineId,
-) -> Activated<PathBuf, (), ()> {
+) -> Activated<PathBuf, (), (), Ipv4Addr> {
     Activated {
         root: system.root(),
         export: None,
@@ -708,6 +754,7 @@ fn activated(
         machine_id,
         resolver: None,
         proxy: None,
+        announcer: None,
     }
 }
 
@@ -720,6 +767,7 @@ fn applied_everything() -> Vec<Effect> {
         Effect::Generate(machine_id_path()),
         Effect::MountExport(TAG.to_owned(), Access::ReadWrite),
         Effect::Resolver(resolver_path(), DNS),
+        Effect::Announce(GATEWAY),
         Effect::Bind(full_view()),
     ]
 }
@@ -735,10 +783,11 @@ fn apply_error(failure: &ActivationFailure) -> &ApplyError {
 #[test]
 fn no_mount_spawn_or_id_generation_happens_before_the_gate() {
     // The application reaches the system only through its calls, which the fake records in
-    // full: none starts a process, and the adapter spawns each execution itself, once the
-    // activation serves its request. Every record asks for a generated machine ID, has an
-    // export, and names a DNS server, which only the application of an accepted record
-    // generates, mounts, and writes.
+    // full: none starts a process but the announcer of the workload's listeners, and the adapter
+    // spawns each execution itself, once the activation serves its request. Every record asks
+    // for a generated machine ID, has an export, names a DNS server, and publishes the workload's
+    // listeners, which only the application of an accepted record generates, mounts, writes, and
+    // announces.
     let base = Instant::now();
     let record = with_everything().encode();
     let settings = with_everything().configuration().clone();
@@ -828,8 +877,8 @@ fn no_mount_spawn_or_id_generation_happens_before_the_gate() {
     adapter.assert_untouched(&failure, |cause| matches!(cause, ActivationCause::Expired));
 
     // Only a valid Activate mounts the root, reads its account databases, generates the machine
-    // ID, mounts the export, writes the resolver file, and binds the runtime's files, before
-    // Ready, and an execution spawns only once Ready opened the fence.
+    // ID, mounts the export, writes the resolver file, starts the announcer, and binds the
+    // runtime's files, before Ready, and an execution spawns only once Ready opened the fence.
     let mut adapter = Adapter::restricted(FakeSystem::new(), base);
     adapter.take(base, ActivationInput::Flow).unwrap();
     assert!(adapter.system.effects.is_empty());
@@ -977,8 +1026,7 @@ fn assembly_and_identity_inputs_are_taken_exactly_from_the_record() {
 
     // The record's other settings, which the application leaves alone, change no input: its
     // bindings, its export's shape and plan, the number of its mappings, which the adapter's
-    // order takes, its network's policy and the publication of its listeners, its resources,
-    // and its restore section.
+    // order takes, its network's policy, its resources, and its restore section.
     let mut other = with_everything().configuration().clone();
     other.image = activation::Image::Erofs {
         binding: activation::Identity::from_bytes([0x66; activation::Identity::LEN]),
@@ -991,7 +1039,6 @@ fn assembly_and_identity_inputs_are_taken_exactly_from_the_record() {
     other.mappings = 7;
     other.network = Some(Network {
         policy: activation::Identity::from_bytes([0xaa; activation::Identity::LEN]),
-        publication: Publication::Unpublished,
         ..network(Some(DNS), Some(PROXY))
     });
     other.resources = ExpectedResources {
@@ -1331,24 +1378,37 @@ fn a_machine_id_or_a_view_that_fails_fails_the_activation_once_the_root_is_torn_
 #[test]
 fn the_runtime_s_binds_are_removed_before_the_root_is_torn_down() {
     // The binds keep the root's mount busy, so they go first, and the export's root, which keeps
-    // the export's mount busy, before them, unless the adapter took it.
+    // the export's mount busy, before them, unless the adapter took it, and the announcer before
+    // anything.
     let mut system = FakeSystem::new();
     let root = system.root();
-    teardown_with(&mut system, None, (), root).unwrap();
+    teardown_with(&mut system, None, None, (), root).unwrap();
     assert_eq!(system.effects, [Effect::Remove, Effect::Teardown]);
     let mut system = FakeSystem::new();
     let root = system.root();
-    teardown_with(&mut system, Some(()), (), root).unwrap();
+    teardown_with(&mut system, None, Some(()), (), root).unwrap();
     assert_eq!(
         system.effects,
         [Effect::Close, Effect::Remove, Effect::Teardown]
+    );
+    let mut system = FakeSystem::new();
+    let root = system.root();
+    teardown_with(&mut system, Some(GATEWAY), Some(()), (), root).unwrap();
+    assert_eq!(
+        system.effects,
+        [
+            Effect::Stop,
+            Effect::Close,
+            Effect::Remove,
+            Effect::Teardown
+        ]
     );
 
     // A removal that fails leaves those binds mounted, and the teardown is attempted all the
     // same; the error reports both.
     let mut system = FakeSystem::stuck();
     let root = system.root();
-    let error = teardown_with(&mut system, Some(()), (), root).unwrap_err();
+    let error = teardown_with(&mut system, None, Some(()), (), root).unwrap_err();
     assert_eq!(
         system.effects,
         [Effect::Close, Effect::Remove, Effect::Teardown]
@@ -1425,7 +1485,7 @@ fn a_network_s_dns_server_is_written_to_a_resolver_file_that_every_execution_see
     let ipv6 = IpAddr::V6(Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0xa00, 1));
     for dns in [DNS, ipv6] {
         let mut configuration = accepted().configuration().clone();
-        configuration.network = Some(network(Some(dns), Some(PROXY)));
+        configuration.network = Some(unpublished(Some(dns), Some(PROXY)));
         let record = clone_record(configuration);
         let mut system = FakeSystem::new();
         let applied = apply_with(&mut system, &record, &template(), None).unwrap();
@@ -1455,7 +1515,7 @@ fn a_network_s_dns_server_is_written_to_a_resolver_file_that_every_execution_see
     // nothing.
     for proxy in [None, Some(PROXY)] {
         let mut configuration = accepted().configuration().clone();
-        configuration.network = Some(network(None, proxy));
+        configuration.network = Some(unpublished(None, proxy));
         let record = clone_record(configuration);
         let mut system = FakeSystem::new();
         let applied = apply_with(&mut system, &record, &template(), None).unwrap();
@@ -1513,36 +1573,43 @@ fn a_resolver_file_names_its_dns_server_once_and_every_execution_may_read_it() {
 
 #[test]
 fn an_export_or_a_network_that_fails_fails_the_activation_once_the_root_is_torn_down() {
-    // The export's mount fails with the export's class, and the resolver file's write and bind
-    // with the network's, while the machine ID's bind fails with the view's, each once the
-    // application closed the export's root, if it mounted the export, and tore the root down,
-    // which unmounts the export.
+    // The export's mount fails with the export's class, and the resolver file's write and bind,
+    // and the announcer's start, with the network's, while the machine ID's bind fails with the
+    // view's, each once the application stopped the announcer, if it started it, closed the
+    // export's root, if it mounted the export, and tore the root down, which unmounts the export.
     let base = Instant::now();
     let bytes = with_everything().encode();
-    let failed = |done: usize, closed: bool| {
+    let failed = |done: usize, stopped: bool, closed: bool| {
         let mut effects = applied_everything()[..done].to_vec();
+        if stopped {
+            effects.push(Effect::Stop);
+        }
         if closed {
             effects.push(Effect::Close);
         }
         effects.push(Effect::Teardown);
         effects
     };
-    let cases: [(FakeSystem, Vec<Effect>, Failed); 5] = [
-        (FakeSystem::unmountable(), failed(4, false), |error| {
-            matches!(
-                error,
-                ApplyError::Export {
-                    error: root::Error::Mount {
-                        mount: root::Mount::Export { tag },
-                        ..
-                    },
-                    teardown: None,
-                } if tag == TAG
-            )
-        }),
+    let cases: [(FakeSystem, Vec<Effect>, Failed); 6] = [
+        (
+            FakeSystem::unmountable(),
+            failed(4, false, false),
+            |error| {
+                matches!(
+                    error,
+                    ApplyError::Export {
+                        error: root::Error::Mount {
+                            mount: root::Mount::Export { tag },
+                            ..
+                        },
+                        teardown: None,
+                    } if tag == TAG
+                )
+            },
+        ),
         (
             FakeSystem::unwritable(io::ErrorKind::AlreadyExists),
-            failed(5, true),
+            failed(5, false, true),
             |error| {
                 matches!(
                     error,
@@ -1554,8 +1621,21 @@ fn an_export_or_a_network_that_fails_fails_the_activation_once_the_root_is_torn_
             },
         ),
         (
+            FakeSystem::unannounced(|| StartError::NoPrivilegedPort),
+            failed(6, false, true),
+            |error| {
+                matches!(
+                    error,
+                    ApplyError::Network {
+                        error: NetworkError::Announcer(StartError::NoPrivilegedPort),
+                        teardown: None,
+                    }
+                )
+            },
+        ),
+        (
             FakeSystem::unbindable(|| entry::Error::Resolver(MappingError::TargetKind)),
-            failed(6, true),
+            failed(7, true, true),
             |error| {
                 matches!(
                     error,
@@ -1572,7 +1652,7 @@ fn an_export_or_a_network_that_fails_fails_the_activation_once_the_root_is_torn_
                 error: Box::new(entry::Error::Resolver(MappingError::TargetKind)),
                 teardown: mappings::TeardownError::of("/etc/machine-id", MappingError::MountPoint),
             }),
-            failed(6, true),
+            failed(7, true, true),
             |error| {
                 matches!(
                     error,
@@ -1585,7 +1665,7 @@ fn an_export_or_a_network_that_fails_fails_the_activation_once_the_root_is_torn_
         ),
         (
             FakeSystem::unbindable(|| entry::Error::MachineId(MappingError::TargetKind)),
-            failed(6, true),
+            failed(7, true, true),
             |error| {
                 matches!(
                     error,
@@ -1610,6 +1690,73 @@ fn an_export_or_a_network_that_fails_fails_the_activation_once_the_root_is_torn_
         assert_eq!(adapter.ready, None);
         assert!(!adapter.fence.is_open());
     }
+}
+
+#[test]
+fn a_network_that_publishes_the_workload_s_listeners_starts_their_announcer_to_its_gateway() {
+    // A network that publishes the workload's listeners has the application start their
+    // announcer, to the template's gateway, once it wrote the resolver file, and before it binds
+    // the runtime's files, and hand it to the adapter, which watches it; a network that publishes
+    // none, and a clone without a network, start none.
+    let mut configuration = accepted().configuration().clone();
+    configuration.network = Some(network(None, Some(PROXY)));
+    let published = clone_record(configuration.clone());
+    let mut system = FakeSystem::new();
+    let applied = apply_with(&mut system, &published, &template(), None).unwrap();
+    let bound = Effect::Bind(view(Some(workload()), MachineId::Image));
+    let assembled = [
+        Effect::Assemble(accepted_assembly()),
+        Effect::Account(workload()),
+    ];
+    assert_eq!(
+        system.effects,
+        [&assembled[..], &[Effect::Announce(GATEWAY), bound.clone()]].concat()
+    );
+    assert_eq!(
+        applied,
+        Activated {
+            proxy: Some(PROXY.to_owned()),
+            announcer: Some(GATEWAY),
+            ..activated(&system, Some(workload()), MachineId::Image)
+        }
+    );
+    configuration.network = Some(unpublished(None, Some(PROXY)));
+    for record in [clone_record(configuration), accepted()] {
+        let mut system = FakeSystem::new();
+        let applied = apply_with(&mut system, &record, &template(), None).unwrap();
+        assert_eq!(
+            system.effects,
+            [&assembled[..], std::slice::from_ref(&bound)].concat()
+        );
+        assert_eq!(applied.announcer, None);
+    }
+
+    // A template without a gateway, as one without a NIC, cannot announce: the record that
+    // publishes listeners fails with the network's class, once the root was torn down, and one
+    // that publishes none applies.
+    let gatewayless = RootTemplate {
+        gateway: None,
+        ..template()
+    };
+    let mut system = FakeSystem::new();
+    let error = apply_with(&mut system, &published, &gatewayless, None).unwrap_err();
+    assert!(
+        matches!(
+            error,
+            ApplyError::Network {
+                error: NetworkError::Gateway,
+                teardown: None,
+            }
+        ),
+        "{error}"
+    );
+    assert_eq!(
+        system.effects,
+        [&assembled[..], &[Effect::Teardown]].concat()
+    );
+    let mut system = FakeSystem::new();
+    let applied = apply_with(&mut system, &accepted(), &gatewayless, None).unwrap();
+    assert_eq!(applied.announcer, None);
 }
 
 /// A tmpfs that stands for a clone's root, mounted at `root` below a temporary directory, in a
@@ -1914,6 +2061,30 @@ fn application_errors_name_their_cause() {
         source.source().unwrap().to_string(),
         MappingError::TargetKind.to_string()
     );
+    let error = ApplyError::Network {
+        error: NetworkError::Gateway,
+        teardown: None,
+    };
+    assert_eq!(
+        error.to_string(),
+        "the network settings cannot be applied: the network publishes the workload's listeners, \
+         but the template names no IPv4 gateway to announce them to"
+    );
+    assert!(error.source().unwrap().source().is_none());
+    let denied = io::Error::from(Errno::EACCES);
+    let error = ApplyError::Network {
+        error: NetworkError::Announcer(StartError::Bind(Errno::EACCES.into())),
+        teardown: None,
+    };
+    assert_eq!(
+        error.to_string(),
+        format!(
+            "the network settings cannot be applied: the announcer's socket cannot be bound to a \
+             privileged source port: {denied}"
+        )
+    );
+    let source = error.source().unwrap();
+    assert_eq!(source.source().unwrap().to_string(), denied.to_string());
 
     // The adapter hands the error to the activation, whose failure names it.
     let base = Instant::now();

@@ -24,7 +24,9 @@
 //! Two of them also offer their steps as typed calls, which any guest init or agent runs in its
 //! own process and their programs run on: on x86-64, `time`'s `TimeAbi` runs the time ABI's
 //! cold-boot step, capture, and restore finish, and [`reseed`] reseeds the kernel's random number
-//! generator with a restore's fresh entropy, which starts with the new [`GenerationId`]. The
+//! generator with a restore's fresh entropy, which starts with the new [`GenerationId`]. And
+//! [`ingress`] starts its program, the announcer of the guest's listeners, from a socket that it
+//! binds for it, as a clone's application does. The
 //! libraries need none of NVX's control protocol, managed agent, or workload identity, and NVX's
 //! managed agent opens its control terminal, applies its host mapping table, and starts, drives,
 //! collects, and settles its workloads through them.

@@ -188,7 +188,9 @@ kernel's view and compares names as the kernel does in both.
 at ASCII whitespace, at most one token, with one IPv4 or IPv6 address in the
 form that OpenVMM writes, and `write_resolver` writes the resolver file that
 names it, `nameserver ADDRESS`, as NVX's init writes the initramfs's
-`/etc/resolv.conf`.
+`/etc/resolv.conf`. `gateway` reads the IPv4 gateway of the guest's NIC from
+OpenVMM's `virtnet_gw=` token, `GATEWAY_TOKEN`, as strictly: the address to
+which the announcer of a clone's listeners sends its announcements.
 
 ### `nvx::protocol::export`
 
@@ -1269,9 +1271,9 @@ expects one, or a GPT disk whose GUID it checks if the record expects one, its
 upper, a tmpfs or the scratch with the record's journal policy, and its overlay
 mode, and with the `RootTemplate` that the guest's own configuration holds,
 which its template captured: the runtime directory, the block devices, the
-timeout, and the host filesystem device's virtio-fs tag, but waits for no device
-past the activation's deadline, which the adapter passes, so that the
-application ends by then.
+timeout, the host filesystem device's virtio-fs tag, and the gateway of the
+template's NIC, if it has one, but waits for no device past the activation's
+deadline, which the adapter passes, so that the application ends by then.
 
 For a GPT disk, it first asks the kernel to reread the disk's partition table
 with `BLKRRPART`, since the kernel created the block devices of partitions for
@@ -1290,19 +1292,25 @@ filesystem device with `Root::mount_export`, read-write, at `hostfs/root` in the
 runtime directory, outside the root, since the record names no mode and OpenVMM
 limits each child to its own access; with its network's DNS server, it writes a
 resolver file that names it, mode 0444, to `RESOLVER_FILE` in the runtime
-directory. It then binds the runtime's files for every execution with one
-`Entry::bind_runtime` in the caller's mount namespace: the machine ID's file
-read-only over the root's `/etc/machine-id` and the resolver file over its
+directory; and with a network that publishes the workload's listeners, it starts
+their announcer, `/sbin/nvx-ingress inherit GATEWAY_IPV4`, which announces from
+its standard input, a UDP socket that the application bound, as root, to a
+privileged source port. It then binds the runtime's files for every execution
+with one `Entry::bind_runtime` in the caller's mount namespace: the machine ID's
+file read-only over the root's `/etc/machine-id` and the resolver file over its
 `/etc/resolv.conf`, or, with neither, nothing; the entry checks the record's
 hostname, which every execution's entry takes with `Entry::hostname`. It returns
 the `Applied` root and workload, from which `take_export` hands the adapter the
 export's `SourceRoot`, to map the host's mapping table from once the clone is
-ready, and `proxy` the network's proxy endpoint, which the adapter tells its
-workloads as at a cold boot, and whose `teardown` closes the export's root and
+ready, `proxy` the network's proxy endpoint, which the adapter tells its
+workloads as at a cold boot, and `announcer` the announcer, which the adapter
+watches through its pidfd, and must end the clone once it ended, since the
+gateway then keeps publishing the listeners that it last announced until the VM
+ends, and whose `teardown` stops the announcer, closes the export's root, and
 removes the binds before it tears the root down, as a drop does, or an
 `ApplyError`, `Export` or `Network` among them, after which nothing that it
 mounted or bound stays mounted unless the error reports the unmounts that
-failed, and applies none of the record's listener publication.
+failed, and no announcer that it started runs.
 
 Once the adapter passed the activation what the session received while the
 application ran, which came before Ready, `Activation::complete` opens the fence
@@ -2470,7 +2478,7 @@ disk's block device.
 | `nvx-exit [CODE]` | Stops the VM with an 8-bit exit code through OpenVMM's control port 0x604 (x86_64) |
 | `nvx-device-io file ...`, `nvx-device-io network ...`, `nvx-device-io map PATH TEXT` | The benchmark helper that measures file and UDP round-trip I/O and prints one JSON line, and reports a file benchmark's progress on stderr; `map` writes TEXT at the start of a file through a shared mapping and holds the dirty mapping until its standard input ends, for the microVM scenarios (x86_64) |
 | `nvx-managed-agent CONTROL_TTY ROOTFS HOSTNAME UID GID USER HOME` | Serves the managed control session and supervises sequential workloads; `--exec-config-fd FD -- WORKLOAD ...` is the direct agent's internal launch helper |
-| `nvx-ingress GATEWAY_IPV4` | Announces reachable TCP listeners and settled UDP sockets to the portable-network gateway; `test DIRECTORY` runs synthetic procfs snapshots |
+| `nvx-ingress [inherit] GATEWAY_IPV4` | Announces reachable TCP listeners and settled UDP sockets to the portable-network gateway, from a privileged source port that it binds, or, with `inherit`, from its standard input, a socket that a clone's application bound to one; `test DIRECTORY` runs synthetic procfs snapshots |
 | `nvx-time [--report-only] COMMAND` | Enforces NVX time ABI v1: runs its conformance checks, repairs the wall clock after a restore, publishes the time state, and runs the discipline and violation-watcher daemon; `test NAME ...` runs its decoder and process test hooks (x86_64) |
 | `nvx-time-probe latency\|warp\|clock ...` | Diagnoses clock-read latency, cross-CPU TSC warp and offset, the clocks, CPUID, clock events, kernel messages, and optionally MSRs (x86_64) |
 
