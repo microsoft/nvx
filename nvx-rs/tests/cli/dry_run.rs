@@ -125,6 +125,27 @@ fn sandbox_dry_runs() -> Vec<DryRun> {
     vec![
         dry_run("minimal", sandbox_run(&[]), one_shot()),
         dry_run(
+            "balanced disk path brackets",
+            [
+                "sandbox",
+                "run",
+                "--dry-run",
+                "--layer",
+                "distro,{root/distro[[1][2]].erofs},11111111-1111-1111-1111-111111111111",
+                "--scratch",
+                "{root/scratch[][1].ext4}",
+            ],
+            one_shot().with(
+                "--microvm-sandbox-block",
+                [
+                    "distro:file:{root/distro[[1][2]].erofs},ro",
+                    "scratch:file:{root/scratch[][1].ext4}",
+                ],
+            ),
+        )
+        .with_file("distro[[1][2]].erofs", Content::Text("distro\n"))
+        .with_file("scratch[][1].ext4", Content::Text("scratch\n")),
+        dry_run(
             "every layer and option",
             sandbox_run(&[
                 "--entrypoint",

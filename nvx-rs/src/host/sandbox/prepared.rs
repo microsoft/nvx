@@ -30,8 +30,9 @@
 //!   The VMM inherits one handle, which no argument names: the claim's handle of the scratch
 //!   image, so that it holds the claim from its start, even if the caller ends before the VMM has
 //!   opened the image. A final path that OpenVMM could not take as the path of a raw image, with a
-//!   comma or semicolon or a container's extension, which a link on the way, the directory of a
-//!   relative path, or the case of a name on disk can bring, fails the preparation.
+//!   comma, semicolon, unbalanced brackets, or a container's extension, which a link on the way,
+//!   the directory of a relative path, or the case of a name on disk can bring, fails the
+//!   preparation.
 //! - Other hosts cannot check files, so no launch is prepared there.
 //!
 //! Images are raw: OpenVMM attaches a file's bytes as they are, and the launch never converts an
@@ -141,8 +142,8 @@ impl PreparedLaunch {
     /// [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported) for files that are not, and as
     /// [`SandboxPlan::openvmm_arguments`] and [`SandboxPlan::kernel_command_line`] fail; on
     /// Windows, also with [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported) for a checked
-    /// file whose final path has a comma or semicolon, or ends in `.vhd`, `.vhdx`, `.vmgs`, or
-    /// `.iso`, which OpenVMM could not attach as a raw image; and with
+    /// file whose final path has a comma, semicolon, or unbalanced brackets, or ends in `.vhd`,
+    /// `.vhdx`, `.vmgs`, or `.iso`, which OpenVMM could not attach as a raw image; and with
     /// [`ErrorKind::Io`](crate::ErrorKind::Io) if a checked file cannot be moved above the
     /// standard streams on Linux, or its final path is unavailable on Windows. It never opens,
     /// reads, or maps a file.

@@ -676,11 +676,23 @@ fn templates_refuse_what_no_capture_takes() {
     for (name, problem) in [
         (
             "placeholder,1.img",
-            "containing commas or semicolons are unsupported",
+            "containing commas, semicolons, or unbalanced brackets are unsupported",
         ),
         (
             "placeholder;1.img",
-            "containing commas or semicolons are unsupported",
+            "containing commas, semicolons, or unbalanced brackets are unsupported",
+        ),
+        (
+            "placeholder[1.img",
+            "containing commas, semicolons, or unbalanced brackets are unsupported",
+        ),
+        (
+            "placeholder]1.img",
+            "containing commas, semicolons, or unbalanced brackets are unsupported",
+        ),
+        (
+            "placeholder][1.img",
+            "containing commas, semicolons, or unbalanced brackets are unsupported",
         ),
         (
             "placeholder.vhd",
@@ -816,7 +828,7 @@ fn templates_refuse_what_no_capture_takes() {
         );
     }
     // Transaction directories whose scratch device OpenVMM's options would split.
-    for name in ["a,b", "a;b"] {
+    for name in ["a,b", "a;b", "a[b", "a]b", "a][b"] {
         let inputs = Inputs {
             transaction: format!("{TRANSACTION}-{name}"),
             ..Inputs::default()
@@ -824,7 +836,8 @@ fn templates_refuse_what_no_capture_takes() {
         assert_eq!(
             refusal(inputs.lower()),
             format!(
-                "disk paths containing commas or semicolons are unsupported: {}",
+                "disk paths containing commas, semicolons, or unbalanced brackets are unsupported: \
+                 {}",
                 Path::new(&inputs.transaction).join(SCRATCH_NAME).display()
             )
         );
@@ -937,8 +950,8 @@ fn templates_check_their_inputs_in_order() {
         ("must be absolute", |inputs| {
             inputs.transaction = format!("{TRANSACTION},1");
         }),
-        ("commas or semicolons", |inputs| {
-            inputs.transaction = TRANSACTION.to_owned();
+        ("commas, semicolons, or unbalanced brackets", |inputs| {
+            inputs.transaction = TRANSACTION.to_owned()
         }),
     ];
     for (refused, fix) in steps {

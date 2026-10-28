@@ -494,9 +494,9 @@ impl SandboxPlan {
     }
 
     /// Checks the plan against the host: each image of its block devices must be a regular file
-    /// whose path has no comma or semicolon, and whose name, and that of the file to which its
-    /// path resolves, as `provision` records it, do not end in `.vhd`, `.vhdx`, `.vmgs`, or
-    /// `.iso`, with which OpenVMM would not attach it as a raw image; and the export plan's
+    /// whose path and resolved path have no comma, semicolon, or unbalanced brackets, and whose
+    /// names do not end in `.vhd`, `.vhdx`, `.vmgs`, or `.iso`, with which OpenVMM would not
+    /// attach it as a raw image; and the export plan's
     /// directories and files must still not overlap, by path or through a hard link or bind
     /// mount, and the plan must pass [`ExportPlan::verify`], which checks again the host objects
     /// that it recorded.
@@ -519,12 +519,13 @@ impl SandboxPlan {
             let shown = path.display().to_string();
             reject_disk_path(path, &shown)?;
             reject_container_path(path, &shown)?;
-            // OpenVMM reads the extension of the path that it is given, which for a provisioned
-            // sandbox is the resolved one: a link must not resolve to a container's name either.
+            // A provisioned sandbox records the resolved path, which must also fit OpenVMM's
+            // block device option and name a raw image.
             let resolved =
                 (host.resolve)(path).map_err(|error| mount::os_error(&error, Some(path)))?;
-            if resolved.file_name() != path.file_name() {
+            if resolved.as_path() != path {
                 let shown = format!("{shown} resolves to {}", resolved.display());
+                reject_disk_path(&resolved, &shown)?;
                 reject_container_path(&resolved, &shown)?;
             }
         }

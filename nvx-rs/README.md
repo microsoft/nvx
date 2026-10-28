@@ -1293,6 +1293,14 @@ again.
 A launch hands the VMM exactly the objects that its checks found, never a path
 that something could replace between the check and the VMM's open of it.
 
+`SandboxPlan::validated` rejects disk image paths containing commas, semicolons,
+or improperly nested square brackets with `ErrorKind::Unsupported`, including
+the resolved paths that `provision` records. Balanced brackets, as in
+`layer[1].erofs` or `layer[[1][2]].erofs`, are supported; an unclosed `[`, an
+unmatched `]`, or reversed `][` is not. `run` and `provision` apply these checks
+before launching OpenVMM or recording a sandbox, and `start` checks recorded
+paths again.
+
 The scratch image, which the VMM writes, has a binding of its own, a
 `ScratchBinding`: its platform scheme, its device or volume and file ID, its
 kind, a regular file, and its length, which fixes the guest's block device, in
@@ -1347,10 +1355,10 @@ the VMM inherits:
   transition ends its VMM. The VMM inherits one handle, which no argument
   names: the scratch image's claim, through `VmmCommand::inherit` and
   `PreparedLaunch::inherited`. A final path that OpenVMM could not take as the
-  path of a raw image, with a comma or semicolon, or ending in `.vhd`, `.vhdx`,
-  `.vmgs`, or `.iso`, which a link, the directory of a relative path, or the
-  case of a name on disk can bring, fails the preparation with
-  `ErrorKind::Unsupported`.
+  path of a raw image, with a comma, semicolon, or unbalanced brackets, or
+  ending in `.vhd`, `.vhdx`, `.vmgs`, or `.iso`, which a link, the directory of
+  a relative path, or the case of a name on disk can bring, fails the preparation
+  with `ErrorKind::Unsupported`.
 
 Images are raw: OpenVMM attaches a file's bytes as they are, and chooses a
 container format by the file's extension, which `/proc/self/fd/N` lacks, so a

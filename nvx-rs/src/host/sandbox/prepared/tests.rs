@@ -496,48 +496,47 @@ fn prepared_launches_refuse_final_paths_that_openvmm_cannot_take() {
     let refused = |message: String| (ErrorKind::Unsupported, message);
     let delimited = |planned: &str, name: &str| {
         refused(format!(
-            "disk paths containing commas or semicolons are unsupported: {} resolves to {}",
+            "disk paths containing commas, semicolons, or unbalanced brackets are unsupported: \
+             {} resolves to {}",
             staged.text(planned),
             final_path(&staged, name)
         ))
     };
 
-    // A distro layer whose final path holds a semicolon, which the plan's path hides behind a
-    // junction.
-    let layers = staged.path("real;layers");
-    fs::create_dir(&layers).unwrap();
-    for name in ["distro.erofs", "distro.erofs.manifest.json"] {
-        fs::copy(staged.path(name), layers.join(name)).unwrap();
+    for (link, target) in [
+        ("layers", "real;layers"),
+        ("unclosed-layers", "real[layers"),
+        ("unopened-layers", "real]layers"),
+        ("reversed-layers", "real][layers"),
+    ] {
+        let layers = staged.path(target);
+        fs::create_dir(&layers).unwrap();
+        for name in ["distro.erofs", "distro.erofs.manifest.json"] {
+            fs::copy(staged.path(name), layers.join(name)).unwrap();
+        }
+        junction(&staged.path(link), &layers);
+        let planned = format!("{link}\\distro.erofs");
+        let resolved = format!("{target}\\distro.erofs");
+        let layer = staged.layer(&planned);
+        let binding = DistroBinding::verify(&layer).unwrap();
+        let checked = binding.check(&layer, DISTRO_POLICY_REVISION).unwrap();
+        let launch = SandboxLaunch::new(
+            vec![layer],
+            &staged.text("scratch.ext4"),
+            SandboxSettings::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            failure(PreparedLaunch::new(
+                launch.bound_plan(&binding).unwrap(),
+                checked,
+                Some(staged.checked_scratch("scratch.ext4")),
+                ""
+            )),
+            delimited(&planned, &resolved)
+        );
     }
-    junction(&staged.path("layers"), &layers);
-    let layer = SandboxLayer::new(
-        LayerRole::Distro,
-        &staged.text("layers\\distro.erofs"),
-        UUID,
-    );
-    let binding = DistroBinding::verify(&layer).unwrap();
-    let checked = binding.check(&layer, DISTRO_POLICY_REVISION).unwrap();
-    let launch = SandboxLaunch::new(
-        vec![layer],
-        &staged.text("scratch.ext4"),
-        SandboxSettings::default(),
-    )
-    .unwrap();
-    assert_eq!(
-        failure(PreparedLaunch::new(
-            launch.bound_plan(&binding).unwrap(),
-            checked,
-            Some(staged.checked_scratch("scratch.ext4")),
-            ""
-        )),
-        delimited("layers\\distro.erofs", "real;layers\\distro.erofs")
-    );
 
-    // A scratch image whose final path holds a comma, behind a junction too.
-    let images = staged.path("real,images");
-    fs::create_dir(&images).unwrap();
-    fs::copy(staged.path("scratch.ext4"), images.join("scratch.ext4")).unwrap();
-    junction(&staged.path("images"), &images);
     let plan_on = |scratch: &str| {
         let (binding, checked) = staged.checked_distro("distro.erofs");
         let launch = SandboxLaunch::new(
@@ -548,16 +547,29 @@ fn prepared_launches_refuse_final_paths_that_openvmm_cannot_take() {
         .unwrap();
         (launch.bound_plan(&binding).unwrap(), checked)
     };
-    let (plan, checked) = plan_on("images\\scratch.ext4");
-    assert_eq!(
-        failure(PreparedLaunch::new(
-            plan,
-            checked,
-            Some(staged.checked_scratch("images\\scratch.ext4")),
-            ""
-        )),
-        delimited("images\\scratch.ext4", "real,images\\scratch.ext4")
-    );
+    for (link, target) in [
+        ("images", "real,images"),
+        ("unclosed-images", "real[images"),
+        ("unopened-images", "real]images"),
+        ("reversed-images", "real][images"),
+    ] {
+        let images = staged.path(target);
+        fs::create_dir(&images).unwrap();
+        fs::copy(staged.path("scratch.ext4"), images.join("scratch.ext4")).unwrap();
+        junction(&staged.path(link), &images);
+        let planned = format!("{link}\\scratch.ext4");
+        let resolved = format!("{target}\\scratch.ext4");
+        let (plan, checked) = plan_on(&planned);
+        assert_eq!(
+            failure(PreparedLaunch::new(
+                plan,
+                checked,
+                Some(staged.checked_scratch(&planned)),
+                ""
+            )),
+            delimited(&planned, &resolved)
+        );
+    }
 
     // A scratch image whose name on disk ends in `.vhd`, which the plan's path names in capitals:
     // OpenVMM, comparing extensions case-sensitively, would attach the plan's path as a raw
@@ -577,6 +589,45 @@ fn prepared_launches_refuse_final_paths_that_openvmm_cannot_take() {
             staged.text("IMAGE.VHD"),
             final_path(&staged, "image.vhd")
         ))
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn prepared_launches_accept_balanced_brackets_in_final_paths() {
+    let staged = Staged::new();
+    let images = staged.path("real[[images]]");
+    fs::create_dir(&images).unwrap();
+    for name in ["distro.erofs", "distro.erofs.manifest.json", "scratch.ext4"] {
+        fs::copy(staged.path(name), images.join(name)).unwrap();
+    }
+    junction(&staged.path("images"), &images);
+    let (binding, checked) = staged.checked_distro("images\\distro.erofs");
+    let launch = SandboxLaunch::new(
+        vec![staged.layer("images\\distro.erofs")],
+        &staged.text("images\\scratch.ext4"),
+        SandboxSettings::default(),
+    )
+    .unwrap();
+    let prepared = PreparedLaunch::new(
+        launch.bound_plan(&binding).unwrap(),
+        checked,
+        Some(staged.checked_scratch("images\\scratch.ext4")),
+        "",
+    )
+    .unwrap();
+    assert_eq!(
+        values(prepared.openvmm_arguments(), "--microvm-sandbox-block"),
+        [
+            format!(
+                "distro:file:{},ro",
+                final_path(&staged, "real[[images]]\\distro.erofs")
+            ),
+            format!(
+                "scratch:file:{}",
+                final_path(&staged, "real[[images]]\\scratch.ext4")
+            ),
+        ]
     );
 }
 

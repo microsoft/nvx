@@ -163,11 +163,21 @@ pub fn require_file(path: &Path, description: &str) -> Result<()> {
 }
 
 /// Refuses a disk path that OpenVMM's `--microvm-sandbox-block` value could not hold: one with
-/// a comma or semicolon. The message shows `path` as `shown`.
+/// a comma, semicolon, or improperly nested brackets. The message shows `path` as `shown`.
 pub(crate) fn reject_disk_path(path: &Path, shown: &str) -> Result<()> {
-    if path.to_string_lossy().contains([',', ';']) {
+    let depth = path
+        .to_string_lossy()
+        .bytes()
+        .try_fold(0_usize, |depth, byte| match byte {
+            b'[' => Some(depth + 1),
+            b']' => depth.checked_sub(1),
+            b',' | b';' => None,
+            _ => Some(depth),
+        });
+    if depth != Some(0) {
         return Err(refused(format!(
-            "disk paths containing commas or semicolons are unsupported: {shown}"
+            "disk paths containing commas, semicolons, or unbalanced brackets are unsupported: \
+             {shown}"
         )));
     }
     Ok(())
