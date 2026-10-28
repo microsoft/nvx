@@ -1,6 +1,6 @@
 //! Templates and clones in the guest: the capture of a template's guest before its root's
-//! assembly, and the repair of each clone that a restore of its snapshot starts, for a guest init
-//! or agent, whether or not it is PID 1.
+//! assembly, and the repair and the activation of each clone that a restore of its snapshot
+//! starts, for a guest init or agent, whether or not it is PID 1.
 //!
 //! A platform template is a VM whose snapshot holds no tenant's root, so that every clone that a
 //! restore of the snapshot starts can attach its own image, upper, and export. Its guest captures
@@ -100,12 +100,53 @@
 //! `nvx-time pre-capture` does, and so does the time daemon: a violation of either stops the VM,
 //! unless the ABI is report-only.
 //!
+//! # Activation
+//!
+//! A repaired clone then takes its own configuration from the host, in one Activate, on a
+//! restricted control session, through an [`Activation`] of the [`Repaired`] clone and of the
+//! caller's fence, which stays closed until the activation is ready, so that no execution starts
+//! before. The activation is a state machine without I/O, independent of any framing: the adapter
+//! passes it what it receives on the clone's NVXS session, each an [`ActivationInput`], and does
+//! what each [`ActivationAction`] that it returns says. Its [`ActivationState`]s, in order, are:
+//!
+//! 1. the transport bootstrap: the clone awaits the reset that the restore queued for the session
+//!    that the guest attached before the capture, which the adapter acknowledges;
+//! 2. restricted: the session takes only flow control and one Activate, and anything else, a
+//!    request or another reset, fails the activation. The activation decodes the Activate's
+//!    record with [`ActivationRecord::decode`](crate::activation::ActivationRecord::decode), and
+//!    accepts it only as a clone's, with a restore section, that expects the CPU count and the
+//!    memory size that the repair reports, before anything has a side effect;
+//! 3. activating: the adapter applies the accepted record, activating the root and the workload
+//!    with its settings, then reports the result to [`Activation::complete`];
+//! 4. ready, with the mappings pending: the activation completed, opened the fence, and returned
+//!    what Ready reports, a [`ReadyActivation`](crate::activation::ReadyActivation): that the
+//!    activation applied, with the record's transaction ID. The host's mapping table, which the
+//!    record announced, and the start of the sandbox follow in the adapter's order, as after a
+//!    cold boot;
+//! 5. started: the adapter's order started the sandbox, which [`Activation::start`] records.
+//!
+//! The host retries an Activate with the same transaction ID and a byte-equal record, and such a
+//! retry joins the activation while it runs, or gets its cached result afterwards, without
+//! activating again, also in a later session, such as once the host's attachment ended, whose
+//! reset a ready clone takes. A changed record, another transaction, another reset before the
+//! clone is ready, and an activation that failed, wholly or partway, are final. The activation's
+//! deadline, which the caller chooses, starts at the restore's acknowledgement, or, for a restore
+//! that the host did not gate until one, when the caller makes the activation, and neither input
+//! nor retries extend it: the adapter wakes by it, and [ticks](Activation::tick) the activation
+//! then, however slowly its input trickles in, and whether or not its output drains. A failure
+//! is an [`ActivationFailure`], which names the [`ActivationState`] in which the activation failed
+//! and its [`ActivationCause`], and which every later call returns again. The activation never
+//! powers the VM off: the adapter reports the failure, and ends the VM.
+//!
 //! # Example
 //!
 //! ```no_run
 //! use std::io;
+//! use std::time::{Duration, Instant};
 //!
-//! use nvx::guest::clone::{self, AdmissionFence, CapturePreparation, Captured, Devices};
+//! use nvx::guest::clone::{
+//!     self, Activation, AdmissionFence, CapturePreparation, Captured, Devices,
+//! };
 //! use nvx::guest::root::Device;
 //! use nvx::protocol::root::{DISTRO_MMIO_BASE, SCRATCH_MMIO_BASE};
 //!
@@ -153,8 +194,11 @@
 //!             }
 //!         };
 //!         println!("{} CPUs, {} bytes of memory", repaired.cpus(), repaired.memory());
-//!         // The clone opens the fence once it may admit executions, such as once activated.
-//!         fence.open();
+//!         // Its activation takes the host's Activate, and opens the fence once the clone is
+//!         // ready: the agent drives it with what its control session receives.
+//!         let timeout = Duration::from_secs(30);
+//!         let activation = Activation::new(&repaired, fence, timeout, Instant::now());
+//!         println!("activate by {:?}", activation.deadline());
 //!     }
 //! }
 //! # Ok(())
@@ -173,8 +217,10 @@
 //! [`TimeAbi::restore_finish`] tells. Apart from a violation of the time ABI in the capture's
 //! preparation, which stops the VM unless the ABI is report-only, as [strict
 //! mode](#strict-mode) tells, they never power the VM off, so a caller that is not PID 1 keeps
-//! its own reaping, transport, and shutdown.
+//! its own reaping, transport, and shutdown. The activation needs no privilege, and makes no
+//! system call: of the clone, it changes only the caller's fence, which it opens.
 
+mod activation;
 mod mounts;
 mod repair;
 #[cfg(test)]
@@ -194,6 +240,10 @@ use super::time::{
     CaptureOutcome, CaptureRequest, PreCaptureError, Restore, ScratchPolicy, TimeAbi, TimeError,
 };
 
+pub use self::activation::{
+    Activation, ActivationAction, ActivationCause, ActivationFailure, ActivationInput,
+    ActivationState,
+};
 pub use self::mounts::{Mounted, Origin};
 pub use self::repair::{
     RangeFault, Repair, RepairCause, RepairError, RepairProgress, RepairStage, Repaired, repair,

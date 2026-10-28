@@ -16,7 +16,8 @@
 //! workload admission, with nothing mounted from the devices that its clones replace, and
 //! through which each clone that a restore of the snapshot starts repairs its restore: it
 //! activates the restore's memory target, reseeds the kernel's random number generator, and
-//! finishes the restore, with its acknowledgement.
+//! finishes the restore, with its acknowledgement, and then takes its own configuration from the
+//! host, in one Activate on a restricted control session, before it admits any execution.
 //!
 //! Each other module holds one program, and the crate's binary of the same name runs its `main`.
 //! Two of them also offer their steps as typed calls, which any guest init or agent runs in its
