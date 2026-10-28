@@ -116,13 +116,14 @@
 //!    record with [`ActivationRecord::decode`](crate::activation::ActivationRecord::decode), and
 //!    accepts it only as a clone's, with a restore section, that expects the CPU count and the
 //!    memory size that the repair reports, before anything has a side effect;
-//! 3. activating: the adapter applies the accepted record, activating the root and the workload
-//!    with its settings, then reports the result to [`Activation::complete`];
+//! 3. activating: the adapter applies the accepted record with [`apply`](fn@apply), which
+//!    activates the root and the workload with its settings, as below, then reports the result
+//!    to [`Activation::complete`];
 //! 4. ready, with the mappings pending: the activation completed, opened the fence, and returned
-//!    what Ready reports, a [`ReadyActivation`](crate::activation::ReadyActivation): that the
-//!    activation applied, with the record's transaction ID. The host's mapping table, which the
-//!    record announced, and the start of the sandbox follow in the adapter's order, as after a
-//!    cold boot;
+//!    what Ready reports beside the adapter's own identities, such as its build, a
+//!    [`ReadyActivation`](crate::activation::ReadyActivation): that the activation applied, with
+//!    the record's transaction ID. The host's mapping table, which the record announced, and the
+//!    start of the sandbox follow in the adapter's order, as after a cold boot;
 //! 5. started: the adapter's order started the sandbox, which [`Activation::start`] records.
 //!
 //! The host retries an Activate with the same transaction ID and a byte-equal record, and such a
@@ -137,6 +138,23 @@
 //! is an [`ActivationFailure`], which names the [`ActivationState`] in which the activation failed
 //! and its [`ActivationCause`], and which every later call returns again. The activation never
 //! powers the VM off: the adapter reports the failure, and ends the VM.
+//!
+//! [`apply`](fn@apply) activates the clone as at a cold boot. It assembles the root with
+//! [`root::assemble`], with the record's image, an EROFS image whose UUID it checks if the record
+//! expects one, its upper, a tmpfs or the scratch, with the record's journal policy, and its
+//! overlay mode, and with the inputs that the guest takes from its own configuration, which its
+//! template captured, a [`RootTemplate`]: the runtime directory, the block devices, and how long
+//! the assembly waits for them. It refuses a GPT disk before anything has a side effect: the
+//! kernel created the block devices of a disk's partitions when it found the template's
+//! placeholder. If the record has a workload identity, it then checks its account in the
+//! assembled root, before Ready, as NVX's init checks it at boot: the identity is
+//! [`Identity::new`](super::entry::Identity::new) of the record's user and group IDs, without
+//! supplementary groups or capabilities, in existing-account mode, and every execution runs as
+//! it. Without one, the adapter gives each execution its own identity, which
+//! [`Entry::check`](super::entry::Entry::check) checks. It returns the [`Applied`] root and
+//! identity, which the adapter keeps, or an [`ApplyError`], after which nothing that it mounted
+//! stays mounted, unless the error holds the unmounts that failed. It applies none of the
+//! record's other settings: its export, its network, its hostname, and its machine ID.
 //!
 //! # Example
 //!
@@ -218,7 +236,10 @@
 //! preparation, which stops the VM unless the ABI is report-only, as [strict
 //! mode](#strict-mode) tells, they never power the VM off, so a caller that is not PID 1 keeps
 //! its own reaping, transport, and shutdown. The activation needs no privilege, and makes no
-//! system call: of the clone, it changes only the caller's fence, which it opens.
+//! system call: of the clone, it changes only the caller's fence, which it opens. Its
+//! application, [`apply`](fn@apply), needs the guest's root user, in the guest's initial mount
+//! namespace, as [`root::assemble`] does: it mounts the root, reads the account databases below
+//! it, and, if it fails, tears it down. It starts no process and generates no ID.
 
 mod activation;
 mod mounts;
@@ -242,7 +263,7 @@ use super::time::{
 
 pub use self::activation::{
     Activation, ActivationAction, ActivationCause, ActivationFailure, ActivationInput,
-    ActivationState,
+    ActivationState, Applied, ApplyError, RootTemplate, apply,
 };
 pub use self::mounts::{Mounted, Origin};
 pub use self::repair::{
