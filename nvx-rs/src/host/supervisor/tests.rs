@@ -474,7 +474,7 @@ fn a_vmm_that_cannot_be_examined_is_indeterminate_and_keeps_its_record() {
         Err(io::Error::new(io::ErrorKind::PermissionDenied, "hidden"))
     };
     let Reattached::Indeterminate(reason) =
-        reattach_with(&mut locked, &runtime(), hidden, |_| {}).unwrap()
+        reattach_with(&mut locked, &runtime(), hidden, |_| Ok(())).unwrap()
     else {
         panic!("a VMM that cannot be examined was classified");
     };
@@ -578,6 +578,61 @@ fn a_launch_whose_command_fails_ends_before_anything_runs() {
 }
 
 #[test]
+fn a_launch_whose_caller_cannot_record_its_failure_keeps_its_journal_for_recovery() {
+    let (_directory, store) = store();
+    let mut locked = store.lock(None).unwrap();
+    let failure = launch_reporting(
+        &mut locked,
+        &LaunchId::generate().unwrap(),
+        &runtime(),
+        &CAPABILITY,
+        |_| Err(Error::unsupported("no command")),
+        |error, spawned| {
+            assert_eq!((error.message(), spawned), ("no command", false));
+            Err(Error::io("the test cannot record the failure"))
+        },
+    )
+    .unwrap_err();
+    assert!(!failure.spawned);
+    let reason = "the test cannot record the failure";
+    assert_eq!(failure.unended.as_deref(), Some(reason));
+    assert_eq!(failure.error.kind(), ErrorKind::Unsupported);
+    assert_eq!(
+        failure.error.message(),
+        format!("no command; the launch could not be ended, and remains for recovery: {reason}")
+    );
+    // The journal remains, as a crash leaves it, until a recovery ends the launch, of which
+    // nothing runs.
+    assert!(store.journal().unwrap().is_some());
+    assert_eq!(locked.recover().unwrap(), Recovery::Exited);
+    assert!(store.journal().unwrap().is_none());
+}
+
+#[test]
+fn a_reattach_whose_caller_cannot_record_an_exit_keeps_the_record_until_one_can() {
+    let (_directory, templates, lease, mut locked) = committed_clone(&this_process());
+    // The recorded VMM exited, but the caller cannot record what ended it.
+    let exited = |_: &ProcessRef| -> io::Result<Option<Process>> { Ok(None) };
+    let error = reattach_with(&mut locked, &runtime(), exited, |_| {
+        Err(Error::io("the test cannot record the exit"))
+    })
+    .unwrap_err();
+    assert_eq!(error.message(), "the test cannot record the exit");
+    // The record, and with it the lease, remain for a later reattach.
+    assert!(locked.runtime().unwrap().is_some());
+    refuses_release(&templates, &mut locked, &lease);
+    let Reattached::Exited { record, recovery } =
+        reattach_with(&mut locked, &runtime(), exited, |_| Ok(())).unwrap()
+    else {
+        panic!("a VMM that exited was not reported as exited");
+    };
+    assert_eq!(record.unwrap().launch(), lease.launch());
+    assert_eq!(recovery, Recovery::Clean);
+    assert!(locked.runtime().unwrap().is_none());
+    assert_eq!(templates.release(&mut locked).unwrap(), Some(lease));
+}
+
+#[test]
 fn a_launch_whose_vmm_cannot_start_ends() {
     let (directory, store) = store();
     let mut locked = store.lock(None).unwrap();
@@ -646,7 +701,7 @@ fn a_clone_whose_vmm_cannot_be_examined_keeps_its_lease() {
         Err(io::Error::new(io::ErrorKind::PermissionDenied, "hidden"))
     };
     let Reattached::Indeterminate(reason) =
-        reattach_with(&mut locked, &runtime(), hidden, |_| {}).unwrap()
+        reattach_with(&mut locked, &runtime(), hidden, |_| Ok(())).unwrap()
     else {
         panic!("a VMM that cannot be examined was classified");
     };

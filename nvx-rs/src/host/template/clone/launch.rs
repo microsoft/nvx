@@ -353,7 +353,8 @@ impl ClonePlan {
                 if spawned {
                     tracker.advance(Progress::Spawned);
                 }
-                tracker.pending(Stage::Launch, host_evidence(error), error);
+                // A failure that cannot be recorded keeps the launch's journal.
+                tracker.pending(Stage::Launch, host_evidence(error), error)
             },
         );
         // The VMM holds the claim, if it started.

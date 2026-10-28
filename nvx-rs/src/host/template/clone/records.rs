@@ -418,15 +418,20 @@ impl Recorder {
     /// teardown that follows it, whose record is [`Teardown::Pending`], so that a crash of the
     /// caller during the teardown leaves the record, which a reattach finishes, as
     /// [`reattach_clone`](super::reattach_clone) describes. The record that the failure writes
-    /// once its teardown ended replaces it. A record that cannot be written now is written then,
-    /// if it can be.
+    /// once its teardown ended replaces it.
+    ///
+    /// Fails if the record cannot be written, durably, as [`write_failure`] writes it: the caller
+    /// then removes nothing that tells that the clone launched, the journal of its launch or the
+    /// runtime record of its VM, which keep its lease, so that a reattach still finds that the
+    /// clone failed, though not how, if a crash of the caller comes before the failure is
+    /// recorded.
     pub(super) fn pending(
         &self,
         stage: Stage,
         progress: Progress,
         (evidence, status): (Evidence, Option<u8>),
         error: &Error,
-    ) {
+    ) -> Result<()> {
         let record = FailureRecord::new(
             &self.lease,
             self.transaction,
@@ -436,7 +441,12 @@ impl Recorder {
             Teardown::Pending,
             error,
         );
-        let _ = write_failure(&self.failure, &record);
+        write_failure(&self.failure, &record).map_err(|failed| {
+            Error::io(format!(
+                "the failure could not be recorded before its teardown: {}",
+                describe(&failed)
+            ))
+        })
     }
 
     /// Resolves `earlier`, the record of a failure that its teardown left unresolved, with
@@ -521,19 +531,35 @@ impl Tracker {
     }
 
     /// Records the failure of the clone at `stage` with `evidence` and `error` before the teardown
-    /// that follows it, once the clone got as far as its progress, as [`Recorder::pending`] does.
-    pub(super) fn pending(&self, stage: Stage, evidence: Evidence, error: &Error) {
+    /// that follows it, once the clone got as far as its progress, as [`Recorder::pending`] does,
+    /// and fails as it fails.
+    pub(super) fn pending(&self, stage: Stage, evidence: Evidence, error: &Error) -> Result<()> {
         self.recorder
-            .pending(stage, self.log.progress(), (evidence, None), error);
+            .pending(stage, self.log.progress(), (evidence, None), error)
     }
 
     /// Ends `starting`, the launch of the clone, which failed at `stage` with `fault`, as `end`
     /// does, and records the failure before the teardown, as [`pending`](Self::pending) does, and
     /// with the teardown's outcome, as [`record`](Self::record) does. The error of a launch that
     /// could not be ended says so, and that its journal remains for recovery.
+    ///
+    /// A failure that cannot be recorded before the teardown ends the clone's VMM through its
+    /// handle, and keeps the launch's journal, as [`Starting::end_keeping_journal`] does, and with
+    /// it the lease, until a reattach ends the launch: the teardown is unresolved, so that a crash
+    /// of the caller before the failure is recorded leaves a launch that a reattach records as
+    /// failed, rather than a clone that ended.
     pub(super) fn fail(&self, starting: Starting<'_>, stage: Stage, fault: Fault) -> CloneFailure {
-        self.pending(stage, fault.evidence, &fault.error);
-        let teardown = Teardown::of((self.end)(starting));
+        let teardown = match self.pending(stage, fault.evidence, &fault.error) {
+            Ok(()) => Teardown::of((self.end)(starting)),
+            Err(unrecorded) => {
+                let ended = if starting.end_keeping_journal() {
+                    "the clone's VMM ended through its handle"
+                } else {
+                    "the clone's VMM did not exit once it was ended through its handle"
+                };
+                Teardown::Unresolved(format!("{ended}, but {unrecorded}"))
+            }
+        };
         let fault = match &teardown {
             Teardown::Unresolved(reason) => Fault::new(
                 fault.evidence,

@@ -1203,6 +1203,65 @@ fn a_caller_fails_a_ready_or_started_clone_with_its_own_evidence_as_the_sequence
 }
 
 #[test]
+fn a_failure_that_cannot_be_recorded_before_its_teardown_keeps_its_launch_for_a_reattach() {
+    let (fixture, image) = fixture();
+    let mut acquired = fixture.acquire("unrecorded");
+    let path = acquired.locked.clone_failure_path();
+    let mut vmm = vmm_with("flush");
+    let (restoring, _) = launch(&fixture, &mut acquired, &image, &mut vmm);
+    let mut control = FakeControl::default();
+    let activated = restoring
+        .activate(&mut control, RestoreDeadlines::default())
+        .unwrap();
+    // The caller diagnoses a defect of the template once the clone is ready, but the record of
+    // its failure cannot be written, as on a full disk: a directory takes its place.
+    fs::create_dir(&path).unwrap();
+    let defect = "the test diagnosed a defect of the generation's repair";
+    let failure = activated.fail(Evidence::TemplateDefect, Error::other(defect));
+    let ready = (Stage::Start, Progress::Ready);
+    let record = failure.record();
+    assert_eq!(
+        ((record.stage, record.progress), record.evidence),
+        (ready, Evidence::TemplateDefect)
+    );
+    // The caller holds the failure, the template's, whose teardown ended the clone's VMM through
+    // its handle, and kept the launch's journal, and with it the lease.
+    assert_eq!(failure.outcome(), Outcome::Template);
+    let Teardown::Unresolved(reason) = &record.teardown else {
+        panic!("the teardown of {failure} was resolved");
+    };
+    let unrecorded = "the failure could not be recorded before its teardown: ";
+    let ended = format!("the clone's VMM ended through its handle, but {unrecorded}");
+    assert!(reason.starts_with(&ended), "{reason}");
+    assert!(failure.message().starts_with(defect), "{failure}");
+    let lost = "; the failure could not be recorded: ";
+    assert!(failure.message().contains(lost), "{failure}");
+    assert_vmm_ended(&vmm);
+    let journal = acquired.locked.journal().unwrap();
+    let journal = journal.expect("the launch kept its journal");
+    assert_eq!(journal.process(), vmm.reference.as_ref());
+    let refusal = fixture.store.release(&mut acquired.locked).unwrap_err();
+    assert_eq!(refusal.code(), ErrorCode::SandboxRunning, "{refusal}");
+    // Once the record can be written, a reattach, as after a crash of the caller, finds that the
+    // clone failed, though not how, rather than a clone that ended.
+    fs::remove_dir(&path).unwrap();
+    let mut control = FakeControl::default();
+    let reattached = reattach_clone(
+        &mut acquired.locked,
+        &runtime_of(&fixture),
+        &mut control,
+        Instant::now() + TIMEOUT,
+        TIMEOUT,
+    )
+    .unwrap();
+    let resolved = failed(reattached);
+    let exited = Teardown::Exited;
+    assert_failed(&resolved, &acquired, ready, Evidence::LostStatus, exited);
+    assert!(control.calls.is_empty());
+    assert_launch_ended(&fixture, &mut acquired, &vmm);
+}
+
+#[test]
 fn a_diagnosis_too_long_for_a_record_keeps_its_ends_and_its_evidence_through_a_reattach() {
     let (fixture, image) = fixture();
     let mut acquired = fixture.acquire("diagnosis");

@@ -773,7 +773,9 @@ evidence and the status, the original outcome, the transaction, the generation,
 the progress, and the teardown: no VM, an exit or a termination that the host
 verified, or an unresolved one, which keeps the launch's journal or runtime
 record, and the lease; a release removes both, and a sandbox that boots cold
-writes neither.
+writes neither. A failure that cannot be recorded before its teardown keeps the
+launch's journal or runtime record, and the lease, so that a reattach still
+finds that the clone failed.
 
 A step or a check of the caller's own that fails once the clone is ready, or
 once its sandbox started, fails the clone with the caller's evidence through
@@ -788,14 +790,15 @@ that another runtime identity launched, or that fails the check, through its
 verified identity; it records the failure of a launch that a crash interrupted,
 but not the journal that a commit may leave beside its runtime record,
 classifies a VM that exited by its outcome report, records a failure before it
-ends a VMM or clears the runtime record of one that exited, finishes a failure
-that a crash left pending as its teardown would have recorded it, keeping its
-transaction, resolves the teardown of an earlier failure with what the VMM left
-as it ended, its outcome report and OpenVMM's fatal error, attributes a status
-of the guest's as one that a workload may have given once the clone's progress
-log is lost, damaged, or was written during another boot of the host, whose
-crash may have lost its last lines, and reads nothing of the template store, so
-that a tombstone or a retirement of the generation leaves the clone its lease.
+ends a VMM or clears the runtime record of one that exited, and fails, leaving
+them as they were, if it cannot, finishes a failure that a crash left pending as
+its teardown would have recorded it, keeping its transaction, resolves the
+teardown of an earlier failure with what the VMM left as it ended, its outcome
+report and OpenVMM's fatal error, attributes a status of the guest's as one that
+a workload may have given once the clone's progress log is lost, damaged, or was
+written during another boot of the host, whose crash may have lost its last
+lines, and reads nothing of the template store, so that a tombstone or a
+retirement of the generation leaves the clone its lease.
 
 `CloneRecords::read` reads what the sandbox keeps of a clone, for the operations
 that list, inspect, or remove clones.
