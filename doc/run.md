@@ -636,9 +636,15 @@ nvx-rs\target\release\nvx-rs.exe run `
   --mount "/mnt/host,C:\Users\me\microvm-share,rw"
 ```
 
-Use `ro` for read-only access. The guest target must be an absolute Linux path.
-It ends at the first comma, and the mode follows the last comma, so a host
-path may contain commas when the mode is given, which it then requires:
+Use `ro` for read-only access. The guest target must be an absolute, canonical
+Linux path other than `/`, without backslashes or `=`. The kernel command line
+carries it, so it must also stay one kernel token: it cannot contain
+whitespace, control characters, double quotes, or any UTF-8 byte that Linux
+treats as whitespace, such as the `0xa0` in `à`. Linux would split the token at
+such a byte, and a double quote would hide the virtio-mmio devices that OpenVMM
+describes after the target from the guest's kernel. The target ends at the
+first comma, and the mode follows the last comma, so a host path may contain
+commas when the mode is given, which it then requires:
 
 ```powershell
 nvx-rs\target\release\nvx-rs.exe run `
