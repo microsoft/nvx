@@ -2280,6 +2280,148 @@ fn a_reattach_fails_a_clone_whose_record_of_a_failure_cannot_be_read() {
 }
 
 #[test]
+fn a_record_of_a_failure_that_cannot_be_read_is_a_failure_whatever_the_reattach_finds() {
+    let reattach = (Stage::Reattach, Progress::Committed);
+    // A VM that exited once its launch committed, with a status of the guest's that is evidence,
+    // or without a report of the guest's own end: the clone failed before, so the failure is the
+    // reattach's, with the error of the record's read, over whose evidence the status's prevails.
+    let cases = [
+        ("report:guest-exit:195", Evidence::RepairStatus, Some(195)),
+        ("", Evidence::HostFailure, None),
+    ];
+    for (words, evidence, status) in cases {
+        let crashed = Crashed::at_with("committed", words);
+        crashed.vmm.end_and_wait();
+        let mut locked = crashed.lock();
+        write_private(&locked.clone_failure_path(), b"not a record").unwrap();
+        let mut control = ReattachControl::answering(Some);
+        let failure = failed(crashed.take_over(&mut locked, &crashed.runtime, &mut control));
+        assert_eq!(failure.code(), ErrorCode::Io, "{words}: {failure}");
+        let (lease, exited) = (&crashed.lease, Teardown::Exited);
+        assert_recorded(&failure, lease, &locked, reattach, evidence, exited);
+        assert_eq!(failure.record().status, status, "{words}");
+        assert!(locked.runtime().unwrap().is_none(), "{words}");
+        assert!(control.capabilities.is_empty(), "{words}");
+        crashed.releases(&mut locked);
+    }
+    // A VM that runs under another runtime identity is ended, and the failure is the same.
+    let crashed = Crashed::at("committed");
+    let mut locked = crashed.lock();
+    write_private(&locked.clone_failure_path(), b"not a record").unwrap();
+    let other = RuntimeIdentity::new(artifact('d'), artifact('e'), artifact('f'));
+    let mut control = ReattachControl::answering(Some);
+    let failure = failed(crashed.take_over(&mut locked, &other, &mut control));
+    assert_eq!(failure.code(), ErrorCode::Io, "{failure}");
+    let (lease, terminated) = (&crashed.lease, Teardown::Terminated);
+    let host = Evidence::HostFailure;
+    assert_recorded(&failure, lease, &locked, reattach, host, terminated);
+    assert!(control.capabilities.is_empty());
+    crashed.releases(&mut locked);
+    // A launch that a crash of its caller interrupted: the reattach replaces the record with its
+    // own failure, pending, before its recovery ends the launch, which a crash of the restarted
+    // caller leaves, for the next reattach to finish.
+    let spawned = (Stage::Reattach, Progress::Spawned);
+    let assert_pending = |locked: &LockedStore| {
+        let pending = read_failure(&locked.clone_failure_path())
+            .unwrap()
+            .expect("the reattach replaced the record that it could not read");
+        assert_eq!(
+            (
+                pending.stage,
+                pending.progress,
+                pending.evidence,
+                pending.code
+            ),
+            (spawned.0, spawned.1, host, ErrorCode::Io)
+        );
+        assert_eq!(pending.teardown, Teardown::Pending);
+    };
+    let crashed = Crashed::at("launched");
+    let mut locked = crashed.lock();
+    write_private(&locked.clone_failure_path(), b"not a record").unwrap();
+    let mut control = ReattachControl::answering(Some);
+    let crash = reattach_clone_with(
+        &mut locked,
+        &crashed.runtime,
+        &mut control,
+        Instant::now() + TIMEOUT,
+        TIMEOUT,
+        |_, _, _| Err(Error::other("the test's caller crashes")),
+    );
+    assert!(crash.is_err());
+    assert_pending(&locked);
+    assert!(locked.journal().unwrap().is_some());
+    let failure = failed(crashed.take_over(&mut locked, &crashed.runtime, &mut control));
+    assert_eq!(failure.code(), ErrorCode::Io, "{failure}");
+    let (lease, terminated) = (&crashed.lease, Teardown::Terminated);
+    assert_recorded(&failure, lease, &locked, spawned, host, terminated);
+    assert!(control.capabilities.is_empty());
+    crashed.releases(&mut locked);
+    // Before the restore-ready event, only the launch's journal, which the recovery removes, holds
+    // the spawn: once it went, the pending record still tells how far the clone got, so the next
+    // reattach takes the status with which the guest ended the VM.
+    let crashed = Crashed::at_with("launched", "report:guest-exit:195");
+    crashed.vmm.end_and_wait();
+    let mut locked = crashed.lock();
+    write_private(&locked.clone_failure_path(), b"not a record").unwrap();
+    let mut control = ReattachControl::answering(Some);
+    let crash = reattach_clone_with(
+        &mut locked,
+        &crashed.runtime,
+        &mut control,
+        Instant::now() + TIMEOUT,
+        TIMEOUT,
+        |locked, runtime, exited| {
+            supervisor::reattach_reporting(locked, runtime, exited)?;
+            Err(Error::other("the test's caller crashes"))
+        },
+    );
+    assert!(crash.is_err());
+    assert_pending(&locked);
+    assert!(locked.journal().unwrap().is_none());
+    let failure = failed(crashed.take_over(&mut locked, &crashed.runtime, &mut control));
+    assert_eq!(failure.code(), ErrorCode::Io, "{failure}");
+    let (lease, exited) = (&crashed.lease, Teardown::Exited);
+    let repair = Evidence::RepairStatus;
+    assert_recorded(&failure, lease, &locked, spawned, repair, exited);
+    assert_eq!(failure.record().status, Some(195));
+    assert!(control.capabilities.is_empty());
+    crashed.releases(&mut locked);
+    // A clone whose launch did not begin: the store holds no record of the launch that the
+    // reattach would remove, so the record stays as it is, and a reattach after a crash of the
+    // caller finds the clone as this one does, with no VM, and takes no report of an earlier VM
+    // of the sandbox for the clone's.
+    let crashed = Crashed::at("prepared");
+    let mut locked = crashed.lock();
+    write_private(&locked.clone_failure_path(), b"not a record").unwrap();
+    let earlier = serde_json::json!({
+        "schema_version": 1,
+        "outcome": {"operation": "managed", "category": "guest-exit", "status_code": 195},
+        "teardown": {"workers": true},
+    });
+    fs::write(locked.outcome_path(), serde_json::to_vec(&earlier).unwrap()).unwrap();
+    let mut control = ReattachControl::answering(Some);
+    let crash = reattach_clone_with(
+        &mut locked,
+        &crashed.runtime,
+        &mut control,
+        Instant::now() + TIMEOUT,
+        TIMEOUT,
+        |_, _, _| Err(Error::other("the test's caller crashes")),
+    );
+    assert!(crash.is_err());
+    let kept = fs::read(locked.clone_failure_path()).unwrap();
+    assert_eq!(kept, b"not a record");
+    let failure = failed(crashed.take_over(&mut locked, &crashed.runtime, &mut control));
+    assert_eq!(failure.code(), ErrorCode::Io, "{failure}");
+    let launching = (Stage::Reattach, Progress::Launching);
+    let (lease, no_vm) = (&crashed.lease, Teardown::NoVm);
+    assert_recorded(&failure, lease, &locked, launching, host, no_vm);
+    assert_eq!(failure.record().status, None);
+    crashed.releases(&mut locked);
+}
+
+#[test]
 fn a_reattach_ends_the_launch_of_a_caller_that_crashed_and_records_its_failure() {
     let cases = [
         (
