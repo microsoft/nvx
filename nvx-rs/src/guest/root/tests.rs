@@ -1161,6 +1161,38 @@ fn the_kernel_shows_a_mount_s_options() {
 }
 
 #[test]
+#[ignore = "needs root"]
+fn a_thread_with_private_tables_finds_its_mount_points_and_options() {
+    std::thread::spawn(|| {
+        sys::unshare_standard_descriptors().unwrap();
+        sys::enter_private_mount_namespace().unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let point = directory.path().join("mount");
+        fs::create_dir(&point).unwrap();
+        let mut kernel = SystemKernel;
+        assert!(!kernel.is_mount_point(&point).unwrap());
+
+        let path = sys::path_c_string(&point).unwrap();
+        let mount = sys::TmpfsMount::mount(c"nvx-root-test", &path, c"size=64k").unwrap();
+        assert!(kernel.is_mount_point(&point).unwrap());
+        let child = point.join("child");
+        fs::create_dir(&child).unwrap();
+        assert!(!kernel.is_mount_point(&child).unwrap());
+        let options = kernel.mount_options(&point).unwrap();
+        assert!(options.split(',').any(|option| option == "rw"), "{options}");
+        assert!(
+            options.split(',').any(|option| option == "size=64k"),
+            "{options}"
+        );
+
+        mount.unmount().unwrap();
+        assert!(!kernel.is_mount_point(&point).unwrap());
+    })
+    .join()
+    .unwrap();
+}
+
+#[test]
 fn a_mount_s_options_are_the_last_field_of_its_line_in_the_mount_table() {
     let table = b"21 1 0:20 / /proc rw,nosuid,nodev,noexec,relatime shared:12 - proc proc rw\n\
                   35 21 8:1 / /run/a\\040b/rootfs rw,nosuid,nodev - overlay overlay \

@@ -326,6 +326,20 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn mount_ids_follow_the_calling_threads_descriptor_table() {
+        let root = mount_id(c"/").unwrap();
+        let proc = mount_id(c"/proc").unwrap();
+        assert_ne!(root, proc);
+        std::thread::spawn(move || {
+            unshare_standard_descriptors().unwrap();
+            assert_eq!(mount_id(c"/"), Ok(root));
+            assert_eq!(mount_id(c"/proc"), Ok(proc));
+        })
+        .join()
+        .unwrap();
+    }
+
+    #[test]
     fn connected_datagrams_wait_for_and_receive_echoes() {
         let server = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
         let std::net::SocketAddr::V4(peer) = server.local_addr().unwrap() else {

@@ -23,8 +23,8 @@ use crate::guest::sys::{self, Errno, Mode, MountFlags, OpenFlags};
 
 pub(crate) use crate::guest::mappings::SystemKernel;
 
-/// The kernel's table of the calling process's mounts.
-const MOUNT_TABLE: &str = "/proc/self/mountinfo";
+/// The kernel's table of the calling thread's mount namespace.
+const MOUNT_TABLE: &str = "/proc/thread-self/mountinfo";
 
 /// The kernel's operations that the root operations perform, other than reads: mounts and
 /// unmounts, flushes of a block device's buffers, writes of a control file, and the sleeps

@@ -107,8 +107,10 @@
 //! caller's mappings. A root has one export at most.
 //!
 //! The mounts are made in the caller's mount namespace, which must be recursively private, as a
-//! guest's initial namespace is. A share, a child, the export, or a mapping that fails once the
-//! root has checked its request latches the root: the root refuses every later share, export, and
+//! guest's initial namespace is. Mount-point checks and mount-option reads use the calling
+//! thread's descriptor table and mount namespace, even when it shares neither with the process's
+//! first thread. A share, a child, the export, or a mapping that fails once the root has checked
+//! its request latches the root: the root refuses every later share, export, and
 //! mapping, so that its caller starts no workload on a partial set, and the mounts before it stay
 //! until the teardown, which unmounts them first.
 //!
