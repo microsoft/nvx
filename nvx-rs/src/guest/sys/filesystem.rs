@@ -87,9 +87,10 @@ pub(crate) fn unmount(target: &CStr) -> Result<(), Errno> {
 }
 
 /// Returns the ID of the mount that `path`, after its symbolic links, is on, which procfs, at
-/// `/proc`, shows in a descriptor's `fdinfo`, as `mountinfo` numbers the mounts. Two paths are on
-/// one mount exactly when their IDs are equal, whatever file systems the mounts show: a bind
-/// mount of a directory shows the file system of its source, but has an ID of its own.
+/// `/proc/thread-self/fdinfo`, shows for a descriptor in the calling thread's table, as
+/// `mountinfo` numbers the mounts. Two paths are on one mount exactly when their IDs are equal,
+/// whatever file systems the mounts show: a bind mount of a directory shows the file system of
+/// its source, but has an ID of its own.
 pub(crate) fn mount_id(path: &CStr) -> Result<u64, Errno> {
     let descriptor = super::open(
         path,
@@ -97,7 +98,7 @@ pub(crate) fn mount_id(path: &CStr) -> Result<u64, Errno> {
         Mode::empty(),
     )?;
     let information = read_file(&super::c_string(
-        format!("/proc/self/fdinfo/{}", descriptor.raw()).as_bytes(),
+        format!("/proc/thread-self/fdinfo/{}", descriptor.raw()).as_bytes(),
     )?)?;
     information
         .split(|&byte| byte == b'\n')
