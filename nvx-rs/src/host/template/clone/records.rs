@@ -14,10 +14,11 @@
 //! caller alone loses no write of. A crash of the host, which ends the clone's VM, may lose the
 //! log's last lines, so how far the clone got is uncertain, once it launched, by a log that was
 //! written during another boot, as by one that is damaged or missing: a workload may have run in
-//! the clone. A step that another record holds, the spawn, which the launch's journal records,
-//! and one that the next step follows at once, the acknowledgment, which the Activate follows, is
-//! appended with that next step, in its one write, so that the log takes a write for each step
-//! from the restore-ready event on. A reader ignores a last line that a crash cut short. A sandbox
+//! the clone. The launch appends the spawn before it returns, although the launch's journal
+//! records it too, since a teardown of the launch removes the journal. A step that the next step
+//! follows at once, the acknowledgment, which the Activate follows, is appended with that next
+//! step, in its one write, so that the log takes a write for the spawn and for each step from the
+//! restore-ready event on. A reader ignores a last line that a crash cut short. A sandbox
 //! that boots cold writes no log.
 //!
 //! # The failure record
@@ -181,8 +182,8 @@ impl ProgressLog {
 
     /// Notes that the clone reached `step`, unless it reached it, or a later step, already,
     /// without writing it: the log records it with the next step that it writes. It is for a
-    /// step that another record holds until then, as the launch's journal holds the spawn of its
-    /// VMM, or that the next step follows at once.
+    /// step that another record holds, as the record of a launch's failure holds the spawn of a
+    /// VMM that the launch could not record, or that the next step follows at once.
     pub(super) fn advance(&mut self, step: Progress) {
         self.progress = self.progress.max(step);
     }

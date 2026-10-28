@@ -113,8 +113,10 @@ impl ClonePlan {
     ///    directory, in place of one that an earlier launch left; on Windows, a named pipe whose
     ///    name the launch draws at random.
     /// 4. Runs [`supervisor::launch`] as the launch that the lease reserves, which begins it with
-    ///    the store's launch journal, starts the VMM, and records its identity in the journal,
-    ///    which holds the spawn until the progress log records it with the restore-ready event.
+    ///    the store's launch journal, starts the VMM, and records its identity in the journal.
+    /// 5. Appends the spawn to the progress log before it returns, since a teardown of the launch
+    ///    removes the journal, which records the spawn too. A launch that cannot append it fails
+    ///    at the launch stage, and ends the VMM.
     ///
     /// The VMM restores the generation's snapshot in place, in the generation's payload, which it
     /// only reads, and which the launch neither copies nor changes, so any number of clones
@@ -367,9 +369,12 @@ impl ClonePlan {
                 return Err(tracker.record(Stage::Launch, Fault::host(failure.error), teardown));
             }
         };
-        // The launch's journal records the spawn, which the progress log records with the next
-        // step.
-        tracker.advance(Progress::Spawned);
+        // The progress log records the spawn before the launch returns: the journal records it too,
+        // but a teardown of the launch removes the journal, and a reattach reads the outcome report
+        // of the clone's VM only once its VMM spawned.
+        if let Err(fault) = tracker.reach(Progress::Spawned) {
+            return Err(tracker.fail(starting, Stage::Launch, fault));
+        }
         Ok(Restoring {
             starting,
             launched,
