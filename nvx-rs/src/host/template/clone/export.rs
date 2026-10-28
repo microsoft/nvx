@@ -10,7 +10,7 @@
 //! directory is then the export's root, which the clone's guest mounts, and the sources of the
 //! plan's binds name paths in it without the child's index, which only an aggregate's root lists.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::error::{Error, Result};
 use crate::host::filesystem::{ExportPlan, GUEST_EXPORT, Owner, ReservedTargets};
@@ -57,24 +57,51 @@ impl DirectoryExport {
     }
 
     /// Refuses the export if its directory lies inside the directory of a template store,
-    /// `store`, or holds it: the guest could then reach the payload of a generation that clones
+    /// `resolved`, or holds it: the guest could then reach the payload of a generation that clones
     /// lease, and write it through a writable export, though nothing may change a leased payload
-    /// or its snapshot.
+    /// or its snapshot. Refuses it as well if it lets the guest write in one of `through`, the
+    /// directories through which the store's path, `store`, leads: the host reaches the store,
+    /// and OpenVMM the snapshots in it, by that path, so the guest could replace a link or a
+    /// directory of the path, and turn the path elsewhere.
     ///
-    /// The check reads nothing: it compares the directory's path, as the plan resolved it, with
-    /// `store`, which the caller resolved as [`filesystem::canonicalize`] resolves the plan's
-    /// paths, so that no link, and on Windows no other letter case, short name, or verbatim
-    /// prefix, hides an overlap. Fails with
+    /// The check reads nothing: it compares the directory's path, and the paths in which the
+    /// guest may write, as the plan resolved them, with `resolved` and `through`, which the caller
+    /// resolved as [`filesystem::canonicalize`] resolves the plan's paths, so that no link, and on
+    /// Windows no other letter case, short name, or verbatim prefix, hides an overlap. Fails with
     /// [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported) for such an export.
     ///
     /// [`filesystem::canonicalize`]: crate::host::filesystem::canonicalize
-    pub(super) fn check_outside(&self, store: &Path) -> Result<()> {
+    pub(super) fn check_outside(
+        &self,
+        store: &Path,
+        resolved: &Path,
+        through: &[PathBuf],
+    ) -> Result<()> {
         for child in &self.plan.children {
-            if child.root.starts_with(store) || store.starts_with(&child.root) {
+            if child.root.starts_with(resolved) || resolved.starts_with(&child.root) {
                 return Err(Error::unsupported(format!(
                     "the export of a clone cannot share {}, which overlaps the template store {}, \
                      whose leased payloads nothing may change",
                     child.root.display(),
+                    resolved.display()
+                )));
+            }
+            // The guest may write anywhere in a writable directory, unless the plan limits its
+            // writes to some of the directory's paths.
+            let written: &[PathBuf] = match (child.writable, child.write.is_empty()) {
+                (false, _) => &[],
+                (true, true) => std::slice::from_ref(&child.root),
+                (true, false) => child.write.as_slice(),
+            };
+            let directory = through
+                .iter()
+                .find(|directory| written.iter().any(|path| directory.starts_with(path)));
+            if let Some(directory) = directory {
+                return Err(Error::unsupported(format!(
+                    "the export of a clone cannot let its guest write in {}, through which the \
+                     path of the template store {} leads, since the guest could then turn that \
+                     path elsewhere",
+                    directory.display(),
                     store.display()
                 )));
             }

@@ -612,6 +612,29 @@ fn created_link(linked: io::Result<()>) -> bool {
     }
 }
 
+/// Links `link` to the directory `target`: a symbolic link on Unix, and a junction on Windows,
+/// which any user may create.
+fn link_dir(target: &Path, link: &Path) {
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(target, link).unwrap();
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        use std::process::{Command, Stdio};
+
+        let status = Command::new("cmd")
+            .raw_arg(format!(
+                "/C mklink /J \"{}\" \"{}\"",
+                link.display(),
+                target.display()
+            ))
+            .stdout(Stdio::null())
+            .status()
+            .unwrap();
+        assert!(status.success(), "cannot link {}", link.display());
+    }
+}
+
 #[test]
 fn a_clone_in_ram_restores_its_lease_with_its_image_and_a_sparse_scratch_device() {
     let fixture = Fixture::new();
@@ -2688,6 +2711,70 @@ fn exports_that_overlap_the_template_store_are_refused_before_anything_is_opened
     let export = fixture.data_export("data");
     let request = with_export(request, &export);
     drop(fixture.plan(&mut acquired, &request, NO_CONTENT).unwrap());
+}
+
+#[test]
+fn exports_that_let_the_guest_turn_the_template_store_s_path_are_refused() {
+    // The store's path leads through two links: `share/link`, to `hop/next`, which links to
+    // `private`, which holds the store. Neither directory of a link holds any part of the store,
+    // but a guest that could write in either could replace its link, and turn the path, by which
+    // the host reaches the store, and OpenVMM the snapshots in it, elsewhere.
+    let fixture = Fixture::in_store(
+        |directory| {
+            for name in ["share", "hop", "private"] {
+                fs::create_dir(directory.join(name)).unwrap();
+            }
+            fs::create_dir(directory.join("share").join("work")).unwrap();
+            let next = directory.join("hop").join("next");
+            link_dir(&directory.join("private"), &next);
+            let link = directory.join("share").join("link");
+            link_dir(&next, &link);
+            link.join("templates")
+        },
+        |_, _, _| {},
+    );
+    let (image, binding) = fixture.image("distro.erofs", IMAGE_LEN);
+    let mut acquired = fixture.acquire("sandbox");
+    let request = tmpfs_request(&image, &binding);
+    let resolved = |name: &str| filesystem::canonicalize(&fixture.directory.path().join(name));
+    let (share, hop) = (resolved("share").unwrap(), resolved("hop").unwrap());
+    // The store's path resolves outside both directories, so no export of either overlaps it.
+    let store = filesystem::canonicalize(fixture.store.dir()).unwrap();
+    assert_eq!(store, resolved("private").unwrap().join("templates"));
+    // A writable export of either directory.
+    for dir in [&share, &hop] {
+        let export = export_plan(&[(dir, "/data", false)], &[], &[]);
+        let request = with_export(request.clone(), &export);
+        let plan = fixture.plan(&mut acquired, &request, NO_CONTENT);
+        assert_eq!(
+            refused(plan, Evidence::InvalidMappings),
+            (
+                ErrorKind::Unsupported,
+                format!(
+                    "the export of a clone cannot let its guest write in {}, through which the \
+                     path of the template store {} leads, since the guest could then turn that \
+                     path elsewhere",
+                    dir.display(),
+                    fixture.store.dir().display()
+                )
+            )
+        );
+        assert_untouched(&acquired);
+    }
+    // A read-only export of the directory of a link, and one in which the guest writes only a
+    // directory beside the link, leave the link as it is.
+    let work = share.join("work");
+    for mappings in [
+        &[(share.as_path(), "/data", true)][..],
+        &[
+            (share.as_path(), "/data", true),
+            (work.as_path(), "/work", false),
+        ],
+    ] {
+        let export = export_plan(mappings, &[], &[]);
+        let request = with_export(request.clone(), &export);
+        drop(fixture.plan(&mut acquired, &request, NO_CONTENT).unwrap());
+    }
 }
 
 #[test]

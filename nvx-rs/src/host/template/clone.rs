@@ -26,10 +26,11 @@ pub use self::restore::{
     RESTORE_TO_READY_TIMEOUT, RestoreDeadlines, Started,
 };
 
+use std::collections::BTreeSet;
 use std::fmt;
 use std::fs::{self, File};
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::time::Instant;
 
 use self::export::DirectoryExport;
@@ -61,6 +62,10 @@ use crate::protocol::{CAPABILITY_LEN, HostMap};
 
 /// Bytes in a mebibyte, the unit in which messages give the size of memory blocks.
 const MIB: u64 = 1024 * 1024;
+
+/// The most links that [`path_directories`] follows in a path, more than a Linux host, 40, or a
+/// Windows host, 63, follows in one.
+const MAX_PATH_LINKS: usize = 64;
 
 /// How messages name the file of the `scratch` block device of a clone whose upper is in RAM.
 const SPARSE_WHAT: &str = "scratch device of the clone";
@@ -354,8 +359,11 @@ impl ClonePlan {
     ///   [`Evidence::HostFailure`];
     /// - with [`ErrorKind::Unsupported`] for an export whose directory, by the path that its plan
     ///   resolved, lies inside the template store's directory, [`Store::dir`], by the path that
-    ///   it resolves to, or holds it, [`Evidence::InvalidMappings`], and with [`ErrorKind::Io`] if
-    ///   the store's directory cannot be resolved, the host's evidence;
+    ///   it resolves to, or holds it, or that lets the guest write in a directory through which
+    ///   the store's path leads, as the host resolves it, links included, which the guest could
+    ///   then turn elsewhere, [`Evidence::InvalidMappings`], and with [`ErrorKind::Io`] if the
+    ///   store's directory, or a directory through which its path leads, cannot be resolved, the
+    ///   host's evidence;
     /// - with [`ErrorKind::NotFound`] if the store no longer indexes the leased generation, and as
     ///   [`Store::index`] fails, the host's evidence; with [`ErrorKind::Io`] if it indexes it with
     ///   another key than the lease names, [`Evidence::MalformedGeneration`]; and as
@@ -471,19 +479,22 @@ impl ClonePlan {
         check_lease(store, lease, locked).attribute(Evidence::HostFailure)?;
         if let Some(export) = &export {
             // The plan resolved the export's paths, so the store's path is resolved as well, so
-            // that no other spelling of it hides an overlap.
+            // that no other spelling of it hides an overlap, and so are the directories through
+            // which it leads, in which the guest must not write.
             let dir = store.dir();
+            let unresolved = |error: io::Error| {
+                Error::io(format!(
+                    "cannot resolve the template store {}",
+                    dir.display()
+                ))
+                .with_source(error)
+            };
             let resolved = filesystem::canonicalize(dir)
-                .map_err(|error| {
-                    Error::io(format!(
-                        "cannot resolve the template store {}",
-                        dir.display()
-                    ))
-                    .with_source(error)
-                })
+                .map_err(unresolved)
                 .on_host()?;
+            let through = path_directories(dir).map_err(unresolved).on_host()?;
             export
-                .check_outside(&resolved)
+                .check_outside(dir, &resolved, &through)
                 .attribute(Evidence::InvalidMappings)?;
         }
         let generation = store
@@ -773,6 +784,48 @@ fn generation_fault(error: Error) -> Fault {
         source = cause.source();
     }
     Fault::new(Evidence::MalformedGeneration, error)
+}
+
+/// Returns the directories through which `path` leads, as the host resolves it, each resolved as
+/// [`filesystem::canonicalize`] resolves the paths of an export plan: for each name of the path,
+/// from the current directory's own for a relative path, the directory in which the host looks
+/// it up, which the path before the name resolves to, and, for a name that is a link, the
+/// directories through which the link's target leads from there, through at most
+/// [`MAX_PATH_LINKS`] links in all.
+///
+/// The host reaches the template store, and OpenVMM the snapshots in it, by the path that the
+/// store names, so a guest that could write in one of these directories could replace a link or
+/// a directory of the path, and turn the host's later operations on the store elsewhere.
+fn path_directories(path: &Path) -> io::Result<Vec<PathBuf>> {
+    let mut directories = BTreeSet::new();
+    let mut pending = vec![(PathBuf::new(), std::path::absolute(path)?)];
+    let mut links = 0;
+    while let Some((start, rest)) = pending.pop() {
+        let mut prefix = start;
+        for component in rest.components() {
+            if !matches!(component, Component::Normal(_)) {
+                // The root, a prefix, or `.` names no entry, and `..` the parent of a directory,
+                // which only a write in the directory that holds that directory could move.
+                prefix.push(component);
+                continue;
+            }
+            let parent = filesystem::canonicalize(&prefix)?;
+            prefix.push(component);
+            if fs::symlink_metadata(&prefix)?.file_type().is_symlink() {
+                links += 1;
+                if links > MAX_PATH_LINKS {
+                    return Err(io::Error::other(format!(
+                        "{} leads through more than {MAX_PATH_LINKS} links",
+                        path.display()
+                    )));
+                }
+                // A link's target that is absolute replaces the directory that it starts from.
+                pending.push((parent.clone(), fs::read_link(&prefix)?));
+            }
+            directories.insert(parent);
+        }
+    }
+    Ok(directories.into_iter().collect())
 }
 
 /// Refuses the path of the file of a clone's block device, which messages call `what`, that
