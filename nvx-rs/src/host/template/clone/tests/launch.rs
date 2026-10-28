@@ -25,7 +25,7 @@ use crate::host::store::{
     CLONE_SCRATCH_NAME, JOURNAL_NAME, LaunchState, LockedStore, OUTCOME_NAME, RESTORE_READY_NAME,
     Recovery, RuntimeIdentity,
 };
-use crate::host::supervisor::{self, Reattached, StopOutcome, VmmCommand};
+use crate::host::supervisor::{self, Reattached, StopOutcome, Vmm, VmmCommand};
 use crate::host::template::Retirement;
 use crate::host::template::clone::launch::{Hooks, Point};
 use crate::host::template::clone::reattach::reattach_clone_with;
@@ -3036,6 +3036,75 @@ fn a_clone_that_its_holder_stopped_ended_whatever_a_reboot_left_of_its_progress_
         assert!(recorded.is_none(), "{rebooted}: {recorded:?}");
         crashed.releases(&mut locked);
     }
+}
+
+#[test]
+fn a_clone_whose_vmm_exited_before_its_holder_s_stop_began_lost_its_status() {
+    let never = |_: &Vmm, _: Instant| -> io::Result<()> {
+        panic!("a stop ran the graceful step of a VMM that had exited")
+    };
+    // Its holder found the clone's VMM running, which then exits, without a report of the
+    // guest's own end, before the holder's stop begins.
+    let crashed = Crashed::at("committed");
+    let mut locked = crashed.lock();
+    let mut control = ReattachControl::answering(Some);
+    let vmm = match crashed.take_over(&mut locked, &crashed.runtime, &mut control) {
+        ReattachedClone::Live { vmm, .. } => vmm,
+        other => panic!("the reattach found {}", describe(&other)),
+    };
+    crashed.vmm.end_and_wait();
+    let stopped = vmm
+        .stop_unless_exited(&mut locked, Instant::now() + TIMEOUT, None, never)
+        .unwrap();
+    assert!(stopped.is_none(), "{stopped:?}");
+    // The stop kept the runtime record, and with it the lease, so the reattach finds that the VM
+    // exited unheld: the clone lost its status, which quarantines nothing.
+    assert_eq!(locked.runtime().unwrap().as_ref(), Some(vmm.record()));
+    crashed.refuses_release(&mut locked);
+    let failure = failed(crashed.take_over(&mut locked, &crashed.runtime, &mut control));
+    assert_eq!(failure.kind(), ErrorKind::Exited, "{failure}");
+    let (run, lost) = ((Stage::Run, Progress::Committed), Evidence::LostStatus);
+    assert_recorded(
+        &failure,
+        &crashed.lease,
+        &locked,
+        run,
+        lost,
+        Teardown::Exited,
+    );
+    assert_eq!(failure.record().status, None);
+    let deadline = Some(Instant::now() + TIMEOUT);
+    assert!(
+        !failure
+            .quarantine(&crashed.fixture.store, deadline)
+            .unwrap()
+    );
+    assert!(locked.runtime().unwrap().is_none());
+    crashed.releases(&mut locked);
+
+    // A stop that ends such a VM as one that it stopped clears the record, and the clone ended.
+    let crashed = Crashed::at("committed");
+    let mut locked = crashed.lock();
+    let vmm = match crashed.take_over(&mut locked, &crashed.runtime, &mut control) {
+        ReattachedClone::Live { vmm, .. } => vmm,
+        other => panic!("the reattach found {}", describe(&other)),
+    };
+    crashed.vmm.end_and_wait();
+    let stopped = vmm
+        .stop(&mut locked, Instant::now() + TIMEOUT, None, never)
+        .unwrap();
+    assert_eq!(stopped.outcome, StopOutcome::Graceful);
+    assert!(locked.runtime().unwrap().is_none());
+    match crashed.take_over(&mut locked, &crashed.runtime, &mut control) {
+        ReattachedClone::Ended {
+            progress: Progress::Committed,
+            report: None,
+        } => {}
+        other => panic!("the reattach found {}", describe(&other)),
+    }
+    let recorded = read_failure(&locked.clone_failure_path()).unwrap();
+    assert!(recorded.is_none(), "{recorded:?}");
+    crashed.releases(&mut locked);
 }
 
 #[test]
