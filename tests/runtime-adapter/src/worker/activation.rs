@@ -25,7 +25,7 @@ use super::executions::{Executions, Sandbox};
 use super::order::Order;
 use super::{RootOperations, Worked, serve_root};
 use crate::GUEST_BUILD;
-use crate::frame::Message;
+use crate::frame::{FrameError, Message};
 use crate::guest::{ServeError, Step};
 use crate::root::Ready;
 
@@ -125,6 +125,26 @@ impl CloneState {
     pub(super) fn tick(&mut self) -> Option<Worked> {
         let ticked = self.activation.tick(Instant::now());
         ticked.err().map(|failure| unactivated(&failure))
+    }
+
+    /// Returns how the worker ends once the session's receipt failed with `error`, if the
+    /// activation takes the failure: an `Activate` whose header announced more than
+    /// [`MAX_ACTIVATE_BODY`](crate::frame::MAX_ACTIVATE_BODY) bytes, the most that a record has,
+    /// which the framing refused before it took any byte of its body. The activation takes it as
+    /// an `Activate` whose record has that many bytes, which fails it, with
+    /// [`ACTIVATION_RECORD`](status::ACTIVATION_RECORD) once the session is restricted, whether
+    /// the clone is ready or not. Any other failure ends the session as it ends that of a VM that
+    /// boots cold.
+    pub(super) fn refused(&mut self, error: &ServeError) -> Option<Worked> {
+        let ServeError::Frame(FrameError::Length { kind, length }) = *error else {
+            return None;
+        };
+        if kind != Message::Activate(Vec::new()).kind() {
+            return None;
+        }
+        let input = ActivationInput::TooLong(length);
+        let failure = self.activation.input(Instant::now(), input).err()?;
+        Some(unactivated(&failure))
     }
 
     /// Handles `message` at `now` through the activation, and, once the clone is ready, in the

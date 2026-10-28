@@ -66,6 +66,9 @@ pub use self::apply::{Applied, ApplyError, RootTemplate, apply};
 ///     Partial,
 ///     /// The host's Activate, with its record's bytes.
 ///     Activate(Vec<u8>),
+///     /// The host's Activate, whose header announced this many bytes, more than a record has,
+///     /// which the framing refused before it read any of them.
+///     TooLong(usize),
 ///     /// Any other message of the host, such as a part of the mapping table, or the start.
 ///     Other(Vec<u8>),
 /// }
@@ -104,6 +107,7 @@ pub use self::apply::{Applied, ApplyError, RootTemplate, apply};
 ///             Received::Reset => ActivationInput::Reset,
 ///             Received::Partial => ActivationInput::Flow,
 ///             Received::Activate(record) => ActivationInput::Activate(record),
+///             Received::TooLong(length) => ActivationInput::TooLong(*length),
 ///             Received::Other(_) => ActivationInput::Request,
 ///         };
 ///         match activation.input(Instant::now(), input)? {
@@ -215,6 +219,11 @@ impl<F: AdmissionFence> Activation<F> {
     ///    acknowledges, a byte-equal retry of the Activate gets the cached result, what Ready
     ///    reports, without activating again, and any other Activate fails as while activating.
     ///    Every other request goes to the adapter's order, as after a cold boot.
+    ///
+    /// An Activate whose record the adapter's framing refused unread, as longer than a record can
+    /// be, [`ActivationInput::TooLong`], fails as one whose record has that many bytes: in the
+    /// transport bootstrap with [`ActivationCause::Request`], and from then on with
+    /// [`ActivationCause::Record`].
     pub fn input(
         &mut self,
         now: Instant,
@@ -236,12 +245,24 @@ impl<F: AdmissionFence> Activation<F> {
                 ActivationState::Activating | ActivationState::Ready | ActivationState::Started,
                 ActivationInput::Activate(record),
             ) => self.retry(record),
+            // A record that long never decodes, so its Activate fails as one whose bytes the
+            // adapter read would, whether the activation accepted another or not.
+            (
+                ActivationState::Restricted
+                | ActivationState::Activating
+                | ActivationState::Ready
+                | ActivationState::Started,
+                ActivationInput::TooLong(length),
+            ) => Err(self.fail(ActivationCause::Record(ActivationError::TooLong(length)))),
             (ActivationState::Ready | ActivationState::Started, ActivationInput::Request) => {
                 Ok(ActivationAction::Serve)
             }
-            (_, ActivationInput::Activate(_) | ActivationInput::Request) => {
-                Err(self.fail(ActivationCause::Request))
-            }
+            (
+                _,
+                ActivationInput::Activate(_)
+                | ActivationInput::TooLong(_)
+                | ActivationInput::Request,
+            ) => Err(self.fail(ActivationCause::Request)),
         }
     }
 
@@ -417,6 +438,12 @@ pub enum ActivationInput<'a> {
     /// The host's Activate, with the bytes of its activation record, the canonical encoding of an
     /// [`ActivationRecord`].
     Activate(&'a [u8]),
+    /// The host's Activate, whose record the adapter's framing refused before it took any byte of
+    /// it, since its header announced this many bytes, more than
+    /// [`MAX_RECORD_BYTES`](crate::activation::MAX_RECORD_BYTES): the activation takes it as an
+    /// Activate whose record's bytes are that long, which [`ActivationRecord::decode`] refuses
+    /// with [`ActivationError::TooLong`].
+    TooLong(usize),
     /// Any other request of the host, such as a part of the mapping table, the start of the
     /// sandbox, an execution, or a probe of the adapter's framing.
     Request,

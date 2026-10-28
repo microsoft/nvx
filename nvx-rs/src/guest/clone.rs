@@ -115,7 +115,9 @@
 //!    request or another reset, fails the activation. The activation decodes the Activate's
 //!    record with [`ActivationRecord::decode`](crate::activation::ActivationRecord::decode), and
 //!    accepts it only as a clone's, with a restore section, that expects the CPU count and the
-//!    memory size that the repair reports, before anything has a side effect;
+//!    memory size that the repair reports, before anything has a side effect. An Activate whose
+//!    record the adapter's framing refused unread, as longer than a record can be, fails as a
+//!    record that long does;
 //! 3. activating: the adapter applies the accepted record with [`apply`](fn@apply), which
 //!    activates the root and the workload with its settings, as below, then reports the result
 //!    to [`Activation::complete`];

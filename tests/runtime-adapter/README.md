@@ -72,7 +72,9 @@ The session keeps no message boundaries, so a message may span several of its
 records, and one record may end a message and start the next. `Decoder`
 reassembles the messages. It checks each header before it takes any byte of
 the body, and holds at most one partial message. A malformed message ends the
-stream, because the framing cannot find the next message after it.
+stream, because the framing cannot find the next message after it. A clone's
+`Activate` whose header announces more than 1 KiB fails the clone's
+activation instead, as a record that long does.
 
 The framing carries each body as bytes, within its kind's limit. The bodies of
 kinds 6 to 22 and 24 have encodings of their own, which the `root`, `probe`,
@@ -1760,6 +1762,9 @@ the tests' directory of account databases. The tests cover:
   resources, which fail the activation with nothing applied, and a GPT disk and
   a workload identity whose account or group the image lacks, which fail its
   application, each with the status of its class, and no `Ready`;
+- an `Activate` whose header announces more than 1 KiB, which the framing
+  refuses before it takes any byte of its body, and which fails the activation
+  with the record's status, before the clone is ready and once it is;
 - the activation's deadline, whether the restore's reset came or not, or part
   of an `Activate`, which the broker sends before the worker runs, so that the
   worker takes it at once, however late it runs: the deadline fails the

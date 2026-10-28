@@ -3962,6 +3962,7 @@ mod clones {
     use nvx::guest::clone::{Activation, AdmissionFence, RootTemplate};
     use nvx::protocol::nvxs::{GuestEvent, GuestSession};
     use nvx::protocol::status;
+    use runtime_adapter::frame::MAX_ACTIVATE_BODY;
     use runtime_adapter::worker::UNACTIVATED_DRAIN;
     use runtime_adapter::worker::activation::ACTIVATION_TIMEOUT;
     use runtime_adapter::worker::capture::{self, Admission};
@@ -4336,6 +4337,48 @@ mod clones {
             broker.send_data(&activate(&record).encode().unwrap(), OUTER_MAX_PAYLOAD);
             let root = unactivated(&mut broker, working, expected);
             assert_eq!(root.calls, [applied(&record)]);
+        }
+    }
+
+    #[test]
+    fn a_clone_fails_on_an_activate_longer_than_a_record_before_it_takes_its_body() {
+        // The framing refuses the header of an Activate that announces more bytes than a record
+        // can have before it takes any byte of its body, and the activation takes it as a record
+        // that long: it fails with the record's status, whether the clone is ready or not, and the
+        // worker answers nothing more.
+        let accepted = record(1, Some(WORKLOAD));
+        let kind = activate(&accepted).kind();
+        for length in [MAX_ACTIVATE_BODY + 1, usize::try_from(u32::MAX).unwrap()] {
+            let mut header = u32::try_from(length).unwrap().to_le_bytes().to_vec();
+            header.push(kind);
+            for ready in [false, true] {
+                let (mut broker, working) =
+                    start_clone(FakeRoot::booting(&layout()), ACTIVATION_TIMEOUT);
+                broker.reset(RESTORED);
+                let mut calls = Vec::new();
+                if ready {
+                    let replies = broker.exchange(&[activate(&accepted)], OUTER_MAX_PAYLOAD, 1);
+                    assert_eq!(replies, [activated(&accepted)]);
+                    calls.push(applied(&accepted));
+                }
+                broker.send_data(&header, OUTER_MAX_PAYLOAD);
+                let (root, worked) = joined(working);
+                let worked = worked.unwrap();
+                let Worked::Unactivated {
+                    status: code,
+                    problem,
+                } = &worked
+                else {
+                    panic!("{length}, ready {ready}: {worked:?}");
+                };
+                assert_eq!(*code, status::ACTIVATION_RECORD, "{problem}");
+                assert!(problem.contains(&format!("{length} bytes")), "{problem}");
+                while let Some(record) = broker.read() {
+                    broker.check(&record);
+                    assert_eq!(broker.accept(&record), [], "{problem}");
+                }
+                assert_eq!(root.calls, calls, "{problem}");
+            }
         }
     }
 

@@ -395,6 +395,54 @@ fn a_changed_record_or_a_new_transaction_is_final() {
 }
 
 #[test]
+fn an_activate_too_long_to_read_fails_as_a_record_that_long() {
+    let t0 = Instant::now();
+    // In the transport bootstrap, as any Activate.
+    let fence = FakeFence::default();
+    let mut activation = bootstrap(&fence, t0);
+    let failure = activation
+        .input(after(t0, 1), ActivationInput::TooLong(MAX_RECORD_BYTES + 1))
+        .unwrap_err();
+    assert_eq!(failure.state(), ActivationState::Bootstrap);
+    assert!(matches!(failure.cause(), ActivationCause::Request));
+    assert_final(&mut activation, &fence, &failure, after(t0, 2), 0);
+    // From then on, as an Activate whose record has that many bytes, which no record has: while
+    // restricted, while the activation runs, and once it is ready, or started, whose fence stays
+    // open.
+    let states: [(Setup, u32); 4] = [(restricted, 0), (activating, 0), (ready, 1), (started, 1)];
+    for (activation, opened) in states {
+        for length in [MAX_RECORD_BYTES + 1, usize::MAX] {
+            let fence = FakeFence::default();
+            let mut activation = activation(&fence, t0);
+            let state = activation.state();
+            let failure = activation
+                .input(after(t0, 1), ActivationInput::TooLong(length))
+                .unwrap_err();
+            assert_eq!(failure.state(), state);
+            assert!(
+                matches!(
+                    failure.cause(),
+                    ActivationCause::Record(ActivationError::TooLong(long)) if *long == length
+                ),
+                "{state}: {failure}"
+            );
+            assert_final(&mut activation, &fence, &failure, after(t0, 2), opened);
+        }
+    }
+    // Past the deadline, before the clone is ready, it fails as every input does.
+    let fence = FakeFence::default();
+    let mut activation = restricted(&fence, t0);
+    let failure = activation
+        .input(
+            after(t0, 10),
+            ActivationInput::TooLong(MAX_RECORD_BYTES + 1),
+        )
+        .unwrap_err();
+    assert!(matches!(failure.cause(), ActivationCause::Expired));
+    assert_final(&mut activation, &fence, &failure, after(t0, 11), 0);
+}
+
+#[test]
 fn a_failed_application_is_final_and_no_retry_applies_the_record_again() {
     let t0 = Instant::now();
     let fence = FakeFence::default();

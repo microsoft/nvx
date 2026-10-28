@@ -97,20 +97,22 @@
 //! with `MapFailed`, as the worker of a VM that boots cold does without one.
 //!
 //! Until the clone is ready, its session takes nothing but that `Activate`: another reset, any
-//! other message, a `Stop` and a `Ping` included, an `Activate` that the activation refuses, and
-//! the passing of the activation's deadline, which ends `activation::ACTIVATION_TIMEOUT` after the
-//! repair's acknowledgement of the restore, fail the activation finally, as does an application
-//! that failed, which nothing retries. Once the clone is ready, the worker answers a retry of the
-//! same `Activate`, byte for byte, with the same `Ready`, without applying it again, and fails the
-//! activation on another. A failed activation ends the worker, and with it the VM, with the status
-//! of `nvx::protocol::status` of the failure's class, from 50 to 58, as
-//! `activation::failure_status` selects it, once the worker dropped its executions and wrote what
-//! it queued, for at most [`UNACTIVATED_DRAIN`], so that a stream that takes nothing, as once the
-//! broker failed, does not keep the clone from ending, and whatever the stream does then. A broker
-//! that closes the stream before the clone is ready ends it the same way, with
-//! [`SESSION_STATUS`], as [`Worked::Abandoned`] tells, and once the clone is ready, as the worker
-//! of a VM that boots cold ends. The worker of a VM that boots cold, which has no activation,
-//! refuses an `Activate` as it refuses any message that it does not take in its state.
+//! other message, a `Stop` and a `Ping` included, an `Activate` that the activation refuses, one
+//! whose header announces more bytes than a record can have, which the framing refuses before it
+//! takes any byte of its body, and the passing of the activation's deadline, which ends
+//! `activation::ACTIVATION_TIMEOUT` after the repair's acknowledgement of the restore, fail the
+//! activation finally, as does an application that failed, which nothing retries. Once the clone
+//! is ready, the worker answers a retry of the same `Activate`, byte for byte, with the same
+//! `Ready`, without applying it again, and fails the activation on another. A failed activation
+//! ends the worker, and with it the VM, with the status of `nvx::protocol::status` of the
+//! failure's class, from 50 to 58, as `activation::failure_status` selects it, once the worker
+//! dropped its executions and wrote what it queued, for at most [`UNACTIVATED_DRAIN`], so that a
+//! stream that takes nothing, as once the broker failed, does not keep the clone from ending, and
+//! whatever the stream does then. A broker that closes the stream before the clone is ready ends
+//! it the same way, with [`SESSION_STATUS`], as [`Worked::Abandoned`] tells, and once the clone is
+//! ready, as the worker of a VM that boots cold ends. The worker of a VM that boots cold, which
+//! has no activation, refuses an `Activate` as it refuses any message that it does not take in
+//! its state.
 //!
 //! # The mapping table and the start
 //!
@@ -575,6 +577,19 @@ impl Phase {
         }
     }
 
+    /// Returns how the worker ends once the session's receipt failed with `error`, if its phase
+    /// takes the failure: a clone's activation takes an `Activate` that the framing refused
+    /// unread, as longer than a record can be, which fails it. Otherwise the error ends the
+    /// session.
+    #[cfg_attr(not(target_arch = "x86_64"), allow(unused_variables))]
+    fn refused(&mut self, error: &ServeError) -> Option<Worked> {
+        match self {
+            Self::Configuring | Self::Ready(_) => None,
+            #[cfg(target_arch = "x86_64")]
+            Self::Clone(state) => state.refused(error),
+        }
+    }
+
     /// Handles `message` at `now`, through `operations`, and hands a message about an execution to
     /// `executions`, which queue what they answer on `connection`, and returns the worker's step.
     fn handle<S: Read + Write + AsFd>(
@@ -633,7 +648,17 @@ fn serve<S: Read + Write + AsFd>(
     loop {
         connection.flush()?;
         while !connection.is_overloaded() {
-            let message = match connection.receive()? {
+            let received = match connection.receive() {
+                Ok(received) => received,
+                Err(error) => match phase.refused(&error) {
+                    Some(worked) => {
+                        executions.clear();
+                        return end(&mut connection, worked);
+                    }
+                    None => return Err(error),
+                },
+            };
+            let message = match received {
                 None => break,
                 Some(Received::Closed) => {
                     // The broker may have closed only its end of the stream, and read on: what
