@@ -11086,6 +11086,528 @@ class MicrovmTests(unittest.TestCase):
                     fingerprints=[original, changed],
                 )
 
+    def test_platform_aggregate_export_script_mounts_and_checks_the_aggregate(self):
+        script = microvm_tests._read_script("platform-aggregate-export.sh")
+        # The clone keeps its captured command line, which discovers the slot
+        # but names no filesystem, so the guest mounts the aggregate itself.
+        self.assertIn(
+            "\ngrep -q 'virtio_mmio.device=0x1000@0xd0001000:6' /proc/cmdline ||",
+            script,
+        )
+        self.assertIn(
+            "\nif grep -Eq '(^| )(virtfs_|nvx_share=)' /proc/cmdline;", script
+        )
+        self.assertIn('\nmount -t virtiofs microvm "$shares" ||', script)
+        self.assertIn(r"""[ "$(ls "$shares" | tr '\n' ' ')" = "0 1 2 3 4 " ]""", script)
+        # It checks every child of the aggregate, and binds a directory and a
+        # file child where it needs them.
+        for child in range(5):
+            self.assertIn(f'"$shares/{child}', script)
+        self.assertIn('\nmount --bind "$shares/0" /workspace ||', script)
+        self.assertIn('\nmount --bind "$shares/3" /config/settings.json ||', script)
+        self.assertIn(
+            "\n    echo "
+            f'"{microvm_tests.PLATFORM_AGGREGATE_FAILURE_MARKER.decode()} $1"\n',
+            script,
+        )
+        self.assertTrue(
+            script.endswith(
+                f"\necho {microvm_tests.PLATFORM_AGGREGATE_MARKER.decode()}\n"
+            )
+        )
+
+    def _run_platform_aggregate_export(
+        self,
+        output_dir: Path,
+        measure_once: MagicMock,
+        *,
+        fingerprints: Sequence[tuple[str, str, str, str | None]] | None = None,
+        refused: Callable[..., None] | None = None,
+        platform: str = "linux",
+    ) -> tuple[MagicMock, MagicMock, MagicMock]:
+        fingerprint = ("manifest", "state", "memory", None)
+        with (
+            patch.object(
+                microvm_tests,
+                "workload_boot_command",
+                return_value=["openvmm", "boot"],
+            ) as workload_boot_command,
+            patch.object(microvm_tests, "capture_snapshot") as capture_snapshot,
+            patch.object(microvm_tests, "measure_once", measure_once),
+            patch.object(
+                microvm_tests,
+                "_scratch_snapshot_fingerprint",
+                side_effect=fingerprints or itertools.repeat(fingerprint),
+            ),
+            patch.object(
+                microvm_tests, "_expect_process_failure", side_effect=refused
+            ) as expect_failure,
+            patch.object(microvm_tests.sys, "platform", platform),
+        ):
+            microvm_tests.run_platform_aggregate_export(
+                Path("openvmm"),
+                Path("vmlinux"),
+                Path("initrd"),
+                "kvm",
+                memory_mib=128,
+                timeout=60,
+                output_dir=output_dir,
+            )
+        return workload_boot_command, capture_snapshot, expect_failure
+
+    @staticmethod
+    def _aggregate_children(command: list[str]) -> list[tuple[str, Path, str]]:
+        """Return the name, host path, and flags of each `--mount-child` of
+        `command`, in order."""
+        children: list[tuple[str, Path, str]] = []
+        for index, argument in enumerate(command):
+            if argument == "--mount-child":
+                name, rest = command[index + 1].split(",", 1)
+                host_path, flags = rest.split(",", 1) if "," in rest else (rest, "")
+                children.append((name, Path(host_path), flags))
+        return children
+
+    @staticmethod
+    def _option_values(command: list[str], option: str) -> list[str]:
+        return [
+            command[index + 1]
+            for index, argument in enumerate(command)
+            if argument == option
+        ]
+
+    @staticmethod
+    def _aggregate_guest(children: list[tuple[str, Path, str]]) -> None:
+        """Change the host trees as the clone's guest does through the
+        aggregate."""
+        roots = {name: host_path for name, host_path, _ in children}
+        (roots["0"] / "from-guest").write_bytes(b"NVX-GUEST-WRITE\n")
+        (roots["0"] / "guest-directory").mkdir()
+        with (roots["2"] / "notes one.txt").open("ab") as notes:
+            notes.write(b"NVX-GUEST-NOTE\n")
+        roots["4"].write_bytes(b"NVX-GUEST-OUTPUT\n")
+
+    @classmethod
+    def _platform_aggregate_measure(
+        cls,
+        output: bytes | None = None,
+        *,
+        guest: Callable[[list[tuple[str, Path, str]]], None] | None = None,
+        on_restore: Callable[[list[str]], None] | None = None,
+    ) -> MagicMock:
+        def measure(command: list[str], **kwargs: object) -> None:
+            if on_restore is not None:
+                on_restore(command)
+            (guest or cls._aggregate_guest)(cls._aggregate_children(command))
+            log_path = cast(Path, kwargs["log_path"])
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            log_path.write_bytes(
+                output
+                if output is not None
+                else microvm_tests.PLATFORM_POST_RESTORE_MARKER
+                + b"\r\n"
+                + microvm_tests.PLATFORM_AGGREGATE_MARKER
+                + b"\r\n"
+                + benchmark.RESTORE_MARKER
+                + b"\r\n"
+            )
+
+        return MagicMock(side_effect=measure)
+
+    def test_platform_aggregate_export_attaches_an_aggregate_at_the_restore(self):
+        def blocks(command: list[str]) -> list[str]:
+            return self._option_values(command, "--microvm-sandbox-block")
+
+        trees: dict[str, dict[str, bytes | None]] = {}
+
+        def on_restore(command: list[str]) -> None:
+            for name, host_path, flags in self._aggregate_children(command):
+                trees[name] = (
+                    {"": host_path.read_bytes()}
+                    if flags.endswith("file")
+                    else microvm_tests._tree_contents(host_path)
+                )
+
+        # Each refused restore requests an aggregate that a cold boot refuses
+        # for the reason that the scenario expects.
+        refusals: list[str] = []
+
+        def refused(command: list[str], *args: object, **_kwargs: object) -> None:
+            reason = cast(bytes, args[2])
+            children = self._aggregate_children(command)
+            roots = [host_path for _, host_path, _ in children]
+            denied = [
+                Path(path) for path in self._option_values(command, "--mount-deny")
+            ]
+            if reason == b"must not overlap":
+                (_, first, _), (_, second, _) = children
+                self.assertTrue(second.is_relative_to(first))
+                refusals.append(
+                    "overlap" if first.is_dir() and second.is_dir() else "file"
+                )
+            elif reason == b"not a regular file":
+                ((_, host_path, flags),) = children
+                self.assertTrue(host_path.is_dir())
+                self.assertEqual(flags, "ro,file")
+                refusals.append("directory-as-file")
+            elif reason == b"not a plain directory":
+                ((_, host_path, flags),) = children
+                self.assertTrue(host_path.is_file())
+                self.assertEqual(flags, "ro")
+                refusals.append("file-as-directory")
+            elif reason == b"not unique":
+                self.assertEqual([name for name, _, _ in children], ["same", "same"])
+                self.assertTrue(all(root.is_dir() for root in roots))
+                refusals.append("repeated-name")
+            elif reason == b"exposes the file":
+                file_children = [
+                    host_path
+                    for _, host_path, flags in children
+                    if flags.endswith("file")
+                ]
+                self.assertIn(denied[-1], file_children)
+                refusals.append("file-policy")
+            elif reason == b"outside the filesystem export roots":
+                self.assertTrue(denied[-1].is_dir())
+                self.assertFalse(any(denied[-1].is_relative_to(root) for root in roots))
+                refusals.append("outside-policy")
+            elif reason == b"absolute host path":
+                self.assertFalse(denied[-1].is_absolute())
+                refusals.append("relative-policy")
+            else:
+                self.fail(f"unexpected refusal {reason!r}")
+
+        with tempfile.TemporaryDirectory() as temporary:
+            output_dir = Path(temporary) / "logs"
+            measure_once = self._platform_aggregate_measure(on_restore=on_restore)
+            (
+                workload_boot_command,
+                capture_snapshot,
+                expect_failure,
+            ) = self._run_platform_aggregate_export(
+                output_dir, measure_once, refused=refused
+            )
+            logs = sorted(path.name for path in output_dir.iterdir())
+
+        self.assertIn("platform-aggregate-export", microvm_tests.MICROVM_TEST_SCENARIOS)
+        self.assertIn(
+            "platform-aggregate-export", microvm_tests.SANDBOX_CONTROL_SCENARIOS
+        )
+        # A platform command line carries no caller tokens, and the capture
+        # leaves the filesystem slot dormant.
+        self.assertEqual(workload_boot_command.call_args.args[5], "")
+        capture_command = capture_snapshot.call_args.args[0]
+        self.assertNotIn("--mount", capture_command)
+        self.assertNotIn("--mount-aggregate", capture_command)
+        self.assertEqual(
+            capture_command[capture_command.index("--snapshot-tier") + 1], "platform"
+        )
+        capture_blocks = blocks(capture_command)
+        self.assertEqual(len(capture_blocks), 2)
+        self.assertRegex(capture_blocks[0], r"^distro:file:.+,ro$")
+        self.assertRegex(capture_blocks[1], r"^scratch:file:.+(?<!,ro)$")
+        self.assertEqual(capture_snapshot.call_args.kwargs["processors"], 1)
+        self.assertEqual(
+            capture_snapshot.call_args.kwargs["post_restore_script"],
+            microvm_tests._read_script("platform-aggregate-export.sh"),
+        )
+
+        # One clone restores the snapshot with a fresh scratch and attaches the
+        # aggregate of the filesystem-shares scenario to the dormant slot.
+        measure_once.assert_called_once()
+        restore = measure_once.call_args.args[0]
+        self.assertIn("--restore-snapshot", restore)
+        restore_blocks = blocks(restore)
+        self.assertEqual(restore_blocks[0], capture_blocks[0])
+        self.assertRegex(restore_blocks[1], r"^scratch:file:.+(?<!,ro)$")
+        self.assertNotEqual(restore_blocks[1], capture_blocks[1])
+        self.assertEqual(
+            self._option_values(restore, "--mount-aggregate"), ["/run/nvx/shares"]
+        )
+        children = self._aggregate_children(restore)
+        self.assertEqual(
+            [(name, flags) for name, _, flags in children],
+            [("0", "rw"), ("1", "ro"), ("2", "rw"), ("3", "ro,file"), ("4", "rw,file")],
+        )
+        workspace, toolcache, data, settings, output = (
+            host_path for _, host_path, _ in children
+        )
+        self.assertEqual(
+            self._option_values(restore, "--mount-deny"),
+            [str(data), str(workspace / "secrets"), str(toolcache / "credentials")],
+        )
+        self.assertEqual(
+            self._option_values(restore, "--mount-allow"),
+            [str(data / "public"), str(data / "notes one.txt")],
+        )
+        self.assertEqual(
+            self._option_values(restore, "--mount-write"), [str(data / "notes one.txt")]
+        )
+        self.assertNotIn("--mount-owner", restore)
+        self.assertEqual(
+            trees,
+            {
+                "0": {
+                    "secrets": None,
+                    "secrets/token": b"NVX-SECRET",
+                    "seed": b"NVX-WORKSPACE",
+                },
+                "1": {
+                    "credentials": None,
+                    "credentials/token": b"NVX-CREDENTIAL",
+                    "seed": b"NVX-TOOLCACHE",
+                    "tools": None,
+                    "tools/node": b"NVX-TOOL",
+                },
+                "2": {
+                    "notes one.txt": b"NVX-NOTES\n",
+                    "private.txt": b"NVX-PRIVATE",
+                    "public": None,
+                    "public/readme": b"NVX-PUBLIC",
+                },
+                "3": {"": b"NVX-SETTINGS"},
+                "4": {"": b"NVX-OUTPUT\n"},
+            },
+        )
+        # Neither file child shares its directory, which holds another file.
+        self.assertEqual(settings.name, "settings.json")
+        self.assertEqual(output.name, "output.txt")
+        self.assertEqual(
+            measure_once.call_args.kwargs["environment"]["OPENVMM_LOG"], "off"
+        )
+        self.assertTrue(measure_once.call_args.kwargs["guest_exit_prequeued"])
+        self.assertEqual(
+            measure_once.call_args.kwargs["failure_marker"],
+            microvm_tests.PLATFORM_AGGREGATE_FAILURE_MARKER,
+        )
+        self.assertEqual(logs, ["platform-aggregate-export-restore.log"])
+
+        # OpenVMM refuses the other restores before the guest runs.
+        self.assertEqual(
+            [entry.args[3] for entry in expect_failure.call_args_list],
+            [reason for _, reason in microvm_tests.PLATFORM_AGGREGATE_REJECTED],
+        )
+        self.assertEqual(
+            [entry.args[1].name for entry in expect_failure.call_args_list],
+            [
+                f"platform-aggregate-export-rejected-{name}.log"
+                for name, _ in microvm_tests.PLATFORM_AGGREGATE_REJECTED
+            ],
+        )
+        self.assertEqual(
+            refusals,
+            [
+                "overlap",
+                "file",
+                "directory-as-file",
+                "file-as-directory",
+                "repeated-name",
+                "file-policy",
+                "outside-policy",
+                "relative-policy",
+            ],
+        )
+        for entry in expect_failure.call_args_list:
+            self.assertIn("--restore-snapshot", entry.args[0])
+            self.assertEqual(blocks(entry.args[0]), restore_blocks)
+            self.assertNotIn("--mount-owner", entry.args[0])
+            self.assertEqual(
+                entry.kwargs["forbidden_markers"],
+                (
+                    microvm_tests.PLATFORM_POST_RESTORE_MARKER,
+                    microvm_tests.PLATFORM_AGGREGATE_MARKER,
+                    benchmark.RESTORE_MARKER,
+                ),
+            )
+
+    def test_platform_aggregate_export_refuses_caller_ownership_on_windows(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            _, _, expect_failure = self._run_platform_aggregate_export(
+                Path(temporary), self._platform_aggregate_measure(), platform="win32"
+            )
+        rejected = len(microvm_tests.PLATFORM_AGGREGATE_REJECTED)
+        self.assertEqual(len(expect_failure.call_args_list), rejected + 1)
+        owner = expect_failure.call_args_list[-1]
+        self.assertEqual(
+            owner.args[3], microvm_tests.PLATFORM_AGGREGATE_OWNER_REJECTION
+        )
+        self.assertEqual(
+            owner.args[1].name, "platform-aggregate-export-rejected-caller-owner.log"
+        )
+        # The restore is the clone's, with caller ownership.
+        self.assertEqual(owner.args[0][-2:], ["--mount-owner", "caller"])
+        self.assertEqual(len(self._aggregate_children(owner.args[0])), 5)
+
+    def test_platform_aggregate_export_requires_the_platform_repair_and_the_check(
+        self,
+    ):
+        complete = (
+            microvm_tests.PLATFORM_POST_RESTORE_MARKER,
+            microvm_tests.PLATFORM_AGGREGATE_MARKER,
+        )
+        for missing in complete:
+            output = b"".join(
+                marker + b"\r\n" for marker in complete if marker != missing
+            )
+            with (
+                self.subTest(missing=missing),
+                tempfile.TemporaryDirectory() as temporary,
+            ):
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "^platform aggregate export restore did not report "
+                    + re.escape(repr(missing.decode()))
+                    + "$",
+                ):
+                    self._run_platform_aggregate_export(
+                        Path(temporary), self._platform_aggregate_measure(output)
+                    )
+
+    def test_platform_aggregate_export_requires_exactly_the_guest_changes(self):
+        def guest_then(
+            change: Callable[[dict[str, Path]], object],
+        ) -> Callable[[list[tuple[str, Path, str]]], None]:
+            def guest(children: list[tuple[str, Path, str]]) -> None:
+                self._aggregate_guest(children)
+                change({name: host_path for name, host_path, _ in children})
+
+            return guest
+
+        def skip_write(children: list[tuple[str, Path, str]]) -> None:
+            roots = {name: host_path for name, host_path, _ in children}
+            (roots["0"] / "guest-directory").mkdir()
+
+        def skip_directory(children: list[tuple[str, Path, str]]) -> None:
+            roots = {name: host_path for name, host_path, _ in children}
+            (roots["0"] / "from-guest").write_bytes(b"NVX-GUEST-WRITE\n")
+
+        for name, guest, message in (
+            ("missing write", skip_write, "did not write to the read-write directory"),
+            (
+                "missing directory",
+                skip_directory,
+                "did not create the guest's directory",
+            ),
+            (
+                "denied path",
+                guest_then(
+                    lambda roots: (roots["0"] / "secrets" / "token").write_bytes(b"x")
+                ),
+                "changed a denied path",
+            ),
+            (
+                "read-only directory",
+                guest_then(lambda roots: (roots["1"] / "mutation").write_bytes(b"x")),
+                "changed the read-only directory",
+            ),
+            (
+                "data beyond the notes",
+                guest_then(
+                    lambda roots: (roots["2"] / "private.txt").write_bytes(b"x")
+                ),
+                "changed the data directory beyond its writable path",
+            ),
+            (
+                "read-only file",
+                guest_then(lambda roots: roots["3"].write_bytes(b"x")),
+                "changed the shared files' directories",
+            ),
+            (
+                "file's directory",
+                guest_then(
+                    lambda roots: (roots["4"].parent / "added").write_bytes(b"x")
+                ),
+                "changed the shared files' directories",
+            ),
+        ):
+            with (
+                self.subTest(name=name),
+                tempfile.TemporaryDirectory() as temporary,
+            ):
+                with self.assertRaisesRegex(
+                    RuntimeError, "^platform aggregate export restore " + message
+                ):
+                    self._run_platform_aggregate_export(
+                        Path(temporary), self._platform_aggregate_measure(guest=guest)
+                    )
+
+    def test_platform_aggregate_export_reports_guest_failures(self):
+        failure = benchmark.GuestFailureReported(
+            "NVX-PLATFORM-AGGREGATE-FAIL mount", "tail"
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            with self.assertRaises(RuntimeError) as raised:
+                self._run_platform_aggregate_export(
+                    Path(temporary), MagicMock(side_effect=failure)
+                )
+        self.assertEqual(
+            str(raised.exception),
+            "platform aggregate export restore: guest reported "
+            "NVX-PLATFORM-AGGREGATE-FAIL mount\n"
+            "--- OpenVMM output ---\ntail",
+        )
+
+    def test_platform_aggregate_export_keeps_the_snapshot_and_the_trees_intact(self):
+        original = ("manifest", "state", "memory", None)
+        changed = ("manifest", "state", "changed", None)
+        for fingerprints, message in (
+            # The capture, then the clone.
+            (
+                [original, changed],
+                "^platform aggregate export restore modified snapshot artifacts$",
+            ),
+            # The capture, the clone, then the refused restores.
+            (
+                [original, original, changed],
+                "^a refused platform aggregate export restore modified snapshot "
+                "artifacts$",
+            ),
+        ):
+            with (
+                self.subTest(message=message),
+                tempfile.TemporaryDirectory() as temporary,
+            ):
+                with self.assertRaisesRegex(RuntimeError, message):
+                    self._run_platform_aggregate_export(
+                        Path(temporary),
+                        self._platform_aggregate_measure(),
+                        fingerprints=fingerprints,
+                    )
+
+        def refused_then(
+            change: Callable[[dict[str, Path]], object],
+        ) -> Callable[..., None]:
+            def refused(command: list[str], *_args: object, **_kwargs: object) -> None:
+                # A refused restore of the whole aggregate that reached the
+                # guest might write to a share.
+                children = self._aggregate_children(command)
+                if len(children) == 5:
+                    change({name: host_path for name, host_path, _ in children})
+
+            return refused
+
+        changes: tuple[tuple[str, Callable[[dict[str, Path]], object]], ...] = (
+            (
+                "workspace",
+                lambda roots: (roots["0"] / "secrets" / "token").write_bytes(b"x"),
+            ),
+            ("data", lambda roots: (roots["2"] / "private.txt").write_bytes(b"x")),
+        )
+        for tree, change in changes:
+            with (
+                self.subTest(tree=tree),
+                tempfile.TemporaryDirectory() as temporary,
+            ):
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "^a refused platform aggregate export restore changed a shared "
+                    "tree$",
+                ):
+                    self._run_platform_aggregate_export(
+                        Path(temporary),
+                        self._platform_aggregate_measure(),
+                        refused=refused_then(change),
+                    )
+
     def test_restore_downtime_shares_one_window_and_waits_for_the_restore_marker(
         self,
     ):
