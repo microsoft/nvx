@@ -1050,3 +1050,11 @@ fn the_live_system_finds_windows_and_block_devices_in_procfs_and_sysfs() {
         io::ErrorKind::NotFound
     );
 }
+
+#[test]
+fn the_capture_and_the_repair_take_the_time_abi_in_strict_mode() {
+    let abi = live_abi();
+    // Strict, unless the kernel command line of the test's host makes the time ABI report-only.
+    assert_ne!(abi.is_strict(), abi.is_report_only());
+    assert_eq!(abi, TimeAbi::new().strict());
+}

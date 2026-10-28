@@ -28,6 +28,8 @@
 //! - [`nvxs`]: the NVXS session without I/O: validated records, incremental parsing, and the
 //!   state machines of the host's and the guest's roles, which carry application bytes of any
 //!   protocol.
+//! - [`status`]: the exit statuses with which a clone's guest ends its VM once its repair or its
+//!   activation failed, the time ABI's included, from which the host classifies a clone's end.
 //!
 //! The module depends on nothing outside the standard library, so the host, the guest, and test
 //! doubles share it. Tests pin its wire constants as literals, and its records, frames, and
@@ -47,6 +49,7 @@ pub mod nvxs;
 mod outer;
 pub mod root;
 pub mod share;
+pub mod status;
 #[cfg(test)]
 mod tests;
 

@@ -20,8 +20,10 @@
 //! The worker of a template's VM, and with it the VM, ends with [`COMMAND_LINE_STATUS`] once
 //! `boot` refused its command line, with [`CAPTURE_STATUS_BASE`] plus the number of the stage of
 //! the capture that failed, with [`CONTINUED_STATUS`] once the capture ended without a snapshot,
-//! and with [`RESTORED_STATUS`] in a clone, which it does not repair yet. A committed capture ends
-//! the template's VM before the worker returns.
+//! and, in a clone, which it repairs, with [`RESTORED_STATUS`] once it repaired the clone, which it
+//! does not activate yet, or with the status of the repair's failure, which
+//! `nvx::protocol::status` documents. A committed capture ends the template's VM before the worker
+//! returns.
 
 use std::{fmt, str};
 
@@ -87,7 +89,8 @@ pub const CAPTURE_STATUS_BASE: u8 = 20;
 pub const CONTINUED_STATUS: u8 = 30;
 
 /// The status with which the worker of a template's VM ends in a clone, which a restore of the
-/// template's snapshot started, and which the worker does not repair yet.
+/// template's snapshot started, once the worker repaired it: the worker does not activate a clone
+/// yet, so the clone ends at once, with its fence of workload admission still closed.
 pub const RESTORED_STATUS: u8 = 31;
 
 /// How a VM boots, as its kernel command line tells the guest agent.
@@ -178,6 +181,8 @@ fn token(parameter: &Parameter<'_>) -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
+    use nvx::protocol::status;
+
     use super::*;
     use crate::root::RootStage;
 
@@ -531,5 +536,16 @@ mod tests {
             assert!(!statuses.contains(&stage.exit_status()), "{stage}");
         }
         assert!(!statuses.contains(&0) && !statuses.contains(&1) && !statuses.contains(&2));
+        // Nor is one the time ABI's, or one of a clone's repair or activation.
+        for reserved in [
+            status::TIME_STATUSES,
+            status::REPAIR_STATUSES,
+            status::ACTIVATION_STATUSES,
+        ] {
+            assert!(
+                !statuses.iter().any(|own| reserved.contains(own)),
+                "{reserved:?}"
+            );
+        }
     }
 }
