@@ -6,8 +6,9 @@
 mod launch;
 mod restore;
 
+use std::collections::HashSet;
 use std::io::Read;
-use std::net::{IpAddr, Ipv4Addr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::time::Duration;
 
 use sha2::{Digest, Sha256};
@@ -20,7 +21,8 @@ use crate::activation::{
 };
 use crate::host::filesystem;
 use crate::host::network::{
-    Access as NetworkAccess, EgressRule, NetworkPolicy, NetworkProxy, ProxyScheme,
+    Access as NetworkAccess, EgressRule, ForwardProtocol, HostLoopback, LoopbackForward,
+    NetworkPolicy, NetworkProxy, Protocol, ProxyScheme,
 };
 use crate::host::paths;
 use crate::host::sandbox::distro::{DISTRO_POLICY_REVISION, PolicyVerdict};
@@ -270,6 +272,43 @@ fn with_network(request: CloneRequest, network: Option<SandboxNetwork>) -> Clone
 /// Returns the network of a guest at `10.0.0.2/24` under a policy whose default is `access`.
 fn network(access: NetworkAccess) -> SandboxNetwork {
     SandboxNetwork::new("10.0.0.2/24", NetworkPolicy::new(access)).unwrap()
+}
+
+/// Returns the fixture of a template with a NIC, at `10.0.0.2/24`, whose class's network allows
+/// egress.
+fn network_fixture() -> Fixture {
+    Fixture::with(|class, spec, physical| {
+        *class = network_class();
+        *spec = ManifestSpec::with_network();
+        let (distro, scratch) = (
+            geometry(IMAGE_LEN, physical),
+            geometry(SCRATCH_LEN, physical),
+        );
+        set_geometries(class, spec, distro, scratch);
+    })
+}
+
+/// Returns the policies of networks that attach a NIC, a template's of each: egress allowed;
+/// egress denied but to some destinations; a proxy alone; ingress allowed; and host-loopback
+/// access both ways, with a forward.
+fn attaching() -> Vec<NetworkPolicy> {
+    let mut ingress = NetworkPolicy::new(NetworkAccess::Deny);
+    ingress.ingress = NetworkAccess::Allow;
+    let mut forwarded = NetworkPolicy::new(NetworkAccess::Allow);
+    forwarded.host_loopback = HostLoopback::Allow;
+    forwarded.host_loopback_forwards.push(LoopbackForward {
+        protocol: ForwardProtocol::Tcp,
+        host_port: 18080,
+        guest_port: 8080,
+    });
+    vec![
+        NetworkPolicy::new(NetworkAccess::Allow),
+        NetworkPolicy::new(NetworkAccess::Deny)
+            .with_allow(EgressRule::to("192.0.2.0/24").on_port(Protocol::Tcp, 443)),
+        NetworkPolicy::proxy_only(NetworkProxy::new(3128).with_scheme(ProxyScheme::Http)),
+        ingress,
+        forwarded,
+    ]
 }
 
 /// Returns the request `request` with the export `export`.
@@ -1982,7 +2021,7 @@ fn requests_that_no_clone_takes_are_refused_before_anything_is_opened() {
 }
 
 #[test]
-fn networks_that_the_template_does_not_have_are_refused() {
+fn templates_serve_the_networks_of_every_policy_at_their_nics_address_alone() {
     let fixture = Fixture::new();
     let (image, binding) = fixture.image("distro.erofs", IMAGE_LEN);
     let mut acquired = fixture.acquire("sandbox");
@@ -2007,51 +2046,36 @@ fn networks_that_the_template_does_not_have_are_refused() {
     let closed = with_network(request, Some(network(NetworkAccess::Deny)));
     drop(fixture.plan(&mut acquired, &closed, NO_CONTENT).unwrap());
 
-    // A template with a NIC serves the clones that attach its network.
-    let fixture = Fixture::with(|class, spec, physical| {
-        *class = network_class();
-        *spec = ManifestSpec::with_network();
-        let (distro, scratch) = (
-            geometry(IMAGE_LEN, physical),
-            geometry(SCRATCH_LEN, physical),
-        );
-        set_geometries(class, spec, distro, scratch);
-    });
+    // A template with a NIC serves no clone without a network.
+    let fixture = network_fixture();
     let (image, binding) = fixture.image("distro.erofs", IMAGE_LEN);
     let mut acquired = fixture.acquire("sandbox");
     let request = tmpfs_request(&image, &binding);
     let generation = fixture.generation.generation();
-    assert_eq!(
-        refused(
-            fixture.plan(&mut acquired, &request, NO_CONTENT),
-            Evidence::InvalidSettings
-        ),
-        (
-            ErrorKind::Unsupported,
-            format!(
-                "the template's generation {generation} has a NIC, whose network every clone of \
-                 it restores, but the adapter's plan of the clone has none"
+    let closed = with_network(request.clone(), Some(network(NetworkAccess::Deny)));
+    for request in [&request, &closed] {
+        assert_eq!(
+            refused(
+                fixture.plan(&mut acquired, request, NO_CONTENT),
+                Evidence::InvalidSettings
+            ),
+            (
+                ErrorKind::Unsupported,
+                format!(
+                    "the template's generation {generation} has a NIC, which its clones restore \
+                     with the network of the adapter's plan, but the plan has none"
+                )
             )
-        )
-    );
-    assert_untouched(&acquired);
-    // Nor does it serve the clones of another policy, nor of its policy at another address or
-    // prefix, though OpenVMM restores the guest's address from the snapshot: a template serves
-    // the clones of its own network alone.
-    let proxy = NetworkProxy::new(3128).with_scheme(ProxyScheme::Http);
-    for other in [
-        network(NetworkAccess::Allow)
-            .policy()
-            .clone()
-            .with_deny(EgressRule::to("192.0.2.0/24")),
-        NetworkPolicy::new(NetworkAccess::Deny).with_allow(EgressRule::to("192.0.2.0/24")),
-        NetworkPolicy::proxy_only(proxy),
-    ]
-    .map(|policy| SandboxNetwork::new("10.0.0.2/24", policy).unwrap())
-    .into_iter()
-    .chain(["10.0.0.3/24", "10.0.0.2/16"].map(|address| {
-        SandboxNetwork::new(address, NetworkPolicy::new(NetworkAccess::Allow)).unwrap()
-    })) {
+        );
+        assert_untouched(&acquired);
+    }
+    // Nor the clones of a network at another address.
+    for (other, policy) in [
+        ("10.0.0.3/24", NetworkPolicy::new(NetworkAccess::Allow)),
+        ("10.0.0.2/16", NetworkPolicy::new(NetworkAccess::Allow)),
+    ] {
+        let other = SandboxNetwork::new(other, policy).unwrap();
+        let address = other.guest_network().to_owned();
         let other = with_network(request.clone(), Some(other));
         assert_eq!(
             refused(
@@ -2061,16 +2085,22 @@ fn networks_that_the_template_does_not_have_are_refused() {
             (
                 ErrorKind::Unsupported,
                 format!(
-                    "the network of the adapter's plan of a clone is not the one that the \
-                     template's generation {generation} restores its NIC with: a template serves \
-                     the clones of its own network policy, at its own guest's address, alone"
+                    "the adapter's plan of a clone attaches a network at {address}, but the NIC \
+                     of the template's generation {generation} is at 10.0.0.2/24: a template \
+                     serves the clones of its own guest's address alone"
                 )
             )
         );
         assert_untouched(&acquired);
     }
-    let attached = with_network(request, Some(network(NetworkAccess::Allow)));
-    drop(fixture.plan(&mut acquired, &attached, NO_CONTENT).unwrap());
+    // It serves the clones of every policy at its guest's address, whatever the policy of its
+    // class's network, since each clone's restore replaces the complete deny-all policy of the
+    // template's NIC with its own.
+    for policy in attaching() {
+        let attached = SandboxNetwork::new("10.0.0.2/24", policy).unwrap();
+        let attached = with_network(request.clone(), Some(attached));
+        drop(fixture.plan(&mut acquired, &attached, NO_CONTENT).unwrap());
+    }
 }
 
 #[test]
@@ -2344,92 +2374,54 @@ fn the_activation_record_of_a_gpt_clone_names_its_disk_and_the_bound_of_its_firs
 }
 
 #[test]
-fn the_activation_record_of_a_clone_of_a_template_with_a_nic_names_its_policy_and_dns_server() {
-    let fixture = Fixture::with(|class, spec, physical| {
-        *class = network_class();
-        *spec = ManifestSpec::with_network();
-        let (distro, scratch) = (
-            geometry(IMAGE_LEN, physical),
-            geometry(SCRATCH_LEN, physical),
-        );
-        set_geometries(class, spec, distro, scratch);
-    });
+fn the_activation_record_of_a_clone_of_a_template_with_a_nic_names_its_own_network() {
+    let fixture = network_fixture();
     let (image, binding) = fixture.image("distro.erofs", IMAGE_LEN);
     let mut acquired = fixture.acquire("sandbox");
-    // The policy's identity is the digest that OpenVMM computed, as the template's key records
-    // it, [7; 32] in this manifest, and the network names no proxy without one.
-    let attached = with_network(
-        tmpfs_request(&image, &binding),
-        Some(network(NetworkAccess::Allow)),
-    );
-    let plan = fixture.plan(&mut acquired, &attached, NO_CONTENT).unwrap();
-    let expected = Network {
-        policy: Identity::from_bytes([7; 32]),
-        dns: None,
-        publication: Publication::Unpublished,
-        proxy: None,
-    };
-    assert_eq!(
-        plan.activation().configuration().network.as_ref(),
-        Some(&expected)
-    );
-    drop((plan, acquired, fixture));
-    // A proxy's URL is the one that the guest sees, at its gateway, for a clone of a template
-    // whose policy has the proxy.
-    let proxy = NetworkProxy::new(3128).with_scheme(ProxyScheme::Http);
-    let proxied = SandboxNetwork::new("10.0.0.2/24", NetworkPolicy::proxy_only(proxy)).unwrap();
-    let fixture = Fixture::with(|class, spec, physical| {
-        *class = CaptureClass {
-            network: Some(proxied.clone()),
-            ..network_class()
-        };
-        *spec = ManifestSpec::with_network();
-        let (distro, scratch) = (
-            geometry(IMAGE_LEN, physical),
-            geometry(SCRATCH_LEN, physical),
+    let gateway = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    // The template's NIC has the IPv6 gateway fd00::a00:1.
+    let ipv6_gateway = IpAddr::V6(Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0xa00, 1));
+    let mut ipv6_dns = NetworkPolicy::new(NetworkAccess::Deny);
+    for protocol in [Protocol::Tcp, Protocol::Udp] {
+        ipv6_dns = ipv6_dns.with_allow(EgressRule::to("fd00::a00:1/128").on_port(protocol, 53));
+    }
+    let mut outbound = NetworkPolicy::new(NetworkAccess::Allow);
+    outbound.host_loopback = HostLoopback::Outbound;
+    let mut policies = vec![ipv6_dns, outbound];
+    policies.extend(attaching());
+    let (unpublished, published) = (Publication::Unpublished, Publication::Published);
+    let expected = [
+        (Some(ipv6_gateway), unpublished, None),
+        (Some(gateway), unpublished, None),
+        (Some(gateway), unpublished, None),
+        (None, unpublished, None),
+        (None, unpublished, Some("http://10.0.0.1:3128")),
+        (None, published, None),
+        (Some(gateway), published, None),
+    ];
+    assert_eq!(policies.len(), expected.len());
+    // Each clone's record names its own network, whatever the policy of the template's class:
+    // the identity of the network, the DNS server that OpenVMM serves the guest at a gateway
+    // under its policy, whether the guest publishes its listeners, and the proxy's URL as the
+    // guest sees it, at its gateway.
+    let mut identities = HashSet::new();
+    for (policy, (dns, publication, proxy)) in policies.into_iter().zip(expected) {
+        let network = SandboxNetwork::new("10.0.0.2/24", policy).unwrap();
+        let request = with_network(tmpfs_request(&image, &binding), Some(network.clone()));
+        let plan = fixture.plan(&mut acquired, &request, NO_CONTENT).unwrap();
+        let recorded = plan.activation().configuration().network.clone();
+        assert_eq!(
+            recorded,
+            Some(Network {
+                policy: digest_of(b"nvx network policy\0", &network),
+                dns,
+                publication,
+                proxy: proxy.map(str::to_owned),
+            }),
+            "{network:?}"
         );
-        set_geometries(class, spec, distro, scratch);
-    });
-    let (image, binding) = fixture.image("distro.erofs", IMAGE_LEN);
-    let mut acquired = fixture.acquire("sandbox");
-    let proxied = with_network(tmpfs_request(&image, &binding), Some(proxied));
-    let plan = fixture.plan(&mut acquired, &proxied, NO_CONTENT).unwrap();
-    assert_eq!(
-        plan.activation().configuration().network,
-        Some(Network {
-            proxy: Some("http://10.0.0.1:3128".to_owned()),
-            ..expected.clone()
-        })
-    );
-    drop((plan, acquired, fixture));
-    // The DNS server with which the template's guest configured its resolver at boot, as its
-    // command line asks, is the clone's.
-    let fixture = Fixture::with(|class, spec, physical| {
-        *class = network_class();
-        *spec = ManifestSpec::with_network();
-        spec.contract()
-            .command_line
-            .push_str(" virtnet_dns=10.0.0.1");
-        let (distro, scratch) = (
-            geometry(IMAGE_LEN, physical),
-            geometry(SCRATCH_LEN, physical),
-        );
-        set_geometries(class, spec, distro, scratch);
-    });
-    let (image, binding) = fixture.image("distro.erofs", IMAGE_LEN);
-    let mut acquired = fixture.acquire("sandbox");
-    let attached = with_network(
-        tmpfs_request(&image, &binding),
-        Some(network(NetworkAccess::Allow)),
-    );
-    let plan = fixture.plan(&mut acquired, &attached, NO_CONTENT).unwrap();
-    assert_eq!(
-        plan.activation().configuration().network,
-        Some(Network {
-            dns: Some(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))),
-            ..expected
-        })
-    );
+        assert!(identities.insert(recorded.unwrap().policy));
+    }
 }
 
 #[test]

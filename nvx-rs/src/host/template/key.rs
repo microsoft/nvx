@@ -3,7 +3,7 @@
 
 use std::collections::BTreeMap;
 use std::fmt;
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::net::{Ipv4Addr, Ipv6Addr};
 
 use sha2::{Digest, Sha256};
 
@@ -18,10 +18,6 @@ use super::manifest::{
 use crate::activation;
 use crate::contract;
 use crate::error::{Error, Result};
-use crate::host::network::{
-    Access, EgressRule, HostLoopback, LoopbackForward, MAX_LOOPBACK_FORWARDS, MAX_RULES,
-    NetworkPolicy, NetworkProxy,
-};
 use crate::host::platform::parse_hex32;
 use crate::host::sandbox::SandboxNetwork;
 use crate::host::sandbox::mount::MOUNT_TAG;
@@ -37,16 +33,6 @@ const CLASS_DOMAIN: &[u8] = b"nvx capture class\0";
 
 /// The generation of a CPU profile that a host derives, rather than a built-in one.
 const HOST_GENERATION: &str = "host";
-
-/// The prefix of the command line's token that names the DNS server of the guest's resolver,
-/// which OpenVMM writes once at most, with an IP address in its canonical spelling.
-const DNS_TOKEN: &str = "virtnet_dns=";
-
-/// Most texts of a key's network: the options of OpenVMM that a network lowers to, each with its
-/// value, as [`SandboxNetwork::openvmm_arguments`] renders them. A network has at most six options
-/// of its own, from `--net` to `--network-proxy`, at most [`MAX_RULES`] rules of each of the two
-/// actions of its egress, and at most [`MAX_LOOPBACK_FORWARDS`] host-loopback forwards.
-const MAX_NETWORK_ARGUMENTS: usize = 2 * (6 + 2 * MAX_RULES + MAX_LOOPBACK_FORWARDS);
 
 /// The versions of the contracts of a template's clones that its runtime identity does not
 /// record: the snapshot format, the saved device state, the time ABI, the restore packet, and the
@@ -376,12 +362,6 @@ fn cpu_profile_problem(profile: &str) -> Option<String> {
     })
 }
 
-/// Returns the guest's network on `nic`, its IPv4 address and prefix length, in the canonical form
-/// of a [`SandboxNetwork`].
-fn guest_network_of(nic: &Nic) -> String {
-    format!("{}/{}", nic.ipv4, nic.prefix_length)
-}
-
 /// The invariant inputs of a template's capture, known before it: what a template's adapter
 /// requests, and the class of the templates that the capture makes.
 ///
@@ -421,8 +401,12 @@ pub struct CaptureClass {
     /// The dormant scratch device.
     pub scratch: BlockGeometry,
     /// The network: `None` or a network that OpenVMM attaches no device for, as
-    /// [`SandboxNetwork::openvmm_arguments`] lowers it, for a template without a NIC, and otherwise
-    /// the network of its fixed NIC and the policy that OpenVMM enforces there.
+    /// [`SandboxNetwork::openvmm_arguments`] lowers it, for a template without a NIC, and
+    /// otherwise a network at the address of the template's fixed NIC. Of the network, the class
+    /// takes only what the template captures: its NIC, at the guest's address, under the
+    /// complete deny-all policy, as [`SandboxNetwork::template_arguments`] lowers it, whatever
+    /// the network's own policy, which each clone's restore replaces with its own. So the classes
+    /// of two networks at one address, whose policies both attach a NIC, are one.
     pub network: Option<SandboxNetwork>,
     /// The invariant settings beyond the machine.
     pub invariants: Invariants,
@@ -468,11 +452,12 @@ impl CaptureClass {
         Ok(())
     }
 
-    /// Returns OpenVMM's arguments of the network, none without a NIC.
+    /// Returns OpenVMM's arguments of the template's NIC, as
+    /// [`SandboxNetwork::template_arguments`] lowers the network, none without a NIC.
     fn network_arguments(&self) -> Result<Vec<String>> {
         match &self.network {
             None => Ok(Vec::new()),
-            Some(network) => network.openvmm_arguments(),
+            Some(network) => network.template_arguments(),
         }
     }
 
@@ -486,8 +471,9 @@ impl CaptureClass {
     /// and activation contract versions as `u64`s; the backend, as OpenVMM spells it, and the
     /// CPU profile, as texts; the processors and those online at boot as `u32`s; the RAM and its
     /// capacity as `u64`s; the `distro` and scratch geometries, each a `u64` length and two
-    /// `u32` block sizes; the network, as the list of the texts of OpenVMM's arguments that
-    /// [`SandboxNetwork::openvmm_arguments`] lowers it to, empty without a NIC; and the invariant
+    /// `u32` block sizes; the network, as the list of the texts of OpenVMM's arguments of the
+    /// template's NIC, which [`SandboxNetwork::template_arguments`] lowers it to, empty without a
+    /// NIC; and the invariant
     /// settings, as a list of names and values, each a text, in the order of their names. The
     /// [module](super) describes the encoding of each kind of value.
     ///
@@ -549,20 +535,16 @@ impl CaptureClass {
 ///   interrupt, features, and queues, and the interrupt delivery of the virtio devices; the
 ///   filesystem slot's version and tag; whether there is a NIC, and the fixed NIC's profile, MAC
 ///   addresses, addresses, prefixes, and gateways, with the identity of the network policy that
-///   OpenVMM enforces there; and the template's [`Invariants`], its other invariant isolation and
-///   resource settings.
-/// - **Network:** the template's network as its class lowers it to OpenVMM's arguments,
-///   [`SandboxNetwork::openvmm_arguments`], none for a template without a NIC: the guest's
-///   address and the network policy as this crate writes them, which a clone's plan compares with
-///   the network of the clone's own plan, and which every restore of the template passes
-///   unchanged. A template serves the clones of its network policy alone, so a host keeps one
-///   template of each policy that its clones take.
+///   OpenVMM enforced there at the capture, the complete deny-all policy, which every restore of
+///   the template replaces with its clone's own; and the template's [`Invariants`], its other
+///   invariant isolation and resource settings.
 ///
 /// A capture's own metadata is not part of it, so the generations of one key differ in it: when
 /// the capture was taken, its time contract's anchor, host, boot, and lineage counter, and the
 /// lengths of its artifacts. [`TemplateManifest`] keeps them. Nothing of a clone is part of it
-/// either: its image, upper, export, the network settings that its activation record names,
-/// identity, and activation targets.
+/// either: its image, upper, export, network policy and settings, identity, and activation
+/// targets. So a template with a NIC serves the clones of every network policy at its guest's
+/// address.
 ///
 /// The key comes from metadata alone: the artifacts' identities that their install metadata
 /// records, the class's inputs, and the capture's manifest. It never reads or digests a binary,
@@ -585,22 +567,15 @@ pub struct TemplateKey {
     filesystem_tag: String,
     /// The invariant settings beyond the machine.
     invariants: Invariants,
-    /// The network, as the class lowered it to OpenVMM's arguments: empty without a NIC.
-    network: Vec<String>,
 }
 
 impl TemplateKey {
     /// Version of the canonical encoding of a key, its first two bytes.
-    ///
-    /// Version 1 holds the template's network. It has not been released, so a template store that
-    /// an earlier build created is not supported: delete it and create a new one. There is no
-    /// migration.
     pub const VERSION: u16 = 1;
 
     /// Most bytes of a key's canonical encoding: what the largest key that a manifest of at most
-    /// [`MAX_MANIFEST_LEN`](super::MAX_MANIFEST_LEN) bytes can describe takes, with the most
-    /// arguments that a network lowers to, with room to spare.
-    pub const MAX_LEN: usize = 576 * 1024;
+    /// [`MAX_MANIFEST_LEN`](super::MAX_MANIFEST_LEN) bytes can describe takes, with room to spare.
+    pub const MAX_LEN: usize = 256 * 1024;
 
     /// Returns the key of the template that a capture of `class` made, whose manifest is
     /// `manifest`.
@@ -610,15 +585,16 @@ impl TemplateKey {
     /// NIC, and the NIC's address and prefix, and a CPU profile that the class's request selects.
     /// A manifest whose machine has no processors online at boot activates all of them at boot,
     /// which a class whose processors are all online at boot requests. The key takes the class's
-    /// runtime, guest build, invariant settings, and network, as the class lowers it to OpenVMM's
-    /// arguments, and this crate's versions of the other contracts.
+    /// runtime, guest build, and invariant settings, and this crate's versions of the other
+    /// contracts.
     ///
     /// The key also takes the identity of the network policy that OpenVMM enforced on the NIC,
-    /// which this check leaves to OpenVMM: OpenVMM derives it from the network arguments of the
-    /// class by an encoding of its own, which this crate does not reproduce. A capture that
-    /// enforced another policy than its class requested makes a key of its own, which no restore
-    /// with the class's network arguments serves, since OpenVMM refuses a restore whose network,
-    /// its policy included, is not the one that the snapshot records.
+    /// which this check leaves to OpenVMM: OpenVMM derives it from the arguments of the
+    /// template's NIC, under the complete deny-all policy, as
+    /// [`SandboxNetwork::template_arguments`] lowers the class's network, by an encoding of its
+    /// own, which this crate does not reproduce. A capture that enforced another policy makes a
+    /// key of its own, which no restore serves, since OpenVMM lets a restore replace the complete
+    /// deny-all policy alone.
     ///
     /// Fails with [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported) as
     /// [`CaptureClass::check`] does, and with [`ErrorKind::Io`](crate::ErrorKind::Io) for a
@@ -687,14 +663,14 @@ impl TemplateKey {
                 );
             }
         }
-        let network = class.network_arguments()?;
+        let attached = !class.network_arguments()?.is_empty();
         let requested_network = class
             .network
             .as_ref()
-            .filter(|_| !network.is_empty())
+            .filter(|_| attached)
             .map(|network| network.guest_network().to_owned());
         // A network that `SandboxNetwork` accepts has the canonical form that this writes.
-        let found_network = machine.nic.as_ref().map(guest_network_of);
+        let found_network = machine.nic.as_ref().map(nic_network);
         if found_network != requested_network {
             let describe = |network: Option<String>| network.unwrap_or_else(|| "none".to_owned());
             return mismatch(
@@ -709,7 +685,6 @@ impl TemplateKey {
             machine: machine.clone(),
             filesystem_tag: MOUNT_TAG.to_owned(),
             invariants: class.invariants.clone(),
-            network,
         })
     }
 
@@ -791,60 +766,22 @@ impl TemplateKey {
         self.machine.nic.is_some()
     }
 
-    /// Returns the template's network as its class lowered it to OpenVMM's arguments,
-    /// [`SandboxNetwork::openvmm_arguments`]: `--net` with the guest's address, and the options
-    /// that enforce the policy of the template's NIC, which every restore of the template passes,
-    /// but `--net` and the address, which OpenVMM takes from the snapshot; none for a template
-    /// without a NIC. A clone's plan requires the same arguments of the network of the clone's own
-    /// plan, so the template serves the clones of its network policy alone.
-    pub fn network_arguments(&self) -> &[String] {
-        &self.network
+    /// Returns the guest's address and prefix on the template's NIC, `ADDRESS/PREFIX`, in the
+    /// canonical form of [`SandboxNetwork::guest_network`], or `None` for a template without a
+    /// NIC. The template serves the clones of every network policy at that address.
+    pub fn guest_network(&self) -> Option<String> {
+        self.machine.nic.as_ref().map(nic_network)
     }
 
-    /// Returns the SHA-256 digest of the canonical encoding of the network policy that OpenVMM
-    /// enforces on the template's NIC, which OpenVMM computed and the manifest records, or `None`
-    /// for a template without a NIC.
-    pub(crate) fn network_policy_digest(&self) -> Option<[u8; 32]> {
-        self.machine.nic.as_ref().map(|nic| nic.policy.digest)
-    }
-
-    /// Returns the address of the DNS server with which the template's guest configured its
-    /// resolver at boot: the one that the `virtnet_dns=` token of the command line names, which
-    /// OpenVMM adds when the policy of the template's NIC lets the guest reach the gateway's DNS
-    /// server, or `None` for a command line without the token.
-    ///
-    /// Fails with [`ErrorKind::Io`](crate::ErrorKind::Io) for a command line that OpenVMM does
-    /// not write: one with more than one such token, with a token for a template without a NIC,
-    /// or with a token that does not name one IP address in its canonical spelling.
-    pub(crate) fn dns_server(&self) -> Result<Option<IpAddr>> {
-        let mut tokens = self
-            .machine
-            .command_line
-            .split_ascii_whitespace()
-            .filter_map(|token| token.strip_prefix(DNS_TOKEN));
-        let Some(token) = tokens.next() else {
-            return Ok(None);
-        };
-        let malformed = |problem: &str| {
-            Err(Error::io(format!(
-                "the command line of the template's key is malformed: {problem}"
-            )))
-        };
-        if tokens.next().is_some() {
-            return malformed(&format!("it holds more than one {DNS_TOKEN} token"));
-        }
-        if self.machine.nic.is_none() {
-            return malformed(&format!(
-                "it names a DNS server, {token:?}, for a template without a NIC"
-            ));
-        }
-        match token.parse::<IpAddr>() {
-            Ok(server) if server.to_string() == token => Ok(Some(server)),
-            _ => malformed(&format!(
-                "its {DNS_TOKEN} token names {token:?}, which is not an IP address in its \
-                 canonical spelling"
-            )),
-        }
+    /// Returns the gateway of the IPv6 identity of the template's NIC, or `None` for a template
+    /// without a NIC or whose NIC has no IPv6 identity.
+    pub(crate) fn ipv6_gateway(&self) -> Option<Ipv6Addr> {
+        self.machine
+            .nic
+            .as_ref()?
+            .ipv6
+            .as_ref()
+            .map(|ipv6| ipv6.gateway)
     }
 
     /// Returns the tag of the filesystem slot, on which a clone's export is bound.
@@ -892,9 +829,6 @@ impl TemplateKey {
     ///    the network policy's mode, a text, digest, 32 bytes, whether it is required, a boolean,
     ///    and encoding version, a `u32`; and the invariant settings, a list of names and values,
     ///    each a text, in the order of their names.
-    /// 8. Network: the texts of OpenVMM's arguments to which the class lowered the network, a list,
-    ///    empty for a template without a NIC, and otherwise starting with `--net` and the NIC's
-    ///    IPv4 address and prefix length, `ADDRESS/PREFIX`.
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut writer = Writer::default();
         writer.u16(Self::VERSION);
@@ -903,16 +837,13 @@ impl TemplateKey {
         self.contracts.write(&mut writer);
         write_machine(&mut writer, &self.machine, &self.filesystem_tag);
         self.invariants.write(&mut writer);
-        writer.list(&self.network, |writer, argument| writer.text(argument));
         writer.finish()
     }
 
     /// Reads a key from its canonical encoding, as [`to_bytes`](Self::to_bytes) writes it.
     ///
     /// The bytes must be the key's one encoding, of version [`VERSION`](Self::VERSION), with no
-    /// value of another form than a key derived from a manifest has, a network that is the
-    /// arguments to which a network of a guest at the address of the machine's NIC lowers, if it
-    /// has one, and none otherwise, and no byte left over.
+    /// value of another form than a key derived from a manifest has, and no byte left over.
     ///
     /// Fails with [`ErrorCode::FormatUnsupported`](crate::ErrorCode::FormatUnsupported) for a key
     /// of another version, and with [`ErrorKind::Io`](crate::ErrorKind::Io) for bytes that are
@@ -945,12 +876,6 @@ impl TemplateKey {
             let contracts = Contracts::read(reader)?;
             let (machine, filesystem_tag) = read_machine(reader)?;
             let invariants = Invariants::read(reader)?;
-            let network = reader.list(MAX_NETWORK_ARGUMENTS, "the network", |reader| {
-                Ok(reader
-                    .text(MAX_TEXT_LEN, "an argument of the network")?
-                    .to_owned())
-            })?;
-            check_network(machine.nic.as_ref(), &network)?;
             Ok(Self {
                 runtime,
                 guest_build,
@@ -958,13 +883,18 @@ impl TemplateKey {
                 machine,
                 filesystem_tag,
                 invariants,
-                network,
             })
         };
         let key = read(&mut reader).map_err(malformed)?;
         reader.finish().map_err(malformed)?;
         Ok(key)
     }
+}
+
+/// Returns the guest's address and prefix on `nic`, `ADDRESS/PREFIX`, the canonical form in which
+/// [`SandboxNetwork::guest_network`] holds a network that it accepts.
+fn nic_network(nic: &Nic) -> String {
+    format!("{}/{}", nic.ipv4, nic.prefix_length)
 }
 
 /// Writes the machine `machine`, whose filesystem slot has the tag `tag`, as
@@ -1208,95 +1138,6 @@ fn read_machine(reader: &mut Reader<'_>) -> Result<(Machine, String), CanonicalE
         ));
     }
     Ok((machine, tag))
-}
-
-/// Checks that `network`, the texts of OpenVMM's arguments of a key's network, are those of a
-/// network of the NIC `nic` of the key's machine, or none for a machine without a NIC: exactly the
-/// arguments to which [`SandboxNetwork::openvmm_arguments`] lowers a network of a guest at the
-/// NIC's address and prefix length, which start with `--net` and that address.
-///
-/// The check reads the policy back from the arguments, as `nvx-rs sandbox` reads its network
-/// options, and lowers it again with its NIC attached, which renders a lowering unchanged: a
-/// policy whose allow rules lower to no OpenVMM rule attaches its NIC even if it lets nothing
-/// through, and reads back without them. A key whose network no policy lowers to is thus
-/// malformed, rather than the network of a template that every clone's plan mismatches.
-fn check_network(nic: Option<&Nic>, network: &[String]) -> Result<(), CanonicalError> {
-    let Some(nic) = nic else {
-        return if network.is_empty() {
-            Ok(())
-        } else {
-            Err(CanonicalError::new(
-                "the network attaches a NIC that the machine does not have",
-            ))
-        };
-    };
-    let address = format!("{}/{}", nic.ipv4, nic.prefix_length);
-    match network {
-        [option, attached, ..] if option == "--net" && *attached == address => {}
-        _ => {
-            return Err(CanonicalError::new(format!(
-                "the network does not attach the machine's NIC at {address}"
-            )));
-        }
-    }
-    let lowered = crate::net::guest_gateway(&address)
-        .and_then(|gateway| read_policy(&network[2..], gateway))
-        .and_then(|policy| crate::host::network::attached_arguments(&policy, &address).ok());
-    if lowered.as_deref() == Some(network) {
-        Ok(())
-    } else {
-        Err(CanonicalError::new(format!(
-            "the network is not the arguments to which a network policy of a guest at {address} \
-             lowers"
-        )))
-    }
-}
-
-/// Reads `arguments`, the options of OpenVMM that follow a network's `--net` and its value, with
-/// their values, for a guest whose gateway is `gateway`, into the policy that they name, as
-/// `nvx-rs sandbox` reads its network options: the rules of each action as OpenVMM reads its
-/// native rules, and, without `--host-loopback`, the host-loopback access that OpenVMM keeps by
-/// default. Returns `None` for an option that no lowering writes, or a value that it does not
-/// take; the caller compares the policy's lowering with the arguments.
-fn read_policy(arguments: &[String], gateway: Ipv4Addr) -> Option<NetworkPolicy> {
-    let options = arguments.chunks_exact(2);
-    if !options.remainder().is_empty() {
-        return None;
-    }
-    let access = |value: &str| match value {
-        "allow" => Some(Access::Allow),
-        "deny" => Some(Access::Deny),
-        _ => None,
-    };
-    let mut policy = NetworkPolicy::new(Access::Deny);
-    policy.host_loopback = HostLoopback::Outbound;
-    for option in options {
-        let [name, value] = option else {
-            return None;
-        };
-        match name.as_str() {
-            "--network-profile" => {}
-            "--network-egress" => policy.egress = access(value)?,
-            "--network-ingress" => policy.ingress = access(value)?,
-            "--host-loopback" => policy.host_loopback = access(value)?.into(),
-            "--network-egress-allow" => policy
-                .allow
-                .rules
-                .push(EgressRule::parse_native(value).ok()?),
-            "--network-egress-deny" => policy
-                .deny
-                .rules
-                .push(EgressRule::parse_native(value).ok()?),
-            "--host-loopback-forward" => policy
-                .host_loopback_forwards
-                .push(LoopbackForward::parse(value).ok()?),
-            "--network-proxy" => {
-                policy.proxy = Some(NetworkProxy::parse_endpoint(value, gateway).ok()?);
-            }
-            _ => return None,
-        }
-    }
-    Some(policy)
 }
 
 #[cfg(test)]

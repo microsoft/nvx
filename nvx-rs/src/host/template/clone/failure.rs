@@ -164,9 +164,8 @@ pub enum Evidence {
     /// [`ACTIVATION_ORDER`](crate::protocol::status::ACTIVATION_ORDER) tell.
     Protocol,
     /// The leased generation is malformed or inconsistent: the store indexes it with another key
-    /// than the lease names, its key or snapshot is malformed, its key names its guest's DNS
-    /// server in a form that OpenVMM does not write, or its payload is not a directory of the
-    /// current user with mode 0700.
+    /// than the lease names, its key or snapshot is malformed, or its payload is not a directory
+    /// of the current user with mode 0700.
     MalformedGeneration,
     /// A defect of the generation's capture or repair, which a diagnostic attributes to the
     /// generation. No clone's restore keeps the guest's diagnostics yet, so a status of the repair

@@ -1,7 +1,7 @@
 //! Tests of the OpenVMM options of network postures, and of the parsers of their rules,
 //! forwards, and proxies.
 
-use std::net::Ipv4Addr;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use super::*;
 use crate::ErrorKind;
@@ -12,43 +12,6 @@ fn rules(arguments: &[String], option: &str) -> Vec<String> {
         .filter(|pair| pair[0] == option)
         .map(|pair| pair[1].clone())
         .collect()
-}
-
-#[test]
-fn an_attached_lowering_attaches_the_device_of_a_policy_that_lets_nothing_through() {
-    // An allow rule that excepts its whole destination lowers to no OpenVMM rule, but a policy
-    // with one attaches its device, closed, as the attached lowering of the same policy
-    // without that rule renders it.
-    let excluded = EgressRule {
-        to: vec![Destination {
-            cidr: "192.0.2.0/24".to_owned(),
-            except: vec!["192.0.2.0/24".to_owned()],
-        }],
-        ports: Vec::new(),
-    };
-    let denied = NetworkPolicy::new(Access::Deny).with_deny(EgressRule::to("1.2.3.4"));
-    for closed in [NetworkPolicy::new(Access::Deny), denied] {
-        assert!(
-            openvmm_arguments(Some(&closed), "10.0.0.2/24")
-                .unwrap()
-                .is_empty()
-        );
-        let excepted = closed.clone().with_allow(excluded.clone());
-        let attached = attached_arguments(&closed, "10.0.0.2/24").unwrap();
-        assert_eq!(
-            attached,
-            openvmm_arguments(Some(&excepted), "10.0.0.2/24").unwrap()
-        );
-        assert_eq!(attached[..2], ["--net", "10.0.0.2/24"]);
-    }
-    // The attached lowering of any other policy is its lowering.
-    let proxied = NetworkPolicy::proxy_only(NetworkProxy::new(3128));
-    for policy in [NetworkPolicy::new(Access::Allow), proxied] {
-        assert_eq!(
-            attached_arguments(&policy, "10.0.0.2/24").unwrap(),
-            openvmm_arguments(Some(&policy), "10.0.0.2/24").unwrap()
-        );
-    }
 }
 
 #[test]
@@ -1022,4 +985,143 @@ fn loopback_forwards_parse_as_openvmm_parses_them() {
         assert_eq!(error.kind(), ErrorKind::Unsupported, "{value}");
         assert_eq!(error.message(), format!("{value}: {reason}"));
     }
+}
+
+#[test]
+fn templates_attach_their_nic_under_the_complete_deny_all_policy() {
+    assert_eq!(
+        template_arguments("10.0.0.2/24"),
+        [
+            "--net",
+            "10.0.0.2/24",
+            "--network-profile",
+            "portable",
+            "--network-egress",
+            "deny",
+            "--network-ingress",
+            "deny",
+            "--host-loopback",
+            "deny",
+        ]
+    );
+}
+
+#[test]
+fn the_dns_server_is_the_first_gateway_whose_dns_service_the_policy_reaches() {
+    let gateway = Ipv4Addr::new(10, 0, 0, 1);
+    let ipv6_gateway: Ipv6Addr = "fd00::a00:1".parse().unwrap();
+    let v4 = Some(IpAddr::V4(gateway));
+    let v6 = Some(IpAddr::V6(ipv6_gateway));
+    let allow = || NetworkPolicy::new(Access::Allow);
+    let deny = || NetworkPolicy::new(Access::Deny);
+    let rule = |cidr: &str| EgressRule::to(cidr);
+    let cases = [
+        ("egress allowed", allow(), v4, v4),
+        ("egress denied", deny(), None, None),
+        ("a proxy-only policy", proxy_only(), None, None),
+        (
+            "an allow rule of TCP port 53 at the gateway",
+            deny().with_allow(rule("10.0.0.1/32").on_port(Protocol::Tcp, 53)),
+            v4,
+            v4,
+        ),
+        (
+            "an allow rule of UDP to every port",
+            deny().with_allow(rule("0.0.0.0/0").on_protocol(Protocol::Udp)),
+            v4,
+            v4,
+        ),
+        (
+            "an allow rule of a range of ports that holds 53",
+            deny().with_allow(rule("10.0.0.0/24").on_port_range(Protocol::Any, 50, 60)),
+            v4,
+            v4,
+        ),
+        (
+            "an allow rule of every protocol at the gateway",
+            deny().with_allow(rule("10.0.0.1")),
+            v4,
+            v4,
+        ),
+        (
+            "an allow rule of another port at the gateway",
+            deny().with_allow(rule("10.0.0.1/32").on_port(Protocol::Tcp, 8080)),
+            None,
+            None,
+        ),
+        (
+            "an allow rule of ICMP at the gateway",
+            deny().with_allow(rule("10.0.0.1/32").on_protocol(Protocol::Icmp)),
+            None,
+            None,
+        ),
+        (
+            "an allow rule of another destination",
+            deny().with_allow(rule("10.0.0.2/32").on_port(Protocol::Udp, 53)),
+            None,
+            None,
+        ),
+        (
+            "a deny rule of UDP alone, which leaves TCP",
+            allow().with_deny(rule("10.0.0.1/32").on_port(Protocol::Udp, 53)),
+            v4,
+            v4,
+        ),
+        (
+            "a deny rule of the IPv4 gateway that an allow rule overlaps",
+            deny()
+                .with_allow(rule("0.0.0.0/0").on_port(Protocol::Any, 53))
+                .with_allow(rule("::/0").on_port(Protocol::Any, 53))
+                .with_deny(rule("10.0.0.0/8")),
+            v6,
+            None,
+        ),
+        (
+            "an allow rule of the IPv6 gateway alone",
+            deny().with_allow(rule("fd00::a00:1/128").on_port(Protocol::Udp, 53)),
+            v6,
+            None,
+        ),
+        (
+            "an exception that removes the IPv4 gateway",
+            deny().with_allow(EgressRule {
+                to: vec![Destination {
+                    cidr: "10.0.0.0/24".to_owned(),
+                    except: vec!["10.0.0.0/30".to_owned()],
+                }],
+                ports: Vec::new(),
+            }),
+            None,
+            None,
+        ),
+    ];
+    for (name, policy, dual_stack, ipv4_only) in cases {
+        assert_eq!(
+            dns_server(&policy, gateway, Some(ipv6_gateway)).unwrap(),
+            dual_stack,
+            "{name}"
+        );
+        assert_eq!(
+            dns_server(&policy, gateway, None).unwrap(),
+            ipv4_only,
+            "{name}"
+        );
+    }
+    // Host-loopback access, ingress, and forwards leave the egress policy's choice.
+    let mut open = deny();
+    open.ingress = Access::Allow;
+    open.host_loopback = HostLoopback::Allow;
+    open.host_loopback_forwards = vec![LoopbackForward {
+        protocol: ForwardProtocol::Tcp,
+        host_port: 18080,
+        guest_port: 8080,
+    }];
+    assert_eq!(
+        dns_server(&open, gateway, Some(ipv6_gateway)).unwrap(),
+        None
+    );
+    // A rule that does not parse fails as the lowering fails.
+    let invalid = deny().with_allow(rule("10.0.0.0/33"));
+    let error = dns_server(&invalid, gateway, None).unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::Unsupported);
 }

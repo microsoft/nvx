@@ -104,7 +104,7 @@
 mod form;
 
 use std::fmt;
-use std::net::Ipv4Addr;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -326,6 +326,31 @@ impl SandboxNetwork {
     /// for a policy that lets nothing through, as [`network::openvmm_arguments`] renders them.
     pub fn openvmm_arguments(&self) -> Result<Vec<String>> {
         network::openvmm_arguments(Some(&self.policy), &self.guest_network)
+    }
+
+    /// Returns the OpenVMM arguments with which a template's capture attaches its NIC for the
+    /// network: the guest's address under the complete deny-all policy, whatever the network's
+    /// own policy, which each restore of the template replaces with its clone's; or none for a
+    /// policy that lets nothing through, for which [`openvmm_arguments`](Self::openvmm_arguments)
+    /// attaches no NIC either, so that a template of the network has none.
+    ///
+    /// Fails as [`openvmm_arguments`](Self::openvmm_arguments) does.
+    pub fn template_arguments(&self) -> Result<Vec<String>> {
+        Ok(if self.openvmm_arguments()?.is_empty() {
+            Vec::new()
+        } else {
+            network::template_arguments(&self.guest_network)
+        })
+    }
+
+    /// Returns the DNS server that OpenVMM names to the guest under the policy, given the IPv6
+    /// gateway of the guest's NIC if the NIC has an IPv6 identity, as [`network::dns_server`]
+    /// chooses it: the gateway, of either family, whose DNS service the policy lets the guest
+    /// reach, if any.
+    ///
+    /// Fails as [`openvmm_arguments`](Self::openvmm_arguments) does.
+    pub(crate) fn dns_server(&self, ipv6_gateway: Option<Ipv6Addr>) -> Result<Option<IpAddr>> {
+        network::dns_server(&self.policy, self.gateway, ipv6_gateway)
     }
 }
 

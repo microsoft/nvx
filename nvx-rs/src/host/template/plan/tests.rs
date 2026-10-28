@@ -7,7 +7,10 @@ use serde_json::json;
 
 use super::*;
 use crate::ErrorKind;
-use crate::host::network::{EgressRule, ForwardProtocol, LoopbackForward, NetworkProxy, Protocol};
+use crate::host::network::{
+    Access, EgressRule, ForwardProtocol, HostLoopback, LoopbackForward, NetworkPolicy,
+    NetworkProxy, Protocol,
+};
 use crate::host::sandbox::distro::{BINDING_VERSION, DISTRO_POLICY_REVISION};
 use crate::host::sandbox::{SandboxDistro, SandboxNetwork, SandboxSettings};
 use crate::host::seal::SEAL_VERSION;
@@ -81,7 +84,7 @@ const DESTINATION: &str = if cfg!(windows) {
 const GENERATION: &str = "000102030405060708090a0b0c0d0e0f";
 
 /// The options of templates' arguments, each of which takes one value.
-const OPTIONS: [&str; 17] = [
+const OPTIONS: [&str; 14] = [
     "--machine",
     "--microvm-sandbox-block",
     "--net",
@@ -89,9 +92,6 @@ const OPTIONS: [&str; 17] = [
     "--network-egress",
     "--network-ingress",
     "--host-loopback",
-    "--network-egress-allow",
-    "--network-egress-deny",
-    "--network-proxy",
     "--processors",
     "--memory",
     "--memory-capacity",
@@ -175,29 +175,48 @@ fn outbound() -> NetworkPolicy {
     policy
 }
 
-/// Returns a network whose policy allows ingress.
-fn listening() -> Option<SandboxNetwork> {
+/// Returns a policy that allows ingress.
+fn listening() -> NetworkPolicy {
     let mut policy = NetworkPolicy::new(Access::Deny);
     policy.ingress = Access::Allow;
-    Some(network(policy))
+    policy
+}
+
+/// Returns a policy that allows egress, and host-loopback access both ways, with a forward of a
+/// TCP port of host loopback to the guest.
+fn forwarded() -> NetworkPolicy {
+    let mut policy = NetworkPolicy::new(Access::Allow);
+    policy.host_loopback = HostLoopback::Allow;
+    policy.host_loopback_forwards.push(LoopbackForward {
+        protocol: ForwardProtocol::Tcp,
+        host_port: 18080,
+        guest_port: 8080,
+    });
+    policy
+}
+
+/// Returns the policies of networks that attach a NIC: they allow egress, egress to some
+/// destinations, egress and host-loopback access from the guest, a proxy alone, ingress, and
+/// host-loopback access both ways, with a forward.
+fn attaching() -> Vec<NetworkPolicy> {
+    vec![
+        NetworkPolicy::new(Access::Allow),
+        NetworkPolicy::new(Access::Deny)
+            .with_allow(EgressRule::to("192.0.2.0/24").on_port(Protocol::Tcp, 443))
+            .with_deny(EgressRule::to("192.0.2.128/25")),
+        outbound(),
+        NetworkPolicy::proxy_only(NetworkProxy::new(3128)),
+        listening(),
+        forwarded(),
+    ]
 }
 
 /// Returns the networks of templates: none; one under a policy that lets nothing through, which
-/// attaches no NIC; and NICs that allow egress, egress to some destinations, egress and
-/// host-loopback access from the guest, and a proxy alone.
+/// attaches no NIC; and those under each policy of [`attaching`].
 fn networks() -> Vec<Option<SandboxNetwork>> {
-    vec![
-        None,
-        Some(network(NetworkPolicy::new(Access::Deny))),
-        Some(network(NetworkPolicy::new(Access::Allow))),
-        Some(network(
-            NetworkPolicy::new(Access::Deny)
-                .with_allow(EgressRule::to("192.0.2.0/24").on_port(Protocol::Tcp, 443))
-                .with_deny(EgressRule::to("192.0.2.128/25")),
-        )),
-        Some(network(outbound())),
-        Some(network(NetworkPolicy::proxy_only(NetworkProxy::new(3128)))),
-    ]
+    let mut networks = vec![None, Some(network(NetworkPolicy::new(Access::Deny)))];
+    networks.extend(attaching().into_iter().map(|policy| Some(network(policy))));
+    networks
 }
 
 /// Returns the resources of `processors`, all online at boot, with 512 MiB of RAM and a capacity
@@ -356,49 +375,34 @@ fn templates_render_their_devices_resources_and_capture_options() {
     // No NIC, without a network or with one that lets nothing through.
     for network in [None, Some(network(NetworkPolicy::new(Access::Deny)))] {
         let template = template(adapter(network));
+        assert!(template.nic_arguments().is_empty());
         assert_eq!(template.capture_arguments(), capture);
         assert_eq!(
             template.openvmm_arguments().unwrap(),
             [devices.clone(), capture.clone()].concat()
         );
     }
-    // One fixed NIC, with the template's policy.
-    let nic = strings(&["--net", "10.0.0.2/24", "--network-profile", "portable"]);
-    for (policy, enforced) in [
-        (
-            NetworkPolicy::new(Access::Allow),
-            strings(&[
-                "--network-egress",
-                "allow",
-                "--network-ingress",
-                "deny",
-                "--host-loopback",
-                "deny",
-            ]),
-        ),
-        (
-            outbound(),
-            strings(&["--network-egress", "allow", "--network-ingress", "deny"]),
-        ),
-        (
-            NetworkPolicy::proxy_only(NetworkProxy::new(3128)),
-            strings(&[
-                "--network-egress",
-                "deny",
-                "--network-ingress",
-                "deny",
-                "--host-loopback",
-                "deny",
-                "--network-proxy",
-                "10.0.0.1:3128",
-            ]),
-        ),
-    ] {
+    // One fixed NIC, at the network's guest address, under the complete deny-all policy, whatever
+    // the network's own, which each clone's restore replaces.
+    let nic = strings(&[
+        "--net",
+        "10.0.0.2/24",
+        "--network-profile",
+        "portable",
+        "--network-egress",
+        "deny",
+        "--network-ingress",
+        "deny",
+        "--host-loopback",
+        "deny",
+    ]);
+    for policy in attaching() {
         let template = template(adapter(Some(network(policy))));
+        assert_eq!(template.nic_arguments(), nic);
         assert_eq!(template.capture_arguments(), capture);
         assert_eq!(
             template.openvmm_arguments().unwrap(),
-            [devices.clone(), nic.clone(), enforced, capture.clone()].concat()
+            [devices.clone(), nic.clone(), capture.clone()].concat()
         );
     }
     // RAM and its capacity in MiB.
@@ -434,7 +438,7 @@ fn templates_keep_the_placeholder_and_the_files_of_their_capture_in_its_transact
     assert_eq!(plan.upper().scratch_path(), Some(Path::new(SCRATCH)));
     assert_eq!(plan.settings(), None);
     assert_eq!(plan.export(), None);
-    assert_eq!(plan.network(), network.as_ref());
+    assert_eq!(plan.network(), None);
     assert_eq!(template.binding(), &binding());
     assert_eq!(template.image_capacity(), GIB);
     assert_eq!(template.scratch_path(), Path::new(SCRATCH));
@@ -587,11 +591,16 @@ fn the_command_line_holds_only_tokens_of_openvmms_platform_allowlist() {
             "nvx_snapshot_tier={}",
             value(&arguments, "--snapshot-tier")
         ));
+        // Under the NIC's complete deny-all policy, OpenVMM writes no DNS server and no
+        // published listeners.
         if arguments.iter().any(|argument| argument == "--net") {
-            let network = template.plan().network().unwrap();
-            let (address, _) = network.guest_network().split_once('/').unwrap();
+            let guest_network = value(&arguments, "--net");
+            let (address, _) = guest_network.split_once('/').unwrap();
             tokens.push(format!("virtnet_ip={address}"));
-            tokens.push(format!("virtnet_gw={}", network.gateway()));
+            tokens.push(format!(
+                "virtnet_gw={}",
+                crate::net::guest_gateway(guest_network).unwrap()
+            ));
         }
         for token in &tokens {
             assert!(openvmm::admits(token), "{token} of {template:?}");
@@ -622,7 +631,7 @@ fn templates_hold_no_tenant_data() {
         for text in [IDENTITY, "tenant", "3128", "/sandboxes", r"\sandboxes"] {
             assert!(!command_line.contains(text), "{text} in {command_line}");
         }
-        for text in [IDENTITY, "tenant", "/sandboxes", r"\sandboxes"] {
+        for text in [IDENTITY, "tenant", "3128", "/sandboxes", r"\sandboxes"] {
             assert!(
                 arguments.iter().all(|argument| !argument.contains(text)),
                 "{text} in {arguments:?}"
@@ -638,12 +647,20 @@ fn templates_hold_no_tenant_data() {
             let option = option.as_str();
             assert!(OPTIONS.contains(&option), "{option} in {arguments:?}");
             assert!(!value.starts_with("--"), "{option} {value}");
-            if ["--network-ingress", "--host-loopback"].contains(&option) {
+            if ["--network-egress", "--network-ingress", "--host-loopback"].contains(&option) {
                 assert_eq!(value, "deny", "{option} in {arguments:?}");
             }
         }
         let devices = template.plan().openvmm_arguments().unwrap();
-        assert_eq!([devices, template.capture_arguments()].concat(), arguments);
+        assert_eq!(
+            [
+                devices,
+                template.nic_arguments().to_vec(),
+                template.capture_arguments()
+            ]
+            .concat(),
+            arguments
+        );
     }
 }
 
@@ -841,29 +858,6 @@ fn templates_refuse_what_no_capture_takes() {
         );
     }
 
-    // Policies through which OpenVMM publishes the guest's listeners.
-    let mut both_ways = NetworkPolicy::new(Access::Allow);
-    both_ways.host_loopback = HostLoopback::Allow;
-    let mut forwarded = both_ways.clone();
-    forwarded.host_loopback_forwards.push(LoopbackForward {
-        protocol: ForwardProtocol::Tcp,
-        host_port: 18080,
-        guest_port: 8080,
-    });
-    for (network, allowed) in [
-        (listening(), "ingress"),
-        (Some(network(both_ways)), "host-loopback access both ways"),
-        (Some(network(forwarded)), "host-loopback access both ways"),
-    ] {
-        assert_eq!(
-            refusal(Inputs::of(adapter(network)).lower()),
-            format!(
-                "a template's network policy cannot allow {allowed}: OpenVMM publishes the \
-                 guest's listeners as live host attachments, which no snapshot holds"
-            )
-        );
-    }
-
     // Transaction directories that OpenVMM would resolve against its own directory.
     let mut relative = vec!["templates/tx-1", "."];
     if cfg!(windows) {
@@ -958,7 +952,7 @@ fn templates_check_their_inputs_in_order() {
             SandboxSettings::default(),
         )
         .unwrap()
-        .with_network(listening()),
+        .with_network(Some(network(listening()))),
         binding: binding_of("erofs", IDENTITY, 1000),
         scratch_length: 0,
         resources: TemplateResources {
@@ -969,12 +963,22 @@ fn templates_check_their_inputs_in_order() {
         },
         transaction: "templates".to_owned(),
     };
-    let steps: [(&str, Fix); 12] = [
+    let steps: [(&str, Fix); 11] = [
         ("a template lowers an adapter's plan", |inputs| {
-            inputs.adapter = adapter_at("placeholder.vhd", gpt(), SandboxUpper::RAM, listening());
+            inputs.adapter = adapter_at(
+                "placeholder.vhd",
+                gpt(),
+                SandboxUpper::RAM,
+                Some(network(listening())),
+            );
         }),
         ("is not the erofs layer", |inputs| {
-            inputs.adapter = adapter_at("placeholder.vhd", erofs(), SandboxUpper::RAM, listening());
+            inputs.adapter = adapter_at(
+                "placeholder.vhd",
+                erofs(),
+                SandboxUpper::RAM,
+                Some(network(listening())),
+            );
         }),
         (
             "the placeholder of a template's capture must be absolute",
@@ -983,12 +987,12 @@ fn templates_check_their_inputs_in_order() {
                     &PLACEHOLDER.replace(".img", ".vhd"),
                     erofs(),
                     SandboxUpper::RAM,
-                    listening(),
+                    Some(network(listening())),
                 );
             },
         ),
         ("disk paths ending in .vhd", |inputs| {
-            inputs.adapter = adapter(listening());
+            inputs.adapter = adapter(Some(network(listening())));
         }),
         ("of 1000 bytes cannot be attached", |inputs| {
             inputs.binding = binding();
@@ -1004,9 +1008,6 @@ fn templates_check_their_inputs_in_order() {
         }),
         ("needs nonzero RAM", |inputs| {
             inputs.resources = resources(2)
-        }),
-        ("cannot allow ingress", |inputs| {
-            inputs.adapter = adapter(None);
         }),
         ("must be absolute", |inputs| {
             inputs.transaction = format!("{TRANSACTION},1");

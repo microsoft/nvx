@@ -133,10 +133,11 @@ impl ClonePlan {
     /// which OpenVMM opens alike, and for an upper in RAM, `--restore-absent-scratch`, which
     /// declares the template's scratch absent, so that OpenVMM attaches it with no file, at the
     /// geometry that the template recorded, as the template's guest negotiated it: its reads return
-    /// zeros and its writes fail, and the clone's guest never uses it; and the template's
-    /// network, as its key records it, [`TemplateKey::network_arguments`], the policy of the
-    /// template's NIC, unchanged, if it has one, without `--net` and the guest's address, which
-    /// OpenVMM takes from the snapshot. The clone's export, if it has one, follows, bound to the
+    /// zeros and its writes fail, and the clone's guest never uses it; and the clone's network, if
+    /// the template has a NIC: `--restore-network-policy`, with which the policy of the clone's
+    /// network replaces the template's complete deny-all policy on the NIC, and the options of that
+    /// policy, without `--net` and the guest's address, which OpenVMM takes from the snapshot. The
+    /// clone's export, if it has one, follows, bound to the
     /// template's dormant filesystem slot: `--mount` with
     /// [`GUEST_EXPORT`](crate::host::filesystem::GUEST_EXPORT), the exported directory, and its
     /// mode, `rw` if a mapping writes it, and `ro` otherwise, then its hidden, re-exposed, and
@@ -290,7 +291,7 @@ impl ClonePlan {
             devices,
             export,
         } = self;
-        let mut devices = device_arguments(&devices, &key)
+        let mut devices = device_arguments(&devices)
             .attribute(Evidence::InvalidSettings)
             .map_err(unrecorded)?;
         let table = match &export {
@@ -624,25 +625,33 @@ impl ClonePlan {
     }
 }
 
-/// Returns OpenVMM's arguments of the devices of a clone's restore: those of the clone's devices,
-/// `devices`, which [`SandboxPlan::openvmm_arguments`] renders, with `--restore-absent-scratch`
-/// for an upper in RAM, whose plan renders no `scratch` block device, then the template's network,
-/// as `key` records it, [`TemplateKey::network_arguments`], without `--net` and the guest's
-/// address, which OpenVMM takes from the snapshot, and refuses beside it.
-fn device_arguments(devices: &SandboxPlan, key: &TemplateKey) -> Result<Vec<String>> {
+/// Returns OpenVMM's arguments of the devices of a clone's restore, `devices`: those that
+/// [`SandboxPlan::openvmm_arguments`] renders, with `--restore-absent-scratch` for an upper in RAM,
+/// whose plan renders no `scratch` block device, and with `--restore-network-policy` in place of
+/// `--net` and the guest's address, which OpenVMM takes from the snapshot, and refuses beside it,
+/// so that the policy of the clone's network replaces the template's complete deny-all policy.
+fn device_arguments(devices: &SandboxPlan) -> Result<Vec<String>> {
     let mut arguments = devices.openvmm_arguments()?;
-    if devices.upper().scratch_path().is_none() {
-        arguments.push("--restore-absent-scratch".to_owned());
+    // The plan renders its network last, after its block devices.
+    let network = arguments.iter().position(|argument| argument == "--net");
+    if let Some(at) = network {
+        arguments.splice(
+            at..(at + 2).min(arguments.len()),
+            ["--restore-network-policy".to_owned()],
+        );
     }
-    // A key's network attaches its NIC first, with `--net` and the guest's address.
-    arguments.extend_from_slice(key.network_arguments().get(2..).unwrap_or_default());
+    if devices.upper().scratch_path().is_none() {
+        arguments.insert(
+            network.unwrap_or(arguments.len()),
+            "--restore-absent-scratch".to_owned(),
+        );
+    }
     Ok(arguments)
 }
 
 /// What OpenVMM's arguments of a clone's restore name besides its control endpoint.
 struct Restore<'a> {
-    /// The arguments of the clone's devices and of the template's network, as
-    /// [`device_arguments`] renders them.
+    /// The arguments of the clone's devices, as [`device_arguments`] renders them.
     devices: Vec<String>,
     /// The generation's key.
     key: &'a TemplateKey,
