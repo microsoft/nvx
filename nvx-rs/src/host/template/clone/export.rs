@@ -62,7 +62,8 @@ impl DirectoryExport {
     /// or its snapshot. Refuses it as well if it lets the guest write in one of `through`, the
     /// directories through which the store's path, `store`, leads: the host reaches the store,
     /// and OpenVMM the snapshots in it, by that path, so the guest could replace a link or a
-    /// directory of the path, and turn the path elsewhere.
+    /// directory of the path, and turn the path elsewhere, or make a directory of it
+    /// unsearchable, and keep the host from following it.
     ///
     /// The check reads nothing: it compares the directory's path, and the paths in which the
     /// guest may write, as the plan resolved them, with `resolved` and `through`, which the caller
@@ -100,7 +101,7 @@ impl DirectoryExport {
                 return Err(Error::unsupported(format!(
                     "the export of a clone cannot let its guest write in {}, through which the \
                      path of the template store {} leads, since the guest could then turn that \
-                     path elsewhere",
+                     path elsewhere, or keep the host from following it",
                     directory.display(),
                     store.display()
                 )));
