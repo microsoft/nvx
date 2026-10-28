@@ -874,6 +874,51 @@ pub(super) fn read_failure(path: &Path) -> Result<Option<FailureRecord>> {
         .map_err(|problem| Error::io(format!("{}: {problem}", malformed())))
 }
 
+/// Reads the record of the failure of the clone of `lease` at `path`, as [`read_failure`] reads
+/// it, or returns `None` if it does not exist.
+///
+/// Fails as [`read_failure`] does, and, as for a record that is malformed, with
+/// [`ErrorKind::Io`](crate::ErrorKind::Io) for a record of another clone's failure, whose template
+/// store, lease, leased generation, its key, or launch is not the lease's: it tells nothing of
+/// this clone, and a [quarantine](CloneFailure::quarantine) of its failure would tombstone the
+/// record's generation, which may not be the one that this clone leases.
+pub(super) fn read_failure_of(path: &Path, lease: &Lease) -> Result<Option<FailureRecord>> {
+    let Some(record) = read_failure(path)? else {
+        return Ok(None);
+    };
+    let leased = lease.template();
+    let differences: Vec<&str> = [
+        (record.store != lease.store(), "the template store"),
+        (record.lease != lease.id(), "the lease"),
+        (
+            record.template.generation != leased.generation,
+            "the leased generation",
+        ),
+        (
+            record.template.key != leased.key,
+            "the key of the leased generation",
+        ),
+        (record.launch != *lease.launch(), "the launch"),
+    ]
+    .into_iter()
+    .filter_map(|(differs, what)| differs.then_some(what))
+    .collect();
+    let Some((last, others)) = differences.split_last() else {
+        return Ok(Some(record));
+    };
+    let differences = if others.is_empty() {
+        (*last).to_owned()
+    } else {
+        format!("{} and {last}", others.join(", "))
+    };
+    Err(Error::io(format!(
+        "the {FAILURE_WHAT} {} belongs to another clone than the one of the lease {}, which the \
+         sandbox's clone binding records: they differ in {differences}",
+        path.display(),
+        lease.id(),
+    )))
+}
+
 /// Reads the private regular file at `path`, the clone's `description`, of at most `limit` bytes,
 /// or returns `None` if it does not exist, or was removed as this opened it, as [`was_removed`]
 /// tells.
@@ -962,8 +1007,8 @@ impl CloneRecords {
     /// the latest transition that replaced it left it, and the records may come from transitions
     /// that ran between the reads. A caller that holds the sandbox's lock reads them at one point
     /// of its lifecycle. Fails as the reads of the clone binding, [`Lease::of`], of the store's
-    /// records, of the progress log, and of the failure record fail; an outcome report that is
-    /// missing or malformed is none.
+    /// records, of the progress log, and of the failure record fail, a failure record of another
+    /// clone than the binding's included; an outcome report that is missing or malformed is none.
     ///
     /// It reads the outcome report only once the clone got past its plan, as the progress log of
     /// its launch, the launch's journal, the runtime record of its VM, or the record of a failure
@@ -978,7 +1023,7 @@ impl CloneRecords {
         let runtime = sandbox.runtime()?;
         let logged = read_progress(&sandbox.clone_progress_path(), lease.launch())?
             .map(|logged| logged.progress);
-        let failure = read_failure(&sandbox.clone_failure_path())?;
+        let failure = read_failure_of(&sandbox.clone_failure_path(), &lease)?;
         // A failure records how far the clone got, which the store's records of its launch no
         // longer tell once the failure ended the launch.
         let progress = progress_of(&lease, journal.as_ref(), runtime.as_ref(), logged).max(
@@ -1315,6 +1360,105 @@ mod tests {
         }
         write_private(&path, b"{").unwrap();
         assert_eq!(read_failure(&path).unwrap_err().kind(), ErrorKind::Io);
+    }
+
+    #[test]
+    fn a_failure_record_of_another_clone_than_the_one_of_the_lease_is_refused() {
+        let (_directory, private) = private_dir();
+        let path = private.join(CLONE_FAILURE_NAME);
+        let written = failure(Teardown::Exited);
+        let lease = Lease::new(
+            written.lease,
+            written.store,
+            written.template.generation,
+            written.template.key,
+            private.clone(),
+            written.launch.clone(),
+        );
+        assert_eq!(read_failure_of(&path, &lease).unwrap(), None);
+        write_failure(&path, &written).unwrap();
+        assert_eq!(
+            read_failure_of(&path, &lease).unwrap(),
+            Some(written.clone())
+        );
+        // A record of the failure of a clone of another store, of another lease, of another
+        // generation, or of another key, or of another launch, tells nothing of the lease's clone,
+        // though `read_failure` reads it.
+        let generation = StoreGeneration::new(NonZeroU64::new(8).unwrap());
+        let launch = LaunchId::try_from("6".repeat(32)).unwrap();
+        let others = [
+            (
+                FailureRecord {
+                    store: StoreId::from_bytes([6; 16]),
+                    ..written.clone()
+                },
+                "the template store",
+            ),
+            (
+                FailureRecord {
+                    lease: LeaseId::from_bytes([6; 16]),
+                    ..written.clone()
+                },
+                "the lease",
+            ),
+            (
+                FailureRecord {
+                    template: TemplateReference {
+                        generation,
+                        ..written.template
+                    },
+                    ..written.clone()
+                },
+                "the leased generation",
+            ),
+            (
+                FailureRecord {
+                    template: TemplateReference {
+                        key: Identity::from_bytes([6; 32]),
+                        ..written.template
+                    },
+                    ..written.clone()
+                },
+                "the key of the leased generation",
+            ),
+            (
+                FailureRecord {
+                    launch: launch.clone(),
+                    ..written.clone()
+                },
+                "the launch",
+            ),
+            (
+                FailureRecord {
+                    lease: LeaseId::from_bytes([6; 16]),
+                    template: TemplateReference {
+                        generation,
+                        ..written.template
+                    },
+                    launch,
+                    ..written.clone()
+                },
+                "the lease, the leased generation and the launch",
+            ),
+        ];
+        for (other, differences) in others {
+            write_failure(&path, &other).unwrap();
+            assert_eq!(read_failure(&path).unwrap(), Some(other));
+            let error = read_failure_of(&path, &lease).unwrap_err();
+            assert_eq!(error.kind(), ErrorKind::Io, "{error}");
+            assert!(
+                error
+                    .to_string()
+                    .ends_with(&format!("they differ in {differences}")),
+                "{error}"
+            );
+        }
+        // A record that cannot be read fails as it does for `read_failure`.
+        write_private(&path, b"{").unwrap();
+        assert_eq!(
+            read_failure_of(&path, &lease).unwrap_err().kind(),
+            ErrorKind::Io
+        );
     }
 
     #[test]
