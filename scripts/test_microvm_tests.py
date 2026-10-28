@@ -23,7 +23,7 @@ import threading
 import time
 import unittest
 from collections.abc import Callable, Collection, Sequence
-from contextlib import ExitStack, nullcontext, redirect_stdout
+from contextlib import ExitStack, nullcontext, redirect_stderr, redirect_stdout
 from datetime import datetime
 from pathlib import Path
 from typing import Any, cast
@@ -1226,6 +1226,9 @@ class _FakeSandboxCli:
             files[arguments[0]] = b""
         elif entrypoint == sandbox_lifecycle_tests.PROBE:
             self.probed = True
+            if "probe-interrupted" in self.faults:
+                # SIGINT reaches the harness while it waits for the probe.
+                raise KeyboardInterrupt
             if "probe-fails" in self.faults:
                 returncode = 1
                 stderr = b"NVX-UBUNTU-SANDBOX-FAIL: the workload shares a namespace\n"
@@ -1687,6 +1690,45 @@ class PublicSandboxLifecycleTests(unittest.TestCase):
             self.assertTrue(
                 (root / "results" / "sandbox-lifecycle-openvmm.log").is_file()
             )
+
+    def test_an_interrupted_acceptance_stops_its_sandboxes(self):
+        # A cancelled CI job interrupts the harness (#946), which stops the
+        # sandboxes that the acceptance started, as a failure does, and still
+        # reports the interruption, not a failure.
+        for faults, preserved in (
+            (("probe-interrupted",), False),
+            (("probe-interrupted", "cleanup-deprovision-fails"), True),
+        ):
+            with (
+                self.subTest(faults=faults),
+                tempfile.TemporaryDirectory() as temporary,
+            ):
+                root = Path(temporary)
+                fake = _FakeSandboxCli(*faults)
+                stderr = io.StringIO()
+                with (
+                    redirect_stderr(stderr),
+                    self.assertRaises(KeyboardInterrupt),
+                ):
+                    self._run(root, fake)
+                fixtures = list(root.glob("nvx-public-lifecycle-*"))
+
+                # The cleanup stopped and deprovisioned the running sandbox.
+                self.assertEqual(fake.operations[-3:], ["exec", "stop", "deprovision"])
+                self.assertFalse(any(fake.running.values()))
+                self.assertEqual(len(fixtures), int(preserved))
+                self.assertTrue(
+                    (root / "results" / "sandbox-lifecycle-checks.json").is_file()
+                )
+                if preserved:
+                    self.assertIn(str(fixtures[0]), stderr.getvalue())
+                    self.assertRegex(
+                        stderr.getvalue(),
+                        "^warning: cleanup after the interruption: .*"
+                        "fixture preserved for recovery",
+                    )
+                else:
+                    self.assertEqual(stderr.getvalue(), "")
 
     def test_scratch_journal_check_reads_the_ext4_recovery_flag(self):
         with tempfile.TemporaryDirectory() as temporary:
