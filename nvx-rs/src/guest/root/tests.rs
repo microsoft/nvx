@@ -607,6 +607,28 @@ fn an_assembly_waits_for_its_devices_until_its_deadline_at_the_latest() {
     let root = guest.assemble_until(&assembly, deadline).unwrap();
     assert_eq!(guest.kernel.sleeps(), 1);
     root.teardown().unwrap();
+
+    // So is one that appears while the assembly sleeps less than an interval, until a deadline
+    // that comes before the interval ends, at which it polls once more.
+    let guest = Guest::bare();
+    attach(&guest.base, 0, "vda", 4096);
+    let root_directory = guest.base.clone();
+    guest.kernel.on_sleep(move |sleeps| {
+        if sleeps == 1 {
+            attach(&root_directory, 1, "vdb", 8192);
+        }
+    });
+    let wait = Duration::from_millis(40);
+    let started = Instant::now();
+    match guest.assemble_until(&assembly, started + wait) {
+        Ok(root) => {
+            assert_eq!(guest.kernel.sleeps(), 1);
+            root.teardown().unwrap();
+        }
+        // Unless the test ran so late that the deadline passed before the assembly looked for
+        // the scratch.
+        Err(error) => assert!(started.elapsed() >= wait, "{error:?}"),
+    }
 }
 
 #[test]

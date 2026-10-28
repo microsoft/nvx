@@ -120,9 +120,10 @@ pub(super) fn prepare(
 }
 
 /// Returns the name and the node of the block device that the VMM attached at `mmio`, polling
-/// for it every [`POLL_INTERVAL`] while `timeout` allows another poll, and until `deadline` at the
-/// latest, if any: it sleeps no longer than until the deadline, and polls no more once the
-/// deadline passed, however long a poll or a sleep took.
+/// for it every [`POLL_INTERVAL`] while `timeout` allows another poll, or, if `deadline` comes
+/// first, until the deadline, at which it polls once more, after a shorter sleep: it sleeps no
+/// longer than until the deadline, and polls no more once the deadline passed, however long a poll
+/// or a sleep took.
 fn resolve(
     kernel: &mut dyn Kernel,
     paths: &Paths,
@@ -132,8 +133,10 @@ fn resolve(
     deadline: Option<Instant>,
 ) -> Result<(String, PathBuf), Error> {
     let left = |deadline: Instant| deadline.saturating_duration_since(Instant::now());
-    let timeout = deadline.map_or(timeout, |deadline| timeout.min(left(deadline)));
-    let polls = timeout.as_millis() / POLL_INTERVAL.as_millis() + 1;
+    let polls = match deadline.map(left) {
+        Some(left) if left < timeout => left.as_nanos().div_ceil(POLL_INTERVAL.as_nanos()) + 1,
+        _ => timeout.as_millis() / POLL_INTERVAL.as_millis() + 1,
+    };
     for poll in 0..polls {
         if poll > 0 {
             let interval = match deadline.map(left) {
