@@ -777,9 +777,9 @@ fn check_outside_store(checked: &CheckedScratch, store: &Store, path: &Path) -> 
 /// those that went from their paths meanwhile, as a publication renames a capture's transaction,
 /// which `dir`, the store's own directory, outlives.
 fn is_within(location: &Path, dir: &Path) -> io::Result<bool> {
-    let dir = platform::file_identity(dir)?;
+    let dir = platform::file_id(dir)?;
     for ancestor in location.ancestors().skip(1) {
-        match platform::file_identity(ancestor) {
+        match platform::file_id(ancestor) {
             Ok(identity) if identity == dir => return Ok(true),
             Ok(_) => {}
             Err(error)

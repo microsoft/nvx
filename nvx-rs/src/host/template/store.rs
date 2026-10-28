@@ -891,8 +891,8 @@ fn take_lock(dir: &Path, deadline: Option<Instant>) -> Result<File> {
                 }
             },
         }
-        let locked = platform::opened_file_identity(&file).map_err(failed)?;
-        match platform::file_identity(&path) {
+        let locked = platform::opened_file_id(&file).map_err(failed)?;
+        match platform::file_id(&path) {
             Ok(current) if current == locked => return Ok(file),
             Ok(_) => {}
             Err(error) if error.kind() == io::ErrorKind::NotFound => {}

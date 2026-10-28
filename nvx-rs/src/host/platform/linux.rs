@@ -639,6 +639,20 @@ pub(crate) fn opened_file_identity(file: &File) -> io::Result<(u64, u64)> {
     Ok((metadata.dev(), metadata.ino()))
 }
 
+/// Returns the identity by which the stores tell a file or directory apart from every other,
+/// following its links: its device and inode, as [`opened_file_id`] gives them.
+pub(crate) fn file_id(path: &Path) -> io::Result<(u64, u128)> {
+    let metadata = fs::metadata(path)?;
+    Ok((metadata.dev(), u128::from(metadata.ino())))
+}
+
+/// Returns the identity by which the stores tell the file that `file` holds open apart from every
+/// other: its device and inode, as its [`FileSeal`](crate::host::seal::FileSeal) holds them.
+pub(crate) fn opened_file_id(file: &File) -> io::Result<(u64, u128)> {
+    let metadata = file.metadata()?;
+    Ok((metadata.dev(), u128::from(metadata.ino())))
+}
+
 /// Returns the number of names, its hard links, of the file that `file` holds open.
 pub(crate) fn link_count(file: &File) -> io::Result<u64> {
     Ok(file.metadata()?.nlink())
@@ -660,14 +674,14 @@ impl Directory {
             .map(Self)
     }
 
-    /// Returns the device and inode of its entry `name`, not following a link, as
-    /// [`opened_file_identity`] gives them, or `None` if it has no such entry.
-    pub(crate) fn entry_identity(&self, name: &str) -> io::Result<Option<(u64, u64)>> {
+    /// Returns the identity of its entry `name`, not following a link, as [`opened_file_id`] gives
+    /// it, or `None` if it has no such entry.
+    pub(crate) fn entry_id(&self, name: &str) -> io::Result<Option<(u64, u128)>> {
         use nix::fcntl::AtFlags;
         use nix::sys::stat::fstatat;
 
         match fstatat(&self.0, name, AtFlags::AT_SYMLINK_NOFOLLOW) {
-            Ok(status) => Ok(Some((status.st_dev, status.st_ino))),
+            Ok(status) => Ok(Some((status.st_dev, u128::from(status.st_ino)))),
             Err(Errno::ENOENT) => Ok(None),
             Err(errno) => Err(errno.into()),
         }

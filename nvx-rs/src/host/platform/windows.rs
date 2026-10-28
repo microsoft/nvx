@@ -1366,7 +1366,8 @@ pub(crate) fn set_access(path: &Path, sddl: &str) -> io::Result<()> {
     result
 }
 
-/// Returns the volume serial number and file index of a file or directory.
+/// Returns the volume serial number and 64-bit file index of a file or directory, which a file
+/// system such as ReFS does not keep unique.
 ///
 /// The object is opened without access rights, which succeeds even while OpenVMM holds it open.
 pub fn file_identity(path: &Path) -> io::Result<(u64, u64)> {
@@ -1375,6 +1376,18 @@ pub fn file_identity(path: &Path) -> io::Result<(u64, u64)> {
         .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
         .open(path)?;
     handle_identity(file.as_raw_handle() as HANDLE)
+}
+
+/// Returns the identity by which the stores tell a file or directory apart from every other,
+/// following its links, as [`opened_file_id`] gives it.
+///
+/// The object is opened without access rights, which succeeds even while OpenVMM holds it open.
+pub(crate) fn file_id(path: &Path) -> io::Result<(u64, u128)> {
+    let file = OpenOptions::new()
+        .access_mode(0)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+        .open(path)?;
+    opened_file_id(&file)
 }
 
 /// Returns whether the file at `path` is deleted: whether an open of it finds no file, or one
@@ -1425,10 +1438,9 @@ impl Directory {
             .map(Self)
     }
 
-    /// Returns the volume serial number and file index of its entry `name`, not following a link
-    /// or other reparse point, as [`opened_file_identity`] gives them, or `None` if it has no such
-    /// entry.
-    pub(crate) fn entry_identity(&self, name: &str) -> io::Result<Option<(u64, u64)>> {
+    /// Returns the identity of its entry `name`, not following a link or other reparse point, as
+    /// [`opened_file_id`] gives it, or `None` if it has no such entry.
+    pub(crate) fn entry_id(&self, name: &str) -> io::Result<Option<(u64, u128)>> {
         use windows_sys::Wdk::Storage::FileSystem::{
             FILE_OPEN_REPARSE_POINT, FILE_SYNCHRONOUS_IO_NONALERT,
         };
@@ -1440,7 +1452,7 @@ impl Directory {
             FILE_READ_ATTRIBUTES | SYNCHRONIZE,
             FILE_OPEN_REPARSE_POINT | FILE_SYNCHRONOUS_IO_NONALERT,
         ) {
-            Ok(entry) => handle_identity(raw(&entry)).map(Some),
+            Ok(entry) => opened_file_id(&fs::File::from(entry)).map(Some),
             Err(STATUS_OBJECT_NAME_NOT_FOUND) => Ok(None),
             Err(status) => Err(status_error(status)),
         }
@@ -1611,9 +1623,19 @@ fn status_error(status: windows_sys::Win32::Foundation::NTSTATUS) -> io::Error {
     io::Error::from_raw_os_error(code as i32)
 }
 
-/// Returns the volume serial number and file index of the file that `file` holds open.
+/// Returns the volume serial number and 64-bit file index of the file that `file` holds open,
+/// which a file system such as ReFS does not keep unique: [`opened_file_id`] tells files apart.
 pub(crate) fn opened_file_identity(file: &fs::File) -> io::Result<(u64, u64)> {
     handle_identity(file.as_raw_handle() as HANDLE)
+}
+
+/// Returns the identity by which the stores tell the file that `file` holds open apart from every
+/// other, as its [`FileSeal`](crate::host::seal::FileSeal) holds it: the volume serial number and
+/// the 128-bit file ID of `FILE_ID_INFO`, which a file system such as ReFS keeps unique where the
+/// 64-bit file index is not.
+pub(crate) fn opened_file_id(file: &fs::File) -> io::Result<(u64, u128)> {
+    let seal = crate::host::seal::FileSeal::of(file)?;
+    Ok((seal.device(), seal.file_id()))
 }
 
 /// Returns the number of names, its hard links, of the file that `file` holds open.
@@ -1623,7 +1645,7 @@ pub(crate) fn link_count(file: &fs::File) -> io::Result<u64> {
     ))
 }
 
-/// Returns the volume serial number and file index of the file that `handle` holds open.
+/// Returns the volume serial number and 64-bit file index of the file that `handle` holds open.
 fn handle_identity(handle: HANDLE) -> io::Result<(u64, u64)> {
     let information = handle_information(handle)?;
     Ok((

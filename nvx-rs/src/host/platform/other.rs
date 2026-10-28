@@ -98,6 +98,16 @@ pub(crate) fn opened_file_identity(_file: &File) -> io::Result<(u64, u64)> {
     Err(unsupported())
 }
 
+/// Fails: this host keeps no store.
+pub(crate) fn file_id(_path: &Path) -> io::Result<(u64, u128)> {
+    Err(unsupported())
+}
+
+/// Fails: this host keeps no store.
+pub(crate) fn opened_file_id(_file: &File) -> io::Result<(u64, u128)> {
+    Err(unsupported())
+}
+
 pub(crate) fn link_count(_file: &File) -> io::Result<u64> {
     Err(unsupported())
 }
@@ -112,7 +122,7 @@ impl Directory {
     }
 
     /// Never called: no directory is open.
-    pub(crate) fn entry_identity(&self, _name: &str) -> io::Result<Option<(u64, u64)>> {
+    pub(crate) fn entry_id(&self, _name: &str) -> io::Result<Option<(u64, u128)>> {
         match *self {}
     }
 

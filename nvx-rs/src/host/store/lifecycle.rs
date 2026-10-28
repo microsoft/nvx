@@ -246,9 +246,8 @@ impl LockedStore {
             return;
         }
         let path = self.path(LOCK_NAME);
-        let held = platform::opened_file_identity(&self.lock);
-        if matches!((held, platform::file_identity(&path)), (Ok(held), Ok(current)) if held == current)
-        {
+        let held = platform::opened_file_id(&self.lock);
+        if matches!((held, platform::file_id(&path)), (Ok(held), Ok(current)) if held == current) {
             let _ = fs::remove_file(&path);
         }
     }
@@ -386,9 +385,9 @@ impl LockedStore {
             move |error: io::Error| RemovalError::Io { path, error }
         };
         let directory = platform::Directory::open(dir).map_err(failed)?;
-        let held = platform::opened_file_identity(&self.lock).map_err(entry_failed(LOCK_NAME))?;
+        let held = platform::opened_file_id(&self.lock).map_err(entry_failed(LOCK_NAME))?;
         if directory
-            .entry_identity(LOCK_NAME)
+            .entry_id(LOCK_NAME)
             .map_err(entry_failed(LOCK_NAME))?
             != Some(held)
         {
@@ -398,7 +397,7 @@ impl LockedStore {
         }
         for name in [JOURNAL_NAME, RUNTIME_NAME] {
             if directory
-                .entry_identity(name)
+                .entry_id(name)
                 .map_err(entry_failed(name))?
                 .is_some()
             {

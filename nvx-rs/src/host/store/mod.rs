@@ -639,8 +639,8 @@ impl SandboxStore {
                 }
             },
         }
-        let locked = platform::opened_file_identity(&file).map_err(failed)?;
-        match platform::file_identity(&path) {
+        let locked = platform::opened_file_id(&file).map_err(failed)?;
+        match platform::file_id(&path) {
             Ok(current) if current == locked => Ok(Taken::Locked(file)),
             Ok(_) => Ok(Taken::Replaced),
             Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(Taken::Replaced),
@@ -793,8 +793,8 @@ impl LockedStore {
         )))?;
         let lock = self.path(LOCK_NAME);
         let examine = || io_error(format!("cannot examine {}", lock.display()));
-        let held = platform::opened_file_identity(&self.lock).map_err(examine())?;
-        if directory.entry_identity(LOCK_NAME).map_err(examine())? != Some(held) {
+        let held = platform::opened_file_id(&self.lock).map_err(examine())?;
+        if directory.entry_id(LOCK_NAME).map_err(examine())? != Some(held) {
             return Err(Error::other(format!(
                 "the directory that {} names does not hold the lock of its sandbox: the path names \
                  another directory than when the lock was taken",

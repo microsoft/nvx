@@ -435,7 +435,7 @@ fn a_removal_makes_the_absence_of_the_clones_files_durable_before_it_removes_any
     locked
         .remove_contents_with(&|| {}, &|directory| {
             // The directory that the sync makes durable holds the sandbox's lock file.
-            let lock = directory.entry_identity(LOCK_NAME).unwrap();
+            let lock = directory.entry_id(LOCK_NAME).unwrap();
             synced.borrow_mut().push((lock, entries_of(&dir)));
             Ok(())
         })
@@ -446,7 +446,7 @@ fn a_removal_makes_the_absence_of_the_clones_files_durable_before_it_removes_any
     assert_eq!(
         synced.into_inner(),
         [(
-            Some(platform::file_identity(&dir.join(LOCK_NAME)).unwrap()),
+            Some(platform::file_id(&dir.join(LOCK_NAME)).unwrap()),
             sorted(&[BOOT, CONFIG, LOCK_NAME, LOG_NAME])
         )]
     );

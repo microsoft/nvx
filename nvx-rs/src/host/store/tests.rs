@@ -323,8 +323,8 @@ fn a_lock_file_replaced_while_waiting_locks_nothing() {
         move || {
             let locked = store.lock(None).unwrap();
             // The waiter holds the lock of the file that the path names now.
-            let current = platform::file_identity(&locked.path(LOCK_NAME)).unwrap();
-            let held = platform::opened_file_identity(&locked.lock).unwrap();
+            let current = platform::file_id(&locked.path(LOCK_NAME)).unwrap();
+            let held = platform::opened_file_id(&locked.lock).unwrap();
             assert_eq!(current, held);
         }
     });

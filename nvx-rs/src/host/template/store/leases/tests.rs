@@ -813,9 +813,9 @@ fn a_release_makes_the_removal_of_its_binding_durable_before_it_removes_its_reco
         Ok(())
     };
     // The release syncs the sandbox's directory through its handle, which holds the lock's file.
-    let lock = platform::file_identity(&sandbox.join(LOCK_NAME)).unwrap();
+    let lock = platform::file_id(&sandbox.join(LOCK_NAME)).unwrap();
     let sync_sandbox = |directory: &platform::Directory| -> io::Result<()> {
-        assert_eq!(directory.entry_identity(LOCK_NAME).unwrap(), Some(lock));
+        assert_eq!(directory.entry_id(LOCK_NAME).unwrap(), Some(lock));
         note(&sandbox);
         Ok(())
     };
