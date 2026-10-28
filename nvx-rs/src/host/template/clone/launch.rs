@@ -345,7 +345,14 @@ impl ClonePlan {
                 command.inherit = inherit;
                 Ok((hooks.command)(command))
             },
-            |error, _| tracker.pending(Stage::Launch, host_evidence(error), error),
+            |error, spawned| {
+                // A VMM that the launch spawned, and could not record, got the clone that far,
+                // which only the record of its failure tells once the launch has ended it.
+                if spawned {
+                    tracker.advance(Progress::Spawned);
+                }
+                tracker.pending(Stage::Launch, host_evidence(error), error);
+            },
         );
         // The VMM holds the claim, if it started.
         drop(claim);

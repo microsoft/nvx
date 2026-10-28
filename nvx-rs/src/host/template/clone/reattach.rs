@@ -61,15 +61,16 @@ pub enum ReattachedClone<S> {
 
 /// Reattaches to the clone of the sandbox of `locked`, under the runtime identity `runtime`,
 /// which the caller would launch the clone's template with now, through the adapter's framing,
-/// `control`, which must answer in a new session by `deadline`, and ends a VMM of the clone that
-/// it may not keep within `bound`.
+/// `control`, which must answer in a new session by `deadline`, and ends a VMM of the clone whose
+/// launch committed, and that it may not keep, within `bound`.
 ///
 /// It reads the records of the clone that the sandbox keeps, as [`CloneRecords`] describes, then
 /// reattaches to the sandbox's VM, as [`supervisor::reattach`] does, which ends a launch that a
-/// crash of its caller interrupted, through the verified identity of its VMM, removes a journal
-/// that the runtime record of its launch supersedes, as the launch's commit may leave it, which is
-/// no failure, and finds a VMM whose launch committed by the identity of its process, which says
-/// which VM it is:
+/// crash of its caller interrupted, through the verified identity of its VMM, as
+/// [`LockedStore::recover`] ends it, within the wait that the store's recovery allows the VMM's
+/// termination, which `bound` does not shorten, removes a journal that the runtime record of its
+/// launch supersedes, as the launch's commit may leave it, which is no failure, and finds a VMM
+/// whose launch committed by the identity of its process, which says which VM it is:
 ///
 /// - A VMM that runs under `runtime`, whose launch is the one that the clone's lease reserves, is
 ///   the clone's, which the reattach checks in a new session, as the restore sequence of the

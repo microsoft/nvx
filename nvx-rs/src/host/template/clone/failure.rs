@@ -153,9 +153,9 @@ pub enum Evidence {
     /// The host's recovery terminated the clone's VMM, whose launch's caller had crashed.
     ForcedKill,
     /// The clone's session broke its protocol: another process at one of the clone's endpoints,
-    /// other bytes than OpenVMM's restore-ready event, a refusal of the adapter's framing, a Ready
-    /// that does not report the record's activation, or a session that broke the order of the
-    /// activation, as the guest's
+    /// bytes that differ from OpenVMM's restore-ready event, a refusal of the adapter's framing, a
+    /// Ready that does not report the record's activation, or a session that broke the order of
+    /// the activation, as the guest's
     /// [`ACTIVATION_PROTOCOL`](crate::protocol::status::ACTIVATION_PROTOCOL) and
     /// [`ACTIVATION_ORDER`](crate::protocol::status::ACTIVATION_ORDER) tell.
     Protocol,
@@ -363,7 +363,8 @@ pub enum Progress {
     Planned,
     /// The launch wrote the clone's files, and may have begun its journal: no VMM was spawned.
     Launching,
-    /// The launch's VMM was spawned, and its journal records it.
+    /// The launch's VMM was spawned, which its journal records, unless the launch could not record
+    /// it, and then ended it through its handle.
     Spawned,
     /// The VMM's restore-ready event was read: the restored VM runs.
     Event,
