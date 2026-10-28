@@ -756,6 +756,56 @@ class CliTests(unittest.TestCase):
                         set(option.findall(usage_of(*command))),
                     )
 
+    @unittest.skipUnless(os.name == "posix", "SIGTERM is a POSIX signal")
+    def test_sigterm_interrupts_a_command_as_sigint_does(self):
+        # A cancelled CI step gets SIGINT and then SIGTERM (#946). Either one
+        # unwinds the command, so that its cleanup stops OpenVMM and removes
+        # its scratch directories, and nvx.py then exits as after Ctrl-C.
+        previous = signal.signal(signal.SIGTERM, signal.SIG_DFL)
+        self.addCleanup(signal.signal, signal.SIGTERM, previous)
+        cleaned: list[bool] = []
+
+        def interrupted(_args: argparse.Namespace) -> int:
+            try:
+                # Without its handler, SIGTERM would end this test process.
+                self.assertIs(
+                    signal.getsignal(signal.SIGTERM), signal.default_int_handler
+                )
+                os.kill(os.getpid(), signal.SIGTERM)
+                deadline = time.monotonic() + 10
+                while time.monotonic() < deadline:
+                    time.sleep(0.01)
+                self.fail("SIGTERM did not interrupt the command")
+            finally:
+                cleaned.append(True)
+
+        stderr = io.StringIO()
+        with (
+            patch.object(
+                nvx, "parse_args", return_value=argparse.Namespace(handler=interrupted)
+            ),
+            contextlib.redirect_stderr(stderr),
+        ):
+            self.assertEqual(nvx.main([]), 130)
+        self.assertEqual(cleaned, [True])
+        self.assertEqual(stderr.getvalue(), "Interrupted\n")
+        self.assertEqual(signal.getsignal(signal.SIGTERM), signal.SIG_DFL)
+
+        # As Python does for SIGINT, nvx.py leaves an ignored SIGTERM ignored.
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+
+        def ignored(_args: argparse.Namespace) -> int:
+            self.assertEqual(signal.getsignal(signal.SIGTERM), signal.SIG_IGN)
+            os.kill(os.getpid(), signal.SIGTERM)
+            time.sleep(0.05)
+            return 0
+
+        with patch.object(
+            nvx, "parse_args", return_value=argparse.Namespace(handler=ignored)
+        ):
+            self.assertEqual(nvx.main([]), 0)
+        self.assertEqual(signal.getsignal(signal.SIGTERM), signal.SIG_IGN)
+
     def test_check_required_ci_rejects_malformed_run_flags(self):
         # microsoft/nvx#496: an empty or malformed --run-* value must not be
         # silently accepted as false, which would let required-status checking

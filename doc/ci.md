@@ -984,6 +984,19 @@ SHA after applying the results to the current `dev` history: it drops rows
 already present for the same platform, ABI, processor count, commit, and
 metric, but otherwise appends them and pushes a baseline update.
 
+## Cancellation
+
+When a run is cancelled, as a push to a pull request cancels the run of its
+previous head, the runner
+[cancels each running step](https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-cancellation):
+it sends SIGINT to the step's shell, SIGTERM if the shell still runs 7.5 s
+later, and kills the shell's process tree another 2.5 s later. After the
+job's last step, the runner's orphan cleanup kills every process that the job
+started and that still runs. `nvx.py` handles SIGTERM as it handles SIGINT:
+either one interrupts its command, which then stops the OpenVMM processes and
+removes the scratch directories that it started and created, and exits with
+status 130 (see [Commands](usage.md#commands)).
+
 ## OpenVMM VMM tests
 
 OpenVMM's `vmm-tests-run` builds the tests that a filter selects and then runs
