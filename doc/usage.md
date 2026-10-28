@@ -176,10 +176,10 @@ nvx-rs/target/release/nvx-rs run
 | `--network-egress-policy-file PATH` | none | Load bounded IPv4 and IPv6 ranges and rule-local CIDR exclusions from JSON. Requires explicit `--network-egress`; cannot be mixed with explicit allow/deny rule flags. |
 | `--host-loopback {allow,deny}` | existing mapping | Control access between the guest and host loopback services. Explicit `allow` is bidirectional: the guest reaches host loopback through its gateway, and every TCP and UDP port on which the guest listens is published on host loopback for the host alone, or with `--network-ingress allow` admits the host as well; see [Host-loopback access](run.md#host-loopback-access). Snapshot capture and restore reject `allow`. |
 | `--network-proxy IPV4:TCP-PORT` | none | Allow one explicit host TCP proxy endpoint. |
-| `--host-loopback-forward PROTOCOL:HOST_PORT:GUEST_PORT` | none | Publish one TCP or UDP localhost port to the guest; repeat to add forwards. |
+| `--host-loopback-forward PROTOCOL:HOST_PORT:GUEST_PORT` | none | Publish one TCP or UDP localhost port to the guest; repeat to add forwards. Snapshot capture and restore reject forwards. |
 | `--outcome-report PATH` | none | Write a bounded local JSON outcome report. |
 | `--cmdline TEXT` | empty | Append kernel parameters; `nvx_*` and `tsc=` tokens are reserved. |
-| `--restore-snapshot PATH` | none | Restore the immutable machine contract and saved state from a snapshot directory. |
+| `--restore-snapshot PATH` | none | Restore the immutable machine contract and saved state from a snapshot directory. A snapshot captured with `--net` needs `--network-profile portable` and the network policy options of its capture, which the restore cannot change; see [Networked snapshots](run.md#networked-snapshots). |
 | `--restore-processors {1,2,4,8}` | none | Bring this contiguous processor prefix online before restore readiness. Requires an opt-in microVM snapshot and cannot exceed `--processors` capacity. |
 | `--restore-memory-mib MIB` | none | Select the 128 MiB-aligned RAM target for an expansion-capable snapshot restore, in the range of `--memory-mib`. |
 | `--restore-ready-path PATH` | none | Publish one restore-readiness event to an existing Unix socket or Windows named pipe. |
