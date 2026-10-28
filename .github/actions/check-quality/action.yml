@@ -51,6 +51,7 @@ runs:
           scripts/setup/setup-linux-mshv.sh \
           scripts/setup/setup-linux-runner.sh
         ${SHELLCHECK} --shell=bash \
+          .github/actions/run-benchmark/forward-signals.sh \
           .github/specula/setup-runner.sh guest/ubuntu/nvx-bashrc \
           scripts/setup/azure/linux/bootstrap-runner.sh \
           scripts/setup/azure/linux/block-runner-metadata.sh \
@@ -72,6 +73,7 @@ runs:
           scripts/setup/setup-linux-mshv.sh \
           scripts/setup/setup-linux-runner.sh
         ${SHFMT} -d -ln bash -i 4 -ci \
+          .github/actions/run-benchmark/forward-signals.sh \
           .github/specula/setup-runner.sh guest/ubuntu/nvx-bashrc \
           scripts/setup/azure/linux/bootstrap-runner.sh \
           scripts/setup/azure/linux/block-runner-metadata.sh \

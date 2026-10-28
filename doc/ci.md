@@ -270,10 +270,12 @@ Every job that uses the `validate-runner` action first ends, on Linux, any
 OpenVMM process that its runner's account still runs, with a warning that
 names it, and fails if one survives SIGKILL or the processes can't be listed.
 A runner runs one job at a time, so such a process is left from an
-earlier job: when a job is cancelled, the runner signals only the step's shell,
-so the test harness keeps running, and it can start a VM after the runner's
-orphan cleanup has listed the job's processes; the cleanup then kills the
-harness, and the VM runs on (#768). The action then reports the Linux
+earlier job. Before a cancellation reached the test harness (see
+[Cancellation](#cancellation)), the harness of a cancelled job kept running
+and could start a VM after the runner's orphan cleanup had listed the job's
+processes; the cleanup then killed the harness, and the VM ran on for 8 days
+(#768). The step still ends a VM that escapes both the harness's cleanup and
+its parent-death signal. The action then reports the Linux
 runner's kernel, CPU, clocksource, and TSC flags, and qualifies the runner
 for the time ABI with `nvx.py doctor --checks H1 H2 H4 --ci-schedule` (see
 [Host qualification](#host-qualification)): the backend, the CPU fingerprint
@@ -996,6 +998,22 @@ started and that still runs. `nvx.py` handles SIGTERM as it handles SIGINT:
 either one interrupts its command, which then stops the OpenVMM processes and
 removes the scratch directories that it started and created, and exits with
 status 130 (see [Commands](usage.md#commands)).
+
+The runner signals only the step's shell, though, and Bash runs a trap only
+once the command in its foreground ends, so a harness that a Linux step ran in
+the foreground never learned of the cancellation: it ran on until the orphan
+cleanup killed it, which left the scratch directories of its scenario behind.
+The Linux steps that run `test-microvm` therefore `exec` it, so that it is the
+step's process. The Linux steps of `run-benchmark`, which run the harness among
+other commands, `exec` it as their last command or source
+`.github/actions/run-benchmark/forward-signals.sh`, whose `run_harness` runs
+the harness in the background, with the SIGINT that Bash ignores there
+restored, and passes SIGINT and SIGTERM on to it as SIGTERM, which, unlike
+SIGINT, the harness never ignores, not even before it has restored SIGINT. A
+signal that arrives as `run_harness` starts the harness, before it knows the
+harness's PID, reaches the harness once it does. The step then ends once the
+harness exits, even if the signal came too late to stop it, and a signal that
+arrives between two harness runs ends the step at once.
 
 On Linux, OpenVMM also ends with `nvx.py` when something kills `nvx.py`
 before its cleanup runs, as the orphan cleanup does. Where the host has

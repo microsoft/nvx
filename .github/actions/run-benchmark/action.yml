@@ -51,6 +51,10 @@ runs:
           --output "data/runs/${{ inputs.platform }}/${{ inputs.platform }}-host.json" \
           --summary "${GITHUB_STEP_SUMMARY}"
 
+    # The runner signals only a step's shell when the job is cancelled, so the
+    # Linux steps run the test harness with run_harness, which passes SIGINT
+    # and SIGTERM on to it as SIGTERM, or exec it, so that it can stop OpenVMM
+    # and remove its scratch directories (doc/ci.md#cancellation).
     - name: Run Linux acceptance test
       if: runner.os != 'Windows'
       shell: bash
@@ -60,6 +64,7 @@ runs:
         NVX_BENCHMARK_MARKER_TIMEOUT: ${{ inputs.marker-timeout }}
       run: |
         set -euo pipefail
+        source "${GITHUB_ACTION_PATH}/forward-signals.sh"
         cpu_args=(--host-cpu-reserve "${NVX_BENCHMARK_HOST_CPU_RESERVE}")
         if [[ -n "${NVX_BENCHMARK_CPUS}" ]]; then
           cpu_args+=(--cpus "${NVX_BENCHMARK_CPUS}")
@@ -71,7 +76,7 @@ runs:
           "${run_dir}"/acceptance-attempt-*.json
         for attempt in 1 2; do
           attempt_output="${run_dir}/acceptance-attempt-${attempt}.json"
-          python3 scripts/nvx.py benchmark \
+          run_harness python3 scripts/nvx.py benchmark \
             --suite e2e \
             --backend "${{ inputs.backend }}" \
             --platform "${{ inputs.platform }}" \
@@ -108,6 +113,7 @@ runs:
         NVX_BENCHMARK_MARKER_TIMEOUT: ${{ inputs.marker-timeout }}
       run: |
         set -euo pipefail
+        source "${GITHUB_ACTION_PATH}/forward-signals.sh"
         cpu_args=(--host-cpu-reserve "${NVX_BENCHMARK_HOST_CPU_RESERVE}")
         if [[ -n "${NVX_BENCHMARK_CPUS}" ]]; then
           cpu_args+=(--cpus "${NVX_BENCHMARK_CPUS}")
@@ -118,7 +124,7 @@ runs:
         rm -rf "${run_dir}"/performance-attempt-*
         for attempt in 1 2; do
           attempt_dir="${run_dir}/performance-attempt-${attempt}"
-          python3 scripts/nvx.py benchmark \
+          run_harness python3 scripts/nvx.py benchmark \
             --suite performance \
             --backend "${{ inputs.backend }}" \
             --platform "${{ inputs.platform }}" \
@@ -154,6 +160,7 @@ runs:
         NVX_BENCHMARK_MARKER_TIMEOUT: ${{ inputs.marker-timeout }}
       run: |
         set -euo pipefail
+        source "${GITHUB_ACTION_PATH}/forward-signals.sh"
         cpu_args=(--host-cpu-reserve "${NVX_BENCHMARK_HOST_CPU_RESERVE}")
         if [[ -n "${NVX_BENCHMARK_CPUS}" ]]; then
           cpu_args+=(--cpus "${NVX_BENCHMARK_CPUS}")
@@ -165,7 +172,7 @@ runs:
           rm -rf "${run_dir}"/shell-snapshot-restore-attempt-*
           for attempt in 1 2; do
             attempt_dir="${run_dir}/shell-snapshot-restore-attempt-${attempt}"
-            python3 scripts/nvx.py benchmark \
+            run_harness python3 scripts/nvx.py benchmark \
               --suite shell-snapshot-restore \
               --backend "${{ inputs.backend }}" \
               --platform "${{ inputs.platform }}" \
@@ -207,7 +214,7 @@ runs:
           cpu_args+=(--cpus "${NVX_BENCHMARK_CPUS}")
         fi
         run_dir="data/runs/${{ inputs.platform }}/microvm-v2/1vcpu/device-io"
-        python3 scripts/nvx.py benchmark \
+        exec python3 scripts/nvx.py benchmark \
           --suite device-io \
           --backend "${{ inputs.backend }}" \
           --platform "${{ inputs.platform }}" \
