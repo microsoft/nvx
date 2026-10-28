@@ -795,6 +795,93 @@ sfdisk() {
                     self.assertNotIn(b"INITIALIZATION_ALLOWED=1", result.stdout)
                     self.assertIn(b"ERROR:", result.stderr)
 
+    def test_linux_metadata_refresh_updates_snapshot_without_provisioning(self):
+        source = builder.source("linux/bootstrap-runner.sh").decode()
+        for original_path, replacement in (
+            (
+                "exec >>/var/log/nvx-runner-bootstrap.log 2>&1",
+                'exec >>"$test_root/bootstrap.log" 2>&1',
+            ),
+            (
+                "metadata_directory=/var/lib/nvx-ci-host-metadata",
+                'metadata_directory="$test_root/metadata"',
+            ),
+        ):
+            self.assertEqual(source.count(original_path), 1)
+            source = source.replace(original_path, replacement)
+        mock = r"""
+set -euo pipefail
+test_root=$1
+scenario=$2
+python3() {
+    local count
+    count=$(cat "$test_root/python-calls")
+    count=$((count + 1))
+    printf '%s\n' "$count" >"$test_root/python-calls"
+    case "$count" in
+        1) printf '%s\n' kvm ciadmin microsoft/nvx '' /opt/nvx-runner 0 /mnt/data preinstalled ;;
+        2)
+            if [ "$scenario" = query-failure ]; then
+                echo 'ERROR: metadata endpoint unavailable' >&2
+                return 1
+            fi
+            printf '%s\n' nvx-linux-8 false
+            cat "$test_root/fresh.json" ;;
+        *) echo 'ERROR: unexpected credential query' >&2; return 1 ;;
+    esac
+}
+id() { printf '%s\n' 1001; }
+install() { command install -d -m 0755 -- "${@: -1}"; }
+unexpected() {
+    printf '%s\n' "$*" >>"$test_root/lifecycle-calls"
+    echo "ERROR: unexpected provisioning operation: $*" >&2
+    return 1
+}
+bash() { unexpected bash "$@"; }
+sudo() { unexpected sudo "$@"; }
+systemctl() { unexpected systemctl "$@"; }
+shutdown() { unexpected shutdown "$@"; }
+(
+    cd "$test_root"
+    set -- --refresh-metadata ./config.json
+    . ./bootstrap.sh
+)
+"""
+        original = {"storageProfile": {"osDisk": {"caching": "ReadWrite"}}}
+        fresh = {"storageProfile": {"osDisk": {"caching": "ReadOnly"}}}
+        for scenario in ("success", "query-failure"):
+            with (
+                self.subTest(scenario=scenario),
+                tempfile.TemporaryDirectory() as temporary,
+            ):
+                root = Path(temporary)
+                metadata = root / "metadata"
+                metadata.mkdir()
+                snapshot = metadata / "compute.json"
+                snapshot.write_text(json.dumps(original), encoding="utf-8")
+                (root / "fresh.json").write_text(json.dumps(fresh), encoding="utf-8")
+                (root / "config.json").write_text("{}", encoding="utf-8")
+                (root / "python-calls").write_text("0", encoding="ascii")
+                (root / "bootstrap.sh").write_bytes(source.encode())
+                result = self.execute_bash(mock, root.as_posix(), scenario)
+                self.assertEqual(
+                    result.returncode == 0,
+                    scenario == "success",
+                    (result.stdout + result.stderr).decode()
+                    + (root / "bootstrap.log").read_text(),
+                )
+                self.assertEqual(
+                    json.loads(snapshot.read_text()),
+                    fresh if scenario == "success" else original,
+                )
+                self.assertEqual((root / "python-calls").read_text().strip(), "2")
+                self.assertFalse((root / "lifecycle-calls").exists())
+                if scenario == "query-failure":
+                    self.assertIn(
+                        "ERROR: metadata endpoint unavailable",
+                        (root / "bootstrap.log").read_text(),
+                    )
+
     def test_linux_runner_finalization_does_not_restart_registered_service(self):
         source = builder.source("linux/bootstrap-runner.sh").decode()
         tail = source[
@@ -808,6 +895,7 @@ sfdisk() {
         mock = r"""
 set -euo pipefail
 runner_directory=$1
+config_path="$runner_directory/config.json"
 test_systemd_root=$2
 scenario=$3
 metadata_service=nvx-runner-metadata-block.service
@@ -866,6 +954,11 @@ systemctl() {
                     )
                     self.assertIn(
                         "Requires=nvx-runner-metadata-block.service",
+                        drop_in.read_text(),
+                    )
+                    self.assertIn(
+                        "ExecStartPre=+/opt/nvx-bootstrap/bootstrap-runner.sh "
+                        f'--refresh-metadata "{runner.as_posix()}/config.json"',
                         drop_in.read_text(),
                     )
                 else:

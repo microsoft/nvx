@@ -2,7 +2,15 @@
 set -euo pipefail
 set +x
 
+refresh_metadata_only=false
+if [ "${1:-}" = --refresh-metadata ]; then
+    refresh_metadata_only=true
+    shift
+fi
 config_path=${1:-/opt/nvx-bootstrap/config.json}
+if [[ "$config_path" != /* ]]; then
+    config_path="$PWD/$config_path"
+fi
 setup_root=/opt/nvx-bootstrap
 exec >>/var/log/nvx-runner-bootstrap.log 2>&1
 
@@ -150,6 +158,10 @@ chmod 0644 "$metadata_file"
 mv -T "$metadata_file" "$metadata_directory/compute.json"
 trap - EXIT
 
+if [ "$refresh_metadata_only" = true ]; then
+    exit 0
+fi
+
 bash "$setup_root/setup-data-disk.sh"
 mountpoint -q "$NVX_DATA_DISK_MOUNT_POINT" || {
     echo "ERROR: managed data disk is not mounted" >&2
@@ -247,8 +259,9 @@ if [[ ! "$service_name" =~ ^actions\.runner\.[A-Za-z0-9_.-]+\.service$ ||
 fi
 drop_in="/etc/systemd/system/${service_name}.d"
 mkdir -p "$drop_in"
-printf '[Unit]\nRequires=%s\nAfter=%s\n[Service]\nExecStartPre=+%s\n' \
+printf '[Unit]\nRequires=%s\nWants=network-online.target\nAfter=%s network-online.target\n[Service]\nExecStartPre=+%s\nExecStartPre=+%s --refresh-metadata "%s"\n' \
     "$metadata_service" "$metadata_service" "$setup_root/block-runner-metadata.sh" \
+    "$setup_root/bootstrap-runner.sh" "$config_path" \
     >"$drop_in/azure-metadata.conf"
 systemctl daemon-reload
 systemctl is-active --quiet "$service_name"

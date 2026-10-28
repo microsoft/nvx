@@ -111,7 +111,10 @@ not writable by jobs. Provisioned Linux and Windows jobs use these snapshots;
 a missing or invalid snapshot fails the host check without querying metadata.
 Linux jobs run as `nvx-runner`, whose metadata block is installed before
 registration. The runner service requires the block on every start; root
-retains metadata access for bootstrap and token retrieval. Metadata-rule updates
+retains metadata access for bootstrap and token retrieval. Before every runner
+start, a root-only `bootstrap-runner.sh --refresh-metadata` hook refreshes the
+snapshot without running disk setup, provisioning, or registration. A failed
+refresh prevents the runner service from starting. Metadata-rule updates
 keep existing protection until a replacement is installed and verified; failures
 stop setup without deleting that protection. Successful Linux registration
 disables the provisioning unit without restarting the runner;
