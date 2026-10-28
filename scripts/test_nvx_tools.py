@@ -21623,6 +21623,65 @@ class BenchmarkTests(unittest.TestCase):
         ):
             benchmark._linux_live_peak_rss_bytes(123)
 
+    def test_linux_process_counters_read_only_kernel_counters(self):
+        # Profiles sample these counters inside measured intervals, where
+        # reading smaps_rollup slowed MSHV snapshot generation (#383).
+        files = {
+            Path("/proc/123/status"): (
+                "Name:\topenvmm\nVmHWM:\t   59008 kB\nVmRSS:\t   57344 kB\n"
+            ),
+            Path("/proc/123/stat"): (
+                "123 (openvmm) S 1 123 123 0 -1 4194560 812 0 3 0 5 2 0 0 20 0 9\n"
+            ),
+        }
+
+        def read_text(path: Path, encoding: str) -> str:
+            self.assertEqual(encoding, "ascii")
+            return files[path]
+
+        with patch.object(
+            Path, "read_text", autospec=True, side_effect=read_text
+        ) as read:
+            counters = benchmark._linux_process_resource_counters(123)
+
+        self.assertEqual(
+            counters,
+            {
+                "rss_bytes": 57344 * 1024,
+                "peak_rss_bytes": 59008 * 1024,
+                "minor_faults": 812,
+                "major_faults": 3,
+                "page_faults": 815,
+            },
+        )
+        self.assertEqual(
+            [entry.args[0] for entry in read.call_args_list],
+            [Path("/proc/123/status"), Path("/proc/123/stat")],
+        )
+
+    def test_process_counters_use_linux_counters_and_tolerate_exit(self):
+        with (
+            patch.object(benchmark.os, "name", "posix"),
+            patch.object(benchmark.sys, "platform", "linux"),
+            patch.object(
+                benchmark,
+                "_linux_process_resource_counters",
+                side_effect=[
+                    {"rss_bytes": 4096},
+                    FileNotFoundError(),
+                    ProcessLookupError(),
+                ],
+            ) as read,
+        ):
+            self.assertEqual(
+                benchmark.process_resource_counters(123), {"rss_bytes": 4096}
+            )
+            # OpenVMM can exit between a profile record and the read.
+            self.assertEqual(benchmark.process_resource_counters(123), {})
+            self.assertEqual(benchmark.process_resource_counters(123), {})
+
+        self.assertEqual(read.call_args_list, [call(123)] * 3)
+
     def test_builds_isolated_workload_command(self):
         command = benchmark.workload_boot_command(
             Path("openvmm"),

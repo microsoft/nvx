@@ -538,9 +538,14 @@ All captures emit a guest marker immediately before `nvx-snapshot`;
 `console_command_round_trip` ends when the host observes that marker, and
 `guest_dispatch_to_publication` spans that observation through snapshot publication.
 Each observed record also includes available process counters. Linux reports RSS, peak RSS,
-minor and major faults, total page faults, and, when `smaps_rollup` is available, private dirty
-and private RSS bytes. Windows reports working set, peak working set, private commit, and page
-faults.
+and minor, major, and total page faults from `/proc/<pid>/status` and `/proc/<pid>/stat`,
+which the kernel fills from counters that it maintains. The coordinator reads them while
+OpenVMM runs the intervals that the benchmark measures, so it reads nothing that walks
+OpenVMM's memory map. Reading `smaps_rollup` there delayed OpenVMM's quiesce and state save
+on MSHV, which raised the snapshot-generation p50 by about 30% on the MSHV CI runner and more
+than doubled it on a bare-metal host, and spread its samples until the stability guard
+rejected some series (#383). Windows reports working set, peak working set, private commit,
+and page faults.
 
 On Windows, each retained capture sample also carries `storage_telemetry`. From just before the
 host requests the snapshot until the source process exits, a coordinator thread samples
@@ -565,7 +570,7 @@ throughput, IOPS, average latency, average queue length, busy time, and peak que
 time; the lazy-writer, flush, and page-writer rates; the peak dirty cache and its threshold; and
 Defender CPU time and I/O. A counter group whose samples differ from the summary's, such as
 Defender's sparser process counters, reports its own interval.
-Linux captures do not flush a file-backed guest RAM image, take about 1 to 4 ms, and record no
+Linux captures do not flush a file-backed guest RAM image, take about 1 to 3 ms, and record no
 storage telemetry.
 
 `profile.phases` groups samples by `operation.phase` and stores raw `samples_ms` plus p50,
@@ -666,7 +671,7 @@ unstable result still fails the job. The stability guard rejects a p50 more than
 lie on each side.
 Singleton outliers remain tolerated, while a host stall cannot publish a bimodal
 series into the history. On the Linux CI runners,
-snapshot generation takes about 1 ms on KVM and about 4 ms on MSHV, so a
+snapshot generation takes about 1 ms on KVM and about 3 ms on MSHV, so a
 sub-millisecond CPU stall in two samples is enough to cross the gap limit.
 
 Each validation also appends the attempt's file, SHA-256 digest, outcome (`valid`,
@@ -724,7 +729,10 @@ When investigating instability, compare each attempt's
 slow `capture.mapped_memory_flush` with otherwise stable capture phases localizes
 the delay to host-side mapped RAM flushing, not guest boot or snapshot restore.
 Extra time in `capture.quiesce`, `capture.save_state`, or between profiled phases
-while the flush and publication phases stay flat instead points to a host CPU stall.
+while the flush and publication phases stay flat instead points to a host CPU stall,
+or to a process that reads OpenVMM's memory map during the capture, as the profile's
+own `smaps_rollup` reads did until #383. A delay that recurs on an idle bare-metal
+host of the same backend is not a host stall.
 Reproduce with the exact executable and guest artifact hashes on the same host
 before attributing the delay to a source change. Keep the stability thresholds and
 bounded remeasurement unchanged when collecting diagnostic evidence.

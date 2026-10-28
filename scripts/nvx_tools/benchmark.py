@@ -855,6 +855,30 @@ def _linux_status_bytes(status: str, name: str) -> int | None:
     return None
 
 
+def _linux_process_resource_counters(pid: int) -> dict[str, int]:
+    # Profiles sample these counters while OpenVMM runs the intervals that a
+    # benchmark measures, so read only files that the kernel fills from the
+    # counters it maintains. smaps_rollup instead walks every mapping and
+    # page table of the process under its mmap lock, and reading it there
+    # slowed MSHV snapshot generation and spread its samples (#383).
+    status = Path(f"/proc/{pid}/status").read_text(encoding="ascii")
+    values: dict[str, int] = {}
+    for field, name in (
+        ("rss_bytes", "VmRSS"),
+        ("peak_rss_bytes", "VmHWM"),
+    ):
+        value = _linux_status_bytes(status, name)
+        if value is not None:
+            values[field] = value
+
+    stat = Path(f"/proc/{pid}/stat").read_text(encoding="ascii")
+    fields = stat.rsplit(")", 1)[1].split()
+    values["minor_faults"] = int(fields[7])
+    values["major_faults"] = int(fields[9])
+    values["page_faults"] = values["minor_faults"] + values["major_faults"]
+    return values
+
+
 def process_resource_counters(pid: int) -> dict[str, int]:
     """Return cheap process counters available on the current host."""
     try:
@@ -867,31 +891,7 @@ def process_resource_counters(pid: int) -> dict[str, int]:
                 "page_faults": int(counters.page_fault_count),
             }
         if sys.platform.startswith("linux"):
-            status = Path(f"/proc/{pid}/status").read_text(encoding="ascii")
-            values: dict[str, int] = {}
-            for field, name in (
-                ("rss_bytes", "VmRSS"),
-                ("peak_rss_bytes", "VmHWM"),
-            ):
-                value = _linux_status_bytes(status, name)
-                if value is not None:
-                    values[field] = value
-
-            stat = Path(f"/proc/{pid}/stat").read_text(encoding="ascii")
-            fields = stat.rsplit(")", 1)[1].split()
-            values["minor_faults"] = int(fields[7])
-            values["major_faults"] = int(fields[9])
-            values["page_faults"] = values["minor_faults"] + values["major_faults"]
-
-            try:
-                rollup = Path(f"/proc/{pid}/smaps_rollup").read_text(encoding="ascii")
-                private_clean = _linux_status_bytes(rollup, "Private_Clean") or 0
-                private_dirty = _linux_status_bytes(rollup, "Private_Dirty") or 0
-                values["private_dirty_bytes"] = private_dirty
-                values["private_rss_bytes"] = private_clean + private_dirty
-            except (OSError, RuntimeError, ValueError):
-                pass
-            return values
+            return _linux_process_resource_counters(pid)
     except (OSError, RuntimeError, ValueError):
         return {}
     return {}
