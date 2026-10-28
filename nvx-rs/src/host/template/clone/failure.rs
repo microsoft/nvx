@@ -496,8 +496,12 @@ impl Teardown {
 /// caller during the teardown leaves the record, which a reattach finishes, and once its teardown
 /// is known, so that the record holds the stage, the evidence and the status, the original
 /// outcome, the transaction of the clone's restore, the leased generation, the clone's progress,
-/// and the teardown's outcome. A failure of the plan, before the launch, leaves no VM and no
-/// record: the caller holds the failure, and releases the lease. A launch keeps its lease, and
+/// and the teardown's outcome. A failure that cannot be recorded before its teardown removes
+/// nothing that tells that the clone launched: the journal of its launch, or the runtime record of
+/// its VM, remains, and with it the lease, so that a reattach still finds that the clone failed,
+/// though not how, if a crash of the caller comes before the record. A failure of the plan, before
+/// the launch, leaves no VM and no record: the caller holds the failure, and releases the lease. A
+/// launch keeps its lease, and
 /// with it the leased generation, until its VM has exited, so a failure that comes after the
 /// clone's Ready, such as one of the repair's deferred work, is classified against that
 /// generation all the same, and so is the status with which the guest ended a VM whose exit a

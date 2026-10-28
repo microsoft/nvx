@@ -510,7 +510,8 @@ impl<'s, S> Started<'s, S> {
             ..
         } = self;
         let committed = starting.commit_reporting(|error| {
-            tracker.pending(Stage::Commit, host_evidence(error), error);
+            // The launch's journal remains, whether or not the failure can be recorded.
+            let _ = tracker.pending(Stage::Commit, host_evidence(error), error);
         });
         match committed {
             Ok(vmm) => {

@@ -19,16 +19,16 @@ use crate::activation::{ReadyActivation, StoreGeneration, TransactionId};
 use crate::host::artifacts;
 use crate::host::platform::Transport;
 use crate::host::process::{BootId, Process, ProcessRef};
-use crate::host::store::files::write_private;
+use crate::host::store::files::{sync_dir, write_private};
 use crate::host::store::{
     CLONE_ACTIVATION_NAME, CLONE_BINDING_NAME, CLONE_FAILURE_NAME, CLONE_PROGRESS_NAME,
     CLONE_SCRATCH_NAME, JOURNAL_NAME, LaunchState, LockedStore, OUTCOME_NAME, RESTORE_READY_NAME,
-    Recovery, RuntimeIdentity,
+    Recovery, RuntimeIdentity, RuntimeRecord,
 };
 use crate::host::supervisor::{self, Reattached, StopOutcome, Vmm, VmmCommand};
 use crate::host::template::Retirement;
 use crate::host::template::clone::launch::{Hooks, Point};
-use crate::host::template::clone::reattach::reattach_clone_with;
+use crate::host::template::clone::reattach::{reattach_clone_syncing, reattach_clone_with};
 use crate::host::template::clone::records::{read_failure, read_progress, write_failure};
 use crate::host::template::store::SNAPSHOT_ARTIFACTS;
 use crate::host::template::test_support::artifact;
@@ -2743,8 +2743,9 @@ fn a_reattach_takes_the_outcome_report_of_a_vm_that_exited_as_it_first_read_it()
         TIMEOUT,
         |locked, runtime, exited| {
             supervisor::reattach_reporting(locked, runtime, |record| {
-                exited(record);
+                exited(record)?;
                 fs::write(&outcome, b"not a report").unwrap();
+                Ok(())
             })
         },
     )
@@ -3138,5 +3139,212 @@ fn an_interrupted_launch_that_a_reattach_cannot_end_yet_keeps_its_lease_until_on
     assert_recorded(&resolved, &crashed.lease, &locked, ready, lost, terminated);
     assert_eq!(resolved.message(), failure.record().message);
     assert!(control.capabilities.is_empty());
+    crashed.releases(&mut locked);
+}
+
+/// Returns the error of `reattached`, which must have failed.
+fn reattach_error<S>(reattached: crate::Result<ReattachedClone<S>>) -> Error {
+    match reattached {
+        Err(error) => error,
+        Ok(other) => panic!("the reattach found {}", describe(&other)),
+    }
+}
+
+/// Takes the clone of the sandbox of `locked` over, under `runtime`, through `control`, with
+/// [`reattach_clone`], while a directory takes the place of the record of the clone's failure, as
+/// on a storage that refuses to write it, once the reattach read the sandbox's records, and
+/// returns the error of the reattach.
+fn unrecorded_take_over(
+    locked: &mut LockedStore,
+    runtime: &RuntimeIdentity,
+    control: &mut ReattachControl,
+) -> Error {
+    let path = locked.clone_failure_path();
+    let reattached = reattach_clone_with(
+        locked,
+        runtime,
+        control,
+        Instant::now() + TIMEOUT,
+        TIMEOUT,
+        |locked, runtime, exited| {
+            fs::create_dir(&path).unwrap();
+            supervisor::reattach_reporting(locked, runtime, exited)
+        },
+    );
+    fs::remove_dir(&path).unwrap();
+    reattach_error(reattached)
+}
+
+#[test]
+fn a_reattach_that_cannot_record_a_failure_ends_and_forgets_nothing_of_the_clone() {
+    let unrecorded = |error: &Error| {
+        let left = "; the reattach left the clone's VM and its records as it found them, for a \
+                    later reattach";
+        let message = error.message();
+        assert_eq!(error.kind(), ErrorKind::Io, "{error}");
+        let start = "the failure could not be recorded before its teardown: ";
+        assert!(
+            message.starts_with(start) && message.ends_with(left),
+            "{error}"
+        );
+    };
+    let mut control = ReattachControl::answering(Some);
+    // A record of a failure that cannot be read, which the reattach would replace with its own
+    // before it ends the interrupted launch that the journal names.
+    let crashed = Crashed::at("activated");
+    let mut locked = crashed.lock();
+    let path = locked.clone_failure_path();
+    fs::create_dir(&path).unwrap();
+    let deadline = Instant::now() + TIMEOUT;
+    let runtime = &crashed.runtime;
+    let reattached = reattach_clone(&mut locked, runtime, &mut control, deadline, TIMEOUT);
+    unrecorded(&reattach_error(reattached));
+    let journal = locked
+        .journal()
+        .unwrap()
+        .expect("the reattach kept the journal");
+    assert!(Process::open(journal.process().unwrap()).unwrap().is_some());
+    crashed.refuses_release(&mut locked);
+    // Once the record can be written, the reattach ends the launch, and records its failure.
+    fs::remove_dir(&path).unwrap();
+    let failure = failed(crashed.take_over(&mut locked, runtime, &mut control));
+    let (ready, killed) = ((Stage::Start, Progress::Ready), Evidence::ForcedKill);
+    let terminated = Teardown::Terminated;
+    assert_recorded(&failure, &crashed.lease, &locked, ready, killed, terminated);
+    crashed.releases(&mut locked);
+    // A VM whose launch committed, and that exited without a report of the guest's own end: the
+    // reattach would record that the clone lost its status before it clears the VM's record.
+    let crashed = Crashed::at("committed");
+    crashed.vmm.end_and_wait();
+    let mut locked = crashed.lock();
+    let record = locked.runtime().unwrap();
+    assert!(record.is_some());
+    unrecorded(&unrecorded_take_over(
+        &mut locked,
+        &crashed.runtime,
+        &mut control,
+    ));
+    assert_eq!(locked.runtime().unwrap(), record);
+    crashed.refuses_release(&mut locked);
+    let failure = failed(crashed.take_over(&mut locked, &crashed.runtime, &mut control));
+    let (run, lost) = ((Stage::Run, Progress::Committed), Evidence::LostStatus);
+    assert_recorded(
+        &failure,
+        &crashed.lease,
+        &locked,
+        run,
+        lost,
+        Teardown::Exited,
+    );
+    crashed.releases(&mut locked);
+    // A VM that runs under another runtime identity, and one whose Ready reports another
+    // activation than its record's: the reattach would end either once it recorded why.
+    let other = RuntimeIdentity::new(artifact('d'), artifact('e'), artifact('f'));
+    let mut refusing = ReattachControl::answering(|_| Some(ReadyActivation { transaction: None }));
+    let reattach = (Stage::Reattach, Progress::Committed);
+    let cases = [
+        (Some(&other), Evidence::RuntimeMismatch),
+        (None, Evidence::Protocol),
+    ];
+    for (runtime, evidence) in cases {
+        let crashed = Crashed::at("committed");
+        let mut locked = crashed.lock();
+        let (runtime, control) = match runtime {
+            Some(other) => (other, &mut control),
+            None => (&crashed.runtime, &mut refusing),
+        };
+        unrecorded(&unrecorded_take_over(&mut locked, runtime, control));
+        let record = locked
+            .runtime()
+            .unwrap()
+            .expect("the reattach kept the record");
+        assert!(
+            Process::open(record.process()).unwrap().is_some(),
+            "{evidence:?}"
+        );
+        crashed.refuses_release(&mut locked);
+        let failure = failed(crashed.take_over(&mut locked, runtime, control));
+        let terminated = Teardown::Terminated;
+        assert_recorded(
+            &failure,
+            &crashed.lease,
+            &locked,
+            reattach,
+            evidence,
+            terminated,
+        );
+        crashed.releases(&mut locked);
+    }
+}
+
+#[test]
+fn a_reattach_makes_the_record_of_an_earlier_failure_durable_before_it_ends_the_launch() {
+    // A failure of the clone's launch, whose record is in place, but whose teardown a crash of
+    // its caller interrupted, maybe once the sync of the record's directory failed.
+    let crashed = Crashed::at("activated");
+    let mut locked = crashed.lock();
+    let ready = (Stage::Start, Progress::Ready);
+    let error = Error::other("the test's launch failed");
+    let at = (ready, transaction_of(&locked));
+    let earlier = (Evidence::Protocol, Teardown::Pending);
+    record_earlier(&crashed.lease, &locked, at, earlier, &error);
+    let mut control = ReattachControl::answering(Some);
+    let reattach = |locked: &mut LockedStore,
+                    runtime: &RuntimeIdentity,
+                    exited: &dyn Fn(&RuntimeRecord) -> Result<()>| {
+        supervisor::reattach_reporting(locked, runtime, exited)
+    };
+    // A reattach that cannot make the record durable ends nothing.
+    let refused = |_: &Path| -> Result<()> { Err(Error::io("the test's sync failed")) };
+    let deadline = Instant::now() + TIMEOUT;
+    let runtime = &crashed.runtime;
+    let reattached = reattach_clone_syncing(
+        &mut locked,
+        runtime,
+        &mut control,
+        deadline,
+        TIMEOUT,
+        &refused,
+        reattach,
+    );
+    let error = reattach_error(reattached);
+    assert_eq!(error.kind(), ErrorKind::Io, "{error}");
+    let refusal = "could not be made durable before its teardown: the test's sync failed";
+    assert!(error.message().contains(refusal), "{error}");
+    let journal = locked
+        .journal()
+        .unwrap()
+        .expect("the reattach kept the journal");
+    assert!(Process::open(journal.process().unwrap()).unwrap().is_some());
+    crashed.refuses_release(&mut locked);
+    // One that can syncs the sandbox's directory before it ends the launch.
+    let synced = RefCell::new(Vec::new());
+    let sync = |dir: &Path| -> Result<()> {
+        synced.borrow_mut().push(dir.to_owned());
+        sync_dir(dir)
+    };
+    let dir = locked.dir().to_owned();
+    let reattached = reattach_clone_syncing(
+        &mut locked,
+        runtime,
+        &mut control,
+        Instant::now() + TIMEOUT,
+        TIMEOUT,
+        &sync,
+        |locked, runtime, exited| {
+            assert_eq!(*synced.borrow(), std::slice::from_ref(&dir));
+            reattach(locked, runtime, exited)
+        },
+    );
+    let failure = failed(reattached.unwrap());
+    let (protocol, terminated) = (Evidence::Protocol, Teardown::Terminated);
+    assert_recorded(
+        &failure,
+        &crashed.lease,
+        &locked,
+        ready,
+        protocol,
+        terminated,
+    );
     crashed.releases(&mut locked);
 }

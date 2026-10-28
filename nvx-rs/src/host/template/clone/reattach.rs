@@ -16,6 +16,7 @@ use crate::error::{Error, ErrorCode, Result};
 use crate::host::launch::timeout_problem;
 use crate::host::process::BootId;
 use crate::host::report::Report;
+use crate::host::store::files::sync_dir;
 use crate::host::store::regular::{open_regular, read_at_most};
 use crate::host::store::{IdentityPart, LockedStore, Recovery, RuntimeIdentity, RuntimeRecord};
 use crate::host::supervisor::{self, Reattached, StopOutcome, Vmm};
@@ -105,7 +106,9 @@ pub enum ReattachedClone<S> {
 /// sequence, and as [the attribution of evidence](Evidence#attribution) describes. A failure is
 /// recorded in the sandbox, as the restore sequence records it: before the reattach ends a VMM of
 /// the clone, recovers an interrupted launch, or clears the runtime record of a VM that exited,
-/// with its teardown [pending](Teardown::Pending), and again once the teardown ended. A clone
+/// with its teardown [pending](Teardown::Pending), and again once the teardown ended. A reattach
+/// that cannot record it then fails, before it ends or forgets anything of the clone's VM, as does
+/// one that cannot make the record of an earlier failure durable. A clone
 /// whose sandbox records a failure already failed for good: the reattach ends a VMM of the clone
 /// that still runs, through its verified identity, then finishes a failure whose teardown a crash
 /// of its caller left pending, as the failure would have recorded it once its teardown ended, or
@@ -142,7 +145,10 @@ pub enum ReattachedClone<S> {
 /// writes anything, and as [`Lease::of`] and [`supervisor::reattach`] fail for records that are
 /// inconsistent, which leave the clone's VM as it was, and the record of the failure of an
 /// interrupted launch, or the one that replaced a record that could not be read, if the reattach
-/// wrote it, pending.
+/// wrote it, pending. Fails with [`ErrorKind::Io`](crate::ErrorKind::Io) if it cannot record the
+/// clone's failure, or make the record of an earlier one durable, before it would end, or forget,
+/// anything of the clone's VM, which it then leaves as it found it, running or not, with the
+/// journal of its launch or its runtime record, and the lease, for a later reattach.
 ///
 /// [`CloneRecords`]: super::CloneRecords
 pub fn reattach_clone<C: CloneControl>(
@@ -164,7 +170,8 @@ pub fn reattach_clone<C: CloneControl>(
 
 /// Reattaches to a clone as [`reattach_clone`] does, reattaching to its VM with `reattach`, which
 /// is [`supervisor::reattach_reporting`] outside tests, and which calls its last argument with
-/// the runtime record of a VMM that exited before it clears the record.
+/// the runtime record of a VMM that exited before it clears the record, and fails, keeping the
+/// record, if that fails.
 pub(super) fn reattach_clone_with<C: CloneControl>(
     locked: &mut LockedStore,
     runtime: &RuntimeIdentity,
@@ -174,7 +181,27 @@ pub(super) fn reattach_clone_with<C: CloneControl>(
     reattach: impl FnOnce(
         &mut LockedStore,
         &RuntimeIdentity,
-        &dyn Fn(&RuntimeRecord),
+        &dyn Fn(&RuntimeRecord) -> Result<()>,
+    ) -> Result<Reattached>,
+) -> Result<ReattachedClone<C::Session>> {
+    reattach_clone_syncing(
+        locked, runtime, control, deadline, bound, &sync_dir, reattach,
+    )
+}
+
+/// Reattaches to a clone as [`reattach_clone_with`] does, syncing the sandbox's directory, to make
+/// the record of an earlier failure durable, with `sync`, which is [`sync_dir`] outside tests.
+pub(super) fn reattach_clone_syncing<C: CloneControl>(
+    locked: &mut LockedStore,
+    runtime: &RuntimeIdentity,
+    control: &mut C,
+    deadline: Instant,
+    bound: Duration,
+    sync: &dyn Fn(&Path) -> Result<()>,
+    reattach: impl FnOnce(
+        &mut LockedStore,
+        &RuntimeIdentity,
+        &dyn Fn(&RuntimeRecord) -> Result<()>,
     ) -> Result<Reattached>,
 ) -> Result<ReattachedClone<C::Session>> {
     let started = Instant::now();
@@ -228,6 +255,20 @@ pub(super) fn reattach_clone_with<C: CloneControl>(
         .and_then(|(_, record)| record.restore().map(|restore| restore.transaction));
     let recorder = Recorder::new(lease.clone(), transaction, locked).uncertain(uncertain);
     let fresh = earlier.is_none();
+    // A record of an earlier failure may be in place without being durable, as a write whose sync
+    // of the sandbox's directory failed leaves it: the reattach makes it durable before it ends,
+    // or forgets, anything that tells that the clone launched, as it records a failure of its own.
+    if let Some(Ok(_)) = &earlier
+        && (journal.is_some() || committed.is_some())
+    {
+        sync(locked.dir()).map_err(|error| {
+            unrecorded(Error::io(format!(
+                "the record of the clone's failure could not be made durable before its \
+                 teardown: {}",
+                describe(&error)
+            )))
+        })?;
+    }
     // A record that cannot be read, or that is another clone's, is replaced by the reattach's own
     // failure, with its teardown pending, before the reattach ends or forgets anything of the
     // clone's launch: the record keeps how far the clone got, which the launch's journal and
@@ -237,12 +278,14 @@ pub(super) fn reattach_clone_with<C: CloneControl>(
     if let Some(Err(fault)) = &earlier
         && (journal.is_some() || committed.is_some())
     {
-        recorder.pending(
-            Stage::Reattach,
-            progress,
-            (fault.evidence, None),
-            &fault.error,
-        );
+        recorder
+            .pending(
+                Stage::Reattach,
+                progress,
+                (fault.evidence, None),
+                &fault.error,
+            )
+            .map_err(unrecorded)?;
     }
     // A launch that the journal names, which no runtime record supersedes, and whose failure the
     // sandbox does not record, was interrupted by a crash of its caller: its failure is recorded
@@ -250,12 +293,14 @@ pub(super) fn reattach_clone_with<C: CloneControl>(
     // record. A journal that the runtime record of its launch supersedes, which the launch's
     // commit may leave, is no failure: the recovery removes it.
     if fresh && journal.is_some() && runtime_record.is_none() {
-        recorder.pending(
-            progress.stage(),
-            progress,
-            (Evidence::LostStatus, None),
-            &interrupted(progress),
-        );
+        recorder
+            .pending(
+                progress.stage(),
+                progress,
+                (Evidence::LostStatus, None),
+                &interrupted(progress),
+            )
+            .map_err(unrecorded)?;
     }
     // So is the failure of a VM whose launch committed, and which exited, before the reattach
     // clears its runtime record, as the outcome report that the recorder reads then tells, which
@@ -263,8 +308,11 @@ pub(super) fn reattach_clone_with<C: CloneControl>(
     let exiting = |_: &RuntimeRecord| {
         if fresh && let Some((fault, status)) = exit_fault(&recorder, progress, true) {
             let evidence = (fault.evidence, status);
-            recorder.pending(progress.stage(), progress, evidence, &fault.error);
+            return recorder
+                .pending(progress.stage(), progress, evidence, &fault.error)
+                .map_err(unrecorded);
         }
+        Ok(())
     };
     let reattached = reattach(locked, runtime, &exiting)?;
     let failed = |fault: Fault, stage: Stage, teardown: Teardown| {
@@ -324,7 +372,9 @@ pub(super) fn reattach_clone_with<C: CloneControl>(
                 }),
                 Err(fault) => {
                     let evidence = (fault.evidence, None);
-                    recorder.pending(Stage::Reattach, progress, evidence, &fault.error);
+                    recorder
+                        .pending(Stage::Reattach, progress, evidence, &fault.error)
+                        .map_err(unrecorded)?;
                     let teardown = stopped(vmm.terminate(locked, bound), bound);
                     failed(fault, Stage::Reattach, teardown)
                 }
@@ -333,7 +383,9 @@ pub(super) fn reattach_clone_with<C: CloneControl>(
         Reattached::Mismatched { vmm, differences } => {
             let fault = Fault::new(Evidence::RuntimeMismatch, mismatched(&differences));
             let evidence = (fault.evidence, None);
-            recorder.pending(Stage::Reattach, progress, evidence, &fault.error);
+            recorder
+                .pending(Stage::Reattach, progress, evidence, &fault.error)
+                .map_err(unrecorded)?;
             let teardown = stopped(vmm.terminate(locked, bound), bound);
             failed(fault, Stage::Reattach, teardown)
         }
@@ -509,6 +561,15 @@ fn unended(error: Error, teardown: &Teardown) -> Error {
         ),
         _ => error,
     }
+}
+
+/// Returns the error of a reattach that could not record the clone's failure, as `error` tells,
+/// before it would end, or forget, anything of the clone's VM, which it leaves as it found it.
+fn unrecorded(error: Error) -> Error {
+    amended(
+        error,
+        "; the reattach left the clone's VM and its records as it found them, for a later reattach",
+    )
 }
 
 /// Returns the error of the launch of a clone that got as far as `progress` before a crash of its
