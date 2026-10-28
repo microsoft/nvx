@@ -6,6 +6,8 @@ cmdline=$(cat /proc/cmdline)
 runtime=/run/nvx
 layers=$runtime/layers
 scratch=$runtime/scratch
+# The mount point of a RAM upper, which nvx::guest::root names alike.
+tmpfs=$runtime/tmpfs
 rootfs=$runtime/rootfs
 # The host export of a managed sandbox goes at $hostfs/root, where only root
 # can enter, as in the guest's plain path.
@@ -194,7 +196,7 @@ read_layer_token() {
             return 0
             ;;
         distro,0xd0003000,gpt | distro,0xd0003000,gpt:*)
-            fatal "nvx_layer=$1 names a GPT image, which this init cannot assemble: it assembles only an EROFS image over a scratch disk"
+            fatal "nvx_layer=$1 names a GPT image, which this init cannot assemble: it assembles only an EROFS image"
             ;;
         distro,0xd0003000,*)
             layer_format=${layer_image%%:*}
@@ -211,20 +213,23 @@ read_layer_token() {
 # Reads the boot tokens of the layered root, with the rules of the host's
 # renderer, nvx::protocol::root: nvx_layer names the image of the distro block
 # device, and nvx_scratch=0xd0006000,ext4 or nvx_overlay_upper=ramfs the upper,
-# each once. This init assembles only an EROFS image over the ext4 scratch
-# disk, so it also refuses a GPT image and a RAM upper. Sets layer_uuid to the
-# filesystem UUID that the image must have, or to nothing if the token names
-# none. The tests replay nvx-rs/tests/fixtures/root-tokens.json through it.
+# each once. This init assembles only an EROFS image, so it also refuses a GPT
+# image. Sets layer_uuid to the filesystem UUID that the image must have, or to
+# nothing if the token names none, and upper to scratch or ram. The parser also
+# refuses a RAM upper beside a scratch block device, which this init checks
+# against the kernel's devices instead, with refuse_scratch_device. The tests
+# replay nvx-rs/tests/fixtures/root-tokens.json through it.
 read_root_tokens() {
     layer_seen=false
     scratch_seen=false
+    ram_seen=false
     layer_uuid=
     # Kernel command-line tokens are deliberately split on spaces.
     # shellcheck disable=SC2086
     set -f
     for token in $cmdline; do
         case "$token" in
-            nvx_layer | nvx_scratch)
+            nvx_layer | nvx_scratch | nvx_overlay_upper)
                 fatal "the $token kernel parameter has no value"
                 ;;
             nvx_layer=*)
@@ -240,16 +245,76 @@ read_root_tokens() {
                 [ "${token#*=}" = 0xd0006000,ext4 ] ||
                     fatal "the nvx_scratch kernel parameter must be 0xd0006000,ext4, not '${token#*=}'"
                 ;;
-            nvx_overlay_upper | nvx_overlay_upper=*)
-                fatal "$token asks for a RAM upper, which this init cannot assemble: it assembles only an EROFS image over a scratch disk"
+            nvx_overlay_upper=*)
+                [ "$ram_seen" = false ] ||
+                    fatal "the nvx_overlay_upper kernel parameter is repeated"
+                ram_seen=true
+                [ "${token#*=}" = ramfs ] ||
+                    fatal "the nvx_overlay_upper kernel parameter must be ramfs, not '${token#*=}'"
                 ;;
         esac
     done
     set +f
+    [ "$scratch_seen" = false ] || [ "$ram_seen" = false ] ||
+        fatal "a layered root has one upper, but the command line names both nvx_scratch and nvx_overlay_upper"
     [ "$layer_seen" = true ] ||
         fatal "the command line names no distro layer: this init needs nvx_layer=distro,0xd0003000,erofs[:UUID]"
-    [ "$scratch_seen" = true ] ||
-        fatal "the command line names no scratch disk: this init needs nvx_scratch=0xd0006000,ext4"
+    if [ "$scratch_seen" = true ]; then
+        upper=scratch
+    elif [ "$ram_seen" = true ]; then
+        upper=ram
+    else
+        fatal "the nvx_layer kernel parameter needs an upper, nvx_scratch or nvx_overlay_upper"
+    fi
+}
+
+# Fails if the kernel has a virtio-mmio device at the scratch block device's
+# MMIO base, 0xd0006000, which a RAM upper must not have. nvx::protocol::root
+# reads the devices from the virtio_mmio.device= parameters of the command
+# line, with the kernel's rules; this init asks the kernel instead, which lists
+# the window of each device that it added in /proc/iomem, where
+# resolve_block_device finds them too.
+refuse_scratch_device() {
+    scratch_address=$(printf '%d' 0xd0006000)
+    while IFS=' ' read -r range separator platform _; do
+        [ "$separator" = : ] || continue
+        case "$platform" in virtio-mmio.*) ;; *) continue ;; esac
+        start=$(printf '%d' "0x${range%%-*}") || continue
+        [ "$start" -ne "$scratch_address" ] ||
+            fatal "a RAM upper takes no scratch block device, but the kernel has a virtio-mmio device at 0xd0006000"
+    done </proc/iomem
+}
+
+# Mounts the upper that read_root_tokens read, and creates the overlay's upper
+# and work directories on it: the ext4 scratch disk at 0xd0006000, or a tmpfs,
+# with the mode of an ext4 scratch's root rather than tmpfs's world-writable
+# default, and with the kernel's default size, half of the guest's RAM, as
+# nvx::guest::root mounts them. Sets upper_point to the upper's mount point,
+# and upper_name to what messages call it. A tmpfs upper's pages are charged to
+# the memory cgroup of the process that writes them, so the workload's writes
+# count against its nvx_memory_max.
+mount_upper() {
+    case "$upper" in
+        scratch)
+            upper_point=$scratch
+            upper_name=scratch
+            mkdir -p "$upper_point"
+            scratch_device=$(resolve_block_device 0xd0006000) ||
+                fatal "scratch device at 0xd0006000 did not appear"
+            blockdev --flushbufs "$scratch_device" ||
+                fatal "failed to drop cached blocks for scratch"
+            mount -t ext4 -o rw,nosuid,nodev "$scratch_device" "$upper_point" ||
+                fatal "failed to mount scratch from $scratch_device"
+            ;;
+        ram)
+            upper_point=$tmpfs
+            upper_name="the tmpfs upper"
+            mkdir -p "$upper_point"
+            mount -t tmpfs -o mode=0755,nosuid,nodev tmpfs "$upper_point" ||
+                fatal "failed to mount the tmpfs upper"
+            ;;
+    esac
+    mkdir -p "$upper_point/upper" "$upper_point/work"
 }
 
 validate_share_target() {
@@ -564,7 +629,7 @@ mount_host_export() {
 
 # Unmount in dependency order: the live shares are children of the overlay, as
 # are the mappings that a managed sandbox's agent unmounts in its own mount
-# namespace before it returns, and the overlay uses the layers and scratch.
+# namespace before it returns, and the overlay uses the layers and the upper.
 teardown() {
     status=$1
     rm -f "$runtime/container.pid" "$runtime/workload-machine-id"
@@ -578,8 +643,8 @@ teardown() {
         echo "NVX-SANDBOX-ERROR: failed to unmount the distro layer" >&2
         status=1
     fi
-    if ! umount "$scratch"; then
-        echo "NVX-SANDBOX-ERROR: failed to unmount scratch" >&2
+    if ! umount "$upper_point"; then
+        echo "NVX-SANDBOX-ERROR: failed to unmount $upper_name" >&2
         status=1
     fi
     echo "NVX-SANDBOX-EXIT: status=$status"
@@ -589,30 +654,26 @@ teardown() {
     done
 }
 
-mkdir -p "$layers" "$scratch" "$rootfs"
+mkdir -p "$layers" "$rootfs"
 # init mounts /run before the time ABI boot check, whose state lives there.
 mountpoint -q /run || mount -t tmpfs -o mode=755,nosuid,nodev tmpfs /run ||
     fatal "failed to mount runtime tmpfs"
-mkdir -p "$layers" "$scratch" "$rootfs"
+mkdir -p "$layers" "$rootfs"
 configure_cgroups
 
 layer_capacity=$(cmdline_value nvx_layer_capacity_sectors || true)
 read_root_tokens
+# A RAM upper is refused beside a scratch block device before anything mounts.
+[ "$upper" = scratch ] || refuse_scratch_device
 mount_layer distro 0xd0003000 "$layer_uuid" "$layer_capacity"
 layer_count=1
 
 lowerdirs=$layers/distro
 
-scratch_device=$(resolve_block_device 0xd0006000) ||
-    fatal "scratch device at 0xd0006000 did not appear"
-blockdev --flushbufs "$scratch_device" ||
-    fatal "failed to drop cached blocks for scratch"
-mount -t ext4 -o rw,nosuid,nodev "$scratch_device" "$scratch" ||
-    fatal "failed to mount scratch from $scratch_device"
-mkdir -p "$scratch/upper" "$scratch/work"
+mount_upper
 
 mount -t overlay overlay \
-    -o "lowerdir=$lowerdirs,upperdir=$scratch/upper,workdir=$scratch/work,metacopy=on,xino=on" \
+    -o "lowerdir=$lowerdirs,upperdir=$upper_point/upper,workdir=$upper_point/work,metacopy=on,xino=on" \
     "$rootfs" || fatal "failed to assemble the container overlay"
 
 entrypoint=$(cmdline_value nvx_entrypoint || true)

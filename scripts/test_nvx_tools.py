@@ -18720,7 +18720,12 @@ class SandboxShareAgentTests(unittest.TestCase):
         return result, log
 
     def _run_teardown(
-        self, script: str, *, shares: tuple[str, ...], failing: str = ""
+        self,
+        script: str,
+        *,
+        shares: tuple[str, ...],
+        failing: str = "",
+        upper: str = "scratch",
     ) -> tuple[subprocess.CompletedProcess[str], list[str]]:
         runtime = self.root / "run"
         runtime.mkdir(exist_ok=True)
@@ -18737,6 +18742,11 @@ class SandboxShareAgentTests(unittest.TestCase):
         mountpoints = "|".join(
             f"{self.rootfs.as_posix()}{target}" for target in reversed(shares)
         )
+        # mount_upper sets the upper's mount point and name.
+        upper_point, upper_name = {
+            "scratch": ("$runtime/scratch", "scratch"),
+            "ram": ("$runtime/tmpfs", "the tmpfs upper"),
+        }[upper]
         result = subprocess.run(
             [
                 self.shell,
@@ -18752,7 +18762,7 @@ class SandboxShareAgentTests(unittest.TestCase):
                 "runtime=$1\nlog=$2\nfailing=$4\n"
                 "share_mountpoints=$(printf '%s' \"$3\" | tr '|' '\\n')\n"
                 "rootfs=$runtime/rootfs\nlayers=$runtime/layers\n"
-                "scratch=$runtime/scratch\n"
+                f'upper_point={upper_point}\nupper_name="{upper_name}"\n'
                 'umount() { printf "umount %s\\n" "$1" >>"$log"; '
                 '[ "$1" != "$failing" ]; }\n'
                 'mountpoint() { [ "$2" = "$layers/distro" ]; }\n'
@@ -18847,6 +18857,42 @@ class SandboxShareAgentTests(unittest.TestCase):
         result, log = self._run_teardown("teardown 0", shares=())
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(log[0], f"umount {runtime}/rootfs")
+
+    def test_agent_teardown_unmounts_the_tmpfs_upper_last(self):
+        runtime = (self.root / "run").as_posix()
+        result, log = self._run_teardown(
+            "teardown 0", shares=("/workspace",), upper="ram"
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            log,
+            [
+                f"umount {self.rootfs.as_posix()}/workspace",
+                f"umount {runtime}/rootfs",
+                f"umount {runtime}/layers/distro",
+                f"umount {runtime}/tmpfs",
+                "exit 0",
+            ],
+        )
+
+        for upper, point, name in (
+            ("scratch", "scratch", "scratch"),
+            ("ram", "tmpfs", "the tmpfs upper"),
+        ):
+            with self.subTest(upper=upper):
+                result, log = self._run_teardown(
+                    "teardown 0",
+                    shares=(),
+                    failing=f"{runtime}/{point}",
+                    upper=upper,
+                )
+                self.assertEqual(result.returncode, 1, result.stdout)
+                self.assertEqual(
+                    result.stderr,
+                    f"NVX-SANDBOX-ERROR: failed to unmount {name}\n",
+                )
+                self.assertEqual(log[-2:], [f"umount {runtime}/{point}", "exit 1"])
+                self.assertIn("NVX-SANDBOX-EXIT: status=1", result.stdout)
 
     def test_agent_teardown_unmounts_shares_in_reverse_mount_order(self):
         rootfs = self.rootfs.as_posix()
@@ -19398,6 +19444,14 @@ class SandboxRootTokenAgentTests(unittest.TestCase):
         Path(__file__).parents[1] / "nvx-rs" / "tests" / "fixtures" / "root-tokens.json"
     )
     UUID = "0123abcd-4567-89ef-0123-456789abcdef"
+    # nvx::protocol::root refuses a RAM upper beside a scratch block device,
+    # which it finds in the virtio_mmio.device= parameters of the command line
+    # as the kernel reads them. The shell init reads the tokens of those cases,
+    # and refuses the device that the kernel lists in /proc/iomem instead.
+    SCRATCH_DEVICE_ERROR = (
+        "a RAM upper takes no scratch block device, but the command line adds a "
+        "virtio-mmio device at 0xd0006000"
+    )
 
     def setUp(self):
         shell = _posix_shell()
@@ -19411,7 +19465,7 @@ class SandboxRootTokenAgentTests(unittest.TestCase):
 
     def _read(self, command_line: str) -> subprocess.CompletedProcess[str]:
         """Runs the agent's reader of the root's boot tokens on `command_line`,
-        and prints the UUID that it expects of the distro layer."""
+        and prints the UUID that it expects of the distro layer and the upper."""
         functions = "".join(
             _shell_function(self.source, name)
             for name in ("is_canonical_uuid", "read_layer_token", "read_root_tokens")
@@ -19428,7 +19482,7 @@ class SandboxRootTokenAgentTests(unittest.TestCase):
                 'fatal() { echo "FATAL: $*" >&2; exit 125; }\n'
                 f"{functions}"
                 "read_root_tokens\n"
-                'echo "layer_uuid=$layer_uuid"\n'
+                'echo "layer_uuid=$layer_uuid upper=$upper"\n'
             ),
             text=True,
             capture_output=True,
@@ -19437,31 +19491,35 @@ class SandboxRootTokenAgentTests(unittest.TestCase):
 
     def test_agent_reads_the_boot_tokens_as_nvx_rs_reads_them(self):
         cases = json.loads(self.FIXTURE.read_text(encoding="utf-8"))["cases"]
-        accepted = 0
+        accepted: set[str] = set()
+        devices = 0
         for case in cases:
             with self.subTest(case=case["name"]):
                 result = self._read(case["command_line"])
                 layout = case.get("layout")
-                if (
-                    layout is not None
-                    and layout["format"] == "erofs"
-                    and layout["upper"] == "scratch"
-                ):
+                if case.get("error") == self.SCRATCH_DEVICE_ERROR:
+                    self.assertNotIn("shell_error", case)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertRegex(result.stdout, r"\Alayer_uuid=\S* upper=ram\n\Z")
+                    devices += 1
+                    continue
+                if layout is not None and layout["format"] == "erofs":
+                    self.assertNotIn("shell_error", case)
                     self.assertEqual(result.returncode, 0, result.stderr)
                     identity = layout["identity"] or ""
-                    self.assertEqual(result.stdout, f"layer_uuid={identity}\n")
-                    accepted += 1
+                    self.assertEqual(
+                        result.stdout,
+                        f"layer_uuid={identity} upper={layout['upper']}\n",
+                    )
+                    accepted.add(layout["upper"])
                     continue
                 self.assertEqual(result.returncode, 125, result.stdout)
                 self.assertRegex(result.stderr, r"\AFATAL: [^\n]+\n\Z")
                 self.assertIn(case.get("shell_error", ""), result.stderr)
-        self.assertGreater(accepted, 0)
+        self.assertEqual(accepted, {"scratch", "ram"})
+        self.assertGreater(devices, 0)
 
     def test_agent_explains_the_roots_that_it_cannot_assemble(self):
-        unsupported = (
-            "which this init cannot assemble: it assembles only an EROFS image "
-            "over a scratch disk"
-        )
         for command_line, message in (
             (
                 f"nvx_layer=distro,0xd0003000,{self.UUID} nvx_scratch=0xd0006000,ext4",
@@ -19469,21 +19527,161 @@ class SandboxRootTokenAgentTests(unittest.TestCase):
                 f"gpt: 'distro,0xd0003000,{self.UUID}'",
             ),
             (
-                f"nvx_layer=distro,0xd0003000,gpt:{self.UUID} "
-                "nvx_scratch=0xd0006000,ext4",
+                f"nvx_layer=distro,0xd0003000,gpt:{self.UUID} nvx_overlay_upper=ramfs",
                 f"nvx_layer=distro,0xd0003000,gpt:{self.UUID} names a GPT image, "
-                f"{unsupported}",
-            ),
-            (
-                f"nvx_layer=distro,0xd0003000,erofs:{self.UUID} "
-                "nvx_overlay_upper=ramfs",
-                f"nvx_overlay_upper=ramfs asks for a RAM upper, {unsupported}",
+                "which this init cannot assemble: it assembles only an EROFS image",
             ),
         ):
             with self.subTest(command_line=command_line):
                 result = self._read(command_line)
                 self.assertEqual(result.returncode, 125, result.stdout)
                 self.assertEqual(result.stderr, f"FATAL: {message}\n")
+
+    def test_agent_requires_one_upper(self):
+        layer = f"nvx_layer=distro,0xd0003000,erofs:{self.UUID}"
+        for command_line, message in (
+            (
+                f"{layer} nvx_overlay_upper=ramfs nvx_scratch=0xd0006000,ext4",
+                "a layered root has one upper, but the command line names both "
+                "nvx_scratch and nvx_overlay_upper",
+            ),
+            (
+                f"quiet {layer}",
+                "the nvx_layer kernel parameter needs an upper, nvx_scratch or "
+                "nvx_overlay_upper",
+            ),
+            (
+                f"{layer} nvx_overlay_upper",
+                "the nvx_overlay_upper kernel parameter has no value",
+            ),
+            (
+                f"{layer} nvx_overlay_upper=tmpfs",
+                "the nvx_overlay_upper kernel parameter must be ramfs, not 'tmpfs'",
+            ),
+            (
+                f"{layer} nvx_overlay_upper=ramfs nvx_overlay_upper=ramfs",
+                "the nvx_overlay_upper kernel parameter is repeated",
+            ),
+        ):
+            with self.subTest(command_line=command_line):
+                result = self._read(command_line)
+                self.assertEqual(result.returncode, 125, result.stdout)
+                self.assertEqual(result.stderr, f"FATAL: {message}\n")
+
+    def test_agent_refuses_a_scratch_device_beside_a_ram_upper(self):
+        iomem = self.root / "iomem"
+        function = _shell_function(self.source, "refuse_scratch_device").replace(
+            "/proc/iomem", iomem.as_posix()
+        )
+        for content, refused in (
+            ("", False),
+            (
+                "d0003000-d0003fff : virtio-mmio.0\n"
+                "  d0003000-d0003fff : virtio-mmio.0\n"
+                "d0007000-d0007fff : virtio-mmio.1\n",
+                False,
+            ),
+            # Only a virtio-mmio device whose window starts at the base counts.
+            ("d0006000-d0006fff : reserved\n", False),
+            ("d0005000-d0006fff : virtio-mmio.2\n", False),
+            (
+                "d0003000-d0003fff : virtio-mmio.0\n"
+                "d0006000-d0006fff : virtio-mmio.1\n"
+                "  d0006000-d0006fff : virtio-mmio.1\n",
+                True,
+            ),
+        ):
+            with self.subTest(content=content):
+                iomem.write_text(content, encoding="utf-8")
+                result = subprocess.run(
+                    [self.shell, "-s"],
+                    input=(
+                        "set -eu\n"
+                        'fatal() { echo "FATAL: $*" >&2; exit 125; }\n'
+                        f"{function}refuse_scratch_device\necho accepted\n"
+                    ),
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                )
+                if refused:
+                    self.assertEqual(result.returncode, 125, result.stdout)
+                    self.assertEqual(
+                        result.stderr,
+                        "FATAL: a RAM upper takes no scratch block device, but the "
+                        "kernel has a virtio-mmio device at 0xd0006000\n",
+                    )
+                else:
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(result.stdout, "accepted\n")
+
+    def test_agent_checks_a_ram_upper_before_it_mounts_anything(self):
+        check = self.source.index('\n[ "$upper" = scratch ] || refuse_scratch_device\n')
+        self.assertLess(self.source.index("\nread_root_tokens\n"), check)
+        self.assertLess(check, self.source.index("\nmount_layer distro "))
+        self.assertLess(
+            self.source.index("\nmount_layer distro "),
+            self.source.index("\nmount_upper\n"),
+        )
+        self.assertIn(
+            "upperdir=$upper_point/upper,workdir=$upper_point/work,metacopy=on,xino=on",
+            self.source,
+        )
+
+    def test_agent_mounts_the_upper_that_the_tokens_name(self):
+        runtime = (self.root / "run").as_posix()
+        log = self.root / "commands.log"
+        for upper, commands, point, name in (
+            (
+                "scratch",
+                [
+                    f"mkdir -p {runtime}/scratch",
+                    "resolve 0xd0006000",
+                    "blockdev --flushbufs /dev/vdb",
+                    f"mount -t ext4 -o rw,nosuid,nodev /dev/vdb {runtime}/scratch",
+                    f"mkdir -p {runtime}/scratch/upper {runtime}/scratch/work",
+                ],
+                f"{runtime}/scratch",
+                "scratch",
+            ),
+            (
+                "ram",
+                [
+                    f"mkdir -p {runtime}/tmpfs",
+                    f"mount -t tmpfs -o mode=0755,nosuid,nodev tmpfs {runtime}/tmpfs",
+                    f"mkdir -p {runtime}/tmpfs/upper {runtime}/tmpfs/work",
+                ],
+                f"{runtime}/tmpfs",
+                "the tmpfs upper",
+            ),
+        ):
+            with self.subTest(upper=upper):
+                log.unlink(missing_ok=True)
+                result = subprocess.run(
+                    [self.shell, "-s", "--", runtime, log.as_posix(), upper],
+                    input=(
+                        "set -eu\n"
+                        "runtime=$1\nlog=$2\nupper=$3\n"
+                        "scratch=$runtime/scratch\ntmpfs=$runtime/tmpfs\n"
+                        'fatal() { echo "FATAL: $*" >&2; exit 125; }\n'
+                        'resolve_block_device() { echo "resolve $*" >>"$log"; '
+                        "echo /dev/vdb; }\n"
+                        'blockdev() { echo "blockdev $*" >>"$log"; }\n'
+                        'mount() { echo "mount $*" >>"$log"; }\n'
+                        'mkdir() { echo "mkdir $*" >>"$log"; }\n'
+                        f"{_shell_function(self.source, 'mount_upper')}"
+                        "mount_upper\n"
+                        'echo "upper_point=$upper_point upper_name=$upper_name"\n'
+                    ),
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(
+                    result.stdout, f"upper_point={point} upper_name={name}\n"
+                )
+                self.assertEqual(log.read_text(encoding="utf-8").splitlines(), commands)
 
     def test_agent_checks_the_layer_uuid_only_when_the_token_names_one(self):
         log = self.root / "commands.log"
