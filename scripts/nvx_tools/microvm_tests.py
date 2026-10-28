@@ -6911,6 +6911,11 @@ def run_filesystem_snapshot(
         live_root.mkdir()
         open_handle = live_root / "open-handle"
         open_handle.write_bytes(b"")
+        # The guest's write through a shared mapping replaces the page, and
+        # each restore's host change replaces it in place, so that the file
+        # stays the object that the mapping holds.
+        mapped_page = live_root / "mapped-page"
+        mapped_page.write_bytes(b"NVX-HOST-INITIAL")
         live_snapshot = root / "live-snapshot"
         live_capture = [
             *workload_boot_command(
@@ -6946,6 +6951,10 @@ def run_filesystem_snapshot(
             raise RuntimeError("live filesystem source crossed the capture boundary")
         if open_handle.read_bytes() != b"NVX-HANDLE-BEFORE":
             raise RuntimeError("live filesystem source completed a post-capture write")
+        if mapped_page.read_bytes() != b"NVX-GUEST-MAPPED":
+            raise RuntimeError(
+                "live filesystem capture did not write back a dirty shared mapping"
+            )
         assert_guest_symlink(live_root / "handle-link", "open-handle")
         assert_live_exchange(live_root)
         live_fingerprint = _snapshot_fingerprint(live_snapshot)
@@ -7020,6 +7029,9 @@ def run_filesystem_snapshot(
             )
 
         for restore_index in range(2):
+            host_change = f"NVX-HOST-AFTER-{restore_index}".encode()
+            with mapped_page.open("r+b") as page:
+                page.write(host_change)
             restore_command = snapshot_restore_command(
                 executable, backend, live_snapshot
             )
@@ -7034,6 +7046,11 @@ def run_filesystem_snapshot(
                 raise RuntimeError(
                     f"live filesystem restore {restore_index} exited with "
                     f"{restored.returncode}"
+                )
+            if mapped_page.read_bytes() != host_change:
+                raise RuntimeError(
+                    f"live filesystem restore {restore_index} wrote captured "
+                    "mapped data back to the host file"
                 )
             if _snapshot_fingerprint(live_snapshot) != live_fingerprint:
                 raise RuntimeError(
