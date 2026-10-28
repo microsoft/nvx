@@ -36,7 +36,10 @@ COLD_START_LOG = """
 VIRTFS_LOG = """
     rw live host directory      write    500.0 MB/s  (min 490, max 510, n=3)
                                                             read   1,200.0 MB/s  (min 1100, max 1300, n=3)
+    write samples                     : 490.0, 500.0, 510.0 MB/s
+    read samples                      : 1100.0, 1200.0, 1300.0 MB/s
     live exchange (cold each)         :     200 ms  (min 190, max 210, n=3)
+    exchange samples                  : 190.000, 200.000, 210.000 ms
 """
 
 DEVICE_IO_LOG = """
@@ -102,22 +105,26 @@ SHELL_SNAPSHOT_LOG = """
 == 128 MiB ==
     cold boot           : median   520.0 ms   (min 510.0, max 530.0, n=5)
     snapshot restore    : median     5.5 ms   (min 5.3, max 5.7, n=5)
+    restore samples     : 5.300, 5.400, 5.500, 5.600, 5.700 ms
     speedup             : 95x (fast-path cold) .. 95x (median cold) faster via snapshot
 
 == 256 MiB ==
     cold boot           : median   540.0 ms   (min 530.0, max 550.0, n=5)
     snapshot restore    : median     6.0 ms   (min 5.8, max 6.2, n=5)
+    restore samples     : 5.800, 5.900, 6.000, 6.100, 6.200 ms
     speedup             : 90x (fast-path cold) .. 90x (median cold) faster via snapshot
 
 == 512 MiB ==
     cold boot           : median   580.0 ms   (min 570.0, max 590.0, n=5)
     snapshot restore    : median     7.0 ms   (min 6.8, max 7.2, n=5)
+    restore samples     : 6.800, 6.900, 7.000, 7.100, 7.200 ms
     speedup             : 83x (fast-path cold) .. 83x (median cold) faster via snapshot
 """
 
 SHELL_SNAPSHOT_RESTORE_LOG = """
 == 512 MiB ==
     snapshot restore    : median     7.0 ms   (p95 7.2, min 6.8, max 7.2, n=5)
+    restore samples     : 6.800, 6.900, 7.000, 7.100, 7.200 ms
 """
 
 

@@ -415,6 +415,10 @@ measures complete process wall time while host and guest exchange files through 
 | `virtfs_live_read` | MB/s | Sequential guest read from the host file after dropping guest page cache. |
 | `virtfs_live_roundtrip` | ms | Guest creates a marker observed by the host, then observes a host rewrite before that VM exits. |
 
+`virtfs.log` follows the summaries of each series with its retained samples in measurement order.
+A host slowdown that delays part of a series splits its samples into two groups, which the median
+alone hides.
+
 ### Device operation rates
 
 The dedicated suite always uses the canonical microVM and attaches the block
@@ -478,6 +482,10 @@ The 64 MiB pair, `shell_snapshot_cold_64_mib` and
 | `shell_snapshot_restore_256_mib` | Restore process launch through lifecycle-aligned verification of a 256 MiB snapshot. |
 | `shell_snapshot_cold_512_mib` | OpenVMM launch to a shell-ready guest with 512 MiB of memory. |
 | `shell_snapshot_restore_512_mib` | Restore process launch through lifecycle-aligned verification of a 512 MiB snapshot. |
+
+Each memory section of `shell-snapshot.log`, and of `shell-snapshot-restore.log` for the
+restore-only suite, lists the retained restore samples in measurement order after the restore
+summary.
 
 ### Snapshot lifecycle profile
 

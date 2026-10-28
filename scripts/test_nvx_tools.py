@@ -56,6 +56,7 @@ from nvx_tools import (  # noqa: E402
     microvm_shards,
     nvx_rs,
     openvmm_test_shards,
+    performance,
     release,
     shard_plans,
     ubuntu,
@@ -22093,6 +22094,7 @@ class BenchmarkTests(unittest.TestCase):
         )
         self.assertIn("== 512 MiB ==", output.getvalue())
         self.assertIn("snapshot restore", output.getvalue())
+        self.assertIn("  restore samples     : 10.000, 12.000 ms\n", output.getvalue())
         self.assertNotIn("cold boot", output.getvalue())
         self.assertIn('marker : "OPENVMM-SNAPSHOT-RESTORE-OK"', output.getvalue())
         self.assertTrue(run.call_args.kwargs["snapshot_profile"])
@@ -22730,6 +22732,84 @@ class BenchmarkTests(unittest.TestCase):
 
         self.assertEqual(io.call_count, 4)
         self.assertEqual(roundtrip.call_count, 4)
+
+    def test_virtfs_lists_every_retained_sample(self):
+        args = argparse.Namespace(
+            virtfs_memory_mib=128,
+            payload_mib=1,
+            processors=1,
+            warmups=1,
+            timeout=1.0,
+            teardown_mode="guest-exit",
+        )
+        # The warmup's rates and exchange time must not appear in the samples.
+        io_results = [
+            {
+                "text": (
+                    f"1 byte copied, 1 s, {write} MB/s\n"
+                    f"1 byte copied, 1 s, {read} MB/s\n"
+                ),
+                "wall_ms": 1.0,
+                "peak_rss_bytes": 1,
+            }
+            for write, read in ((99, 99), (11, 21), (12.5, 22), (13, 23))
+        ]
+        roundtrip_results = [
+            {"text": "", "wall_ms": wall_ms, "peak_rss_bytes": 1}
+            for wall_ms in (99.0, 2.5, 3.25, 4.125)
+        ]
+        with (
+            patch.object(benchmark, "run_guest_script", side_effect=io_results),
+            patch.object(
+                benchmark, "_run_virtfs_roundtrip", side_effect=roundtrip_results
+            ),
+            patch("sys.stdout", new_callable=io.StringIO) as output,
+        ):
+            benchmark.benchmark_virtfs_workload(
+                args,
+                Path("openvmm"),
+                Path("vmlinux"),
+                Path("initrd"),
+                "kvm",
+                runs=3,
+            )
+
+        lines = output.getvalue().splitlines()
+        self.assertIn(
+            "  write samples                     : 11.0, 12.5, 13.0 MB/s", lines
+        )
+        self.assertIn(
+            "  read samples                      : 21.0, 22.0, 23.0 MB/s", lines
+        )
+        self.assertIn(
+            "  exchange samples                  : 2.500, 3.250, 4.125 ms", lines
+        )
+        # The listed samples must leave the summaries that collection parses
+        # intact.
+        metrics = performance._parse_virtfs(output.getvalue())
+        self.assertEqual(metrics["virtfs_live_write"], ("MB/s", "higher", 12.5))
+        self.assertEqual(metrics["virtfs_live_read"], ("MB/s", "higher", 22.0))
+        self.assertEqual(metrics["virtfs_live_roundtrip"], ("ms", "lower", 3.2))
+
+    def test_shell_snapshot_summary_lists_restore_samples_in_order(self):
+        restored = [85.6894, 74.955, 107.1931, 36.2756]
+        with patch("sys.stdout", new_callable=io.StringIO) as output:
+            benchmark._print_shell_snapshot_summary(256, [308.7, 309.1], restored)
+
+        lines = output.getvalue().splitlines()
+        restore = next(
+            index
+            for index, line in enumerate(lines)
+            if line.startswith("  snapshot restore    : median")
+        )
+        self.assertEqual(
+            lines[restore + 1],
+            "  restore samples     : 85.689, 74.955, 107.193, 36.276 ms",
+        )
+        self.assertEqual(
+            performance._parse_shell_snapshot_restore(output.getvalue()),
+            {"shell_snapshot_restore_256_mib": ("ms", "lower", 80.3)},
+        )
 
     def test_device_io_retains_failure_and_resumes_completed_attempts(self):
         args = argparse.Namespace(
