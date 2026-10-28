@@ -538,9 +538,14 @@ All captures emit a guest marker immediately before `nvx-snapshot`;
 `console_command_round_trip` ends when the host observes that marker, and
 `guest_dispatch_to_publication` spans that observation through snapshot publication.
 Each observed record also includes available process counters. Linux reports RSS, peak RSS,
-minor and major faults, total page faults, and, when `smaps_rollup` is available, private dirty
-and private RSS bytes. Windows reports working set, peak working set, private commit, and page
-faults.
+and minor, major, and total page faults from `/proc/<pid>/status` and `/proc/<pid>/stat`,
+which the kernel fills from counters that it maintains. The coordinator reads them while
+OpenVMM runs the intervals that the benchmark measures, so it reads nothing that walks
+OpenVMM's memory map. Reading `smaps_rollup` there delayed OpenVMM's quiesce and state save
+on MSHV, which raised the snapshot-generation p50 by about 30% on the MSHV CI runner and more
+than doubled it on a bare-metal host, and spread its samples until the stability guard
+rejected some series (#383). Windows reports working set, peak working set, private commit,
+and page faults.
 
 On Windows, each retained capture sample also carries `storage_telemetry`. From just before the
 host requests the snapshot until the source process exits, a coordinator thread samples
