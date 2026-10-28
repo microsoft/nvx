@@ -31,6 +31,14 @@
   nested repository. Do not claim unavailable hardware or cross-platform gates
   passed; report the missing prerequisite and rely on CI when appropriate.
 
+## Documentation
+
+- In [`nvx-rs/README.md`](../nvx-rs/README.md#layout), each row of the module
+  table says in one line, of at most 200 characters, what a module is for, and
+  links to the module's section after the table, which holds the module's
+  details. Put a module's details in its section, wrapped like the rest of the
+  README, and change its row only when the module's purpose changes.
+
 ## Platforms And Hosts
 
 - Linux supports `kvm` or `mshv`; Windows supports only `whp`. Select one backend
