@@ -350,11 +350,11 @@ impl fmt::Display for Stage {
 
 /// How far a clone got, in the order of its steps: the latest step that it reached.
 ///
-/// The steps from the restore-ready event to the start's confirmation are those of the clone's
-/// restore sequence, which its progress log,
-/// [`CLONE_PROGRESS_NAME`](crate::host::store::CLONE_PROGRESS_NAME), records as each is reached;
-/// the store's records tell the others: the launch's journal records the spawn of its VMM, and the
-/// runtime record its commit.
+/// The steps from the spawn of the clone's VMM to the start's confirmation are those that its
+/// launch and restore sequence record in its progress log,
+/// [`CLONE_PROGRESS_NAME`](crate::host::store::CLONE_PROGRESS_NAME), as each is reached; the
+/// store's records tell the spawn too, and the commit: the launch's journal records the spawn of
+/// its VMM until the launch ends, and the runtime record its commit.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 #[non_exhaustive]

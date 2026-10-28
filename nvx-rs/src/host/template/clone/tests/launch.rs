@@ -29,7 +29,7 @@ use crate::host::supervisor::{self, Reattached, StopOutcome, VmmCommand};
 use crate::host::template::Retirement;
 use crate::host::template::clone::launch::{Hooks, Point};
 use crate::host::template::clone::reattach::reattach_clone_with;
-use crate::host::template::clone::records::{read_failure, write_failure};
+use crate::host::template::clone::records::{read_failure, read_progress, write_failure};
 use crate::host::template::store::SNAPSHOT_ARTIFACTS;
 use crate::host::template::test_support::artifact;
 
@@ -2518,6 +2518,73 @@ fn a_reattach_records_the_failure_of_an_interrupted_launch_before_it_ends_the_la
     );
     assert!(control.capabilities.is_empty());
     crashed.releases(&mut locked);
+}
+
+/// A launch that its caller abandons before the clone's activation leaves a progress log that
+/// records the spawn of the clone's VMM, which the launch's journal, which the teardown removes,
+/// records no more, so that a reattach reads the outcome report of the clone's VM, and records the
+/// failure that the guest's status gives.
+#[test]
+fn a_launch_abandoned_before_its_activation_leaves_the_spawn_for_a_reattach() {
+    let fixture = Fixture::new();
+    complete_snapshot(&fixture);
+    let (image, binding) = fixture.image("distro.erofs", IMAGE_LEN);
+    let mut acquired = fixture.acquire("abandoned");
+    let progress = acquired.locked.clone_progress_path();
+    let launch = acquired.lease.launch().clone();
+    let plan = fixture
+        .plan(&mut acquired, &tmpfs_request(&image, &binding), NO_CONTENT)
+        .unwrap();
+    let runtime = plan.key().runtime().clone();
+    let mut vmm = VmmDir::new();
+    // The guest's repair ends the clone's VM with its status, which the VMM reports as it exits.
+    vmm.plan("report:guest-exit:195");
+    let dir = vmm.path().to_owned();
+    let made = RefCell::new(None);
+    let command = fake_vmm(&dir, &made);
+    let hooks = Hooks {
+        command: &command,
+        ..Hooks::LAUNCH
+    };
+    let restoring = plan
+        .launch_with(&mut acquired, Path::new(OPENVMM), &runtime, hooks)
+        .unwrap();
+    vmm.reference = Some(restoring.starting().process().reference().clone());
+    // The log records the spawn once the launch returns.
+    let logged = read_progress(&progress, &launch).unwrap().unwrap();
+    assert_eq!(
+        (logged.progress, logged.boot),
+        (Progress::Spawned, Some(BootId::current().unwrap()))
+    );
+    let capability = hex(restoring.capability());
+    assert_eq!(vmm.started(), format!("{capability} true"));
+    vmm.end_and_wait();
+    assert_eq!(restoring.abandon().unwrap(), Recovery::Exited);
+    assert!(acquired.locked.journal().unwrap().is_none());
+    let mut control = ReattachControl::answering(Some);
+    let reattached = reattach_clone(
+        &mut acquired.locked,
+        &runtime,
+        &mut control,
+        Instant::now() + TIMEOUT,
+        TIMEOUT,
+    );
+    let failure = failed(reattached.unwrap());
+    assert_recorded(
+        &failure,
+        &acquired.lease,
+        &acquired.locked,
+        (Stage::Restore, Progress::Spawned),
+        Evidence::RepairStatus,
+        Teardown::Exited,
+    );
+    assert_eq!(failure.record().status, Some(195));
+    assert!(control.capabilities.is_empty());
+    assert_eq!(
+        fixture.store.release(&mut acquired.locked).unwrap(),
+        Some(acquired.lease.clone())
+    );
+    assert_released(acquired.lease.sandbox());
 }
 
 #[test]
