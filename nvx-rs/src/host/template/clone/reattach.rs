@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 use super::failure::{
     Attribute, CloneFailure, Evidence, Fault, Progress, Stage, Teardown, amended, describe,
 };
-use super::records::{Recorder, progress_of, read_failure, read_progress};
+use super::records::{Recorder, progress_of, read_failure_of, read_progress};
 use super::restore::{ActivationSession, CloneControl};
 use crate::activation::{ActivationRecord, MAX_RECORD_BYTES, ReadyActivation};
 use crate::error::{Error, ErrorCode, Result};
@@ -112,13 +112,17 @@ pub enum ReattachedClone<S> {
 /// it ended since tells more, as the guest's status, which the record does not hold, and the
 /// error that OpenVMM reported, for a VMM that exited before its restore-ready event, may, and
 /// returns the failure, with the record's lease, transaction, stage, progress, and code. A record
-/// of a failure that cannot be read tells as much, though not how the clone failed: if the store
-/// holds records of the clone's launch, which the reattach may remove, the reattach first replaces
-/// it with the record of its own failure at [`Stage::Reattach`], with the error of the record's
-/// read and the host's evidence, its teardown pending, which keeps how far the clone got for a
+/// of a failure that cannot be read tells as much, though not how the clone failed, and so does
+/// a record of another clone's failure, whose template store, lease, leased generation, its key,
+/// or launch is not the binding's, and which tells nothing of this clone: if the store holds
+/// records of the clone's launch, which the reattach may remove, the reattach first replaces it
+/// with the record of its own failure at [`Stage::Reattach`], with the error of the record's read
+/// and the host's evidence, its teardown pending, which keeps how far the clone got for a
 /// reattach after a crash of the caller. It then ends a VMM of the clone that still runs the same
 /// way, and records the failure with the teardown that it found or made, as any failure that it
-/// records, over whose evidence a status of the guest's prevails.
+/// records, over whose evidence a status of the guest's prevails. The failure that it returns is
+/// then this clone's, so a [quarantine](CloneFailure::quarantine) of it never reaches a
+/// generation that the clone does not lease.
 ///
 /// The reattach reads no record of the template store: the lease holds the clone's generation,
 /// and the sandbox's activation record the clone's transaction, so a tombstone, or a retirement,
@@ -194,8 +198,9 @@ pub(super) fn reattach_clone_with<C: CloneControl>(
         .as_ref()
         .filter(|record| record.launch() == launch);
     // The record of an earlier failure of the clone, or the fault of a record that cannot be read,
-    // which still tells that the clone launched, and failed for good, though not how.
-    let earlier = read_failure(&locked.clone_failure_path())
+    // or of one of another clone's failure, which still tells that the clone launched, and failed
+    // for good, though not how.
+    let earlier = read_failure_of(&locked.clone_failure_path(), &lease)
         .map_err(unreadable_failure)
         .transpose();
     let logged = read_progress(&locked.clone_progress_path(), launch).unwrap_or(None);
@@ -221,12 +226,12 @@ pub(super) fn reattach_clone_with<C: CloneControl>(
         .and_then(|(_, record)| record.restore().map(|restore| restore.transaction));
     let recorder = Recorder::new(lease.clone(), transaction, locked).uncertain(uncertain);
     let fresh = earlier.is_none();
-    // A record that cannot be read is replaced by the reattach's own failure, with its teardown
-    // pending, before the reattach ends or forgets anything of the clone's launch: the record keeps
-    // how far the clone got, which the launch's journal and runtime record hold, and the reattach
-    // removes, for a reattach after a crash of this caller, which finishes it. Without them, the
-    // reattach removes nothing that the record would keep, and a later reattach finds the clone as
-    // this one does.
+    // A record that cannot be read, or that is another clone's, is replaced by the reattach's own
+    // failure, with its teardown pending, before the reattach ends or forgets anything of the
+    // clone's launch: the record keeps how far the clone got, which the launch's journal and
+    // runtime record hold, and the reattach removes, for a reattach after a crash of this caller,
+    // which finishes it. Without them, the reattach removes nothing that the record would keep, and
+    // a later reattach finds the clone as this one does.
     if let Some(Err(fault)) = &earlier
         && (journal.is_some() || committed.is_some())
     {
@@ -537,9 +542,9 @@ fn mismatched(differences: &[IdentityPart]) -> Error {
     )
 }
 
-/// Returns the fault of a clone whose sandbox holds a record of a failure that cannot be read, as
-/// `error` tells: the record still shows that the clone failed, so the reattach keeps none of it,
-/// with the host's evidence.
+/// Returns the fault of a clone whose sandbox holds a record of a failure that cannot be read, or
+/// that is another clone's, as `error` tells: the record still shows that the clone failed, so
+/// the reattach keeps none of it, with the host's evidence.
 fn unreadable_failure(error: Error) -> Fault {
     Fault::host(amended(
         error,

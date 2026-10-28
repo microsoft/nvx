@@ -2280,6 +2280,47 @@ fn a_reattach_fails_a_clone_whose_record_of_a_failure_cannot_be_read() {
 }
 
 #[test]
+fn a_reattach_fails_a_clone_whose_sandbox_records_the_failure_of_another_clone() {
+    // A record of the failure of another lease's clone, of another launch, which leased another
+    // generation of the same store, whose evidence is the template's: it tells nothing of this
+    // clone, so the reattach takes it as a record that it cannot read, and the failure that it
+    // records in its place, and returns, is this clone's, which quarantines nothing.
+    let crashed = Crashed::at("committed");
+    let mut locked = crashed.lock();
+    let lease = &crashed.lease;
+    let generation = lease.generation().get().checked_add(1).unwrap();
+    let other = Lease::new(
+        crate::host::template::LeaseId::from_bytes([0xa5; 16]),
+        lease.store(),
+        StoreGeneration::new(generation),
+        lease.template().key,
+        lease.sandbox().to_owned(),
+        crate::host::store::LaunchId::generate().unwrap(),
+    );
+    let defect = Error::io("the test's generation is malformed");
+    let at = ((Stage::Restore, Progress::Spawned), None);
+    let template = (Evidence::MalformedGeneration, Teardown::Exited);
+    record_earlier(&other, &locked, at, template, &defect);
+    let mut control = ReattachControl::answering(Some);
+    let failure = failed(crashed.take_over(&mut locked, &crashed.runtime, &mut control));
+    assert_eq!(failure.code(), ErrorCode::Io, "{failure}");
+    assert!(
+        failure.message().contains("belongs to another clone"),
+        "{failure}"
+    );
+    let reattach = (Stage::Reattach, Progress::Committed);
+    let (host, terminated) = (Evidence::HostFailure, Teardown::Terminated);
+    assert_recorded(&failure, lease, &locked, reattach, host, terminated);
+    assert!(control.capabilities.is_empty());
+    assert!(locked.runtime().unwrap().is_none());
+    crashed.releases(&mut locked);
+    drop(locked);
+    let store = &crashed.fixture.store;
+    assert!(!failure.quarantine(store, None).unwrap());
+    assert!(store.tombstones().unwrap().is_empty());
+}
+
+#[test]
 fn a_record_of_a_failure_that_cannot_be_read_is_a_failure_whatever_the_reattach_finds() {
     let reattach = (Stage::Reattach, Progress::Committed);
     // A VM that exited once its launch committed, with a status of the guest's that is evidence,
