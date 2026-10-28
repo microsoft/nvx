@@ -37,8 +37,12 @@ fn mount(value: &str, denied: &[&str]) -> SandboxMount {
 }
 
 fn with_export(export: Option<ExportPlan>) -> Result<SandboxLaunch> {
-    SandboxLaunch::new(vec![distro()], "scratch.ext4", SandboxSettings::default())?
-        .with_export(export)
+    SandboxLaunch::new(
+        vec![distro()],
+        SandboxUpper::scratch("scratch.ext4"),
+        SandboxSettings::default(),
+    )?
+    .with_export(export)
 }
 
 /// Returns `path`, an absolute POSIX path, as an absolute host path: on Windows, on drive `C:`.
@@ -136,7 +140,7 @@ pub(super) fn native(path: &str) -> String {
 fn launch_contract_builds_agent_command_line() {
     let launch = SandboxLaunch::new(
         vec![distro()],
-        "scratch.ext4",
+        SandboxUpper::scratch("scratch.ext4"),
         SandboxSettings {
             entrypoint: "/bin/workload".to_owned(),
             args: vec!["--serve".to_owned()],
@@ -189,7 +193,7 @@ fn launch_contract_builds_agent_command_line() {
 fn launch_contract_rejects_duplicates_and_reserved_tokens() {
     let error = SandboxLaunch::new(
         vec![distro(), distro()],
-        "scratch.ext4",
+        SandboxUpper::scratch("scratch.ext4"),
         SandboxSettings::default(),
     )
     .unwrap_err();
@@ -238,12 +242,16 @@ fn launch_settings_are_checked_in_order() {
     let settings = |change: fn(&mut SandboxSettings)| {
         let mut settings = SandboxSettings::default();
         change(&mut settings);
-        message(SandboxLaunch::new(vec![distro()], "s.ext4", settings))
+        message(SandboxLaunch::new(
+            vec![distro()],
+            SandboxUpper::scratch("s.ext4"),
+            settings,
+        ))
     };
     assert_eq!(
         message(SandboxLaunch::new(
             Vec::new(),
-            "s.ext4",
+            SandboxUpper::scratch("s.ext4"),
             SandboxSettings::default()
         )),
         "a sandbox requires exactly one read-only distro layer"
@@ -251,7 +259,7 @@ fn launch_settings_are_checked_in_order() {
     assert_eq!(
         message(SandboxLaunch::new(
             vec![distro(); 4],
-            "s.ext4",
+            SandboxUpper::scratch("s.ext4"),
             SandboxSettings::default()
         )),
         "duplicate sandbox layer role(s): distro"
@@ -264,7 +272,11 @@ fn launch_settings_are_checked_in_order() {
             ..SandboxSettings::default()
         };
         assert_eq!(
-            message(SandboxLaunch::new(vec![distro()], "s.ext4", settings)),
+            message(SandboxLaunch::new(
+                vec![distro()],
+                SandboxUpper::scratch("s.ext4"),
+                settings
+            )),
             "sandbox entrypoint must be an absolute path without whitespace, control characters, or quotes"
         );
     }
@@ -279,7 +291,7 @@ fn launch_settings_are_checked_in_order() {
     for hostname in ["", "-a", "a-", "A", "a.b", "a\n"] {
         let launch = SandboxLaunch::new(
             vec![distro()],
-            "s.ext4",
+            SandboxUpper::scratch("s.ext4"),
             SandboxSettings {
                 hostname: hostname.to_owned(),
                 ..SandboxSettings::default()
@@ -310,7 +322,11 @@ fn launch_rejects_limits_the_guest_cgroup_cannot_store() {
     let settings = |change: fn(&mut SandboxSettings)| {
         let mut settings = SandboxSettings::default();
         change(&mut settings);
-        message(SandboxLaunch::new(vec![distro()], "s.ext4", settings))
+        message(SandboxLaunch::new(
+            vec![distro()],
+            SandboxUpper::scratch("s.ext4"),
+            settings,
+        ))
     };
     assert_eq!(parse_decimal::<u64>("18446744073709551616"), None);
     assert_eq!(
@@ -806,7 +822,7 @@ impl Fixture {
                 &self.path("distro.erofs"),
                 "11111111-1111-1111-1111-111111111111",
             )],
-            &self.path("scratch.ext4"),
+            SandboxUpper::scratch(&self.path("scratch.ext4")),
             SandboxSettings::default(),
         )
         .unwrap()
@@ -1181,7 +1197,7 @@ fn launch_contract_rejects_disk_option_delimiters_and_unbalanced_brackets() {
                 &layer,
                 "11111111-1111-1111-1111-111111111111",
             )],
-            &fixture.path("scratch.ext4"),
+            SandboxUpper::scratch(&fixture.path("scratch.ext4")),
             SandboxSettings::default(),
         )
         .unwrap();
@@ -1206,7 +1222,7 @@ fn launch_validation_requires_the_layers_and_the_scratch_image() {
             &fixture.path("missing.erofs"),
             "11111111-1111-1111-1111-111111111111",
         )],
-        &fixture.path("scratch.ext4"),
+        SandboxUpper::scratch(&fixture.path("scratch.ext4")),
         SandboxSettings::default(),
     )
     .unwrap();

@@ -778,10 +778,10 @@ and OpenVMM's outcome report.
 
 The launch profile of `nvx-rs sandbox`, with native input validation:
 `SandboxLaunch`, with the distro `SandboxLayer`, an EROFS layer or a GPT disk,
-the one layer that a sandbox takes, the ext4 scratch disk, the entrypoint,
-arguments, hostname, workload identity, and `SandboxSettings` resource limits
-(`Option<u64>` for memory and `Option<u32>` for processes), and the
-`SandboxPlan` that it makes of them.
+the one layer that a sandbox takes, its `SandboxUpper`, the ext4 scratch disk
+or RAM, the entrypoint, arguments, hostname, workload identity, and
+`SandboxSettings` resource limits (`Option<u64>` for memory and `Option<u32>`
+for processes), and the `SandboxPlan` that it makes of them.
 
 `plan`: `SandboxPlan`, the typed plan of a cold layered launch, which is
 persistable in a versioned serde form: one read-only `distro` block device, an
@@ -1471,7 +1471,9 @@ deprovision the sandbox and provision it again`, and one that another sandbox
 claims with `another sandbox claims the ext4 scratch image IMAGE`. `run` binds
 and claims the scratch image itself, and runs OpenVMM through a prepared
 launch until it exits; its command, which it prints, names the checked files,
-except in a dry run, which launches nothing.
+except in a dry run, which launches nothing. A sandbox whose upper is in RAM,
+`--upper ram`, has no scratch image: `provision` records `null` for the image
+and its binding, and neither `start` nor `run` binds or claims one.
 
 ## Sandbox input contract
 
@@ -1790,9 +1792,9 @@ before them.
   elsewhere, as `nvx.py` quoted it with `subprocess.list2cmdline` and
   `shlex.join`. Unless `--dry-run` is given, it then runs OpenVMM with the
   standard streams and exits with its status; the command then names the
-  checked distro layer and scratch image as `/proc/self/fd/N` on Linux, which
-  OpenVMM inherits, and by their final paths on Windows, as
-  [Checked handoff](#checked-handoff) describes.
+  checked distro layer, and the scratch image of an upper on scratch, as
+  `/proc/self/fd/N` on Linux, which OpenVMM inherits, and by their final paths
+  on Windows, as [Checked handoff](#checked-handoff) describes.
   `--outcome-report` asks OpenVMM for its outcome report.
 - `provision` records the sandbox in its state directory. `start` launches
   OpenVMM detached with the managed lifecycle, passes it a fresh capability
@@ -1816,7 +1818,7 @@ earlier `nvx-rs` provisioned, which has no bindings or no typed network:
 
 | File | Contents |
 | --- | --- |
-| `config.json` | The provisioned sandbox, in format 7, with the export plan of its shares under `export`, `null` for none, the binding of its distro layer under `distro_binding`, that of its scratch image under `scratch_binding`, and its network under `network`, `null` for none, written by `serde_json`'s pretty printer with the members of every object sorted by name, with mode 0600, through a temporary file. `start` reads it as strict JSON, as egress policy files are read, into the typed fields of format 7, and also reads the format 1 that earlier builds wrote for a sandbox without shares, with `mount` `null` and no `export` |
+| `config.json` | The provisioned sandbox, in format 8, with the export plan of its shares under `export`, `null` for none, its upper under `upper`, `scratch` or `ram`, the binding of its distro layer under `distro_binding`, its scratch image under `scratch` and that image's binding under `scratch_binding`, both `null` for an upper in RAM, and its network under `network`, `null` for none, written by `serde_json`'s pretty printer with the members of every object sorted by name, with mode 0600, through a temporary file. `start` reads it as strict JSON, as egress policy files are read, into the typed fields of format 8, and also reads the format 7 that earlier builds wrote, which records no `upper` and keeps the upper on scratch, and the format 1 that they wrote for a sandbox without shares, with `mount` `null` and no `export` |
 | `sandbox.lock` | The store's lock, which serializes the lifecycle transitions |
 | `launch.json` | The store's journal of a start in progress, or of one that was interrupted |
 | `runtime.json` | The store's runtime record of the running VM, in its format 4: the OpenVMM process, by its ID, its start time, and the host's boot, its control endpoint, `STATE/control.sock` or `//./pipe/openvmm-microvm-HEX` on Windows, and the [runtime identity](#runtime-identity) of its start |
@@ -2037,10 +2039,11 @@ command-line tokens make it fail: `fake_exit_on_start=STATUS`,
 OpenVMM, it opens the sandbox's block devices at the paths that its options
 name and holds them until it exits, after `fake_block_delay_ms=MS` if asked,
 and records what each held in `fake-openvmm-TOKEN-blocks.json` next to the
-kernel. It also runs the VMs of templates' captures, whose block devices it
-opens as OpenVMM does, without following a link and, on Windows, sharing only
-reads and deletion, recording in that file whether a handle could write them;
-it then publishes the snapshot of the manifest that
+kernel; it takes a scratch disk, or, for `nvx_overlay_upper=ramfs`, the
+`distro` layer alone. It also runs the VMs of templates' captures, whose block
+devices it opens as OpenVMM does, without following a link and, on Windows,
+sharing only reads and deletion, recording in that file whether a handle could
+write them; it then publishes the snapshot of the manifest that
 `fake-openvmm-capture.json` next to the kernel names, or fails, never ends, or
 crashes, as that scenario asks. A managed `start` also reads the root's
 [runtime identity](#runtime-identity), so a test root holds build provenance,

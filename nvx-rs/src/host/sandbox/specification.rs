@@ -18,7 +18,7 @@ const UUID: &str = "11111111-2222-3333-4444-555555555555";
 fn launch(settings: SandboxSettings) -> SandboxLaunch {
     SandboxLaunch::new(
         vec![SandboxLayer::new(LayerRole::Distro, "distro.erofs", UUID)],
-        "scratch.ext4",
+        SandboxUpper::scratch("scratch.ext4"),
         settings,
     )
     .unwrap()
@@ -67,8 +67,12 @@ fn layer_values_are_role_path_uuid() {
     assert_eq!(layer.path(), Path::new("distro.erofs"));
     assert_eq!(layer.format(), DistroFormat::Erofs);
     assert_eq!(layer.uuid(), UUID);
-    let launch =
-        SandboxLaunch::new(vec![layer], "scratch.ext4", SandboxSettings::default()).unwrap();
+    let launch = SandboxLaunch::new(
+        vec![layer],
+        SandboxUpper::scratch("scratch.ext4"),
+        SandboxSettings::default(),
+    )
+    .unwrap();
     assert!(
         launch
             .plan()
@@ -92,12 +96,12 @@ fn layer_values_are_role_path_uuid() {
     }
     refused(SandboxLaunch::new(
         Vec::new(),
-        "scratch.ext4",
+        SandboxUpper::scratch("scratch.ext4"),
         SandboxSettings::default(),
     ));
     refused(SandboxLaunch::new(
         vec![launch.distro().clone(); 2],
-        "scratch.ext4",
+        SandboxUpper::scratch("scratch.ext4"),
         SandboxSettings::default(),
     ));
 }
@@ -213,7 +217,7 @@ fn launch_arguments_follow_the_openvmm_contract() {
             };
             let launch = SandboxLaunch::new(
                 vec![layer],
-                "scratch.ext4",
+                SandboxUpper::scratch("scratch.ext4"),
                 SandboxSettings {
                     workload_identity: identity,
                     ..SandboxSettings::default()
@@ -320,7 +324,7 @@ fn accepted_launch_shapes_keep_their_arguments_and_kernel_tokens() {
                 "layer.erofs",
                 "11111111-1111-1111-1111-111111111111",
             )],
-            "scratch.ext4",
+            SandboxUpper::scratch("scratch.ext4"),
             SandboxSettings::default(),
         )
         .unwrap()
@@ -428,7 +432,7 @@ fn launch_settings_follow_the_guest_contract() {
     for (memory, pids) in [(0_u32, 1_u32), (1, 0), (1, 4_194_304)] {
         refused(SandboxLaunch::new(
             vec![SandboxLayer::new(LayerRole::Distro, "distro.erofs", UUID)],
-            "scratch.ext4",
+            SandboxUpper::scratch("scratch.ext4"),
             SandboxSettings {
                 memory_max: Some(u64::from(memory)),
                 pids_max: Some(pids),
@@ -439,7 +443,7 @@ fn launch_settings_follow_the_guest_contract() {
     for entrypoint in ["bin/sh", "/bin/a b", "/bin/a\"b"] {
         refused(SandboxLaunch::new(
             vec![SandboxLayer::new(LayerRole::Distro, "distro.erofs", UUID)],
-            "scratch.ext4",
+            SandboxUpper::scratch("scratch.ext4"),
             SandboxSettings {
                 entrypoint: entrypoint.to_owned(),
                 ..SandboxSettings::default()
@@ -548,7 +552,7 @@ fn kernel_token_values_refuse_separators() {
         ] {
             refused(SandboxLaunch::new(
                 vec![SandboxLayer::new(LayerRole::Distro, "distro.erofs", UUID)],
-                "scratch.ext4",
+                SandboxUpper::scratch("scratch.ext4"),
                 settings,
             ));
         }
@@ -626,7 +630,7 @@ fn the_reproduction_of_microsoft_nvx_723_is_refused() {
     }
     refused(SandboxLaunch::new(
         vec![SandboxLayer::new(LayerRole::Distro, "distro.erofs", UUID)],
-        "scratch.ext4",
+        SandboxUpper::scratch("scratch.ext4"),
         SandboxSettings {
             args: vec!["x\u{e0}tsc=unstable".to_owned()],
             ..SandboxSettings::default()
@@ -676,7 +680,7 @@ proptest! {
         let uuid = Uuid::from_bytes(bytes).to_string();
         let layer = SandboxLayer::parse(&format!("distro,distro.erofs,{uuid}")).unwrap();
         prop_assert_eq!(layer.uuid(), &uuid);
-        let launch = SandboxLaunch::new(vec![layer], "scratch.ext4", SandboxSettings::default()).unwrap();
+        let launch = SandboxLaunch::new(vec![layer], SandboxUpper::scratch("scratch.ext4"), SandboxSettings::default()).unwrap();
         let command_line = launch.plan().kernel_command_line("").unwrap();
         let expected = format!("nvx_layer=distro,0xd0003000,erofs:{uuid}");
         prop_assert!(command_line.split_ascii_whitespace().any(|token| token == expected));
@@ -851,7 +855,7 @@ proptest! {
         let targets = [format!("/share-0/{first}"), format!("/share-1/{second}")];
         let launch = SandboxLaunch::new(
             vec![SandboxLayer::new(LayerRole::Distro, "distro.erofs", UUID)],
-            "scratch.ext4",
+            SandboxUpper::scratch("scratch.ext4"),
             SandboxSettings {
                 entrypoint: entrypoint.clone(),
                 args: vec![argument.clone()],

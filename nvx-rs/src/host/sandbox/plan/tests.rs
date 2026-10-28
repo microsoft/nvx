@@ -1044,7 +1044,7 @@ fn launches_plan_their_distro_layer_over_their_scratch_image() {
             "distro.erofs",
             EROFS_UUID,
         )],
-        "scratch.ext4",
+        SandboxUpper::scratch("scratch.ext4"),
         SandboxSettings::default(),
     )
     .unwrap();
@@ -1056,7 +1056,7 @@ fn launches_plan_their_distro_layer_over_their_scratch_image() {
     );
     assert_eq!(plan.upper().kind(), RootUpper::Scratch);
     assert_eq!(plan.upper().scratch_path(), Some(Path::new("scratch.ext4")));
-    assert_eq!(launch.scratch(), Path::new("scratch.ext4"));
+    assert_eq!(launch.scratch(), Some(Path::new("scratch.ext4")));
     assert_eq!(plan.settings(), Some(&SandboxSettings::default()));
     // The guest takes the UUID in its canonical text, which `--layer` writes, and nothing else.
     for invalid in ["", "not-a-uuid", "11111111-1111-1111-1111-11111111111A"] {
@@ -1066,7 +1066,7 @@ fn launches_plan_their_distro_layer_over_their_scratch_image() {
                 "distro.erofs",
                 invalid,
             )],
-            "scratch.ext4",
+            SandboxUpper::scratch("scratch.ext4"),
             SandboxSettings {
                 entrypoint: "relative".to_owned(),
                 ..SandboxSettings::default()
@@ -1082,6 +1082,36 @@ fn launches_plan_their_distro_layer_over_their_scratch_image() {
 }
 
 #[test]
+fn launches_plan_their_distro_layer_over_ram() {
+    let launch = SandboxLaunch::new(
+        vec![SandboxLayer::new(
+            LayerRole::Distro,
+            "distro.erofs",
+            EROFS_UUID,
+        )],
+        SandboxUpper::RAM,
+        SandboxSettings::default(),
+    )
+    .unwrap();
+    assert_eq!(launch.upper(), &SandboxUpper::RAM);
+    assert_eq!(launch.scratch(), None);
+    let plan = launch.plan();
+    assert_eq!(plan.upper().kind(), RootUpper::Ram);
+    // The distro layer is the one block device, and the guest keeps the upper in RAM.
+    assert_eq!(
+        plan.blocks(),
+        [(BlockRole::Distro, Path::new("distro.erofs"))]
+    );
+    let command_line = plan.kernel_command_line("").unwrap();
+    let tokens: Vec<&str> = command_line.split(' ').collect();
+    assert!(tokens.contains(&RAM_UPPER_TOKEN), "{command_line}");
+    assert!(
+        !tokens.iter().any(|token| token.starts_with(SCRATCH_TOKEN)),
+        "{command_line}"
+    );
+}
+
+#[test]
 fn launches_plan_the_image_that_the_binding_of_their_distro_layer_records() {
     let directory = tempfile::tempdir().unwrap();
     let layer = directory.path().join("distro.erofs");
@@ -1092,7 +1122,7 @@ fn launches_plan_the_image_that_the_binding_of_their_distro_layer_records() {
             layer.to_str().unwrap(),
             EROFS_UUID,
         )],
-        "scratch.ext4",
+        SandboxUpper::scratch("scratch.ext4"),
         SandboxSettings::default(),
     )
     .unwrap();
@@ -1899,7 +1929,7 @@ fn launches_carry_their_network_into_their_plans() {
             layer.to_str().unwrap(),
             EROFS_UUID,
         )],
-        "scratch.ext4",
+        SandboxUpper::scratch("scratch.ext4"),
         SandboxSettings::default(),
     )
     .unwrap();

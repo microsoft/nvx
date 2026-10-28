@@ -71,7 +71,8 @@ fn start_locked(
     // OpenVMM those objects: on Linux, OpenVMM inherits their descriptors; on Windows, it opens
     // them by their final paths, which the files, and OpenVMM's copies of them, keep anything from
     // replacing before OpenVMM, whose opens share them, has opened them, even if the start ends
-    // first. The scratch image's check also claims it for this sandbox, until OpenVMM exits.
+    // first. The scratch image's check also claims it for this sandbox, until OpenVMM exits. An
+    // upper in RAM has no scratch image, and its configuration no binding of one.
     let binding = config.distro_binding()?;
     let scratch_binding = config.scratch_binding()?;
     let distro = binding
@@ -79,9 +80,14 @@ fn start_locked(
         .map_err(binding_error)?;
     // Reading the network checks its policy again, as provision did, before anything launches.
     let launch = launch.with_network(config.network()?);
-    let scratch = scratch_binding
-        .check(launch.scratch(), Instant::now() + CLAIM_RELEASE_WAIT)
-        .map_err(binding_error)?;
+    let scratch = match (scratch_binding, launch.scratch()) {
+        (Some(scratch_binding), Some(scratch)) => Some(
+            scratch_binding
+                .check(scratch, Instant::now() + CLAIM_RELEASE_WAIT)
+                .map_err(binding_error)?,
+        ),
+        _ => None,
+    };
     // The plan takes the format and identity of the distro layer from its binding.
     let plan = launch.bound_plan(&binding)?;
     let [executable, kernel, initrd] = artifacts.require()?;
@@ -94,7 +100,7 @@ fn start_locked(
         ));
     }
     let memory_mib = config.memory_mib();
-    let prepared = PreparedLaunch::new(plan, distro, Some(scratch), config.cmdline())?;
+    let prepared = PreparedLaunch::new(plan, distro, scratch, config.cmdline())?;
     // The control endpoint, which the launch chooses, goes between these arguments.
     let mut head = vec![executable];
     head.extend(prepared.openvmm_arguments().iter().cloned());
@@ -146,8 +152,8 @@ fn start_locked(
             }
             session.map_host_paths(&maps, timeout).inspect_err(|error| {
                 // The agent then refuses workloads, so the guest shuts down as a stop has it do:
-                // it unmounts what it mapped, the export, the overlay, and the scratch disk before
-                // the VM powers off. A failed transfer closed the session, so a guest that stopped
+                // it unmounts what it mapped, the export, the overlay, and the upper before the
+                // VM powers off. A failed transfer closed the session, so a guest that stopped
                 // answering is terminated at once.
                 if !matches!(error, Exit::Interrupted) {
                     stopping = session.stop(timeout).is_ok();

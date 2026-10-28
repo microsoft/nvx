@@ -146,6 +146,25 @@ fn sandbox_dry_runs() -> Vec<DryRun> {
         .with_file("distro[[1][2]].erofs", Content::Text("distro\n"))
         .with_file("scratch[][1].ext4", Content::Text("scratch\n")),
         dry_run(
+            "explicit scratch upper",
+            sandbox_run(&["--upper", "scratch"]),
+            one_shot(),
+        ),
+        // An upper in RAM attaches the distro layer alone, and asks the guest for a tmpfs upper.
+        dry_run(
+            "RAM upper",
+            [
+                "sandbox",
+                "run",
+                "--layer",
+                LAYER,
+                "--upper",
+                "ram",
+                "--dry-run",
+            ],
+            one_shot().in_ram(),
+        ),
+        dry_run(
             "every layer and option",
             sandbox_run(&[
                 "--entrypoint",

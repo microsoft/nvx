@@ -60,7 +60,9 @@
 //! The fake also serves the sandbox profile of `nvx-rs sandbox`, which a
 //! `--microvm-sandbox-block` option selects: read-only `distro`, `runtime`, and `custom` layers
 //! and a `scratch` disk, each an existing file, with `nvx_sandbox=1`, `nvx_entrypoint=`, and
-//! `nvx_hostname=` on the kernel command line. Like OpenVMM, it opens each block device at the
+//! `nvx_hostname=` on the kernel command line, or, for a RAM-backed overlay, which one
+//! `nvx_overlay_upper=ramfs` there requests, as OpenVMM reads it, the `distro` layer alone. Like
+//! OpenVMM, it opens each block device at the
 //! path that its option names, a layer read-only and the scratch disk for reading and writing,
 //! and holds them until it exits; it reads them whole, and records what each held, with its role
 //! and path, in `fake-openvmm-<token>-blocks.json` next to the kernel. The
@@ -1212,8 +1214,10 @@ fn parse(program: &str, arguments: &[String]) -> Result<Options, String> {
         if !tokens.contains(&"nvx_sandbox=1") {
             return Err("a sandbox block device requires nvx_sandbox=1".to_owned());
         }
-        let blocks =
-            check_sandbox_blocks(values.get("--microvm-sandbox-block").into_iter().flatten())?;
+        let blocks = check_sandbox_blocks(
+            values.get("--microvm-sandbox-block").into_iter().flatten(),
+            ram_overlay_requested(&tokens)?,
+        )?;
         if capture {
             // A template's VM boots the invariant configuration alone, without a tenant.
             if tokens != ["nvx_sandbox=1"] {
@@ -1646,9 +1650,11 @@ fn check_control_console(endpoint: &str, snapshot: Option<&Path>) -> Result<(), 
 
 /// Checks the sandbox block devices of a sandbox: each layer, `ROLE:file:PATH,ro` with a role of
 /// `distro`, `runtime`, or `custom`, at most once each, and one scratch disk, `scratch:file:PATH`,
-/// each an existing regular file, and returns them in order.
+/// each an existing regular file, and returns them in order. A RAM-backed overlay, `ram_overlay`,
+/// takes the `distro` layer alone instead, as OpenVMM admits it.
 fn check_sandbox_blocks<'a>(
     blocks: impl Iterator<Item = &'a &'a str>,
+    ram_overlay: bool,
 ) -> Result<Vec<SandboxBlock>, String> {
     let mut roles = BTreeSet::new();
     let mut checked = Vec::new();
@@ -1672,10 +1678,34 @@ fn check_sandbox_blocks<'a>(
             read_only,
         });
     }
-    if !roles.contains("scratch") || roles.len() < 2 {
+    if ram_overlay {
+        if roles != BTreeSet::from(["distro"]) {
+            return Err(
+                "microVM RAM-backed overlay requires exactly one read-only distro block".to_owned(),
+            );
+        }
+    } else if !roles.contains("scratch") || roles.len() < 2 {
         return Err("a sandbox needs a layer and a scratch disk".to_owned());
     }
     Ok(checked)
+}
+
+/// Returns whether the kernel command line of `tokens` requests a RAM-backed overlay upper, with
+/// one `nvx_overlay_upper=ramfs`, as OpenVMM reads it: a token of that name with another value,
+/// none, or a second one fails.
+fn ram_overlay_requested(tokens: &[&str]) -> Result<bool, String> {
+    let values: Vec<&str> = tokens
+        .iter()
+        .filter_map(|token| {
+            let (name, value) = token.split_once('=').unwrap_or((token, ""));
+            (name == "nvx_overlay_upper").then_some(value)
+        })
+        .collect();
+    match values[..] {
+        [] => Ok(false),
+        ["ramfs"] => Ok(true),
+        _ => Err("microVM nvx_overlay_upper must appear once and equal ramfs".to_owned()),
+    }
 }
 
 /// Returns the number of host mappings that the `nvx_maps=` tokens of a kernel command line,

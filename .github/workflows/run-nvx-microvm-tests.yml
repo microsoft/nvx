@@ -526,7 +526,7 @@ jobs:
 
           with open(sys.argv[1], encoding="utf-8") as stream:
               config = json.load(stream)
-          if config["format"] != 7 or config["export"]["owner"] != "caller":
+          if config["format"] != 8 or config["export"]["owner"] != "caller":
               sys.exit(f"managed sandbox did not persist caller ownership: {config}")
           EOF
           if nvx-rs/target/release/nvx-rs sandbox start --state-dir "${state}"; then
@@ -664,7 +664,7 @@ jobs:
               ("/opt/hostedtoolcache", "", "ro", ["nvx-denied"], "directory"),
               ("/results/output.txt", "", "rw", [], "file"),
           ]
-          if config["format"] != 7 or "mounts" in config or shares != expected:
+          if config["format"] != 8 or "mounts" in config or shares != expected:
               sys.exit(f"managed sandbox did not persist every share: {config}")
           EOF
           nvx-rs/target/release/nvx-rs sandbox start --state-dir "${state}"
@@ -800,7 +800,7 @@ jobs:
                   ["nvx-writable"],
               ),
           ]
-          if config["format"] != 7 or "mounts" in config or shares != expected:
+          if config["format"] != 8 or "mounts" in config or shares != expected:
               sys.exit(f"managed sandbox did not persist the access policy: {config}")
           EOF
           nvx-rs/target/release/nvx-rs sandbox start --state-dir "${state}"
@@ -1125,7 +1125,7 @@ jobs:
               $denied = ($child.denied | ForEach-Object { $_.Substring($child.root.Length + 1).Replace("\", "/") }) -join ";"
               "$($bind.target),$($bind.source),$mode,$denied,$kind"
           }) -join " "
-          if ($config.format -ne 7 -or $shares -ne "/workspace,,rw,nvx-denied,directory /config/settings.json,,ro,,file /opt/hostedtoolcache,,ro,nvx-denied,directory /results/output.txt,,rw,,file") {
+          if ($config.format -ne 8 -or $shares -ne "/workspace,,rw,nvx-denied,directory /config/settings.json,,ro,,file /opt/hostedtoolcache,,ro,nvx-denied,directory /results/output.txt,,rw,,file") {
               throw "managed sandbox did not persist every share: $($config | ConvertTo-Json -Compress -Depth 5)"
           }
           try {
@@ -1236,7 +1236,7 @@ jobs:
           function Get-Relative($paths) {
               ($paths | ForEach-Object { $_.Substring($child.root.Length + 1).Replace("\", "/") }) -join ","
           }
-          if ($config.format -ne 7 -or @($config.export.children).Count -ne 1 -or @($config.export.binds).Count -ne 1 -or $bind.target -ne "/workspace" -or $bind.readOnly -or (Get-Relative $child.denied) -ne "nvx-denied" -or (Get-Relative $child.allowed) -ne "nvx-denied/nvx-allowed" -or (Get-Relative $child.write) -ne "nvx-writable") {
+          if ($config.format -ne 8 -or @($config.export.children).Count -ne 1 -or @($config.export.binds).Count -ne 1 -or $bind.target -ne "/workspace" -or $bind.readOnly -or (Get-Relative $child.denied) -ne "nvx-denied" -or (Get-Relative $child.allowed) -ne "nvx-denied/nvx-allowed" -or (Get-Relative $child.write) -ne "nvx-writable") {
               throw "managed sandbox did not persist the access policy: $($config | ConvertTo-Json -Compress -Depth 5)"
           }
           try {

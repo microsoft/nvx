@@ -20,9 +20,9 @@
 //!   guest targets and the checks of host paths, plans the shares of a sandbox through the planner
 //!   of every NVX caller, [`host::filesystem`](crate::host::filesystem), and renders the plan as
 //!   the guest's shell reads it at boot.
-//! - [`SandboxLaunch`]: the launch of `nvx-rs sandbox`, its layers over its scratch image with
-//!   its settings and the export plan of its shares, which plans its distro layer, in the layer's
-//!   format, over the scratch image.
+//! - [`SandboxLaunch`]: the launch of `nvx-rs sandbox`, its layers over its upper, an ext4
+//!   scratch image or RAM, with its settings and the export plan of its shares, which plans its
+//!   distro layer, in the layer's format, over that upper.
 //! - [`options`]: the checks that `nvx-rs sandbox` and `nvx-rs run` apply to their options: the
 //!   attribution of access-policy paths to shares, the systemd entrypoint check and the preflight
 //!   that verifies the distro layer, the targets of `nvx-rs run` shares, and the managed exec
@@ -353,9 +353,9 @@ fn validate_settings(settings: &SandboxSettings) -> Result<()> {
     Ok(())
 }
 
-/// The launch of a sandbox of `nvx-rs sandbox`: its read-only layers, its ext4 scratch image, its
-/// settings, the export plan of its shares, and its network, which it plans as its distro layer,
-/// in the layer's format, over the scratch image.
+/// The launch of a sandbox of `nvx-rs sandbox`: its read-only layers, its upper, an ext4 scratch
+/// image or RAM, its settings, the export plan of its shares, and its network, which it plans as
+/// its distro layer, in the layer's format, over its upper.
 ///
 /// Its layers are keyed by the role of each `--layer` value, of which a launch takes only the
 /// distro layer. [`plan`](Self::plan) returns its [`SandboxPlan`], which renders its OpenVMM
@@ -366,15 +366,14 @@ fn validate_settings(settings: &SandboxSettings) -> Result<()> {
 pub struct SandboxLaunch {
     /// The read-only layers, in the order given: the distro layer alone.
     layers: Vec<SandboxLayer>,
-    /// The plan: the distro layer, in its format and with its identity, over the scratch image,
-    /// with the settings and the export plan.
+    /// The plan: the distro layer, in its format and with its identity, over the upper, with the
+    /// settings and the export plan.
     plan: SandboxPlan,
 }
 
 impl SandboxLaunch {
-    /// Returns the launch of `layers` over the ext4 image at `scratch`, which is spelled with its
-    /// components alone, as [`Path::components`] reads them, without shares, which
-    /// [`with_export`](Self::with_export) adds.
+    /// Returns the launch of `layers` over `upper`, an ext4 scratch image or RAM, without shares,
+    /// which [`with_export`](Self::with_export) adds.
     ///
     /// Fails with [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported), checking in this
     /// order: no duplicate roles, exactly one layer, the distro layer, a UUID of the distro layer
@@ -382,7 +381,7 @@ impl SandboxLaunch {
     /// checks them.
     pub fn new(
         layers: Vec<SandboxLayer>,
-        scratch: &str,
+        upper: SandboxUpper,
         settings: SandboxSettings,
     ) -> Result<Self> {
         let mut duplicates: Vec<&str> = LAYER_ROLES
@@ -418,7 +417,7 @@ impl SandboxLaunch {
         };
         let plan = SandboxPlan::new(
             SandboxDistro::at(distro.path().to_path_buf(), image),
-            SandboxUpper::scratch(scratch),
+            upper,
             settings,
         )?;
         Ok(Self { layers, plan })
@@ -434,15 +433,17 @@ impl SandboxLaunch {
         &self.layers[0]
     }
 
-    /// Returns the scratch image.
-    pub fn scratch(&self) -> &Path {
-        self.plan
-            .upper()
-            .scratch_path()
-            .expect("a launch keeps its upper on its scratch image")
+    /// Returns the upper: an ext4 scratch image, or RAM.
+    pub fn upper(&self) -> &SandboxUpper {
+        self.plan.upper()
     }
 
-    /// Returns the settings besides the layers and the scratch image.
+    /// Returns the scratch image, or `None` for an upper in RAM.
+    pub fn scratch(&self) -> Option<&Path> {
+        self.plan.upper().scratch_path()
+    }
+
+    /// Returns the settings besides the layers and the upper.
     pub fn settings(&self) -> &SandboxSettings {
         self.plan
             .settings()
@@ -481,8 +482,8 @@ impl SandboxLaunch {
     }
 
     /// Returns the plan of the launch: its distro layer, in the format and with the identity of
-    /// its layer, as a `--layer` value names an EROFS layer and its UUID, over its scratch image,
-    /// with its settings, the export plan of its shares, and its network.
+    /// its layer, as a `--layer` value names an EROFS layer and its UUID, over its upper, with its
+    /// settings, the export plan of its shares, and its network.
     pub fn plan(&self) -> &SandboxPlan {
         &self.plan
     }
@@ -500,10 +501,10 @@ impl SandboxLaunch {
     }
 
     /// Checks the launch against the host, as [`SandboxPlan::validated`] checks its plan: the
-    /// distro layer and the scratch image must be regular files whose paths have no comma or
-    /// semicolon, and whose names, and those of the files to which their paths resolve, do not end
-    /// in an extension with which OpenVMM would not attach them as raw images, and the export
-    /// plan's directories and files must still not overlap, and it must pass
+    /// distro layer and the scratch image of an upper on scratch must be regular files whose paths
+    /// have no comma or semicolon, and whose names, and those of the files to which their paths
+    /// resolve, do not end in an extension with which OpenVMM would not attach them as raw images,
+    /// and the export plan's directories and files must still not overlap, and it must pass
     /// [`ExportPlan::verify`].
     ///
     /// Fails with [`ErrorKind::Unavailable`](crate::ErrorKind::Unavailable) for a missing image,

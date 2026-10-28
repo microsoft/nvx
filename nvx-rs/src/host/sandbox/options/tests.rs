@@ -12,7 +12,7 @@ use crate::ErrorKind;
 use crate::host::paths::{self, resolve};
 use crate::host::sandbox::layer::LayerRole;
 use crate::host::sandbox::mount::{aggregate_child_name, plan_mounts, validate_mounts};
-use crate::host::sandbox::{SandboxLayer, SandboxSettings};
+use crate::host::sandbox::{SandboxLayer, SandboxSettings, SandboxUpper};
 
 fn message<T: std::fmt::Debug>(result: Result<T>) -> String {
     let error = result.unwrap_err();
@@ -83,7 +83,7 @@ impl Layer {
                 &self.path("distro.erofs"),
                 "11111111-1111-1111-1111-111111111111",
             )],
-            &self.path("scratch.ext4"),
+            SandboxUpper::scratch(&self.path("scratch.ext4")),
             SandboxSettings {
                 entrypoint: entrypoint.to_owned(),
                 ..SandboxSettings::default()
@@ -789,6 +789,70 @@ fn managed_non_launch_operations_reject_network_policy_options() {
 }
 
 #[test]
+fn sandbox_launches_take_the_scratch_image_that_their_upper_needs() {
+    for operation in [SandboxOperation::Run, SandboxOperation::Provision] {
+        // Without --upper, as with --upper scratch, the upper is on the image of --scratch.
+        for upper in [None, Some(RootUpper::Scratch)] {
+            let options = SandboxOptions {
+                upper,
+                ..launching(operation)
+            };
+            assert_eq!(options.check().unwrap(), None);
+            let missing = SandboxOptions {
+                scratch: false,
+                ..options
+            };
+            assert_eq!(
+                message(missing.check()),
+                format!("sandbox {operation} requires --layer and --scratch")
+            );
+        }
+        // An upper in RAM has no scratch image, and needs the distro layer alone.
+        let ram = SandboxOptions {
+            upper: Some(RootUpper::Ram),
+            scratch: false,
+            ..launching(operation)
+        };
+        assert_eq!(ram.check().unwrap(), None);
+        let with_scratch = SandboxOptions {
+            scratch: true,
+            ..ram.clone()
+        };
+        assert_eq!(
+            message(with_scratch.check()),
+            "--upper ram and --scratch are mutually exclusive: an upper in RAM has no scratch \
+             image"
+        );
+        let without_layer = SandboxOptions {
+            layers: false,
+            ..ram
+        };
+        assert_eq!(
+            message(without_layer.check()),
+            format!("sandbox {operation} requires --layer")
+        );
+    }
+    // A provisioned sandbox keeps the upper that its provision recorded.
+    for operation in [
+        SandboxOperation::Start,
+        SandboxOperation::Exec,
+        SandboxOperation::Stop,
+        SandboxOperation::Deprovision,
+    ] {
+        for upper in [RootUpper::Scratch, RootUpper::Ram] {
+            let options = SandboxOptions {
+                upper: Some(upper),
+                ..SandboxOptions::new(operation)
+            };
+            assert_eq!(
+                message(options.check()),
+                "--upper is only valid for sandbox run or provision"
+            );
+        }
+    }
+}
+
+#[test]
 fn sandbox_command_rejects_misplaced_mount_options() {
     for kind in POLICY_KINDS {
         let options = SandboxOptions {
@@ -887,7 +951,7 @@ impl Shares {
                 &self.path("distro.erofs"),
                 "11111111-1111-1111-1111-111111111111",
             )],
-            &self.path("scratch.ext4"),
+            SandboxUpper::scratch(&self.path("scratch.ext4")),
             SandboxSettings::default(),
         )?;
         let mounts = sandbox_mounts(&mounts, &policy_paths, owner)?;

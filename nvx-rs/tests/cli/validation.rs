@@ -394,6 +394,31 @@ fn sandbox_refusals() -> Vec<Refusal> {
             &["sandbox run", "--layer", "--scratch"],
         ),
         refusal(
+            "explicit scratch upper without scratch",
+            "unsupported",
+            ["sandbox", "run", "--layer", LAYER, "--upper", "scratch"],
+            &["sandbox run", "--layer", "--scratch"],
+        ),
+        // An upper in RAM has no scratch image, and needs the distro layer alone.
+        refusal(
+            "RAM upper with scratch",
+            "unsupported",
+            sandbox_run(&["--upper", "ram"]),
+            &["--upper ram", "--scratch", "mutually exclusive"],
+        ),
+        refusal(
+            "RAM upper without layer",
+            "unsupported",
+            ["sandbox", "provision", "--upper", "ram"],
+            &["sandbox provision requires --layer"],
+        ),
+        refusal(
+            "upper outside run",
+            "unsupported",
+            ["sandbox", "start", "--upper", "ram"],
+            &["--upper", "run or provision"],
+        ),
+        refusal(
             "policy file with rules",
             "unsupported",
             sandbox_run(&[

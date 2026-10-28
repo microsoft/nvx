@@ -182,6 +182,13 @@ const USAGE_ERRORS: &[UsageError] = &[
         code: "argument-invalid",
         fragments: &["--hypervisor", "\"hyperv\""],
     },
+    // The RAM upper's option names it `ram`, whatever the guest mounts for it.
+    UsageError {
+        name: "invalid upper",
+        arguments: &["sandbox", "--upper", "tmpfs"],
+        code: "argument-invalid",
+        fragments: &["--upper", "\"tmpfs\"", "\"scratch\"", "\"ram\""],
+    },
     UsageError {
         name: "invalid operation",
         arguments: &["sandbox", "restart"],
@@ -674,6 +681,7 @@ const HELP: [Help; 6] = [
         usage: "usage: nvx-rs sandbox [{run,provision,start,exec,stop,deprovision}] [OPTIONS]",
         options: &[
             "--layer ROLE,PATH,EROFS_UUID",
+            "--upper {scratch,ram}",
             "--state-dir STATE_DIR",
             "--dry-run",
         ],
