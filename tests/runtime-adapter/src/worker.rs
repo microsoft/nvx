@@ -80,10 +80,11 @@
 //!    effect.
 //! 3. The worker applies the record through `RootOperations::apply`, which runs
 //!    `nvx::guest::clone::apply`: it assembles the root from the template's devices, with the
-//!    record's image, upper, and overlay mode, and checks the account of the record's workload
-//!    identity, if it has one, in the assembled root, as the worker of a VM that boots cold does
-//!    for a root configuration. The template bootstrapped the guest for its root with its own
-//!    configuration before its capture, so the clone has its cgroups.
+//!    record's image, upper, and overlay mode, waiting for each device until the activation's
+//!    deadline at the latest, so that the application ends by then, and checks the account of the
+//!    record's workload identity, if it has one, in the assembled root, as the worker of a VM that
+//!    boots cold does for a root configuration. The template bootstrapped the guest for its root
+//!    with its own configuration before its capture, so the clone has its cgroups.
 //! 4. It completes the activation, which opens the fence, and answers `Ready`, which reports that
 //!    the activation applied, with the record's transaction, after the guest agent's build.
 //! 5. It then serves the host's order as after a cold boot: the mapping table that the record
@@ -423,7 +424,8 @@ pub trait RootOperations: EntryOperations {
 
     /// Applies `record`, the record of the Activate that a clone's activation accepted, to the
     /// clone, as `nvx::guest::clone::apply` does, with `template`, the inputs of the root's
-    /// assembly that the clone's template captured, and keeps the root that it assembled: in
+    /// assembly that the clone's template captured, by `deadline`, the activation's, if any, until
+    /// which it waits for each device at the latest, and keeps the root that it assembled: in
     /// place of a root configuration's [layout](Self::command_line), assembly, and account check.
     /// The template's VM [bootstrapped](Self::bootstrap) the guest before its capture.
     ///
@@ -435,6 +437,7 @@ pub trait RootOperations: EntryOperations {
         &mut self,
         record: &ActivationRecord,
         template: &RootTemplate,
+        deadline: Option<Instant>,
     ) -> Result<Option<Identity>, ApplyError>;
 }
 
@@ -1215,8 +1218,9 @@ impl RootOperations for LibraryRoot {
         &mut self,
         record: &ActivationRecord,
         template: &RootTemplate,
+        deadline: Option<Instant>,
     ) -> Result<Option<Identity>, ApplyError> {
-        let (root, identity) = clone::apply(record, template)?.into_parts();
+        let (root, identity) = clone::apply(record, template, deadline)?.into_parts();
         self.root = Some(root);
         Ok(identity)
     }

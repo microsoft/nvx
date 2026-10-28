@@ -1178,6 +1178,10 @@ struct FakeRoot {
     gate: Option<Receiver<()>>,
     /// The worker's calls, in order.
     calls: Vec<Call>,
+    /// The deadline of each of a clone's applications, in order, until which it waits for the
+    /// devices at the latest.
+    #[cfg(target_arch = "x86_64")]
+    deadlines: Vec<Option<Instant>>,
     /// The workload cgroup of the test's own, below which the worker runs its executions in
     /// cgroups of their own, where the test can create cgroups.
     workload: Option<Workload>,
@@ -1216,6 +1220,8 @@ impl FakeRoot {
             assembly: Duration::ZERO,
             gate: None,
             calls: Vec::new(),
+            #[cfg(target_arch = "x86_64")]
+            deadlines: Vec::new(),
             workload,
         }
     }
@@ -1328,24 +1334,33 @@ impl RootOperations for FakeRoot {
     }
 
     /// Applies the record as `nvx::guest::clone::apply` does, without a root: it refuses a GPT
-    /// disk before anything else, takes as long as the assembly, and checks the account of the
-    /// record's workload identity, if it has one, in existing-account mode, in the [accounts'
+    /// disk before anything else, takes as long as the assembly, but no longer than until
+    /// `deadline`, as the waits for the devices do, and checks the account of the record's
+    /// workload identity, if it has one, in existing-account mode, in the [accounts'
     /// root](accounts), which stands for the root that it assembled.
     #[cfg(target_arch = "x86_64")]
     fn apply(
         &mut self,
         record: &nvx::activation::ActivationRecord,
         template: &nvx::guest::clone::RootTemplate,
+        deadline: Option<Instant>,
     ) -> Result<Option<entry::Identity>, nvx::guest::clone::ApplyError> {
         use nvx::guest::clone::ApplyError;
 
         let applied = (record.clone(), template.clone());
         self.calls.push(Call::Apply(Box::new(applied)));
+        self.deadlines.push(deadline);
         let configuration = record.configuration();
         if matches!(configuration.image, nvx::activation::Image::Gpt { .. }) {
             return Err(ApplyError::Gpt);
         }
-        thread::sleep(self.assembly);
+        let assembly = match deadline {
+            Some(deadline) => self
+                .assembly
+                .min(deadline.saturating_duration_since(Instant::now())),
+            None => self.assembly,
+        };
+        thread::sleep(assembly);
         let Some(workload) = configuration.workload.identity else {
             return Ok(None);
         };
@@ -4425,6 +4440,34 @@ mod clones {
         assert_eq!(replies, [Message::Pong, Message::Stopped]);
         let (_, worked) = joined(working);
         assert_eq!(worked.unwrap(), Worked::Stopped);
+    }
+
+    #[test]
+    fn a_clone_s_application_ends_by_the_activation_s_deadline() {
+        // The worker hands the application the activation's deadline, until which it waits for
+        // the devices at the latest: an Activate whose application would outlast the deadline,
+        // such as one whose device never appears, ends the clone with the deadline's status once
+        // the deadline passed, rather than once the application's waits would have ended, with
+        // no Ready.
+        let timeout = Duration::from_secs(2);
+        let slow = Duration::from_secs(60);
+        let root = FakeRoot::booting(&layout()).assembling_for(slow);
+        let started = Instant::now();
+        let (mut broker, working) = start_clone(root, timeout);
+        broker.reset(RESTORED);
+        let record = record(1, Some(WORKLOAD));
+        broker.send_data(&activate(&record).encode().unwrap(), OUTER_MAX_PAYLOAD);
+        let root = unactivated(&mut broker, working, status::ACTIVATION_DEADLINE);
+        let ended = Instant::now();
+        assert!(ended - started < slow, "{:?}", ended - started);
+        assert_eq!(root.calls, [applied(&record)]);
+        // It is the activation's deadline: `timeout` after the repair's acknowledgement of the
+        // restore, which the test's clone made once the test started.
+        let [Some(deadline)] = root.deadlines[..] else {
+            panic!("{:?}", root.deadlines);
+        };
+        assert!(deadline >= started + timeout, "{deadline:?}");
+        assert!(deadline <= ended + timeout, "{deadline:?}");
     }
 
     #[test]

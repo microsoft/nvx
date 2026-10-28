@@ -7,7 +7,7 @@ mod tests;
 
 use std::fmt;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 #[cfg(doc)]
 use super::Activation;
@@ -31,7 +31,8 @@ pub struct RootTemplate {
     /// The scratch block device, which holds the upper of a record whose upper is the scratch,
     /// and which a record whose upper is a tmpfs leaves alone.
     pub scratch: Device,
-    /// How long the assembly waits for each device to appear.
+    /// How long the assembly waits for each device to appear, until the deadline that
+    /// [`apply`](fn@apply) takes at the latest.
     pub timeout: Duration,
 }
 
@@ -76,8 +77,9 @@ impl Applied {
 }
 
 /// Applies `record`, the record of the Activate that a clone's [`Activation`] accepted, to the
-/// clone, as at a cold boot, and returns the root and the workload that it activated, which the
-/// adapter keeps once it reported the result to [`Activation::complete`].
+/// clone, as at a cold boot, by `deadline`, the activation's [deadline](Activation::deadline), if
+/// any, and returns the root and the workload that it activated, which the adapter keeps once it
+/// reported the result to [`Activation::complete`].
 ///
 /// In order, it:
 ///
@@ -86,9 +88,12 @@ impl Applied {
 ///    with the record's journal policy; and its overlay mode; and, from `template`, the runtime
 ///    directory, the devices, and the timeout. It refuses a GPT disk, with
 ///    [`ApplyError::Gpt`], before anything has a side effect;
-/// 2. assembles the root with [`root::assemble`], which checks the devices, and the image as the
-///    record expects it, and mounts the root, or fails with [`ApplyError::Assembly`], once it
-///    unmounted what it mounted;
+/// 2. assembles the root as [`root::assemble`] does, which checks the devices, and the image as
+///    the record expects it, and mounts the root, or fails with [`ApplyError::Assembly`], once it
+///    unmounted what it mounted. It waits for each device as long as the template's timeout
+///    allows, but never past `deadline`: a device that has not appeared by then fails the
+///    assembly, as at its timeout, so that the application ends by the activation's deadline,
+///    past which [`Activation::complete`] fails the activation as expired, whatever the result;
 /// 3. if the record has a workload identity, checks its account in the assembled root, before
 ///    Ready, as NVX's init checks it at boot: the identity is [`Identity::new`] of the record's
 ///    user and group IDs, without supplementary groups or capabilities, in
@@ -103,8 +108,12 @@ impl Applied {
 ///
 /// It needs the guest's root user, in the guest's initial mount namespace, as
 /// [`root::assemble`] does.
-pub fn apply(record: &ActivationRecord, template: &RootTemplate) -> Result<Applied, ApplyError> {
-    let (root, identity) = apply_with(&mut LiveSystem, record, template)?;
+pub fn apply(
+    record: &ActivationRecord,
+    template: &RootTemplate,
+    deadline: Option<Instant>,
+) -> Result<Applied, ApplyError> {
+    let (root, identity) = apply_with(&mut LiveSystem, record, template, deadline)?;
     Ok(Applied { root, identity })
 }
 
@@ -167,8 +176,13 @@ trait System {
     /// What an assembly mounted: a [`Root`], in a VM.
     type Root;
 
-    /// Assembles the root of `assembly`, as [`root::assemble`] does.
-    fn assemble(&mut self, assembly: &Assembly) -> Result<Self::Root, AssemblyError>;
+    /// Assembles the root of `assembly`, as [`root::assemble`] does, but waits for each device
+    /// until `deadline` at the latest, if any.
+    fn assemble(
+        &mut self,
+        assembly: &Assembly,
+        deadline: Option<Instant>,
+    ) -> Result<Self::Root, AssemblyError>;
 
     /// Reads and checks the account of `identity` in `root`, as [`check_account`] does.
     fn account(&mut self, root: &Self::Root, identity: &Identity) -> Result<(), entry::Error>;
@@ -183,8 +197,12 @@ struct LiveSystem;
 impl System for LiveSystem {
     type Root = Root;
 
-    fn assemble(&mut self, assembly: &Assembly) -> Result<Root, AssemblyError> {
-        root::assemble(assembly)
+    fn assemble(
+        &mut self,
+        assembly: &Assembly,
+        deadline: Option<Instant>,
+    ) -> Result<Root, AssemblyError> {
+        root::assemble_until(assembly, deadline)
     }
 
     fn account(&mut self, root: &Root, identity: &Identity) -> Result<(), entry::Error> {
@@ -196,17 +214,21 @@ impl System for LiveSystem {
     }
 }
 
-/// Applies `record` with `template` through `system`, as [`apply`](fn@apply) does, and returns
-/// the root that it assembled, and the identity in which every execution runs, if any.
+/// Applies `record` with `template` by `deadline`, if any, through `system`, as
+/// [`apply`](fn@apply) does, and returns the root that it assembled, and the identity in which
+/// every execution runs, if any.
 fn apply_with<S: System>(
     system: &mut S,
     record: &ActivationRecord,
     template: &RootTemplate,
+    deadline: Option<Instant>,
 ) -> Result<(S::Root, Option<Identity>), ApplyError> {
     let configuration = record.configuration();
     let assembly = assembly(template, configuration)?;
     let identity = configuration.workload.identity.map(workload_identity);
-    let root = system.assemble(&assembly).map_err(ApplyError::Assembly)?;
+    let root = system
+        .assemble(&assembly, deadline)
+        .map_err(ApplyError::Assembly)?;
     if let Some(identity) = &identity
         && let Err(error) = system.account(&root, identity)
     {

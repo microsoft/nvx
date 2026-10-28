@@ -27,11 +27,11 @@ pub use self::apply::{Applied, ApplyError, RootTemplate, apply};
 /// The adapter passes it what it receives on the session, each an [`ActivationInput`], through
 /// [`input`](Self::input), and does what the [`ActivationAction`] that it returns says. The
 /// adapter applies the record of the Activate that the activation accepted, with
-/// [`apply`](fn@apply), and reports the result through [`complete`](Self::complete), and it
-/// reports the start of the sandbox, which its own order takes once the activation is ready,
-/// through [`start`](Self::start). The adapter's loop wakes by the [`deadline`](Self::deadline),
-/// and [ticks](Self::tick) the activation then, whether input arrives or not, and whether its
-/// output drains or not.
+/// [`apply`](fn@apply), whose waits end by the activation's [`deadline`](Self::deadline), and
+/// reports the result through [`complete`](Self::complete), and it reports the start of the
+/// sandbox, which its own order takes once the activation is ready, through
+/// [`start`](Self::start). The adapter's loop wakes by the deadline, and [ticks](Self::tick) the
+/// activation then, whether input arrives or not, and whether its output drains or not.
 ///
 /// It goes through the [`ActivationState`]s in order, and each takes these inputs:
 ///
@@ -73,16 +73,19 @@ pub use self::apply::{Applied, ApplyError, RootTemplate, apply};
 ///     Other(Vec<u8>),
 /// }
 ///
-/// /// The agent of a clone, which serves its control session in its own framing.
+/// /// The agent of a clone, which serves its control session in its own framing, and queues what
+/// /// it sends, so that a host that reads nothing holds up neither the agent nor the deadline.
 /// trait Agent {
-///     /// Waits until the host sends something, or until `deadline`, and returns what it sent.
+///     /// Waits until the host sends something, or until `deadline`, while it writes what the
+///     /// agent queued, and returns what the host sent, or `None` once the deadline passed.
 ///     fn receive(&mut self, deadline: Option<Instant>) -> Option<Received>;
-///     /// Acknowledges the session's reset, and abandons the earlier epoch's work.
+///     /// Queues the acknowledgement of the session's reset, and abandons the earlier epoch's
+///     /// work.
 ///     fn acknowledge(&mut self);
 ///     /// Keeps the clone's activated root, and the identity, if any, in which it runs every
 ///     /// execution.
 ///     fn keep(&mut self, applied: Applied);
-///     /// Sends Ready, which reports `activation` beside the agent's own identities, such as its
+///     /// Queues Ready, which reports `activation` beside the agent's own identities, such as its
 ///     /// build.
 ///     fn ready(&mut self, activation: ReadyActivation);
 ///     /// Serves `message` in the agent's order, as after a cold boot, and returns whether the
@@ -115,8 +118,12 @@ pub use self::apply::{Applied, ApplyError, RootTemplate, apply};
 ///             ActivationAction::Continue | ActivationAction::Join => {}
 ///             ActivationAction::Apply(record) => {
 ///                 // The record is valid, and nothing happened before: the activation's side
-///                 // effects start here, and the fence opens once they all succeeded.
-///                 let ready = match clone::apply(&record, template) {
+///                 // effects start here, and the fence opens once they all succeeded. The
+///                 // application waits for the devices until the activation's deadline at the
+///                 // latest, so that it ends by then. A reset that comes meanwhile waits for it,
+///                 // and a ready activation takes it as a later session's.
+///                 let deadline = activation.deadline();
+///                 let ready = match clone::apply(&record, template, deadline) {
 ///                     Ok(applied) => {
 ///                         agent.keep(applied);
 ///                         activation.complete(Instant::now(), Ok(()))?

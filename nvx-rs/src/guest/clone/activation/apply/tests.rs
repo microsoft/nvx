@@ -84,6 +84,8 @@ struct FakeSystem {
     failing: bool,
     /// What the clone did, in order.
     effects: Vec<Effect>,
+    /// The deadline of each assembly, in order, by which it waits for its devices.
+    deadlines: Vec<Option<Instant>>,
 }
 
 impl FakeSystem {
@@ -98,6 +100,7 @@ impl FakeSystem {
             image,
             failing: false,
             effects: Vec::new(),
+            deadlines: Vec::new(),
         }
     }
 
@@ -124,8 +127,13 @@ impl FakeSystem {
 impl System for FakeSystem {
     type Root = PathBuf;
 
-    fn assemble(&mut self, assembly: &Assembly) -> Result<PathBuf, AssemblyError> {
+    fn assemble(
+        &mut self,
+        assembly: &Assembly,
+        deadline: Option<Instant>,
+    ) -> Result<PathBuf, AssemblyError> {
         self.effects.push(Effect::Assemble(assembly.clone()));
+        self.deadlines.push(deadline);
         if self.failing {
             // An assembly refuses a relative runtime directory before it does anything else,
             // which gives the fake a real failure.
@@ -234,7 +242,9 @@ impl Adapter {
             ActivationAction::Acknowledge | ActivationAction::Continue | ActivationAction::Join => {
             }
             ActivationAction::Apply(record) => {
-                let result = match apply_with(&mut self.system, &record, &template()) {
+                let deadline = self.activation.deadline();
+                let applied = apply_with(&mut self.system, &record, &template(), deadline);
+                let result = match applied {
                     Ok(applied) => {
                         self.applied = Some(applied);
                         Ok(())
@@ -543,6 +553,8 @@ fn a_valid_activate_activates_the_root_and_the_workload_once_before_ready() {
             Effect::Spawn,
         ]
     );
+    // The assembly waited for the devices until the activation's deadline at the latest.
+    assert_eq!(adapter.system.deadlines, [Some(base + TIMEOUT)]);
 }
 
 #[test]
@@ -585,7 +597,8 @@ fn assembly_and_identity_inputs_are_taken_exactly_from_the_record() {
                 for identity in [None, Some(WORKLOAD)] {
                     let record = clone_record(configuration(image, upper, overlay, identity));
                     let mut system = FakeSystem::new();
-                    let (root, applied) = apply_with(&mut system, &record, &template).unwrap();
+                    let (root, applied) =
+                        apply_with(&mut system, &record, &template, None).unwrap();
                     assert_eq!(root, system.root());
                     let assembly = Assembly {
                         runtime: template.runtime.clone(),
@@ -631,8 +644,10 @@ fn assembly_and_identity_inputs_are_taken_exactly_from_the_record() {
     };
     let other = ActivationRecord::new(None, other).unwrap();
     let (mut first, mut second) = (FakeSystem::new(), FakeSystem::new());
-    let first_identity = apply_with(&mut first, &accepted(), &template).unwrap().1;
-    let second_identity = apply_with(&mut second, &other, &template).unwrap().1;
+    let first_identity = apply_with(&mut first, &accepted(), &template, None)
+        .unwrap()
+        .1;
+    let second_identity = apply_with(&mut second, &other, &template, None).unwrap().1;
     assert_eq!(first.effects, second.effects);
     assert_eq!(first_identity, second_identity);
 }
@@ -713,7 +728,7 @@ fn a_workload_identity_without_an_account_in_the_image_is_refused_before_ready()
         None,
     ));
     let mut system = FakeSystem::with(b"", b"");
-    let (_, identity) = apply_with(&mut system, &anyone, &template()).unwrap();
+    let (_, identity) = apply_with(&mut system, &anyone, &template(), None).unwrap();
     assert_eq!(identity, None);
     assert_eq!(system.effects, [Effect::Assemble(accepted_assembly())]);
 }
@@ -759,12 +774,15 @@ fn the_application_refuses_without_privileges_what_it_cannot_assemble() {
         activation::OverlayMode::TrustedLowers,
         Some(WORKLOAD),
     ));
-    assert!(matches!(apply(&disk, &template()), Err(ApplyError::Gpt)));
+    assert!(matches!(
+        apply(&disk, &template(), None),
+        Err(ApplyError::Gpt)
+    ));
     let relative = RootTemplate {
         runtime: PathBuf::from("run/nvx"),
         ..template()
     };
-    let Err(ApplyError::Assembly(error)) = apply(&accepted(), &relative) else {
+    let Err(ApplyError::Assembly(error)) = apply(&accepted(), &relative, None) else {
         panic!("a relative runtime directory was assembled");
     };
     assert!(

@@ -782,10 +782,11 @@ after the repair's acknowledgement of the restore:
    `worker::capture::root_template` of the template's configuration: its
    runtime directory, the `distro` and scratch block devices, and its device
    timeout. The application assembles the root, an EROFS image over a tmpfs
-   or the scratch, in the record's overlay mode, and checks the account of the
-   record's workload identity, if it has one, in the assembled root, in
-   existing-account mode. It applies none of the record's other settings: its
-   export, its network, its hostname, and its machine ID.
+   or the scratch, in the record's overlay mode, waiting for each device until
+   the activation's deadline at the latest, so that it ends by then, and checks
+   the account of the record's workload identity, if it has one, in the
+   assembled root, in existing-account mode. It applies none of the record's
+   other settings: its export, its network, its hostname, and its machine ID.
 4. It completes the activation, which opens the fence, and answers `Ready`,
    which reports the activation after the guest agent's build.
 5. It then serves the host's order, as after a cold boot: the mapping table
@@ -1744,8 +1745,10 @@ test broker, with the session that the template's VM attached, active in the
 epoch of its broker's first reset, and the clone's activation,
 `nvx::guest::clone::Activation::with_resources`, behind a closed fence. The fake
 root applies each record as `nvx::guest::clone::apply` does, without a root: it
-refuses a GPT disk, and checks the account of the record's workload identity in
-the tests' directory of account databases. The tests cover:
+refuses a GPT disk, takes as long as a test asks, but no longer than until the
+activation's deadline, as the waits for the devices do, and checks the account
+of the record's workload identity in the tests' directory of account databases.
+The tests cover:
 
 - the reset that the restore queued, of another instance, which the worker
   acknowledges without an attachment, and the `Activate`, whose record it
@@ -1769,6 +1772,9 @@ the tests' directory of account databases. The tests cover:
   of an `Activate`, which the broker sends before the worker runs, so that the
   worker takes it at once, however late it runs: the deadline fails the
   activation with nothing applied, and ends nothing once the clone is ready;
+- an application that would outlast the activation's deadline, which gets that
+  deadline, and which ends the clone with the deadline's status once the
+  deadline passed, with no `Ready`;
 - a stream that takes nothing more from the worker, as once the broker failed,
   after which the worker still ends once its activation's deadline passed,
   with the deadline's status, or once the broker closed its end of the stream

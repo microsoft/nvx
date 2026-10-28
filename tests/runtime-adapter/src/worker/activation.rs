@@ -31,8 +31,9 @@ use crate::root::Ready;
 
 /// How long a clone's activation may take, from the repair's acknowledgement of the restore until
 /// the clone is ready: long enough for the host to connect once the restore is ready, and for the
-/// application of the record to wait for each block device as long as the template's
-/// configuration allows. A clone that the host did not activate by then ends.
+/// application of the record to wait for each block device as long as the template's default
+/// configuration allows. The application's waits end by then at the latest, and a clone that the
+/// host did not activate by then ends.
 pub const ACTIVATION_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// Returns the status with which the worker of a clone, and with it the VM, ends once the clone's
@@ -210,7 +211,10 @@ impl CloneState {
         executions: &mut Executions,
         record: &ActivationRecord,
     ) -> Step<Worked> {
-        let applied = operations.apply(record, &self.template);
+        // The application's waits for the devices end by the activation's deadline, past which
+        // the completion fails the activation, whatever the application's result.
+        let deadline = self.activation.deadline();
+        let applied = operations.apply(record, &self.template, deadline);
         let (result, identity) = match applied {
             Ok(identity) => (Ok(()), identity),
             Err(error) => (Err(error.into()), None),

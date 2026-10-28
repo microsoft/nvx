@@ -7,7 +7,7 @@ use std::io;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use super::kernel::{Call, FakeKernel, Operation, Paths, super_options};
 use super::*;
@@ -151,7 +151,18 @@ impl Guest {
 
     /// Assembles `assembly` with a clone of the guest's kernel.
     fn assemble(&self, assembly: &Assembly) -> Result<Root, AssemblyError> {
-        assemble_with(Box::new(self.kernel.clone()), &self.paths, assembly)
+        assemble_with(Box::new(self.kernel.clone()), &self.paths, assembly, None)
+    }
+
+    /// Assembles `assembly` with a clone of the guest's kernel, waiting for each device until
+    /// `deadline` at the latest.
+    fn assemble_until(
+        &self,
+        assembly: &Assembly,
+        deadline: Instant,
+    ) -> Result<Root, AssemblyError> {
+        let kernel = Box::new(self.kernel.clone());
+        assemble_with(kernel, &self.paths, assembly, Some(deadline))
     }
 
     /// Sets the overlay module's parameter `name`, the default of one of the overlay's options:
@@ -521,6 +532,62 @@ fn devices_are_found_when_they_appear_and_missing_ones_time_out() {
 }
 
 #[test]
+fn an_assembly_waits_for_its_devices_until_its_deadline_at_the_latest() {
+    // However long its timeout, an assembly whose deadline passed looks for each device once,
+    // without sleeping, and finds a missing one missing, before it mounts anything.
+    let guest = Guest::bare();
+    attach(&guest.base, 0, "vda", 4096);
+    let mut assembly = guest.assembly();
+    assembly.timeout = Duration::from_secs(600);
+    let error = guest.assemble_until(&assembly, Instant::now()).unwrap_err();
+    assert!(
+        matches!(
+            error.error(),
+            Error::Missing {
+                role: Role::Scratch,
+                mmio: SCRATCH,
+            }
+        ),
+        "{error:?}"
+    );
+    assert_eq!(guest.kernel.sleeps(), 0);
+    assert!(guest.kernel.mounts().is_empty());
+
+    // One whose deadline is a second away polls, 50 ms apart, until the deadline rather than
+    // until its timeout's end.
+    let guest = Guest::bare();
+    attach(&guest.base, 0, "vda", 4096);
+    let deadline = Instant::now() + Duration::from_secs(1);
+    let error = guest.assemble_until(&assembly, deadline).unwrap_err();
+    assert!(
+        matches!(
+            error.error(),
+            Error::Missing {
+                role: Role::Scratch,
+                ..
+            }
+        ),
+        "{error:?}"
+    );
+    let sleeps = guest.kernel.sleeps();
+    assert!((1..=20).contains(&sleeps), "{sleeps}");
+
+    // A device that appears before the deadline is found.
+    let guest = Guest::bare();
+    attach(&guest.base, 0, "vda", 4096);
+    let root_directory = guest.base.clone();
+    guest.kernel.on_sleep(move |sleeps| {
+        if sleeps == 1 {
+            attach(&root_directory, 1, "vdb", 8192);
+        }
+    });
+    let deadline = Instant::now() + Duration::from_secs(1);
+    let root = guest.assemble_until(&assembly, deadline).unwrap();
+    assert_eq!(guest.kernel.sleeps(), 1);
+    root.teardown().unwrap();
+}
+
+#[test]
 fn a_device_of_another_size_is_refused_before_it_is_flushed() {
     let guest = Guest::new();
     let mut assembly = guest.assembly();
@@ -862,7 +929,7 @@ fn a_runtime_directory_that_another_root_holds_is_refused() {
         if sleeps == 1 {
             attach(&directory, 0, "vda", 4096);
             let calls = kernel.calls().len();
-            let result = assemble_with(Box::new(kernel.clone()), &paths, &assembly);
+            let result = assemble_with(Box::new(kernel.clone()), &paths, &assembly, None);
             *outcome.lock().unwrap() = Some((result.map(drop), kernel.calls().len() - calls));
         }
     });
@@ -1087,7 +1154,8 @@ fn a_runtime_directory_where_a_directory_is_bound_is_refused() {
             runtime,
             ..guest.assembly()
         };
-        let error = assemble_with(Box::new(SystemKernel), &guest.paths, &assembly).unwrap_err();
+        let error =
+            assemble_with(Box::new(SystemKernel), &guest.paths, &assembly, None).unwrap_err();
         assert!(
             matches!(error.error(), Error::Occupied { path } if *path == distro),
             "{error:?}"
