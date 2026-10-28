@@ -1,8 +1,41 @@
-//! The attribution of run policy paths belongs to OpenVMM, not to option order.
+//! The shares of `run`: their targets stay single kernel tokens, and OpenVMM, not option order,
+//! attributes their policy paths.
 
 use proptest::prelude::*;
 
 use super::*;
+use crate::host::sandbox::mount::MountAccess;
+use crate::protocol::cmdline::{self, parameters, virtio_mmio_devices};
+
+/// Returns the kernel command line that OpenVMM composes from `cmdline`, the `--cmdline` that
+/// `run` gives it for the cold boot of an aggregate of read-write shares, as its
+/// `build_microvm_command_line` and `append_microvm_virtio_discovery` do: its console parameters,
+/// `cmdline`, the virtio-mmio devices of its virtio-fs slot and of its boot virtio-console, and
+/// the aggregate's bootstrap tokens.
+fn effective_command_line(cmdline: &str) -> String {
+    format!(
+        "earlycon=xe9 console=hvc1 reboot=t panic=-1 {cmdline} \
+         virtio_mmio.device=0x1000@0xd0001000:6 virtio_mmio.device=0x1000@0xd0002000:7{}",
+        aggregate_command_line_fragment(&[MountAccess::ReadWrite])
+    )
+}
+
+/// Returns a strategy for the last component of a guest target: mostly characters that a target
+/// may hold, and now and then a NUL, a quote, or a character with a byte that Linux reads as
+/// whitespace. U+00A0, U+00E0, and U+0120 end in the byte 0xa0 in UTF-8.
+fn component() -> impl Strategy<Value = String> {
+    prop::collection::vec(
+        prop_oneof![
+            12 => prop::char::range('a', 'z'),
+            3 => prop::sample::select(vec!['0', '-', '_', '\u{e9}', '\u{4e2d}']),
+            1 => prop::sample::select(vec![
+                '\0', '\t', '\n', ' ', '"', '\u{a0}', '\u{e0}', '\u{120}',
+            ]),
+        ],
+        1..12,
+    )
+    .prop_map(String::from_iter)
+}
 
 #[test]
 fn single_share_targets_must_remain_one_kernel_token() {
@@ -21,6 +54,48 @@ fn single_share_targets_must_remain_one_kernel_token() {
 }
 
 proptest! {
+    /// A target that `run` accepts stays inside its share's `nvx_share=` token, which the kernel
+    /// reads as one parameter. Linux splits a parameter at a byte that it reads as whitespace,
+    /// stops at a NUL, and reads everything after a lone quote as part of the parameter, so a
+    /// target with one of them would split its token, or hide the virtio-mmio devices that OpenVMM
+    /// describes after the shares from the guest's kernel (microsoft/nvx#798).
+    #[test]
+    fn share_tokens_hide_no_virtio_mmio_device(
+        components in prop::collection::vec(component(), 2..5),
+    ) {
+        let options = Options {
+            mounts: components
+                .iter()
+                .enumerate()
+                .map(|(index, component)| format!("/share-{index}/{component},host-{index},rw"))
+                .collect(),
+            ..Options::default()
+        };
+        let rules = options.network.egress_rules().unwrap();
+        let result = extend_shares_and_network(&mut Vec::new(), &options, &rules);
+        let separated = components.iter().any(|component| {
+            component
+                .bytes()
+                .any(|byte| matches!(byte, b'\0' | b'"') || cmdline::is_space(byte))
+        });
+        prop_assert_eq!(result.is_err(), separated);
+        if let Ok(user) = result {
+            let line = effective_command_line(&user);
+            let read: Vec<String> = parameters(line.as_bytes())
+                .map(|parameter| {
+                    let mut text = parameter.name.to_vec();
+                    if let Some(value) = parameter.value {
+                        text.push(b'=');
+                        text.extend_from_slice(value);
+                    }
+                    String::from_utf8_lossy(&text).into_owned()
+                })
+                .collect();
+            prop_assert_eq!(read, line.split(' ').collect::<Vec<_>>());
+            prop_assert_eq!(virtio_mmio_devices(line.as_bytes()).count(), 2);
+        }
+    }
+
     #[test]
     fn policy_paths_attach_to_their_shares(
         events in prop::collection::vec((any::<bool>(), 0_u8..3, any::<bool>()), 0..40),
