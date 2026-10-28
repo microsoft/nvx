@@ -757,7 +757,8 @@ impl Root {
             paths,
             Role::Distro,
             assembly.distro,
-            device_wait(assembly.timeout, deadline),
+            assembly.timeout,
+            deadline,
         )?;
         let lowers = match &assembly.image {
             Image::Erofs { uuid } => {
@@ -781,7 +782,8 @@ impl Root {
                     paths,
                     Role::Scratch,
                     device,
-                    device_wait(assembly.timeout, deadline),
+                    assembly.timeout,
+                    deadline,
                 )?;
                 if journal == Journal::Forbidden {
                     check_no_journal(&device)?;
@@ -1087,15 +1089,6 @@ impl fmt::Debug for Root {
             .field("mapped", &self.mapped)
             .field("latched", &self.latched)
             .finish_non_exhaustive()
-    }
-}
-
-/// Returns how long an assembly waits from now for a device to appear: `timeout`, but never past
-/// `deadline`, if any.
-fn device_wait(timeout: Duration, deadline: Option<Instant>) -> Duration {
-    match deadline {
-        Some(deadline) => timeout.min(deadline.saturating_duration_since(Instant::now())),
-        None => timeout,
     }
 }
 

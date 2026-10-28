@@ -10,7 +10,7 @@ use std::io;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use super::kernel::{Kernel, Paths};
 use super::{Device, DeviceStep, Error, Role};
@@ -58,18 +58,19 @@ pub(super) struct Ext4Features {
 }
 
 /// Finds the block device of `role` that the VMM attached at `device`'s MMIO window, polling
-/// until it appears for as long as `timeout` allows, checks that its access mode is the role's,
-/// read-only for the distro and writable for the scratch, checks its size if the caller expects
-/// one, and flushes its buffers, so that later reads come from the device. Returns the path of
-/// its node.
+/// until it appears for as long as `timeout` allows, but never past `deadline`, if any, checks
+/// that its access mode is the role's, read-only for the distro and writable for the scratch,
+/// checks its size if the caller expects one, and flushes its buffers, so that later reads come
+/// from the device. Returns the path of its node.
 pub(super) fn prepare(
     kernel: &mut dyn Kernel,
     paths: &Paths,
     role: Role,
     device: Device,
     timeout: Duration,
+    deadline: Option<Instant>,
 ) -> Result<PathBuf, Error> {
-    let (name, path) = resolve(kernel, paths, role, device.mmio, timeout)?;
+    let (name, path) = resolve(kernel, paths, role, device.mmio, timeout, deadline)?;
     let attributes = paths.sys.join("class/block").join(&name);
     let read_only = fs::read(attributes.join("ro"))
         .and_then(|text| match parse_count(&text)? {
@@ -119,18 +120,28 @@ pub(super) fn prepare(
 }
 
 /// Returns the name and the node of the block device that the VMM attached at `mmio`, polling
-/// for it every [`POLL_INTERVAL`] while `timeout` allows another poll.
+/// for it every [`POLL_INTERVAL`] while `timeout` allows another poll, and until `deadline` at the
+/// latest, if any: it sleeps no longer than until the deadline, and polls no more once the
+/// deadline passed, however long a poll or a sleep took.
 fn resolve(
     kernel: &mut dyn Kernel,
     paths: &Paths,
     role: Role,
     mmio: u64,
     timeout: Duration,
+    deadline: Option<Instant>,
 ) -> Result<(String, PathBuf), Error> {
+    let left = |deadline: Instant| deadline.saturating_duration_since(Instant::now());
+    let timeout = deadline.map_or(timeout, |deadline| timeout.min(left(deadline)));
     let polls = timeout.as_millis() / POLL_INTERVAL.as_millis() + 1;
     for poll in 0..polls {
         if poll > 0 {
-            kernel.sleep(POLL_INTERVAL);
+            let interval = match deadline.map(left) {
+                Some(left) if left.is_zero() => break,
+                Some(left) => POLL_INTERVAL.min(left),
+                None => POLL_INTERVAL,
+            };
+            kernel.sleep(interval);
         }
         let found = find(paths, mmio).map_err(|error| Error::Lookup { role, mmio, error })?;
         if let Some(name) = found {

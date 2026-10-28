@@ -572,6 +572,28 @@ fn an_assembly_waits_for_its_devices_until_its_deadline_at_the_latest() {
     let sleeps = guest.kernel.sleeps();
     assert!((1..=20).contains(&sleeps), "{sleeps}");
 
+    // The deadline bounds the polls in time too, whatever a poll or a sleep takes: a sleep that
+    // overruns it is the last.
+    let guest = Guest::bare();
+    attach(&guest.base, 0, "vda", 4096);
+    guest
+        .kernel
+        .on_sleep(|_| std::thread::sleep(Duration::from_millis(600)));
+    let deadline = Instant::now() + Duration::from_millis(500);
+    let error = guest.assemble_until(&assembly, deadline).unwrap_err();
+    assert!(
+        matches!(
+            error.error(),
+            Error::Missing {
+                role: Role::Scratch,
+                ..
+            }
+        ),
+        "{error:?}"
+    );
+    let sleeps = guest.kernel.sleeps();
+    assert!(sleeps <= 1, "{sleeps}");
+
     // A device that appears before the deadline is found.
     let guest = Guest::bare();
     attach(&guest.base, 0, "vda", 4096);
