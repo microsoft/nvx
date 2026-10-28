@@ -913,8 +913,9 @@ fn a_vmm_that_exits_or_sends_anything_but_its_event_ends_the_launch() {
     let (fixture, image) = fixture();
     // A VMM that exits before its event, as OpenVMM does once it cannot restore the snapshot, ends
     // the wait at once, and loses the clone's status, unless OpenVMM's fatal error tells that the
-    // host cannot present the template's CPU or time; another version of the event, and part of
-    // it, are refused, and the VMM that sent them is terminated.
+    // host cannot present the template's CPU or time, or bind a forward of the clone's network;
+    // another version of the event, and part of it, are refused, and the VMM that sent them is
+    // terminated.
     let cases = [
         (
             "exit",
@@ -947,6 +948,15 @@ fn a_vmm_that_exits_or_sends_anything_but_its_event_ends_the_launch() {
             Evidence::IncompatibleHost,
             Teardown::Exited,
         ),
+        // The launch of its VM worker fails too where OpenVMM cannot bind a forward of the
+        // clone's network as it restores the clone's NIC, because another socket holds its port.
+        (
+            "forward",
+            "close forward:18080",
+            ErrorKind::Exited,
+            Evidence::ForwardBind,
+            Teardown::Exited,
+        ),
         (
             "other",
             "other flush",
@@ -975,15 +985,25 @@ fn a_vmm_that_exits_or_sends_anything_but_its_event_ends_the_launch() {
         assert!(launched.before.elapsed() < TIMEOUT, "{plan}");
         assert!(control.calls.is_empty(), "{plan}");
         assert_failed(&error, &acquired, restore, evidence, teardown);
-        // The record keeps the line of OpenVMM's fatal error, and not the warning before it.
-        let fatal = plan
-            .split_whitespace()
-            .find_map(|word| word.strip_prefix("fatal:"));
-        if let Some(code) = fatal {
-            let line =
-                format!("OpenVMM reported: fatal error: [{code}] failed to launch vm worker");
+        // The record keeps the line of OpenVMM's fatal error, and not the warning before it, with
+        // the cause of the error's chain that names the forward that OpenVMM cannot bind.
+        let line = plan.split_whitespace().find_map(|word| {
+            if let Some(code) = word.strip_prefix("fatal:") {
+                Some(format!("[{code}] failed to launch vm worker"))
+            } else {
+                word.strip_prefix("forward:").map(|port| {
+                    format!(
+                        "failed to launch vm worker: failed to create socket for port forward \
+                         (Tcp 127.0.0.1:{port})"
+                    )
+                })
+            }
+        });
+        if let Some(line) = line {
+            let line = format!("OpenVMM reported: fatal error: {line}");
             assert!(error.message().ends_with(&line), "{error}");
             assert!(error.record().message.ends_with(&line), "{error}");
+            assert_eq!(error.outcome(), evidence.outcome(), "{error}");
         }
         assert_launch_ended(&fixture, &mut acquired, &vmm);
     }

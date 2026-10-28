@@ -974,7 +974,10 @@ fn read_private(path: &Path, description: &str, limit: u64) -> Result<Option<Vec
 /// [`FATAL_TAIL_BYTES`] of the VMM's log at `path`, cut to [`MAX_FATAL_CHARS`], or none if they
 /// hold none, or the log cannot be read: the line that leads OpenVMM's fatal error, then the
 /// error's time ABI code, if it has one, as [the attribution of evidence](Evidence#attribution)
-/// describes.
+/// describes. If the line does not name a forward that OpenVMM cannot bind,
+/// [`failure::FORWARD_BIND_TEXT`], but a cause of the error's chain that follows it does, the
+/// cause follows the line, after `: `, cut to [`MAX_FATAL_CHARS`] too, without the indentation and
+/// the number with which the chain lists it.
 fn read_fatal(path: &Path) -> Option<String> {
     let mut log = open_regular(path).ok()?;
     let length = log.metadata().ok()?.len();
@@ -983,11 +986,37 @@ fn read_fatal(path: &Path) -> Option<String> {
     let mut tail = Vec::new();
     log.take(FATAL_TAIL_BYTES).read_to_end(&mut tail).ok()?;
     let text = String::from_utf8_lossy(&tail);
-    let line = text
-        .lines()
-        .rev()
-        .find(|line| line.starts_with(failure::FATAL_PREFIX))?;
-    Some(line.chars().take(MAX_FATAL_CHARS).collect())
+    let lines: Vec<&str> = text.lines().collect();
+    let at = lines
+        .iter()
+        .rposition(|line| line.starts_with(failure::FATAL_PREFIX))?;
+    let mut fatal: String = lines[at].chars().take(MAX_FATAL_CHARS).collect();
+    if !fatal.contains(failure::FORWARD_BIND_TEXT) {
+        let forward = lines[at + 1..]
+            .iter()
+            .map(|line| cause(line))
+            .find(|cause| cause.starts_with(failure::FORWARD_BIND_TEXT));
+        if let Some(forward) = forward {
+            fatal.push_str(": ");
+            fatal.extend(forward.chars().take(MAX_FATAL_CHARS));
+        }
+    }
+    Some(fatal)
+}
+
+/// Returns the cause of an error's chain that `line` lists, as OpenVMM writes the chain after the
+/// line that leads its fatal error, `    N: CAUSE` for each of several causes, or `    CAUSE` for
+/// one alone: without its indentation, and its number, if it has one.
+fn cause(line: &str) -> &str {
+    let line = line.trim_start();
+    match line.split_once(": ") {
+        Some((number, cause))
+            if !number.is_empty() && number.bytes().all(|b| b.is_ascii_digit()) =>
+        {
+            cause
+        }
+        _ => line,
+    }
 }
 
 /// What the sandbox of a clone keeps of it, as [`CloneRecords::read`] reads it: the lease that its
@@ -1515,5 +1544,39 @@ mod tests {
         // A log without a fatal error, or one that only names it, holds none.
         fs::write(&path, "the VMM exited\nwarning: fatal error: quoted\n").unwrap();
         assert_eq!(read_fatal(&path), None);
+    }
+
+    #[test]
+    fn the_cause_that_names_a_forward_that_openvmm_cannot_bind_follows_the_fatal_line() {
+        let (_directory, private) = private_dir();
+        let path = private.join("openvmm.log");
+        let fatal = "fatal error: failed to launch vm worker";
+        let forward = "failed to create socket for port forward (Tcp 127.0.0.1:18080)";
+        let expected = format!("{fatal}: {forward}");
+        // OpenVMM lists the causes of its error's chain after the line, numbered when there are
+        // several, and alone otherwise.
+        for chain in [
+            format!(
+                "    0: failed to resolve the network endpoint\n    1: {forward}\n    2: Address \
+                 already in use (os error 98)\n"
+            ),
+            format!("    {forward}\n"),
+        ] {
+            let log = format!("a line of the VMM's log\n{fatal}\n\nCaused by:\n{chain}");
+            fs::write(&path, &log).unwrap();
+            assert_eq!(
+                read_fatal(&path).as_deref(),
+                Some(expected.as_str()),
+                "{log}"
+            );
+        }
+        // A line that names the forward itself keeps its text alone.
+        let named = format!("fatal error: {forward}");
+        fs::write(&path, format!("{named}\n\nCaused by:\n    {forward}\n")).unwrap();
+        assert_eq!(read_fatal(&path).as_deref(), Some(named.as_str()));
+        // A forward that a line before the fatal error names is no cause of it.
+        let log = format!("warning: {forward}\n{fatal}\n\nCaused by:\n    0: another cause\n");
+        fs::write(&path, log).unwrap();
+        assert_eq!(read_fatal(&path).as_deref(), Some(fatal));
     }
 }
