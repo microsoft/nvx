@@ -31,6 +31,10 @@
 //!   layer and its manifest, and which a launch checks from metadata alone.
 //! - [`scratch`]: the binding of the scratch image, its identity, kind, and length, which a
 //!   launch checks from metadata alone, and the claim of the image by one sandbox at a time.
+//! - The block geometry that OpenVMM presents for each checked file, its length and its logical
+//!   and physical block sizes, which [`CheckedDistro::geometry`](distro::CheckedDistro::geometry)
+//!   and [`CheckedScratch::geometry`](scratch::CheckedScratch::geometry) read through the file,
+//!   as OpenVMM reads it.
 //! - [`PreparedLaunch`]: the launch of a plan with the files that the checks of its block devices
 //!   returned, which hands the VMM those objects rather than paths that something could replace
 //!   meanwhile: the OpenVMM arguments that name them, and the descriptors that the VMM inherits;
@@ -49,6 +53,7 @@
 //! the path quoted with Rust's debug formatting.
 
 pub mod distro;
+pub(crate) mod geometry;
 pub mod layer;
 pub mod mount;
 pub mod options;
@@ -56,10 +61,13 @@ pub mod plan;
 pub mod prepared;
 pub mod scratch;
 
+use std::fs::File;
 use std::path::Path;
 
 use self::distro::{DistroBinding, DistroFormat};
+use self::geometry::BlockGeometry;
 pub use self::layer::{LAYER_ROLES, LayerRole, SandboxLayer};
+use self::mount::os_error;
 pub use self::mount::{MountAccess, MountKind, MountOwner, MountPolicy, PolicyKind, SandboxMount};
 pub use self::plan::{
     BlockRole, PLAN_VERSION, SandboxDistro, SandboxNetwork, SandboxPlan, SandboxUpper,
@@ -187,6 +195,64 @@ pub(crate) fn reject_container_path(path: &Path, shown: &str) -> Result<()> {
         )));
     }
     Ok(())
+}
+
+/// The logical block size that OpenVMM presents for a sandbox block device, in bytes, of which the
+/// device's length is a nonzero multiple.
+const LOGICAL_BLOCK_SIZE: u32 = 512;
+
+/// The physical block size that OpenVMM presents for a sandbox block device on Windows, in bytes.
+#[cfg(windows)]
+const WINDOWS_PHYSICAL_BLOCK_SIZE: u32 = 4096;
+
+/// Returns the block geometry that OpenVMM presents for a sandbox block device whose file `file`
+/// holds open, which messages call `description` at `path`, read through `file` as OpenVMM reads
+/// it through its own open of the file, as
+/// [`CheckedDistro::geometry`](distro::CheckedDistro::geometry) describes.
+///
+/// Fails with [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported) for a length or a physical
+/// block size that OpenVMM refuses, and with [`ErrorKind::Io`](crate::ErrorKind::Io) if the file's
+/// metadata cannot be read.
+pub(crate) fn block_geometry(file: &File, path: &Path, description: &str) -> Result<BlockGeometry> {
+    let shown = path.display();
+    let metadata = file
+        .metadata()
+        .map_err(|error| os_error(&error, Some(path)))?;
+    let length = metadata.len();
+    if length == 0 || !length.is_multiple_of(u64::from(LOGICAL_BLOCK_SIZE)) {
+        return Err(refused(format!(
+            "the {description} {shown} of {length} bytes cannot be attached: OpenVMM attaches \
+             block devices of nonzero multiples of {LOGICAL_BLOCK_SIZE} bytes"
+        )));
+    }
+    #[cfg(target_os = "linux")]
+    let (reported, physical) = {
+        use std::os::unix::fs::MetadataExt;
+
+        let size = metadata.blksize();
+        (size, u32::try_from(size).ok())
+    };
+    #[cfg(windows)]
+    let (reported, physical) = (
+        u64::from(WINDOWS_PHYSICAL_BLOCK_SIZE),
+        Some(WINDOWS_PHYSICAL_BLOCK_SIZE),
+    );
+    #[cfg(not(any(target_os = "linux", windows)))]
+    let (reported, physical) = (u64::from(LOGICAL_BLOCK_SIZE), Some(LOGICAL_BLOCK_SIZE));
+    match physical {
+        Some(physical) if physical >= LOGICAL_BLOCK_SIZE && physical.is_power_of_two() => {
+            Ok(BlockGeometry {
+                length,
+                logical_block_size: LOGICAL_BLOCK_SIZE,
+                physical_block_size: physical,
+            })
+        }
+        _ => Err(refused(format!(
+            "the {description} {shown} cannot be attached: its filesystem's block size of \
+             {reported} bytes is not a physical block size that OpenVMM presents, a power of two \
+             from {LOGICAL_BLOCK_SIZE} bytes to 2 GiB"
+        ))),
+    }
 }
 
 /// The launch settings of a [`SandboxPlan`] or a [`SandboxLaunch`], besides its block devices and

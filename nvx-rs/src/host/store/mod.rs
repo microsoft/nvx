@@ -15,6 +15,8 @@
 //!   outcome.json           the VMM's outcome report of the latest launch
 //!   .tmpXXXXXX             the outcome report while the VMM writes it, which it then publishes
 //!   clone.json             the binding of a clone to the generation of a template that it leases
+//!   clone-scratch.raw      the file of the scratch device of a clone whose upper is in RAM, a
+//!                          sparse file that the clone's plan creates
 //!   ...                    the caller's configuration record and other files, which it declares
 //! ```
 //!
@@ -238,7 +240,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 pub use self::caller::CallerFiles;
-use self::caller::is_report_staging;
+use self::caller::{is_report_staging, is_store_temporary};
 use self::files::{io_error, remove_if_present};
 pub use self::identity::{
     ArtifactIdentity, IdentityCheck, IdentityPart, MAX_IDENTITY_LEN, RuntimeIdentity,
@@ -283,11 +285,19 @@ pub const OUTCOME_NAME: &str = "outcome.json";
 /// removes once its VM has exited. A [removal](self#removal) of the sandbox removes it first, and
 /// makes its absence durable before the sandbox goes.
 pub const CLONE_BINDING_NAME: &str = "clone.json";
+/// Name of the file of the `scratch` block device of a clone whose upper is in RAM, which the
+/// clone's restore attaches in place of the template's scratch, and which the guest leaves
+/// unused: a sparse file of the template's scratch length, which
+/// [`template::ClonePlan::new`](crate::host::template::ClonePlan::new) creates under the lease,
+/// replacing one that an earlier clone of the sandbox left, and which
+/// [`template::Store::release`](crate::host::template::Store::release) removes once the clone's VM
+/// has exited, as a [removal](self#removal) of the sandbox does.
+pub const CLONE_SCRATCH_NAME: &str = "clone-scratch.raw";
 /// Every file that the store keeps in a sandbox's directory. Replacing a record leaves a
 /// temporary file named `.NAME.NUMBER.tmp` beside it only if the replacement was interrupted, and
 /// a VMM that is killed while it writes its outcome report leaves the file in which it stages it;
 /// see [the report staging file](self#the-report-staging-file).
-pub const FILE_NAMES: [&str; 9] = [
+pub const FILE_NAMES: [&str; 10] = [
     LOCK_NAME,
     JOURNAL_NAME,
     RUNTIME_NAME,
@@ -297,6 +307,7 @@ pub const FILE_NAMES: [&str; 9] = [
     CONSOLE_NAME,
     OUTCOME_NAME,
     CLONE_BINDING_NAME,
+    CLONE_SCRATCH_NAME,
 ];
 
 /// Interval at which a lock that another holder has is tried again: the sandbox's lock, by a
@@ -489,6 +500,12 @@ impl SandboxStore {
         self.path(CLONE_BINDING_NAME)
     }
 
+    /// Returns the path of the file of the scratch device of a clone whose upper is in RAM,
+    /// [`CLONE_SCRATCH_NAME`].
+    pub fn clone_scratch_path(&self) -> PathBuf {
+        self.path(CLONE_SCRATCH_NAME)
+    }
+
     /// Reads the runtime record, which names the sandbox's VM from the commit of its launch until
     /// its runtime is cleared.
     pub fn runtime(&self) -> Result<Option<RuntimeRecord>> {
@@ -660,6 +677,32 @@ impl LockedStore {
     /// launch of a clone, once a release ends the lease.
     pub(crate) fn reserve(&mut self, launch: Option<LaunchId>) {
         self.reserved = launch;
+    }
+
+    /// Returns the launch of the sandbox's clone that the lease acquired under this lock reserves,
+    /// until [`begin_launch`](Self::begin_launch) begins it, or a release ends the lease.
+    pub(crate) fn reserved(&self) -> Option<&LaunchId> {
+        self.reserved.as_ref()
+    }
+
+    /// Returns the paths at which the store reaches the entries of the sandbox's directory that
+    /// it owns, which its transitions replace and remove: its files, [`FILE_NAMES`], at its own
+    /// paths, whether or not they exist, which the file system resolves as it resolves every
+    /// name, without regard to case on Windows, say; and the temporary files of its records and
+    /// the files in which a VMM staged an outcome report, under the names by which the directory
+    /// lists them now, as a [removal](self#removal) finds them.
+    pub(crate) fn owned_entries(&self) -> io::Result<Vec<PathBuf>> {
+        let mut owned: Vec<PathBuf> = FILE_NAMES.iter().map(|name| self.path(name)).collect();
+        for entry in std::fs::read_dir(self.dir())? {
+            let entry = entry?;
+            let name = entry.file_name();
+            if let Some(name) = name.to_str()
+                && (is_store_temporary(name) || is_report_staging(name))
+            {
+                owned.push(entry.path());
+            }
+        }
+        Ok(owned)
     }
 
     /// Returns the caller's files that the lock knows: those that a [lifecycle

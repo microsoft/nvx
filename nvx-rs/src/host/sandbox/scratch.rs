@@ -56,8 +56,9 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
+use super::geometry::BlockGeometry;
 use super::mount::os_error;
-use super::refused;
+use super::{block_geometry, refused};
 use crate::error::{Error, ErrorCode, Result};
 use crate::host::paths;
 use crate::host::seal::{FileId, FileKind, FileSeal, SealScheme};
@@ -155,6 +156,25 @@ impl CheckedScratch {
     /// Returns the path at which the check opened the image.
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// Returns the block geometry that OpenVMM presents for the image as the `scratch` block
+    /// device, read through the checked file, as
+    /// [`CheckedDistro::geometry`](super::distro::CheckedDistro::geometry) reads that of a distro
+    /// layer: the image's length, logical blocks of 512 bytes, and physical blocks of the I/O
+    /// block size of the image's filesystem on Linux, of 4096 bytes on Windows, and of the logical
+    /// block size on other hosts. On Windows, the checked file is the image's guard, which may
+    /// read the image's metadata.
+    ///
+    /// It reads the file's metadata alone, never the image's content. The scratch image of a
+    /// clone must present the geometry of its template's scratch, its length included, as
+    /// [`ClonePlan`](crate::host::template::ClonePlan) checks before the clone's launch.
+    ///
+    /// Fails with [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported) for a length or a
+    /// physical block size that OpenVMM refuses, and with [`ErrorKind::Io`](crate::ErrorKind::Io)
+    /// if the metadata cannot be read.
+    pub fn geometry(&self) -> Result<BlockGeometry> {
+        block_geometry(&self.file, &self.path, DESCRIPTION)
     }
 
     /// Returns the checked image, which the caller then holds with its claim: an owned descriptor

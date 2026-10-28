@@ -26,9 +26,8 @@ use crate::host::instance::generate_capability;
 use crate::host::platform;
 use crate::host::sandbox::distro::{CheckedDistro, DistroBinding, DistroFormat};
 use crate::host::sandbox::{LayerRole, SandboxLayer, SandboxPlan};
-use crate::host::seal::FileSeal;
 use crate::host::store::files::{create_new, remove_if_present, sync_dir, write_private};
-use crate::host::store::regular::{open_regular, read_at_most};
+use crate::host::store::regular::{identity_of, open_regular, read_at_most};
 use crate::host::store::{
     JOURNAL_NAME, LOCK_NAME, LOG_NAME, LaunchId, LockedStore, OUTCOME_NAME, Recovery, SOCKET_NAME,
     SandboxStore,
@@ -1015,14 +1014,6 @@ fn create_scratch(path: &Path, length: u64) -> Result<(u64, u128)> {
     platform::make_sparse(&file).map_err(failed)?;
     file.set_len(length).map_err(failed)?;
     identity_of(&file).map_err(failed)
-}
-
-/// Returns the identity of the file that `file` holds open, as its [`FileSeal`] records it: its
-/// device or volume, and its file ID, the 128-bit one of `FILE_ID_INFO` on Windows, which a file
-/// system such as ReFS keeps unique where the 64-bit file index is not.
-fn identity_of(file: &fs::File) -> io::Result<(u64, u128)> {
-    let seal = FileSeal::of(file)?;
-    Ok((seal.device(), seal.file_id()))
 }
 
 /// Checks the files of the capture of `template`, with the inputs `capture`, before its VM
