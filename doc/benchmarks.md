@@ -491,11 +491,11 @@ On MSHV and WHP, collection rejects a restore series of at least ten samples tha
 host stall split, with the limits that guard snapshot generation: a p50 more than 25% above p25,
 or a gap of more than 25% between adjacent sorted samples with at least two samples on each side.
 Such a series must list its samples, and the list must match the summary's count and median.
-`performance validate-workload` applies the same check without collecting, so that a caller can
-remeasure the series. KVM restore series are exempt: the KVM CI runners restore a snapshot in two
-modes about twice apart, so 1,933 of the 6,192 KVM restore series that CI measured from
-2026-10-04 to 2026-10-27 exceed those limits without a stall, against 4 of 6,144 on MSHV and 2 of
-5,646 on WHP (#345).
+`performance validate-workload` applies the same check without collecting, so that CI can
+remeasure the series, as [CI collection](#ci-collection) describes. KVM restore series are
+exempt: the KVM CI runners restore a snapshot in two modes about twice apart, so 1,933 of the
+6,192 KVM restore series that CI measured from 2026-10-04 to 2026-10-27 exceed those limits
+without a stall, against 4 of 6,144 on MSHV and 2 of 5,646 on WHP (#345).
 
 ### Snapshot lifecycle profile
 
@@ -679,6 +679,15 @@ published lifecycle metrics. The step summary lists every attempt with its outco
 snapshot-generation p50, and whether it was published, and reports the storage
 telemetry of each attempt, rejected ones included.
 
+CI likewise validates the [shell-snapshot restore series](#shell-snapshot) after the
+one-vCPU `performance` suite and after each 2-, 4-, and 8-vCPU `shell-snapshot-restore`
+suite. Each attempt writes its logs to its own `performance-attempt-N` or
+`shell-snapshot-restore-attempt-N` directory, and `performance validate-workload`
+checks it. Status 75 on the first attempt remeasures the whole suite once, and only a
+validated attempt's files are copied to the result directory for collection. Other
+validation failures stop immediately, and a second unstable attempt fails the job. On
+KVM, whose restore series have no stability guard, validation accepts every attempt.
+
 Before updating the run-scoped `benchmark-<platform>-<run-id>` artifact, each platform
 uploads its raw results and lifecycle profiles to the immutable
 `benchmark-diagnostics-<platform>-<run-id>-attempt-<run-attempt>` artifact, including
@@ -686,8 +695,9 @@ after a benchmark failure. Both artifacts are retained for one day. Rerunning a
 workflow cannot overwrite an earlier attempt's diagnostics. Downstream gates still
 use the run-scoped artifact so a failed-jobs-only rerun can reuse successful
 platform results from an earlier workflow attempt. The `acceptance-attempt-N.json`
-files identify the bounded lifecycle remeasurements within one workflow attempt,
-not the workflow's `github.run_attempt`.
+files and the `performance-attempt-N` and `shell-snapshot-restore-attempt-N`
+directories identify the bounded remeasurements within one workflow attempt, not the
+workflow's `github.run_attempt`.
 
 Lifecycle JSON results and workload `benchmark-metadata.json` files record host
 provenance under `host`: the runner name from `RUNNER_NAME`, the machine name, the
