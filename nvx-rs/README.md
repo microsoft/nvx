@@ -1283,6 +1283,17 @@ Another workflow runs cargo-mutants on the files and with the tests that a
 dispatch names; see
 [nvx-rs mutation testing](../doc/ci.md#nvx-rs-mutation-testing).
 
+The guest's mount-ID tests also run from a thread with its own descriptor
+table. An ignored test of `nvx::guest::root` checks mount points and mount
+options from a thread with both its own descriptor table and a private mount
+namespace. It mounts a temporary tmpfs and needs root, but no hypervisor;
+run it as root with:
+
+```bash
+NVX_BUNDLE=skip cargo test --locked --all-features --lib -- \
+  --ignored --exact guest::root::tests::a_thread_with_private_tables_finds_its_mount_points_and_options
+```
+
 `tests/openvmm_vectors.rs` is an ignored test that compares the copies of
 OpenVMM's vectors in `tests/vectors/openvmm/` with the files of the OpenVMM
 submodule, which the `nvx-rs` job cannot check out, and the versions of
