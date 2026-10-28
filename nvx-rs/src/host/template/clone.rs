@@ -194,8 +194,13 @@ pub enum CloneUpper {
 ///   mount or a mount point of the store, or of a directory above or inside it, a loopback
 ///   share, or a hard link of a payload. Whoever names an export must not name such an alias,
 ///   nor a directory that holds one. The launch checks the plan's host objects again, with
-///   [`ExportPlan::verify`], before it restores the clone. A request without an export leaves
-///   the slot dormant.
+///   [`ExportPlan::verify`], before it restores the clone, but OpenVMM resolves an export's path
+///   again at each launch and restore, so the directories above the export's directory must be
+///   ones that no guest may change, as those above the clone's block devices must, which
+///   [Block devices by path](Store#block-devices-by-path) describes: whoever names an export
+///   must not name one inside a directory that a writable export of another sandbox or clone
+///   holds, whose guest could replace the directory with a link, and turn the export elsewhere,
+///   to a leased payload, say. A request without an export leaves the slot dormant.
 /// - The activation record, which the clone's guest applies in place of the configuration that
 ///   the template captured, names the restore, with a fresh transaction ID, the clone's image,
 ///   upper, export, and settings, the template's network, and the resources that the clone must
