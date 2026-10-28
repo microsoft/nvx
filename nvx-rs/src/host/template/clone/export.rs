@@ -65,10 +65,19 @@ impl DirectoryExport {
     /// directory of the path, and turn the path elsewhere, or make a directory of it
     /// unsearchable, and keep the host from following it.
     ///
+    /// Refuses it too if its directory is, or holds, the directory of the clone's sandbox,
+    /// `sandbox`, which the lease names by its path with its links resolved: the host writes the
+    /// clone's records there, by their paths, so the guest could otherwise change them, or
+    /// replace the directory, or one above it, with a link, and turn the host's writes
+    /// elsewhere, into a leased snapshot, say. The directories above it are the only ones through
+    /// which that path leads, and only an export that holds it could let the guest change one. A
+    /// directory inside the sandbox's, among the caller's files, holds none of the host's records.
+    ///
     /// The check reads nothing: it compares the directory's path, and the paths in which the
-    /// guest may write, as the plan resolved them, with `resolved` and `through`, which the caller
-    /// resolved as [`filesystem::canonicalize`] resolves the plan's paths, so that no link, and on
-    /// Windows no other letter case, short name, or verbatim prefix, hides an overlap. Fails with
+    /// guest may write, as the plan resolved them, with `resolved`, `through`, and `sandbox`,
+    /// which the caller and the lease resolved as [`filesystem::canonicalize`] resolves the plan's
+    /// paths, so that no link, and on Windows no other letter case, short name, or verbatim
+    /// prefix, hides an overlap. Fails with
     /// [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported) for such an export.
     ///
     /// Since the check compares the paths that the export and the store resolve to, an alias of
@@ -89,6 +98,7 @@ impl DirectoryExport {
         store: &Path,
         resolved: &Path,
         through: &[PathBuf],
+        sandbox: &Path,
     ) -> Result<()> {
         for child in &self.plan.children {
             if child.root.starts_with(resolved) || resolved.starts_with(&child.root) {
@@ -97,6 +107,14 @@ impl DirectoryExport {
                      whose leased payloads nothing may change",
                     child.root.display(),
                     resolved.display()
+                )));
+            }
+            if sandbox.starts_with(&child.root) {
+                return Err(Error::unsupported(format!(
+                    "the export of a clone cannot share {}, which holds the directory of the \
+                     clone's sandbox {}, in which the host writes the clone's records",
+                    child.root.display(),
+                    sandbox.display()
                 )));
             }
             // The guest may write anywhere in a writable directory, unless the plan limits its

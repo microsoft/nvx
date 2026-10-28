@@ -204,14 +204,18 @@ pub enum CloneUpper {
 ///   that the plan and the store's directory resolve to, so that no guest reaches the payload of
 ///   a generation through it, nor let the guest write in a directory through which the store's
 ///   path leads, links and `..` included, since the host reaches the store, and OpenVMM its
-///   snapshots, by that path. These checks compare paths, so an alias of the store that an
-///   administrator configures is outside them, as the directories above the store are: a bind
-///   mount or a mount point of the store, or of a directory above or inside it, a loopback
-///   share, or a hard link of a payload. Whoever names an export must not name such an alias,
-///   nor a directory that holds one. The launch checks the plan's host objects again, with
-///   [`ExportPlan::verify`], before it restores the clone, but OpenVMM resolves an export's path
-///   again at each launch and restore, so the directories above the export's directory must be
-///   ones that no guest may change, as those above the clone's block devices must, which
+///   snapshots, by that path. Nor may it be, or hold, the directory of the clone's sandbox, which
+///   the lease names by its resolved path, and in which the host writes the clone's records,
+///   which the guest could otherwise change, or turn elsewhere, into a leased snapshot, say,
+///   though a directory inside the sandbox's, among the caller's files, may be exported. These
+///   checks compare paths, so an alias of the store that an administrator configures is outside
+///   them, as the directories above the store are: a bind mount or a mount point of the store,
+///   or of a directory above or inside it, a loopback share, or a hard link of a payload.
+///   Whoever names an export must not name such an alias, nor a directory that holds one. The
+///   launch checks the plan's host objects again, with [`ExportPlan::verify`], before it
+///   restores the clone, but OpenVMM resolves an export's path again at each launch and restore,
+///   so the directories above the export's directory must be ones that no guest may change, as
+///   those above the clone's block devices must, which
 ///   [Block devices by path](Store#block-devices-by-path) describes: whoever names an export
 ///   must not name one inside a directory that a writable export of another sandbox or clone
 ///   holds, whose guest could replace the directory with a link, and turn the export elsewhere,
@@ -371,9 +375,10 @@ impl ClonePlan {
     ///   [`Evidence::HostFailure`];
     /// - with [`ErrorKind::Unsupported`] for an export whose directory, by the path that its plan
     ///   resolved, lies inside the template store's directory, [`Store::dir`], by the path that
-    ///   it resolves to, or holds it, or that lets the guest write in a directory through which
-    ///   the store's path leads, as the host resolves it, links and `..` included, which the guest
-    ///   could then turn elsewhere, or keep the host from following, [`Evidence::InvalidMappings`],
+    ///   it resolves to, or holds it, or is or holds the directory of the clone's sandbox,
+    ///   [`Lease::sandbox`], or that lets the guest write in a directory through which the store's
+    ///   path leads, as the host resolves it, links and `..` included, which the guest could then
+    ///   turn elsewhere, or keep the host from following, [`Evidence::InvalidMappings`],
     ///   and with [`ErrorKind::Io`] if the store's directory, or a directory through which its
     ///   path leads, cannot be resolved, the host's evidence;
     /// - with [`ErrorKind::NotFound`] if the store no longer indexes the leased generation, and as
@@ -492,7 +497,8 @@ impl ClonePlan {
         if let Some(export) = &export {
             // The plan resolved the export's paths, so the store's path is resolved as well, so
             // that no other spelling of it hides an overlap, and so are the directories through
-            // which it leads, in which the guest must not write.
+            // which it leads, in which the guest must not write. The lease names the sandbox's
+            // directory, in which the host writes the clone's records, by its resolved path.
             let dir = store.dir();
             let unresolved = |error: io::Error| {
                 Error::io(format!(
@@ -506,7 +512,7 @@ impl ClonePlan {
                 .on_host()?;
             let through = path_directories(dir).map_err(unresolved).on_host()?;
             export
-                .check_outside(dir, &resolved, &through)
+                .check_outside(dir, &resolved, &through, lease.sandbox())
                 .attribute(Evidence::InvalidMappings)?;
         }
         let generation = store
