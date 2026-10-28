@@ -79,6 +79,31 @@ def _posix_shell() -> str | None:
     return shell
 
 
+def _bdi_stats(dirty: int, io: int = 0, more_io: int = 0) -> str:
+    """Return a backing device's debugfs statistics whose writeback lists hold
+    `dirty`, `io`, and `more_io` inodes, in the kernel's layout."""
+    return (
+        "BdiWriteback:                0 kB\n"
+        f"BdiReclaimable:     {4 * (dirty + io + more_io):10d} kB\n"
+        f"b_dirty:            {dirty:10d}\n"
+        f"b_io:               {io:10d}\n"
+        f"b_more_io:          {more_io:10d}\n"
+        "b_dirty_time:                0\n"
+    )
+
+
+# A mount table with one host share, bound below its root and mounted whole,
+# and a block device's mount, which is no host share.
+_ONE_SHARE_MOUNTINFO = (
+    "22 1 0:20 / /proc rw,nosuid shared:5 - proc proc rw\n"
+    "30 25 0:42 /0 /work\\040space rw,nosuid,nodev - virtiofs microvm rw\n"
+    "31 25 0:42 / /mnt/share rw,nosuid,nodev shared:9 - virtiofs microvm rw\n"
+    "60 25 8:1 / /data rw - ext4 /dev/vda rw\n"
+)
+# The debugfs statistics of the share of _ONE_SHARE_MOUNTINFO.
+_ONE_SHARE_STATS = "/sys/kernel/debug/bdi/0:42/stats"
+
+
 # The line that releases the private-network ingress guest after the host's
 # probes.
 PRIVATE_INGRESS_RELEASE = microvm_tests.PRIVATE_INGRESS_CHECKED + b"\n"
@@ -5383,6 +5408,285 @@ class MicrovmTests(unittest.TestCase):
         self.assertEqual(
             dispatch_metadata("3"),
             (1, "fail_closed snapshot capture metadata is invalid\n"),
+        )
+
+    def _run_host_share_write_back(
+        self,
+        mountinfo: str,
+        stats: Sequence[str | None],
+        *,
+        failing_sync: int | None = None,
+        pass_limit: int | None = None,
+        prelude: str = "",
+        script: str = "write_back_host_shares\n",
+    ) -> tuple[int, str, list[str]]:
+        """Run nvx-snapshot's write-back of the host shares that `mountinfo`
+        mounts, and return the shell's status, its stderr, and the calls of
+        the stand-ins of debugfs and sync(1), which record them in order.
+
+        Pass N reads `stats[N - 1]`, and cannot read a missing or None entry.
+        The `failing_sync`th sync fails, and `pass_limit` replaces the limit of
+        1,024 passes. `prelude` runs before the functions are defined, and
+        `script` after the stand-ins are."""
+        shell = _posix_shell()
+        if shell is None:
+            self.skipTest("POSIX shell is unavailable")
+        snapshot = (
+            Path(__file__).parents[1] / "guest" / "common" / "nvx-snapshot"
+        ).read_text(encoding="utf-8")
+        start = snapshot.index("list_host_shares() {")
+        end = snapshot.index("\n}\n", snapshot.index("write_back_host_shares() {")) + 3
+        functions = snapshot[start:end].replace(
+            "/proc/self/mountinfo", '"$root/mountinfo"'
+        )
+        if pass_limit is not None:
+            limit = '[ "$passes" -ge 1024 ]'
+            self.assertIn(limit, functions)
+            functions = functions.replace(limit, f'[ "$passes" -ge {pass_limit} ]')
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "mountinfo").write_text(mountinfo, encoding="ascii", newline="\n")
+            for index, text in enumerate(stats, 1):
+                if text is not None:
+                    (root / f"stats-{index}").write_text(
+                        text, encoding="ascii", newline="\n"
+                    )
+            if failing_sync is not None:
+                (root / f"sync-fail-{failing_sync}").touch()
+            result = subprocess.run(
+                [shell, "-s", "--", temporary],
+                input=(
+                    "set -eu\n"
+                    'root="$1"\n'
+                    'echo 0 >"$root/passes"\n'
+                    'echo 0 >"$root/syncs"\n'
+                    ': >"$root/calls"\n'
+                    f"{prelude}"
+                    f"{functions}"
+                    "read_writeback_stats() {\n"
+                    '    pass=$(($(cat "$root/passes") + 1))\n'
+                    '    echo "$pass" >"$root/passes"\n'
+                    '    printf \'%s\\n\' "stats $*" >>"$root/calls"\n'
+                    '    cat "$root/stats-$pass" 2>/dev/null\n'
+                    "}\n"
+                    "sync() {\n"
+                    '    count=$(($(cat "$root/syncs") + 1))\n'
+                    '    echo "$count" >"$root/syncs"\n'
+                    '    printf \'%s\\n\' "sync $*" >>"$root/calls"\n'
+                    '    [ ! -e "$root/sync-fail-$count" ]\n'
+                    "}\n"
+                    f"{script}"
+                ),
+                text=True,
+                capture_output=True,
+                timeout=30,
+                check=False,
+            )
+            calls = (root / "calls").read_text(encoding="ascii").splitlines()
+        return result.returncode, result.stderr, calls
+
+    def test_host_share_write_back_repeats_until_no_inode_is_dirty(self):
+        status, stderr, calls = self._run_host_share_write_back(
+            _ONE_SHARE_MOUNTINFO,
+            [_bdi_stats(2, io=1), _bdi_stats(0, more_io=1), _bdi_stats(0)],
+        )
+        self.assertEqual((status, stderr), (0, ""))
+        # Each pass syncs the share through its whole mount, and so does the
+        # pass that counts no dirty inode, whose sync waits for the writes
+        # still in flight.
+        self.assertEqual(calls, [f"stats {_ONE_SHARE_STATS}", "sync -f /mnt/share"] * 3)
+
+    def test_host_share_write_back_skips_a_guest_without_host_shares(self):
+        status, stderr, calls = self._run_host_share_write_back(
+            "22 1 0:20 / /proc rw - proc proc rw\n"
+            "60 25 8:1 / /data rw - ext4 /dev/vda rw\n",
+            [],
+        )
+        self.assertEqual((status, stderr, calls), (0, "", []))
+
+    def test_host_share_write_back_names_one_mount_of_each_share(self):
+        status, stderr, calls = self._run_host_share_write_back(
+            # A share mounted whole, and one mounted only below its root, whose
+            # mount points mountinfo escapes and one of which holds a newline.
+            "31 25 0:42 / /mnt/share rw - virtiofs microvm rw\n"
+            "40 25 0:50 /child /bound\\012line rw - virtiofs microvm rw\n"
+            "41 25 0:50 /child /srv/my\\040data\\134x rw - virtiofs microvm rw\n"
+            "42 25 0:42 /0 /mnt/share/again rw - virtiofs microvm rw\n",
+            [_bdi_stats(1) + _bdi_stats(0), _bdi_stats(0) + _bdi_stats(0)],
+        )
+        self.assertEqual((status, stderr), (0, ""))
+        stats = "/sys/kernel/debug/bdi/0:42/stats /sys/kernel/debug/bdi/0:50/stats"
+        self.assertEqual(
+            calls,
+            [f"stats {stats}", "sync -f /mnt/share", "sync -f /srv/my data\\x"] * 2,
+        )
+
+        status, stderr, calls = self._run_host_share_write_back(
+            "50 25 0:60 /x /only\\012newline rw - virtiofs microvm rw\n",
+            [_bdi_stats(0)],
+        )
+        self.assertEqual(
+            (status, stderr, calls),
+            (1, "nvx-snapshot: no mount point of host share 0:60 can be named\n", []),
+        )
+
+    def test_host_share_write_back_continues_while_passes_make_progress(self):
+        counts = [5, 3, 3, 2, 0]
+        status, stderr, calls = self._run_host_share_write_back(
+            _ONE_SHARE_MOUNTINFO, [_bdi_stats(count) for count in counts]
+        )
+        self.assertEqual((status, stderr), (0, ""))
+        self.assertEqual(
+            calls, [f"stats {_ONE_SHARE_STATS}", "sync -f /mnt/share"] * len(counts)
+        )
+
+    def test_host_share_write_back_fails_when_passes_stall(self):
+        # Three passes in a row that count no fewer dirty inodes than the pass
+        # before each fail, however many passes made progress before them.
+        for counts in ([4, 4, 4, 4], [1, 2, 3, 4], [2, 1, 1, 1, 1]):
+            status, stderr, calls = self._run_host_share_write_back(
+                _ONE_SHARE_MOUNTINFO,
+                [_bdi_stats(count) for count in counts] + [_bdi_stats(0)],
+            )
+            self.assertEqual(
+                (status, stderr),
+                (
+                    1,
+                    "nvx-snapshot: the host shares kept dirty pages through "
+                    f"{len(counts)} write-back passes\n",
+                ),
+                counts,
+            )
+            self.assertEqual(
+                calls,
+                [f"stats {_ONE_SHARE_STATS}", "sync -f /mnt/share"] * len(counts),
+                counts,
+            )
+
+    def test_host_share_write_back_bounds_its_passes(self):
+        # Counts that fall in every other pass never stall three times in a
+        # row, so only the limit of passes ends them.
+        status, stderr, calls = self._run_host_share_write_back(
+            _ONE_SHARE_MOUNTINFO,
+            [_bdi_stats(count) for count in [2, 1] * 4],
+            pass_limit=6,
+        )
+        self.assertEqual(
+            (status, stderr),
+            (
+                1,
+                "nvx-snapshot: the host shares kept dirty pages through 6 "
+                "write-back passes\n",
+            ),
+        )
+        self.assertEqual(calls.count("sync -f /mnt/share"), 6)
+
+    def test_host_share_write_back_refuses_unreadable_or_malformed_lists(self):
+        for stats in (
+            None,
+            "b_dirty: 1\nb_io: 0\n",
+            "b_dirty: 1\nb_io: x\nb_more_io: 0\n",
+            "b_dirty: -1\nb_io: 0\nb_more_io: 0\n",
+            "b_dirty:\nb_io: 0\nb_more_io: 0\n",
+            "b_dirty: 1\nb_io: 0\nb_more_io: 0\nb_io: 0\n",
+        ):
+            status, stderr, calls = self._run_host_share_write_back(
+                _ONE_SHARE_MOUNTINFO, [stats, _bdi_stats(0)]
+            )
+            self.assertEqual(
+                (status, stderr, calls),
+                (
+                    1,
+                    "nvx-snapshot: cannot read the writeback lists of the host "
+                    "shares\n",
+                    [f"stats {_ONE_SHARE_STATS}"],
+                ),
+                stats,
+            )
+
+    def test_host_share_write_back_refuses_a_failed_sync(self):
+        # The sync of the pass that counts no dirty inode waits for the
+        # writes in flight, so its failure refuses the capture too.
+        for failing_sync in (1, 2):
+            status, stderr, calls = self._run_host_share_write_back(
+                _ONE_SHARE_MOUNTINFO,
+                [_bdi_stats(1), _bdi_stats(0)],
+                failing_sync=failing_sync,
+            )
+            self.assertEqual(
+                (status, stderr),
+                (
+                    1,
+                    "nvx-snapshot: failed to write back the host share at /mnt/share\n",
+                ),
+            )
+            self.assertEqual(
+                calls,
+                [f"stats {_ONE_SHARE_STATS}", "sync -f /mnt/share"] * failing_sync,
+            )
+
+    def test_failed_host_share_write_back_thaws_and_requests_no_capture(self):
+        snapshot = (
+            Path(__file__).parents[1] / "guest" / "common" / "nvx-snapshot"
+        ).read_text(encoding="utf-8")
+        # Every capture writes the shares back after the cleanup trap and the
+        # paired barriers are in place, and before the request.
+        write_back = snapshot.index("write_back_host_shares || exit 1")
+        self.assertLess(snapshot.index("trap cleanup EXIT"), write_back)
+        self.assertLess(snapshot.index('fsfreeze -f "$scratch_mount"'), write_back)
+        self.assertLess(write_back, snapshot.index("/sbin/nvx-time capture"))
+
+        helpers_start = snapshot.index("console_status() {")
+        cleanup_end = snapshot.index("\n}\n", snapshot.index("cleanup() {")) + 3
+        helpers = (
+            snapshot[helpers_start:cleanup_end]
+            .replace(">/dev/console", '>>"$root/console"')
+            .replace("/sbin/nvx-exit", "nvx_exit")
+            .replace("/sbin/nvx-time", "nvx_time")
+        )
+        status, stderr, calls = self._run_host_share_write_back(
+            _ONE_SHARE_MOUNTINFO,
+            [None],
+            prelude=(
+                'container_cgroup="$root/cgroup"\n'
+                'scratch_mount="$root/scratch"\n'
+                'mkdir "$container_cgroup"\n'
+                'echo 1 >"$container_cgroup/cgroup.freeze"\n'
+                "container_frozen=true\n"
+                "scratch_frozen=true\n"
+                "stall_detectors_suppressed=true\n"
+                "post_restore_pending=false\n"
+                "fsfreeze() {\n"
+                '    printf \'%s\\n\' "fsfreeze $1" >>"$root/calls"\n'
+                "}\n"
+                "nvx_time() {\n"
+                '    freeze=$(cat "$container_cgroup/cgroup.freeze")\n'
+                '    printf \'%s\\n\' "nvx-time $* freeze=$freeze" >>"$root/calls"\n'
+                "}\n"
+                "nvx_exit() {\n"
+                '    printf \'%s\\n\' "nvx-exit $*" >>"$root/calls"\n'
+                "}\n"
+                f"{helpers}"
+            ),
+            script=(
+                "trap cleanup EXIT\n"
+                "write_back_host_shares || exit 1\n"
+                "nvx_time capture\n"
+            ),
+        )
+        # The guest requests no capture, thaws the scratch filesystem and then
+        # the workload, and only then restores the stall detectors.
+        self.assertEqual(
+            (status, stderr),
+            (1, "nvx-snapshot: cannot read the writeback lists of the host shares\n"),
+        )
+        self.assertEqual(
+            calls,
+            [
+                f"stats {_ONE_SHARE_STATS}",
+                "fsfreeze -u",
+                "nvx-time cancel-capture freeze=0",
+            ],
         )
 
     def test_console_log_persists_buffered_and_completed_output(self):
