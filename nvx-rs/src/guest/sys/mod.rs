@@ -18,7 +18,8 @@
 //! it. Standard output and standard error belong to the process: `Stdout`, `DirectStdout`, and
 //! `write_standard_error` borrow them from the standard library's handles only to write them
 //! directly, so the standard library's line buffer for standard output must stay empty, which
-//! the guest module ensures by denying the standard library's print macros.
+//! the guest module ensures by denying the standard library's print macros. Standard input
+//! belongs to the process too, and `discard_standard_input` borrows it only to read it directly.
 //!
 //! The spawn boundary and the managed agent need a few operations that `nix` cannot provide,
 //! which reach libc through `nix`'s re-export: a spawned child, which may neither allocate nor
@@ -118,8 +119,6 @@ pub(crate) use port::{PortAccess, PortError, check_released, power_off, probe_po
 #[cfg(all(test, target_arch = "x86_64"))]
 pub(crate) use process::forbid_system_calls;
 pub(crate) use process::set_command_name;
-#[cfg(target_arch = "x86_64")]
-pub(crate) use process::syscall_process_id;
 pub(crate) use process::{
     ChildStatus, DirectStdout, ForkResult, ProcessId, Stdout, WaitTarget, current_process, detach,
     exec, exit_immediately, fork, ignore_interrupt_and_hangup, kill_process, kill_process_group,
@@ -129,6 +128,8 @@ pub(crate) use process::{
 };
 #[cfg(test)]
 pub(crate) use process::{continue_traced, deny_system_call, spawn_traced_child};
+#[cfg(target_arch = "x86_64")]
+pub(crate) use process::{discard_standard_input, syscall_process_id};
 #[cfg(test)]
 pub(crate) use process::{fork_isolated_test, has_exited, spawn_child_without_exit_signal};
 pub(crate) use rooted::{
