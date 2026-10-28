@@ -698,10 +698,11 @@ the lease ends, and removes the record and `restore.sock`, as it removes
 adapter's framing of its control session, a `CloneControl`, by a
 restore-to-Ready deadline that runs from the launch, `RESTORE_TO_READY_TIMEOUT`,
 60 seconds by default: it reads the restore-ready event as soon as it comes,
-refusing another process's connection and other bytes, since OpenVMM on Windows
-waits until the host has read it; only then connects to the clone's control
-endpoint, whose console bounds the host's authentication from the connection on;
-attaches with the launch's capability; sends the record, read again from
+refusing another process's connection and bytes that differ from the event, and
+reading nothing past it, since OpenVMM on Windows waits until the host has read
+it, and then closes its end; only then connects to the clone's control endpoint,
+whose console bounds the host's authentication from the connection on; attaches
+with the launch's capability; sends the record, read again from
 `clone-activation.bin`, which must still be byte for byte the launch's, in the
 adapter's Activate, as the session's first request; and checks that Ready
 reports the record's transaction ID. It replaces a session that the adapter

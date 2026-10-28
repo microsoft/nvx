@@ -128,10 +128,11 @@ impl<'s> Restoring<'s> {
     ///
     /// 1. Waits for OpenVMM's restore-ready event, [`RESTORE_READY_EVENT`], at the endpoint at
     ///    which the launch listens, [`ready_endpoint`](Self::ready_endpoint), and reads it as soon
-    ///    as it comes: OpenVMM connects to the endpoint before the restored VM runs, and writes
-    ///    the event once the restored VM has started, after which, on Windows, it waits until the
-    ///    host has read the event. The wait refuses a connection of another process than the VMM,
-    ///    and other bytes than the event, and ends once the VMM has exited.
+    ///    as it comes: OpenVMM connects to the endpoint before the restored VM runs, writes the
+    ///    event once the restored VM has started, after which, on Windows, it waits until the
+    ///    host has read the event, and then closes its end, which carries nothing else. The wait
+    ///    refuses a connection of another process than the VMM, and bytes that differ from the
+    ///    event, reads nothing past the event, and ends once the VMM has exited.
     /// 2. Reads the clone's activation record again where the launch wrote it,
     ///    [`CLONE_ACTIVATION_NAME`](crate::host::store::CLONE_ACTIVATION_NAME) in the sandbox,
     ///    which must still be, byte for byte, the record of the launch,
@@ -178,10 +179,10 @@ impl<'s> Restoring<'s> {
     /// - [`ErrorKind::Exited`](crate::ErrorKind::Exited) once the VMM exited before its event, or
     ///   before a connection;
     /// - [`ErrorKind::Protocol`](crate::ErrorKind::Protocol) for a connection to the restore-ready
-    ///   endpoint of another process than the VMM, other bytes than the event, a control endpoint
-    ///   that another process serves, a failure of the adapter's framing, a session that it lost
-    ///   in the last of the sessions, and a Ready that reports another activation than the
-    ///   record's, or none;
+    ///   endpoint of another process than the VMM, bytes there that differ from the event, a
+    ///   control endpoint that another process serves, a failure of the adapter's framing, a
+    ///   session that it lost in the last of the sessions, and a Ready that reports another
+    ///   activation than the record's, or none;
     /// - [`ErrorKind::Io`](crate::ErrorKind::Io) if the endpoints fail otherwise, and if the
     ///   sandbox's activation record cannot be read, or is no longer the launch's;
     /// - [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported) for a deadline beyond the
@@ -586,6 +587,8 @@ fn wait_event(
 ) -> Result<()> {
     let process = starting.process();
     let pid = process.reference().pid;
+    // OpenVMM writes the event once, and then closes its end, so the wait reads the event's bytes
+    // and nothing past them.
     let length = RESTORE_READY_EVENT.len();
     let mut received = Vec::with_capacity(length);
     while received.len() < length {
