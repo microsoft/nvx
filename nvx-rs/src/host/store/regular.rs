@@ -1,10 +1,12 @@
 //! The files that the template modules read, and that a sandbox's store reads as its clone
-//! binding: regular files that are not links, which they read within a bound.
+//! binding: regular files that are not links, which they read within a bound, and the identity of
+//! a file that a template module holds open.
 
 use std::fs::{File, OpenOptions};
 use std::io::{self, Read};
 use std::path::Path;
 
+use crate::host::seal::FileSeal;
 use crate::host::{filesystem, platform};
 
 /// Returns the error of a file that is a link, or not a regular file.
@@ -79,4 +81,12 @@ pub(crate) fn read_at_most(file: File, limit: u64, what: &str) -> io::Result<Vec
         )));
     }
     Ok(bytes)
+}
+
+/// Returns the identity of the file that `file` holds open, as its [`FileSeal`] records it: its
+/// device or volume, and its file ID, the 128-bit one of `FILE_ID_INFO` on Windows, which a file
+/// system such as ReFS keeps unique where the 64-bit file index is not.
+pub(crate) fn identity_of(file: &File) -> io::Result<(u64, u128)> {
+    let seal = FileSeal::of(file)?;
+    Ok((seal.device(), seal.file_id()))
 }

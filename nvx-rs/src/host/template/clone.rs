@@ -28,10 +28,9 @@ use crate::host::sandbox::scratch::{self, CheckedScratch, ScratchBinding};
 use crate::host::sandbox::{
     LayerRole, SandboxLayer, SandboxPlan, block_geometry, reject_container_path, reject_disk_path,
 };
-use crate::host::seal::FileSeal;
 use crate::host::store::LockedStore;
 use crate::host::store::files::{create_new, remove_if_present};
-use crate::host::store::regular::{open_regular, was_removed};
+use crate::host::store::regular::{identity_of, open_regular, was_removed};
 use crate::protocol::CAPABILITY_LEN;
 
 /// Bytes in a mebibyte, the unit in which messages give the size of memory blocks.
@@ -756,14 +755,6 @@ fn check_geometry(
         )));
     }
     Ok(())
-}
-
-/// Returns the identity of the file that `file` holds open, as its [`FileSeal`] records it: its
-/// device or volume, and its file ID, the 128-bit one of `FILE_ID_INFO` on Windows, which a file
-/// system such as ReFS keeps unique where the 64-bit file index is not.
-fn identity_of(file: &File) -> io::Result<(u64, u128)> {
-    let seal = FileSeal::of(file)?;
-    Ok((seal.device(), seal.file_id()))
 }
 
 /// Checks the file at `path` as OpenVMM will open it, by its path: a regular file, not a link,
