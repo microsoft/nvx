@@ -92,12 +92,12 @@
 <!-- nvx::guest&#45;&gt;nvx::activation -->
 <g id="edge9" class="edge">
 <title>nvx::guest&#45;&gt;nvx::activation</title>
-<g id="a_edge9"><a xlink:title="nvx::guest uses nvx::activation: 1 pair of modules">
+<g id="a_edge9"><a xlink:title="nvx::guest uses nvx::activation: 2 pairs of modules">
 <path fill="none" stroke="#0d9488" d="M380.53,-378.99C399.07,-358.12 428.54,-326.41 457,-302 460.06,-299.38 463.34,-296.76 466.68,-294.22"/>
 <polygon fill="#0d9488" stroke="#0d9488" points="468.08,-296.01 471.94,-290.3 465.37,-292.36 468.08,-296.01"/>
 </a>
 </g>
-<text text-anchor="middle" x="430" y="-330" font-family="Liberation Sans,Arial,Helvetica,sans-serif" font-size="10.00" fill="#52677d">1</text>
+<text text-anchor="middle" x="430" y="-330" font-family="Liberation Sans,Arial,Helvetica,sans-serif" font-size="10.00" fill="#52677d">2</text>
 </g>
 <!-- nvx::guest&#45;&gt;nvx::exec -->
 <g id="edge10" class="edge">
