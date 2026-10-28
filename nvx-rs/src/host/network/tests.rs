@@ -15,6 +15,43 @@ fn rules(arguments: &[String], option: &str) -> Vec<String> {
 }
 
 #[test]
+fn an_attached_lowering_attaches_the_device_of_a_policy_that_lets_nothing_through() {
+    // An allow rule that excepts its whole destination lowers to no OpenVMM rule, but a policy
+    // with one attaches its device, closed, as the attached lowering of the same policy
+    // without that rule renders it.
+    let excluded = EgressRule {
+        to: vec![Destination {
+            cidr: "192.0.2.0/24".to_owned(),
+            except: vec!["192.0.2.0/24".to_owned()],
+        }],
+        ports: Vec::new(),
+    };
+    let denied = NetworkPolicy::new(Access::Deny).with_deny(EgressRule::to("1.2.3.4"));
+    for closed in [NetworkPolicy::new(Access::Deny), denied] {
+        assert!(
+            openvmm_arguments(Some(&closed), "10.0.0.2/24")
+                .unwrap()
+                .is_empty()
+        );
+        let excepted = closed.clone().with_allow(excluded.clone());
+        let attached = attached_arguments(&closed, "10.0.0.2/24").unwrap();
+        assert_eq!(
+            attached,
+            openvmm_arguments(Some(&excepted), "10.0.0.2/24").unwrap()
+        );
+        assert_eq!(attached[..2], ["--net", "10.0.0.2/24"]);
+    }
+    // The attached lowering of any other policy is its lowering.
+    let proxied = NetworkPolicy::proxy_only(NetworkProxy::new(3128));
+    for policy in [NetworkPolicy::new(Access::Allow), proxied] {
+        assert_eq!(
+            attached_arguments(&policy, "10.0.0.2/24").unwrap(),
+            openvmm_arguments(Some(&policy), "10.0.0.2/24").unwrap()
+        );
+    }
+}
+
+#[test]
 fn default_postures_map_to_portable_profile_options() {
     assert!(openvmm_arguments(None, "10.0.0.2/24").unwrap().is_empty());
     assert!(

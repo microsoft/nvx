@@ -33,6 +33,7 @@ pub mod policy;
 mod proxy;
 mod rule;
 
+pub(crate) use self::arguments::attached_arguments;
 pub use self::arguments::openvmm_arguments;
 pub use self::loopback::{ForwardProtocol, HostLoopback, LoopbackForward};
 pub use self::proxy::{NetworkProxy, ProxyScheme};

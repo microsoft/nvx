@@ -1216,9 +1216,10 @@ fn read_machine(reader: &mut Reader<'_>) -> Result<(Machine, String), CanonicalE
 /// NIC's address and prefix length, which start with `--net` and that address.
 ///
 /// The check reads the policy back from the arguments, as `nvx-rs sandbox` reads its network
-/// options, and lowers it again, which renders a lowering unchanged. A key whose network no
-/// policy lowers to is thus malformed, rather than the network of a template that every clone's
-/// plan mismatches.
+/// options, and lowers it again with its NIC attached, which renders a lowering unchanged: a
+/// policy whose allow rules lower to no OpenVMM rule attaches its NIC even if it lets nothing
+/// through, and reads back without them. A key whose network no policy lowers to is thus
+/// malformed, rather than the network of a template that every clone's plan mismatches.
 fn check_network(nic: Option<&Nic>, network: &[String]) -> Result<(), CanonicalError> {
     let Some(nic) = nic else {
         return if network.is_empty() {
@@ -1240,7 +1241,7 @@ fn check_network(nic: Option<&Nic>, network: &[String]) -> Result<(), CanonicalE
     }
     let lowered = crate::net::guest_gateway(&address)
         .and_then(|gateway| read_policy(&network[2..], gateway))
-        .and_then(|policy| crate::host::network::openvmm_arguments(Some(&policy), &address).ok());
+        .and_then(|policy| crate::host::network::attached_arguments(&policy, &address).ok());
     if lowered.as_deref() == Some(network) {
         Ok(())
     } else {

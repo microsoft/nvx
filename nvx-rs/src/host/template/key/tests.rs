@@ -6,7 +6,8 @@ use std::collections::HashSet;
 use super::*;
 use crate::ErrorCode;
 use crate::host::network::{
-    Access, EgressRule, ForwardProtocol, NetworkPolicy, NetworkProxy, Protocol, ProxyScheme,
+    Access, Destination, EgressRule, ForwardProtocol, NetworkPolicy, NetworkProxy, Protocol,
+    ProxyScheme,
 };
 use crate::host::template::test_support::{
     self as support, MIB, ManifestSpec, artifact, network_class,
@@ -881,8 +882,6 @@ fn keys_of_machines_that_no_manifest_describes_are_refused() {
         ),
         // Another profile than OpenVMM's portable one.
         (|key| key.network[3] = "strict".to_owned(), UNLOWERED),
-        // A policy that lets nothing through, which attaches no NIC.
-        (|key| key.network[5] = "deny".to_owned(), UNLOWERED),
         // A rule that OpenVMM would not read.
         (
             |key| {
@@ -980,6 +979,13 @@ fn keys_of_machines_that_no_manifest_describes_are_refused() {
 
 #[test]
 fn keys_read_back_the_network_of_each_policy() {
+    let excluded = EgressRule {
+        to: vec![Destination {
+            cidr: "192.0.2.0/24".to_owned(),
+            except: vec!["192.0.2.0/24".to_owned()],
+        }],
+        ports: Vec::new(),
+    };
     let mut open = NetworkPolicy::new(Access::Allow);
     open.ingress = Access::Allow;
     open.host_loopback = HostLoopback::Outbound;
@@ -1007,6 +1013,13 @@ fn keys_read_back_the_network_of_each_policy() {
             .with_deny(EgressRule::to("192.0.2.7")),
         forwarded,
         NetworkPolicy::proxy_only(NetworkProxy::new(3128).with_scheme(ProxyScheme::Https)),
+        // A closed policy whose allow rule excepts its whole destination, which lowers to no
+        // OpenVMM rule, attaches its NIC all the same, with no allow rule, with or without deny
+        // rules: its arguments read back as a policy that lets nothing through.
+        NetworkPolicy::new(Access::Deny).with_allow(excluded.clone()),
+        NetworkPolicy::new(Access::Deny)
+            .with_allow(excluded)
+            .with_deny(EgressRule::to("198.51.100.0/24")),
     ];
     for policy in policies {
         let network = SandboxNetwork::new("10.0.0.2/24", policy).unwrap();
