@@ -77,6 +77,16 @@ The [module diagrams](../doc/modules/README.md) show the crate's modules, the
 modules that each contains, and the dependencies between its top-level modules,
 on Linux and Windows.
 
+The [filesystem module](src/host/filesystem/mod.rs) keeps its request types and
+planner together, with private siblings for guest and host paths, access policies,
+OpenVMM limits, and recorded-plan checks and rendering. The
+[instance module](src/host/instance/mod.rs) separates private-file helpers,
+lock-held lifecycle transitions, and workload execution. The CLI's
+[managed sandbox lifecycle](src/host/cli/sandbox/lifecycle/mod.rs) separates state
+directories, outcome reports, start and exec, and stop and deprovision. Their
+`mod.rs` files retain the existing entry points through re-exports; their
+`tests.rs` files keep the unit tests at the same module paths.
+
 | Module | Contents |
 | --- | --- |
 | `nvx::protocol` | The codec of the control console: `NVXS` outer records, `NVXC` application frames, the `EXEC` payload that the host encodes and the guest agent decodes, the `MAPS` payloads of the host mapping table, `GuestFeatures`, and the `nvx_maps=` and `nvx_workload_account=create` tokens. The [conformance vectors](tests/vectors/README.md) of version 1, `tests/vectors/nvxc-v1.txt`, and OpenVMM's vectors and cases of the `NVXS` session pin every record, frame, and payload independently of the codec, which the host, the guest agent, and the fake OpenVMM share |
