@@ -1000,7 +1000,7 @@ class PerformanceTests(unittest.TestCase):
                     ]
                 )
 
-        self.assertEqual(status, performance.UNSTABLE_LIFECYCLE_EXIT_CODE)
+        self.assertEqual(status, performance.UNSTABLE_EXIT_CODE)
         self.assertEqual(status, 75)
         self.assertIn("unstable snapshot generation", stderr.getvalue())
 

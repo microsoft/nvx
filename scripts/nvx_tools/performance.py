@@ -76,13 +76,13 @@ LIFECYCLE_MEMORY_MIB = 128
 LIFECYCLE_BOOT_MARKER = "ALPINE-MICROVM-BOOT-OK"
 LIFECYCLE_RESTORE_MARKER = "OPENVMM-SNAPSHOT-RESTORE-OK"
 LIFECYCLE_CAPTURE_TIMING = "openvmm-input-gate-to-publication"
-LIFECYCLE_STABILITY_MINIMUM_SAMPLES = 10
-LIFECYCLE_STABILITY_MINIMUM_CLUSTER_SAMPLES = 2
-LIFECYCLE_SNAPSHOT_MAX_P50_OVER_P25 = 1.25
-LIFECYCLE_SNAPSHOT_MAX_CLUSTER_GAP = 1.25
-UNSTABLE_LIFECYCLE_EXIT_CODE = 75
+STABILITY_MINIMUM_SAMPLES = 10
+STABILITY_MINIMUM_CLUSTER_SAMPLES = 2
+STABILITY_MAX_P50_OVER_P25 = 1.25
+STABILITY_MAX_CLUSTER_GAP = 1.25
+UNSTABLE_EXIT_CODE = 75
 LIFECYCLE_ATTEMPT_LOG_SCHEMA_VERSION = 1
-LIFECYCLE_ATTEMPT_STATUSES = {0: "valid", UNSTABLE_LIFECYCLE_EXIT_CODE: "unstable"}
+LIFECYCLE_ATTEMPT_STATUSES = {0: "valid", UNSTABLE_EXIT_CODE: "unstable"}
 """Validation statuses by exit status; any other status is ``invalid``."""
 SHA256_HEX = re.compile(r"[0-9a-f]{64}")
 COMMIT_ID = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
@@ -957,25 +957,27 @@ def _openvmm_statistics(
     return p50, minimum, maximum, len(samples)
 
 
-def _validate_snapshot_generation_stability(
-    document: dict[str, object], backend: str, source: Path
-) -> None:
-    samples = _openvmm_samples(
-        document, "snapshot_capture", backend, "samples_ms", source
-    )
-    if len(samples) < LIFECYCLE_STABILITY_MINIMUM_SAMPLES:
+def _validate_sample_stability(samples: Sequence[float], series: str) -> None:
+    """Reject a millisecond series that a transient host stall split.
+
+    With at least ``STABILITY_MINIMUM_SAMPLES`` samples, a p50 more than 25%
+    above p25, or a gap of more than 25% between adjacent sorted samples with
+    at least two samples on each side, raises ``UnstablePerformanceError``.
+    A single outlier and a uniformly slower series both pass. Callers must
+    pass positive samples.
+    """
+    if len(samples) < STABILITY_MINIMUM_SAMPLES:
         return
 
     ordered = sorted(samples)
     p25 = ordered[math.ceil(len(ordered) * 0.25) - 1]
     p50 = statistics.median(ordered)
     ratio = p50 / p25
-    if ratio > LIFECYCLE_SNAPSHOT_MAX_P50_OVER_P25:
+    if ratio > STABILITY_MAX_P50_OVER_P25:
         raise UnstablePerformanceError(
-            f"unstable snapshot generation at {source}:snapshot_capture."
-            f"{backend}.samples_ms: p50 {p50:.3f} ms is "
+            f"unstable {series}: p50 {p50:.3f} ms is "
             f"{(ratio - 1) * 100:.1f}% above p25 {p25:.3f} ms "
-            f"(limit {(LIFECYCLE_SNAPSHOT_MAX_P50_OVER_P25 - 1) * 100:.1f}%); "
+            f"(limit {(STABILITY_MAX_P50_OVER_P25 - 1) * 100:.1f}%); "
             "rerun on an idle host"
         )
 
@@ -987,20 +989,28 @@ def _validate_snapshot_generation_stability(
             ordered[split_index],
         )
         for split_index in range(
-            LIFECYCLE_STABILITY_MINIMUM_CLUSTER_SAMPLES,
-            len(ordered) - LIFECYCLE_STABILITY_MINIMUM_CLUSTER_SAMPLES + 1,
+            STABILITY_MINIMUM_CLUSTER_SAMPLES,
+            len(ordered) - STABILITY_MINIMUM_CLUSTER_SAMPLES + 1,
         )
     )
     gap_ratio, split_index, lower, upper = max(cluster_gaps)
-    if gap_ratio > LIFECYCLE_SNAPSHOT_MAX_CLUSTER_GAP:
+    if gap_ratio > STABILITY_MAX_CLUSTER_GAP:
         raise UnstablePerformanceError(
-            f"unstable snapshot generation at {source}:snapshot_capture."
-            f"{backend}.samples_ms: samples split {split_index}/"
+            f"unstable {series}: samples split {split_index}/"
             f"{len(ordered) - split_index} between {lower:.3f} ms and "
             f"{upper:.3f} ms ({(gap_ratio - 1) * 100:.1f}% gap, "
-            f"limit {(LIFECYCLE_SNAPSHOT_MAX_CLUSTER_GAP - 1) * 100:.1f}%); "
+            f"limit {(STABILITY_MAX_CLUSTER_GAP - 1) * 100:.1f}%); "
             "rerun on an idle host"
         )
+
+
+def _validate_snapshot_generation_stability(
+    document: dict[str, object], backend: str, source: Path
+) -> None:
+    _validate_sample_stability(
+        _openvmm_samples(document, "snapshot_capture", backend, "samples_ms", source),
+        f"snapshot generation at {source}:snapshot_capture.{backend}.samples_ms",
+    )
 
 
 def read_lifecycle_data(platform: str, input_path: Path) -> LifecycleData:
@@ -3060,7 +3070,7 @@ def command_performance(args: argparse.Namespace) -> int:
             try:
                 read_lifecycle_data(args.platform, args.input)
             except UnstablePerformanceError as error:
-                status, message = UNSTABLE_LIFECYCLE_EXIT_CODE, str(error)
+                status, message = UNSTABLE_EXIT_CODE, str(error)
             except PerformanceError as error:
                 status, message = 2, str(error)
             if message is not None:
