@@ -44,7 +44,8 @@
 //! clone and of the fence, whose deadline ends [`ACTIVATION_TIMEOUT`] after the repair's
 //! acknowledgement, it answers the reset that the restore queued for the session that the snapshot
 //! holds, takes the host's `Activate`, and applies its record with [`root_template`] of the
-//! template's configuration, then serves the host's order as after a cold boot, as the
+//! template's configuration and its NIC's gateway, then serves the host's order as after a cold
+//! boot, as the
 //! [worker's documentation](super#clones) describes. The clone ends as that session does. Once its
 //! activation failed, or the broker closed the stream before the clone was ready, the worker waits
 //! for the tty to send what it wrote for at most [`UNACTIVATED_DRAIN`], so that a tty that sends
@@ -52,6 +53,7 @@
 
 use std::fmt;
 use std::io::{self, Read, Write};
+use std::net::Ipv4Addr;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -86,13 +88,16 @@ pub fn template_config() -> RootConfig {
     RootConfig::default()
 }
 
-/// Returns the inputs of a clone's root's assembly that its template captured, from `config`, the
-/// template's own root configuration: its runtime directory; the distro and the scratch block
-/// devices, at the MMIO windows from which the worker of a VM that boots cold assembles its root,
-/// with the sizes that the configuration names, if any; how long the assembly waits for each;
-/// and the host filesystem device, by [`FILESYSTEM_TAG`], through which the host attaches the
-/// export of a clone's record. The record of the clone's `Activate` holds the rest.
-pub fn root_template(config: &RootConfig) -> RootTemplate {
+/// Returns the inputs of a clone's activation that its template captured, from `config`, the
+/// template's own root configuration, and `gateway`, the IPv4 gateway of the template's NIC, which
+/// its kernel command line names, if it has one: its runtime directory; the distro and the scratch
+/// block devices, at the MMIO windows from which the worker of a VM that boots cold assembles its
+/// root, with the sizes that the configuration names, if any; how long the assembly waits for
+/// each; the host filesystem device, by [`FILESYSTEM_TAG`], through which the host attaches the
+/// export of a clone's record; and the gateway, to which the announcer of the listeners of a
+/// clone whose record publishes them announces them. The record of the clone's `Activate` holds
+/// the rest.
+pub fn root_template(config: &RootConfig, gateway: Option<Ipv4Addr>) -> RootTemplate {
     RootTemplate {
         runtime: PathBuf::from(&config.runtime),
         distro: Device {
@@ -105,7 +110,7 @@ pub fn root_template(config: &RootConfig) -> RootTemplate {
         },
         timeout: config.device_timeout,
         filesystem_tag: FILESYSTEM_TAG.to_owned(),
-        gateway: None,
+        gateway,
     }
 }
 
@@ -304,6 +309,7 @@ enum Capture {
 }
 
 /// Captures the template's VM on its control tty at `tty`, with the root operations `operations`,
+/// whose NIC's IPv4 gateway is `gateway`, if it has a NIC, as its kernel command line names it,
 /// as the [module documentation](self) describes, and returns how the worker ended: once the
 /// bootstrap failed, or the capture ended without a snapshot, or failed, or in a clone, which a
 /// restore of the snapshot started, once its repair failed, or the session that the worker served
@@ -319,6 +325,7 @@ enum Capture {
 pub fn capture_on_terminal(
     tty: &Path,
     operations: &mut dyn RootOperations,
+    gateway: Option<Ipv4Addr>,
 ) -> Result<Templated, ServeError> {
     guest::on_terminal_within(tty, |terminal| {
         let config = template_config();
@@ -357,7 +364,7 @@ pub fn capture_on_terminal(
         // The activation's deadline starts at the repair's acknowledgement of the restore.
         let acknowledged = repaired.acknowledged_at();
         let activation = Activation::new(&repaired, fence, ACTIVATION_TIMEOUT, Instant::now());
-        let template = root_template(&config);
+        let template = root_template(&config, gateway);
         let worked = work_clone(
             open_tty(tty)?,
             session,
@@ -511,9 +518,10 @@ mod tests {
         // names another.
         let config = template_config();
         assert_eq!(config, RootConfig::default());
-        let template = root_template(&config);
+        let template = root_template(&config, None);
         assert_eq!(template.runtime, Path::new(&config.runtime));
         assert_eq!(template.timeout, config.device_timeout);
+        assert_eq!(template.gateway, None);
         // The clone's root comes from the devices whose mounts the template's capture checks, and
         // its export, if its record has one, through the host filesystem device that the capture
         // found unmounted.
@@ -527,11 +535,14 @@ mod tests {
             scratch_sectors: Some(16),
             ..config
         };
-        let template = root_template(&sized);
+        // A template with a NIC hands its clones its gateway.
+        let gateway = std::net::Ipv4Addr::new(10, 0, 0, 1);
+        let template = root_template(&sized, Some(gateway));
         assert_eq!(
             (template.distro.sectors, template.scratch.sectors),
             (Some(8), Some(16))
         );
+        assert_eq!(template.gateway, Some(gateway));
         assert_eq!(
             (template.distro.mmio, template.scratch.mmio),
             (DISTRO_MMIO_BASE, SCRATCH_MMIO_BASE)

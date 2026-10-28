@@ -83,8 +83,11 @@
 //!   clones take, since each clone's restore brings its own processor target online, up to N, MIB
 //!   mebibytes of RAM, 256 by default, and a RAM capacity of MIB mebibytes, its RAM by default, to
 //!   which a restore may expand it, and a dormant scratch of BYTES bytes, 64 MiB by default. It has
-//!   one NIC under the policy of the network FILE, which the creation reads as a launch reads its
-//!   network, unless the policy lets nothing through, and none without a network. The creation
+//!   one NIC at the guest's address of the network FILE, which the creation reads as a launch reads
+//!   its network, under the complete deny-all policy, whatever the network's own, which each
+//!   clone's restore replaces with the clone's, unless the network's policy lets nothing through,
+//!   and none without a network: the networks of every policy at one guest's address share one
+//!   class, and so one template. The creation
 //!   reads the network before anything else, then stages the placeholder as `stage` stages an
 //!   image, verifying it explicitly, which hashes it only when a manifest is beside it, and checks
 //!   the class before it creates the store. A capture boots the template's VM through NVX's
@@ -129,9 +132,10 @@
 //!   generation G of the template store TEMPLATES, an `nvx::host::template::Store`, in the sandbox
 //!   store STORE, which it creates if needed; see `runtime_adapter::clone`. The clone's VM has the
 //!   network of the file FILE, if given, which the command reads first, as `launch` reads its
-//!   network: it must be the template's, the guest's address and the policy of the template's NIC,
-//!   which every restore of the template attaches, or for a template without a NIC none, or one
-//!   that lets nothing through. SHARES, as `launch` takes them, share
+//!   network: it must be at the guest's address of the template's NIC, under a policy of its own,
+//!   which the clone's restore installs on the NIC in place of the template's complete deny-all
+//!   policy, or for a template without a NIC none, or one that lets nothing through. SHARES, as
+//!   `launch` takes them, share
 //!   host paths with the clone's root: the command plans their export as a launch does, with
 //!   NVX's `filesystem::plan`, and refuses shares that it cannot export before anything but its
 //!   network. It then reads the generation from the store's index, and, unless N and MIB
@@ -144,7 +148,8 @@
 //!   `Store::acquire`, which refuses a generation that a tombstone quarantines, or that is not
 //!   eligible then, and NVX's `ClonePlan` checks the clone against the generation, from the
 //!   metadata of its files
-//!   alone: its network, which must be the one that the template's key records, its image, the
+//!   alone: its network, which must attach a NIC exactly when the template's key records one, at
+//!   the guest's address of the template's NIC, under a policy of its own, its image, the
 //!   raw file PATH, an EROFS filesystem, `erofs`, or a GPT disk, `gpt`, of
 //!   which the guest expects the identity UUID, no longer than the template's placeholder,
 //!   whatever the placeholder's format, and of its block sizes, its upper, the ext4 scratch image
@@ -167,11 +172,15 @@
 //!   the clone's root before it is ready, the overlay mode MODE and the scratch's journal policy
 //!   POLICY, as a launch takes them, for a GPT disk, the bound BYTES of its first partition, 64
 //!   KiB unless given, as a launch's guest takes it by default, the export, by the identity of
-//!   its plan, with the number of its mappings, and for a template with a NIC its network: the
-//!   identity of its policy, the DNS server with which the template's guest configured its
-//!   resolver at boot, if any, whose address the clone's guest writes to a resolver file that it
-//!   binds read-only over the root's `/etc/resolv.conf`, and the URL of the policy's proxy, if
-//!   any, which every execution then finds in its environment, as a launch's executions do. Every
+//!   its plan, with the number of its mappings, and for a template with a NIC the clone's network:
+//!   the identity of its policy, the DNS server that OpenVMM serves the guest under the policy, if
+//!   any, which NVX finds as OpenVMM does, since the template's guest learned none, and whose
+//!   address the clone's guest writes to a resolver file that it binds read-only over the root's
+//!   `/etc/resolv.conf`, whether the policy publishes the workload's listeners, as it does with
+//!   ingress, or with host-loopback access both ways, for which the clone's guest starts their
+//!   announcer and refuses `CAP_NET_BIND_SERVICE` and `CAP_NET_RAW` to its executions, and the
+//!   URL of the policy's proxy, if any, which every execution then finds in its environment, as a
+//!   launch's executions do. Every
 //!   execution of the clone sees the hostname
 //!   `runtime-adapter`, and the machine ID that `--machine-id` chooses: the image's own, `image`,
 //!   by default, or one that the guest generates once for the clone, `generated`, which a

@@ -29,9 +29,11 @@
 //! activation, retries of the `Activate`, the order that the worker serves once the clone is
 //! ready, the status of each class of the activation's failures, which the worker answers with
 //! nothing, before any side effect where the class allows, its deadline, also once the stream
-//! takes nothing more, the record's workload identity, as which every execution runs, and the
+//! takes nothing more, the record's workload identity, as which every execution runs, the
 //! mapping table of the record's export, which the worker applies from the export that the
-//! application mounted, while it leaves the endpoint of the network's proxy to the host.
+//! application mounted, while it leaves the endpoint of the network's proxy to the host, and the
+//! announcer of the listeners of a record whose network publishes them, whose end ends the clone,
+//! which the fake stands for with a pipe that the test closes.
 //!
 //! The worker's executions run behind the test broker too, whose host side drives the engine's
 //! peers through the host program's own `exec::HostExecution`: the tests cover several executions
@@ -56,7 +58,7 @@ use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::Shutdown;
-use std::os::fd::OwnedFd;
+use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::net::UnixStream;
 use std::os::unix::process::{CommandExt, ExitStatusExt};
@@ -70,6 +72,7 @@ use std::time::{Duration, Instant};
 
 use nix::errno::Errno;
 use nix::fcntl::OFlag;
+use nix::poll::{self, PollFd, PollFlags, PollTimeout};
 use nix::pty;
 use nix::sys::signal::{self, Signal};
 use nix::sys::wait::{self, Id, WaitPidFlag, WaitStatus};
@@ -1137,6 +1140,10 @@ enum Operation {
     /// its record's export, if any.
     #[cfg(target_arch = "x86_64")]
     Resolver,
+    /// A clone's start of the announcer of its workload's listeners, which its record's network
+    /// publishes, once it wrote the resolver file, if any.
+    #[cfg(target_arch = "x86_64")]
+    Announce,
     /// The host export's mount: the one that the kernel command line names, or a clone's record's.
     MountExport,
     /// A probe.
@@ -1201,6 +1208,14 @@ struct FakeRoot {
     /// The workload cgroup of the test's own, below which the worker runs its executions in
     /// cgroups of their own, where the test can create cgroups.
     workload: Option<Workload>,
+    /// The read end of a pipe whose write end the test holds, which the application takes as the
+    /// announcer that it starts, if the test made one with [`ending`](Self::ending).
+    ending: Option<OwnedFd>,
+    /// The announcer that a clone's application started, for a record whose network publishes
+    /// the workload's listeners, until the worker collected its end: the read end of a pipe,
+    /// which polls readable, hung up, once its write end closes, as an announcer's pidfd polls
+    /// readable once the announcer ended, with that write end, unless the test holds it.
+    announcer: Option<(OwnedFd, Option<OwnedFd>)>,
 }
 
 impl FakeRoot {
@@ -1239,6 +1254,8 @@ impl FakeRoot {
             #[cfg(target_arch = "x86_64")]
             deadlines: Vec::new(),
             workload,
+            ending: None,
+            announcer: None,
         }
     }
 
@@ -1262,6 +1279,14 @@ impl FakeRoot {
     fn assembling_for(mut self, assembly: Duration) -> Self {
         self.assembly = assembly;
         self
+    }
+
+    /// Makes the announcer that a clone's application starts end once the test drops the returned
+    /// write end of its pipe.
+    fn ending(mut self) -> (Self, OwnedFd) {
+        let (read, write) = announcer_pipe();
+        self.ending = Some(read);
+        (self, write)
     }
 
     /// Makes each probe, and each of a clone's applications, wait until the test opens the gate,
@@ -1346,7 +1371,24 @@ impl RootOperations for FakeRoot {
 
     fn teardown(&mut self) -> Result<(), String> {
         self.calls.push(Call::Teardown);
+        self.announcer = None;
         self.result(Operation::Teardown)
+    }
+
+    fn announcer(&self) -> Option<BorrowedFd<'_>> {
+        self.announcer.as_ref().map(|(read, _)| read.as_fd())
+    }
+
+    /// Returns the announcer's end once the write end of its pipe closed, which collects it.
+    fn announcer_ended(&mut self) -> Option<String> {
+        let (read, _) = self.announcer.as_ref()?;
+        let mut polls = [PollFd::new(read.as_fd(), PollFlags::POLLIN)];
+        poll::poll(&mut polls, PollTimeout::ZERO).unwrap();
+        let ended = polls[0].revents().is_some_and(|events| !events.is_empty());
+        ended.then(|| {
+            self.announcer = None;
+            "the test ended the announcer".to_owned()
+        })
     }
 
     /// Applies the record as `nvx::guest::clone::apply` does, without a root, once the test opened
@@ -1358,9 +1400,12 @@ impl RootOperations for FakeRoot {
     /// stands for the root that it assembled. It then stands for the generation of the machine ID
     /// that the record asks for, if any, the mount of the record's export through the template's
     /// host filesystem device, if it has one, the write of the resolver file that names the DNS
-    /// server of the record's network, if it names one, and the setting of the record's hostname
-    /// and machine ID for every execution, which fail if the test fails [`Operation::MachineId`],
-    /// [`Operation::MountExport`], [`Operation::Resolver`], and [`Operation::View`].
+    /// server of the record's network, if it names one, the start of the announcer of the
+    /// workload's listeners, if the network publishes them, and the setting of the record's
+    /// hostname and machine ID for every execution, which fail if the test fails
+    /// [`Operation::MachineId`], [`Operation::MountExport`], [`Operation::Resolver`],
+    /// [`Operation::Announce`], and [`Operation::View`]. A failure after the start stops the
+    /// announcer.
     #[cfg(target_arch = "x86_64")]
     fn apply(
         &mut self,
@@ -1368,8 +1413,9 @@ impl RootOperations for FakeRoot {
         template: &nvx::guest::clone::RootTemplate,
         deadline: Option<Instant>,
     ) -> Result<Option<entry::Identity>, nvx::guest::clone::ApplyError> {
-        use nvx::activation::MachineIdMode;
+        use nvx::activation::{self, MachineIdMode};
         use nvx::guest::clone::{ApplyError, NetworkError};
+        use nvx::guest::ingress::StartError;
         use nvx::guest::root::{DeviceStep, Error, Mount, Role};
 
         let applied = (record.clone(), template.clone());
@@ -1436,11 +1482,34 @@ impl RootOperations for FakeRoot {
                     teardown: None,
                 })?;
         }
-        self.result(Operation::View)
-            .map_err(|problem| ApplyError::View {
+        if network.is_some_and(|network| network.publication == activation::Publication::Published)
+        {
+            if template.gateway.is_none() {
+                return Err(ApplyError::Network {
+                    error: NetworkError::Gateway,
+                    teardown: None,
+                });
+            }
+            self.result(Operation::Announce)
+                .map_err(|problem| ApplyError::Network {
+                    error: NetworkError::Announcer(StartError::Spawn(io::Error::other(problem))),
+                    teardown: None,
+                })?;
+            self.announcer = Some(match self.ending.take() {
+                Some(read) => (read, None),
+                None => {
+                    let (read, write) = announcer_pipe();
+                    (read, Some(write))
+                }
+            });
+        }
+        self.result(Operation::View).map_err(|problem| {
+            self.announcer = None;
+            ApplyError::View {
                 error: entry::Error::Root(io::Error::other(problem)),
                 teardown: None,
-            })?;
+            }
+        })?;
         Ok(identity)
     }
 }
@@ -1473,6 +1542,13 @@ const PASSWD: &str = "root:x:0:0:root:/root:/bin/sh\n\
 
 /// The `/etc/group` of the [accounts' root](accounts).
 const GROUP: &str = "root:x:0:\nstaff:x:50:\nworkload:x:1000:\n";
+
+/// Returns a pipe that stands for the pidfd of a clone's announcer: its read end, which polls
+/// readable once the write end closes, and its write end. Both close on exec, so that no program
+/// that a test spawns holds the write end, and keeps the announcer from ending.
+fn announcer_pipe() -> (OwnedFd, OwnedFd) {
+    nix::unistd::pipe2(OFlag::O_CLOEXEC).unwrap()
+}
 
 /// Returns the directory that stands for the assembled root of every fake root when the worker
 /// prepares an entry: one of the tests' own, below the target directory, for the tests' user,
@@ -4075,6 +4151,9 @@ mod clones {
         memory: 1 << 30,
     };
 
+    /// The IPv4 gateway of the NIC of the clones' template.
+    const GATEWAY: Ipv4Addr = Ipv4Addr::new(10, 0, 0, 1);
+
     /// Returns the record of a clone's Activate of the transaction `transaction`, whose workload
     /// runs as `identity`, if any: an EROFS image over a scratch, without an export, a mapping, or
     /// a network, which expects [`RESOURCES`].
@@ -4144,6 +4223,15 @@ mod clones {
         })
     }
 
+    /// Returns the record of `record`'s transaction with the network of [`networked`], without a
+    /// proxy, but which publishes the workload's listeners.
+    fn published(record: &ActivationRecord) -> ActivationRecord {
+        changed(&networked(record, None), |configuration| {
+            let network = configuration.network.as_mut().unwrap();
+            network.publication = activation::Publication::Published;
+        })
+    }
+
     /// Returns the activation of a clone that the worker repaired, with [`RESOURCES`], behind the
     /// worker's fence, which the capture's barrier handed over closed, and whose deadline ends
     /// `timeout` after `acknowledged`, as from the repair's acknowledgement of the restore.
@@ -4153,10 +4241,10 @@ mod clones {
         Activation::with_resources(RESOURCES, Some(acknowledged), fence, timeout, acknowledged)
     }
 
-    /// Returns the inputs of the assembly of the clones' roots that their template captured:
-    /// those of the template's own configuration.
+    /// Returns the inputs of the activation of the clones that their template captured: those of
+    /// the template's own configuration, and the gateway of its NIC, [`GATEWAY`].
     fn template() -> RootTemplate {
-        capture::root_template(&capture::template_config())
+        capture::root_template(&capture::template_config(), Some(GATEWAY))
     }
 
     /// Returns the guest's role of the session that the template's VM attached before its
@@ -4450,8 +4538,9 @@ mod clones {
         // The application fails once the kernel refused to reread a GPT disk's partition table,
         // and refuses a workload identity whose account the image lacks, or whose primary group
         // it lacks, a machine ID that it cannot generate, and a hostname or machine ID that it
-        // cannot set for every execution, an export that it cannot mount, and a resolver file
-        // that it cannot write, before Ready.
+        // cannot set for every execution, an export that it cannot mount, a resolver file that it
+        // cannot write, and an announcer of the workload's listeners that it cannot start, before
+        // Ready.
         let gpt = changed(&clone, |configuration| {
             configuration.image = activation::Image::Gpt {
                 binding: activation::Identity::from_bytes([0x11; 32]),
@@ -4492,6 +4581,11 @@ mod clones {
                 exported(&clone, 1),
                 FakeRoot::failing(Operation::MountExport, "the export's device is missing"),
                 status::ACTIVATION_EXPORT,
+            ),
+            (
+                published(&clone),
+                FakeRoot::failing(Operation::Announce, "no privileged port is free"),
+                status::ACTIVATION_NETWORK,
             ),
             (
                 networked(&clone, None),
@@ -4808,10 +4902,12 @@ mod clones {
     }
 
     /// Returns the entrance of a clone's execution as `identity`, with the hostname `hostname`,
-    /// its record's, and published listeners.
+    /// its record's, and unpublished listeners, as a record whose network publishes none, or
+    /// that has none, has them.
     fn cloned(identity: entry::Identity, hostname: &[u8]) -> Entrance {
         Entrance {
             hostname: hostname.to_vec(),
+            publication: Publication::Unpublished,
             ..entrance(identity)
         }
     }
@@ -4850,6 +4946,130 @@ mod clones {
         let (root, worked) = host.stop();
         assert_eq!(worked.unwrap(), Worked::Stopped);
         assert_eq!(entrances(&root), [cloned(identity, b"another-clone")]);
+    }
+
+    #[test]
+    fn a_clone_s_executions_enter_the_root_with_the_publication_of_its_record_s_network() {
+        // A record's network publishes the guest's listeners under a policy that allows ingress
+        // or host-loopback access both ways, and then the entry refuses at stage 0 the
+        // capabilities that could forge a listener announcement, as after a cold boot whose
+        // configuration publishes them. A record whose network publishes none, or that has
+        // none, leaves them to the execution, as the other capabilities of the allowlist.
+        let capabilities = [
+            Capability::NET_BIND_SERVICE,
+            Capability::NET_RAW,
+            Capability::CHOWN,
+        ];
+        for (record, publication) in [
+            (record(1, None), Publication::Unpublished),
+            (networked(&record(1, None), None), Publication::Unpublished),
+            (published(&record(1, None)), Publication::Published),
+        ] {
+            let mut host = Host::activated(FakeRoot::booting(&layout()), &record);
+            for (id, capability) in (1..).zip(capabilities) {
+                let identity = exec::Identity {
+                    capabilities: 1 << capability.number(),
+                    ..exec::Identity::new(0, 0)
+                };
+                host.start(
+                    start_of(id, shell("exit 0")).with_identity(identity),
+                    Vec::new(),
+                );
+            }
+            host.run_until(|host| (1..=3).all(|id| host.outcome(id).is_some()));
+            for (id, capability) in (1..).zip(capabilities) {
+                if publication == Publication::Published && capability != Capability::CHOWN {
+                    let failure = LaunchFailure::new(0, Errno::EPERM as i32);
+                    let outcome = host.outcome(id).unwrap();
+                    assert_eq!(outcome.launch_failure(), Some(failure), "{capability}");
+                } else {
+                    check_lossless(&host, id, Status::Exited(0));
+                }
+            }
+            let (root, worked) = host.stop();
+            assert_eq!(worked.unwrap(), Worked::Stopped);
+            let expected = capabilities.map(|capability| Entrance {
+                publication,
+                ..cloned(
+                    entry::Identity::new(0, 0).capabilities(Capabilities::EMPTY.with(capability)),
+                    b"clone",
+                )
+            });
+            assert_eq!(entrances(&root), expected, "{publication:?}");
+        }
+    }
+
+    #[test]
+    fn a_clone_whose_announcer_ends_ends_with_the_network_s_status() {
+        // The application started the announcer of the listeners that the record's network
+        // publishes, whose end, once the clone is ready, before its sandbox started or after, and
+        // with an execution running, ends the clone with the network's status, once the worker
+        // dropped its executions: the gateway would keep publishing the listeners that the
+        // announcer last announced, and learn of no later change of them.
+        let record = published(&record(1, None));
+        for started in [false, true] {
+            let (root, ending) = FakeRoot::booting(&layout()).ending();
+            let (mut broker, working) = start_clone(root, ACTIVATION_TIMEOUT);
+            broker.reset(RESTORED);
+            let replies = broker.exchange(&[activate(&record)], OUTER_MAX_PAYLOAD, 1);
+            assert_eq!(replies, [activated(&record)]);
+            // The host waits for Ready before it starts the sandbox: until the activation
+            // settled, any message but a retry of the Activate fails it.
+            if started {
+                let replies = broker.exchange(&[Message::Start], OUTER_MAX_PAYLOAD, 1);
+                assert_eq!(replies, [Message::Started]);
+            }
+            drop(ending);
+            let (root, worked) = joined(working);
+            let worked = worked.unwrap();
+            assert_eq!(
+                worked,
+                Worked::Unactivated {
+                    status: status::ACTIVATION_NETWORK,
+                    problem: "the test ended the announcer".to_owned(),
+                }
+            );
+            assert_eq!(root.calls, [applied(&record)], "{started}");
+            assert!(root.announcer.is_none());
+        }
+        let (root, ending) = FakeRoot::booting(&layout()).ending();
+        let mut host = Host::activated(root, &record);
+        let running = start_of(1, shell("echo up; exec sleep 60"));
+        host.start(running.with_identity(exec::Identity::new(0, 0)), Vec::new());
+        host.run_until(|host| host.executions[&1].output(Stream::Stdout) == b"up\n");
+        drop(ending);
+        let (root, worked) = joined(host.working.take().unwrap());
+        assert_eq!(worked.unwrap().status(), status::ACTIVATION_NETWORK);
+        assert_eq!(root.calls[0], applied(&record));
+
+        // A template without a gateway cannot announce the listeners of a record that publishes
+        // them, which fails before Ready with the network's status.
+        let root = FakeRoot::booting(&layout());
+        let (broker, guest) = UnixStream::pair().unwrap();
+        let mut broker = Broker::new(broker);
+        let session = captured_session();
+        let acknowledged = Instant::now();
+        let activation = repaired(acknowledged, ACTIVATION_TIMEOUT);
+        let gatewayless = RootTemplate {
+            gateway: None,
+            ..template()
+        };
+        let working = thread::spawn(move || {
+            let mut root = root;
+            let worked = worker::work_clone(
+                guest,
+                session,
+                &mut root,
+                activation,
+                gatewayless,
+                Some(acknowledged),
+            );
+            (root, worked)
+        });
+        broker.reset(RESTORED);
+        broker.send_data(&activate(&record).encode().unwrap(), OUTER_MAX_PAYLOAD);
+        let root = unactivated(&mut broker, working, status::ACTIVATION_NETWORK);
+        assert!(root.announcer.is_none());
     }
 
     /// Returns the facts of the guest's `report`.

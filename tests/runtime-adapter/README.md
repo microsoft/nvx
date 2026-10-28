@@ -640,7 +640,9 @@ credit that it needs, never keeps the others' output from the host.
   session creates, and, as PID 1 of its PID namespace, its end ends every
   process of the namespace. The guest's network device, its addresses, and the
   announcer of its listeners stay with NVX's `/init`, which configures them
-  before PID 1 starts; see [Networks](#networks).
+  before PID 1 starts, but for the announcer of a clone, which the clone's
+  application starts; see [Networks](#networks) and
+  [Template mode](#template-mode).
 - Each execution runs in a cgroup of its own below the workload cgroup of the
   root configuration, `execution-N`, where N counts the cgroups that the worker
   prepared. The worker prepares it with
@@ -806,10 +808,12 @@ after the repair's acknowledgement of the restore:
    CPU count and the memory size that the repair found, before anything has a
    side effect.
 3. It applies the record with `nvx::guest::clone::apply`, with
-   `worker::capture::root_template` of the template's configuration: its
-   runtime directory, the `distro` and scratch block devices, its device
-   timeout, and the tag of the host filesystem device,
-   `worker::capture::FILESYSTEM_TAG`. The application assembles the root, an
+   `worker::capture::root_template` of the template's configuration and of its
+   NIC's IPv4 gateway, which `template::boot` read from the template's kernel
+   command line: its runtime directory, the `distro` and scratch block devices,
+   its device timeout, the tag of the host filesystem device,
+   `worker::capture::FILESYSTEM_TAG`, and the gateway, if the template has a
+   NIC. The application assembles the root, an
    EROFS image or a GPT disk over a tmpfs or the scratch, in the record's
    overlay mode, waiting for each device until the activation's deadline at the
    latest, so that it ends by then, and checks the account of the record's
@@ -827,10 +831,19 @@ after the repair's acknowledgement of the restore:
    the worker of a VM that boots cold mounts the one that its kernel command
    line names. If the record's network names a DNS server, it writes a resolver
    file that names it, of mode 0444, in `nvx::guest::clone::RESOLVER_FILE` of
-   the runtime directory. It then binds the generated machine ID read-only over
-   the root's `/etc/machine-id`, and the resolver file read-only over its
-   `/etc/resolv.conf`, in the worker's mount namespace, for every execution;
-   with the image's own machine ID and without a DNS server, it binds nothing.
+   the runtime directory. If the record's network publishes the workload's
+   listeners, it starts their announcer,
+   `/sbin/nvx-ingress inherit GATEWAY_IPV4`, with
+   `nvx::guest::ingress::Announcer::start`: it binds a UDP socket to a
+   privileged source port, from which alone OpenVMM's gateway takes
+   announcements, and runs the program with that socket as its standard input,
+   to the template's gateway, waiting until the program runs, but for no
+   announcement. The template, captured under a policy that publishes nothing,
+   runs no announcer of its own. It then binds the generated machine ID
+   read-only over the root's `/etc/machine-id`, and the resolver file read-only
+   over its `/etc/resolv.conf`, in the worker's mount namespace, for every
+   execution; with the image's own machine ID and without a DNS server, it binds
+   nothing.
 4. Once it took what the session received while the application ran, which came
    before `Ready`, it completes the activation, which opens the fence, and
    answers `Ready`, which reports the activation after the guest agent's build,
@@ -846,13 +859,18 @@ after the repair's acknowledgement of the restore:
    execution takes the record's hostname. The host tells the workloads the
    endpoint of the network's proxy, as after a cold boot: the host program's
    `exec` adds it to each execution's environment, so the worker leaves each
-   execution's environment exactly its start's. The application does not apply
-   the publication of the record's listeners, so a clone's executions enter the
-   root with listeners published, the entry's default, which refuses the most.
-   On the stop, the worker closes the export's root and removes the
-   application's binds, which keep the root's mounts busy, before it tears the
-   root down, through `nvx::guest::clone::Applied::teardown`. It also answers
-   the [`activation` probe](#probes), with when the events of its activation and
+   execution's environment exactly its start's. A clone's executions enter the
+   root with the publication of listeners that the record's network names:
+   published under a policy that publishes them, which refuses
+   `CAP_NET_BIND_SERVICE` and `CAP_NET_RAW`, and unpublished otherwise, a clone
+   without a network included. The worker polls the pidfd of the announcer that
+   the application started with the session's stream: once the announcer ended,
+   before the clone was ready or after, the clone ends with status 57, as one
+   whose announcer could not start. On the stop, the worker stops the announcer,
+   closes the export's root, and removes the application's binds, which keep the
+   root's mounts busy, before it tears the root down, through
+   `nvx::guest::clone::Applied::teardown`. It also answers the
+   [`activation` probe](#probes), with when the events of its activation and
    order happened after the repair's acknowledgement of the restore.
 
 Until the clone is ready, its session takes nothing but that `Activate`:
@@ -880,7 +898,7 @@ ends with one of these statuses, after a diagnostic on standard error:
 | 1 | The control tty cannot be opened or put in raw mode, the attachment or the acknowledgement of the broker's reset cannot be sent, or the broker closes the session or sends anything but a reset first, or, in a clone, its session failed or the broker closed it |
 | 13 | The bootstrap of the guest for the template's root failed, before the attachment |
 | 15 | In a clone, the root's teardown failed once the host stopped the worker |
-| 20 | The kernel command line names the platform tier, but holds another parameter, a double quote, or `--`, or the worker cannot read it |
+| 20 | The kernel command line names the platform tier, but holds another parameter, a double quote, `--`, or a gateway that OpenVMM does not render, or the worker cannot read it |
 | 21 | The fence of workload admission cannot be closed |
 | 22 | Something is mounted from the template's devices or from an overlay, or the mount table cannot be checked |
 | 23 | The time ABI's boot checks did not complete |
@@ -904,7 +922,7 @@ ends with one of these statuses, after a diagnostic on standard error:
 | 54 | The root's assembly failed, its upper not fresh among its causes, or the kernel did not reread the partition table of the record's GPT disk before it |
 | 55 | The clone's workload cannot be activated: the image refuses the record's workload identity, as it holds no account of the identity, or not its group, or its account databases cannot be read, or the machine ID that the record asks for cannot be generated, or the record's hostname or that machine ID cannot be set for every execution |
 | 56 | The record's host export cannot be mounted |
-| 57 | The record's network settings cannot be applied: the resolver file that names its DNS server cannot be written, or set for every execution |
+| 57 | The record's network settings cannot be applied: the resolver file that names its DNS server cannot be written, or set for every execution, or the announcer of the listeners that its network publishes cannot start, as without the template's gateway; or that announcer ended |
 | 58 | The worker's own order misused the activation: it completed an activation that did not run, or started the sandbox before the clone was ready, or again |
 | 193 | A conformance check of the time ABI failed in the clone's repair, such as the finish's, which needs a running time daemon |
 | 195 | The time ABI's part of the clone's repair failed, such as the validation of the restore packet, or the record of the restore |

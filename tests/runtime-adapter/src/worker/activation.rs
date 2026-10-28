@@ -28,7 +28,7 @@ use std::io::{Read, Write};
 use std::os::fd::AsFd;
 use std::time::{Duration, Instant};
 
-use nvx::activation::{ActivationRecord, ReadyActivation};
+use nvx::activation::{self, ActivationRecord, ReadyActivation};
 use nvx::guest::clone::{
     Activation, ActivationAction, ActivationCause, ActivationFailure, ActivationInput, ApplyError,
     RootTemplate,
@@ -84,8 +84,10 @@ pub const ACTIVATION_PROBE: &str = "activation";
 /// - [`ACTIVATION_EXPORT`](status::ACTIVATION_EXPORT): the host export of the record cannot be
 ///   mounted, as [`ApplyError::Export`] tells;
 /// - [`ACTIVATION_NETWORK`](status::ACTIVATION_NETWORK): the resolver file that names the DNS
-///   server of the record's network cannot be written or set for every execution, as
-///   [`ApplyError::Network`] tells;
+///   server of the record's network cannot be written or set for every execution, or the
+///   announcer of the workload's listeners, which the network publishes, cannot start, as
+///   [`ApplyError::Network`] tells. The worker also ends a clone whose announcer ended with it,
+///   whether the clone was ready or not, outside the activation;
 /// - [`ACTIVATION_ORDER`](status::ACTIVATION_ORDER): the worker's own order completed an
 ///   activation that did not run, or started the sandbox before the clone was ready, or again.
 ///
@@ -141,6 +143,9 @@ struct Applied {
     mappings: u32,
     /// The hostname of every execution: the record's.
     hostname: Vec<u8>,
+    /// The publication of the listeners of every execution: that of the record's network, and
+    /// unpublished without one.
+    publication: Publication,
     /// The number of retries of the Activate that joined the application, which its completion
     /// answers too.
     joined: usize,
@@ -287,8 +292,8 @@ impl CloneState {
 
     /// Applies `record`, the record of the Activate that the activation accepted, through
     /// `operations`, with the template's inputs, by the activation's deadline, and keeps the
-    /// application's result, with the record's hostname and the number of its mappings, until the
-    /// worker [settles](Self::settle) the activation with it.
+    /// application's result, with the record's hostname, its publication of listeners, and the
+    /// number of its mappings, until the worker [settles](Self::settle) the activation with it.
     fn apply(&mut self, operations: &mut dyn RootOperations, record: &ActivationRecord) {
         // The application's waits for the devices end by the activation's deadline, past which
         // the completion fails the activation, whatever the application's result.
@@ -297,10 +302,21 @@ impl CloneState {
         let configuration = record.configuration();
         // A record announces at most `nvx::activation::MAX_MAPPINGS` mappings, which fit a `u32`.
         let mappings = configuration.mappings as u32;
+        // The executions enter the root with the record's publication of listeners, as a launch's
+        // executions enter it with its root configuration's: published, which refuses
+        // `CAP_NET_BIND_SERVICE` and `CAP_NET_RAW`, under a network that publishes them, and
+        // unpublished otherwise, a clone without a network included.
+        let publication = match configuration.network.as_ref() {
+            Some(network) if network.publication == activation::Publication::Published => {
+                Publication::Published
+            }
+            _ => Publication::Unpublished,
+        };
         self.applied = Some(Applied {
             result,
             mappings,
             hostname: configuration.workload.hostname.clone(),
+            publication,
             joined: 0,
         });
     }
@@ -310,8 +326,9 @@ impl CloneState {
     /// returns the worker's step: `Ready`, which reports the activation, for the `Activate` and
     /// for each retry that joined its application, once the clone is ready, after which
     /// `executions` run in the cgroups that the template's bootstrap prepared, as the record's
-    /// workload identity, if it has one, with the record's hostname, and the worker's order awaits
-    /// the record's mappings; or the end, once the activation failed.
+    /// workload identity, if it has one, with the record's hostname and publication of listeners,
+    /// and the worker's order awaits the record's mappings; or the end, once the activation
+    /// failed.
     pub(super) fn settle(
         &mut self,
         operations: &mut dyn RootOperations,
@@ -326,10 +343,8 @@ impl CloneState {
             Ok(activation) => {
                 self.timeline.ready = Some(Instant::now());
                 let identity = identity.map(|identity| (identity.uid(), identity.gid()));
-                // The executions' listeners are published, the entry's default, which refuses
-                // the most, as a root configuration that names no publication has them.
                 let sandbox =
-                    Sandbox::new(identity, Publication::Published).with_hostname(applied.hostname);
+                    Sandbox::new(identity, applied.publication).with_hostname(applied.hostname);
                 executions.run_in(operations.cgroups(), sandbox);
                 self.order = Some(Order::new(applied.mappings));
                 Step::Continue(vec![ready(activation); 1 + applied.joined])
@@ -442,6 +457,7 @@ mod tests {
     };
     use nvx::guest::clone::{AdmissionFence, NetworkError};
     use nvx::guest::entry;
+    use nvx::guest::ingress::StartError;
     use nvx::guest::mappings::MappingError;
     use nvx::guest::root::{self, Assembly, Device, Error as RootError, Role};
     use nvx::protocol::root::DISTRO_MMIO_BASE;
@@ -632,6 +648,17 @@ mod tests {
         };
         let network = activating().complete(now(), Err(unbound.into()));
         cases.push((failed(network), status::ACTIVATION_NETWORK));
+        for error in [
+            NetworkError::Gateway,
+            NetworkError::Announcer(StartError::NoPrivilegedPort),
+        ] {
+            let unannounced = ApplyError::Network {
+                error,
+                teardown: None,
+            };
+            let network = activating().complete(now(), Err(unannounced.into()));
+            cases.push((failed(network), status::ACTIVATION_NETWORK));
+        }
         let other = activating().complete(now(), Err("another failure of the application".into()));
         cases.push((failed(other), status::ACTIVATION_ROOT));
         // The worker's own order.
@@ -675,7 +702,10 @@ mod tests {
 
         let template = template_config();
         assert!(ACTIVATION_TIMEOUT >= 2 * template.device_timeout);
-        assert_eq!(root_template(&template).timeout, template.device_timeout);
+        assert_eq!(
+            root_template(&template, None).timeout,
+            template.device_timeout
+        );
     }
 
     #[test]

@@ -20,7 +20,9 @@
 //!   RAM and its capacity;
 //! - the geometries of the placeholder and of the dormant scratch, as OpenVMM presents a sandbox
 //!   block device, which [`geometry`] gives;
-//! - the network, which the adapter's plan renders too, and no other invariant setting.
+//! - the network, of which the class takes the NIC alone, at the guest's address, under the
+//!   complete deny-all policy, whatever the network's own, which each clone's restore replaces
+//!   with the clone's, and no other invariant setting.
 //!
 //! The capture's VM boots NVX's kernel with the initramfs of the adapter's VMs, which puts the
 //! guest agent in place of NVX's agents; see [`crate::initramfs`]. NVX gives it the kernel command
@@ -94,7 +96,8 @@ pub struct Request {
     pub memory_capacity: u64,
     /// The length of the dormant scratch, in bytes.
     pub scratch_length: u64,
-    /// The network of the template's fixed NIC, or `None` for a template without a NIC.
+    /// The network at whose guest's address the template has its fixed NIC, under the complete
+    /// deny-all policy, or `None` for a template without a NIC.
     pub network: Option<SandboxNetwork>,
 }
 
