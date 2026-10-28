@@ -706,6 +706,70 @@ impl Directory {
         }
     }
 
+    /// Opens the directory `path` with the right to search it alone, without following a link at
+    /// its own name, though links on the way to it are followed, or returns `None` if it does not
+    /// exist. Fails if it is a link, or not a directory.
+    ///
+    /// The handle names the directory's entries, and needs no right to read the directory, which
+    /// an owner-only directory may withhold; it cannot [sync](Self::sync) it.
+    pub(crate) fn search(path: &Path) -> io::Result<Option<Self>> {
+        use nix::fcntl::OFlag;
+
+        match OpenOptions::new()
+            .read(true)
+            .custom_flags((OFlag::O_PATH | OFlag::O_DIRECTORY | OFlag::O_NOFOLLOW).bits())
+            .open(path)
+        {
+            Ok(dir) => Ok(Some(Self(dir))),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(error)
+                if [Errno::ELOOP, Errno::ENOTDIR]
+                    .map(|errno| Some(errno as i32))
+                    .contains(&error.raw_os_error()) =>
+            {
+                Err(io::Error::other(format!(
+                    "{} is a link, or not a directory",
+                    path.display()
+                )))
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Opens its subdirectory `name` with the right to search it alone, not following a link, as
+    /// [`search`](Self::search) opens a directory, or returns `None` if it has no such entry.
+    /// Fails if the entry is a link, or not a directory.
+    pub(crate) fn search_dir(&self, name: &str) -> io::Result<Option<Self>> {
+        self.open_dir_with(name, nix::fcntl::OFlag::O_PATH)
+    }
+
+    /// Opens its subdirectory `name` for reading, not following a link, or returns `None` if it
+    /// has no such entry. Fails if the entry is a link, or not a directory.
+    pub(crate) fn open_dir(&self, name: &str) -> io::Result<Option<Self>> {
+        self.open_dir_with(name, nix::fcntl::OFlag::O_RDONLY)
+    }
+
+    /// Opens its subdirectory `name` with the access `access`, not following a link, as
+    /// [`open_dir`](Self::open_dir) and [`search_dir`](Self::search_dir) do.
+    fn open_dir_with(&self, name: &str, access: nix::fcntl::OFlag) -> io::Result<Option<Self>> {
+        use nix::fcntl::{OFlag, openat};
+        use nix::sys::stat::Mode;
+
+        match openat(
+            &self.0,
+            name,
+            access | OFlag::O_DIRECTORY | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC,
+            Mode::empty(),
+        ) {
+            Ok(dir) => Ok(Some(Self(File::from(dir)))),
+            Err(Errno::ENOENT) => Ok(None),
+            Err(Errno::ELOOP | Errno::ENOTDIR) => Err(io::Error::other(format!(
+                "{name} is a link, or not a directory"
+            ))),
+            Err(errno) => Err(errno.into()),
+        }
+    }
+
     /// Removes its file `name`, if it has one.
     pub(crate) fn remove_file(&self, name: &str) -> io::Result<()> {
         use nix::unistd::{UnlinkatFlags, unlinkat};

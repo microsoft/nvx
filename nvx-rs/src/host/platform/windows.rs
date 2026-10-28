@@ -1480,6 +1480,67 @@ impl Directory {
         }
     }
 
+    /// Opens the directory `path` without following a link or other reparse point at its own
+    /// name, though those on the way to it are followed, and without access rights, which the
+    /// opens of its entries do not need, or returns `None` if it does not exist. Fails if it is a
+    /// link, a junction or another reparse point, or not a directory.
+    pub(crate) fn search(path: &Path) -> io::Result<Option<Self>> {
+        let opened = OpenOptions::new()
+            .access_mode(0)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+            .open(path);
+        let dir = match opened {
+            Ok(dir) => dir,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        let attributes = handle_information(dir.as_raw_handle() as HANDLE)?.dwFileAttributes;
+        if attributes & FILE_ATTRIBUTE_DIRECTORY == 0
+            || attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0
+        {
+            return Err(io::Error::other(format!(
+                "{} is a link, or not a directory",
+                path.display()
+            )));
+        }
+        Ok(Some(Self(dir)))
+    }
+
+    /// Opens its subdirectory `name` as [`open_dir`](Self::open_dir) does: Windows needs no right
+    /// to list a directory to name its entries.
+    pub(crate) fn search_dir(&self, name: &str) -> io::Result<Option<Self>> {
+        self.open_dir(name)
+    }
+
+    /// Opens its subdirectory `name`, not following a link or other reparse point, or returns
+    /// `None` if it has no such entry, or one whose deletion is pending. Fails if the entry is a
+    /// link, a junction or another reparse point, or not a directory.
+    pub(crate) fn open_dir(&self, name: &str) -> io::Result<Option<Self>> {
+        use windows_sys::Wdk::Storage::FileSystem::{
+            FILE_DIRECTORY_FILE, FILE_OPEN_REPARSE_POINT, FILE_SYNCHRONOUS_IO_NONALERT,
+        };
+        use windows_sys::Win32::Foundation::{
+            STATUS_DELETE_PENDING, STATUS_NOT_A_DIRECTORY, STATUS_OBJECT_NAME_NOT_FOUND,
+        };
+        use windows_sys::Win32::Storage::FileSystem::{FILE_READ_ATTRIBUTES, SYNCHRONIZE};
+
+        let refused = || io::Error::other(format!("{name} is a link, or not a directory"));
+        let entry = match self.open_entry(
+            OsStr::new(name),
+            FILE_READ_ATTRIBUTES | SYNCHRONIZE,
+            FILE_DIRECTORY_FILE | FILE_OPEN_REPARSE_POINT | FILE_SYNCHRONOUS_IO_NONALERT,
+        ) {
+            Ok(entry) => entry,
+            Err(STATUS_OBJECT_NAME_NOT_FOUND | STATUS_DELETE_PENDING) => return Ok(None),
+            Err(STATUS_NOT_A_DIRECTORY) => return Err(refused()),
+            Err(status) => return Err(status_error(status)),
+        };
+        if handle_information(raw(&entry))?.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+            return Err(refused());
+        }
+        Ok(Some(Self(fs::File::from(entry))))
+    }
+
     /// Removes its file `name`, if it has one. A file whose deletion is pending already, which a
     /// file system without POSIX deletion keeps under its name until its last handle closes,
     /// counts as removed.

@@ -24,17 +24,19 @@ use crate::error::{Error, ErrorCode, ErrorKind, Result};
 use crate::host::platform::{self, parse_hex_id};
 use crate::host::process::BootId;
 use crate::host::store::files::{open_lock, write_private};
-use crate::host::store::lease::{ID_LEN, hex, read_private, read_record, store_error};
+use crate::host::store::lease::{
+    ID_LEN, StoreRecord, hex, read_identity, read_private, read_record, store_error,
+};
 
 #[cfg(all(test, any(target_os = "linux", windows)))]
 pub(super) use self::capture::SNAPSHOT_ARTIFACTS;
 pub(super) use self::capture::SOCKET_PATH_LIMIT;
 pub use self::capture::{CAPTURE_RECORD_NAME, CAPTURES_NAME, Capture, Created, TRANSACTION_NAME};
 pub use self::leases::{Acquired, LEASES_NAME, Retirement, TOMBSTONES_NAME};
-pub use crate::host::store::lease::{GENERATIONS_NAME, Lease, LeaseId, STORE_FORMAT, StoreId};
+pub use crate::host::store::lease::{
+    GENERATIONS_NAME, Lease, LeaseId, STORE_FORMAT, STORE_RECORD_NAME, StoreId,
+};
 
-/// Name of the store's identity record.
-pub const STORE_RECORD_NAME: &str = "store.json";
 /// Name of the store's index.
 pub const INDEX_NAME: &str = "index.json";
 /// Name of the lock of the store's index.
@@ -48,9 +50,6 @@ pub const MAX_GENERATIONS: usize = 1024;
 
 /// The store generation that a new store assigns first.
 const FIRST_GENERATION: StoreGeneration = StoreGeneration::new(NonZeroU64::MIN);
-
-/// Longest identity record, in bytes.
-const MAX_STORE_RECORD_LEN: u64 = 4 * 1024;
 
 /// Longest index, in bytes: more than an index of [`MAX_GENERATIONS`] generations takes.
 const MAX_INDEX_LEN: u64 = 4 * 1024 * 1024;
@@ -915,33 +914,6 @@ fn write_record<T: Serialize>(path: &Path, record: &T, description: &str) -> Res
         .map_err(|error| Error::other(format!("cannot encode {description}")).with_source(error))?;
     text.push(b'\n');
     write_private(path, &text)
-}
-
-/// Reads the identity of the store in `dir` from its identity record, or returns `None` if the
-/// directory holds none.
-fn read_identity(dir: &Path) -> Result<Option<StoreId>> {
-    let path = dir.join(STORE_RECORD_NAME);
-    let description = "identity record of the template store";
-    let Some(record) = read_record::<StoreRecord>(&path, description, MAX_STORE_RECORD_LEN)? else {
-        return Ok(None);
-    };
-    record.store.parse().map(Some).map_err(|error: Error| {
-        Error::io(format!(
-            "the {description} {} is malformed: {}",
-            path.display(),
-            error.message()
-        ))
-    })
-}
-
-/// The identity record of a store, as JSON.
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct StoreRecord {
-    /// [`STORE_FORMAT`].
-    format: u32,
-    /// The store's identity.
-    store: String,
 }
 
 /// The index of a store, as JSON.

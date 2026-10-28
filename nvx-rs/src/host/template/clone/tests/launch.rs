@@ -1111,14 +1111,27 @@ fn a_clone_whose_control_socket_openvmm_or_the_host_cannot_use_starts_nothing() 
         )
     );
     // A payload private to the current user, as a plan requires, but whose mode is not 0700, as
-    // OpenVMM requires of the directory of its control socket.
+    // OpenVMM requires of the directory of its control socket. An acquisition refuses such a
+    // payload too, so its mode changes here once the lease is granted.
     let fixture = Fixture::new();
+    complete_snapshot(&fixture);
+    let (image, binding) = fixture.image("distro.erofs", IMAGE_LEN);
+    let mut acquired = fixture.acquire("sandbox");
+    let plan = fixture
+        .plan(&mut acquired, &tmpfs_request(&image, &binding), NO_CONTENT)
+        .unwrap();
     let payload = fixture.store.payload_dir(fixture.generation.generation());
     fs::set_permissions(&payload, fs::Permissions::from_mode(0o500)).unwrap();
-    let ((kind, message), _) = refused(&fixture, "sandbox");
+    let refusal = failure(plan.launch_with(
+        &mut acquired,
+        Path::new(OPENVMM),
+        &runtime_of(&fixture),
+        hooks,
+    ));
     fs::set_permissions(&payload, fs::Permissions::from_mode(0o700)).unwrap();
+    assert_unlaunched(&fixture, &acquired);
     assert_eq!(
-        (kind, message),
+        refusal,
         (
             ErrorKind::Io,
             format!(

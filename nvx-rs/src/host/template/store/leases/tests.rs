@@ -23,6 +23,7 @@ use crate::host::store::{
 };
 use crate::host::supervisor::{self, Reattached, StopOutcome, VmmCommand};
 use crate::host::template::eligibility::MAX_DOWNTIME_NS;
+use crate::host::template::store::SNAPSHOT_NAME;
 use crate::host::template::store::tests::{
     cause, link_dir, link_file, publish, publish_with, remove, storage, store as new_store,
     unlink_dir,
@@ -283,6 +284,29 @@ fn acquisitions_refuse_what_they_cannot_lease_and_lease_nothing() {
         let error = refusal(&store, generation, &sandbox, &now);
         assert_eq!(error.code(), ErrorCode::TemplateIneligible, "{error}");
         assert!(error.message().contains(condition), "{error}");
+    }
+    // On Unix, a payload that is not a directory of the current user with mode 0700, which a
+    // launch of the clone requires, and through which a release ends the lease: it opens the
+    // payload for reading, and removes the clone's socket from it.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        let payload = store.payload_dir(generation);
+        for mode in [0o300, 0o500] {
+            fs::set_permissions(&payload, fs::Permissions::from_mode(mode)).unwrap();
+            let error = refusal(&store, generation, &sandbox, &now);
+            fs::set_permissions(&payload, fs::Permissions::from_mode(0o700)).unwrap();
+            assert_eq!(error.kind(), ErrorKind::Io, "{error}");
+            assert_eq!(
+                error.message(),
+                format!(
+                    "the payload of the generation {} has mode {mode:o}, not the mode 700 that \
+                     the directory of a control socket must have",
+                    payload.display()
+                )
+            );
+        }
     }
     // A sandbox that is not provisioned: its directory is missing, or holds no configuration.
     let unprovisioned = directory.path().join("unprovisioned");
@@ -808,8 +832,11 @@ fn a_release_makes_the_removal_of_its_binding_durable_before_it_removes_its_reco
             .borrow_mut()
             .push((dir.to_owned(), clone, bound, record.exists()));
     };
-    let sync = |dir: &Path| -> Result<()> {
-        note(dir);
+    // The release syncs the payload through its handle, which holds the generation's snapshot.
+    let snapshot = platform::file_id(&payload.join(SNAPSHOT_NAME)).unwrap();
+    let sync_payload = |directory: &platform::Directory| -> io::Result<()> {
+        assert_eq!(directory.entry_id(SNAPSHOT_NAME).unwrap(), Some(snapshot));
+        note(&payload);
         Ok(())
     };
     // The release syncs the sandbox's directory through its handle, which holds the lock's file.
@@ -829,7 +856,7 @@ fn a_release_makes_the_removal_of_its_binding_durable_before_it_removes_its_reco
     let mut locked = SandboxStore::lock_existing(&sandbox, &files(), None).unwrap();
     assert_eq!(
         store
-            .release_with(&mut locked, &|| {}, &sync, &sync_sandbox)
+            .release_with(&mut locked, &|| {}, &sync_payload, &sync_sandbox)
             .unwrap(),
         Some(lease)
     );
@@ -866,17 +893,15 @@ fn a_release_makes_the_removal_of_its_binding_durable_before_it_removes_its_reco
             .release_with(
                 &mut locked,
                 &|| {},
-                &|dir: &Path| {
-                    if dir == payload {
-                        Err(Error::io("the disk failed"))
-                    } else {
-                        Ok(())
-                    }
-                },
+                &|_| Err(io::Error::other("the disk failed")),
                 &|_| Ok(()),
             )
             .unwrap_err();
-        assert_eq!(error.message(), "the disk failed");
+        assert_eq!(
+            error.message(),
+            format!("cannot sync the directory {}", payload.display())
+        );
+        assert_eq!(cause(&error), "the disk failed");
         assert_eq!(binding(&sandbox), Some(again.clone()));
         assert_eq!(locked.reserved(), None);
         assert!(fs::symlink_metadata(&scratch).is_err());
@@ -884,7 +909,7 @@ fn a_release_makes_the_removal_of_its_binding_durable_before_it_removes_its_reco
     // A release that cannot make the binding's removal durable keeps the record, which a
     // retirement removes once no binding names it.
     let error = store
-        .release_with(&mut locked, &|| {}, &|_: &Path| Ok(()), &|_| {
+        .release_with(&mut locked, &|| {}, &|_| Ok(()), &|_| {
             Err(io::Error::other("the disk failed"))
         })
         .unwrap_err();
@@ -1245,7 +1270,7 @@ fn a_release_ends_the_lease_of_the_sandbox_whose_lock_it_holds_whatever_its_path
             .release_with(
                 &mut locked,
                 &|| swap(&first, &moved),
-                &sync_dir,
+                &platform::Directory::sync,
                 &platform::Directory::sync
             )
             .unwrap(),
@@ -1290,6 +1315,294 @@ fn a_release_ends_the_lease_of_the_sandbox_whose_lock_it_holds_whatever_its_path
     let mut both = vec![again, other_lease];
     both.sort_by_key(Lease::id);
     assert_eq!(store.leases(generation).unwrap(), both);
+}
+
+/// The payload of a generation, which holds the control sockets of the VMMs of its clones on
+/// Linux, opens through the store's directory, following no link, or junction on Windows, at the
+/// store's directory, at its directory of the generations, or at the payload, once it has found
+/// that the store's directory holds the store of the caller's identity. On Unix, a store's
+/// directory and its directory of the generations need only the right to be searched, which an
+/// owner-only directory may grant without the right to read it.
+#[test]
+fn the_payload_of_a_generation_opens_through_no_link() {
+    let (directory, store) = new_store();
+    let published = publish(&store, &ManifestSpec::template(), storage(1));
+    let generation = published.generation();
+    let id = store.id();
+    let payload = store.payload_dir(generation);
+    let snapshot = platform::file_id(&payload.join(SNAPSHOT_NAME)).unwrap();
+    let opened = open_payload(store.dir(), id, generation).unwrap().unwrap();
+    assert_eq!(opened.entry_id(SNAPSHOT_NAME).unwrap(), Some(snapshot));
+    drop(opened);
+    // A generation without a payload has none, nor has a store that is gone, or one of another
+    // identity.
+    assert!(
+        open_payload(store.dir(), id, store_generation(9))
+            .unwrap()
+            .is_none()
+    );
+    let missing = directory.path().join("missing");
+    assert!(open_payload(&missing, id, generation).unwrap().is_none());
+    let foreign = StoreId::from_bytes([0x5a; 16]);
+    assert!(
+        open_payload(store.dir(), foreign, generation)
+            .unwrap()
+            .is_none()
+    );
+    // Another store in the store's place, whose generation of the same number has a payload, has
+    // none of the store's, nor has a directory that holds no store.
+    let other = Store::create(directory.path().join("other")).unwrap();
+    fs::create_dir(other.payload_dir(generation)).unwrap();
+    let moved = directory.path().join("moved");
+    fs::rename(store.dir(), &moved).unwrap();
+    fs::rename(other.dir(), store.dir()).unwrap();
+    assert!(open_payload(store.dir(), id, generation).unwrap().is_none());
+    assert!(
+        open_payload(store.dir(), other.id(), generation)
+            .unwrap()
+            .is_some()
+    );
+    fs::rename(store.dir(), other.dir()).unwrap();
+    fs::create_dir(store.dir()).unwrap();
+    assert!(open_payload(store.dir(), id, generation).unwrap().is_none());
+    fs::remove_dir(store.dir()).unwrap();
+    // A link in the place of the store's directory, even to the store, of the directory of the
+    // generations, or of the payload, and a file in the place of the store's directory or of the
+    // payload, are refused.
+    let generations = store.dir().join(GENERATIONS_NAME);
+    let refused = |entry: &dyn std::fmt::Display| {
+        let error = open_payload(store.dir(), id, generation).err().unwrap();
+        assert_eq!(error.kind(), ErrorKind::Io, "{error}");
+        assert_eq!(
+            error.message(),
+            format!(
+                "cannot open the payload of the generation {}",
+                payload.display()
+            )
+        );
+        assert_eq!(
+            cause(&error),
+            format!("{entry} is a link, or not a directory")
+        );
+    };
+    link_dir(&moved, store.dir());
+    refused(&store.dir().display());
+    unlink_dir(store.dir());
+    fs::write(store.dir(), b"").unwrap();
+    refused(&store.dir().display());
+    fs::remove_file(store.dir()).unwrap();
+    fs::rename(&moved, store.dir()).unwrap();
+    for (path, name, link) in [
+        (&payload, generation.to_string(), true),
+        (&generations, GENERATIONS_NAME.to_owned(), true),
+        (&payload, generation.to_string(), false),
+    ] {
+        fs::rename(path, &moved).unwrap();
+        if link {
+            link_dir(&moved, path);
+        } else {
+            fs::write(path, b"").unwrap();
+        }
+        refused(&name);
+        if link {
+            unlink_dir(path);
+        } else {
+            fs::remove_file(path).unwrap();
+        }
+        fs::rename(&moved, path).unwrap();
+    }
+    assert!(open_payload(store.dir(), id, generation).unwrap().is_some());
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        let mode = |dir: &Path, mode| {
+            fs::set_permissions(dir, fs::Permissions::from_mode(mode)).unwrap();
+        };
+        for dir in [&generations, store.dir()] {
+            mode(dir, 0o300);
+        }
+        let opened = open_payload(store.dir(), id, generation);
+        for dir in [&generations, store.dir()] {
+            mode(dir, 0o700);
+        }
+        let opened = opened.unwrap().unwrap();
+        assert_eq!(opened.entry_id(SNAPSHOT_NAME).unwrap(), Some(snapshot));
+        opened.sync().unwrap();
+    }
+}
+
+/// A release whose generation's payload, or store's directory, a link takes the place of: before
+/// the release begins, it refuses, and removes nothing; once it has opened the payload, it removes
+/// the socket from the payload that it opened, and the link's target keeps its file. Only on Unix,
+/// where the payload holds the socket of the clone's VMM.
+#[cfg(unix)]
+#[test]
+fn a_release_removes_the_socket_from_the_payload_that_it_opened_whatever_its_path_names_meanwhile()
+{
+    let (directory, store) = new_store();
+    let published = publish(&store, &ManifestSpec::template(), storage(1));
+    let generation = published.generation();
+    let sandbox = provision(directory.path(), "sandbox");
+    let lease = leased(&store, &published, &sandbox);
+    let payload = store.payload_dir(generation);
+    let name = clone_socket_name(lease.launch());
+    // A socket that the VMM left in the payload, which a file stands for, and a directory that
+    // holds a file of its name, to which a link takes the payload's place.
+    fs::write(payload.join(&name), b"").unwrap();
+    let decoy = directory.path().join("decoy");
+    fs::create_dir(&decoy).unwrap();
+    fs::write(decoy.join(&name), b"").unwrap();
+    // A directory of the store's layout, whose generation of the same number holds a file of the
+    // socket's name, to which a link takes the store's place.
+    let decoy_store = directory.path().join("decoy-store");
+    let decoy_socket = decoy_store
+        .join(GENERATIONS_NAME)
+        .join(generation.to_string())
+        .join(&name);
+    fs::create_dir_all(decoy_socket.parent().unwrap()).unwrap();
+    fs::write(&decoy_socket, b"").unwrap();
+    let moved = directory.path().join("moved");
+    let swap = || {
+        fs::rename(&payload, &moved).unwrap();
+        link_dir(&decoy, &payload);
+    };
+    let restore = || {
+        unlink_dir(&payload);
+        fs::rename(&moved, &payload).unwrap();
+    };
+    let mut locked = SandboxStore::lock_existing(&sandbox, &files(), None).unwrap();
+    let refused = |locked: &mut LockedStore, entry: &dyn std::fmt::Display| {
+        let error = store.release(locked).unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::Io, "{error}");
+        assert_eq!(
+            error.message(),
+            format!(
+                "cannot open the payload of the generation {}",
+                payload.display()
+            )
+        );
+        assert_eq!(
+            cause(&error),
+            format!("{entry} is a link, or not a directory")
+        );
+        assert!(decoy.join(&name).exists());
+        assert!(decoy_socket.exists());
+        assert_eq!(binding(&sandbox), Some(lease.clone()));
+    };
+    swap();
+    refused(&mut locked, &generation);
+    assert!(moved.join(&name).exists());
+    restore();
+    fs::rename(store.dir(), &moved).unwrap();
+    link_dir(&decoy_store, store.dir());
+    refused(&mut locked, &store.dir().display());
+    unlink_dir(store.dir());
+    fs::rename(&moved, store.dir()).unwrap();
+    assert!(payload.join(&name).exists());
+    assert_eq!(
+        store
+            .release_with(
+                &mut locked,
+                &swap,
+                &platform::Directory::sync,
+                &platform::Directory::sync
+            )
+            .unwrap(),
+        Some(lease)
+    );
+    drop(locked);
+    assert!(fs::symlink_metadata(moved.join(&name)).is_err());
+    assert!(decoy.join(&name).exists());
+    assert!(decoy_socket.exists());
+    assert_eq!(binding(&sandbox), None);
+    restore();
+    assert!(store.leases(generation).unwrap().is_empty());
+}
+
+/// A sandbox's store that clears the runtime record of its clone's VM removes the VMM's control
+/// socket through the payload of its generation, as a recovery of its launch does: it refuses a
+/// link in the place of the payload or of the template store's directory, keeping the record, and
+/// leaves the files of another store in the template store's place. Only on Unix, where the socket
+/// is a file.
+#[cfg(unix)]
+#[test]
+fn a_sandbox_s_store_removes_the_socket_of_its_clone_through_no_link() {
+    let (directory, store) = new_store();
+    let published = publish(&store, &ManifestSpec::template(), storage(1));
+    let generation = published.generation();
+    let sandbox = provision(directory.path(), "sandbox");
+    let lease = leased(&store, &published, &sandbox);
+    let payload = store.payload_dir(generation);
+    let socket = store.clone_socket_path(&lease);
+    let name = clone_socket_name(lease.launch());
+    fs::write(&socket, b"").unwrap();
+    let decoy = directory.path().join("decoy");
+    fs::create_dir(&decoy).unwrap();
+    fs::write(decoy.join(&name), b"").unwrap();
+    // Another store, whose generation of the same number holds a file of the socket's name.
+    let other = Store::create(directory.path().join("other")).unwrap();
+    fs::create_dir(other.payload_dir(generation)).unwrap();
+    let other_socket = other.payload_dir(generation).join(&name);
+    fs::write(&other_socket, b"").unwrap();
+    // The runtime record of the clone's VM, whose control endpoint is the socket.
+    let record = json!({
+        "format": FORMAT,
+        "launch": lease.launch().to_string(),
+        "process": { "pid": 42, "startTime": 4242, "boot": "ab".repeat(16) },
+        "endpoint": socket.to_str().unwrap(),
+        "runtime": serde_json::to_value(runtime()).unwrap(),
+    });
+    let write_record = || {
+        write_private(&sandbox.join(RUNTIME_NAME), record.to_string().as_bytes()).unwrap();
+    };
+    write_record();
+    let mut locked = SandboxStore::lock_existing(&sandbox, &files(), None).unwrap();
+    let refused = |locked: &mut LockedStore, entry: &dyn std::fmt::Display| {
+        let error = locked.clear_runtime().unwrap_err();
+        assert_eq!(
+            error.message(),
+            format!(
+                "cannot open the payload of the generation {}",
+                payload.display()
+            )
+        );
+        assert_eq!(
+            cause(&error),
+            format!("{entry} is a link, or not a directory")
+        );
+        assert!(decoy.join(&name).exists());
+        assert!(other_socket.exists());
+        assert!(sandbox.join(RUNTIME_NAME).exists());
+    };
+    let moved = directory.path().join("moved");
+    fs::rename(&payload, &moved).unwrap();
+    link_dir(&decoy, &payload);
+    refused(&mut locked, &generation);
+    assert!(moved.join(&name).exists());
+    unlink_dir(&payload);
+    fs::rename(&moved, &payload).unwrap();
+    fs::rename(store.dir(), &moved).unwrap();
+    link_dir(other.dir(), store.dir());
+    refused(&mut locked, &store.dir().display());
+    unlink_dir(store.dir());
+    // Another store in the store's place holds no socket of the clone's, so the record goes, and
+    // the other store's file stays, as does the socket in the store's own directory.
+    fs::rename(other.dir(), store.dir()).unwrap();
+    locked.clear_runtime().unwrap();
+    assert!(!sandbox.join(RUNTIME_NAME).exists());
+    fs::rename(store.dir(), other.dir()).unwrap();
+    fs::rename(&moved, store.dir()).unwrap();
+    assert!(other_socket.exists());
+    assert!(socket.exists());
+    write_record();
+    locked.clear_runtime().unwrap();
+    assert!(fs::symlink_metadata(&socket).is_err());
+    assert!(!sandbox.join(RUNTIME_NAME).exists());
+    assert!(decoy.join(&name).exists());
+    assert!(other_socket.exists());
+    drop(locked);
+    assert_eq!(release(&store, &sandbox).unwrap(), Some(lease));
 }
 
 #[test]
@@ -1938,7 +2251,9 @@ fn clone_role() {
     if step == "releasing" {
         let mut locked = SandboxStore::lock_existing(&sandbox, &files(), None).unwrap();
         store
-            .release_with(&mut locked, &|| {}, &sync, &|_| crash(&step))
+            .release_with(&mut locked, &|| {}, &platform::Directory::sync, &|_| {
+                crash(&step)
+            })
             .unwrap();
         panic!("the release did not make the removal of its binding durable");
     }

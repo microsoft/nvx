@@ -29,6 +29,12 @@ pub const STORE_FORMAT: u32 = 1;
 /// Name of the directory of the generations' payloads.
 pub const GENERATIONS_NAME: &str = "generations";
 
+/// Name of the store's identity record.
+pub const STORE_RECORD_NAME: &str = "store.json";
+
+/// Longest identity record, in bytes.
+pub(crate) const MAX_STORE_RECORD_LEN: u64 = 4 * 1024;
+
 /// Bytes of a [`StoreId`] and of a [`StorageGeneration`](crate::host::template::StorageGeneration).
 pub(crate) const ID_LEN: usize = 16;
 
@@ -270,6 +276,97 @@ pub(crate) fn is_clone_socket(lease: &Lease, path: &Path) -> bool {
         && payload.and_then(Path::file_name) == Some(OsStr::new(&generation))
         && payload.and_then(Path::parent).and_then(Path::file_name)
             == Some(OsStr::new(GENERATIONS_NAME))
+}
+
+/// Opens the payload of the generation `generation` of the template store `id` in `store`, which
+/// holds the control sockets of the VMMs of the generation's clones on Linux:
+/// `generations/<generation>`, for reading, so that the caller can sync it once it removed a
+/// socket from it.
+///
+/// It follows no link at the store's own name, at the directory of the generations, or at the
+/// payload, and fails if one of them is a link, or not a directory, so that a link that takes the
+/// place of one of them never leads a removal to the files of another directory. It reads the
+/// store's identity through the handle of the store's directory, failing if it cannot read the
+/// identity record, and returns `None` if that directory holds another store, or none, as it does
+/// if the store, its directory of the generations, or the payload is gone: the payload of a store
+/// that is gone holds no socket. It opens the store's directory and the directory of the
+/// generations with the right to search them alone, which an owner-only directory may grant
+/// without the right to read it.
+pub(crate) fn open_payload(
+    store: &Path,
+    id: StoreId,
+    generation: StoreGeneration,
+) -> Result<Option<platform::Directory>> {
+    let payload = store.join(GENERATIONS_NAME).join(generation.to_string());
+    let failed = || {
+        store_error(format!(
+            "cannot open the payload of the generation {}",
+            payload.display()
+        ))
+    };
+    let Some(dir) = platform::Directory::search(store).map_err(failed())? else {
+        return Ok(None);
+    };
+    if read_identity_in(&dir, store)? != Some(id) {
+        return Ok(None);
+    }
+    let Some(generations) = dir.search_dir(GENERATIONS_NAME).map_err(failed())? else {
+        return Ok(None);
+    };
+    generations
+        .open_dir(&generation.to_string())
+        .map_err(failed())
+}
+
+/// Reads the identity of the store in `dir` from its identity record, or returns `None` if the
+/// directory holds none.
+pub(crate) fn read_identity(dir: &Path) -> Result<Option<StoreId>> {
+    let path = dir.join(STORE_RECORD_NAME);
+    read_identity_with(&path, || open_existing(&path))
+}
+
+/// Reads the identity of the store whose directory `directory` holds open, in `dir`, as
+/// [`read_identity`] reads it at its path, or returns `None` if the directory holds no identity
+/// record, or, on Windows, one whose deletion is pending: through the handle, so that it reads
+/// the identity of the directory that the handle holds, whatever `dir` names meanwhile.
+pub(crate) fn read_identity_in(
+    directory: &platform::Directory,
+    dir: &Path,
+) -> Result<Option<StoreId>> {
+    read_identity_with(&dir.join(STORE_RECORD_NAME), || {
+        open_regular_in(directory, STORE_RECORD_NAME)
+    })
+}
+
+/// Reads the identity of a store from its identity record at `path`, which `open` opens, or
+/// returns `None` if `open` finds none.
+fn read_identity_with(
+    path: &Path,
+    open: impl FnOnce() -> io::Result<Option<File>>,
+) -> Result<Option<StoreId>> {
+    let description = "identity record of the template store";
+    let Some(record) =
+        read_record_with::<StoreRecord>(path, description, MAX_STORE_RECORD_LEN, open)?
+    else {
+        return Ok(None);
+    };
+    record.store.parse().map(Some).map_err(|error: Error| {
+        Error::io(format!(
+            "the {description} {} is malformed: {}",
+            path.display(),
+            error.message()
+        ))
+    })
+}
+
+/// The identity record of a store, as JSON.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct StoreRecord {
+    /// [`STORE_FORMAT`].
+    pub(crate) format: u32,
+    /// The store's identity.
+    pub(crate) store: String,
 }
 
 /// Reads the clone binding of the sandbox in `dir`, or returns `None` if it holds none, or if the

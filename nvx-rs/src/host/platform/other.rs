@@ -132,6 +132,21 @@ impl Directory {
     }
 
     /// Never called: no directory is open.
+    pub(crate) fn open_dir(&self, _name: &str) -> io::Result<Option<Self>> {
+        match *self {}
+    }
+
+    /// Fails: this host keeps no store.
+    pub(crate) fn search(_path: &Path) -> io::Result<Option<Self>> {
+        Err(unsupported())
+    }
+
+    /// Never called: no directory is open.
+    pub(crate) fn search_dir(&self, _name: &str) -> io::Result<Option<Self>> {
+        match *self {}
+    }
+
+    /// Never called: no directory is open.
     pub(crate) fn remove_file(&self, _name: &str) -> io::Result<()> {
         match *self {}
     }

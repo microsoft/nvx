@@ -251,7 +251,7 @@ use self::files::{io_error, remove_if_present};
 pub use self::identity::{
     ArtifactIdentity, IdentityCheck, IdentityPart, MAX_IDENTITY_LEN, RuntimeIdentity,
 };
-use self::lease::{Lease, is_clone_socket};
+use self::lease::{Lease, clone_socket_name, is_clone_socket, open_payload};
 pub use self::lifecycle::{Lingering, RemovalError};
 pub use self::record::{
     LaunchId, LaunchJournal, LaunchState, LogClaim, MAX_ENDPOINT_LEN, RuntimeRecord,
@@ -1095,7 +1095,9 @@ impl LockedStore {
     /// Removes the runtime record, the launch capability, and the control socket of a VM that has
     /// exited, and any outcome report that its VMM staged without publishing it, the runtime
     /// record last. The control socket of a clone's VMM, beside the snapshot that it restores, goes
-    /// too. The log, console log, and outcome report outlive the run.
+    /// too, and the clearing fails, keeping the runtime record, if a link takes the place of the
+    /// template store's directory, of its directory of the generations, or of the payload of the
+    /// socket's generation. The log, console log, and outcome report outlive the run.
     pub fn clear_runtime(&mut self) -> Result<()> {
         // Only a Linux endpoint is a file, which may be a clone's beside its snapshot. A record that
         // cannot be read names none, and a release removes a clone's socket all the same.
@@ -1128,6 +1130,15 @@ impl LockedStore {
     /// names it. Any other endpoint stays: the sandbox's own control socket, which the caller
     /// removes, and a named pipe. Neither reads the binding.
     ///
+    /// The socket goes through a handle of the generation's payload, which a handle of the
+    /// template store's directory opens, as a release opens it: following no link at the store's
+    /// directory, at its directory of the generations, or at the payload, and once it checked
+    /// through that handle that the directory holds the lease's store, so that neither a link that
+    /// takes the place of one of them nor a directory that takes the place of the store ever leads
+    /// the removal to the files of another directory. Such a link fails the removal; a payload
+    /// that is gone holds no socket, and neither does a directory that holds another store, or
+    /// none, in the place of the lease's, whose files stay.
+    ///
     /// The removal is not made durable here:
     /// [`template::Store::release`](crate::host::template::Store::release) makes it durable before
     /// the lease ends, and a retirement removes whatever a crash brings back with the generation's
@@ -1137,9 +1148,18 @@ impl LockedStore {
         if !cfg!(unix) || socket == self.socket_path() {
             return Ok(());
         }
-        match Lease::of(self)? {
-            Some(lease) if is_clone_socket(&lease, socket) => remove_if_present(socket),
-            _ => Ok(()),
+        let Some(lease) = Lease::of(self)?.filter(|lease| is_clone_socket(lease, socket)) else {
+            return Ok(());
+        };
+        // The socket is `<store>/generations/<generation>/<launch>.sock`, as the check found.
+        let Some(store) = socket.ancestors().nth(3) else {
+            return Ok(());
+        };
+        match open_payload(store, lease.store(), lease.generation())? {
+            Some(payload) => payload
+                .remove_file(&clone_socket_name(lease.launch()))
+                .map_err(store_error(format!("cannot remove {}", socket.display()))),
+            None => Ok(()),
         }
     }
 }
