@@ -1000,24 +1000,25 @@ fn the_control_socket_of_a_clone_goes_once_its_vm_has_ended_and_for_good_with_it
 }
 
 #[test]
-fn a_clone_of_a_template_with_a_nic_restores_its_policy_without_its_address() {
-    let fixture = Fixture::with(|class, spec, physical| {
-        *class = network_class();
-        *spec = ManifestSpec::with_network();
-        let (distro, scratch) = (
-            geometry(IMAGE_LEN, physical),
-            geometry(SCRATCH_LEN, physical),
-        );
-        set_geometries(class, spec, distro, scratch);
-    });
+fn a_clone_of_a_template_with_a_nic_restores_its_own_policy_in_place_of_the_templates() {
+    let fixture = network_fixture();
     complete_snapshot(&fixture);
     let (image, binding) = fixture.image("distro.erofs", IMAGE_LEN);
     let mut acquired = fixture.acquire("sandbox");
-    let attached = network(NetworkAccess::Allow);
+    // The class's network allows egress; the clone's denies it but to one destination, and
+    // publishes the guest's listeners on host loopback, with a forward.
+    let mut policy = NetworkPolicy::new(NetworkAccess::Deny)
+        .with_allow(EgressRule::to("192.0.2.0/24").on_port(Protocol::Tcp, 443));
+    policy.host_loopback = HostLoopback::Allow;
+    policy.host_loopback_forwards.push(LoopbackForward {
+        protocol: ForwardProtocol::Tcp,
+        host_port: 18080,
+        guest_port: 8080,
+    });
+    let attached = SandboxNetwork::new("10.0.0.2/24", policy).unwrap();
     let request = with_network(tmpfs_request(&image, &binding), Some(attached.clone()));
     let plan = fixture.plan(&mut acquired, &request, NO_CONTENT).unwrap();
     let runtime = plan.key().runtime().clone();
-    let template = plan.key().network_arguments().to_vec();
     let mut vmm = VmmDir::new();
     let dir = vmm.path().to_owned();
     let made = RefCell::new(None);
@@ -1030,21 +1031,20 @@ fn a_clone_of_a_template_with_a_nic_restores_its_policy_without_its_address() {
         .launch_with(&mut acquired, Path::new(OPENVMM), &runtime, hooks)
         .unwrap();
     vmm.reference = Some(restoring.starting().process().reference().clone());
-    // The devices end with the template's network, as its key records it, the arguments of the
-    // network's policy, without the guest's address, which OpenVMM takes from the snapshot, and
-    // refuses beside it: after the image, and the clone's scratch, which its upper in RAM
-    // declares absent.
-    let mut policy = attached.openvmm_arguments().unwrap();
-    assert_eq!(template, policy);
-    assert_eq!(policy[..2], ["--net", "10.0.0.2/24"]);
-    policy.drain(..2);
+    // After the image, the devices end with `--restore-network-policy` and the options of the
+    // clone's own policy, without `--net` and the guest's address, which OpenVMM takes from the
+    // snapshot, and refuses beside it, then with `--restore-absent-scratch`, which declares the
+    // scratch of the clone's upper in RAM absent.
+    let mut expected = attached.openvmm_arguments().unwrap();
+    assert_eq!(expected[..2], ["--net", "10.0.0.2/24"]);
+    expected.splice(..2, ["--restore-network-policy".to_owned()]);
+    expected.push("--restore-absent-scratch".to_owned());
     let arguments = made.take().unwrap().arguments;
     let devices = arguments
         .iter()
         .position(|argument| argument == "--single-process")
         .unwrap();
-    assert_eq!(arguments[4], "--restore-absent-scratch");
-    assert_eq!(arguments[5..devices], policy);
+    assert_eq!(arguments[4..devices], expected);
     assert!(!arguments.iter().any(|argument| argument == "--net"));
 }
 

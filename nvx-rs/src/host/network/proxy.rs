@@ -109,6 +109,7 @@ impl NetworkProxy {
     ///
     /// Fails with [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported) and a message that
     /// starts with `endpoint`.
+    #[cfg(feature = "cli")]
     pub(crate) fn parse_endpoint(endpoint: &str, gateway: Ipv4Addr) -> Result<Self> {
         let refused = |reason: String| Err(Error::unsupported(format!("{endpoint}: {reason}")));
         let Some((address, port)) = endpoint

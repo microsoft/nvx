@@ -12,7 +12,7 @@ yet breaks those peers. Only bytes that no codec produced catch such a change.
 | [`nvxc-v1.txt`](nvxc-v1.txt) | Version 1 of the control protocol: `NVXC` frames, their `EXEC`, `MAPS`, and features payloads, and `NVXS` records of NVX's host and guest |
 | [`nvxl-v1.txt`](nvxl-v1.txt) | Version 1 of the `NVXL` listener announcement |
 | [`activation-v1.txt`](activation-v1.txt) | Version 1 of the activation record of a layered root, and what Ready reports about an activation |
-| [`template-key-v1.txt`](template-key-v1.txt) | Version 1 of the canonical encodings of a template's compatibility key, which holds the template's network as its capture class lowered it, and of a capture class, with their identities |
+| [`template-key-v1.txt`](template-key-v1.txt) | Version 1 of the canonical encodings of a template's compatibility key and of a capture class, with their identities |
 | [`openvmm/`](openvmm) | OpenVMM's vectors and cases of the `NVXS` session, and the excerpts of its sources that define the kernel command-line tokens of its platform tier, unchanged |
 
 [4.4 Host-Guest Control Interface](../../../doc/design/4.4-host-guest-control-interface.md)
@@ -66,11 +66,12 @@ the key that the vector's bytes decode to.
   name the export's root. Only the clone of a template whose export is a
   directory sends one, to the template's own guest, which deploys with the
   host and whose build the template's key names, so the C agent of earlier
-  releases, which refuses it, never receives one. And the keys of
-  `template-key-v1.txt` came to end with the template's network in place: the
-  key's encoding has not been released, so a template store that an earlier
-  build created is not supported, and is deleted and created again, since
-  nothing migrates it.
+  releases, which refuses it, never receives one. And `CLASS|NETWORK` of
+  `template-key-v1.txt` came to encode its network in place as the template
+  captures it, under the complete deny-all policy: the encodings of a key and
+  of a class have not been released, so a template store that an earlier build
+  created is not supported, and is deleted and created again, since nothing
+  migrates it.
 - The bytes come from the protocol's definition, never from the code that they
   check, and so do the values of each vector.
 

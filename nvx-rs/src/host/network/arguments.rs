@@ -1,10 +1,10 @@
 //! The OpenVMM options that enforce a network posture.
 
-use std::net::Ipv4Addr;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
-use super::address::Interval;
+use super::address::{Family, Interval};
 use super::loopback::check_loopback_forwards;
-use super::lowering;
+use super::lowering::{self, NativeProtocol, Rule};
 use super::rule::parse_rules;
 use super::{
     Access, DNS_PORT, HostLoopback, MAX_HOST_LOOPBACK_PREFIX, NetworkPolicy, NetworkProxy,
@@ -41,30 +41,6 @@ pub fn openvmm_arguments(
     let Some(policy) = policy else {
         return Ok(Vec::new());
     };
-    lower_policy(policy, guest_network, false)
-}
-
-/// Returns the OpenVMM options of `policy` for a guest at `guest_network`, as
-/// [`openvmm_arguments`] renders them, but those of an attached network device for a policy that
-/// lets nothing through too, for which [`openvmm_arguments`] attaches none: the options of the
-/// same policy with one more allow rule that lowers to no OpenVMM rule, such as one that excepts
-/// its whole destination, and which [`openvmm_arguments`] renders with a device.
-///
-/// Fails as [`openvmm_arguments`] does.
-pub(crate) fn attached_arguments(
-    policy: &NetworkPolicy,
-    guest_network: &str,
-) -> Result<Vec<String>> {
-    lower_policy(policy, guest_network, true)
-}
-
-/// Returns the OpenVMM options of `policy` for a guest at `guest_network`, as
-/// [`openvmm_arguments`] renders them, and, if `attached`, as [`attached_arguments`] does.
-fn lower_policy(
-    policy: &NetworkPolicy,
-    guest_network: &str,
-    attached: bool,
-) -> Result<Vec<String>> {
     if let Some(proxy) = &policy.proxy {
         return proxy_arguments(policy, proxy, guest_network);
     }
@@ -86,8 +62,7 @@ fn lower_policy(
              shorter, which leaves an address at which OpenVMM presents host peers to the guest"
         )));
     }
-    if !attached
-        && policy.egress == Access::Deny
+    if policy.egress == Access::Deny
         && policy.allow.rules.is_empty()
         && policy.ingress == Access::Deny
         && policy.host_loopback == HostLoopback::Deny
@@ -136,6 +111,90 @@ fn lower_policy(
         ));
     }
     Ok(arguments)
+}
+
+/// Returns the OpenVMM options with which a template's capture attaches its NIC to a guest at
+/// `guest_network`: the portable profile under the complete deny-all policy, egress denied
+/// without rules, ingress and host-loopback access denied, without a proxy or forwards.
+///
+/// It is the one policy of a snapshot that OpenVMM lets a restore replace, with
+/// `--restore-network-policy` and the options of the new policy: under it, the guest learned no
+/// DNS server and announces no listeners, and the NIC's endpoint held no flows, listeners, or
+/// forwards, so nothing that the snapshot holds depends on the policy beyond the NIC's identity.
+pub(crate) fn template_arguments(guest_network: &str) -> Vec<String> {
+    [
+        "--net",
+        guest_network,
+        "--network-profile",
+        "portable",
+        "--network-egress",
+        "deny",
+        "--network-ingress",
+        "deny",
+        "--host-loopback",
+        "deny",
+    ]
+    .map(str::to_owned)
+    .to_vec()
+}
+
+/// Returns the DNS server that OpenVMM names to a guest under `policy`, whose NIC's IPv4 gateway
+/// is `gateway`, and whose IPv6 gateway is `ipv6_gateway` if its NIC has an IPv6 identity, as
+/// OpenVMM chooses it: the IPv4 gateway if the policy lets the guest reach its DNS service, TCP
+/// or UDP port 53, and otherwise the IPv6 gateway if it lets the guest reach that one's, and none
+/// if it lets the guest reach neither, as a proxy-only policy does. A deny rule that matches the
+/// traffic denies it, and otherwise an allow rule that matches it, or the egress default, allows
+/// it. Denied host-loopback access leaves the gateway's DNS service to the egress policy.
+///
+/// OpenVMM names the server on the kernel command line of a VM that boots with the policy, and a
+/// clone whose restore installs the policy learns it from its activation record instead.
+///
+/// Fails as [`openvmm_arguments`] does for rules that it cannot parse.
+pub(crate) fn dns_server(
+    policy: &NetworkPolicy,
+    gateway: Ipv4Addr,
+    ipv6_gateway: Option<Ipv6Addr>,
+) -> Result<Option<IpAddr>> {
+    if policy.proxy.is_some() {
+        return Ok(None);
+    }
+    let allow = parse_rules(&policy.allow)?.concat();
+    let deny = parse_rules(&policy.deny)?.concat();
+    let reaches = |server: IpAddr| {
+        [NativeProtocol::Tcp, NativeProtocol::Udp]
+            .into_iter()
+            .any(|protocol| {
+                let selected = |rule: &Rule| selects(rule, server, protocol, DNS_PORT);
+                !deny.iter().any(selected)
+                    && (allow.iter().any(selected) || policy.egress == Access::Allow)
+            })
+    };
+    Ok([Some(IpAddr::V4(gateway)), ipv6_gateway.map(IpAddr::V6)]
+        .into_iter()
+        .flatten()
+        .find(|&server| reaches(server)))
+}
+
+/// Returns whether `rule` selects traffic of `protocol` to `port` of `address`, as OpenVMM's rule
+/// selects it: an address of the rule's family among its addresses, and any traffic for a rule of
+/// every protocol, or traffic of its protocol to one of its ports, or to any for a rule without
+/// ports.
+fn selects(rule: &Rule, address: IpAddr, protocol: NativeProtocol, port: u16) -> bool {
+    let (family, address) = match address {
+        IpAddr::V4(address) => (Family::V4, u128::from(u32::from(address))),
+        IpAddr::V6(address) => (Family::V6, u128::from(address)),
+    };
+    rule.family == family
+        && rule
+            .addresses
+            .iter()
+            .any(|&(first, last)| first <= address && address <= last)
+        && rule.protocol.is_none_or(|selected| {
+            selected == protocol
+                && rule
+                    .ports
+                    .is_none_or(|(first, last)| (first..=last).contains(&port))
+        })
 }
 
 /// Returns the OpenVMM options of a policy with a proxy, which must be proxy-only, for a guest at

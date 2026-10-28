@@ -6,8 +6,9 @@ use std::path::{Path, PathBuf};
 use super::manifest::PROCESSOR_COUNTS;
 use super::store::{SNAPSHOT_NAME, StorageGeneration};
 use crate::error::{Error, Result};
-use crate::host::network::{Access, HostLoopback, NetworkPolicy};
 use crate::host::paths;
+#[cfg(doc)]
+use crate::host::sandbox::SandboxNetwork;
 use crate::host::sandbox::distro::DistroBinding;
 use crate::host::sandbox::plan::bound_image;
 use crate::host::sandbox::{SandboxPlan, SandboxUpper, reject_container_path, reject_disk_path};
@@ -84,10 +85,13 @@ pub struct TemplateResources {
 ///   directory, which sets the device's length and block sizes, and which the template does not
 ///   keep.
 /// - The filesystem slot, which every cold boot exposes, stays dormant: the plan exports nothing.
-/// - The plan's network gives the template its fixed NIC, with its policy, or none, for a
-///   template whose clones have no network. The policy allows neither ingress nor host-loopback
-///   access both ways, which its forwards need: through them, OpenVMM publishes the guest's
-///   listeners as live host attachments, which no snapshot holds.
+/// - The plan's network gives the template its fixed NIC, at the network's guest address, under
+///   the complete deny-all policy, whatever the network's own, as
+///   [`SandboxNetwork::template_arguments`] lowers it: egress denied without rules, ingress and
+///   host-loopback access denied, without a proxy or forwards. It is the one policy that a
+///   restore may replace, so each clone's restore installs the clone's own policy on the NIC. A
+///   plan without a network, or with one that lets nothing through, which attaches no NIC, gives
+///   the template none.
 /// - Its [`TemplateResources`]: its processor capacity, of which those online at boot are online
 ///   when it is captured, and its RAM, with the capacity to which a restore may expand it,
 ///   OpenVMM's `--memory-capacity`.
@@ -105,8 +109,9 @@ pub struct TemplateResources {
 /// console, reboot, and panic settings, `nr_cpus=` with the processor capacity,
 /// `nvx_snapshot_tier=platform`, the virtio devices and the control tty that the guest discovers,
 /// and the NIC's addresses. The arguments name no workload identity, lifecycle, share, or
-/// published listener, for which OpenVMM would write other tokens. The command line therefore
-/// holds no image identity, hostname, share, proxy, entrypoint, or other tenant data, and every
+/// published listener, for which OpenVMM would write other tokens, and under the NIC's deny-all
+/// policy, OpenVMM names no DNS server either. The command line therefore holds no image
+/// identity, hostname, share, proxy, DNS server, entrypoint, or other tenant data, and every
 /// clone of the template has the same.
 ///
 /// # The capture
@@ -159,9 +164,12 @@ pub struct TemplateResources {
 /// ```
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TemplatePlan {
-    /// The capture's devices: an adapter's plan of the placeholder over the dormant scratch device,
-    /// with the NIC, if any.
+    /// The capture's devices but its NIC: an adapter's plan of the placeholder over the dormant
+    /// scratch device, without a network.
     plan: SandboxPlan,
+    /// OpenVMM's arguments of the template's NIC, under the complete deny-all policy, or none for
+    /// a template without a NIC.
+    nic: Vec<String>,
     /// The binding of the placeholder.
     binding: DistroBinding,
     /// The length of the dormant scratch device, in bytes.
@@ -181,11 +189,11 @@ pub struct TemplatePlan {
 impl TemplatePlan {
     /// Lowers `adapter`, an adapter's plan, which [`SandboxPlan::adapter`] makes, into the plan of
     /// a template's capture: of its placeholder, which `binding` binds, over a dormant scratch
-    /// device of `scratch_length` bytes, with its network, the processors and RAM of `resources`,
-    /// the capture's transaction directory `transaction`, spelled with its components alone, as
-    /// [`Path::components`] reads them, and its bound-block storage generation `generation`,
-    /// which is apart from the other [namespaces](super::Store#four-namespaces) of a template's
-    /// generations.
+    /// device of `scratch_length` bytes, with the NIC of its network, the processors and RAM of
+    /// `resources`, the capture's transaction directory `transaction`, spelled with its components
+    /// alone, as [`Path::components`] reads them, and its bound-block storage generation
+    /// `generation`, which is apart from the other [namespaces](super::Store#four-namespaces) of a
+    /// template's generations.
     ///
     /// The plan's upper is no part of the template, which attaches its dormant scratch device in
     /// the upper's place, whatever the upper.
@@ -201,10 +209,10 @@ impl TemplatePlan {
     /// logical blocks that OpenVMM presents;
     /// processors other than 1, 2, 4, or 8, or processors online at boot other than 1, 2, 4, or
     /// 8, or more than the processors; RAM or a RAM capacity that is not a nonzero multiple
-    /// of [`MEMORY_BLOCK_SIZE`], or a capacity below the RAM; a network policy that allows ingress,
-    /// or host-loopback access both ways; and a transaction directory that is not valid Unicode,
-    /// that is relative, which OpenVMM would resolve against the directory in which it runs, or
-    /// whose path holds a comma or a semicolon, which OpenVMM's block device options would split.
+    /// of [`MEMORY_BLOCK_SIZE`], or a capacity below the RAM; and a transaction directory that is
+    /// not valid Unicode, that is relative, which OpenVMM would resolve against the directory in
+    /// which it runs, or whose path holds a comma or a semicolon, which OpenVMM's block device
+    /// options would split.
     ///
     /// It reads, opens, and creates nothing.
     pub fn new(
@@ -260,15 +268,15 @@ impl TemplatePlan {
             )));
         }
         check_resources(&resources)?;
-        if let Some(network) = adapter.network() {
-            check_policy(network.policy())?;
-        }
+        let nic = match adapter.network() {
+            Some(network) => network.template_arguments()?,
+            None => Vec::new(),
+        };
         let transaction = transaction_directory(transaction)?;
         let scratch = transaction.join(SCRATCH_NAME);
         reject_disk_path(&scratch, &scratch.display().to_string())?;
         let destination = transaction.join(SNAPSHOT_NAME);
-        let plan = SandboxPlan::adapter(distro.clone(), SandboxUpper::scratch_at(scratch))
-            .with_network(adapter.network().cloned());
+        let plan = SandboxPlan::adapter(distro.clone(), SandboxUpper::scratch_at(scratch));
         // A template whose processors are all online at boot needs no limit, and records none,
         // as OpenVMM records none without the parameter.
         let command_line = if resources.boot_processors < resources.processors {
@@ -281,6 +289,7 @@ impl TemplatePlan {
         };
         Ok(Self {
             plan,
+            nic,
             binding: binding.clone(),
             scratch_length,
             resources,
@@ -291,10 +300,18 @@ impl TemplatePlan {
         })
     }
 
-    /// Returns the capture's devices: an adapter's plan of the placeholder over the dormant
-    /// scratch device, with the template's NIC, if any.
+    /// Returns the capture's devices but its NIC: an adapter's plan of the placeholder over the
+    /// dormant scratch device, without a network, whose NIC [`nic_arguments`](Self::nic_arguments)
+    /// attaches.
     pub fn plan(&self) -> &SandboxPlan {
         &self.plan
+    }
+
+    /// Returns OpenVMM's arguments of the template's NIC, at the guest address of the adapter's
+    /// network, under the complete deny-all policy, as [`SandboxNetwork::template_arguments`]
+    /// lowers them, or none for a template without a NIC.
+    pub fn nic_arguments(&self) -> &[String] {
+        &self.nic
     }
 
     /// Returns the binding of the placeholder.
@@ -358,8 +375,9 @@ impl TemplatePlan {
 
     /// Returns OpenVMM's arguments of the capture: those of its devices, as
     /// [`SandboxPlan::openvmm_arguments`] renders them for [`plan`](Self::plan), the microVM
-    /// machine, the placeholder as the read-only `distro` block device, the dormant scratch device
-    /// as the `scratch` one, and the NIC, if any; then those of
+    /// machine, the placeholder as the read-only `distro` block device, and the dormant scratch
+    /// device as the `scratch` one; then those of the NIC, if any,
+    /// [`nic_arguments`](Self::nic_arguments); then those of
     /// [`capture_arguments`](Self::capture_arguments).
     ///
     /// The arguments name the block devices by their paths, which OpenVMM opens itself. A capture
@@ -371,6 +389,7 @@ impl TemplatePlan {
     /// Fails as [`SandboxPlan::openvmm_arguments`] does.
     pub fn openvmm_arguments(&self) -> Result<Vec<String>> {
         let mut arguments = self.plan.openvmm_arguments()?;
+        arguments.extend_from_slice(&self.nic);
         arguments.extend(self.capture_arguments());
         Ok(arguments)
     }
@@ -446,23 +465,6 @@ fn check_resources(resources: &TemplateResources) -> Result<()> {
         )));
     }
     Ok(())
-}
-
-/// Refuses a network policy that a template's capture cannot take: one that allows ingress, or
-/// host-loopback access both ways, which its forwards need, through which OpenVMM publishes the
-/// guest's listeners as live host attachments, which no snapshot holds.
-fn check_policy(policy: &NetworkPolicy) -> Result<()> {
-    let allowed = if policy.ingress == Access::Allow {
-        "ingress"
-    } else if policy.host_loopback == HostLoopback::Allow {
-        "host-loopback access both ways"
-    } else {
-        return Ok(());
-    };
-    Err(Error::unsupported(format!(
-        "a template's network policy cannot allow {allowed}: OpenVMM publishes the guest's \
-         listeners as live host attachments, which no snapshot holds"
-    )))
 }
 
 /// Returns the transaction directory `path`, spelled with its components alone, as
