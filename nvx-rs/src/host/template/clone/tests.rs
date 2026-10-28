@@ -2512,6 +2512,47 @@ fn exports_that_let_the_guest_block_the_template_store_s_path_are_refused() {
 }
 
 #[test]
+fn exports_that_hold_the_sandbox_s_directory_are_refused() {
+    // The host writes the clone's records in the sandbox's directory, by their paths, so a guest
+    // that could reach the directory could change them, or replace it with a link, and turn the
+    // host's writes elsewhere, into a leased snapshot, say.
+    let fixture = Fixture::new();
+    let (image, binding) = fixture.image("distro.erofs", IMAGE_LEN);
+    let mut acquired = fixture.acquire("sandbox");
+    let request = tmpfs_request(&image, &binding);
+    let sandbox = acquired.lease.sandbox().to_owned();
+    // The sandbox's directory, writable, and the directory that holds it, read-only.
+    for (dir, read_only) in [
+        (sandbox.clone(), false),
+        (sandbox.parent().unwrap().to_owned(), true),
+    ] {
+        let export = export_plan(&[(&dir, "/data", read_only)], &[], &[]);
+        let request = with_export(request.clone(), &export);
+        let plan = fixture.plan(&mut acquired, &request, NO_CONTENT);
+        assert_eq!(
+            refused(plan, Evidence::InvalidMappings),
+            (
+                ErrorKind::Unsupported,
+                format!(
+                    "the export of a clone cannot share {}, which holds the directory of the \
+                     clone's sandbox {}, in which the host writes the clone's records",
+                    dir.display(),
+                    sandbox.display()
+                )
+            )
+        );
+        assert_untouched(&acquired);
+    }
+    // A directory inside the sandbox's, among the caller's files, holds none of the host's
+    // records.
+    let shared = sandbox.join("shared");
+    fs::create_dir(&shared).unwrap();
+    let export = export_plan(&[(&shared, "/data", false)], &[], &[]);
+    let request = with_export(request, &export);
+    drop(fixture.plan(&mut acquired, &request, NO_CONTENT).unwrap());
+}
+
+#[test]
 fn the_export_of_a_clone_binds_its_directory_with_its_policy_and_owner() {
     let fixture = Fixture::new();
     let data = fixture.exported("data", &["work", "secret/shown"]);
