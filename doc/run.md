@@ -1264,6 +1264,13 @@ that they cannot look up, as through a link loop, rather than take it for no
 manifest. Keep provisioned layers and their manifests read-only, and never
 rewrite them in place.
 
+Disk image paths and the paths they resolve to must contain no commas or
+semicolons, and square brackets must nest properly. Balanced brackets, as in
+`layer[1].erofs` or `layer[[1][2]].erofs`, work; an unclosed `[`, an unmatched
+`]`, or reversed `][` fails with `error[unsupported]` before `run` launches
+OpenVMM or `provision` records the sandbox. `start` applies the same checks to
+recorded paths.
+
 `provision` also binds the scratch image: its identity, kind, and length,
 which the VM's writes leave unchanged. `start` checks the binding from
 metadata alone, refuses a scratch image that was replaced or resized since
@@ -1281,10 +1288,10 @@ images from being replaced, renamed, or deleted until the guest is ready, as
 long as `run` or `start` runs until then: if it ends before OpenVMM has opened
 them, as when it crashes, a replacement at their paths would reach OpenVMM
 ([#780](https://github.com/microsoft/nvx/issues/780)).
-There, a final path with a comma or semicolon, or ending in `.vhd`, `.vhdx`,
-`.vmgs`, or `.iso`, which OpenVMM could not attach as a raw image, fails the
-launch. Images are attached raw: stage an image in a container format, such as
-a VHD, as a raw file first.
+There, a final path with a comma, semicolon, or unbalanced brackets, or ending
+in `.vhd`, `.vhdx`, `.vmgs`, or `.iso`, which OpenVMM could not attach as a raw
+image, fails the launch. Images are attached raw: stage an image in a container
+format, such as a VHD, as a raw file first.
 
 `provision` records the guest memory of `--memory-mib`, which it takes from 1
 to 17592186044415 MiB, as `run` does. `provision` in `nvx.py` and in earlier
