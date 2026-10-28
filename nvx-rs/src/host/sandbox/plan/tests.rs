@@ -798,6 +798,54 @@ fn plans_check_their_export_plan_for_the_container_root() {
 }
 
 #[test]
+fn plans_require_properly_nested_disk_path_brackets() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = |name: &str| native(directory.path().join(name).to_str().unwrap());
+    let plain = path("plain.img");
+    fs::write(&plain, b"image").unwrap();
+    for (name, accepted) in [
+        ("image[1.img", false),
+        ("image]1.img", false),
+        ("image][1.img", false),
+        ("image[[1].img", false),
+        ("image[1]].img", false),
+        ("image.img", true),
+        ("image[].img", true),
+        ("image[1].img", true),
+        ("image[[1][2]].img", true),
+        ("image[1][2].img", true),
+    ] {
+        let image = path(name);
+        fs::write(&image, b"image").unwrap();
+        for plan in [
+            SandboxPlan::adapter(
+                SandboxDistro::new(&image, RootImage::gpt(None)),
+                SandboxUpper::RAM,
+            ),
+            SandboxPlan::adapter(
+                SandboxDistro::new(&plain, RootImage::gpt(None)),
+                SandboxUpper::scratch(&image),
+            ),
+        ] {
+            let result = plan.validated();
+            if accepted {
+                result.unwrap();
+            } else {
+                let error = result.unwrap_err();
+                assert_eq!(error.kind(), ErrorKind::Unsupported);
+                assert_eq!(
+                    error.to_string(),
+                    format!(
+                        "disk paths containing commas, semicolons, or unbalanced brackets are \
+                         unsupported: {image}"
+                    )
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn plans_check_the_images_of_their_block_devices_against_the_host() {
     let directory = tempfile::tempdir().unwrap();
     let path = |name: &str| native(directory.path().join(name).to_str().unwrap());
@@ -841,7 +889,10 @@ fn plans_check_the_images_of_their_block_devices_against_the_host() {
     fs::write(&delimited, b"image").unwrap();
     assert_eq!(
         message(plan("distro,ro.img", RootImage::gpt(None), SandboxUpper::RAM).validated()),
-        format!("disk paths containing commas or semicolons are unsupported: {delimited}")
+        format!(
+            "disk paths containing commas, semicolons, or unbalanced brackets are unsupported: \
+             {delimited}"
+        )
     );
     // OpenVMM would read a container from a file with one of these extensions.
     for extension in ["vhd", "vhdx", "vmgs", "iso"] {
@@ -937,6 +988,39 @@ fn plans_check_the_images_of_their_block_devices_against_the_host() {
         refusal("vhdx", "scratch.ext4", "upper.vhdx")
     );
     scratch.validated().unwrap();
+    for (directory, accepted) in [
+        ("images,raw", false),
+        ("images;raw", false),
+        ("images[1", false),
+        ("images]1", false),
+        ("images][1", false),
+        ("images[[1][2]]", true),
+    ] {
+        for (link, candidate) in [("distro.img", &raw), ("scratch.ext4", &scratch)] {
+            let target = format!("{directory}/{link}");
+            let resolve = linked(link, &target);
+            let host = mount::HostQueries {
+                resolve: &resolve,
+                ..mount::HostQueries::native()
+            };
+            let result = candidate.validated_with(&host);
+            if accepted {
+                result.unwrap();
+            } else {
+                let error = result.unwrap_err();
+                assert_eq!(error.kind(), ErrorKind::Unsupported);
+                assert_eq!(
+                    error.to_string(),
+                    format!(
+                        "disk paths containing commas, semicolons, or unbalanced brackets are \
+                         unsupported: {} resolves to {}",
+                        path(link),
+                        path(&target)
+                    )
+                );
+            }
+        }
+    }
     #[cfg(unix)]
     {
         std::os::unix::fs::symlink(path("distro.vhd"), path("link.img")).unwrap();

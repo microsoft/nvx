@@ -1249,7 +1249,7 @@ fn requests_that_no_clone_takes_are_refused_before_anything_is_opened() {
     );
     let message = refusal(&at(&format!("{},x", image.to_str().unwrap())));
     assert!(
-        message.starts_with("disk paths containing commas or semicolons"),
+        message.starts_with("disk paths containing commas, semicolons, or unbalanced brackets"),
         "{message}"
     );
     let message = refusal(&at(image.with_extension("vhdx").to_str().unwrap()));

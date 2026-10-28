@@ -1165,24 +1165,36 @@ fn launch_validation_requires_the_kind_of_each_share() {
 }
 
 #[test]
-fn launch_contract_rejects_disk_option_delimiters() {
+fn launch_contract_rejects_disk_option_delimiters_and_unbalanced_brackets() {
     let fixture = Fixture::new();
-    let layer = fixture.path("layer;create=1G");
-    fs::write(&layer, b"").unwrap();
-    let launch = SandboxLaunch::new(
-        vec![SandboxLayer::new(
-            LayerRole::Distro,
-            &layer,
-            "11111111-1111-1111-1111-111111111111",
-        )],
-        &fixture.path("scratch.ext4"),
-        SandboxSettings::default(),
-    )
-    .unwrap();
-    assert_eq!(
-        launch.validated().unwrap_err().to_string(),
-        format!("disk paths containing commas or semicolons are unsupported: {layer}")
-    );
+    for name in [
+        "layer;create=1G",
+        "layer[1.erofs",
+        "layer]1.erofs",
+        "layer][1.erofs",
+    ] {
+        let layer = fixture.path(name);
+        fs::write(&layer, b"").unwrap();
+        let launch = SandboxLaunch::new(
+            vec![SandboxLayer::new(
+                LayerRole::Distro,
+                &layer,
+                "11111111-1111-1111-1111-111111111111",
+            )],
+            &fixture.path("scratch.ext4"),
+            SandboxSettings::default(),
+        )
+        .unwrap();
+        let error = launch.validated().unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::Unsupported);
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "disk paths containing commas, semicolons, or unbalanced brackets are unsupported: \
+                 {layer}"
+            )
+        );
+    }
 }
 
 #[test]
