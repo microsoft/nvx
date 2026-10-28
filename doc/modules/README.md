@@ -89,7 +89,7 @@ contains 92 modules.
 ### `nvx::protocol`
 
 `nvx::protocol`, in
-[`nvx-rs/src/protocol/mod.rs`](../../nvx-rs/src/protocol/mod.rs), contains 14
+[`nvx-rs/src/protocol/mod.rs`](../../nvx-rs/src/protocol/mod.rs), contains 15
 modules.
 
 ![The modules that nvx::protocol contains](nvx-protocol.svg)

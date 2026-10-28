@@ -137,7 +137,7 @@
 <path fill="#e0f2fe" stroke="#0284c7" stroke-width="1.2" d="M329.5,-80C329.5,-80 196.5,-80 196.5,-80 190.5,-80 184.5,-74 184.5,-68 184.5,-68 184.5,-34 184.5,-34 184.5,-28 190.5,-22 196.5,-22 196.5,-22 329.5,-22 329.5,-22 335.5,-22 341.5,-28 341.5,-34 341.5,-34 341.5,-68 341.5,-68 341.5,-74 335.5,-80 329.5,-80"/>
 <text text-anchor="middle" x="263" y="-61.6" font-family="Liberation Sans,Arial,Helvetica,sans-serif" font-size="13.00" fill="#14283f">protocol</text>
 <text text-anchor="middle" x="263" y="-47.6" font-family="Liberation Sans,Arial,Helvetica,sans-serif" font-size="13.00" fill="#14283f">NVXS / NVXC codecs</text>
-<text text-anchor="middle" x="263" y="-33.6" font-family="Liberation Sans,Arial,Helvetica,sans-serif" font-size="13.00" fill="#14283f">14 nested modules</text>
+<text text-anchor="middle" x="263" y="-33.6" font-family="Liberation Sans,Arial,Helvetica,sans-serif" font-size="13.00" fill="#14283f">15 nested modules</text>
 </a>
 </g>
 </g>
