@@ -56,6 +56,7 @@ from nvx_tools import (  # noqa: E402
     microvm_shards,
     nvx_rs,
     openvmm_test_shards,
+    performance,
     release,
     shard_plans,
     ubuntu,
@@ -627,6 +628,77 @@ def _write_release_fixture(
         "nvx_rs": nvx_rs_binary,
     }
     return paths, kernel_inputs, revision
+
+
+# The CI steps that validate each shell-snapshot restore attempt and remeasure
+# an unstable one once: their suite, processor counts, and scenarios of
+# validation statuses and benchmark exit status.
+RESTORE_REMEASUREMENT_STEPS = (
+    (
+        "performance suite",
+        "performance",
+        (1,),
+        (
+            ("first-success", (0,), 0),
+            ("remeasured-success", (75, 0), 0),
+            ("both-unstable", (75, 75), 0),
+            ("invalid-data", (2,), 0),
+            ("unstable-then-invalid", (75, 2), 0),
+            ("benchmark-failure", (), 42),
+        ),
+    ),
+    (
+        "multi-vCPU shell restore",
+        "shell-snapshot-restore",
+        (2, 4, 8),
+        (
+            ("first-success", (0, 0, 0), 0),
+            ("remeasured-success", (0, 75, 0, 0), 0),
+            ("both-unstable", (0, 75, 75), 0),
+            ("invalid-data", (0, 2), 0),
+            ("unstable-then-invalid", (75, 2), 0),
+            ("benchmark-failure", (), 42),
+        ),
+    ),
+)
+
+
+def _expected_restore_remeasurement(
+    platform: str,
+    suite: str,
+    processor_counts: Sequence[int],
+    statuses: Sequence[int],
+    benchmark_status: int,
+) -> tuple[int, list[str], dict[tuple[int, int], int], dict[int, int]]:
+    """Return the exit status of a restore remeasurement step, the lines that
+    its stubbed commands print, the benchmark number of each measured
+    (processors, attempt), and the benchmark number that each processor count
+    publishes."""
+    lines: list[str] = []
+    measured: dict[tuple[int, int], int] = {}
+    published: dict[int, int] = {}
+    validations = iter(statuses)
+    for processors in processor_counts:
+        run_dir = f"data/runs/{platform}/microvm-v2/{processors}vcpu"
+        for attempt in (1, 2):
+            attempt_dir = f"{run_dir}/{suite}-attempt-{attempt}"
+            measured[processors, attempt] = len(measured) + 1
+            lines.append(f"benchmark {suite} {processors} {attempt_dir}")
+            if benchmark_status:
+                return benchmark_status, lines, measured, published
+            lines.append(f"validate {platform} {attempt_dir}")
+            status = next(validations)
+            if status == 0:
+                published[processors] = measured[processors, attempt]
+                break
+            if status != 75 or attempt == 2:
+                return status, lines, measured, published
+            vcpus = "" if suite == "performance" else f" with {processors} vCPUs"
+            lines.append(
+                f"::warning::Shell-snapshot restore{vcpus} was unstable on attempt "
+                f"{attempt}; remeasuring once"
+            )
+    return 0, lines, measured, published
 
 
 class CliTests(unittest.TestCase):
@@ -12795,6 +12867,49 @@ Write-Output (Get-ExpectedRunnerLabels -BenchmarkRunner)
                 self.assertEqual(script.count(log), 1)
                 self.assertLess(script.index("--lifecycle-input"), script.index(log))
 
+    def test_ci_remeasures_only_unstable_restore_results(self):
+        action = (
+            BuildConstants.REPO_ROOT
+            / ".github"
+            / "actions"
+            / "run-benchmark"
+            / "action.yml"
+        ).read_text(encoding="utf-8")
+
+        self.assertEqual(action.count("performance validate-workload"), 4)
+        for operating_system, loop, unstable, attempt_dir in (
+            (
+                "Linux",
+                "for attempt in 1 2; do",
+                '"${validation_status}" -ne 75',
+                'attempt_dir="${run_dir}/{suite}-attempt-${attempt}"',
+            ),
+            (
+                "Windows",
+                "foreach ($Attempt in 1, 2)",
+                "$ValidationStatus -ne 75",
+                '$AttemptDir = "$RunDir/{suite}-attempt-$Attempt"',
+            ),
+        ):
+            for step, suite, _, _ in RESTORE_REMEASUREMENT_STEPS:
+                with self.subTest(step=f"Run {operating_system} {step}"):
+                    script = _composite_action_script(
+                        action, f"Run {operating_system} {step}"
+                    )
+                    self.assertEqual(script.count("performance validate-workload"), 1)
+                    self.assertEqual(script.count(loop), 1)
+                    self.assertEqual(script.count(unstable), 1)
+                    self.assertEqual(script.count("was unstable on attempt"), 1)
+                    self.assertIn(attempt_dir.replace("{suite}", suite), script)
+                    # The suite writes only to its attempt's directory, which
+                    # validation then checks.
+                    self.assertEqual(script.count("--output-dir"), 1)
+                    self.assertIn("--input-dir", script)
+                    self.assertLess(
+                        script.index("--output-dir"),
+                        script.index("performance validate-workload"),
+                    )
+
     def test_windows_benchmarks_use_provisioned_data_volume_scratch(self):
         action = (
             BuildConstants.REPO_ROOT
@@ -13563,6 +13678,267 @@ python3() {
                     self.assertEqual(
                         json.loads(accepted.read_text(encoding="utf-8")),
                         {"attempt": len(statuses)},
+                    )
+
+    def _assert_restore_attempts(
+        self,
+        root: Path,
+        platform: str,
+        suite: str,
+        processor_counts: Sequence[int],
+        measured: dict[tuple[int, int], int],
+        published: dict[int, int],
+    ) -> None:
+        for processors in processor_counts:
+            run_dir = root / "data" / "runs" / platform / "microvm-v2"
+            run_dir /= f"{processors}vcpu"
+            attempts = sorted(
+                attempt for count, attempt in measured if count == processors
+            )
+            # Every attempt keeps its logs, and none survives from an earlier run.
+            self.assertEqual(
+                sorted(path.name for path in run_dir.glob(f"{suite}-attempt-*")),
+                [f"{suite}-attempt-{attempt}" for attempt in attempts],
+            )
+            for attempt in attempts:
+                log = run_dir / f"{suite}-attempt-{attempt}" / f"{suite}.log"
+                self.assertEqual(
+                    log.read_text(encoding="utf-8-sig").strip(),
+                    f"attempt {measured[processors, attempt]}",
+                )
+            # Only a validated attempt is published for collection.
+            self.assertEqual(
+                (run_dir / f"{suite}.log").exists(), processors in published
+            )
+            self.assertEqual(
+                (run_dir / "benchmark-metadata.json").exists(),
+                processors in published,
+            )
+            if processors in published:
+                self.assertEqual(
+                    (run_dir / f"{suite}.log").read_text(encoding="utf-8-sig").strip(),
+                    f"attempt {published[processors]}",
+                )
+                self.assertEqual(
+                    json.loads(
+                        (run_dir / "benchmark-metadata.json").read_text(
+                            encoding="utf-8-sig"
+                        )
+                    ),
+                    {"attempt": published[processors]},
+                )
+
+    @unittest.skipUnless(os.name == "posix", "requires bash")
+    def test_linux_restore_suites_preserve_attempts_and_publish_only_valid_data(
+        self,
+    ):
+        action = (
+            BuildConstants.REPO_ROOT
+            / ".github"
+            / "actions"
+            / "run-benchmark"
+            / "action.yml"
+        ).read_text(encoding="utf-8")
+        platform = "linux-mshv-virtual-machine"
+        stub = r"""
+benchmark_count=0
+validation_count=0
+python3() {
+    local argument previous="" suite="" processors="" output_dir="" input_dir=""
+    local platform=""
+    for argument in "$@"; do
+        case "${previous}" in
+        --suite) suite="${argument}" ;;
+        --processors) processors="${argument}" ;;
+        --output-dir) output_dir="${argument}" ;;
+        --input-dir) input_dir="${argument}" ;;
+        --platform) platform="${argument}" ;;
+        esac
+        previous="${argument}"
+    done
+    if [[ "${2-}" == benchmark ]]; then
+        benchmark_count=$((benchmark_count + 1))
+        echo "benchmark ${suite} ${processors} ${output_dir}"
+        mkdir -p "${output_dir}"
+        printf 'attempt %d\n' "${benchmark_count}" >"${output_dir}/${suite}.log"
+        printf '{"attempt":%d}' "${benchmark_count}" \
+            >"${output_dir}/benchmark-metadata.json"
+        return "${BENCHMARK_STATUS}"
+    fi
+    if [[ "${2-} ${3-}" == "performance validate-workload" ]]; then
+        validation_count=$((validation_count + 1))
+        echo "validate ${platform} ${input_dir}"
+        return "${VALIDATION_STATUSES[validation_count - 1]}"
+    fi
+    echo "unexpected command: $*" >&2
+    return 1
+}
+"""
+        environment = os.environ.copy()
+        environment.update(
+            {
+                "NVX_BENCHMARK_CPUS": "0-7",
+                "NVX_BENCHMARK_HOST_CPU_RESERVE": "0",
+                "NVX_BENCHMARK_MARKER_TIMEOUT": "40",
+            }
+        )
+        for step, suite, processor_counts, scenarios in RESTORE_REMEASUREMENT_STEPS:
+            script = _composite_action_script(action, f"Run Linux {step}")
+            for name, value in (
+                ("backend", "mshv"),
+                ("platform", platform),
+                ("warmups", "1"),
+                ("runs", "10"),
+                ("teardown-mode", "guest-exit"),
+            ):
+                script = script.replace("${{ inputs." + name + " }}", value)
+            for name, statuses, benchmark_status in scenarios:
+                with (
+                    self.subTest(step=step, name=name),
+                    tempfile.TemporaryDirectory() as temporary,
+                ):
+                    root = Path(temporary).resolve()
+                    # A rerun in the same directory must not keep an attempt
+                    # of the previous run.
+                    stale = root / "data" / "runs" / platform / "microvm-v2"
+                    stale /= f"{processor_counts[0]}vcpu/{suite}-attempt-2"
+                    stale.mkdir(parents=True)
+                    (stale / f"{suite}.log").write_text("stale\n", encoding="utf-8")
+                    setup = (
+                        "VALIDATION_STATUSES=("
+                        + " ".join(str(status) for status in statuses)
+                        + f")\nBENCHMARK_STATUS={benchmark_status}\n"
+                    )
+                    result = subprocess.run(
+                        [
+                            "bash",
+                            "--noprofile",
+                            "--norc",
+                            "-eo",
+                            "pipefail",
+                            "-c",
+                            setup + stub + script,
+                        ],
+                        cwd=root,
+                        env=environment,
+                        capture_output=True,
+                        text=True,
+                        timeout=30,
+                        check=False,
+                    )
+
+                    expected_status, lines, measured, published = (
+                        _expected_restore_remeasurement(
+                            platform,
+                            suite,
+                            processor_counts,
+                            statuses,
+                            benchmark_status,
+                        )
+                    )
+                    self.assertEqual(result.returncode, expected_status, result.stderr)
+                    self.assertEqual(result.stdout.splitlines(), lines)
+                    self._assert_restore_attempts(
+                        root, platform, suite, processor_counts, measured, published
+                    )
+
+    @unittest.skipUnless(os.name == "nt", "requires Windows PowerShell")
+    def test_windows_restore_suites_preserve_attempts_and_publish_only_valid_data(
+        self,
+    ):
+        action = (
+            BuildConstants.REPO_ROOT
+            / ".github"
+            / "actions"
+            / "run-benchmark"
+            / "action.yml"
+        ).read_text(encoding="utf-8")
+        platform = "windows-whp-virtual-machine"
+        stub = """
+$BenchmarkCount = 0
+$ValidationCount = 0
+function python {
+    $Options = @{}
+    for ($Index = 2; $Index -lt $args.Count - 1; $Index++) {
+        $Options["$($args[$Index])"] = "$($args[$Index + 1])"
+    }
+    if ($args[1] -eq "benchmark") {
+        $script:BenchmarkCount += 1
+        $Output = $Options["--output-dir"]
+        $Suite = $Options["--suite"]
+        Write-Output "benchmark $Suite $($Options['--processors']) $Output"
+        New-Item -ItemType Directory -Path $Output -Force | Out-Null
+        Set-Content -LiteralPath "$Output/$Suite.log" `
+            -Value "attempt $($script:BenchmarkCount)"
+        Set-Content -LiteralPath "$Output/benchmark-metadata.json" `
+            -Value ('{"attempt":' + $script:BenchmarkCount + '}')
+        $global:LASTEXITCODE = $script:BenchmarkStatus
+    }
+    elseif ("$($args[1]) $($args[2])" -eq "performance validate-workload") {
+        Write-Output "validate $($Options['--platform']) $($Options['--input-dir'])"
+        $global:LASTEXITCODE = $script:ValidationStatuses[$script:ValidationCount]
+        $script:ValidationCount += 1
+    }
+    else {
+        throw "unexpected command: $args"
+    }
+}
+"""
+        for step, suite, processor_counts, scenarios in RESTORE_REMEASUREMENT_STEPS:
+            script = _composite_action_script(action, f"Run Windows {step}")
+            for name, value in (
+                ("backend", "whp"),
+                ("platform", platform),
+                ("warmups", "1"),
+                ("runs", "10"),
+                ("teardown-mode", "guest-exit"),
+            ):
+                script = script.replace("${{ inputs." + name + " }}", value)
+            for name, statuses, benchmark_status in scenarios:
+                with (
+                    self.subTest(step=step, name=name),
+                    tempfile.TemporaryDirectory() as temporary,
+                ):
+                    root = Path(temporary).resolve()
+                    # A rerun in the same directory must not keep an attempt
+                    # of the previous run.
+                    stale = root / "data" / "runs" / platform / "microvm-v2"
+                    stale /= f"{processor_counts[0]}vcpu/{suite}-attempt-2"
+                    stale.mkdir(parents=True)
+                    (stale / f"{suite}.log").write_text("stale\n", encoding="utf-8")
+                    setup = (
+                        "$ValidationStatuses = @("
+                        + ", ".join(str(status) for status in statuses)
+                        + f")\n$BenchmarkStatus = {benchmark_status}\n"
+                    )
+                    result = subprocess.run(
+                        [
+                            "powershell.exe",
+                            "-NoProfile",
+                            "-NonInteractive",
+                            "-Command",
+                            setup + stub + script,
+                        ],
+                        cwd=root,
+                        capture_output=True,
+                        text=True,
+                        timeout=30,
+                        check=False,
+                    )
+
+                    expected_status, lines, measured, published = (
+                        _expected_restore_remeasurement(
+                            platform,
+                            suite,
+                            processor_counts,
+                            statuses,
+                            benchmark_status,
+                        )
+                    )
+                    self.assertEqual(result.returncode, expected_status, result.stderr)
+                    self.assertEqual(result.stdout.splitlines(), lines)
+                    self._assert_restore_attempts(
+                        root, platform, suite, processor_counts, measured, published
                     )
 
 
@@ -22093,6 +22469,7 @@ class BenchmarkTests(unittest.TestCase):
         )
         self.assertIn("== 512 MiB ==", output.getvalue())
         self.assertIn("snapshot restore", output.getvalue())
+        self.assertIn("  restore samples     : 10.000, 12.000 ms\n", output.getvalue())
         self.assertNotIn("cold boot", output.getvalue())
         self.assertIn('marker : "OPENVMM-SNAPSHOT-RESTORE-OK"', output.getvalue())
         self.assertTrue(run.call_args.kwargs["snapshot_profile"])
@@ -22730,6 +23107,84 @@ class BenchmarkTests(unittest.TestCase):
 
         self.assertEqual(io.call_count, 4)
         self.assertEqual(roundtrip.call_count, 4)
+
+    def test_virtfs_lists_every_retained_sample(self):
+        args = argparse.Namespace(
+            virtfs_memory_mib=128,
+            payload_mib=1,
+            processors=1,
+            warmups=1,
+            timeout=1.0,
+            teardown_mode="guest-exit",
+        )
+        # The warmup's rates and exchange time must not appear in the samples.
+        io_results = [
+            {
+                "text": (
+                    f"1 byte copied, 1 s, {write} MB/s\n"
+                    f"1 byte copied, 1 s, {read} MB/s\n"
+                ),
+                "wall_ms": 1.0,
+                "peak_rss_bytes": 1,
+            }
+            for write, read in ((99, 99), (11, 21), (12.5, 22), (13, 23))
+        ]
+        roundtrip_results = [
+            {"text": "", "wall_ms": wall_ms, "peak_rss_bytes": 1}
+            for wall_ms in (99.0, 2.5, 3.25, 4.125)
+        ]
+        with (
+            patch.object(benchmark, "run_guest_script", side_effect=io_results),
+            patch.object(
+                benchmark, "_run_virtfs_roundtrip", side_effect=roundtrip_results
+            ),
+            patch("sys.stdout", new_callable=io.StringIO) as output,
+        ):
+            benchmark.benchmark_virtfs_workload(
+                args,
+                Path("openvmm"),
+                Path("vmlinux"),
+                Path("initrd"),
+                "kvm",
+                runs=3,
+            )
+
+        lines = output.getvalue().splitlines()
+        self.assertIn(
+            "  write samples                     : 11.0, 12.5, 13.0 MB/s", lines
+        )
+        self.assertIn(
+            "  read samples                      : 21.0, 22.0, 23.0 MB/s", lines
+        )
+        self.assertIn(
+            "  exchange samples                  : 2.500, 3.250, 4.125 ms", lines
+        )
+        # The listed samples must leave the summaries that collection parses
+        # intact.
+        metrics = performance._parse_virtfs(output.getvalue())
+        self.assertEqual(metrics["virtfs_live_write"], ("MB/s", "higher", 12.5))
+        self.assertEqual(metrics["virtfs_live_read"], ("MB/s", "higher", 22.0))
+        self.assertEqual(metrics["virtfs_live_roundtrip"], ("ms", "lower", 3.2))
+
+    def test_shell_snapshot_summary_lists_restore_samples_in_order(self):
+        restored = [85.6894, 74.955, 107.1931, 36.2756]
+        with patch("sys.stdout", new_callable=io.StringIO) as output:
+            benchmark._print_shell_snapshot_summary(256, [308.7, 309.1], restored)
+
+        lines = output.getvalue().splitlines()
+        restore = next(
+            index
+            for index, line in enumerate(lines)
+            if line.startswith("  snapshot restore    : median")
+        )
+        self.assertEqual(
+            lines[restore + 1],
+            "  restore samples     : 85.689, 74.955, 107.193, 36.276 ms",
+        )
+        self.assertEqual(
+            performance._parse_shell_snapshot_restore(output.getvalue()),
+            {"shell_snapshot_restore_256_mib": ("ms", "lower", 80.3)},
+        )
 
     def test_device_io_retains_failure_and_resumes_completed_attempts(self):
         args = argparse.Namespace(

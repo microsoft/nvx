@@ -3182,6 +3182,12 @@ def _format_rate_summary(samples: Sequence[float]) -> str:
     )
 
 
+def _format_samples(samples: Sequence[float], unit: str, *, digits: int) -> str:
+    """List a series' retained samples in measurement order, so that a split
+    of the series can be recognized from its log."""
+    return f"{', '.join(f'{value:.{digits}f}' for value in samples)} {unit}"
+
+
 def _guest_exit_script(teardown_mode: str) -> str:
     return (
         _read_benchmark_script("guest-exit.sh") if teardown_mode == "guest-exit" else ""
@@ -3835,6 +3841,12 @@ def benchmark_virtfs_workload(
             f"  {'rw live host directory':<27} write {_format_rate_summary(write_rates)}"
         )
         print(f"  {'':<27} read  {_format_rate_summary(read_rates)}")
+        print(
+            f"  {'write samples':<34}: {_format_samples(write_rates, 'MB/s', digits=1)}"
+        )
+        print(
+            f"  {'read samples':<34}: {_format_samples(read_rates, 'MB/s', digits=1)}"
+        )
         print(f"  OpenVMM peak RSS                  : {format_rss_summary(io_rss)}")
         print()
 
@@ -3860,6 +3872,10 @@ def benchmark_virtfs_workload(
         print(
             "  live exchange (cold each)         : "
             + format_sample_summary(roundtrip_samples)
+        )
+        print(
+            f"  {'exchange samples':<34}: "
+            f"{_format_samples(roundtrip_samples, 'ms', digits=3)}"
         )
         print(
             f"  OpenVMM peak RSS                  : {format_rss_summary(roundtrip_rss)}"
@@ -4013,6 +4029,12 @@ def _format_shell_snapshot_line(name: str, values: Sequence[float]) -> str:
     )
 
 
+def _format_restore_samples_line(values: Sequence[float]) -> str:
+    # The retained samples show whether a transient host stall split the
+    # series, which its median alone hides.
+    return f"  {'restore samples':<20}: {_format_samples(values, 'ms', digits=3)}"
+
+
 def _print_shell_snapshot_summary(
     memory_mib: int,
     cold: Sequence[float],
@@ -4032,6 +4054,7 @@ def _print_shell_snapshot_summary(
             "TSC PIT-calib)"
         )
     print(_format_shell_snapshot_line("snapshot restore", restored))
+    print(_format_restore_samples_line(restored))
     restore_p50 = statistics.median(restored)
     if restore_p50 > 0:
         base = statistics.median(fast) if fast else statistics.median(cold)
@@ -4184,6 +4207,7 @@ def benchmark_shell_snapshot_restore_workload(
             print(
                 _format_shell_snapshot_line("snapshot restore", restored["samples_ms"])
             )
+            print(_format_restore_samples_line(restored["samples_ms"]))
             restore_profile = restored.get("profile")
             if restore_profile is not None:
                 print_lifecycle_profile_summary(

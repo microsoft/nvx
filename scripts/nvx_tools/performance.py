@@ -76,13 +76,13 @@ LIFECYCLE_MEMORY_MIB = 128
 LIFECYCLE_BOOT_MARKER = "ALPINE-MICROVM-BOOT-OK"
 LIFECYCLE_RESTORE_MARKER = "OPENVMM-SNAPSHOT-RESTORE-OK"
 LIFECYCLE_CAPTURE_TIMING = "openvmm-input-gate-to-publication"
-LIFECYCLE_STABILITY_MINIMUM_SAMPLES = 10
-LIFECYCLE_STABILITY_MINIMUM_CLUSTER_SAMPLES = 2
-LIFECYCLE_SNAPSHOT_MAX_P50_OVER_P25 = 1.25
-LIFECYCLE_SNAPSHOT_MAX_CLUSTER_GAP = 1.25
-UNSTABLE_LIFECYCLE_EXIT_CODE = 75
+STABILITY_MINIMUM_SAMPLES = 10
+STABILITY_MINIMUM_CLUSTER_SAMPLES = 2
+STABILITY_MAX_P50_OVER_P25 = 1.25
+STABILITY_MAX_CLUSTER_GAP = 1.25
+UNSTABLE_EXIT_CODE = 75
 LIFECYCLE_ATTEMPT_LOG_SCHEMA_VERSION = 1
-LIFECYCLE_ATTEMPT_STATUSES = {0: "valid", UNSTABLE_LIFECYCLE_EXIT_CODE: "unstable"}
+LIFECYCLE_ATTEMPT_STATUSES = {0: "valid", UNSTABLE_EXIT_CODE: "unstable"}
 """Validation statuses by exit status; any other status is ``invalid``."""
 SHA256_HEX = re.compile(r"[0-9a-f]{64}")
 COMMIT_ID = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
@@ -109,6 +109,21 @@ SHELL_SNAPSHOT_SECTION = re.compile(
     r"(?P<body>.*?)(?=^==\s*[0-9]+\s+MiB\s*==\s*$|\Z)",
     re.IGNORECASE | re.MULTILINE | re.DOTALL,
 )
+SHELL_SNAPSHOT_RESTORE_LOGS = ("shell-snapshot.log", "shell-snapshot-restore.log")
+SHELL_SNAPSHOT_RESTORE_SUMMARY = re.compile(
+    rf"^\s*snapshot restore\s*:\s*median\s+(?P<median>{NUMBER})\s*ms\b"
+    r"[^\n]*\bn=(?P<count>[0-9]+)\)",
+    re.IGNORECASE | re.MULTILINE,
+)
+SHELL_SNAPSHOT_RESTORE_SAMPLES = re.compile(
+    r"^\s*restore samples\s*:[ \t]*(?P<samples>[^\r\n]*?)[ \t]*ms[ \t]*\r?$",
+    re.IGNORECASE | re.MULTILINE,
+)
+SAMPLE_VALUE = re.compile(r"[0-9]+(?:\.[0-9]+)?")
+# The KVM CI runners restore a shell snapshot in two modes about twice apart,
+# so about a third of their restore series exceed the stability limits without
+# a host stall, against fewer than 0.1% on MSHV and WHP (#345).
+RESTORE_STABILITY_BACKENDS = frozenset({"mshv", "whp"})
 
 
 class PerformanceError(RuntimeError):
@@ -368,6 +383,57 @@ def _parse_shell_snapshot_restore(text: str) -> dict[str, MetricValue]:
             )
         )
     return metrics
+
+
+def _shell_snapshot_restore_samples(text: str, source: str) -> dict[int, list[float]]:
+    """Return the restore samples that each memory section of a shell-snapshot
+    log lists, by memory size.
+
+    A section whose summary counts at least ``STABILITY_MINIMUM_SAMPLES``
+    restores must list them, so that a log can't evade the stability guard by
+    omitting them. The listed samples must be positive and match the summary's
+    count and median.
+    """
+    sections = _shell_snapshot_sections(text, source)
+    if not sections:
+        raise PerformanceError(f"missing memory sections in {source}")
+    series: dict[int, list[float]] = {}
+    for memory_mib, body in sorted(sections.items()):
+        location = f"{source} ({memory_mib} MiB)"
+        summary = SHELL_SNAPSHOT_RESTORE_SUMMARY.search(body)
+        if summary is None:
+            raise PerformanceError(f"missing snapshot restore summary in {location}")
+        count = int(summary.group("count"))
+        listed = SHELL_SNAPSHOT_RESTORE_SAMPLES.search(body)
+        if listed is None:
+            if count >= STABILITY_MINIMUM_SAMPLES:
+                raise PerformanceError(f"missing restore samples in {location}")
+            continue
+        values = [value.strip() for value in listed.group("samples").split(",")]
+        if not all(SAMPLE_VALUE.fullmatch(value) for value in values):
+            raise PerformanceError(
+                f"malformed restore samples in {location}: {listed.group('samples')!r}"
+            )
+        samples = [float(value) for value in values]
+        # The stability guard divides by samples.
+        if not all(sample > 0 for sample in samples):
+            raise PerformanceError(f"non-positive restore sample in {location}")
+        if len(samples) != count:
+            raise PerformanceError(
+                f"{location} lists {len(samples)} restore samples, but its "
+                f"summary counts {count}"
+            )
+        median = statistics.median(samples)
+        reported = _number(summary.group("median"))
+        # The summary rounds the median to 0.1 ms, and the list rounds each
+        # sample to 0.001 ms.
+        if abs(median - reported) > 0.051:
+            raise PerformanceError(
+                f"{location} lists restore samples with median {median:.3f} ms, "
+                f"but its summary reports {reported:g} ms"
+            )
+        series[memory_mib] = samples
+    return series
 
 
 def _parse_network(text: str) -> dict[str, MetricValue]:
@@ -957,25 +1023,27 @@ def _openvmm_statistics(
     return p50, minimum, maximum, len(samples)
 
 
-def _validate_snapshot_generation_stability(
-    document: dict[str, object], backend: str, source: Path
-) -> None:
-    samples = _openvmm_samples(
-        document, "snapshot_capture", backend, "samples_ms", source
-    )
-    if len(samples) < LIFECYCLE_STABILITY_MINIMUM_SAMPLES:
+def _validate_sample_stability(samples: Sequence[float], series: str) -> None:
+    """Reject a millisecond series that a transient host stall split.
+
+    With at least ``STABILITY_MINIMUM_SAMPLES`` samples, a p50 more than 25%
+    above p25, or a gap of more than 25% between adjacent sorted samples with
+    at least two samples on each side, raises ``UnstablePerformanceError``.
+    A single outlier and a uniformly slower series both pass. Callers must
+    pass positive samples.
+    """
+    if len(samples) < STABILITY_MINIMUM_SAMPLES:
         return
 
     ordered = sorted(samples)
     p25 = ordered[math.ceil(len(ordered) * 0.25) - 1]
     p50 = statistics.median(ordered)
     ratio = p50 / p25
-    if ratio > LIFECYCLE_SNAPSHOT_MAX_P50_OVER_P25:
+    if ratio > STABILITY_MAX_P50_OVER_P25:
         raise UnstablePerformanceError(
-            f"unstable snapshot generation at {source}:snapshot_capture."
-            f"{backend}.samples_ms: p50 {p50:.3f} ms is "
+            f"unstable {series}: p50 {p50:.3f} ms is "
             f"{(ratio - 1) * 100:.1f}% above p25 {p25:.3f} ms "
-            f"(limit {(LIFECYCLE_SNAPSHOT_MAX_P50_OVER_P25 - 1) * 100:.1f}%); "
+            f"(limit {(STABILITY_MAX_P50_OVER_P25 - 1) * 100:.1f}%); "
             "rerun on an idle host"
         )
 
@@ -987,20 +1055,84 @@ def _validate_snapshot_generation_stability(
             ordered[split_index],
         )
         for split_index in range(
-            LIFECYCLE_STABILITY_MINIMUM_CLUSTER_SAMPLES,
-            len(ordered) - LIFECYCLE_STABILITY_MINIMUM_CLUSTER_SAMPLES + 1,
+            STABILITY_MINIMUM_CLUSTER_SAMPLES,
+            len(ordered) - STABILITY_MINIMUM_CLUSTER_SAMPLES + 1,
         )
     )
     gap_ratio, split_index, lower, upper = max(cluster_gaps)
-    if gap_ratio > LIFECYCLE_SNAPSHOT_MAX_CLUSTER_GAP:
+    if gap_ratio > STABILITY_MAX_CLUSTER_GAP:
         raise UnstablePerformanceError(
-            f"unstable snapshot generation at {source}:snapshot_capture."
-            f"{backend}.samples_ms: samples split {split_index}/"
+            f"unstable {series}: samples split {split_index}/"
             f"{len(ordered) - split_index} between {lower:.3f} ms and "
             f"{upper:.3f} ms ({(gap_ratio - 1) * 100:.1f}% gap, "
-            f"limit {(LIFECYCLE_SNAPSHOT_MAX_CLUSTER_GAP - 1) * 100:.1f}%); "
+            f"limit {(STABILITY_MAX_CLUSTER_GAP - 1) * 100:.1f}%); "
             "rerun on an idle host"
         )
+
+
+def _validate_snapshot_generation_stability(
+    document: dict[str, object], backend: str, source: Path
+) -> None:
+    _validate_sample_stability(
+        _openvmm_samples(document, "snapshot_capture", backend, "samples_ms", source),
+        f"snapshot generation at {source}:snapshot_capture.{backend}.samples_ms",
+    )
+
+
+def _shell_snapshot_restore_logs(input_dir: Path) -> list[Path]:
+    return [
+        input_dir / filename
+        for filename in SHELL_SNAPSHOT_RESTORE_LOGS
+        if (input_dir / filename).is_file()
+    ]
+
+
+def _validate_restore_stability(logs: Sequence[Path]) -> int:
+    """Reject the shell-snapshot restore series in ``logs`` that a transient
+    host stall split, reporting every such series, and return how many series
+    had enough samples to check."""
+    checked = 0
+    unstable: list[str] = []
+    for path in logs:
+        series = _shell_snapshot_restore_samples(_read_log(path), str(path))
+        for memory_mib, samples in series.items():
+            if len(samples) < STABILITY_MINIMUM_SAMPLES:
+                continue
+            checked += 1
+            try:
+                _validate_sample_stability(
+                    samples, f"shell-snapshot restore at {path} ({memory_mib} MiB)"
+                )
+            except UnstablePerformanceError as error:
+                unstable.append(str(error))
+    if unstable:
+        raise UnstablePerformanceError("\n".join(unstable))
+    return checked
+
+
+def validate_workload_stability(platform: str, input_dir: Path) -> None:
+    """Check the workload logs in ``input_dir`` for series that a transient
+    host stall split, so that the caller can remeasure them before collection.
+
+    Only the shell-snapshot restore series have a guard, and only on the
+    backends in ``RESTORE_STABILITY_BACKENDS``.
+    """
+    backend = OPENVMM_BACKENDS.get(platform)
+    if backend is None:
+        raise PerformanceError(f"unsupported OpenVMM benchmark platform: {platform!r}")
+    logs = _shell_snapshot_restore_logs(input_dir)
+    if not logs:
+        raise PerformanceError(f"no shell-snapshot restore log found in {input_dir}")
+    if backend not in RESTORE_STABILITY_BACKENDS:
+        print(
+            f"SKIP: shell-snapshot restore series have no stability guard on {backend}"
+        )
+        return
+    checked = _validate_restore_stability(logs)
+    print(
+        f"Shell-snapshot restore series in {input_dir} are stable "
+        f"({checked} with at least {STABILITY_MINIMUM_SAMPLES} samples checked)"
+    )
 
 
 def read_lifecycle_data(platform: str, input_path: Path) -> LifecycleData:
@@ -1916,6 +2048,8 @@ def collect_results(
             if metric in collected:
                 raise PerformanceError(f"duplicate collected metric: {metric}")
             collected[metric] = value
+    if OPENVMM_BACKENDS.get(platform) in RESTORE_STABILITY_BACKENDS:
+        _validate_restore_stability(_shell_snapshot_restore_logs(input_dir))
 
     lifecycle = (
         read_lifecycle_data(platform, lifecycle_input)
@@ -2942,6 +3076,13 @@ def configure_parser(parser: argparse.ArgumentParser) -> None:
         help="append the validation outcome to this lifecycle attempt log",
     )
 
+    validate_workload = commands.add_parser(
+        "validate-workload",
+        help="check workload logs for series that a transient host stall split",
+    )
+    validate_workload.add_argument("--platform", required=True)
+    validate_workload.add_argument("--input-dir", type=Path, required=True)
+
     collect_openvmm = commands.add_parser(
         "collect-openvmm", help="convert an OpenVMM benchmark JSON result to p50 CSV"
     )
@@ -3060,7 +3201,7 @@ def command_performance(args: argparse.Namespace) -> int:
             try:
                 read_lifecycle_data(args.platform, args.input)
             except UnstablePerformanceError as error:
-                status, message = UNSTABLE_LIFECYCLE_EXIT_CODE, str(error)
+                status, message = UNSTABLE_EXIT_CODE, str(error)
             except PerformanceError as error:
                 status, message = 2, str(error)
             if message is not None:
@@ -3074,6 +3215,14 @@ def command_performance(args: argparse.Namespace) -> int:
                     f"({attempt.status}) in {args.attempt_log}"
                 )
             return status
+        if args.performance_command == "validate-workload":
+            try:
+                validate_workload_stability(args.platform, args.input_dir)
+            except UnstablePerformanceError as error:
+                for line in str(error).splitlines():
+                    print(f"ERROR: {line}", file=sys.stderr)
+                return UNSTABLE_EXIT_CODE
+            return 0
         if args.performance_command == "collect-openvmm":
             collect_openvmm_results(
                 args.platform,

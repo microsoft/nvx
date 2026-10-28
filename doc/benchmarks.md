@@ -415,6 +415,10 @@ measures complete process wall time while host and guest exchange files through 
 | `virtfs_live_read` | MB/s | Sequential guest read from the host file after dropping guest page cache. |
 | `virtfs_live_roundtrip` | ms | Guest creates a marker observed by the host, then observes a host rewrite before that VM exits. |
 
+`virtfs.log` follows the summaries of each series with its retained samples in measurement order.
+A host slowdown that delays part of a series splits its samples into two groups, which the median
+alone hides.
+
 ### Device operation rates
 
 The dedicated suite always uses the canonical microVM and attaches the block
@@ -478,6 +482,20 @@ The 64 MiB pair, `shell_snapshot_cold_64_mib` and
 | `shell_snapshot_restore_256_mib` | Restore process launch through lifecycle-aligned verification of a 256 MiB snapshot. |
 | `shell_snapshot_cold_512_mib` | OpenVMM launch to a shell-ready guest with 512 MiB of memory. |
 | `shell_snapshot_restore_512_mib` | Restore process launch through lifecycle-aligned verification of a 512 MiB snapshot. |
+
+Each memory section of `shell-snapshot.log`, and of `shell-snapshot-restore.log` for the
+restore-only suite, lists the retained restore samples in measurement order after the restore
+summary.
+
+On MSHV and WHP, collection rejects a restore series of at least ten samples that a transient
+host stall split, with the limits that guard snapshot generation: a p50 more than 25% above p25,
+or a gap of more than 25% between adjacent sorted samples with at least two samples on each side.
+Such a series must list its samples, and the list must match the summary's count and median.
+`performance validate-workload` applies the same check without collecting, so that CI can
+remeasure the series, as [CI collection](#ci-collection) describes. KVM restore series are
+exempt: the KVM CI runners restore a snapshot in two modes about twice apart, so 1,933 of the
+6,192 KVM restore series that CI measured from 2026-10-04 to 2026-10-27 exceed those limits
+without a stall, against 4 of 6,144 on MSHV and 2 of 5,646 on WHP (#345).
 
 ### Snapshot lifecycle profile
 
@@ -661,6 +679,15 @@ published lifecycle metrics. The step summary lists every attempt with its outco
 snapshot-generation p50, and whether it was published, and reports the storage
 telemetry of each attempt, rejected ones included.
 
+CI likewise validates the [shell-snapshot restore series](#shell-snapshot) after the
+one-vCPU `performance` suite and after each 2-, 4-, and 8-vCPU `shell-snapshot-restore`
+suite. Each attempt writes its logs to its own `performance-attempt-N` or
+`shell-snapshot-restore-attempt-N` directory, and `performance validate-workload`
+checks it. Status 75 on the first attempt remeasures the whole suite once, and only a
+validated attempt's files are copied to the result directory for collection. Other
+validation failures stop immediately, and a second unstable attempt fails the job. On
+KVM, whose restore series have no stability guard, validation accepts every attempt.
+
 Before updating the run-scoped `benchmark-<platform>-<run-id>` artifact, each platform
 uploads its raw results and lifecycle profiles to the immutable
 `benchmark-diagnostics-<platform>-<run-id>-attempt-<run-attempt>` artifact, including
@@ -668,8 +695,9 @@ after a benchmark failure. Both artifacts are retained for one day. Rerunning a
 workflow cannot overwrite an earlier attempt's diagnostics. Downstream gates still
 use the run-scoped artifact so a failed-jobs-only rerun can reuse successful
 platform results from an earlier workflow attempt. The `acceptance-attempt-N.json`
-files identify the bounded lifecycle remeasurements within one workflow attempt,
-not the workflow's `github.run_attempt`.
+files and the `performance-attempt-N` and `shell-snapshot-restore-attempt-N`
+directories identify the bounded remeasurements within one workflow attempt, not the
+workflow's `github.run_attempt`.
 
 Lifecycle JSON results and workload `benchmark-metadata.json` files record host
 provenance under `host`: the runner name from `RUNNER_NAME`, the machine name, the
