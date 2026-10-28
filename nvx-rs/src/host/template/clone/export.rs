@@ -75,7 +75,13 @@ impl DirectoryExport {
     /// the store that an administrator configures is outside it, as the directories above the
     /// store are: a bind mount or a mount point of the store, or of a directory above or inside
     /// it, a loopback share, or a hard link of a payload. Whoever names an export must not name
-    /// such an alias, nor a directory that holds one.
+    /// such an alias, nor a directory that holds one. Nor does the check see what changes after
+    /// it: OpenVMM resolves an export's path again at each launch and restore, so the directories
+    /// above the export's directory must be ones that no guest may change, as those above the
+    /// clone's block devices must, which [Block devices by
+    /// path](crate::host::template::Store#block-devices-by-path) describes: whoever names an
+    /// export must not name one inside a directory that a writable export of another sandbox or
+    /// clone holds.
     ///
     /// [`filesystem::canonicalize`]: crate::host::filesystem::canonicalize
     pub(super) fn check_outside(
