@@ -256,6 +256,8 @@ impl Repair {
             RepairStage::Finish,
             RepairCause::Incomplete,
         ));
+        // The finish acknowledges before any deferred work, which it may run in line.
+        let acknowledged_at = acknowledge.then(Instant::now);
         if let Err(error) = self.system.restore_finish(finish) {
             let error = RepairError::new(RepairStage::Finish, RepairCause::Time(error));
             self.progress = Progress::Failed(error.clone());
@@ -265,7 +267,7 @@ impl Repair {
             generation_id: self.restore.generation_id(),
             cpus: resources.cpus,
             memory: resources.memory,
-            acknowledged_at: acknowledge.then(Instant::now),
+            acknowledged_at,
         };
         self.progress = Progress::Repaired(repaired);
         Ok(repaired)
@@ -321,7 +323,8 @@ pub struct Repaired {
     cpus: u32,
     /// The memory size of the online memory blocks, in bytes.
     memory: u64,
-    /// When the repair acknowledged the restore, if the restore asked for it.
+    /// An instant no later than the repair's acknowledgement of the restore, taken right before
+    /// the finish, if the restore asked for the acknowledgement.
     acknowledged_at: Option<Instant>,
 }
 
@@ -342,8 +345,12 @@ impl Repaired {
         self.memory
     }
 
-    /// Returns when the repair acknowledged the restore, once its finish returned, or `None` if
+    /// Returns an instant no later than the repair's acknowledgement of the restore, or `None` if
     /// the host did not gate its input until the acknowledgement.
+    ///
+    /// The repair takes the instant right before its finish, which acknowledges the restore
+    /// before any of the deferred time work, and may run that work before it returns, so a
+    /// deadline that starts at the acknowledgement may count from the instant.
     pub fn acknowledged_at(&self) -> Option<Instant> {
         self.acknowledged_at
     }

@@ -5,7 +5,9 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
+use std::thread;
+use std::time::Duration;
 
 use super::*;
 use crate::guest::reseed::tests::take_dropped;
@@ -275,6 +277,99 @@ fn an_ungated_restore_is_finished_without_an_acknowledgement() {
         calls.take().last(),
         Some(&Call::Finish(RestoreFinish::new()))
     );
+}
+
+/// How long the finish of a [`Deferring`] system runs the restore's deferred work after its
+/// acknowledgement: long enough that an instant taken once the finish returned would follow the
+/// acknowledgement by far.
+const DEFERRED_WORK: Duration = Duration::from_millis(50);
+
+/// A system that makes its calls through a [`FakeSystem`], and whose finish acknowledges the
+/// restore, then runs the restore's deferred work for [`DEFERRED_WORK`] before it returns, as the
+/// time ABI's finish does without a time daemon. It records when its reseed, the step before the
+/// finish, returned, and when its finish acknowledged the restore.
+struct Deferring {
+    /// The system through which it makes its calls.
+    system: FakeSystem,
+    /// When the reseed returned.
+    reseeded: Arc<OnceLock<Instant>>,
+    /// When the finish acknowledged the restore.
+    acknowledged: Arc<OnceLock<Instant>>,
+}
+
+impl RepairSystem for Deferring {
+    fn online_cpus(&mut self) -> io::Result<Vec<u8>> {
+        self.system.online_cpus()
+    }
+
+    fn block_size(&mut self) -> io::Result<Vec<u8>> {
+        self.system.block_size()
+    }
+
+    fn memory_blocks(&mut self) -> io::Result<Vec<u64>> {
+        self.system.memory_blocks()
+    }
+
+    fn block_state(&mut self, block: u64) -> io::Result<Option<Vec<u8>>> {
+        self.system.block_state(block)
+    }
+
+    fn add_block(&mut self, address: u64) -> io::Result<()> {
+        self.system.add_block(address)
+    }
+
+    fn online_block(&mut self, block: u64) -> io::Result<()> {
+        self.system.online_block(block)
+    }
+
+    fn reseed(&mut self, seed: &Seed) -> Result<(), ReseedError> {
+        let result = self.system.reseed(seed);
+        self.reseeded.set(Instant::now()).unwrap();
+        result
+    }
+
+    fn restore_finish(&mut self, finish: RestoreFinish) -> Result<(), TimeError> {
+        self.system.restore_finish(finish)?;
+        self.acknowledged.set(Instant::now()).unwrap();
+        thread::sleep(DEFERRED_WORK);
+        Ok(())
+    }
+}
+
+#[test]
+fn the_instant_of_the_acknowledgement_precedes_the_deferred_work_of_the_finish() {
+    let calls = Calls::default();
+    let reseeded = Arc::new(OnceLock::new());
+    let acknowledged = Arc::new(OnceLock::new());
+    let system = Deferring {
+        system: FakeSystem::new(&calls),
+        reseeded: Arc::clone(&reseeded),
+        acknowledged: Arc::clone(&acknowledged),
+    };
+    let restore = restore();
+    take_dropped();
+    let repaired = Repair::with_system(restore, Box::new(system))
+        .run()
+        .unwrap();
+    let returned = Instant::now();
+    let reseeded = *reseeded.get().unwrap();
+    let acknowledged = *acknowledged.get().unwrap();
+    // The finish returned long after it acknowledged the restore, but the repair took its instant
+    // between the reseed and the acknowledgement, so that a deadline that starts at the instant
+    // starts no later than at the acknowledgement.
+    assert!(returned.duration_since(acknowledged) >= DEFERRED_WORK);
+    let instant = repaired.acknowledged_at().unwrap();
+    assert!(
+        reseeded <= instant,
+        "{instant:?} precedes the reseed, {reseeded:?}"
+    );
+    assert!(
+        instant <= acknowledged,
+        "{instant:?} follows the acknowledgement, {acknowledged:?}"
+    );
+    let mut expected = vec![Call::OnlineCpus, Call::BlockSize];
+    expected.extend(finishing());
+    assert_eq!(calls.take(), expected);
 }
 
 /// Checks that the repair of a clone that captured the first `captured` memory blocks of RAM, in
