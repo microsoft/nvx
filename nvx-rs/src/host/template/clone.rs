@@ -360,10 +360,10 @@ impl ClonePlan {
     /// - with [`ErrorKind::Unsupported`] for an export whose directory, by the path that its plan
     ///   resolved, lies inside the template store's directory, [`Store::dir`], by the path that
     ///   it resolves to, or holds it, or that lets the guest write in a directory through which
-    ///   the store's path leads, as the host resolves it, links included, which the guest could
-    ///   then turn elsewhere, [`Evidence::InvalidMappings`], and with [`ErrorKind::Io`] if the
-    ///   store's directory, or a directory through which its path leads, cannot be resolved, the
-    ///   host's evidence;
+    ///   the store's path leads, as the host resolves it, links and `..` included, which the guest
+    ///   could then turn elsewhere, or keep the host from following, [`Evidence::InvalidMappings`],
+    ///   and with [`ErrorKind::Io`] if the store's directory, or a directory through which its
+    ///   path leads, cannot be resolved, the host's evidence;
     /// - with [`ErrorKind::NotFound`] if the store no longer indexes the leased generation, and as
     ///   [`Store::index`] fails, the host's evidence; with [`ErrorKind::Io`] if it indexes it with
     ///   another key than the lease names, [`Evidence::MalformedGeneration`]; and as
@@ -788,14 +788,15 @@ fn generation_fault(error: Error) -> Fault {
 
 /// Returns the directories through which `path` leads, as the host resolves it, each resolved as
 /// [`filesystem::canonicalize`] resolves the paths of an export plan: for each name of the path,
-/// from the current directory's own for a relative path, the directory in which the host looks
-/// it up, which the path before the name resolves to, and, for a name that is a link, the
-/// directories through which the link's target leads from there, through at most
+/// `..` included, from the current directory's own for a relative path, the directory in which
+/// the host looks it up, which the path before the name resolves to, and, for a name that is a
+/// link, the directories through which the link's target leads from there, through at most
 /// [`MAX_PATH_LINKS`] links in all.
 ///
 /// The host reaches the template store, and OpenVMM the snapshots in it, by the path that the
 /// store names, so a guest that could write in one of these directories could replace a link or
-/// a directory of the path, and turn the host's later operations on the store elsewhere.
+/// a directory of the path, and turn the host's later operations on the store elsewhere, or
+/// make the directory unsearchable, and keep the host from the store.
 fn path_directories(path: &Path) -> io::Result<Vec<PathBuf>> {
     let mut directories = BTreeSet::new();
     let mut pending = vec![(PathBuf::new(), std::path::absolute(path)?)];
@@ -803,11 +804,22 @@ fn path_directories(path: &Path) -> io::Result<Vec<PathBuf>> {
     while let Some((start, rest)) = pending.pop() {
         let mut prefix = start;
         for component in rest.components() {
-            if !matches!(component, Component::Normal(_)) {
-                // The root, a prefix, or `.` names no entry, and `..` the parent of a directory,
-                // which only a write in the directory that holds that directory could move.
-                prefix.push(component);
-                continue;
+            match component {
+                Component::Normal(_) => {}
+                Component::CurDir | Component::ParentDir => {
+                    // Unix looks `.` and `..` up in the directory before them, as it does a name,
+                    // so a guest that could change that directory could keep the host from
+                    // searching it. Windows resolves them from a path's text, as
+                    // `std::path::absolute` did.
+                    directories.insert(filesystem::canonicalize(&prefix)?);
+                    prefix.push(component);
+                    continue;
+                }
+                Component::RootDir | Component::Prefix(_) => {
+                    // The root and a prefix name no entry.
+                    prefix.push(component);
+                    continue;
+                }
             }
             let parent = filesystem::canonicalize(&prefix)?;
             prefix.push(component);

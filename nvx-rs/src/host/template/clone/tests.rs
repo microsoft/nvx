@@ -2753,7 +2753,7 @@ fn exports_that_let_the_guest_turn_the_template_store_s_path_are_refused() {
                 format!(
                     "the export of a clone cannot let its guest write in {}, through which the \
                      path of the template store {} leads, since the guest could then turn that \
-                     path elsewhere",
+                     path elsewhere, or keep the host from following it",
                     dir.display(),
                     fixture.store.dir().display()
                 )
@@ -2768,6 +2768,67 @@ fn exports_that_let_the_guest_turn_the_template_store_s_path_are_refused() {
         &[(share.as_path(), "/data", true)][..],
         &[
             (share.as_path(), "/data", true),
+            (work.as_path(), "/work", false),
+        ],
+    ] {
+        let export = export_plan(mappings, &[], &[]);
+        let request = with_export(request.clone(), &export);
+        drop(fixture.plan(&mut acquired, &request, NO_CONTENT).unwrap());
+    }
+}
+
+#[test]
+fn exports_that_let_the_guest_block_the_template_store_s_path_are_refused() {
+    // The store's path leads through `traverse` and its `..`, which Unix looks up in `traverse`:
+    // a guest that could write there could make it unsearchable, and keep the host from the
+    // store. Windows resolves `..` from the path's text, and never looks in `traverse`.
+    let fixture = Fixture::in_store(
+        |directory| {
+            for name in ["traverse", "private"] {
+                fs::create_dir(directory.join(name)).unwrap();
+            }
+            fs::create_dir(directory.join("traverse").join("work")).unwrap();
+            directory
+                .join("traverse")
+                .join("..")
+                .join("private")
+                .join("templates")
+        },
+        |_, _, _| {},
+    );
+    let (image, binding) = fixture.image("distro.erofs", IMAGE_LEN);
+    let mut acquired = fixture.acquire("sandbox");
+    let request = tmpfs_request(&image, &binding);
+    let traverse = filesystem::canonicalize(&fixture.directory.path().join("traverse")).unwrap();
+    // A writable export of the directory.
+    let export = export_plan(&[(&traverse, "/data", false)], &[], &[]);
+    let writable = with_export(request.clone(), &export);
+    let plan = fixture.plan(&mut acquired, &writable, NO_CONTENT);
+    if cfg!(windows) {
+        drop(plan.unwrap());
+    } else {
+        assert_eq!(
+            refused(plan, Evidence::InvalidMappings),
+            (
+                ErrorKind::Unsupported,
+                format!(
+                    "the export of a clone cannot let its guest write in {}, through which the \
+                     path of the template store {} leads, since the guest could then turn that \
+                     path elsewhere, or keep the host from following it",
+                    traverse.display(),
+                    fixture.store.dir().display()
+                )
+            )
+        );
+        assert_untouched(&acquired);
+    }
+    // A read-only export of the directory, and one in which the guest writes only a directory
+    // in it, leave the directory as it is.
+    let work = traverse.join("work");
+    for mappings in [
+        &[(traverse.as_path(), "/data", true)][..],
+        &[
+            (traverse.as_path(), "/data", true),
             (work.as_path(), "/work", false),
         ],
     ] {
