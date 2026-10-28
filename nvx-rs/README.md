@@ -87,6 +87,11 @@ directories, outcome reports, start and exec, and stop and deprovision. Their
 `mod.rs` files retain the existing entry points through re-exports; their
 `tests.rs` files keep the unit tests at the same module paths.
 
+The table below says in one line what each module is for, and links to the
+module's section after the table, which holds the module's details. A change to
+a module's details goes in its section; its row, at most 200 characters long,
+changes only when the module's purpose does.
+
 | Module | Purpose |
 | --- | --- |
 | [`nvx::protocol`](#nvxprotocol) | The codec of the control console's `NVXS` records, `NVXC` frames, and payloads, which the host, the guest agent, and the fake OpenVMM share |
