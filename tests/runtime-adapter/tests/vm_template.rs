@@ -9,13 +9,15 @@
 //! its key, and its snapshot, and whose key holds what the scenario asked for: the runtime of the
 //! adapter's VMs, with the guest agent's build, the backend, the processors and those online at
 //! boot, the RAM and its capacity, the geometries of the placeholder and of the dormant scratch, a
-//! NIC exactly when the network lets something through, and a kernel command line of the platform
+//! NIC exactly when the network lets something through, which the capture attaches under the
+//! complete deny-all policy, whatever the network's own, and a kernel command line of the platform
 //! tier's tokens alone, with `maxcpus=` for a template whose processors are not all online at
-//! boot, which names neither the placeholder's identity nor a root. The slot of the
+//! boot, and the NIC's addresses, but neither a DNS server nor a publication of the guest's
+//! listeners, which names neither the placeholder's identity nor a root. The slot of the
 //! template's class then holds no transaction, and records no launch, and a second creation serves
-//! the generation without a capture. NVX refuses a network whose policy no template takes before
-//! any VM starts, and the host program refuses a class that no capture takes before it creates the
-//! store.
+//! the generation without a capture, as does the creation of a network of any other policy at the
+//! same guest's address, whose class is the same. The host program refuses a class that no capture
+//! takes before it creates the store.
 //!
 //! Other scenarios run the host program's operations on the generations of a store: `refresh`,
 //! which captures a generation of a class whose store holds an eligible one already, and retires
@@ -85,10 +87,15 @@ const GATEWAY: &str = "192.0.2.1";
 const PROXY_PORT: u16 = 3128;
 /// The port of the gateway to which the allow rule lets TCP through.
 const RULE_PORT: u16 = 8080;
+/// The port of host loopback that a forward forwards to the guest's [`RULE_PORT`]. The capture
+/// binds no forward, so nothing holds it.
+const FORWARD_PORT: u16 = 18080;
 
 /// The network of a scenario's template, which the creation reads from a file that the test
 /// writes, in the serde form of a plan's network: the guest at [`GUEST_NETWORK`], with egress
-/// denied and no host-loopback access unless the network says otherwise.
+/// denied and no host-loopback access unless the network says otherwise. The capture attaches the
+/// NIC of a network that lets something through under the complete deny-all policy, whatever the
+/// network's own.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Network {
     /// No network, which attaches no network device.
@@ -104,13 +111,27 @@ enum Network {
     Outbound,
     /// A proxy-only network, whose proxy is at [`PROXY_PORT`] of host loopback.
     Proxy,
-    /// Ingress allowed, which no template takes: OpenVMM would publish the guest's listeners.
+    /// Ingress allowed, under which OpenVMM would publish the guest's listeners.
     Ingress,
-    /// Host-loopback access in both directions, which no template takes either.
+    /// Host-loopback access in both directions, under which OpenVMM would publish the guest's
+    /// listeners on host loopback.
     HostLoopback,
+    /// Host-loopback access in both directions, with a forward from [`FORWARD_PORT`] of host
+    /// loopback to the guest's [`RULE_PORT`].
+    Forward,
 }
 
 impl Network {
+    /// The networks that let something through, each at [`GUEST_NETWORK`].
+    const WITH_NIC: [Self; 7] = [
+        Self::Egress,
+        Self::AllowRule,
+        Self::Outbound,
+        Self::Proxy,
+        Self::Ingress,
+        Self::HostLoopback,
+        Self::Forward,
+    ];
     /// Returns the network's serde form, or `None` without a network.
     fn form(self) -> Option<Value> {
         let mut form = json!({
@@ -141,6 +162,14 @@ impl Network {
             Self::Proxy => form["proxy"] = json!({"port": PROXY_PORT, "scheme": "http"}),
             Self::Ingress => form["ingress"] = json!("allow"),
             Self::HostLoopback => form["hostLoopback"] = json!("allow"),
+            Self::Forward => {
+                form["hostLoopback"] = json!("allow");
+                form["hostLoopbackForwards"] = json!([{
+                    "protocol": "tcp",
+                    "hostPort": FORWARD_PORT,
+                    "guestPort": RULE_PORT,
+                }]);
+            }
         }
         Some(form)
     }
@@ -412,8 +441,9 @@ fn assert_captured(templates: &Templates, created: &Printed, template: &Template
 
     // The kernel command line, which every clone restores: the platform tier's tokens alone,
     // which OpenVMM's capture admits, with the processors, those online at boot when they are
-    // fewer, and the NIC's addresses exactly when the template has a NIC, but neither the
-    // placeholder's identity nor a root's tokens.
+    // fewer, and the NIC's addresses exactly when the template has a NIC, but neither a DNS server
+    // nor a publication of the guest's listeners, which OpenVMM names to no guest under the NIC's
+    // complete deny-all policy, nor the placeholder's identity, nor a root's tokens.
     let command_line = key.command_line();
     let tokens: Vec<Vec<u8>> = cmdline::parameters(command_line.as_bytes())
         .map(|parameter| token(&parameter))
@@ -445,11 +475,23 @@ fn assert_captured(templates: &Templates, created: &Printed, template: &Template
         [limit] => assert!(limited && **limit == expected.as_bytes(), "{command_line}"),
         _ => panic!("{command_line} limits the processors online at boot more than once"),
     }
-    assert_eq!(
-        tokens.iter().any(|token| token.starts_with(b"virtnet_ip=")),
-        template.network.has_nic(),
-        "{command_line}"
-    );
+    for address in ["virtnet_ip=", "virtnet_gw="] {
+        assert_eq!(
+            tokens
+                .iter()
+                .any(|token| token.starts_with(address.as_bytes())),
+            template.network.has_nic(),
+            "{address} in {command_line}"
+        );
+    }
+    for absent in ["virtnet_dns=", "virtnet_ingress="] {
+        assert!(
+            !tokens
+                .iter()
+                .any(|token| token.starts_with(absent.as_bytes())),
+            "{absent} in {command_line}"
+        );
+    }
     for tenant in [templates.identity.as_str(), "nvx_layer", "nvx_scratch"] {
         assert!(!command_line.contains(tenant), "{tenant} in {command_line}");
     }
@@ -497,26 +539,6 @@ fn captures(name: &str, template: Template) {
     assert_eq!(fs::read(&log).unwrap(), captured);
 }
 
-/// Creates `template` in a template store of its own, in the sandbox of the test `name`, and
-/// checks that NVX refuses its network with `problem` before any VM starts: the store indexes no
-/// generation, and no VMM ran in any slot.
-fn refuses(name: &str, template: Template, problem: &str) {
-    let mut templates = Templates::new(name);
-    templates.create(&template, FAILED);
-    let stderr = templates.sandbox.stderr();
-    assert!(stderr.contains(problem), "{stderr}");
-    assert!(templates.store().index().unwrap().generations().is_empty());
-    let slots = fs::read_dir(templates.sandbox.store.join(CAPTURES_NAME))
-        .into_iter()
-        .flatten();
-    for slot in slots {
-        let slot = slot.unwrap().path();
-        for name in [LOG_NAME, TRANSACTION_NAME] {
-            assert!(!slot.join(name).exists(), "{}", slot.display());
-        }
-    }
-}
-
 #[test]
 #[ignore = "boots a VM; see the module documentation for what it needs"]
 fn a_template_without_a_network_has_no_nic() {
@@ -551,46 +573,32 @@ fn a_network_that_lets_nothing_through_has_no_nic() {
 
 #[test]
 #[ignore = "boots a VM; see the module documentation for what it needs"]
-fn an_egress_network_has_its_nic() {
-    captures("tpl-egress", Template::new(Network::Egress));
-}
+fn the_networks_of_every_policy_at_one_guest_s_address_share_one_template() {
+    // A creation of a network that would publish the guest's listeners, and forwards a port of
+    // host loopback, captures a template whose NIC its capture attached under the complete
+    // deny-all policy.
+    let mut templates = Templates::new("tpl-nic");
+    let template = Template::new(Network::Forward);
+    let created = templates.create(&template, 0);
+    assert_captured(&templates, &created, &template);
+    let log = templates.slot(&created["class"]).join(LOG_NAME);
+    let captured = fs::read(&log).unwrap();
 
-#[test]
-#[ignore = "boots a VM; see the module documentation for what it needs"]
-fn an_allow_rule_has_its_nic() {
-    captures("tpl-rule", Template::new(Network::AllowRule));
-}
-
-#[test]
-#[ignore = "boots a VM; see the module documentation for what it needs"]
-fn outbound_host_loopback_has_its_nic() {
-    captures("tpl-outbound", Template::new(Network::Outbound));
-}
-
-#[test]
-#[ignore = "boots a VM; see the module documentation for what it needs"]
-fn a_proxy_only_network_has_its_nic() {
-    captures("tpl-proxy", Template::new(Network::Proxy));
-}
-
-#[test]
-#[ignore = "needs NVX's artifacts; see the module documentation"]
-fn ingress_is_refused_before_any_vm_starts() {
-    refuses(
-        "tpl-ingress",
-        Template::new(Network::Ingress),
-        "a template's network policy cannot allow ingress",
-    );
-}
-
-#[test]
-#[ignore = "needs NVX's artifacts; see the module documentation"]
-fn host_loopback_both_ways_is_refused_before_any_vm_starts() {
-    refuses(
-        "tpl-loopback",
-        Template::new(Network::HostLoopback),
-        "a template's network policy cannot allow host-loopback access both ways",
-    );
+    // A creation of each network that lets something through, at the same guest's address, finds
+    // the same class, whatever its policy, and serves the generation without a capture.
+    for network in Network::WITH_NIC {
+        let existing = templates.create(&Template::new(network), 0);
+        assert_eq!(existing["created"], "existing", "{network:?}: {existing:?}");
+        for printed in ["generation", "key", "class"] {
+            assert_eq!(
+                existing[printed], created[printed],
+                "{network:?}: {printed}"
+            );
+        }
+    }
+    assert_eq!(templates.store().index().unwrap().generations().len(), 1);
+    // No VMM ran since the capture's, whose log the slot keeps.
+    assert_eq!(fs::read(&log).unwrap(), captured);
 }
 
 #[test]
