@@ -388,6 +388,10 @@ impl VmmDir {
     /// - `fatal:CODE`, with `exit` or `close`, writes the line with which OpenVMM reports a fatal
     ///   error of the time ABI code `CODE`, and the error's chain, on its standard error, after a
     ///   warning that names another code, before it exits;
+    /// - `forward:PORT`, with `exit` or `close`, writes the line with which OpenVMM reports a fatal
+    ///   error without a code, and the error's chain, whose second cause names the forward of host
+    ///   loopback's TCP port `PORT` that OpenVMM cannot bind, on its standard error, after a
+    ///   warning that names that forward too, before it exits;
     /// - `other` sends a version of the event that OpenVMM does not send;
     /// - `partial` sends the first bytes of the event, then closes its end of the endpoint;
     /// - `flush` flushes the event as OpenVMM does, which waits on Windows until the host read
@@ -464,6 +468,18 @@ fn restore_vmm_role() {
                 "NVX-CPU-PROFILE-FALLBACK: [E_PROFILE_UNSUPPORTED] the test's warning\n\
                  fatal error: [{code}] failed to launch vm worker\n\nCaused by:\n    \
                  0: [{code}] the test's restore"
+            )
+            .unwrap();
+        }
+        if let Some(port) = words.iter().find_map(|word| word.strip_prefix("forward:")) {
+            // OpenVMM gives the error no code, and numbers the causes of its chain.
+            writeln!(
+                std::io::stderr(),
+                "warning: the test's forward (Tcp 127.0.0.1:{port}) is not yet bound\n\
+                 fatal error: failed to launch vm worker\n\nCaused by:\n    \
+                 0: failed to resolve the test's network endpoint\n    \
+                 1: failed to create socket for port forward (Tcp 127.0.0.1:{port})\n    \
+                 2: the test's port is held"
             )
             .unwrap();
         }

@@ -13,7 +13,7 @@ yet breaks those peers. Only bytes that no codec produced catch such a change.
 | [`nvxl-v1.txt`](nvxl-v1.txt) | Version 1 of the `NVXL` listener announcement |
 | [`activation-v1.txt`](activation-v1.txt) | Version 1 of the activation record of a layered root, and what Ready reports about an activation |
 | [`template-key-v1.txt`](template-key-v1.txt) | Version 1 of the canonical encodings of a template's compatibility key and of a capture class, with their identities |
-| [`openvmm/`](openvmm) | OpenVMM's vectors and cases of the `NVXS` session, and the excerpts of its sources that define the kernel command-line tokens of its platform tier, unchanged |
+| [`openvmm/`](openvmm) | OpenVMM's vectors and cases of the `NVXS` session, and the excerpts of its sources that define the kernel command-line tokens of its platform tier and the error of a port forward that it cannot bind, unchanged |
 
 [4.4 Host-Guest Control Interface](../../../doc/design/4.4-host-guest-control-interface.md)
 and
@@ -87,7 +87,7 @@ refusals of the records' payloads and headers. The tests of
 `nvx::protocol::nvxs` check that each vector decodes and encodes to its bytes,
 and that each case is accepted or refused as it says.
 
-`openvmm/` also holds two excerpts of OpenVMM's sources at that commit, whole
+`openvmm/` also holds three excerpts of OpenVMM's sources at that commit, whole
 lines, unchanged: `platform_command_line_token_is_invariant.rs`, the function
 of `openvmm/openvmm_helpers/src/snapshot/microvm.rs` that admits the kernel
 command-line tokens of a capture at OpenVMM's platform tier, and
@@ -97,7 +97,14 @@ the function reads. The tests of `nvx::host::template` compile them, and check
 each token of a template's kernel command line with OpenVMM's own function. The
 runtime adapter in `tests/runtime-adapter/` compiles them too, as the allowlist
 with which the guest agent of a template's VM checks its kernel command line,
-and its tests pin the set of tokens that they admit.
+and its tests pin the set of tokens that they admit. The third,
+`port_forward_socket_creation.rs`, is the variant of the error of
+`vm/devices/net/net_consomme/src/resolver.rs` with which OpenVMM reports a port
+forward whose socket on the host it cannot bind, as when a clone's VMM restores
+its NIC with a forward whose port another socket holds. OpenVMM gives that
+error no code, so the launch of a clone attributes it to the host by its text,
+and the tests of `nvx::host::template` read the excerpt, and check that the
+text is OpenVMM's.
 
 The tests cannot call OpenVMM's broker or its allowlist: OpenVMM's workspace
 needs a later Rust release than `nvx`'s minimum, and the `nvx-rs` job cannot
