@@ -115,10 +115,13 @@
 //!    request or another reset, fails the activation. The activation decodes the Activate's
 //!    record with [`ActivationRecord::decode`](crate::activation::ActivationRecord::decode), and
 //!    accepts it only as a clone's, with a restore section, that expects the CPU count and the
-//!    memory size that the repair reports, before anything has a side effect;
+//!    memory size that the repair reports, before anything has a side effect. An Activate whose
+//!    record the adapter's framing refused unread, as longer than a record can be, fails as a
+//!    record that long does;
 //! 3. activating: the adapter applies the accepted record with [`apply`](fn@apply), which
-//!    activates the root and the workload with its settings, as below, then reports the result
-//!    to [`Activation::complete`];
+//!    activates the root and the workload with its settings, as below, passes the activation
+//!    what the session received meanwhile, which came before Ready, then reports the result to
+//!    [`Activation::complete`];
 //! 4. ready, with the mappings pending: the activation completed, opened the fence, and returned
 //!    what Ready reports beside the adapter's own identities, such as its build, a
 //!    [`ReadyActivation`](crate::activation::ReadyActivation): that the activation applied, with
@@ -139,15 +142,16 @@
 //! and its [`ActivationCause`], and which every later call returns again. The activation never
 //! powers the VM off: the adapter reports the failure, and ends the VM.
 //!
-//! [`apply`](fn@apply) activates the clone as at a cold boot. It assembles the root with
-//! [`root::assemble`], with the record's image, an EROFS image whose UUID it checks if the record
-//! expects one, its upper, a tmpfs or the scratch, with the record's journal policy, and its
-//! overlay mode, and with the inputs that the guest takes from its own configuration, which its
-//! template captured, a [`RootTemplate`]: the runtime directory, the block devices, and how long
-//! the assembly waits for them. It refuses a GPT disk before anything has a side effect: the
-//! kernel created the block devices of a disk's partitions when it found the template's
-//! placeholder. If the record has a workload identity, it then checks its account in the
-//! assembled root, before Ready, as NVX's init checks it at boot: the identity is
+//! [`apply`](fn@apply) activates the clone as at a cold boot. It assembles the root as
+//! [`root::assemble`] does, with the record's image, an EROFS image whose UUID it checks if the
+//! record expects one, its upper, a tmpfs or the scratch, with the record's journal policy, and
+//! its overlay mode, and with the inputs that the guest takes from its own configuration, which
+//! its template captured, a [`RootTemplate`]: the runtime directory, the block devices, and how
+//! long the assembly waits for each, but never past the activation's deadline, which the adapter
+//! passes, so that the application ends by then. It refuses a GPT disk before anything has a
+//! side effect: the kernel created the block devices of a disk's partitions when it found the
+//! template's placeholder. If the record has a workload identity, it then checks its account in
+//! the assembled root, before Ready, as NVX's init checks it at boot: the identity is
 //! [`Identity::new`](super::entry::Identity::new) of the record's user and group IDs, without
 //! supplementary groups or capabilities, in existing-account mode, and every execution runs as
 //! it. Without one, the adapter gives each execution its own identity, which

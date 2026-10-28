@@ -14,11 +14,13 @@
 //! The framing carries the body of each kind as bytes, within the kind's limit. The bodies of the
 //! messages of a layered root, of its probes, and of executions have encodings of their own, which
 //! the [`root`](crate::root), [`probe`](crate::probe), and [`exec`](crate::exec) modules write and
-//! read: a body that does not decode is a [`BodyError`], which the receiver answers or refuses,
-//! while the stream goes on.
+//! read, and that of a clone's activation is the canonical encoding of an activation record, which
+//! `nvx::activation` writes and reads: a body that does not decode is a [`BodyError`], which the
+//! receiver answers or refuses, while the stream goes on.
 
 use std::fmt;
 
+use nvx::activation::MAX_RECORD_BYTES;
 use nvx::protocol::OUTER_MAX_PAYLOAD;
 
 /// Bytes of a message's header: the body's length, then the message's kind.
@@ -37,6 +39,10 @@ pub const MAX_TEXT_BODY: usize = 4096;
 /// fields; see [`exec`](crate::exec).
 pub const MAX_CONTROL_BODY: usize = 64;
 
+/// Most bytes of the body of an `Activate`: the canonical encoding of an activation record, which
+/// holds at most `nvx::activation::MAX_RECORD_BYTES`.
+pub const MAX_ACTIVATE_BODY: usize = MAX_RECORD_BYTES;
+
 /// A message of the adapter's framing.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Message {
@@ -54,8 +60,9 @@ pub enum Message {
     /// encoded as a [`RootConfig`](crate::root::RootConfig). The guest decodes and checks it
     /// itself, so that it answers one that it refuses with [`Message::RootFailed`].
     RootConfig(Vec<u8>),
-    /// The guest's answer to [`Message::RootConfig`] once it has assembled the root, with the
-    /// guest agent's build, encoded as a [`Ready`](crate::root::Ready).
+    /// The guest's answer to [`Message::RootConfig`] once it has assembled the root, or to
+    /// [`Message::Activate`] once it activated a clone, with the guest agent's build, and what it
+    /// reports about a clone's activation, encoded as a [`Ready`](crate::root::Ready).
     Ready(Vec<u8>),
     /// A stage of the guest's layered root failed, encoded as a
     /// [`RootFailure`](crate::root::RootFailure): the guest's answer to [`Message::RootConfig`],
@@ -107,6 +114,11 @@ pub enum Message {
     Start,
     /// The guest's confirmation of [`Message::Start`].
     Started,
+    /// The host's activation of a clone, which a restore of a template's snapshot started: the
+    /// clone's activation record, in its canonical encoding, which
+    /// `nvx::activation::ActivationRecord::encode` writes, and which the guest decodes and checks
+    /// itself. The guest answers it with [`Message::Ready`] once it activated the clone.
+    Activate(Vec<u8>),
 }
 
 impl Message {
@@ -119,7 +131,8 @@ impl Message {
     /// its kind allows: [`MAX_BODY`] for an `Echo`, a `Report`, an execution's start, or its input
     /// or output, or a part of the mapping table, [`MAX_TEXT_BODY`] for a root configuration, the
     /// guest's readiness, a root's failure, a failure of the mapping table, a probe, or a probe's
-    /// failure, [`MAX_CONTROL_BODY`] for an execution's other messages, and none for the others.
+    /// failure, [`MAX_CONTROL_BODY`] for an execution's other messages, [`MAX_ACTIVATE_BODY`] for
+    /// an `Activate`, and none for the others.
     pub fn encode(&self) -> Result<Vec<u8>, FrameError> {
         let (kind, body) = self.parts();
         if body.len() > kind.max_body() {
@@ -166,6 +179,7 @@ impl Message {
             Self::MapFailed(body) => (Kind::MapFailed, body),
             Self::Start => (Kind::Start, &[]),
             Self::Started => (Kind::Started, &[]),
+            Self::Activate(body) => (Kind::Activate, body),
         }
     }
 }
@@ -222,6 +236,8 @@ const KIND_MAP_FAILED: u8 = 24;
 const KIND_START: u8 = 25;
 /// Kind of a [`Message::Started`].
 const KIND_STARTED: u8 = 26;
+/// Kind of a [`Message::Activate`].
+const KIND_ACTIVATE: u8 = 27;
 
 /// Kind of a [`Message`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -279,6 +295,8 @@ enum Kind {
     Start = KIND_START,
     /// [`Message::Started`].
     Started = KIND_STARTED,
+    /// [`Message::Activate`].
+    Activate = KIND_ACTIVATE,
 }
 
 impl Kind {
@@ -311,6 +329,7 @@ impl Kind {
             KIND_MAP_FAILED => Some(Self::MapFailed),
             KIND_START => Some(Self::Start),
             KIND_STARTED => Some(Self::Started),
+            KIND_ACTIVATE => Some(Self::Activate),
             _ => None,
         }
     }
@@ -342,6 +361,7 @@ impl Kind {
             | Self::ExecEnd
             | Self::ExecInputClosed
             | Self::ExecTerminal => MAX_CONTROL_BODY,
+            Self::Activate => MAX_ACTIVATE_BODY,
             Self::Ping
             | Self::Pong
             | Self::Stop
@@ -382,6 +402,7 @@ impl Kind {
             Self::MapFailed => Message::MapFailed(body),
             Self::Start => Message::Start,
             Self::Started => Message::Started,
+            Self::Activate => Message::Activate(body),
         }
     }
 }
@@ -393,7 +414,7 @@ pub enum FrameError {
     /// A kind that the framing does not define.
     Kind(u8),
     /// A body longer than its kind allows: [`MAX_BODY`] bytes, [`MAX_TEXT_BODY`],
-    /// [`MAX_CONTROL_BODY`], or none.
+    /// [`MAX_CONTROL_BODY`], [`MAX_ACTIVATE_BODY`], or none.
     Length {
         /// Kind of the message.
         kind: u8,
@@ -536,7 +557,8 @@ impl Decoder {
 #[cfg(test)]
 mod tests {
     use super::{
-        Decoder, FrameError, HEADER_LEN, Kind, MAX_BODY, MAX_CONTROL_BODY, MAX_TEXT_BODY, Message,
+        Decoder, FrameError, HEADER_LEN, Kind, MAX_ACTIVATE_BODY, MAX_BODY, MAX_CONTROL_BODY,
+        MAX_TEXT_BODY, Message,
     };
 
     /// Returns one message of each kind, with bodies of no, few, and the most bytes.
@@ -577,6 +599,9 @@ mod tests {
             Message::MapFailed(vec![b'm'; MAX_TEXT_BODY]),
             Message::Start,
             Message::Started,
+            Message::Activate(Vec::new()),
+            Message::Activate(b"\x01\x00record".to_vec()),
+            Message::Activate(vec![b'a'; MAX_ACTIVATE_BODY]),
             Message::Stop,
             Message::Stopped,
         ]
@@ -613,6 +638,7 @@ mod tests {
             Message::MapFailed(body(24)),
             Message::Start,
             Message::Started,
+            Message::Activate(body(27)),
         ]
     }
 
@@ -702,6 +728,10 @@ mod tests {
         );
         assert_eq!(Message::Start.encode().unwrap(), [0, 0, 0, 0, 25]);
         assert_eq!(Message::Started.encode().unwrap(), [0, 0, 0, 0, 26]);
+        assert_eq!(
+            Message::Activate(b"x".to_vec()).encode().unwrap(),
+            [1, 0, 0, 0, 27, b'x']
+        );
         // The kinds are numbered from 1, without gaps.
         for (kind, message) in (1..).zip(one_of_each()) {
             assert_eq!(message.kind(), kind, "{message:?}");
@@ -714,7 +744,7 @@ mod tests {
     #[test]
     fn each_kind_decodes_from_its_code_alone() {
         for code in 0..=u8::MAX {
-            let defined = (1..=26).contains(&code).then_some(code);
+            let defined = (1..=27).contains(&code).then_some(code);
             assert_eq!(Kind::from_code(code).map(Kind::code), defined, "{code}");
         }
     }
@@ -769,17 +799,25 @@ mod tests {
         let too_long = u32::try_from(MAX_BODY + 1).unwrap().to_le_bytes();
         let too_long_text = u32::try_from(MAX_TEXT_BODY + 1).unwrap().to_le_bytes();
         let too_long_control = u32::try_from(MAX_CONTROL_BODY + 1).unwrap().to_le_bytes();
+        let too_long_record = u32::try_from(MAX_ACTIVATE_BODY + 1).unwrap().to_le_bytes();
         let header = |length: [u8; 4], kind: u8| [length[0], length[1], length[2], length[3], kind];
         let text = |kind: u8| header(too_long_text, kind);
         let mut cases = vec![
             ([0, 0, 0, 0, 0], FrameError::Kind(0)),
-            ([0, 0, 0, 0, 27], FrameError::Kind(27)),
+            ([0, 0, 0, 0, 28], FrameError::Kind(28)),
             ([9, 0, 0, 0, 0xff], FrameError::Kind(0xff)),
             (
                 [0xff, 0xff, 0xff, 0xff, 3],
                 FrameError::Length {
                     kind: 3,
                     length: u32::MAX as usize,
+                },
+            ),
+            (
+                header(too_long_record, 27),
+                FrameError::Length {
+                    kind: 27,
+                    length: MAX_ACTIVATE_BODY + 1,
                 },
             ),
         ];
@@ -835,6 +873,12 @@ mod tests {
         assert_eq!(maps.len(), HEADER_LEN + MAX_BODY);
         let ready = Message::Ready(vec![0; MAX_TEXT_BODY]).encode().unwrap();
         assert_eq!(ready.len(), HEADER_LEN + MAX_TEXT_BODY);
+        // An Activate carries the largest record, whose limit is the activation record's own.
+        assert_eq!(MAX_ACTIVATE_BODY, nvx::activation::MAX_RECORD_BYTES);
+        let activate = Message::Activate(vec![0; MAX_ACTIVATE_BODY])
+            .encode()
+            .unwrap();
+        assert_eq!(activate.len(), HEADER_LEN + MAX_ACTIVATE_BODY);
         let cases = [
             (Message::Echo(vec![0; MAX_BODY + 1]), 3, MAX_BODY + 1),
             (Message::Report(vec![0; MAX_BODY + 1]), 10, MAX_BODY + 1),
@@ -881,6 +925,11 @@ mod tests {
                 Message::MapFailed(vec![0; MAX_TEXT_BODY + 1]),
                 24,
                 MAX_TEXT_BODY + 1,
+            ),
+            (
+                Message::Activate(vec![0; MAX_ACTIVATE_BODY + 1]),
+                27,
+                MAX_ACTIVATE_BODY + 1,
             ),
         ];
         for (message, kind, length) in cases {

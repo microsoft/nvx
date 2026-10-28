@@ -132,7 +132,7 @@ fn reported() -> ReadyActivation {
 /// Returns the activation, in its transport bootstrap, of the clone behind `fence`, whose repair
 /// acknowledged its restore at `acknowledged`.
 fn bootstrap(fence: &FakeFence, acknowledged: Instant) -> Activation<FakeFence> {
-    Activation::of(
+    Activation::with_resources(
         resources(),
         Some(acknowledged),
         fence.clone(),
@@ -395,6 +395,54 @@ fn a_changed_record_or_a_new_transaction_is_final() {
 }
 
 #[test]
+fn an_activate_too_long_to_read_fails_as_a_record_that_long() {
+    let t0 = Instant::now();
+    // In the transport bootstrap, as any Activate.
+    let fence = FakeFence::default();
+    let mut activation = bootstrap(&fence, t0);
+    let failure = activation
+        .input(after(t0, 1), ActivationInput::TooLong(MAX_RECORD_BYTES + 1))
+        .unwrap_err();
+    assert_eq!(failure.state(), ActivationState::Bootstrap);
+    assert!(matches!(failure.cause(), ActivationCause::Request));
+    assert_final(&mut activation, &fence, &failure, after(t0, 2), 0);
+    // From then on, as an Activate whose record has that many bytes, which no record has: while
+    // restricted, while the activation runs, and once it is ready, or started, whose fence stays
+    // open.
+    let states: [(Setup, u32); 4] = [(restricted, 0), (activating, 0), (ready, 1), (started, 1)];
+    for (activation, opened) in states {
+        for length in [MAX_RECORD_BYTES + 1, usize::MAX] {
+            let fence = FakeFence::default();
+            let mut activation = activation(&fence, t0);
+            let state = activation.state();
+            let failure = activation
+                .input(after(t0, 1), ActivationInput::TooLong(length))
+                .unwrap_err();
+            assert_eq!(failure.state(), state);
+            assert!(
+                matches!(
+                    failure.cause(),
+                    ActivationCause::Record(ActivationError::TooLong(long)) if *long == length
+                ),
+                "{state}: {failure}"
+            );
+            assert_final(&mut activation, &fence, &failure, after(t0, 2), opened);
+        }
+    }
+    // Past the deadline, before the clone is ready, it fails as every input does.
+    let fence = FakeFence::default();
+    let mut activation = restricted(&fence, t0);
+    let failure = activation
+        .input(
+            after(t0, 10),
+            ActivationInput::TooLong(MAX_RECORD_BYTES + 1),
+        )
+        .unwrap_err();
+    assert!(matches!(failure.cause(), ActivationCause::Expired));
+    assert_final(&mut activation, &fence, &failure, after(t0, 11), 0);
+}
+
+#[test]
 fn a_failed_application_is_final_and_no_retry_applies_the_record_again() {
     let t0 = Instant::now();
     let fence = FakeFence::default();
@@ -507,7 +555,7 @@ fn the_deadline_starts_at_the_acknowledgement_and_retries_never_extend_it() {
     let fence = FakeFence::default();
     // The repair acknowledged the restore at `t0`, and the adapter made the activation later.
     let mut activation =
-        Activation::of(resources(), Some(t0), fence.clone(), TIMEOUT, after(t0, 3));
+        Activation::with_resources(resources(), Some(t0), fence.clone(), TIMEOUT, after(t0, 3));
     assert_eq!(activation.deadline(), Some(after(t0, 10)));
     activation
         .input(after(t0, 8), ActivationInput::Reset)
@@ -548,7 +596,8 @@ fn an_ungated_restore_s_deadline_starts_at_the_activation() {
     let t0 = Instant::now();
     let fence = FakeFence::default();
     // Without an acknowledgement, the deadline starts when the adapter makes the activation.
-    let mut activation = Activation::of(resources(), None, fence.clone(), TIMEOUT, after(t0, 5));
+    let mut activation =
+        Activation::with_resources(resources(), None, fence.clone(), TIMEOUT, after(t0, 5));
     assert_eq!(activation.deadline(), Some(after(t0, 15)));
     activation.tick(after(t0, 14)).unwrap();
     let failure = activation
@@ -558,7 +607,8 @@ fn an_ungated_restore_s_deadline_starts_at_the_activation() {
     assert!(matches!(failure.cause(), ActivationCause::Expired));
     assert_final(&mut activation, &fence, &failure, after(t0, 16), 0);
     // A deadline that no instant can hold never passes.
-    let mut activation = Activation::of(resources(), Some(t0), fence.clone(), Duration::MAX, t0);
+    let mut activation =
+        Activation::with_resources(resources(), Some(t0), fence.clone(), Duration::MAX, t0);
     assert_eq!(activation.deadline(), None);
     activation.tick(after(t0, 1 << 30)).unwrap();
     let reset = activation.input(after(t0, 1 << 30), ActivationInput::Reset);
@@ -956,7 +1006,7 @@ fn failures_name_their_state_and_their_cause() {
 #[test]
 fn an_activation_debugs_its_state_resources_and_deadline_without_its_fence() {
     let t0 = Instant::now();
-    let activation = Activation::of(
+    let activation = Activation::with_resources(
         ExpectedResources {
             cpus: 4,
             memory: 2 << 30,

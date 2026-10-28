@@ -170,7 +170,7 @@ use std::io;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use self::kernel::{Kernel, SystemKernel};
 use super::gpt::DeviceError;
@@ -484,14 +484,30 @@ impl OverlayMode {
 ///
 /// A failure unmounts what the assembly mounted, as [`Root::teardown`] does, and reports both.
 pub fn assemble(assembly: &Assembly) -> Result<Root, AssemblyError> {
-    assemble_with(Box::new(SystemKernel), &Paths::default(), assembly)
+    assemble_until(assembly, None)
 }
 
-/// Implements [`assemble`] with `kernel`, and with the kernel's interfaces at `paths`.
+/// Assembles the layered root of `assembly`, as [`assemble`] does, but waits for each device until
+/// `deadline` at the latest, if any, however long `assembly`'s timeout allows: a device that has
+/// not appeared by then is missing, as one that has not appeared by the timeout is.
+pub(crate) fn assemble_until(
+    assembly: &Assembly,
+    deadline: Option<Instant>,
+) -> Result<Root, AssemblyError> {
+    assemble_with(
+        Box::new(SystemKernel),
+        &Paths::default(),
+        assembly,
+        deadline,
+    )
+}
+
+/// Implements [`assemble_until`] with `kernel`, and with the kernel's interfaces at `paths`.
 fn assemble_with(
     kernel: Box<dyn Kernel>,
     paths: &Paths,
     assembly: &Assembly,
+    deadline: Option<Instant>,
 ) -> Result<Root, AssemblyError> {
     let runtime = assembly.runtime.as_os_str().as_bytes();
     if below_its_root(&assembly.runtime, true).is_none()
@@ -520,7 +536,7 @@ fn assemble_with(
         latched: false,
         reservation: None,
     };
-    match root.mount_layers(paths, assembly) {
+    match root.mount_layers(paths, assembly, deadline) {
         Ok(()) => Ok(root),
         Err(error) => Err(AssemblyError {
             error,
@@ -664,8 +680,14 @@ impl Root {
         self.unmount()
     }
 
-    /// Implements [`assemble`]'s steps after the first.
-    fn mount_layers(&mut self, paths: &Paths, assembly: &Assembly) -> Result<(), Error> {
+    /// Implements [`assemble`]'s steps after the first, waiting for each device until `deadline`
+    /// at the latest, if any.
+    fn mount_layers(
+        &mut self,
+        paths: &Paths,
+        assembly: &Assembly,
+        deadline: Option<Instant>,
+    ) -> Result<(), Error> {
         let runtime = self.runtime.clone();
         fs::create_dir_all(&runtime).map_err(|error| Error::MountPoint {
             path: runtime.clone(),
@@ -736,6 +758,7 @@ impl Root {
             Role::Distro,
             assembly.distro,
             assembly.timeout,
+            deadline,
         )?;
         let lowers = match &assembly.image {
             Image::Erofs { uuid } => {
@@ -760,6 +783,7 @@ impl Root {
                     Role::Scratch,
                     device,
                     assembly.timeout,
+                    deadline,
                 )?;
                 if journal == Journal::Forbidden {
                     check_no_journal(&device)?;

@@ -18,12 +18,14 @@
 //! with a control console.
 //!
 //! The worker of a template's VM, and with it the VM, ends with [`COMMAND_LINE_STATUS`] once
-//! `boot` refused its command line, with [`CAPTURE_STATUS_BASE`] plus the number of the stage of
-//! the capture that failed, with [`CONTINUED_STATUS`] once the capture ended without a snapshot,
-//! and, in a clone, which it repairs, with [`RESTORED_STATUS`] once it repaired the clone, which it
-//! does not activate yet, or with the status of the repair's failure, which
-//! `nvx::protocol::status` documents. A committed capture ends the template's VM before the worker
-//! returns.
+//! `boot` refused its command line, with the bootstrap's status, 13, once the bootstrap of the
+//! guest for the template's root failed, with [`CAPTURE_STATUS_BASE`] plus the number of the stage
+//! of the capture that failed, and with [`CONTINUED_STATUS`] once the capture ended without a
+//! snapshot. In a clone, which it repairs, it ends with the status of the repair's failure, which
+//! `nvx::protocol::status` documents, and once it repaired the clone, as the clone's session ends:
+//! with the status of the class of the clone's activation's failure, which `nvx::protocol::status`
+//! documents too, or, once the clone was ready, as the worker of a VM that boots cold does. A
+//! committed capture ends the template's VM before the worker returns.
 
 use std::{fmt, str};
 
@@ -87,11 +89,6 @@ pub const CAPTURE_STATUS_BASE: u8 = 20;
 /// The status with which the worker of a template's VM ends once the capture ended without a
 /// snapshot, and the template continued.
 pub const CONTINUED_STATUS: u8 = 30;
-
-/// The status with which the worker of a template's VM ends in a clone, which a restore of the
-/// template's snapshot started, once the worker repaired it: the worker does not activate a clone
-/// yet, so the clone ends at once, with its fence of workload admission still closed.
-pub const RESTORED_STATUS: u8 = 31;
 
 /// How a VM boots, as its kernel command line tells the guest agent.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -528,9 +525,9 @@ mod tests {
 
     #[test]
     fn a_template_s_statuses_are_its_own() {
-        let mut statuses = vec![COMMAND_LINE_STATUS, CONTINUED_STATUS, RESTORED_STATUS];
+        let mut statuses = vec![COMMAND_LINE_STATUS, CONTINUED_STATUS];
         statuses.extend((1..=9).map(|stage| CAPTURE_STATUS_BASE + stage));
-        assert_eq!(statuses, [20, 30, 31, 21, 22, 23, 24, 25, 26, 27, 28, 29]);
+        assert_eq!(statuses, [20, 30, 21, 22, 23, 24, 25, 26, 27, 28, 29]);
         // None is a root stage's, the worker's after its session failed, or the usage error's.
         for stage in RootStage::ALL {
             assert!(!statuses.contains(&stage.exit_status()), "{stage}");

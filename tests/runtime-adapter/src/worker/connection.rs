@@ -7,11 +7,14 @@
 //! earlier epoch's partial message, and credits each DATA payload back, once it decoded the
 //! payload's messages. A reset also drops the records that the stream has not begun to take,
 //! which belong to the earlier epoch, and ends the one that it began, so that the stream stays
-//! whole.
+//! whole. In a clone, the connection resumes the session that the template's VM attached before
+//! its capture, and whose first epoch it acknowledged, which the snapshot holds, rather than
+//! attaching: the restore's broker resets it, which the connection acknowledges as any reset.
 
 use std::collections::VecDeque;
 use std::io::{self, Read, Write};
 use std::os::fd::{AsFd, BorrowedFd};
+use std::time::{Duration, Instant};
 
 use nix::errno::Errno;
 use nix::fcntl::{self, FcntlArg, OFlag};
@@ -81,12 +84,33 @@ impl<S: Read + Write + AsFd> Connection<S> {
     /// Makes `stream` nonblocking, and returns the connection over it, with the guest's
     /// attachment queued.
     pub(super) fn new(stream: S) -> Result<Self, ServeError> {
+        let mut connection = Self::over(stream, GuestSession::new())?;
+        connection.record(GuestSession::attach)?;
+        Ok(connection)
+    }
+
+    /// Makes `stream` nonblocking, and returns the connection over it, with `session`, the guest's
+    /// role of a session that the guest attached already, on the same stream: that of a template's
+    /// VM, which attached before its capture, and acknowledged its broker's reset, in a clone that
+    /// a restore of the snapshot started, whose broker resets the session that the snapshot holds
+    /// again, with another instance. The connection queues no attachment.
+    ///
+    /// A session that has not attached takes no record, so that the connection fails as the
+    /// guest agent's blocking `session` does once the broker sends one.
+    #[cfg(target_arch = "x86_64")]
+    pub(super) fn resume(stream: S, session: GuestSession) -> Result<Self, ServeError> {
+        Self::over(stream, session)
+    }
+
+    /// Makes `stream` nonblocking, and returns the connection over it, with `session`, the guest's
+    /// role of the session, and nothing queued.
+    fn over(stream: S, session: GuestSession) -> Result<Self, ServeError> {
         let flags = fcntl::fcntl(&stream, FcntlArg::F_GETFL).map_err(failed)?;
         let flags = OFlag::from_bits_retain(flags) | OFlag::O_NONBLOCK;
         fcntl::fcntl(&stream, FcntlArg::F_SETFL(flags)).map_err(failed)?;
-        let mut connection = Self {
+        Ok(Self {
             stream,
-            session: GuestSession::new(),
+            session,
             input: vec![0; READ_CHUNK].into_boxed_slice(),
             start: 0,
             end: 0,
@@ -97,9 +121,7 @@ impl<S: Read + Write + AsFd> Connection<S> {
             output: VecDeque::new(),
             written: 0,
             queued: 0,
-        };
-        connection.record(GuestSession::attach)?;
-        Ok(connection)
+        })
     }
 
     /// Returns what the connection received next, or `None` until the stream has more.
@@ -198,15 +220,29 @@ impl<S: Read + Write + AsFd> Connection<S> {
         Ok(())
     }
 
-    /// Writes every queued record, waiting while the stream takes none.
-    pub(super) fn finish(&mut self) -> Result<(), ServeError> {
+    /// Writes every queued record, waiting while the stream takes none, until `deadline` passes,
+    /// if there is one, after which it leaves the rest queued.
+    pub(super) fn finish(&mut self, deadline: Option<Instant>) -> Result<(), ServeError> {
         loop {
             self.flush()?;
             if self.output.is_empty() {
                 return Ok(());
             }
+            let timeout = match deadline {
+                None => PollTimeout::NONE,
+                Some(deadline) => {
+                    let left = deadline.saturating_duration_since(Instant::now());
+                    if left.is_zero() {
+                        return Ok(());
+                    }
+                    // Poll counts whole milliseconds, so a shorter wait would return before the
+                    // deadline.
+                    PollTimeout::try_from(left.max(Duration::from_millis(1)))
+                        .unwrap_or(PollTimeout::MAX)
+                }
+            };
             let mut descriptors = [PollFd::new(self.stream.as_fd(), PollFlags::POLLOUT)];
-            match poll::poll(&mut descriptors, PollTimeout::NONE) {
+            match poll::poll(&mut descriptors, timeout) {
                 Ok(_) | Err(Errno::EINTR) => {}
                 Err(error) => return Err(failed(error)),
             }

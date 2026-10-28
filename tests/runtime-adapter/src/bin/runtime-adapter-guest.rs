@@ -22,9 +22,11 @@
 //!   session failed or the broker closed the tty, each but the first after a diagnostic on
 //!   standard error. In a template's VM, whose kernel command line names the platform snapshot
 //!   tier, the worker captures the VM before it assembles any root instead, on x86_64, as
-//!   `runtime_adapter::worker::capture` describes: it exits with 20 to 30, or, in a clone, which
-//!   it repairs, with 31 once it repaired the clone, with 40 to 45, 193, or 195 once the repair
-//!   failed, as `nvx::protocol::status` documents, or with 1 once its session failed, each after a
+//!   `runtime_adapter::worker::capture` describes: it exits with 13 once the template's bootstrap
+//!   failed, or with 20 to 30. In a clone, which it repairs, then activates and serves, it exits
+//!   with 40 to 45, 193, or 195 once the repair failed, with 50 to 58 once the clone's activation
+//!   failed, as `nvx::protocol::status` documents, and, once the clone was ready, as the worker of
+//!   a VM that boots cold does. It exits with 1 once its session failed. Each comes after a
 //!   diagnostic on standard error, unless a committed capture ended the VM; see
 //!   `runtime_adapter::template`.
 //! - `runtime-adapter-guest idle` sleeps until a signal ends it.
@@ -158,8 +160,12 @@ fn worker(tty: &std::path::Path, sibling: Option<u32>) -> ExitCode {
             match &worked {
                 Worked::Stopped => {}
                 Worked::Failed(failure) => eprintln!("runtime-adapter-guest: {failure}"),
-                Worked::Closed => {
+                Worked::Closed | Worked::Abandoned => {
                     eprintln!("runtime-adapter-guest: the broker closed {}", tty.display());
+                }
+                // Only a clone's worker activates, in `capture_template`.
+                Worked::Unactivated { problem, .. } => {
+                    eprintln!("runtime-adapter-guest: {problem}");
                 }
             }
             worked.status()
@@ -176,10 +182,10 @@ fn worker(tty: &std::path::Path, sibling: Option<u32>) -> ExitCode {
 }
 
 /// Reads the kernel command line through `operations`, before anything else, and captures a
-/// template's VM on the tty `tty`, as `runtime_adapter::worker::capture` describes, then repairs
-/// a clone that a restore of its snapshot started. Returns the status with which the worker ends
-/// then, after a diagnostic on standard error, or `None` in a VM that boots cold, whose worker
-/// serves the host.
+/// template's VM on the tty `tty`, with `operations`, as `runtime_adapter::worker::capture`
+/// describes, then repairs a clone that a restore of its snapshot started, and serves it through
+/// its activation. Returns the status with which the worker ends then, after a diagnostic on
+/// standard error, or `None` in a VM that boots cold, whose worker serves the host.
 ///
 /// A command line that the worker cannot read, or that `runtime_adapter::template::boot` refuses,
 /// ends the worker with `COMMAND_LINE_STATUS`.
@@ -203,7 +209,7 @@ fn capture_template(
             return Some(COMMAND_LINE_STATUS);
         }
     }
-    Some(match capture::capture_on_terminal(tty) {
+    Some(match capture::capture_on_terminal(tty, operations) {
         Ok(templated) => {
             eprintln!("runtime-adapter-guest: {templated}");
             templated.status()
