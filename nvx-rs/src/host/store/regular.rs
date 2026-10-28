@@ -50,19 +50,42 @@ pub(crate) fn open_regular(path: &Path) -> io::Result<File> {
         const OPEN_REPARSE_POINT: u32 = 0x0020_0000;
         options.custom_flags(OPEN_REPARSE_POINT);
     }
-    let file = match options.open(path) {
-        Ok(file) => file,
-        // `O_NOFOLLOW` refuses a link, and an open that does not wait refuses a socket.
-        #[cfg(unix)]
-        Err(error)
-            if [nix::errno::Errno::ELOOP, nix::errno::Errno::ENXIO]
-                .into_iter()
-                .any(|errno| error.raw_os_error() == Some(errno as i32)) =>
-        {
-            return Err(not_regular());
-        }
-        Err(error) => return Err(error),
-    };
+    let file = options.open(path).map_err(refused_open)?;
+    regular(file)
+}
+
+/// Opens the file `name` of `directory` for reading, as [`open_regular`] opens the file at a
+/// path, if it is a regular file, or returns `None` if the directory has no such entry, or, on
+/// Windows, one whose deletion is pending, which is removed. The open names the entry through the
+/// handle, so that it reaches the entry of the directory that the handle holds, whatever the
+/// directory's path names meanwhile.
+pub(crate) fn open_regular_in(
+    directory: &platform::Directory,
+    name: &str,
+) -> io::Result<Option<File>> {
+    match directory.open_file(name) {
+        Ok(Some(file)) => regular(file).map(Some),
+        Ok(None) => Ok(None),
+        Err(error) => Err(refused_open(error)),
+    }
+}
+
+/// Returns `error`, with which an open failed, as the error of a file that is not a regular file if
+/// the open refused one: on Unix, a link, which `O_NOFOLLOW` refuses, or a socket, which an open
+/// that does not wait refuses.
+fn refused_open(error: io::Error) -> io::Error {
+    #[cfg(unix)]
+    if [nix::errno::Errno::ELOOP, nix::errno::Errno::ENXIO]
+        .into_iter()
+        .any(|errno| error.raw_os_error() == Some(errno as i32))
+    {
+        return not_regular();
+    }
+    error
+}
+
+/// Returns `file`, which an open that follows no link opened, if it is a regular file.
+fn regular(file: File) -> io::Result<File> {
     let metadata = file.metadata()?;
     if !metadata.file_type().is_file() || filesystem::is_reparse_point(&metadata) {
         return Err(not_regular());

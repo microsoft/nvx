@@ -1446,6 +1446,28 @@ impl Directory {
         }
     }
 
+    /// Opens its entry `name` for reading, not following a link or other reparse point, or
+    /// returns `None` if it has no such entry, or one whose deletion is pending, which a file
+    /// system without POSIX deletion keeps under its name until its last handle closes, and which
+    /// is removed. The caller checks what the entry is.
+    pub(crate) fn open_file(&self, name: &str) -> io::Result<Option<fs::File>> {
+        use windows_sys::Wdk::Storage::FileSystem::{
+            FILE_OPEN_REPARSE_POINT, FILE_SYNCHRONOUS_IO_NONALERT,
+        };
+        use windows_sys::Win32::Foundation::{STATUS_DELETE_PENDING, STATUS_OBJECT_NAME_NOT_FOUND};
+        use windows_sys::Win32::Storage::FileSystem::FILE_GENERIC_READ;
+
+        match self.open_entry(
+            OsStr::new(name),
+            FILE_GENERIC_READ,
+            FILE_OPEN_REPARSE_POINT | FILE_SYNCHRONOUS_IO_NONALERT,
+        ) {
+            Ok(entry) => Ok(Some(fs::File::from(entry))),
+            Err(STATUS_OBJECT_NAME_NOT_FOUND | STATUS_DELETE_PENDING) => Ok(None),
+            Err(status) => Err(status_error(status)),
+        }
+    }
+
     /// Removes its file `name`, if it has one. A file whose deletion is pending already, which a
     /// file system without POSIX deletion keeps under its name until its last handle closes,
     /// counts as removed.

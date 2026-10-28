@@ -401,6 +401,8 @@ fn a_lock_file_that_is_a_link_fails_at_once() {
     assert_eq!(fs::read(&target).unwrap(), CAPABILITY);
 }
 
+// Other hosts open no handle of a sandbox's directory, through which a clone's files go.
+#[cfg(any(target_os = "linux", windows))]
 #[test]
 fn the_files_that_a_clone_kept_of_its_launch_go_and_nothing_else() {
     let (_directory, store) = store();
@@ -414,7 +416,8 @@ fn the_files_that_a_clone_kept_of_its_launch_go_and_nothing_else() {
     ] {
         fs::write(path, b"left").unwrap();
     }
-    locked.remove_clone_files().unwrap();
+    let directory = locked.open_dir().unwrap();
+    locked.remove_clone_files(&directory).unwrap();
     let mut left: Vec<String> = fs::read_dir(store.dir())
         .unwrap()
         .map(|entry| entry.unwrap().file_name().into_string().unwrap())
@@ -425,7 +428,7 @@ fn the_files_that_a_clone_kept_of_its_launch_go_and_nothing_else() {
     expected.sort_unstable();
     assert_eq!(left, expected);
     // Nothing to remove is no failure.
-    locked.remove_clone_files().unwrap();
+    locked.remove_clone_files(&directory).unwrap();
 }
 
 #[cfg(unix)]

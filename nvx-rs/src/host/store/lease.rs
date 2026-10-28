@@ -8,6 +8,7 @@
 
 use std::ffi::OsStr;
 use std::fmt;
+use std::fs::File;
 use std::io;
 use std::num::NonZeroU64;
 use std::path::{Path, PathBuf};
@@ -16,7 +17,7 @@ use std::str::FromStr;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
-use super::regular::{open_regular, read_at_most, was_removed};
+use super::regular::{open_regular, open_regular_in, read_at_most, was_removed};
 use super::{CLONE_BINDING_NAME, LaunchId, SandboxStore};
 use crate::activation::{Identity, StoreGeneration, TemplateReference};
 use crate::error::{Error, ErrorCode, ErrorKind, Result};
@@ -277,10 +278,35 @@ pub(crate) fn read_binding(dir: &Path) -> Result<Option<Lease>> {
     read_lease(&dir.join(CLONE_BINDING_NAME), BINDING_DESCRIPTION)
 }
 
+/// Reads the clone binding of the sandbox whose directory `directory` holds open, in `dir`, as
+/// [`read_binding`] reads it at its path, or returns `None` if the directory holds none, or, on
+/// Windows, one whose deletion is pending, which is removed: through the handle, so that it reads
+/// the binding of the directory that the handle holds, whatever `dir` names meanwhile.
+pub(crate) fn read_binding_in(
+    directory: &platform::Directory,
+    dir: &Path,
+) -> Result<Option<Lease>> {
+    read_lease_with(&dir.join(CLONE_BINDING_NAME), BINDING_DESCRIPTION, || {
+        open_regular_in(directory, CLONE_BINDING_NAME)
+    })
+}
+
 /// Reads the record of a lease at `path`, its `description`, or returns `None` if it does not
 /// exist.
 pub(crate) fn read_lease(path: &Path, description: &str) -> Result<Option<Lease>> {
-    let Some(record) = read_record::<LeaseRecord>(path, description, MAX_LEASE_RECORD_LEN)? else {
+    read_lease_with(path, description, || open_existing(path))
+}
+
+/// Reads the record of a lease, its `description` at `path`, from the file that `open` opens, or
+/// returns `None` if `open` finds none.
+fn read_lease_with(
+    path: &Path,
+    description: &str,
+    open: impl FnOnce() -> io::Result<Option<File>>,
+) -> Result<Option<Lease>> {
+    let Some(record) =
+        read_record_with::<LeaseRecord>(path, description, MAX_LEASE_RECORD_LEN, open)?
+    else {
         return Ok(None);
     };
     record.into_lease().map(Some).map_err(|problem| {
@@ -387,13 +413,32 @@ pub(crate) fn store_error(context: String) -> impl FnOnce(io::Error) -> Error {
 /// Windows, a file's own access control list decides who may open it, whatever the store's
 /// directory allows.
 pub(crate) fn read_private(path: &Path, description: &str, limit: u64) -> Result<Option<Vec<u8>>> {
-    let failed = || store_error(format!("cannot read the {description} {}", path.display()));
-    let file = match open_regular(path) {
-        Ok(file) => file,
+    read_private_with(path, description, limit, || open_existing(path))
+}
+
+/// Opens the regular file at `path`, as [`open_regular`] does, or returns `None` if it does not
+/// exist, or was removed as this opened it, as [`was_removed`] tells.
+fn open_existing(path: &Path) -> io::Result<Option<File>> {
+    match open_regular(path) {
+        Ok(file) => Ok(Some(file)),
         Err(error) if error.kind() == io::ErrorKind::NotFound || was_removed(path, &error) => {
-            return Ok(None);
+            Ok(None)
         }
-        Err(error) => return Err(failed()(error)),
+        Err(error) => Err(error),
+    }
+}
+
+/// Reads the private regular file that `open` opens, the store's `description` at `path`, of at
+/// most `limit` bytes, as [`read_private`] reads it, or returns `None` if `open` finds none.
+fn read_private_with(
+    path: &Path,
+    description: &str,
+    limit: u64,
+    open: impl FnOnce() -> io::Result<Option<File>>,
+) -> Result<Option<Vec<u8>>> {
+    let failed = || store_error(format!("cannot read the {description} {}", path.display()));
+    let Some(file) = open().map_err(failed())? else {
+        return Ok(None);
     };
     if let Some(problem) = platform::private_file_problem(&file).map_err(failed())? {
         return Err(Error::io(format!(
@@ -413,7 +458,18 @@ pub(crate) fn read_record<T: DeserializeOwned>(
     description: &str,
     limit: u64,
 ) -> Result<Option<T>> {
-    let Some(text) = read_private(path, description, limit)? else {
+    read_record_with(path, description, limit, || open_existing(path))
+}
+
+/// Reads the store's record that `open` opens, its `description` at `path`, as [`read_record`]
+/// reads it, or returns `None` if `open` finds none.
+fn read_record_with<T: DeserializeOwned>(
+    path: &Path,
+    description: &str,
+    limit: u64,
+    open: impl FnOnce() -> io::Result<Option<File>>,
+) -> Result<Option<T>> {
+    let Some(text) = read_private_with(path, description, limit, open)? else {
         return Ok(None);
     };
     let malformed = || format!("the {description} {} is malformed", path.display());

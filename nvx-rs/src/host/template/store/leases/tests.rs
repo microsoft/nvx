@@ -18,13 +18,14 @@ use crate::activation::TemplateReference;
 use crate::host::process::{Process, ProcessRef};
 use crate::host::store::files::write_private;
 use crate::host::store::{
-    CLONE_ACTIVATION_NAME, CLONE_SCRATCH_NAME, FORMAT, LaunchState, RESTORE_READY_NAME,
+    CLONE_ACTIVATION_NAME, CLONE_SCRATCH_NAME, FORMAT, LOCK_NAME, LaunchState, RESTORE_READY_NAME,
     RUNTIME_NAME, Recovery, RuntimeIdentity,
 };
 use crate::host::supervisor::{self, Reattached, StopOutcome, VmmCommand};
 use crate::host::template::eligibility::MAX_DOWNTIME_NS;
 use crate::host::template::store::tests::{
-    link_dir, link_file, publish, publish_with, remove, storage, store as new_store, unlink_dir,
+    cause, link_dir, link_file, publish, publish_with, remove, storage, store as new_store,
+    unlink_dir,
 };
 use crate::host::template::test_support::{ManifestSpec, artifact, network_class};
 use crate::host::test_support::released;
@@ -797,7 +798,7 @@ fn a_release_makes_the_removal_of_its_binding_durable_before_it_removes_its_reco
         RESTORE_READY_NAME,
     ];
     let synced = RefCell::new(Vec::new());
-    let sync = |dir: &Path| -> Result<()> {
+    let note = |dir: &Path| {
         let clone = kept
             .iter()
             .any(|name| fs::symlink_metadata(sandbox.join(name)).is_ok())
@@ -806,6 +807,16 @@ fn a_release_makes_the_removal_of_its_binding_durable_before_it_removes_its_reco
         synced
             .borrow_mut()
             .push((dir.to_owned(), clone, bound, record.exists()));
+    };
+    let sync = |dir: &Path| -> Result<()> {
+        note(dir);
+        Ok(())
+    };
+    // The release syncs the sandbox's directory through its handle, which holds the lock's file.
+    let lock = platform::file_identity(&sandbox.join(LOCK_NAME)).unwrap();
+    let sync_sandbox = |directory: &platform::Directory| -> io::Result<()> {
+        assert_eq!(directory.entry_identity(LOCK_NAME).unwrap(), Some(lock));
+        note(&sandbox);
         Ok(())
     };
     for name in kept {
@@ -816,7 +827,12 @@ fn a_release_makes_the_removal_of_its_binding_durable_before_it_removes_its_reco
         fs::write(&socket, b"").unwrap();
     }
     let mut locked = SandboxStore::lock_existing(&sandbox, &files(), None).unwrap();
-    assert_eq!(store.release_with(&mut locked, &sync).unwrap(), Some(lease));
+    assert_eq!(
+        store
+            .release_with(&mut locked, &|| {}, &sync, &sync_sandbox)
+            .unwrap(),
+        Some(lease)
+    );
     drop(locked);
     let mut expected = vec![(sandbox.clone(), false, false, true)];
     if cfg!(unix) {
@@ -847,13 +863,18 @@ fn a_release_makes_the_removal_of_its_binding_durable_before_it_removes_its_reco
     // A release that cannot make the socket's removal durable keeps the binding, and the lease.
     if cfg!(unix) {
         let error = store
-            .release_with(&mut locked, &|dir: &Path| {
-                if dir == payload {
-                    Err(Error::io("the disk failed"))
-                } else {
-                    Ok(())
-                }
-            })
+            .release_with(
+                &mut locked,
+                &|| {},
+                &|dir: &Path| {
+                    if dir == payload {
+                        Err(Error::io("the disk failed"))
+                    } else {
+                        Ok(())
+                    }
+                },
+                &|_| Ok(()),
+            )
             .unwrap_err();
         assert_eq!(error.message(), "the disk failed");
         assert_eq!(binding(&sandbox), Some(again.clone()));
@@ -863,18 +884,18 @@ fn a_release_makes_the_removal_of_its_binding_durable_before_it_removes_its_reco
     // A release that cannot make the binding's removal durable keeps the record, which a
     // retirement removes once no binding names it.
     let error = store
-        .release_with(&mut locked, &|dir: &Path| {
-            if dir == sandbox {
-                Err(Error::io("the disk failed"))
-            } else {
-                Ok(())
-            }
+        .release_with(&mut locked, &|| {}, &|_: &Path| Ok(()), &|_| {
+            Err(io::Error::other("the disk failed"))
         })
         .unwrap_err();
     assert_eq!(locked.reserved(), None);
     assert!(fs::symlink_metadata(&scratch).is_err());
     drop(locked);
-    assert_eq!(error.message(), "the disk failed");
+    assert_eq!(
+        error.message(),
+        format!("cannot sync the directory {}", sandbox.display())
+    );
+    assert_eq!(cause(&error), "the disk failed");
     assert_eq!(binding(&sandbox), None);
     assert_eq!(store.leases(generation).unwrap(), [again]);
     assert_eq!(store.retire(generation, None).unwrap(), Retirement::Retired);
@@ -1151,21 +1172,20 @@ fn a_release_takes_the_lock_of_its_sandbox_through_the_path_of_its_lease() {
     let link = root.join("link");
     link_dir(&first, &link);
     // A lock taken through a link refuses a release, which removes nothing, also once the link
-    // names another sandbox, whose lease a release would otherwise end without its lock.
+    // names another sandbox, whose lease a release would otherwise end without its lock: the
+    // directory that the link names then holds another lock file than the one locked.
     let mut locked = SandboxStore::lock_existing(link.join("sandbox"), &files(), None).unwrap();
-    for retargeted in [false, true] {
+    for (retargeted, refusal) in [
+        (false, "does not name it by the path of its lease"),
+        (true, "does not hold the lock of its sandbox"),
+    ] {
         if retargeted {
             unlink_dir(&link);
             link_dir(&second, &link);
         }
         let error = store.release(&mut locked).unwrap_err();
         assert_eq!(error.kind(), ErrorKind::Other, "{error}");
-        assert!(
-            error
-                .message()
-                .contains("does not name it by the path of its lease"),
-            "{error}"
-        );
+        assert!(error.message().contains(refusal), "{error}");
         assert_eq!(binding(&leased_sandbox), Some(lease.clone()));
         assert_eq!(binding(&other), Some(other_lease.clone()));
         assert_eq!(store.leases(generation).unwrap(), both);
@@ -1175,6 +1195,101 @@ fn a_release_takes_the_lock_of_its_sandbox_through_the_path_of_its_lease() {
     assert_eq!(release(&store, lease.sandbox()).unwrap(), Some(lease));
     assert_eq!(binding(&leased_sandbox), None);
     assert_eq!(store.leases(generation).unwrap(), [other_lease]);
+}
+
+/// A release whose path comes to name another sandbox, once a directory in the path is renamed,
+/// and a link to the other sandbox's parent takes its place: only on Unix, since Windows refuses
+/// to rename a directory that holds an open file, such as the lock's.
+#[cfg(unix)]
+#[test]
+fn a_release_ends_the_lease_of_the_sandbox_whose_lock_it_holds_whatever_its_path_names_meanwhile() {
+    let (directory, store) = new_store();
+    let root = filesystem::canonicalize(directory.path()).unwrap();
+    let published = publish(&store, &ManifestSpec::template(), storage(1));
+    let generation = published.generation();
+    let (first, second) = (root.join("first"), root.join("second"));
+    fs::create_dir(&first).unwrap();
+    fs::create_dir(&second).unwrap();
+    let leased_sandbox = provision(&first, "sandbox");
+    let other = provision(&second, "sandbox");
+    let lease = leased(&store, &published, &leased_sandbox);
+    let other_lease = leased(&store, &published, &other);
+    let kept = [
+        CLONE_SCRATCH_NAME,
+        CLONE_ACTIVATION_NAME,
+        RESTORE_READY_NAME,
+    ];
+    for sandbox in [&leased_sandbox, &other] {
+        for name in kept {
+            fs::write(sandbox.join(name), b"").unwrap();
+        }
+    }
+    // Moves `parent` to `to`, and links `parent` to the other sandbox's parent.
+    let swap = |parent: &Path, to: &Path| {
+        fs::rename(parent, to).unwrap();
+        link_dir(&second, parent);
+    };
+    // The other sandbox's files, and its lease, stay.
+    let other_stays = || {
+        for name in kept {
+            assert!(other.join(name).exists(), "{name}");
+        }
+        assert_eq!(binding(&other), Some(other_lease.clone()));
+    };
+    // Once the release has checked the sandbox, its path comes to name the other sandbox, from
+    // the removal of its files on.
+    let moved = root.join("moved");
+    let mut locked = SandboxStore::lock_existing(&leased_sandbox, &files(), None).unwrap();
+    assert_eq!(
+        store
+            .release_with(
+                &mut locked,
+                &|| swap(&first, &moved),
+                &sync_dir,
+                &platform::Directory::sync
+            )
+            .unwrap(),
+        Some(lease)
+    );
+    drop(locked);
+    // The release removed the files and the binding of the sandbox whose lock it held.
+    let released = moved.join("sandbox");
+    for name in kept {
+        assert!(fs::symlink_metadata(released.join(name)).is_err(), "{name}");
+    }
+    assert_eq!(binding(&released), None);
+    other_stays();
+    assert_eq!(
+        store.leases(generation).unwrap(),
+        std::slice::from_ref(&other_lease)
+    );
+    // A release whose path names the other sandbox once the lock is taken, before the release
+    // begins, refuses, and removes nothing.
+    let again = leased(&store, &published, &released);
+    for name in kept {
+        fs::write(released.join(name), b"").unwrap();
+    }
+    let mut locked = SandboxStore::lock_existing(&released, &files(), None).unwrap();
+    let away = root.join("away");
+    swap(&moved, &away);
+    let error = store.release(&mut locked).unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::Other, "{error}");
+    assert!(
+        error
+            .message()
+            .contains("does not hold the lock of its sandbox"),
+        "{error}"
+    );
+    drop(locked);
+    let kept_sandbox = away.join("sandbox");
+    for name in kept {
+        assert!(kept_sandbox.join(name).exists(), "{name}");
+    }
+    assert_eq!(binding(&kept_sandbox), Some(again.clone()));
+    other_stays();
+    let mut both = vec![again, other_lease];
+    both.sort_by_key(Lease::id);
+    assert_eq!(store.leases(generation).unwrap(), both);
 }
 
 #[test]
@@ -1807,10 +1922,11 @@ fn clone_role() {
     };
     let store = Store::open(dir).unwrap();
     let generation = StoreGeneration::new(generation.parse().unwrap());
-    // The step's transaction crashes as it makes its write in `target` durable.
+    // The step's transaction crashes as it makes its write in `target` durable, or, for a
+    // release, the removal of the binding, in the sandbox's directory.
     let target = match step.as_str() {
         "after-record" => Some(store.dir().join(LEASES_NAME)),
-        "after-binding" | "releasing" => Some(sandbox.clone()),
+        "after-binding" => Some(sandbox.clone()),
         _ => None,
     };
     let sync = |dir: &Path| -> Result<()> {
@@ -1821,7 +1937,9 @@ fn clone_role() {
     };
     if step == "releasing" {
         let mut locked = SandboxStore::lock_existing(&sandbox, &files(), None).unwrap();
-        store.release_with(&mut locked, &sync).unwrap();
+        store
+            .release_with(&mut locked, &|| {}, &sync, &|_| crash(&step))
+            .unwrap();
         panic!("the release did not make the removal of its binding durable");
     }
     let now = after(store.index().unwrap().get(generation).unwrap(), 1);
@@ -2445,5 +2563,37 @@ mod windows {
         assert_eq!(binding(&sandbox), None);
         drop(held_record);
         assert!(store.leases(generation).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_release_takes_the_files_of_its_sandbox_whose_deletion_is_pending_for_removed() {
+        let (directory, store) = new_store();
+        let published = publish(&store, &ManifestSpec::template(), storage(1));
+        let generation = published.generation();
+        let sandbox = provision(directory.path(), "sandbox");
+        let lease = leased(&store, &published, &sandbox);
+        // A stop removed the runtime record of the clone's VM, and the journal of its launch,
+        // which a scanner, say, holds: the release, which reads them through its handle of the
+        // sandbox's directory, finds that the sandbox records no VM and no launch.
+        let held: Vec<fs::File> = [JOURNAL_NAME, RUNTIME_NAME]
+            .into_iter()
+            .map(|name| {
+                fs::write(sandbox.join(name), b"{}").unwrap();
+                delete_pending(&sandbox.join(name))
+            })
+            .collect();
+        assert_eq!(release(&store, &sandbox).unwrap(), Some(lease));
+        assert_eq!(binding(&sandbox), None);
+        assert!(store.leases(generation).unwrap().is_empty());
+        drop(held);
+        // A release that removed the binding, which a reader holds, and failed before its record
+        // went, leaves a binding whose deletion is pending, which a release retried finds removed.
+        let again = leased(&store, &published, &sandbox);
+        let held_binding = delete_pending(&sandbox.join(CLONE_BINDING_NAME));
+        assert_eq!(release(&store, &sandbox).unwrap(), None);
+        drop(held_binding);
+        assert_eq!(binding(&sandbox), None);
+        assert_eq!(store.leases(generation).unwrap(), [again]);
+        assert_eq!(store.retire(generation, None).unwrap(), Retirement::Retired);
     }
 }

@@ -117,6 +117,11 @@ impl Directory {
     }
 
     /// Never called: no directory is open.
+    pub(crate) fn open_file(&self, _name: &str) -> io::Result<Option<File>> {
+        match *self {}
+    }
+
+    /// Never called: no directory is open.
     pub(crate) fn remove_file(&self, _name: &str) -> io::Result<()> {
         match *self {}
     }

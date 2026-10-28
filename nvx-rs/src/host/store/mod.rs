@@ -777,27 +777,49 @@ impl LockedStore {
         Ok(owned)
     }
 
+    /// Opens the sandbox's directory through its path, as one handle through which a release of
+    /// the lease of its clone names the directory's entries, and checks through that handle that
+    /// the directory holds this lock's file, as a [removal](self#removal) checks it: no change of
+    /// the path meanwhile, of a link in it or of one of its directories, then makes the release
+    /// reach the entries of another sandbox, whose lock it does not hold.
+    ///
+    /// Fails with [`ErrorKind::Other`] if the directory that the path names does not hold this
+    /// lock's file.
+    pub(crate) fn open_dir(&self) -> Result<platform::Directory> {
+        let dir = self.dir();
+        let directory = platform::Directory::open(dir).map_err(io_error(format!(
+            "cannot open the directory {}",
+            dir.display()
+        )))?;
+        let lock = self.path(LOCK_NAME);
+        let examine = || io_error(format!("cannot examine {}", lock.display()));
+        let held = platform::opened_file_identity(&self.lock).map_err(examine())?;
+        if directory.entry_identity(LOCK_NAME).map_err(examine())? != Some(held) {
+            return Err(Error::other(format!(
+                "the directory that {} names does not hold the lock of its sandbox: the path names \
+                 another directory than when the lock was taken",
+                dir.display()
+            )));
+        }
+        Ok(directory)
+    }
+
     /// Removes what the clone of the sandbox kept of its launch in the sandbox's directory, whose
-    /// VM has exited: the file of its scratch device, [`CLONE_SCRATCH_NAME`], its activation
-    /// record, [`CLONE_ACTIVATION_NAME`], and the socket of its restore-ready event,
-    /// [`RESTORE_READY_NAME`]. A release, as a [removal](self#removal) does, removes them before
-    /// the clone binding, whose removal, once durable, makes theirs durable too, since all are
-    /// entries of the sandbox's directory. A file whose deletion is pending, as a Windows file
-    /// system without POSIX deletion leaves a removed file that another handle holds, is removed
-    /// already, as [`was_removed`](regular::was_removed) tells, so that a release that failed once
-    /// it removed the file can be retried.
-    pub(crate) fn remove_clone_files(&self) -> Result<()> {
+    /// VM has exited, through `directory`, the handle of the directory that
+    /// [`open_dir`](Self::open_dir) returned: the file of its scratch device,
+    /// [`CLONE_SCRATCH_NAME`], its activation record, [`CLONE_ACTIVATION_NAME`], and the socket of
+    /// its restore-ready event, [`RESTORE_READY_NAME`]. A release, as a [removal](self#removal)
+    /// does, removes them before the clone binding, whose removal, once durable, makes theirs
+    /// durable too, since all are entries of the sandbox's directory. A file whose deletion is
+    /// pending, as a Windows file system without POSIX deletion leaves a removed file that another
+    /// handle holds, is removed already, so that a release that failed once it removed the file can
+    /// be retried.
+    pub(crate) fn remove_clone_files(&self, directory: &platform::Directory) -> Result<()> {
         for name in CLONE_FILE_NAMES {
-            let path = self.path(name);
-            match std::fs::remove_file(&path) {
-                Err(error)
-                    if error.kind() != io::ErrorKind::NotFound
-                        && !regular::was_removed(&path, &error) =>
-                {
-                    return Err(io_error(format!("cannot remove {}", path.display()))(error));
-                }
-                _ => {}
-            }
+            directory.remove_file(name).map_err(io_error(format!(
+                "cannot remove {}",
+                self.path(name).display()
+            )))?;
         }
         Ok(())
     }

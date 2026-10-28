@@ -1207,7 +1207,9 @@ mod windows {
             .map(|name| delete_pending(&dir.join(name)))
             .collect();
         let locked = SandboxStore::lock_existing(&dir, &files(), None).unwrap();
-        locked.remove_clone_files().unwrap();
+        locked
+            .remove_clone_files(&locked.open_dir().unwrap())
+            .unwrap();
         drop(locked);
         drop(pending);
         let names = entries_of(&dir);

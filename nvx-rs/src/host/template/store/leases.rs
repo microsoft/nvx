@@ -24,11 +24,13 @@ use crate::host::filesystem;
 use crate::host::platform;
 use crate::host::store::files::{remove_if_present, sync_dir};
 use crate::host::store::lease::{
-    Lease, LeaseId, LeaseRecord, MAX_LEASE_RECORD_LEN, clone_socket_name, read_binding, read_lease,
+    Lease, LeaseId, LeaseRecord, MAX_LEASE_RECORD_LEN, clone_socket_name, read_binding,
+    read_binding_in, read_lease,
 };
-use crate::host::store::regular::was_removed;
+use crate::host::store::regular::{open_regular_in, was_removed};
 use crate::host::store::{
-    CLONE_BINDING_NAME, CallerFiles, LaunchId, LockedStore, Reservation, SandboxStore,
+    CLONE_BINDING_NAME, CallerFiles, JOURNAL_NAME, LaunchId, LockedStore, RUNTIME_NAME,
+    Reservation, SandboxStore,
 };
 use crate::host::template::eligibility::HostTime;
 use crate::host::template::key::KeyIdentity;
@@ -366,23 +368,44 @@ impl Store {
     /// lock of the store.
     ///
     /// The caller takes the sandbox's lock through the lease's path, as [`Lease::sandbox`]
-    /// returns it, and as [`acquire`](Self::acquire) takes it, which has no links: a link in the
-    /// path of the lock could change as the release runs, and make it remove another sandbox's
-    /// binding, whose lock it does not hold.
+    /// returns it, and as [`acquire`](Self::acquire) takes it, with its links resolved. The
+    /// release names the entries of the sandbox's directory through one handle of the directory
+    /// that the path names, once it checked through that handle that the directory holds the
+    /// lock's file: through it, it checks that the sandbox records no VM and no launch, reads the
+    /// binding, removes the clone's files and the binding, and makes their absence durable. No
+    /// change of the path as the release runs, of a link in it or of one of its directories, then
+    /// makes it check or remove the files of another sandbox, whose lock it does not hold.
     ///
-    /// Fails with [`ErrorKind::Other`] if the sandbox holds a lease of another store, or if the
-    /// lock does not name the sandbox by its lease's path, and then removes nothing.
+    /// Fails with [`ErrorKind::Other`] if the sandbox holds a lease of another store, if the lock
+    /// does not name the sandbox by its lease's path, or if the directory that the path names does
+    /// not hold the lock's file, and then removes nothing.
     pub fn release(&self, locked: &mut LockedStore) -> Result<Option<Lease>> {
-        self.release_with(locked, &sync_dir)
+        self.release_with(locked, &|| {}, &sync_dir, &platform::Directory::sync)
     }
 
-    /// Releases a lease as [`release`](Self::release) does, making the removal of its binding
-    /// durable with `sync`.
-    fn release_with(&self, locked: &mut LockedStore, sync: SyncDir<'_>) -> Result<Option<Lease>> {
-        if locked.journal()?.is_some() || locked.runtime()?.is_some() {
-            return Err(may_run(locked.dir()));
+    /// Releases a lease as [`release`](Self::release) does, running `checked` once its checks
+    /// pass, before it removes anything, and making the removal of the clone's socket durable with
+    /// `sync`, and that of the binding with `sync_sandbox`, through the handle of the sandbox's
+    /// directory.
+    fn release_with(
+        &self,
+        locked: &mut LockedStore,
+        checked: &dyn Fn(),
+        sync: SyncDir<'_>,
+        sync_sandbox: &dyn Fn(&platform::Directory) -> io::Result<()>,
+    ) -> Result<Option<Lease>> {
+        let directory = locked.open_dir()?;
+        // A record whose deletion is pending, on Windows, is removed, as its readers take it.
+        for name in [JOURNAL_NAME, RUNTIME_NAME] {
+            let present = open_regular_in(&directory, name).map_err(store_error(format!(
+                "cannot examine {}",
+                locked.dir().join(name).display()
+            )))?;
+            if present.is_some() {
+                return Err(may_run(locked.dir()));
+            }
         }
-        let Some(lease) = read_binding(locked.dir())? else {
+        let Some(lease) = read_binding_in(&directory, locked.dir())? else {
             return Ok(None);
         };
         if lease.store() != self.id {
@@ -402,6 +425,7 @@ impl Store {
             )));
         }
         let recorded = self.check_records_dir(LEASES_NAME, LEASES_WHAT)?;
+        checked();
         // A plan of the clone launches under the reservation that the lease's acquisition left in
         // the lock, which the release ends before it removes anything, so that a release that
         // fails once it removed the clone's files, such as the scratch device's file of an upper
@@ -413,9 +437,18 @@ impl Store {
         // all are entries of the sandbox's directory, but not that of the socket, an entry of the
         // leased generation's payload, which must be durable before the lease ends, so that a
         // generation whose leases have drained holds no clone's socket.
-        locked.remove_clone_files()?;
+        locked.remove_clone_files(&directory)?;
         self.remove_clone_socket(&lease, sync)?;
-        unbind(locked.dir(), sync)?;
+        let binding = locked.dir().join(CLONE_BINDING_NAME);
+        directory
+            .remove_file(CLONE_BINDING_NAME)
+            .map_err(store_error(format!("cannot remove {}", binding.display())))?;
+        // The binding's absence is durable before its record goes: a binding that outlasted the
+        // record through a crash would let a retirement delete the generation that it names.
+        sync_sandbox(&directory).map_err(store_error(format!(
+            "cannot sync the directory {}",
+            locked.dir().display()
+        )))?;
         if recorded {
             remove_lease_record(&self.lease_path(lease.id()))?;
         }

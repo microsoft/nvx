@@ -673,6 +673,25 @@ impl Directory {
         }
     }
 
+    /// Opens its entry `name` for reading, not following a link, and without waiting, as an open
+    /// of a FIFO without a writer would, or returns `None` if it has no such entry. The caller
+    /// checks what the entry is.
+    pub(crate) fn open_file(&self, name: &str) -> io::Result<Option<File>> {
+        use nix::fcntl::{OFlag, openat};
+        use nix::sys::stat::Mode;
+
+        match openat(
+            &self.0,
+            name,
+            OFlag::O_RDONLY | OFlag::O_NOFOLLOW | OFlag::O_NONBLOCK | OFlag::O_CLOEXEC,
+            Mode::empty(),
+        ) {
+            Ok(file) => Ok(Some(File::from(file))),
+            Err(Errno::ENOENT) => Ok(None),
+            Err(errno) => Err(errno.into()),
+        }
+    }
+
     /// Removes its file `name`, if it has one.
     pub(crate) fn remove_file(&self, name: &str) -> io::Result<()> {
         use nix::unistd::{UnlinkatFlags, unlinkat};
