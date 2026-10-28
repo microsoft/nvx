@@ -211,6 +211,29 @@ runs:
           exit 1
         fi
 
+    # A harness that something killed outright, as the runner's orphan
+    # cleanup killed those of cancelled jobs, leaves its scenarios' scratch
+    # directories in the temporary directory (#946). As with OpenVMM, no step
+    # before this one runs the harness, so the account's harness directories
+    # there are left from earlier jobs.
+    - name: Remove scratch left by earlier jobs
+      if: runner.os != 'Windows'
+      shell: bash
+      run: |
+        set -euo pipefail
+        temporary=$(python3 -c 'import tempfile; print(tempfile.gettempdir())')
+        find "${temporary}" -mindepth 1 -maxdepth 1 -type d -user "$(id -u)" \
+          \( -name 'nvx-*' -o -name 'openvmm-*' \) -print0 |
+          while IFS= read -r -d '' directory; do
+            modified=$(stat -c %y "${directory}" || true)
+            echo "::notice::Removing ${directory}, last modified ${modified:-at an unknown time}, which an earlier job left behind"
+            # A scenario can leave a directory that even its owner can't write.
+            chmod -R u+rwX -- "${directory}" 2>/dev/null || true
+            if ! rm -rf --one-file-system -- "${directory}"; then
+              echo "::warning::Could not remove ${directory}, which an earlier job left behind"
+            fi
+          done
+
     # Host time. The time ABI host qualification (doc/ci.md,
     # "Host qualification") checks the backend, the CPU fingerprint and
     # generation, and the TSC rate stability on its short CI schedule, and,

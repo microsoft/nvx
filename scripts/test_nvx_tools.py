@@ -12378,6 +12378,147 @@ python3() {
             environment["PATH"] = f"{stubs}{os.pathsep}{environment['PATH']}"
             self.assertNotEqual(run(environment).returncode, 0)
 
+    def test_linux_runners_remove_scratch_left_by_earlier_jobs(self):
+        validate_runner = (
+            BuildConstants.REPO_ROOT
+            / ".github"
+            / "actions"
+            / "validate-runner"
+            / "action.yml"
+        ).read_text(encoding="utf-8")
+
+        # #946: a harness that the runner's orphan cleanup killed left its
+        # scenario's scratch directory behind, and the ten Linux runners held
+        # 64 of them. The next job removes the account's harness directories,
+        # once it has ended the OpenVMM processes that could still use them.
+        name = "Remove scratch left by earlier jobs"
+        self.assertLess(
+            validate_runner.index(
+                "    - name: Terminate OpenVMM left by earlier jobs\n"
+            ),
+            validate_runner.index(f"    - name: {name}\n"),
+        )
+        self.assertLess(
+            validate_runner.index(f"    - name: {name}\n"),
+            validate_runner.index("    - name: Report host TSC\n"),
+        )
+        step = validate_runner.split(f"    - name: {name}\n", 1)[1]
+        step = step.split("\n\n", 1)[0]
+        self.assertIn("      if: runner.os != 'Windows'\n", step)
+        self.assertIn("      shell: bash\n", step)
+        script = "\n".join(
+            line.removeprefix("        ")
+            for line in step.split("      run: |\n", 1)[1].splitlines()
+        )
+        temporary_line = (
+            "temporary=$(python3 -c 'import tempfile; print(tempfile.gettempdir())')\n"
+        )
+        self.assertIn(temporary_line, script)
+        # Each scratch directory that the harness creates in the temporary
+        # directory has a prefix that the step removes.
+        for module in (
+            "benchmark",
+            "managed_exec_tests",
+            "microvm_tests",
+            "sandbox_lifecycle_tests",
+            "sandbox_proxy_tests",
+        ):
+            source = (
+                BuildConstants.REPO_ROOT / "scripts" / "nvx_tools" / f"{module}.py"
+            ).read_text(encoding="utf-8")
+            calls = re.findall(
+                r"(?:TemporaryDirectory|mkdtemp)\((.*?)\)", source, re.DOTALL
+            )
+            self.assertTrue(calls, module)
+            for arguments in calls:
+                with self.subTest(module=module, arguments=arguments):
+                    self.assertRegex(arguments, r'^\s*prefix=f?"(nvx|openvmm)-')
+                    self.assertNotIn("dir=", arguments)
+        if sys.platform != "linux":
+            return
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            scratch = root / "tmp"
+            scratch.mkdir()
+            # The step never sees the temporary directory of this host.
+            check = script.replace(
+                temporary_line, f"temporary={shlex.quote(str(scratch))}\n", 1
+            )
+
+            def run(
+                environment: dict[str, str] | None = None,
+            ) -> subprocess.CompletedProcess[str]:
+                return subprocess.run(
+                    ["bash", "-c", check],
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                    check=False,
+                    env=environment,
+                )
+
+            left = [
+                scratch / "nvx-restore-downtime-duijv83o",
+                scratch / "openvmm-device-io-ep0lqoc8",
+            ]
+            for directory in left:
+                (directory / "snapshot").mkdir(parents=True)
+                (directory / "snapshot" / "memory.bin").write_bytes(bytes(16))
+            # A directory that even its owner can't empty as it is.
+            locked = left[0] / "locked"
+            locked.mkdir()
+            (locked / "file").write_text("locked", encoding="utf-8")
+            locked.chmod(0o500)
+            # Neither a file nor a link to a directory is a harness directory.
+            outside = root / "outside"
+            outside.mkdir()
+            (outside / "data").write_text("outside", encoding="utf-8")
+            other = scratch / "other-directory"
+            other.mkdir()
+            file = scratch / "nvx-file"
+            file.write_text("file", encoding="utf-8")
+            link = scratch / "nvx-link"
+            link.symlink_to(outside, target_is_directory=True)
+
+            result = run()
+            self.assertEqual(result.returncode, 0, result.stderr)
+            for directory in left:
+                self.assertFalse(directory.exists())
+                self.assertIn(
+                    f"::notice::Removing {directory}, last modified ", result.stdout
+                )
+            self.assertIn(", which an earlier job left behind\n", result.stdout)
+            self.assertNotIn("::warning::", result.stdout)
+            self.assertTrue(other.is_dir())
+            self.assertEqual(file.read_text(encoding="utf-8"), "file")
+            self.assertTrue(link.is_symlink())
+            self.assertEqual((outside / "data").read_text(encoding="utf-8"), "outside")
+            # Without leftover directories, the step says nothing.
+            result = run()
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout, "")
+            # A directory that the step can't remove warns but doesn't fail the
+            # job, and a failure to list the directories fails it.
+            stubs = root / "stubs"
+            stubs.mkdir()
+            stuck = scratch / "nvx-stuck"
+            stuck.mkdir()
+            (stubs / "rm").write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+            (stubs / "rm").chmod(0o755)
+            environment = dict(os.environ)
+            environment["PATH"] = f"{stubs}{os.pathsep}{environment['PATH']}"
+            result = run(environment)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn(
+                f"::warning::Could not remove {stuck}, which an earlier job left behind",
+                result.stdout,
+            )
+            (stubs / "rm").unlink()
+            (stubs / "find").write_text("#!/bin/sh\nexit 2\n", encoding="utf-8")
+            (stubs / "find").chmod(0o755)
+            self.assertNotEqual(run(environment).returncode, 0)
+
     def test_runners_qualify_their_host_time_before_every_job(self):
         validate_runner = (
             BuildConstants.REPO_ROOT

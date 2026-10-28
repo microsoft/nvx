@@ -274,9 +274,14 @@ earlier job. Before a cancellation reached the test harness (see
 [Cancellation](#cancellation)), the harness of a cancelled job kept running
 and could start a VM after the runner's orphan cleanup had listed the job's
 processes; the cleanup then killed the harness, and the VM ran on for 8 days
-(#768). The step still ends a VM that escapes both the harness's cleanup and
-its parent-death signal. The action then reports the Linux
-runner's kernel, CPU, clocksource, and TSC flags, and qualifies the runner
+(#768). It still ends a VM that escapes both the harness's cleanup and its
+parent-death signal. The action next removes the account's `nvx-*` and
+`openvmm-*` directories in Python's temporary directory, where the test
+harness runs its scenarios, with a notice that names each one, and fails if it
+can't list them: a harness that something killed outright left them behind,
+and on October 28, 2026, the ten Linux runners held 64 of them (#946). It then
+reports the Linux runner's kernel, CPU, clocksource, and TSC flags, and
+qualifies the runner
 for the time ABI with `nvx.py doctor --checks H1 H2 H4 --ci-schedule` (see
 [Host qualification](#host-qualification)): the backend, the CPU fingerprint
 and generation, and the TSC rate stability on its short schedule. The microVM
@@ -1030,7 +1035,9 @@ could kill the supervisor before it ended a tree that the cleanup didn't list,
 such as an OpenVMM that started after the listing. The kernel sends
 these signals when the thread that started the process exits, so only a
 process that the main thread starts gets them, and `nvx.py` starts its VMs
-from its main thread.
+from its main thread. The `validate-runner` action of the runner's next job
+ends the OpenVMM processes and removes the scratch directories that still
+escape all of this.
 
 ## OpenVMM VMM tests
 
