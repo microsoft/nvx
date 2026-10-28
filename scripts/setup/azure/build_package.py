@@ -31,7 +31,11 @@ class WindowsDisk(TypedDict):
     temporaryDriveFallback: str
 
 
-class CommonConfig(TypedDict):
+class CommonOptionalConfig(TypedDict, total=False):
+    benchmarkRunnerName: str
+
+
+class CommonConfig(CommonOptionalConfig):
     subscriptionId: str
     resourceGroup: str
     vmssName: str
@@ -52,11 +56,7 @@ class LinuxConfig(CommonConfig):
     dataDisk: LinuxDisk
 
 
-class WindowsOptionalConfig(TypedDict, total=False):
-    benchmarkRunnerName: str
-
-
-class WindowsConfig(CommonConfig, WindowsOptionalConfig):
+class WindowsConfig(CommonConfig):
     os: Literal["windows"]
     runnerDirectory: str
     dataDisk: WindowsDisk
@@ -93,12 +93,12 @@ COMMON_OPTIONAL = {
     "bootstrapSecretName",
     "runnerNumberOffset",
     "runnerDirectory",
+    "benchmarkRunnerName",
 }
 PLATFORM_FIELDS = {
     "linux": {"backend", "kernelMode"},
     "windows": {
         "benchmarkScratchDirectory",
-        "benchmarkRunnerName",
         "sshDefaultShell",
         "publicKeys",
     },
@@ -250,6 +250,17 @@ def normalize_config(config: object) -> LinuxConfig | WindowsConfig:
     }
     if len(roles) > 1:
         raise ValueError("runnerLabels must not contain both general and benchmark")
+    benchmark_name: str | None = None
+    if "benchmarkRunnerName" in values:
+        benchmark_name = text(
+            values["benchmarkRunnerName"],
+            "benchmarkRunnerName",
+            rf"{re.escape(name_prefix)}-(?:0|[1-9][0-9]{{0,15}})",
+        )
+        if "general" not in roles or int(benchmark_name.rsplit("-", 1)[1]) < offset:
+            raise ValueError(
+                "benchmarkRunnerName requires general labels and a valid VMSS instance number"
+            )
     disk_value = values["dataDisk"]
     if not isinstance(disk_value, dict):
         raise ValueError("dataDisk must be an object")
@@ -270,6 +281,8 @@ def normalize_config(config: object) -> LinuxConfig | WindowsConfig:
         "bootstrapSecretName": secret_name,
         "runnerNumberOffset": offset,
     }
+    if benchmark_name is not None:
+        common["benchmarkRunnerName"] = benchmark_name
     if os_type == "linux":
         if admin_username in ("root", "nvx-runner"):
             raise ValueError("Linux adminUsername must not be root or nvx-runner")
@@ -383,17 +396,6 @@ def normalize_config(config: object) -> LinuxConfig | WindowsConfig:
     required_labels = ["windows", "whp", "virtual-machine"]
     if [label.lower() for label in labels[:3]] != required_labels:
         raise ValueError(f"runnerLabels must start with {', '.join(required_labels)}")
-    benchmark_name: str | None = None
-    if "benchmarkRunnerName" in values:
-        benchmark_name = text(
-            values["benchmarkRunnerName"],
-            "benchmarkRunnerName",
-            rf"{re.escape(name_prefix)}-(?:0|[1-9][0-9]{{0,15}})",
-        )
-        if "general" not in roles or int(benchmark_name.rsplit("-", 1)[1]) < offset:
-            raise ValueError(
-                "benchmarkRunnerName requires general labels and a valid VMSS instance number"
-            )
     windows_config: WindowsConfig = {
         **common,
         "os": "windows",
@@ -407,8 +409,6 @@ def normalize_config(config: object) -> LinuxConfig | WindowsConfig:
         "sshDefaultShell": default_shell,
         "publicKeys": public_keys,
     }
-    if benchmark_name is not None:
-        windows_config["benchmarkRunnerName"] = benchmark_name
     return windows_config
 
 

@@ -27,7 +27,7 @@ values=[
     ",".join(label for label in additional if label.lower() not in ("general","benchmark")),
     config["runnerDirectory"],
     str(config["dataDisk"]["lun"]),config["dataDisk"]["mountPoint"],
-    config["kernelMode"],str("benchmark" in roles).lower(),
+    config["kernelMode"],
 ]
 if (
     any(not isinstance(value,str) or "\n" in value or "\r" in value for value in values)
@@ -38,7 +38,7 @@ print("\n".join(values))
 PY
 )
 mapfile -t values <<<"$settings"
-[ "${#values[@]}" = 9 ] || {
+[ "${#values[@]}" = 8 ] || {
     echo "ERROR: incomplete bootstrap configuration" >&2
     exit 1
 }
@@ -50,16 +50,15 @@ runner_directory=${values[4]}
 export NVX_DATA_DISK_LUN=${values[5]}
 export NVX_DATA_DISK_MOUNT_POINT=${values[6]}
 kernel_mode=${values[7]}
-benchmark_runner=${values[8]}
 admin_uid=$(id -u "$admin_username")
 [ "$admin_uid" -ne 0 ] || {
     echo "ERROR: the runner administrator must not be root" >&2
     exit 1
 }
 
-runner_name=$(
+instance_settings=$(
     python3 - "$config_path" <<'PY'
-import json,sys,urllib.request
+import json,re,sys,urllib.request
 with open(sys.argv[1],encoding="utf-8") as stream:
     config=json.load(stream)
 request=urllib.request.Request(
@@ -81,9 +80,76 @@ if (
 instance=name[len(prefix):]
 if not instance.isdecimal():
     raise SystemExit("Azure instance metadata has no numeric VMSS instance ID")
-print(config["runnerNamePrefix"]+"-"+str(int(instance)+config["runnerNumberOffset"]))
+runner_name=config["runnerNamePrefix"]+"-"+str(int(instance)+config["runnerNumberOffset"])
+benchmark=(
+    any(label.lower()=="benchmark" for label in config["runnerLabels"])
+    or config.get("benchmarkRunnerName")==runner_name
+)
+def field(source,name,pattern):
+    value=source.get(name,"") if isinstance(source,dict) else None
+    if not isinstance(value,str) or not re.fullmatch(pattern,value):
+        raise SystemExit("Azure compute metadata contains an invalid "+name)
+    return value
+def safe_disk(disk,data=False):
+    if not isinstance(disk,dict):
+        raise SystemExit("Azure compute metadata has no disk profile")
+    safe={
+        "diskSizeGB":field(disk,"diskSizeGB",r"[0-9]{1,10}"),
+        "managedDisk":{"storageAccountType":field(
+            disk.get("managedDisk"),"storageAccountType",r"[A-Za-z0-9_]{1,64}"
+        )},
+        "caching":field(disk,"caching",r"None|ReadOnly|ReadWrite"),
+        "writeAcceleratorEnabled":field(disk,"writeAcceleratorEnabled",r"(?i:true|false)"),
+    }
+    if data:
+        safe["lun"]=field(disk,"lun",r"[0-9]{1,2}")
+        if int(safe["lun"])>63:
+            raise SystemExit("Azure data disk metadata contains an invalid LUN")
+        for name in ("bytesPerSecondThrottle","opsPerSecondThrottle"):
+            safe[name]=field(disk,name,r"[0-9]{0,20}")
+    else:
+        safe["diffDiskSettings"]={"option":field(
+            disk.get("diffDiskSettings",{}),"option",r"[A-Za-z]{0,32}"
+        )}
+    return safe
+profile=metadata["storageProfile"]
+disks=profile.get("dataDisks")
+if not isinstance(disks,list) or not disks:
+    raise SystemExit("Azure compute metadata has no managed data disks")
+safe={
+    "vmSize":field(metadata,"vmSize",r"Standard_[A-Za-z0-9_]{1,80}"),
+    "storageProfile":{
+        "osDisk":safe_disk(profile.get("osDisk")),
+        "dataDisks":[safe_disk(disk,True) for disk in disks],
+        "resourceDisk":{"size":field(profile.get("resourceDisk",{}),"size",r"[0-9]{0,16}")},
+    },
+}
+print(runner_name)
+print(str(benchmark).lower())
+print(json.dumps(safe,separators=(",",":")))
 PY
 )
+mapfile -t instance_values <<<"$instance_settings"
+[ "${#instance_values[@]}" = 3 ] || {
+    echo "ERROR: incomplete Azure instance settings" >&2
+    exit 1
+}
+runner_name=${instance_values[0]}
+benchmark_runner=${instance_values[1]}
+
+metadata_directory=/var/lib/nvx-ci-host-metadata
+if [ -L "$metadata_directory" ]; then
+    echo "ERROR: host metadata directory must not be a symlink" >&2
+    exit 1
+fi
+install -d -o root -g root -m 0755 "$metadata_directory"
+metadata_file=$(mktemp "$metadata_directory/compute.XXXXXX")
+trap 'rm -f -- "$metadata_file"' EXIT
+printf '%s\n' "${instance_values[2]}" >"$metadata_file"
+chmod 0644 "$metadata_file"
+mv -T "$metadata_file" "$metadata_directory/compute.json"
+trap - EXIT
+
 bash "$setup_root/setup-data-disk.sh"
 mountpoint -q "$NVX_DATA_DISK_MOUNT_POINT" || {
     echo "ERROR: managed data disk is not mounted" >&2
