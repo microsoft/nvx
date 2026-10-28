@@ -965,6 +965,30 @@ refuses a RAM upper beside a scratch block device. With either upper, the
 overlay keeps `metacopy=on` and `xino=on`, which `/sbin/nvx-sandbox-smoke`
 checks.
 
+The explicit `test-microvm --scenario sandbox-ram-upper --backend BACKEND`
+scenario is the acceptance for the RAM upper. Like the
+[managed lifecycle](#managed-lifecycle) scenarios, it runs `nvx-rs sandbox` as
+subprocesses with the guest-artifact build's Ubuntu layer, so it also runs only
+when named, but it attaches no scratch image. It checks that `provision`
+refuses `--upper ram` beside `--scratch`, and `start` refuses `--upper`, before
+either creates any state. A one-shot `run` of `/sbin/nvx-sandbox-smoke` must
+print an OpenVMM command with one sandbox block device, the read-only distro
+layer, and `nvx_overlay_upper=ramfs` in place of the scratch token, and the
+probe must pass its profile and resource-limit checks over a tmpfs upper. The
+run's `--outcome-report`, under the scenario's temporary directory, must report
+success and a complete teardown, and also names its OpenVMM to the scenario's
+process checks and cleanup, which find VMs by that directory. A managed sandbox
+must record `ram` without a scratch image, pass the probe's managed and
+resource-limit checks, show its guest one virtio block device and the RAM
+upper's token, and read back a file that an earlier request wrote.
+Under a 32 MiB `--memory-max`, a 20 MiB file in its upper must leave no room
+for a 20 MiB allocation, which the memory controller kills, and which succeeds
+once the file is removed. After a `stop` and a new `start`, the file is gone.
+The scenario's evidence, with a `sandbox-ram-upper-` prefix, holds its bounded
+command observations, the runtime record, the output of the one-shot run, of
+the probe, of the guest's view, and of the memory check, and the outcome
+reports of the one-shot run and of both stops.
+
 ### Live host shares
 
 `sandbox run` and `sandbox provision` accept repeatable

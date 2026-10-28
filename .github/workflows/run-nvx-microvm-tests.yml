@@ -211,6 +211,7 @@ jobs:
           --scenario managed-exec-config
           --scenario sandbox-lifecycle
           --scenario sandbox-proxy-only
+          --scenario sandbox-ram-upper
           --output-dir "build/test-results/public-exec-${{ inputs.backend }}"
 
       - name: Run public managed sandbox acceptance on Windows
@@ -222,6 +223,7 @@ jobs:
           --scenario managed-exec-config
           --scenario sandbox-lifecycle
           --scenario sandbox-proxy-only
+          --scenario sandbox-ram-upper
           --output-dir "build/test-results/public-exec-${{ inputs.backend }}"
 
       - name: Run Ubuntu guest smoke tests on Linux
