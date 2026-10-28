@@ -799,9 +799,12 @@ series, so a `dev` run that finishes after the reset cannot refill it.
 
 The regression gate compares the target p50 with the median of the latest 10
 p50 values on the pull request's base branch and requires all 10
-matching history points. A metric regresses only when it is more than 40%
-worse. Lower-is-better millisecond metrics must also be more than 5 ms
+matching history points. A metric regresses only when it is more than 50%
+worse. Lower-is-better millisecond metrics must also be more than 10 ms
 slower; higher-is-better metrics use the percentage comparison alone.
+[`ci.yml`](../.github/workflows/ci.yml) sets these thresholds;
+[`performance gate`](usage.md#performance-gate) defaults to 40% and 5 ms when
+it runs without them.
 Missing or insufficient history is a warmup, not a failure. Successful `dev`
 builds append collected results to topology-specific files in `data/`. Every
 new ABI/count series begins as a warmup baseline before its regression gate
