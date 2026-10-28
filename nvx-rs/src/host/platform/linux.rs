@@ -868,7 +868,8 @@ pub(crate) struct ReadyListener {
 
 /// Listens at the Unix socket `socket_path`, in place of a socket that an earlier launch left
 /// there, as the restore-ready endpoint of a clone's launch, and returns the endpoint, as
-/// OpenVMM's `--restore-ready-path` takes it, and its listener.
+/// OpenVMM's `--restore-ready-path` takes it, and its listener. The socket has mode 0600,
+/// whatever the umask, as [`set_ready_socket_mode`] gives it.
 pub(crate) fn listen_ready(socket_path: &Path) -> io::Result<(String, ReadyListener)> {
     let endpoint = socket_path
         .to_str()
@@ -879,6 +880,10 @@ pub(crate) fn listen_ready(socket_path: &Path) -> io::Result<(String, ReadyListe
         _ => {}
     }
     let socket = UnixListener::bind(socket_path)?;
+    // The umask may clear bits of the mode that the bind gives the socket, even its owner's
+    // permission to write it, without which a VMM that is not root cannot connect: the mode is
+    // set again before any VMM may connect.
+    set_ready_socket_mode(socket_path)?;
     // The host polls the socket before it accepts, so an accept never blocks.
     socket.set_nonblocking(true)?;
     let listener = ReadyListener {
@@ -963,6 +968,35 @@ impl ReadyListener {
             Err(error) => Err(error),
         }
     }
+}
+
+/// Gives the restore-ready socket at `socket_path`, which the caller bound, the mode 0600, whatever
+/// the umask: its owner, the user of the clone's VMM, may connect to it, which takes the
+/// permission to write it, and no one else may.
+///
+/// The socket is opened only to locate it, following no link at its name, and refused unless it
+/// is a socket.
+fn set_ready_socket_mode(socket_path: &Path) -> io::Result<()> {
+    use std::os::unix::fs::FileTypeExt;
+
+    use nix::fcntl::OFlag;
+
+    let socket = OpenOptions::new()
+        .read(true)
+        .custom_flags((OFlag::O_PATH | OFlag::O_NOFOLLOW).bits())
+        .open(socket_path)?;
+    if !socket.metadata()?.file_type().is_socket() {
+        return Err(io::Error::other(format!(
+            "{} is not the restore-ready socket that the launch bound",
+            socket_path.display()
+        )));
+    }
+    // A descriptor that only locates the socket cannot change its mode itself, but its link in
+    // /proc names exactly the socket that it opened.
+    fs::set_permissions(
+        Path::new("/proc/self/fd").join(socket.as_raw_fd().to_string()),
+        Permissions::from_mode(0o600),
+    )
 }
 
 /// Connects to a control endpoint served by the process `expected_pid`.
@@ -1109,6 +1143,28 @@ mod tests {
         }
         assert!(elapsed < Duration::from_secs(1), "{elapsed:?}");
         assert!(process.wait(Instant::now()).unwrap().unwrap());
+    }
+
+    #[test]
+    fn a_restore_ready_socket_lets_its_owner_connect_whatever_the_umask() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("ready.sock");
+        // A umask that clears even the owner's permission to write what it creates, in a thread
+        // of the test's own, whose umask no other thread shares.
+        let (endpoint, _listener) = thread::scope(|scope| {
+            scope
+                .spawn(|| {
+                    nix::sched::unshare(nix::sched::CloneFlags::CLONE_FS).unwrap();
+                    nix::sys::stat::umask(nix::sys::stat::Mode::from_bits_truncate(0o277));
+                    listen_ready(&path)
+                })
+                .join()
+                .unwrap()
+        })
+        .unwrap();
+        let mode = fs::symlink_metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & PERMISSION_BITS, 0o600, "{mode:o}");
+        UnixStream::connect(&endpoint).unwrap();
     }
 
     #[test]
