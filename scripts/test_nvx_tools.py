@@ -19971,6 +19971,13 @@ _SANDBOX_MOUNTINFO = (
     "25 24 0:25 / /dev/pts rw,relatime - devpts devpts rw,mode=620,ptmxmode=666\n"
     "26 24 0:26 / /dev/shm rw,nosuid,nodev,relatime - tmpfs tmpfs rw\n"
 )
+# The kernel command line of a sandbox whose upper is on scratch, which the
+# smoke check reads from /proc/cmdline.
+_SCRATCH_COMMAND_LINE = (
+    "console=hvc0 nvx_sandbox=1 "
+    "nvx_layer=distro,0xd0003000,erofs:0123abcd-4567-89ef-0123-456789abcdef "
+    "nvx_scratch=0xd0006000,ext4"
+)
 _SANDBOX_STATUS = (
     "Name:\tsh\nUid:\t65534\t65534\t65534\t65534\n"
     "Gid:\t65534\t65534\t65534\t65534\nGroups:\t\nNoNewPrivs:\t1\n"
@@ -20101,6 +20108,13 @@ class SandboxSmokeProfileTests(unittest.TestCase):
         self.assertEqual(result.stdout, "checked\n")
         result = run(private, command_line="console=hvc0", hostname="nvx-sandbox")
         self.assertEqual(result.returncode, 0, result.stderr)
+        # A caller's --cmdline keeps its newlines, so a token may follow one.
+        multiline = "console=hvc0 quiet\nloglevel=0\nnvx_hostname=nvx-lifecycle"
+        result = run(private, command_line=multiline)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        result = run(private, command_line=multiline, hostname="nvx-sandbox")
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("expected nvx-lifecycle", result.stderr)
 
         for name, initial in (
             ("mnt", "mnt:[4026531832]"),
@@ -20128,14 +20142,20 @@ class SandboxSmokeProfileTests(unittest.TestCase):
         self.assertEqual(result.returncode, 1, result.stdout)
         self.assertIn("expected nvx-lifecycle", result.stderr)
 
-    def test_mount_check_requires_private_runtime_mounts_once(self):
-        functions = ("mount_records", "require_mount", "check_mounts")
-        mountinfo = self._fixture("mountinfo", _SANDBOX_MOUNTINFO)
-        result = self._run(
-            functions,
+    def _check_mounts(
+        self, mountinfo: str, command_line: str
+    ) -> subprocess.CompletedProcess[str]:
+        return self._run(
+            ("mount_records", "require_mount", "check_mounts"),
             "check_mounts\necho checked",
-            {"/proc/self/mountinfo": mountinfo},
+            {
+                "/proc/self/mountinfo": self._fixture("mountinfo", mountinfo),
+                "/proc/cmdline": self._fixture("cmdline", command_line + "\n"),
+            },
         )
+
+    def test_mount_check_requires_private_runtime_mounts_once(self):
+        result = self._check_mounts(_SANDBOX_MOUNTINFO, _SCRATCH_COMMAND_LINE)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout, "checked\n")
 
@@ -20166,6 +20186,16 @@ class SandboxSmokeProfileTests(unittest.TestCase):
                 "lowerdir=/srv/distro",
                 "does not use the image layers",
             ),
+            "metacopy": (
+                ",metacopy=on,",
+                ",",
+                "the root overlay is mounted without metacopy=on",
+            ),
+            "xino": (
+                ",xino=on\n",
+                "\n",
+                "the root overlay is mounted without xino=on",
+            ),
             "missing-shm": (
                 "26 24 0:26 / /dev/shm rw,nosuid,nodev,relatime - tmpfs tmpfs rw\n",
                 "",
@@ -20180,14 +20210,51 @@ class SandboxSmokeProfileTests(unittest.TestCase):
         for mutation, (old, new, message) in mutations.items():
             with self.subTest(mutation=mutation):
                 self.assertIn(old, _SANDBOX_MOUNTINFO)
-                mountinfo = self._fixture(
-                    "mountinfo", _SANDBOX_MOUNTINFO.replace(old, new, 1)
-                )
-                result = self._run(
-                    functions, "check_mounts", {"/proc/self/mountinfo": mountinfo}
+                result = self._check_mounts(
+                    _SANDBOX_MOUNTINFO.replace(old, new, 1), _SCRATCH_COMMAND_LINE
                 )
                 self.assertEqual(result.returncode, 1, result.stdout)
                 self.assertIn(message, result.stderr)
+
+    def test_mount_check_requires_the_upper_that_the_command_line_declares(self):
+        tmpfs = _SANDBOX_MOUNTINFO.replace("/run/nvx/scratch/", "/run/nvx/tmpfs/")
+        ram = _SCRATCH_COMMAND_LINE.replace(
+            "nvx_scratch=0xd0006000,ext4", "nvx_overlay_upper=ramfs"
+        )
+        # A caller's --cmdline keeps its newlines, and the root's tokens follow
+        # it.
+        multiline = ram.replace("console=hvc0 ", "console=hvc0 quiet\nloglevel=0\n")
+        for mountinfo, command_line, message in (
+            (tmpfs, ram, None),
+            (tmpfs, multiline, None),
+            (_SANDBOX_MOUNTINFO, ram, "upper layer is not on tmpfs"),
+            (_SANDBOX_MOUNTINFO, multiline, "upper layer is not on tmpfs"),
+            (tmpfs, _SCRATCH_COMMAND_LINE, "upper layer is not on scratch"),
+            # Only the RAM upper's token declares it.
+            (
+                tmpfs,
+                _SCRATCH_COMMAND_LINE + " xnvx_overlay_upper=ramfs",
+                "upper layer is not on scratch",
+            ),
+            (
+                tmpfs,
+                _SCRATCH_COMMAND_LINE + " nvx_overlay_upper=tmpfs",
+                "upper layer is not on scratch",
+            ),
+            (
+                tmpfs.replace(",metacopy=on,", ","),
+                ram,
+                "the root overlay is mounted without metacopy=on",
+            ),
+        ):
+            with self.subTest(mountinfo=mountinfo, command_line=command_line):
+                result = self._check_mounts(mountinfo, command_line)
+                if message is None:
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(result.stdout, "checked\n")
+                else:
+                    self.assertEqual(result.returncode, 1, result.stdout)
+                    self.assertIn(message, result.stderr)
 
     def test_cgroup_check_requires_the_container_cgroup(self):
         for content, returncode in (

@@ -830,7 +830,9 @@ check, it requires:
   PID namespace and the `--hostname` value as its host name;
 - exactly one mount at each of `/`, `/proc`, `/sys`, `/dev`, `/dev/pts`, and
   `/dev/shm`, none of which propagates to another namespace: an overlay root
-  over the EROFS layers whose upper directory is on scratch, `nosuid,nodev,noexec`
+  over the EROFS layers, with `metacopy=on` and `xino=on`, whose upper
+  directory is on the upper that the kernel command line declares, scratch, or
+  a tmpfs for `nvx_overlay_upper=ramfs`, `nosuid,nodev,noexec`
   procfs, read-only sysfs, and a private `/dev` tmpfs that holds only `fd`,
   `full`, `null`, `ptmx`, `pts`, `random`, `shm`, `stderr`, `stdin`, `stdout`,
   `tty`, `urandom`, and `zero`, with its own devpts instance;
@@ -840,8 +842,8 @@ check, it requires:
 - no port I/O: a port read without the permission ends the reader with
   `SIGSEGV`, and a request for the permission fails;
 - the agent-owned `/container` cgroup; and
-- Ubuntu image files that the workload cannot modify, and a scratch-backed
-  `/tmp` write that lands in the overlay.
+- Ubuntu image files that the workload cannot modify, and a `/tmp` write that
+  lands in the overlay, on its upper.
 
 A managed workload that mounted into the agent's namespace would stack its
 runtime mounts on those of earlier requests, so the single-mount check also

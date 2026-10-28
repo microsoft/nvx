@@ -86,9 +86,11 @@ check_namespaces() {
     [ "$init_uids" = "$workload_ids" ] ||
         fail "PID 1 of the workload PID namespace runs as $init_uids"
     expected_hostname=nvx-sandbox
-    read -r kernel_command_line </proc/cmdline
+    # Read the whole file: a caller's --cmdline keeps its newlines, so tokens
+    # may follow a line break.
+    kernel_command_line=$(cat /proc/cmdline)
     set -f
-    # Kernel command-line tokens are deliberately split on spaces.
+    # Kernel command-line tokens are deliberately split on whitespace.
     # shellcheck disable=SC2086
     for token in $kernel_command_line; do
         case "$token" in
@@ -145,11 +147,13 @@ require_mount() {
     mount_super=${mount_record##* }
 }
 
-# The workload sees its own overlay root over the image layers, with its
-# upper layer on scratch, and private proc, read-only sysfs, and device
-# mounts. Each container runtime mount appears once: a managed exec that
-# made its mounts in the agent's namespace would stack them on those of the
-# earlier execs. No mount propagates to or from another namespace.
+# The workload sees its own overlay root over the image layers, with the
+# overlay options that the init agent sets, and with its upper layer where the
+# kernel command line declares it: on scratch, or on a tmpfs for
+# nvx_overlay_upper=ramfs. It also sees private proc, read-only sysfs, and
+# device mounts. Each container runtime mount appears once: a managed exec
+# that made its mounts in the agent's namespace would stack them on those of
+# the earlier execs. No mount propagates to or from another namespace.
 check_mounts() {
     while read -r _ _ _ _ mount_point _ mount_rest; do
         case "$mount_rest" in
@@ -162,10 +166,29 @@ check_mounts() {
         *,lowerdir=/run/nvx/layers/*) ;;
         *) fail "the root overlay does not use the image layers: $mount_super" ;;
     esac
+    declared_upper=scratch
+    # Read the whole file: a caller's --cmdline keeps its newlines, so the
+    # root's tokens may follow a line break.
+    kernel_command_line=$(cat /proc/cmdline)
+    set -f
+    # Kernel command-line tokens are deliberately split on whitespace.
+    # shellcheck disable=SC2086
+    for token in $kernel_command_line; do
+        case "$token" in
+            nvx_overlay_upper=ramfs) declared_upper=tmpfs ;;
+        esac
+    done
+    set +f
     case ",$mount_super," in
-        *,upperdir=/run/nvx/scratch/upper,*) ;;
-        *) fail "the root overlay upper layer is not on scratch: $mount_super" ;;
+        *",upperdir=/run/nvx/$declared_upper/upper,"*) ;;
+        *) fail "the root overlay upper layer is not on $declared_upper: $mount_super" ;;
     esac
+    for overlay_option in metacopy=on xino=on; do
+        case ",$mount_super," in
+            *",$overlay_option,"*) ;;
+            *) fail "the root overlay is mounted without $overlay_option: $mount_super" ;;
+        esac
+    done
     require_mount /proc proc nosuid nodev noexec
     require_mount /sys sysfs ro nosuid nodev noexec
     require_mount /dev tmpfs nosuid
@@ -257,7 +280,7 @@ check_cgroup() {
 }
 
 # The workload cannot modify the image's files, and its writes land in the
-# scratch-backed overlay.
+# overlay, on its upper.
 check_image() {
     grep -qx 'ID=ubuntu' /etc/os-release || fail "the image is not Ubuntu"
     for image_file in /etc/passwd /usr/bin/env; do
@@ -268,11 +291,11 @@ check_image() {
     if (: >/usr/nvx-sandbox-image-write) 2>/dev/null; then
         fail "the workload can create files in image directory /usr"
     fi
-    printf 'scratch-backed-write\n' >/tmp/nvx-ubuntu-sandbox-smoke
-    [ "$(cat /tmp/nvx-ubuntu-sandbox-smoke)" = scratch-backed-write ] ||
-        fail "the scratch-backed write did not persist"
+    printf 'upper-write\n' >/tmp/nvx-ubuntu-sandbox-smoke
+    [ "$(cat /tmp/nvx-ubuntu-sandbox-smoke)" = upper-write ] ||
+        fail "the write to the upper did not persist"
     [ "$(stat -f -c %T /tmp/nvx-ubuntu-sandbox-smoke)" = overlayfs ] ||
-        fail "the scratch-backed write did not land in the overlay"
+        fail "the write to the upper did not land in the overlay"
 }
 
 # Starts sleepers until a fork fails or $2 have started, then stops and reaps
