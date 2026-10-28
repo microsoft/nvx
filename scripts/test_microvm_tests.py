@@ -5192,6 +5192,24 @@ class MicrovmTests(unittest.TestCase):
                 )
         interaction.assert_not_called()
 
+    def test_time_abi_monitor_failure_does_not_start_process(self):
+        # #720: the monitor is built before OpenVMM starts, so that its
+        # failure cannot leave OpenVMM running outside the cleanup.
+        with tempfile.TemporaryDirectory() as temporary:
+            log_path = Path(temporary) / "output.log"
+            with (
+                patch.object(
+                    openvmm_process,
+                    "TimeAbiMonitor",
+                    side_effect=RuntimeError("synthetic monitor failure"),
+                ),
+                patch.object(openvmm_process, "InteractiveProcess") as interaction,
+                self.assertRaisesRegex(RuntimeError, "synthetic monitor failure"),
+            ):
+                openvmm_process.OpenvmmProcess(["openvmm"], log_path)
+            self.assertFalse(log_path.exists())
+        interaction.assert_not_called()
+
     def test_snapshot_restore_runs_the_time_abi_steps_through_nvx_time(self):
         snapshot = (
             Path(__file__).parents[1] / "guest" / "common" / "nvx-snapshot"
