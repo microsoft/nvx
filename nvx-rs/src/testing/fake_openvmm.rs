@@ -131,6 +131,10 @@
 //! on Windows, they take the access of the destination's directory, while OpenVMM gives them its
 //! own, which the store's unit tests apply.
 //!
+//! Like OpenVMM, the fake takes `--net` only with `--network-profile portable`, and only to boot a
+//! guest: a restore takes the addressing of its NIC from its snapshot, so it refuses `--net`, and
+//! takes `--network-profile` alone, which a boot refuses.
+//!
 //! Every `--mount-deny`, `--mount-allow`, and `--mount-write` path of a launch must exist in a
 //! shared directory. Like OpenVMM, the fake attributes each one to the share whose root contains
 //! it once it has resolved both, so a root that is relative to the working directory, as
@@ -1337,8 +1341,17 @@ fn parse(program: &str, arguments: &[String]) -> Result<Options, String> {
     {
         return Err("--host-loopback-forward requires explicit --host-loopback allow".to_owned());
     }
-    if values.contains_key("--net") {
+    // OpenVMM attaches a NIC at boot with `--net`, and restores one with the addressing that its
+    // snapshot saved, which `--network-profile` selects without `--net`.
+    let net = values.contains_key("--net");
+    if net || values.contains_key("--network-profile") {
         expect("--network-profile", "portable")?;
+    }
+    if net && restore.is_some() {
+        return Err("restore takes microVM network addressing from saved state".to_owned());
+    }
+    if !net && restore.is_none() && values.contains_key("--network-profile") {
+        return Err("--network-profile portable requires --net or --restore-snapshot".to_owned());
     }
     let knob = |name: &str| {
         tokens
@@ -2724,6 +2737,27 @@ mod tests {
             options.args_dump,
             temporary.path().join("fake-openvmm-share.json")
         );
+        // A restored NIC keeps the addressing that its snapshot saved, so a restore takes the
+        // network profile and policy without `--net`.
+        let networked = run_with(&[
+            "--restore-snapshot",
+            "{dir}/snapshot",
+            "--network-profile",
+            "portable",
+            "--network-egress",
+            "deny",
+            "--network-egress-allow",
+            "10.0.0.1/32:tcp:443",
+            "--host-loopback",
+            "deny",
+        ]);
+        let (temporary, options) = parse_run(&networked);
+        let options = options.unwrap();
+        assert_eq!(options.restore, Some(temporary.path().join("snapshot")));
+        assert!(options.network.requested);
+        assert_eq!(options.network.mode, "rules");
+        assert_eq!(options.network.allow, 1);
+        assert_eq!(options.network.host_loopback, "deny");
     }
 
     #[test]
@@ -2759,6 +2793,18 @@ mod tests {
             (
                 restore(&["--restore-memory", "1G"]),
                 "--restore-memory must be given in MiB",
+            ),
+            (
+                restore(&["--net", "10.0.0.2/24", "--network-profile", "portable"]),
+                "restore takes microVM network addressing from saved state",
+            ),
+            (
+                restore(&["--network-profile", "open"]),
+                "--network-profile must be portable, not open",
+            ),
+            (
+                boot(&["--network-profile", "portable"]),
+                "--network-profile portable requires --net or --restore-snapshot",
             ),
             (
                 boot(&["--restore-processors", "2"]),

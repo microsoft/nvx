@@ -56,8 +56,10 @@ nvx-rs/target/release/nvx-rs run \
 ```
 
 Networking requires the explicit `portable` capability profile. It uses the
-same in-process data plane on KVM, MSHV, and WHP; omitting either `--net` or
-`--network-profile portable` is rejected before OpenVMM starts.
+same in-process data plane on KVM, MSHV, and WHP; a cold boot that omits
+either `--net` or `--network-profile portable` is rejected before OpenVMM
+starts. A restore takes its addresses from the snapshot instead; see
+[Networked snapshots](#networked-snapshots).
 
 Select an explicit processor count after building the matching specialized guest kernel:
 
@@ -369,11 +371,12 @@ Most `nvx-rs run` options pass through unchanged: `--machine`, `--processors`,
 | `--dry-run` | No equivalent; this only prints the generated command |
 
 Always include `--single-process`. When restoring, omit `--memory`, `--kernel`,
-and `--initrd`. Every restore gives the guest fresh entropy through the time
-ABI's restore packet, so `--restore-entropy` is no longer needed; OpenVMM still
-accepts it without effect. Do not pass `--guest ubuntu` during restore; the
-captured RAM and machine contract already identify the restored guest. For
-example:
+`--initrd`, and `--net`, whose addresses the snapshot keeps; see
+[Networked snapshots](#networked-snapshots). Every restore gives the guest
+fresh entropy through the time ABI's restore packet, so `--restore-entropy` is
+no longer needed; OpenVMM still accepts it without effect. Do not pass
+`--guest ubuntu` during restore; the captured RAM and machine contract already
+identify the restored guest. For example:
 
 ```bash
 ./bin/openvmm \
@@ -507,6 +510,34 @@ explicit `--host-loopback allow`, because its listeners are live host
 attachments, and so does a restore, unless it installs a new policy on a
 [NIC template](#platform-nic-templates).
 
+### Networked snapshots
+
+A snapshot captured with `--net` keeps its NIC's addresses and the digest of
+its network policy. Restore it with `--network-profile portable`, without
+`--net`, and with the network policy options of the capture, which OpenVMM
+checks against that digest before the guest runs. `nvx-rs run` passes them to
+OpenVMM as given, and refuses `--net` on a restore:
+
+```bash
+nvx-rs/target/release/nvx-rs run \
+  --restore-snapshot /var/lib/nvx/snapshot \
+  --network-profile portable \
+  --network-egress deny \
+  --network-egress-allow 10.0.0.1/32:tcp:443
+```
+
+The restore fails unless its policy matches the captured one: the default
+egress, the same rules, whether `--network-egress-allow` and
+`--network-egress-deny` give them or a policy file compiles to them,
+`--host-loopback`, and `--network-proxy`. A restore therefore cannot change
+the policy, and, like a capture, it rejects `--network-ingress allow`, explicit
+`--host-loopback allow`, and `--host-loopback-forward`, whose published ports
+are live host attachments. The restored guest keeps the network configuration
+that its boot applied, such as its DNS server; flows from before the capture
+do not survive the restore, and new traffic opens fresh ones. A snapshot
+captured without `--net` takes no network option at restore. Only a
+[platform NIC template](#platform-nic-templates) takes a new policy at restore.
+
 ### Platform NIC templates
 
 A platform snapshot whose NIC was captured with a complete deny-all policy,
@@ -539,8 +570,8 @@ policy names no DNS server and starts no `nvx-ingress`, so it learns its DNS
 server and whether to report its listeners from its host after the restore.
 OpenVMM rejects the option for a cold boot, for a snapshot of another tier or
 without a NIC, and for a NIC captured with any other policy, and every other
-networked restore requires the captured policy. `nvx-rs run` does not pass
-the option.
+[networked restore](#networked-snapshots) requires the captured policy.
+`nvx-rs run` does not pass the option.
 
 ## Migration from the retired profile
 

@@ -710,6 +710,31 @@ fn run_refusals() -> Vec<Refusal> {
             run_dry(&["--network-profile", "portable"]),
             &["--net", "--network-profile"],
         ),
+        // A restored NIC keeps the addressing that its snapshot saved.
+        refusal(
+            "run: net of a restore",
+            "unsupported",
+            run_dry(&[
+                "--restore-snapshot",
+                "{root/snapshot}",
+                "--net",
+                "10.0.0.2/24",
+                "--network-profile",
+                "portable",
+            ]),
+            &["--net", "restore", "network addressing"],
+        ),
+        refusal(
+            "run: net without profile of a restore",
+            "unsupported",
+            run_dry(&[
+                "--restore-snapshot",
+                "{root/snapshot}",
+                "--net",
+                "10.0.0.2/24",
+            ]),
+            &["--net", "restore", "network addressing"],
+        ),
         refusal(
             "run: ready path without snapshot",
             "unsupported",
