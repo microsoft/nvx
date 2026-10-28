@@ -452,7 +452,9 @@ Ctrl-C, that is SIGINT, interrupts a command, and so does SIGTERM outside
 Windows, which is how CI ends a cancelled step (see
 [Cancellation](ci.md#cancellation)). The command then runs its cleanup, as
 `test-microvm` and `benchmark` stop their OpenVMM processes and remove their
-scratch directories, prints `Interrupted`, and exits with status 130.
+scratch directories, prints `Interrupted`, and exits with status 130. On
+Linux, the OpenVMM processes that they start, and the process trees that they
+contain, end with `nvx.py` even when something kills it outright.
 
 ## Initialization and verification
 

@@ -34,7 +34,7 @@ from string import Template
 from typing import IO, Literal, Protocol, TextIO, TypedDict, cast
 
 from . import benchmark_host, common, host_telemetry
-from .adversarial_oracles import ProcessTreeContainment
+from .adversarial_oracles import ProcessTreeContainment, killed_with_parent
 from .build_constants import (
     AlpineBuildConstants,
     BuildConstants,
@@ -1538,6 +1538,11 @@ class InteractiveProcess:
     Linux attaches the console to a pseudo-terminal, and other platforms use
     pipes. stderr shares the console stream unless ``separate_stderr`` gives it
     a pipe of its own, which the caller must drain with ``read_stderr``.
+
+    On Linux, a command started from the main thread ends with this process,
+    even when this process is killed outright: OpenVMM by its parent-death
+    signal (``killed_with_parent``), and with ``contain_process_tree``, the
+    whole tree by its supervisor.
     """
 
     def __init__(
@@ -1556,7 +1561,12 @@ class InteractiveProcess:
         process_command = (
             self.containment.command(command)
             if self.containment is not None
-            else list(command)
+            else killed_with_parent(command)
+        )
+        process_environment = (
+            self.containment.environment(environment)
+            if self.containment is not None
+            else environment
         )
         if sys.platform.startswith("linux"):
             openpty = cast(
@@ -1572,7 +1582,7 @@ class InteractiveProcess:
                     stdin=child_fd,
                     stdout=child_fd,
                     stderr=subprocess.PIPE if separate_stderr else child_fd,
-                    env=environment,
+                    env=process_environment,
                     creationflags=creationflags,
                 )
             except Exception:
@@ -1590,7 +1600,7 @@ class InteractiveProcess:
                     stdin=subprocess.PIPE,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE if separate_stderr else subprocess.STDOUT,
-                    env=environment,
+                    env=process_environment,
                     creationflags=creationflags,
                 )
             except Exception:

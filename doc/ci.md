@@ -997,6 +997,23 @@ either one interrupts its command, which then stops the OpenVMM processes and
 removes the scratch directories that it started and created, and exits with
 status 130 (see [Commands](usage.md#commands)).
 
+On Linux, OpenVMM also ends with `nvx.py` when something kills `nvx.py`
+before its cleanup runs, as the orphan cleanup does. Where the host has
+util-linux's `setpriv`, as the runners do, `nvx.py` starts OpenVMM through
+`setpriv --pdeathsig KILL`, so that the kernel kills OpenVMM when `nvx.py`
+exits, and through a shell that starts OpenVMM only if `nvx.py` is still its
+parent, since an `nvx.py` that died before `setpriv` armed the signal sent
+none. A contained process tree, such as `nvx-rs run` and the
+OpenVMM that it starts, runs under a supervisor that the kernel sends SIGTERM
+when `nvx.py` exits, and which then kills the whole tree. The supervisor runs
+without the job's `RUNNER_TRACKING_ID`, which it gives back to the command,
+because the orphan cleanup kills the processes whose environment holds it and
+could kill the supervisor before it ended a tree that the cleanup didn't list,
+such as an OpenVMM that started after the listing. The kernel sends
+these signals when the thread that started the process exits, so only a
+process that the main thread starts gets them, and `nvx.py` starts its VMs
+from its main thread.
+
 ## OpenVMM VMM tests
 
 OpenVMM's `vmm-tests-run` builds the tests that a filter selects and then runs

@@ -9,6 +9,7 @@ import hashlib
 import json
 import os
 import queue
+import shutil
 import signal
 import socket
 import subprocess
@@ -17,7 +18,7 @@ import tempfile
 import threading
 import time
 import unittest
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import cast
 from unittest.mock import MagicMock, call, patch
@@ -61,14 +62,17 @@ from nvx_tools.adversarial_executor import (
     sanitized_environment,
 )
 from nvx_tools.adversarial_oracles import (
+    _OWNED_EXEC,
     BoundedProcessResult,
     NetworkCanary,
     OracleSession,
+    ProcessTreeContainment,
     _freeze_linux_process_tree,
     _linux_process_exited,
     _reap_linux_children,
     _reap_linux_descendants,
     _WindowsJob,
+    killed_with_parent,
     run_bounded_process,
     terminate_process_tree,
 )
@@ -1262,6 +1266,394 @@ class AdversarialOracleTests(unittest.TestCase):
                             os.kill(pid, 9)
                 unrelated.kill()
                 unrelated.wait()
+
+    def test_only_main_thread_commands_end_with_their_parent(self) -> None:
+        # #946: the kernel sends a parent-death signal when the thread that
+        # started the process exits, so only the main thread, which lives as
+        # long as its process, ties a process to its own.
+        command = ["openvmm", "--hypervisor", "kvm"]
+        containment = ProcessTreeContainment()
+        self.addCleanup(containment.abort_spawn)
+
+        def from_thread(start: Callable[[], list[str]]) -> list[str]:
+            started: list[list[str]] = []
+            thread = threading.Thread(target=lambda: started.append(start()))
+            thread.start()
+            thread.join()
+            return started[0]
+
+        with (
+            patch("nvx_tools.adversarial_oracles.sys.platform", "linux"),
+            patch(
+                "nvx_tools.adversarial_oracles.shutil.which",
+                return_value="/usr/bin/setpriv",
+            ) as which,
+        ):
+            self.assertEqual(
+                killed_with_parent(command),
+                [
+                    "/usr/bin/setpriv",
+                    "--pdeathsig",
+                    "KILL",
+                    "--",
+                    "/bin/sh",
+                    "-c",
+                    _OWNED_EXEC,
+                    "sh",
+                    str(os.getpid()),
+                    *command,
+                ],
+            )
+            which.assert_called_once_with("setpriv")
+            self.assertEqual(from_thread(lambda: killed_with_parent(command)), command)
+            supervised = containment.command(command)
+            self.assertEqual(supervised[:2], [sys.executable, "-I"])
+            self.assertEqual(Path(supervised[2]).name, "process_supervisor.py")
+            self.assertEqual(supervised[3:], [str(os.getpid()), "--", *command])
+            self.assertEqual(
+                from_thread(lambda: containment.command(command))[3:],
+                ["--", *command],
+            )
+        with (
+            patch("nvx_tools.adversarial_oracles.sys.platform", "linux"),
+            patch("nvx_tools.adversarial_oracles.shutil.which", return_value=None),
+        ):
+            self.assertEqual(killed_with_parent(command), command)
+        with patch("nvx_tools.adversarial_oracles.sys.platform", "win32"):
+            self.assertEqual(killed_with_parent(command), command)
+            self.assertEqual(containment.command(command), command)
+
+    @unittest.skipUnless(sys.platform.startswith("linux"), "Linux parent-death signal")
+    def test_a_killed_owner_takes_its_interactive_processes_along(self) -> None:
+        # #946: the runner's orphan cleanup kills the test harness of a
+        # cancelled job outright, and a VM that the harness had started after
+        # the cleanup listed the job's processes ran on for days (#768). What
+        # InteractiveProcess starts ends with its owner all the same: OpenVMM
+        # by its parent-death signal, and a contained tree, descendants that
+        # leave its session included, by its supervisor.
+        owner_script = (
+            "import os, sys\n"
+            "sys.path.insert(0, sys.argv[1])\n"
+            "from nvx_tools.benchmark import InteractiveProcess\n"
+            "interaction = InteractiveProcess(\n"
+            "    sys.argv[3:],\n"
+            "    dict(os.environ),\n"
+            "    contain_process_tree=sys.argv[2] == 'contained',\n"
+            ")\n"
+            "print(interaction.process.pid, flush=True)\n"
+            "sys.stdin.read()\n"
+        )
+        for contained in (False, True):
+            with (
+                self.subTest(contained=contained),
+                tempfile.TemporaryDirectory() as temporary,
+            ):
+                if not contained and shutil.which("setpriv") is None:
+                    self.skipTest("needs setpriv")
+                root = Path(temporary)
+                pid_paths = [root / "command.pid"]
+                script = (
+                    "import os, pathlib, subprocess, sys, time\n"
+                    "pathlib.Path(sys.argv[1]).write_text(str(os.getpid()))\n"
+                )
+                if contained:
+                    pid_paths.append(root / "descendant.pid")
+                    script += (
+                        "child = subprocess.Popen([sys.executable, '-c', "
+                        "'import os, time; os.setsid(); time.sleep(60)'])\n"
+                        "pathlib.Path(sys.argv[2]).write_text(str(child.pid))\n"
+                    )
+                script += "time.sleep(60)\n"
+                owner = subprocess.Popen(
+                    [
+                        sys.executable,
+                        "-c",
+                        owner_script,
+                        str(Path(__file__).resolve().parent),
+                        "contained" if contained else "direct",
+                        sys.executable,
+                        "-c",
+                        script,
+                        *(str(path) for path in pid_paths),
+                    ],
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
+                )
+                owned: list[int] = []
+                try:
+                    assert owner.stdout is not None
+                    line = owner.stdout.readline()
+                    self.assertTrue(line, "the owner exited before it started")
+                    owned.append(int(line))
+                    deadline = time.monotonic() + 30
+                    for path in pid_paths:
+                        while True:
+                            self.assertLess(time.monotonic(), deadline)
+                            try:
+                                owned.append(int(path.read_text(encoding="utf-8")))
+                                break
+                            except (FileNotFoundError, ValueError):
+                                time.sleep(0.01)
+                    owner.kill()
+                    owner.wait()
+                    deadline = time.monotonic() + 10
+                    while not all(_process_exited(pid) for pid in owned):
+                        self.assertLess(
+                            time.monotonic(),
+                            deadline,
+                            f"processes {owned} outlived their owner",
+                        )
+                        time.sleep(0.05)
+                finally:
+                    for pid in owned:
+                        if _process_running(pid):
+                            with contextlib.suppress(ProcessLookupError):
+                                os.kill(pid, 9)
+                    if owner.poll() is None:
+                        owner.kill()
+                        owner.wait()
+                    for stream in (owner.stdin, owner.stdout):
+                        if stream is not None:
+                            stream.close()
+
+    @unittest.skipUnless(sys.platform.startswith("linux"), "Linux parent-death signal")
+    def test_a_command_whose_owner_exited_never_starts(self) -> None:
+        # #946: an owner that dies before setpriv arms the parent-death signal
+        # sends none, and the orphaned command is then another process's
+        # child, as it is here, where a shell starts it. It must not start.
+        if shutil.which("setpriv") is None:
+            self.skipTest("needs setpriv")
+        with tempfile.TemporaryDirectory() as temporary:
+            started = Path(temporary) / "started"
+            command = killed_with_parent(
+                [
+                    sys.executable,
+                    "-c",
+                    "import pathlib, sys; pathlib.Path(sys.argv[1]).touch()",
+                    str(started),
+                ]
+            )
+            orphaned = subprocess.run(
+                ["/bin/sh", "-c", '"$@"; exit "$?"', "sh", *command],
+                timeout=30,
+                check=False,
+            )
+            self.assertNotEqual(orphaned.returncode, 0)
+            self.assertFalse(started.exists())
+            # Its owner starts it.
+            owned = subprocess.run(command, timeout=30, check=False)
+            self.assertEqual(owned.returncode, 0)
+            self.assertTrue(started.exists())
+
+    def test_supervisors_run_without_the_runners_tracking_id(self) -> None:
+        # #946: the runner's orphan cleanup kills the processes whose
+        # environment names the job in RUNNER_TRACKING_ID. The supervisor runs
+        # without it, so that the cleanup can't kill it before it ends its
+        # tree, and gives it back to its command, which the cleanup tracks.
+        containment = ProcessTreeContainment()
+        self.addCleanup(containment.abort_spawn)
+        environment = {"RUNNER_TRACKING_ID": "github_1234", "NVX_MARKER": "kept"}
+        with patch("nvx_tools.adversarial_oracles.sys.platform", "linux"):
+            self.assertEqual(
+                containment.environment(environment),
+                {
+                    "NVX_SUPERVISED_RUNNER_TRACKING_ID": "github_1234",
+                    "NVX_MARKER": "kept",
+                },
+            )
+            self.assertEqual(
+                containment.environment({"NVX_MARKER": "kept"}),
+                {"NVX_MARKER": "kept"},
+            )
+        with patch("nvx_tools.adversarial_oracles.sys.platform", "win32"):
+            self.assertEqual(containment.environment(environment), environment)
+        self.assertEqual(environment["RUNNER_TRACKING_ID"], "github_1234")
+
+    @unittest.skipUnless(sys.platform.startswith("linux"), "Linux process ownership")
+    def test_the_orphan_cleanup_leaves_a_contained_tree_to_its_supervisor(
+        self,
+    ) -> None:
+        # #946: the runner's orphan cleanup lists the processes whose
+        # environment names the job in RUNNER_TRACKING_ID and then kills them,
+        # the test harness first. A process that the harness's contained tree
+        # starts after the listing, such as OpenVMM, escapes the list, and the
+        # supervisor, which the cleanup doesn't list, ends it.
+        tracking = f"nvx-test-{os.getpid()}-{time.monotonic_ns()}"
+        owner_script = (
+            "import os, sys\n"
+            "sys.path.insert(0, sys.argv[1])\n"
+            "from nvx_tools.benchmark import InteractiveProcess\n"
+            "interaction = InteractiveProcess(\n"
+            "    sys.argv[2:], dict(os.environ), contain_process_tree=True\n"
+            ")\n"
+            "print(interaction.process.pid, flush=True)\n"
+            "sys.stdin.read()\n"
+        )
+        command_script = (
+            "import os, pathlib, subprocess, sys, time\n"
+            "pathlib.Path(sys.argv[1]).write_text(str(os.getpid()))\n"
+            "while not pathlib.Path(sys.argv[2]).exists():\n"
+            "    time.sleep(0.01)\n"
+            "late = subprocess.Popen([sys.executable, '-c', "
+            "'import os, time; os.setsid(); time.sleep(60)'])\n"
+            "pathlib.Path(sys.argv[3]).write_text(str(late.pid))\n"
+            "time.sleep(60)\n"
+        )
+
+        def listed() -> list[int]:
+            tracked = f"RUNNER_TRACKING_ID={tracking}".encode()
+            found: list[int] = []
+            for entry in Path("/proc").iterdir():
+                if not entry.name.isdigit():
+                    continue
+                try:
+                    environment = (entry / "environ").read_bytes().split(b"\0")
+                except OSError:
+                    continue
+                if tracked in environment:
+                    found.append(int(entry.name))
+            return sorted(found)
+
+        def read_pid(path: Path) -> int:
+            deadline = time.monotonic() + 30
+            while True:
+                self.assertLess(time.monotonic(), deadline)
+                try:
+                    return int(path.read_text(encoding="utf-8"))
+                except (FileNotFoundError, ValueError):
+                    time.sleep(0.01)
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            go = root / "go"
+            owner = subprocess.Popen(
+                [
+                    sys.executable,
+                    "-c",
+                    owner_script,
+                    str(Path(__file__).resolve().parent),
+                    sys.executable,
+                    "-c",
+                    command_script,
+                    str(root / "command.pid"),
+                    str(go),
+                    str(root / "late.pid"),
+                ],
+                env=dict(os.environ, RUNNER_TRACKING_ID=tracking),
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+            )
+            owned: list[int] = []
+            try:
+                assert owner.stdout is not None
+                line = owner.stdout.readline()
+                self.assertTrue(line, "the owner exited before it started")
+                supervisor = int(line)
+                owned.append(supervisor)
+                command = read_pid(root / "command.pid")
+                owned.append(command)
+                snapshot = listed()
+                self.assertIn(owner.pid, snapshot)
+                self.assertIn(command, snapshot)
+                self.assertNotIn(supervisor, snapshot)
+                go.touch()
+                owned.append(read_pid(root / "late.pid"))
+                for pid in snapshot:
+                    with contextlib.suppress(ProcessLookupError):
+                        os.kill(pid, 9)
+                owner.wait()
+                deadline = time.monotonic() + 10
+                while not all(_process_exited(pid) for pid in owned):
+                    self.assertLess(
+                        time.monotonic(),
+                        deadline,
+                        f"processes {owned} outlived the cleanup",
+                    )
+                    time.sleep(0.05)
+            finally:
+                for pid in owned:
+                    if _process_running(pid):
+                        with contextlib.suppress(ProcessLookupError):
+                            os.kill(pid, 9)
+                if owner.poll() is None:
+                    owner.kill()
+                    owner.wait()
+                for stream in (owner.stdin, owner.stdout):
+                    if stream is not None:
+                        stream.close()
+
+    @unittest.skipUnless(sys.platform.startswith("linux"), "Linux process ownership")
+    def test_a_supervisor_whose_parent_exited_starts_nothing(self) -> None:
+        # A parent that exited before the supervisor set its parent-death
+        # signal sends no signal, so the supervisor checks its parent first.
+        exited = subprocess.Popen([sys.executable, "-c", ""])
+        exited.wait()
+        supervisor = (
+            Path(__file__).resolve().parent / "nvx_tools" / "process_supervisor.py"
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            started = Path(temporary) / "started"
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    "-I",
+                    str(supervisor),
+                    str(exited.pid),
+                    "--",
+                    sys.executable,
+                    "-c",
+                    "import pathlib, sys; pathlib.Path(sys.argv[1]).touch()",
+                    str(started),
+                ],
+                timeout=30,
+                check=False,
+            )
+            self.assertEqual(result.returncode, -signal.SIGTERM)
+            self.assertFalse(started.exists())
+
+    @unittest.skipUnless(sys.platform.startswith("linux"), "Linux process ownership")
+    def test_a_supervisor_forwards_signals_while_its_parent_lives(self) -> None:
+        # The command handles the forwarded SIGTERM and exits with status 7,
+        # which a supervisor that took its parent for dead would have killed.
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            pid_path = root / "command.pid"
+            stopped = root / "stopped"
+            script = (
+                "import os, pathlib, signal, sys, time\n"
+                "def stop(signum, frame):\n"
+                "    pathlib.Path(sys.argv[2]).touch()\n"
+                "    sys.exit(7)\n"
+                "signal.signal(signal.SIGTERM, stop)\n"
+                "pathlib.Path(sys.argv[1]).write_text(str(os.getpid()))\n"
+                "time.sleep(60)\n"
+            )
+            containment = ProcessTreeContainment()
+            supervisor = subprocess.Popen(
+                containment.command(
+                    [sys.executable, "-c", script, str(pid_path), str(stopped)]
+                )
+            )
+            command_pid: int | None = None
+            try:
+                deadline = time.monotonic() + 30
+                while command_pid is None:
+                    self.assertLess(time.monotonic(), deadline)
+                    try:
+                        command_pid = int(pid_path.read_text(encoding="utf-8"))
+                    except (FileNotFoundError, ValueError):
+                        time.sleep(0.01)
+                supervisor.send_signal(signal.SIGTERM)
+                self.assertEqual(supervisor.wait(timeout=30), 7)
+                self.assertTrue(stopped.exists())
+                self.assertTrue(_process_exited(command_pid))
+            finally:
+                if command_pid is not None and _process_running(command_pid):
+                    with contextlib.suppress(ProcessLookupError):
+                        os.kill(command_pid, 9)
+                if supervisor.poll() is None:
+                    supervisor.kill()
+                    supervisor.wait()
 
     def test_network_canary_counts_connections_queued_at_close(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
