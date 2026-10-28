@@ -2,7 +2,7 @@
 //! anything changes: each refusal exits with status 1, names what it refuses, leaves the root as it
 //! was, with no state directory, and launches no OpenVMM.
 
-use crate::harness::{Content, Hosts, LAYER, Root, SCRATCH, in_parallel};
+use crate::harness::{Content, Hosts, LAYER, Outcome, Root, SCRATCH, UUID, in_parallel};
 
 /// An environment file of one entry.
 const ENVIRONMENT: Content = Content::Text(r#"["A=1"]"#);
@@ -1268,6 +1268,59 @@ fn run_refusals() -> Vec<Refusal> {
             ],
         ),
     ]
+}
+
+#[test]
+fn unbalanced_disk_paths_fail_before_launch_or_provision() {
+    let root = Root::new();
+    for directory in ["images[1", "images]1", "images][1"] {
+        let relative = format!("{directory}/image.img");
+        root.write(&relative, b"image\n");
+        let before = root.snapshot();
+        let resolved = root.below(&relative).to_str().unwrap().to_owned();
+        for distro in [true, false] {
+            for path in [resolved.as_str(), "image.img"] {
+                let layer = if distro {
+                    format!("distro,{path},{UUID}")
+                } else {
+                    root.expand(LAYER)
+                };
+                let scratch = if distro {
+                    root.expand(SCRATCH)
+                } else {
+                    path.to_owned()
+                };
+                for (operation, dry_run) in [("run", false), ("run", true), ("provision", false)] {
+                    let mut arguments = vec![
+                        "sandbox".to_owned(),
+                        operation.to_owned(),
+                        "--layer".to_owned(),
+                        layer.clone(),
+                        "--scratch".to_owned(),
+                        scratch.clone(),
+                    ];
+                    if dry_run {
+                        arguments.push("--dry-run".to_owned());
+                    }
+                    if operation == "provision" {
+                        arguments.extend(["--state-dir".to_owned(), root.expand("{root/state}")]);
+                    }
+                    let output = root
+                        .command(&arguments)
+                        .current_dir(root.below(directory))
+                        .output()
+                        .unwrap();
+                    let outcome = Outcome::new(arguments, output);
+                    let message =
+                        outcome.assert_error("unsupported", &["unbalanced brackets", &resolved]);
+                    if path == "image.img" {
+                        assert!(message.contains("resolves to"), "{message}");
+                    }
+                    assert_eq!(root.snapshot(), before, "{}", outcome.describe());
+                }
+            }
+        }
+    }
 }
 
 #[test]
