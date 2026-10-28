@@ -27,8 +27,10 @@ pub use self::apply::{Applied, ApplyError, RootTemplate, apply};
 /// The adapter passes it what it receives on the session, each an [`ActivationInput`], through
 /// [`input`](Self::input), and does what the [`ActivationAction`] that it returns says. The
 /// adapter applies the record of the Activate that the activation accepted, with
-/// [`apply`](fn@apply), whose waits end by the activation's [`deadline`](Self::deadline), and
-/// reports the result through [`complete`](Self::complete), and it reports the start of the
+/// [`apply`](fn@apply), whose waits end by the activation's [`deadline`](Self::deadline), passes
+/// the activation what the session received while the application ran, which came before Ready,
+/// then reports the result through [`complete`](Self::complete), whose Ready answers the Activate
+/// and each retry that [joined](ActivationAction::Join) it, and it reports the start of the
 /// sandbox, which its own order takes once the activation is ready, through
 /// [`start`](Self::start). The adapter's loop wakes by the deadline, and [ticks](Self::tick) the
 /// activation then, whether input arrives or not, and whether its output drains or not.
@@ -77,7 +79,8 @@ pub use self::apply::{Applied, ApplyError, RootTemplate, apply};
 /// /// it sends, so that a host that reads nothing holds up neither the agent nor the deadline.
 /// trait Agent {
 ///     /// Waits until the host sends something, or until `deadline`, while it writes what the
-///     /// agent queued, and returns what the host sent, or `None` once the deadline passed.
+///     /// agent queued, and returns what the host sent, or `None` once the deadline passed. A
+///     /// deadline that passed already returns only what the host sent already.
 ///     fn receive(&mut self, deadline: Option<Instant>) -> Option<Received>;
 ///     /// Queues the acknowledgement of the session's reset, and abandons the earlier epoch's
 ///     /// work.
@@ -106,24 +109,26 @@ pub use self::apply::{Applied, ApplyError, RootTemplate, apply};
 ///             activation.tick(Instant::now())?;
 ///             continue;
 ///         };
-///         let input = match &received {
-///             Received::Reset => ActivationInput::Reset,
-///             Received::Partial => ActivationInput::Flow,
-///             Received::Activate(record) => ActivationInput::Activate(record),
-///             Received::TooLong(length) => ActivationInput::TooLong(*length),
-///             Received::Other(_) => ActivationInput::Request,
-///         };
-///         match activation.input(Instant::now(), input)? {
+///         match activation.input(Instant::now(), input(&received))? {
 ///             ActivationAction::Acknowledge => agent.acknowledge(),
 ///             ActivationAction::Continue | ActivationAction::Join => {}
 ///             ActivationAction::Apply(record) => {
 ///                 // The record is valid, and nothing happened before: the activation's side
 ///                 // effects start here, and the fence opens once they all succeeded. The
 ///                 // application waits for the devices until the activation's deadline at the
-///                 // latest, so that it ends by then. A reset that comes meanwhile waits for it,
-///                 // and a ready activation takes it as a later session's.
-///                 let deadline = activation.deadline();
-///                 let ready = match clone::apply(&record, template, deadline) {
+///                 // latest, so that it ends by then.
+///                 let applied = clone::apply(&record, template, activation.deadline());
+///                 // What the host sent meanwhile came before Ready: a retry of the Activate,
+///                 // byte for byte, joins the application, and anything else, a reset included,
+///                 // fails the activation, which drops what the application assembled.
+///                 let mut joined = 0;
+///                 while let Some(received) = agent.receive(Some(Instant::now())) {
+///                     let action = activation.input(Instant::now(), input(&received))?;
+///                     if action == ActivationAction::Join {
+///                         joined += 1;
+///                     }
+///                 }
+///                 let ready = match applied {
 ///                     Ok(applied) => {
 ///                         agent.keep(applied);
 ///                         activation.complete(Instant::now(), Ok(()))?
@@ -131,7 +136,10 @@ pub use self::apply::{Applied, ApplyError, RootTemplate, apply};
 ///                     // A failed application fails the activation: the fence stays closed.
 ///                     Err(error) => activation.complete(Instant::now(), Err(error.into()))?,
 ///                 };
-///                 agent.ready(ready);
+///                 // Ready answers the Activate, and each retry that joined its application.
+///                 for _ in 0..=joined {
+///                     agent.ready(ready);
+///                 }
 ///             }
 ///             ActivationAction::Ready(ready) => agent.ready(ready),
 ///             // The activation serves only another message, once it is ready.
@@ -143,6 +151,17 @@ pub use self::apply::{Applied, ApplyError, RootTemplate, apply};
 ///                 }
 ///             }
 ///         }
+///     }
+/// }
+///
+/// /// Returns the activation's input of `received`.
+/// fn input(received: &Received) -> ActivationInput<'_> {
+///     match received {
+///         Received::Reset => ActivationInput::Reset,
+///         Received::Partial => ActivationInput::Flow,
+///         Received::Activate(record) => ActivationInput::Activate(record),
+///         Received::TooLong(length) => ActivationInput::TooLong(*length),
+///         Received::Other(_) => ActivationInput::Request,
 ///     }
 /// }
 /// ```
@@ -467,8 +486,9 @@ pub enum ActivationAction {
     Continue,
     /// The activation accepted the host's Activate, whose record decoded and validated, and
     /// which nothing before had any side effect of: the adapter applies the record with
-    /// [`apply`](fn@apply), which activates the root and the workload with its settings, then
-    /// reports the result to [`Activation::complete`].
+    /// [`apply`](fn@apply), which activates the root and the workload with its settings, passes
+    /// the activation what the session received meanwhile, which came before Ready, then reports
+    /// the result to [`Activation::complete`].
     Apply(Box<ActivationRecord>),
     /// A retry of the accepted Activate joined the activation that runs: what
     /// [`Activation::complete`] returns answers it too, as the adapter's framing answers each

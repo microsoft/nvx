@@ -85,8 +85,13 @@
 //!    record's workload identity, if it has one, in the assembled root, as the worker of a VM that
 //!    boots cold does for a root configuration. The template bootstrapped the guest for its root
 //!    with its own configuration before its capture, so the clone has its cgroups.
-//! 4. It completes the activation, which opens the fence, and answers `Ready`, which reports that
-//!    the activation applied, with the record's transaction, after the guest agent's build.
+//! 4. Once it took what the session received while the application ran, which came before
+//!    `Ready`, it completes the activation, which opens the fence, and answers `Ready`, which
+//!    reports that the activation applied, with the record's transaction, after the guest agent's
+//!    build, to the `Activate` and to each retry of it, byte for byte, that came meanwhile, which
+//!    joins the application. Anything else that came meanwhile, a reset included, fails the
+//!    activation, as before the application, so the host waits for `Ready` before it sends the
+//!    mapping table or the start.
 //! 5. It then serves the host's order as after a cold boot: the mapping table that the record
 //!    announces, the start, the executions, the probes, and the stop. The record's workload
 //!    identity, if it has one, is the whole sandbox's, as a root configuration's is, so that
@@ -593,6 +598,23 @@ impl Phase {
         }
     }
 
+    /// Completes what the phase defers until the session took everything that it received, and
+    /// returns the worker's step then, if it deferred anything: a clone's activation, with the
+    /// application that ran meanwhile, through `operations`, after which `executions` run in the
+    /// clone's sandbox.
+    #[cfg_attr(not(target_arch = "x86_64"), allow(unused_variables))]
+    fn settle(
+        &mut self,
+        operations: &mut dyn RootOperations,
+        executions: &mut Executions,
+    ) -> Option<Step<Worked>> {
+        match self {
+            Self::Configuring | Self::Ready(_) => None,
+            #[cfg(target_arch = "x86_64")]
+            Self::Clone(state) => state.settle(operations, executions),
+        }
+    }
+
     /// Handles `message` at `now`, through `operations`, and hands a message about an execution to
     /// `executions`, which queue what they answer on `connection`, and returns the worker's step.
     fn handle<S: Read + Write + AsFd>(
@@ -662,7 +684,16 @@ fn serve<S: Read + Write + AsFd>(
                 },
             };
             let message = match received {
-                None => break,
+                // The session took everything that it received: a clone's activation completes
+                // with the application that ran meanwhile, if any.
+                None => {
+                    if let Some(step) = phase.settle(operations, &mut executions)
+                        && let Some(worked) = replied(&mut connection, step)?
+                    {
+                        return end(&mut connection, worked);
+                    }
+                    break;
+                }
                 Some(Received::Closed) => {
                     // The broker may have closed only its end of the stream, and read on: what
                     // the worker queued reaches it, as once the host stopped the worker, after
@@ -686,14 +717,7 @@ fn serve<S: Read + Write + AsFd>(
             // starts.
             let now = Instant::now();
             let step = phase.handle(operations, &mut executions, &mut connection, now, message)?;
-            let (replies, ended) = match step {
-                Step::Continue(replies) => (replies, None),
-                Step::End(replies, worked) => (replies, Some(worked)),
-            };
-            for reply in &replies {
-                connection.send(reply)?;
-            }
-            if let Some(worked) = ended {
+            if let Some(worked) = replied(&mut connection, step)? {
                 return end(&mut connection, worked);
             }
         }
@@ -715,6 +739,22 @@ fn serve<S: Read + Write + AsFd>(
         }
         wait(&connection, &executions, phase.deadline())?;
     }
+}
+
+/// Queues the replies of `step` on `connection`, and returns how the worker ends, if the step ends
+/// it.
+fn replied<S: Read + Write + AsFd>(
+    connection: &mut Connection<S>,
+    step: Step<Worked>,
+) -> Result<Option<Worked>, ServeError> {
+    let (replies, ended) = match step {
+        Step::Continue(replies) => (replies, None),
+        Step::End(replies, worked) => (replies, Some(worked)),
+    };
+    for reply in &replies {
+        connection.send(reply)?;
+    }
+    Ok(ended)
 }
 
 /// Ends the session on `connection` as `worked` tells, once the worker dropped its executions:

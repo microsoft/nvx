@@ -16,7 +16,7 @@ use nvx::guest::clone::{
     Activation, ActivationAction, ActivationCause, ActivationFailure, ActivationInput, ApplyError,
     RootTemplate,
 };
-use nvx::guest::entry::Publication;
+use nvx::guest::entry::{Identity, Publication};
 use nvx::protocol::status;
 
 use super::capture::Admission;
@@ -78,14 +78,31 @@ pub fn failure_status(failure: &ActivationFailure) -> u8 {
 }
 
 /// A clone's activation, as the worker's session drives it, with the inputs of the root's
-/// assembly that the clone's template captured, and the worker's order once the clone is ready.
+/// assembly that the clone's template captured, the application that awaits the activation's
+/// completion, if any, and the worker's order once the clone is ready.
 pub(super) struct CloneState {
     /// The clone's activation, behind the worker's fence of workload admission.
     activation: Activation<Admission>,
     /// The inputs of the root's assembly that the clone's template captured.
     template: RootTemplate,
+    /// The application of the accepted record, once it ran, until the worker
+    /// [settles](Self::settle) the activation with its result.
+    applied: Option<Applied>,
     /// The worker's order, once the clone is ready.
     order: Option<Order>,
+}
+
+/// The application of the record of the Activate that a clone's activation accepted, which ran,
+/// and which awaits the activation's completion.
+struct Applied {
+    /// The identity in which every execution runs, if the record has a workload identity, or why
+    /// the application failed.
+    result: Result<Option<Identity>, ApplyError>,
+    /// The number of mappings that the record announces.
+    mappings: u32,
+    /// The number of retries of the Activate that joined the application, which its completion
+    /// answers too.
+    joined: usize,
 }
 
 impl CloneState {
@@ -95,6 +112,7 @@ impl CloneState {
         Self {
             activation,
             template,
+            applied: None,
             order: None,
         }
     }
@@ -153,10 +171,14 @@ impl CloneState {
     /// `connection`, as [`serve_root`] does once the root of a VM that boots cold is ready.
     ///
     /// Before the clone is ready, the activation takes an `Activate`, whose record it hands back
-    /// once it accepted it, and which the worker applies then, through `operations`, and fails on
-    /// any other message. The worker answers an `Activate` that the activation completed with
-    /// `Ready`, which reports the activation, as it answers a retry once the clone is ready. Once
-    /// the activation failed, the worker drops its executions, and ends.
+    /// once it accepted it, and which the worker applies then, through `operations`, and keeps the
+    /// result of until it [settles](Self::settle) the activation. Until then, the activation takes
+    /// what the session received meanwhile, as while it activates: a retry of the same
+    /// `Activate`, byte for byte, joins the application, and any other message fails the
+    /// activation. The worker answers an `Activate` that the activation completed, and each retry
+    /// that joined its application, with `Ready`, which reports the activation, as it answers a
+    /// retry once the clone is ready. Once the activation failed, the worker drops its executions,
+    /// and ends.
     pub(super) fn handle<S: Read + Write + AsFd>(
         &mut self,
         operations: &mut dyn RootOperations,
@@ -174,7 +196,16 @@ impl CloneState {
             Err(failure) => return Ok(self.end(executions, &failure)),
         };
         Ok(match action {
-            ActivationAction::Apply(record) => self.apply(operations, executions, &record),
+            ActivationAction::Apply(record) => {
+                self.apply(operations, &record);
+                Step::Continue(Vec::new())
+            }
+            ActivationAction::Join => {
+                if let Some(applied) = &mut self.applied {
+                    applied.joined += 1;
+                }
+                Step::Continue(Vec::new())
+            }
             ActivationAction::Ready(activation) => Step::Continue(vec![ready(activation)]),
             ActivationAction::Serve => {
                 let order = self
@@ -191,49 +222,58 @@ impl CloneState {
                 }
                 step
             }
-            // The application completes before the worker takes the host's next message, so no
-            // retry joins one that runs.
-            ActivationAction::Join | ActivationAction::Continue | ActivationAction::Acknowledge => {
+            ActivationAction::Continue | ActivationAction::Acknowledge => {
                 Step::Continue(Vec::new())
             }
         })
     }
 
     /// Applies `record`, the record of the Activate that the activation accepted, through
-    /// `operations`, with the template's inputs, completes the activation with the result, and
-    /// returns the worker's step: `Ready`, which reports the activation, once the clone is ready,
-    /// after which `executions` run in the cgroups that the template's bootstrap prepared, as the
-    /// record's workload identity, if it has one, and the worker's order awaits the record's
-    /// mappings; or the end, once the activation failed.
-    fn apply(
-        &mut self,
-        operations: &mut dyn RootOperations,
-        executions: &mut Executions,
-        record: &ActivationRecord,
-    ) -> Step<Worked> {
+    /// `operations`, with the template's inputs, by the activation's deadline, and keeps the
+    /// application's result until the worker [settles](Self::settle) the activation with it.
+    fn apply(&mut self, operations: &mut dyn RootOperations, record: &ActivationRecord) {
         // The application's waits for the devices end by the activation's deadline, past which
         // the completion fails the activation, whatever the application's result.
         let deadline = self.activation.deadline();
-        let applied = operations.apply(record, &self.template, deadline);
-        let (result, identity) = match applied {
+        let result = operations.apply(record, &self.template, deadline);
+        // A record announces at most `nvx::activation::MAX_MAPPINGS` mappings, which fit a `u32`.
+        let mappings = record.configuration().mappings as u32;
+        self.applied = Some(Applied {
+            result,
+            mappings,
+            joined: 0,
+        });
+    }
+
+    /// Completes the activation with the result of the application that ran, if any, once the
+    /// worker took what the session received while it ran, which comes before `Ready`, and
+    /// returns the worker's step: `Ready`, which reports the activation, for the `Activate` and
+    /// for each retry that joined its application, once the clone is ready, after which
+    /// `executions` run in the cgroups that the template's bootstrap prepared, as the record's
+    /// workload identity, if it has one, and the worker's order awaits the record's mappings; or
+    /// the end, once the activation failed.
+    pub(super) fn settle(
+        &mut self,
+        operations: &mut dyn RootOperations,
+        executions: &mut Executions,
+    ) -> Option<Step<Worked>> {
+        let applied = self.applied.take()?;
+        let (result, identity) = match applied.result {
             Ok(identity) => (Ok(()), identity),
             Err(error) => (Err(error.into()), None),
         };
-        match self.activation.complete(Instant::now(), result) {
+        Some(match self.activation.complete(Instant::now(), result) {
             Ok(activation) => {
                 let identity = identity.map(|identity| (identity.uid(), identity.gid()));
                 // The executions' listeners are published, the entry's default, which refuses
                 // the most, as a root configuration that names no publication has them.
                 let sandbox = Sandbox::new(identity, Publication::Published);
                 executions.run_in(operations.cgroups(), sandbox);
-                // A record announces at most `nvx::activation::MAX_MAPPINGS` mappings, which fit
-                // a `u32`.
-                let mappings = record.configuration().mappings as u32;
-                self.order = Some(Order::new(mappings));
-                Step::Continue(vec![ready(activation)])
+                self.order = Some(Order::new(applied.mappings));
+                Step::Continue(vec![ready(activation); 1 + applied.joined])
             }
             Err(failure) => self.end(executions, &failure),
-        }
+        })
     }
 
     /// Drops the worker's executions, which ends their programs, once the activation failed with

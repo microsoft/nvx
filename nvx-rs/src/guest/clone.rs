@@ -119,8 +119,9 @@
 //!    record the adapter's framing refused unread, as longer than a record can be, fails as a
 //!    record that long does;
 //! 3. activating: the adapter applies the accepted record with [`apply`](fn@apply), which
-//!    activates the root and the workload with its settings, as below, then reports the result
-//!    to [`Activation::complete`];
+//!    activates the root and the workload with its settings, as below, passes the activation
+//!    what the session received meanwhile, which came before Ready, then reports the result to
+//!    [`Activation::complete`];
 //! 4. ready, with the mappings pending: the activation completed, opened the fence, and returned
 //!    what Ready reports beside the adapter's own identities, such as its build, a
 //!    [`ReadyActivation`](crate::activation::ReadyActivation): that the activation applied, with

@@ -1173,8 +1173,8 @@ struct FakeRoot {
     latched: bool,
     /// How long the assembly takes.
     assembly: Duration,
-    /// The gate that each probe waits on, once it recorded its call, until the test opens it, if
-    /// any.
+    /// The gate that each probe, and each of a clone's applications, waits on, once it recorded
+    /// its call, until the test opens it, if any.
     gate: Option<Receiver<()>>,
     /// The worker's calls, in order.
     calls: Vec<Call>,
@@ -1248,8 +1248,8 @@ impl FakeRoot {
         self
     }
 
-    /// Makes each probe wait until the test opens the gate, which the returned sender opens for
-    /// one probe at a time.
+    /// Makes each probe, and each of a clone's applications, wait until the test opens the gate,
+    /// which the returned sender opens for one at a time.
     fn gated(mut self) -> (Self, Sender<()>) {
         let (open, gate) = mpsc::channel();
         self.gate = Some(gate);
@@ -1333,11 +1333,11 @@ impl RootOperations for FakeRoot {
         self.result(Operation::Teardown)
     }
 
-    /// Applies the record as `nvx::guest::clone::apply` does, without a root: it refuses a GPT
-    /// disk before anything else, takes as long as the assembly, but no longer than until
-    /// `deadline`, as the waits for the devices do, and checks the account of the record's
-    /// workload identity, if it has one, in existing-account mode, in the [accounts'
-    /// root](accounts), which stands for the root that it assembled.
+    /// Applies the record as `nvx::guest::clone::apply` does, without a root, once the test opened
+    /// the gate, if any: it refuses a GPT disk before anything else, takes as long as the
+    /// assembly, but no longer than until `deadline`, as the waits for the devices do, and checks
+    /// the account of the record's workload identity, if it has one, in existing-account mode, in
+    /// the [accounts' root](accounts), which stands for the root that it assembled.
     #[cfg(target_arch = "x86_64")]
     fn apply(
         &mut self,
@@ -1350,6 +1350,10 @@ impl RootOperations for FakeRoot {
         let applied = (record.clone(), template.clone());
         self.calls.push(Call::Apply(Box::new(applied)));
         self.deadlines.push(deadline);
+        if let Some(gate) = &self.gate {
+            gate.recv_timeout(TIMEOUT)
+                .expect("the test opens the gate in time");
+        }
         let configuration = record.configuration();
         if matches!(configuration.image, nvx::activation::Image::Gpt { .. }) {
             return Err(ApplyError::Gpt);
@@ -4189,13 +4193,14 @@ mod clones {
     impl Host {
         /// Starts a clone's worker with the root operations `root`, and returns the host, once the
         /// worker activated the clone with `record`, which announces no mapping, and started the
-        /// sandbox.
+        /// sandbox. The host waits for Ready before it starts the sandbox.
         fn activated(root: FakeRoot, record: &ActivationRecord) -> Self {
             let (mut broker, working) = start_clone(root, ACTIVATION_TIMEOUT);
             broker.reset(RESTORED);
-            let messages = [activate(record), Message::Start];
-            let replies = broker.exchange(&messages, OUTER_MAX_PAYLOAD, 2);
-            assert_eq!(replies, [activated(record), Message::Started]);
+            let replies = broker.exchange(&[activate(record)], OUTER_MAX_PAYLOAD, 1);
+            assert_eq!(replies, [activated(record)]);
+            let replies = broker.exchange(&[Message::Start], OUTER_MAX_PAYLOAD, 1);
+            assert_eq!(replies, [Message::Started]);
             Self {
                 broker,
                 working: Some(working),
@@ -4471,6 +4476,55 @@ mod clones {
     }
 
     #[test]
+    fn a_clone_takes_what_came_during_its_application_before_it_is_ready() {
+        // The application runs until the test opens the gate, by when the host sent more after
+        // its Activate, before Ready, which the worker takes before it completes the activation:
+        // another reset, which the worker acknowledges, or a request fails the activation, with
+        // the status of the host's session, after one application, and with no Ready.
+        let record = record(1, Some(WORKLOAD));
+        let bytes = activate(&record).encode().unwrap();
+        for reset in [true, false] {
+            let (root, gate) = FakeRoot::booting(&layout()).gated();
+            let (mut broker, working) = start_clone(root, ACTIVATION_TIMEOUT);
+            broker.reset(RESTORED);
+            broker.send_data(&bytes, OUTER_MAX_PAYLOAD);
+            if reset {
+                broker.reset_ahead(Identity {
+                    epoch: 2,
+                    ..RESTORED
+                });
+            } else {
+                broker.send_data(&Message::Ping.encode().unwrap(), OUTER_MAX_PAYLOAD);
+            }
+            gate.send(()).unwrap();
+            if reset {
+                broker.acknowledged();
+            }
+            let root = unactivated(&mut broker, working, status::ACTIVATION_PROTOCOL);
+            assert_eq!(root.calls, [applied(&record)], "reset {reset}");
+        }
+
+        // A retry of the Activate, byte for byte, joins the application: the worker answers both
+        // with Ready, after one application, then serves the host's order.
+        let (root, gate) = FakeRoot::booting(&layout()).gated();
+        let (mut broker, working) = start_clone(root, ACTIVATION_TIMEOUT);
+        broker.reset(RESTORED);
+        broker.send_data(&bytes, OUTER_MAX_PAYLOAD);
+        broker.send_data(&bytes, OUTER_MAX_PAYLOAD);
+        gate.send(()).unwrap();
+        let mut replies = Vec::new();
+        while replies.len() < 2 {
+            replies.extend(broker.take());
+        }
+        assert_eq!(replies, [activated(&record), activated(&record)]);
+        let replies = broker.exchange(&[Message::Stop], OUTER_MAX_PAYLOAD, 1);
+        assert_eq!(replies, [Message::Stopped]);
+        let (root, worked) = joined(working);
+        assert_eq!(worked.unwrap(), Worked::Stopped);
+        assert_eq!(root.calls, [applied(&record), Call::Teardown]);
+    }
+
+    #[test]
     fn a_clone_whose_stream_takes_nothing_still_ends_once_its_activation_failed() {
         // The guest's direction of the stream is full, as once the broker failed: the worker
         // cannot send its acknowledgement of the restore's reset, and still ends once the
@@ -4593,14 +4647,12 @@ mod clones {
             let (mut broker, working) =
                 start_clone(FakeRoot::booting(&layout()), ACTIVATION_TIMEOUT);
             broker.reset(RESTORED);
-            let mut messages = vec![activate(&accepted)];
-            let mut expected = vec![activated(&accepted)];
+            let replies = broker.exchange(&[activate(&accepted)], OUTER_MAX_PAYLOAD, 1);
+            assert_eq!(replies, [activated(&accepted)]);
             if started {
-                messages.push(Message::Start);
-                expected.push(Message::Started);
+                let replies = broker.exchange(&[Message::Start], OUTER_MAX_PAYLOAD, 1);
+                assert_eq!(replies, [Message::Started]);
             }
-            let replies = broker.exchange(&messages, OUTER_MAX_PAYLOAD, messages.len());
-            assert_eq!(replies, expected);
             broker.send_data(&activate(&other).encode().unwrap(), OUTER_MAX_PAYLOAD);
             let root = unactivated(&mut broker, working, status::ACTIVATION_PROTOCOL);
             assert_eq!(root.calls, [applied(&accepted)], "{other:?}");

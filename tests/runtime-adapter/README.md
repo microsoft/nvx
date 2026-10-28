@@ -787,8 +787,13 @@ after the repair's acknowledgement of the restore:
    the account of the record's workload identity, if it has one, in the
    assembled root, in existing-account mode. It applies none of the record's
    other settings: its export, its network, its hostname, and its machine ID.
-4. It completes the activation, which opens the fence, and answers `Ready`,
-   which reports the activation after the guest agent's build.
+4. Once it took what the session received while the application ran, which
+   came before `Ready`, it completes the activation, which opens the fence,
+   and answers `Ready`, which reports the activation after the guest agent's
+   build, to the `Activate` and to each retry of it, byte for byte, that came
+   meanwhile, which joins the application. Anything else that came meanwhile,
+   a reset included, fails the activation, as before the application, so the
+   host waits for `Ready` before it sends the mapping table or the start.
 5. It then serves the host's order, as after a cold boot: the mapping table
    that the record announces, the start, the executions, the probes, and the
    stop. The record's workload identity, if it has one, is the whole
@@ -1775,6 +1780,11 @@ The tests cover:
 - an application that would outlast the activation's deadline, which gets that
   deadline, and which ends the clone with the deadline's status once the
   deadline passed, with no `Ready`;
+- a reset, a request, and a retry of the `Activate` that the host sends while
+  the application runs, which the worker takes before it completes the
+  activation: the reset and the request fail it, with the status of the host's
+  session and no `Ready`, and the retry joins it, so that both get `Ready`,
+  after one application;
 - a stream that takes nothing more from the worker, as once the broker failed,
   after which the worker still ends once its activation's deadline passed,
   with the deadline's status, or once the broker closed its end of the stream
