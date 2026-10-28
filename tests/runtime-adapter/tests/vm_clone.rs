@@ -889,7 +889,14 @@ struct Export {
 impl Export {
     /// Writes the directory `name` in the [`EXPORTS`] of the sandbox of `template`, with `files`,
     /// each a path in it, with components separated by `/`, and its contents, and the empty
-    /// `directories`.
+    /// `directories`, and lets anyone create entries in each of its directories, itself included,
+    /// so that only a mapping's access refuses what a clone's execution writes there.
+    ///
+    /// A Linux host shows the guest each host object's owner and mode, which the guest's kernel
+    /// checks: on an unprivileged host, the directories belong to the test's user, not to user
+    /// ID 0, as which an execution runs without the capabilities that override the check, so they
+    /// would refuse its writes. A Windows host shows the guest user ID 0 as each object's owner, so
+    /// there the directories keep their access.
     fn write(
         template: &Template,
         name: &str,
@@ -907,6 +914,21 @@ impl Export {
             let path = export.path(file);
             fs::create_dir_all(path.parent().unwrap()).unwrap();
             fs::write(path, contents).unwrap();
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            let mut pending = vec![export.root.clone()];
+            while let Some(directory) = pending.pop() {
+                fs::set_permissions(&directory, fs::Permissions::from_mode(0o777)).unwrap();
+                for entry in fs::read_dir(&directory).unwrap() {
+                    let entry = entry.unwrap();
+                    if entry.file_type().unwrap().is_dir() {
+                        pending.push(entry.path());
+                    }
+                }
+            }
         }
         export
     }
