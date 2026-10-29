@@ -7,7 +7,7 @@ use std::os::windows::io::{
     AsHandle, AsRawHandle, BorrowedHandle, FromRawHandle, OwnedHandle, RawHandle,
 };
 use std::path::Path;
-use std::sync::{Mutex, MutexGuard, PoisonError};
+use std::sync::{Mutex, PoisonError};
 use std::thread;
 use std::time::{Duration, Instant};
 use std::{mem, ptr};
@@ -592,21 +592,19 @@ impl Drop for AttributeList {
     }
 }
 
-/// Serializes the spawns that make handles of their caller inheritable, from the moment that one
-/// reads the inheritability of its handles until it restores it. Two spawns that allow the same
-/// handle would otherwise take each other's temporary inheritability for the handle's own: one
-/// could find the handle no longer inheritable when it creates its process, and fail, and then
-/// leave the handle inheritable for good.
+/// Serializes the spawns of VMMs, each from before it makes the first handle of its caller
+/// inheritable, its standard handles among them, until it has closed or restored them all. Two
+/// spawns that allow the same handle would otherwise take each other's temporary inheritability
+/// for the handle's own: one could find the handle no longer inheritable when it creates its
+/// process, and fail, and then leave the handle inheritable for good.
 static INHERITANCE: Mutex<()> = Mutex::new(());
 
 /// Handles of a caller that a spawn makes inheritable for as long as it needs them, and whose
-/// earlier inheritability it restores when dropped.
+/// earlier inheritability it restores when dropped. The spawn holds [`INHERITANCE`] meanwhile,
+/// so that no other spawn of a VMM takes their temporary inheritability for their own.
 struct InheritableForSpawn {
     /// Each handle, and whether it was inheritable before.
     handles: Vec<(HANDLE, bool)>,
-    /// [`INHERITANCE`], held while any of the handles is inheritable for this spawn, and released
-    /// after their inheritability is restored.
-    _serialized: Option<MutexGuard<'static, ()>>,
 }
 
 impl InheritableForSpawn {
@@ -616,8 +614,6 @@ impl InheritableForSpawn {
     fn new(handles: &[HANDLE]) -> io::Result<Self> {
         let mut inheritable = Self {
             handles: Vec::with_capacity(handles.len()),
-            _serialized: (!handles.is_empty())
-                .then(|| INHERITANCE.lock().unwrap_or_else(PoisonError::into_inner)),
         };
         for &handle in handles {
             let mut flags = 0;
@@ -662,10 +658,11 @@ impl Drop for InheritableForSpawn {
 /// A handle in the list must be inheritable while the process is created. The `stdio` handles
 /// are inheritable from here until the spawn closes them, and the handles `inherit` from here
 /// until the spawn restores their earlier inheritability, right after the process is created.
-/// Spawns that allow handles of their caller run that part one at a time, so two that allow the
-/// same handle restore what it was before either. A process that the caller spawns concurrently
-/// without a handle list, as `std::process` does, could inherit them in that window; a process
-/// that it spawns with one could not.
+/// The spawn holds [`INHERITANCE`] throughout that window, so spawns of VMMs run it one at a time,
+/// and two that allow the same handle restore what it was before either. A process that the
+/// caller spawns concurrently without a handle list, as `std::process` does, inherits them if it
+/// is created in that window, and holds them until it exits, the log of OpenVMM's standard output
+/// and error among them; a process that it spawns with a handle list does not.
 ///
 /// Fails with [`io::ErrorKind::InvalidInput`] for a batch file, as [`refuse_batch_file`] says.
 pub(crate) fn spawn_detached(
@@ -696,9 +693,9 @@ pub(crate) fn spawn_detached(
 /// Unlike `std::process::Command`, which lets the child inherit every inheritable handle of the
 /// caller, it passes the child no other handle of the caller than the handles `inherit`, which
 /// keep their values in the child, through the handle list of [`spawn_detached`], with the same
-/// window for processes that the caller spawns concurrently without one. Unlike
-/// `std::process::Command` too, which escapes the arguments of a batch file for `cmd.exe`, it
-/// fails with [`io::ErrorKind::InvalidInput`] for a batch file, as [`refuse_batch_file`] says.
+/// window, under the same lock, for processes that the caller spawns concurrently without one.
+/// Unlike `std::process::Command` too, which escapes the arguments of a batch file for `cmd.exe`,
+/// it fails with [`io::ErrorKind::InvalidInput`] for a batch file, as [`refuse_batch_file`] says.
 #[cfg(feature = "cli")]
 pub(crate) fn spawn_foreground(
     program: &Path,
@@ -759,6 +756,11 @@ fn spawn_listed(
     let application = wide(program);
     let mut command_line = command_line(program.as_os_str(), arguments)?;
     let directory = working_dir.map(wide);
+    // No handle may be inheritable for this spawn outside the lock. Locals are dropped in the
+    // reverse of their order, so every return restores the handles `inherit`, and closes the
+    // `stdio` handles, which it moves here for that, before it releases the lock.
+    let lock = INHERITANCE.lock().unwrap_or_else(PoisonError::into_inner);
+    let stdio = stdio;
     let standard = stdio
         .each_ref()
         .map(|handle| handle.as_ref().map_or(ptr::null_mut(), raw));
@@ -817,6 +819,8 @@ fn spawn_listed(
     }
     // SAFETY: PROCESS_INFORMATION is a plain C structure for which all-zero is a valid value.
     let mut information: PROCESS_INFORMATION = unsafe { mem::zeroed() };
+    #[cfg(test)]
+    tests::in_window();
     // SAFETY: every string is NUL-terminated, the command line is mutable, and the startup
     // information and attribute list stay alive for the call.
     let created = unsafe {
@@ -841,9 +845,10 @@ fn spawn_listed(
         Ok(())
     };
     // The child holds its own copies of the handles now, so the caller's need not be
-    // inheritable any longer.
+    // inheritable any longer, and the window closes.
     drop(inheritable);
     drop(stdio);
+    drop(lock);
     created?;
     drop(owned(information.hThread));
     let process = owned(information.hProcess)
@@ -2209,6 +2214,22 @@ mod tests {
 
     use super::*;
 
+    thread_local! {
+        /// What a spawn of this thread runs in its window, once its handles are inheritable and
+        /// before it creates its process.
+        static IN_WINDOW: std::cell::RefCell<Option<Box<dyn FnMut()>>> =
+            const { std::cell::RefCell::new(None) };
+    }
+
+    /// Runs what the test of this thread asked its spawns to run in their window, if anything.
+    pub(super) fn in_window() {
+        IN_WINDOW.with_borrow_mut(|hook| {
+            if let Some(hook) = hook {
+                hook();
+            }
+        });
+    }
+
     fn line(program: &str, arguments: &[&str]) -> String {
         let arguments: Vec<OsString> = arguments.iter().map(OsString::from).collect();
         let mut units = command_line(OsStr::new(program), &arguments).unwrap();
@@ -2640,5 +2661,130 @@ mod tests {
             !inheritable(&shared),
             "the spawns left the handle inheritable"
         );
+    }
+
+    /// The longest wait of the tests of a spawn's window.
+    const WINDOW_TIMEOUT: Duration = Duration::from_secs(30);
+
+    /// A process that a test spawned, which is killed and waited for when it is dropped, also
+    /// when the test fails.
+    struct Running(std::process::Child);
+
+    impl Drop for Running {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    /// Returns a command that runs for a minute, without standard streams.
+    fn sleeper() -> std::process::Command {
+        let mut command = std::process::Command::new("ping");
+        command
+            .args(["-n", "60", "127.0.0.1"])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        command
+    }
+
+    /// A spawn of a stand-in VMM, `cmd /c exit 0`, with a log as its standard output and error, as
+    /// `supervisor::spawn` passes the VMM its launch's log, that another thread runs and holds in
+    /// its window, with the log's handles inheritable, until it is released.
+    struct HeldSpawn {
+        /// The log.
+        log: std::path::PathBuf,
+        /// The log's identity, as its claim is checked.
+        identity: (u64, u64),
+        /// Releases the spawn from its window when it sends, or when it is dropped.
+        release: std::sync::mpsc::Sender<()>,
+        /// The thread of the spawn, which returns the stand-in.
+        spawn: thread::JoinHandle<io::Result<LaunchedProcess>>,
+    }
+
+    impl HeldSpawn {
+        /// Starts the spawn, with its log in `directory`, and returns once it is in its window.
+        fn start(directory: &Path) -> Self {
+            let log = directory.join("vmm.log");
+            let file = fs::File::create(&log).unwrap();
+            let identity = file_identity(&log).unwrap();
+            let (entered, in_window) = std::sync::mpsc::channel();
+            let (release, released) = std::sync::mpsc::channel::<()>();
+            let system = std::env::var_os("SystemRoot").unwrap();
+            let cmd = Path::new(&system).join("System32").join("cmd.exe");
+            let spawn = thread::spawn(move || {
+                IN_WINDOW.set(Some(Box::new(move || {
+                    let _ = entered.send(());
+                    // A test that fails drops its sender, which ends the wait.
+                    let _ = released.recv_timeout(WINDOW_TIMEOUT);
+                })));
+                let (stdin, _stdin_writer) = io::pipe()?;
+                let stderr = file.try_clone()?;
+                spawn_detached(
+                    &cmd,
+                    &["/c", "exit", "0"].map(OsString::from),
+                    &std::env::temp_dir(),
+                    [stdin.into(), file.into(), stderr.into()],
+                    &[],
+                    false,
+                )
+            });
+            in_window
+                .recv_timeout(WINDOW_TIMEOUT)
+                .expect("the spawn did not reach its window");
+            Self {
+                log,
+                identity,
+                release,
+                spawn,
+            }
+        }
+
+        /// Releases the spawn from its window, and returns once the stand-in has exited, with the
+        /// log and its identity.
+        fn finish(self) -> (std::path::PathBuf, (u64, u64)) {
+            let _ = self.release.send(());
+            let stand_in = self.spawn.join().unwrap().unwrap();
+            assert!(
+                stand_in.terminate(WINDOW_TIMEOUT),
+                "the stand-in did not exit"
+            );
+            (self.log, self.identity)
+        }
+    }
+
+    /// Returns whether the claim on the log `log`, the file `identity`, is released within
+    /// `timeout`.
+    fn claim_released_within(log: &Path, identity: (u64, u64), timeout: Duration) -> bool {
+        let deadline = Instant::now() + timeout;
+        loop {
+            if !log_claim_held(log, identity).unwrap() {
+                return true;
+            }
+            if Instant::now() >= deadline {
+                return false;
+            }
+            thread::sleep(Duration::from_millis(25));
+        }
+    }
+
+    #[test]
+    fn a_process_spawned_without_the_spawn_lock_in_a_window_holds_the_vmms_log() {
+        let directory = tempfile::tempdir().unwrap();
+        let held = HeldSpawn::start(directory.path());
+        // `std::process::Command` passes the process every handle of this one that is
+        // inheritable, the log's among them in the window.
+        let other = sleeper().spawn().map(Running);
+        let (log, identity) = held.finish();
+        let mut other = other.unwrap();
+        // The process holds the log's claim after the stand-in has exited, for longer than a
+        // recovery checks a held claim again, as long as it runs.
+        let kept = !claim_released_within(&log, identity, Duration::from_secs(2));
+        let running = other.0.try_wait().unwrap().is_none();
+        drop(other);
+        let released = claim_released_within(&log, identity, WINDOW_TIMEOUT);
+        assert!(running, "the process spawned in the window exited early");
+        assert!(kept, "a process spawned in the window did not hold the log");
+        assert!(released, "the log stayed held after the process exited");
     }
 }
