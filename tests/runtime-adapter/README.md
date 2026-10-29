@@ -1480,7 +1480,7 @@ state, and hash nothing. They take no lock, so each record is as they read it.
 `runtime-adapter-host start` starts a clone of a generation of a template store
 in a sandbox store, through NVX's public API, `nvx::host::template`. Its
 library side, `clone`, holds what the command's options choose of the clone,
-`clone::Request`: its image, an EROFS layer or a GPT disk of the length of the
+`clone::Request`: its image, an EROFS layer or a GPT disk no longer than the
 template's placeholder, its upper, on an ext4 scratch image or in RAM, its
 memory target, the template's RAM unless given, the workload identity as which
 its executions run, its overlay mode, its scratch's journal policy, the bound
@@ -1554,8 +1554,10 @@ template attaches unchanged, or, for a template without a NIC, none, or one
 that lets nothing through, so that a clone of another network policy finds no
 template in it,
 the bindings of its images, which no one else may change, the geometry of its
-image, which must be the placeholder's, its length included, and that of its
-scratch image, which must be the template's scratch's, its memory target,
+image, which must have the placeholder's block sizes, and be no longer than
+the placeholder, whose length is the capacity that the restore presents,
+reading zeros past the image's end, and that of its scratch image, which must
+be the template's scratch's, its length included, its memory target,
 whole blocks of 128 MiB, from the template's RAM to its capacity, and its
 export, if it has one: the template's filesystem slot, which its capture left
 dormant, binds one directory, so the export must have exactly one, the
@@ -1572,7 +1574,11 @@ template store and the generation, so
 that a later stop finds the store whose lease it releases. Once NVX checked
 the export again, with `ExportPlan::verify`, OpenVMM restores the
 generation's snapshot in place, through NVX's supervisor, as the launch that the
-lease reserves, with the export's directory on the template's filesystem slot,
+lease reserves, with the clone's image at the capacity of the template's
+placeholder, over the scratch image, or, for a clone in RAM, with the
+template's scratch absent, which OpenVMM attaches with no file, so that no
+file of the host backs it, with the export's directory on the template's
+filesystem slot,
 and the template's NIC, if it has one, under the template's network,
 and the restore sequence activates the clone through the
 adapter's clone order, `host::CloneOrder`, which sends the clone's activation
@@ -1809,8 +1815,8 @@ Each command of `runtime-adapter-host` but `stage`, `list`, `inspect`, and
   TEMPLATES in the sandbox store STORE, which it creates if needed, and whose
   `stage` staged its images, which no one else may change: the image PATH, an
   EROFS file system, `erofs`, or a GPT disk, `gpt`, of which the guest expects
-  the identity UUID, the file system's UUID or the disk's GUID, of the length
-  of the template's placeholder, whatever the placeholder's format, over the
+  the identity UUID, the file system's UUID or the disk's GUID, no longer than
+  the template's placeholder, whatever the placeholder's format, over the
   ext4 scratch image PATH, or RAM, with a memory target of MIB mebibytes, the
   template's RAM by default, the workload identity UID:GID, if given, as which
   every execution runs, and whose account the guest checks before the clone is
@@ -2793,7 +2799,8 @@ in the host-only configuration, through `runtime-adapter-host start` and
 captures a template of its own, of 1 processor and 256 MiB of RAM with a
 capacity of 1 GiB, in a template store of its own, of a copy of NVX's Ubuntu
 EROFS image that a directory of the platform holds, which the clones stage as
-their image, or of a GPT disk of its length that the platform holds beside it,
+their image, or of a GPT disk 16 MiB longer than it that the platform holds
+beside it,
 without a NIC unless its row names a network, whose guest is at `192.0.2.2/24`,
 as in the [template scenarios](#template-scenarios),
 and starts its clones, each in a sandbox store of its own, over a copy of the
@@ -2808,8 +2815,8 @@ directory that the starts authorize:
 | Test | Clones | Expects |
 | --- | --- | --- |
 | `one_generation_serves_clones_of_each_upper_and_memory_target` | Two at once, over a scratch image at 256 MiB, and in RAM at 512 MiB with untrusted lowers, then one over a scratch image at 1 GiB | Each started, by the host's monotonic clock, with its own lease, which the store lists with the clone's sandbox, its memory target online, its upper, overlay mode, and image's contents, and the events of its activation in order; a stop releases each lease; the generation's snapshot unchanged, and its payload with nothing but the capture's files once the clones stopped |
-| `one_generation_serves_clones_of_either_format_over_either_upper` | Of a template whose placeholder is a GPT disk of two layers, four at once: the EROFS image over a scratch image and in RAM, a GPT disk of one layer in RAM, and one of three layers over a scratch image, with a bound that its first partition meets exactly; then the disk of one layer, with a bound one byte smaller than its first partition | Each started, with its upper and the overlay's options; the EROFS image's root, without a first partition; each GPT disk's layers, ext4 file systems mounted read-only once each, from the partitions that its own table names, stacked in order, and the bytes of its own first partition; then status 8, and the record of a failure of the request, at the activation, once the VM exited, by the evidence of an unusable root, with the guest's status 54; nothing quarantined, and the lease released, with the records |
-| `a_start_refuses_what_the_template_cannot_serve_before_any_vmm_starts` | An image 4 KiB longer, one 4 KiB shorter, and one 100 bytes longer, than the placeholder, a scratch image of twice the template's scratch, memory targets of 2 GiB and of 320 MiB, unstaged images, and a generation that the store does not hold, then the generation once its key is gone | For those that NVX's plan refuses, status 8, with NVX's reason, and the record of a failure of the request, at the plan, without a VM, by the evidence of a length that the request supplied, of the image's geometry, which OpenVMM cannot attach, or of invalid targets, which quarantines nothing; for unstaged images, status 1, without a record; for the generation, status 10, with the record of a selection that names no template, which the store never published, without a lease; any lease released, and no VMM's log or record in the sandbox; for the generation without its key, status 8, and the record of a failure of the template, at the plan, by the evidence of a malformed generation, which quarantines the generation, so that the store refuses a later start's selection, with status 10, as `ineligible`, by the evidence of its tombstone, without a lease |
+| `one_generation_serves_clones_of_either_format_over_either_upper` | Of a template whose placeholder is a GPT disk of two layers, longer than the EROFS image, four at once, each image shorter than the placeholder: the EROFS image over a scratch image and in RAM, a GPT disk of one layer, of the EROFS image's length, in RAM, and one of three layers, as short as its layout allows, over a scratch image, with a bound that its first partition meets exactly; then the disk of one layer, with a bound one byte smaller than its first partition | Each started, with its upper and the overlay's options; the EROFS image's root, without a first partition; each GPT disk's layers, ext4 file systems mounted read-only once each, from the partitions that its own table names, stacked in order, and the bytes of its own first partition; the image's read-only disk at the placeholder's length, and the scratch device at the template's scratch length, each of which the guest reads to its end; for a clone in RAM, no file of its sandbox as long as the template's scratch, and on Linux `--restore-absent-scratch` and no `scratch` block device among its VMM's arguments, which name one over a scratch image; then status 8, and the record of a failure of the request, at the activation, once the VM exited, by the evidence of an unusable root, with the guest's status 54; nothing quarantined, and the lease released, with the records |
+| `a_start_refuses_what_the_template_cannot_serve_before_any_vmm_starts` | An EROFS image and a GPT disk 4 KiB longer, and an EROFS image 100 bytes longer, than the placeholder, a scratch image of twice the template's scratch, memory targets of 2 GiB and of 320 MiB, unstaged images, and a generation that the store does not hold, then the generation once its key is gone | For those that NVX's plan refuses, status 8, with NVX's reason, and the record of a failure of the request, at the plan, without a VM, by the evidence of a length that the request supplied, of the image's geometry, which OpenVMM cannot attach, or of invalid targets, which quarantines nothing; for unstaged images, status 1, without a record; for the generation, status 10, with the record of a selection that names no template, which the store never published, without a lease; any lease released, and no VMM's log or record in the sandbox; for the generation without its key, status 8, and the record of a failure of the template, at the plan, by the evidence of a malformed generation, which quarantines the generation, so that the store refuses a later start's selection, with status 10, as `ineligible`, by the evidence of its tombstone, without a lease |
 | `a_clone_whose_activation_fails_ends_before_it_is_ready` | A scratch image of zeros, a journal that the record forbids, a workload identity whose account the image lacks, and, through NVX's restore sequence, a ping, a start, or the start of an execution before the `Activate` | Status 8, no `Ready`, and the record of a failure, at the activation, once the VM exited: of the request, by the evidence of an unusable root, with the guest's status 54, or of invalid settings, with 55, or, before the `Activate`, of an unknown cause, by the protocol's, with 51, which the sandbox records until the release; nothing quarantined, and the lease released, with the records |
 | `a_clone_refuses_a_scratch_image_whose_upper_an_earlier_clone_used` | Over a scratch image, in whose root the `contents` probe writes a file, then over a copy of that scratch image once the first clone stopped | The first started; then status 8, since the copy's upper is not fresh, and the record of a failure of the request, at the activation, once the VM exited, by the evidence of an unusable root, with the guest's status 54; nothing quarantined, and the lease released, with the records |
 | `clones_at_once_keep_their_own_uppers_and_machine_ids` | Three at once: over a scratch image and in RAM, each with a generated machine ID, and in RAM with the image's own; two executions in each, as user ID 0, that write a marker in the root, and try to write `/etc/machine-id` | In every execution, the hostname `runtime-adapter`, and no marker of another clone; a generated machine ID that differs between the clones, the same in each execution of a clone, held by one bind that is read-only, `nosuid`, and `nodev`, and that the write cannot change; with the image's own machine ID, none, since the image has none, no bind, and in the later execution, the ID that the first wrote; then each stop releases its lease |
@@ -3026,7 +3033,7 @@ layered roots, captures of templates, and the starts and runs of their clones.
 | `vm_clone` | `clones_at_once_see_only_their_own_exports` | Clones of one generation at once see only their own exports, and a clone without one none |
 | `vm_clone` | `each_command_reattaches_to_the_clone_from_a_new_process` | `reattach`, `probe`, and `exec` each reattach to the clone from a new process, in a later epoch, without a second activation |
 | `vm_clone` | `one_generation_serves_clones_of_each_upper_and_memory_target` | One generation serves clones over a scratch image and in RAM, at each memory target up to its capacity, each with its own lease, and leaves its snapshot unchanged |
-| `vm_clone` | `one_generation_serves_clones_of_either_format_over_either_upper` | A template of a GPT placeholder serves EROFS and GPT clones of other layouts over either upper, and a first partition over its bound ends a clone with status 54 |
+| `vm_clone` | `one_generation_serves_clones_of_either_format_over_either_upper` | A template of a GPT placeholder serves EROFS and GPT clones of other layouts, shorter than the placeholder, at its length, over either upper, those in RAM with no scratch file, and a first partition over its bound ends a clone with status 54 |
 | `vm_clone` | `the_lease_of_a_start_that_ended_before_its_record_is_released_through_its_template_store` | The lease of a start that ended before it recorded its clone is released only through its own template store, which `--template` names |
 
 ### Running the VM tests

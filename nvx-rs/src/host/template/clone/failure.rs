@@ -119,7 +119,9 @@ pub enum Evidence {
     /// changed, or removed after its binding was made, or its path names another file than the
     /// check found, or one that others may change.
     SuppliedIdentity,
-    /// A file that the request supplied has another length than the template's device.
+    /// A file that the request supplied is of a length that the template's device cannot take: an
+    /// image longer than the template's placeholder, or a scratch image of another length than the
+    /// template's scratch.
     SuppliedLength,
     /// A file that the request supplied presents other block sizes than the template's device, or
     /// a geometry that OpenVMM refuses.
@@ -133,10 +135,9 @@ pub enum Evidence {
     /// The host ran out of a resource, such as its storage, its memory, or its descriptors.
     ResourceExhaustion,
     /// The host cannot restore the template: this build speaks other contracts than the template,
-    /// or reads no key of the template's encoding version, or the sandbox's filesystem presents
-    /// another geometry than the template's scratch, or OpenVMM refused to restore the snapshot
-    /// with a time ABI code that says that the host cannot present the template's CPU profile,
-    /// TSC, or LAPIC timer, as [the attribution](Self#attribution) describes.
+    /// or reads no key of the template's encoding version, or OpenVMM refused to restore the
+    /// snapshot with a time ABI code that says that the host cannot present the template's CPU
+    /// profile, TSC, or LAPIC timer, as [the attribution](Self#attribution) describes.
     IncompatibleHost,
     /// The clone runs, or would launch, under another runtime identity than the template's or the
     /// caller's, which the clone's guest might not speak.

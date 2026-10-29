@@ -367,7 +367,8 @@ impl Index {
 /// opened for reading, which on Windows lets no one write it, until the VM has ended. The
 /// directories above the files must be ones that only the current user, or an administrator, may
 /// change, since OpenVMM resolves each path again. A restore of a clone, whose block devices
-/// OpenVMM also opens by their paths, takes the same rule.
+/// OpenVMM also opens by their paths, takes the same rule; a restore of a clone in RAM declares its
+/// scratch absent, which OpenVMM attaches with no file.
 ///
 /// ## What the VM leaves
 ///
