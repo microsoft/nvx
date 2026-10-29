@@ -536,6 +536,10 @@ explicit handle list.
 event until a deadline, and takes a bounded forced step through the VMM's
 verified identity only on request.
 
+`Vmm::stop_unless_exited` stops the VM the same way only if its VMM still runs
+as the stop begins, and otherwise stops nothing and keeps the runtime record of
+its launch, so that `reattach` finds that the VM exited without its holder.
+
 `Vmm::terminate` takes that forced step alone, within the caller's bound, for a
 VM whose guest the caller must not ask anything, such as one of another runtime
 identity.
@@ -678,11 +682,12 @@ store's names is refused.
 
 `ClonePlan::launch` then launches the clone as the launch that its lease
 reserves, once it has checked that the sandbox's clone binding records the
-lease, and returns a `Restoring`: it writes the clone's activation record in its
-canonical encoding, `clone-activation.bin`, from which a caller resends it
-unchanged; it listens for the VMM's restore-ready event, at the socket
-`restore.sock` on Linux, and at a named pipe of a random name on Windows; and it
-runs `supervisor::launch` with OpenVMM's restore of the clone's devices,
+lease, and that the sandbox records no failure of the clone, which fails once
+under its lease, and returns a `Restoring`: it writes the clone's activation
+record in its canonical encoding, `clone-activation.bin`, from which a caller
+resends it unchanged; it listens for the VMM's restore-ready event, at the
+socket `restore.sock` on Linux, and at a named pipe of a random name on Windows;
+and it runs `supervisor::launch` with OpenVMM's restore of the clone's devices,
 `--restore-snapshot` with the generation's snapshot in place, which no clone
 copies or changes, so that clones of one generation restore it at once,
 `--restore-memory` with the memory target, and `--restore-ready-path`, under the
@@ -727,6 +732,77 @@ runtime record. A failure ends the launch as `Starting::abandon` does; a crash
 before the commit leaves the launch's journal, whose recovery ends the VMM,
 while the lease lasts until the release, and a crash after it leaves a VM that
 reattaches, and keeps its lease while it runs.
+
+A failure of a clone is a `CloneFailure`, whose `Evidence` attributes it to an
+`Outcome`, at a `Stage`, once the clone got as far as its `Progress`: the
+request, for a denied authorization, a stale binding, invalid targets, format,
+settings, Activate, or mappings, or an image, a scratch, or a root that the
+template cannot serve, and for a supplied file of the wrong identity, length, or
+geometry, which the host's staging takes instead once the caller proves it,
+`CloneFailure::with_staging_proven`; the host, for an endpoint that cannot be
+bound, resource exhaustion, a host that cannot restore the template, another
+runtime, or a failure of its own operations; unknown, for a lost status, a
+timeout, a reset, a forced kill, or a broken protocol; the template, for a
+malformed generation, or a defect of its capture or repair that a diagnosis
+attributes to it, the only outcome that quarantines the generation, through its
+tombstone, `CloneFailure::quarantine`; and the repair stage, for a status of the
+clone's repair alone.
+
+OpenVMM's outcome report gives the status with which the guest ended the clone's
+VM, which `status_evidence` attributes, and which prevails over what the host or
+the caller saw, but not over evidence of the template, which shows the
+provenance that a status alone leaves to establish: a status of the repair at
+any point, and one of the activation before the start was sent.
+
+A VMM that exits before its restore-ready event, as OpenVMM does once it cannot
+restore the snapshot, after it closed the event's endpoint, which the sequence
+then gives ten seconds to exit, leaves the line with which OpenVMM reported its
+fatal error in its log, which the failure's message keeps, and whose time ABI
+code, if it says that the host cannot present the template's CPU profile, TSC,
+or LAPIC timer, attributes the failure to the host.
+
+From the launch on, a failure ends the clone's VMM through its verified
+identity, and the sandbox keeps the clone's progress log, `clone-progress.log`,
+which records each step from the spawn to the commit, after a first line that
+names the launch and the boot of the host, a few lines that it appends without a
+sync, and the record of its failure, `clone-failure.json`, JSON in format
+`FAILURE_FORMAT`, which it writes before the teardown, with the teardown
+pending, so that a crash of the caller during the teardown leaves it for a
+reattach to finish, and again once the teardown ended, with the stage, the
+evidence and the status, the original outcome, the transaction, the generation,
+the progress, and the teardown: no VM, an exit or a termination that the host
+verified, or an unresolved one, which keeps the launch's journal or runtime
+record, and the lease; a release removes both, and a sandbox that boots cold
+writes neither. A failure that cannot be recorded before its teardown keeps the
+launch's journal or runtime record, and the lease, so that a reattach still
+finds that the clone failed.
+
+A step or a check of the caller's own that fails once the clone is ready, or
+once its sandbox started, fails the clone with the caller's evidence through
+`Activated::fail` or `Started::fail`, which end the launch and record the
+failure as the sequence's own failures do.
+
+`reattach_clone` takes a clone over after the caller of its launch restarted: it
+reattaches by the identity of its VMM's process, checks a committed clone in a
+new session, in which the clone answers the byte-equal Activate of
+`clone-activation.bin` with the Ready that it answered once, and ends a clone
+that another runtime identity launched, or that fails the check, through its
+verified identity; it records the failure of a launch that a crash interrupted,
+but not the journal that a commit may leave beside its runtime record,
+classifies a VM that exited by its outcome report, which is the clone's VM's
+once its launch began, whether or not a crash left a record of its spawn,
+records a failure before it ends a VMM or clears the runtime record of one that
+exited, and fails, leaving them as they were, if it cannot, finishes a failure
+that a crash left pending as its teardown would have recorded it, keeping its
+transaction, resolves the teardown of an earlier failure with what the VMM left
+as it ended, its outcome report and OpenVMM's fatal error, attributes a status
+of the guest's as one that a workload may have given once the clone's progress
+log is lost, damaged, or was written during another boot of the host, whose
+crash may have lost its last lines, and reads nothing of the template store, so
+that a tombstone or a retirement of the generation leaves the clone its lease.
+
+`CloneRecords::read` reads what the sandbox keeps of a clone, for the operations
+that list, inspect, or remove clones.
 
 `Store::tombstone` quarantines a generation, which takes no new lease while its
 leases keep working, and `Store::retire` deletes it once its leases have

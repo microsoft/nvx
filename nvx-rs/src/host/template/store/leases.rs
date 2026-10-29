@@ -165,8 +165,10 @@ impl Store {
     /// - with [`ErrorCode::TemplateIneligible`] if it is not eligible at `now`;
     /// - on Linux, with [`ErrorKind::Io`] if the generation's payload is not a directory of the
     ///   current user with mode 0700, which a launch of the clone requires, as OpenVMM does of the
-    ///   directory of a control socket, and which a release needs, to remove the clone's socket
-    ///   from the payload and make its absence durable;
+    ///   directory of a control socket, or if a release could not open it as it opens it,
+    ///   following no link at the store's directory, at the directory of the generations, or at
+    ///   the payload: a release opens the payload to remove the clone's socket from it and make
+    ///   its absence durable;
     /// - with [`ErrorCode::SandboxNotProvisioned`] if the directory does not exist, or holds no
     ///   configuration record of the caller, as `files` declares it;
     /// - with [`ErrorCode::SandboxRunning`] if the sandbox records a VM, or a launch, which may
@@ -229,11 +231,11 @@ impl Store {
             ));
         }
         // A release removes the socket of the clone's VMM through a handle of the payload, which
-        // it opens for reading, so that it can make the removal durable: a payload that it could
-        // not open, or remove an entry from, would keep the lease and its binding past it.
-        if cfg!(unix) {
-            self.check_payload(generation)?;
-        }
+        // it opens for reading, following no link from the store's directory on, so that it can
+        // make the removal durable: a payload that it could not open, or remove an entry from,
+        // would keep the lease and its binding past it.
+        #[cfg(target_os = "linux")]
+        self.check_payload(generation)?;
         let not_provisioned = || {
             Error::new(
                 ErrorCode::SandboxNotProvisioned,
@@ -369,8 +371,11 @@ impl Store {
     /// launch: the file of the scratch device of a clone whose upper is in RAM,
     /// [`CLONE_SCRATCH_NAME`](crate::host::store::CLONE_SCRATCH_NAME), which the clone's
     /// [plan](crate::host::template::ClonePlan) created, the clone's activation record,
-    /// [`CLONE_ACTIVATION_NAME`](crate::host::store::CLONE_ACTIVATION_NAME), and the socket of
-    /// its restore-ready event, [`RESTORE_READY_NAME`](crate::host::store::RESTORE_READY_NAME);
+    /// [`CLONE_ACTIVATION_NAME`](crate::host::store::CLONE_ACTIVATION_NAME), the socket of its
+    /// restore-ready event, [`RESTORE_READY_NAME`](crate::host::store::RESTORE_READY_NAME), and
+    /// its records, which last as long as the lease, its progress log,
+    /// [`CLONE_PROGRESS_NAME`](crate::host::store::CLONE_PROGRESS_NAME), and the record of its
+    /// failure, [`CLONE_FAILURE_NAME`](crate::host::store::CLONE_FAILURE_NAME);
     /// then, on Linux, the control socket of the clone's VMM, `<launch>.sock` in the leased
     /// generation's payload, after the launch that the lease reserved, whose absence it makes
     /// durable; then the clone binding, and once their removal is durable, the lease's record in
@@ -486,16 +491,24 @@ impl Store {
         Ok(Some(lease))
     }
 
-    /// Refuses the payload of the generation `generation` unless it is a directory of the current
-    /// user with mode 0700, as a launch of a clone requires it, OpenVMM requiring that mode of the
-    /// directory of a control socket, and as a release of the clone's lease needs it on Linux: the
-    /// release opens the payload for reading, and removes the clone's socket from it.
+    /// Refuses the payload of the generation `generation` unless a release of a clone's lease can
+    /// open it, as [`open_payload`] opens it, following no link at the store's directory, at the
+    /// directory of the generations, or at the payload, through a directory that holds this
+    /// store, and it is a directory of the current user with mode 0700. A launch of a clone
+    /// requires that mode, OpenVMM requiring it of the directory of a control socket, and so does
+    /// the release: it opens the payload for reading, and removes the clone's socket from it.
+    #[cfg(target_os = "linux")]
     fn check_payload(&self, generation: StoreGeneration) -> Result<()> {
         let payload = self.payload_dir(generation);
-        let problem = platform::check_store_dir(&payload).map_err(store_error(format!(
-            "cannot open the payload of the generation {}",
-            payload.display()
-        )))?;
+        let problem = match open_payload(self.dir(), self.id, generation)? {
+            Some(directory) => directory.store_dir_problem().map_err(store_error(format!(
+                "cannot examine the payload of the generation {}",
+                payload.display()
+            )))?,
+            None => {
+                Some("is gone, or the store's directory holds another store, or none".to_owned())
+            }
+        };
         match problem {
             Some(problem) => Err(Error::io(format!(
                 "the payload of the generation {} {problem}",

@@ -18,8 +18,8 @@ use crate::activation::TemplateReference;
 use crate::host::process::{Process, ProcessRef};
 use crate::host::store::files::write_private;
 use crate::host::store::{
-    CLONE_ACTIVATION_NAME, CLONE_SCRATCH_NAME, FORMAT, LOCK_NAME, LaunchState, RESTORE_READY_NAME,
-    RUNTIME_NAME, Recovery, RuntimeIdentity,
+    CLONE_ACTIVATION_NAME, CLONE_FAILURE_NAME, CLONE_PROGRESS_NAME, CLONE_SCRATCH_NAME, FORMAT,
+    LOCK_NAME, LaunchState, RESTORE_READY_NAME, RUNTIME_NAME, Recovery, RuntimeIdentity,
 };
 use crate::host::supervisor::{self, Reattached, StopOutcome, VmmCommand};
 use crate::host::template::eligibility::MAX_DOWNTIME_NS;
@@ -285,26 +285,52 @@ fn acquisitions_refuse_what_they_cannot_lease_and_lease_nothing() {
         assert_eq!(error.code(), ErrorCode::TemplateIneligible, "{error}");
         assert!(error.message().contains(condition), "{error}");
     }
-    // On Unix, a payload that is not a directory of the current user with mode 0700, which a
+    // On Linux, a payload that is not a directory of the current user with mode 0700, which a
     // launch of the clone requires, and through which a release ends the lease: it opens the
-    // payload for reading, and removes the clone's socket from it.
-    #[cfg(unix)]
+    // payload for reading, and removes the clone's socket from it. A user other than root cannot
+    // open a payload of mode 0300 for reading at all.
+    #[cfg(target_os = "linux")]
     {
         use std::os::unix::fs::PermissionsExt;
 
         let payload = store.payload_dir(generation);
+        let unopened = format!(
+            "cannot open the payload of the generation {}",
+            payload.display()
+        );
         for mode in [0o300, 0o500] {
             fs::set_permissions(&payload, fs::Permissions::from_mode(mode)).unwrap();
             let error = refusal(&store, generation, &sandbox, &now);
             fs::set_permissions(&payload, fs::Permissions::from_mode(0o700)).unwrap();
             assert_eq!(error.kind(), ErrorKind::Io, "{error}");
-            assert_eq!(
-                error.message(),
-                format!(
-                    "the payload of the generation {} has mode {mode:o}, not the mode 700 that \
-                     the directory of a control socket must have",
-                    payload.display()
-                )
+            let refused = format!(
+                "the payload of the generation {} has mode {mode:o}, not the mode 700 that the \
+                 directory of a control socket must have",
+                payload.display()
+            );
+            assert!(
+                error.message() == refused || (mode == 0o300 && error.message() == unopened),
+                "{error}"
+            );
+        }
+        // A link in the place of the store's directory, of the directory of the generations, or of
+        // the payload, even to a directory that holds the same files: a release, which follows
+        // none of them, could not open the payload.
+        let root = store.dir().to_owned();
+        let generations = payload.parent().unwrap().to_owned();
+        let elsewhere = directory.path().join("elsewhere");
+        for linked in [&root, &generations, &payload] {
+            fs::rename(linked, &elsewhere).unwrap();
+            std::os::unix::fs::symlink(&elsewhere, linked).unwrap();
+            let error = refusal(&store, generation, &sandbox, &now);
+            fs::remove_file(linked).unwrap();
+            fs::rename(&elsewhere, linked).unwrap();
+            assert_eq!(error.kind(), ErrorKind::Io, "{error}");
+            assert_eq!(error.message(), unopened, "{error}");
+            let source = std::error::Error::source(&error).unwrap().to_string();
+            assert!(
+                source.ends_with("is a link, or not a directory"),
+                "{source}"
             );
         }
     }
@@ -819,6 +845,8 @@ fn a_release_makes_the_removal_of_its_binding_durable_before_it_removes_its_reco
     let kept = [
         CLONE_SCRATCH_NAME,
         CLONE_ACTIVATION_NAME,
+        CLONE_PROGRESS_NAME,
+        CLONE_FAILURE_NAME,
         RESTORE_READY_NAME,
     ];
     let synced = RefCell::new(Vec::new());
@@ -1242,6 +1270,8 @@ fn a_release_ends_the_lease_of_the_sandbox_whose_lock_it_holds_whatever_its_path
     let kept = [
         CLONE_SCRATCH_NAME,
         CLONE_ACTIVATION_NAME,
+        CLONE_PROGRESS_NAME,
+        CLONE_FAILURE_NAME,
         RESTORE_READY_NAME,
     ];
     for sandbox in [&leased_sandbox, &other] {

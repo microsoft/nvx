@@ -86,6 +86,13 @@
 //! [`Vmm::terminate`] takes that forced step alone, with no graceful step: it ends a VM whose
 //! guest the caller cannot ask to shut down, such as one that another runtime identity started.
 //!
+//! A stop decides by its own check whether the VMM still runs as it begins. [`Vmm::stop`] ends a
+//! VM whose VMM had exited by then as one that it stopped, and clears the runtime record of its
+//! launch. [`Vmm::stop_unless_exited`] stops nothing then, and keeps the record, so that
+//! [`reattach`] finds that the VM exited without its holder, as a caller that tells how the VM
+//! ended, such as a clone's, needs: a holder that checked whether the VMM had exited, then stopped
+//! the VM, would otherwise attribute to its stop a VMM that exited in between.
+//!
 //! # Reattach
 //!
 //! After an orchestrator restarts within the same host boot, [`reattach`] ends an interrupted
@@ -130,7 +137,11 @@
 //!    session, and checks its Ready, by a deadline that runs from the launch;
 //!    [`Activated::start`](crate::host::template::Activated::start) starts its sandbox; and
 //!    [`Started::commit`](crate::host::template::Started::commit) commits the launch, as
-//!    [`Starting::commit`] does. A failure ends the launch, as [`Starting::abandon`] does.
+//!    [`Starting::commit`] does. A failure ends the launch, as [`Starting::abandon`] does, through
+//!    the VMM's verified identity, and the sandbox records it until the release, with the evidence
+//!    that attributes it, as a [`CloneFailure`](crate::host::template::CloneFailure) describes: a
+//!    launch that cannot be ended keeps its journal, and the lease, and so does one whose failure
+//!    cannot be recorded before its end, whose VMM is ended through its handle.
 //! 4. Once the clone's VM has exited, as a stop, a termination, or a reattach verifies,
 //!    [`Store::release`](crate::host::template::Store::release) ends the lease, under the
 //!    sandbox's lock, taken through the lease's path,
@@ -173,6 +184,12 @@
 //!   lasts as long as the VM runs, until a stop or a termination verifies its exit.
 //! - During a release, the binding goes first, durably, and leaves the record of the lease, which
 //!   a retirement removes.
+//!
+//! The caller of a clone's launch that restarts takes the clone over with
+//! [`reattach_clone`](crate::host::template::reattach_clone), which reattaches as [`reattach`]
+//! does, records the failure of a launch that it ended, checks the activation of a clone whose
+//! launch committed in a new session, and ends a clone that another runtime identity launched, or
+//! that fails the check, through its verified identity.
 //!
 //! The evidence of the VM's exit decides each outcome. A record of an earlier boot, or of a process
 //! ID that another process now has, names a VM that has exited: reattach clears it, and the lease
@@ -222,31 +239,85 @@ pub fn launch<'s, 'h>(
     capability: &[u8; CAPABILITY_LEN],
     command: impl FnOnce(&str) -> Result<VmmCommand<'h>>,
 ) -> Result<Starting<'s>> {
+    launch_reporting(
+        locked,
+        reserved,
+        runtime,
+        capability,
+        command,
+        |_, _| Ok(()),
+    )
+    .map_err(|failure| failure.error)
+}
+
+/// How a launch of [`launch_reporting`] failed.
+#[derive(Debug)]
+pub(crate) struct LaunchFailure {
+    /// The error of the step that failed, which says why the launch could not be ended if it
+    /// could not.
+    pub(crate) error: Error,
+    /// Whether the launch spawned its VMM, which it then ended through the VMM's handle.
+    pub(crate) spawned: bool,
+    /// Why the launch was not ended, whose journal then remains for [`LockedStore::recover`]:
+    /// it could not be, or its caller could not record its failure first. `None` once it ended.
+    pub(crate) unended: Option<String>,
+}
+
+/// Launches a VMM as [`launch`] does, and tells how a launch that fails ended, as a
+/// [`LaunchFailure`]. A launch that began, and fails, calls `failing` with the step's error, and
+/// whether it spawned the VMM, before it ends the launch, so that the caller may record the
+/// failure, as a clone's launch does, before anything of the launch ends. If `failing` fails, the
+/// launch ends a VMM that it spawned through the VMM's handle, as always, but keeps its journal,
+/// as a crash would leave it, for [`LockedStore::recover`]: the journal then still tells that the
+/// launch began, though the caller could not record its failure.
+pub(crate) fn launch_reporting<'s, 'h>(
+    locked: &'s mut LockedStore,
+    reserved: &LaunchId,
+    runtime: &RuntimeIdentity,
+    capability: &[u8; CAPABILITY_LEN],
+    command: impl FnOnce(&str) -> Result<VmmCommand<'h>>,
+    failing: impl FnOnce(&Error, bool) -> Result<()>,
+) -> std::result::Result<Starting<'s>, LaunchFailure> {
     let store = SandboxStore::clone(locked);
-    let mut launch = locked.begin_launch(reserved, runtime, capability)?;
+    // A launch that does not begin leaves nothing to end.
+    let mut launch = locked
+        .begin_launch(reserved, runtime, capability)
+        .map_err(|error| LaunchFailure {
+            error,
+            spawned: false,
+            unended: None,
+        })?;
     let command = match command(launch.endpoint()) {
         Ok(command) => command,
-        Err(error) => return Err(abandon_after(launch, error)),
+        Err(error) => {
+            let recorded = failing(&error, false);
+            return Err(abandon_after(launch, error, false, recorded));
+        }
     };
     let log = match launch.take_log() {
         Ok(log) => log,
-        Err(error) => return Err(abandon_after(launch, error)),
+        Err(error) => {
+            let recorded = failing(&error, false);
+            return Err(abandon_after(launch, error, false, recorded));
+        }
     };
     let child = match spawn(&command, capability, log) {
         Ok(child) => child,
         Err(error) => {
             let error = Error::io(format!("cannot launch {}", command.program.display()))
                 .with_source(error);
-            return Err(abandon_after(launch, error));
+            let recorded = failing(&error, false);
+            return Err(abandon_after(launch, error, false, recorded));
         }
     };
     let process = match launch.record_process(&child) {
         Ok(process) => process,
         Err(error) => {
+            let recorded = failing(&error, true);
             // An unrecorded VMM holds the claim of its launch, so only its handle can end it,
             // before the launch ends.
             child.kill_and_wait();
-            return Err(abandon_after(launch, error));
+            return Err(abandon_after(launch, error, true, recorded));
         }
     };
     Ok(Starting {
@@ -259,22 +330,46 @@ pub fn launch<'s, 'h>(
     })
 }
 
-/// Ends `launch`, which failed with `error`, and returns `error`, which says why the launch could
-/// not be ended if it could not: its journal then remains for [`LockedStore::recover`].
-fn abandon_after(launch: Launch<'_>, error: Error) -> Error {
-    let reason = match launch.abandon() {
-        Ok(Recovery::Indeterminate(reason)) => reason,
-        Ok(_) => return error,
-        Err(failure) => failure.to_string(),
+/// Ends `launch`, which failed with `error`, after it `spawned` a VMM or not, once its caller
+/// `recorded` the failure, and returns how it failed, whose error says why the launch was not
+/// ended if it was not: its journal then remains for [`LockedStore::recover`]. A launch whose
+/// caller could not record its failure keeps its journal, as a crash would leave it, and ends no
+/// more of it than its caller did.
+fn abandon_after(
+    launch: Launch<'_>,
+    error: Error,
+    spawned: bool,
+    recorded: Result<()>,
+) -> LaunchFailure {
+    let reason = match recorded {
+        Err(unrecorded) => {
+            drop(launch);
+            unrecorded.to_string()
+        }
+        Ok(()) => match launch.abandon() {
+            Ok(Recovery::Indeterminate(reason)) => reason,
+            Ok(_) => {
+                return LaunchFailure {
+                    error,
+                    spawned,
+                    unended: None,
+                };
+            }
+            Err(failure) => failure.to_string(),
+        },
     };
     let (kind, message, source) = error.into_parts();
     let error = Error::new(
         kind,
         format!("{message}; the launch could not be ended, and remains for recovery: {reason}"),
     );
-    match source {
-        Some(source) => error.with_source(source),
-        None => error,
+    LaunchFailure {
+        error: match source {
+            Some(source) => error.with_source(source),
+            None => error,
+        },
+        spawned,
+        unended: Some(reason),
     }
 }
 
@@ -367,7 +462,15 @@ impl<'s> Starting<'s> {
     ///
     /// Fails if the runtime record cannot be written. The VMM is then ended through its handle,
     /// and the journal that remains shows [`LockedStore::recover`] that it exited.
-    pub fn commit(mut self) -> Result<Vmm> {
+    pub fn commit(self) -> Result<Vmm> {
+        self.commit_reporting(|_| {})
+    }
+
+    /// Commits the launch as [`commit`](Self::commit) does, and calls `failing` with the error of
+    /// a commit that fails, before it ends the VMM, so that the caller may record the failure
+    /// first, as a clone's launch does. The journal remains all the same, whether or not the
+    /// caller could.
+    pub(crate) fn commit_reporting(mut self, failing: impl FnOnce(&Error)) -> Result<Vmm> {
         let StartingInner {
             launch,
             child,
@@ -383,6 +486,7 @@ impl<'s> Starting<'s> {
                 })
             }
             Err(error) => {
+                failing(&error);
                 // No runtime record names the VM, so its VMM must not run on.
                 child.kill_and_wait();
                 Err(error)
@@ -400,6 +504,25 @@ impl<'s> Starting<'s> {
             .take()
             .expect("a launch is abandoned once")
             .abandon()
+    }
+
+    /// Ends the launch's VMM through its handle, and keeps the launch's journal, as a crash of the
+    /// caller would leave it, for [`LockedStore::recover`], which ends the launch once it finds
+    /// the VMM exited. Returns whether the VMM exited, as [`Launched::kill_and_wait`] does.
+    ///
+    /// It ends a launch whose caller could not record its failure before the launch's end, as a
+    /// clone's launch records it, so that the journal, which keeps the clone's lease, still tells
+    /// that the launch began.
+    pub(crate) fn end_keeping_journal(mut self) -> bool {
+        let StartingInner {
+            launch,
+            child,
+            process: _,
+        } = self.inner.take().expect("a launch is ended once");
+        let exited = child.kill_and_wait();
+        // A launch that is dropped keeps its journal.
+        drop(launch);
+        exited
     }
 }
 
@@ -470,7 +593,10 @@ impl Vmm {
     /// The result says whether the VMM exited without the forced step, the forced step ended it,
     /// or it still runs; see [`StopOutcome`]. Once the VMM has exited, the stop clears the runtime
     /// record of its launch, as [`LockedStore::clear_runtime`] does, unless the record is another
-    /// VM's by then. A VMM that still runs keeps its record.
+    /// VM's by then. A VMM that still runs keeps its record. One that had exited before the stop
+    /// began, which runs no step, ends as one that the stop ended, as [`StopOutcome::Graceful`],
+    /// and its record is cleared: [`stop_unless_exited`](Self::stop_unless_exited) tells such a
+    /// VMM apart, and keeps its record.
     ///
     /// `locked` must be the locked store of the VM's sandbox. Fails with
     /// [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported) if `forced` is zero or longer
@@ -484,19 +610,33 @@ impl Vmm {
         forced: Option<Duration>,
         graceful: impl FnOnce(&Self, Instant) -> std::result::Result<(), E>,
     ) -> Result<Stopped<E>> {
-        self.check_store(locked)?;
-        if let Some(bound) = forced {
-            check_bound(bound, "the forced step")?;
-        }
-        let stopped = stop_process(
-            &self.process,
-            self.record.process().pid,
-            deadline,
-            forced,
-            || graceful(self, deadline),
-        )?;
-        self.clear_if_exited(locked, stopped.outcome)?;
-        Ok(stopped)
+        self.stop_with(locked, deadline, forced, graceful, &self.process)
+    }
+
+    /// Stops the VM as [`stop`](Self::stop) does, unless its VMM had exited before the stop began,
+    /// and returns `None` then, with the runtime record of its launch kept.
+    ///
+    /// The stop decides by its own check of the VMM, before its graceful step, as
+    /// [`stop`](Self::stop) does. A VMM that had exited by then ended without its holder, however
+    /// recently the holder found it running: the stop runs no step, signals nothing, and clears
+    /// nothing, so that the record tells [`reattach`] that the VM exited unheld, as one that exits
+    /// while no caller holds it does. A caller that tells how the VM ended then reattaches, as
+    /// [`reattach_clone`](crate::host::template::reattach_clone) does, which records a clone's
+    /// failure, with the loss of its status if no report of the guest's own end tells why its VM
+    /// exited, before it clears the record. [`stop`](Self::stop) ends such a VM as one that it
+    /// stopped, and clears its record, so a holder that checks whether the VMM has exited, then
+    /// stops the VM with it, attributes to its stop a VMM that exits in between.
+    ///
+    /// A VMM that runs as the stop begins is stopped as [`stop`](Self::stop) stops it, with the
+    /// same result, and its exit is the stop's from then on. Fails as [`stop`](Self::stop) fails.
+    pub fn stop_unless_exited<E>(
+        &self,
+        locked: &mut LockedStore,
+        deadline: Instant,
+        forced: Option<Duration>,
+        graceful: impl FnOnce(&Self, Instant) -> std::result::Result<(), E>,
+    ) -> Result<Option<Stopped<E>>> {
+        self.stop_unless_exited_with(locked, deadline, forced, graceful, &self.process)
     }
 
     /// Ends the VM by identity-verified forced termination: terminates its VMM through its
@@ -523,6 +663,51 @@ impl Vmm {
     /// hold it.
     pub fn terminate(&self, locked: &mut LockedStore, bound: Duration) -> Result<StopOutcome> {
         self.terminate_with(locked, bound, &self.process)
+    }
+
+    /// Stops the VM as [`stop`](Self::stop) does, through `process`: its VMM, or, in tests, a
+    /// stand-in for it.
+    fn stop_with<E>(
+        &self,
+        locked: &mut LockedStore,
+        deadline: Instant,
+        forced: Option<Duration>,
+        graceful: impl FnOnce(&Self, Instant) -> std::result::Result<(), E>,
+        process: &impl Stoppable,
+    ) -> Result<Stopped<E>> {
+        if let Some(stopped) =
+            self.stop_unless_exited_with(locked, deadline, forced, graceful, process)?
+        {
+            return Ok(stopped);
+        }
+        self.clear_if_exited(locked, StopOutcome::Graceful)?;
+        Ok(Stopped {
+            outcome: StopOutcome::Graceful,
+            graceful_error: None,
+        })
+    }
+
+    /// Stops the VM as [`stop_unless_exited`](Self::stop_unless_exited) does, through `process`:
+    /// its VMM, or, in tests, a stand-in for it.
+    fn stop_unless_exited_with<E>(
+        &self,
+        locked: &mut LockedStore,
+        deadline: Instant,
+        forced: Option<Duration>,
+        graceful: impl FnOnce(&Self, Instant) -> std::result::Result<(), E>,
+        process: &impl Stoppable,
+    ) -> Result<Option<Stopped<E>>> {
+        self.check_store(locked)?;
+        if let Some(bound) = forced {
+            check_bound(bound, "the forced step")?;
+        }
+        let stopped = stop_process(process, self.record.process().pid, deadline, forced, || {
+            graceful(self, deadline)
+        })?;
+        if let Some(stopped) = &stopped {
+            self.clear_if_exited(locked, stopped.outcome)?;
+        }
+        Ok(stopped)
     }
 
     /// Ends the VM as [`terminate`](Self::terminate) does, through `process`: its VMM, or, in
@@ -576,11 +761,11 @@ fn check_bound(bound: Duration, what: &str) -> Result<()> {
     }
 }
 
-/// How [`Vmm::stop`] or [`Vmm::terminate`] ended.
+/// How [`Vmm::stop`], [`Vmm::stop_unless_exited`], or [`Vmm::terminate`] ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum StopOutcome {
     /// The VMM exited without the forced step: by the deadline of the graceful step, or before
-    /// the stop or the termination began.
+    /// the stop or the termination began, which [`Vmm::stop_unless_exited`] reports as no stop.
     Graceful,
     /// The forced step terminated the VMM through its verified handle, and it exited within the
     /// step's bound: the graceful step of a stop did not end it, or a termination took the step
@@ -592,8 +777,8 @@ pub enum StopOutcome {
     TimedOut,
 }
 
-/// What [`Vmm::stop`] did: how the stop ended, and the failure of its graceful step, if it
-/// failed.
+/// What [`Vmm::stop`] or [`Vmm::stop_unless_exited`] did: how the stop ended, and the failure of
+/// its graceful step, if it failed.
 #[derive(Debug)]
 pub struct Stopped<E> {
     /// How the stop ended.
@@ -629,23 +814,21 @@ impl Stoppable for Process {
 }
 
 /// Stops the VMM `process`, whose ID is `pid`, with the graceful step `graceful`, the deadline
-/// `deadline`, and the forced step that `forced` requests, as [`Vmm::stop`] describes, without
-/// clearing its runtime record.
+/// `deadline`, and the forced step that `forced` requests, as [`Vmm::stop_unless_exited`]
+/// describes, without clearing its runtime record: returns `None`, and takes no step, if the VMM
+/// had exited before.
 fn stop_process<E>(
     process: &impl Stoppable,
     pid: u32,
     deadline: Instant,
     forced: Option<Duration>,
     graceful: impl FnOnce() -> std::result::Result<(), E>,
-) -> Result<Stopped<E>> {
+) -> Result<Option<Stopped<E>>> {
     if process
         .has_exited()
         .map_err(|error| undetermined(pid, error))?
     {
-        return Ok(Stopped {
-            outcome: StopOutcome::Graceful,
-            graceful_error: None,
-        });
+        return Ok(None);
     }
     let graceful_error = graceful().err();
     let exited = match graceful_error {
@@ -658,10 +841,10 @@ fn stop_process<E>(
         None => StopOutcome::TimedOut,
         Some(bound) => force(process, pid, bound)?,
     };
-    Ok(Stopped {
+    Ok(Some(Stopped {
         outcome,
         graceful_error,
-    })
+    }))
 }
 
 /// Terminates the VMM `process`, whose ID is `pid`, unless it has exited, and waits up to `bound`
@@ -752,15 +935,28 @@ pub enum Reattached {
 /// can. Fails with [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported) for an invalid
 /// `runtime`, and as [`LockedStore::recover`] does for inconsistent records.
 pub fn reattach(locked: &mut LockedStore, runtime: &RuntimeIdentity) -> Result<Reattached> {
-    reattach_with(locked, runtime, Process::open)
+    reattach_with(locked, runtime, Process::open, |_| Ok(()))
 }
 
-/// Reattaches as [`reattach`] does, holding the recorded VMM with `open`, which is
+/// Reattaches as [`reattach`] does, and calls `exited` with the runtime record of a VMM that it
+/// found exited, before it clears the record, so that the caller may record what ended the VM
+/// while the sandbox still names it, as a clone's reattach does. Fails, and keeps the record, if
+/// `exited` fails.
+pub(crate) fn reattach_reporting(
+    locked: &mut LockedStore,
+    runtime: &RuntimeIdentity,
+    exited: impl FnOnce(&RuntimeRecord) -> Result<()>,
+) -> Result<Reattached> {
+    reattach_with(locked, runtime, Process::open, exited)
+}
+
+/// Reattaches as [`reattach_reporting`] does, holding the recorded VMM with `open`, which is
 /// [`Process::open`] outside tests.
 fn reattach_with(
     locked: &mut LockedStore,
     runtime: &RuntimeIdentity,
     open: impl FnOnce(&ProcessRef) -> io::Result<Option<Process>>,
+    exited: impl FnOnce(&RuntimeRecord) -> Result<()>,
 ) -> Result<Reattached> {
     runtime.check()?;
     let recovery = locked.recover()?;
@@ -779,6 +975,7 @@ fn reattach_with(
     let process = match open(record.process()) {
         Ok(Some(process)) => process,
         Ok(None) => {
+            exited(&record)?;
             locked.clear_runtime_of(Some(&record))?;
             return Ok(Reattached::Exited {
                 record: Some(record),

@@ -2205,7 +2205,7 @@ pub(crate) fn interrupted() -> bool {
 
 #[cfg(test)]
 mod tests {
-    use std::io::Read;
+    use std::io::{Read, Write};
 
     use super::*;
 
@@ -2231,6 +2231,43 @@ mod tests {
         let refused = end_process(false, 7, || panic!("terminated"), || Ok(false)).unwrap_err();
         assert_eq!(refused.kind(), io::ErrorKind::PermissionDenied);
         end_process(false, 7, || panic!("terminated"), || Ok(true)).unwrap();
+    }
+
+    #[test]
+    fn a_restore_ready_client_that_closed_before_its_connection_was_accepted_is_read_to_its_end() {
+        let pid = std::process::id();
+        let receive_all = |listener: &mut ReadyListener| {
+            let mut received = Vec::new();
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while listener
+                .receive(pid, &mut received, 64, Duration::from_millis(50))
+                .unwrap()
+            {
+                assert!(Instant::now() < deadline, "the endpoint did not close");
+            }
+            received
+        };
+        // A client that sent nothing, as a VMM that fails as it starts, and one that sent its
+        // event, each closed before the listener accepted their connection: what they sent
+        // remains to read, and then the end of the pipe.
+        for sent in [&b""[..], b"the event\n"] {
+            let (endpoint, mut listener) = listen_ready(Path::new("unused")).unwrap();
+            let mut client = fs::OpenOptions::new().write(true).open(&endpoint).unwrap();
+            client.write_all(sent).unwrap();
+            drop(client);
+            assert_eq!(receive_all(&mut listener), sent);
+        }
+        // A client that closes once the listener accepted its connection.
+        let (endpoint, mut listener) = listen_ready(Path::new("unused")).unwrap();
+        let client = fs::OpenOptions::new().write(true).open(&endpoint).unwrap();
+        let mut received = Vec::new();
+        assert!(
+            listener
+                .receive(pid, &mut received, 64, Duration::from_millis(50))
+                .unwrap()
+        );
+        drop(client);
+        assert_eq!(receive_all(&mut listener), b"");
     }
 
     #[test]
