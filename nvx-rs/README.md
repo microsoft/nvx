@@ -2487,6 +2487,8 @@ must read as the model does every command line of up to six bytes among a
 letter and those that `next_arg` treats apart, and random ones. With the model,
 properties check that the kernel reads no reserved parameter in the extra
 parameters that a `LaunchSpec` accepts, whatever separates it, and reads the
-`hostname=` parameter after them, and that the time ABI's check of the guest's
+`hostname=` parameter after them; that the time ABI's check of the guest's
 command line fails exactly when the kernel applies a clock parameter that the
-ABI forbids.
+ABI forbids; and that the kernel reads every token of the command lines of a
+sandbox whose entrypoint, arguments, and share targets a launch accepts as one
+parameter, whole.
