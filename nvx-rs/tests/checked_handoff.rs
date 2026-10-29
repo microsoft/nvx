@@ -209,6 +209,26 @@ fn staged_blocks() -> String {
     )
 }
 
+/// Tries to replace both staged images at their paths, as something that takes a path after the
+/// checks would, and fails the test unless it can on Linux, where the VMM opens the checked files
+/// whatever has their paths, and cannot on Windows, where the checked files hold their paths.
+fn replace_images(staged: &Staged) {
+    for (path, replacement) in [
+        (staged.distro(), "replaced distro\n"),
+        (staged.scratch(), "replaced scratch\n"),
+    ] {
+        let new = path.with_extension("new");
+        fs::write(&new, replacement).unwrap();
+        let replaced = fs::rename(&new, &path);
+        assert_eq!(
+            replaced.is_ok(),
+            cfg!(target_os = "linux"),
+            "{}: {replaced:?}",
+            path.display()
+        );
+    }
+}
+
 /// The working directory of a VMM fixture. Dropping it ends the fixture, and the launched VMM
 /// that it holds, so that a failed test leaves no process behind.
 struct VmmDirectory {
@@ -469,23 +489,9 @@ fn a_prepared_launch_hands_the_vmm_its_checked_images_alone() {
     )
     .unwrap();
 
-    // Something replaces both images between the checks and the VMM's opens: on Linux it can,
-    // and the VMM opens the checked files anyway; on Windows the checked files keep it from
-    // doing so.
-    for (path, replacement) in [
-        (staged.distro(), "replaced distro\n"),
-        (staged.scratch(), "replaced scratch\n"),
-    ] {
-        let new = path.with_extension("new");
-        fs::write(&new, replacement).unwrap();
-        let replaced = fs::rename(&new, &path);
-        assert_eq!(
-            replaced.is_ok(),
-            cfg!(target_os = "linux"),
-            "{}: {replaced:?}",
-            path.display()
-        );
-    }
+    // Something replaces both images between the checks and the VMM's opens: on Linux it can, and
+    // the VMM opens the checked files anyway; on Windows the checked files keep it from doing so.
+    replace_images(&staged);
 
     #[cfg(target_os = "linux")]
     let checked: Vec<PathBuf> = {
@@ -710,10 +716,29 @@ fn a_vmm_keeps_the_scratch_images_claim_once_its_launcher_is_gone() {
     let claimed = check_scratch().unwrap_err();
     assert_eq!(claimed.kind(), ErrorKind::TimedOut, "{claimed}");
 
-    // The claim lasts while the VMM writes the image, which changes its length here, so that a
-    // binding of the written image tells the claim apart, and it ends with the VMM.
+    // Something then replaces both images at their paths, before the VMM opens them: on Linux it
+    // can, and on Windows the copies of the checked files that the VMM inherited keep it from
+    // doing so. Either way, the VMM opens the checked images. On Linux, links that the test keeps
+    // to them put them back at their paths once the VMM has opened them, for the checks below.
+    #[cfg(target_os = "linux")]
+    let kept: Vec<(PathBuf, PathBuf)> = [staged.distro(), staged.scratch()]
+        .into_iter()
+        .map(|path| {
+            let kept = path.with_extension("kept");
+            fs::hard_link(&path, &kept).unwrap();
+            (kept, path)
+        })
+        .collect();
+    replace_images(&staged);
     File::create(vmm.path().join(GO_MARKER)).unwrap();
     assert_eq!(vmm.report(BLOCKS_REPORT), staged_blocks());
+    #[cfg(target_os = "linux")]
+    for (kept, path) in kept {
+        fs::rename(kept, path).unwrap();
+    }
+
+    // The claim lasts while the VMM writes the image, which changes its length here, so that a
+    // binding of the written image tells the claim apart, and it ends with the VMM.
     let written = ScratchBinding::bind(launch.scratch()).unwrap();
     assert_ne!(written, scratch_binding);
     let check_written = || written.check(launch.scratch(), Instant::now() + CLAIM_RELEASE_WAIT);
@@ -730,6 +755,13 @@ fn a_vmm_keeps_the_scratch_images_claim_once_its_launcher_is_gone() {
     );
     launched.kill_and_wait();
     drop(check_written().unwrap());
+
+    // On Windows, the VMM's copies of the checked files went with it too, so the images can be
+    // renamed again.
+    #[cfg(windows)]
+    for path in [staged.distro(), staged.scratch()] {
+        rename_away_and_back(&path);
+    }
 }
 
 /// Renames the file at `path` away and back, which no process that holds it without sharing its
