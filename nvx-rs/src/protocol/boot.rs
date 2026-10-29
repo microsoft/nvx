@@ -1,5 +1,6 @@
 //! Kernel command-line tokens through which the host configures the guest agent at boot.
 
+use super::cmdline::{self, Token};
 use super::{MAX_HOST_MAPPINGS, ProtocolError, violation};
 
 /// Prefix of the token that announces how many host mappings the guest agent receives through
@@ -7,11 +8,15 @@ use super::{MAX_HOST_MAPPINGS, ProtocolError, violation};
 /// many.
 pub const MAPS_TOKEN: &str = "nvx_maps=";
 
+/// The name of the [`MAPS_TOKEN`] token: its text up to the `=`.
+const MAPS_NAME: &[u8] = MAPS_TOKEN.as_bytes().split_at(MAPS_TOKEN.len() - 1).0;
+
 /// Token with which the guest creates an account for the workload identity when its image lacks
 /// a usable one.
 pub const WORKLOAD_ACCOUNT_TOKEN: &str = "nvx_workload_account=create";
 
-/// Parses the `nvx_maps=COUNT` token from a Linux kernel command line.
+/// Parses the `nvx_maps=COUNT` token from a Linux kernel command line, whose tokens it reads as
+/// the guest's init splits them, with [`cmdline::init_tokens`].
 ///
 /// No token announces zero mappings. One token may contain only decimal digits and must name a
 /// count from 1 through [`MAX_HOST_MAPPINGS`]. A duplicate or malformed `nvx_maps=` token is an
@@ -19,8 +24,12 @@ pub const WORKLOAD_ACCOUNT_TOKEN: &str = "nvx_workload_account=create";
 pub fn parse_host_mapping_count(command_line: &[u8]) -> Result<u32, ProtocolError> {
     let mut count = 0;
     let mut found = false;
-    for token in command_line.split(|byte| matches!(byte, b' ' | b'\t' | b'\n')) {
-        let Some(digits) = token.strip_prefix(MAPS_TOKEN.as_bytes()) else {
+    for token in cmdline::init_tokens(command_line) {
+        let Token {
+            name: MAPS_NAME,
+            value: Some(digits),
+        } = token
+        else {
             continue;
         };
         if found || digits.is_empty() {

@@ -27,7 +27,8 @@
 
 use std::fmt;
 
-use super::{ProtocolError, cmdline, violation};
+use super::cmdline::{self, Token};
+use super::{ProtocolError, violation};
 use crate::uuid::Uuid;
 
 /// The MMIO base of the `distro` block device, which holds a layered root's image.
@@ -191,15 +192,15 @@ impl RootLayout {
     /// that of a blockless root has none.
     ///
     /// The command line splits at spaces, tabs, and newlines, without quoting, as the guest's init
-    /// splits it, and its tokens may come in any order. Each boot token must take one of the forms
-    /// of the [module](self), with a value and at most once. The image needs one upper, and each
-    /// upper the image. A RAM upper also refuses a scratch block device: the kernel adds a
-    /// microVM's virtio-mmio devices from the `virtio_mmio.device=SIZE@BASE:IRQ` parameters that
-    /// the VMM appends, and none may sit at [`SCRATCH_MMIO_BASE`]. The parser reads those
-    /// parameters as the kernel does, with [`cmdline::virtio_mmio_devices`], since the kernel
-    /// splits its command line at more whitespace than init, honors double quotes, and stops at
-    /// `--`. Other tokens are ignored, as are the devices that the layout uses, which the guest
-    /// resolves itself.
+    /// splits it, with [`cmdline::init_tokens`], and its tokens may come in any order. Each boot
+    /// token must take one of the forms of the [module](self), with a value and at most once. The
+    /// image needs one upper, and each upper the image. A RAM upper also refuses a scratch block
+    /// device: the kernel adds a microVM's virtio-mmio devices from the
+    /// `virtio_mmio.device=SIZE@BASE:IRQ` parameters that the VMM appends, and none may sit at
+    /// [`SCRATCH_MMIO_BASE`]. The parser reads those parameters as the kernel does, with
+    /// [`cmdline::virtio_mmio_devices`], since the kernel splits its command line at more
+    /// whitespace than init, honors double quotes, and stops at `--`. Other tokens are ignored, as
+    /// are the devices that the layout uses, which the guest resolves itself.
     ///
     /// Fails with a [`ProtocolError`] that names the first token that breaks these rules, or the
     /// tokens that conflict.
@@ -207,11 +208,7 @@ impl RootLayout {
         let mut image = None;
         let mut scratch = false;
         let mut ram = false;
-        for token in command_line.split(|byte| matches!(byte, b' ' | b'\t' | b'\n')) {
-            let (name, value) = match token.iter().position(|&byte| byte == b'=') {
-                Some(equals) => (&token[..equals], Some(&token[equals + 1..])),
-                None => (token, None),
-            };
+        for Token { name, value } in cmdline::init_tokens(command_line) {
             let Some(parameter) = [LAYER, SCRATCH, OVERLAY_UPPER]
                 .into_iter()
                 .find(|parameter| parameter.as_bytes() == name)

@@ -1468,6 +1468,40 @@ fn adapter_plans_refuse_what_their_root_and_openvmm_own() {
 }
 
 #[test]
+fn plans_refuse_the_tokens_that_the_guest_init_reads_in_quoted_values() {
+    // The kernel reads `x` with a quoted value, but the guest's init splits the command line at
+    // spaces, tabs, and newlines without quoting, and reads the tokens in the value.
+    let sandbox_plan = plan(images()[0], SandboxUpper::RAM, SandboxSettings::default());
+    let adapter_plan = adapter(images()[2], SandboxUpper::RAM);
+    for (plan, user, refusal) in [
+        (
+            &sandbox_plan,
+            "x=\"y nvx_entrypoint=/bin/other\"",
+            "nvx_entrypoint is owned by the sandbox profile",
+        ),
+        (
+            &sandbox_plan,
+            "x=\"y\tvirtfs_tag=other\"",
+            "virtfs_tag is owned by the sandbox --mount option",
+        ),
+        (
+            &adapter_plan,
+            "x=\"y nvx_layer=distro,0xd0003000,gpt\"",
+            "nvx_layer is owned by the plan's root",
+        ),
+        (
+            &adapter_plan,
+            "x=\"y\nvirtfs_tag=microvm\"",
+            "virtfs_tag is owned by OpenVMM's shares",
+        ),
+    ] {
+        let error = plan.kernel_command_line(user).unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::Unsupported, "{user:?}");
+        assert_eq!(error.to_string(), refusal, "{user:?}");
+    }
+}
+
+#[test]
 fn adapter_plans_persist_without_settings_or_an_export() {
     let plan = SandboxPlan::adapter(
         SandboxDistro::new("/images/distro.img", RootImage::gpt(Some(uuid(GPT_GUID)))),

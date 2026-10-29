@@ -1,7 +1,9 @@
-//! Tests of the kernel command line as Linux reads it, and of the DNS server that OpenVMM names in
-//! it. The expectations follow Linux 6.18: `lib/cmdline.c`, `kernel/params.c`, `lib/vsprintf.c`,
-//! `lib/kstrtox.c`, and `drivers/virtio/virtio_mmio.c`; and, for the DNS server, OpenVMM's
-//! rendering and reading of its `virtnet_dns=` token, `openvmm_defs::microvm`'s
+//! Tests of the kernel command line as Linux and the guest's init read it, and of the DNS server
+//! that OpenVMM names in it. The expectations follow Linux 6.18: `lib/cmdline.c`,
+//! `kernel/params.c`, `lib/vsprintf.c`, `lib/kstrtox.c`, and `drivers/virtio/virtio_mmio.c`; for
+//! the init's tokens, the field splitting of the shell with which NVX's init, `guest/common/init`,
+//! reads the command line, `for token in $cmdline` with the default `IFS`; and, for the DNS
+//! server, OpenVMM's rendering and reading of its `virtnet_dns=` token, `openvmm_defs::microvm`'s
 //! `command_line_fragment_with` and `microvm_command_line_dns_server`, whose vectors they take.
 //! The [`model`] of `next_arg` and `parse_args` transcribes the kernel's code, and `parameters` must
 //! read every command line as it does.
@@ -54,6 +56,21 @@ fn owned(command_line: &[u8]) -> Vec<(Vec<u8>, Option<Vec<u8>>)> {
     parameters(command_line)
         .map(|parameter| (parameter.name.to_vec(), parameter.value.map(<[u8]>::to_vec)))
         .collect()
+}
+
+/// Checks that the guest's init splits `command_line` into the tokens `expected`: that
+/// [`init_tokens`] reads the name of each, and its value, if it has one.
+fn assert_init_tokens(command_line: &[u8], expected: &[(&[u8], Option<&[u8]>)]) {
+    let expected: Vec<_> = expected
+        .iter()
+        .map(|&(name, value)| Token { name, value })
+        .collect();
+    assert_eq!(
+        init_tokens(command_line).collect::<Vec<_>>(),
+        expected,
+        "{}",
+        command_line.escape_ascii()
+    );
 }
 
 /// Returns a strategy for command lines: mostly the bytes that `next_arg` treats apart, letters,
@@ -385,6 +402,55 @@ fn devices_come_from_the_parameters_that_the_kernel_reads() {
         ]
     );
     assert_eq!(virtio_mmio_devices(b"").count(), 0);
+}
+
+#[test]
+fn the_init_splits_only_at_spaces_tabs_and_newlines() {
+    // Every other byte stays in its token: those that the kernel takes for whitespace too, the
+    // vertical tab, the form feed, the carriage return, and 0xa0, and a quote and a NUL.
+    for byte in 0..=u8::MAX {
+        let command_line = [b'a', byte, b'b'];
+        match byte {
+            b' ' | b'\t' | b'\n' => {
+                assert_init_tokens(&command_line, &[(b"a", None), (b"b", None)]);
+            }
+            b'=' => assert_init_tokens(&command_line, &[(b"a", Some(b"b"))]),
+            _ => assert_init_tokens(&command_line, &[(&command_line, None)]),
+        }
+    }
+}
+
+#[test]
+fn command_lines_split_into_tokens_as_the_init_splits_them() {
+    assert_init_tokens(b"a b=c", &[(b"a", None), (b"b", Some(b"c"))]);
+    // The init finds no empty token before, between, or after the bytes at which it splits.
+    assert_init_tokens(
+        b" \ta \n\tb\t\t c\n",
+        &[(b"a", None), (b"b", None), (b"c", None)],
+    );
+    assert_init_tokens(b"", &[]);
+    assert_init_tokens(b" \t\n", &[]);
+    // A name ends at the token's first `=`, even one that starts the token, at which the kernel's
+    // would not end, and the value holds the rest.
+    assert_init_tokens(b"=", &[(b"", Some(b""))]);
+    assert_init_tokens(b"=a=b", &[(b"", Some(b"a=b"))]);
+    assert_init_tokens(b"a=", &[(b"a", Some(b""))]);
+    assert_init_tokens(b"a=b=c", &[(b"a", Some(b"b=c"))]);
+    // The init honors no quotes, and reads past a NUL and a `--`, at which the kernel stops.
+    assert_init_tokens(
+        b"\"a b\" c=\"d e\"",
+        &[
+            (b"\"a", None),
+            (b"b\"", None),
+            (b"c", Some(b"\"d")),
+            (b"e\"", None),
+        ],
+    );
+    assert_init_tokens(b"a\0b c", &[(b"a\0b", None), (b"c", None)]);
+    assert_init_tokens(
+        b"a -- b=c",
+        &[(b"a", None), (b"--", None), (b"b", Some(b"c"))],
+    );
 }
 
 #[test]

@@ -26,13 +26,17 @@ use crate::guest::reseed::Seed;
 use crate::guest::sys::{
     self, Errno, FileDescriptor, ForkResult, OpenFlags, Port, PortAccess, PortError, kernel,
 };
+use crate::protocol::cmdline::{self, Token};
 
 /// Maximum accepted restore pairing uncertainty.
 const REPAIR_BOUND_NS: i64 = 1_000_000;
 /// Samples that repair takes when the packet's pairing is too uncertain.
 const REPAIR_SAMPLE_ATTEMPTS: usize = 2;
-/// The kernel command-line token that makes the time ABI report-only.
-const REPORT_ONLY_TOKEN: &[u8] = b"nvx_time_abi=report-only";
+/// The kernel command-line token that makes the time ABI report-only, `nvx_time_abi=report-only`.
+const REPORT_ONLY_TOKEN: Token<'static> = Token {
+    name: b"nvx_time_abi",
+    value: Some(b"report-only"),
+};
 
 /// The guest side of NVX time ABI version one: its cold-boot time step and the start of its time
 /// daemon, its VM generation ID, the capture request with the repair of a restore, and the
@@ -250,13 +254,14 @@ impl Default for TimeAbi {
     }
 }
 
-/// Returns whether the kernel command line selects report-only mode.
+/// Returns whether the kernel command line selects report-only mode: whether it holds the
+/// `nvx_time_abi=report-only` token, among the tokens into which [`cmdline::init_tokens`] splits
+/// it as the guest's init does.
 fn cmdline_requests_report_only() -> bool {
     let Ok(text) = sys::read_file(kernel::COMMAND_LINE) else {
         return false;
     };
-    text.split(|byte| matches!(byte, b' ' | b'\t' | b'\n'))
-        .any(|token| token == REPORT_ONLY_TOKEN)
+    cmdline::init_tokens(&text).any(|token| token == REPORT_ONLY_TOKEN)
 }
 
 /// Ends a call with `result`, unless the calling thread may still hold port permission that a

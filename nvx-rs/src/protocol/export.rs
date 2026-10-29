@@ -28,6 +28,7 @@
 
 use std::fmt;
 
+use super::cmdline::{self, Token};
 use super::{ProtocolError, violation};
 
 /// The guest directory of the host export, the value of its `virtfs_dir=` token: the directory
@@ -104,14 +105,14 @@ impl HostExport {
     /// that the host maps no paths into has none.
     ///
     /// The command line splits at spaces, tabs, and newlines, without quoting, as the guest's init
-    /// splits it, and its tokens may come in any order. Each of the export's tokens must take its
-    /// form of the [module](self), with a value and at most once, and the command line must hold
-    /// all four or none: `virtfs_dir=` [`EXPORT_DIRECTORY`], which a single shared directory or the
-    /// aggregate of NVX's one-shot live shares names another way, `virtfs_tag=` a nonempty name of
-    /// letters, digits, `_`, and `-`, `virtfs_mode=` `ro` or `rw`, and `virtfs_aggregate=1`. An
-    /// `nvx_share=` token is refused too, whether or not the export's tokens are there: it binds a
-    /// child of an aggregate as a live share, which the guest of an export never does. Other tokens
-    /// are ignored.
+    /// splits it, with [`cmdline::init_tokens`], and its tokens may come in any order. Each of the
+    /// export's tokens must take its form of the [module](self), with a value and at most once, and
+    /// the command line must hold all four or none: `virtfs_dir=` [`EXPORT_DIRECTORY`], which a
+    /// single shared directory or the aggregate of NVX's one-shot live shares names another way,
+    /// `virtfs_tag=` a nonempty name of letters, digits, `_`, and `-`, `virtfs_mode=` `ro` or `rw`,
+    /// and `virtfs_aggregate=1`. An `nvx_share=` token is refused too, whether or not the export's
+    /// tokens are there: it binds a child of an aggregate as a live share, which the guest of an
+    /// export never does. Other tokens are ignored.
     ///
     /// Fails with a [`ProtocolError`] that names the first token that breaks these rules, or the
     /// tokens that an incomplete export lacks.
@@ -120,11 +121,7 @@ impl HostExport {
         let mut tag = None;
         let mut mode = None;
         let mut aggregate = false;
-        for token in command_line.split(|byte| matches!(byte, b' ' | b'\t' | b'\n')) {
-            let (name, value) = match token.iter().position(|&byte| byte == b'=') {
-                Some(equals) => (&token[..equals], Some(&token[equals + 1..])),
-                None => (token, None),
-            };
+        for Token { name, value } in cmdline::init_tokens(command_line) {
             if name == SHARE.as_bytes() && value.is_some() {
                 return Err(violation(format!(
                     "the {SHARE} kernel parameter binds a live share, but a guest that mounts the \

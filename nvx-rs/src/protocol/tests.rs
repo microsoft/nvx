@@ -894,6 +894,38 @@ fn host_mapping_count_matches_the_guest_command_line_parser() {
 }
 
 #[test]
+fn host_mapping_count_splits_the_command_line_as_the_guest_init_does() {
+    // The init splits the command line at spaces, tabs, and newlines alone, without quoting and
+    // past a `--`, unlike the kernel, and the count's token is named `nvx_maps`, byte for byte,
+    // and has a value.
+    for (command_line, expected) in [
+        (&b"nvx_maps nvx_maps=2"[..], 2),
+        (b"quiet -- nvx_maps=2", 2),
+        (b"\"nvx_maps=2\"", 0),
+        (b"=nvx_maps=2", 0),
+        (b"nvx-maps=2", 0),
+        (b"quiet\rnvx_maps=2", 0),
+        (b"quiet\x0bnvx_maps=2", 0),
+        (b"quiet\xa0nvx_maps=2", 0),
+    ] {
+        assert_eq!(
+            parse_host_mapping_count(command_line).unwrap(),
+            expected,
+            "{}",
+            command_line.escape_ascii()
+        );
+    }
+    // A byte at which the init does not split stays in the count.
+    for command_line in [&b"nvx_maps=2\r"[..], b"nvx_maps=2\xa0", b"nvx_maps=\"2\""] {
+        assert!(
+            parse_host_mapping_count(command_line).is_err(),
+            "{}",
+            command_line.escape_ascii()
+        );
+    }
+}
+
+#[test]
 fn both_agent_modes_announce_the_host_mapping_table() {
     assert_eq!(GuestFeatures::DIRECT_AGENT.bits(), 0x7d);
     // The layered root creates no account, so it announces no workload accounts (bit 2).
