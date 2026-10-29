@@ -1936,6 +1936,59 @@ fn a_launch_that_began_shows_the_report_of_a_vmm_that_its_journal_does_not_recor
 }
 
 #[test]
+fn a_reattach_takes_the_report_of_a_vmm_whose_launch_a_recovery_of_the_sandbox_ended() {
+    // The caller crashed once the launch began, before the journal recorded the VMM that it
+    // spawned, which left the report, and a recovery of the sandbox's launch then removed the
+    // journal: nothing records the spawn, but the report is the clone's VM's, as an inspection
+    // takes it, so a reattach of the clone takes it too.
+    let recovered = |status: u8| {
+        let crashed = Crashed::at("begun");
+        let mut locked = crashed.lock();
+        fs::write(locked.outcome_path(), guest_exit(status)).unwrap();
+        match crashed.reattach(&mut locked) {
+            Reattached::Exited {
+                record: None,
+                recovery: Recovery::Exited,
+            } => {}
+            other => panic!("unexpected reattach: {other:?}"),
+        }
+        assert!(locked.journal().unwrap().is_none());
+        (crashed, locked)
+    };
+    let mut control = ReattachControl::answering(Some);
+    // The status of the guest's repair is evidence of the clone's failure at any point.
+    let (crashed, mut locked) = recovered(195);
+    let failure = failed(crashed.take_over(&mut locked, &crashed.runtime, &mut control));
+    assert_eq!(failure.kind(), ErrorKind::Exited, "{failure}");
+    assert_recorded(
+        &failure,
+        &crashed.lease,
+        &locked,
+        (Stage::Launch, Progress::Launching),
+        Evidence::RepairStatus,
+        Teardown::Exited,
+    );
+    assert_eq!(failure.record().status, Some(195));
+    crashed.releases(&mut locked);
+    // Another status is no evidence of a failure: the clone ended, with the report of its VM.
+    let (crashed, mut locked) = recovered(3);
+    match crashed.take_over(&mut locked, &crashed.runtime, &mut control) {
+        ReattachedClone::Ended {
+            progress: Progress::Launching,
+            report: Some(report),
+        } => {
+            let outcome = (report.category.as_deref(), report.status_code);
+            assert_eq!(outcome, (Some("guest-exit"), Some(3)));
+        }
+        other => panic!("the reattach found {}", describe(&other)),
+    }
+    let records = CloneRecords::read(&locked).unwrap().unwrap();
+    assert!(records.failure.is_none());
+    crashed.releases(&mut locked);
+    assert!(control.capabilities.is_empty());
+}
+
+#[test]
 fn a_launch_whose_caller_crashes_once_its_vmm_started_ends_the_vmm_as_reattach_recovers_it() {
     let crashed = Crashed::at("launched");
     let reference = crashed.vmm.reference.clone().unwrap();
@@ -2430,17 +2483,10 @@ fn a_record_of_a_failure_that_cannot_be_read_is_a_failure_whatever_the_reattach_
     crashed.releases(&mut locked);
     // A clone whose launch did not begin: the store holds no record of the launch that the
     // reattach would remove, so the record stays as it is, and a reattach after a crash of the
-    // caller finds the clone as this one does, with no VM, and takes no report of an earlier VM
-    // of the sandbox for the clone's.
+    // caller finds the clone as this one does, with no VM.
     let crashed = Crashed::at("prepared");
     let mut locked = crashed.lock();
     write_private(&locked.clone_failure_path(), b"not a record").unwrap();
-    let earlier = serde_json::json!({
-        "schema_version": 1,
-        "outcome": {"operation": "managed", "category": "guest-exit", "status_code": 195},
-        "teardown": {"workers": true},
-    });
-    fs::write(locked.outcome_path(), serde_json::to_vec(&earlier).unwrap()).unwrap();
     let mut control = ReattachControl::answering(Some);
     let crash = reattach_clone_with(
         &mut locked,
@@ -2459,6 +2505,28 @@ fn a_record_of_a_failure_that_cannot_be_read_is_a_failure_whatever_the_reattach_
     let (lease, no_vm) = (&crashed.lease, Teardown::NoVm);
     assert_recorded(&failure, lease, &locked, launching, host, no_vm);
     assert_eq!(failure.record().status, None);
+    crashed.releases(&mut locked);
+    // A clone whose launch a recovery of the sandbox ended, once its caller crashed before the
+    // journal recorded the VMM that it spawned, which left the report: nothing records the spawn,
+    // but the report is the clone's VM's, since the launch removed any earlier VM's report before
+    // it recorded anything, and the status of the guest's repair prevails.
+    let crashed = Crashed::at("begun");
+    let mut locked = crashed.lock();
+    fs::write(locked.outcome_path(), guest_exit(195)).unwrap();
+    match crashed.reattach(&mut locked) {
+        Reattached::Exited {
+            record: None,
+            recovery: Recovery::Exited,
+        } => {}
+        other => panic!("unexpected reattach: {other:?}"),
+    }
+    write_private(&locked.clone_failure_path(), b"not a record").unwrap();
+    let failure = failed(crashed.take_over(&mut locked, &crashed.runtime, &mut control));
+    assert_eq!(failure.code(), ErrorCode::Io, "{failure}");
+    let (lease, exited) = (&crashed.lease, Teardown::Exited);
+    let repair = Evidence::RepairStatus;
+    assert_recorded(&failure, lease, &locked, launching, repair, exited);
+    assert_eq!(failure.record().status, Some(195));
     crashed.releases(&mut locked);
 }
 

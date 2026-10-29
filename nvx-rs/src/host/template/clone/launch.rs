@@ -371,8 +371,8 @@ impl ClonePlan {
             }
         };
         // The progress log records the spawn before the launch returns: the journal records it too,
-        // but a teardown of the launch removes the journal, and a reattach reads the outcome report
-        // of the clone's VM only once its VMM spawned.
+        // but a teardown of the launch removes the journal, and a reattach then takes how far the
+        // clone got, and so the stage of its failure, from the log.
         if let Err(fault) = tracker.reach(Progress::Spawned) {
             return Err(tracker.fail(starting, Stage::Launch, fault));
         }
