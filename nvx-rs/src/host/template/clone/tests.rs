@@ -19,7 +19,9 @@ use crate::activation::{
     Publication, Upper, WorkloadIdentity,
 };
 use crate::host::filesystem;
-use crate::host::network::{Access as NetworkAccess, NetworkPolicy, NetworkProxy, ProxyScheme};
+use crate::host::network::{
+    Access as NetworkAccess, EgressRule, NetworkPolicy, NetworkProxy, ProxyScheme,
+};
 use crate::host::paths;
 use crate::host::sandbox::distro::{DISTRO_POLICY_REVISION, PolicyVerdict};
 use crate::host::sandbox::scratch::CLAIM_RELEASE_WAIT;
@@ -2048,8 +2050,8 @@ fn networks_that_the_template_does_not_have_are_refused() {
         (
             ErrorKind::Unsupported,
             format!(
-                "the template's generation {generation} has a NIC, which its clones restore with \
-                 the network of the adapter's plan, but the plan has none"
+                "the template's generation {generation} has a NIC, whose network every clone of \
+                 it restores, but the adapter's plan of the clone has none"
             )
         )
     );
@@ -2072,6 +2074,37 @@ fn networks_that_the_template_does_not_have_are_refused() {
                     "the adapter's plan of a clone gives its guest the network {other}, but the \
                      template's generation {generation} restores its NIC on 10.0.0.2/24, from its \
                      snapshot"
+                )
+            )
+        );
+        assert_untouched(&acquired);
+    }
+    // Nor does it serve the clones of another policy at its address: a template serves the clones
+    // of its own network alone.
+    let proxy = NetworkProxy::new(3128).with_scheme(ProxyScheme::Http);
+    for other in [
+        network(NetworkAccess::Allow)
+            .policy()
+            .clone()
+            .with_deny(EgressRule::to("192.0.2.0/24")),
+        NetworkPolicy::new(NetworkAccess::Deny).with_allow(EgressRule::to("192.0.2.0/24")),
+        NetworkPolicy::proxy_only(proxy),
+    ] {
+        let other = with_network(
+            request.clone(),
+            Some(SandboxNetwork::new("10.0.0.2/24", other).unwrap()),
+        );
+        assert_eq!(
+            refused(
+                fixture.plan(&mut acquired, &other, NO_CONTENT),
+                Evidence::InvalidSettings
+            ),
+            (
+                ErrorKind::Unsupported,
+                format!(
+                    "the network of the adapter's plan of a clone is not the one that the \
+                     template's generation {generation} restores its NIC with: a template serves \
+                     the clones of its own network policy, at its own guest's address, alone"
                 )
             )
         );
@@ -2383,13 +2416,26 @@ fn the_activation_record_of_a_clone_of_a_template_with_a_nic_names_its_policy_an
         plan.activation().configuration().network.as_ref(),
         Some(&expected)
     );
-    drop(plan);
-    // A proxy's URL is the one that the guest sees, at its gateway.
+    drop((plan, acquired, fixture));
+    // A proxy's URL is the one that the guest sees, at its gateway, for a clone of a template
+    // whose policy has the proxy.
     let proxy = NetworkProxy::new(3128).with_scheme(ProxyScheme::Http);
-    let proxied = with_network(
-        tmpfs_request(&image, &binding),
-        Some(SandboxNetwork::new("10.0.0.2/24", NetworkPolicy::proxy_only(proxy)).unwrap()),
-    );
+    let proxied = SandboxNetwork::new("10.0.0.2/24", NetworkPolicy::proxy_only(proxy)).unwrap();
+    let fixture = Fixture::with(|class, spec, physical| {
+        *class = CaptureClass {
+            network: Some(proxied.clone()),
+            ..network_class()
+        };
+        *spec = ManifestSpec::with_network();
+        let (distro, scratch) = (
+            geometry(IMAGE_LEN, physical),
+            geometry(SCRATCH_LEN, physical),
+        );
+        set_geometries(class, spec, distro, scratch);
+    });
+    let (image, binding) = fixture.image("distro.erofs", IMAGE_LEN);
+    let mut acquired = fixture.acquire("sandbox");
+    let proxied = with_network(tmpfs_request(&image, &binding), Some(proxied));
     let plan = fixture.plan(&mut acquired, &proxied, NO_CONTENT).unwrap();
     assert_eq!(
         plan.activation().configuration().network,

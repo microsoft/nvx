@@ -1387,7 +1387,14 @@ compatibility key, whose kernel command line holds the platform tier's tokens
 alone: neither the placeholder's identity nor a root's tokens. The template has
 a NIC exactly when its network lets something through: a network that denies
 egress, ingress, and host-loopback access, without a proxy, attaches none, as
-no network does. NVX refuses a network whose policy no template takes, one that
+no network does. The key holds the network as NVX lowers it, OpenVMM's
+arguments of the guest's address and of its policy, none without a NIC, so each
+network policy has a template of its own, which serves the
+[clones](#clones) of that policy alone. The key's encoding, version 1, includes
+that network and has not been released, so a template store that an earlier
+build created is not supported: delete it and create a new one. There is no
+migration. NVX refuses a network whose policy no
+template takes, one that
 allows ingress or host-loopback access both ways, before any VM starts, and the
 command refuses a class that no capture takes, such as one of 3 processors,
 before it creates the store. A capture that fails leaves the store's
@@ -1403,11 +1410,13 @@ library side, `clone`, holds what the command's options choose of the clone,
 template's placeholder, its upper, on an ext4 scratch image or in RAM, its
 memory target, the template's RAM unless given, the workload identity as which
 its executions run, its overlay mode, its scratch's journal policy, the bound
-of a GPT disk's first partition, the machine ID that its executions see, and
+of a GPT disk's first partition, the machine ID that its executions see,
 the host paths that it shares with its root, as a launch's
-[shares](#shares).
-`Request::plan` plans the image over the upper as a launch plans a layered
-root, `Request::export` plans the export of the shares as a launch plans it,
+[shares](#shares), and its [network](#networks), as a launch reads it, which
+must be the template's.
+`Request::plan` plans the image over the upper, with the network, as a launch
+plans a layered root, `Request::export` plans the export of the shares as a
+launch plans it,
 and `Request::clone_request` returns NVX's `CloneRequest` of both, with the
 bindings that the sandbox's store stages for the images, as `stage` stages
 them, so the start hashes nothing. The clone's activation record names the
@@ -1416,12 +1425,22 @@ ID, unless the request asks for one that the guest generates once for the
 clone, which a read-only bind holds at the root's `/etc/machine-id` for every
 execution, and the guest's defaults of the other settings, unless the request
 names them; for a GPT disk, the bound of its first partition is 64 KiB unless
-the request names one, as a launch's guest takes it by default.
+the request names one, as a launch's guest takes it by default. For a template
+with a NIC, the record names the network: the identity of its policy, the DNS
+server with which the template's guest configured its resolver at boot, if
+any, which the guest writes to a resolver file, of mode 0444, that a
+read-only bind holds at the root's `/etc/resolv.conf` for every execution,
+beside a generated machine ID, and the URL of the policy's proxy, if any,
+which every execution of the clone finds in its environment, as an execution
+of a launch does; see [Template mode](#template-mode). Without a DNS server,
+the root keeps the image's own `/etc/resolv.conf`.
 The guest of a GPT clone rereads the disk's partition table before it
 assembles the root, since its kernel created the partitions of the template's
 placeholder.
 
-The command first plans the export of the clone's shares, if it has any, and
+The command first reads the clone's network, if given, as a launch reads it,
+and refuses one that the plan refuses, then plans the export of the clone's
+shares, if it has any, and
 refuses those that it cannot export, as a launch refuses them, then reads the
 generation from the store's index, and, unless the request names the clone's
 memory target, its compatibility key, whose RAM the target is then, before it
@@ -1443,6 +1462,11 @@ time.
 
 NVX's `ClonePlan` then checks the clone against the generation from the
 metadata of its files alone, under the sandbox's lock, which the lease holds:
+its network, which must be the one that the template's key holds, the guest's
+address and the policy of the template's NIC, which every restore of the
+template attaches unchanged, or, for a template without a NIC, none, or one
+that lets nothing through, so that a clone of another network policy finds no
+template in it,
 the bindings of its images, which no one else may change, the geometry of its
 image, which must be the placeholder's, its length included, and that of its
 scratch image, which must be the template's scratch's, its memory target,
@@ -1455,12 +1479,15 @@ reaches the payload of a generation. A clone that
 the template cannot serve fails there, before any VMM starts. The command then records the clone in the
 sandbox's store, as `clone::CloneRecord`, in the format of a launch's
 [record](#layered-roots), in the mode `clone`, with the template's kernel
-command line, the plan and the bindings, so that `probe` and `exec` read the
-plan back, no root configuration, and the template store and the generation, so
+command line, the plan, with the clone's network, and the bindings, so that
+`probe` and `exec` read the plan back, and `exec` gives executions the URL of
+the network's proxy, if any, as for a launch, no root configuration, and the
+template store and the generation, so
 that a later stop finds the store whose lease it releases. Once NVX checked
 the export again, with `ExportPlan::verify`, OpenVMM restores the
 generation's snapshot in place, through NVX's supervisor, as the launch that the
 lease reserves, with the export's directory on the template's filesystem slot,
+and the template's NIC, if it has one, under the template's network,
 and the restore sequence activates the clone through the
 adapter's clone order, `host::CloneOrder`, which sends the clone's activation
 record in an `Activate`, checks the guest agent's build in its `Ready`, sends
@@ -1630,7 +1657,7 @@ the directory that `NVX_ARTIFACTS_DIR` names, and the guest agent's build from
   its record again, and releases the lease of a clone that ended, through the
   template store TEMPLATES, if given, in place of the one that the clone's
   record names.
-- `start STORE --template TEMPLATES --generation G --distro FORMAT:PATH --distro-identity UUID --upper (scratch:PATH | ram) [--memory MIB] [--workload-identity UID:GID] [--overlay-mode MODE] [--scratch-journal POLICY] [--first-partition-bound BYTES] [--machine-id (image | generated)] [SHARES]`
+- `start STORE --template TEMPLATES --generation G --distro FORMAT:PATH --distro-identity UUID --upper (scratch:PATH | ram) [--memory MIB] [--workload-identity UID:GID] [--overlay-mode MODE] [--scratch-journal POLICY] [--first-partition-bound BYTES] [--machine-id (image | generated)] [--network FILE] [SHARES]`
   starts a [clone](#clones) of the generation G of the template store
   TEMPLATES in the sandbox store STORE, which it creates if needed, and whose
   `stage` staged its images, which no one else may change: the image PATH, an
@@ -1645,9 +1672,13 @@ the directory that `NVX_ARTIFACTS_DIR` names, and the guest agent's build from
   partition, 64 KiB by default, as a launch's guest takes it. Every execution
   of the clone sees the hostname `runtime-adapter`, and the machine ID that
   `--machine-id` chooses: the image's own, `image`, by default, or one that the
-  guest generates once for the clone, `generated`. SHARES, as `launch` takes
+  guest generates once for the clone, `generated`. The clone's VM has the
+  [network](#networks) that FILE holds, if given, which the start reads before
+  anything else, as a launch does, and which must be the template's: NVX's plan
+  refuses any other before any VMM starts, as [Clones](#clones) describes.
+  SHARES, as `launch` takes
   them, share host paths with the clone's root: the start refuses those that it
-  cannot export before anything else, and NVX's plan those that the
+  cannot export before anything but its network, and NVX's plan those that the
   template's filesystem slot cannot bind, as [Clones](#clones) describes.
   Once the restore sequence sent the clone's mapping table, if it has one, and
   started the clone's sandbox, it exchanges a `Ping`
@@ -2139,11 +2170,19 @@ Windows, without a hypervisor:
   generation, whose image the plan refuses, and whose shares it cannot export,
   each with status 1 before it needs NVX's artifacts or creates the sandbox's
   store, and the shares before it reads the template store;
+- a start whose network cannot be read, or is one that the plan refuses, with
+  status 1 before anything else: before its image, which does not exist, its
+  shares, which it cannot export, and the template store, which does not exist;
 - the text form of a host's time, which `RUNTIME_ADAPTER_HOST_TIME` takes,
   written and read back on both clocks, and the texts that are none;
 - a clone's record: its JSON, with the plan that `layered::LaunchRecord`
   reads back, the template store and the generation that a stop reads, a
   launch's record that is no clone's, and records that a reader refuses;
+- a clone's network: the plan of a request with a proxy-only network, NVX's
+  request of the clone, whose plan names the proxy's URL that NVX's activation
+  record of the clone takes, and the clone's record, from whose plan an
+  execution finds that URL in each of the proxy's variables, after its own
+  entries; and an open network, and none, with no proxy's settings;
 - NVX's request of a clone, with the staged bindings, the memory target, and
   the guest's defaults or the request's settings, the images that the
   sandbox's store does not stage, which it refuses, and the export of the
@@ -2499,6 +2538,8 @@ captures a template of its own, of 1 processor and 256 MiB of RAM with a
 capacity of 1 GiB, in a template store of its own, of a copy of NVX's Ubuntu
 EROFS image that a directory of the platform holds, which the clones stage as
 their image, or of a GPT disk of its length that the platform holds beside it,
+without a NIC unless its row names a network, whose guest is at `192.0.2.2/24`,
+as in the [template scenarios](#template-scenarios),
 and starts its clones, each in a sandbox store of its own, over a copy of the
 scratch template, which no one else may change either, or in RAM. The GPT disks
 of a template's placeholder and of the clones, which the test writes with
@@ -2530,6 +2571,20 @@ directory that the starts authorize:
 | `clones_at_once_see_only_their_own_exports` | Four at once: one with a read-write export of its own and a generated machine ID, two over the same read-only export, over a scratch image and in RAM, and one without an export | Each with an export started with one mapping, and a record that names it by the identity of its plan, the same for the clones of one export, and on Linux, one `--mount`, read-write or read-only, as the mapping needs; each export mounted read-write, even where its mapping is read-only; below the root, the mapping, beside the bind of a generated machine ID; each clone's own directory, with its access; without an export, no export in the record, no mapping, no `--mount` on Linux, no export mounted, and nothing below the root; the `entries` probe, whose helper writes the root's machine ID, failing with `EROFS` where the generated one is bound; the host's directories with what the writable export took alone; then each stop releases its lease |
 | `a_start_refuses_an_export_that_a_dormant_filesystem_slot_cannot_bind_before_any_vmm_starts` | Sharing two host directories, and sharing a file alone | Status 8, with NVX's reason, and the record of a failure of the request, at the plan, without a VM, by the evidence of invalid mappings, which quarantines nothing; the lease released, and the host's directories unchanged |
 | `a_clone_whose_mapping_fails_ends_before_its_sandbox_starts` | Over a scratch image, sharing a host directory whose second mapping puts a directory onto a file of the image | Status 8, a `Ready`, but no start, and the record of a failure of an unknown cause, at the start, at the clone's `Ready`, by the evidence of the protocol, once the VM exited with the guest's success, or NVX terminated it, with the guest's report that the table failed after its first mapping; nothing quarantined, and the lease released, with the records; the host's directory unchanged |
+| `a_template_without_a_nic_serves_clones_without_a_network` | Two at once, without a network, and with one that lets nothing through; then, once they stopped, one of each network with a NIC of the template scenarios | The first two started, with no network in their records, on Linux no argument of a network of their VMMs, no network device, and the image's own `/etc/resolv.conf`, an empty file of mode 0644, which no bind holds, and root may write; then for each of the others, status 8, with NVX's reason, and the record of a failure of the request, at the plan, without a VM, by the evidence of invalid settings, which quarantines nothing; the lease released |
+| `a_template_serves_the_clones_of_its_own_network_policy_alone` | Of a template of each network with a NIC of the template scenarios: one of the template's network, then, once it stopped, one of each other network, one of the template's policy at the guest's address `192.0.2.3/24`, one of a network that lets nothing through, and one without a network | The first started, with one network device, on Linux the VMM's arguments of the template's policy, as its key holds them, without `--net`, and a record that names the policy, the gateway's DNS server for the networks with egress allowed, the proxy's URL for the proxy-only one, and no publication; from an execution, a TCP connection to the gateway at the port of each of three listeners of host loopback, which opens, and arrives at the listener, where the policy lets it through, and fails, with nothing arriving, elsewhere: the allow rule's listener alone, the proxy's alone, every one with egress and outbound host-loopback access allowed, and none with egress allowed alone; then for each of the others, status 8, with NVX's reason, and the record of a failure of the request, at the plan, without a VM, by the evidence of invalid settings, which quarantines nothing; the lease released; each template's policy differs from the others' |
+| `a_clone_binds_the_resolver_of_its_policy_s_dns_server_read_only` | Of a template of a network with egress allowed, two at once, with a generated machine ID, and with the image's own; then, once they stopped, a GPT disk whose layer holds a regular file `etc`, with the image's own machine ID | Each of the first two started, with a record that names the gateway's DNS server, one network device, and at `/etc/resolv.conf`, a file of mode 0444 that names the server, held by a bind that is read-only, `nosuid`, and `nodev`, after the bind of the generated machine ID, below the root, whose file system refuses a write as root, with nothing in the upper there; and a TCP connection to the server's DNS port, which the gateway's DNS proxy accepts without the host's resolver; then status 8, since no bind can hold the resolver configuration below a file, and the record of a failure of the request, at the activation, once the VM exited, by the evidence of invalid settings, with the guest's status 57; nothing quarantined, and the lease released, with the records |
+| `a_clone_s_executions_find_the_proxy_of_its_policy` | Of a template of a proxy-only network, one, with an execution as user ID 0 that runs `env`, then one that names its own `HTTPS_PROXY` | A record that names the proxy's URL, `http://192.0.2.1:PORT`, at the port of the proxy's listener, and no DNS server; the first execution with its own entry, then the URL in `http_proxy`, `https_proxy`, `HTTP_PROXY`, and `HTTPS_PROXY`; the second with exactly its own environment; one network device, and the image's own `/etc/resolv.conf`, which no bind holds |
+| `a_clone_of_a_template_with_a_nic_maps_its_export_beside_its_resolver` | Of a template of a network with egress allowed, one with a generated machine ID, sharing a host directory read-write | Started, with one mapping, and a record that names the export and the gateway's DNS server; on Linux, the VMM's one `--mount`, read-write, and its arguments of the template's policy; below the root, the binds of the machine ID and of the resolver configuration, then the export's mapping; the export's directory, and a write through it, which the host's directory holds after the stop |
+
+Every network that the scenarios give a template is one that a template takes:
+a network that lets nothing through, egress allowed, with outbound
+host-loopback access or without, one rule that allows TCP to the gateway at the
+port of a listener of host loopback, or a proxy at the port of another. The
+tests bind those listeners, and a third, which no network names, on host IPv4
+loopback, at ports that the host chooses, and hold them until they end. A
+clone's start names its network by a file that the test writes in the
+template's directory.
 
 A test that fails keeps its template's directory, with the template store and
 the platform's image, as long as it keeps the directory of a clone that leases

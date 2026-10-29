@@ -5,10 +5,14 @@
 //!
 //! Each scenario captures a [`Template`] of its own, with 256 MiB of RAM, of a capacity of
 //! 1 GiB, in a template store of its own, as `vm_template` does, of the platform's copy of the
-//! fixtures' Ubuntu EROFS image, or of a GPT [`Disk`] of the image's length, and starts its
+//! fixtures' Ubuntu EROFS image, or of a GPT [`Disk`] of the image's length, without a NIC unless
+//! the scenario gives it a [`Network`], with the guest at `192.0.2.2/24`, and starts its
 //! clones, each in a sandbox store of its own, which stages the clone's images, as a launch's
 //! does: that copy, or a GPT disk, and for a clone over a scratch image, a copy of the scratch
-//! template, which, as NVX requires of a clone's images, no one else may change either.
+//! template, which, as NVX requires of a clone's images, no one else may change either. The
+//! scenarios of exports, as the others but those of networks, capture templates without a NIC,
+//! whose clones bind no resolver configuration, so the mount tables that they check hold no
+//! `/etc/resolv.conf`.
 //!
 //! - One generation serves clones over a scratch image and in RAM, at once and in turn, at each
 //!   memory target from the template's RAM to its capacity, which the guest has online. The store
@@ -87,6 +91,32 @@
 //!   disk to its end shows the guest's statistics count.
 //! - A clone's time settles after it is ready, with no violation, after the downtime that the
 //!   host's monotonic clock measured.
+//! - A template without a NIC serves clones without a network, and of a network that lets nothing
+//!   through, which attaches no NIC either: neither has a network device, nor a network in its
+//!   record, and each keeps the image's own `/etc/resolv.conf`, which no bind holds. NVX's plan
+//!   refuses a clone of a network with a NIC there before any VMM starts.
+//! - A template of each network with a NIC that a template takes serves the clones of its own
+//!   network alone: their restores attach the template's NIC under its policy, unchanged, which
+//!   lets through what the policy allows alone, and their records name the policy, the DNS server
+//!   with which the template's guest configured its resolver at boot, where the policy lets the
+//!   guest reach the gateway's, and the proxy, if any. Of the listeners of host loopback that the
+//!   tests bind, a clone reaches at its gateway the allow rule's alone, the proxy's alone, every
+//!   one with egress and outbound host-loopback access allowed, and none without host-loopback
+//!   access. NVX's plan refuses, before any VMM starts, a clone of another network, of the
+//!   template's policy at another address of the guest, of a network that lets nothing through,
+//!   and one without a network. Each template's key holds a policy of its own.
+//! - A clone of a network that lets the guest reach the gateway's DNS server finds a resolver
+//!   file that names it, of mode 0444, which a read-only bind holds at `/etc/resolv.conf`, after
+//!   the bind of a generated machine ID, as mount tables list them, and which no write changes,
+//!   and reaches the server through the template's NIC: a TCP connection to its DNS port opens,
+//!   which the gateway's DNS proxy accepts itself. A clone whose resolver configuration cannot be
+//!   bound, since its image holds a regular file `etc`, ends before it is ready, with the status
+//!   of its network settings.
+//! - The executions of a clone of a proxy-only network find the URL of its proxy, which its record
+//!   names, in their environment, as a launch's executions do, and the clone keeps the image's own
+//!   `/etc/resolv.conf`.
+//! - A clone of a template with a NIC maps its export once it is ready, below the binds of its
+//!   resolver configuration and of a generated machine ID.
 //!
 //! The tests boot VMs, so they are ignored. They read what the `common` module lists, and take
 //! the template's image and the scratch template from its fixtures.
@@ -104,13 +134,16 @@ use std::ffi::{OsStr, OsString};
 use std::fs::{self, File};
 use std::io;
 use std::mem;
+use std::net::{IpAddr, Ipv4Addr, TcpListener};
 use std::num::NonZeroU64;
 use std::path::{Path, PathBuf};
+use std::sync::LazyLock;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
 use nvx::activation::{
-    ActivationRecord, Configuration, ExportKind, MachineIdMode, ReadyActivation, StoreGeneration,
+    ActivationRecord, Configuration, ExportKind, MachineIdMode, Publication, ReadyActivation,
+    StoreGeneration,
 };
 use nvx::exec::{Key, Limits, Timers, Window};
 use nvx::host::artifacts::Artifacts;
@@ -118,6 +151,7 @@ use nvx::host::artifacts::Artifacts;
 use nvx::host::filesystem::GUEST_EXPORT;
 use nvx::host::platform::Transport;
 use nvx::host::process::{BootId, Process};
+use nvx::host::sandbox::SandboxNetwork;
 use nvx::host::store::{CallerFiles, LOG_NAME, SandboxStore};
 use nvx::host::template::{
     CAPTURE_RECORD_NAME, CloneControl, ClonePlan, CloneRecords, Evidence, GENERATIONS_NAME,
@@ -135,10 +169,12 @@ use runtime_adapter::exec::{HostMessage, Start};
 use runtime_adapter::frame::Message;
 use runtime_adapter::hook::{Action, STEP_HOOK, Step, StepHook};
 use runtime_adapter::host::Client;
+use runtime_adapter::layered::PROXY_VARIABLES;
 use runtime_adapter::root::DEFAULT_RUNTIME;
 use runtime_adapter::runtime::Runtime;
 use runtime_adapter::sharing::HostFsSharing;
 use runtime_adapter::staged::Staged;
+use serde_json::{Value, json};
 
 use common::gpt::{self, Contents, Layout, Partition, hexadecimal, small_layer};
 use common::{Fixtures, Printed, Sandbox};
@@ -251,6 +287,50 @@ done
 /// The `map` probe of the clones that share one host directory at `/srv/data`: the directory, and
 /// its file `marker`.
 const MAP_DATA: &str = "map data=srv/data marker=srv/data/marker";
+/// The guest's address and prefix in the networks of the scenarios' templates and clones, in a
+/// range reserved for documentation, which no host's own address shares, as `vm_template` gives
+/// it.
+const GUEST_NETWORK: &str = "192.0.2.2/24";
+/// Another address of the guest in the same network, at which no template has its NIC.
+const OTHER_GUEST_NETWORK: &str = "192.0.2.3/24";
+/// The gateway of the scenarios' networks, the first address of the guest's, at which the guest
+/// reaches the DNS server that OpenVMM serves, and host loopback.
+const GATEWAY: &str = "192.0.2.1";
+/// The host's side of the scenarios' networks, which the tests bind the first time that they name
+/// one of its ports, and hold until they end.
+static HOST_SIDE: LazyLock<HostSide> = LazyLock::new(HostSide::bind);
+/// How long the host waits at a service of its side for a connection that a clone opened there,
+/// where the clone's network lets it through.
+const ARRIVAL: Duration = Duration::from_secs(10);
+/// How long the host waits at a service of its side for a connection where the clone's network
+/// must not let it through.
+const NEGATIVE_OBSERVATION: Duration = Duration::from_millis(250);
+/// The proxy's settings of an execution that names its own, which it keeps.
+const OWN_PROXY: &str = "HTTPS_PROXY=http://proxy.example:8080";
+/// The `map` probe of a clone's resolver configuration: what the root's `/etc/resolv.conf` shows.
+const MAP_RESOLVER: &str = "map resolver=etc/resolv.conf";
+/// The program of the executions that show what a clone has of its network, `/bin/sh -c
+/// NETWORK_VIEW sh`, which prints, a line each: the number of the guest's network devices besides
+/// loopback, as `/sys/class/net` lists them, `devices N`, and the mode and the type of the root's
+/// `/etc/resolv.conf`, as `stat` prints them, `resolver MODE TYPE`.
+const NETWORK_VIEW: &str = "echo \"devices $(ls /sys/class/net | grep -cvx lo)\"; \
+    echo \"resolver $(stat -c '%a %F' /etc/resolv.conf)\"";
+/// The program of the executions that try the DNS server that a clone's resolver configuration
+/// names, `/bin/sh -c DNS_REACH sh`, which prints, a line each: the server, `server ADDRESS`, and
+/// `dns 0` once a TCP connection to the server's port 53, which it tries with `nc` for at most 2
+/// seconds, opened, or `dns 1` once it failed. The gateway's DNS proxy accepts that connection
+/// itself, before any query of the guest reaches the host's resolver, so whether it opens depends
+/// on neither that resolver nor its upstream servers.
+const DNS_REACH: &str = "server=$(sed -n 's/^nameserver //p' /etc/resolv.conf); \
+    echo \"server $server\"; nc -z -w 2 \"$server\" 53 </dev/null >/dev/null 2>&1; \
+    echo \"dns $?\"";
+/// The program of the executions that try the services of the host's side of a clone's network,
+/// `/bin/sh -c "set -- GATEWAY TARGET...; REACH"`, each target `NAME:PORT`, which tries a TCP
+/// connection to the gateway at each PORT with `nc`, for at most 2 seconds, and prints, a line
+/// each, `NAME 0` once it opened, or `NAME 1` once it failed.
+const REACH: &str = "gateway=$1; shift; for target in \"$@\"; do \
+    nc -z -w 2 \"$gateway\" \"${target#*:}\" </dev/null >/dev/null 2>&1; \
+    echo \"${target%%:*} $?\"; done";
 /// The placeholder of the template of the scenarios of GPT disks: a disk of two layers, whose
 /// partitions start at multiples of 1 MiB.
 const PLACEHOLDER: Disk = Disk {
@@ -365,10 +445,212 @@ impl Disk {
     }
 }
 
+/// The network of a scenario's template or clone, which the host program reads from a file that
+/// the test writes, in the serde form of a plan's network, as `vm_template` writes it: the guest at
+/// an address of its own, with egress denied, and no host-loopback access, unless the network says
+/// otherwise.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Network {
+    /// Everything denied, without a proxy, which attaches no NIC.
+    Deny,
+    /// Egress allowed, without host-loopback access, which lets the guest reach the gateway's DNS
+    /// server.
+    Egress,
+    /// Egress denied but for one rule, TCP to the gateway at the port of [`Service::Rule`], with
+    /// outbound host-loopback access.
+    AllowRule,
+    /// Egress allowed, with outbound host-loopback access, which lets the guest reach the gateway's
+    /// DNS server too.
+    Outbound,
+    /// A proxy-only network, whose proxy is [`Service::Proxy`], on host loopback.
+    Proxy,
+}
+
+impl Network {
+    /// The networks with a NIC that a template takes, which `vm_template` captures.
+    const WITH_NIC: [Self; 4] = [Self::Egress, Self::AllowRule, Self::Outbound, Self::Proxy];
+
+    /// Returns the network's name, which names its files.
+    fn name(self) -> &'static str {
+        match self {
+            Self::Deny => "deny",
+            Self::Egress => "egress",
+            Self::AllowRule => "rule",
+            Self::Outbound => "outbound",
+            Self::Proxy => "proxy",
+        }
+    }
+
+    /// Returns the network's serde form, with the guest at `guest`.
+    fn form(self, guest: &str) -> Value {
+        let mut form = json!({
+            "guestNetwork": guest,
+            "egress": "deny",
+            "allow": {"name": "egress.allow", "rules": []},
+            "deny": {"name": "egress.deny", "rules": []},
+            "ingress": "deny",
+            "hostLoopback": "deny",
+            "hostLoopbackForwards": [],
+            "proxy": null,
+        });
+        match self {
+            Self::Deny => {}
+            Self::Egress => form["egress"] = json!("allow"),
+            Self::AllowRule => {
+                let port = HOST_SIDE.port(Service::Rule);
+                form["allow"]["rules"] = json!([{
+                    "to": [{"cidr": format!("{GATEWAY}/32"), "except": []}],
+                    "ports": [{"protocol": "tcp", "port": port, "endPort": null}],
+                }]);
+                form["hostLoopback"] = json!("outbound");
+            }
+            Self::Outbound => {
+                form["egress"] = json!("allow");
+                form["hostLoopback"] = json!("outbound");
+            }
+            Self::Proxy => {
+                let port = HOST_SIDE.port(Service::Proxy);
+                form["proxy"] = json!({"port": port, "scheme": "http"});
+            }
+        }
+        form
+    }
+
+    /// Returns OpenVMM's arguments with which the restore of a clone of a template of the network,
+    /// with the guest at `guest`, attaches the template's NIC, as NVX lowers the network: all of
+    /// them but `--net` and the guest's address, which OpenVMM takes from the snapshot, and none
+    /// for a network that lets nothing through.
+    fn restored(self, guest: &str) -> Vec<String> {
+        let network = serde_json::from_value::<SandboxNetwork>(self.form(guest)).unwrap();
+        let mut arguments = network.openvmm_arguments().unwrap();
+        arguments.drain(..arguments.len().min(2));
+        arguments
+    }
+
+    /// Returns the DNS server that the network's clones' records name, with which the template's
+    /// guest configured its resolver at boot: the gateway's, for a network that lets the guest
+    /// reach it.
+    fn dns(self) -> Option<IpAddr> {
+        matches!(self, Self::Egress | Self::Outbound).then(|| GATEWAY.parse().unwrap())
+    }
+
+    /// Returns the URL of the network's proxy, as the guest sees it, which the network's clones'
+    /// records name, if it has one.
+    fn proxy(self) -> Option<String> {
+        (self == Self::Proxy)
+            .then(|| format!("http://{GATEWAY}:{}", HOST_SIDE.port(Service::Proxy)))
+    }
+
+    /// Returns the services of the host's side that the network lets a clone reach at its
+    /// gateway: none without host-loopback access, the allow rule's alone, every one with egress
+    /// and outbound host-loopback access allowed, and the proxy alone for a proxy-only network.
+    fn reaches(self) -> &'static [Service] {
+        match self {
+            Self::Deny | Self::Egress => &[],
+            Self::AllowRule => &[Service::Rule],
+            Self::Outbound => &Service::ALL,
+            Self::Proxy => &[Service::Proxy],
+        }
+    }
+}
+
+/// A service of the host's side of the scenarios' networks: a listener on host IPv4 loopback,
+/// which a clone reaches at the same port of its gateway where its network lets it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Service {
+    /// The proxy of a proxy-only network. No clone sends it a request; a connection that opens
+    /// shows that the network lets the clone reach it.
+    Proxy,
+    /// The service to which the allow rule of a network lets TCP through.
+    Rule,
+    /// A service that no network names.
+    Other,
+}
+
+impl Service {
+    /// Every service.
+    const ALL: [Self; 3] = [Self::Proxy, Self::Rule, Self::Other];
+
+    /// Returns the service's name, which [`REACH`] prints.
+    fn name(self) -> &'static str {
+        match self {
+            Self::Proxy => "proxy",
+            Self::Rule => "rule",
+            Self::Other => "other",
+        }
+    }
+}
+
+/// The host's side of the scenarios' networks: the listener of each [`Service`], on host IPv4
+/// loopback, at a port that the host chose, which the networks that the tests write name. The
+/// listeners hold their ports until the tests end, so that no other socket takes one.
+struct HostSide {
+    /// The listener of [`Service::Proxy`].
+    proxy: TcpListener,
+    /// The listener of [`Service::Rule`].
+    rule: TcpListener,
+    /// The listener of [`Service::Other`].
+    other: TcpListener,
+}
+
+impl HostSide {
+    /// Binds the listener of each service.
+    fn bind() -> Self {
+        let bind = || TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        Self {
+            proxy: bind(),
+            rule: bind(),
+            other: bind(),
+        }
+    }
+
+    /// Returns the listener of `service`.
+    fn listener(&self, service: Service) -> &TcpListener {
+        match service {
+            Service::Proxy => &self.proxy,
+            Service::Rule => &self.rule,
+            Service::Other => &self.other,
+        }
+    }
+
+    /// Returns the port of `service`.
+    fn port(&self, service: Service) -> u16 {
+        self.listener(service).local_addr().unwrap().port()
+    }
+
+    /// Returns whether a connection arrived at the listener of `service` within `wait`, or at once
+    /// for no wait, which it accepts and closes.
+    fn accepted(&self, service: Service, wait: Duration) -> bool {
+        let listener = self.listener(service);
+        listener.set_nonblocking(true).unwrap();
+        let deadline = Instant::now() + wait;
+        loop {
+            match listener.accept() {
+                Ok(_) => return true,
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
+                Err(error) => panic!("the listener of {service:?} failed: {error}"),
+            }
+            if Instant::now() >= deadline {
+                return false;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+}
+
+/// Writes the network `network`, with the guest at `guest`, in a file of its own in `directory`,
+/// and returns the file's path.
+fn write_network(directory: &Path, network: Network, guest: &str) -> PathBuf {
+    let address = guest.replace(['.', '/'], "-");
+    let path = directory.join(format!("network-{}-{address}.json", network.name()));
+    fs::write(&path, network.form(guest).to_string()).unwrap();
+    path
+}
+
 /// The template of a scenario: the generation that a template store of its own captured, in the
 /// scenario's sandbox, of the platform's copy of the fixtures' Ubuntu EROFS image, or of a GPT
 /// [`Disk`] of its length, with [`TEMPLATE_MEMORY`] MiB of RAM, of a capacity of
-/// [`TEMPLATE_CAPACITY`] MiB.
+/// [`TEMPLATE_CAPACITY`] MiB, and a NIC exactly when its [`Network`] lets something through.
 struct Template {
     /// The scenario's sandbox, whose store is the template store, until the template drops.
     sandbox: Option<Sandbox>,
@@ -389,19 +671,27 @@ impl Template {
     /// after the 32 hexadecimal digits of the launch, must fit the path of a Unix socket, so the
     /// scenarios' names are short.
     fn create(name: &str) -> Self {
-        Self::capture(name, None)
+        Self::capture(name, None, None)
     }
 
     /// Creates the sandbox of the scenario `name`, stages the platform's copy of the image, and
     /// captures the template of the GPT disk `placeholder`, of the image's length, which the
     /// platform stages beside it, as [`create`](Self::create) does.
     fn of_disk(name: &str, placeholder: &Disk) -> Self {
-        Self::capture(name, Some(placeholder))
+        Self::capture(name, Some(placeholder), None)
     }
 
     /// Creates the sandbox of the scenario `name`, stages the platform's copy of the image, and
-    /// captures the template of the GPT disk `placeholder`, if any, and of the image otherwise.
-    fn capture(name: &str, placeholder: Option<&Disk>) -> Self {
+    /// captures the template of the image with the network `network`, with the guest at
+    /// [`GUEST_NETWORK`], as [`create`](Self::create) does.
+    fn in_network(name: &str, network: Network) -> Self {
+        Self::capture(name, None, Some(network))
+    }
+
+    /// Creates the sandbox of the scenario `name`, stages the platform's copy of the image, and
+    /// captures the template of the GPT disk `placeholder`, if any, and of the image otherwise,
+    /// with the network `network`, if any, with the guest at [`GUEST_NETWORK`].
+    fn capture(name: &str, placeholder: Option<&Disk>, network: Option<Network>) -> Self {
         let mut sandbox = Sandbox::new(name);
         let fixtures = Fixtures::find();
         let image = stage_platform(&sandbox.root.join("platform"), &fixtures);
@@ -414,7 +704,8 @@ impl Template {
             }
         };
         let (memory, capacity) = (TEMPLATE_MEMORY.to_string(), TEMPLATE_CAPACITY.to_string());
-        let options = [
+        let network = network.map(|network| write_network(&sandbox.root, network, GUEST_NETWORK));
+        let mut options = vec![
             OsStr::new("--distro"),
             &distro,
             OsStr::new("--distro-identity"),
@@ -424,6 +715,9 @@ impl Template {
             OsStr::new("--memory-capacity"),
             OsStr::new(&capacity),
         ];
+        if let Some(network) = &network {
+            options.extend([OsStr::new("--network"), network.as_os_str()]);
+        }
         let created = sandbox.create(&options, 0);
         assert_eq!(created["created"], "captured", "{created:?}");
         assert_eq!(created["generation"], GENERATION.to_string(), "{created:?}");
@@ -496,6 +790,13 @@ impl Template {
         let path = self.image.with_file_name(name);
         disk.write(&path, fs::metadata(&self.image).unwrap().len());
         path
+    }
+
+    /// Returns the options of a start whose clone has the network `network`, with the guest at
+    /// `guest`, from a file that they name, which the template's directory holds.
+    fn network_options(&self, network: Network, guest: &str) -> Vec<String> {
+        let path = write_network(self.root(), network, guest);
+        vec!["--network".to_owned(), path.display().to_string()]
     }
 
     /// Stages the template's image in the store of `sandbox`, which it creates, for a clone in
@@ -741,6 +1042,29 @@ impl Cloned {
         assert!(Lease::of(&store).unwrap().is_none());
     }
 
+    /// Checks that NVX's plan refused the start's clone before any VMM started, as one that the
+    /// template cannot serve, with a diagnostic that says `problem`: a failure of the request, by
+    /// the evidence of invalid settings, which quarantines nothing, and that the start released the
+    /// lease that the store granted.
+    fn assert_unserved(&self, problem: &str) {
+        let started = &self.started;
+        assert!(started.contains_key("lease"), "{started:?}");
+        assert_eq!(
+            failure(started),
+            [
+                "request",
+                "invalid-settings",
+                "plan",
+                "planned",
+                "none",
+                "no-vm"
+            ],
+            "{started:?}"
+        );
+        assert_eq!(started["quarantined"], "no", "{started:?}");
+        self.assert_refused(problem);
+    }
+
     /// Checks that the start started the clone's VM, which ended before the clone was ready, with
     /// `status`, the guest's status of its activation's failure, and that the start printed the
     /// failure's record, of the request, by `evidence`, at the activation, once the VM exited,
@@ -831,6 +1155,34 @@ impl Cloned {
             .collect()
     }
 
+    /// Checks that the clone reaches, at its gateway, the services of the host's side `reached`
+    /// alone: a TCP connection that an execution opens to each of them, with [`REACH`], arrives at
+    /// its listener, while one to each other service fails, and none arrives there.
+    fn assert_reaches(&mut self, reached: &[Service]) {
+        let host = &*HOST_SIDE;
+        // Nothing else connects to the listeners, but a connection that a failed check left.
+        for service in Service::ALL {
+            while host.accepted(service, Duration::ZERO) {}
+        }
+        let targets =
+            Service::ALL.map(|service| format!("{}:{}", service.name(), host.port(service)));
+        let found = self.script(&format!("set -- {GATEWAY} {}; {REACH}", targets.join(" ")));
+        let expected = Service::ALL.map(|service| {
+            let status = u8::from(!reached.contains(&service));
+            format!("{} {status}", service.name())
+        });
+        assert_eq!(found, expected, "{reached:?}");
+        for service in Service::ALL {
+            let reach = reached.contains(&service);
+            let wait = if reach { ARRIVAL } else { NEGATIVE_OBSERVATION };
+            assert_eq!(
+                host.accepted(service, wait),
+                reach,
+                "{service:?} of {reached:?}"
+            );
+        }
+    }
+
     /// Returns the configuration of the clone's activation record, which NVX keeps in the clone's
     /// sandbox, in its canonical encoding, while the clone holds its lease.
     fn configuration(&self) -> Configuration {
@@ -848,12 +1200,7 @@ impl Cloned {
     fn assert_vmm_mount(&self, export: Option<(&Export, &str)>) {
         #[cfg(target_os = "linux")]
         {
-            let pid = &self.started["pid"];
-            let command_line = fs::read(format!("/proc/{pid}/cmdline")).unwrap();
-            let arguments = command_line
-                .split(|byte| *byte == 0)
-                .map(|argument| String::from_utf8_lossy(argument).into_owned())
-                .collect::<Vec<_>>();
+            let arguments = self.vmm_arguments();
             let mounts = arguments
                 .windows(2)
                 .filter(|pair| pair[0] == "--mount")
@@ -870,6 +1217,47 @@ impl Cloned {
         }
         #[cfg(not(target_os = "linux"))]
         let _ = export;
+    }
+
+    /// Checks the arguments with which NVX started the clone's VMM, on Linux, as
+    /// [`assert_vmm_mount`](Self::assert_vmm_mount) does: `policy`, the arguments of the policy of
+    /// the template's NIC, in order, as the template's key holds them, and no other argument of a
+    /// network, so no `--net`, since OpenVMM takes the NIC and the guest's address from the
+    /// snapshot, nor any argument of a network for a template without a NIC.
+    fn assert_vmm_network(&self, policy: &[String]) {
+        #[cfg(target_os = "linux")]
+        {
+            let arguments = self.vmm_arguments();
+            let of_network = |argument: &&String| {
+                argument.starts_with("--net") || argument.as_str() == "--host-loopback"
+            };
+            assert_eq!(
+                arguments.iter().filter(of_network).count(),
+                policy.iter().filter(of_network).count(),
+                "{policy:?} in {arguments:?}"
+            );
+            assert!(
+                policy.is_empty()
+                    || arguments
+                        .windows(policy.len())
+                        .any(|window| window == policy),
+                "{policy:?} in {arguments:?}"
+            );
+        }
+        #[cfg(not(target_os = "linux"))]
+        let _ = policy;
+    }
+
+    /// Returns the arguments with which NVX started the clone's VMM, which the test, as root,
+    /// reads on Linux.
+    #[cfg(target_os = "linux")]
+    fn vmm_arguments(&self) -> Vec<String> {
+        let pid = &self.started["pid"];
+        let command_line = fs::read(format!("/proc/{pid}/cmdline")).unwrap();
+        command_line
+            .split(|byte| *byte == 0)
+            .map(|argument| String::from_utf8_lossy(argument).into_owned())
+            .collect()
     }
 }
 
@@ -1358,6 +1746,7 @@ fn refuses_early(template: &Template, early: Message) {
         first_partition_bound: None,
         machine_id: MachineIdMode::Image,
         sharing: HostFsSharing::default(),
+        network: None,
     };
     let plan = request.plan().unwrap();
     let staged = Staged::read(&sandbox.store).unwrap().unwrap();
@@ -2843,5 +3232,332 @@ fn a_clone_whose_mapping_fails_ends_before_its_sandbox_starts() {
         export.tree(),
         tree_of(&["out"], &[("out/marker", "marker")])
     );
+    assert_payload(&template, false);
+}
+
+/// Returns the facts that the [`MAP_RESOLVER`] probe found of a root's `/etc/resolv.conf`: the
+/// mounts below the root, and the options of the topmost mount at the file, what it shows, and
+/// whether a write of it is allowed.
+fn resolver_facts(facts: &Printed) -> [&str; 4] {
+    [
+        "mounts",
+        "resolver.options",
+        "resolver.kind",
+        "resolver.write",
+    ]
+    .map(|key| facts[&format!("map.{key}")].as_str())
+}
+
+/// Starts a clone in RAM of `template` in a new sandbox of the scenario `name`, with the start's
+/// `options`, checks that the start exits with `status`, and returns the clone.
+fn start_with(template: &Template, name: &str, options: &[String], status: i32) -> Cloned {
+    let options = options.iter().map(String::as_str).collect::<Vec<_>>();
+    let start = StartOf {
+        options: &options,
+        ..StartOf::default()
+    };
+    template.start(name, start, status)
+}
+
+#[test]
+#[ignore = "boots VMs; see the module documentation for what they need"]
+fn a_template_without_a_nic_serves_clones_without_a_network() {
+    let template = Template::create("cl-nonic");
+    // A clone without a network, and one of a network that lets nothing through, which attaches
+    // no NIC either, as the template's capture attached none: the template serves both.
+    let deny = template.network_options(Network::Deny, GUEST_NETWORK);
+    let mut clones = [("cl-none", Vec::new()), ("cl-deny", deny)].map(|(name, options)| {
+        let cloned = start_with(&template, name, &options, 0);
+        cloned.assert_started();
+        cloned
+    });
+
+    // Neither has a network: no network in its record, and on Linux, no argument of a network of
+    // its VMM; no network device, and the image's own `/etc/resolv.conf`, an empty file, which no
+    // bind holds, and which root may write.
+    for cloned in &mut clones {
+        assert_eq!(cloned.configuration().network, None);
+        cloned.assert_vmm_network(&[]);
+        assert_eq!(
+            cloned.script(NETWORK_VIEW),
+            ["devices 0", "resolver 644 regular empty file"]
+        );
+        let facts = cloned.probe(&[MAP_RESOLVER]);
+        assert_eq!(
+            resolver_facts(&facts),
+            ["", "none", "file 0", "allowed"],
+            "{facts:?}"
+        );
+    }
+    for cloned in &mut clones {
+        cloned.stop();
+    }
+
+    // A clone of a network with a NIC finds no template there: NVX's plan refuses each before any
+    // VMM starts.
+    for network in Network::WITH_NIC {
+        let options = template.network_options(network, GUEST_NETWORK);
+        let refused = start_with(&template, "cl-r", &options, CLONE_FAILED);
+        refused.assert_unserved(
+            "the adapter's plan of a clone attaches a network, but the template's generation 1 \
+             has no NIC",
+        );
+    }
+    assert!(template.leases().is_empty());
+    assert_payload(&template, false);
+}
+
+#[test]
+#[ignore = "boots VMs; see the module documentation for what they need"]
+fn a_template_serves_the_clones_of_its_own_network_policy_alone() {
+    let other = "the network of the adapter's plan of a clone is not the one that the template's \
+                 generation 1 restores its NIC with";
+    let address = format!(
+        "the adapter's plan of a clone gives its guest the network {OTHER_GUEST_NETWORK}, but the \
+         template's generation 1 restores its NIC on {GUEST_NETWORK}, from its snapshot"
+    );
+    let none = "the template's generation 1 has a NIC, whose network every clone of it restores, \
+                but the adapter's plan of the clone has none";
+    let mut policies = Vec::new();
+    for network in Network::WITH_NIC {
+        let template = Template::in_network(&format!("cl-p-{}", network.name()), network);
+
+        // The template serves a clone of its own network: its NIC, which the clone's restore
+        // attached under the template's policy, unchanged, and a record that names the policy,
+        // the DNS server with which the template's guest configured its resolver at boot, where
+        // the policy lets the guest reach the gateway's, and the proxy, if any, and that
+        // publishes no listener. The NIC lets through what the policy allows alone: the clone
+        // reaches, at its gateway, the services of the host's side that the policy lets it reach,
+        // and no other.
+        let own = template.network_options(network, GUEST_NETWORK);
+        let mut cloned = start_with(&template, "cl-own", &own, 0);
+        cloned.assert_started();
+        let recorded = cloned
+            .configuration()
+            .network
+            .expect("the record names the network");
+        assert_eq!(
+            (&recorded.dns, &recorded.proxy, recorded.publication),
+            (&network.dns(), &network.proxy(), Publication::Unpublished),
+            "{network:?}"
+        );
+        policies.push((network, recorded.policy));
+        cloned.assert_vmm_network(&network.restored(GUEST_NETWORK));
+        assert_eq!(cloned.script(NETWORK_VIEW)[0], "devices 1", "{network:?}");
+        cloned.assert_reaches(network.reaches());
+        cloned.stop();
+
+        // A clone of any other network finds no template there: of each other network with a
+        // NIC, of the template's policy at another address of the guest, of a network that lets
+        // nothing through, which attaches no NIC, and without a network. NVX's plan refuses each
+        // before any VMM starts, and names both addresses where the guest's address alone
+        // differs.
+        let mut cases = Network::WITH_NIC
+            .into_iter()
+            .filter(|requested| *requested != network)
+            .map(|requested| (Some((requested, GUEST_NETWORK)), other))
+            .collect::<Vec<_>>();
+        cases.extend([
+            (Some((network, OTHER_GUEST_NETWORK)), address.as_str()),
+            (Some((Network::Deny, GUEST_NETWORK)), none),
+            (None, none),
+        ]);
+        for (requested, problem) in cases {
+            let options = requested.map_or_else(Vec::new, |(requested, guest)| {
+                template.network_options(requested, guest)
+            });
+            let refused = start_with(&template, "cl-r", &options, CLONE_FAILED);
+            refused.assert_unserved(problem);
+        }
+        assert!(template.leases().is_empty());
+        assert_payload(&template, false);
+    }
+    // Each template's key holds a policy of its own, which its clones' records name.
+    for (index, (network, policy)) in policies.iter().enumerate() {
+        for (other, other_policy) in &policies[index + 1..] {
+            assert_ne!(policy, other_policy, "{network:?} and {other:?}");
+        }
+    }
+}
+
+#[test]
+#[ignore = "boots VMs; see the module documentation for what they need"]
+fn a_clone_binds_the_resolver_of_its_policy_s_dns_server_read_only() {
+    let template = Template::in_network("cl-dns", Network::Egress);
+    let own = template.network_options(Network::Egress, GUEST_NETWORK);
+    let mut generated = own.clone();
+    generated.extend(["--machine-id".to_owned(), "generated".to_owned()]);
+    // Two clones at once: one with a generated machine ID, and one with the image's own.
+    let mut clones = [
+        ("cl-gen", generated, "/etc/machine-id,/etc/resolv.conf"),
+        ("cl-img", own.clone(), "/etc/resolv.conf"),
+    ]
+    .map(|(name, options, mounts)| {
+        let cloned = start_with(&template, name, &options, 0);
+        cloned.assert_started();
+        (cloned, mounts)
+    });
+    let resolver = format!("nameserver {GATEWAY}");
+    for (cloned, mounts) in &mut clones {
+        // The record names the gateway's DNS server, with which the template's guest configured
+        // its resolver at boot.
+        let recorded = cloned
+            .configuration()
+            .network
+            .expect("the record names the network");
+        assert_eq!(recorded.dns, Network::Egress.dns());
+
+        // The guest wrote a resolver file that names it, of mode 0444, which a read-only bind,
+        // without set-user-ID programs or devices, holds at the root's `/etc/resolv.conf`, below
+        // the root, after the bind of a generated machine ID: a write there, even as root, finds
+        // its file system read-only, and the overlay's upper holds nothing there.
+        let facts = cloned.probe(&[MAP_RESOLVER]);
+        let fact = |key: &str| facts[&format!("map.{key}")].as_str();
+        assert_eq!(fact("mounts"), *mounts, "{facts:?}");
+        let options = mount_options(fact("resolver.options"));
+        assert!(
+            options.is_superset(&BTreeSet::from(["ro", "nosuid", "nodev"])),
+            "{facts:?}"
+        );
+        let size = format!("file {}", resolver.len() + 1);
+        let found = ["kind", "read", "write", "upper"].map(|key| fact(&format!("resolver.{key}")));
+        assert_eq!(
+            found,
+            [size.as_str(), resolver.as_str(), "refused", "absent"],
+            "{facts:?}"
+        );
+        assert_eq!(
+            cloned.script(NETWORK_VIEW),
+            ["devices 1", "resolver 444 regular file"]
+        );
+
+        // The guest reaches that server through the template's NIC: a TCP connection to its DNS
+        // port opens, which the gateway's DNS proxy accepts itself, whatever the host's resolver
+        // and its upstream servers do.
+        assert_eq!(
+            cloned.script(DNS_REACH),
+            [format!("server {GATEWAY}"), "dns 0".to_owned()]
+        );
+    }
+    for (cloned, _) in &mut clones {
+        cloned.stop();
+    }
+
+    // A clone of a disk whose top layer holds a regular file `etc`, below which nothing can be
+    // bound at `/etc/resolv.conf`, ends before it is ready, with the status of its network
+    // settings, which attributes the failure to the request's invalid settings. It keeps the
+    // image's own machine ID, which needs no bind.
+    let disk = template.disk("etc.gpt", &ETC_FILE);
+    let own = own.iter().map(String::as_str).collect::<Vec<_>>();
+    let start = StartOf {
+        image: Some(Image::Gpt(&ETC_FILE, &disk)),
+        options: &own,
+        ..StartOf::default()
+    };
+    let ended = template.start("cl-etc", start, CLONE_FAILED);
+    ended.assert_unactivated(&template, "invalid-settings", status::ACTIVATION_NETWORK);
+    assert_payload(&template, false);
+}
+
+#[test]
+#[ignore = "boots VMs; see the module documentation for what they need"]
+fn a_clone_s_executions_find_the_proxy_of_its_policy() {
+    let template = Template::in_network("cl-proxy", Network::Proxy);
+    let own = template.network_options(Network::Proxy, GUEST_NETWORK);
+    let mut cloned = start_with(&template, "cl-p", &own, 0);
+    cloned.assert_started();
+    let url = Network::Proxy.proxy().expect("the network has a proxy");
+
+    // The record names the proxy's URL, as the guest sees it, and no DNS server, since the policy
+    // lets the guest reach nothing but the proxy.
+    let recorded = cloned
+        .configuration()
+        .network
+        .expect("the record names the network");
+    assert_eq!(
+        (recorded.dns, recorded.proxy.as_deref()),
+        (None, Some(url.as_str()))
+    );
+
+    // An execution finds that URL in each of the proxy's variables, after its own entries, as
+    // the host gives it from the clone's record, as it gives a launch's executions; one that names
+    // its own proxy's settings keeps exactly its own environment.
+    let proxies = PROXY_VARIABLES
+        .map(|variable| format!("{variable}={url}\\n"))
+        .concat();
+    for (entry, expected) in [
+        ("FIRST=1", format!("FIRST=1\\n{proxies}")),
+        (OWN_PROXY, format!("{OWN_PROXY}\\n")),
+    ] {
+        let ran = cloned.exec(&["--identity", "0:0", "--env", entry, "--", "/usr/bin/env"]);
+        let facts =
+            ["launch", "status", "stdout", "stderr"].map(|key| &ran[&format!("exec.1.{key}")]);
+        assert_eq!(
+            facts,
+            ["started", "exit 0", expected.as_str(), ""],
+            "{ran:?}"
+        );
+    }
+
+    // Without a DNS server, the guest binds no resolver: the clone, which has the template's NIC,
+    // keeps the image's own `/etc/resolv.conf`.
+    assert_eq!(
+        cloned.script(NETWORK_VIEW),
+        ["devices 1", "resolver 644 regular empty file"]
+    );
+    let facts = cloned.probe(&[MAP_RESOLVER]);
+    assert_eq!(
+        resolver_facts(&facts),
+        ["", "none", "file 0", "allowed"],
+        "{facts:?}"
+    );
+    cloned.stop();
+    assert!(template.leases().is_empty());
+    assert_payload(&template, false);
+}
+
+#[test]
+#[ignore = "boots VMs; see the module documentation for what they need"]
+fn a_clone_of_a_template_with_a_nic_maps_its_export_beside_its_resolver() {
+    let template = Template::in_network("cl-netexp", Network::Egress);
+    let export = Export::write(&template, "data", &[("marker", "data")], &[]);
+    let mut options = export.options(&[(".", "/srv/data")], &[]);
+    options.extend(template.network_options(Network::Egress, GUEST_NETWORK));
+    options.extend(["--machine-id".to_owned(), "generated".to_owned()]);
+    let mut cloned = start_with(&template, "cl-ne", &options, 0);
+    cloned.assert_mapped(1);
+
+    // The record names the export, with its one mapping, and the network's DNS server. On Linux,
+    // the restore bound the export's directory to the template's dormant filesystem slot, and
+    // attached the template's NIC under its policy.
+    let configuration = cloned.configuration();
+    let recorded = configuration.export.map(|export| export.kind);
+    assert_eq!(
+        (recorded, configuration.mappings),
+        (Some(ExportKind::Directory), 1)
+    );
+    let dns = configuration.network.and_then(|network| network.dns);
+    assert_eq!(dns, Network::Egress.dns());
+    cloned.assert_vmm_mount(Some((&export, "rw")));
+    cloned.assert_vmm_network(&Network::Egress.restored(GUEST_NETWORK));
+
+    // Below the root, the binds of the generated machine ID and of the resolver, which the
+    // activation made, then the export's mapping, which came once the clone was ready.
+    let probe = format!("{MAP_DATA} resolver=etc/resolv.conf");
+    let facts = cloned.probe(&[&probe]);
+    let fact = |key: &str| facts[&format!("map.{key}")].as_str();
+    assert_eq!(
+        fact("mounts"),
+        "/etc/machine-id,/etc/resolv.conf,/srv/data",
+        "{facts:?}"
+    );
+    assert_eq!(fact("resolver.read"), format!("nameserver {GATEWAY}"));
+    let data = ["kind", "entries", "write"].map(|key| fact(&format!("data.{key}")));
+    assert_eq!(data, ["directory", "marker", "allowed"], "{facts:?}");
+    assert_eq!(fact("marker.read"), "data", "{facts:?}");
+    cloned.stop();
+    let written = [("marker", "data"), ("written", "runtime-adapter")];
+    assert_eq!(export.tree(), tree_of(&[], &written));
+    assert!(template.leases().is_empty());
     assert_payload(&template, false);
 }
