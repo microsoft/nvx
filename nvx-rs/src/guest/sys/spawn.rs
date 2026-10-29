@@ -32,7 +32,7 @@ use nix::fcntl::{FcntlArg, FdFlag};
 use nix::libc::{c_char, c_int, c_uint, c_ulong};
 use nix::unistd::{ForkResult, Gid, Pid, Uid};
 
-use super::{EntryChild, Errno, FileDescriptor, ProcessId};
+use super::{EntryChild, Errno, FileDescriptor, PATH_MAX, ProcessId};
 use crate::guest::spawn::LaunchStage;
 
 /// Prefix of the mutable physical-working-directory environment entry.
@@ -224,6 +224,51 @@ impl PhysicalPwd {
     }
 }
 
+/// A `PATH` search for a child's program, prepared before `fork`: the directories in which the
+/// child looks for it, and the one buffer in which the child builds each path in turn, so that the
+/// search takes the same memory however long the program's name and the `PATH` are.
+struct Search {
+    /// The `PATH` value in whose directories the child looks, in their order.
+    path: CString,
+    /// The buffer in which the child builds each path, of [`PATH_MAX`] bytes: it holds every path
+    /// that the kernel takes, with its terminating NUL, so the kernel refuses every other with
+    /// `ENAMETOOLONG`.
+    buffer: Box<[u8]>,
+}
+
+impl Search {
+    /// Prepares the search for `program` in the directories of `path`, a `PATH` value, or returns
+    /// `None` for a program whose name is empty or holds a `/`, which the child runs as it is.
+    fn new(program: &CStr, path: CString) -> Option<Self> {
+        let name = program.to_bytes();
+        if name.is_empty() || name.contains(&b'/') {
+            return None;
+        }
+        Some(Self {
+            path,
+            buffer: vec![0; PATH_MAX].into_boxed_slice(),
+        })
+    }
+
+    /// Runs the program `name` from the first directory in which the child can run it, as
+    /// [`exec`] does, and returns the `errno` of the search's failure, as [`search`] tells.
+    ///
+    /// # Safety
+    ///
+    /// As for [`exec`].
+    unsafe fn run(
+        &mut self,
+        name: &CStr,
+        arguments: &[*const c_char],
+        environment: Option<&[*const c_char]>,
+    ) -> Errno {
+        search(name, &self.path, &mut self.buffer, |path| {
+            // SAFETY: the caller establishes what `exec` requires.
+            unsafe { exec(path, arguments, environment) }
+        })
+    }
+}
+
 /// Credentials of the working-directory check, and the supplementary groups that the child gives
 /// back after it.
 struct Credentials {
@@ -241,9 +286,8 @@ pub(crate) struct PreparedChild {
     program: CString,
     /// Arguments, argument zero first.
     arguments: Vec<CString>,
-    /// The paths at which the child looks for its program, in order, or `None` to run `program`
-    /// as it is.
-    candidates: Option<Box<[CString]>>,
+    /// The search in which the child looks for its program, or `None` to run `program` as it is.
+    search: Option<Search>,
     /// Exact environment, without the physical `PWD` entry, or `None` to inherit the caller's.
     environment: Option<Vec<CString>>,
     /// Physical `PWD` entry that the child fills.
@@ -308,8 +352,8 @@ impl PreparedChild {
     /// streams'; a command with no argument zero is invalid too. An entry needs a cgroup or a
     /// barrier, at which its caller places it, and takes neither a root directory nor
     /// credentials, as its own root and identity replace them. Each fails with `EINVAL`. A program
-    /// that the spec names without a `/`, in a spec with a search path, gets the paths here at
-    /// which its child looks for it.
+    /// that the spec names without a `/`, in a spec with a search path, gets here the one buffer
+    /// in which its child builds, in turn, each path at which it looks for it.
     pub(crate) fn new(spec: ChildSpec) -> Result<Self, Errno> {
         if spec.arguments.is_empty()
             || spec
@@ -373,14 +417,13 @@ impl PreparedChild {
                 .chain(&spec.inherited),
         );
         let kept = ascending_numbers(spec.inherited.iter().chain([&report_writer]));
-        let candidates = spec
+        let search = spec
             .search_path
-            .as_deref()
-            .and_then(|path| search_candidates(&spec.program, path));
+            .and_then(|path| Search::new(&spec.program, path));
         Ok(Self {
             program: spec.program,
             arguments: spec.arguments,
-            candidates,
+            search,
             environment,
             physical_pwd,
             root,
@@ -450,6 +493,9 @@ impl PreparedChild {
             pointers.push(std::ptr::null());
             pointers
         });
+        // The child builds the paths of its search in the search's buffer, whose owner leaves
+        // `self` too, so that the child may write to it while it borrows `self`.
+        let mut search = self.search.take();
 
         // SAFETY: every child input and pointer vector was allocated above, and the child runs
         // only the non-returning routine below.
@@ -471,6 +517,7 @@ impl PreparedChild {
                         &argument_pointers,
                         environment_pointers.as_deref(),
                         physical.map(|(entry, _)| entry),
+                        search.as_mut(),
                     )
                 }
             }
@@ -496,13 +543,15 @@ impl PreparedChild {
     /// # Safety
     ///
     /// This must run only in the just-forked child. `arguments` and `environment` must be
-    /// NUL-terminated vectors of pointers to C strings that outlive the call, and `physical_pwd`,
-    /// if any, the physical `PWD` entry of this child.
+    /// NUL-terminated vectors of pointers to C strings that outlive the call, `physical_pwd`, if
+    /// any, the physical `PWD` entry of this child, and `search`, if any, the search for its
+    /// program.
     unsafe fn run_child(
         &self,
         arguments: &[*const c_char],
         environment: Option<&[*const c_char]>,
         physical_pwd: Option<*mut u8>,
+        search: Option<&mut Search>,
     ) -> ! {
         let report = &self.report_writer;
         if self.process_group
@@ -627,8 +676,8 @@ impl PreparedChild {
         // SAFETY: the caller establishes that `arguments` and `environment` are NUL-terminated
         // vectors of pointers to C strings that outlive the call.
         let error = unsafe {
-            match &self.candidates {
-                Some(candidates) => search(candidates, arguments, environment),
+            match search {
+                Some(search) => search.run(&self.program, arguments, environment),
                 None => exec(&self.program, arguments, environment),
             }
         };
@@ -838,30 +887,6 @@ fn retry(mut call: impl FnMut() -> Result<(), Errno>) -> Result<(), Errno> {
     }
 }
 
-/// Returns the paths at which a child looks for `program` in the directories of `path`, a `PATH`
-/// value, in their order, or `None` for a program whose name is empty or holds a `/`, which the
-/// child runs as it is. An empty directory, such as the one between two adjacent colons, stands
-/// for the working directory, as it does for `execvp`, so its path is the program's name alone.
-fn search_candidates(program: &CStr, path: &CStr) -> Option<Box<[CString]>> {
-    let name = program.to_bytes();
-    if name.is_empty() || name.contains(&b'/') {
-        return None;
-    }
-    let candidates = path
-        .to_bytes()
-        .split(|&byte| byte == b':')
-        .map(|directory| {
-            let candidate = if directory.is_empty() {
-                name.to_vec()
-            } else {
-                [directory, b"/", name].concat()
-            };
-            CString::new(candidate).expect("a path of C strings and a slash holds no NUL")
-        })
-        .collect();
-    Some(candidates)
-}
-
 /// Replaces the child with the program at `program`, with `arguments` and `environment`, or the
 /// caller's environment without one, and returns the `errno` of the failure. `nix`'s `exec`
 /// wrappers allocate their pointer vectors, so libc takes the ones that the parent prepared.
@@ -888,34 +913,64 @@ unsafe fn exec(
     Errno::last()
 }
 
-/// Runs the first of `candidates`, in their order, that the child can run, as [`exec`] does, and
-/// returns the `errno` of the search's failure.
+/// Looks for the program `name` in the directories of `path`, a `PATH` value, as `execvp` does,
+/// and returns the `errno` of the search's failure: it builds in `buffer`, in turn, the path of
+/// `name` in each directory, in their order, and passes it to `run`, which runs the program there
+/// or returns why not. An empty directory, such as the one between two adjacent colons, stands for
+/// the working directory, so its path is the name alone.
 ///
-/// A candidate that does not exist, `ENOENT`, `ENOTDIR`, or `ENAMETOOLONG`, is skipped, as is one
-/// that the child may not run, `EACCES`, which the search remembers. Any other failure, such as
+/// A path that does not fit in `buffer` with its terminating NUL is skipped as one that `run`
+/// refused with `ENAMETOOLONG`, which the kernel does for every path that a search's buffer of
+/// [`PATH_MAX`] bytes cannot hold.
+///
+/// A path that does not exist, `ENOENT`, `ENOTDIR`, or `ENAMETOOLONG`, is skipped, as is one that
+/// the child may not run, `EACCES`, which the search remembers. Any other failure, such as
 /// `ENOEXEC` for a file that the kernel cannot run, ends the search with its `errno`. A search
-/// that runs no candidate fails with `EACCES` if it skipped one that the child may not run, and
-/// otherwise with the last candidate's `errno`.
-///
-/// # Safety
-///
-/// As for [`exec`].
-unsafe fn search(
-    candidates: &[CString],
-    arguments: &[*const c_char],
-    environment: Option<&[*const c_char]>,
+/// that runs no path fails with `EACCES` if it skipped one that the child may not run, and
+/// otherwise with the last path's `errno`.
+fn search(
+    name: &CStr,
+    path: &CStr,
+    buffer: &mut [u8],
+    mut run: impl FnMut(&CStr) -> Errno,
 ) -> Errno {
+    let name = name.to_bytes();
     let mut refused = false;
     let mut last = Errno::ENOENT;
-    for candidate in candidates {
-        // SAFETY: the caller establishes what `exec` requires.
-        match unsafe { exec(candidate, arguments, environment) } {
+    for directory in path.to_bytes().split(|&byte| byte == b':') {
+        let error = match place(buffer, directory, name) {
+            // SAFETY: the path ends with the NUL that `place` wrote after parts of `name` and
+            // `path`, which hold no other.
+            Some(candidate) => run(unsafe { CStr::from_bytes_with_nul_unchecked(candidate) }),
+            None => Errno::ENAMETOOLONG,
+        };
+        match error {
             Errno::EACCES => refused = true,
             error @ (Errno::ENOENT | Errno::ENOTDIR | Errno::ENAMETOOLONG) => last = error,
             error => return error,
         }
     }
     if refused { Errno::EACCES } else { last }
+}
+
+/// Writes in `buffer` the path of the program `name` in `directory`, `DIRECTORY/NAME`, or `NAME`
+/// alone for an empty directory, which stands for the working directory, and its terminating NUL,
+/// and returns them, or `None` if they do not fit.
+fn place<'a>(buffer: &'a mut [u8], directory: &[u8], name: &[u8]) -> Option<&'a [u8]> {
+    let start = if directory.is_empty() {
+        0
+    } else {
+        directory.len() + 1
+    };
+    let end = start + name.len();
+    let path = buffer.get_mut(..=end)?;
+    if start > 0 {
+        path[..directory.len()].copy_from_slice(directory);
+        path[directory.len()] = b'/';
+    }
+    path[start..end].copy_from_slice(name);
+    path[end] = 0;
+    Some(path)
 }
 
 /// The kernel's `struct sigaction`, which `rt_sigaction` reads, unlike libc's, as x86-64 lays it
@@ -1415,46 +1470,112 @@ mod tests {
         }
     }
 
+    /// Searches for `name` in the directories of `path` with a buffer of `size` bytes, where every
+    /// path fails with `error`, and returns the paths that the search tried, in order, and its
+    /// `errno`.
+    fn searched(name: &CStr, path: &CStr, size: usize, error: Errno) -> (Vec<String>, Errno) {
+        let mut buffer = vec![0; size];
+        let mut tried = Vec::new();
+        let outcome = search(name, path, &mut buffer, |candidate| {
+            // The kernel reads a path up to its first NUL, which must end it.
+            let bytes = candidate.to_bytes_with_nul();
+            assert_eq!(
+                bytes.iter().position(|&byte| byte == 0),
+                Some(bytes.len() - 1)
+            );
+            tried.push(candidate.to_str().unwrap().to_owned());
+            error
+        });
+        (tried, outcome)
+    }
+
     #[test]
     fn a_search_tries_each_directory_of_its_path_in_order() {
-        let candidates = |program: &CStr, path: &CStr| {
-            search_candidates(program, path).map(|candidates| {
-                candidates
-                    .iter()
-                    .map(|candidate| candidate.to_str().unwrap().to_owned())
-                    .collect::<Vec<_>>()
-            })
-        };
+        let tried = |name: &CStr, path: &CStr| searched(name, path, PATH_MAX, Errno::ENOENT).0;
         assert_eq!(
-            candidates(c"prog", c"/usr/bin:/bin/"),
-            Some(vec!["/usr/bin/prog".to_owned(), "/bin//prog".to_owned()])
+            tried(c"prog", c"/usr/bin:/bin/"),
+            ["/usr/bin/prog", "/bin//prog"]
         );
         // An empty directory, at either end or between two colons, or an empty path, is the
         // working directory.
         assert_eq!(
-            candidates(c"prog", c":/bin::"),
-            Some(vec![
-                "prog".to_owned(),
-                "/bin/prog".to_owned(),
-                "prog".to_owned(),
-                "prog".to_owned()
-            ])
+            tried(c"prog", c":/bin::"),
+            ["prog", "/bin/prog", "prog", "prog"]
         );
-        assert_eq!(candidates(c"prog", c""), Some(vec!["prog".to_owned()]));
+        assert_eq!(tried(c"prog", c""), ["prog"]);
         // A name that is empty or holds a slash is not searched for.
         for program in [c"", c"/bin/sh", c"bin/sh", c"./prog"] {
-            assert_eq!(candidates(program, c"/bin"), None, "{program:?}");
+            assert!(
+                Search::new(program, c"/bin".to_owned()).is_none(),
+                "{program:?}"
+            );
         }
-        // Only a spec with a search path prepares its paths.
+        // Only a spec with a search path prepares a search, whose one buffer holds the longest
+        // path that the kernel takes.
+        let spec = ChildSpec::new(c"prog".to_owned(), vec![c"prog".to_owned()]);
+        assert!(PreparedChild::new(spec).unwrap().search.is_none());
         let mut spec = ChildSpec::new(c"prog".to_owned(), vec![c"prog".to_owned()]);
-        assert!(PreparedChild::new(spec).unwrap().candidates.is_none());
-        spec = ChildSpec::new(c"prog".to_owned(), vec![c"prog".to_owned()]);
         spec.set_search_path(c"/bin".to_owned());
         let prepared = PreparedChild::new(spec).unwrap();
+        let search = prepared.search.as_ref().unwrap();
         assert_eq!(
-            prepared.candidates.as_deref(),
-            Some(&[c"/bin/prog".to_owned()][..])
+            (search.path.as_c_str(), search.buffer.len()),
+            (c"/bin", PATH_MAX)
         );
+    }
+
+    #[test]
+    fn a_search_skips_a_path_that_its_buffer_cannot_hold() {
+        // A buffer of `PATH_MAX` bytes holds a path of `PATH_MAX - 1` bytes and its NUL, and no
+        // longer one.
+        let directory = |length: usize| format!("/{}", "d".repeat(length - 1));
+        let fits = directory(PATH_MAX - "/prog".len() - 1);
+        let path = CString::new(format!("{}:{fits}", directory(fits.len() + 1))).unwrap();
+        let (tried, error) = searched(c"prog", &path, PATH_MAX, Errno::ENOENT);
+        assert_eq!(tried, [format!("{fits}/prog")]);
+        assert_eq!(error, Errno::ENOENT);
+        // A skipped path counts as one that failed with `ENAMETOOLONG`: the last path's error
+        // replaces it, and a path that the child may not run takes precedence over it, as they
+        // do over the kernel's. `/bin/prog` and its NUL fill 10 bytes, and `/sbin/prog` does not
+        // fit.
+        for (path, error, outcome) in [
+            (c"/sbin:/bin", Errno::ENOENT, Errno::ENOENT),
+            (c"/bin:/sbin", Errno::ENOENT, Errno::ENAMETOOLONG),
+            (c"/bin:/sbin", Errno::EACCES, Errno::EACCES),
+            (c"/sbin:/bin:/usr", Errno::ENOEXEC, Errno::ENOEXEC),
+        ] {
+            let (tried, failure) = searched(c"prog", path, 10, error);
+            assert_eq!(tried, ["/bin/prog"], "{path:?}");
+            assert_eq!(failure, outcome, "{path:?}");
+        }
+    }
+
+    #[test]
+    fn the_kernel_refuses_every_path_that_a_search_s_buffer_cannot_hold() {
+        // The kernel takes a path of `PATH_MAX - 1` bytes, which it looks up, and refuses a longer
+        // one with `ENAMETOOLONG`, as a search does with every path that does not fit in its
+        // buffer of `PATH_MAX` bytes.
+        let directory = tempfile::tempdir().unwrap();
+        let mut long = sys::path_c_string(&directory.path().join("missing"))
+            .unwrap()
+            .into_bytes();
+        while long.len() < PATH_MAX {
+            long.extend_from_slice(b"/d");
+        }
+        for (length, error) in [
+            (PATH_MAX - 1, Errno::ENOENT),
+            (PATH_MAX, Errno::ENAMETOOLONG),
+        ] {
+            let program = CString::new(&long[..length]).unwrap();
+            assert_eq!(
+                run(ChildSpec::new(program, vec![c"program".to_owned()])),
+                (
+                    Some((LaunchStage::Exec.code(), error as i32)),
+                    Some(ChildStatus::Exited(LAUNCH_FAILURE_STATUS))
+                ),
+                "{length}"
+            );
+        }
     }
 
     #[test]

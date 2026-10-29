@@ -323,13 +323,18 @@ impl Command {
     /// it. The child searches `path`, not the `PATH` of the program's environment: a caller whose
     /// program's own `PATH` should decide passes that one.
     ///
+    /// The search takes the same memory however long the name and `path` are, as `execvp`'s does:
+    /// one buffer of `PATH_MAX` bytes, 4096, which the command prepares before the child starts,
+    /// and in which the child builds each path in turn, so that the child allocates nothing. A
+    /// path that does not fit in the buffer with its terminating NUL is one that the kernel
+    /// refuses with `ENAMETOOLONG`, and the child skips it as such without trying it.
+    ///
     /// The child skips a path that does not exist, which `ENOENT`, `ENOTDIR`, or `ENAMETOOLONG`
     /// reports, and one that it may not run, `EACCES`, which it remembers. Any other failure,
     /// such as `ENOEXEC` for a file that the kernel cannot run, ends the search: unlike some
     /// `execvp`s, the child runs no shell for such a file. A search that runs nothing fails the
     /// [stage](LaunchStage::Exec) with `EACCES` if the child skipped a path that it may not run,
-    /// and otherwise with the last path's error. The command prepares the paths before the child
-    /// starts, so the search allocates nothing in the child.
+    /// and otherwise with the last path's error.
     pub fn search_path(mut self, path: CString) -> Self {
         self.spec.set_search_path(path);
         self
@@ -847,6 +852,93 @@ mod tests {
             assert_eq!(status, Some(ChildStatus::Exited(125)));
             assert!(output.is_empty());
         }
+    }
+
+    /// Returns a command that looks for the program `name` in `directories`, and runs it as
+    /// `sh -c 'printf ran'`.
+    fn searched_for(name: &str, directories: &[&str]) -> Command {
+        Command::new(
+            CString::new(name).unwrap(),
+            vec![c"sh".to_owned(), c"-c".to_owned(), c"printf ran".to_owned()],
+        )
+        .search_path(CString::new(directories.join(":")).unwrap())
+    }
+
+    /// Runs `command`, whose search fails, and returns the search's error once the child has
+    /// exited with the launch failure status without output.
+    fn search_error(command: Command) -> i32 {
+        let (failure, status, output, _) = run(command);
+        assert_eq!(status, Some(ChildStatus::Exited(125)));
+        assert!(output.is_empty());
+        let failure = failure.expect("the search fails");
+        assert_eq!(failure.stage(), LaunchStage::Exec);
+        failure.raw_os_error()
+    }
+
+    #[test]
+    fn a_search_skips_a_path_longer_than_path_max() {
+        let directory = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink("/bin/sh", directory.path().join("prog")).unwrap();
+        let found = directory.path().display().to_string();
+        let missing = directory.path().join("missing").display().to_string();
+        // The path from this directory to any name is longer than `PATH_MAX`.
+        let long = format!("/{}", "d/".repeat(2048));
+        let (failure, status, output, _) = run(searched_for("prog", &[&long, &found]));
+        assert_eq!((failure, status), (None, Some(ChildStatus::Exited(0))));
+        assert_eq!(output, b"ran");
+        // The search skips that directory as if the kernel had refused its path with
+        // `ENAMETOOLONG`, which a later path's error replaces.
+        assert_eq!(
+            search_error(searched_for("prog", &[&missing, &long])),
+            Errno::ENAMETOOLONG as i32
+        );
+        assert_eq!(
+            search_error(searched_for("prog", &[&long, &missing])),
+            Errno::ENOENT as i32
+        );
+    }
+
+    /// Returns the peak resident memory of the calling process, in KiB: its `VmHWM`.
+    fn peak_resident_kib() -> u64 {
+        std::fs::read_to_string("/proc/self/status")
+            .unwrap()
+            .lines()
+            .find_map(|line| line.strip_prefix("VmHWM:"))
+            .and_then(|value| value.trim().strip_suffix("kB"))
+            .and_then(|value| value.trim().parse().ok())
+            .expect("the status holds the peak resident memory")
+    }
+
+    #[test]
+    fn a_search_s_memory_is_bounded_whatever_its_name_and_path() {
+        if crate::guest::managed_agent::isolate_process_test(
+            "NVX_SPAWN_BOUNDED_SEARCH_TEST_CHILD",
+            "guest::spawn::tests::a_search_s_memory_is_bounded_whatever_its_name_and_path",
+        ) {
+            return;
+        }
+        // The peak resident memory of the isolated process tells how much a launch prepared,
+        // once a first launch has brought in the code that every launch runs, which it counts
+        // too.
+        let directory = tempfile::tempdir().unwrap();
+        let missing = directory.path().join("missing").display().to_string();
+        assert_eq!(
+            search_error(searched_for("prog", &[&missing])),
+            Errno::ENOENT as i32
+        );
+        // A 4,096-byte name in each of the 32,764 empty directories of 32,763 colons would make
+        // 32,764 paths of 4,097 bytes: 128 MiB.
+        let name = CString::new("n".repeat(4096)).unwrap();
+        let command = Command::new(name.clone(), vec![name])
+            .search_path(CString::new(":".repeat(32_763)).unwrap());
+        let before = peak_resident_kib();
+        let error = search_error(command);
+        let grown = peak_resident_kib() - before;
+        assert_eq!(error, Errno::ENAMETOOLONG as i32);
+        assert!(
+            grown < 16 * 1024,
+            "the launch grew the peak resident memory by {grown} KiB"
+        );
     }
 
     #[test]
