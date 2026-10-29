@@ -31,6 +31,8 @@ allow)
     nc -l -p @INGRESS_PORT@ >/dev/null 2>&1 & ingress_pid=$!
     sleep 0.1
     kill -0 "$ingress_pid" 2>/dev/null || fail 25
+    # The terminal would echo the host's release into the lines after it.
+    stty -echo || fail 31
     echo NVX-DIRECTIONAL-INGRESS-"READY"
     read -r ingress_release || fail 26
     [ "$ingress_release" = NVX-DIRECTIONAL-INGRESS-CHECKED ] || fail 27

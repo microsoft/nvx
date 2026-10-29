@@ -2572,6 +2572,36 @@ class GuestConsoleEchoTests(unittest.TestCase):
                     ["openvmm"], "echo NVX-DONE\n", b"NVX-DONE", timeout=1
                 )
 
+    def test_scripts_awaiting_a_release_turn_the_echo_off_first(self):
+        # The host's release arrives while the script runs.
+        for name, ready, release in (
+            (
+                "directional-network-policy.sh.in",
+                'echo NVX-DIRECTIONAL-INGRESS-"READY"',
+                "read -r ingress_release",
+            ),
+            (
+                "host-loopback-policy.sh.in",
+                f"echo {microvm_tests.HOST_LOOPBACK_INGRESS_READY_MARKER.decode()}",
+                "read -r release",
+            ),
+            (
+                "private-network-ingress.sh.in",
+                f"echo {microvm_tests.PRIVATE_INGRESS_LISTENING_MARKER.decode()}",
+                "read -r release",
+            ),
+            (
+                "platform-network-policy.sh.in",
+                f"echo {microvm_tests.PLATFORM_NETWORK_LISTENING_MARKER.decode()}",
+                "read -r release exchange",
+            ),
+        ):
+            with self.subTest(name=name):
+                script = microvm_tests._read_script(name)
+                self.assertEqual(script.count("stty -echo"), 1)
+                self.assertLess(script.index("stty -echo"), script.index(ready))
+                self.assertLess(script.index(ready), script.index(release))
+
 
 class GuestIdentityScriptTests(unittest.TestCase):
     def test_guest_identity_checks_fail_before_success_markers(self):
@@ -4231,6 +4261,8 @@ class MicrovmTests(unittest.TestCase):
             path = root / "private-network-ingress.sh"
             path.write_text(
                 "sleep() { :; }\n"
+                # The script's input is a pipe here, not the guest's terminal.
+                'stty() { [ "$*" = -echo ]; }\n'
                 f"pidof() {{ return {0 if ingress_running else 1}; }}\n"
                 'nc() { case "$*" in\n'
                 f"'-l -p '*) {tcp} ;;\n"
@@ -4695,6 +4727,8 @@ class MicrovmTests(unittest.TestCase):
             path = root / "host-loopback-policy.sh"
             path.write_text(
                 "sleep() { :; }\n"
+                # The script's input is a pipe here, not the guest's terminal.
+                'stty() { [ "$*" = -echo ]; }\n'
                 f"pidof() {{ return {0 if announcer else 1}; }}\n"
                 "wget() { echo NVX-HOST-LOOPBACK-GENERAL; }\n"
                 'nc() { case "$*" in\n'
