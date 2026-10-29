@@ -24,20 +24,23 @@ use crate::error::{Error, ErrorCode, ErrorKind, Result};
 use crate::host::platform::{self, parse_hex_id};
 use crate::host::process::BootId;
 use crate::host::store::files::{open_lock, write_private};
-use crate::host::store::lease::{ID_LEN, hex, read_private, read_record, store_error};
+use crate::host::store::lease::{
+    ID_LEN, StoreRecord, hex, read_identity, read_private, read_record, store_error,
+};
 
+#[cfg(all(test, any(target_os = "linux", windows)))]
+pub(super) use self::capture::SNAPSHOT_ARTIFACTS;
+pub(super) use self::capture::SOCKET_PATH_LIMIT;
 pub use self::capture::{CAPTURE_RECORD_NAME, CAPTURES_NAME, Capture, Created, TRANSACTION_NAME};
 pub use self::leases::{Acquired, LEASES_NAME, Retirement, TOMBSTONES_NAME};
-pub use crate::host::store::lease::{Lease, LeaseId, STORE_FORMAT, StoreId};
+pub use crate::host::store::lease::{
+    GENERATIONS_NAME, Lease, LeaseId, STORE_FORMAT, STORE_RECORD_NAME, StoreId,
+};
 
-/// Name of the store's identity record.
-pub const STORE_RECORD_NAME: &str = "store.json";
 /// Name of the store's index.
 pub const INDEX_NAME: &str = "index.json";
 /// Name of the lock of the store's index.
 pub const INDEX_LOCK_NAME: &str = "index.lock";
-/// Name of the directory of the generations' payloads.
-pub const GENERATIONS_NAME: &str = "generations";
 /// Name of the canonical encoding of a generation's key in its payload.
 pub const KEY_NAME: &str = "key.bin";
 /// Name of a generation's snapshot in its payload.
@@ -47,9 +50,6 @@ pub const MAX_GENERATIONS: usize = 1024;
 
 /// The store generation that a new store assigns first.
 const FIRST_GENERATION: StoreGeneration = StoreGeneration::new(NonZeroU64::MIN);
-
-/// Longest identity record, in bytes.
-const MAX_STORE_RECORD_LEN: u64 = 4 * 1024;
 
 /// Longest index, in bytes: more than an index of [`MAX_GENERATIONS`] generations takes.
 const MAX_INDEX_LEN: u64 = 4 * 1024 * 1024;
@@ -248,6 +248,8 @@ impl Index {
 ///       capture.json       the record of the capture that made it
 ///       key.bin            the canonical encoding of its compatibility key
 ///       snapshot/          its snapshot, as OpenVMM published it
+///       <launch>.sock      on Linux, the control socket of the VMM of a clone that leases it,
+///                          named after the clone's launch, until the lease's release
 ///   leases/                the records of the leases that the store granted
 ///     <L>.json             the record of the lease L
 ///   tombstones/            the tombstones of the generations that take no new leases
@@ -279,7 +281,9 @@ impl Index {
 /// of its key and of its capture class, its storage generation, and what its manifest records of
 /// the capture itself, its creation time, its time contract, and the lengths of its artifacts.
 /// The payload of a generation never changes once the index lists it: the record of its capture,
-/// the canonical encoding of its key, which [`Store::read_key`] reads, and its snapshot. The index
+/// the canonical encoding of its key, which [`Store::read_key`] reads, and its snapshot, which its
+/// clones restore in place. Only the control sockets of the VMMs of the clones that lease it come
+/// and go beside them, on Linux, as [`Store::acquire`] describes. The index
 /// changes as generations are published and retired, and the records of leases and tombstones as
 /// clones lease generations, and as generations are quarantined and retired.
 ///
@@ -421,6 +425,14 @@ impl Index {
 /// once the sandbox records no VM and no launch, and so once its VM has exited, as its store
 /// verifies through the VM's recorded process, also after a reattach. A caller that reads a
 /// generation's payload, as a restore does, holds a lease of it.
+///
+/// On Linux, a payload holds the control socket of the VMM of each clone that leases it,
+/// `<launch>.sock`, named after the launch that the lease reserves, beside the snapshot that the
+/// clone restores, and of no clone whose lease has ended: the release makes the socket's absence
+/// durable before it ends the lease. So a payload holds entries other than its capture's while
+/// its generation has leases, which nothing that reads an indexed payload may refuse, and a
+/// retirement deletes the payload with any socket that a crash, or a removal of a sandbox that
+/// never released its lease, left in it.
 ///
 /// A tombstone, which [`Store::tombstone`] writes, quarantines a generation: it takes no new
 /// lease, and selection skips it, while the leases that it granted keep working.
@@ -878,8 +890,8 @@ fn take_lock(dir: &Path, deadline: Option<Instant>) -> Result<File> {
                 }
             },
         }
-        let locked = platform::opened_file_identity(&file).map_err(failed)?;
-        match platform::file_identity(&path) {
+        let locked = platform::opened_file_id(&file).map_err(failed)?;
+        match platform::file_id(&path) {
             Ok(current) if current == locked => return Ok(file),
             Ok(_) => {}
             Err(error) if error.kind() == io::ErrorKind::NotFound => {}
@@ -902,33 +914,6 @@ fn write_record<T: Serialize>(path: &Path, record: &T, description: &str) -> Res
         .map_err(|error| Error::other(format!("cannot encode {description}")).with_source(error))?;
     text.push(b'\n');
     write_private(path, &text)
-}
-
-/// Reads the identity of the store in `dir` from its identity record, or returns `None` if the
-/// directory holds none.
-fn read_identity(dir: &Path) -> Result<Option<StoreId>> {
-    let path = dir.join(STORE_RECORD_NAME);
-    let description = "identity record of the template store";
-    let Some(record) = read_record::<StoreRecord>(&path, description, MAX_STORE_RECORD_LEN)? else {
-        return Ok(None);
-    };
-    record.store.parse().map(Some).map_err(|error: Error| {
-        Error::io(format!(
-            "the {description} {} is malformed: {}",
-            path.display(),
-            error.message()
-        ))
-    })
-}
-
-/// The identity record of a store, as JSON.
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct StoreRecord {
-    /// [`STORE_FORMAT`].
-    format: u32,
-    /// The store's identity.
-    store: String,
 }
 
 /// The index of a store, as JSON.

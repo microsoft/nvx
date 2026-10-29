@@ -24,10 +24,14 @@ use crate::host::filesystem;
 use crate::host::platform;
 use crate::host::store::files::{remove_if_present, sync_dir};
 use crate::host::store::lease::{
-    Lease, LeaseId, LeaseRecord, MAX_LEASE_RECORD_LEN, read_binding, read_lease,
+    Lease, LeaseId, LeaseRecord, MAX_LEASE_RECORD_LEN, clone_socket_name, open_payload,
+    read_binding, read_binding_in, read_lease,
 };
-use crate::host::store::regular::was_removed;
-use crate::host::store::{CLONE_BINDING_NAME, CallerFiles, LaunchId, LockedStore, SandboxStore};
+use crate::host::store::regular::{open_regular_in, was_removed};
+use crate::host::store::{
+    CLONE_BINDING_NAME, CallerFiles, JOURNAL_NAME, LaunchId, LockedStore, RUNTIME_NAME,
+    Reservation, SandboxStore,
+};
 use crate::host::template::eligibility::HostTime;
 use crate::host::template::key::KeyIdentity;
 
@@ -132,22 +136,37 @@ impl Store {
     /// In one transaction, under the store's lock and then the sandbox's
     /// [lifecycle lock](crate::host::store#lifecycle-locks), it checks that the store indexes the
     /// generation, that no tombstone quarantines it, that it is eligible at `now`, as
-    /// [`Generation::eligibility`] decides it, and that the sandbox is provisioned, records no VM
-    /// and no launch, and holds no lease; and it writes the lease's record in the store, and then
-    /// the same record as the sandbox's clone binding, beside its launch journal, each durable
-    /// before the next step, so that no binding outlasts, through a crash of the host, the record
-    /// that keeps its generation in the store. It resolves the links of the sandbox's path before
-    /// it takes the sandbox's lock, and the lease, the binding, and the lock that it returns all
-    /// name the sandbox by that path, as [`Lease::sandbox`] returns it, which no later change of a
-    /// link redirects to another directory. It returns the lease, with the sandbox's lock, the only
-    /// one under which the caller launches the clone, once, as the launch that the lease reserves,
-    /// [`Lease::launch`], and releases the store's lock.
+    /// [`Generation::eligibility`] decides it, that its payload, on Linux, is one that a launch of
+    /// the clone and a release of its lease can use, and that the sandbox is provisioned, records
+    /// no VM and no launch, and holds no lease; and it writes the lease's record in the store, and
+    /// then the same record as the sandbox's clone binding, beside its launch journal, each
+    /// durable before the next step, so that no binding outlasts, through a crash of the host, the
+    /// record that keeps its generation in the store. It resolves the links of the sandbox's path
+    /// before it takes the sandbox's lock, and the lease, the binding, and the lock that it
+    /// returns all name the sandbox by that path, as [`Lease::sandbox`] returns it, which no later
+    /// change of a link redirects to another directory. It returns the lease, with the sandbox's
+    /// lock, the only one under which the caller launches the clone, once, as the launch that the
+    /// lease reserves, [`Lease::launch`], and releases the store's lock.
+    ///
+    /// The launch that the lease reserves restores the generation's snapshot in place, and its VMM
+    /// listens beside the snapshot, as OpenVMM requires of a restore on Linux: at the control
+    /// socket `<launch>.sock`, in the generation's payload, after the launch's identity, rather
+    /// than at the sandbox's own socket. So a payload holds the sockets of the clones of its
+    /// generation, each named after a launch, while they lease it, and none once its leases have
+    /// drained: the VMM removes its socket as it exits, a stop or a recovery of the sandbox
+    /// removes the one that an abrupt exit leaves, and a [release](Self::release) makes the
+    /// socket's absence durable before the lease ends. On Windows, the VMM listens at a named
+    /// pipe, as every launch does.
     ///
     /// Fails, and leases nothing:
     ///
     /// - with [`ErrorKind::NotFound`] if the store does not index the generation;
     /// - with [`ErrorCode::TemplateTombstoned`] if a tombstone quarantines it;
     /// - with [`ErrorCode::TemplateIneligible`] if it is not eligible at `now`;
+    /// - on Linux, with [`ErrorKind::Io`] if the generation's payload is not a directory of the
+    ///   current user with mode 0700, which a launch of the clone requires, as OpenVMM does of the
+    ///   directory of a control socket, and which a release needs, to remove the clone's socket
+    ///   from the payload and make its absence durable;
     /// - with [`ErrorCode::SandboxNotProvisioned`] if the directory does not exist, or holds no
     ///   configuration record of the caller, as `files` declares it;
     /// - with [`ErrorCode::SandboxRunning`] if the sandbox records a VM, or a launch, which may
@@ -208,6 +227,12 @@ impl Store {
                     self.dir.display()
                 ),
             ));
+        }
+        // A release removes the socket of the clone's VMM through a handle of the payload, which
+        // it opens for reading, so that it can make the removal durable: a payload that it could
+        // not open, or remove an entry from, would keep the lease and its binding past it.
+        if cfg!(unix) {
+            self.check_payload(generation)?;
         }
         let not_provisioned = || {
             Error::new(
@@ -307,8 +332,27 @@ impl Store {
             return Err(error);
         }
         drop(lock);
-        locked.reserve(Some(lease.launch().clone()));
+        locked.reserve(Some(Reservation {
+            socket: self.clone_socket_path(&lease),
+            launch: lease.launch().clone(),
+        }));
         Ok(Acquired { lease, locked })
+    }
+
+    /// Returns the path of the Linux socket at which the VMM of the clone that holds `lease`
+    /// listens, its control endpoint: `<launch>.sock`, after the launch that the lease reserves,
+    /// in the payload of the leased generation, beside the snapshot that the VMM restores in
+    /// place, since OpenVMM requires a restore's control socket in the snapshot's parent. The
+    /// clone's launch refuses a path that a Unix socket, or OpenVMM's option `listen=<path>`,
+    /// cannot take.
+    ///
+    /// A payload holds the sockets of the clones of its generation only while they lease it: the
+    /// VMM removes its socket as it exits, a stop or a recovery removes what an abrupt exit
+    /// leaves, and a [release](Self::release) makes the socket's absence durable before the lease
+    /// ends. A [retirement](Self::retire) removes the payload with whatever a crash left in it.
+    pub(crate) fn clone_socket_path(&self, lease: &Lease) -> PathBuf {
+        self.payload_dir(lease.generation())
+            .join(clone_socket_name(lease.launch()))
     }
 
     /// Releases the lease that the sandbox of `locked` holds, and returns it, or returns `None` if
@@ -318,32 +362,77 @@ impl Store {
     /// [`ErrorCode::SandboxRunning`] while the sandbox records a VM or a launch, which may still
     /// run. The sandbox's store clears those records only once it has verified that the VM's
     /// process exited, through its recorded [`ProcessRef`](crate::host::process::ProcessRef), as
-    /// a stop or a [`reattach`](crate::host::supervisor::reattach) does. The release removes the
-    /// file of the scratch device of a clone whose upper is in RAM,
+    /// a stop or a [`reattach`](crate::host::supervisor::reattach) does. The release first ends
+    /// the reservation of the launch that `locked` holds, if it acquired the lease, so that one
+    /// that fails part of the way, once it removed files that a launch of the clone's plan needs,
+    /// leaves no launch that the lock may begin. It then removes what the clone kept of its
+    /// launch: the file of the scratch device of a clone whose upper is in RAM,
     /// [`CLONE_SCRATCH_NAME`](crate::host::store::CLONE_SCRATCH_NAME), which the clone's
-    /// [plan](crate::host::template::ClonePlan) created, then the clone binding, and once their
-    /// removal is durable, the lease's record in the store, so that an interrupted release leaves
-    /// a record that no binding names, which a [retirement](Self::retire) removes, and never a
-    /// binding without its record. It takes no lock of the store.
+    /// [plan](crate::host::template::ClonePlan) created, the clone's activation record,
+    /// [`CLONE_ACTIVATION_NAME`](crate::host::store::CLONE_ACTIVATION_NAME), and the socket of
+    /// its restore-ready event, [`RESTORE_READY_NAME`](crate::host::store::RESTORE_READY_NAME);
+    /// then, on Linux, the control socket of the clone's VMM, `<launch>.sock` in the leased
+    /// generation's payload, after the launch that the lease reserved, whose absence it makes
+    /// durable; then the clone binding, and once their removal is durable, the lease's record in
+    /// the store, so that an interrupted release leaves a record that no binding names, which a
+    /// [retirement](Self::retire) removes, and never a binding without its record. It takes no
+    /// lock of the store.
     ///
     /// The caller takes the sandbox's lock through the lease's path, as [`Lease::sandbox`]
-    /// returns it, and as [`acquire`](Self::acquire) takes it, which has no links: a link in the
-    /// path of the lock could change as the release runs, and make it remove another sandbox's
-    /// binding, whose lock it does not hold.
+    /// returns it, and as [`acquire`](Self::acquire) takes it, with its links resolved. The
+    /// release names the entries of the sandbox's directory through one handle of the directory
+    /// that the path names, once it checked through that handle that the directory holds the
+    /// lock's file: through it, it checks that the sandbox records no VM and no launch, reads the
+    /// binding, removes the clone's files and the binding, and makes their absence durable. No
+    /// change of the path as the release runs, of a link in it or of one of its directories, then
+    /// makes it check or remove the files of another sandbox, whose lock it does not hold.
     ///
-    /// Fails with [`ErrorKind::Other`] if the sandbox holds a lease of another store, or if the
-    /// lock does not name the sandbox by its lease's path, and then removes nothing.
+    /// Likewise, on Linux, the release opens the leased generation's payload before it removes
+    /// anything, through a handle of the store's directory: following no link at the store's
+    /// directory, at its directory of the generations, or at the payload, and once it checked
+    /// through that handle that the directory holds this store. It removes the clone's socket and
+    /// makes its absence durable through the payload's handle, so that neither a link that takes
+    /// the place of one of them nor a directory that takes the place of the store ever leads it to
+    /// remove the files of another directory. A directory that holds another store, or none, holds
+    /// no payload of this store's, so no socket goes.
+    ///
+    /// Fails with [`ErrorKind::Other`] if the sandbox holds a lease of another store, if the lock
+    /// does not name the sandbox by its lease's path, or if the directory that the path names does
+    /// not hold the lock's file, and with [`ErrorKind::Io`] if the store's directory, its
+    /// directory of the generations, or the payload is a link, or not a directory, and then
+    /// removes nothing.
     pub fn release(&self, locked: &mut LockedStore) -> Result<Option<Lease>> {
-        self.release_with(locked, &sync_dir)
+        self.release_with(
+            locked,
+            &|| {},
+            &platform::Directory::sync,
+            &platform::Directory::sync,
+        )
     }
 
-    /// Releases a lease as [`release`](Self::release) does, making the removal of its binding
-    /// durable with `sync`.
-    fn release_with(&self, locked: &mut LockedStore, sync: SyncDir<'_>) -> Result<Option<Lease>> {
-        if locked.journal()?.is_some() || locked.runtime()?.is_some() {
-            return Err(may_run(locked.dir()));
+    /// Releases a lease as [`release`](Self::release) does, running `checked` once its checks
+    /// pass, before it removes anything, and making the removal of the clone's socket durable with
+    /// `sync_payload`, through the handle of the leased generation's payload, and that of the
+    /// binding with `sync_sandbox`, through the handle of the sandbox's directory.
+    fn release_with(
+        &self,
+        locked: &mut LockedStore,
+        checked: &dyn Fn(),
+        sync_payload: &dyn Fn(&platform::Directory) -> io::Result<()>,
+        sync_sandbox: &dyn Fn(&platform::Directory) -> io::Result<()>,
+    ) -> Result<Option<Lease>> {
+        let directory = locked.open_dir()?;
+        // A record whose deletion is pending, on Windows, is removed, as its readers take it.
+        for name in [JOURNAL_NAME, RUNTIME_NAME] {
+            let present = open_regular_in(&directory, name).map_err(store_error(format!(
+                "cannot examine {}",
+                locked.dir().join(name).display()
+            )))?;
+            if present.is_some() {
+                return Err(may_run(locked.dir()));
+            }
         }
-        let Some(lease) = read_binding(locked.dir())? else {
+        let Some(lease) = read_binding_in(&directory, locked.dir())? else {
             return Ok(None);
         };
         if lease.store() != self.id {
@@ -363,16 +452,92 @@ impl Store {
             )));
         }
         let recorded = self.check_records_dir(LEASES_NAME, LEASES_WHAT)?;
-        // The clone's VM has exited, and the sandbox launches nothing else under the lease, so no
-        // VM holds the scratch device's file of a RAM upper. The binding's removal makes the
-        // file's durable too, since both are entries of the sandbox's directory.
-        remove_if_present(&locked.clone_scratch_path())?;
-        unbind(locked.dir(), sync)?;
+        // The payload opens before anything goes, so that a link in its place refuses the release.
+        let payload = self.open_clone_payload(&lease)?;
+        checked();
+        // A plan of the clone launches under the reservation that the lease's acquisition left in
+        // the lock, which the release ends before it removes anything, so that a release that
+        // fails once it removed the clone's files, such as the scratch device's file of an upper
+        // in RAM, leaves no launch that the lock may begin.
         locked.reserve(None);
+        // The clone's VM has exited, and the sandbox launches nothing else under the lease, so no
+        // VM holds the scratch device's file of a RAM upper, or listens at the clone's control
+        // socket. The binding's removal makes the removal of the clone's files durable too, since
+        // all are entries of the sandbox's directory, but not that of the socket, an entry of the
+        // leased generation's payload, which must be durable before the lease ends, so that a
+        // generation whose leases have drained holds no clone's socket.
+        locked.remove_clone_files(&directory)?;
+        if let Some(payload) = &payload {
+            self.remove_clone_socket(&lease, payload, sync_payload)?;
+        }
+        let binding = locked.dir().join(CLONE_BINDING_NAME);
+        directory
+            .remove_file(CLONE_BINDING_NAME)
+            .map_err(store_error(format!("cannot remove {}", binding.display())))?;
+        // The binding's absence is durable before its record goes: a binding that outlasted the
+        // record through a crash would let a retirement delete the generation that it names.
+        sync_sandbox(&directory).map_err(store_error(format!(
+            "cannot sync the directory {}",
+            locked.dir().display()
+        )))?;
         if recorded {
             remove_lease_record(&self.lease_path(lease.id()))?;
         }
         Ok(Some(lease))
+    }
+
+    /// Refuses the payload of the generation `generation` unless it is a directory of the current
+    /// user with mode 0700, as a launch of a clone requires it, OpenVMM requiring that mode of the
+    /// directory of a control socket, and as a release of the clone's lease needs it on Linux: the
+    /// release opens the payload for reading, and removes the clone's socket from it.
+    fn check_payload(&self, generation: StoreGeneration) -> Result<()> {
+        let payload = self.payload_dir(generation);
+        let problem = platform::check_store_dir(&payload).map_err(store_error(format!(
+            "cannot open the payload of the generation {}",
+            payload.display()
+        )))?;
+        match problem {
+            Some(problem) => Err(Error::io(format!(
+                "the payload of the generation {} {problem}",
+                payload.display()
+            ))),
+            None => Ok(()),
+        }
+    }
+
+    /// Opens the payload of the generation that `lease` leases, which on Linux holds the control
+    /// socket of the clone's VMM, through the store's directory, following no link, as
+    /// [`open_payload`] opens it, or returns `None` elsewhere, where the VMM listens at a named
+    /// pipe, or if the payload is gone, or the store's directory holds another store, or none,
+    /// since neither holds a socket of this store's clones.
+    fn open_clone_payload(&self, lease: &Lease) -> Result<Option<platform::Directory>> {
+        if !cfg!(unix) {
+            return Ok(None);
+        }
+        open_payload(self.dir(), self.id, lease.generation())
+    }
+
+    /// Removes the control socket of the VMM of the clone that holds `lease`, beside the snapshot
+    /// that the VMM restored, from `payload`, the handle of the leased generation's payload, if it
+    /// is there, and makes its absence durable with `sync`, through that handle. The VMM removes
+    /// its socket as it exits, and a stop or a recovery removes the one that an abrupt exit
+    /// leaves, but neither makes the removal durable.
+    fn remove_clone_socket(
+        &self,
+        lease: &Lease,
+        payload: &platform::Directory,
+        sync: &dyn Fn(&platform::Directory) -> io::Result<()>,
+    ) -> Result<()> {
+        payload
+            .remove_file(&clone_socket_name(lease.launch()))
+            .map_err(store_error(format!(
+                "cannot remove {}",
+                self.clone_socket_path(lease).display()
+            )))?;
+        sync(payload).map_err(store_error(format!(
+            "cannot sync the directory {}",
+            self.payload_dir(lease.generation()).display()
+        )))
     }
 
     /// Returns the leases of the generation `generation` that the store's records list, in the

@@ -1,20 +1,30 @@
 //! Tests of the plans of clones: the checks of their images, uppers, and memory targets against
 //! the generation that they lease, which read no content, the claims of their scratch images, and
-//! the sparse scratch device of an upper in RAM.
+//! the sparse scratch device of an upper in RAM; and, in [`launch`], of their launches.
+
+mod launch;
 
 use std::io::Read;
+use std::net::{IpAddr, Ipv4Addr};
 use std::time::Duration;
+
+use sha2::{Digest, Sha256};
 
 use super::*;
 use crate::ErrorCode;
+use crate::activation::{
+    Configuration, ExpectedResources, Identity, Image, MachineIdMode, Network, Publication, Upper,
+    WorkloadIdentity,
+};
 use crate::host::filesystem;
-use crate::host::network::{Access as NetworkAccess, NetworkPolicy};
+use crate::host::network::{Access as NetworkAccess, NetworkPolicy, NetworkProxy, ProxyScheme};
 use crate::host::paths;
 use crate::host::sandbox::distro::{DISTRO_POLICY_REVISION, PolicyVerdict};
 use crate::host::sandbox::scratch::CLAIM_RELEASE_WAIT;
 use crate::host::sandbox::{SandboxDistro, SandboxNetwork, SandboxSettings, SandboxUpper};
 use crate::host::seal::{FileSeal, open_metadata_only};
 use crate::host::store::{CLONE_SCRATCH_NAME, CallerFiles, LOG_NAME, SandboxStore};
+use crate::host::template::store::{CAPTURES_NAME, SNAPSHOT_NAME, TRANSACTION_NAME};
 use crate::host::template::test_support::{MIB, ManifestSpec, class, network_class};
 use crate::host::template::{CaptureClass, HostTime};
 use crate::host::test_support::released;
@@ -78,6 +88,25 @@ fn stage(path: &Path, length: u64) {
     #[cfg(unix)]
     std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
     options.open(path).unwrap().set_len(length).unwrap();
+}
+
+/// Makes `link` a junction to the directory `target`, quoting both paths, since `cmd` splits its
+/// arguments at commas and semicolons.
+#[cfg(windows)]
+fn junction(link: &Path, target: &Path) {
+    use std::os::windows::process::CommandExt;
+    use std::process::{Command, Stdio};
+
+    let status = Command::new("cmd")
+        .raw_arg(format!(
+            "/C mklink /J \"{}\" \"{}\"",
+            link.display(),
+            target.display()
+        ))
+        .stdout(Stdio::null())
+        .status()
+        .unwrap();
+    assert!(status.success(), "cannot link {}", link.display());
 }
 
 /// Returns the physical block size that OpenVMM presents for the files of the directory `dir`:
@@ -152,7 +181,9 @@ fn layer(path: &Path) -> SandboxLayer {
 }
 
 /// Returns the request of a clone of the image at `image`, which `binding` binds, over an upper in
-/// RAM, with the template's RAM as its memory target.
+/// RAM, with the template's RAM as its memory target, and the settings of [`workload`], for
+/// untrusted lowers, and with a journal policy, [`Journal::Forbidden`], that its record leaves
+/// out.
 fn tmpfs_request(image: &Path, binding: &DistroBinding) -> CloneRequest {
     CloneRequest {
         adapter: SandboxPlan::adapter(
@@ -163,6 +194,21 @@ fn tmpfs_request(image: &Path, binding: &DistroBinding) -> CloneRequest {
         policy_revision: DISTRO_POLICY_REVISION,
         scratch: None,
         memory: MEMORY,
+        workload: workload(),
+        overlay: OverlayMode::UntrustedLowers,
+        journal: Journal::Forbidden,
+    }
+}
+
+/// Returns the view that these tests' clones give their workloads of their VMs.
+fn workload() -> WorkloadView {
+    WorkloadView {
+        hostname: b"clone".to_vec(),
+        machine_id: MachineIdMode::Generated,
+        identity: Some(WorkloadIdentity {
+            uid: 1000,
+            gid: 1000,
+        }),
     }
 }
 
@@ -243,9 +289,18 @@ impl Fixture {
     /// Publishes a template as [`new`](Self::new) does, of the class and manifest that `change`
     /// changes, given the physical block size of the files of the directory.
     fn with(change: impl FnOnce(&mut CaptureClass, &mut ManifestSpec, u32)) -> Self {
+        Self::in_store(|directory| directory.join("templates"), change)
+    }
+
+    /// Publishes a template as [`with`](Self::with) does, in a store at the path that `store`
+    /// returns, given the temporary directory, in which it creates the store's parent directory.
+    fn in_store(
+        store: impl FnOnce(&Path) -> PathBuf,
+        change: impl FnOnce(&mut CaptureClass, &mut ManifestSpec, u32),
+    ) -> Self {
         let directory = tempfile::tempdir().unwrap();
         let physical = physical_block_size(directory.path());
-        let store = Store::create(directory.path().join("templates")).unwrap();
+        let store = Store::create(store(directory.path())).unwrap();
         let (mut class, mut spec) = (class(), ManifestSpec::template());
         set_geometries(
             &mut class,
@@ -289,17 +344,24 @@ impl Fixture {
         (path, binding)
     }
 
-    /// Provisions the sandbox `name`, and leases the generation to it, a second after its
-    /// capture.
-    fn acquire(&self, name: &str) -> Acquired {
+    /// Provisions the sandbox `name`, and returns its directory, with its links resolved, as a
+    /// lease names it.
+    fn provision(&self, name: &str) -> PathBuf {
         let dir = self.path("sandboxes", name);
         let locked = SandboxStore::lock_for_provision(&dir, &files(), None).unwrap();
         fs::write(dir.join(CONFIG), b"{}").unwrap();
         drop(locked);
+        filesystem::canonicalize(&dir).unwrap()
+    }
+
+    /// Provisions the sandbox `name`, and leases the generation to it, a second after its
+    /// capture.
+    fn acquire(&self, name: &str) -> Acquired {
+        let sandbox = self.provision(name);
         self.store
             .acquire(
                 self.generation.generation(),
-                filesystem::canonicalize(&dir).unwrap(),
+                sandbox,
                 &files(),
                 &after(&self.generation, 1),
                 None,
@@ -691,6 +753,188 @@ fn links_and_directories_under_the_names_of_the_sandboxs_store_are_refused() {
     // The plan creates the file of the scratch device once nothing else is there.
     let plan = fixture.plan(&mut acquired, &request, NO_CONTENT).unwrap();
     assert!(fs::symlink_metadata(plan.scratch_path()).unwrap().is_file());
+}
+
+#[test]
+fn a_scratch_image_that_is_a_file_of_a_generation_s_snapshot_is_refused() {
+    let fixture = Fixture::new();
+    let (image, image_binding) = fixture.image("distro.erofs", IMAGE_LEN);
+    let mut acquired = fixture.acquire("sandbox");
+    // The RAM of the leased generation's snapshot, and that of another generation's, which the
+    // store's index need not list, of the template's scratch length: the clone's guest would write
+    // a snapshot that every clone of its generation restores in place.
+    let snapshot = fixture.store.snapshot_dir(&fixture.generation).unwrap();
+    let leased = snapshot.join("memory.bin");
+    stage(&leased, SCRATCH_LEN);
+    let next = fixture.generation.generation().get().get() + 1;
+    let other = crate::activation::StoreGeneration::new(std::num::NonZeroU64::new(next).unwrap());
+    let other = fixture
+        .store
+        .payload_dir(other)
+        .join(snapshot.file_name().unwrap());
+    fs::create_dir_all(&other).unwrap();
+    let other = other.join("memory.bin");
+    stage(&other, SCRATCH_LEN);
+    // Through a hard link among the scratch images, another name of the file, and by its own
+    // path, in the store's directory.
+    let cases = [
+        (&leased, fixture.path("scratches", "leased.raw")),
+        (&other, fixture.path("scratches", "other.raw")),
+        (&other, other.clone()),
+    ];
+    for (memory, scratch) in cases {
+        let linked = scratch != *memory;
+        if linked {
+            fs::hard_link(memory, &scratch).unwrap();
+        }
+        let binding = ScratchBinding::bind(&scratch).unwrap();
+        let request = scratch_request(&image, &image_binding, &scratch, &binding);
+        let expected = if linked {
+            format!(
+                "the scratch image {} has 2 names, but a clone's scratch image must have a single \
+                 name: another, a hard link, could make it a file of a snapshot, which every \
+                 clone of its generation restores in place",
+                scratch.display()
+            )
+        } else {
+            format!(
+                "the scratch image {} is {}, in the directory of the template store {}, where its \
+                 captures write the snapshots that every clone of a generation restores in place: \
+                 a clone's scratch image must be outside it",
+                scratch.display(),
+                location_of(&File::open(&scratch).unwrap())
+                    .unwrap()
+                    .display(),
+                fixture.store.dir().display()
+            )
+        };
+        assert_eq!(
+            failure(fixture.plan(&mut acquired, &request, NO_CONTENT)),
+            (ErrorKind::Unsupported, expected)
+        );
+        assert_untouched(&acquired);
+    }
+}
+
+#[test]
+fn a_scratch_image_in_the_template_store_is_refused() {
+    let fixture = Fixture::new();
+    let (image, image_binding) = fixture.image("distro.erofs", IMAGE_LEN);
+    let mut acquired = fixture.acquire("sandbox");
+    // A file in the store's directory, and one of a snapshot that a capture of the store writes,
+    // which its publication makes a generation's by renaming the capture's transaction, of the
+    // template's scratch length: by their own paths, and through links on the way to them, which
+    // the image's location resolves.
+    let dir = fixture.store.dir().to_owned();
+    let loose = dir.join("scratch.raw");
+    let transaction = dir.join(CAPTURES_NAME).join("slot").join(TRANSACTION_NAME);
+    let memory = transaction.join(SNAPSHOT_NAME).join("memory.bin");
+    fs::create_dir_all(memory.parent().unwrap()).unwrap();
+    for file in [&loose, &memory] {
+        stage(file, SCRATCH_LEN);
+    }
+    let through = |link: &Path| link.join(SNAPSHOT_NAME).join("memory.bin");
+    let mut cases = vec![(&loose, loose.clone()), (&memory, memory.clone())];
+    let link = fixture.path("links", "transaction");
+    fs::create_dir_all(link.parent().unwrap()).unwrap();
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&transaction, &link).unwrap();
+    #[cfg(windows)]
+    junction(&link, &transaction);
+    cases.push((&memory, through(&link)));
+    // The transaction held open, as a descriptor keeps a directory whatever renames it.
+    #[cfg(target_os = "linux")]
+    let held = File::open(&transaction).unwrap();
+    #[cfg(target_os = "linux")]
+    cases.push((
+        &memory,
+        through(
+            &Path::new("/proc/self/fd").join(std::os::fd::AsRawFd::as_raw_fd(&held).to_string()),
+        ),
+    ));
+    for (file, scratch) in cases {
+        let binding = ScratchBinding::bind(&scratch).unwrap();
+        let request = scratch_request(&image, &image_binding, &scratch, &binding);
+        let location = location_of(&File::open(file).unwrap()).unwrap();
+        assert_eq!(
+            failure(fixture.plan(&mut acquired, &request, NO_CONTENT)),
+            (
+                ErrorKind::Unsupported,
+                format!(
+                    "the scratch image {} is {}, in the directory of the template store {}, \
+                     where its captures write the snapshots that every clone of a generation \
+                     restores in place: a clone's scratch image must be outside it",
+                    scratch.display(),
+                    location.display(),
+                    dir.display()
+                )
+            )
+        );
+        assert_untouched(&acquired);
+    }
+}
+
+/// On Windows, a file of a volume without a drive letter or a mount point is located by the
+/// volume's GUID, above which the store's directory is found all the same.
+#[cfg(windows)]
+#[test]
+fn locations_that_name_their_volume_by_its_guid_are_compared_with_the_store() {
+    let fixture = Fixture::new();
+    let dir = fixture.store.dir().to_owned();
+    let inside = dir
+        .join(CAPTURES_NAME)
+        .join("slot")
+        .join(TRANSACTION_NAME)
+        .join("memory.bin");
+    fs::create_dir_all(inside.parent().unwrap()).unwrap();
+    stage(&inside, SCRATCH_LEN);
+    let (outside, _) = fixture.scratch("scratch.ext4", SCRATCH_LEN);
+    for (file, within) in [(&inside, true), (&outside, false)] {
+        let location = crate::host::seal::final_volume_path(&File::open(file).unwrap()).unwrap();
+        assert!(
+            location.to_string_lossy().starts_with(r"\\?\Volume{"),
+            "{}",
+            location.display()
+        );
+        assert_eq!(
+            is_within(&location, &dir).unwrap(),
+            within,
+            "{}",
+            location.display()
+        );
+    }
+}
+
+#[test]
+fn a_scratch_image_with_another_name_is_refused() {
+    let fixture = Fixture::new();
+    let (image, image_binding) = fixture.image("distro.erofs", IMAGE_LEN);
+    let mut acquired = fixture.acquire("sandbox");
+    // Another name of the image, outside the template store, as a file of the snapshot of another
+    // store would be, or one of a snapshot that a capture of this store writes, which neither the
+    // store's generations nor the image's location show.
+    let (scratch, _) = fixture.scratch("scratch.ext4", SCRATCH_LEN);
+    let other = fixture.path("stores", "memory.bin");
+    fs::create_dir_all(other.parent().unwrap()).unwrap();
+    fs::hard_link(&scratch, &other).unwrap();
+    let binding = ScratchBinding::bind(&scratch).unwrap();
+    let request = scratch_request(&image, &image_binding, &scratch, &binding);
+    assert_eq!(
+        failure(fixture.plan(&mut acquired, &request, NO_CONTENT)),
+        (
+            ErrorKind::Unsupported,
+            format!(
+                "the scratch image {} has 2 names, but a clone's scratch image must have a single \
+                 name: another, a hard link, could make it a file of a snapshot, which every clone \
+                 of its generation restores in place",
+                scratch.display()
+            )
+        )
+    );
+    assert_untouched(&acquired);
+    // Once its other name went, the image is the clone's alone.
+    fs::remove_file(&other).unwrap();
+    drop(fixture.plan(&mut acquired, &request, NO_CONTENT).unwrap());
 }
 
 #[test]
@@ -1347,6 +1591,26 @@ fn networks_that_the_template_does_not_have_are_refused() {
         )
     );
     assert_untouched(&acquired);
+    // OpenVMM restores the guest's address on the NIC from the snapshot, so a plan of another
+    // address, or of another prefix, is refused.
+    for other in ["10.0.0.3/24", "10.0.0.2/16"] {
+        let moved = with_network(
+            request.clone(),
+            Some(SandboxNetwork::new(other, NetworkPolicy::new(NetworkAccess::Allow)).unwrap()),
+        );
+        assert_eq!(
+            failure(fixture.plan(&mut acquired, &moved, NO_CONTENT)),
+            (
+                ErrorKind::Unsupported,
+                format!(
+                    "the adapter's plan of a clone gives its guest the network {other}, but the \
+                     template's generation {generation} restores its NIC on 10.0.0.2/24, from its \
+                     snapshot"
+                )
+            )
+        );
+        assert_untouched(&acquired);
+    }
     let attached = with_network(request, Some(network(NetworkAccess::Allow)));
     drop(fixture.plan(&mut acquired, &attached, NO_CONTENT).unwrap());
 }
@@ -1466,4 +1730,258 @@ fn files_that_their_paths_do_not_name_as_checked_are_refused() {
         )
     );
     assert_untouched(&acquired);
+}
+
+/// Returns the SHA-256 digest of `domain` and of the serde form of `binding`, as the identity of a
+/// binding is documented.
+fn digest_of(domain: &[u8], binding: &impl serde::Serialize) -> Identity {
+    let digest = Sha256::new()
+        .chain_update(domain)
+        .chain_update(serde_json::to_vec(binding).unwrap())
+        .finalize();
+    Identity::from_bytes(digest.into())
+}
+
+#[test]
+fn the_activation_record_of_a_clone_in_ram_names_its_restore_image_and_settings() {
+    let fixture = Fixture::new();
+    let (image, binding) = fixture.image("distro.erofs", IMAGE_LEN);
+    let mut acquired = fixture.acquire("sandbox");
+    let request = tmpfs_request(&image, &binding);
+    let plan = fixture.plan(&mut acquired, &request, NO_CONTENT).unwrap();
+    let record = plan.activation();
+    let restore = record.restore().unwrap();
+    assert_eq!(restore.template, acquired.lease.template());
+    assert_eq!(
+        record.configuration(),
+        &Configuration {
+            image: Image::Erofs {
+                binding: digest_of(b"nvx distro binding\0", &binding),
+                uuid: Some(Uuid::parse(UUID).unwrap()),
+            },
+            // A clone in RAM has no journal policy, whatever the request's.
+            upper: Upper::Tmpfs,
+            overlay: OverlayMode::UntrustedLowers,
+            export: None,
+            mappings: 0,
+            network: None,
+            workload: workload(),
+            resources: ExpectedResources {
+                cpus: plan.key().processors(),
+                memory: MEMORY,
+            },
+        }
+    );
+    // The plan shows the record, which holds nothing secret.
+    let shown_plan = format!("{plan:?}");
+    assert!(
+        shown_plan.contains(&format!("activation: {record:?}")),
+        "{shown_plan}"
+    );
+    // Each plan draws its own transaction.
+    let transaction = restore.transaction;
+    drop(plan);
+    let again = fixture.plan(&mut acquired, &request, NO_CONTENT).unwrap();
+    let restored = again.activation().restore().unwrap();
+    assert_ne!(restored.transaction, transaction);
+    assert_eq!(restored.template, acquired.lease.template());
+    // A larger memory target is the resources that the clone must have.
+    drop(again);
+    let larger = CloneRequest {
+        memory: 2 * MEMORY,
+        ..request
+    };
+    let plan = fixture.plan(&mut acquired, &larger, NO_CONTENT).unwrap();
+    assert_eq!(
+        plan.activation().configuration().resources.memory,
+        2 * MEMORY
+    );
+}
+
+#[test]
+fn the_activation_record_of_a_clone_on_a_scratch_image_names_its_binding_and_journal() {
+    let fixture = Fixture::new();
+    let (image, binding) = fixture.image("distro.erofs", IMAGE_LEN);
+    let (scratch, scratch_binding) = fixture.scratch("scratch.ext4", SCRATCH_LEN);
+    let mut acquired = fixture.acquire("sandbox");
+    for journal in [Journal::Forbidden, Journal::Allowed] {
+        let request = CloneRequest {
+            overlay: OverlayMode::TrustedLowers,
+            journal,
+            ..scratch_request(&image, &binding, &scratch, &scratch_binding)
+        };
+        let plan = fixture.plan(&mut acquired, &request, NO_CONTENT).unwrap();
+        let configuration = plan.activation().configuration();
+        assert_eq!(
+            configuration.upper,
+            Upper::Scratch {
+                binding: digest_of(b"nvx scratch binding\0", &scratch_binding),
+                journal,
+            }
+        );
+        assert_eq!(configuration.overlay, OverlayMode::TrustedLowers);
+        assert_eq!(
+            *configuration.image.binding(),
+            digest_of(b"nvx distro binding\0", &binding)
+        );
+    }
+    // The identities of two bindings differ, as their files do.
+    let (other, other_binding) = fixture.scratch("other.ext4", SCRATCH_LEN);
+    let request = scratch_request(&image, &binding, &other, &other_binding);
+    let plan = fixture.plan(&mut acquired, &request, NO_CONTENT).unwrap();
+    assert_ne!(
+        plan.activation().configuration().upper,
+        Upper::Scratch {
+            binding: digest_of(b"nvx scratch binding\0", &scratch_binding),
+            journal: Journal::Forbidden,
+        }
+    );
+}
+
+#[test]
+fn the_activation_record_of_a_clone_of_a_template_with_a_nic_names_its_policy_and_dns_server() {
+    let fixture = Fixture::with(|class, spec, physical| {
+        *class = network_class();
+        *spec = ManifestSpec::with_network();
+        let (distro, scratch) = (
+            geometry(IMAGE_LEN, physical),
+            geometry(SCRATCH_LEN, physical),
+        );
+        set_geometries(class, spec, distro, scratch);
+    });
+    let (image, binding) = fixture.image("distro.erofs", IMAGE_LEN);
+    let mut acquired = fixture.acquire("sandbox");
+    // The policy's identity is the digest that OpenVMM computed, as the template's key records
+    // it, [7; 32] in this manifest, and the network names no proxy without one.
+    let attached = with_network(
+        tmpfs_request(&image, &binding),
+        Some(network(NetworkAccess::Allow)),
+    );
+    let plan = fixture.plan(&mut acquired, &attached, NO_CONTENT).unwrap();
+    let expected = Network {
+        policy: Identity::from_bytes([7; 32]),
+        dns: None,
+        publication: Publication::Unpublished,
+        proxy: None,
+    };
+    assert_eq!(
+        plan.activation().configuration().network.as_ref(),
+        Some(&expected)
+    );
+    drop(plan);
+    // A proxy's URL is the one that the guest sees, at its gateway.
+    let proxy = NetworkProxy::new(3128).with_scheme(ProxyScheme::Http);
+    let proxied = with_network(
+        tmpfs_request(&image, &binding),
+        Some(SandboxNetwork::new("10.0.0.2/24", NetworkPolicy::proxy_only(proxy)).unwrap()),
+    );
+    let plan = fixture.plan(&mut acquired, &proxied, NO_CONTENT).unwrap();
+    assert_eq!(
+        plan.activation().configuration().network,
+        Some(Network {
+            proxy: Some("http://10.0.0.1:3128".to_owned()),
+            ..expected.clone()
+        })
+    );
+    drop((plan, acquired, fixture));
+    // The DNS server with which the template's guest configured its resolver at boot, as its
+    // command line asks, is the clone's.
+    let fixture = Fixture::with(|class, spec, physical| {
+        *class = network_class();
+        *spec = ManifestSpec::with_network();
+        spec.contract()
+            .command_line
+            .push_str(" virtnet_dns=10.0.0.1");
+        let (distro, scratch) = (
+            geometry(IMAGE_LEN, physical),
+            geometry(SCRATCH_LEN, physical),
+        );
+        set_geometries(class, spec, distro, scratch);
+    });
+    let (image, binding) = fixture.image("distro.erofs", IMAGE_LEN);
+    let mut acquired = fixture.acquire("sandbox");
+    let attached = with_network(
+        tmpfs_request(&image, &binding),
+        Some(network(NetworkAccess::Allow)),
+    );
+    let plan = fixture.plan(&mut acquired, &attached, NO_CONTENT).unwrap();
+    assert_eq!(
+        plan.activation().configuration().network,
+        Some(Network {
+            dns: Some(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))),
+            ..expected
+        })
+    );
+}
+
+#[test]
+fn settings_that_no_activation_record_holds_are_refused_before_anything_is_created() {
+    let fixture = Fixture::new();
+    let (image, binding) = fixture.image("distro.erofs", IMAGE_LEN);
+    let mut acquired = fixture.acquire("sandbox");
+    let request = tmpfs_request(&image, &binding);
+    let with_workload = |workload: WorkloadView| CloneRequest {
+        workload,
+        ..request.clone()
+    };
+    for (workload, problem) in [
+        (
+            WorkloadView {
+                hostname: Vec::new(),
+                ..workload()
+            },
+            "the hostname is not 1 to 64 bytes without a NUL",
+        ),
+        (
+            WorkloadView {
+                hostname: vec![b'h'; 65],
+                ..workload()
+            },
+            "the hostname is not 1 to 64 bytes without a NUL",
+        ),
+        (
+            WorkloadView {
+                hostname: b"clone\0".to_vec(),
+                ..workload()
+            },
+            "the hostname is not 1 to 64 bytes without a NUL",
+        ),
+        (
+            WorkloadView {
+                identity: Some(WorkloadIdentity { uid: 0, gid: 1000 }),
+                ..workload()
+            },
+            "the workload identity's UID or GID is 0 or 4294967295",
+        ),
+    ] {
+        assert_eq!(
+            failure(fixture.plan(&mut acquired, &with_workload(workload), NO_CONTENT)),
+            (
+                ErrorKind::Unsupported,
+                format!("no clone activates with the settings of the request: {problem}")
+            )
+        );
+        assert_untouched(&acquired);
+    }
+    // A GPT image, whose binding names it, is refused before anything is opened.
+    let path = fixture.path("images", "distro.gpt");
+    stage(&path, IMAGE_LEN);
+    let gpt = SandboxLayer::gpt(LayerRole::Distro, path.to_str().unwrap(), UUID);
+    let gpt_binding = DistroBinding::import(&gpt, PolicyVerdict::ACCEPTED).unwrap();
+    let gpt_request = CloneRequest {
+        adapter: SandboxPlan::adapter(
+            SandboxDistro::new(path.to_str().unwrap(), bound_image(&gpt_binding).unwrap()),
+            SandboxUpper::RAM,
+        ),
+        binding: gpt_binding,
+        ..request.clone()
+    };
+    let (kind, message) = failure(fixture.plan(&mut acquired, &gpt_request, NO_CONTENT));
+    assert_eq!(kind, ErrorKind::Unsupported, "{message}");
+    assert!(
+        message.starts_with("the image of a clone must be an EROFS layer"),
+        "{message}"
+    );
+    assert_untouched(&acquired);
+    drop(fixture.plan(&mut acquired, &request, NO_CONTENT).unwrap());
 }

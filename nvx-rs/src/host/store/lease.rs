@@ -6,7 +6,9 @@
 //! [`template::Store`](crate::host::template::Store), grants and ends leases, and reads its own
 //! records, with these, and [`template`](crate::host::template) re-exports what is public here.
 
+use std::ffi::OsStr;
 use std::fmt;
+use std::fs::File;
 use std::io;
 use std::num::NonZeroU64;
 use std::path::{Path, PathBuf};
@@ -15,7 +17,7 @@ use std::str::FromStr;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
-use super::regular::{open_regular, read_at_most, was_removed};
+use super::regular::{open_regular, open_regular_in, read_at_most, was_removed};
 use super::{CLONE_BINDING_NAME, LaunchId, SandboxStore};
 use crate::activation::{Identity, StoreGeneration, TemplateReference};
 use crate::error::{Error, ErrorCode, ErrorKind, Result};
@@ -23,6 +25,15 @@ use crate::host::platform::{self, parse_hex_id, parse_hex32};
 
 /// Version of the store's records: its identity record and its index.
 pub const STORE_FORMAT: u32 = 1;
+
+/// Name of the directory of the generations' payloads.
+pub const GENERATIONS_NAME: &str = "generations";
+
+/// Name of the store's identity record.
+pub const STORE_RECORD_NAME: &str = "store.json";
+
+/// Longest identity record, in bytes.
+pub(crate) const MAX_STORE_RECORD_LEN: u64 = 4 * 1024;
 
 /// Bytes of a [`StoreId`] and of a [`StorageGeneration`](crate::host::template::StorageGeneration).
 pub(crate) const ID_LEN: usize = 16;
@@ -247,16 +258,152 @@ impl fmt::Debug for Lease {
     }
 }
 
+/// Returns the name of the control socket of the VMM of the clone whose launch is `launch`, in the
+/// payload of the leased generation: `<launch>.sock`.
+pub(crate) fn clone_socket_name(launch: &LaunchId) -> String {
+    format!("{launch}.sock")
+}
+
+/// Returns whether `path` names the control socket of the VMM of the clone that holds `lease`, as
+/// [`template::Store::clone_socket_path`](crate::host::template::Store::clone_socket_path) returns
+/// it: `generations/<generation>/<launch>.sock`, in a template store, which a lease names by its
+/// identity alone.
+pub(crate) fn is_clone_socket(lease: &Lease, path: &Path) -> bool {
+    let name = clone_socket_name(&lease.launch);
+    let generation = lease.generation.to_string();
+    let payload = path.parent();
+    path.file_name() == Some(OsStr::new(&name))
+        && payload.and_then(Path::file_name) == Some(OsStr::new(&generation))
+        && payload.and_then(Path::parent).and_then(Path::file_name)
+            == Some(OsStr::new(GENERATIONS_NAME))
+}
+
+/// Opens the payload of the generation `generation` of the template store `id` in `store`, which
+/// holds the control sockets of the VMMs of the generation's clones on Linux:
+/// `generations/<generation>`, for reading, so that the caller can sync it once it removed a
+/// socket from it.
+///
+/// It follows no link at the store's own name, at the directory of the generations, or at the
+/// payload, and fails if one of them is a link, or not a directory, so that a link that takes the
+/// place of one of them never leads a removal to the files of another directory. It reads the
+/// store's identity through the handle of the store's directory, failing if it cannot read the
+/// identity record, and returns `None` if that directory holds another store, or none, as it does
+/// if the store, its directory of the generations, or the payload is gone: the payload of a store
+/// that is gone holds no socket. It opens the store's directory and the directory of the
+/// generations with the right to search them alone, which an owner-only directory may grant
+/// without the right to read it.
+pub(crate) fn open_payload(
+    store: &Path,
+    id: StoreId,
+    generation: StoreGeneration,
+) -> Result<Option<platform::Directory>> {
+    let payload = store.join(GENERATIONS_NAME).join(generation.to_string());
+    let failed = || {
+        store_error(format!(
+            "cannot open the payload of the generation {}",
+            payload.display()
+        ))
+    };
+    let Some(dir) = platform::Directory::search(store).map_err(failed())? else {
+        return Ok(None);
+    };
+    if read_identity_in(&dir, store)? != Some(id) {
+        return Ok(None);
+    }
+    let Some(generations) = dir.search_dir(GENERATIONS_NAME).map_err(failed())? else {
+        return Ok(None);
+    };
+    generations
+        .open_dir(&generation.to_string())
+        .map_err(failed())
+}
+
+/// Reads the identity of the store in `dir` from its identity record, or returns `None` if the
+/// directory holds none.
+pub(crate) fn read_identity(dir: &Path) -> Result<Option<StoreId>> {
+    let path = dir.join(STORE_RECORD_NAME);
+    read_identity_with(&path, || open_existing(&path))
+}
+
+/// Reads the identity of the store whose directory `directory` holds open, in `dir`, as
+/// [`read_identity`] reads it at its path, or returns `None` if the directory holds no identity
+/// record, or, on Windows, one whose deletion is pending: through the handle, so that it reads
+/// the identity of the directory that the handle holds, whatever `dir` names meanwhile.
+pub(crate) fn read_identity_in(
+    directory: &platform::Directory,
+    dir: &Path,
+) -> Result<Option<StoreId>> {
+    read_identity_with(&dir.join(STORE_RECORD_NAME), || {
+        open_regular_in(directory, STORE_RECORD_NAME)
+    })
+}
+
+/// Reads the identity of a store from its identity record at `path`, which `open` opens, or
+/// returns `None` if `open` finds none.
+fn read_identity_with(
+    path: &Path,
+    open: impl FnOnce() -> io::Result<Option<File>>,
+) -> Result<Option<StoreId>> {
+    let description = "identity record of the template store";
+    let Some(record) =
+        read_record_with::<StoreRecord>(path, description, MAX_STORE_RECORD_LEN, open)?
+    else {
+        return Ok(None);
+    };
+    record.store.parse().map(Some).map_err(|error: Error| {
+        Error::io(format!(
+            "the {description} {} is malformed: {}",
+            path.display(),
+            error.message()
+        ))
+    })
+}
+
+/// The identity record of a store, as JSON.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct StoreRecord {
+    /// [`STORE_FORMAT`].
+    pub(crate) format: u32,
+    /// The store's identity.
+    pub(crate) store: String,
+}
+
 /// Reads the clone binding of the sandbox in `dir`, or returns `None` if it holds none, or if the
 /// directory does not exist.
 pub(crate) fn read_binding(dir: &Path) -> Result<Option<Lease>> {
     read_lease(&dir.join(CLONE_BINDING_NAME), BINDING_DESCRIPTION)
 }
 
+/// Reads the clone binding of the sandbox whose directory `directory` holds open, in `dir`, as
+/// [`read_binding`] reads it at its path, or returns `None` if the directory holds none, or, on
+/// Windows, one whose deletion is pending, which is removed: through the handle, so that it reads
+/// the binding of the directory that the handle holds, whatever `dir` names meanwhile.
+pub(crate) fn read_binding_in(
+    directory: &platform::Directory,
+    dir: &Path,
+) -> Result<Option<Lease>> {
+    read_lease_with(&dir.join(CLONE_BINDING_NAME), BINDING_DESCRIPTION, || {
+        open_regular_in(directory, CLONE_BINDING_NAME)
+    })
+}
+
 /// Reads the record of a lease at `path`, its `description`, or returns `None` if it does not
 /// exist.
 pub(crate) fn read_lease(path: &Path, description: &str) -> Result<Option<Lease>> {
-    let Some(record) = read_record::<LeaseRecord>(path, description, MAX_LEASE_RECORD_LEN)? else {
+    read_lease_with(path, description, || open_existing(path))
+}
+
+/// Reads the record of a lease, its `description` at `path`, from the file that `open` opens, or
+/// returns `None` if `open` finds none.
+fn read_lease_with(
+    path: &Path,
+    description: &str,
+    open: impl FnOnce() -> io::Result<Option<File>>,
+) -> Result<Option<Lease>> {
+    let Some(record) =
+        read_record_with::<LeaseRecord>(path, description, MAX_LEASE_RECORD_LEN, open)?
+    else {
         return Ok(None);
     };
     record.into_lease().map(Some).map_err(|problem| {
@@ -363,13 +510,32 @@ pub(crate) fn store_error(context: String) -> impl FnOnce(io::Error) -> Error {
 /// Windows, a file's own access control list decides who may open it, whatever the store's
 /// directory allows.
 pub(crate) fn read_private(path: &Path, description: &str, limit: u64) -> Result<Option<Vec<u8>>> {
-    let failed = || store_error(format!("cannot read the {description} {}", path.display()));
-    let file = match open_regular(path) {
-        Ok(file) => file,
+    read_private_with(path, description, limit, || open_existing(path))
+}
+
+/// Opens the regular file at `path`, as [`open_regular`] does, or returns `None` if it does not
+/// exist, or was removed as this opened it, as [`was_removed`] tells.
+fn open_existing(path: &Path) -> io::Result<Option<File>> {
+    match open_regular(path) {
+        Ok(file) => Ok(Some(file)),
         Err(error) if error.kind() == io::ErrorKind::NotFound || was_removed(path, &error) => {
-            return Ok(None);
+            Ok(None)
         }
-        Err(error) => return Err(failed()(error)),
+        Err(error) => Err(error),
+    }
+}
+
+/// Reads the private regular file that `open` opens, the store's `description` at `path`, of at
+/// most `limit` bytes, as [`read_private`] reads it, or returns `None` if `open` finds none.
+fn read_private_with(
+    path: &Path,
+    description: &str,
+    limit: u64,
+    open: impl FnOnce() -> io::Result<Option<File>>,
+) -> Result<Option<Vec<u8>>> {
+    let failed = || store_error(format!("cannot read the {description} {}", path.display()));
+    let Some(file) = open().map_err(failed())? else {
+        return Ok(None);
     };
     if let Some(problem) = platform::private_file_problem(&file).map_err(failed())? {
         return Err(Error::io(format!(
@@ -389,7 +555,18 @@ pub(crate) fn read_record<T: DeserializeOwned>(
     description: &str,
     limit: u64,
 ) -> Result<Option<T>> {
-    let Some(text) = read_private(path, description, limit)? else {
+    read_record_with(path, description, limit, || open_existing(path))
+}
+
+/// Reads the store's record that `open` opens, its `description` at `path`, as [`read_record`]
+/// reads it, or returns `None` if `open` finds none.
+fn read_record_with<T: DeserializeOwned>(
+    path: &Path,
+    description: &str,
+    limit: u64,
+    open: impl FnOnce() -> io::Result<Option<File>>,
+) -> Result<Option<T>> {
+    let Some(text) = read_private_with(path, description, limit, open)? else {
         return Ok(None);
     };
     let malformed = || format!("the {description} {} is malformed", path.display());

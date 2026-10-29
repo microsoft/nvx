@@ -8,7 +8,8 @@
 //!   launch.json            the journal of a launch in progress, or of one that was interrupted
 //!   runtime.json           the runtime record of its running VM
 //!   control.capability     the launch capability of its VM
-//!   control.sock           the control endpoint of its VM, on Linux
+//!   control.sock           the control endpoint of its VM, on Linux, but for a clone, whose VMM
+//!                          listens beside the snapshot that it restores
 //!   openvmm.log            the VMM's output, claimed by the launch that created it
 //!   console.log            the guest console of the latest launch, or of every launch, if the
 //!                          caller captures it
@@ -17,6 +18,9 @@
 //!   clone.json             the binding of a clone to the generation of a template that it leases
 //!   clone-scratch.raw      the file of the scratch device of a clone whose upper is in RAM, a
 //!                          sparse file that the clone's plan creates
+//!   clone-activation.bin   the activation record of a clone, which its launch writes
+//!   restore.sock           the endpoint at which the launch of a clone awaits the restore-ready
+//!                          event of its VMM, on Linux
 //!   ...                    the caller's configuration record and other files, which it declares
 //! ```
 //!
@@ -141,7 +145,8 @@
 //!   the VMM through the control endpoint that the journal names, holds it, confirms that the
 //!   endpoint still names it once held, and terminates it.
 //!   On Windows the endpoint is a pipe whose name each launch draws at random, which names the
-//!   VMM by itself. On Linux it is the same socket path for every launch of the sandbox, so the
+//!   VMM by itself. On Linux it is the same socket path for every launch of the sandbox, but the
+//!   one launch of a clone, whose VMM listens at a socket that its lease reserves, so the
 //!   VMM must also hold the claimed log as its standard output. Until the VMM serves its
 //!   endpoint, recovery is indeterminate and keeps the journal; once the VMM exits, the released
 //!   claim proves it.
@@ -197,12 +202,13 @@
 //! # Removal
 //!
 //! [`LockedStore::remove`] removes a sandbox that no VMM can run in: it refuses while the store
-//! records a VM or a launch, which the caller reattaches to, or recovers, first. It removes the
-//! sandbox's [clone binding](CLONE_BINDING_NAME) first, and makes its absence durable before
-//! anything else goes. It checks for those records, and removes the binding, through one handle of
-//! the directory, once it has checked through that handle that the directory holds its lock, so
-//! that no change of a link in the path meanwhile makes it remove another sandbox's binding. It
-//! then removes the store's files and the caller's, the configuration record last, and the
+//! records a VM or a launch, which the caller reattaches to, or recovers, first. It removes what a
+//! clone kept of its launch, as a release does, and the sandbox's
+//! [clone binding](CLONE_BINDING_NAME) first, and makes their absence durable before anything
+//! else goes. It checks for those records, and removes those files, through one handle of the
+//! directory, once it has checked through that handle that the directory holds its lock, so that
+//! no change of a link in the path meanwhile makes it remove another sandbox's files. It then
+//! removes the store's other files and the caller's, the configuration record last, and the
 //! temporary files that the store owns: those that an interrupted replacement of one of its files
 //! leaves, `.NAME.NUMBER.tmp`, and the VMM's [report staging file](#the-report-staging-file). It
 //! then refuses entries that are neither the store's nor the caller's, naming them, and keeps the
@@ -245,7 +251,7 @@ use self::files::{io_error, remove_if_present};
 pub use self::identity::{
     ArtifactIdentity, IdentityCheck, IdentityPart, MAX_IDENTITY_LEN, RuntimeIdentity,
 };
-use self::lease::Lease;
+use self::lease::{Lease, clone_socket_name, is_clone_socket, open_payload};
 pub use self::lifecycle::{Lingering, RemovalError};
 pub use self::record::{
     LaunchId, LaunchJournal, LaunchState, LogClaim, MAX_ENDPOINT_LEN, RuntimeRecord,
@@ -271,7 +277,10 @@ pub const JOURNAL_NAME: &str = "launch.json";
 pub const RUNTIME_NAME: &str = "runtime.json";
 /// Name of the file that holds the launch capability.
 pub const CAPABILITY_NAME: &str = "control.capability";
-/// Name of the Linux control socket.
+/// Name of the Linux control socket, at which the VMM of every launch of the sandbox listens, but
+/// that of a clone, which listens beside the snapshot that it restores, at the socket that its
+/// lease reserves, as [`template::Store::acquire`](crate::host::template::Store::acquire)
+/// describes.
 pub const SOCKET_NAME: &str = "control.sock";
 /// Name of the VMM's log.
 pub const LOG_NAME: &str = "openvmm.log";
@@ -293,11 +302,33 @@ pub const CLONE_BINDING_NAME: &str = "clone.json";
 /// [`template::Store::release`](crate::host::template::Store::release) removes once the clone's VM
 /// has exited, as a [removal](self#removal) of the sandbox does.
 pub const CLONE_SCRATCH_NAME: &str = "clone-scratch.raw";
+/// Name of the activation record of a clone, in its canonical encoding, which the clone's launch,
+/// [`template::ClonePlan::launch`](crate::host::template::ClonePlan::launch), writes before it
+/// spawns the clone's VMM, so that the restore activates the clone with that record and its
+/// transaction whatever happens to the launch's caller, and which
+/// [`template::Store::release`](crate::host::template::Store::release) removes once the clone's VM
+/// has exited, as a [removal](self#removal) of the sandbox does.
+pub const CLONE_ACTIVATION_NAME: &str = "clone-activation.bin";
+/// Name of the Linux socket at which the launch of a clone,
+/// [`template::ClonePlan::launch`](crate::host::template::ClonePlan::launch), listens for the
+/// restore-ready event of its VMM, which OpenVMM sends once it has prepared the restore, before
+/// the restored VM runs; on Windows, the endpoint is a named pipe, whose name each launch draws at
+/// random. [`template::Store::release`](crate::host::template::Store::release) removes it once the
+/// clone's VM has exited, as a [removal](self#removal) of the sandbox does.
+pub const RESTORE_READY_NAME: &str = "restore.sock";
+/// The files that the clone of a sandbox keeps of its launch, which a release removes once the
+/// clone's VM has exited, as a [removal](self#removal) of the sandbox does, before the clone
+/// binding.
+const CLONE_FILE_NAMES: [&str; 3] = [
+    CLONE_SCRATCH_NAME,
+    CLONE_ACTIVATION_NAME,
+    RESTORE_READY_NAME,
+];
 /// Every file that the store keeps in a sandbox's directory. Replacing a record leaves a
 /// temporary file named `.NAME.NUMBER.tmp` beside it only if the replacement was interrupted, and
 /// a VMM that is killed while it writes its outcome report leaves the file in which it stages it;
 /// see [the report staging file](self#the-report-staging-file).
-pub const FILE_NAMES: [&str; 10] = [
+pub const FILE_NAMES: [&str; 12] = [
     LOCK_NAME,
     JOURNAL_NAME,
     RUNTIME_NAME,
@@ -308,6 +339,8 @@ pub const FILE_NAMES: [&str; 10] = [
     OUTCOME_NAME,
     CLONE_BINDING_NAME,
     CLONE_SCRATCH_NAME,
+    CLONE_ACTIVATION_NAME,
+    RESTORE_READY_NAME,
 ];
 
 /// Interval at which a lock that another holder has is tried again: the sandbox's lock, by a
@@ -506,6 +539,17 @@ impl SandboxStore {
         self.path(CLONE_SCRATCH_NAME)
     }
 
+    /// Returns the path of the activation record of a clone, [`CLONE_ACTIVATION_NAME`].
+    pub fn clone_activation_path(&self) -> PathBuf {
+        self.path(CLONE_ACTIVATION_NAME)
+    }
+
+    /// Returns the path of the Linux socket at which the launch of a clone awaits the
+    /// restore-ready event of its VMM, [`RESTORE_READY_NAME`].
+    pub fn restore_ready_path(&self) -> PathBuf {
+        self.path(RESTORE_READY_NAME)
+    }
+
     /// Reads the runtime record, which names the sandbox's VM from the commit of its launch until
     /// its runtime is cleared.
     pub fn runtime(&self) -> Result<Option<RuntimeRecord>> {
@@ -595,8 +639,8 @@ impl SandboxStore {
                 }
             },
         }
-        let locked = platform::opened_file_identity(&file).map_err(failed)?;
-        match platform::file_identity(&path) {
+        let locked = platform::opened_file_id(&file).map_err(failed)?;
+        match platform::file_id(&path) {
             Ok(current) if current == locked => Ok(Taken::Locked(file)),
             Ok(_) => Ok(Taken::Replaced),
             Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(Taken::Replaced),
@@ -648,7 +692,24 @@ pub struct LockedStore {
     lock_removed: bool,
     /// The launch of the sandbox's clone that the lease acquired under this lock reserves, until
     /// [`begin_launch`](Self::begin_launch) begins it, or a release ends the lease.
-    reserved: Option<LaunchId>,
+    reserved: Option<Reservation>,
+}
+
+/// The launch of a sandbox's clone that a lease reserves, as
+/// [`template::Store::acquire`](crate::host::template::Store::acquire) acquires the lease, and
+/// where the clone's VMM listens.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Reservation {
+    /// The identity of the launch, [`Lease::launch`].
+    pub(crate) launch: LaunchId,
+    /// The path of the Linux socket at which the clone's VMM listens, its control endpoint: beside
+    /// the snapshot that it restores, in the payload of the leased generation, since OpenVMM
+    /// requires a restore's control socket in the snapshot's parent, rather than the sandbox's
+    /// own control socket. Windows endpoints are named pipes, which [`begin_launch`] draws as it
+    /// does for every launch.
+    ///
+    /// [`begin_launch`]: LockedStore::begin_launch
+    pub(crate) socket: PathBuf,
 }
 
 impl Deref for LockedStore {
@@ -672,17 +733,28 @@ impl LockedStore {
         }
     }
 
-    /// Lets [`begin_launch`](Self::begin_launch) begin `launch`, once, as the launch of the
-    /// sandbox's clone that the lease acquired under this lock reserves, or, given `None`, no
-    /// launch of a clone, once a release ends the lease.
-    pub(crate) fn reserve(&mut self, launch: Option<LaunchId>) {
-        self.reserved = launch;
+    /// Lets [`begin_launch`](Self::begin_launch) begin the launch that `reservation` names, once,
+    /// as the launch of the sandbox's clone that the lease acquired under this lock reserves,
+    /// whose VMM listens at the reservation's socket, or, given `None`, no launch of a clone, once
+    /// a release ends the lease.
+    pub(crate) fn reserve(&mut self, reservation: Option<Reservation>) {
+        self.reserved = reservation;
     }
 
     /// Returns the launch of the sandbox's clone that the lease acquired under this lock reserves,
     /// until [`begin_launch`](Self::begin_launch) begins it, or a release ends the lease.
     pub(crate) fn reserved(&self) -> Option<&LaunchId> {
-        self.reserved.as_ref()
+        self.reserved
+            .as_ref()
+            .map(|reservation| &reservation.launch)
+    }
+
+    /// Returns the path of the Linux socket at which the VMM of the launch that
+    /// [`reserved`](Self::reserved) returns listens.
+    pub(crate) fn reserved_socket(&self) -> Option<&Path> {
+        self.reserved
+            .as_ref()
+            .map(|reservation| reservation.socket.as_path())
     }
 
     /// Returns the paths at which the store reaches the entries of the sandbox's directory that
@@ -705,6 +777,53 @@ impl LockedStore {
         Ok(owned)
     }
 
+    /// Opens the sandbox's directory through its path, as one handle through which a release of
+    /// the lease of its clone names the directory's entries, and checks through that handle that
+    /// the directory holds this lock's file, as a [removal](self#removal) checks it: no change of
+    /// the path meanwhile, of a link in it or of one of its directories, then makes the release
+    /// reach the entries of another sandbox, whose lock it does not hold.
+    ///
+    /// Fails with [`ErrorKind::Other`] if the directory that the path names does not hold this
+    /// lock's file.
+    pub(crate) fn open_dir(&self) -> Result<platform::Directory> {
+        let dir = self.dir();
+        let directory = platform::Directory::open(dir).map_err(io_error(format!(
+            "cannot open the directory {}",
+            dir.display()
+        )))?;
+        let lock = self.path(LOCK_NAME);
+        let examine = || io_error(format!("cannot examine {}", lock.display()));
+        let held = platform::opened_file_id(&self.lock).map_err(examine())?;
+        if directory.entry_id(LOCK_NAME).map_err(examine())? != Some(held) {
+            return Err(Error::other(format!(
+                "the directory that {} names does not hold the lock of its sandbox: the path names \
+                 another directory than when the lock was taken",
+                dir.display()
+            )));
+        }
+        Ok(directory)
+    }
+
+    /// Removes what the clone of the sandbox kept of its launch in the sandbox's directory, whose
+    /// VM has exited, through `directory`, the handle of the directory that
+    /// [`open_dir`](Self::open_dir) returned: the file of its scratch device,
+    /// [`CLONE_SCRATCH_NAME`], its activation record, [`CLONE_ACTIVATION_NAME`], and the socket of
+    /// its restore-ready event, [`RESTORE_READY_NAME`]. A release, as a [removal](self#removal)
+    /// does, removes them before the clone binding, whose removal, once durable, makes theirs
+    /// durable too, since all are entries of the sandbox's directory. A file whose deletion is
+    /// pending, as a Windows file system without POSIX deletion leaves a removed file that another
+    /// handle holds, is removed already, so that a release that failed once it removed the file can
+    /// be retried.
+    pub(crate) fn remove_clone_files(&self, directory: &platform::Directory) -> Result<()> {
+        for name in CLONE_FILE_NAMES {
+            directory.remove_file(name).map_err(io_error(format!(
+                "cannot remove {}",
+                self.path(name).display()
+            )))?;
+        }
+        Ok(())
+    }
+
     /// Returns the caller's files that the lock knows: those that a [lifecycle
     /// lock](self#lifecycle-locks) was taken with, and none for [`SandboxStore::lock`].
     pub fn files(&self) -> &CallerFiles {
@@ -720,6 +839,12 @@ impl LockedStore {
     /// endpoint, and writes the journal's marker, which names the launch. It keeps the console log
     /// of a caller that keeps the console of every launch, as [`CallerFiles::keeping_console`]
     /// declares. Nothing is spawned yet: the caller spawns the VMM with [`Launch::take_log`].
+    ///
+    /// The control endpoint is a named pipe of a random name on Windows. On Linux, it is the
+    /// sandbox's control socket, [`socket_path`](SandboxStore::socket_path), but for the launch
+    /// that the lease of the sandbox's clone reserves: its VMM restores the leased generation's
+    /// snapshot, and listens beside it, at the socket that the lease reserves in the generation's
+    /// payload, as [`template::Store::acquire`](crate::host::template::Store::acquire) describes.
     ///
     /// Fails if the sandbox's VM runs, or a launch was interrupted and is not recovered yet, and
     /// with [`ErrorKind::Unsupported`] for an all-zero capability or an invalid runtime identity.
@@ -754,7 +879,7 @@ impl LockedStore {
             )));
         }
         if let Some(lease) = Lease::of(self)?
-            && (lease.launch() != launch || self.reserved.as_ref() != Some(launch))
+            && (lease.launch() != launch || self.reserved() != Some(launch))
         {
             let reservation = if lease.launch() == launch {
                 format!("whose launch {launch} begins once, under the lock that acquired the lease")
@@ -781,7 +906,13 @@ impl LockedStore {
             remove_if_present(&self.console_path())?;
         }
         self.remove_report_staging()?;
-        let endpoint = platform::control_endpoint(&socket)
+        // The VMM of a clone listens at the socket that its lease reserves, beside the snapshot
+        // that it restores.
+        let listening = match &self.reserved {
+            Some(reservation) if reservation.launch == *launch => reservation.socket.as_path(),
+            _ => &socket,
+        };
+        let endpoint = platform::control_endpoint(listening)
             .map_err(|error| Error::io("cannot choose a control endpoint").with_source(error))?;
         let (log, claim) = self.create_log()?;
         files::write_private(&self.capability_path(), capability)?;
@@ -854,6 +985,7 @@ impl LockedStore {
             for name in [CAPABILITY_NAME, SOCKET_NAME] {
                 remove_if_present(&self.path(name))?;
             }
+            self.remove_clone_socket(journal.endpoint())?;
             self.remove_report_staging()?;
             // The journal goes last, so that an interrupted removal leaves it for a later
             // recovery to finish.
@@ -962,13 +1094,73 @@ impl LockedStore {
 
     /// Removes the runtime record, the launch capability, and the control socket of a VM that has
     /// exited, and any outcome report that its VMM staged without publishing it, the runtime
-    /// record last. The log, console log, and outcome report outlive the run.
+    /// record last. The control socket of a clone's VMM, beside the snapshot that it restores, goes
+    /// too, and the clearing fails, keeping the runtime record, if a link takes the place of the
+    /// template store's directory, of its directory of the generations, or of the payload of the
+    /// socket's generation. The log, console log, and outcome report outlive the run.
     pub fn clear_runtime(&mut self) -> Result<()> {
+        // Only a Linux endpoint is a file, which may be a clone's beside its snapshot. A record that
+        // cannot be read names none, and a release removes a clone's socket all the same.
+        let record = if cfg!(unix) {
+            self.runtime().ok().flatten()
+        } else {
+            None
+        };
+        self.clear_runtime_of(record.as_ref())
+    }
+
+    /// Clears the runtime record of a VM that has exited, as [`clear_runtime`](Self::clear_runtime)
+    /// does, given `record`, the runtime record that the caller read under this lock, if any, whose
+    /// control endpoint is the VM's.
+    pub(crate) fn clear_runtime_of(&mut self, record: Option<&RuntimeRecord>) -> Result<()> {
         for name in [CAPABILITY_NAME, SOCKET_NAME] {
             remove_if_present(&self.path(name))?;
         }
+        if let Some(record) = record {
+            self.remove_clone_socket(record.endpoint())?;
+        }
         self.remove_report_staging()?;
         remove_if_present(&self.path(RUNTIME_NAME))
+    }
+
+    /// Removes the control socket at `endpoint`, the control endpoint that a launch of the
+    /// sandbox recorded, if it is the socket of the sandbox's clone beside the snapshot that its
+    /// VMM restores, which the lease that the sandbox's clone binding records reserved, as
+    /// [`template::Store::clone_socket_path`](crate::host::template::Store::clone_socket_path)
+    /// names it. Any other endpoint stays: the sandbox's own control socket, which the caller
+    /// removes, and a named pipe. Neither reads the binding.
+    ///
+    /// The socket goes through a handle of the generation's payload, which a handle of the
+    /// template store's directory opens, as a release opens it: following no link at the store's
+    /// directory, at its directory of the generations, or at the payload, and once it checked
+    /// through that handle that the directory holds the lease's store, so that neither a link that
+    /// takes the place of one of them nor a directory that takes the place of the store ever leads
+    /// the removal to the files of another directory. Such a link fails the removal; a payload
+    /// that is gone holds no socket, and neither does a directory that holds another store, or
+    /// none, in the place of the lease's, whose files stay.
+    ///
+    /// The removal is not made durable here:
+    /// [`template::Store::release`](crate::host::template::Store::release) makes it durable before
+    /// the lease ends, and a retirement removes whatever a crash brings back with the generation's
+    /// payload.
+    fn remove_clone_socket(&self, endpoint: &str) -> Result<()> {
+        let socket = Path::new(endpoint);
+        if !cfg!(unix) || socket == self.socket_path() {
+            return Ok(());
+        }
+        let Some(lease) = Lease::of(self)?.filter(|lease| is_clone_socket(lease, socket)) else {
+            return Ok(());
+        };
+        // The socket is `<store>/generations/<generation>/<launch>.sock`, as the check found.
+        let Some(store) = socket.ancestors().nth(3) else {
+            return Ok(());
+        };
+        match open_payload(store, lease.store(), lease.generation())? {
+            Some(payload) => payload
+                .remove_file(&clone_socket_name(lease.launch()))
+                .map_err(store_error(format!("cannot remove {}", socket.display()))),
+            None => Ok(()),
+        }
     }
 }
 

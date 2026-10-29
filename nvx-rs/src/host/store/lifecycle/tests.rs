@@ -11,7 +11,8 @@ use std::time::Duration;
 
 use super::*;
 use crate::host::store::{
-    CAPABILITY_NAME, CLONE_SCRATCH_NAME, CONSOLE_NAME, LOG_NAME, OUTCOME_NAME, SOCKET_NAME,
+    CAPABILITY_NAME, CLONE_ACTIVATION_NAME, CLONE_SCRATCH_NAME, CONSOLE_NAME, LOG_NAME,
+    OUTCOME_NAME, RESTORE_READY_NAME, SOCKET_NAME,
 };
 use crate::host::test_support::released;
 
@@ -324,6 +325,8 @@ fn a_removal_removes_the_store_the_callers_files_and_the_directory() {
         SOCKET_NAME,
         CLONE_BINDING_NAME,
         CLONE_SCRATCH_NAME,
+        CLONE_ACTIVATION_NAME,
+        RESTORE_READY_NAME,
         BOOT,
         ".runtime.json.12345.tmp",
         ".sandbox.lock.7.tmp",
@@ -408,10 +411,23 @@ fn a_removal_is_refused_while_a_vm_or_a_launch_is_recorded() {
     }
 }
 
+/// Writes the files that a clone keeps of its launch in the sandbox `dir`, its binding included.
+fn write_clone_files(dir: &Path) {
+    for name in [
+        CLONE_BINDING_NAME,
+        CLONE_SCRATCH_NAME,
+        CLONE_ACTIVATION_NAME,
+        RESTORE_READY_NAME,
+    ] {
+        fs::write(dir.join(name), b"{}").unwrap();
+    }
+}
+
 #[test]
-fn a_removal_makes_the_absence_of_the_clone_binding_durable_before_it_removes_anything_else() {
+fn a_removal_makes_the_absence_of_the_clones_files_durable_before_it_removes_anything_else() {
     let (_directory, dir) = sandbox();
-    for name in [CLONE_BINDING_NAME, LOG_NAME, BOOT] {
+    write_clone_files(&dir);
+    for name in [LOG_NAME, BOOT] {
         fs::write(dir.join(name), b"{}").unwrap();
     }
     let locked = SandboxStore::lock_existing(&dir, &files(), None).unwrap();
@@ -419,18 +435,18 @@ fn a_removal_makes_the_absence_of_the_clone_binding_durable_before_it_removes_an
     locked
         .remove_contents_with(&|| {}, &|directory| {
             // The directory that the sync makes durable holds the sandbox's lock file.
-            let lock = directory.entry_identity(LOCK_NAME).unwrap();
+            let lock = directory.entry_id(LOCK_NAME).unwrap();
             synced.borrow_mut().push((lock, entries_of(&dir)));
             Ok(())
         })
         .unwrap();
     // A crash after the sync, even once the directory or one of its ancestors is gone, cannot
-    // bring the binding back, and one before the configuration record goes leaves a provisioned
-    // sandbox, whose removal can be retried.
+    // bring the binding or the clone's files back, and one before the configuration record goes
+    // leaves a provisioned sandbox, whose removal can be retried.
     assert_eq!(
         synced.into_inner(),
         [(
-            Some(platform::file_identity(&dir.join(LOCK_NAME)).unwrap()),
+            Some(platform::file_id(&dir.join(LOCK_NAME)).unwrap()),
             sorted(&[BOOT, CONFIG, LOCK_NAME, LOG_NAME])
         )]
     );
@@ -440,11 +456,10 @@ fn a_removal_makes_the_absence_of_the_clone_binding_durable_before_it_removes_an
 }
 
 #[test]
-fn a_removal_that_cannot_make_the_absence_of_the_clone_binding_durable_keeps_the_sandbox() {
+fn a_removal_that_cannot_make_the_absence_of_the_clones_files_durable_keeps_the_sandbox() {
     let (_directory, dir) = sandbox();
-    for name in [CLONE_BINDING_NAME, LOG_NAME] {
-        fs::write(dir.join(name), b"{}").unwrap();
-    }
+    write_clone_files(&dir);
+    fs::write(dir.join(LOG_NAME), b"{}").unwrap();
     let locked = SandboxStore::lock_existing(&dir, &files(), None).unwrap();
     let error = locked
         .remove_contents_with(&|| {}, &|_| Err(io::Error::other("the sync failed")))
@@ -455,7 +470,8 @@ fn a_removal_that_cannot_make_the_absence_of_the_clone_binding_durable_keeps_the
     );
     assert_eq!(Error::from(error).kind(), ErrorKind::Io);
     drop(locked);
-    // Only the binding went, so the sandbox is still provisioned, and its removal can be retried.
+    // Only the clone's files went, so the sandbox is still provisioned, and its removal can be
+    // retried.
     assert_eq!(entries_of(&dir), sorted(&[CONFIG, LOCK_NAME, LOG_NAME]));
     assert!(remove(&dir).unwrap().is_none());
     assert!(!dir.exists());
@@ -501,24 +517,40 @@ fn relink(target: &Path, link: &Path) {
 }
 
 /// Provisions the sandboxes `one/sandbox` and `two/sandbox` in `root`, each holding a clone
-/// binding, links `root/link` to `one`, and returns `one`, `two`, and the link.
+/// binding and the files that a clone keeps of its launch, links `root/link` to `one`, and returns
+/// `one`, `two`, and the link.
 fn linked_sandboxes(root: &Path) -> (PathBuf, PathBuf, PathBuf) {
     let (one, two, link) = (root.join("one"), root.join("two"), root.join("link"));
     for parent in [&one, &two] {
         fs::create_dir(parent).unwrap();
         let sandbox = parent.join("sandbox");
         provision(&sandbox);
-        fs::write(sandbox.join(CLONE_BINDING_NAME), b"{}").unwrap();
+        write_clone_files(&sandbox);
     }
     link_dir(&one, &link);
     (one, two, link)
+}
+
+/// The entries of a provisioned sandbox that [`linked_sandboxes`] made, with `more`, sorted.
+fn linked_entries(more: &[&str]) -> Vec<String> {
+    let mut names = vec![
+        CLONE_ACTIVATION_NAME,
+        CLONE_BINDING_NAME,
+        CLONE_SCRATCH_NAME,
+        CONFIG,
+        LOCK_NAME,
+        RESTORE_READY_NAME,
+    ];
+    names.extend_from_slice(more);
+    sorted(&names)
 }
 
 #[test]
 fn a_removal_unbinds_the_sandbox_whose_lock_it_holds_whatever_its_path_names_meanwhile() {
     let directory = tempfile::tempdir().unwrap();
     let (one, two, link) = linked_sandboxes(directory.path());
-    // The other sandbox records a launch, so its VM may run, and its binding must stay.
+    // The other sandbox records a launch, so its VM may run, and its binding and the files of its
+    // clone's launch must stay.
     fs::write(two.join("sandbox").join(JOURNAL_NAME), b"{}").unwrap();
     let locked = SandboxStore::lock_existing(link.join("sandbox"), &files(), None).unwrap();
     // The link names the other sandbox's parent from the checks to the binding's removal, and
@@ -532,7 +564,7 @@ fn a_removal_unbinds_the_sandbox_whose_lock_it_holds_whatever_its_path_names_mea
     assert_eq!(entries_of(&one.join("sandbox")), [LOCK_NAME]);
     assert_eq!(
         entries_of(&two.join("sandbox")),
-        sorted(&[CLONE_BINDING_NAME, CONFIG, JOURNAL_NAME, LOCK_NAME])
+        linked_entries(&[JOURNAL_NAME])
     );
     assert!(locked.remove_directory().unwrap().is_none());
     assert!(!one.join("sandbox").exists());
@@ -554,10 +586,7 @@ fn a_removal_through_a_path_that_names_another_sandbox_meanwhile_removes_nothing
     );
     assert_eq!(Error::from(error).kind(), ErrorKind::Io);
     for parent in [&one, &two] {
-        assert_eq!(
-            entries_of(&parent.join("sandbox")),
-            sorted(&[CLONE_BINDING_NAME, CONFIG, LOCK_NAME])
-        );
+        assert_eq!(entries_of(&parent.join("sandbox")), linked_entries(&[]));
     }
 }
 
@@ -1137,6 +1166,59 @@ mod windows {
         drop(pending);
         lingering.wait(within(10)).unwrap();
         assert!(!dir.exists());
+    }
+
+    #[test]
+    fn a_removal_takes_the_clone_files_whose_deletion_is_pending_for_removed() {
+        let (_directory, dir) = sandbox();
+        fs::write(dir.join(CLONE_BINDING_NAME), b"{}").unwrap();
+        for name in CLONE_FILE_NAMES {
+            fs::write(dir.join(name), b"").unwrap();
+        }
+        // The removal of what a clone kept of its launch leaves the deletion of each file that a
+        // reader holds pending, which the removal's own removal of them then finds.
+        let pending: Vec<File> = CLONE_FILE_NAMES
+            .into_iter()
+            .map(|name| delete_pending(&dir.join(name)))
+            .collect();
+        let mut lingering = remove(&dir)
+            .unwrap()
+            .expect("the files whose deletion is pending keep the directory");
+        // Everything else went, the binding included, and the clone's files linger, as a removed
+        // lock file does, rather than being refused as entries that are not the store's.
+        assert_eq!(entries_of(&dir), sorted(&CLONE_FILE_NAMES));
+        let error = lingering.wait(Some(Instant::now())).unwrap_err();
+        assert!(matches!(error, RemovalError::TimedOut(_)), "{error}");
+        drop(pending);
+        lingering.wait(within(10)).unwrap();
+        assert!(!dir.exists());
+    }
+
+    #[test]
+    fn a_retried_removal_of_the_clone_files_takes_those_whose_deletion_is_pending_for_removed() {
+        let (_directory, dir) = sandbox();
+        for name in CLONE_FILE_NAMES {
+            fs::write(dir.join(name), b"").unwrap();
+        }
+        // A release that failed once it removed the clone's files, which readers hold, retries
+        // their removal, which finds each one's deletion pending.
+        let pending: Vec<File> = CLONE_FILE_NAMES
+            .into_iter()
+            .map(|name| delete_pending(&dir.join(name)))
+            .collect();
+        let locked = SandboxStore::lock_existing(&dir, &files(), None).unwrap();
+        locked
+            .remove_clone_files(&locked.open_dir().unwrap())
+            .unwrap();
+        drop(locked);
+        drop(pending);
+        let names = entries_of(&dir);
+        assert!(
+            names
+                .iter()
+                .all(|name| !CLONE_FILE_NAMES.contains(&name.as_str())),
+            "{names:?}"
+        );
     }
 
     #[test]

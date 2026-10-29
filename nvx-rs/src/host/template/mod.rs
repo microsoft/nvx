@@ -37,6 +37,9 @@
 //!   its memory target against the template, and refuses a request that the template cannot
 //!   serve, such as an image of another length or block geometry than the template's placeholder,
 //!   before any VMM starts.
+//! - [`ClonePlan::launch`] launches the clone, as the launch that its lease reserves: OpenVMM
+//!   restores the generation's snapshot in place with the clone's devices, and the clone's
+//!   activation record waits in its sandbox, as a [`Restoring`] describes.
 //!
 //! # Canonical encoding
 //!
@@ -68,7 +71,7 @@ mod store;
 mod test_support;
 mod wire;
 
-pub use self::clone::{ClonePlan, CloneRequest, CloneUpper};
+pub use self::clone::{ClonePlan, CloneRequest, CloneUpper, Restoring};
 pub use self::eligibility::{Downtime, DowntimeSource, Eligibility, HostTime, MAX_DOWNTIME_NS};
 pub use self::key::{CaptureClass, ClassIdentity, Invariants, KeyIdentity, TemplateKey};
 pub use self::manifest::{

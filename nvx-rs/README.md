@@ -635,13 +635,27 @@ and no launch.
 the launch that the lease reserves, from metadata alone: the leased generation,
 its key, which must speak the current contracts, the boot and control contracts
 of the runtime that captured it included, and its snapshot; a network exactly
-when the template has a NIC; a memory target in whole blocks of
-`MEMORY_BLOCK_SIZE` from the template's RAM to its capacity; the clone's image,
-which the check of its `DistroBinding` opens; its upper, either the caller's
-scratch image, which the check of its `ScratchBinding` claims, and which nothing
-formats, copies, or reads, or for an upper in RAM a fresh sparse file,
-`clone-scratch.raw` in the sandbox's directory, which the release removes; and a
-fresh capability.
+when the template has a NIC, on the guest network of that NIC, whose address
+OpenVMM restores from the snapshot, and under the policy of that NIC, which
+OpenVMM checks as it restores it, since the key names the policy only by
+OpenVMM's identity of it; a memory target in whole blocks of `MEMORY_BLOCK_SIZE`
+from the template's RAM to its capacity; the clone's image, which the check of
+its `DistroBinding` opens; its upper, either the caller's scratch image, which
+the check of its `ScratchBinding` claims, and which nothing formats, copies, or
+reads, or for an upper in RAM a fresh sparse file, `clone-scratch.raw` in the
+sandbox's directory, which the release removes; and a fresh capability.
+
+It builds the clone's activation record, `ClonePlan::activation`, which the
+clone's guest applies in place of the configuration that the template captured,
+from the request's `WorkloadView`, overlay mode, and journal policy, and from
+the checked inputs: a restore section with a fresh transaction ID of 16 random
+bytes and the lease's `TemplateReference`; the image, an EROFS layer, with its
+binding's identity and the UUID that the adapter's plan expects of it, since a
+GPT image is refused; a tmpfs, or the scratch image's binding identity with the
+journal policy; no export; the template NIC's policy identity, as its key
+records it, unpublished listeners, and the guest's proxy URL; and the template's
+processors and the memory target. A binding's identity is the SHA-256 digest of
+a domain and of the binding's serde form, never of a file's content.
 
 The image and the scratch device must present the `BlockGeometry` of the
 template's, which a restore compares, and be, at the paths by which OpenVMM
@@ -651,6 +665,34 @@ scratch image may be a file that the sandbox's store owns, such as
 `clone-scratch.raw`, its log, or its records, by any path, since the store's
 transitions replace or remove them, and a link or a directory under one of the
 store's names is refused.
+
+`ClonePlan::launch` then launches the clone as the launch that its lease
+reserves, once it has checked that the sandbox's clone binding records the
+lease, and returns a `Restoring`: it writes the clone's activation record in its
+canonical encoding, `clone-activation.bin`, from which a caller resends it
+unchanged; it listens for the VMM's restore-ready event, at the socket
+`restore.sock` on Linux, and at a named pipe of a random name on Windows; and it
+runs `supervisor::launch` with OpenVMM's restore of the clone's devices,
+`--restore-snapshot` with the generation's snapshot in place, which no clone
+copies or changes, so that clones of one generation restore it at once,
+`--restore-memory` with the memory target, and `--restore-ready-path`, under the
+template's backend, CPU profile, and processors, with a boot console that
+discards its output, as cold boots have, and the control console, but no kernel,
+initramfs, command line, or guest address, which the snapshot fixes.
+
+On Linux, where OpenVMM requires a restore's control socket in the snapshot's
+parent, the clone's VMM listens in the generation's payload, at `<launch>.sock`,
+named after the launch that the lease reserves, whose path must be shorter than
+108 bytes with or without the payload's links resolved; on Windows, it listens
+at a named pipe, as every launch does. The VMM inherits the claim of a scratch
+image, on Windows through the image's guard, once the launch has closed the
+claim's handle, which OpenVMM's open of the image would refuse.
+
+A payload holds the sockets of its clones only while they lease it: the VMM
+removes its socket as it exits, a stop or a recovery removes the one that an
+abrupt exit leaves, and the release makes the socket's absence durable before
+the lease ends, and removes the record and `restore.sock`, as it removes
+`clone-scratch.raw`.
 
 `Store::tombstone` quarantines a generation, which takes no new lease while its
 leases keep working, and `Store::retire` deletes it once its leases have

@@ -171,4 +171,30 @@ mod tests {
             Err(error) => panic!("{error}"),
         }
     }
+
+    /// The stores tell files apart by the identities that their seals hold, with the 128-bit file
+    /// IDs of `FILE_ID_INFO` on Windows, whether they examine a path, an open file, or an entry of
+    /// an open directory.
+    #[cfg(any(target_os = "linux", windows))]
+    #[test]
+    fn the_stores_tell_files_apart_by_the_identities_that_their_seals_hold() {
+        use crate::host::seal::FileSeal;
+
+        let directory = tempfile::tempdir().unwrap();
+        let opened = Directory::open(directory.path()).unwrap();
+        let mut ids = Vec::new();
+        for name in ["first", "second"] {
+            let path = directory.path().join(name);
+            std::fs::write(&path, b"").unwrap();
+            let file = std::fs::File::open(&path).unwrap();
+            let seal = FileSeal::of(&file).unwrap();
+            let id = (seal.device(), seal.file_id());
+            assert_eq!(opened_file_id(&file).unwrap(), id, "{name}");
+            assert_eq!(file_id(&path).unwrap(), id, "{name}");
+            assert_eq!(opened.entry_id(name).unwrap(), Some(id), "{name}");
+            ids.push(id);
+        }
+        assert_ne!(ids[0], ids[1]);
+        assert_eq!(opened.entry_id("missing").unwrap(), None);
+    }
 }

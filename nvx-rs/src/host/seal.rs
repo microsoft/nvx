@@ -237,6 +237,14 @@ pub(crate) fn final_path(file: &File) -> io::Result<std::path::PathBuf> {
     imp::final_path(file)
 }
 
+/// Returns the final path of the open `file` as [`final_path`] does, but with its volume named by
+/// its GUID, `\\?\Volume{GUID}\`, which names a volume that has no drive letter or mount point,
+/// and so no path by a drive, too.
+#[cfg(windows)]
+pub(crate) fn final_volume_path(file: &File) -> io::Result<std::path::PathBuf> {
+    imp::final_volume_path(file)
+}
+
 /// Opens `path` for its metadata alone, so that no read or mapping of its content can succeed
 /// through the file: with `O_PATH` on Linux, and on Windows with `FILE_READ_ATTRIBUTES` alone,
 /// sharing every access.
