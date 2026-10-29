@@ -559,7 +559,7 @@ install_or_verify_runner_package() {
 
 refresh_runner_service_script() {
     [ -n "$removed_service_name" ] || return 0
-    run_as_root python3 - "$runner_directory" "$removed_service_name" "$runner_name" <<'PY'
+    run_as_root python3 -I - "$runner_directory" "$removed_service_name" "$runner_name" <<'PY'
 import pathlib
 import sys
 
@@ -602,7 +602,7 @@ configure_runner_account() {
 
 set_runner_disable_update() {
     validate_runner_state_paths
-    run_as_root python3 -c '
+    run_as_root python3 -I -c '
 import json
 import pathlib
 import sys
@@ -908,7 +908,7 @@ install_runner() {
 
     configured_runner_name=
     if run_as_root test -f "${runner_directory}/.runner"; then
-        configured_runner_name=$(run_as_root python3 -c \
+        configured_runner_name=$(run_as_root python3 -I -c \
             'import json, sys; print(json.load(open(sys.argv[1], encoding="utf-8-sig"))["agentName"])' \
             "${runner_directory}/.runner")
     fi
@@ -1047,13 +1047,13 @@ check_runner_host() {
             return 0
         fi
         if [ "$configure_runner" = true ]; then
-            configured_runner_name=$(run_as_root python3 -c \
+            configured_runner_name=$(run_as_root python3 -I -c \
                 'import json, sys; print(json.load(open(sys.argv[1], encoding="utf-8-sig"))["agentName"])' \
                 "${runner_directory}/.runner")
             [ "$configured_runner_name" = "$runner_name" ] ||
                 die "configured runner is ${configured_runner_name}, expected ${runner_name}"
         fi
-        runner_disable_update=$(run_as_root python3 -c \
+        runner_disable_update=$(run_as_root python3 -I -c \
             'import json, sys; print(json.load(open(sys.argv[1], encoding="utf-8-sig")).get("disableUpdate"))' \
             "${runner_directory}/.runner")
         [ "$runner_disable_update" = True ] ||

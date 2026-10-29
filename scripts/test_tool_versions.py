@@ -699,6 +699,17 @@ class ToolManifestReaderTests(unittest.TestCase):
             with self.subTest(invocation=invocation):
                 self.assertIn(' +"$RUST_TOOLCHAIN" install ', invocation)
 
+    def test_linux_setup_runs_python_as_root_in_isolated_mode(self):
+        # Without -I, Python searches the current directory first, so a
+        # module there that another user wrote, such as a json.py, would run
+        # as root.
+        source = LINUX.read_text(encoding="utf-8")
+        invocations = re.findall(r"run_as_root python3[^\n]*", source)
+        self.assertTrue(invocations)
+        for invocation in invocations:
+            with self.subTest(invocation=invocation):
+                self.assertTrue(invocation.startswith("run_as_root python3 -I "))
+
     def test_linux_setup_installs_the_pinned_musl_target_in_both_modes(self):
         source = LINUX.read_text(encoding="utf-8")
         # Installation and check mode take each mode's targets from one place.
