@@ -119,6 +119,7 @@ MICROVM_TEST_SCENARIOS = (
     "managed-lifecycle",
     "managed-exec-config",
     "network-snapshot",
+    "platform-aggregate-export",
     "platform-filesystem",
     "platform-network-policy",
     "platform-restore-processors",
@@ -144,6 +145,7 @@ UBUNTU_UNSUPPORTED_SCENARIOS = frozenset(("console-snapshot",))
 SANDBOX_CONTROL_SCENARIOS = frozenset(
     (
         "managed-exec-config",
+        "platform-aggregate-export",
         "platform-filesystem",
         "platform-network-policy",
         "platform-restore-processors",
@@ -387,6 +389,38 @@ PLATFORM_FILESYSTEM_FAILURE_MARKER = b"NVX-PLATFORM-FILESYSTEM-FAIL"
 PLATFORM_FILESYSTEM_MARKER = b"NVX-PLATFORM-FILESYSTEM-OK"
 PLATFORM_FILESYSTEM_HOST_SEED = b"NVX-HOST-TO-GUEST"
 PLATFORM_FILESYSTEM_GUEST_RESULT = b"NVX-GUEST-TO-HOST"
+# A platform restore attaches the aggregate of the filesystem-shares scenario
+# to the filesystem slot that the capture left dormant. The clone keeps its
+# captured command line, which names no filesystem, so it mounts the aggregate
+# itself and checks each child's kind, mode, and policy through its root.
+PLATFORM_AGGREGATE_FAILURE_MARKER = b"NVX-PLATFORM-AGGREGATE-FAIL"
+PLATFORM_AGGREGATE_MARKER = b"NVX-PLATFORM-AGGREGATE-OK"
+# The restores of the platform snapshot that OpenVMM refuses before the guest
+# runs, because their aggregates are ones that a cold boot refuses, and why.
+PLATFORM_AGGREGATE_REJECTED = (
+    ("overlapping-children", b"must not overlap"),
+    ("file-in-directory", b"must not overlap"),
+    ("directory-as-file", b"not a regular file"),
+    ("file-as-directory", b"not a plain directory"),
+    ("repeated-name", b"not unique"),
+    ("file-policy", b"exposes the file"),
+    ("outside-policy", b"outside the filesystem export roots"),
+    ("relative-policy", b"absolute host path"),
+)
+# A Windows host refuses caller ownership at a restore as at a cold boot.
+PLATFORM_AGGREGATE_OWNER_REJECTION = b"--mount-owner caller requires a Linux host"
+# Lines that only a restored clone's guest prints, from its platform repair's
+# report to the restore's end, so that a refused restore prints none of them.
+PLATFORM_AGGREGATE_GUEST_MARKERS = (
+    PLATFORM_POST_RESTORE_MARKER,
+    PLATFORM_AGGREGATE_MARKER,
+    RESTORE_MARKER,
+)
+# The dormant slot of a snapshot of any other tier, or without a tier, binds
+# only a --mount at a restore.
+DORMANT_AGGREGATE_REJECTION = (
+    b"--mount-aggregate on a dormant filesystem slot requires a platform snapshot"
+)
 # Records the time ABI rates and restore clock report of each restore. These
 # records are written before the restored VPs run, so they never split a guest
 # console line; targets that log while the guest runs, such as virt_kvm's
@@ -5954,6 +5988,209 @@ def run_platform_filesystem(
             raise RuntimeError(f"{context} modified snapshot artifacts")
 
 
+def run_platform_aggregate_export(
+    executable: Path,
+    kernel: Path,
+    initrd: Path,
+    backend: str,
+    *,
+    memory_mib: int,
+    timeout: float,
+    output_dir: Path,
+) -> None:
+    """Attach an aggregate of host directories and files to the filesystem
+    slot that a platform snapshot left dormant, and use it from the clone.
+
+    The aggregate is the filesystem-shares scenario's: a read-write workspace
+    and a read-only tool cache, each with a denied path, a read-write data
+    directory whose root exposes only its allowed paths and whose notes alone
+    are writable, and a read-only and a read-write file. The clone keeps its
+    captured command line, so its guest mounts the aggregate itself, checks
+    each child's kind, mode, and policy through the aggregate's root, and binds
+    a directory and a file child; the host then checks that the guest changed
+    exactly what the policy lets it change. Before the guest runs, OpenVMM must
+    refuse the restores whose aggregates a cold boot refuses, and on a Windows
+    host caller ownership, and no restore may change the snapshot.
+    """
+    with tempfile.TemporaryDirectory(
+        prefix="nvx-platform-aggregate-export-"
+    ) as temporary:
+        root = Path(temporary)
+        snapshot_path = root / "snapshot"
+        layer = root / "distro.erofs"
+        capture_scratch = root / "capture-scratch.raw"
+        restore_scratch = root / "restore-scratch.raw"
+        outside = root / "outside"
+        _write_pattern(layer, 1024 * 1024, 0x3C)
+        _write_pattern(capture_scratch, 1024 * 1024, 0xA5)
+        _write_pattern(restore_scratch, 1024 * 1024, 0x5A)
+        outside.mkdir()
+        workspace, toolcache, data, files = _create_shared_trees(root)
+        settings, output = _shared_files(files)
+        toolcache_contents = _tree_contents(toolcache)
+        data_contents = _tree_contents(data)
+        files_contents = _tree_contents(files)
+        boot_command = workload_boot_command(
+            executable, backend, kernel, initrd, memory_mib, ""
+        )
+        # Without --mount or --mount-aggregate, the capture leaves the
+        # filesystem slot dormant.
+        capture_snapshot(
+            [
+                *boot_command,
+                "--snapshot-destination",
+                str(snapshot_path),
+                "--snapshot-tier",
+                "platform",
+                "--microvm-sandbox-block",
+                _block_arg("distro", layer, read_only=True),
+                "--microvm-sandbox-block",
+                _block_arg("scratch", capture_scratch, read_only=False),
+            ],
+            snapshot_path,
+            timeout=timeout,
+            processors=1,
+            post_restore_script=_read_script("platform-aggregate-export.sh"),
+            log_path=output_dir / "platform-aggregate-export-capture.log",
+        )
+        fingerprint = _scratch_snapshot_fingerprint(snapshot_path)
+
+        def restore_command(*arguments: str) -> list[str]:
+            command = snapshot_restore_command(executable, backend, snapshot_path)
+            command.extend(
+                (
+                    "--microvm-sandbox-block",
+                    _block_arg("distro", layer, read_only=True),
+                    "--microvm-sandbox-block",
+                    _block_arg("scratch", restore_scratch, read_only=False),
+                    *arguments,
+                )
+            )
+            return command
+
+        aggregate = (
+            *_aggregate_arguments(workspace, toolcache, data, files),
+            "--mount-deny",
+            str(workspace / "secrets"),
+            "--mount-deny",
+            str(toolcache / "credentials"),
+        )
+        context = "platform aggregate export restore"
+        restored = _measure_restore(
+            restore_command(*aggregate),
+            context=context,
+            environment=_restore_environment(),
+            timeout=timeout,
+            log_path=output_dir / "platform-aggregate-export-restore.log",
+            failure_marker=PLATFORM_AGGREGATE_FAILURE_MARKER,
+        )
+        for marker in (PLATFORM_POST_RESTORE_MARKER, PLATFORM_AGGREGATE_MARKER):
+            if not contains_output_line(restored, marker):
+                raise RuntimeError(f"{context} did not report {marker.decode()!r}")
+        guest_write = workspace / "from-guest"
+        if (
+            not guest_write.is_file()
+            or guest_write.read_bytes() != b"NVX-GUEST-WRITE\n"
+        ):
+            raise RuntimeError(f"{context} did not write to the read-write directory")
+        if not (workspace / "guest-directory").is_dir():
+            raise RuntimeError(f"{context} did not create the guest's directory")
+        if (workspace / "secrets" / "token").read_bytes() != b"NVX-SECRET":
+            raise RuntimeError(f"{context} changed a denied path")
+        if _tree_contents(toolcache) != toolcache_contents:
+            raise RuntimeError(f"{context} changed the read-only directory")
+        data_contents["notes one.txt"] = b"NVX-NOTES\nNVX-GUEST-NOTE\n"
+        if _tree_contents(data) != data_contents:
+            raise RuntimeError(
+                f"{context} changed the data directory beyond its writable path"
+            )
+        files_contents["results/output.txt"] = b"NVX-GUEST-OUTPUT\n"
+        if _tree_contents(files) != files_contents:
+            raise RuntimeError(
+                f"{context} changed the shared files' directories, the read-only "
+                "file, or the read-write file other than as it wrote"
+            )
+        if _scratch_snapshot_fingerprint(snapshot_path) != fingerprint:
+            raise RuntimeError(f"{context} modified snapshot artifacts")
+        workspace_contents = _tree_contents(workspace)
+
+        rejected_arguments = {
+            "overlapping-children": (
+                "--mount-aggregate",
+                "/run/nvx/shares",
+                "--mount-child",
+                f"0,{toolcache},ro",
+                "--mount-child",
+                f"1,{toolcache / 'tools'},ro",
+            ),
+            "file-in-directory": (
+                "--mount-aggregate",
+                "/run/nvx/shares",
+                "--mount-child",
+                f"0,{settings.parent},rw",
+                "--mount-child",
+                f"1,{settings},ro,file",
+            ),
+            "directory-as-file": (
+                "--mount-aggregate",
+                "/run/nvx/shares",
+                "--mount-child",
+                f"0,{settings.parent},ro,file",
+            ),
+            "file-as-directory": (
+                "--mount-aggregate",
+                "/run/nvx/shares",
+                "--mount-child",
+                f"0,{settings},ro",
+            ),
+            "repeated-name": (
+                "--mount-aggregate",
+                "/run/nvx/shares",
+                "--mount-child",
+                f"same,{workspace},rw",
+                "--mount-child",
+                f"same,{toolcache},ro",
+            ),
+            "file-policy": (*aggregate, "--mount-deny", str(output)),
+            "outside-policy": (*aggregate, "--mount-deny", str(outside)),
+            "relative-policy": (*aggregate, "--mount-deny", "secrets"),
+        }
+        rejected = [
+            (name, rejected_arguments[name], reason)
+            for name, reason in PLATFORM_AGGREGATE_REJECTED
+        ]
+        if sys.platform == "win32":
+            rejected.append(
+                (
+                    "caller-owner",
+                    (*aggregate, "--mount-owner", "caller"),
+                    PLATFORM_AGGREGATE_OWNER_REJECTION,
+                )
+            )
+        for name, arguments, reason in rejected:
+            _expect_process_failure(
+                restore_command(*arguments),
+                output_dir / f"platform-aggregate-export-rejected-{name}.log",
+                timeout,
+                reason,
+                forbidden_markers=PLATFORM_AGGREGATE_GUEST_MARKERS,
+            )
+        if _scratch_snapshot_fingerprint(snapshot_path) != fingerprint:
+            raise RuntimeError(
+                "a refused platform aggregate export restore modified snapshot "
+                "artifacts"
+            )
+        if (
+            _tree_contents(workspace) != workspace_contents
+            or _tree_contents(toolcache) != toolcache_contents
+            or _tree_contents(data) != data_contents
+            or _tree_contents(files) != files_contents
+        ):
+            raise RuntimeError(
+                "a refused platform aggregate export restore changed a shared tree"
+            )
+
+
 def run_restore_downtime(
     executable: Path,
     kernel: Path,
@@ -6902,6 +7139,19 @@ def run_filesystem_snapshot(
             (late_root / "guest-result").read_bytes() != b"NVX-GUEST-TO-HOST"
         ):
             raise RuntimeError("dormant filesystem late attachment failed")
+        # Only a platform snapshot's dormant slot binds an aggregate.
+        aggregate_restore = snapshot_restore_command(
+            executable, backend, dormant_snapshot
+        )
+        aggregate_restore.extend(
+            ("--mount-aggregate", "/mnt/late", "--mount-child", f"0,{late_root},rw")
+        )
+        _expect_process_failure(
+            aggregate_restore,
+            output_dir / "filesystem-dormant-aggregate.log",
+            timeout,
+            DORMANT_AGGREGATE_REJECTION,
+        )
         if _snapshot_fingerprint(dormant_snapshot) != dormant_fingerprint:
             raise RuntimeError(
                 "dormant filesystem restores modified snapshot artifacts"
@@ -7152,6 +7402,38 @@ def _shares_command(
     return command
 
 
+def _create_shared_trees(root: Path) -> tuple[Path, Path, Path, Path]:
+    """Create the workspace, the tool cache, the data directory, and the
+    directory of the shared files that the aggregate of
+    `_aggregate_arguments` shares, below `root`, and return them. Each holds
+    paths that the aggregate's policy hides or exposes, and each shared file a
+    sibling that the aggregate does not share."""
+    workspace = root / "workspace"
+    toolcache = root / "toolcache"
+    data = root / "data"
+    files = root / "files"
+    settings, output = _shared_files(files)
+    (workspace / "secrets").mkdir(parents=True)
+    (toolcache / "tools").mkdir(parents=True)
+    (toolcache / "credentials").mkdir()
+    (data / "public").mkdir(parents=True)
+    settings.parent.mkdir(parents=True)
+    output.parent.mkdir(parents=True)
+    (workspace / "seed").write_bytes(b"NVX-WORKSPACE")
+    (workspace / "secrets" / "token").write_bytes(b"NVX-SECRET")
+    (toolcache / "seed").write_bytes(b"NVX-TOOLCACHE")
+    (toolcache / "tools" / "node").write_bytes(b"NVX-TOOL")
+    (toolcache / "credentials" / "token").write_bytes(b"NVX-CREDENTIAL")
+    (data / "public" / "readme").write_bytes(b"NVX-PUBLIC")
+    (data / "notes one.txt").write_bytes(b"NVX-NOTES\n")
+    (data / "private.txt").write_bytes(b"NVX-PRIVATE")
+    settings.write_bytes(b"NVX-SETTINGS")
+    (settings.parent / "secret.json").write_bytes(b"NVX-CONFIG-SECRET")
+    output.write_bytes(b"NVX-OUTPUT\n")
+    (output.parent / "other.txt").write_bytes(b"NVX-OTHER")
+    return workspace, toolcache, data, files
+
+
 def run_filesystem_shares(
     executable: Path,
     kernel: Path,
@@ -7167,29 +7449,8 @@ def run_filesystem_shares(
     its directory, together, as the children of one aggregate."""
     with tempfile.TemporaryDirectory(prefix="nvx-filesystem-shares-") as temporary:
         root = Path(temporary)
-        workspace = root / "workspace"
-        toolcache = root / "toolcache"
-        data = root / "data"
-        files = root / "files"
+        workspace, toolcache, data, files = _create_shared_trees(root)
         settings, output = _shared_files(files)
-        (workspace / "secrets").mkdir(parents=True)
-        (toolcache / "tools").mkdir(parents=True)
-        (toolcache / "credentials").mkdir()
-        (data / "public").mkdir(parents=True)
-        settings.parent.mkdir(parents=True)
-        output.parent.mkdir(parents=True)
-        (workspace / "seed").write_bytes(b"NVX-WORKSPACE")
-        (workspace / "secrets" / "token").write_bytes(b"NVX-SECRET")
-        (toolcache / "seed").write_bytes(b"NVX-TOOLCACHE")
-        (toolcache / "tools" / "node").write_bytes(b"NVX-TOOL")
-        (toolcache / "credentials" / "token").write_bytes(b"NVX-CREDENTIAL")
-        (data / "public" / "readme").write_bytes(b"NVX-PUBLIC")
-        (data / "notes one.txt").write_bytes(b"NVX-NOTES\n")
-        (data / "private.txt").write_bytes(b"NVX-PRIVATE")
-        settings.write_bytes(b"NVX-SETTINGS")
-        (settings.parent / "secret.json").write_bytes(b"NVX-CONFIG-SECRET")
-        output.write_bytes(b"NVX-OUTPUT\n")
-        (output.parent / "other.txt").write_bytes(b"NVX-OTHER")
         toolcache_contents = _tree_contents(toolcache)
         files_contents = _tree_contents(files)
 
@@ -9093,6 +9354,21 @@ def _run_scenarios(
             f"on OpenVMM/{args.backend}",
         )
         run_platform_filesystem(
+            executable,
+            kernel,
+            initrd,
+            args.backend,
+            memory_mib=args.memory_mib,
+            timeout=args.timeout,
+            output_dir=output_dir,
+        )
+    if "platform-aggregate-export" in scenarios:
+        report.start(
+            "platform-aggregate-export",
+            "Running microVM platform-snapshot aggregate export correctness on "
+            f"OpenVMM/{args.backend}",
+        )
+        run_platform_aggregate_export(
             executable,
             kernel,
             initrd,

@@ -217,6 +217,26 @@ mount the share, read the file that the host wrote, and write one that the
 host then reads, and the restore may not change the snapshot. Until OpenVMM's
 virtio-fs queue workers waited for the gate to release (#904), the clone's
 mount succeeded but its first read never returned.
+The `platform-aggregate-export` scenario covers an aggregate of host
+directories and files that a platform restore attaches to the filesystem slot
+that the capture left dormant, as a clone's export does. It captures a
+platform snapshot without a filesystem and restores it with the aggregate of
+the `filesystem-shares` scenario: a read-write workspace and a read-only tool
+cache, each with a denied path, a read-write data directory whose root exposes
+only its allowed paths and whose notes alone are writable, and a read-only and
+a read-write file. The clone keeps its captured command line, which names no
+filesystem, so its guest must mount the aggregate itself, find the five
+children in its read-only root, which only root can enter, check each child's
+kind, mode, and policy, and bind a directory and a file child, and the host
+must then find exactly the writes that the policy admits. Before the guest
+runs, OpenVMM must refuse the restores whose aggregates a cold boot refuses,
+with overlapping directories, a file inside a directory child, a child of the
+wrong kind, a repeated name, a policy path of a file child, one outside every
+child, or a relative one, and on a Windows host caller ownership, and no
+restore may change the snapshot. `filesystem-snapshot` also requires OpenVMM
+to refuse an aggregate for the dormant slot of its untiered snapshot, which
+binds only a `--mount`, because only a platform snapshot's dormant slot binds
+an aggregate.
 The `filesystem-snapshot` scenario's blockless capture of a live share covers
 the write-back of shared mappings (#555). A guest process dirties a page of a
 file in the share through a shared mapping with `nvx-device-io map` and holds

@@ -46,6 +46,7 @@
         "lifecycle": 1.7,
         "managed-lifecycle": 4.2,
         "network-snapshot": 17.0,
+        "platform-aggregate-export": 3.4,
         "platform-filesystem": 6.0,
         "platform-network-policy": 13.7,
         "platform-restore-processors": 16.0,
@@ -67,8 +68,9 @@
       },
       "shards": [
         {
-          "seconds": 249.9,
+          "seconds": 251.4,
           "scenarios": [
+            "command-line-limit",
             "console-snapshot",
             "directional-network-policy",
             "endpoint-policy-snapshot",
@@ -87,9 +89,8 @@
           ]
         },
         {
-          "seconds": 249.5,
+          "seconds": 251.4,
           "scenarios": [
-            "command-line-limit",
             "console-exit",
             "cpu-profile-fallback",
             "denied-filesystem-paths",
@@ -104,6 +105,7 @@
             "l3-l4-egress-port-ranges",
             "l3-l4-egress-protocols",
             "lifecycle",
+            "platform-aggregate-export",
             "platform-filesystem",
             "platform-network-policy",
             "platform-zero-fill",
@@ -142,6 +144,7 @@
         "lifecycle": 1.6,
         "managed-lifecycle": 4.3,
         "network-snapshot": 16.8,
+        "platform-aggregate-export": 4.5,
         "platform-filesystem": 6.0,
         "platform-network-policy": 16.5,
         "platform-restore-processors": 16.0,
@@ -163,7 +166,7 @@
       },
       "shards": [
         {
-          "seconds": 230.5,
+          "seconds": 232.5,
           "scenarios": [
             "console-snapshot",
             "directional-network-policy",
@@ -173,8 +176,8 @@
             "network-snapshot",
             "platform-filesystem",
             "platform-restore-processors",
+            "platform-zero-fill",
             "restore-downtime",
-            "restore-memory",
             "restore-processors",
             "scratch-snapshot",
             "smp",
@@ -184,7 +187,7 @@
           ]
         },
         {
-          "seconds": 230.0,
+          "seconds": 232.5,
           "scenarios": [
             "command-line-limit",
             "console-exit",
@@ -202,9 +205,10 @@
             "l3-l4-egress-protocols",
             "lifecycle",
             "managed-lifecycle",
+            "platform-aggregate-export",
             "platform-network-policy",
-            "platform-zero-fill",
             "private-network-ingress",
+            "restore-memory",
             "sandbox-blocks",
             "structured-outcome",
             "time-abi-conformance",
@@ -238,6 +242,7 @@
         "lifecycle": 2.1,
         "managed-lifecycle": 17.8,
         "network-snapshot": 17.6,
+        "platform-aggregate-export": 9.1,
         "platform-filesystem": 6.0,
         "platform-network-policy": 24.8,
         "platform-restore-processors": 16.0,
@@ -259,7 +264,7 @@
       },
       "shards": [
         {
-          "seconds": 327.1,
+          "seconds": 331.7,
           "scenarios": [
             "console-snapshot",
             "denied-filesystem-paths",
@@ -268,6 +273,7 @@
             "filesystem-snapshot",
             "host-loopback-policy",
             "network-snapshot",
+            "platform-aggregate-export",
             "platform-filesystem",
             "platform-restore-processors",
             "restore-downtime",
@@ -276,12 +282,11 @@
             "scratch-snapshot",
             "smp",
             "smp-snapshot",
-            "snapshot-tiers",
-            "virtio-net"
+            "snapshot-tiers"
           ]
         },
         {
-          "seconds": 327.2,
+          "seconds": 331.7,
           "scenarios": [
             "command-line-limit",
             "console-exit",
@@ -305,6 +310,7 @@
             "snapshot-core",
             "structured-outcome",
             "time-abi-conformance",
+            "virtio-net",
             "workload-identity"
           ]
         }

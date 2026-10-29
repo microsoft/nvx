@@ -573,6 +573,39 @@ without a NIC, and for a NIC captured with any other policy, and every other
 [networked restore](#networked-snapshots) requires the captured policy.
 `nvx-rs run` does not pass the option.
 
+### Platform filesystem exports
+
+A platform snapshot captured without `--mount` or `--mount-aggregate` leaves
+the virtio-fs slot dormant. Each restore may bind one directory to it with
+`--mount`, or an aggregate of directories and files with `--mount-aggregate`
+and its `--mount-child` options, for example:
+
+```bash
+./bin/openvmm \
+  --single-process \
+  --machine microvm \
+  --hypervisor kvm \
+  --restore-snapshot /var/lib/nvx/template \
+  --microvm-sandbox-block distro:file:/var/lib/nvx/image.erofs,ro \
+  --restore-absent-scratch \
+  --mount-aggregate /run/nvx/shares \
+  --mount-child 0,/srv/checkout,rw \
+  --mount-child 1,/opt/hostedtoolcache,ro \
+  --mount-child 2,/srv/app/config/settings.json,ro,file \
+  --mount-deny /srv/checkout/.git/credentials
+```
+
+OpenVMM validates the aggregate's children, their `--mount-deny`,
+`--mount-allow`, and `--mount-write` paths, and the `--mount-owner` mode as it
+validates a cold boot's, and attaches the aggregate before any vCPU runs. The
+slot's device and the guest's kernel command line stay as captured, without a
+`virtfs_*` or `nvx_share=` token, so the guest must learn of the export from
+its host, mount tag `microvm` itself, and bind each child where it needs it.
+The dormant slot of a snapshot of another tier, or without a tier, still
+binds only a `--mount`, and a snapshot captured with an export requires that
+export again. `nvx-rs run`, which passes no sandbox blocks, cannot restore a
+platform snapshot.
+
 ## Migration from the retired profile
 
 `microvm` is now the only selector and launches the contract previously named
@@ -747,7 +780,10 @@ Capture and restore inspect and reopen the guest's open files as OpenVMM's
 user, so unless OpenVMM runs as root, they fail while the guest holds a file
 that only its caller can reach or reopen, such as one open for writing.
 A snapshot captured without a mapping may restore with one new `--mount` of a
-directory, but not with several or with a file; after resume, mount it
+directory, but not with several or with a file, because `nvx-rs run` restores
+only snapshots without sandbox blocks, whose dormant slot takes no aggregate;
+OpenVMM binds an aggregate to the dormant slot of a
+[platform snapshot](#platform-filesystem-exports). After resume, mount it
 explicitly inside the guest because the initramfs hook has already completed:
 
 ```sh
