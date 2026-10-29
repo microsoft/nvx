@@ -1180,13 +1180,20 @@ message.
 Without `--net`, the sandbox has no network device, and the other network
 options are refused. With it, an omitted option takes OpenVMM's default:
 egress allowed, ingress denied, and host-loopback access from the workload
-alone, through its gateway. A policy that lets nothing through, egress denied
-without allow rules, ingress denied, and `--host-loopback deny`, attaches no
-network device. Egress rules need an explicit `--network-egress`, as OpenVMM
-requires. Forwards need `--host-loopback allow`; UDP forwards also need egress
-allowed by default and no deny rule that covers the guest network, which
-carries their replies. `--host-loopback allow` needs a guest network prefix of
-`/29` or shorter; see [Host-loopback access](#host-loopback-access).
+alone, through its gateway. A policy attaches no network device when it has
+`--network-egress deny` and `--host-loopback deny`, and no allow rules,
+`--network-ingress allow`, or `--network-proxy`, whatever its deny rules. The
+allow rules of a `--network-egress-policy-file` are the native rules that it
+compiles to, so a file whose allow rules all except their whole destinations
+compiles to none. Any other policy attaches a network device, even one that
+lets nothing through, such as one whose `--network-egress-deny 192.0.2.0/24`
+covers its `--network-egress-allow 192.0.2.1`. In the typed policy of the NVX
+Rust API, every allow rule counts, even one that lowers to no OpenVMM rule.
+Egress rules need an explicit `--network-egress`, as OpenVMM requires. Forwards
+need `--host-loopback allow`; UDP forwards also need egress allowed by default
+and no deny rule that covers the guest network, which carries their replies.
+`--host-loopback allow` needs a guest network prefix of `/29` or shorter; see
+[Host-loopback access](#host-loopback-access).
 
 #### Proxy-only networking
 
@@ -1237,10 +1244,12 @@ refuses, before launch:
   proxy, and a proxy that is not at the gateway, which OpenVMM refused as it
   started.
 
-A policy that lets nothing through now attaches no network device, where
-OpenVMM attached one that carried nothing. `start` refuses a sandbox that an
-earlier release provisioned, whose configuration records the network options
-rather than the typed policy; deprovision it and provision it again.
+A policy with `--network-egress deny` and `--host-loopback deny`, and no allow
+rules, `--network-ingress allow`, or `--network-proxy`, now attaches no network
+device, where OpenVMM attached one that carried nothing. `start` refuses a
+sandbox that an earlier release provisioned, whose configuration records the
+network options rather than the typed policy; deprovision it and provision it
+again.
 
 The explicit `test-microvm --scenario sandbox-proxy-only --backend BACKEND`
 scenario is the acceptance for proxy-only networking. Like the
