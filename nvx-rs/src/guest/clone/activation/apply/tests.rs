@@ -1702,7 +1702,7 @@ fn a_network_that_publishes_the_workload_s_listeners_starts_their_announcer_to_i
     configuration.network = Some(network(None, Some(PROXY)));
     let published = clone_record(configuration.clone());
     let mut system = FakeSystem::new();
-    let applied = apply_with(&mut system, &published, &template()).unwrap();
+    let applied = apply_with(&mut system, &published, &template(), None).unwrap();
     let bound = Effect::Bind(view(Some(workload()), MachineId::Image));
     let assembled = [
         Effect::Assemble(accepted_assembly()),
@@ -1723,7 +1723,7 @@ fn a_network_that_publishes_the_workload_s_listeners_starts_their_announcer_to_i
     configuration.network = Some(unpublished(None, Some(PROXY)));
     for record in [clone_record(configuration), accepted()] {
         let mut system = FakeSystem::new();
-        let applied = apply_with(&mut system, &record, &template()).unwrap();
+        let applied = apply_with(&mut system, &record, &template(), None).unwrap();
         assert_eq!(
             system.effects,
             [&assembled[..], std::slice::from_ref(&bound)].concat()
@@ -1739,7 +1739,7 @@ fn a_network_that_publishes_the_workload_s_listeners_starts_their_announcer_to_i
         ..template()
     };
     let mut system = FakeSystem::new();
-    let error = apply_with(&mut system, &published, &gatewayless).unwrap_err();
+    let error = apply_with(&mut system, &published, &gatewayless, None).unwrap_err();
     assert!(
         matches!(
             error,
@@ -1755,7 +1755,7 @@ fn a_network_that_publishes_the_workload_s_listeners_starts_their_announcer_to_i
         [&assembled[..], &[Effect::Teardown]].concat()
     );
     let mut system = FakeSystem::new();
-    let applied = apply_with(&mut system, &accepted(), &gatewayless).unwrap();
+    let applied = apply_with(&mut system, &accepted(), &gatewayless, None).unwrap();
     assert_eq!(applied.announcer, None);
 }
 

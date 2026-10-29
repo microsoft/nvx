@@ -348,6 +348,10 @@ impl RepairSystem for Deferring {
         self.system.online_cpus()
     }
 
+    fn online_cpu(&mut self, cpu: u32) -> io::Result<()> {
+        self.system.online_cpu(cpu)
+    }
+
     fn block_size(&mut self) -> io::Result<Vec<u8>> {
         self.system.block_size()
     }
