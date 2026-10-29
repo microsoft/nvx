@@ -84,11 +84,34 @@ pub(crate) fn write_without_sigpipe(
     descriptor: &FileDescriptor,
     bytes: &[u8],
 ) -> Result<usize, Errno> {
+    without_sigpipe(|| descriptor.write(bytes))
+}
+
+/// Writes all `bytes` to standard error and ignores failures, as `write_standard_error` does, but
+/// makes each `write` as [`write_without_sigpipe`] does: a standard error whose reader is gone
+/// fails the write without raising `SIGPIPE`, whatever the process's disposition of it.
+#[cfg(target_arch = "x86_64")]
+pub(crate) fn write_standard_error_without_sigpipe(bytes: &[u8]) {
+    let mut remaining = bytes;
+    while !remaining.is_empty() {
+        match without_sigpipe(|| nix::unistd::write(std::io::stderr(), remaining)) {
+            Ok(0) => return,
+            Ok(count) => remaining = &remaining[count..],
+            Err(Errno::EINTR) => {}
+            Err(_) => return,
+        }
+    }
+}
+
+/// Makes the one `write` system call of `write` with `SIGPIPE` blocked in the calling thread, and
+/// takes back the signal that its failure with `EPIPE` left pending, as [`write_without_sigpipe`]
+/// describes.
+fn without_sigpipe(write: impl FnOnce() -> Result<usize, Errno>) -> Result<usize, Errno> {
     let pipe = SigSet::from(Signal::SIGPIPE);
     let previous = pipe.thread_swap_mask(SigmaskHow::SIG_BLOCK)?;
     // A failure to tell leaves any pending signal alone.
     let joined = is_pending_for_thread(Signal::SIGPIPE).unwrap_or(true);
-    let written = descriptor.write(bytes);
+    let written = write();
     if written == Err(Errno::EPIPE) && !joined {
         let immediately = nix::libc::timespec {
             tv_sec: 0,

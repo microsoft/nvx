@@ -13308,6 +13308,67 @@ function python {
                     {"scratch": scratch},
                 )
 
+    def test_failed_windows_benchmarks_keep_their_storage_events(self):
+        action = (
+            BuildConstants.REPO_ROOT
+            / ".github"
+            / "actions"
+            / "run-benchmark"
+            / "action.yml"
+        ).read_text(encoding="utf-8")
+        step = _composite_action_step(action, "Save Windows storage events")
+        script = _composite_action_script(action, "Save Windows storage events")
+
+        self.assertIn("      if: failure() && runner.os == 'Windows'", step)
+        self.assertIn(
+            '$Output = "data/runs/${{ inputs.platform }}/windows-storage-events.txt"',
+            script,
+        )
+        self.assertLess(
+            action.index("- name: Save Windows storage events"),
+            action.index("- name: Upload benchmark diagnostics"),
+        )
+
+    @unittest.skipUnless(os.name == "nt", "requires Windows PowerShell")
+    def test_windows_storage_events_step_writes_both_logs(self):
+        action = (
+            BuildConstants.REPO_ROOT
+            / ".github"
+            / "actions"
+            / "run-benchmark"
+            / "action.yml"
+        ).read_text(encoding="utf-8")
+        script = _composite_action_script(
+            action, "Save Windows storage events"
+        ).replace("${{ inputs.platform }}", "windows-whp-virtual-machine")
+
+        with tempfile.TemporaryDirectory() as temporary:
+            result = subprocess.run(
+                ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script],
+                cwd=temporary,
+                capture_output=True,
+                text=True,
+                timeout=120,
+                check=False,
+            )
+            output = (
+                Path(temporary)
+                / "data"
+                / "runs"
+                / "windows-whp-virtual-machine"
+                / "windows-storage-events.txt"
+            )
+            lines = output.read_text(encoding="utf-8-sig").splitlines()
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertRegex(lines[0], r"^Storage events since \d{4}-\d\d-\d\dT")
+        self.assertIn("--- Microsoft-Windows-Storage-Storport/Operational ---", lines)
+        self.assertIn("--- System ---", lines)
+        self.assertLess(
+            lines.index("--- Microsoft-Windows-Storage-Storport/Operational ---"),
+            lines.index("--- System ---"),
+        )
+
     @unittest.skipUnless(os.name == "nt", "requires Windows PowerShell")
     def test_windows_benchmark_scratch_steps_manage_per_job_directories(self):
         action = (
@@ -21909,6 +21970,96 @@ class BenchmarkTests(unittest.TestCase):
         wait.assert_not_called()
         self.assertTrue(log.endswith(b"NVX-RESTORE-PROCESSORS-FAIL unstable-tsc\r\n"))
 
+    def test_terminate_waits_for_a_killed_process_to_exit(self):
+        process = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(60)"]
+        )
+        try:
+            benchmark.terminate(process)
+            exited = process.returncode is not None
+        finally:
+            process.kill()
+            process.wait()
+
+        self.assertTrue(exited)
+        # An exited process is not killed again.
+        with patch.object(process, "kill") as kill:
+            benchmark.terminate(process)
+        kill.assert_not_called()
+
+    def test_terminate_fails_when_a_killed_process_keeps_running(self):
+        process = MagicMock(pid=4321)
+        process.poll.return_value = None
+        with (
+            patch.object(benchmark, "_wait_for_exit", return_value=False) as wait,
+            self.assertRaisesRegex(
+                RuntimeError, "process 4321 did not exit within 30s of being killed"
+            ),
+        ):
+            benchmark.terminate(process)
+
+        process.kill.assert_called_once_with()
+        wait.assert_called_once_with(process, benchmark.TERMINATION_TIMEOUT_SECONDS)
+
+    def test_terminate_warns_only_about_a_slow_exit(self):
+        for times, warning in (
+            ((10.0, 12.5), "process 4321 took 2.500s to exit after it was killed"),
+            ((10.0, 10.05), None),
+        ):
+            process = MagicMock(pid=4321)
+            process.poll.return_value = None
+            stderr = io.StringIO()
+            with (
+                patch.object(benchmark, "_wait_for_exit", return_value=True),
+                patch.object(benchmark.time, "perf_counter", side_effect=times),
+                contextlib.redirect_stderr(stderr),
+            ):
+                benchmark.terminate(process)
+
+            if warning is None:
+                self.assertEqual(stderr.getvalue(), "")
+            else:
+                self.assertIn(warning, stderr.getvalue())
+
+    def test_exit_wait_ignores_the_returncode_that_a_windows_kill_stores(self):
+        # Popen.kill() of a terminating Windows process stores its exit code,
+        # although the process still runs.
+        process = MagicMock(pid=4321, returncode=1)
+        process.poll.return_value = 1
+        with (
+            patch.object(benchmark.os, "name", "nt"),
+            patch.object(
+                benchmark, "_wait_for_windows_process", side_effect=[False, True]
+            ) as wait,
+        ):
+            self.assertFalse(benchmark._wait_for_exit(process, 2.0))
+            self.assertTrue(benchmark._wait_for_exit(process, 2.0))
+
+        self.assertEqual(wait.call_args_list, [call(4321, 2.0)] * 2)
+        process.wait.assert_not_called()
+
+    def test_exit_wait_reports_a_posix_process_that_keeps_running(self):
+        process = MagicMock(pid=4321)
+        process.wait.side_effect = [subprocess.TimeoutExpired(["openvmm"], 2.0), 0]
+        with patch.object(benchmark.os, "name", "posix"):
+            self.assertFalse(benchmark._wait_for_exit(process, 2.0))
+            self.assertTrue(benchmark._wait_for_exit(process, 2.0))
+
+        self.assertEqual(process.wait.call_args_list, [call(timeout=2.0)] * 2)
+
+    @unittest.skipUnless(sys.platform == "win32", "requires Windows")
+    def test_windows_exit_wait_waits_for_the_process_object(self):
+        process = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(60)"]
+        )
+        try:
+            self.assertFalse(benchmark._wait_for_windows_process(process.pid, 0.05))
+            process.kill()
+            self.assertTrue(benchmark._wait_for_windows_process(process.pid, 30))
+        finally:
+            process.kill()
+            process.wait()
+
     def test_guest_runner_preserves_primary_and_close_failures_with_bounded_tail(self):
         class FakeProcess:
             pid = 123
@@ -22003,6 +22154,312 @@ class BenchmarkTests(unittest.TestCase):
                     b"DONE",
                     timeout=1,
                 )
+
+    def test_guest_runner_describes_the_host_before_killing_a_hung_guest(self):
+        class FakeProcess:
+            pid = 123
+
+            def poll(self):
+                return None
+
+        process = FakeProcess()
+        events: list[str] = []
+
+        class HungInteraction:
+            containment = None
+
+            def __init__(self):
+                self.process = process
+                self.closed = threading.Event()
+
+            def read_output(self, chunks: queue.Queue[bytes | None]):
+                chunks.put(benchmark.BOOT_MARKER + b"\n/ # esac\n")
+                self.closed.wait(5)
+                chunks.put(None)
+
+            def write_input(self, _data: bytes):
+                pass
+
+            def close(self):
+                self.closed.set()
+
+        def describe(observed: object) -> str:
+            events.append("described")
+            self.assertIs(observed, process)
+            return "files: shared/device-io.bin 4096 bytes"
+
+        def fail(_observed: object) -> str:
+            raise OSError("volume stalled")
+
+        def kill(_process: object) -> None:
+            events.append("killed")
+
+        for describer, state in (
+            (describe, "files: shared/device-io.bin 4096 bytes"),
+            (fail, "could not be described: volume stalled"),
+        ):
+            events.clear()
+            with (
+                patch.object(
+                    benchmark, "InteractiveProcess", return_value=HungInteraction()
+                ),
+                patch.object(benchmark, "_try_peak_rss", return_value=1024),
+                patch.object(benchmark, "terminate", side_effect=kill),
+            ):
+                with self.assertRaises(RuntimeError) as raised:
+                    benchmark.run_guest_script(
+                        ["openvmm"],
+                        "guest command\n",
+                        b"DONE",
+                        timeout=0.2,
+                        host_state_on_timeout=describer,
+                    )
+
+            message = str(raised.exception)
+            self.assertTrue(
+                message.startswith(
+                    "guest workload did not finish within 0.2s\n"
+                    f"--- host state at the timeout ---\n{state}\n"
+                    "--- OpenVMM output ---\n"
+                ),
+                message,
+            )
+            self.assertTrue(message.endswith("/ # esac\n"), message)
+            if describer is describe:
+                # The host is described while OpenVMM still runs.
+                self.assertEqual(events, ["described", "killed"])
+
+    def test_guest_runner_describes_the_host_only_for_a_timeout(self):
+        class FakeProcess:
+            pid = 123
+
+            def poll(self):
+                return 7
+
+            def wait(self):
+                return 7
+
+        class ExitingInteraction:
+            process = FakeProcess()
+            containment = None
+
+            def read_output(self, chunks: queue.Queue[bytes | None]):
+                chunks.put(benchmark.BOOT_MARKER + b"\n")
+                chunks.put(None)
+
+            def write_input(self, _data: bytes):
+                pass
+
+            def close(self):
+                pass
+
+        describe = MagicMock(return_value="files: none")
+        with (
+            patch.object(
+                benchmark, "InteractiveProcess", return_value=ExitingInteraction()
+            ),
+            patch.object(benchmark, "_try_peak_rss", return_value=1024),
+            patch.object(benchmark, "terminate"),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "OpenVMM exited with status 7"):
+                benchmark.run_guest_script(
+                    ["openvmm"],
+                    "guest command\n",
+                    b"DONE",
+                    timeout=1,
+                    host_state_on_timeout=describe,
+                )
+
+        describe.assert_not_called()
+
+    def test_guest_runner_ends_a_hung_guest_when_its_description_is_interrupted(
+        self,
+    ):
+        class FakeProcess:
+            pid = 123
+
+            def poll(self):
+                return None
+
+        events: list[str] = []
+
+        class HungInteraction:
+            containment = None
+
+            def __init__(self):
+                self.process = FakeProcess()
+                self.closed = threading.Event()
+
+            def read_output(self, chunks: queue.Queue[bytes | None]):
+                chunks.put(benchmark.BOOT_MARKER + b"\n/ # esac\n")
+                self.closed.wait(5)
+                chunks.put(None)
+
+            def write_input(self, _data: bytes):
+                pass
+
+            def close(self):
+                events.append("closed")
+                self.closed.set()
+
+        def interrupt(_observed: object) -> str:
+            raise KeyboardInterrupt
+
+        def kill(_process: object) -> None:
+            events.append("killed")
+
+        with (
+            patch.object(
+                benchmark, "InteractiveProcess", return_value=HungInteraction()
+            ),
+            patch.object(benchmark, "_try_peak_rss", return_value=1024),
+            patch.object(benchmark, "terminate", side_effect=kill),
+        ):
+            with self.assertRaises(KeyboardInterrupt) as raised:
+                benchmark.run_guest_script(
+                    ["openvmm"],
+                    "guest command\n",
+                    b"DONE",
+                    timeout=0.2,
+                    host_state_on_timeout=interrupt,
+                )
+
+        # The interruption ends the run once OpenVMM is ended and its console closed.
+        self.assertEqual(events, ["killed", "closed"])
+        self.assertIsInstance(raised.exception.__context__, TimeoutError)
+
+    def test_device_io_host_state_describes_files_processes_and_volume(self):
+        from datetime import datetime, timezone
+
+        whole_seconds = datetime(2026, 10, 7, 15, 40, 38, tzinfo=timezone.utc)
+        modified_ns = int(whole_seconds.timestamp()) * 1_000_000_000 + 123_000_000
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "block.raw").write_bytes(b"")
+            (root / "shared").mkdir()
+            (root / "shared" / "device-io.bin").write_bytes(bytes(4096))
+            for path in (root / "block.raw", root / "shared" / "device-io.bin"):
+                os.utime(path, ns=(modified_ns, modified_ns))
+            with (
+                patch.object(benchmark, "_openvmm_pids", return_value=[77, 123]),
+                patch.object(
+                    benchmark.host_telemetry,
+                    "describe_volume_activity",
+                    return_value="scratch F: write 0.0 MiB/s at n/a ms, queue 32.0",
+                ) as activity,
+            ):
+                state = benchmark._device_io_host_state(root, MagicMock(pid=123))
+
+        activity.assert_called_once_with(
+            {"scratch": root}, benchmark.DEVICE_IO_HOST_STATE_SAMPLE_SECONDS
+        )
+        self.assertEqual(
+            state,
+            "files: block.raw 0 bytes, modified 2026-10-07T15:40:38.123+00:00; "
+            "shared/device-io.bin 4096 bytes, "
+            "modified 2026-10-07T15:40:38.123+00:00\n"
+            "OpenVMM processes: 77, 123 (this attempt)\n"
+            "scratch volume: scratch F: write 0.0 MiB/s at n/a ms, queue 32.0",
+        )
+
+    def test_device_io_host_state_bounds_each_description(self):
+        release = threading.Event()
+
+        def stalled(_root: Path) -> str:
+            release.wait(10)
+            return "late"
+
+        try:
+            with (
+                patch.object(benchmark, "DEVICE_IO_HOST_STATE_TIMEOUT_SECONDS", 0.2),
+                patch.object(
+                    benchmark, "_describe_volume_activity", side_effect=stalled
+                ),
+                patch.object(
+                    benchmark, "_describe_files", side_effect=OSError("no listing")
+                ),
+                patch.object(benchmark, "_openvmm_pids", return_value=[]),
+            ):
+                started = time.monotonic()
+                state = benchmark._device_io_host_state(Path("root"), MagicMock(pid=1))
+                elapsed = time.monotonic() - started
+        finally:
+            release.set()
+
+        self.assertLess(elapsed, 5)
+        self.assertEqual(
+            state,
+            "files: failed: no listing\n"
+            "OpenVMM processes: none\n"
+            "scratch volume: did not finish within 0.2s",
+        )
+
+    def test_device_io_host_state_reports_a_directory_that_cannot_be_listed(self):
+        real_scandir = os.scandir
+
+        def scandir(path: str):
+            if os.path.basename(path) == "shared":
+                raise OSError("Input/output error")
+            return real_scandir(path)
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "block.raw").write_bytes(b"")
+            (root / "shared").mkdir()
+            (root / "shared" / "device-io.bin").write_bytes(b"")
+            # The listing fails rather than leave out the files that it cannot list.
+            with patch.object(benchmark.os, "scandir", side_effect=scandir):
+                with self.assertRaisesRegex(OSError, "Input/output error"):
+                    benchmark._describe_files(root)
+            with self.assertRaises(FileNotFoundError):
+                benchmark._describe_files(root / "missing")
+            with (
+                patch.object(benchmark, "_openvmm_pids", return_value=[]),
+                patch.object(
+                    benchmark, "_describe_volume_activity", return_value="idle"
+                ),
+            ):
+                state = benchmark._device_io_host_state(
+                    root / "missing", MagicMock(pid=1)
+                )
+
+        self.assertRegex(state.splitlines()[0], r"^files: failed: .*missing")
+
+    def test_openvmm_pids_reads_the_windows_task_list(self):
+        listing = (
+            '"openvmm.exe","4321","Services","0","82,412 K"\r\n'
+            '"openvmm.exe","17","Services","0","1,024 K"\r\n'
+        )
+        with (
+            patch.object(benchmark.os, "name", "nt"),
+            patch.object(
+                benchmark.subprocess,
+                "run",
+                return_value=subprocess.CompletedProcess([], 0, listing, ""),
+            ) as run,
+        ):
+            self.assertEqual(benchmark._openvmm_pids(), [17, 4321])
+            run.return_value = subprocess.CompletedProcess(
+                [], 0, "INFO: No tasks are running which match the criteria.\r\n", ""
+            )
+            self.assertEqual(benchmark._openvmm_pids(), [])
+
+        self.assertEqual(
+            run.call_args.args[0][:3],
+            ["tasklist.exe", "/FI", "IMAGENAME eq openvmm.exe"],
+        )
+
+    def test_openvmm_pids_reads_linux_process_names(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            proc = Path(temporary)
+            for pid, name in ((12, "openvmm"), (7, "python3"), (40, "openvmm")):
+                (proc / str(pid)).mkdir()
+                (proc / str(pid) / "comm").write_text(f"{name}\n", encoding="utf-8")
+            # A process that exited before its name was read, and a link.
+            (proc / "99").mkdir()
+            (proc / "self").mkdir()
+            with patch.object(benchmark.os, "name", "posix"):
+                self.assertEqual(benchmark._openvmm_pids(proc), [12, 40])
 
     def test_live_peak_rss_samples_linux_process_without_reaping(self):
         process = MagicMock(pid=123)
@@ -23787,6 +24244,12 @@ class BenchmarkTests(unittest.TestCase):
                     output_path=output,
                 )
                 self.assertEqual(run_guest.call_count, 6)
+                # A hung attempt describes the host of its scratch directory.
+                host_state = run_guest.call_args.kwargs["host_state_on_timeout"]
+                self.assertIs(host_state.func, benchmark._device_io_host_state)
+                self.assertTrue(
+                    host_state.args[0].name.startswith("openvmm-device-io-")
+                )
                 network_commands = [
                     call.args[0]
                     for call in run_guest.call_args_list

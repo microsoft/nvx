@@ -15,11 +15,12 @@
 //! a second owner, such as a `std::fs::File` made from its number. `FileDescriptor` implements
 //! `std::io::Read` with one `read` system call per call, as `std::fs::File` does, so that a
 //! standard-library adapter such as `BufReader` can hold it and add the only buffer in front of
-//! it. Standard output and standard error belong to the process: `Stdout`, `DirectStdout`, and
-//! `write_standard_error` borrow them from the standard library's handles only to write them
-//! directly, so the standard library's line buffer for standard output must stay empty, which
-//! the guest module ensures by denying the standard library's print macros. Standard input
-//! belongs to the process too, and `discard_standard_input` borrows it only to read it directly.
+//! it. Standard output and standard error belong to the process: `Stdout`, `DirectStdout`,
+//! `write_standard_error`, and `write_standard_error_without_sigpipe` borrow them from the
+//! standard library's handles only to write them directly, so the standard library's line buffer
+//! for standard output must stay empty, which the guest module ensures by denying the standard
+//! library's print macros. Standard input belongs to the process too, and
+//! `discard_standard_input` borrows it only to read it directly.
 //!
 //! The spawn boundary and the managed agent need a few operations that `nix` cannot provide,
 //! which reach libc through `nix`'s re-export: a spawned child, which may neither allocate nor
@@ -150,6 +151,8 @@ pub(crate) use scheduler::{
 pub(crate) use secret::zeroize;
 #[cfg(test)]
 pub(crate) use signal::default_sigpipe;
+#[cfg(target_arch = "x86_64")]
+pub(crate) use signal::write_standard_error_without_sigpipe;
 pub(crate) use signal::{
     ChildSignalWait, SignalDescriptor, ignore_signals, queue_user_signal, reset_child_signal,
     write_without_sigpipe,

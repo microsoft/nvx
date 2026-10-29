@@ -348,6 +348,11 @@ launch, or one killed after a teardown timeout, fails on a time ABI power-off st
 the status of its termination. A guest exit with a nonzero status fails the run regardless; the
 scan reads what the console delivers within a second, so that a time ABI power-off is reported
 with its event.
+When the harness kills OpenVMM, after a timeout or a failure, it waits up to 30 s for the
+process to exit. A killed process exits only once the I/O that its threads wait for completes,
+so a stalled disk can hold it, while a hung microVM otherwise exits within tens of
+milliseconds: an exit that takes longer than a second prints a warning with its time, and a
+process that still runs after 30 s fails the run's cleanup.
 Benchmarks never ask the guest for its time ABI status, as the correctness jobs do after cold
 boots and restores, so the guest prints nothing extra. Up to the marker, the scan only parses
 output the harness reads anyway, and the harness reads the rest of the console only after it
@@ -455,6 +460,18 @@ and resumes the first absent attempt. The selected ABI is part of metadata and
 the default output directory, so v1 and v2 records cannot mix. Changed controls or provenance are rejected. Temporary raw
 disks, shared directories, the UDP server, and each benchmark-owned VMM are cleaned on success,
 failure, or interruption.
+
+An attempt that times out also describes the host in its error before the harness kills
+OpenVMM: the files of the attempt's directory, with their sizes and modification times; the
+OpenVMM processes that still run; and, on Windows, the scratch volume's write rate, latency,
+queue, and busy time, with the CPU, cache, and Defender activity, over 3 s, from the counters of
+the [snapshot lifecycle profile's](#snapshot-lifecycle-profile) storage telemetry. A stalled
+volume can block each of them, so each that does not finish within 10 s says so instead.
+`nvx-device-io` reports a file benchmark's progress on standard error, which the guest console
+shows: `nvx-device-io: opened` once it has opened, and when creating, sized the file,
+`nvx-device-io: transferred N blocks` once its timed loop ends, and, for a write,
+`nvx-device-io: flushed` or `nvx-device-io: flush failed`, so the console of a hung attempt
+shows the phase that it hung in.
 
 ### Shell snapshot
 
@@ -696,7 +713,11 @@ KVM, whose restore series have no stability guard, validation accepts every atte
 Before updating the run-scoped `benchmark-<platform>-<run-id>` artifact, each platform
 uploads its raw results and lifecycle profiles to the immutable
 `benchmark-diagnostics-<platform>-<run-id>-attempt-<run-attempt>` artifact, including
-after a benchmark failure. Both artifacts are retained for one day. Rerunning a
+after a benchmark failure. When a Windows benchmark fails, the artifact also holds
+`windows-storage-events.txt`: the Storport and System storage events since the job
+started, including request timeouts, resets, I/Os that took more than 30 s, and
+per-disk latency histograms, which a runner's reimage would erase. The job warns when
+an I/O took more than 30 s. Both artifacts are retained for one day. Rerunning a
 workflow cannot overwrite an earlier attempt's diagnostics. Downstream gates still
 use the run-scoped artifact so a failed-jobs-only rerun can reuse successful
 platform results from an earlier workflow attempt. The `acceptance-attempt-N.json`
