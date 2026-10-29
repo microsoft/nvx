@@ -352,7 +352,10 @@ When the harness kills OpenVMM, after a timeout or a failure, it waits up to 30 
 process to exit. A killed process exits only once the I/O that its threads wait for completes,
 so a stalled disk can hold it, while a hung microVM otherwise exits within tens of
 milliseconds: an exit that takes longer than a second prints a warning with its time, and a
-process that still runs after 30 s fails the run's cleanup.
+process that still runs after 30 s fails the run's cleanup. Such a process can also keep its
+output reader from stopping, so every later cleanup step still runs, and the error that led to
+the kill keeps its message and OpenVMM output with each cleanup failure appended under
+`--- cleanup failures ---`. A process that the harness gave up on is not killed again.
 Benchmarks never ask the guest for its time ABI status, as the correctness jobs do after cold
 boots and restores, so the guest prints nothing extra. Up to the marker, the scan only parses
 output the harness reads anyway, and the harness reads the rest of the console only after it
