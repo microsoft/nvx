@@ -12,8 +12,8 @@ yet breaks those peers. Only bytes that no codec produced catch such a change.
 | [`nvxc-v1.txt`](nvxc-v1.txt) | Version 1 of the control protocol: `NVXC` frames, their `EXEC`, `MAPS`, and features payloads, and `NVXS` records of NVX's host and guest |
 | [`nvxl-v1.txt`](nvxl-v1.txt) | Version 1 of the `NVXL` listener announcement |
 | [`activation-v1.txt`](activation-v1.txt) | Version 1 of the activation record of a layered root, and what Ready reports about an activation |
-| [`template-key-v1.txt`](template-key-v1.txt) | Version 1 of the canonical encodings of a template's compatibility key, which holds the template's network as its capture class lowered it, and of a capture class, with their identities |
-| [`openvmm/`](openvmm) | OpenVMM's vectors and cases of the `NVXS` session, and the excerpts of its sources that define the kernel command-line tokens of its platform tier, unchanged |
+| [`template-key-v1.txt`](template-key-v1.txt) | Version 1 of the canonical encodings of a template's compatibility key and of a capture class, with their identities |
+| [`openvmm/`](openvmm) | OpenVMM's vectors and cases of the `NVXS` session, and the excerpts of its sources that define the kernel command-line tokens of its platform tier and the error of a port forward that it cannot bind, unchanged |
 
 [4.4 Host-Guest Control Interface](../../../doc/design/4.4-host-guest-control-interface.md)
 and
@@ -66,11 +66,12 @@ the key that the vector's bytes decode to.
   name the export's root. Only the clone of a template whose export is a
   directory sends one, to the template's own guest, which deploys with the
   host and whose build the template's key names, so the C agent of earlier
-  releases, which refuses it, never receives one. And the keys of
-  `template-key-v1.txt` came to end with the template's network in place: the
-  key's encoding has not been released, so a template store that an earlier
-  build created is not supported, and is deleted and created again, since
-  nothing migrates it.
+  releases, which refuses it, never receives one. And `CLASS|NETWORK` of
+  `template-key-v1.txt` came to encode its network in place as the template
+  captures it, under the complete deny-all policy: the encodings of a key and
+  of a class have not been released, so a template store that an earlier build
+  created is not supported, and is deleted and created again, since nothing
+  migrates it.
 - The bytes come from the protocol's definition, never from the code that they
   check, and so do the values of each vector.
 
@@ -86,7 +87,7 @@ refusals of the records' payloads and headers. The tests of
 `nvx::protocol::nvxs` check that each vector decodes and encodes to its bytes,
 and that each case is accepted or refused as it says.
 
-`openvmm/` also holds two excerpts of OpenVMM's sources at that commit, whole
+`openvmm/` also holds three excerpts of OpenVMM's sources at that commit, whole
 lines, unchanged: `platform_command_line_token_is_invariant.rs`, the function
 of `openvmm/openvmm_helpers/src/snapshot/microvm.rs` that admits the kernel
 command-line tokens of a capture at OpenVMM's platform tier, and
@@ -96,7 +97,14 @@ the function reads. The tests of `nvx::host::template` compile them, and check
 each token of a template's kernel command line with OpenVMM's own function. The
 runtime adapter in `tests/runtime-adapter/` compiles them too, as the allowlist
 with which the guest agent of a template's VM checks its kernel command line,
-and its tests pin the set of tokens that they admit.
+and its tests pin the set of tokens that they admit. The third,
+`port_forward_socket_creation.rs`, is the variant of the error of
+`vm/devices/net/net_consomme/src/resolver.rs` with which OpenVMM reports a port
+forward whose socket on the host it cannot bind, as when a clone's VMM restores
+its NIC with a forward whose port another socket holds. OpenVMM gives that
+error no code, so the launch of a clone attributes it to the host by its text,
+and the tests of `nvx::host::template` read the excerpt, and check that the
+text is OpenVMM's.
 
 The tests cannot call OpenVMM's broker or its allowlist: OpenVMM's workspace
 needs a later Rust release than `nvx`'s minimum, and the `nvx-rs` job cannot

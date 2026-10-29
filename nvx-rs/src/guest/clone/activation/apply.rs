@@ -8,7 +8,7 @@ mod tests;
 use std::fmt;
 use std::fs;
 use std::io;
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv4Addr};
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -17,11 +17,14 @@ use std::time::{Duration, Instant};
 use super::super::Devices;
 #[cfg(doc)]
 use super::Activation;
-use crate::activation::{self, ActivationRecord, Configuration, MachineIdMode, WorkloadIdentity};
+use crate::activation::{
+    self, ActivationRecord, Configuration, MachineIdMode, Publication, WorkloadIdentity,
+};
 use crate::gpt::Expected;
 #[cfg(doc)]
 use crate::guest::entry::AccountMode;
 use crate::guest::entry::{self, Entry, Identity, MachineId, RuntimeBinds};
+use crate::guest::ingress::{Announcer, StartError};
 use crate::guest::mappings::{self, Access, SourceRoot};
 use crate::guest::root::{self, Assembly, AssemblyError, Device, Root, TeardownError};
 use crate::protocol::cmdline::write_resolver;
@@ -39,11 +42,12 @@ pub const RESOLVER_FILE: &str = "resolv.conf";
 /// The mode of the resolver file, whatever the umask: every execution may read it.
 const RESOLVER_MODE: u32 = 0o444;
 
-/// The inputs of a clone's root assembly that its guest takes from its own configuration, which
-/// its template captured, so that every clone of the template has the same: the runtime
-/// directory, the block devices, which their MMIO windows name, with the sizes that they must
-/// have, how long the assembly waits for each, and the host filesystem device, which its
-/// virtio-fs tag names. [`apply`](fn@apply) takes the rest from the activation record.
+/// The inputs of a clone's activation that its guest takes from its own configuration, which its
+/// template captured, so that every clone of the template has the same: the runtime directory,
+/// the block devices, which their MMIO windows name, with the sizes that they must have, how long
+/// the assembly of the root waits for each, the host filesystem device, which its virtio-fs tag
+/// names, and the IPv4 gateway of the template's NIC, if it has one. [`apply`](fn@apply) takes
+/// the rest from the activation record.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct RootTemplate {
     /// The runtime directory, below which the root is mounted, as [`Assembly::runtime`] tells,
@@ -62,6 +66,11 @@ pub struct RootTemplate {
     /// nothing mounted, as [`Devices::filesystem_tag`] names it, and through which the host
     /// attaches the export of a record that has one.
     pub filesystem_tag: String,
+    /// The IPv4 gateway of the template's NIC, which the template's kernel command line names, as
+    /// [`gateway`](crate::protocol::cmdline::gateway) reads it, if the template has a NIC: the
+    /// gateway to which the announcer of the workload's listeners sends its announcements, for a
+    /// record that publishes them.
+    pub gateway: Option<Ipv4Addr>,
 }
 
 /// A clone's root and workload, which [`apply`](fn@apply) activated: the [`Root`] that it
@@ -69,7 +78,8 @@ pub struct RootTemplate {
 /// export, if the record has one, the runtime's binds that it made on the root, in the caller's
 /// mount namespace, the identity in which every execution runs, if the record has a workload
 /// identity, the workload's hostname and machine ID, the record's, the resolver file that names
-/// the DNS server of the record's network, if it names one, and the endpoint of its proxy, if any.
+/// the DNS server of the record's network, if it names one, the endpoint of its proxy, if any, and
+/// the announcer of the workload's listeners, if the record's network publishes them.
 ///
 /// Without a workload identity, the adapter gives each execution its own identity, which
 /// [`Entry::check`] checks when the adapter prepares the execution's entry, as at a cold boot.
@@ -78,11 +88,17 @@ pub struct RootTemplate {
 /// runtime's binds, which each execution's mount namespace copies from the caller's. The adapter
 /// [takes](Self::take_export) the export's root, from which it maps the host's mapping table once
 /// the clone is ready, and tells its workloads the [proxy's endpoint](Self::proxy) as at a cold
-/// boot. [`teardown`](Self::teardown) closes the export's root, if the adapter did not take it,
-/// removes the binds, then tears the root down, and dropping it does the same, ignoring failures,
-/// as dropping a [`Root`] does.
+/// boot. The adapter watches the [announcer](Self::announcer) through its pidfd, and must end the
+/// clone once the announcer ended: the gateway then keeps publishing the listeners that the
+/// announcer last announced until the VM ends, and learns of no later change of them.
+/// [`teardown`](Self::teardown) stops the announcer, closes the export's root, if the adapter did
+/// not take it, removes the binds, then tears the root down, and dropping it does the same,
+/// ignoring failures, as dropping a [`Root`] does.
 #[derive(Debug)]
 pub struct Applied {
+    /// The announcer of the workload's listeners, if the record's network publishes them, which a
+    /// drop stops first, as a teardown does.
+    announcer: Option<Announcer>,
     /// The root of the host export, which keeps the export's mount busy, so that a drop closes it
     /// before the root drops, unless the adapter took it.
     export: Option<SourceRoot>,
@@ -155,6 +171,20 @@ impl Applied {
         self.proxy.as_deref()
     }
 
+    /// Returns the announcer of the workload's listeners, which the application started, if the
+    /// record's network publishes them, so that the adapter polls its [pidfd](Announcer::pidfd),
+    /// and ends the clone once the announcer ended, as it must: the gateway then keeps publishing
+    /// the listeners that the announcer last announced, and learns of no later change of them.
+    pub fn announcer(&self) -> Option<&Announcer> {
+        self.announcer.as_ref()
+    }
+
+    /// Returns the announcer of the workload's listeners, as [`announcer`](Self::announcer)
+    /// does, so that the adapter collects its status once it ended.
+    pub fn announcer_mut(&mut self) -> Option<&mut Announcer> {
+        self.announcer.as_mut()
+    }
+
     /// Takes the root of the host export, if the record has an export, and the adapter did not
     /// take it before: the [`SourceRoot`] from which the adapter maps the host's mapping table
     /// with [`Root::map`] once the clone is ready, as at a cold boot.
@@ -166,11 +196,12 @@ impl Applied {
         self.export.take()
     }
 
-    /// Closes the root of the host export, unless the adapter [took](Self::take_export) it,
-    /// removes the runtime's binds, then tears the root down, as [`Root::teardown`] does, which
-    /// unmounts the host export too, in the caller's mount namespace, which must be the one where
-    /// the application made the binds: the export's root and the binds keep the root's mounts
-    /// busy, and a teardown detaches no busy mount.
+    /// Stops the announcer of the workload's listeners, if the application started one, as
+    /// [`Announcer::stop`] does, ignoring its failure, closes the root of the host export, unless
+    /// the adapter [took](Self::take_export) it, removes the runtime's binds, then tears the root
+    /// down, as [`Root::teardown`] does, which unmounts the host export too, in the caller's mount
+    /// namespace, which must be the one where the application made the binds: the export's root
+    /// and the binds keep the root's mounts busy, and a teardown detaches no busy mount.
     ///
     /// It attempts both the removal and the teardown, whatever failed before, and fails with the
     /// binds that stay mounted, and the unmounts of the root's teardown that failed, whose mounts
@@ -180,24 +211,30 @@ impl Applied {
             export,
             mut binds,
             root,
+            announcer,
             ..
         } = self;
-        teardown_with(&mut LiveSystem, export, binds.take(), root)
+        teardown_with(&mut LiveSystem, announcer, export, binds.take(), root)
     }
 
     /// Returns the assembled root, the runtime's binds on it, and the identity in which every
     /// execution runs, if any, for an adapter that keeps them apart: it then removes the binds
     /// with [`RuntimeBinds::remove`] before it tears the root down, in the same mount namespace,
-    /// since dropping them leaves them mounted. It closes the root of the host export, unless the
-    /// adapter [took](Self::take_export) it.
+    /// since dropping them leaves them mounted. It stops the announcer of the workload's
+    /// listeners, if the application started one, and closes the root of the host export, unless
+    /// the adapter [took](Self::take_export) it.
     pub fn into_parts(self) -> (Root, RuntimeBinds, Option<Identity>) {
         let Self {
             export,
             mut binds,
             root,
             identity,
+            announcer,
             ..
         } = self;
+        if let Some(announcer) = announcer {
+            let _ = announcer.stop();
+        }
         drop(export);
         (root, binds.take(), identity)
     }
@@ -274,8 +311,8 @@ impl std::error::Error for AppliedTeardownError {}
 ///    the record expects of it, if any, and the bound of its first partition; its upper, a tmpfs,
 ///    or the scratch, with the record's journal policy; and its overlay mode; and, from
 ///    `template`, the runtime directory, the devices, and the timeout. It takes the workload's
-///    hostname and machine-ID mode, whether it has an export, and its network's DNS server and
-///    proxy endpoint from the record too;
+///    hostname and machine-ID mode, whether it has an export, and its network's DNS server,
+///    proxy endpoint, and publication of the workload's listeners from the record too;
 /// 2. for a GPT disk, asks the kernel to reread the disk's partition table, once the distro
 ///    device appeared, so that the block devices of the disk's partitions are those of the
 ///    clone's disk, rather than those of the template's placeholder, which the kernel created
@@ -322,15 +359,22 @@ impl std::error::Error for AppliedTeardownError {}
 ///    new file, of mode 0444, whatever the umask, so that every execution may read it. A file
 ///    there already, or one that cannot be created or written, fails with
 ///    [`ApplyError::Network`], once the application tore the root down;
-/// 8. binds the runtime's files into the root, for every execution, with one
+/// 8. if the record's network publishes the workload's listeners, starts their announcer, to
+///    the gateway of [`RootTemplate::gateway`], with [`Announcer::start`]: it binds a UDP socket
+///    to a privileged source port, and spawns `/sbin/nvx-ingress inherit GATEWAY_IPV4` with the
+///    socket as its standard input, and waits until the program runs, but for no announcement.
+///    The template captured its NIC under a policy that publishes nothing, so no announcer ran
+///    in it. A template without a gateway, a socket that cannot be bound, and a program that does
+///    not run fail with [`ApplyError::Network`], once the application tore the root down;
+/// 9. binds the runtime's files into the root, for every execution, with one
 ///    [`Entry::bind_runtime`], in the caller's mount namespace, of which each execution's starts
 ///    as a copy: a generated machine ID's file, read-only over the root's `/etc/machine-id`, then
 ///    the resolver file, read-only over the root's `/etc/resolv.conf`, and, with the image's own
 ///    machine ID and without a resolver file, nothing. The entry checks the record's hostname
 ///    first, which every execution's entry then takes, through [`Entry::hostname`]. A failure to
 ///    bind the resolver file fails with [`ApplyError::Network`], and any other with
-///    [`ApplyError::View`], once the binds that it made were removed, and the application tore
-///    the root down.
+///    [`ApplyError::View`], once the binds that it made were removed, the application stopped
+///    the announcer that it started, and tore the root down.
 ///
 /// The activation answers a retry of the Activate without applying the record again, so every
 /// execution, and every retry, sees the same machine ID and resolver file. A failure after the
@@ -338,12 +382,12 @@ impl std::error::Error for AppliedTeardownError {}
 /// finally, and the adapter ends the VM.
 ///
 /// It returns the root of the host export, the [`SourceRoot`] from which the adapter maps the
-/// host's mapping table once the clone is ready, as at a cold boot, and the endpoint of the
-/// network's proxy, which it leaves to the adapter, which tells its workloads as at a cold boot.
-/// It applies none of the record's other settings: the publication of the workload's listeners.
-/// It starts no process, generates at most one ID, after the activation accepted the record, and
-/// never powers the VM off: a failure, which the adapter reports to [`Activation::complete`],
-/// fails the activation finally, and the adapter ends the VM.
+/// host's mapping table once the clone is ready, as at a cold boot, the endpoint of the network's
+/// proxy, which it leaves to the adapter, which tells its workloads as at a cold boot, and the
+/// announcer that it started, which the adapter watches. It starts no other process, generates at
+/// most one ID, after the activation accepted the record, and never powers the VM off: a failure,
+/// which the adapter reports to [`Activation::complete`], fails the activation finally, and the
+/// adapter ends the VM.
 ///
 /// It needs the guest's root user, in the guest's initial mount namespace, as
 /// [`root::assemble`] does, and the binds of a generated machine ID and of a resolver file need
@@ -363,6 +407,7 @@ pub fn apply(
         machine_id: activated.machine_id,
         resolver: activated.resolver,
         proxy: activated.proxy,
+        announcer: activated.announcer,
     })
 }
 
@@ -424,7 +469,9 @@ pub enum ApplyError {
     },
     /// The record's network settings could not be applied, as this error tells: the resolver
     /// file that names the network's DNS server could not be written, or bound over the root's
-    /// `/etc/resolv.conf`. The application then tore the root down.
+    /// `/etc/resolv.conf`, or the announcer of the workload's listeners, which the network
+    /// publishes, could not start. The application then stopped an announcer that it started,
+    /// and tore the root down.
     Network {
         /// Why the network settings could not be applied.
         error: NetworkError,
@@ -505,6 +552,12 @@ pub enum NetworkError {
     /// [`entry::Error::Rollback`] of one, after which the entry removed the binds that it made,
     /// unless the error names those that stay.
     Bind(entry::Error),
+    /// The network publishes the workload's listeners, but the template names no IPv4 gateway,
+    /// [`RootTemplate::gateway`], to which their announcer would send its announcements.
+    Gateway,
+    /// The announcer of the workload's listeners, which the network publishes, could not start,
+    /// as [`Announcer::start`] tells.
+    Announcer(StartError),
 }
 
 impl fmt::Display for NetworkError {
@@ -512,6 +565,11 @@ impl fmt::Display for NetworkError {
         match self {
             Self::Write(error) => write!(formatter, "the resolver file cannot be written: {error}"),
             Self::Bind(error) => error.fmt(formatter),
+            Self::Gateway => formatter.write_str(
+                "the network publishes the workload's listeners, but the template names no IPv4 \
+                 gateway to announce them to",
+            ),
+            Self::Announcer(error) => error.fmt(formatter),
         }
     }
 }
@@ -520,8 +578,11 @@ impl std::error::Error for NetworkError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Write(error) => Some(error),
-            // The entry's error names the resolver file already, so it stands for this one.
+            // The entry's error names the resolver file already, so it stands for this one, as
+            // the start's error names the announcer.
             Self::Bind(error) => error.source(),
+            Self::Announcer(error) => error.source(),
+            Self::Gateway => None,
         }
     }
 }
@@ -537,6 +598,10 @@ trait System {
 
     /// The runtime's binds that a bind made: [`RuntimeBinds`], in a VM.
     type Binds;
+
+    /// The announcer of the workload's listeners that a start returned: an [`Announcer`], in a
+    /// VM.
+    type Announcer;
 
     /// Asks the kernel to reread the partition table of the GPT disk on the distro device
     /// `distro`, once it appeared, waiting for it for as long as `timeout` allows, but until
@@ -579,6 +644,13 @@ trait System {
     /// [`write_resolver_file`] does.
     fn write_resolver(&mut self, path: &Path, server: IpAddr) -> io::Result<()>;
 
+    /// Starts the announcer of the workload's listeners, which announces them to `gateway`, as
+    /// [`Announcer::start`] does.
+    fn announce(&mut self, gateway: Ipv4Addr) -> Result<Self::Announcer, StartError>;
+
+    /// Stops `announcer`, as [`Announcer::stop`] does, ignoring its failure.
+    fn stop(&mut self, announcer: Self::Announcer);
+
     /// Binds the runtime's files of `view` into `root`, for every execution, in the caller's
     /// mount namespace, as [`Entry::bind_runtime`] does with the view's [entry](View::entry).
     fn bind(&mut self, root: &Self::Root, view: &View) -> Result<Self::Binds, entry::Error>;
@@ -597,6 +669,7 @@ impl System for LiveSystem {
     type Root = Root;
     type Export = SourceRoot;
     type Binds = RuntimeBinds;
+    type Announcer = Announcer;
 
     fn reread(
         &mut self,
@@ -638,6 +711,14 @@ impl System for LiveSystem {
 
     fn write_resolver(&mut self, path: &Path, server: IpAddr) -> io::Result<()> {
         write_resolver_file(path, server)
+    }
+
+    fn announce(&mut self, gateway: Ipv4Addr) -> Result<Announcer, StartError> {
+        Announcer::start(gateway)
+    }
+
+    fn stop(&mut self, announcer: Announcer) {
+        let _ = announcer.stop();
     }
 
     fn bind(&mut self, root: &Root, view: &View) -> Result<RuntimeBinds, entry::Error> {
@@ -688,10 +769,10 @@ impl View {
 /// What an application activated through a system, which an [`Applied`] holds in a VM: the
 /// root, the root of the host export, if any, the runtime's binds on the root, the identity in
 /// which every execution runs, if any, the workload's hostname and machine ID, the resolver file,
-/// if any, and the proxy's endpoint, if any.
+/// if any, the proxy's endpoint, if any, and the announcer of the workload's listeners, if any.
 #[derive(Debug)]
 #[cfg_attr(test, derive(PartialEq, Eq))]
-struct Activated<R, E, B> {
+struct Activated<R, E, B, A> {
     /// The assembled root.
     root: R,
     /// The root of the host export, if the record has an export.
@@ -708,10 +789,17 @@ struct Activated<R, E, B> {
     resolver: Option<PathBuf>,
     /// The endpoint of the proxy, if the record's network names one.
     proxy: Option<String>,
+    /// The announcer of the workload's listeners, if the record's network publishes them.
+    announcer: Option<A>,
 }
 
 /// What an application through a system of type `S` activated.
-type ActivatedBy<S> = Activated<<S as System>::Root, <S as System>::Export, <S as System>::Binds>;
+type ActivatedBy<S> = Activated<
+    <S as System>::Root,
+    <S as System>::Export,
+    <S as System>::Binds,
+    <S as System>::Announcer,
+>;
 
 /// Applies `record` with `template` by `deadline`, if any, through `system`, as
 /// [`apply`](fn@apply) does, and returns what it activated.
@@ -778,6 +866,22 @@ fn apply_with<S: System>(
         }
         None => None,
     };
+    let publishes = network.is_some_and(|network| network.publication == Publication::Published);
+    let announcer = if publishes {
+        let started = match template.gateway {
+            Some(gateway) => system.announce(gateway).map_err(NetworkError::Announcer),
+            None => Err(NetworkError::Gateway),
+        };
+        match started {
+            Ok(announcer) => Some(announcer),
+            Err(error) => {
+                let teardown = discard(system, export, root);
+                return Err(ApplyError::Network { error, teardown });
+            }
+        }
+    } else {
+        None
+    };
     let view = View {
         identity: identity.clone().unwrap_or_else(|| Identity::new(0, 0)),
         hostname: workload.hostname.clone(),
@@ -787,6 +891,9 @@ fn apply_with<S: System>(
     let binds = match system.bind(&root, &view) {
         Ok(binds) => binds,
         Err(error) => {
+            if let Some(announcer) = announcer {
+                system.stop(announcer);
+            }
             let teardown = discard(system, export, root);
             return Err(if is_resolver(&error) {
                 let error = NetworkError::Bind(error);
@@ -805,6 +912,7 @@ fn apply_with<S: System>(
         machine_id: view.machine_id,
         resolver: view.resolver,
         proxy: network.and_then(|network| network.proxy.clone()),
+        announcer,
     })
 }
 
@@ -832,15 +940,19 @@ fn is_resolver(error: &entry::Error) -> bool {
     }
 }
 
-/// Closes `export`, the root of the host export, if any, removes `binds`, then tears `root` down,
-/// through `system`, as [`Applied::teardown`] does, attempting the removal and the teardown
-/// whatever failed before.
+/// Stops `announcer`, if any, closes `export`, the root of the host export, if any, removes
+/// `binds`, then tears `root` down, through `system`, as [`Applied::teardown`] does, attempting the
+/// removal and the teardown whatever failed before.
 fn teardown_with<S: System>(
     system: &mut S,
+    announcer: Option<S::Announcer>,
     export: Option<S::Export>,
     binds: S::Binds,
     root: S::Root,
 ) -> Result<(), AppliedTeardownError> {
+    if let Some(announcer) = announcer {
+        system.stop(announcer);
+    }
     if let Some(export) = export {
         system.close(export);
     }

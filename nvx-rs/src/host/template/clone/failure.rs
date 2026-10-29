@@ -65,7 +65,11 @@ use crate::protocol::status;
 /// profile, TSC, or LAPIC timer failed on an [incompatible host](Self::IncompatibleHost). Any
 /// other code, such as one of the snapshot's time contract, keeps what the host saw, since it does
 /// not tell a defect of the generation from one of this host's OpenVMM, and the failure's message
-/// keeps the line.
+/// keeps the line. One error that has no code tells the host's fault by its text alone: a VMM
+/// whose error's chain names a forward of the clone's network whose port of host loopback OpenVMM
+/// cannot bind, as one that another socket holds, which OpenVMM binds as it restores the clone's
+/// NIC, before its restore-ready event, failed to [bind a forward](Self::ForwardBind). The failure's
+/// message keeps that cause of the chain after the line.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 #[non_exhaustive]
@@ -130,7 +134,9 @@ pub enum Evidence {
     /// event, or a control socket whose path a Unix socket's address, or OpenVMM's option
     /// `listen=<path>`, cannot hold.
     EndpointBind,
-    /// A forward of the clone's network cannot be bound. No clone's network forwards a port yet.
+    /// A forward of the clone's network cannot be bound: OpenVMM cannot bind its port of host
+    /// loopback, as when another socket holds it, as it restores the clone's NIC, and exits before
+    /// its restore-ready event, as [the attribution](Self#attribution) describes.
     ForwardBind,
     /// The host ran out of a resource, such as its storage, its memory, or its descriptors.
     ResourceExhaustion,
@@ -164,9 +170,8 @@ pub enum Evidence {
     /// [`ACTIVATION_ORDER`](crate::protocol::status::ACTIVATION_ORDER) tell.
     Protocol,
     /// The leased generation is malformed or inconsistent: the store indexes it with another key
-    /// than the lease names, its key or snapshot is malformed, its key names its guest's DNS
-    /// server in a form that OpenVMM does not write, or its payload is not a directory of the
-    /// current user with mode 0700.
+    /// than the lease names, its key or snapshot is malformed, or its payload is not a directory
+    /// of the current user with mode 0700.
     MalformedGeneration,
     /// A defect of the generation's capture or repair, which a diagnostic attributes to the
     /// generation. No clone's restore keeps the guest's diagnostics yet, so a status of the repair
@@ -890,17 +895,31 @@ const INCOMPATIBLE_HOST_CODES: [&str; 13] = [
     "E_LAPIC_RATE_MISMATCH",
 ];
 
+/// The text with which a cause of OpenVMM's fatal error names a forward of a clone's network whose
+/// port of host loopback OpenVMM cannot bind as it restores the clone's NIC: the forward's
+/// protocol, `Tcp` or `Udp`, its address, and its port follow, then `)`, as the excerpt of
+/// OpenVMM's source `tests/vectors/openvmm/port_forward_socket_creation.rs` spells the error.
+/// OpenVMM gives the error no code.
+pub(super) const FORWARD_BIND_TEXT: &str = "failed to create socket for port forward (";
+
 /// Returns the evidence of `line`, the line with which OpenVMM reported the error that ended a
-/// clone's VMM before its restore-ready event, as [the attribution of
-/// evidence](Evidence#attribution) describes: [`Evidence::IncompatibleHost`] for an error whose
-/// time ABI code says that the host cannot present the template's CPU or time, and none for any
-/// other.
+/// clone's VMM before its restore-ready event, followed by the cause of the error's chain that
+/// names a forward that OpenVMM cannot bind, if it has one, as the launch reads them from the end
+/// of the VMM's log, as [the attribution of evidence](Evidence#attribution) describes:
+/// [`Evidence::IncompatibleHost`] for an error whose time ABI code says that the host cannot
+/// present the template's CPU or time, [`Evidence::ForwardBind`] for one that names a forward that
+/// OpenVMM cannot bind, [`FORWARD_BIND_TEXT`], and none for any other.
 pub(super) fn fatal_evidence(line: &str) -> Option<Evidence> {
-    let code = line.strip_prefix(FATAL_PREFIX)?.strip_prefix('[')?;
-    let code = &code[..code.find(']')?];
-    INCOMPATIBLE_HOST_CODES
-        .contains(&code)
-        .then_some(Evidence::IncompatibleHost)
+    let reported = line.strip_prefix(FATAL_PREFIX)?;
+    let code = reported
+        .strip_prefix('[')
+        .and_then(|code| code.get(..code.find(']')?));
+    if code.is_some_and(|code| INCOMPATIBLE_HOST_CODES.contains(&code)) {
+        return Some(Evidence::IncompatibleHost);
+    }
+    reported
+        .contains(FORWARD_BIND_TEXT)
+        .then_some(Evidence::ForwardBind)
 }
 
 #[cfg(test)]
@@ -1238,6 +1257,39 @@ mod tests {
         ] {
             assert_eq!(fatal_evidence(line), None, "{line}");
         }
+    }
+
+    #[test]
+    fn openvmm_s_fatal_error_is_evidence_of_a_forward_bind_when_it_names_a_forward_it_cannot_bind()
+    {
+        // OpenVMM spells the error as its source, which the excerpt copies, writes it.
+        let excerpt =
+            include_str!("../../../../tests/vectors/openvmm/port_forward_socket_creation.rs");
+        let attribute = format!("#[error(\"{FORWARD_BIND_TEXT}{{details}})\")]");
+        assert!(
+            excerpt.lines().any(|line| line.trim() == attribute),
+            "{attribute} in {excerpt}"
+        );
+        // The cause of the chain follows the line that leads the error, or is the line's own.
+        for line in [
+            "fatal error: failed to launch vm worker: failed to create socket for port forward \
+             (Tcp 127.0.0.1:18080)",
+            "fatal error: failed to create socket for port forward (Udp 127.0.0.1:5353)",
+            "fatal error: [E_MANIFEST_TIME] failed to launch vm worker: failed to create socket \
+             for port forward (Tcp 127.0.0.1:18080)",
+        ] {
+            assert_eq!(fatal_evidence(line), Some(Evidence::ForwardBind), "{line}");
+        }
+        // A code of an incompatible host prevails, and a line that is not the fatal error tells
+        // nothing.
+        let incompatible = "fatal error: [E_CPU_GENERATION] failed to launch vm worker: failed to \
+                            create socket for port forward (Tcp 127.0.0.1:18080)";
+        assert_eq!(
+            fatal_evidence(incompatible),
+            Some(Evidence::IncompatibleHost)
+        );
+        let quoted = "warning: failed to create socket for port forward (Tcp 127.0.0.1:18080)";
+        assert_eq!(fatal_evidence(quoted), None);
     }
 
     #[test]

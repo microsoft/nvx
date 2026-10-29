@@ -188,7 +188,9 @@ kernel's view and compares names as the kernel does in both.
 at ASCII whitespace, at most one token, with one IPv4 or IPv6 address in the
 form that OpenVMM writes, and `write_resolver` writes the resolver file that
 names it, `nameserver ADDRESS`, as NVX's init writes the initramfs's
-`/etc/resolv.conf`.
+`/etc/resolv.conf`. `gateway` reads the IPv4 gateway of the guest's NIC from
+OpenVMM's `virtnet_gw=` token, `GATEWAY_TOKEN`, as strictly: the address to
+which the announcer of a clone's listeners sends its announcements.
 
 ### `nvx::protocol::export`
 
@@ -572,9 +574,10 @@ are restored.
 template's capture, without I/O: the placeholder `distro`, which its
 `DistroBinding` binds, and whose length is the capacity of every clone's image,
 over a dormant scratch device, the sparse file `SCRATCH_NAME` in the capture's
-transaction directory, with the dormant filesystem slot, and no NIC or one under
-the template's policy, which allows neither ingress nor host-loopback access
-both ways; `TemplateResources`, with the processors, 1, 2, 4, or 8, and those
+transaction directory, with the dormant filesystem slot, and no NIC or one at
+the guest's address of the adapter's network, under the complete deny-all
+policy, whatever the network's own, which each clone's restore replaces with the
+clone's; `TemplateResources`, with the processors, 1, 2, 4, or 8, and those
 online at boot, as many or fewer, and RAM and a `--memory-capacity` in blocks of
 `MEMORY_BLOCK_SIZE`; the kernel command line `nvx_sandbox=1`, with `maxcpus=`
 and the processors online at boot when they are fewer, so that the capture's
@@ -595,17 +598,19 @@ identity is unbound, a fresh scratch, and the dormant filesystem slot.
 `CaptureClass` holds the invariant inputs of a capture, known before it: the
 runtime, the guest's build, the backend, the requested CPU profile, the
 processors, those online at boot, and RAM, the geometries of the disks, the
-network, and the adapter's other `Invariants`.
+network, of which it takes what the template captures alone, its NIC at the
+guest's address under the complete deny-all policy, and the adapter's other
+`Invariants`.
 
 `TemplateKey::new` checks that the capture made the machine that its class
 requested, and derives the template's compatibility key, from metadata alone:
 the runtime and contract versions through which its clones are restored, the
 backend, CPU profile and effective CPUID, topology, rates, resources, kernel
-command line, disks, and devices of its machine, and its network, as its class
-lowered it to OpenVMM's arguments, the guest's address and the policy of its
-NIC, which every restore of the template passes unchanged, so that a template
-serves the clones of its network policy alone. A capture's own metadata, such as
-its time anchor and host, stays out of the key.
+command line, disks, and devices of its machine, with the NIC's addresses and
+the identity of the complete deny-all policy under which the capture attached
+it, which each clone's restore replaces with the clone's own, so that a template
+with a NIC serves the clones of every network policy at its guest's address. A
+capture's own metadata, such as its time anchor and host, stays out of the key.
 
 A key and a class each have one canonical, versioned encoding, whose
 domain-separated SHA-256 digest is its identity, a `KeyIdentity`, which converts
@@ -613,9 +618,10 @@ to and from the `nvx::activation::Identity` by which a clone's activation record
 names its template's key, or a `ClassIdentity`; the
 [conformance vectors](tests/vectors/README.md) of version 1,
 `tests/vectors/template-key-v1.txt`, pin both encodings and identities. The
-key's encoding, version 1, includes the template's network and has not been
-released, so a template store that an earlier build created is not supported:
-delete it and create a new one. There is no migration.
+key's encoding, version 1, leaves the network policy out, since templates
+capture their NIC under the complete deny-all policy, and has not been released,
+so a template store that an earlier build created is not supported: delete it
+and create a new one. There is no migration.
 
 `Store` keeps the generations of templates that a host published, apart from
 every sandbox's store, at a location that the adapter chooses: a private
@@ -664,11 +670,12 @@ and no launch.
 `ClonePlan::new` plans a clone under the lock that acquired its lease, before
 the launch that the lease reserves, from metadata alone: the leased generation,
 its key, which must speak the current contracts, the boot and control contracts
-of the runtime that captured it included, and its snapshot; the template's
-network exactly, as its key records it, or none for a template without a NIC, so
-that a template serves the clones of its network policy, at its guest's address,
-which OpenVMM restores from the snapshot, alone; a processor target of 1, 2, 4,
-or 8 from the template's processors online at boot to its capacity; a memory
+of the runtime that captured it included, and its snapshot; a network that
+attaches a NIC if and only if the template has one, at the guest's address of
+the template's NIC, which OpenVMM restores from the snapshot, so that a template
+with a NIC serves the clones of every network policy at its guest's address; a
+processor target of 1, 2, 4, or 8 from the template's processors online at boot
+to its capacity; a memory
 target in whole blocks
 of `MEMORY_BLOCK_SIZE` from the template's RAM to its capacity; the clone's
 image, which the check of its `DistroBinding` opens; its upper, either the
@@ -705,10 +712,12 @@ partition table the guest checks with `nvx::gpt` as at a cold launch; a tmpfs,
 or the scratch image's binding identity with the journal policy; the export, a
 directory, with its plan's identity, and its mappings, the plan's binds, from 1
 to 4,096, or no export and no mappings, which leaves the slot dormant; the
-template NIC's policy identity, as its key records it, unpublished listeners,
-and the guest's proxy URL; and the processor and memory targets. The identity of
-a binding or of an export plan is the SHA-256 digest of a domain and of its
-serde form, never of a file's content.
+clone's network, with its identity, the DNS server that OpenVMM serves the guest
+at a gateway under its policy, if any, whether the guest publishes its
+listeners, as under a policy that allows ingress or host-loopback access both
+ways, and the guest's proxy URL; and the processor and memory targets. The
+identity of a binding, of an export plan, or of a network is the SHA-256 digest
+of a domain and of its serde form, never of a file's content.
 
 The image must present the logical and physical block sizes of the template's
 placeholder and be no longer than it, since a restore presents every clone's
@@ -732,8 +741,9 @@ writes the clone's activation record in its canonical encoding,
 the VMM's restore-ready event, at the socket `restore.sock` on Linux, and at a
 named pipe of a random name on Windows; and it runs `supervisor::launch` with
 OpenVMM's restore of the clone's devices, with `--restore-absent-scratch` for a
-clone in RAM, and of the template's network, as its
-key records it, unchanged, its export bound to the dormant slot, `--mount` with
+clone in RAM, and of its network, whose policy `--restore-network-policy`
+installs on the template's NIC in place of the complete deny-all policy, its
+export bound to the dormant slot, `--mount` with
 the directory, and its hidden, re-exposed, and writable paths and its owner,
 `--restore-snapshot` with the generation's snapshot in place, which no clone
 copies or changes, so that clones of one generation restore it at once,
@@ -1261,9 +1271,9 @@ expects one, or a GPT disk whose GUID it checks if the record expects one, its
 upper, a tmpfs or the scratch with the record's journal policy, and its overlay
 mode, and with the `RootTemplate` that the guest's own configuration holds,
 which its template captured: the runtime directory, the block devices, the
-timeout, and the host filesystem device's virtio-fs tag, but waits for no device
-past the activation's deadline, which the adapter passes, so that the
-application ends by then.
+timeout, the host filesystem device's virtio-fs tag, and the gateway of the
+template's NIC, if it has one, but waits for no device past the activation's
+deadline, which the adapter passes, so that the application ends by then.
 
 For a GPT disk, it first asks the kernel to reread the disk's partition table
 with `BLKRRPART`, since the kernel created the block devices of partitions for
@@ -1282,19 +1292,25 @@ filesystem device with `Root::mount_export`, read-write, at `hostfs/root` in the
 runtime directory, outside the root, since the record names no mode and OpenVMM
 limits each child to its own access; with its network's DNS server, it writes a
 resolver file that names it, mode 0444, to `RESOLVER_FILE` in the runtime
-directory. It then binds the runtime's files for every execution with one
-`Entry::bind_runtime` in the caller's mount namespace: the machine ID's file
-read-only over the root's `/etc/machine-id` and the resolver file over its
+directory; and with a network that publishes the workload's listeners, it starts
+their announcer, `/sbin/nvx-ingress inherit GATEWAY_IPV4`, which announces from
+its standard input, a UDP socket that the application bound, as root, to a
+privileged source port. It then binds the runtime's files for every execution
+with one `Entry::bind_runtime` in the caller's mount namespace: the machine ID's
+file read-only over the root's `/etc/machine-id` and the resolver file over its
 `/etc/resolv.conf`, or, with neither, nothing; the entry checks the record's
 hostname, which every execution's entry takes with `Entry::hostname`. It returns
 the `Applied` root and workload, from which `take_export` hands the adapter the
 export's `SourceRoot`, to map the host's mapping table from once the clone is
-ready, and `proxy` the network's proxy endpoint, which the adapter tells its
-workloads as at a cold boot, and whose `teardown` closes the export's root and
+ready, `proxy` the network's proxy endpoint, which the adapter tells its
+workloads as at a cold boot, and `announcer` the announcer, which the adapter
+watches through its pidfd, and must end the clone once it ended, since the
+gateway then keeps publishing the listeners that it last announced until the VM
+ends, and whose `teardown` stops the announcer, closes the export's root, and
 removes the binds before it tears the root down, as a drop does, or an
 `ApplyError`, `Export` or `Network` among them, after which nothing that it
 mounted or bound stays mounted unless the error reports the unmounts that
-failed, and applies none of the record's listener publication.
+failed, and no announcer that it started runs.
 
 Once the adapter passed the activation what the session received while the
 application ran, which came before Ready, `Activation::complete` opens the fence
@@ -2462,7 +2478,7 @@ disk's block device.
 | `nvx-exit [CODE]` | Stops the VM with an 8-bit exit code through OpenVMM's control port 0x604 (x86_64) |
 | `nvx-device-io file ...`, `nvx-device-io network ...`, `nvx-device-io map PATH TEXT` | The benchmark helper that measures file and UDP round-trip I/O and prints one JSON line, and reports a file benchmark's progress on stderr; `map` writes TEXT at the start of a file through a shared mapping and holds the dirty mapping until its standard input ends, for the microVM scenarios (x86_64) |
 | `nvx-managed-agent CONTROL_TTY ROOTFS HOSTNAME UID GID USER HOME` | Serves the managed control session and supervises sequential workloads; `--exec-config-fd FD -- WORKLOAD ...` is the direct agent's internal launch helper |
-| `nvx-ingress GATEWAY_IPV4` | Announces reachable TCP listeners and settled UDP sockets to the portable-network gateway; `test DIRECTORY` runs synthetic procfs snapshots |
+| `nvx-ingress [inherit] GATEWAY_IPV4` | Announces reachable TCP listeners and settled UDP sockets to the portable-network gateway, from a privileged source port that it binds, or, with `inherit`, from its standard input, a socket that a clone's application bound to one; `test DIRECTORY` runs synthetic procfs snapshots |
 | `nvx-time [--report-only] COMMAND` | Enforces NVX time ABI v1: runs its conformance checks, repairs the wall clock after a restore, publishes the time state, and runs the discipline and violation-watcher daemon; `test NAME ...` runs its decoder and process test hooks (x86_64) |
 | `nvx-time-probe latency\|warp\|clock ...` | Diagnoses clock-read latency, cross-CPU TSC warp and offset, the clocks, CPUID, clock events, kernel messages, and optionally MSRs (x86_64) |
 

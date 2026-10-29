@@ -24,6 +24,13 @@
 //! a policy with a proxy denies egress without rules, ingress, and host-loopback access, and has
 //! no forwards. [`NetworkProxy::url`] gives the proxy's URL as the guest sees it; how workloads
 //! learn it is the caller's choice.
+//!
+//! A template's capture attaches its NIC under the complete deny-all policy instead, whatever the
+//! network's own: egress denied without rules, ingress and host-loopback access denied, without a
+//! proxy or forwards. It is the one policy of a snapshot that OpenVMM lets a restore replace, so
+//! each restore of the template installs its clone's own policy, and the clone's activation
+//! record gives the guest what OpenVMM gives a VM that boots with the policy on its kernel command
+//! line: its DNS server, and whether its listeners are published.
 
 mod address;
 mod arguments;
@@ -33,8 +40,8 @@ pub mod policy;
 mod proxy;
 mod rule;
 
-pub(crate) use self::arguments::attached_arguments;
 pub use self::arguments::openvmm_arguments;
+pub(crate) use self::arguments::{dns_server, template_arguments};
 pub use self::loopback::{ForwardProtocol, HostLoopback, LoopbackForward};
 pub use self::proxy::{NetworkProxy, ProxyScheme};
 pub use self::rule::{Access, Destination, EgressRule, EgressRules, PortSelector, Protocol};
@@ -137,6 +144,15 @@ impl NetworkPolicy {
     pub fn with_deny(mut self, rule: EgressRule) -> Self {
         self.deny.rules.push(rule);
         self
+    }
+
+    /// Returns whether OpenVMM publishes the guest's listeners under the policy: to the host's
+    /// private networks with ingress allowed, or on host loopback with host-loopback access
+    /// allowed both ways. While it does, the guest announces its listeners to the gateway, and
+    /// refuses its workloads `CAP_NET_BIND_SERVICE` and `CAP_NET_RAW`, with which they could forge
+    /// an announcement.
+    pub fn publishes_listeners(&self) -> bool {
+        self.ingress == Access::Allow || self.host_loopback == HostLoopback::Allow
     }
 }
 

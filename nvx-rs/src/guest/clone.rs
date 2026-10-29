@@ -152,19 +152,20 @@
 //! tmpfs or the scratch, with the record's journal policy, and its overlay mode, and with the
 //! inputs that the guest takes from its own configuration, which its template captured, a
 //! [`RootTemplate`]: the runtime directory, the block devices, the host filesystem device's
-//! virtio-fs tag, and how long the assembly waits for each block device, but never past the
-//! activation's deadline, which the adapter passes, so that the application ends by then. For a GPT
-//! disk, it first asks the kernel to reread the disk's partition table, once the distro device
-//! appeared, by the same deadline: the kernel created the block devices of partitions from the
-//! template's placeholder, when it found it, and creates those of the clone's disk then, from the
-//! same read-only bytes that the assembly reads and checks, as at a cold boot. The upper must be
-//! fresh: the assembly refuses one whose `upper` or `work` directory exists and is not empty, since
-//! a clone's root starts as its image alone, while a cold sandbox's scratch keeps its upper across
-//! boots; the check reads at most one entry of each, and no file. If the record has a workload
-//! identity, it then checks its account in the assembled root, before Ready, as NVX's init checks
-//! it at boot: the identity is [`Identity::new`](super::entry::Identity::new) of the record's user
-//! and group IDs, without supplementary groups or capabilities, in existing-account mode, and every
-//! execution runs as it. Without one, the adapter gives each execution its own identity, which
+//! virtio-fs tag, the gateway of the template's NIC, if it has one, and how long the assembly waits
+//! for each block device, but never past the activation's deadline, which the adapter passes, so
+//! that the application ends by then. For a GPT disk, it first asks the kernel to reread the disk's
+//! partition table, once the distro device appeared, by the same deadline: the kernel created the
+//! block devices of partitions from the template's placeholder, when it found it, and creates those
+//! of the clone's disk then, from the same read-only bytes that the assembly reads and checks, as
+//! at a cold boot. The upper must be fresh: the assembly refuses one whose `upper` or `work`
+//! directory exists and is not empty, since a clone's root starts as its image alone, while a cold
+//! sandbox's scratch keeps its upper across boots; the check reads at most one entry of each, and
+//! no file. If the record has a workload identity, it then checks its account in the assembled
+//! root, before Ready, as NVX's init checks it at boot: the identity is
+//! [`Identity::new`](super::entry::Identity::new) of the record's user and group IDs, without
+//! supplementary groups or capabilities, in existing-account mode, and every execution runs as it.
+//! Without one, the adapter gives each execution its own identity, which
 //! [`Entry::check`](super::entry::Entry::check) checks. If the record asks for a generated machine
 //! ID, it then generates one, once, with
 //! [`MachineId::generate`](super::entry::MachineId::generate), after the repair's reseed, so that
@@ -174,18 +175,25 @@
 //! `hostfs/root` in the runtime directory, outside the root, where only the guest's root user
 //! reaches it: the record names no mode, and OpenVMM limits each of the export's children to its
 //! own access. If the record's network names a DNS server, it writes a resolver file that names
-//! it to [`RESOLVER_FILE`] in the runtime directory. It then binds the runtime's files into the
-//! root for every execution, with one [`Entry::bind_runtime`](super::entry::Entry::bind_runtime),
-//! in the caller's mount namespace: the generated machine ID's file, read-only over the root's
-//! `/etc/machine-id`, and the resolver file, read-only over the root's `/etc/resolv.conf`, or,
-//! with neither, nothing. The entry checks the record's hostname first, which every execution's
-//! entry then takes. It returns the [`Applied`] root and workload, which the adapter keeps, with
-//! the export's root, from which the adapter maps the host's mapping table once the clone is
-//! ready, and the network's proxy endpoint, which the adapter tells its workloads as at a cold
-//! boot, and whose [`teardown`](Applied::teardown) closes the export's root and removes the binds
-//! before it tears the root down, or an [`ApplyError`], after which nothing that it mounted or
-//! bound stays mounted, unless the error holds the unmounts that failed. It applies none of the
-//! record's other settings: the publication of the workload's listeners.
+//! it to [`RESOLVER_FILE`] in the runtime directory. If the network publishes the workload's
+//! listeners, it starts their announcer, with
+//! [`Announcer::start`](super::ingress::Announcer::start), to the template's gateway: the
+//! template captured its NIC under a policy that publishes nothing, so that no announcer ran in
+//! it. It then binds the runtime's files into the root for every execution, with one
+//! [`Entry::bind_runtime`](super::entry::Entry::bind_runtime), in the caller's mount namespace:
+//! the generated machine ID's file, read-only over the root's `/etc/machine-id`, and the
+//! resolver file, read-only over the root's `/etc/resolv.conf`, or, with neither, nothing. The
+//! entry checks the record's hostname first, which every execution's entry then takes. It returns
+//! the [`Applied`] root and workload, which the adapter keeps, with the export's root, from which
+//! the adapter maps the host's mapping table once the clone is ready, the network's proxy
+//! endpoint, which the adapter tells its workloads as at a cold boot, and the announcer, which the
+//! adapter watches, and must end the clone once the announcer ended: the gateway then keeps
+//! publishing the listeners that the announcer last announced until the VM ends, and learns of no
+//! later change of them. The [`teardown`](Applied::teardown) of the [`Applied`] stops the
+//! announcer, closes the export's root, and removes the binds before it tears the root down. An
+//! application that fails returns an [`ApplyError`] instead, after which nothing that it mounted or
+//! bound stays mounted, unless the error holds the unmounts that failed, and no announcer that it
+//! started runs.
 //!
 //! # Example
 //!
@@ -271,8 +279,10 @@
 //! application, [`apply`](fn@apply), needs the guest's root user, in the guest's initial mount
 //! namespace, as [`root::assemble`] does: for a GPT disk, it asks the kernel to reread the disk's
 //! partition table, which needs `CAP_SYS_ADMIN`; it mounts the root, reads the account databases
-//! below it, and, if it fails, tears it down. It starts no process, and generates at most one ID,
-//! a machine ID that the record asks for. It mounts the host export of a record that has one, and
+//! below it, and, if it fails, tears it down. It starts no process but the announcer of a record
+//! whose network publishes the workload's listeners, whose socket it binds to a privileged source
+//! port, and whose status it collects through the [`Applied`], and it generates at most one ID, a
+//! machine ID that the record asks for. It mounts the host export of a record that has one, and
 //! writes the machine ID's and the resolver's files in the runtime directory, whose binds over
 //! the root's `/etc/machine-id` and `/etc/resolv.conf` need Linux 6.8 or later.
 

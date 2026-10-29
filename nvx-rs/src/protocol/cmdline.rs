@@ -1,7 +1,7 @@
 //! The kernel command line as Linux and the guest's init read it: the parameters into which the
 //! kernel splits it, the virtio-mmio devices that its `virtio_mmio.device` parameters describe,
-//! and the tokens into which the guest's init splits it; and the guest's DNS server, which
-//! OpenVMM names in it.
+//! and the tokens into which the guest's init splits it; and the guest's DNS server and the IPv4
+//! gateway of its NIC, which OpenVMM names in it.
 //!
 //! A reader that splits a command line by rules of its own may find parameters that the kernel
 //! never sees, or miss ones that it applies: the kernel splits at more bytes than ASCII
@@ -30,20 +30,24 @@
 //!   check of the user's kernel parameters, in `nvx::host::sandbox`, which splits them both as the
 //!   kernel and as the init does, and compares their names as the kernel does.
 //!
-//! The kernel leaves OpenVMM's `virtnet_dns=` token to the guest, which reads it from the whole
-//! command line, as OpenVMM checks it:
+//! The kernel leaves OpenVMM's `virtnet_dns=` and `virtnet_gw=` tokens to the guest, which reads
+//! them from the whole command line, as OpenVMM checks them:
 //!
-//! - [`dns_server`] reads the DNS server that the token names, strictly, as OpenVMM renders and
-//!   reads it: at most one token, with one IPv4 or IPv6 address.
+//! - [`dns_server`] reads the DNS server that the `virtnet_dns=` token names, strictly, as OpenVMM
+//!   renders and reads it: at most one token, with one IPv4 or IPv6 address.
 //! - [`write_resolver`] writes the resolver file that names that server, as NVX's init writes the
 //!   initramfs's `/etc/resolv.conf` from the token.
+//! - [`gateway`] reads the IPv4 gateway that the `virtnet_gw=` token names, as strictly: at most
+//!   one token, with one IPv4 address.
 //!
 //! Like the rest of [`protocol`](super), it needs nothing outside the standard library, so the
 //! host, the guest, and test doubles share it.
 
+use std::fmt::Display;
 use std::io;
 use std::iter::FusedIterator;
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv4Addr};
+use std::str::FromStr;
 
 use super::{ProtocolError, violation};
 
@@ -54,6 +58,11 @@ pub const VIRTIO_MMIO_DEVICE: &str = "virtio_mmio.device";
 /// the gateway's addresses, IPv4 or IPv6, which it adds to a microVM's command line when the
 /// network policy lets the guest reach the gateway's DNS service.
 pub const DNS_TOKEN: &str = "virtnet_dns=";
+
+/// Prefix of the token through which OpenVMM names the IPv4 gateway of the guest's NIC,
+/// `virtnet_gw=`, which it adds to a microVM's command line with the NIC's other tokens: the
+/// gateway's address, to which the guest's announcer of its listeners sends its announcements.
+pub const GATEWAY_TOKEN: &str = "virtnet_gw=";
 
 /// Returns whether the kernel takes `byte` for whitespace, as its `isspace` does: the space, tab,
 /// newline, vertical tab, form feed, carriage return, and Latin-1's no-break space, 0xa0.
@@ -292,29 +301,55 @@ pub fn init_tokens(command_line: &[u8]) -> impl Iterator<Item = Token<'_>> {
 /// such as `010.0.0.1`, `fd00:0::a00:1`, or `FD00::A00:1`. OpenVMM also checks, before the guest
 /// boots, that the address is one of the gateway's, which the guest leaves to it.
 pub fn dns_server(command_line: &[u8]) -> Result<Option<IpAddr>, ProtocolError> {
-    let mut server = None;
+    address_token(command_line, DNS_TOKEN, "IPv4 or IPv6")
+}
+
+/// Returns the IPv4 gateway that the `virtnet_gw=` token of `command_line`, such as the guest's
+/// `/proc/cmdline`, names, or `None` if no token names one, as for a guest without a NIC.
+///
+/// The reader takes the command line's tokens as [`dns_server`] takes them, and accepts the token
+/// only as OpenVMM renders it: at most one token, whose value is one IPv4 address in its canonical
+/// text, as Rust's [`Ipv4Addr`] writes it, such as `10.0.0.1`. It refuses with a
+/// [`ProtocolError`] a repeated token, an empty value, an IPv6 address, which OpenVMM names with
+/// `virtnet_gw6=` instead, and another spelling of an address, such as `010.0.0.1`.
+pub fn gateway(command_line: &[u8]) -> Result<Option<Ipv4Addr>, ProtocolError> {
+    address_token(command_line, GATEWAY_TOKEN, "IPv4")
+}
+
+/// Returns the address of the `family` that the token of `command_line` that starts with
+/// `prefix`, such as `virtnet_dns=`, names, or `None` if no token names one, as [`dns_server`]
+/// reads its token: at most one, whose value is one address in its canonical text.
+fn address_token<A: FromStr + Display>(
+    command_line: &[u8],
+    prefix: &str,
+    family: &str,
+) -> Result<Option<A>, ProtocolError> {
+    let name = prefix.strip_suffix('=').unwrap_or(prefix);
+    let mut found = None;
     for token in command_line.split(u8::is_ascii_whitespace) {
-        let Some(value) = token.strip_prefix(DNS_TOKEN.as_bytes()) else {
+        let Some(value) = token.strip_prefix(prefix.as_bytes()) else {
             continue;
         };
-        if server.is_some() {
-            return Err(violation("the virtnet_dns kernel parameter is repeated"));
+        if found.is_some() {
+            return Err(violation(format!(
+                "the {name} kernel parameter is repeated"
+            )));
         }
         let address = std::str::from_utf8(value).ok().and_then(|text| {
-            text.parse::<IpAddr>()
+            text.parse::<A>()
                 .ok()
                 .filter(|address| address.to_string() == text)
         });
         let Some(address) = address else {
             return Err(violation(format!(
-                "the virtnet_dns kernel parameter must name one IPv4 or IPv6 address as OpenVMM \
-                 renders it, not '{}'",
+                "the {name} kernel parameter must name one {family} address as OpenVMM renders \
+                 it, not '{}'",
                 value.escape_ascii()
             )));
         };
-        server = Some(address);
+        found = Some(address);
     }
-    Ok(server)
+    Ok(found)
 }
 
 /// Writes to `writer` a resolver file, in the format of `/etc/resolv.conf`, that names `server` as

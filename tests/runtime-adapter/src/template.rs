@@ -15,7 +15,9 @@
 //! quotes from a parameter, and hands what follows `--` to init rather than taking it as
 //! parameters, though init may still read it from `/proc/cmdline`, so `boot` also refuses a
 //! template's command line that holds either, as OpenVMM refuses them in the command line of a VM
-//! with a control console.
+//! with a control console. It then reads the IPv4 gateway of the template's NIC, if the template
+//! has one, with `nvx::protocol::cmdline::gateway`, which refuses a gateway that OpenVMM would not
+//! render: the announcer of each clone that publishes its listeners announces them to it.
 //!
 //! The worker of a template's VM, and with it the VM, ends with [`COMMAND_LINE_STATUS`] once
 //! `boot` refused its command line, with the bootstrap's status, 13, once the bootstrap of the
@@ -27,8 +29,10 @@
 //! documents too, or, once the clone was ready, as the worker of a VM that boots cold does. A
 //! committed capture ends the template's VM before the worker returns.
 
+use std::net::Ipv4Addr;
 use std::{fmt, str};
 
+use nvx::protocol::ProtocolError;
 use nvx::protocol::cmdline::{self, Parameter};
 
 /// Returns whether `token`, a parameter of a kernel command line as the command line spells it,
@@ -98,7 +102,11 @@ pub enum Boot {
     Cold,
     /// A template's VM, which captures before it assembles any root: its kernel command line
     /// names the platform tier, and holds that tier's tokens alone.
-    Template,
+    Template {
+        /// The IPv4 gateway of the template's NIC, which the command line names, if the template
+        /// has a NIC.
+        gateway: Option<Ipv4Addr>,
+    },
 }
 
 /// Why [`boot`] refused the kernel command line of a template's VM.
@@ -111,22 +119,26 @@ pub enum CommandLineError {
     Quote,
     /// A `--`, after which the kernel hands the rest of the command line to init.
     Delimiter,
+    /// A gateway that OpenVMM would not render, as `nvx::protocol::cmdline::gateway` tells: a
+    /// `virtnet_gw=` token that repeats, or that does not name one IPv4 address in its canonical
+    /// text.
+    Gateway(ProtocolError),
 }
 
 impl fmt::Display for CommandLineError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .write_str("the kernel command line names the platform snapshot tier, but holds ")?;
+        formatter.write_str("the kernel command line names the platform snapshot tier, but ")?;
         match self {
             Self::Token(token) => write!(
                 formatter,
-                "`{}`, which the tier's allowlist does not hold",
+                "holds `{}`, which the tier's allowlist does not hold",
                 token.escape_ascii()
             ),
-            Self::Quote => formatter.write_str("a double quote, which the kernel drops"),
+            Self::Quote => formatter.write_str("holds a double quote, which the kernel drops"),
             Self::Delimiter => {
-                formatter.write_str("`--`, after which the kernel hands the rest to init")
+                formatter.write_str("holds `--`, after which the kernel hands the rest to init")
             }
+            Self::Gateway(error) => formatter.write_str(error.message()),
         }
     }
 }
@@ -135,11 +147,12 @@ impl std::error::Error for CommandLineError {}
 
 /// Returns how a VM boots, as its kernel command line, `command_line`, such as `/proc/cmdline`,
 /// tells, as the [module documentation](self) describes: a command line names the platform tier
-/// if the kernel finds [`PLATFORM_TIER`] among its parameters.
+/// if the kernel finds [`PLATFORM_TIER`] among its parameters, and a template's names the gateway
+/// of its NIC, if it has one.
 ///
 /// Fails with a [`CommandLineError`] if the command line names the platform tier, but holds a
 /// double quote, or else a `--`, or else a parameter that [`is_platform_token`] does not accept,
-/// the first in the command line's order.
+/// the first in the command line's order, or else a gateway that OpenVMM would not render.
 pub fn boot(command_line: &[u8]) -> Result<Boot, CommandLineError> {
     let template = cmdline::parameters(command_line)
         .any(|parameter| token(&parameter) == PLATFORM_TIER.as_bytes());
@@ -156,13 +169,14 @@ pub fn boot(command_line: &[u8]) -> Result<Boot, CommandLineError> {
     {
         return Err(CommandLineError::Delimiter);
     }
-    match cmdline::parameters(command_line)
+    if let Some(token) = cmdline::parameters(command_line)
         .map(|parameter| token(&parameter))
         .find(|token| !is_platform_token(token))
     {
-        Some(token) => Err(CommandLineError::Token(token)),
-        None => Ok(Boot::Template),
+        return Err(CommandLineError::Token(token));
     }
+    let gateway = cmdline::gateway(command_line).map_err(CommandLineError::Gateway)?;
+    Ok(Boot::Template { gateway })
 }
 
 /// Returns `parameter` as the command line spells it, without quotes: its name, then `=` and its
@@ -354,10 +368,16 @@ mod tests {
             &format!(" {NETWORK} nvx_control_tty"),
             1,
         );
+        // A template with a NIC names its gateway, which the announcers of its clones take.
+        assert_eq!(
+            boot(network.as_bytes()),
+            Ok(Boot::Template {
+                gateway: Some(Ipv4Addr::new(10, 0, 2, 2))
+            })
+        );
         for command_line in [
             TEMPLATE.to_owned(),
             TEMPLATE.trim_end().to_owned(),
-            network,
             // A template that brings fewer processors online at boot than its capacity.
             TEMPLATE.replacen(" nvx_control_tty", " maxcpus=1 nvx_control_tty", 1),
             // The tier alone, and each token whole once more, which OpenVMM leaves to its own
@@ -369,7 +389,7 @@ mod tests {
         ] {
             assert_eq!(
                 boot(command_line.as_bytes()),
-                Ok(Boot::Template),
+                Ok(Boot::Template { gateway: None }),
                 "{command_line:?}"
             );
         }
@@ -379,7 +399,38 @@ mod tests {
                 *byte = 0xa0;
             }
         }
-        assert_eq!(boot(&latin1), Ok(Boot::Template));
+        assert_eq!(boot(&latin1), Ok(Boot::Template { gateway: None }));
+    }
+
+    #[test]
+    fn template_mode_refuses_a_gateway_that_openvmm_would_not_render() {
+        for (gateway, problem) in [
+            (
+                "virtnet_gw=10.0.2.2 virtnet_gw=10.0.2.2",
+                "the virtnet_gw kernel parameter is repeated",
+            ),
+            (
+                "virtnet_gw=010.0.2.2",
+                "the virtnet_gw kernel parameter must name one IPv4 address as OpenVMM renders \
+                 it, not '010.0.2.2'",
+            ),
+            (
+                "virtnet_gw=fd00::2",
+                "the virtnet_gw kernel parameter must name one IPv4 address as OpenVMM renders \
+                 it, not 'fd00::2'",
+            ),
+        ] {
+            let command_line = format!("{} {gateway}\n", TEMPLATE.trim_end());
+            let refused = boot(command_line.as_bytes()).unwrap_err();
+            assert!(
+                matches!(&refused, CommandLineError::Gateway(error) if error.message() == problem),
+                "{refused:?}"
+            );
+            assert_eq!(
+                refused.to_string(),
+                format!("the kernel command line names the platform snapshot tier, but {problem}")
+            );
+        }
     }
 
     #[test]

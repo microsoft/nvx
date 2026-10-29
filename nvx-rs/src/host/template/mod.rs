@@ -37,8 +37,9 @@
 //!   memory target against the template, and its export, if it has one, a plan of one directory,
 //!   which the template's dormant filesystem slot binds, and refuses a request that the template
 //!   cannot serve, such as an image longer than the template's placeholder, the capacity of every
-//!   clone's image, or of other block sizes, a network other than the template's, which its key
-//!   records, or an export of several directories or of a file, before any VMM starts.
+//!   clone's image, or of other block sizes, a network that attaches a NIC where the template has
+//!   none, none where it has one, or one at another guest address than the template's, or an
+//!   export of several directories or of a file, before any VMM starts.
 //! - [`ClonePlan::launch`] launches the clone, as the launch that its lease reserves, once the
 //!   objects of its export are still those that its plan found: OpenVMM restores the generation's
 //!   snapshot in place with the clone's devices and export, and the clone's activation record
@@ -80,8 +81,7 @@
 //! - A list is its count, a `u32`, then its items in order.
 //!
 //! [`TemplateKey::from_bytes`] refuses any other encoding, and bytes left after it. The vectors in
-//! `tests/vectors/template-key-v1.txt` fix version 1 of a key's encoding, which holds the
-//! template's network, as its class lowered it, and of a class's.
+//! `tests/vectors/template-key-v1.txt` fix version 1 of a key's encoding and of a class's.
 
 mod canonical;
 mod clone;

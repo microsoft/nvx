@@ -640,7 +640,9 @@ credit that it needs, never keeps the others' output from the host.
   session creates, and, as PID 1 of its PID namespace, its end ends every
   process of the namespace. The guest's network device, its addresses, and the
   announcer of its listeners stay with NVX's `/init`, which configures them
-  before PID 1 starts; see [Networks](#networks).
+  before PID 1 starts, but for the announcer of a clone, which the clone's
+  application starts; see [Networks](#networks) and
+  [Template mode](#template-mode).
 - Each execution runs in a cgroup of its own below the workload cgroup of the
   root configuration, `execution-N`, where N counts the cgroups that the worker
   prepared. The worker prepares it with
@@ -806,10 +808,12 @@ after the repair's acknowledgement of the restore:
    CPU count and the memory size that the repair found, before anything has a
    side effect.
 3. It applies the record with `nvx::guest::clone::apply`, with
-   `worker::capture::root_template` of the template's configuration: its
-   runtime directory, the `distro` and scratch block devices, its device
-   timeout, and the tag of the host filesystem device,
-   `worker::capture::FILESYSTEM_TAG`. The application assembles the root, an
+   `worker::capture::root_template` of the template's configuration and of its
+   NIC's IPv4 gateway, which `template::boot` read from the template's kernel
+   command line: its runtime directory, the `distro` and scratch block devices,
+   its device timeout, the tag of the host filesystem device,
+   `worker::capture::FILESYSTEM_TAG`, and the gateway, if the template has a
+   NIC. The application assembles the root, an
    EROFS image or a GPT disk over a tmpfs or the scratch, in the record's
    overlay mode, waiting for each device until the activation's deadline at the
    latest, so that it ends by then, and checks the account of the record's
@@ -827,10 +831,19 @@ after the repair's acknowledgement of the restore:
    the worker of a VM that boots cold mounts the one that its kernel command
    line names. If the record's network names a DNS server, it writes a resolver
    file that names it, of mode 0444, in `nvx::guest::clone::RESOLVER_FILE` of
-   the runtime directory. It then binds the generated machine ID read-only over
-   the root's `/etc/machine-id`, and the resolver file read-only over its
-   `/etc/resolv.conf`, in the worker's mount namespace, for every execution;
-   with the image's own machine ID and without a DNS server, it binds nothing.
+   the runtime directory. If the record's network publishes the workload's
+   listeners, it starts their announcer,
+   `/sbin/nvx-ingress inherit GATEWAY_IPV4`, with
+   `nvx::guest::ingress::Announcer::start`: it binds a UDP socket to a
+   privileged source port, from which alone OpenVMM's gateway takes
+   announcements, and runs the program with that socket as its standard input,
+   to the template's gateway, waiting until the program runs, but for no
+   announcement. The template, captured under a policy that publishes nothing,
+   runs no announcer of its own. It then binds the generated machine ID
+   read-only over the root's `/etc/machine-id`, and the resolver file read-only
+   over its `/etc/resolv.conf`, in the worker's mount namespace, for every
+   execution; with the image's own machine ID and without a DNS server, it binds
+   nothing.
 4. Once it took what the session received while the application ran, which came
    before `Ready`, it completes the activation, which opens the fence, and
    answers `Ready`, which reports the activation after the guest agent's build,
@@ -846,13 +859,18 @@ after the repair's acknowledgement of the restore:
    execution takes the record's hostname. The host tells the workloads the
    endpoint of the network's proxy, as after a cold boot: the host program's
    `exec` adds it to each execution's environment, so the worker leaves each
-   execution's environment exactly its start's. The application does not apply
-   the publication of the record's listeners, so a clone's executions enter the
-   root with listeners published, the entry's default, which refuses the most.
-   On the stop, the worker closes the export's root and removes the
-   application's binds, which keep the root's mounts busy, before it tears the
-   root down, through `nvx::guest::clone::Applied::teardown`. It also answers
-   the [`activation` probe](#probes), with when the events of its activation and
+   execution's environment exactly its start's. A clone's executions enter the
+   root with the publication of listeners that the record's network names:
+   published under a policy that publishes them, which refuses
+   `CAP_NET_BIND_SERVICE` and `CAP_NET_RAW`, and unpublished otherwise, a clone
+   without a network included. The worker polls the pidfd of the announcer that
+   the application started with the session's stream: once the announcer ended,
+   before the clone was ready or after, the clone ends with status 57, as one
+   whose announcer could not start. On the stop, the worker stops the announcer,
+   closes the export's root, and removes the application's binds, which keep the
+   root's mounts busy, before it tears the root down, through
+   `nvx::guest::clone::Applied::teardown`. It also answers the
+   [`activation` probe](#probes), with when the events of its activation and
    order happened after the repair's acknowledgement of the restore.
 
 Until the clone is ready, its session takes nothing but that `Activate`:
@@ -880,7 +898,7 @@ ends with one of these statuses, after a diagnostic on standard error:
 | 1 | The control tty cannot be opened or put in raw mode, the attachment or the acknowledgement of the broker's reset cannot be sent, or the broker closes the session or sends anything but a reset first, or, in a clone, its session failed or the broker closed it |
 | 13 | The bootstrap of the guest for the template's root failed, before the attachment |
 | 15 | In a clone, the root's teardown failed once the host stopped the worker |
-| 20 | The kernel command line names the platform tier, but holds another parameter, a double quote, or `--`, or the worker cannot read it |
+| 20 | The kernel command line names the platform tier, but holds another parameter, a double quote, `--`, or a gateway that OpenVMM does not render, or the worker cannot read it |
 | 21 | The fence of workload admission cannot be closed |
 | 22 | Something is mounted from the template's devices or from an overlay, or the mount table cannot be checked |
 | 23 | The time ABI's boot checks did not complete |
@@ -904,7 +922,7 @@ ends with one of these statuses, after a diagnostic on standard error:
 | 54 | The root's assembly failed, its upper not fresh among its causes, or the kernel did not reread the partition table of the record's GPT disk before it |
 | 55 | The clone's workload cannot be activated: the image refuses the record's workload identity, as it holds no account of the identity, or not its group, or its account databases cannot be read, or the machine ID that the record asks for cannot be generated, or the record's hostname or that machine ID cannot be set for every execution |
 | 56 | The record's host export cannot be mounted |
-| 57 | The record's network settings cannot be applied: the resolver file that names its DNS server cannot be written, or set for every execution |
+| 57 | The record's network settings cannot be applied: the resolver file that names its DNS server cannot be written, or set for every execution, or the announcer of the listeners that its network publishes cannot start, as without the template's gateway; or that announcer ended |
 | 58 | The worker's own order misused the activation: it completed an activation that did not run, or started the sandbox before the clone was ready, or again |
 | 193 | A conformance check of the time ABI failed in the clone's repair, such as the finish's, which needs a running time daemon |
 | 195 | The time ABI's part of the clone's repair failed, such as the validation of the restore packet, or the record of the restore |
@@ -1385,7 +1403,8 @@ command's options choose of the template, and `Request::capture` returns NVX's
   processors, those online at boot, 1 unless the command names more, the
   fewest that the template's clones take, the RAM and its capacity, the
   geometries of the placeholder and of the dormant scratch, as OpenVMM presents
-  a sandbox block device, which `capture::geometry` gives, and the network;
+  a sandbox block device, which `capture::geometry` gives, and the network, as
+  the capture attaches its NIC, which no network's policy changes;
 - NVX's artifacts, with the initramfs that puts the guest agent in place of
   NVX's agents, which the command writes into a directory of its own in the
   system's temporary directory, private to the current user, as a launch
@@ -1411,16 +1430,19 @@ compatibility key, whose kernel command line holds the platform tier's tokens
 alone: neither the placeholder's identity nor a root's tokens. The template has
 a NIC exactly when its network lets something through: a network that denies
 egress, ingress, and host-loopback access, without a proxy, attaches none, as
-no network does. The key holds the network as NVX lowers it, OpenVMM's
-arguments of the guest's address and of its policy, none without a NIC, so each
-network policy has a template of its own, which serves the
-[clones](#clones) of that policy alone. The key's encoding, version 1, includes
-that network and has not been released, so a template store that an earlier
-build created is not supported: delete it and create a new one. There is no
-migration. NVX refuses a network whose policy no
-template takes, one that
-allows ingress or host-loopback access both ways, before any VM starts, and the
-command refuses a class that no capture takes, such as one of 3 processors, or
+no network does. The capture attaches the NIC at the network's guest address,
+under OpenVMM's complete deny-all policy, whatever the network's own: egress
+denied without rules, ingress and host-loopback access denied, without a proxy
+or forwards, the one policy of a snapshot that a restore may replace. So the
+template's guest learns no DNS server, and starts no announcer of its
+listeners, and the key holds what the capture made of the network alone:
+whether there is a NIC, its addresses, and the identity of its deny-all
+policy. The networks of every policy at one guest address therefore share one
+class, and one template, which serves the [clones](#clones) of each of them.
+The key's encoding, version 1, holds the NIC that way and has not been
+released, so a template store that an earlier build created is not supported:
+delete it and create a new one. There is no migration. The command refuses a
+class that no capture takes, such as one of 3 processors, or
 of more online at boot than in all, before it creates the store. A capture that
 fails leaves the store's
 generations as they were, and the command's diagnostic names the log of the VMM
@@ -1496,7 +1518,8 @@ its executions run, its overlay mode, its scratch's journal policy, the bound
 of a GPT disk's first partition, the machine ID that its executions see,
 the host paths that it shares with its root, as a launch's
 [shares](#shares), and its [network](#networks), as a launch reads it, which
-must be the template's.
+must be at the guest's address of the template's NIC, under a policy of its
+own.
 `Request::plan` plans the image over the upper, with the network, as a launch
 plans a layered root, `Request::export` plans the export of the shares as a
 launch plans it,
@@ -1509,14 +1532,19 @@ clone, which a read-only bind holds at the root's `/etc/machine-id` for every
 execution, and the guest's defaults of the other settings, unless the request
 names them; for a GPT disk, the bound of its first partition is 64 KiB unless
 the request names one, as a launch's guest takes it by default. For a template
-with a NIC, the record names the network: the identity of its policy, the DNS
-server with which the template's guest configured its resolver at boot, if
-any, which the guest writes to a resolver file, of mode 0444, that a
-read-only bind holds at the root's `/etc/resolv.conf` for every execution,
-beside a generated machine ID, and the URL of the policy's proxy, if any,
-which every execution of the clone finds in its environment, as an execution
-of a launch does; see [Template mode](#template-mode). Without a DNS server,
-the root keeps the image's own `/etc/resolv.conf`.
+with a NIC, the record names the clone's network: the identity of its policy,
+a digest of its serde form; the DNS server that OpenVMM serves the guest under
+the policy, if any, which NVX finds as OpenVMM does, since the template's guest
+learned none, and which the guest writes to a resolver file, of mode 0444, that
+a read-only bind holds at the root's `/etc/resolv.conf` for every execution,
+beside a generated machine ID; whether the policy publishes the workload's
+listeners, as it does with ingress, or with host-loopback access both ways, for
+which the clone's guest starts their announcer, and refuses
+`CAP_NET_BIND_SERVICE` and `CAP_NET_RAW` to its executions; and the URL of the
+policy's proxy, if any, which every execution of the clone finds in its
+environment, as an execution of a launch does; see
+[Template mode](#template-mode). Without a DNS server, the root keeps the
+image's own `/etc/resolv.conf`.
 The guest of a GPT clone rereads the disk's partition table before it
 assembles the root, since its kernel created the partitions of the template's
 placeholder.
@@ -1560,11 +1588,11 @@ measures its downtime, is `ineligible`, by the evidence `tombstone` or
 
 NVX's `ClonePlan` then checks the clone against the generation from the
 metadata of its files alone, under the sandbox's lock, which the lease holds:
-its network, which must be the one that the template's key holds, the guest's
-address and the policy of the template's NIC, which every restore of the
-template attaches unchanged, or, for a template without a NIC, none, or one
-that lets nothing through, so that a clone of another network policy finds no
-template in it,
+its network, which must attach a NIC exactly when the template has one, at the
+guest's address of the template's NIC, under a policy of its own, which the
+clone's restore installs on the NIC, or, for a template without a NIC, none, or
+one that lets nothing through, so that a clone at another guest address finds
+no template in it,
 the bindings of its images, which no one else may change, the geometry of its
 image, which must have the placeholder's block sizes, and be no longer than
 the placeholder, whose length is the capacity that the restore presents,
@@ -1593,8 +1621,10 @@ placeholder, over the scratch image, or, for a clone in RAM, with the
 template's scratch absent, which OpenVMM attaches with no file, so that no
 file of the host backs it, with the export's directory on the template's
 filesystem slot,
-and the template's NIC, if it has one, under the template's network,
-and the restore sequence activates the clone through the
+and the template's NIC, if it has one, under the policy of the clone's
+network, which `--restore-network-policy` installs in place of the template's
+complete deny-all policy, and the restore sequence activates the clone through
+the
 adapter's clone order, `host::CloneOrder`, which sends the clone's activation
 record in an `Activate`, checks the guest agent's build in its `Ready`, sends
 the export's mapping table, which the record announces, in order, as a launch
@@ -2776,12 +2806,7 @@ artifacts, and creates a template of it in a template store of its own:
 | `a_template_without_a_network_has_no_nic` | 2 processors, 1 of them online at boot, 256 MiB of RAM with a capacity of 512 MiB, a 32 MiB scratch, and no network | A captured template without a NIC, whose key records its 1 processor online at boot, which `maxcpus=1` limits |
 | `a_template_whose_processors_are_all_online_at_boot_limits_none` | 2 processors, both online at boot | A captured template whose key records no processors online at boot, without `maxcpus=` |
 | `a_network_that_lets_nothing_through_has_no_nic` | A network that denies egress, ingress, and host-loopback access, without a proxy | A captured template without a NIC |
-| `an_egress_network_has_its_nic` | Egress allowed | A captured template with a NIC |
-| `an_allow_rule_has_its_nic` | Egress denied but for one TCP rule to the gateway, with outbound host-loopback access | A captured template with a NIC |
-| `outbound_host_loopback_has_its_nic` | Egress allowed, with outbound host-loopback access | A captured template with a NIC |
-| `a_proxy_only_network_has_its_nic` | A proxy-only network | A captured template with a NIC |
-| `ingress_is_refused_before_any_vm_starts` | Ingress allowed | NVX's refusal, with status 1, a store without a generation, and no VMM's log or transaction in any slot |
-| `host_loopback_both_ways_is_refused_before_any_vm_starts` | Host-loopback access both ways | NVX's refusal, with status 1, a store without a generation, and no VMM's log or transaction in any slot |
+| `the_networks_of_every_policy_at_one_guest_s_address_share_one_template` | Host-loopback access both ways, with a forward of port 18080 of host loopback to the guest's port 8080; then, at the same guest's address, each network that lets something through: egress allowed, with outbound host-loopback access or without, one TCP rule to the gateway at port 8080, with outbound host-loopback access, a proxy at port 3128 of host loopback, ingress allowed, host-loopback access both ways, and that forward | A captured template with a NIC, under the complete deny-all policy, whose key's command line names the NIC's addresses, but neither a DNS server nor a publication of the guest's listeners; then each creation `existing`, with the same generation, key, and class, without a capture |
 | `a_class_that_no_capture_takes_is_refused_before_the_store` | 3 processors, then 2 processors with 4 online at boot | NVX's refusal of each class, with status 1, before the store exists |
 | `a_refresh_captures_and_retires_the_generations_that_it_supersedes` | A creation, then two refreshes, the second while a clone leases the second generation, then a creation once the clone released it | `list` and `inspect` of the first generation; each refresh captures a new generation, although the store holds an eligible one, and its eviction retires the first generation, and leaves the leased second one, tombstoned, with its payload; the creation serves the third without a capture, and its eviction deletes the second |
 | `a_removal_reports_busy_while_leases_keep_the_generation` | A creation, two clones' leases of its generation, a removal, a second creation, then a removal after each release | `list` and `inspect` with the leases; the removal tombstones the generation, which keeps its payload and takes no new lease, and reports busy, with status 7 and its leases; the second creation captures a new generation, and leaves the first to its leases; a removal reports busy while a lease remains, and deletes the generation once none does; a second removal finds it retired, one of a generation that the store never published fails, and a generation that no lease keeps goes at once |
@@ -2796,8 +2821,10 @@ processors and those online at boot, none for a template whose processors are
 all online at boot, the RAM and its capacity, the geometries of the placeholder
 and of the scratch, the NIC, and a kernel command line of the platform tier's
 tokens alone, with the processors, `maxcpus=` with those online at boot
-exactly when they are fewer, and, exactly with a NIC, the NIC's addresses,
-which names neither the placeholder's identity nor a root's tokens. Its class's
+exactly when they are fewer, and, exactly with a NIC, the NIC's addresses, but
+neither a DNS server nor a publication of the guest's listeners, which OpenVMM
+names to no guest under the NIC's deny-all policy, and which names neither the
+placeholder's identity nor a root's tokens. Its class's
 slot then holds no transaction and records no launch, and a second creation
 prints `existing`, with the same generation, key, and class, without a capture:
 the slot's log of the VMM stays as the capture left it.
@@ -2857,10 +2884,11 @@ directory that the starts authorize:
 | `a_start_refuses_an_export_that_a_dormant_filesystem_slot_cannot_bind_before_any_vmm_starts` | Sharing two host directories, and sharing a file alone | Status 8, with NVX's reason, and the record of a failure of the request, at the plan, without a VM, by the evidence of invalid mappings, which quarantines nothing; the lease released, and the host's directories unchanged |
 | `a_clone_whose_mapping_fails_ends_before_its_sandbox_starts` | Over a scratch image, sharing a host directory whose second mapping puts a directory onto a file of the image | Status 8, a `Ready`, but no start, and the record of a failure of an unknown cause, at the start, at the clone's `Ready`, by the evidence of the protocol, once the VM exited with the guest's success, or NVX terminated it, with the guest's report that the table failed after its first mapping; nothing quarantined, and the lease released, with the records; the host's directory unchanged |
 | `a_template_without_a_nic_serves_clones_without_a_network` | Two at once, without a network, and with one that lets nothing through; then, once they stopped, one of each network with a NIC of the template scenarios | The first two started, with no network in their records, on Linux no argument of a network of their VMMs, no network device, and the image's own `/etc/resolv.conf`, an empty file of mode 0644, which no bind holds, and root may write; then for each of the others, status 8, with NVX's reason, and the record of a failure of the request, at the plan, without a VM, by the evidence of invalid settings, which quarantines nothing; the lease released |
-| `a_template_serves_the_clones_of_its_own_network_policy_alone` | Of a template of each network with a NIC of the template scenarios: one of the template's network, then, once it stopped, one of each other network, one of the template's policy at the guest's address `192.0.2.3/24`, one of a network that lets nothing through, and one without a network | The first started, with one network device, on Linux the VMM's arguments of the template's policy, as its key holds them, without `--net`, and a record that names the policy, the gateway's DNS server for the networks with egress allowed, the proxy's URL for the proxy-only one, and no publication; from an execution, a TCP connection to the gateway at the port of each of three listeners of host loopback, which opens, and arrives at the listener, where the policy lets it through, and fails, with nothing arriving, elsewhere: the allow rule's listener alone, the proxy's alone, every one with egress and outbound host-loopback access allowed, and none with egress allowed alone; then for each of the others, status 8, with NVX's reason, and the record of a failure of the request, at the plan, without a VM, by the evidence of invalid settings, which quarantines nothing; the lease released; each template's policy differs from the others' |
-| `a_clone_binds_the_resolver_of_its_policy_s_dns_server_read_only` | Of a template of a network with egress allowed, two at once, with a generated machine ID, and with the image's own; then, once they stopped, a GPT disk whose layer holds a regular file `etc`, with the image's own machine ID | Each of the first two started, with a record that names the gateway's DNS server, one network device, and at `/etc/resolv.conf`, a file of mode 0444 that names the server, held by a bind that is read-only, `nosuid`, and `nodev`, after the bind of the generated machine ID, below the root, whose file system refuses a write as root, with nothing in the upper there; and a TCP connection to the server's DNS port, which the gateway's DNS proxy accepts without the host's resolver; then status 8, since no bind can hold the resolver configuration below a file, and the record of a failure of the request, at the activation, once the VM exited, by the evidence of invalid settings, with the guest's status 57; nothing quarantined, and the lease released, with the records |
-| `a_clone_s_executions_find_the_proxy_of_its_policy` | Of a template of a proxy-only network, one, with an execution as user ID 0 that runs `env`, then one that names its own `HTTPS_PROXY` | A record that names the proxy's URL, `http://192.0.2.1:PORT`, at the port of the proxy's listener, and no DNS server; the first execution with its own entry, then the URL in `http_proxy`, `https_proxy`, `HTTP_PROXY`, and `HTTPS_PROXY`; the second with exactly its own environment; one network device, and the image's own `/etc/resolv.conf`, which no bind holds |
-| `a_clone_of_a_template_with_a_nic_maps_its_export_beside_its_resolver` | Of a template of a network with egress allowed, one with a generated machine ID, sharing a host directory read-write | Started, with one mapping, and a record that names the export and the gateway's DNS server; on Linux, the VMM's one `--mount`, read-write, and its arguments of the template's policy; below the root, the binds of the machine ID and of the resolver configuration, then the export's mapping; the export's directory, and a write through it, which the host's directory holds after the stop |
+| `one_template_serves_the_clones_of_every_network_policy_at_its_guest_s_address` | Of a template of host-loopback access both ways, with a forward: in turn, one of each network with a NIC, of egress allowed, with outbound host-loopback access or without, of one TCP rule to the gateway, with outbound host-loopback access, of a proxy, of ingress allowed, of host-loopback access both ways, and of that access with a forward; then one at the guest's address `192.0.2.3/24`, one of a network that lets nothing through, and one without a network | Each of the first started, with one network device, on Linux the VMM's `--restore-network-policy`, then the arguments of the clone's own policy, without `--net`, and a record that names the policy, the gateway's DNS server for the networks with egress allowed, the proxy's URL for the proxy-only one, and a publication of the guest's listeners for those with ingress or host-loopback access both ways; an execution's TCP connections to the gateway, at the ports of the host's listeners on host loopback, that reach the allow rule's alone, the proxy's alone, every one with egress and outbound host-loopback access, and none otherwise, as the host's listeners confirm; a listener of the guest, as nobody, that the host reaches at its port of host loopback, with a line each way, exactly with host-loopback access both ways, once the clone's announcer announced it, and through the forward's port; and executions as user ID 0 that ask for `CAP_NET_BIND_SERVICE` or `CAP_NET_RAW` refused with `EPERM` where the listeners are published, and started elsewhere, as one that asks for `CAP_CHOWN` everywhere; then for each of the others, status 8, with NVX's reason, and the record of a failure of the request, at the plan, without a VM, by the evidence of invalid settings, which quarantines nothing; the lease released; each clone's policy differs from the others' |
+| `a_forward_whose_port_another_socket_holds_fails_the_clone_as_the_host_s` | Of a template of a network with egress allowed, one of host-loopback access both ways, with a forward of a port of host loopback that a listener of the host holds; then, once the listener closed, one of the same network | Status 8, with OpenVMM's cause, that it cannot create the forward's socket, and the record of a failure of the host, at the restore, once the VMM exited before its restore-ready event, by the evidence of the forward's bind, which quarantines nothing; the lease released, with the records; then a clone that starts and stops |
+| `a_clone_binds_the_resolver_of_its_policy_s_dns_server_read_only` | Of a template of a proxy-only network, two at once, of a network with egress allowed, with a generated machine ID, and with the image's own; then, once they stopped, a GPT disk whose layer holds a regular file `etc`, with the image's own machine ID | Each of the first two started, with a record that names the gateway's DNS server, one network device, and at `/etc/resolv.conf`, a file of mode 0444 that names the server, held by a bind that is read-only, `nosuid`, and `nodev`, after the bind of the generated machine ID, below the root, whose file system refuses a write as root, with nothing in the upper there; and a TCP connection to the server's DNS port, which the gateway's DNS proxy accepts without the host's resolver; then status 8, since no bind can hold the resolver configuration below a file, and the record of a failure of the request, at the activation, once the VM exited, by the evidence of invalid settings, with the guest's status 57; nothing quarantined, and the lease released, with the records |
+| `a_clone_s_executions_find_the_proxy_of_its_policy` | Of a template of a network with egress allowed, one of a proxy-only network, with an execution as user ID 0 that runs `env`, then one that names its own `HTTPS_PROXY` | A record that names the proxy's URL, `http://192.0.2.1:PORT`, at the port of the proxy's listener, and no DNS server; the first execution with its own entry, then the URL in `http_proxy`, `https_proxy`, `HTTP_PROXY`, and `HTTPS_PROXY`; the second with exactly its own environment; one network device, and the image's own `/etc/resolv.conf`, which no bind holds |
+| `a_clone_of_a_template_with_a_nic_maps_its_export_beside_its_resolver` | Of a template of a network with egress allowed, one with a generated machine ID, sharing a host directory read-write | Started, with one mapping, and a record that names the export and the gateway's DNS server; on Linux, the VMM's one `--mount`, read-write, and its `--restore-network-policy`, then the arguments of the clone's policy; below the root, the binds of the machine ID and of the resolver configuration, then the export's mapping; the export's directory, and a write through it, which the host's directory holds after the stop |
 | `a_selection_that_names_no_template_leases_nothing` | A start that names a template store that does not exist, then, once `remove` retired the generation, which no lease kept, a start of it | Status 10, with the record of a selection that names no template, by the evidence `no-store`, then `retired`, without a lease or a VM; and a store that indexes no generation |
 | `a_run_runs_one_execution_in_its_clone_then_tears_the_clone_down` | A run over a scratch image, as nobody, whose execution names its environment and its working directory, and ends with status 3, then a run in RAM, as nobody, whose execution names an identity of its own | Each with status 0, in one command: the preflight's `staged`, the clone started as a start starts one, the execution, and a stop that releases the lease, without a VM; the first execution's output, of the Ubuntu image's root, as nobody, in its working directory, with its environment, and its status; the second refused with `EINVAL`; no lease left, and the payload with nothing but the capture's files |
 | `a_run_whose_clone_does_not_start_runs_nothing` | A run that names a template store that does not exist, one with a clock fixture past the restore window, and one over a scratch image of zeros | Once the preflight staged the images, status 10, with the record of a selection that names no template, by the evidence `no-store`, then of an `expired` generation, without a lease or a VM; then status 8, with the record of a failure of the request at the activation, once the VM exited, the lease released, and no execution or stop |
@@ -2868,12 +2896,16 @@ directory that the starts authorize:
 | `a_run_s_execution_finds_its_shares_beneath_the_root` | A run over a scratch image, sharing a host directory read-write, whose execution, as user ID 0, reads a file of the directory and writes another | Status 0, its clone started with one mapping and stopped as a run's; the file's contents in the execution's output; and the written file in the host's directory once the run tore the clone down |
 | `a_run_whose_clone_s_vm_exits_during_its_execution_ends_with_the_clone_s_failure` | A run over a scratch image, sharing a host directory read-write, whose execution, as user ID 0, writes a file there, then waits, while the test terminates the clone's VMM | Status 8, its clone started with one mapping, the diagnostic of the executions' failure, `stopped=exited`, and the record of a failure of an unknown cause, at the run, by the evidence of the clone's lost status, without a status of the guest's, once the VM exited, which quarantines nothing, and no execution; the lease released, with the records; then another clone that starts and stops |
 
-Every network that the scenarios give a template is one that a template takes:
-a network that lets nothing through, egress allowed, with outbound
-host-loopback access or without, one rule that allows TCP to the gateway at the
-port of a listener of host loopback, or a proxy at the port of another. The
-tests bind those listeners, and a third, which no network names, on host IPv4
-loopback, at ports that the host chooses, and hold them until they end. A
+The scenarios' networks let nothing through, or allow egress, with outbound
+host-loopback access or without, or one rule that allows TCP to the gateway at
+the port of a listener of host loopback, with outbound host-loopback access, or
+have a proxy at the port of another, or allow ingress, or host-loopback access
+both ways, with a forward or without. The tests bind those listeners, and a
+third, which no network names, on host IPv4 loopback, at ports that the host
+chooses, and hold them until they end. The forward's port of host loopback, and
+the guest's port of the listener that the scenarios run in the guest, to which
+it forwards, are ports that no socket of the host held when the tests drew
+them. A
 clone's start names its network by a file that the test writes in the
 template's directory.
 
@@ -3016,17 +3048,12 @@ layered roots, captures of templates, and the starts and runs of their clones.
 | `vm_layered` | `unstaged_images_are_refused_before_spawn` | Images that the store does not stage are refused before the VM spawns, with nothing of a launch left, and boot once staged |
 | `vm_template` | `a_class_that_no_capture_takes_is_refused_before_the_store` | `create` of a class that no capture takes, of 3 processors, or of more online at boot than in all, fails with status 1 before the store exists |
 | `vm_template` | `a_network_that_lets_nothing_through_has_no_nic` | `create` of a network that lets nothing through captures a template without a NIC |
-| `vm_template` | `a_proxy_only_network_has_its_nic` | `create` of a proxy-only network captures a template with a NIC |
 | `vm_template` | `a_refresh_captures_and_retires_the_generations_that_it_supersedes` | `refresh` captures a new generation although the store holds an eligible one, and its eviction retires the one that it supersedes, or tombstones it while a clone leases it, as `list` and `inspect` report |
 | `vm_template` | `a_refresh_refuses_a_class_that_no_capture_takes_before_the_store` | `refresh` of a class that no capture takes fails with status 1 before the store exists |
 | `vm_template` | `a_removal_reports_busy_while_leases_keep_the_generation` | `remove` tombstones a leased generation, keeps its payload, and reports busy, with status 7 and its leases, until no lease remains, then deletes it |
 | `vm_template` | `a_template_whose_processors_are_all_online_at_boot_limits_none` | `create` captures a template whose processors are all online at boot without `maxcpus=`, and whose key records none online at boot |
 | `vm_template` | `a_template_without_a_network_has_no_nic` | `create` captures a template without a NIC, whose key holds what it asked for, its processor online at boot among it, and serves it again without a capture |
-| `vm_template` | `an_allow_rule_has_its_nic` | `create` of an allow rule captures a template with a NIC |
-| `vm_template` | `an_egress_network_has_its_nic` | `create` of a network with egress allowed captures a template with a NIC |
-| `vm_template` | `host_loopback_both_ways_is_refused_before_any_vm_starts` | `create` refuses host-loopback access both ways with status 1, before any VM starts, with no generation |
-| `vm_template` | `ingress_is_refused_before_any_vm_starts` | `create` refuses ingress with status 1, before any VM starts, with no generation |
-| `vm_template` | `outbound_host_loopback_has_its_nic` | `create` with outbound host-loopback access captures a template with a NIC |
+| `vm_template` | `the_networks_of_every_policy_at_one_guest_s_address_share_one_template` | `create` of a network of any policy captures one template, whose NIC the capture attaches under the complete deny-all policy, and the creations of the networks of every other policy at the same guest's address serve it without a capture |
 | `vm_clone` | `a_clone_binds_the_resolver_of_its_policy_s_dns_server_read_only` | A clone of a network with egress allowed binds a resolver file that names the gateway's DNS server read-only at `/etc/resolv.conf`, and a TCP connection to the server's DNS port opens, which the gateway's DNS proxy accepts; one whose resolver cannot be bound ends with status 57 |
 | `vm_clone` | `a_clone_maps_its_export_beneath_its_root_before_its_sandbox_starts` | A clone maps its export's mappings beneath its root before its sandbox starts, each with its access, a denied file hidden, and writes reach the host's directory through the writable ones alone |
 | `vm_clone` | `a_clone_of_a_template_with_a_nic_maps_its_export_beside_its_resolver` | A clone of a template with a NIC maps its export below the binds of its machine ID and of its resolver configuration |
@@ -3039,10 +3066,11 @@ layered roots, captures of templates, and the starts and runs of their clones.
 | `vm_clone` | `a_clone_whose_mapping_fails_ends_before_its_sandbox_starts` | A clone whose guest fails a mapping ends before its sandbox starts, with the failure's record, and leaves the host's directory unchanged |
 | `vm_clone` | `a_clone_whose_view_cannot_be_set_ends_before_it_is_ready` | A generated machine ID that no bind can hold ends the clone before it is ready, with status 55, while the image's own needs no bind |
 | `vm_clone` | `a_clone_whose_vm_exits_once_a_stop_found_it_fails_before_its_lease_is_released` | A clone whose VM exits once a stop found it running fails, with status 8 and the record of a failure by the evidence of its lost status, quarantines nothing, and releases its lease |
+| `vm_clone` | `a_forward_whose_port_another_socket_holds_fails_the_clone_as_the_host_s` | A forward whose port of host loopback another socket holds ends the clone before its restore-ready event, with status 8 and the record of a failure of the host, by the evidence of the forward's bind, and the template serves the network once the port is free |
 | `vm_clone` | `a_generation_is_eligible_by_the_clock_of_its_capture` | The store checks eligibility by the host's monotonic clock on the boot of the capture, and by UTC after a reboot, and refuses an expired or an early generation with status 10, without a lease |
 | `vm_clone` | `a_generation_refuses_clones_of_fewer_processors_than_its_template_booted_with` | NVX's plan refuses a processor target below the template's processors online at boot before any VMM starts, and the generation serves its clones from those up |
 | `vm_clone` | `a_host_program_of_another_runtime_ends_the_clone_through_its_verified_identity` | A host program of another runtime ends the clone through its verified identity, without a word to its guest, with status 8, and releases its lease |
-| `vm_clone` | `a_run_in_a_template_of_a_network_finds_its_policy_s_proxy` | A run's execution, in a clone of a proxy-only template, finds the proxy's URL in its environment, and a run of another network runs nothing, with status 8 |
+| `vm_clone` | `a_run_in_a_template_of_a_network_finds_its_policy_s_proxy` | A run's execution, in a clone of a proxy-only template, finds the proxy's URL in its environment, and a run of a network that lets nothing through runs nothing, with status 8 |
 | `vm_clone` | `a_run_runs_one_execution_in_its_clone_then_tears_the_clone_down` | A run stages its images, starts a clone, runs one execution in its root, with the execution's environment and working directory, then stops the clone and releases its lease, whatever the execution did |
 | `vm_clone` | `a_run_s_execution_finds_its_shares_beneath_the_root` | A run's execution reads and writes through its share, which the clone mapped beneath its root, and the host's directory keeps what it wrote |
 | `vm_clone` | `a_run_whose_clone_does_not_start_runs_nothing` | A run whose selection the store refuses ends with status 10, and one whose clone fails with status 8, without an execution or a stop |
@@ -3050,7 +3078,6 @@ layered roots, captures of templates, and the starts and runs of their clones.
 | `vm_clone` | `a_selection_that_names_no_template_leases_nothing` | A start of a template store that does not exist, or of a generation that `remove` retired, ends with status 10 and the refusal's record, without a lease or a VM |
 | `vm_clone` | `a_start_refuses_an_export_that_a_dormant_filesystem_slot_cannot_bind_before_any_vmm_starts` | An export of two directories, or of a file alone, is refused with status 8 before any VMM starts |
 | `vm_clone` | `a_start_refuses_what_the_template_cannot_serve_before_any_vmm_starts` | Images, scratch images, and memory targets that the template cannot serve are refused with status 8 before any VMM starts, unstaged images with status 1, and a generation that the store does not hold with status 10 |
-| `vm_clone` | `a_template_serves_the_clones_of_its_own_network_policy_alone` | A template with a NIC serves the clones of its own network alone, whose restores attach its NIC under its policy, and NVX's plan refuses the others with status 8 before any VMM starts |
 | `vm_clone` | `a_template_without_a_nic_serves_clones_without_a_network` | A template without a NIC serves clones without a network, or with one that lets nothing through, and refuses those of a network with a NIC with status 8 |
 | `vm_clone` | `a_tombstone_leaves_the_running_clone_of_its_generation_to_its_lease` | A tombstone refuses new clones of its generation with status 10, while the running clone serves on, and releases its lease once it stops |
 | `vm_clone` | `clones_at_once_keep_their_own_uppers_and_machine_ids` | Clones at once keep their own uppers, and their own machine IDs, generated, distinct, and bound read-only, or the image's own |
@@ -3059,6 +3086,7 @@ layered roots, captures of templates, and the starts and runs of their clones.
 | `vm_clone` | `one_generation_serves_clones_of_each_processor_count_from_its_boot_online_count_to_its_capacity` | One generation serves clones of each supported processor count from the template's processors online at boot to its capacity, whose repair brings the target's CPUs online, and NVX's plan refuses an unsupported count and one beyond the capacity before any VMM starts |
 | `vm_clone` | `one_generation_serves_clones_of_each_upper_and_memory_target` | One generation serves clones over a scratch image and in RAM, at each memory target up to its capacity, each with its own lease, and leaves its snapshot unchanged |
 | `vm_clone` | `one_generation_serves_clones_of_either_format_over_either_upper` | A template of a GPT placeholder serves EROFS and GPT clones of other layouts, shorter than the placeholder, at its length, over either upper, those in RAM with no scratch file, and a first partition over its bound ends a clone with status 54 |
+| `vm_clone` | `one_template_serves_the_clones_of_every_network_policy_at_its_guest_s_address` | One template with a NIC serves the clones of every network policy at its guest's address, whose restores install their own policies on its NIC, which lets through what each allows, publishes the guest's listeners, through the clone's announcer, and forwards ports where it says, and NVX's plan refuses another address, or no NIC, with status 8 before any VMM starts |
 | `vm_clone` | `the_lease_of_a_start_that_ended_before_its_record_is_released_through_its_template_store` | The lease of a start that ended before it recorded its clone is released only through its own template store, which `--template` names |
 
 ### Running the VM tests

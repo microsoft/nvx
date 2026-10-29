@@ -201,24 +201,26 @@ fn capture_template(
     let boot = operations
         .command_line()
         .and_then(|command_line| template::boot(&command_line).map_err(|error| error.to_string()));
-    match boot {
+    let gateway = match boot {
         Ok(Boot::Cold) => return None,
-        Ok(Boot::Template) => {}
+        Ok(Boot::Template { gateway }) => gateway,
         Err(problem) => {
             eprintln!("runtime-adapter-guest: {problem}");
             return Some(COMMAND_LINE_STATUS);
         }
-    }
-    Some(match capture::capture_on_terminal(tty, operations) {
-        Ok(templated) => {
-            eprintln!("runtime-adapter-guest: {templated}");
-            templated.status()
-        }
-        Err(error) => {
-            eprintln!("runtime-adapter-guest: {error}");
-            SESSION_STATUS
-        }
-    })
+    };
+    Some(
+        match capture::capture_on_terminal(tty, operations, gateway) {
+            Ok(templated) => {
+                eprintln!("runtime-adapter-guest: {templated}");
+                templated.status()
+            }
+            Err(error) => {
+                eprintln!("runtime-adapter-guest: {error}");
+                SESSION_STATUS
+            }
+        },
+    )
 }
 
 /// Runs the executions of the worker's `entries` probe in the root `root`, each placed in the cgroup

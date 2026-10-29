@@ -78,11 +78,10 @@ pub struct CloneRequest {
     /// The adapter's plan, which [`SandboxPlan::adapter`] makes, of the clone's image, its
     /// `distro`, an EROFS layer or a GPT disk, over its upper: in RAM, a tmpfs, as
     /// [`SandboxUpper::RAM`](crate::host::sandbox::SandboxUpper::RAM) plans it, or on the
-    /// caller's scratch image. Its network must be the template's, which every restore of the
-    /// template attaches unchanged, as [`ClonePlan::new`] checks: the network that the template's
-    /// class lowered to OpenVMM's arguments, as its key records it,
-    /// [`TemplateKey::network_arguments`], or for a template without a NIC none, or one that lets
-    /// nothing through, which attaches none either.
+    /// caller's scratch image. Its network is the clone's own, whose policy the restore enforces
+    /// on the template's NIC in place of the template's complete deny-all policy, at the guest's
+    /// address that the NIC has, [`TemplateKey::guest_network`], or for a template without a NIC
+    /// none, or one that lets nothing through, which attaches none either.
     pub adapter: SandboxPlan,
     /// The binding of the image.
     pub binding: DistroBinding,
@@ -198,15 +197,13 @@ pub enum CloneUpper {
 ///   online at boot, and serves the target of its capacity alone.
 /// - The memory target must be whole blocks of [`MEMORY_BLOCK_SIZE`], and of the template's own
 ///   memory blocks, from the template's RAM to its RAM capacity.
-/// - The network of the adapter's plan must be the template's: lowered to OpenVMM's arguments, as
+/// - The network of the adapter's plan must attach a NIC, as
 ///   [`SandboxNetwork::openvmm_arguments`](crate::host::sandbox::SandboxNetwork::openvmm_arguments)
-///   lowers it, it must be the network that the template's key records,
-///   [`TemplateKey::network_arguments`], the guest's address and the policy of the template's NIC,
-///   or none for a template without a NIC. A template serves the clones of its network policy
-///   alone, and the restore passes the template's network unchanged, as the key records it, so no
-///   clone has ingress, host-loopback access to its listeners, or forwards, which no template's
-///   policy allows: a template's capture refuses a policy that allows ingress, or host-loopback
-///   access both ways, which forwards need.
+///   lowers it, if and only if the template has one, at the guest's address of the template's NIC,
+///   which its key records, [`TemplateKey::guest_network`]. A template captures its NIC under the
+///   complete deny-all policy, which the restore replaces with the policy of the clone's network,
+///   so a template serves the clones of every network policy at its guest's address: egress
+///   rules, a proxy, ingress, host-loopback access, and host-loopback forwards alike.
 /// - The export, if the request has one, must be a plan that [`filesystem::plan`] could have made
 ///   for the container root, as [`ExportPlan::check`] finds it, of exactly one child, a
 ///   directory: a template's filesystem slot is dormant, and a restore binds one directory to it,
@@ -234,7 +231,7 @@ pub enum CloneUpper {
 ///   to a leased payload, say. A request without an export leaves the slot dormant.
 /// - The activation record, which the clone's guest applies in place of the configuration that
 ///   the template captured, names the restore, with a fresh transaction ID, the clone's image,
-///   upper, export, and settings, the template's network, and the resources that the clone must
+///   upper, export, and settings, its network, and the resources that the clone must
 ///   have, as [`activation`](Self::activation) describes. Its settings must keep the limits of a
 ///   record, as [`Configuration::check`] checks them.
 /// - The capability is fresh: the plan draws it for the clone's launch, [`launch`](Self::launch).
@@ -319,8 +316,8 @@ pub struct ClonePlan {
     activation: ActivationRecord,
     /// The capability of the clone's launch.
     capability: [u8; CAPABILITY_LEN],
-    /// The clone's devices, which its restore attaches with the template's network: the adapter's
-    /// plan of its image, over the file of its `scratch` block device.
+    /// The clone's devices, which its restore attaches: the adapter's plan of its image and
+    /// network, over the file of its `scratch` block device.
     devices: SandboxPlan,
     /// The clone's export, which its restore binds to the template's dormant filesystem slot, if
     /// it has one.
@@ -406,17 +403,15 @@ impl ClonePlan {
     /// - with [`ErrorKind::Unsupported`] for a request that the template cannot serve: a template
     ///   whose key names other contracts than this build speaks, the boot and control contracts
     ///   of the runtime that captured it included, [`Evidence::IncompatibleHost`]; a plan whose
-    ///   network is not the template's, as the template's key records it,
-    ///   [`TemplateKey::network_arguments`]: a network for a template without a NIC, none for a
-    ///   template with a NIC, or one with another guest network than the template's NIC, whose
-    ///   address OpenVMM restores from the snapshot, or another policy,
-    ///   [`Evidence::InvalidSettings`]; and a processor target other than 1, 2, 4, or 8, or
+    ///   network does not lower to OpenVMM's arguments, as
+    ///   [`SandboxNetwork::openvmm_arguments`](crate::host::sandbox::SandboxNetwork::openvmm_arguments)
+    ///   finds it, a plan with a network for a template without a NIC, or without one for a
+    ///   template with a NIC, or one at another guest's address than the template's NIC, as its
+    ///   key records it, [`TemplateKey::guest_network`], [`Evidence::InvalidSettings`]; and a
+    ///   processor target other than 1, 2, 4, or 8, or
     ///   outside the template's processors online at boot and its processor capacity, and a
     ///   memory target that is not whole blocks of [`MEMORY_BLOCK_SIZE`] and of the template's
     ///   memory blocks, from the template's RAM to its RAM capacity, [`Evidence::InvalidTargets`];
-    /// - with [`ErrorKind::Io`] for a template whose command line names the DNS server of its
-    ///   guest's resolver in another form than OpenVMM writes: more than once, without a NIC, or
-    ///   other than as one IP address in its canonical spelling, [`Evidence::MalformedGeneration`];
     /// - with [`ErrorKind::Unsupported`] for settings that no activation record holds, as
     ///   [`Configuration::check`] finds them, such as a GPT disk's first-partition bound of 0, a
     ///   hostname that is empty, longer than
@@ -684,16 +679,16 @@ impl ClonePlan {
     /// the export, if the request has one, a directory, with the identity of its plan, and the
     /// number of its mappings, the binds of the plan, from 1 to
     /// [`MAX_MAPPINGS`](crate::activation::MAX_MAPPINGS), or no export and no mappings; the
-    /// network of the template's NIC, if it has one, with the identity of the policy that OpenVMM
-    /// enforces there, as the template's key records it, the DNS server with which the template's
-    /// guest configured its resolver at boot, if the template's
-    /// [command line](TemplateKey::command_line) names one, unpublished listeners, and the URL of
-    /// the policy's proxy as the guest sees it, if any; and the processor target, which the
-    /// restore brings online, and the memory target, as the resources that the clone must have.
+    /// clone's network, if the template has a NIC, with the identity of the network, whose policy
+    /// the restore enforces on the NIC, the DNS server that OpenVMM serves the guest at a gateway
+    /// under that policy, if any, whether the guest publishes its listeners, as it does under a
+    /// policy that allows ingress or host-loopback access both ways, and the URL of the policy's
+    /// proxy as the guest sees it, if any; and the processor target, which the restore brings
+    /// online, and the memory target, as the resources that the clone must have.
     ///
-    /// The identity of a binding, or of an export plan, is the SHA-256 digest of a domain of its
-    /// kind and of its serde form, a few hundred bytes of metadata: the plan reads no content to
-    /// compute it.
+    /// The identity of a binding, of an export plan, or of a network is the SHA-256 digest of a
+    /// domain of its kind and of its serde form, a few hundred bytes of metadata: the plan reads
+    /// no content to compute it.
     pub fn activation(&self) -> &ActivationRecord {
         &self.activation
     }
@@ -725,11 +720,12 @@ impl fmt::Debug for ClonePlan {
 
 /// Returns the devices of the clone of `request`: the adapter's plan of its image over its upper,
 /// which renders the `scratch` block device of an upper on a scratch image alone, since the
-/// restore declares that of an upper in RAM absent. The restore attaches the template's network,
-/// which its key records, rather than the plan's, which the plan's check found to be the same.
+/// restore declares that of an upper in RAM absent, and of its network, whose policy the restore
+/// enforces on the template's NIC.
 fn devices_of(request: &CloneRequest) -> SandboxPlan {
     let adapter = &request.adapter;
     SandboxPlan::adapter(adapter.distro().clone(), adapter.upper().clone())
+        .with_network(adapter.network().cloned())
 }
 
 /// Refuses a request that no clone takes, as [`ClonePlan::new`] describes, without reading or
@@ -935,48 +931,37 @@ fn check_template(
             )),
         ));
     }
-    // A template serves the clones of its own network alone: the guest's address and the policy of
-    // its NIC, which every restore passes unchanged, or no NIC, which a network that lets nothing
-    // through attaches no more than none does. OpenVMM restores the guest's address on the NIC
-    // from the snapshot, so a plan of another address would run on the template's.
+    // A template captures its NIC under the complete deny-all policy, which every restore replaces
+    // with the policy of its clone's network, so it serves the clones of every network at its
+    // guest's address, or, without a NIC, those of none, or of one that lets nothing through,
+    // which attaches no NIC either.
     let requested = match request.adapter.network() {
-        None => Vec::new(),
-        Some(network) => network
-            .openvmm_arguments()
-            .attribute(Evidence::InvalidSettings)?,
+        None => None,
+        Some(network) => {
+            let attached = !network
+                .openvmm_arguments()
+                .attribute(Evidence::InvalidSettings)?
+                .is_empty();
+            attached.then(|| network.guest_network())
+        }
     };
-    let template = key.network_arguments();
-    if requested != template {
-        let guest = request
-            .adapter
-            .network()
-            .map(|network| network.guest_network());
-        let nic = key.guest_network();
-        let problem = if template.is_empty() {
-            format!(
-                "the adapter's plan of a clone attaches a network, but the template's \
-                 generation {name} has no NIC"
-            )
-        } else if requested.is_empty() {
-            format!(
-                "the template's generation {name} has a NIC, whose network every clone of it \
-                 restores, but the adapter's plan of the clone has none"
-            )
-        } else if let Some(guest) = guest
-            && let Some(nic) = nic.as_deref()
-            && guest != nic
-        {
-            format!(
-                "the adapter's plan of a clone gives its guest the network {guest}, but the \
-                 template's generation {name} restores its NIC on {nic}, from its snapshot"
-            )
-        } else {
-            format!(
-                "the network of the adapter's plan of a clone is not the one that the template's \
-                 generation {name} restores its NIC with: a template serves the clones of its \
-                 own network policy, at its own guest's address, alone"
-            )
-        };
+    let problem = match (requested, key.guest_network()) {
+        (Some(_), None) => Some(format!(
+            "the adapter's plan of a clone attaches a network, but the template's generation \
+             {name} has no NIC"
+        )),
+        (None, Some(_)) => Some(format!(
+            "the template's generation {name} has a NIC, which its clones restore with the \
+             network of the adapter's plan, but the plan has none"
+        )),
+        (Some(requested), Some(template)) if requested != template => Some(format!(
+            "the adapter's plan of a clone attaches a network at {requested}, but the NIC of the \
+             template's generation {name} is at {template}: a template serves the clones of its \
+             own guest's address alone"
+        )),
+        _ => None,
+    };
+    if let Some(problem) = problem {
         return Err(Fault::new(
             Evidence::InvalidSettings,
             Error::unsupported(problem),

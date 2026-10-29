@@ -94,8 +94,12 @@ const CAPTURES_WHAT: &str = "the captures of the template store";
 /// The adapter's plan is lowered as [`TemplatePlan::new`] lowers it, with the processors, those
 /// online at boot among them, and RAM of the class, and a scratch of the class's scratch length;
 /// its upper is no part of the template. The class and the plan must describe one VM: a
-/// placeholder whose binding records the class's `distro` length, and a network of the plan that
-/// lowers to the OpenVMM arguments of the class's network.
+/// placeholder whose binding records the class's `distro` length, and a network of the plan whose
+/// NIC, as [`SandboxNetwork::template_arguments`] lowers it for a template, is the class's: none,
+/// or one at the same guest's address, under the complete deny-all policy, whatever the policies
+/// of the two networks.
+///
+/// [`SandboxNetwork::template_arguments`]: crate::host::sandbox::SandboxNetwork::template_arguments
 #[derive(Debug, Clone)]
 pub struct Capture {
     /// The class of the capture, which names its slot, and from which the capture takes its
@@ -220,7 +224,7 @@ impl Inputs {
     ///
     /// Fails with [`ErrorKind::Unsupported`] as [`CaptureClass::identity`] fails, and for a
     /// placeholder whose binding records another length than the class's `distro`, and a plan
-    /// whose network lowers to other arguments than the class's; and with
+    /// whose network attaches another NIC than the class's, as a template attaches it; and with
     /// [`ErrorKind::Unavailable`] for an artifact whose path cannot be resolved.
     fn check(capture: &Capture) -> Result<Self> {
         let class = &capture.class;
@@ -236,15 +240,15 @@ impl Inputs {
         }
         let planned = match capture.adapter.network() {
             None => Vec::new(),
-            Some(network) => network.openvmm_arguments()?,
+            Some(network) => network.template_arguments()?,
         };
         let requested = match &class.network {
             None => Vec::new(),
-            Some(network) => network.openvmm_arguments()?,
+            Some(network) => network.template_arguments()?,
         };
         if planned != requested {
             return Err(Error::unsupported(format!(
-                "the adapter's plan attaches the network {planned:?}, but the class requests \
+                "the adapter's plan attaches the NIC {planned:?}, but the class requests \
                  {requested:?}"
             )));
         }

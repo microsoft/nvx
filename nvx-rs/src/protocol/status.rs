@@ -75,7 +75,8 @@ pub const ACTIVATION_WORKLOAD: u8 = 55;
 /// The host export cannot be mounted in the clone.
 pub const ACTIVATION_EXPORT: u8 = 56;
 /// The record's network settings cannot be applied in the clone: its resolver or its proxy
-/// endpoint.
+/// endpoint, or the announcer of the workload's listeners, which its network publishes, cannot
+/// start, or ended.
 pub const ACTIVATION_NETWORK: u8 = 57;
 /// The guest's own order misused the activation: it completed an activation that did not run,
 /// or started the sandbox before the clone was ready.

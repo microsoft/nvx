@@ -8,15 +8,16 @@
 //! first partition, the machine ID that its executions see, the image's own or one that its
 //! guest generates, the host paths that it shares with its root, as a launch shares them,
 //! `sharing::HostFsSharing`, and its network, as a launch reads it, `layered::read_network`,
-//! which must be the template's.
+//! which must be at the guest's address of the template's NIC, under a policy of its own.
 //! [`Request::plan`] plans the image over the upper, with the network, as a launch plans a layered
 //! root, [`Request::export`] plans the export of the shares as a launch plans it, and
 //! [`Request::clone_request`] returns NVX's `nvx::host::template::CloneRequest` of both, with the
 //! bindings that the sandbox's store stages for its images, as `staged::Staged` records them:
 //! staging hashes, and a start never does. NVX's `ClonePlan` then checks the request against the
 //! leased generation before any VMM starts, from the metadata of the clone's files alone, takes
-//! only the template's network, as the template's key records it, and only an export of one
-//! directory, which the clone's restore binds to the template's dormant filesystem slot.
+//! only a network at the guest's address of the template's NIC, whose policy the clone's restore
+//! installs on the NIC in place of the template's complete deny-all policy, and only an export of
+//! one directory, which the clone's restore binds to the template's dormant filesystem slot.
 //!
 //! A clone's [record](CloneRecord) names the template store and the generation that the clone
 //! leases, beside the plan and the bindings, as the record of a launch names what it launched, so
@@ -98,9 +99,9 @@ pub struct Request {
     /// The host paths that the clone shares with its root, as a launch shares them, if any.
     pub sharing: HostFsSharing,
     /// The network of the clone's VM, as a launch reads it, `layered::read_network`, if it has
-    /// one: the template's network, the guest's address and the policy of the template's NIC, which
-    /// every restore of the template attaches, or for a template without a NIC none, or one that
-    /// lets nothing through.
+    /// one: a network at the guest's address of the template's NIC, under a policy of its own,
+    /// which the clone's restore installs on the NIC, or for a template without a NIC none, or one
+    /// that lets nothing through.
     pub network: Option<SandboxNetwork>,
 }
 

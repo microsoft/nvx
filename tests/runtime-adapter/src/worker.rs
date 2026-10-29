@@ -88,11 +88,15 @@
 //!    one, once, after the repair's reseed. If the record has an export, it mounts the host export
 //!    out of the root, through the template's host filesystem device, `capture::FILESYSTEM_TAG`, as
 //!    the worker of a VM that boots cold mounts the one that its command line names, and if the
-//!    record's network names a DNS server, it writes a resolver file that names it. It then binds
-//!    the generated machine ID read-only over the root's `/etc/machine-id`, and the resolver file
-//!    over its `/etc/resolv.conf`, in the worker's mount namespace, which each execution's copies.
-//!    The template bootstrapped the guest for its root with its own configuration before its
-//!    capture, so the clone has its cgroups.
+//!    record's network names a DNS server, it writes a resolver file that names it. If the record's
+//!    network publishes the workload's listeners, it starts their announcer,
+//!    `/sbin/nvx-ingress inherit GATEWAY_IPV4`, from a UDP socket that it binds to a privileged
+//!    source port, to the gateway that the template's kernel command line names, as NVX's `/init`
+//!    starts it at a cold boot whose policy publishes them: the template, captured under a policy
+//!    that publishes nothing, runs none. It then binds the generated machine ID read-only over the
+//!    root's `/etc/machine-id`, and the resolver file over its `/etc/resolv.conf`, in the worker's
+//!    mount namespace, which each execution's copies. The template bootstrapped the guest for its
+//!    root with its own configuration before its capture, so the clone has its cgroups.
 //! 4. Once it took what the session received while the application ran, which came before `Ready`,
 //!    it completes the activation, which opens the fence, and answers `Ready`, which reports that
 //!    the activation applied, with the record's transaction, after the guest agent's build, to the
@@ -105,19 +109,24 @@
 //!    the stop. The record's workload identity, if it has one, is the whole sandbox's, as a root
 //!    configuration's is, so that executions name none, every execution takes the record's
 //!    hostname, and a clone's executions run in the cgroups of the template's bootstrap. On the
-//!    stop, the worker closes the export's root and removes the binds of the application before it
-//!    tears the root down, since they keep the root's mounts busy, through
+//!    stop, the worker stops the announcer, closes the export's root, and removes the binds of the
+//!    application before it tears the root down, since they keep the root's mounts busy, through
 //!    `nvx::guest::clone::Applied::teardown`. It also answers the probe
 //!    `activation::ACTIVATION_PROBE`, with when the events of the clone's activation and order
 //!    happened, after the repair's acknowledgement of the restore.
 //!
-//! The application leaves out two of the record's settings. The endpoint of its network's proxy,
+//! The application leaves out one of the record's settings. The endpoint of its network's proxy,
 //! which `nvx::guest::clone::Applied::proxy` returns, is the host's to tell the workloads, as
 //! after a cold boot: the host program's `exec` gives each execution the proxy's URL in its
 //! environment, from the plan of the VM's network, so that an execution's environment stays
-//! exactly its start's. And the publication of the record's listeners is not applied, so a
-//! clone's executions enter the root with listeners published, the entry's default, which refuses
-//! the most.
+//! exactly its start's. A clone's executions enter the root with the publication of listeners
+//! that the record's network names, published under a policy that publishes them, and unpublished
+//! otherwise, a clone without a network included. The worker polls the pidfd of the announcer of
+//! a record that publishes them with the session's stream, in its loop, and nothing else: once
+//! the announcer ended, before the clone is ready or after, the gateway keeps publishing the
+//! listeners that it last announced, and learns of no later change of them, so the activation
+//! fails finally with `nvx::protocol::status`'s `ACTIVATION_NETWORK`, as an application whose
+//! announcer could not start does.
 //!
 //! Until the clone is ready, its session takes nothing but that `Activate`: another reset, any
 //! other message, a `Stop` and a `Ping` included, an `Activate` that the activation refuses, one
@@ -208,7 +217,8 @@
 //!   describes it: in new mount, PID, and UTS namespaces, with the root moved over `/`, with the
 //!   sandbox's hostname, the entry's default, `nvx-sandbox`, after a cold boot, and the record's in
 //!   a clone, and no time status, and with the publication of listeners that the root
-//!   configuration names, published unless it names them unpublished, as the entry's default is.
+//!   configuration names, published unless it names them unpublished, as the entry's default is,
+//!   after a cold boot, and that the record's network names in a clone, unpublished without one.
 //!   After a cold boot, it sees the image's own machine ID and `/etc/resolv.conf`, so that the
 //!   worker binds nothing into the root, and in a clone, the machine ID that the record names,
 //!   which the clone's application bound for every execution if the record asks for a generated
@@ -229,7 +239,8 @@
 //!   controlling terminal, and the process group that the session creates. As PID 1 of its PID
 //!   namespace, its end ends every process of the namespace. The guest's network device, its
 //!   addresses, and the announcer of its listeners stay with NVX's `/init`, which configures them
-//!   before PID 1 starts.
+//!   before PID 1 starts, but for the announcer of a clone, which the clone's application starts
+//!   and the worker supervises.
 //! - Each execution runs in a cgroup of its own below the workload cgroup, `execution-N`, where N
 //!   counts the cgroups that the worker prepared. The worker prepares it with
 //!   `nvx::guest::cgroup::ExecutionCgroup::prepare`, and the program joins it as it spawns,
@@ -289,7 +300,7 @@ pub mod probes;
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
-use std::os::fd::AsFd;
+use std::os::fd::{AsFd, BorrowedFd};
 use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
@@ -309,6 +320,8 @@ use nvx::guest::cgroup::Layout;
 #[cfg(target_arch = "x86_64")]
 use nvx::guest::clone::{self, Activation, ApplyError, RootTemplate};
 use nvx::guest::entry::{self, Entry, Identity, Prepared, Publication};
+#[cfg(target_arch = "x86_64")]
+use nvx::guest::ingress::Announcer;
 use nvx::guest::mappings::{Mapping, SourceRoot};
 use nvx::guest::nvxs::GuestConnectionError;
 use nvx::guest::process::Child;
@@ -322,6 +335,7 @@ use nvx::protocol::nvxs::GuestSession;
 use nvx::protocol::root::{
     DISTRO_MMIO_BASE, ImageFormat, RootLayout, RootUpper, SCRATCH_MMIO_BASE,
 };
+use nvx::protocol::status;
 
 use crate::GUEST_BUILD;
 use crate::exec::HostMessage;
@@ -450,17 +464,29 @@ pub trait RootOperations: EntryOperations {
     /// Runs `probe` on the assembled root, and returns what it found.
     fn probe(&mut self, probe: &Probe) -> Result<Facts, String>;
 
-    /// Tears the assembled root down, once it removed the runtime's binds that a clone's
-    /// application, through `apply`, made on it, which keep the root's mount busy.
+    /// Tears the assembled root down, once it stopped the announcer that a clone's application,
+    /// through `apply`, started, if any, and removed the runtime's binds that the application made
+    /// on it, which keep the root's mount busy.
     fn teardown(&mut self) -> Result<(), String>;
+
+    /// Returns the pidfd of the announcer of the workload's listeners that a clone's application,
+    /// through `apply`, started for a record whose network publishes them, which polls readable
+    /// once the announcer ended, or `None` without one, or once its status was collected.
+    fn announcer(&self) -> Option<BorrowedFd<'_>>;
+
+    /// Collects the status of the announcer of the workload's listeners, if it ended, without
+    /// blocking, and returns how it ended, as a problem, or `None` while it runs, or without one.
+    fn announcer_ended(&mut self) -> Option<String>;
 
     /// Applies `record`, the record of the Activate that a clone's activation accepted, to the
     /// clone, as `nvx::guest::clone::apply` does, with `template`, the inputs of the root's
     /// assembly that the clone's template captured, by `deadline`, the activation's, if any, until
     /// which it waits for each device at the latest, and keeps the root that it assembled, with the
-    /// runtime's binds that it made on it, which the [teardown](Self::teardown) removes first, and
-    /// the root of the host export that it mounted, if the record has one, from which
-    /// [`map`](Self::map) maps the host's mapping table: in place of a root configuration's
+    /// runtime's binds that it made on it, which the [teardown](Self::teardown) removes first, the
+    /// root of the host export that it mounted, if the record has one, from which
+    /// [`map`](Self::map) maps the host's mapping table, and the announcer of the workload's
+    /// listeners that it started, if the record's network publishes them, whose
+    /// [pidfd](Self::announcer) the worker polls: in place of a root configuration's
     /// [layout](Self::command_line), assembly, [export](Self::mount_export), and account check.
     /// The template's VM [bootstrapped](Self::bootstrap) the guest before its capture.
     ///
@@ -501,7 +527,8 @@ pub enum Worked {
     /// closed.
     Abandoned,
     /// A clone's activation failed, finally: before the clone was ready, which left the worker's
-    /// fence of workload admission closed, or once it was ready.
+    /// fence of workload admission closed, or once it was ready, as once the announcer of the
+    /// workload's listeners that its application started ended.
     Unactivated {
         /// The status of `nvx::protocol::status` of the failure's class, with which the worker
         /// ends.
@@ -770,7 +797,20 @@ fn serve<S: Read + Write + AsFd>(
         if backlogged && !connection.is_backlogged() {
             continue;
         }
-        wait(&connection, &executions, phase.deadline())?;
+        let announcer = operations.announcer();
+        // Once a clone's announcer ended, whenever it ends, the gateway keeps publishing the
+        // listeners that it last announced, and learns of no later change of them: the clone's
+        // activation fails finally with the network's class, which ends the clone.
+        if wait(&connection, &executions, phase.deadline(), announcer)?
+            && let Some(problem) = operations.announcer_ended()
+        {
+            executions.clear();
+            let worked = Worked::Unactivated {
+                status: status::ACTIVATION_NETWORK,
+                problem,
+            };
+            return end(&mut connection, worked);
+        }
     }
 }
 
@@ -840,15 +880,18 @@ fn open_tty(tty: &Path) -> Result<File, ServeError> {
         })
 }
 
-/// Waits until the session's stream or an execution's descriptor polls ready, the earliest
-/// deadline of the executions passes, or `deadline`, the session's own, if it has one; at once if
-/// the connection holds bytes that the worker takes next. The worker waits for the host's messages
-/// unless the connection is overloaded, and for the executions' output unless it is backlogged.
+/// Waits until the session's stream, an execution's descriptor, or `announcer`, the pidfd of the
+/// announcer of a clone's listeners, if any, polls ready, the earliest deadline of the executions
+/// passes, or `deadline`, the session's own, if it has one; at once if the connection holds bytes
+/// that the worker takes next. The worker waits for the host's messages unless the connection is
+/// overloaded, and for the executions' output unless it is backlogged. Returns whether the
+/// announcer's pidfd polled readable, once the announcer ended.
 fn wait<S: Read + Write + AsFd>(
     connection: &Connection<S>,
     executions: &Executions,
     deadline: Option<Instant>,
-) -> Result<(), ServeError> {
+    announcer: Option<BorrowedFd<'_>>,
+) -> Result<bool, ServeError> {
     let overloaded = connection.is_overloaded();
     let mut events = PollFlags::empty();
     if !overloaded {
@@ -859,6 +902,10 @@ fn wait<S: Read + Write + AsFd>(
     }
     let mut descriptors = vec![PollFd::new(connection.descriptor(), events)];
     executions.poll_descriptors(&mut descriptors, connection.is_backlogged());
+    let announcing = announcer.map(|pidfd| {
+        descriptors.push(PollFd::new(pidfd, PollFlags::POLLIN));
+        descriptors.len() - 1
+    });
     let deadline = [executions.deadline(), deadline]
         .into_iter()
         .flatten()
@@ -882,7 +929,11 @@ fn wait<S: Read + Write + AsFd>(
         }
     };
     match poll::poll(&mut descriptors, timeout) {
-        Ok(_) | Err(Errno::EINTR) => Ok(()),
+        Ok(_) | Err(Errno::EINTR) => Ok(announcing.is_some_and(|index| {
+            descriptors[index]
+                .revents()
+                .is_some_and(|events| !events.is_empty())
+        })),
         Err(error) => Err(ServeError::Session(GuestConnectionError::Io(error.into()))),
     }
 }
@@ -1324,9 +1375,10 @@ impl RootOperations for LibraryRoot {
     }
 
     /// Runs `nvx::guest::root::Root::teardown`, once it closed the host export's root, which keeps
-    /// the export busy, and, for a clone, `nvx::guest::clone::Applied::teardown`, which removes
-    /// the runtime's binds that the application made on the root first, since they keep the root's
-    /// mount busy too. A root whose teardown failed keeps its mounts.
+    /// the export busy, and, for a clone, `nvx::guest::clone::Applied::teardown`, which stops the
+    /// announcer that the application started, if any, and removes the runtime's binds that the
+    /// application made on the root first, since they keep the root's mount busy too. A root whose
+    /// teardown failed keeps its mounts.
     fn teardown(&mut self) -> Result<(), String> {
         self.export = None;
         match self.root.take() {
@@ -1335,9 +1387,39 @@ impl RootOperations for LibraryRoot {
         }
     }
 
+    /// Lends the pidfd of the announcer that a clone's application started, through
+    /// `nvx::guest::clone::Applied::announcer`.
+    fn announcer(&self) -> Option<BorrowedFd<'_>> {
+        match &self.root {
+            #[cfg(target_arch = "x86_64")]
+            Some(Assembled::Clone(applied)) => applied.announcer().map(Announcer::pidfd),
+            _ => None,
+        }
+    }
+
+    /// Collects the status of the announcer that a clone's application started, with
+    /// `nvx::guest::ingress::Announcer::try_wait`.
+    fn announcer_ended(&mut self) -> Option<String> {
+        match &mut self.root {
+            #[cfg(target_arch = "x86_64")]
+            Some(Assembled::Clone(applied)) => match applied.announcer_mut()?.try_wait() {
+                Ok(None) => None,
+                Ok(Some(status)) => Some(format!(
+                    "the announcer of the workload's listeners ended: {status}"
+                )),
+                Err(error) => Some(format!(
+                    "the status of the announcer of the workload's listeners cannot be collected: \
+                     {error}"
+                )),
+            },
+            _ => None,
+        }
+    }
+
     /// Runs `nvx::guest::clone::apply`, and keeps the root and the runtime's binds that it made,
-    /// and the root of the host export that it mounted, if the record has one, from which the
-    /// worker maps the host's mapping table, as after a cold boot.
+    /// the announcer that it started, if any, and the root of the host export that it mounted, if
+    /// the record has one, from which the worker maps the host's mapping table, as after a cold
+    /// boot.
     #[cfg(target_arch = "x86_64")]
     fn apply(
         &mut self,

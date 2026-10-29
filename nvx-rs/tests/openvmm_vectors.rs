@@ -2,9 +2,9 @@
 //! protocol vectors and the excerpts of OpenVMM's sources in `tests/vectors/openvmm/`, and the
 //! versions of OpenVMM's contracts in `nvx::contract`.
 //!
-//! The protocol's tests read the copies, and the unit tests of `nvx::host::template` compile the
-//! excerpts, because the `nvx-rs` job cannot check out the submodule, whose deploy key fork pull
-//! requests lack. This test is ignored by default: the NVX CLI jobs, which check out the
+//! The protocol's tests read the copies, and the unit tests of `nvx::host::template` compile or
+//! read the excerpts, because the `nvx-rs` job cannot check out the submodule, whose deploy key
+//! fork pull requests lack. This test is ignored by default: the NVX CLI jobs, which check out the
 //! submodule, run it, and so does an OpenVMM pin promotion.
 
 use std::fs;
@@ -21,7 +21,7 @@ const FILES: [&str; 2] = [
 
 /// The excerpts of OpenVMM's sources that `tests/vectors/openvmm/` copies: for each, its file
 /// there, and the file of the OpenVMM submodule whose lines it copies, unchanged.
-const EXCERPTS: [(&str, &str); 2] = [
+const EXCERPTS: [(&str, &str); 3] = [
     (
         "microvm_control_tty_command_line.rs",
         "openvmm/openvmm_defs/src/microvm.rs",
@@ -29,6 +29,10 @@ const EXCERPTS: [(&str, &str); 2] = [
     (
         "platform_command_line_token_is_invariant.rs",
         "openvmm/openvmm_helpers/src/snapshot/microvm.rs",
+    ),
+    (
+        "port_forward_socket_creation.rs",
+        "vm/devices/net/net_consomme/src/resolver.rs",
     ),
 ];
 
