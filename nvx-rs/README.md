@@ -839,8 +839,9 @@ Windows.
 `prepared`: `PreparedLaunch`, the launch of a plan with the checked files of its
 block devices, which renders the plan's OpenVMM arguments and kernel command
 line, naming the checked files as `/proc/self/fd/N` on Linux and by their final
-paths on Windows, and lists the descriptors that the VMM inherits through
-`VmmCommand::inherit`; see [Checked handoff](#checked-handoff).
+paths on Windows, lists the descriptors or handles that the VMM inherits through
+`VmmCommand::inherit`, and releases the checked files, and on Windows the VMM's
+copies of them, at authenticated Ready; see [Checked handoff](#checked-handoff).
 
 ### `nvx::testing::fake_openvmm`
 
@@ -1397,9 +1398,10 @@ handle is a guard that holds no access to the image's content, shares reading
 and writing, and denies deleting and renaming the image, and the check makes
 sure that no other process has the image open for writing, as another sandbox's
 VMM does, then opens the image for writing, sharing every access, as the claim's
-handle, which the VMM inherits: so the VMM holds the claim from its start, even
-if the launcher ends before the VMM has opened the image. Claims exclude the
-launches of NVX, not a process that writes the image on its own.
+handle. The VMM inherits the claim's handle and the guard: so it holds the
+claim, and the guard the image's path, from its start, even if the launcher ends
+before the VMM has opened the image. Claims exclude the launches of NVX, not a
+process that writes the image on its own.
 
 `PreparedLaunch::new` takes a `SandboxPlan`, the `CheckedDistro` that
 `DistroBinding::check` returned for its image, and, for an upper on scratch,
@@ -1423,14 +1425,19 @@ the VMM inherits:
   The checked files hold that path in place: the distro layer's file denies
   writing and deleting the layer, the scratch image's guard denies deleting and
   renaming it, and NTFS renames no directory while a file below it is open;
-  OpenVMM's opens share them. A launcher that ends before OpenVMM has opened
-  the images, as when it crashes, closes the checked files early, so that a
-  replacement at their paths would then reach OpenVMM unchecked, and
-  [#780](https://github.com/microsoft/nvx/issues/780) tracks holding the paths
-  in that case; `start` never commits such a launch, and the sandbox's next
-  transition ends its VMM. The VMM inherits one handle, which no argument
-  names: the scratch image's claim, through `VmmCommand::inherit` and
-  `PreparedLaunch::inherited`. A final path that OpenVMM could not take as the
+  OpenVMM's opens share them. The VMM also inherits the handles of the checked
+  files and the scratch image's claim, though no argument names a handle,
+  through `VmmCommand::inherit` and `PreparedLaunch::inherited`, so that its
+  copies hold the paths and the claim from its start: a launcher that ends
+  before OpenVMM has opened the images, as when it crashes, closes only its own
+  checked files, and a replacement at their paths still fails until OpenVMM
+  exits; `start` never commits such a launch, and the sandbox's next transition
+  ends its VMM. At authenticated Ready, `PreparedLaunch::release` closes
+  OpenVMM's copies of the checked files with `DuplicateHandle` and
+  `DUPLICATE_CLOSE_SOURCE`, through the VMM's process handle that its launch
+  holds, once a copy of each is found to hold the checked file's object, and
+  then the checked files themselves, so that the guards are released while
+  OpenVMM keeps the claim. A final path that OpenVMM could not take as the
   path of a raw image, with a comma, semicolon, or unbalanced brackets, or
   ending in `.vhd`, `.vhdx`, `.vmgs`, or `.iso`, which a link, the directory of
   a relative path, or the case of a name on disk can bring, fails the preparation
@@ -1441,11 +1448,11 @@ container format by the file's extension, which `/proc/self/fd/N` lacks, so a
 caller whose images use a container format, such as a fixed VHD, stages a raw
 file. The paths in the arguments hold for the launch alone: the plan, which
 callers persist, keeps the real paths. The caller adds its own arguments,
-starts the VMM, and drops the prepared launch once the guest reports
-authenticated Ready, or once it has torn down a launch that failed; the VMM's
-own opens then keep the images, and what it inherited keeps the scratch
-image's claim. Staging, the checks, and the preparation of a launch read no
-content of the images.
+starts the VMM, and releases the prepared launch with `PreparedLaunch::release`
+once the guest reports authenticated Ready, or drops it once it has torn down a
+launch that failed; the VMM's own opens then keep the images, and what it
+inherited keeps the scratch image's claim. Staging, the checks, and the
+preparation of a launch read no content of the images.
 
 The clone of a template takes its block devices by path instead, as the
 template's capture does, since OpenVMM opens the files of a restore itself:
@@ -1457,8 +1464,8 @@ template recorded for its own, which `CheckedDistro::geometry` and
 `nvx-rs sandbox provision` records the scratch image's binding under
 `scratch_binding` in `config.json`, at the image's resolved path, and `start`
 checks it after the distro binding, and launches OpenVMM through a prepared
-launch, which it drops once the guest is ready or OpenVMM has exited. A
-scratch image that changed fails as a distro layer does, such as with
+launch, which it releases once the guest is ready, or drops once OpenVMM has
+exited. A scratch image that changed fails as a distro layer does, such as with
 `IMAGE changed after its scratch binding was made: its length differs;
 deprovision the sandbox and provision it again`, and one that another sandbox
 claims with `another sandbox claims the ext4 scratch image IMAGE`. `run` binds
@@ -2001,7 +2008,8 @@ guest agents of NVX advertise bits 0, 4, and 6 in sandbox mode.
   fails; see [Checked handoff](#checked-handoff). OpenVMM inherits no other
   descriptor or handle of `run` beyond its standard streams, as `subprocess.run`
   passes none with `close_fds`: on Windows, OpenVMM's handle list holds copies
-  of `run`'s standard handles and the scratch image's claim alone.
+  of `run`'s standard handles, its checked files, and the scratch image's claim
+  alone.
 - `start` and `exec` refuse, and `stop` terminates, a VM that another runtime
   identity started; see [Runtime identity](#runtime-identity).
 - `run --restore-snapshot` refuses `--net`, whose addressing a restored NIC

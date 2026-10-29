@@ -1888,6 +1888,26 @@ fn wait_for(path: &Path) {
     }
 }
 
+/// Waits until the file at `path` holds a whole JSON document, and returns it: the fake OpenVMM
+/// writes its dumps with `fs::write`, which creates a file before it writes the file's content.
+fn wait_for_json(path: &Path) -> Value {
+    let deadline = std::time::Instant::now() + Duration::from_secs(60);
+    loop {
+        let parsed = fs::read_to_string(path)
+            .ok()
+            .and_then(|text| serde_json::from_str(&text).ok());
+        if let Some(document) = parsed {
+            return document;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "{} holds no whole JSON document",
+            path.display()
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
 #[test]
 fn start_hands_openvmm_the_images_that_it_checked() {
     // Images that something replaces after the start checked them and before OpenVMM opens them:
@@ -1987,6 +2007,106 @@ fn start_hands_openvmm_the_images_that_it_checked() {
             text(&output.stderr)
         );
     }
+}
+
+#[test]
+fn a_start_that_ends_before_openvmm_opens_the_images_leaves_it_the_checked_ones() {
+    // A start that ends after it spawned OpenVMM and before OpenVMM opened its images, as when the
+    // CLI crashes, closes its checked files early: on Windows, the copies of them that OpenVMM
+    // inherited keep anything from replacing the images at their final paths until OpenVMM exits;
+    // on Linux, OpenVMM opens the checked files through the descriptors that it inherited,
+    // whatever has their paths. The sandbox's next transition ends that OpenVMM.
+    let root = Root::new();
+    // OpenVMM opens its images seconds after it starts, and a guest that answers after a minute
+    // keeps the start waiting.
+    provisioned_with(
+        &root,
+        "state",
+        "fake_block_delay_ms=3000 fake_boot_delay_ms=60000",
+    );
+    let distro = root.path.join("distro.erofs");
+    let scratch = root.path.join("scratch.ext4");
+    let mut start = Command::new(NVX_RS)
+        .arg("--root")
+        .arg(&root.path)
+        .args(lifecycle("start", &root, "state"))
+        .current_dir(&root.path)
+        .env_remove("NVX_OPENVMM")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    // The start recorded its OpenVMM in its launch journal right after it spawned it.
+    let journal = root.path.join("state").join("launch.json");
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let reference: ProcessRef = loop {
+        let recorded = fs::read_to_string(&journal)
+            .ok()
+            .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+            .and_then(|journal| serde_json::from_value(journal.get("process")?.clone()).ok());
+        if let Some(reference) = recorded {
+            break reference;
+        }
+        assert!(Instant::now() < deadline, "the start recorded no OpenVMM");
+        thread::sleep(Duration::from_millis(20));
+    };
+    // The CLI dies, as a crash would, before OpenVMM has opened its images, and leaves it running.
+    start.kill().unwrap();
+    start.wait().unwrap();
+    let process = Process::open(&reference)
+        .unwrap()
+        .expect("the OpenVMM of the start runs");
+    let blocks = root
+        .path
+        .join("build")
+        .join("fake-openvmm-state-blocks.json");
+    assert!(!blocks.exists());
+    for (path, replacement) in [
+        (&distro, "replaced distro\n"),
+        (&scratch, "replaced scratch\n"),
+    ] {
+        let new = path.with_extension("new");
+        fs::write(&new, replacement).unwrap();
+        let replaced = fs::rename(&new, path);
+        assert_eq!(
+            replaced.is_ok(),
+            cfg!(unix),
+            "{}: {replaced:?}",
+            path.display()
+        );
+    }
+
+    // OpenVMM opens the objects that the start checked, and dumps what they held while the start's
+    // OpenVMM still runs: the dump is whole once it parses, which no prefix of it does.
+    let opened = wait_for_json(&blocks);
+    let opened: Vec<(&str, &str)> = opened
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|block| {
+            (
+                block["role"].as_str().unwrap(),
+                block["content"].as_str().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(opened, [("distro", "distro\n"), ("scratch", "scratch\n")]);
+
+    // The next transition ends the start, whose OpenVMM it verifies through the journal, and the
+    // copies of the checked files go with OpenVMM: on Windows, the images can be renamed again.
+    assert_eq!(
+        transition(&root, "stop", "state", &[]),
+        failed("sandbox-not-running", "sandbox is not running")
+    );
+    assert!(process.has_exited().unwrap());
+    #[cfg(windows)]
+    for path in [&distro, &scratch] {
+        let moved = path.with_extension("moved");
+        fs::rename(path, &moved).unwrap();
+        fs::rename(&moved, path).unwrap();
+    }
+    assert_eq!(transition(&root, "deprovision", "state", &[]), succeeded());
 }
 
 /// Makes `handle` inheritable, or not, as code that spawns without a handle list does around its

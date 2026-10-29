@@ -3,16 +3,17 @@ use std::fs::{self, OpenOptions};
 use std::io;
 use std::os::windows::ffi::OsStrExt;
 use std::os::windows::fs::OpenOptionsExt;
-use std::os::windows::io::{AsHandle, AsRawHandle, FromRawHandle, OwnedHandle, RawHandle};
+use std::os::windows::io::{
+    AsHandle, AsRawHandle, BorrowedHandle, FromRawHandle, OwnedHandle, RawHandle,
+};
 use std::path::Path;
 use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::thread;
 use std::time::{Duration, Instant};
 use std::{mem, ptr};
 
-#[cfg(feature = "cli")]
-use windows_sys::Win32::Foundation::{DUPLICATE_SAME_ACCESS, DuplicateHandle};
 use windows_sys::Win32::Foundation::{
+    CompareObjectHandles, DUPLICATE_CLOSE_SOURCE, DUPLICATE_SAME_ACCESS, DuplicateHandle,
     ERROR_ACCESS_DENIED, ERROR_ALREADY_EXISTS, ERROR_BROKEN_PIPE, ERROR_FILE_NOT_FOUND,
     ERROR_INVALID_PARAMETER, ERROR_IO_PENDING, ERROR_MORE_DATA, ERROR_NO_DATA,
     ERROR_OPERATION_ABORTED, ERROR_PIPE_BUSY, ERROR_PIPE_CONNECTED, ERROR_PIPE_NOT_CONNECTED,
@@ -207,7 +208,9 @@ pub fn process_start_time(pid: u32) -> io::Result<Option<u64>> {
 ///
 /// [`terminate`]: Self::terminate
 pub(crate) struct ProcessHandle {
-    /// Process handle with query-limited-information and synchronize access.
+    /// Process handle with query-limited-information and synchronize access, or with every
+    /// access, the right to duplicate the process's handles included, for a process that this
+    /// one launched, as [`LaunchedProcess::pin`] holds it.
     process: OwnedHandle,
     /// Whether the handle also has terminate access.
     terminate: bool,
@@ -264,6 +267,71 @@ impl ProcessHandle {
             },
             || has_exited(&self.process),
         )
+    }
+
+    /// Closes the handle of process `pid` that has the value of this process's handle `ours`,
+    /// which the process inherited from this one: a handle keeps its value in a child that
+    /// inherits it, and a child that never uses it, as a VMM never uses the guards of the checked
+    /// files that it inherits, keeps it there.
+    ///
+    /// The process loses no other handle: the handle is closed only once a copy of it is found to
+    /// hold the object of `ours`, so a process that did not inherit `ours` keeps every handle that
+    /// it has, and the close fails with [`io::ErrorKind::InvalidInput`], or as `DuplicateHandle`
+    /// fails for a value that names no handle of the process. A process that has exited has closed
+    /// its handles, so the close succeeds. Fails with [`io::ErrorKind::PermissionDenied`] through
+    /// a handle that may not duplicate the handles of the process, as one that [`open_process`]
+    /// returns: only that of [`LaunchedProcess::pin`] may.
+    pub(crate) fn close_inherited(&self, pid: u32, ours: BorrowedHandle<'_>) -> io::Result<()> {
+        let value = ours.as_raw_handle() as HANDLE;
+        let exited = || has_exited(&self.process);
+        let mut copy = ptr::null_mut();
+        // SAFETY: the value is looked up among the handles of the process alone, and the output
+        // pointer is valid.
+        let duplicated = unsafe {
+            DuplicateHandle(
+                raw(&self.process),
+                value,
+                GetCurrentProcess(),
+                &mut copy,
+                0,
+                0,
+                DUPLICATE_SAME_ACCESS,
+            )
+        } != 0;
+        if !duplicated {
+            return super::unless_exited(Err(io::Error::last_os_error()), exited);
+        }
+        let copy =
+            owned(copy).ok_or_else(|| io::Error::other("DuplicateHandle returned no handle"))?;
+        // SAFETY: both handles are open.
+        if unsafe { CompareObjectHandles(raw(&copy), value) } == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "process {pid} did not inherit handle {:#x} of this process",
+                    value as usize
+                ),
+            ));
+        }
+        drop(copy);
+        // SAFETY: without a target process, DuplicateHandle duplicates nothing, and only closes
+        // the handle of the process, which holds the object of `ours`.
+        let closed = unsafe {
+            DuplicateHandle(
+                raw(&self.process),
+                value,
+                ptr::null_mut(),
+                ptr::null_mut(),
+                0,
+                0,
+                DUPLICATE_CLOSE_SOURCE,
+            )
+        } != 0;
+        if closed {
+            Ok(())
+        } else {
+            super::unless_exited(Err(io::Error::last_os_error()), exited)
+        }
     }
 }
 
@@ -2284,10 +2352,6 @@ mod tests {
     /// Returns whether the handle `value` of `process` refers to the object that `ours` holds, as
     /// a handle that the process inherited from this one does, under the same value.
     fn holds(process: &OwnedHandle, value: HANDLE, ours: &impl AsRawHandle) -> bool {
-        use windows_sys::Win32::Foundation::{
-            CompareObjectHandles, DUPLICATE_SAME_ACCESS, DuplicateHandle,
-        };
-
         let mut copy = ptr::null_mut();
         // SAFETY: the process handle has full access, the value is only looked up in that
         // process, and the output pointer is valid.
@@ -2330,6 +2394,54 @@ mod tests {
             )
         };
         assert_ne!(set, 0, "{}", io::Error::last_os_error());
+    }
+
+    #[test]
+    fn a_child_loses_only_the_inherited_handle_that_is_closed_in_it() {
+        let directory = tempfile::tempdir().unwrap();
+        let closed = std::fs::File::create(directory.path().join("closed")).unwrap();
+        let kept = std::fs::File::create(directory.path().join("kept")).unwrap();
+        let (_other_reader, other) = io::pipe().unwrap();
+        let (stdin, _stdin_writer) = io::pipe().unwrap();
+        let (_stdout_reader, stdout) = io::pipe().unwrap();
+        let stderr = stdout.try_clone().unwrap();
+        let system = std::env::var_os("SystemRoot").unwrap();
+        let ping = Path::new(&system).join("System32").join("PING.EXE");
+        let child = spawn_detached(
+            &ping,
+            &["-n", "30", "127.0.0.1"].map(OsString::from),
+            &std::env::temp_dir(),
+            [stdin.into(), stdout.into(), stderr.into()],
+            &[Inherited::new(&closed), Inherited::new(&kept)],
+            false,
+        )
+        .unwrap();
+        let pid = child.id();
+        let (process, start_time) = child.pin().unwrap();
+        let value = |handle: &std::fs::File| handle.as_raw_handle() as HANDLE;
+        let held = |handle: &std::fs::File| holds(&child.process, value(handle), handle);
+        let inherited = (held(&closed), held(&kept));
+        // A handle that the child did not inherit is not closed in it, and neither is any of its
+        // own.
+        let refused = process.close_inherited(pid, other.as_handle());
+        // A process found again, through a handle that may not duplicate its handles, keeps them.
+        let found = open_process(pid, start_time).unwrap().unwrap();
+        let denied = found.close_inherited(pid, closed.as_handle());
+        let closing = process.close_inherited(pid, closed.as_handle());
+        let after = (held(&closed), held(&kept));
+        assert!(child.terminate(Duration::from_secs(10)));
+        // Once the child has exited, it holds no handle, so a close succeeds.
+        let exited = process.close_inherited(pid, kept.as_handle());
+        assert_eq!(inherited, (true, true), "the child did not inherit both");
+        assert!(refused.is_err(), "{refused:?}");
+        assert_eq!(denied.unwrap_err().kind(), io::ErrorKind::PermissionDenied);
+        closing.unwrap();
+        assert_eq!(
+            after,
+            (false, true),
+            "the close did not take the closed handle alone"
+        );
+        exited.unwrap();
     }
 
     #[test]

@@ -1208,9 +1208,16 @@ fn launch(
                 println!("root=ready");
                 println!("build={}", escape(ready.build()));
                 // The guest has assembled the root, so OpenVMM holds the images: the checked files
-                // can go, which releases their guards, while OpenVMM keeps the scratch image's
-                // claim.
-                drop(prepared);
+                // can go, with OpenVMM's copies of them on Windows, which releases their guards,
+                // while OpenVMM keeps the scratch image's claim.
+                if let Some(prepared) = prepared.take() {
+                    prepared.release(starting.process()).map_err(|error| {
+                        failed(format!(
+                            "cannot release the checked files: {}",
+                            describe(&error)
+                        ))
+                    })?;
+                }
                 deadline += step(hook, Step::Ready)?;
             }
             Err(OrderError::Root(failure)) => {

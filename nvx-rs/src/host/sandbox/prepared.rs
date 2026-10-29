@@ -23,16 +23,14 @@
 //!   place until they are closed: the distro layer's file denies other opens for writing or
 //!   deleting the layer, the scratch image's guard denies deleting or renaming it, and NTFS renames
 //!   no directory while a file below it is open. OpenVMM's read-only open of the layer, and its
-//!   open of the scratch image for reading and writing, share them. A caller that ends before the
-//!   VMM has opened the images, as when it crashes, closes the checked files early, so that a
-//!   replacement at their paths would then reach the VMM unchecked;
-//!   [#780](https://github.com/microsoft/nvx/issues/780) tracks holding the paths in that case.
-//!   The VMM inherits one handle, which no argument names: the claim's handle of the scratch
-//!   image, so that it holds the claim from its start, even if the caller ends before the VMM has
-//!   opened the image. A final path that OpenVMM could not take as the path of a raw image, with a
-//!   comma, semicolon, unbalanced brackets, or a container's extension, which a link on the way,
-//!   the directory of a relative path, or the case of a name on disk can bring, fails the
-//!   preparation.
+//!   open of the scratch image for reading and writing, share them. The VMM also inherits their
+//!   handles, and the claim's handle of the scratch image, though no argument names a handle, so
+//!   that its copies hold the paths, and the claim, from its start, even if the caller ends before
+//!   the VMM has opened the images, as when it crashes: a replacement at their paths then fails
+//!   until the VMM exits, and never reaches it unchecked. A final path that OpenVMM could not take
+//!   as the path of a raw image, with a comma, semicolon, unbalanced brackets, or a container's
+//!   extension, which a link on the way, the directory of a relative path, or the case of a name
+//!   on disk can bring, fails the preparation.
 //! - Other hosts cannot check files, so no launch is prepared there.
 //!
 //! Images are raw: OpenVMM attaches a file's bytes as they are, and the launch never converts an
@@ -42,9 +40,13 @@
 //! renders them, and the plan, which callers persist, keeps the real paths. The caller adds its own
 //! arguments, such as its boot console, CPU profile, and guest control, starts the VMM with
 //! [`PreparedLaunch::inherited`] as its allowlist, and holds the prepared launch until the guest
-//! reports authenticated Ready, or until it has torn down a launch that failed. Dropping it then
-//! closes the checked files, which releases the guards, while the VMM keeps its own opens of the
-//! images, and the claim of the scratch image, which it inherited.
+//! reports authenticated Ready, when [`PreparedLaunch::release`] closes the checked files, which
+//! releases the guards, or until it has torn down a launch that failed, when dropping the prepared
+//! launch closes them. The VMM keeps its own opens of the images, and the claim of the scratch
+//! image, which it inherited. On Windows, the release also closes the VMM's copies of the checked
+//! files, through the handle of the VMM that its launch holds; a prepared launch that is dropped
+//! without one, as when its caller ends before the guest is ready, leaves them to the VMM until it
+//! exits.
 //!
 //! A plan never names a root identity for the workload: [`SandboxPlan::new`] refuses a zero UID
 //! or GID, so the VMM's `--microvm-workload-identity` never encodes root, and an adapter's plan,
@@ -61,7 +63,10 @@ use super::refused;
 use super::scratch::CheckedScratch;
 #[cfg(windows)]
 use super::{reject_container_path, reject_disk_path};
+#[cfg(windows)]
+use crate::error::Error;
 use crate::error::Result;
+use crate::host::process::Process;
 #[cfg(windows)]
 #[cfg(windows)]
 use crate::host::seal;
@@ -76,8 +81,9 @@ use crate::host::sys;
 /// returned. The caller then starts the VMM with [`openvmm_arguments`](Self::openvmm_arguments),
 /// its own arguments, and [`kernel_command_line`](Self::kernel_command_line), with
 /// [`inherited`](Self::inherited) as the allowlist of its
-/// [`VmmCommand`](crate::host::supervisor::VmmCommand), and drops the prepared launch once the
-/// guest reports authenticated Ready, or once a launch that failed is torn down:
+/// [`VmmCommand`](crate::host::supervisor::VmmCommand), and [releases](Self::release) the
+/// prepared launch once the guest reports authenticated Ready, or drops it once a launch that
+/// failed is torn down:
 ///
 /// ```no_run
 /// use std::ffi::OsString;
@@ -109,7 +115,7 @@ use crate::host::sys;
 /// command.inherit = prepared.inherited();
 /// let launched = supervisor::spawn(&command, capability, File::create("openvmm.log")?)?;
 /// // ... record the VMM, and wait for the guest's authenticated Ready ...
-/// drop(prepared);
+/// prepared.release(&launched.process()?)?;
 /// launched.detach();
 /// # Ok(())
 /// # }
@@ -291,31 +297,71 @@ impl PreparedLaunch {
     }
 
     /// Returns the descriptors or handles that the VMM inherits, for the allowlist of its
-    /// [`VmmCommand::inherit`](crate::host::supervisor::VmmCommand::inherit): on Linux, those of
-    /// the checked distro layer and of the checked scratch image, if any, which
-    /// [`openvmm_arguments`](Self::openvmm_arguments) names; on Windows, the claim's handle of the
-    /// checked scratch image, if any, which no argument names, since the VMM opens the checked
-    /// files by their final paths; elsewhere none.
+    /// [`VmmCommand::inherit`](crate::host::supervisor::VmmCommand::inherit): those of the checked
+    /// distro layer and of the checked scratch image, if any, which on Linux
+    /// [`openvmm_arguments`](Self::openvmm_arguments) names, and on Windows, where the VMM opens the
+    /// checked files by their final paths, hold those paths for the VMM, with the claim's handle of
+    /// the scratch image, which no argument names; elsewhere none.
     pub fn inherited(&self) -> Vec<Inherited<'_>> {
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", windows))]
         {
             let mut inherited = vec![Inherited::new(self.distro.file())];
-            inherited.extend(
-                self.scratch
-                    .as_ref()
-                    .map(|scratch| Inherited::new(scratch.file())),
-            );
+            if let Some(scratch) = &self.scratch {
+                inherited.push(Inherited::new(scratch.file()));
+                #[cfg(windows)]
+                inherited.push(Inherited::new(scratch.claim()));
+            }
             inherited
-        }
-        #[cfg(windows)]
-        {
-            self.scratch
-                .iter()
-                .map(|scratch| Inherited::new(scratch.claim()))
-                .collect()
         }
         #[cfg(not(any(target_os = "linux", windows)))]
         Vec::new()
+    }
+
+    /// Releases the checked files once the VMM has opened the images, when the guest reports
+    /// authenticated Ready, which releases their guards: on Windows, it first closes the VMM's
+    /// copies of the checked files, those of the distro layer and of the scratch image's guard,
+    /// then, on every host, the checked files themselves, as dropping the prepared launch does. The
+    /// VMM keeps its own opens of the images, and the scratch image's claim, which it inherited.
+    ///
+    /// `vmm` must be the VMM that inherited [`inherited`](Self::inherited), held as its launch
+    /// holds it: through [`Starting::process`](crate::host::supervisor::Starting::process), or
+    /// [`Launched::process`](crate::host::supervisor::Launched::process). A VMM that has exited
+    /// has closed its copies. A launch that failed needs no release: dropping the prepared launch
+    /// once the launch is torn down closes the checked files, and the VMM's copies went with it. A
+    /// prepared launch that is dropped without a release, as when its caller ends before the guest
+    /// is ready, leaves the VMM its copies until it exits.
+    ///
+    /// Fails on Windows with [`ErrorKind::Io`](crate::ErrorKind::Io) if the VMM's copy of a
+    /// checked file cannot be closed: for a `vmm` that did not inherit it, which keeps all of its
+    /// handles, or one held without the right to close them, as [`Process::open`] holds a process.
+    /// The checked files are closed whatever the outcome, and the VMM keeps the copies that remain
+    /// until it exits.
+    pub fn release(self, vmm: &Process) -> Result<()> {
+        #[cfg(windows)]
+        {
+            use std::os::windows::io::AsHandle;
+
+            let mut checked = vec![(self.distro.file(), self.distro.path())];
+            checked.extend(
+                self.scratch
+                    .as_ref()
+                    .map(|scratch| (scratch.file(), scratch.path())),
+            );
+            for (file, path) in checked {
+                vmm.close_inherited(file.as_handle()).map_err(|error| {
+                    Error::io(format!(
+                        "cannot release the guard of {}, which VMM process {} inherited",
+                        path.display(),
+                        vmm.reference().pid
+                    ))
+                    .with_source(error)
+                })?;
+            }
+        }
+        #[cfg(not(windows))]
+        let _ = vmm;
+        drop(self);
+        Ok(())
     }
 }
 
