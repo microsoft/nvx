@@ -364,18 +364,33 @@ impl Client {
     /// The guest agent of a VM with a layered root tears the root down first, and reports a
     /// teardown that failed with `RootFailed` before `Stopped`: the client returns that failure.
     pub fn stop(&mut self, deadline: Instant) -> Result<Option<RootFailure>, ClientError> {
+        self.stop_skipping(deadline, |_| false)
+    }
+
+    /// Stops the guest agent as [`stop`](Self::stop) does, but skips the guest's messages before
+    /// `Stopped` that `late` accepts: those that the guest may still send, in this attachment,
+    /// about executions that a driver finished without them, as [`Executions::is_about`] accepts
+    /// them. Any other message answers the `Stop`, as it does for [`stop`](Self::stop).
+    pub fn stop_skipping(
+        &mut self,
+        deadline: Instant,
+        mut late: impl FnMut(&Message) -> bool,
+    ) -> Result<Option<RootFailure>, ClientError> {
         let request = Message::Stop;
-        let failure = match self.request(&request, deadline)? {
-            Message::Stopped => return Ok(None),
-            Message::RootFailed(body) => self.decoded(RootFailure::decode(&body))?,
-            reply => return Err(self.mismatched(&request, &reply)),
-        };
-        match self
-            .receive(Some(deadline))
-            .map_err(|error| self.fail(error))?
-        {
-            Message::Stopped => Ok(Some(failure)),
-            reply => Err(self.mismatched(&request, &reply)),
+        self.send(&request, Some(deadline))?;
+        let mut failure = None;
+        loop {
+            match self
+                .receive(Some(deadline))
+                .map_err(|error| self.fail(error))?
+            {
+                Message::Stopped => return Ok(failure),
+                Message::RootFailed(body) if failure.is_none() => {
+                    failure = Some(self.decoded(RootFailure::decode(&body))?);
+                }
+                reply if late(&reply) => {}
+                reply => return Err(self.mismatched(&request, &reply)),
+            }
         }
     }
 

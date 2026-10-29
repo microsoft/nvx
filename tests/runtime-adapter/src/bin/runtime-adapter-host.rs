@@ -186,7 +186,12 @@
 //!   agent that does not answer the `Ping` or the `Echo` fails the clone so, through
 //!   `Started::fail`, as the restore sequence attributes the failures of its sessions. A start
 //!   that fails otherwise, at a step of the adapter's own before the clone's launch, releases the
-//!   lease.
+//!   lease. A selection that the template store refuses ends the start before it leases anything,
+//!   with the refusal's record, in the form of a failure's: a template store that does not exist,
+//!   and a generation that the store never published, or no longer holds, name no template; a
+//!   generation whose capture the restore window of its time contract no longer admits at the
+//!   host's time is expired; and one that a tombstone quarantines, or whose capture is after the
+//!   host's time, is ineligible.
 //! - `runtime-adapter-host stop STORE` reattaches and attaches as `reattach` does, then stops the
 //!   VM: it asks the guest agent to stop, which first tears down a layered root, waits for the VM
 //!   to exit, and checks the VM's outcome report. A VM whose guest agent does not confirm the stop
@@ -223,6 +228,32 @@
 //!   the broker instance's ID, as a little-endian number. The guest refuses a key that it heard of
 //!   before, and the epochs of a broker instance only advance, while a broker restored from a
 //!   snapshot has a new instance ID, so no command repeats the key of another's execution.
+//! - `runtime-adapter-host run STORE --template TEMPLATES --generation G --distro FORMAT:PATH
+//!   --distro-identity UUID --upper (scratch:PATH | ram) [--memory MIB] [--workload-identity
+//!   UID:GID] [--overlay-mode MODE] [--scratch-journal POLICY] [--first-partition-bound BYTES]
+//!   [--machine-id (image | generated)] [--network FILE] [SHARES] EXECUTION` runs one execution in
+//!   a clone of the generation G of the template store TEMPLATES, in the sandbox store STORE,
+//!   which it creates if needed, then tears the clone down. The EXECUTION is one of `exec`'s, whose
+//!   options may come among the start's, in any order, and whose PROGRAM and ARGs are every
+//!   argument after `--`. The command first reads the clone's network, and plans the clone and the
+//!   export of its shares, as `start` does, then checks that the guest takes the execution's
+//!   start, with the URL of the proxy of the clone's network, if any, in its environment, as
+//!   `exec` gives it to an execution of a clone, so that none of them fails the command once it
+//!   staged anything. Its preflight then stages the clone's images in STORE, as `stage` stages
+//!   them, which verifies the image, and hashes it only when a manifest is beside it, and prints
+//!   that it did, before the clone's start, which hashes nothing. It starts the clone as `start`
+//!   does, and ends as a start ends once the template store refuses the selection, or the clone
+//!   fails. It runs the execution in the clone's root, as `exec` runs one, through the guest
+//!   agent's execution control, in the session in which the clone's sandbox started, so that the
+//!   program, its arguments, and its environment reach the guest in the execution's start, never
+//!   in the template's boot tokens, and prints its output and outcome once it finished. The
+//!   execution finds the clone's shares beneath the root, since the restore sequence maps them
+//!   before the clone's sandbox starts. Then it stops the clone, as `stop` does, whatever the
+//!   execution did, which releases the lease once the VM exited. The stop takes the same session,
+//!   in which it skips the guest's messages about the execution that may still arrive once the
+//!   command finished it without them, as when it gave up waiting for its outcome. It holds the
+//!   sandbox's lock, which the lease took, until then, so no other command reattaches to the clone
+//!   meanwhile.
 //!
 //! Each command but `stage`, `list`, `inspect`, and `remove`, which need no artifacts, takes NVX's
 //! artifacts from the directory that `NVX_ARTIFACTS_DIR` names, a repository checkout or an
@@ -267,6 +298,7 @@
 //! - `table`: how the guest took the mapping table: `applied` or `failed`;
 //! - `mapped`: how many of the table's mappings the guest applied;
 //! - `sandbox`: `started` once the guest started the sandbox;
+//! - `preflight`: `staged` once `run` staged the images of its clone;
 //! - `PROBE.KEY`: the fact KEY that the probe named PROBE found;
 //! - `exec.N.KEY`: what execution N did, with these KEYs:
 //!   - `launch`: `started`, `failed STAGE ERRNO`, with the number of the guest's stage that failed
@@ -289,29 +321,36 @@
 //!   one that the store held;
 //! - `generation`, `key`, and `class`: the store generation of the template that `create` or
 //!   `refresh` served, or that `inspect` reports, and the identities of its compatibility key and
-//!   of its capture class, each 64 hexadecimal digits, or the store generation that `start`
-//!   leased;
+//!   of its capture class, each 64 hexadecimal digits, or the store generation that `start` or
+//!   `run` leased;
 //! - `retired` and `draining`: the generations that the eviction of `create` or `refresh` retired,
 //!   each list separated by commas, or `none`: those of the class that it deleted, or found gone
 //!   already, with those whose interrupted retirement it completed, and those that leases keep,
 //!   tombstoned;
-//! - `lease`: the identity of the lease that `start` took, 32 hexadecimal digits;
+//! - `lease`: the identity of the lease that `start` or `run` took, 32 hexadecimal digits;
 //! - `downtime` and `source`: the downtime of the leased generation's capture at the host's time,
 //!   in nanoseconds, and the clock that measured it: `monotonic`, the host's monotonic clock, on
 //!   the host's boot that captured the template, or `utc` otherwise;
-//! - `released`: the identity of the lease that a stop, or a start that failed, released;
-//! - `failure.KEY`: the record of a clone's failure, with these KEYs:
+//! - `released`: the identity of the lease that a stop, a start that failed, or the teardown of a
+//!   run released;
+//! - `failure.KEY`: the record of a clone's failure, or of the selection of a start or a run that
+//!   the template store refused, with these KEYs:
 //!   - `outcome`: what the failure is attributed to: `request`, `staging`, `host`, `unknown`,
-//!     `template`, or `repair`;
-//!   - `evidence`: what the host saw of it, which attributes it, such as `supplied-length`;
+//!     `template`, or `repair`, or, for a refused selection, `no-template`, `expired`, or
+//!     `ineligible`;
+//!   - `evidence`: what the host saw of it, which attributes it, such as `supplied-length`, or,
+//!     for a refused selection, `no-store`, `unpublished`, or `retired`, of no template,
+//!     `expired`, or `tombstone` or `early`, of an ineligible generation;
 //!   - `stage`: where the clone failed: `plan`, `launch`, `restore`, `activation`, `start`,
-//!     `commit`, `run`, or `reattach`;
-//!   - `progress`: the step that the clone reached, as `progress` spells it;
+//!     `commit`, `run`, or `reattach`, or `selection` for a refused selection;
+//!   - `progress`: the step that the clone reached, as `progress` spells it, or `none` for a
+//!     refused selection;
 //!   - `status`: the status with which the guest ended the VM, as OpenVMM's outcome report gives
 //!     it, or `none`;
 //!   - `teardown`: how the teardown that followed ended: `no-vm`, `exited`, `terminated`, or
 //!     `unresolved`;
-//!   - `code`: the code of the failure's error, such as `runtime-mismatch`;
+//!   - `code`: the code of the failure's error, such as `runtime-mismatch`, or `not-found`,
+//!     `template-tombstoned`, or `template-ineligible` for a refused selection;
 //! - `quarantined`: whether the command quarantined the generation of a clone that failed:
 //!   `yes`, for a failure of the template, or `no`;
 //! - `store`: the identity of the template store that `list` or `inspect` read, 32 hexadecimal
@@ -343,22 +382,27 @@
 //! For tests, `launch`, `reattach`, and `stop` take a step hook from the variable
 //! `RUNTIME_ADAPTER_STEP_HOOK`, which pauses the command at a named step, for a time that a launch
 //! leaves out of its deadline, or exits it there without unwinding, with status 5; see
-//! `runtime_adapter::hook`. `start` takes the
+//! `runtime_adapter::hook`. `start` and `run` take the
 //! host's time, at which the store checks the generation's eligibility, from the variable
 //! `RUNTIME_ADAPTER_HOST_TIME`, if it is set, as a clock fixture, such as another boot's; see
 //! `runtime_adapter::clone::HOST_TIME_VARIABLE`.
 //!
 //! They exit with 0 once they did what they were asked, `exec` once every execution finished,
-//! whatever its outcome, with 3 when reattach finds a VM that booted cold mismatched, with 4 when
+//! whatever its outcome, and `run` once its execution finished so, and the clone stopped, as
+//! `stop` stops one, with 3 when reattach finds a VM that booted cold mismatched, with 4 when
 //! the guest reported that a stage of the root failed, and the VM ended with the stage's status
 //! and a complete teardown, with 5 when the step hook ends a command, with 6 when the guest failed
 //! a mapping of the table, and the VM stopped gracefully, with success and a complete teardown,
 //! with 7 when `remove` finds leases that keep the generation, which it tombstoned,
 //! with 8 when a clone failed, once nothing of it runs and the command released its lease, with 9
-//! when a clone failed, and its teardown is unresolved, so that the sandbox keeps the lease, and
-//! with 1, after a diagnostic on standard error, when they fail. Anything else is a usage error,
-//! with status 2, as is a value of `RUNTIME_ADAPTER_STEP_HOOK` that sets no step hook, or of
-//! `RUNTIME_ADAPTER_HOST_TIME` that is not a host's time.
+//! when a clone failed, and its teardown is unresolved, so that the sandbox keeps the lease, with
+//! 10 when the template store refused the selection of a start or a run, so that it leased and
+//! launched nothing, and with 1, after a diagnostic on standard error, when they fail, as `run`
+//! does once its execution failed to run, after the teardown, unless the teardown ended with 4, 8,
+//! or 9, as when the clone's VM exited during the execution, which `run` then exits with, after
+//! the diagnostic. Anything else is a usage error, with status 2, as is a value of
+//! `RUNTIME_ADAPTER_STEP_HOOK` that sets no step hook, or of `RUNTIME_ADAPTER_HOST_TIME` that is
+//! not a host's time.
 
 use std::env;
 use std::error::Error;
@@ -378,18 +422,19 @@ use nvx::host::instance::generate_capability;
 use nvx::host::launch::{DEFAULT_MEMORY_MIB, LaunchSpec};
 use nvx::host::nvxs::HostConnectionError;
 use nvx::host::report::{self, Report};
+use nvx::host::sandbox::SandboxPlan;
 use nvx::host::session;
 use nvx::host::store::{CallerFiles, IdentityPart, LOG_NAME, LaunchId, LockedStore, SandboxStore};
 use nvx::host::supervisor::{self, Reattached, Starting, StopOutcome, Vmm, VmmCommand};
 use nvx::host::template::{
     Acquired, CAPTURES_NAME, Capture, CloneControl, CloneFailure, ClonePlan, Created,
-    DowntimeSource, Eligibility, Evidence, FailureRecord, HostTime, Lease, ReattachedClone,
-    RestoreDeadlines, Retirement, Store, TRANSACTION_NAME, reattach_clone,
+    DowntimeSource, Eligibility, Evidence, FailureRecord, Generation, HostTime, Lease,
+    ReattachedClone, RestoreDeadlines, Retirement, Store, TRANSACTION_NAME, reattach_clone,
 };
 use nvx::protocol::CAPABILITY_LEN;
 use nvx::protocol::root::ImageFormat;
 use nvx::uuid::Uuid;
-use nvx::{ErrorKind, Hypervisor};
+use nvx::{ErrorCode, ErrorKind, Hypervisor};
 use runtime_adapter::GUEST_BUILD;
 use runtime_adapter::capture::{
     DEFAULT_CPU_PROFILE, DEFAULT_PROCESSORS, DEFAULT_SCRATCH_LENGTH, Request,
@@ -454,6 +499,10 @@ const CLONE_FAILED: u8 = 8;
 /// VM of the clone may still run, or NVX could not record the failure before it ended the VM, and
 /// the sandbox keeps the clone's lease, and NVX's records of its launch, for a later reattach.
 const CLONE_UNRESOLVED: u8 = 9;
+/// The exit status of a start whose template store refused its selection: the store does not
+/// exist, or does not hold the generation, or the generation is expired or ineligible at the
+/// host's time, so that the start leased and launched nothing.
+const SELECTION_REFUSED: u8 = 10;
 // The timers and limits of `exec` below are values chosen for tests that make a valid
 // configuration, within the limits that the guest and the host allow: chunks of at most
 // `exec::MAX_CHUNK` bytes, at most `worker::MAX_EXECUTION_MEMORY` bytes held in the guest for
@@ -472,6 +521,15 @@ const EXEC_INPUT_FRAMES: u32 = 4;
 const EXEC_OUTPUT_FRAMES: u32 = 8;
 /// The argument that ends an execution's arguments, after which another execution may follow.
 const EXEC_END: &str = ";";
+/// The options of an execution, which `run` takes among those of a start.
+const EXECUTION_OPTIONS: [&str; 6] = [
+    "--identity",
+    "--groups",
+    "--capabilities",
+    "--numeric",
+    "--cwd",
+    "--env",
+];
 /// The command lines that the program accepts.
 const USAGE: &str = concat!(
     "usage: runtime-adapter-host\n",
@@ -506,6 +564,16 @@ const USAGE: &str = concat!(
     " [--network FILE]\n",
     "           [--share HOST:TARGET[:ro]... [--deny PATH]... [--reserved TARGET]...",
     " [--share-root DIR]...]\n",
+    "       runtime-adapter-host run STORE --template TEMPLATES --generation G",
+    " --distro FORMAT:PATH\n",
+    "           --distro-identity UUID --upper (scratch:PATH | ram) [--guest-build BUILD]",
+    " [--memory MIB]\n",
+    "           [--workload-identity UID:GID] [--overlay-mode MODE]",
+    " [--scratch-journal POLICY]\n",
+    "           [--first-partition-bound BYTES] [--machine-id (image | generated)]",
+    " [--network FILE]\n",
+    "           [--share HOST:TARGET[:ro]... [--deny PATH]... [--reserved TARGET]...",
+    " [--share-root DIR]...] EXECUTION\n",
     "       runtime-adapter-host probe STORE PROBE... [--guest-build BUILD]\n",
     "       runtime-adapter-host exec STORE [--guest-build BUILD] EXECUTION [';' EXECUTION]...\n",
     "           EXECUTION: [--identity UID:GID [--groups GID,...] [--capabilities N,...]",
@@ -605,6 +673,20 @@ enum Command {
         /// The host's time, for tests, if `RUNTIME_ADAPTER_HOST_TIME` sets one.
         time: Option<HostTime>,
     },
+    /// Start a clone of a generation of a template, run one execution in its root, and tear it
+    /// down.
+    Run {
+        /// The sandbox's store.
+        store: PathBuf,
+        /// The guest agent's build.
+        guest_build: String,
+        /// The clone.
+        request: Box<CloneOptions>,
+        /// The execution.
+        execution: Box<Execution>,
+        /// The host's time, for tests, if `RUNTIME_ADAPTER_HOST_TIME` sets one.
+        time: Option<HostTime>,
+    },
     /// Reattach to the VM, and run probes in its layered root.
     Probe {
         /// The sandbox's store.
@@ -625,7 +707,7 @@ enum Command {
     },
 }
 
-/// An execution of `exec`, as its options and arguments give it.
+/// An execution of `exec` or `run`, as its options and arguments give it.
 #[derive(Default)]
 struct Execution {
     /// `--identity`: the user ID and the group ID.
@@ -765,7 +847,7 @@ impl Serving {
     }
 }
 
-/// The clone of `start`, as its options give it.
+/// The clone of `start` or `run`, as its options give it.
 struct CloneOptions {
     /// The template store.
     templates: PathBuf,
@@ -776,6 +858,44 @@ struct CloneOptions {
     /// The file of the clone's network, if it has one, which the start reads first, as a launch
     /// reads its network.
     network: Option<PathBuf>,
+}
+
+impl CloneOptions {
+    /// Reads the clone's network, if it has one, as a launch reads its network, then plans the
+    /// clone's layered root, with that network, and the export of the clone's shares, if it has
+    /// any, as a launch plans its own, or says why it cannot: a network that the plan refuses,
+    /// then an image, or shares, that it refuses. It needs nothing but the options, and the files
+    /// that they name, and creates nothing. NVX's plan of the clone then requires the template's
+    /// network of it.
+    fn plan(&self) -> Result<PlannedClone, String> {
+        let network = self
+            .network
+            .as_deref()
+            .map(read_network)
+            .transpose()
+            .map_err(|error| describe(&error))?;
+        let request = runtime_adapter::clone::Request {
+            network,
+            ..self.request.clone()
+        };
+        let plan = request.plan().map_err(|error| describe(&error))?;
+        let export = request.export().map_err(|error| describe(&error))?;
+        Ok(PlannedClone {
+            request,
+            plan,
+            export,
+        })
+    }
+}
+
+/// The clone of `start` or `run`, as [`CloneOptions::plan`] planned it.
+struct PlannedClone {
+    /// The clone's image, upper, memory target, settings, and network.
+    request: runtime_adapter::clone::Request,
+    /// The adapter's plan of the clone's image over its upper, with its network.
+    plan: SandboxPlan,
+    /// The export of the host paths that the clone shares with its root, if any.
+    export: Option<ExportPlan>,
 }
 
 /// The options of a command.
@@ -848,7 +968,9 @@ fn main() -> ExitCode {
             format,
             identity,
             scratch,
-        } => stage(&store, &distro, format, identity, scratch.as_deref()),
+        } => {
+            stage(&store, &distro, format, identity, scratch.as_deref()).map(|()| ExitCode::SUCCESS)
+        }
         Command::Launch {
             store,
             guest_agent,
@@ -901,6 +1023,13 @@ fn main() -> ExitCode {
             request,
             time,
         } => start(&store, &guest_build, &request, time),
+        Command::Run {
+            store,
+            guest_build,
+            request,
+            execution,
+            time,
+        } => run(&store, &guest_build, &request, &execution, time),
         Command::Probe {
             store,
             guest_build,
@@ -928,7 +1057,7 @@ fn parse(arguments: Vec<OsString>) -> Result<Command, String> {
     let name = match name.to_str() {
         Some(
             name @ ("stage" | "launch" | "create" | "refresh" | "list" | "inspect" | "remove"
-            | "reattach" | "stop" | "start" | "probe" | "exec"),
+            | "reattach" | "stop" | "start" | "run" | "probe" | "exec"),
         ) => name.to_owned(),
         _ => return Err(format!("unknown command {name:?}")),
     };
@@ -940,6 +1069,9 @@ fn parse(arguments: Vec<OsString>) -> Result<Command, String> {
     })?);
     if name == "exec" {
         return parse_exec(store, arguments);
+    }
+    if name == "run" {
+        return parse_run(store, arguments);
     }
     if matches!(name.as_str(), "list" | "inspect" | "remove") {
         return parse_generations(&name, store, arguments);
@@ -964,6 +1096,7 @@ fn parse(arguments: Vec<OsString>) -> Result<Command, String> {
     }
     let guest_build = options
         .guest_build
+        .take()
         .unwrap_or_else(|| GUEST_BUILD.to_owned());
     Ok(match name.as_str() {
         "stage" => {
@@ -1074,44 +1207,12 @@ fn parse(arguments: Vec<OsString>) -> Result<Command, String> {
                 },
             }
         }
-        "start" => {
-            let templates = options.template.ok_or("start needs --template")?;
-            let generation = options.generation.ok_or("start needs --generation")?;
-            let (format, distro) = options.distro.ok_or("start needs --distro")?;
-            let identity = options.identity.ok_or("start needs --distro-identity")?;
-            let scratch = options.upper.ok_or("start needs --upper")?;
-            if scratch.is_none() && options.scratch_journal.is_some() {
-                return Err("--scratch-journal needs --upper scratch:PATH".to_owned());
-            }
-            if format == ImageFormat::Erofs && options.first_partition_bound.is_some() {
-                return Err("--first-partition-bound needs --distro gpt:PATH".to_owned());
-            }
-            check_shares(&options.sharing)?;
-            Command::Start {
-                store,
-                guest_build,
-                request: Box::new(CloneOptions {
-                    templates,
-                    generation,
-                    request: runtime_adapter::clone::Request {
-                        distro,
-                        format,
-                        identity,
-                        scratch,
-                        memory: options.memory,
-                        workload_identity: options.workload_identity,
-                        overlay_mode: options.overlay_mode,
-                        scratch_journal: options.scratch_journal,
-                        first_partition_bound: options.first_partition_bound,
-                        machine_id: options.machine_id.unwrap_or(MachineIdMode::Image),
-                        sharing: options.sharing,
-                        network: None,
-                    },
-                    network: options.network,
-                }),
-                time: host_time_from_env()?,
-            }
-        }
+        "start" => Command::Start {
+            store,
+            guest_build,
+            request: Box::new(clone_options(&name, options)?),
+            time: host_time_from_env()?,
+        },
         "probe" if probes.is_empty() => return Err("probe needs a probe".to_owned()),
         "probe" => Command::Probe {
             store,
@@ -1141,8 +1242,12 @@ fn parse_option(
             .into_string()
             .map_err(|value| format!("the value {value:?} of {option} is not Unicode"))
     };
-    // A refresh takes the options of a creation.
-    let command = if name == "refresh" { "create" } else { name };
+    // A refresh takes the options of a creation, and a run those of a start.
+    let command = match name {
+        "refresh" => "create",
+        "run" => "start",
+        name => name,
+    };
     match (command, option) {
         ("launch" | "create", "--guest-agent") if options.guest_agent.is_none() => {
             options.guest_agent = Some(PathBuf::from(value));
@@ -1297,8 +1402,8 @@ fn parse_option(
     Ok(())
 }
 
-/// Says why the options of `sharing`, of a launch or a start, are not a command's: `--deny`,
-/// `--reserved`, or `--share-root` without a `--share`.
+/// Says why the options of `sharing`, of a launch, a start, or a run, are not a command's:
+/// `--deny`, `--reserved`, or `--share-root` without a `--share`.
 fn check_shares(sharing: &HostFsSharing) -> Result<(), String> {
     let options = [
         ("--deny", !sharing.denied().is_empty()),
@@ -1346,38 +1451,7 @@ fn parse_exec(
                 .ok_or_else(|| format!("{option:?} needs a value"))??;
             match option.as_str() {
                 "--guest-build" if guest_build.is_none() => guest_build = Some(value),
-                "--identity" if execution.identity.is_none() => {
-                    let identity = ids(&value)
-                        .ok_or_else(|| format!("--identity takes UID:GID, not {value:?}"))?;
-                    execution.identity = Some(identity);
-                }
-                "--groups" if execution.groups.is_none() => {
-                    let groups =
-                        numbers(&value, |group| group.parse::<u32>().ok()).ok_or_else(|| {
-                            format!("--groups takes GIDs, separated by commas, not {value:?}")
-                        })?;
-                    execution.groups = Some(groups);
-                }
-                "--capabilities" if execution.capabilities.is_none() => {
-                    let capabilities = numbers(&value, |number| {
-                        number.parse::<u8>().ok().filter(|number| *number < 64)
-                    })
-                    .ok_or_else(|| {
-                        format!(
-                            "--capabilities takes capability numbers from 0 to 63, separated by \
-                             commas, not {value:?}"
-                        )
-                    })?;
-                    let set = capabilities
-                        .into_iter()
-                        .fold(0, |set, number| set | 1 << number);
-                    execution.capabilities = Some(set);
-                }
-                "--cwd" if execution.working_directory.is_none() => {
-                    execution.working_directory = Some(value);
-                }
-                "--env" => execution.environment.push(value),
-                _ => return Err(format!("unexpected option {option:?} of exec")),
+                _ => execution_option(&mut execution, "exec", &option, value)?,
             }
         }
         let mut more = false;
@@ -1389,24 +1463,7 @@ fn parse_exec(
             }
             execution.arguments.push(argument);
         }
-        if execution.arguments.is_empty() {
-            return Err("exec needs a program after `--`".to_owned());
-        }
-        if execution.identity.is_none() {
-            let qualifiers = [
-                ("--groups", execution.groups.is_some()),
-                ("--capabilities", execution.capabilities.is_some()),
-                ("--numeric", execution.numeric),
-            ];
-            if let Some((option, _)) = qualifiers.iter().find(|(_, given)| *given) {
-                return Err(format!("{option} needs --identity"));
-            }
-        }
-        // The guest ends its session on a start that it cannot decode, so the program refuses
-        // one that breaks the rules of the encoding, as a relative working directory or an
-        // environment entry without a name does, or that the framing does not carry, before it
-        // attaches.
-        check_start(&execution.start(Key::new(0, 0)))?;
+        check_execution(&execution, "exec")?;
         executions.push(execution);
         if !more {
             break;
@@ -1424,6 +1481,177 @@ fn parse_exec(
         store,
         guest_build: guest_build.unwrap_or_else(|| GUEST_BUILD.to_owned()),
         executions,
+    })
+}
+
+/// Parses the option `option` of an execution of the command `name`, `exec` or `run`, with
+/// `value`, into `execution`, or says why it is not one of an execution's options that take a
+/// value, or why its value is invalid.
+fn execution_option(
+    execution: &mut Execution,
+    name: &str,
+    option: &str,
+    value: String,
+) -> Result<(), String> {
+    match option {
+        "--identity" if execution.identity.is_none() => {
+            let identity =
+                ids(&value).ok_or_else(|| format!("--identity takes UID:GID, not {value:?}"))?;
+            execution.identity = Some(identity);
+        }
+        "--groups" if execution.groups.is_none() => {
+            let groups = numbers(&value, |group| group.parse::<u32>().ok()).ok_or_else(|| {
+                format!("--groups takes GIDs, separated by commas, not {value:?}")
+            })?;
+            execution.groups = Some(groups);
+        }
+        "--capabilities" if execution.capabilities.is_none() => {
+            let capabilities = numbers(&value, |number| {
+                number.parse::<u8>().ok().filter(|number| *number < 64)
+            })
+            .ok_or_else(|| {
+                format!(
+                    "--capabilities takes capability numbers from 0 to 63, separated by commas, \
+                     not {value:?}"
+                )
+            })?;
+            let set = capabilities
+                .into_iter()
+                .fold(0, |set, number| set | 1 << number);
+            execution.capabilities = Some(set);
+        }
+        "--cwd" if execution.working_directory.is_none() => {
+            execution.working_directory = Some(value);
+        }
+        "--env" => execution.environment.push(value),
+        _ => return Err(format!("unexpected option {option:?} of {name}")),
+    }
+    Ok(())
+}
+
+/// Checks the execution `execution` of the command `name`, once its arguments are parsed: that it
+/// names a program, that it names an identity if it qualifies one, and that the guest takes its
+/// start, or says why not.
+fn check_execution(execution: &Execution, name: &str) -> Result<(), String> {
+    if execution.arguments.is_empty() {
+        return Err(format!("{name} needs a program after `--`"));
+    }
+    if execution.identity.is_none() {
+        let qualifiers = [
+            ("--groups", execution.groups.is_some()),
+            ("--capabilities", execution.capabilities.is_some()),
+            ("--numeric", execution.numeric),
+        ];
+        if let Some((option, _)) = qualifiers.iter().find(|(_, given)| *given) {
+            return Err(format!("{option} needs --identity"));
+        }
+    }
+    // The guest ends its session on a start that it cannot decode, so the program refuses one
+    // that breaks the rules of the encoding, as a relative working directory or an environment
+    // entry without a name does, or that the framing does not carry, before it attaches.
+    check_start(&execution.start(Key::new(0, 0)))
+}
+
+/// Parses the arguments of `run` after its sandbox store `store`: the options of `start`, and
+/// those of one execution, as `exec` takes them, in any order, then `--`, and the execution's
+/// program and its arguments, every one that follows, or says why they are not the command's.
+fn parse_run(
+    store: PathBuf,
+    mut arguments: impl Iterator<Item = OsString>,
+) -> Result<Command, String> {
+    let mut options = Options::default();
+    let mut execution = Execution::default();
+    loop {
+        let argument = arguments
+            .next()
+            .ok_or("run needs `-- PROGRAM` after its options")?;
+        let Some(option) = argument.to_str().filter(|option| option.starts_with("--")) else {
+            return Err(format!("unexpected argument {argument:?} of run"));
+        };
+        match option {
+            "--" => break,
+            "--numeric" if !execution.numeric => {
+                execution.numeric = true;
+                continue;
+            }
+            _ => {}
+        }
+        let option = option.to_owned();
+        let value = arguments
+            .next()
+            .ok_or_else(|| format!("{option:?} needs a value"))?;
+        if EXECUTION_OPTIONS.contains(&option.as_str()) {
+            let value = value
+                .into_string()
+                .map_err(|value| format!("the value {value:?} of {option} is not Unicode"))?;
+            execution_option(&mut execution, "run", &option, value)?;
+        } else {
+            parse_option(&mut options, "run", &option, value)?;
+        }
+    }
+    for argument in arguments {
+        let argument = argument
+            .into_string()
+            .map_err(|argument| format!("the argument {argument:?} of run is not Unicode"))?;
+        execution.arguments.push(argument);
+    }
+    check_execution(&execution, "run")?;
+    let guest_build = options
+        .guest_build
+        .take()
+        .unwrap_or_else(|| GUEST_BUILD.to_owned());
+    Ok(Command::Run {
+        store,
+        guest_build,
+        request: Box::new(clone_options("run", options)?),
+        execution: Box::new(execution),
+        time: host_time_from_env()?,
+    })
+}
+
+/// Returns the clone that the options `options` of `start` or `run`, the command `name`, select
+/// and describe, or says why they do not.
+fn clone_options(name: &str, options: Options) -> Result<CloneOptions, String> {
+    let templates = options
+        .template
+        .ok_or_else(|| format!("{name} needs --template"))?;
+    let generation = options
+        .generation
+        .ok_or_else(|| format!("{name} needs --generation"))?;
+    let (format, distro) = options
+        .distro
+        .ok_or_else(|| format!("{name} needs --distro"))?;
+    let identity = options
+        .identity
+        .ok_or_else(|| format!("{name} needs --distro-identity"))?;
+    let scratch = options
+        .upper
+        .ok_or_else(|| format!("{name} needs --upper"))?;
+    if scratch.is_none() && options.scratch_journal.is_some() {
+        return Err("--scratch-journal needs --upper scratch:PATH".to_owned());
+    }
+    if format == ImageFormat::Erofs && options.first_partition_bound.is_some() {
+        return Err("--first-partition-bound needs --distro gpt:PATH".to_owned());
+    }
+    check_shares(&options.sharing)?;
+    Ok(CloneOptions {
+        templates,
+        generation,
+        request: runtime_adapter::clone::Request {
+            distro,
+            format,
+            identity,
+            scratch,
+            memory: options.memory,
+            workload_identity: options.workload_identity,
+            overlay_mode: options.overlay_mode,
+            scratch_journal: options.scratch_journal,
+            first_partition_bound: options.first_partition_bound,
+            machine_id: options.machine_id.unwrap_or(MachineIdMode::Image),
+            sharing: options.sharing,
+            network: None,
+        },
+        network: options.network,
     })
 }
 
@@ -1499,7 +1727,7 @@ fn stage(
     format: ImageFormat,
     identity: Uuid,
     scratch: Option<&Path>,
-) -> Result<ExitCode, String> {
+) -> Result<(), String> {
     // Verification may hash the image, so it runs before the sandbox is locked.
     let staged =
         Staged::stage(distro, format, identity, scratch).map_err(|error| describe(&error))?;
@@ -1507,10 +1735,7 @@ fn stage(
     let _locked = store
         .lock(Some(Instant::now() + LOCK_TIMEOUT))
         .map_err(|error| describe(&error))?;
-    staged
-        .write(store.dir())
-        .map_err(|error| describe(&error))?;
-    Ok(ExitCode::SUCCESS)
+    staged.write(store.dir()).map_err(|error| describe(&error))
 }
 
 /// Launches a VM of the guest agent `guest_agent` in the sandbox store `store`, on `hypervisor`
@@ -2105,43 +2330,90 @@ impl Drop for TemporaryDirectory {
 
 /// Starts a clone of the generation of the template store that `clone` names, as it asks, in the
 /// sandbox store `store`, which it creates if needed, with the guest agent's build `guest_build`,
-/// at the host's time `time`, or at the time that `HostTime::now` samples without one.
+/// at the host's time `time`, or at the time that `HostTime::now` samples without one, as
+/// [`start_clone`] does, and leaves it running.
 fn start(
     store: &Path,
     guest_build: &str,
     clone: &CloneOptions,
     time: Option<HostTime>,
 ) -> Result<ExitCode, String> {
-    // A network that the plan refuses fails the start before anything else, as it fails a launch.
-    // NVX's plan of the clone then requires the template's network of it.
-    let network = clone
-        .network
-        .as_deref()
-        .map(read_network)
-        .transpose()
-        .map_err(|error| describe(&error))?;
-    let request = runtime_adapter::clone::Request {
-        network,
-        ..clone.request.clone()
+    // A network that the plan refuses fails the start before anything else, as it fails a launch,
+    // then an image, or shares, that it refuses.
+    let planned = clone.plan()?;
+    // The clone keeps running once the command lets go of its VM, its session, and its sandbox's
+    // lock, as once a launch committed.
+    Ok(
+        match start_clone(store, guest_build, clone, planned, time)? {
+            Ok(_running) => ExitCode::SUCCESS,
+            Err(status) => status,
+        },
+    )
+}
+
+/// A clone that [`start_clone`] started, whose launch it committed, and which runs.
+struct Running {
+    /// The runtime of NVX's artifacts, under which the clone runs.
+    runtime: Runtime,
+    /// The clone's sandbox store.
+    sandbox: SandboxStore,
+    /// The sandbox's lock, which the clone's lease holds.
+    locked: LockedStore,
+    /// The clone's VM.
+    vmm: Vmm,
+    /// The session of the adapter's clone order in which the clone's sandbox started.
+    client: Client,
+}
+
+/// Starts a clone of the generation of the template store that `clone` names, as `planned`, its
+/// plan, asks, in the sandbox store `store`, which it creates if needed, with the guest agent's
+/// build `guest_build`, at the host's time `time`, or at the time that `HostTime::now` samples
+/// without one, and prints what it did. Returns the clone, which runs, once it committed the
+/// clone's launch, or the status with which the command ends otherwise: once the template store
+/// refused the selection, or the clone failed, as [`clone_failed`] ends it.
+fn start_clone(
+    store: &Path,
+    guest_build: &str,
+    clone: &CloneOptions,
+    planned: PlannedClone,
+    time: Option<HostTime>,
+) -> Result<Result<Running, ExitCode>, String> {
+    let PlannedClone {
+        request,
+        plan,
+        export,
+    } = planned;
+    // A selection that the template store refuses as it names no template fails the start before
+    // it needs NVX's artifacts or the sandbox's store.
+    let templates = match Store::open(&clone.templates) {
+        Ok(templates) => templates,
+        Err(error) if error.kind() == ErrorKind::NotFound => {
+            return Ok(Err(selection_refused(
+                Refusal::NoTemplate("no-store"),
+                &error,
+            )));
+        }
+        Err(error) => return Err(describe(&error)),
     };
-    // A request that the adapter's plan refuses, shares that it cannot export, and a generation
-    // that the template store does not hold, fail the start before it needs NVX's artifacts or
-    // the sandbox's store.
-    let plan = request.plan().map_err(|error| describe(&error))?;
-    let export = request.export().map_err(|error| describe(&error))?;
-    let templates = Store::open(&clone.templates).map_err(|error| describe(&error))?;
-    let generation = templates
-        .index()
-        .map_err(|error| describe(&error))?
-        .get(clone.generation)
-        .cloned()
-        .ok_or_else(|| {
-            format!(
-                "the template store {} holds no generation {}",
-                templates.dir().display(),
-                clone.generation
-            )
-        })?;
+    let index = templates.index().map_err(|error| describe(&error))?;
+    let Some(generation) = index.get(clone.generation).cloned() else {
+        // The store never assigns a store generation twice, so one before its next publication's
+        // was published, and retired since.
+        let evidence = if clone.generation < index.next_generation() {
+            "retired"
+        } else {
+            "unpublished"
+        };
+        let error = nvx::Error::not_found(format!(
+            "the template store {} holds no generation {}",
+            templates.dir().display(),
+            clone.generation
+        ));
+        return Ok(Err(selection_refused(
+            Refusal::NoTemplate(evidence),
+            &error,
+        )));
+    };
     // The clone's memory target is the request's, or else the template's RAM, which the
     // generation's key gives. A key that cannot be read gives none: NVX's plan reads the key
     // again, once the store leased the generation, and attributes the failure, to the generation
@@ -2160,15 +2432,22 @@ fn start(
         None => HostTime::now().map_err(|error| describe(&error))?,
     };
     let sandbox = SandboxStore::create(store).map_err(|error| describe(&error))?;
-    let mut acquired = templates
-        .acquire(
-            generation.generation(),
-            sandbox.dir(),
-            &CallerFiles::none(),
-            &now,
-            Some(Instant::now() + LOCK_TIMEOUT),
-        )
-        .map_err(|error| describe(&error))?;
+    let acquired = templates.acquire(
+        generation.generation(),
+        sandbox.dir(),
+        &CallerFiles::none(),
+        &now,
+        Some(Instant::now() + LOCK_TIMEOUT),
+    );
+    let mut acquired = match acquired {
+        Ok(acquired) => acquired,
+        Err(error) => {
+            return match Refusal::of(&error, &generation, &now) {
+                Some(refusal) => Ok(Err(selection_refused(refusal, &error))),
+                None => Err(describe(&error)),
+            };
+        }
+    };
     println!("generation={}", generation.generation());
     println!("lease={}", acquired.lease.id());
     if let Eligibility::Eligible(downtime) = generation.eligibility(&now) {
@@ -2185,8 +2464,16 @@ fn start(
         guest_build,
     };
     match clone.run(&mut acquired) {
-        Ok(()) => Ok(ExitCode::SUCCESS),
-        Err(Failed::Clone(failure)) => clone_failed(Ok(&templates), acquired.locked, failure),
+        Ok((vmm, client)) => Ok(Ok(Running {
+            runtime,
+            sandbox,
+            locked: acquired.locked,
+            vmm,
+            client,
+        })),
+        Err(Failed::Clone(failure)) => {
+            clone_failed(Ok(&templates), acquired.locked, failure).map(Err)
+        }
         Err(Failed::Command(problem)) => {
             // The command failed before the clone's launch, so nothing of it runs.
             match release_lease(&templates, &mut acquired.locked) {
@@ -2195,6 +2482,65 @@ fn start(
             }
         }
     }
+}
+
+/// Why a template store refused the selection of a start, as the start reports it: its outcome,
+/// with the evidence that attributes it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Refusal {
+    /// The selection names no template: the store does not exist, `no-store`, or never published
+    /// the generation, `unpublished`, or retired it, `retired`.
+    NoTemplate(&'static str),
+    /// The restore window of the time contract of the generation's capture no longer admits it at
+    /// the host's time.
+    Expired,
+    /// The generation takes no new clone: a tombstone quarantines it, `tombstone`, or its capture
+    /// is after the host's time, `early`.
+    Ineligible(&'static str),
+}
+
+impl Refusal {
+    /// Returns why the store refused, with `error`, to lease `generation` at the host's time `now`,
+    /// or `None` if the error is not a refusal of the selection: the store no longer holds the
+    /// generation, which it retired since the start read its index, a tombstone quarantines it, or
+    /// it is not eligible at `now`, as `Generation::eligibility` decides it. A sandbox that is not
+    /// provisioned, whose error is of the kind `NotFound` too, is not a refusal of the selection.
+    fn of(error: &nvx::Error, generation: &Generation, now: &HostTime) -> Option<Self> {
+        match error.code() {
+            ErrorCode::TemplateTombstoned => Some(Self::Ineligible("tombstone")),
+            ErrorCode::TemplateIneligible => Some(match generation.eligibility(now) {
+                Eligibility::Expired(_) => Self::Expired,
+                _ => Self::Ineligible("early"),
+            }),
+            ErrorCode::NotFound => Some(Self::NoTemplate("retired")),
+            _ => None,
+        }
+    }
+
+    /// Returns the outcome and the evidence of the refusal, as its record spells them.
+    fn names(self) -> (&'static str, &'static str) {
+        match self {
+            Self::NoTemplate(evidence) => ("no-template", evidence),
+            Self::Expired => ("expired", "expired"),
+            Self::Ineligible(evidence) => ("ineligible", evidence),
+        }
+    }
+}
+
+/// Ends a start whose template store refused its selection, as `refusal` says, with `error`, which
+/// leased and launched nothing: prints the refusal's record, as [`print_clone_failure`] prints a
+/// failure's, at the stage `selection`, and returns the exit status [`SELECTION_REFUSED`].
+fn selection_refused(refusal: Refusal, error: &nvx::Error) -> ExitCode {
+    let (outcome, evidence) = refusal.names();
+    println!("failure.outcome={outcome}");
+    println!("failure.evidence={evidence}");
+    println!("failure.stage=selection");
+    println!("failure.progress=none");
+    println!("failure.status=none");
+    println!("failure.teardown=no-vm");
+    println!("failure.code={}", error.code());
+    eprintln!("runtime-adapter-host: {}", describe(error));
+    ExitCode::from(SELECTION_REFUSED)
 }
 
 /// How the launch of a clone failed, once the store leased its generation.
@@ -2229,14 +2575,15 @@ impl CloneLaunch<'_> {
     /// Plans, records, and launches the clone in the sandbox of `acquired`, which leased the
     /// generation, activates it, maps its export's table, if it has one, starts its sandbox,
     /// exchanges a `Ping` and the longest `Echo` with its guest agent, and commits the launch,
-    /// leaving the clone running.
+    /// leaving the clone running. Returns the clone's VM, and the session of the adapter's order
+    /// in which its sandbox started.
     ///
     /// Fails with the clone's failure, as NVX's plan, launch, restore sequence, and commit return
     /// it, or as `Started::fail` records it for a guest agent that does not answer the command
     /// once the clone's sandbox started, which ended the launch, unless its teardown is
     /// unresolved, and with the problem of a step of the adapter's own before the launch
     /// otherwise.
-    fn run(self, acquired: &mut Acquired) -> Result<(), Failed> {
+    fn run(self, acquired: &mut Acquired) -> Result<(Vmm, Client), Failed> {
         let Self {
             templates,
             request,
@@ -2297,8 +2644,7 @@ impl CloneLaunch<'_> {
             let (evidence, error) = unanswered(&order, error, deadline);
             return Err(Failed::Clone(started.fail(evidence, error)));
         }
-        started.commit().map_err(Failed::Clone)?;
-        Ok(())
+        started.commit().map_err(Failed::Clone)
     }
 }
 
@@ -2715,23 +3061,74 @@ fn reattach(
     }
     let Found {
         store,
-        mut locked,
+        locked,
         vmm,
         leased,
         ..
     } = found;
+    let clone = leased.then_some(CloneStop {
+        runtime: &runtime,
+        guest_build,
+        templates,
+    });
+    stop_vm(&store, locked, vmm, clone, |deadline| {
+        attached?
+            .stop(deadline)
+            .map_err(|error| unconfirmed(&error))
+    })
+}
+
+/// Returns the problem of a stop whose guest agent did not confirm it, as the client failed with
+/// `error`.
+fn unconfirmed(error: &ClientError) -> String {
+    format!(
+        "the guest agent did not confirm the stop: {}",
+        describe(error)
+    )
+}
+
+/// What a command that stops the VM of a clone, as [`stop_vm`] stops it, needs to end the clone:
+/// the runtime and the guest agent's build under which it reattaches to the clone once its VM
+/// exited, as [`reattach_leased`] does, and the template store that the command names, if any, in
+/// place of the one that the clone's record names, through which it releases the clone's lease.
+#[derive(Clone, Copy)]
+struct CloneStop<'a> {
+    /// The runtime of NVX's artifacts.
+    runtime: &'a Runtime,
+    /// The guest agent's build.
+    guest_build: &'a str,
+    /// The template store that the command names, if any.
+    templates: Option<&'a Path>,
+}
+
+/// Stops the VM `vmm` of the sandbox store `store`, whose lock `locked` the command holds, and
+/// prints how it stopped. Its graceful step, `confirm`, asks the guest agent to stop by the
+/// deadline that it takes, and returns, once the guest agent confirmed the stop, the failure of
+/// the root's teardown that the guest agent reported first, if any. A VM whose guest agent cannot
+/// confirm the stop is terminated.
+///
+/// The VM of a clone, which `clone` ends, stops as [`reattach`] describes: with
+/// `Vmm::stop_unless_exited`, after which the command reads how the clone ended from its records,
+/// and releases its lease once the clone ended through the stop, or ends as [`conclude`] does
+/// otherwise. A VM that booted cold stops with `Vmm::stop`.
+///
+/// Returns success once the VM exited, as its guest agent confirmed, with the outcome `success 0`
+/// and a complete teardown, and [`ROOT_FAILED`] once the guest agent reported the failure of its
+/// root, which it prints, and fails otherwise.
+fn stop_vm(
+    store: &SandboxStore,
+    mut locked: LockedStore,
+    vmm: Vmm,
+    clone: Option<CloneStop<'_>>,
+    confirm: impl FnOnce(Instant) -> Result<Option<RootFailure>, String>,
+) -> Result<ExitCode, String> {
     // A VM whose guest agent cannot confirm the stop is terminated.
     let mut failure = None;
     let graceful = |_: &Vmm, deadline: Instant| -> Result<(), String> {
-        failure = attached?.stop(deadline).map_err(|error| {
-            format!(
-                "the guest agent did not confirm the stop: {}",
-                describe(&error)
-            )
-        })?;
+        failure = confirm(deadline)?;
         Ok(())
     };
-    let stopped = if leased {
+    let stopped = if clone.is_some() {
         // A clone's VM that had exited when the stop began ended without its holder: the stop
         // stops nothing then, and keeps the runtime record of its launch, which tells so.
         vmm.stop_unless_exited(
@@ -2752,8 +3149,9 @@ fn reattach(
     .map_err(|error| describe(&error))?;
     let Some(stopped) = stopped else {
         println!("stopped=exited");
-        let reattached = reattach_leased(&mut locked, &runtime, guest_build)?;
-        return conclude(reattached, locked, templates);
+        let clone = clone.expect("only the stop of a clone's VM stops nothing");
+        let reattached = reattach_leased(&mut locked, clone.runtime, clone.guest_build)?;
+        return conclude(reattached, locked, clone.templates);
     };
     println!(
         "stopped={}",
@@ -2764,13 +3162,15 @@ fn reattach(
         }
     );
     // The store verified that the VM exited, unless the stop timed out.
-    if leased && stopped.outcome != StopOutcome::TimedOut {
-        match reattach_leased(&mut locked, &runtime, guest_build)? {
+    if let Some(clone) = clone
+        && stopped.outcome != StopOutcome::TimedOut
+    {
+        match reattach_leased(&mut locked, clone.runtime, clone.guest_build)? {
             ReattachedClone::Ended { .. } => {
-                let templates = clone_templates(&locked, templates)?;
+                let templates = clone_templates(&locked, clone.templates)?;
                 release_lease(&templates, &mut locked)?;
             }
-            reattached => return conclude(reattached, locked, templates),
+            reattached => return conclude(reattached, locked, clone.templates),
         }
     }
     if let Some(problem) = stopped.graceful_error {
@@ -2781,12 +3181,12 @@ fn reattach(
     }
     match failure {
         None => {
-            check_outcome(&store, "success", 0)?;
+            check_outcome(store, "success", 0)?;
             Ok(ExitCode::SUCCESS)
         }
         Some(failure) => {
             print_failure(&failure);
-            check_outcome(&store, "guest-exit", failure.stage().exit_status().into())?;
+            check_outcome(store, "guest-exit", failure.stage().exit_status().into())?;
             Ok(ExitCode::from(ROOT_FAILED))
         }
     }
@@ -2834,10 +3234,21 @@ fn exec(store: &Path, guest_build: &str, executions: &[Execution]) -> Result<Exi
     // starts before it, and, for a VM that booted cold, before it attaches. A start takes its key
     // once the command attached, and a key's encoding has the same size whatever its value.
     let plan = LaunchRecord::read_plan(found.store.dir()).map_err(|error| describe(&error))?;
+    let starts = starts_of(executions, plan.as_ref())?;
+    let deadline = Instant::now() + SESSION_TIMEOUT;
+    let mut client = found.attach(deadline)?;
+    run_executions(&mut client, &mut Executions::new(), starts, deadline)?;
+    Ok(ExitCode::SUCCESS)
+}
+
+/// Returns the starts of `executions`, numbered from 1, each with the URL of the proxy of the
+/// network of the VM's plan `plan`, if any, in its environment, once it checked that the guest
+/// takes every one, or says why it would not take one.
+fn starts_of(executions: &[Execution], plan: Option<&SandboxPlan>) -> Result<Vec<Start>, String> {
     let mut starts = Vec::with_capacity(executions.len());
     for (number, execution) in (1..).zip(executions) {
         let start = execution.start(Key::new(0, 0));
-        let start = match &plan {
+        let start = match plan {
             Some(plan) => with_proxy(start, plan),
             None => start,
         };
@@ -2846,19 +3257,28 @@ fn exec(store: &Path, guest_build: &str, executions: &[Execution]) -> Result<Exi
         })?;
         starts.push(start);
     }
-    let deadline = Instant::now() + SESSION_TIMEOUT;
-    let mut client = found.attach(deadline)?;
+    Ok(starts)
+}
+
+/// Runs the executions of `starts`, numbered from 1, at once, with the driver `running`, which
+/// started none before, in the session `client`, starting each by `deadline`, and prints what each
+/// did once every one finished.
+fn run_executions(
+    client: &mut Client,
+    running: &mut Executions,
+    starts: Vec<Start>,
+    deadline: Instant,
+) -> Result<(), String> {
     // The keys of the attachment's executions are new to the guest: see the module documentation.
     let identity = client.identity();
     let (base, _) = identity.instance_id.split_at(8);
     let base = u64::from_le_bytes(base.try_into().expect("an instance ID has 16 bytes"));
-    let mut running = Executions::new();
     let mut ids = Vec::new();
     for (number, mut start) in (1..).zip(starts) {
         let key = Key::new(base.wrapping_add(number), identity.epoch);
         start.key = key;
         running
-            .start(&mut client, start, exec_timers(), deadline)
+            .start(client, start, exec_timers(), deadline)
             .map_err(|error| format!("cannot start execution {number}: {}", describe(&error)))?;
         ids.push(key.id());
     }
@@ -2866,13 +3286,106 @@ fn exec(store: &Path, guest_build: &str, executions: &[Execution]) -> Result<Exi
     // its settlement passed, or once the guest's last messages about it arrived.
     let deadline = Instant::now() + EXEC_TIMEOUT + EXEC_GRACE + EXEC_SETTLEMENT + SESSION_TIMEOUT;
     running
-        .run(&mut client, deadline)
+        .run(client, deadline)
         .map_err(|error| format!("the executions failed: {}", describe(&error)))?;
     for (number, id) in (1..).zip(ids) {
         let execution = running.get(id).expect("the driver started every execution");
         print_execution(number, execution);
     }
-    Ok(ExitCode::SUCCESS)
+    Ok(())
+}
+
+/// Runs one execution, `execution`, in a clone of the generation of the template store that
+/// `clone` names, as it asks, in the sandbox store `store`, which it creates if needed, with the
+/// guest agent's build `guest_build`, at the host's time `time`, or at the time that
+/// `HostTime::now` samples without one, then tears the clone down, and prints what it did.
+///
+/// It first plans the clone as `start` does, with its network and the export of its shares, and
+/// checks that the guest takes the execution's start, with the URL of the proxy of the clone's
+/// network, if any, in its environment, as `exec` gives it to an execution of a clone. Its
+/// preflight then stages the clone's images in the sandbox, as `stage` does, which verifies the
+/// image, and prints `preflight=staged`. It then starts the clone, as `start` does, and ends as a
+/// start ends once the template store refuses the selection, or the clone fails. It runs the
+/// execution in the clone's root, as `exec` runs one, through the guest agent's execution control,
+/// in the session in which the clone's sandbox started, and prints what the execution did. Then it
+/// stops the clone, whatever the execution did, as `stop` does, which releases the clone's lease
+/// once its VM exited. The stop takes that session too, in which it skips the guest's messages
+/// about the execution that may still arrive once the command finished it without them.
+///
+/// An execution that failed to run, as one whose session ended, fails the command after the stop.
+/// Since the session may have ended with the VM, as when its VMM crashed, the command first waits
+/// for the VMM to exit, as long as a stop waits for one that it terminated, [`FORCED_TIMEOUT`]: the
+/// stop then finds that the VM exited without the command, and ends the clone as a reattach that
+/// finds it so does, rather than take the exit for its own. Once the stop returned another status
+/// than success, [`ROOT_FAILED`], [`CLONE_FAILED`], or [`CLONE_UNRESOLVED`], the command ends with
+/// that status, after the execution's diagnostic.
+fn run(
+    store: &Path,
+    guest_build: &str,
+    clone: &CloneOptions,
+    execution: &Execution,
+    time: Option<HostTime>,
+) -> Result<ExitCode, String> {
+    // A network, an image, or shares that the plan refuses, and a start that the guest would
+    // refuse, fail the command before it stages anything.
+    let planned = clone.plan()?;
+    let starts = starts_of(std::slice::from_ref(execution), Some(&planned.plan))?;
+    let request = &planned.request;
+    stage(
+        store,
+        &request.distro,
+        request.format,
+        request.identity,
+        request.scratch.as_deref(),
+    )?;
+    println!("preflight=staged");
+    let Running {
+        runtime,
+        sandbox,
+        locked,
+        vmm,
+        mut client,
+    } = match start_clone(store, guest_build, clone, planned, time)? {
+        Ok(running) => running,
+        Err(status) => return Ok(status),
+    };
+    let mut executions = Executions::new();
+    let ran = run_executions(
+        &mut client,
+        &mut executions,
+        starts,
+        Instant::now() + SESSION_TIMEOUT,
+    );
+    if ran.is_err() {
+        // The session may have ended with the VM, as when its VMM crashed. Once the VMM's exit is
+        // done, the stop finds that the VM exited without the command, and ends the clone as a
+        // reattach that finds it so does, rather than take the exit for its own. The stop checks
+        // the VMM itself, so a wait that fails changes nothing.
+        let _ = vmm.wait(Instant::now() + FORCED_TIMEOUT);
+    }
+    // The clone's record names the template store that releases its lease, as for `stop`.
+    let stop = CloneStop {
+        runtime: &runtime,
+        guest_build,
+        templates: None,
+    };
+    let stopped = stop_vm(&sandbox, locked, vmm, Some(stop), |deadline| {
+        client
+            .stop_skipping(deadline, |message| executions.is_about(message))
+            .map_err(|error| unconfirmed(&error))
+    });
+    match (ran, stopped) {
+        (Ok(()), stopped) => stopped,
+        // A stop that ended otherwise than in success, as one that found that the clone's VM
+        // exited during the execution, tells how the clone ended, so the command ends with its
+        // status, after the execution's diagnostic.
+        (Err(problem), Ok(status)) if status != ExitCode::SUCCESS => {
+            eprintln!("runtime-adapter-host: {problem}");
+            Ok(status)
+        }
+        (Err(problem), Ok(_)) => Err(problem),
+        (Err(problem), Err(teardown)) => Err(format!("{problem}; {teardown}")),
+    }
 }
 
 /// Prints what the execution numbered `number`, `execution`, which finished, did.

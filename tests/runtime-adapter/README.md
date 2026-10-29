@@ -936,7 +936,11 @@ transport to the session's host endpoint, such as the one that
   or shares one with the next message;
 - `ping`, `echo` and `stop` each send a request and check its answer: `Pong`,
   an `Echo` of the same bytes, and `Stopped`. `stop` also returns the failure
-  of a layered root's teardown, which the guest reports before it confirms;
+  of a layered root's teardown, which the guest reports before it confirms.
+  `stop_skipping` stops the guest agent as `stop` does, but skips the messages
+  before `Stopped` that its caller accepts, such as those that the guest may
+  still send about a driver's executions, which `Executions::is_about`
+  accepts;
 - `configure_root` sends a root configuration, and returns how the guest
   answered: `Ready`, with the guest agent's build, or the stage of the root
   that failed;
@@ -999,7 +1003,9 @@ cancellation for each execution, at most a credit for each message that it
 reads, of output windows of at most 32 frames, so that the guest's messages
 ahead of its own credit stay few. The guest may still send messages about the
 executions of a run that gave up on one or failed, so a later batch takes an
-attachment of its own, as each command of the host program does.
+attachment of its own, as each command of the host program does, and a stop in
+the same attachment skips them, with `Client::stop_skipping` and
+`Executions::is_about`, as `runtime-adapter-host run` stops its clone.
 
 The guest ends its session on a second start of the same key, even in a later
 epoch of the session, so the keys of a driver's executions must be new to the
@@ -1345,6 +1351,17 @@ the hook does nothing.
 
 ### Templates
 
+The adapter's operations on templates, and on their clones, are commands of
+`runtime-adapter-host`, which [Commands](#commands) details:
+
+| Operation | Command | What it does |
+| --- | --- | --- |
+| Create, refresh | `create`, `refresh` | Serves an eligible generation of the template's capture class that the store holds, or captures a new one, as `refresh` always does, and prints it once the store committed it, then evicts the generations that it supersedes; see [Eviction](#eviction) |
+| List, inspect | `list`, `inspect` | Reports the generations, their keys, classes, states, eligibility and its reason, and leases, and the metadata of a capture, without loading VM state or hashing; see [Listings](#listings) |
+| Remove, retire | `remove` | Tombstones a generation, so that it takes no new lease, reports busy, with the status 7, while leases remain, and deletes it once they drained, but never moves or deletes a leased generation |
+| Start from a template | `start` | Starts a clone of an explicit, eligible generation, with its image, scratch, and settings, which the sandbox stages; reports a selection of no template, of an expired generation, or of an ineligible one, and a clone's failure, attributed to the request, the host, or the template, or whose teardown is unresolved; never captures, boots cold, rehashes, or falls back to another format; see [Clones](#clones) |
+| Run from a template | `run` | Plans the clone as `start` does, with its network and shares, stages the clone's images in a preflight that it reports, starts a clone as `start` does, runs one execution in the clone's root, and tears the clone down; see [Running a clone](#running-a-clone) |
+
 `runtime-adapter-host create` serves a template of the guest agent from an NVX
 template store, `nvx::host::template::Store`, with `Store::create_template`: a
 generation of the template's capture class that the store holds, and that is
@@ -1517,6 +1534,18 @@ each, the clock as a manifest spells it, `linux-boottime` or
 It affects the store's check alone: OpenVMM's restore samples the host's own
 time.
 
+A selection that the store refuses ends the start before it leases anything,
+with the refusal's record, in the form of a failure's, at the stage
+`selection`, without a VM, and the status 10: a template store that does not
+exist, and a generation that the store never published, or no longer holds,
+name no template, `no-template`, by the evidence `no-store`, `unpublished`, or
+`retired`; a generation whose capture the restore window of its time contract
+no longer admits at the host's time is `expired`; and one that a tombstone
+quarantines, or whose capture is after the host's time, by the clock that
+measures its downtime, is `ineligible`, by the evidence `tombstone` or
+`early`. The record's code is the code of NVX's error: `not-found`,
+`template-tombstoned`, or `template-ineligible`.
+
 NVX's `ClonePlan` then checks the clone against the generation from the
 metadata of its files alone, under the sandbox's lock, which the lease holds:
 its network, which must be the one that the template's key holds, the guest's
@@ -1618,6 +1647,46 @@ record's, which the release refuses unless the lease is of it.
 A tombstone of the generation refuses new leases of it, and leaves those that
 sandboxes hold to their clones, which reattach, stop, and release them as
 before.
+
+#### Running a clone
+
+`runtime-adapter-host run` runs one execution in a clone of a generation, and
+tears the clone down. Its preflight, which it reports with `preflight=staged`,
+stages the clone's images in the sandbox's store, as `stage` stages them,
+verifying the image, which hashes it only when a manifest is beside it, before
+the clone's start, which hashes nothing. The command first reads the clone's
+network, and plans the clone and the export of its shares, as `start` does,
+then checks that the guest takes the execution's start, with the URL of the
+proxy of the clone's network, if any, in its environment, as `exec` gives it to
+an execution of a clone, so a network, an image, shares, or a start that it
+would refuse fail the command before it stages anything. It then starts the
+clone as `start` does,
+at the host's time, or the one that `RUNTIME_ADAPTER_HOST_TIME` gives, and ends
+as a start ends once the template store refuses the selection, or the clone
+fails, with the record of the refusal or of the failure. Once the clone runs,
+the command runs the execution in its root, the one that the clone's
+activation assembled, through `host::Executions`, in the session of the
+adapter's clone order in which the clone's sandbox started, as `exec` runs
+one. The program, its arguments, and its environment reach the guest in the
+execution's start, through the guest agent's execution control, never in the
+template's boot tokens. The execution finds the clone's shares beneath the
+root, since the restore sequence maps them before the clone's sandbox starts.
+Then, whatever the execution did, the command stops the
+clone as `stop` does, and releases the lease once the store verified that the
+VM exited: a run leaves no clone running, and no lease held, unless its stop
+timed out. The stop takes the same session, in which it skips the guest's
+messages about the execution that may still arrive once the command finished
+it without them, as when it gave up waiting for its outcome. It holds the
+sandbox's lock, which the lease took, from the start to
+the teardown, so no other command reattaches to its clone meanwhile. A run
+whose execution failed to run, such as one whose session ended, still tears the
+clone down, then fails, after the execution's diagnostic. Since the session may
+have ended with the VM, as when its VMM crashed, the run first waits up to 10
+seconds for the VMM to exit, as long as a stop waits for one that it
+terminated: its stop then finds that the VM exited without it, and ends the
+clone as a reattach that finds it so does, with the record of its failure, so
+the run exits with 8, or 9 while the teardown is unresolved. It exits with 4
+once the guest reported that a stage of the root failed, and with 1 otherwise.
 
 ### Commands
 
@@ -1764,7 +1833,10 @@ Each command of `runtime-adapter-host` but `stage`, `list`, `inspect`, and
   leaving the VM running, and the sandbox holding the lease. A clone that
   fails, such as one whose activation failed before it was ready, and whose VM
   ended with the status of the failure's class, from 50 to 58, ends as
-  [Clones](#clones) describes, with the record of its failure.
+  [Clones](#clones) describes, with the record of its failure. A selection
+  that the template store refuses, of no template, of an expired generation,
+  or of an ineligible one, ends the start before it leases anything, with the
+  refusal's record, as [Clones](#clones) describes.
 - `stop STORE [--template TEMPLATES]` reattaches and attaches as `reattach`
   does, then stops the VM:
   the adapter's `Stop`, which the guest agent confirms with `Stopped` before it
@@ -1807,6 +1879,20 @@ Each command of `runtime-adapter-host` but `stage`, `list`, `inspect`, and
   number. The guest refuses a key that it heard of before, and the epochs of a
   broker instance only advance, while a broker restored from a snapshot has a
   new instance ID, so no command repeats the key of another's execution.
+- `run STORE --template TEMPLATES --generation G --distro FORMAT:PATH --distro-identity UUID --upper (scratch:PATH | ram) [--memory MIB] [--workload-identity UID:GID] [--overlay-mode MODE] [--scratch-journal POLICY] [--first-partition-bound BYTES] [--machine-id (image | generated)] [--network FILE] [SHARES] EXECUTION`
+  runs one EXECUTION, one of `exec`'s, in a [clone](#clones) of the generation
+  G of the template store TEMPLATES, in the sandbox store STORE, which it
+  creates if needed, then tears the clone down, as
+  [running a clone](#running-a-clone) describes. The execution's options may
+  come among the start's, in any order, and its PROGRAM and ARGs are every
+  argument after `--`. It first plans the clone as `start` does, with its
+  network and its shares, and checks the execution's start, with the URL of
+  the network's proxy, if any. Its preflight then stages the clone's images in
+  STORE, as `stage` stages them, and prints `preflight=staged`. It then starts
+  the clone as `start` does, runs the execution in the clone's root as `exec`
+  runs one, and prints its output and outcome once it finished. Then it stops
+  the clone as `stop` does, whatever the execution did, which releases the
+  lease once the VM exited.
 
 `reattach`, `stop`, `probe`, and `exec` find a VM that booted cold under
 another runtime identity mismatched, and then signal nothing: the VM keeps
@@ -1825,7 +1911,8 @@ that assembled the root), `stage` and `problem` (the stage of the root that
 failed, such as `assembly`, and the problem, or the problem of a mapping that
 failed), `table` (`applied` or `failed`: how the guest took the mapping table),
 `mapped` (how many of the table's mappings the guest applied), `sandbox`
-(`started` once the guest started the sandbox), `PROBE.KEY` (the fact KEY that
+(`started` once the guest started the sandbox), `preflight` (`staged` once
+`run` staged the images of its clone), `PROBE.KEY` (the fact KEY that
 the probe named PROBE found), `exec.N.KEY` (what execution N did: its `launch`,
 `started`, `failed STAGE ERRNO`, or `none`; its `status`, `exit CODE`,
 `signal NUMBER`, or `none`; the `cause` for which a side ended it, such as
@@ -1840,23 +1927,30 @@ completed, which the outcome report records apart from the root's), `created`
 (`captured` once a capture made the template's generation, as a refresh's
 always does, or `existing` once the store held it), `generation` (the
 generation's number in the template store, which `create` or `refresh` served,
-`inspect` reports, or `start` leased), `key` and `class` (the identities of its
+`inspect` reports, or `start` or `run` leased), `key` and `class` (the identities of its
 compatibility key and of its capture class, in hexadecimal), `retired` and
 `draining` (the generations that the eviction of a creation or a refresh
 retired: those of the class that are gone, with those whose interrupted
 retirement it completed, and those that leases keep, each list separated by
 commas, or `none`),
-`lease` (the identity of the lease that `start` took, 32 hexadecimal digits),
+`lease` (the identity of the lease that `start` or `run` took, 32 hexadecimal
+digits),
 `downtime` and `source` (the downtime of the leased generation's capture at the
 host's time, in nanoseconds, and the clock that measured it, `monotonic` or
-`utc`), `released` (the identity of the lease that a stop, or a start that
-failed, released), `failure.KEY` (the record of a clone's failure: its
+`utc`), `released` (the identity of the lease that a stop, a start that failed,
+or the teardown of a run released), `failure.KEY` (the record of a clone's
+failure, or of the selection of a start or a run that the template store
+refused: its
 `outcome`, what the failure is attributed to, `request`, `staging`, `host`,
-`unknown`, `template`, or `repair`; its `evidence`, what the host saw of it,
-which attributes it, such as `supplied-length`; its `stage`, where the clone
+`unknown`, `template`, or `repair`, or `no-template`, `expired`, or
+`ineligible` for a refused selection; its `evidence`, what the host saw of it,
+which attributes it, such as `supplied-length`, or `no-store`, `unpublished`,
+`retired`, `expired`, `tombstone`, or `early` for a refused selection; its
+`stage`, where the clone
 failed, `plan`, `launch`, `restore`, `activation`, `start`, `commit`, `run`, or
-`reattach`; its `progress`, the step that the clone reached, as `progress`
-spells it; its `status`, the status with which the guest ended the VM, as the
+`reattach`, or `selection`; its `progress`, the step that the clone reached, as
+`progress` spells it, or `none` for a refused selection; its `status`, the
+status with which the guest ended the VM, as the
 VM's outcome report gives it, or `none`; its `teardown`, how the teardown that
 followed ended, `no-vm`, `exited`, `terminated`, or `unresolved`; and its
 `code`, the code of the failure's error, such as `runtime-mismatch`),
@@ -1882,7 +1976,8 @@ leases that keep it). Values
 escape `\`, newlines, and carriage returns as `\\`, `\n`, and `\r`, and each
 byte of a program's output that is not part of UTF-8 text as `\xHH`. The
 commands exit with 0 once they did what they were asked, `exec` once every
-execution finished, whatever its outcome, with 3 when they find a VM that
+execution finished, whatever its outcome, and `run` once its execution finished
+so, and the clone stopped as `stop` stops one, with 3 when they find a VM that
 booted cold mismatched, with 4 when the guest reported that a stage of the root
 failed, and the VM ended with the stage's status and a complete teardown, with
 5 when the [step hook](#the-step-hook) ended a command, with 6 when the guest
@@ -1890,9 +1985,14 @@ failed a mapping of the table, and the VM stopped gracefully, with a success
 and a complete teardown, with 7 when `remove` found leases that keep the
 generation, which it tombstoned, with 8 when a clone failed, once nothing of it
 runs and the command released its lease, with 9 when a clone failed, and its
-teardown is unresolved, so that the sandbox keeps the lease, and with 1, after
+teardown is unresolved, so that the sandbox keeps the lease, with 10 when the
+template store refused the selection of a start or a run, so that it leased
+and launched nothing, and with 1, after
 a diagnostic on standard error, when they
-fail. A value of `RUNTIME_ADAPTER_HOST_TIME` that is not a host's time is a
+fail, as `run` does once its execution failed to run, after its teardown,
+unless the teardown ended with 4, 8, or 9, which `run` then exits with, after
+the diagnostic. A
+value of `RUNTIME_ADAPTER_HOST_TIME` that is not a host's time is a
 usage error, as is a value of `RUNTIME_ADAPTER_STEP_HOOK` that sets no step
 hook, with status 2. Without arguments, the program reports the contract that
 it was built against.
@@ -2050,7 +2150,11 @@ Windows. They cover:
   the run; a timeout that fires while the guest says nothing, after which the
   execution is cancelled, then fenced; and a run whose deadline passes first,
   in a receive, which leaves the client usable, or in a send that waits for a
-  guest that stopped reading, which ends it.
+  guest that stopped reading, which ends it; and a stop, once the driver gave
+  up on an execution, that skips the guest's late messages about it, before
+  and after a teardown that failed, while `stop` takes the first for its
+  answer, and neither skips a message about an execution that the driver did
+  not start.
 
 Through a relay between its test broker and a pseudo-terminal,
 `tests/guest_session.rs` also checks that `guest::serve_terminal` and
@@ -2272,12 +2376,28 @@ Windows, without a hypervisor:
   other commands do not take, with a clock fixture that is not a host's time
   too;
 - a start whose template store does not exist, or does not hold the
-  generation, whose image the plan refuses, and whose shares it cannot export,
-  each with status 1 before it needs NVX's artifacts or creates the sandbox's
-  store, and the shares before it reads the template store;
+  generation, each with status 10 and the record of a selection that names no
+  template, and one whose image the plan refuses, or whose shares it cannot
+  export, with status 1, each before it needs NVX's artifacts or creates the
+  sandbox's store, and the shares before it reads the template store;
 - a start whose network cannot be read, or is one that the plan refuses, with
   status 1 before anything else: before its image, which does not exist, its
   shares, which it cannot export, and the template store, which does not exist;
+- the command lines of `run` that the host program refuses, each with status
+  2: missing options, a missing `--` or program, the qualifiers of an identity
+  without one, an execution's start that the guest would refuse, a
+  first-partition bound for an EROFS image, a share's options without a share,
+  invalid values, an option given twice, arguments before `--`, and the options
+  of other commands, with a clock fixture that is not a host's time too;
+- a run whose network cannot be read, or is one that the plan refuses, or whose
+  shares it cannot export, with status 1, before it stages anything or creates
+  the sandbox's store;
+- a run whose image the plan refuses, with status 1, before it stages anything
+  or creates the sandbox's store, and runs whose template store does not exist,
+  or does not hold the generation, each with status 10 and the preflight's
+  `staged` before the record of a selection that names no template, once the
+  preflight staged the clone's images, before it needs NVX's artifacts, and
+  without a lease;
 - the text form of a host's time, which `RUNTIME_ADAPTER_HOST_TIME` takes,
   written and read back on both clocks, and the texts that are none;
 - a clone's record: its JSON, with the plan that `layered::LaunchRecord`
@@ -2668,7 +2788,8 @@ generations and payloads that the store then holds.
 ### Clone scenarios
 
 `tests/vm_clone.rs` starts [clones](#clones) of templates on a real hypervisor,
-in the host-only configuration, through `runtime-adapter-host start`. Each test
+in the host-only configuration, through `runtime-adapter-host start` and
+`run`. Each test
 captures a template of its own, of 1 processor and 256 MiB of RAM with a
 capacity of 1 GiB, in a template store of its own, of a copy of NVX's Ubuntu
 EROFS image that a directory of the platform holds, which the clones stage as
@@ -2688,19 +2809,19 @@ directory that the starts authorize:
 | --- | --- | --- |
 | `one_generation_serves_clones_of_each_upper_and_memory_target` | Two at once, over a scratch image at 256 MiB, and in RAM at 512 MiB with untrusted lowers, then one over a scratch image at 1 GiB | Each started, by the host's monotonic clock, with its own lease, which the store lists with the clone's sandbox, its memory target online, its upper, overlay mode, and image's contents, and the events of its activation in order; a stop releases each lease; the generation's snapshot unchanged, and its payload with nothing but the capture's files once the clones stopped |
 | `one_generation_serves_clones_of_either_format_over_either_upper` | Of a template whose placeholder is a GPT disk of two layers, four at once: the EROFS image over a scratch image and in RAM, a GPT disk of one layer in RAM, and one of three layers over a scratch image, with a bound that its first partition meets exactly; then the disk of one layer, with a bound one byte smaller than its first partition | Each started, with its upper and the overlay's options; the EROFS image's root, without a first partition; each GPT disk's layers, ext4 file systems mounted read-only once each, from the partitions that its own table names, stacked in order, and the bytes of its own first partition; then status 8, and the record of a failure of the request, at the activation, once the VM exited, by the evidence of an unusable root, with the guest's status 54; nothing quarantined, and the lease released, with the records |
-| `a_start_refuses_what_the_template_cannot_serve_before_any_vmm_starts` | An image 4 KiB longer, one 4 KiB shorter, and one 100 bytes longer, than the placeholder, a scratch image of twice the template's scratch, memory targets of 2 GiB and of 320 MiB, unstaged images, and a generation that the store does not hold, then the generation once its key is gone | For those that NVX's plan refuses, status 8, with NVX's reason, and the record of a failure of the request, at the plan, without a VM, by the evidence of a length that the request supplied, of the image's geometry, which OpenVMM cannot attach, or of invalid targets, which quarantines nothing; for the others, status 1, without a record; any lease released, and no VMM's log or record in the sandbox; for the generation without its key, status 8, and the record of a failure of the template, at the plan, by the evidence of a malformed generation, which quarantines the generation, so that a later start fails without a lease |
+| `a_start_refuses_what_the_template_cannot_serve_before_any_vmm_starts` | An image 4 KiB longer, one 4 KiB shorter, and one 100 bytes longer, than the placeholder, a scratch image of twice the template's scratch, memory targets of 2 GiB and of 320 MiB, unstaged images, and a generation that the store does not hold, then the generation once its key is gone | For those that NVX's plan refuses, status 8, with NVX's reason, and the record of a failure of the request, at the plan, without a VM, by the evidence of a length that the request supplied, of the image's geometry, which OpenVMM cannot attach, or of invalid targets, which quarantines nothing; for unstaged images, status 1, without a record; for the generation, status 10, with the record of a selection that names no template, which the store never published, without a lease; any lease released, and no VMM's log or record in the sandbox; for the generation without its key, status 8, and the record of a failure of the template, at the plan, by the evidence of a malformed generation, which quarantines the generation, so that the store refuses a later start's selection, with status 10, as `ineligible`, by the evidence of its tombstone, without a lease |
 | `a_clone_whose_activation_fails_ends_before_it_is_ready` | A scratch image of zeros, a journal that the record forbids, a workload identity whose account the image lacks, and, through NVX's restore sequence, a ping, a start, or the start of an execution before the `Activate` | Status 8, no `Ready`, and the record of a failure, at the activation, once the VM exited: of the request, by the evidence of an unusable root, with the guest's status 54, or of invalid settings, with 55, or, before the `Activate`, of an unknown cause, by the protocol's, with 51, which the sandbox records until the release; nothing quarantined, and the lease released, with the records |
 | `a_clone_refuses_a_scratch_image_whose_upper_an_earlier_clone_used` | Over a scratch image, in whose root the `contents` probe writes a file, then over a copy of that scratch image once the first clone stopped | The first started; then status 8, since the copy's upper is not fresh, and the record of a failure of the request, at the activation, once the VM exited, by the evidence of an unusable root, with the guest's status 54; nothing quarantined, and the lease released, with the records |
 | `clones_at_once_keep_their_own_uppers_and_machine_ids` | Three at once: over a scratch image and in RAM, each with a generated machine ID, and in RAM with the image's own; two executions in each, as user ID 0, that write a marker in the root, and try to write `/etc/machine-id` | In every execution, the hostname `runtime-adapter`, and no marker of another clone; a generated machine ID that differs between the clones, the same in each execution of a clone, held by one bind that is read-only, `nosuid`, and `nodev`, and that the write cannot change; with the image's own machine ID, none, since the image has none, no bind, and in the later execution, the ID that the first wrote; then each stop releases its lease |
 | `a_clone_whose_view_cannot_be_set_ends_before_it_is_ready` | Of a template of the EROFS image, a GPT disk whose layer holds a regular file `etc`, with the image's own machine ID, then with a generated one | The first started, with the disk's root; then status 8, since no bind can hold the machine ID below a file, and the record of a failure of the request, at the activation, once the VM exited, by the evidence of invalid settings, with the guest's status 55; nothing quarantined, and the lease released, with the records |
 | `a_clone_runs_its_executions_as_its_workload_identity_once_it_is_ready` | Over a scratch image, as nobody | An execution that runs as nobody, one that names an identity refused with `EINVAL`, and the first execution after the clone's start |
-| `a_generation_is_eligible_by_the_clock_of_its_capture` | At the host's time, then with clock fixtures: UTC a day behind, another boot an hour after the capture by UTC, and the restore window passed by each clock, or UTC before the capture | The host's monotonic clock on the boot of the capture, whatever UTC says, UTC after a reboot, with the fixture's downtime, and the store's refusal without a lease outside the window |
+| `a_generation_is_eligible_by_the_clock_of_its_capture` | At the host's time, then with clock fixtures: UTC a day behind, another boot an hour after the capture by UTC, and the restore window passed by each clock, or UTC before the capture | The host's monotonic clock on the boot of the capture, whatever UTC says, UTC after a reboot, with the fixture's downtime, and, outside the window, status 10, with the record of the store's refusal of the selection, `expired` once the window passed, and `ineligible`, by the evidence `early`, before the capture, without a lease |
 | `a_clone_reads_no_more_of_its_disks_than_its_root_needs` | Over a scratch image, and in RAM | Less than an eighth of each disk read once the clone is ready, and each disk's whole length once the guest read it to its end |
 | `a_clone_s_time_settles_after_it_is_ready` | In RAM | The time daemon's restore check `ok`, after the restore's generation, without a violation, after a downtime that the host's monotonic clock measured, and a clone that still serves |
 | `each_command_reattaches_to_the_clone_from_a_new_process` | Over a scratch image, then `reattach`, `probe`, `exec`, and `reattach` again, each from a new process | The launch's records, committed, with the clone's VM and no failure; each command `live`, with the clone's VMM, in a new session of the same broker, in a later epoch; the events of the activation as they were; an execution as nobody; and a stop that releases the lease, with the records |
 | `a_host_program_of_another_runtime_ends_the_clone_through_its_verified_identity` | In RAM, then a `reattach` with another guest agent's build | Status 8, `reattached=failed`, without a session, and the record of a failure of the host, at the reattach, by the evidence of the runtime's mismatch, once NVX terminated the VMM, which quarantines nothing; the lease released, with the records; then another clone that starts and stops |
 | `a_clone_whose_vm_exits_once_a_stop_found_it_fails_before_its_lease_is_released` | In RAM, then a `stop` that the step hook pauses at `found`, while the test terminates the clone's VMM | Status 8, `reattached=live` and `stopped=exited`, and the record of a failure of an unknown cause, at the run, by the evidence of the clone's lost status, without a status of the guest's, once the VM exited, which quarantines nothing; the lease released, with the records; then another clone that starts and stops |
-| `a_tombstone_leaves_the_running_clone_of_its_generation_to_its_lease` | Over a scratch image, then a tombstone of its generation, through NVX's store | A start that the tombstone refuses, without a lease; the running clone, which reattaches, probes, runs an execution, and stops, which releases its lease; and the generation's snapshot unchanged |
+| `a_tombstone_leaves_the_running_clone_of_its_generation_to_its_lease` | Over a scratch image, then a tombstone of its generation, through NVX's store | A start whose selection the store refuses, with status 10 and the record of an `ineligible` generation, by the evidence of its tombstone, without a lease; the running clone, which reattaches, probes, runs an execution, and stops, which releases its lease; and the generation's snapshot unchanged |
 | `the_lease_of_a_start_that_ended_before_its_record_is_released_through_its_template_store` | In RAM, in a sandbox that NVX's store leased a generation to, as a start that ended before it recorded the clone leaves it: first moved, with another sandbox at its lease's path, which holds a lease of its own, then none; then in place, without a record of a clone, then with the record of an earlier clone, of another template | For the moved sandbox, a `stop` and a `reattach` that refuse it, since the sandbox at its lease's path does not hold its lease, and leave that sandbox's lease; in place, a stop that finds the clone `ended` at `planned`, and keeps the lease, whose template store no record names; a stop with another template store, which the release refuses; a `reattach` or a `stop` with `--template` naming the lease's own, which releases it; and a start and a stop in the sandbox after each |
 | `a_clone_maps_its_export_beneath_its_root_before_its_sandbox_starts` | Over a scratch image, sharing one host directory: the directory itself, read-only, a read-write directory inside it, at its target there, a read-only file, and a read-write directory, with a file hidden | Started, with four mappings, and a record that names the export, a directory, by the identity of its plan, with four mappings; on Linux, the VMM's one `--mount`, of the directory, read-write; the export mounted once, read-write, `nosuid`, and `nodev`, below a `hostfs` of mode 0700 that root owns; the mappings below the root, and nothing else, in the table's order, each with its access, `nosuid`, and `nodev`, showing what the host holds but for the hidden file, with the missing targets created empty in the upper; the same from an execution as user ID 0; and writes through the writable mappings alone, which the host's directory holds, before and after the stop |
 | `clones_at_once_see_only_their_own_exports` | Four at once: one with a read-write export of its own and a generated machine ID, two over the same read-only export, over a scratch image and in RAM, and one without an export | Each with an export started with one mapping, and a record that names it by the identity of its plan, the same for the clones of one export, and on Linux, one `--mount`, read-write or read-only, as the mapping needs; each export mounted read-write, even where its mapping is read-only; below the root, the mapping, beside the bind of a generated machine ID; each clone's own directory, with its access; without an export, no export in the record, no mapping, no `--mount` on Linux, no export mounted, and nothing below the root; the `entries` probe, whose helper writes the root's machine ID, failing with `EROFS` where the generated one is bound; the host's directories with what the writable export took alone; then each stop releases its lease |
@@ -2711,6 +2832,12 @@ directory that the starts authorize:
 | `a_clone_binds_the_resolver_of_its_policy_s_dns_server_read_only` | Of a template of a network with egress allowed, two at once, with a generated machine ID, and with the image's own; then, once they stopped, a GPT disk whose layer holds a regular file `etc`, with the image's own machine ID | Each of the first two started, with a record that names the gateway's DNS server, one network device, and at `/etc/resolv.conf`, a file of mode 0444 that names the server, held by a bind that is read-only, `nosuid`, and `nodev`, after the bind of the generated machine ID, below the root, whose file system refuses a write as root, with nothing in the upper there; and a TCP connection to the server's DNS port, which the gateway's DNS proxy accepts without the host's resolver; then status 8, since no bind can hold the resolver configuration below a file, and the record of a failure of the request, at the activation, once the VM exited, by the evidence of invalid settings, with the guest's status 57; nothing quarantined, and the lease released, with the records |
 | `a_clone_s_executions_find_the_proxy_of_its_policy` | Of a template of a proxy-only network, one, with an execution as user ID 0 that runs `env`, then one that names its own `HTTPS_PROXY` | A record that names the proxy's URL, `http://192.0.2.1:PORT`, at the port of the proxy's listener, and no DNS server; the first execution with its own entry, then the URL in `http_proxy`, `https_proxy`, `HTTP_PROXY`, and `HTTPS_PROXY`; the second with exactly its own environment; one network device, and the image's own `/etc/resolv.conf`, which no bind holds |
 | `a_clone_of_a_template_with_a_nic_maps_its_export_beside_its_resolver` | Of a template of a network with egress allowed, one with a generated machine ID, sharing a host directory read-write | Started, with one mapping, and a record that names the export and the gateway's DNS server; on Linux, the VMM's one `--mount`, read-write, and its arguments of the template's policy; below the root, the binds of the machine ID and of the resolver configuration, then the export's mapping; the export's directory, and a write through it, which the host's directory holds after the stop |
+| `a_selection_that_names_no_template_leases_nothing` | A start that names a template store that does not exist, then, once `remove` retired the generation, which no lease kept, a start of it | Status 10, with the record of a selection that names no template, by the evidence `no-store`, then `retired`, without a lease or a VM; and a store that indexes no generation |
+| `a_run_runs_one_execution_in_its_clone_then_tears_the_clone_down` | A run over a scratch image, as nobody, whose execution names its environment and its working directory, and ends with status 3, then a run in RAM, as nobody, whose execution names an identity of its own | Each with status 0, in one command: the preflight's `staged`, the clone started as a start starts one, the execution, and a stop that releases the lease, without a VM; the first execution's output, of the Ubuntu image's root, as nobody, in its working directory, with its environment, and its status; the second refused with `EINVAL`; no lease left, and the payload with nothing but the capture's files |
+| `a_run_whose_clone_does_not_start_runs_nothing` | A run that names a template store that does not exist, one with a clock fixture past the restore window, and one over a scratch image of zeros | Once the preflight staged the images, status 10, with the record of a selection that names no template, by the evidence `no-store`, then of an `expired` generation, without a lease or a VM; then status 8, with the record of a failure of the request at the activation, once the VM exited, the lease released, and no execution or stop |
+| `a_run_in_a_template_of_a_network_finds_its_policy_s_proxy` | Of a template of a proxy-only network, a run of its network, whose execution, as user ID 0, runs `env` with an entry of its own, then a run of a network that lets nothing through | The first with status 0, its clone started and stopped as a run's, and the execution's own entry, then the proxy's URL, `http://192.0.2.1:PORT`, at the port of the proxy's listener, in `http_proxy`, `https_proxy`, `HTTP_PROXY`, and `HTTPS_PROXY`; then, once the preflight staged the images, status 8, with NVX's reason, and the record of a failure of the request, at the plan, without a VM, by the evidence of invalid settings, which quarantines nothing, the lease released, and no execution or stop |
+| `a_run_s_execution_finds_its_shares_beneath_the_root` | A run over a scratch image, sharing a host directory read-write, whose execution, as user ID 0, reads a file of the directory and writes another | Status 0, its clone started with one mapping and stopped as a run's; the file's contents in the execution's output; and the written file in the host's directory once the run tore the clone down |
+| `a_run_whose_clone_s_vm_exits_during_its_execution_ends_with_the_clone_s_failure` | A run over a scratch image, sharing a host directory read-write, whose execution, as user ID 0, writes a file there, then waits, while the test terminates the clone's VMM | Status 8, its clone started with one mapping, the diagnostic of the executions' failure, `stopped=exited`, and the record of a failure of an unknown cause, at the run, by the evidence of the clone's lost status, without a status of the guest's, once the VM exited, which quarantines nothing, and no execution; the lease released, with the records; then another clone that starts and stops |
 
 Every network that the scenarios give a template is one that a template takes:
 a network that lets nothing through, egress allowed, with outbound
@@ -2724,6 +2851,183 @@ template's directory.
 A test that fails keeps its template's directory, with the template store and
 the platform's image, as long as it keeps the directory of a clone that leases
 the template, whose VM might still run.
+
+### Stage scenarios
+
+The template and clone stage's scenarios run as one suite, which
+[`scenarios.txt`](scenarios.txt) names: each line names a test target of
+`tests/`, then one of its tests. CI's runtime adapter step runs the suite on
+each backend, KVM, MSHV, and WHP, with
+`python3 scripts/nvx.py test-runtime-adapter --backend BACKEND`, in the
+host-only configuration: it runs each target's scenarios by name, the VM
+scenarios, which are ignored, with the others, and checks that each of them ran
+and passed. It fails once a line names a test that its target does not have, a
+target that a line names has a test that no line names, the library or another
+target has an ignored test, or a named test does not run and pass, so that a
+scenario that is renamed, added, or gone fails it rather than drop out of the
+suite. With `--check-only`, it checks the names alone, and runs nothing.
+
+The suite holds each operation's outcomes, from `create` to `run`, without a
+hypervisor and in VMs, and every scenario of the stage's VMs: launches of
+layered roots, captures of templates, and the starts and runs of their clones.
+
+| Target | Scenario | Proves |
+| --- | --- | --- |
+| `template_capture` | `a_capture_takes_its_class_and_inputs_from_the_request` | A capture's request: the plan of the placeholder over RAM, with the request's network, the placeholder's binding, the policy revision, the artifacts, and the class, which the network names |
+| `template_capture` | `the_host_program_refuses_a_template_before_it_creates_anything` | `create` refuses a network that the plan refuses, or that it cannot read, with status 1 before it needs NVX's artifacts or creates the store |
+| `template_operations` | `a_refresh_refuses_a_template_before_it_creates_anything` | `refresh` refuses a network that the plan refuses with status 1 before it needs NVX's artifacts or creates the store, as `create` does |
+| `template_operations` | `an_empty_template_store_lists_no_generation` | `list` of a store without generations prints none, and `inspect` and `remove` of a generation that it never published fail with status 1, and tombstone nothing |
+| `template_operations` | `the_host_program_refuses_command_lines_of_the_operations` | The command lines of `refresh`, `list`, `inspect`, and `remove` that the host program refuses, each with status 2 |
+| `template_operations` | `the_operations_open_a_template_store_and_create_none` | `list`, `inspect`, and `remove` of a directory that does not exist, or that holds no template store, fail with status 1, and create nothing |
+| `clone_start` | `a_clone_s_plan_request_and_record_carry_its_network` | A clone's network reaches the adapter's plan, NVX's request of the clone, and the clone's record, from which an execution finds the URL of the network's proxy |
+| `clone_start` | `a_clone_s_record_names_its_template_store_and_generation_beside_its_plan` | A clone's record names its template store and its generation, which a stop reads back, beside the plan that the other commands read |
+| `clone_start` | `a_clone_s_request_takes_the_staged_bindings_and_the_guest_s_defaults` | NVX's request of a clone takes the staged bindings, the memory target, the guest's defaults or the request's settings, and the export of the request's shares, and refuses images that the store does not stage |
+| `clone_start` | `a_host_s_time_keeps_its_text_form` | A host's time keeps the clock fixture's text form, on both clocks, and the texts that are none are refused |
+| `clone_start` | `a_run_refuses_a_network_or_shares_that_the_plan_refuses_before_it_stages_anything` | A run refuses a network that it cannot read, or that the plan refuses, and shares that it cannot export, with status 1 before it stages anything or creates the sandbox's store |
+| `clone_start` | `a_run_refuses_a_selection_that_names_no_template_once_its_preflight_staged_the_images` | A run refuses an image that the plan refuses with status 1 before it stages anything, and a selection that names no template with status 10 and the refusal's record once its preflight staged the images, without a lease |
+| `clone_start` | `a_start_refuses_a_generation_that_the_template_store_does_not_hold_before_anything_else` | A start whose template store does not exist, or does not hold the generation, ends with status 10 and the refusal's record, and one whose image the plan refuses with status 1, before it needs NVX's artifacts or creates the sandbox's store |
+| `clone_start` | `a_start_refuses_a_network_that_the_plan_refuses_before_anything_else` | A start refuses a network that it cannot read, or that the plan refuses, with status 1 before its image, its shares, and the template store |
+| `clone_start` | `a_start_refuses_shares_that_it_cannot_export_before_anything_else` | A start refuses shares that it cannot export with status 1 before it reads the template store or creates the sandbox's store |
+| `clone_start` | `the_host_program_refuses_options_that_do_not_make_a_run` | The command lines of `run` that the host program refuses, its execution's included, each with status 2, and a clock fixture that is not a host's time |
+| `clone_start` | `the_host_program_refuses_options_that_do_not_make_a_start` | The command lines of `start` that the host program refuses, each with status 2, and a clock fixture that is not a host's time |
+| `host_session` | `a_clone_s_order_ends_its_table_at_a_mapping_that_the_guest_fails_and_stops_the_guest` | A clone's order sends no more of its table, nor `Start`, once the guest fails a mapping, and asks the guest to stop |
+| `host_session` | `a_clone_s_order_maps_the_root_of_its_export_with_an_empty_source` | A clone's order sends the mapping of its export's root, whose source is empty, in its table |
+| `host_session` | `a_clone_s_order_sends_its_record_first_then_starts_its_sandbox_as_after_a_cold_boot` | A clone's order sends its activation record first, returns the activation that `Ready` reports, then sends the table in parts and `Start`, and fails on a refusal, a deadline, another build, or an answer that does not decode |
+| `host_session` | `a_clone_s_session_that_ends_after_its_bootstrap_is_lost_and_the_next_takes_the_same_record` | A clone's session that a reset, the end of its stream, or its transport ended is lost, and the next session sends the same record first |
+| `host_session` | `a_mapping_that_the_guest_fails_ends_the_table_and_the_host_stops_the_guest` | A mapping that the guest fails, at the first, a middle, or the last part, ends the table without `Start`, and the host stops the guest and learns how the stop ended |
+| `host_session` | `a_receive_that_times_out_keeps_the_partial_message` | A receive that times out inside a message keeps what arrived, and a later receive returns the whole message |
+| `host_session` | `a_reset_or_a_disconnect_in_the_middle_of_a_message_drops_it` | A reset or a disconnect in the middle of a message drops the message, in the next epoch or with a new instance |
+| `host_session` | `a_send_that_fails_or_times_out_ends_the_client_with_what_it_holds` | A send that times out after part of a record, or whose transport fails, ends the client with the message that it held |
+| `host_session` | `a_stop_skips_the_guest_s_late_messages_about_the_executions_that_the_driver_gave_up_on` | A stop skips the guest's late messages about the executions that the driver gave up on, before and after a teardown that failed, and no message about an execution that it did not start |
+| `host_session` | `answers_whose_bodies_do_not_decode_end_the_client` | Answers whose bodies do not decode end the client |
+| `host_session` | `only_a_session_that_ended_is_lost_to_a_clone_s_order` | A clone's order takes only a session that ended for lost, and its other failures for final |
+| `host_session` | `requests_check_their_answers_and_end_the_client_when_they_fail` | Requests check the kind of their answers, and end the client when they fail |
+| `host_session` | `the_client_attaches_and_exchanges_messages_that_span_records` | The client attaches with the launch capability, and exchanges messages that span records both ways |
+| `host_session` | `the_client_configures_a_layered_root_probes_it_and_learns_how_its_teardown_ended` | The client configures a layered root, probes it, and learns how its teardown ended once it stopped |
+| `host_session` | `the_client_fails_on_records_that_the_protocol_does_not_allow` | Sequence, epoch, and instance errors, stale and identity-less resets, record lengths, bootstrap identities, ERROR payloads, and header faults end the client |
+| `host_session` | `the_client_reassembles_messages_from_partial_and_shared_records` | Records that end a message and start the next, and records whose bytes arrive in pieces down to one byte, give back whole messages |
+| `host_session` | `the_client_refuses_messages_that_its_framing_does_not_allow` | The client refuses malformed headers before their body arrives, messages that only the host program sends, and a message beyond the framing's limit, which it does not send |
+| `host_session` | `the_client_returns_the_stage_of_the_root_that_failed` | The client returns the stage of the root that failed, with its problem |
+| `host_session` | `the_client_waits_for_the_guest_and_reports_refusals_while_attaching` | The client waits for the guest while it attaches, until its deadline, and reports a refusal, in an ERROR or by the end of the stream |
+| `host_session` | `the_driver_ends_its_run_on_a_message_that_breaks_the_rules` | A message about an execution that the driver did not start, about none, that does not decode, or that breaks the engine's rules, and the end of the stream, end the driver's run |
+| `host_session` | `the_driver_fires_the_timers_of_its_executions_while_the_guest_says_nothing` | An execution's timeout fires while the guest says nothing, after which the driver cancels the execution, then fences it |
+| `host_session` | `the_driver_refuses_starts_before_it_sends_them` | The driver refuses the starts that the guest would not decode or run, and a start once it ran, before it sends anything, with a client that stays usable |
+| `host_session` | `the_driver_runs_executions_at_once_and_collects_their_output_and_outcomes` | The driver runs executions at once, and collects the output of each, byte-exact, and its outcome, a refused launch's included |
+| `host_session` | `the_driver_s_sends_wait_for_a_guest_that_stops_reading_until_the_deadline_of_its_run` | A run whose deadline passes in a receive leaves the client usable, and in a send that waits for a guest that stopped reading, ends it |
+| `host_session` | `the_host_orders_a_layered_root_ready_then_its_table_in_parts_then_start` | The host's order: the root configuration that announces the table, the guest's readiness, each part of the table once the guest applied the one before, then `Start` |
+| `host_session` | `the_host_sends_nothing_more_to_a_guest_agent_of_another_build_or_whose_root_failed` | The host sends nothing more to a guest agent of another build, or whose root failed |
+| `staged_images` | `a_launch_takes_the_bindings_that_the_store_stages_for_its_images` | A launch takes the bindings that the store staged for its images, and not those of other images |
+| `staged_images` | `staging_verifies_the_image_and_binds_the_scratch` | Staging verifies an image against the manifest beside it, refuses another image's, stages a GPT disk over RAM, and refuses images that no launch could attach |
+| `staged_images` | `the_host_program_stages_images_in_the_store` | `stage` records the staged images, a staging that fails leaves them, and another replaces them |
+| `staged_images` | `the_store_records_the_staged_images` | The record of the staged images, as written and read, and the forms that a reader refuses |
+| `layered_launch` | `a_launch_claims_its_scratch_image_until_it_releases_its_checked_files` | A launch claims its scratch image, which a second launch waits for, then fails to take, until the first releases its checked files |
+| `layered_launch` | `a_launch_reads_only_the_networks_that_the_plan_takes` | A launch refuses the network files that the plan refuses, each for the plan's reason |
+| `layered_launch` | `a_launch_records_what_it_launched` | A launch's record holds the bindings that it checked, over a scratch image and over RAM, and a VM without a layered root has one too |
+| `layered_launch` | `a_launch_refuses_images_that_are_not_staged_or_changed_since` | A launch refuses images that the store does not stage, of another format or identity, and images that changed, were replaced, or are gone since they were staged |
+| `layered_launch` | `a_launch_refuses_shares_that_it_cannot_export` | A launch refuses shares outside the authorized directories, inaccessible ones, reserved targets, a read-only share inside a read-write one, and a hidden path that does not exist |
+| `layered_launch` | `a_launch_renders_each_element_of_its_network_through_the_plan` | OpenVMM's arguments of each element of a policy, after the plan's block devices, the proxy's URL, and the publication of listeners, as NVX's lowering renders them |
+| `layered_launch` | `a_launch_shares_host_paths_inside_the_authorized_directories` | The export of shares inside an authorized directory maps each at its target, parents first, hides a denied path, and comes with the root configuration and OpenVMM's arguments that attach it |
+| `layered_launch` | `a_layered_launch_hands_openvmm_the_checked_images` | OpenVMM's arguments name the checked files, by the descriptors that OpenVMM inherits on Linux and by their final paths on Windows, without a workload identity or a managed lifecycle |
+| `layered_launch` | `a_layered_launch_passes_what_the_guest_checks_as_it_is` | A launch passes on the options that the guest checks as they are |
+| `layered_launch` | `a_layered_launch_plans_its_blocks_and_boot_tokens_with_the_adapters_plan` | The adapter's plan of a layered launch: its block devices and boot tokens, without the sandbox profile's settings, and the sizes of the images |
+| `layered_launch` | `an_execution_finds_the_url_of_its_network_s_proxy_in_its_environment` | An execution's start carries the URL of its network's proxy after its own entries, keeps its own proxy settings, and is unchanged without a proxy |
+| `layered_launch` | `shares_read_their_host_path_their_target_and_their_access` | The text of a share, `HOST:TARGET[:ro]` |
+| `layered_launch` | `the_host_program_refuses_a_network_before_it_launches` | `launch --network` refuses a network that the plan refuses, or that it cannot read, with status 1 before it needs NVX's artifacts or creates the store |
+| `layered_launch` | `the_host_program_refuses_options_that_do_not_make_a_command` | The command lines that the host program refuses, each with status 2, those of `exec`, `--workload-identity`, and `create` included |
+| `layered_launch` | `the_host_program_refuses_shares_before_it_touches_the_store` | `launch` refuses shares that it cannot export with status 1 before it creates the store |
+| `layered_launch` | `the_record_of_a_launch_gives_back_its_plan` | A launch's record gives back its plan, from which the host finds the proxy's URL, none for a VM without a layered root, and a reader refuses other records |
+| `vm_restart` | `a_host_program_of_another_runtime_finds_the_vm_mismatched_and_signals_nothing` | A host program that ships another build of the guest agent finds the VM mismatched, and signals nothing, until the host program of its runtime stops it |
+| `vm_restart` | `a_launch_tears_down_a_vm_whose_guest_agent_is_of_another_build` | A launch whose VM's guest agent reports another build sends it neither the table nor `Start`, and fails, which ends the VM |
+| `vm_restart` | `a_restarted_host_program_reattaches_to_the_vm_and_stops_it` | Another process's `reattach` holds the VM, which is not its child, in a later epoch, and a third's `stop` stops it gracefully, with no runtime record left |
+| `vm_steps` | `a_launch_that_the_hook_ends_after_its_checks_leaves_no_launch` | A launch that the step hook ends at `checked`, with status 5, leaves nothing of a launch in the store, and releases the scratch image's claim |
+| `vm_steps` | `images_replaced_after_the_checks_never_reach_the_vm` | Images that files of zeros replace after the checks never reach the VM, whose guest assembles the checked originals |
+| `vm_steps` | `the_hook_pauses_a_launch_at_each_of_its_steps` | The step hook pauses a launch at each of its steps, at which the store holds what the step says |
+| `vm_layered` | `a_changed_image_is_refused_before_spawn` | A GPT disk written in place after it was staged is refused before the VM spawns, and boots once staged again |
+| `vm_layered` | `a_denied_network_lets_no_probe_through` | A network that denies everything attaches no network device, and an execution reaches nothing |
+| `vm_layered` | `a_failed_mapping_tears_the_vm_down` | A mapping that the guest refuses ends the table, without `Start`, and the VM ends cleanly once the guest tore the root down |
+| `vm_layered` | `a_forward_reaches_its_guest_port` | A forward of a port of host loopback reaches a listener of the guest at its port |
+| `vm_layered` | `a_proxy_only_network_lets_only_its_proxy_through` | A proxy-only network lets an execution reach its proxy, through the URL in its environment, and nothing else |
+| `vm_layered` | `a_read_only_share_inside_a_writable_one_is_refused_before_launch` | A read-only share inside a writable one is refused before the VM spawns |
+| `vm_layered` | `a_replaced_scratch_is_refused_before_spawn` | A scratch image that another copy replaced after it was staged is refused before the VM spawns, and boots once staged again |
+| `vm_layered` | `a_share_inside_a_reserved_tree_is_refused_before_launch` | A share inside a tree that the adapter reserves is refused before the VM spawns |
+| `vm_layered` | `a_share_over_a_reserved_tree_is_refused_before_launch` | A share that would cover a reserved tree is refused before the VM spawns |
+| `vm_layered` | `accountless_workload_identity_fails_its_stage` | A workload identity whose account the image lacks fails its stage once the root is assembled, and the VM ends with 16 |
+| `vm_layered` | `allowed_host_loopback_publishes_the_listeners` | Host-loopback access both ways publishes the guest's listeners, which the host reaches, while egress still governs the guest's own connections |
+| `vm_layered` | `an_allow_rule_lets_only_its_destination_through` | An allow rule lets an execution reach its destination alone |
+| `vm_layered` | `an_unauthorized_host_path_is_refused_before_launch` | A share of a host directory that the adapter does not authorize is refused before the VM spawns |
+| `vm_layered` | `busy_root_fails_the_teardown` | A root that a probe keeps open fails its teardown, which the stop reports, and the VM ends with 15 |
+| `vm_layered` | `corrupt_layer_fails_the_assembly` | A corrupt layer that asks the kernel to panic on an error fails the assembly without a panic, and the VM ends with 14 |
+| `vm_layered` | `cyclic_journal_is_not_loaded` | A layer's cyclic journal, without `needs_recovery`, is never scanned: the root assembles, serves, and tears down |
+| `vm_layered` | `erofs_over_ram` | The EROFS image over a tmpfs in RAM, without a scratch, and with no disk but the image's |
+| `vm_layered` | `erofs_over_ram_maps_the_table` | The mapping table over a tmpfs, as over a scratch image |
+| `vm_layered` | `erofs_over_ram_with_untrusted_lowers` | The image over a tmpfs in the untrusted-lowers mode, which copies up a file's data and refuses the rename of a lower directory |
+| `vm_layered` | `erofs_over_scratch` | The EROFS image over a scratch image: the root that the worker assembled outside PID 1, its overlay in the default mode, its cgroups, an empty table, and a clean teardown |
+| `vm_layered` | `erofs_over_scratch_maps_the_table` | The export, mounted once below a private `hostfs`, and the table's mappings, in the plan's order, each with its access, `nosuid`, and `nodev` |
+| `vm_layered` | `erofs_over_scratch_with_untrusted_lowers` | The image over a scratch image in the untrusted-lowers mode, which copies up a file's data and refuses the rename of a lower directory |
+| `vm_layered` | `executions_run_as_the_workload_identity` | Executions that name no identity run as the workload identity, without capabilities, with exactly their start's environment, and one that names an identity is refused with `EINVAL` |
+| `vm_layered` | `executions_run_in_the_root` | Executions run at once in the root, as the identities that they name, byte-exact, and end on their own, reusable |
+| `vm_layered` | `executions_take_the_settings_of_a_proxy_only_network` | The executions of a proxy-only network find its proxy's URL in their environment, after their own entries, unless they name their own |
+| `vm_layered` | `first_partition_over_its_bound_fails_the_assembly` | A GPT disk whose first partition is larger than its bound fails the assembly, and the VM ends with 14 |
+| `vm_layered` | `forbidden_journal_fails_the_assembly` | A scratch image whose journal the launch forbids fails the assembly before the guest mounts it, and the VM ends with 14 |
+| `vm_layered` | `full_ram_upper_refuses_writes` | A tmpfs upper refuses writes with `ENOSPC` once full, and takes them again once freed |
+| `vm_layered` | `full_scratch_refuses_writes` | A scratch upper refuses writes with `ENOSPC` once full, and takes them again once freed |
+| `vm_layered` | `gpt_over_ram` | A GPT disk over a tmpfs, with a bound that its first partition meets exactly |
+| `vm_layered` | `gpt_over_ram_maps_the_table` | The mapping table over a GPT disk over a tmpfs |
+| `vm_layered` | `gpt_over_ram_with_untrusted_lowers` | A GPT disk over a tmpfs in the untrusted-lowers mode |
+| `vm_layered` | `gpt_over_scratch` | A GPT disk over a scratch image: its first partition's bytes, and its layers, each mounted read-only once, stacked in order |
+| `vm_layered` | `gpt_over_scratch_maps_the_table` | The mapping table over a GPT disk, whose targets the worker creates, with their parents |
+| `vm_layered` | `gpt_over_scratch_with_untrusted_lowers` | A GPT disk over a scratch image in the untrusted-lowers mode |
+| `vm_layered` | `invalid_configuration_fails_its_stage` | A relative runtime directory fails the configuration's stage, and the VM ends with 11 |
+| `vm_layered` | `other_disk_guid_fails_the_assembly` | A GPT disk of another GUID than the launch expects fails the assembly, and the VM ends with 14 |
+| `vm_layered` | `other_identity_fails_the_assembly` | An image of another identity than the launch expects fails the assembly, and the VM ends with 14 |
+| `vm_layered` | `outbound_host_loopback_publishes_no_listener` | Egress with outbound host-loopback access reaches every destination, and publishes no listener of the guest |
+| `vm_layered` | `published_listeners_refuse_binding_and_raw_sockets` | While listeners are published, the guest refuses `CAP_NET_BIND_SERVICE` and `CAP_NET_RAW` with `EPERM`, and keeps the other capabilities of its allowlist |
+| `vm_layered` | `recovery_required_layer_fails_the_assembly` | A layer whose journal needs recovery is refused before any mount, whatever `noload` says, and the VM ends with 14 |
+| `vm_layered` | `root_profiles_enter_the_root` | Executions enter the root as PID 1 of their namespaces, with their standard streams alone, no inheritable or ambient capability, and no new privileges |
+| `vm_layered` | `unstaged_images_are_refused_before_spawn` | Images that the store does not stage are refused before the VM spawns, with nothing of a launch left, and boot once staged |
+| `vm_template` | `a_class_that_no_capture_takes_is_refused_before_the_store` | `create` of a class that no capture takes, of 3 processors, fails with status 1 before the store exists |
+| `vm_template` | `a_network_that_lets_nothing_through_has_no_nic` | `create` of a network that lets nothing through captures a template without a NIC |
+| `vm_template` | `a_proxy_only_network_has_its_nic` | `create` of a proxy-only network captures a template with a NIC |
+| `vm_template` | `a_refresh_captures_and_retires_the_generations_that_it_supersedes` | `refresh` captures a new generation although the store holds an eligible one, and its eviction retires the one that it supersedes, or tombstones it while a clone leases it, as `list` and `inspect` report |
+| `vm_template` | `a_refresh_refuses_a_class_that_no_capture_takes_before_the_store` | `refresh` of a class that no capture takes fails with status 1 before the store exists |
+| `vm_template` | `a_removal_reports_busy_while_leases_keep_the_generation` | `remove` tombstones a leased generation, keeps its payload, and reports busy, with status 7 and its leases, until no lease remains, then deletes it |
+| `vm_template` | `a_template_without_a_network_has_no_nic` | `create` captures a template without a NIC, whose key holds what it asked for, and serves it again without a capture |
+| `vm_template` | `an_allow_rule_has_its_nic` | `create` of an allow rule captures a template with a NIC |
+| `vm_template` | `an_egress_network_has_its_nic` | `create` of a network with egress allowed captures a template with a NIC |
+| `vm_template` | `host_loopback_both_ways_is_refused_before_any_vm_starts` | `create` refuses host-loopback access both ways with status 1, before any VM starts, with no generation |
+| `vm_template` | `ingress_is_refused_before_any_vm_starts` | `create` refuses ingress with status 1, before any VM starts, with no generation |
+| `vm_template` | `outbound_host_loopback_has_its_nic` | `create` with outbound host-loopback access captures a template with a NIC |
+| `vm_clone` | `a_clone_binds_the_resolver_of_its_policy_s_dns_server_read_only` | A clone of a network with egress allowed binds a resolver file that names the gateway's DNS server read-only at `/etc/resolv.conf`, and a TCP connection to the server's DNS port opens, which the gateway's DNS proxy accepts; one whose resolver cannot be bound ends with status 57 |
+| `vm_clone` | `a_clone_maps_its_export_beneath_its_root_before_its_sandbox_starts` | A clone maps its export's mappings beneath its root before its sandbox starts, each with its access, a denied file hidden, and writes reach the host's directory through the writable ones alone |
+| `vm_clone` | `a_clone_of_a_template_with_a_nic_maps_its_export_beside_its_resolver` | A clone of a template with a NIC maps its export below the binds of its machine ID and of its resolver configuration |
+| `vm_clone` | `a_clone_reads_no_more_of_its_disks_than_its_root_needs` | A clone's restore reads less than an eighth of each disk, before the guest reads each to its end |
+| `vm_clone` | `a_clone_refuses_a_scratch_image_whose_upper_an_earlier_clone_used` | A scratch image whose upper an earlier clone used ends the clone before it is ready, with status 54 |
+| `vm_clone` | `a_clone_runs_its_executions_as_its_workload_identity_once_it_is_ready` | A clone runs its executions as its record's workload identity once it is ready, and refuses one that names an identity with `EINVAL` |
+| `vm_clone` | `a_clone_s_executions_find_the_proxy_of_its_policy` | The executions of a clone of a proxy-only network find its proxy's URL in their environment, and the clone keeps the image's own `/etc/resolv.conf` |
+| `vm_clone` | `a_clone_s_time_settles_after_it_is_ready` | A clone's time settles once it is ready, without a violation, after the downtime that the host's monotonic clock measured |
+| `vm_clone` | `a_clone_whose_activation_fails_ends_before_it_is_ready` | A clone whose activation fails ends before it is ready, with the status of the failure's class and the failure's record, quarantines nothing, and releases its lease |
+| `vm_clone` | `a_clone_whose_mapping_fails_ends_before_its_sandbox_starts` | A clone whose guest fails a mapping ends before its sandbox starts, with the failure's record, and leaves the host's directory unchanged |
+| `vm_clone` | `a_clone_whose_view_cannot_be_set_ends_before_it_is_ready` | A generated machine ID that no bind can hold ends the clone before it is ready, with status 55, while the image's own needs no bind |
+| `vm_clone` | `a_clone_whose_vm_exits_once_a_stop_found_it_fails_before_its_lease_is_released` | A clone whose VM exits once a stop found it running fails, with status 8 and the record of a failure by the evidence of its lost status, quarantines nothing, and releases its lease |
+| `vm_clone` | `a_generation_is_eligible_by_the_clock_of_its_capture` | The store checks eligibility by the host's monotonic clock on the boot of the capture, and by UTC after a reboot, and refuses an expired or an early generation with status 10, without a lease |
+| `vm_clone` | `a_host_program_of_another_runtime_ends_the_clone_through_its_verified_identity` | A host program of another runtime ends the clone through its verified identity, without a word to its guest, with status 8, and releases its lease |
+| `vm_clone` | `a_run_in_a_template_of_a_network_finds_its_policy_s_proxy` | A run's execution, in a clone of a proxy-only template, finds the proxy's URL in its environment, and a run of another network runs nothing, with status 8 |
+| `vm_clone` | `a_run_runs_one_execution_in_its_clone_then_tears_the_clone_down` | A run stages its images, starts a clone, runs one execution in its root, with the execution's environment and working directory, then stops the clone and releases its lease, whatever the execution did |
+| `vm_clone` | `a_run_s_execution_finds_its_shares_beneath_the_root` | A run's execution reads and writes through its share, which the clone mapped beneath its root, and the host's directory keeps what it wrote |
+| `vm_clone` | `a_run_whose_clone_does_not_start_runs_nothing` | A run whose selection the store refuses ends with status 10, and one whose clone fails with status 8, without an execution or a stop |
+| `vm_clone` | `a_run_whose_clone_s_vm_exits_during_its_execution_ends_with_the_clone_s_failure` | A run whose clone's VM exits during its execution ends with the clone's failure, status 8, once its stop found that the VM exited, quarantines nothing, and releases its lease |
+| `vm_clone` | `a_selection_that_names_no_template_leases_nothing` | A start of a template store that does not exist, or of a generation that `remove` retired, ends with status 10 and the refusal's record, without a lease or a VM |
+| `vm_clone` | `a_start_refuses_an_export_that_a_dormant_filesystem_slot_cannot_bind_before_any_vmm_starts` | An export of two directories, or of a file alone, is refused with status 8 before any VMM starts |
+| `vm_clone` | `a_start_refuses_what_the_template_cannot_serve_before_any_vmm_starts` | Images, scratch images, and memory targets that the template cannot serve are refused with status 8 before any VMM starts, unstaged images with status 1, and a generation that the store does not hold with status 10 |
+| `vm_clone` | `a_template_serves_the_clones_of_its_own_network_policy_alone` | A template with a NIC serves the clones of its own network alone, whose restores attach its NIC under its policy, and NVX's plan refuses the others with status 8 before any VMM starts |
+| `vm_clone` | `a_template_without_a_nic_serves_clones_without_a_network` | A template without a NIC serves clones without a network, or with one that lets nothing through, and refuses those of a network with a NIC with status 8 |
+| `vm_clone` | `a_tombstone_leaves_the_running_clone_of_its_generation_to_its_lease` | A tombstone refuses new clones of its generation with status 10, while the running clone serves on, and releases its lease once it stops |
+| `vm_clone` | `clones_at_once_keep_their_own_uppers_and_machine_ids` | Clones at once keep their own uppers, and their own machine IDs, generated, distinct, and bound read-only, or the image's own |
+| `vm_clone` | `clones_at_once_see_only_their_own_exports` | Clones of one generation at once see only their own exports, and a clone without one none |
+| `vm_clone` | `each_command_reattaches_to_the_clone_from_a_new_process` | `reattach`, `probe`, and `exec` each reattach to the clone from a new process, in a later epoch, without a second activation |
+| `vm_clone` | `one_generation_serves_clones_of_each_upper_and_memory_target` | One generation serves clones over a scratch image and in RAM, at each memory target up to its capacity, each with its own lease, and leaves its snapshot unchanged |
+| `vm_clone` | `one_generation_serves_clones_of_either_format_over_either_upper` | A template of a GPT placeholder serves EROFS and GPT clones of other layouts over either upper, and a first partition over its bound ends a clone with status 54 |
+| `vm_clone` | `the_lease_of_a_start_that_ended_before_its_record_is_released_through_its_template_store` | The lease of a start that ended before it recorded its clone is released only through its own template store, which `--template` names |
 
 ### Running the VM tests
 
@@ -2748,7 +3052,14 @@ NVX_HYPERVISOR=kvm NVX_ARTIFACTS_DIR="$(cd ../.. && pwd)" \
   cargo test --locked --features host -- --ignored
 ```
 
-On Windows, take the guest agent from a Linux build.
+On Windows, take the guest agent from a Linux build. To run the
+[stage scenarios](#stage-scenarios) by name, as CI runs them, run in the
+repository's root, after the build of the guest agent above, or with
+`--guest-agent PATH` naming another:
+
+```bash
+python3 scripts/nvx.py test-runtime-adapter --backend kvm
+```
 
 Run the checks of each configuration in this directory. The guest-only
 configuration needs Linux and the musl target, which
@@ -2779,11 +3090,12 @@ configuration. A change to the adapter is a test input of CI's
 NVX microVM tests. Their
 [workflow](../../.github/workflows/run-nvx-microvm-tests.yml) builds the
 host-only configuration on each backend, in the jobs that run the guest and
-sandbox steps, and runs its ignored tests, the adapter's VM scenarios, template
-captures, and clones, with `NVX_HYPERVISOR` naming the backend,
-`NVX_ARTIFACTS_DIR` the checkout, into which the job downloaded NVX's
+sandbox steps, and runs the adapter's consolidated suite, the
+[stage scenarios](#stage-scenarios), by name, with
+`nvx.py test-runtime-adapter`, which names the backend in `NVX_HYPERVISOR`, the
+checkout in `NVX_ARTIFACTS_DIR`, into which the job downloaded NVX's
 artifacts, their provenance, and the fixtures of the layered scenarios with
-the guest artifacts, as NVX's own layered scenarios take them, and
-`RUNTIME_ADAPTER_GUEST` the guest agent. The Linux jobs build the guest agent
+the guest artifacts, as NVX's own layered scenarios take them, and the guest
+agent in `RUNTIME_ADAPTER_GUEST`. The Linux jobs build the guest agent
 first, and the Windows job takes the one that CI's `distro-artifacts` job
 builds on Linux.
