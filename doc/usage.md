@@ -1661,6 +1661,36 @@ benchmarks will use; it defaults to the system temporary directory. `--output`
 writes this host in the host-file format, ready to replace the expected host,
 and `--summary` appends a Markdown comparison that includes it.
 
+#### `performance storage-events`
+
+```text
+python scripts\nvx.py performance storage-events
+    --since TIME
+    --output-dir PATH
+    [--scratch-dir PATH]
+```
+
+Saves the Windows storage events from `--since`, an ISO 8601 time with a UTC
+offset or `Z`, such as PowerShell's round-trip format, until now, as a failed
+Windows platform job does; see [CI collection](benchmarks.md#ci-collection).
+It writes the `Microsoft-Windows-Storage-Storport/Operational` events and the
+System log's storage events as rendered XML, and `storage-events.txt`, which
+summarizes them and lists every event, to `--output-dir`, and prints the
+summary. I/Os that took longer than Storport's threshold raise a GitHub Actions
+warning annotation, and so does a log that can't be read, which doesn't fail the
+command. `--scratch-dir` names the benchmark scratch directory, whose volume,
+with the workspace, temporary, and system volumes, the summary names for each
+Storport device; it defaults to the system temporary directory. A stalled
+volume can stall what reads it, so the command abandons a query after 120
+seconds, and probes the volumes only once it has saved the events, for at most
+30 seconds, after which the summary says why it names none. It also abandons
+creating `--output-dir` or writing a file there after 30 seconds, as the
+directory can share that volume, and the summary and a warning then name each
+file that it couldn't save. Reading the
+Storport log takes a service account, such as the runners' Network Service, an
+elevated prompt, or membership in Event Log Readers. On other hosts, the command
+exits with status 2.
+
 ## Source and package commands
 
 ### `collect-sources`
