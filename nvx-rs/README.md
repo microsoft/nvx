@@ -661,15 +661,18 @@ sandbox's directory, which the release removes; and a fresh capability.
 
 It builds the clone's activation record, `ClonePlan::activation`, which the
 clone's guest applies in place of the configuration that the template captured,
-from the request's `WorkloadView`, overlay mode, and journal policy, and from
-the checked inputs: a restore section with a fresh transaction ID of 16 random
-bytes and the lease's `TemplateReference`; the image, an EROFS layer, with its
-binding's identity and the UUID that the adapter's plan expects of it, since a
-GPT image is refused; a tmpfs, or the scratch image's binding identity with the
-journal policy; no export; the template NIC's policy identity, as its key
-records it, unpublished listeners, and the guest's proxy URL; and the template's
-processors and the memory target. A binding's identity is the SHA-256 digest of
-a domain and of the binding's serde form, never of a file's content.
+from the request's `WorkloadView`, overlay mode, journal policy, and bound of a
+GPT disk's first partition, and from the checked inputs: a restore section with
+a fresh transaction ID of 16 random bytes and the lease's `TemplateReference`;
+the image, an EROFS layer or a GPT disk, as its binding names it, with its
+binding's identity and the filesystem UUID or disk GUID that the adapter's plan
+expects of it, and for a GPT disk the bound of its first partition, whose
+partition table the guest checks with `nvx::gpt` as at a cold launch; a tmpfs,
+or the scratch image's binding identity with the journal policy; no export; the
+template NIC's policy identity, as its key records it, unpublished listeners,
+and the guest's proxy URL; and the template's processors and the memory target.
+A binding's identity is the SHA-256 digest of a domain and of the binding's
+serde form, never of a file's content.
 
 The image and the scratch device must present the `BlockGeometry` of the
 template's, which a restore compares, and be, at the paths by which OpenVMM
@@ -1197,19 +1200,23 @@ Activate whose record the adapter's framing refused unread, as longer than a
 record can be, fails as a record that long does; the adapter applies the record
 with `apply`, as at a cold boot: it assembles the root as `root::assemble` does,
 with the record's image, an EROFS image whose UUID it checks if the record
-expects one, its upper, a tmpfs or the scratch with the record's journal policy,
-and its overlay mode, and with the `RootTemplate` that the guest's own
-configuration holds, which its template captured: the runtime directory, the
-block devices, and the timeout, but waits for no device past the activation's
-deadline, which the adapter passes, so that the application ends by then.
+expects one, or a GPT disk whose GUID it checks if the record expects one, its
+upper, a tmpfs or the scratch with the record's journal policy, and its overlay
+mode, and with the `RootTemplate` that the guest's own configuration holds,
+which its template captured: the runtime directory, the block devices, and the
+timeout, but waits for no device past the activation's deadline, which the
+adapter passes, so that the application ends by then.
 
-It refuses a GPT disk before any side effect, since the kernel created the block
-devices of its partitions for the template's placeholder, and, with the record's
-workload identity, checks its account in the assembled root before Ready, as
-NVX's init checks it at boot: `entry::Identity::new(uid, gid)`, without
-supplementary groups or capabilities, in existing-account mode, as which every
-execution runs, while without one each execution names its own identity, which
-`Entry::check` checks. It returns the `Applied` root and identity, or an
+For a GPT disk, it first asks the kernel to reread the disk's partition table
+with `BLKRRPART`, since the kernel created the block devices of partitions for
+the template's placeholder. Whatever the image, it requires a fresh upper, whose
+`upper` and `work` directories are missing or empty, in a bounded check that
+reads no file, while a cold sandbox's scratch keeps its upper across boots. With
+the record's workload identity, it checks its account in the assembled root
+before Ready, as NVX's init checks it at boot: `entry::Identity::new(uid, gid)`,
+without supplementary groups or capabilities, in existing-account mode, as which
+every execution runs, while without one each execution names its own identity,
+which `Entry::check` checks. It returns the `Applied` root and identity, or an
 `ApplyError`, after which nothing that it mounted stays mounted unless the error
 reports the unmounts that failed, and applies none of the record's export,
 network, hostname, or machine ID.

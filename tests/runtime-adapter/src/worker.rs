@@ -80,11 +80,12 @@
 //!    effect.
 //! 3. The worker applies the record through `RootOperations::apply`, which runs
 //!    `nvx::guest::clone::apply`: it assembles the root from the template's devices, with the
-//!    record's image, upper, and overlay mode, waiting for each device until the activation's
-//!    deadline at the latest, so that the application ends by then, and checks the account of the
-//!    record's workload identity, if it has one, in the assembled root, as the worker of a VM that
-//!    boots cold does for a root configuration. The template bootstrapped the guest for its root
-//!    with its own configuration before its capture, so the clone has its cgroups.
+//!    record's image, upper, and overlay mode, once the kernel reread the partition table of a
+//!    GPT disk, over a fresh upper, waiting for each device until the activation's deadline at
+//!    the latest, so that the application ends by then, and checks the account of the record's
+//!    workload identity, if it has one, in the assembled root, as the worker of a VM that boots
+//!    cold does for a root configuration. The template bootstrapped the guest for its root with
+//!    its own configuration before its capture, so the clone has its cgroups.
 //! 4. Once it took what the session received while the application ran, which came before
 //!    `Ready`, it completes the activation, which opens the fence, and answers `Ready`, which
 //!    reports that the activation applied, with the record's transaction, after the guest agent's

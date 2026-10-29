@@ -149,9 +149,15 @@ impl Guest {
         }
     }
 
-    /// Assembles `assembly` with a clone of the guest's kernel.
+    /// Assembles `assembly` with a clone of the guest's kernel, as [`assemble`] does.
     fn assemble(&self, assembly: &Assembly) -> Result<Root, AssemblyError> {
-        assemble_with(Box::new(self.kernel.clone()), &self.paths, assembly, None)
+        assemble_with(
+            Box::new(self.kernel.clone()),
+            &self.paths,
+            assembly,
+            None,
+            Contents::Kept,
+        )
     }
 
     /// Assembles `assembly` with a clone of the guest's kernel, waiting for each device until
@@ -162,7 +168,25 @@ impl Guest {
         deadline: Instant,
     ) -> Result<Root, AssemblyError> {
         let kernel = Box::new(self.kernel.clone());
-        assemble_with(kernel, &self.paths, assembly, Some(deadline))
+        assemble_with(
+            kernel,
+            &self.paths,
+            assembly,
+            Some(deadline),
+            Contents::Kept,
+        )
+    }
+
+    /// Assembles `assembly` with a clone of the guest's kernel and a fresh upper, as
+    /// [`assemble_fresh`] does.
+    fn assemble_fresh(&self, assembly: &Assembly) -> Result<Root, AssemblyError> {
+        assemble_with(
+            Box::new(self.kernel.clone()),
+            &self.paths,
+            assembly,
+            None,
+            Contents::Fresh,
+        )
     }
 
     /// Sets the overlay module's parameter `name`, the default of one of the overlay's options:
@@ -926,6 +950,137 @@ fn new_upper_and_work_directories_have_mode_0755_whatever_the_umask() {
 }
 
 #[test]
+fn a_fresh_upper_s_directories_must_be_missing_or_empty() {
+    let mode = |path: &Path| fs::metadata(path).unwrap().mode() & 0o7777;
+    // A scratch or a tmpfs without the directories gets them, as any root's upper does, with no
+    // other call than a cold root's.
+    for upper in [scratch_upper(Journal::Allowed), Upper::Tmpfs] {
+        let guest = Guest::new();
+        let assembly = Assembly {
+            upper,
+            ..guest.assembly()
+        };
+        guest.assemble_fresh(&assembly).unwrap().teardown().unwrap();
+        let point = upper_point(upper.kind());
+        for directory in ["upper", "work"] {
+            let path = guest.path(&format!("run/nvx/{point}/{directory}"));
+            assert_eq!(mode(&path), 0o755, "{directory}");
+        }
+        assert_eq!(
+            guest.kernel.mounts(),
+            below(&guest.text("run/nvx"), &["layers/distro", point, "rootfs"])
+        );
+    }
+
+    // Empty directories that the scratch holds already pass, and keep their mode.
+    let guest = Guest::new();
+    for directory in ["upper", "work"] {
+        let path = guest.path("run/nvx/scratch").join(directory);
+        fs::create_dir_all(&path).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    guest
+        .assemble_fresh(&guest.assembly())
+        .unwrap()
+        .teardown()
+        .unwrap();
+    for directory in ["upper", "work"] {
+        assert_eq!(mode(&guest.path("run/nvx/scratch").join(directory)), 0o700);
+    }
+
+    // A directory that holds an entry, such as the work directory that an earlier overlay
+    // left, is refused once the upper is mounted, before the overlay, and before the other
+    // directory is created; the failure unmounts the layer and the upper, and leaves the entry.
+    for (directory, entry, other) in [("upper", "etc", "work"), ("work", "work", "upper")] {
+        let guest = Guest::new();
+        let path = guest.path("run/nvx/scratch").join(directory);
+        fs::create_dir_all(path.join(entry)).unwrap();
+        let error = guest.assemble_fresh(&guest.assembly()).unwrap_err();
+        assert!(
+            matches!(error.error(), Error::NotFresh { path: refused } if *refused == path),
+            "{error:?}"
+        );
+        assert!(error.cleanup().is_none());
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "the upper's directory {} is not empty, but the upper must be fresh",
+                path.display()
+            )
+        );
+        let mounted = below(&guest.text("run/nvx"), &["layers/distro", "scratch"]);
+        assert_eq!(guest.kernel.mounts(), mounted);
+        assert_eq!(guest.kernel.unmounts(), mounted);
+        assert!(path.join(entry).is_dir());
+        assert!(!guest.path("run/nvx/scratch").join(other).exists());
+    }
+
+    // So is anything there but a directory, a symbolic link to an empty one included, as any
+    // root's assembly refuses it.
+    for link in [false, true] {
+        let guest = Guest::new();
+        let upper = guest.path("run/nvx/scratch/upper");
+        if link {
+            fs::create_dir_all(guest.path("elsewhere")).unwrap();
+            fs::create_dir_all(guest.path("run/nvx/scratch")).unwrap();
+            std::os::unix::fs::symlink(guest.path("elsewhere"), &upper).unwrap();
+        } else {
+            write(&upper, "a file");
+        }
+        let error = guest.assemble_fresh(&guest.assembly()).unwrap_err();
+        assert!(
+            matches!(error.error(), Error::MountPoint { path, error }
+                if *path == upper && error.raw_os_error() == Some(Errno::ENOTDIR as i32)),
+            "{error:?}"
+        );
+    }
+
+    // A cold root keeps both, whatever they hold, as a scratch keeps its upper across boots.
+    let guest = Guest::new();
+    for path in ["run/nvx/scratch/upper/etc", "run/nvx/scratch/work/work"] {
+        fs::create_dir_all(guest.path(path)).unwrap();
+    }
+    guest
+        .assemble(&guest.assembly())
+        .unwrap()
+        .teardown()
+        .unwrap();
+    assert!(guest.path("run/nvx/scratch/upper/etc").is_dir());
+    assert!(guest.path("run/nvx/scratch/work/work").is_dir());
+}
+
+#[test]
+fn the_freshness_check_takes_one_entry_of_a_directory_and_opens_none() {
+    // However many entries a directory holds, the check refuses it at its first, and opens
+    // none: not a FIFO, whose open would block, nor a directory below it.
+    let guest = Guest::new();
+    let upper = guest.path("run/nvx/scratch/upper");
+    fs::create_dir_all(upper.join("a/b/c")).unwrap();
+    for index in 0..1024 {
+        fs::write(upper.join(format!("file{index}")), "content").unwrap();
+    }
+    let fifo = sys::path_c_string(&upper.join("fifo")).unwrap();
+    sys::create_fifo(&fifo, sys::Mode::from_bits_truncate(0o600)).unwrap();
+    let error = guest.assemble_fresh(&guest.assembly()).unwrap_err();
+    assert!(
+        matches!(error.error(), Error::NotFresh { path } if *path == upper),
+        "{error:?}"
+    );
+
+    // The listing's first entry decides, and the check takes no other.
+    let mut taken = 0;
+    let listing = std::iter::from_fn(|| {
+        taken += 1;
+        Some(Ok::<_, io::Error>(()))
+    });
+    assert!(holds_entry(listing).unwrap());
+    assert_eq!(taken, 1);
+    assert!(!holds_entry(std::iter::empty::<io::Result<()>>()).unwrap());
+    let failed = holds_entry(std::iter::once(Err::<(), _>(os_error(Errno::EIO))));
+    assert_eq!(failed.unwrap_err().raw_os_error(), Some(Errno::EIO as i32));
+}
+
+#[test]
 fn a_runtime_directory_that_another_root_holds_is_refused() {
     let guest = Guest::new();
     let first = guest.assemble(&guest.assembly()).unwrap();
@@ -973,7 +1128,13 @@ fn a_runtime_directory_that_another_root_holds_is_refused() {
         if sleeps == 1 {
             attach(&directory, 0, "vda", 4096);
             let calls = kernel.calls().len();
-            let result = assemble_with(Box::new(kernel.clone()), &paths, &assembly, None);
+            let result = assemble_with(
+                Box::new(kernel.clone()),
+                &paths,
+                &assembly,
+                None,
+                Contents::Kept,
+            );
             *outcome.lock().unwrap() = Some((result.map(drop), kernel.calls().len() - calls));
         }
     });
@@ -1230,8 +1391,14 @@ fn a_runtime_directory_where_a_directory_is_bound_is_refused() {
             runtime,
             ..guest.assembly()
         };
-        let error =
-            assemble_with(Box::new(SystemKernel), &guest.paths, &assembly, None).unwrap_err();
+        let error = assemble_with(
+            Box::new(SystemKernel),
+            &guest.paths,
+            &assembly,
+            None,
+            Contents::Kept,
+        )
+        .unwrap_err();
         assert!(
             matches!(error.error(), Error::Occupied { path } if *path == distro),
             "{error:?}"
@@ -2250,6 +2417,245 @@ fn a_missing_partition_fails_at_once_before_any_mount() {
     );
     assert_eq!(guest.kernel.sleeps(), 0);
     assert!(guest.kernel.mounts().is_empty());
+}
+
+#[test]
+fn a_reread_asks_the_kernel_for_the_distro_disk_s_table_once_the_device_appears() {
+    // The reread finds the distro device by its window, as an assembly does, and only asks the
+    // kernel to reread the disk's table: it checks, flushes, reads, and mounts nothing.
+    let guest = Guest::new();
+    let distro = guest.assembly().distro;
+    let timeout = Duration::from_millis(100);
+    let node = block::reread(
+        &mut guest.kernel.clone(),
+        &guest.paths,
+        distro,
+        timeout,
+        None,
+    )
+    .unwrap();
+    assert_eq!(node, guest.path("dev/vda"));
+    assert_eq!(guest.kernel.calls(), [Call::Reread(guest.text("dev/vda"))]);
+
+    // It waits for the device as long as the timeout allows, and asks nothing of one that does
+    // not appear.
+    let guest = Guest::bare();
+    let directory = guest.base.clone();
+    guest.kernel.on_sleep(move |sleeps| {
+        if sleeps == 1 {
+            attach(&directory, 0, "vda", 4096);
+        }
+    });
+    let waiting = Duration::from_secs(1);
+    block::reread(
+        &mut guest.kernel.clone(),
+        &guest.paths,
+        distro,
+        waiting,
+        None,
+    )
+    .unwrap();
+    assert_eq!(guest.kernel.sleeps(), 1);
+    assert_eq!(guest.kernel.calls(), [Call::Reread(guest.text("dev/vda"))]);
+    let guest = Guest::bare();
+    let error = block::reread(
+        &mut guest.kernel.clone(),
+        &guest.paths,
+        distro,
+        timeout,
+        None,
+    )
+    .unwrap_err();
+    assert!(
+        matches!(
+            error,
+            Error::Missing {
+                role: Role::Distro,
+                mmio: DISTRO,
+            }
+        ),
+        "{error:?}"
+    );
+    assert_eq!(guest.kernel.sleeps(), 2);
+    assert!(guest.kernel.calls().is_empty());
+
+    // However long its timeout, one whose deadline passed looks for the device once, without
+    // sleeping, as an assembly does, and asks nothing of a missing one.
+    let guest = Guest::bare();
+    let patient = Duration::from_secs(600);
+    let error = block::reread(
+        &mut guest.kernel.clone(),
+        &guest.paths,
+        distro,
+        patient,
+        Some(Instant::now()),
+    )
+    .unwrap_err();
+    assert!(
+        matches!(
+            error,
+            Error::Missing {
+                role: Role::Distro,
+                mmio: DISTRO,
+            }
+        ),
+        "{error:?}"
+    );
+    assert_eq!(guest.kernel.sleeps(), 0);
+    assert!(guest.kernel.calls().is_empty());
+
+    // The kernel's refusal, as while one of the disk's partitions is open, names the device.
+    let guest = Guest::new();
+    let vda = guest.path("dev/vda");
+    guest.kernel.fail(Operation::Reread, &vda, Errno::EBUSY);
+    let error = block::reread(
+        &mut guest.kernel.clone(),
+        &guest.paths,
+        distro,
+        timeout,
+        None,
+    )
+    .unwrap_err();
+    assert!(
+        matches!(
+            &error,
+            Error::Device {
+                role: Role::Distro,
+                step: DeviceStep::Reread,
+                device,
+                error,
+            } if *device == vda && error.raw_os_error() == Some(Errno::EBUSY as i32)
+        ),
+        "{error:?}"
+    );
+    assert_eq!(
+        error.to_string(),
+        format!(
+            "failed to reread the partition table of the distro device {}: {}",
+            vda.display(),
+            os_error(Errno::EBUSY)
+        )
+    );
+}
+
+/// The loop device of a test, which it detaches once dropped.
+struct LoopDevice(PathBuf);
+
+impl LoopDevice {
+    /// Attaches the disk image `image`, read-only and with its partitions scanned, as the kernel
+    /// scans those of a virtio disk, or returns `None` without `losetup`.
+    fn attach(image: &Path) -> Option<Self> {
+        let output = std::process::Command::new("losetup")
+            .args(["--find", "--show", "--read-only", "--partscan"])
+            .arg(image)
+            .output();
+        let output = match output {
+            Ok(output) => output,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return None,
+            Err(error) => panic!("cannot run losetup: {error}"),
+        };
+        assert!(output.status.success(), "{output:?}");
+        let node = String::from_utf8(output.stdout).unwrap();
+        Some(Self(PathBuf::from(node.trim_end())))
+    }
+
+    /// Returns the number, start, and size, in 512-byte sectors, of each partition that the
+    /// kernel created, as sysfs lists them, in order.
+    fn partitions(&self) -> Vec<(u64, u64, u64)> {
+        let name = self.0.file_name().unwrap().to_str().unwrap();
+        let disk = Path::new("/sys/class/block").join(name);
+        let mut partitions = Vec::new();
+        for entry in fs::read_dir(&disk).unwrap() {
+            let entry = entry.unwrap().path();
+            if !entry.join("partition").exists() {
+                continue;
+            }
+            let number = |file: &str| {
+                let text = fs::read_to_string(entry.join(file)).unwrap();
+                text.trim_end().parse::<u64>().unwrap()
+            };
+            partitions.push((number("partition"), number("start"), number("size")));
+        }
+        partitions.sort_unstable();
+        partitions
+    }
+
+    /// Returns the node of partition `number`.
+    fn partition(&self, number: u8) -> PathBuf {
+        let mut node = self.0.clone().into_os_string();
+        node.push(format!("p{number}"));
+        node.into()
+    }
+}
+
+impl Drop for LoopDevice {
+    fn drop(&mut self) {
+        let _ = std::process::Command::new("losetup")
+            .arg("--detach")
+            .arg(&self.0)
+            .status();
+    }
+}
+
+/// Waits until udev, if the host runs it, handled its events, during which its probes may hold
+/// a partition open.
+fn settle() {
+    let _ = std::process::Command::new("udevadm").arg("settle").status();
+}
+
+/// Writes `message` to the standard error, past the test harness's capture, as the guest's
+/// programs write theirs.
+fn report(message: &str) {
+    use std::io::Write;
+
+    let _ = writeln!(io::stderr(), "{message}");
+}
+
+#[test]
+#[ignore = "needs root and a loop device"]
+fn the_kernel_rereads_a_partition_table_that_changed_under_it() {
+    // A read-only loop device stands for a clone's distro device: the kernel scanned it when it
+    // found the template's placeholder, and the disk now holds the clone's, of another layout.
+    if !nix::unistd::geteuid().is_root() {
+        report("skipped: the test needs root");
+        return;
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let image = directory.path().join("disk");
+    let placeholder = GptDisk::new(b"placeholder", 3).image();
+    let clone = GptDisk::new(&[0x5a; 600], 1).image();
+    let length = placeholder.len().max(clone.len());
+    let padded = |disk: &[u8]| {
+        let mut disk = disk.to_vec();
+        disk.resize(length, 0);
+        disk
+    };
+    fs::write(&image, padded(&placeholder)).unwrap();
+    let Some(device) = LoopDevice::attach(&image) else {
+        report("skipped: the test needs losetup");
+        return;
+    };
+    settle();
+    // Both disks' tables take 34 blocks: the MBR, the header, and 128 entries of 128 bytes. The
+    // placeholder's first partition takes one block and the clone's two, then each layer four.
+    let found = [(1, 34, 1), (2, 35, 4), (3, 39, 4), (4, 43, 4)];
+    assert_eq!(device.partitions(), found);
+    fs::write(&image, padded(&clone)).unwrap();
+    assert_eq!(device.partitions(), found);
+
+    // The reread drops the placeholder's partitions, and creates the clone's, with their nodes,
+    // from the disk's bytes, before it returns.
+    let node = sys::path_c_string(&device.0).unwrap();
+    SystemKernel.reread_partitions(&node).unwrap();
+    assert_eq!(device.partitions(), [(1, 34, 2), (2, 36, 4)]);
+    assert!(device.partition(2).exists());
+    assert!(!device.partition(3).exists());
+
+    // While one of the disk's partitions is open, the kernel refuses to reread its table.
+    settle();
+    let open = fs::File::open(device.partition(2)).unwrap();
+    assert_eq!(SystemKernel.reread_partitions(&node), Err(Errno::EBUSY));
+    drop(open);
 }
 
 #[test]
