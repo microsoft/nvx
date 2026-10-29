@@ -14,6 +14,7 @@ import json
 import os
 import queue
 import re
+import shlex
 import shutil
 import socket
 import subprocess
@@ -206,6 +207,20 @@ def _warp_probe_output(cpus: int, *, offset_ns: int = 40) -> bytes:
         "tsc_hz=2793437000 tsc_hz_source=cpuid conclusive=1\r\n"
     )
     return (probe_round * time_abi.warp_rounds(cpus) + "NVX-WARP-PROBE-OK\r\n").encode()
+
+
+def _guest_script_result(
+    output: str, *, transcript: str = ""
+) -> microvm_tests.GuestScriptResult:
+    """Return what run_guest_script returns for a staged script that printed
+    ``output``, after the console printed ``transcript`` and the start line."""
+    start = microvm_tests.GUEST_SCRIPT_START_MARKER.decode()
+    return microvm_tests.GuestScriptResult(
+        text=f"{transcript}{start}\r\n{output}",
+        wall_ms=0.0,
+        peak_rss_bytes=0,
+        output=output,
+    )
 
 
 def _restore_status_output(
@@ -2291,6 +2306,271 @@ class PublicSandboxProxyOnlyTests(unittest.TestCase):
             "gateway-udp 0\n"
             "host-address 127\n",
         )
+
+
+class _ExitingProcess:
+    """An OpenVMM process that exits with status 0 once its console ends."""
+
+    pid = 123
+
+    def __init__(self) -> None:
+        self.exited = False
+
+    def poll(self) -> int | None:
+        return 0 if self.exited else None
+
+    def wait(self, timeout: float | None = None) -> int:
+        del timeout
+        self.exited = True
+        return 0
+
+
+class _EchoingGuestConsole:
+    """A guest console whose input arrives in pieces of ``piece`` characters
+    while commands run, as a slow guest's did in #785. The terminal echoes
+    each piece as it arrives, into what the running command prints, before
+    the newline of its line.
+
+    The shell reads one line at a time and echoes it after its prompt, and it
+    waits for the rest of a line that has not arrived. It runs ``echo``,
+    ``cat >PATH <<'DELIMITER'``, ``. PATH``, and ``nvx-exit``, with ``; ``
+    between commands, and ignores other commands.
+    """
+
+    def __init__(self, piece: int) -> None:
+        self.process = _ExitingProcess()
+        self.containment = None
+        self._piece = piece
+        self._input: queue.Queue[bytes] = queue.Queue()
+
+    def write_input(self, data: bytes) -> None:
+        self._input.put(data)
+
+    def close(self) -> None:
+        pass
+
+    def read_output(self, chunks: queue.Queue[bytes | None]) -> None:
+        chunks.put(b"NVX-GUEST-BOOT-OK: alpine\r\n")
+        typed = self._input.get(timeout=5).decode()
+        files: dict[str, list[str]] = {}
+        arrived = 0
+        consumed = 0
+
+        def emit(text: str) -> None:
+            if text:
+                chunks.put(text.encode())
+
+        def read_line(prompt: str) -> str:
+            nonlocal arrived, consumed
+            end = typed.index("\n", consumed)
+            arrived = max(arrived, end + 1)
+            line = typed[consumed:end]
+            consumed = end + 1
+            emit(f"{prompt}{line}\r\n")
+            return line
+
+        def run(line: str) -> bool:
+            """Run the commands of ``line``, and return whether the guest
+            still runs."""
+            nonlocal arrived
+            for command in line.split("; "):
+                heredoc = re.fullmatch(r"cat >(\S+) <<'(\w+)'", command)
+                if heredoc is not None:
+                    # The shell reads the here-document before cat runs.
+                    path, delimiter = heredoc.groups()
+                    files[path] = []
+                    while (body := read_line("> ")) != delimiter:
+                        files[path].append(body)
+                piece = typed[arrived : arrived + self._piece]
+                arrived += len(piece)
+                echo = piece.replace("\n", "\r\n")
+                words = shlex.split(command, comments=True)
+                if words[:1] == ["echo"]:
+                    emit(" ".join(words[1:]) + echo + "\r\n")
+                    continue
+                emit(echo)
+                if words[:1] == ["."]:
+                    if not all(run(stored) for stored in files[words[1]]):
+                        return False
+                elif words[:1] == ["nvx-exit"]:
+                    return False
+            return True
+
+        while consumed < len(typed) and run(read_line("/ # ")):
+            pass
+        self.process.exited = True
+        chunks.put(None)
+
+
+class GuestConsoleEchoTests(unittest.TestCase):
+    """The guest's terminal echoes console input that arrives while a command
+    runs into what the command prints (#785); no scenario may parse it."""
+
+    # Typed line by line, this script printed its DNS marker while the guest
+    # was still receiving the UDP probe's line, as in CI.
+    ECHOED_SCRIPT = (
+        "set -eu\n"
+        "echo NVX-IPV6-EGRESS-DNS none\n"
+        "probe_udp udp6-named fd00::c000:201 20000 &\n"
+        "probe_icmp icmp6 fd00::c000:201 &\n"
+        "echo NVX-IPV6-EGRESS-OK\n"
+        "nvx-exit 0\n"
+    )
+    # The piece that arrives while the script's first line runs ends where
+    # CI's did, inside the UDP probe's port.
+    ECHOED_PIECE = ECHOED_SCRIPT.index("0000 &") - len("set -eu\n")
+
+    def test_typed_script_lets_the_echo_cut_into_its_dns_marker(self):
+        console = _EchoingGuestConsole(self.ECHOED_PIECE)
+        with patch.object(benchmark, "InteractiveProcess", return_value=console):
+            result = benchmark.run_guest_script(
+                ["nvx-rs", "run"],
+                self.ECHOED_SCRIPT,
+                microvm_tests.IPV6_EGRESS_COMPLETION_MARKER,
+                timeout=5,
+                boot_marker=microvm_tests.BOOT_MARKER,
+            )
+        self.assertIn("NVX-IPV6-EGRESS-DNS none0000 &\r\n", result["text"])
+        self.assertEqual(
+            microvm_tests._ipv6_egress_dns_report(result["text"]), "none0000 &"
+        )
+
+    def test_staged_script_keeps_the_echo_out_of_its_output(self):
+        console = _EchoingGuestConsole(self.ECHOED_PIECE)
+        with patch.object(benchmark, "InteractiveProcess", return_value=console):
+            result = microvm_tests.run_guest_script(
+                ["nvx-rs", "run"],
+                self.ECHOED_SCRIPT,
+                microvm_tests.IPV6_EGRESS_COMPLETION_MARKER,
+                timeout=5,
+            )
+        self.assertEqual(
+            result["output"], "NVX-IPV6-EGRESS-DNS none\r\nNVX-IPV6-EGRESS-OK\r\n"
+        )
+        self.assertEqual(
+            microvm_tests._ipv6_egress_dns_report(result["output"]), "none"
+        )
+        # The terminal still echoed the input that arrived while cat ran, but
+        # before the start line.
+        before, _, _ = result["text"].partition("NVX-GUEST-SCRIPT-START\r\n")
+        self.assertIn('\r\necho NVX-GUEST-SCRIPT-"START"; . /tmp/', before)
+
+    def test_scripts_run_once_the_guest_has_consumed_them(self):
+        script = 'echo "NVX-OUT ${value:-none}"\necho NVX-DONE\nnvx-exit 0\n'
+        transcript = (
+            "NVX-GUEST-BOOT-OK: alpine\r\n"
+            # An echoed fragment of the staged script, cut before a marker.
+            "NVX-DONE\r\n"
+            '/ # echo NVX-GUEST-SCRIPT-"START"; . /tmp/nvx-guest-script\r\n'
+            "NVX-GUEST-SCRIPT-START\r\n"
+            "NVX-OUT none\r\n"
+            "NVX-DONE\r\n"
+        )
+        with patch.object(
+            microvm_tests,
+            "_run_guest_script",
+            return_value={"text": transcript, "wall_ms": 5.0, "peak_rss_bytes": 7},
+        ) as run:
+            result = microvm_tests.run_guest_script(
+                ["openvmm"],
+                script,
+                b"NVX-DONE",
+                timeout=30,
+                log_path=Path("guest.log"),
+                contain_process_tree=True,
+            )
+        run.assert_called_once_with(
+            ["openvmm"],
+            "cat >/tmp/nvx-guest-script <<'NVX_GUEST_SCRIPT'\n"
+            + script
+            + "NVX_GUEST_SCRIPT\n"
+            + 'echo NVX-GUEST-SCRIPT-"START"; . /tmp/nvx-guest-script\n',
+            b"NVX-DONE",
+            timeout=30,
+            windows_cpus=None,
+            teardown_mode="guest-exit",
+            log_path=Path("guest.log"),
+            boot_marker=microvm_tests.BOOT_MARKER,
+            contain_process_tree=True,
+            time_abi_status=True,
+        )
+        self.assertEqual(result["output"], "NVX-OUT none\r\nNVX-DONE\r\n")
+        self.assertEqual(result["text"], transcript)
+        self.assertEqual((result["wall_ms"], result["peak_rss_bytes"]), (5.0, 7))
+
+    def test_staged_input_sources_the_script_in_the_console_shell(self):
+        shell = _posix_shell()
+        if shell is None:
+            self.skipTest("POSIX shell is unavailable")
+        script = 'value=staged\necho "NVX-OUT $value"\n'
+        with (
+            tempfile.TemporaryDirectory() as temporary,
+            patch.object(
+                microvm_tests,
+                "_run_guest_script",
+                return_value={
+                    "text": "NVX-GUEST-SCRIPT-START\nNVX-OUT staged\n",
+                    "wall_ms": 0.0,
+                    "peak_rss_bytes": 0,
+                },
+            ) as run,
+        ):
+            microvm_tests.run_guest_script(
+                ["openvmm"], script, b"NVX-OUT staged", timeout=1
+            )
+            staged = run.call_args.args[1].replace(
+                microvm_tests.GUEST_SCRIPT_PATH,
+                (Path(temporary) / "script").as_posix(),
+            )
+            # The shell that reads the input keeps the script's variables.
+            result = subprocess.run(
+                [shell],
+                input=(staged + 'echo "NVX-AFTER $value"\n').encode(),
+                capture_output=True,
+                timeout=10,
+                check=False,
+            )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            result.stdout.decode().replace("\r\n", "\n"),
+            "NVX-GUEST-SCRIPT-START\nNVX-OUT staged\nNVX-AFTER staged\n",
+        )
+
+    def test_scripts_cannot_end_their_staging_early(self):
+        for script, message in (
+            ("echo NVX-DONE", "must end with a newline"),
+            ("echo one\nNVX_GUEST_SCRIPT\necho NVX-DONE\n", "cannot hold the line"),
+        ):
+            with (
+                self.subTest(message=message),
+                patch.object(microvm_tests, "_run_guest_script") as run,
+                self.assertRaisesRegex(ValueError, message),
+            ):
+                microvm_tests.run_guest_script(
+                    ["openvmm"], script, b"NVX-DONE", timeout=1
+                )
+            run.assert_not_called()
+
+    def test_markers_count_only_after_the_start_line(self):
+        for text, message in (
+            (
+                "NVX-DONE\r\nNVX-GUEST-SCRIPT-START\r\nNVX-OTHER\r\n",
+                "did not print 'NVX-DONE' after its start line",
+            ),
+            ('NVX-GUEST-SCRIPT-"START"\r\nNVX-DONE\r\n', "never printed the start"),
+        ):
+            with (
+                self.subTest(message=message),
+                patch.object(
+                    microvm_tests,
+                    "_run_guest_script",
+                    return_value={"text": text, "wall_ms": 0.0, "peak_rss_bytes": 0},
+                ),
+                self.assertRaisesRegex(RuntimeError, message),
+            ):
+                microvm_tests.run_guest_script(
+                    ["openvmm"], "echo NVX-DONE\n", b"NVX-DONE", timeout=1
+                )
 
 
 class GuestIdentityScriptTests(unittest.TestCase):
@@ -6738,6 +7018,29 @@ class MicrovmTests(unittest.TestCase):
             ["NVX-LIFECYCLE-FAIL code=1", "NVX-EXIT 1"],
         )
 
+    def test_lifecycle_script_ends_its_debug_port_line(self):
+        shell = _posix_shell()
+        if shell is None:
+            self.skipTest("POSIX shell is unavailable")
+        script = microvm_tests._read_script("lifecycle.sh")
+        tail = script[script.index("for octal in") : script.index("nvx-exit 0")]
+        # OpenVMM prints the debug port's bytes in the console stream, where
+        # the staged script prints its marker right after them.
+        result = subprocess.run(
+            [shell],
+            input=b"dd() { cat; }\n" + tail.encode(),
+            capture_output=True,
+            timeout=10,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(
+            microvm_tests.contains_output_line(
+                result.stdout, microvm_tests.LIFECYCLE_COMPLETION_MARKER
+            ),
+            result.stdout,
+        )
+
     def test_smp_uses_requested_processor_count(self):
         text = (
             b"NVX-SMP-PROBE-OK\r\n" + _warp_probe_output(4) + b"nvx-exit 0\r\n"
@@ -6754,7 +7057,9 @@ class MicrovmTests(unittest.TestCase):
                 return_value="probe\n",
             ) as smp_probe_script,
             patch.object(
-                microvm_tests, "run_guest_script", return_value={"text": text}
+                microvm_tests,
+                "run_guest_script",
+                return_value=_guest_script_result(text),
             ) as run_guest_script,
         ):
             microvm_tests.run_smp(
@@ -6801,7 +7106,9 @@ class MicrovmTests(unittest.TestCase):
         for text, message in cases:
             with self.subTest(message=message):
                 with patch.object(
-                    microvm_tests, "run_guest_script", return_value={"text": text}
+                    microvm_tests,
+                    "run_guest_script",
+                    return_value=_guest_script_result(text),
                 ):
                     with self.assertRaisesRegex(RuntimeError, message):
                         microvm_tests.run_smp(
@@ -6823,7 +7130,7 @@ class MicrovmTests(unittest.TestCase):
         self.assertNotIn("smp-lapic", microvm_tests.DEBUG_KERNEL_SCENARIOS)
         text = (b"NVX-SMP-PROBE-OK\r\n" + _warp_probe_output(4)).decode()
         with patch.object(
-            microvm_tests, "run_guest_script", return_value={"text": text}
+            microvm_tests, "run_guest_script", return_value=_guest_script_result(text)
         ) as run:
             microvm_tests.run_smp(
                 Path("openvmm"),
@@ -6853,20 +7160,24 @@ class MicrovmTests(unittest.TestCase):
 
     def test_smp_lapic_asserts_the_counting_lapic_facts(self):
         rates = f"tsc_hz=2793437000 lapic_hz={time_abi.LAPIC_HZ['kvm']}"
-        passing = (
+        # The status query runs before the staged script, which prints the
+        # markers.
+        status = (
             f"NVX-TIME-ABI: v=1 phase=boot status=ok cpus=4 {rates} "
             "generation=0 elapsed_us=2390\r\n"
             "NVX-TIME-ABI: v=1 phase=runtime status=synchronized generation=0 "
             "discontinuities=0 offset_ns=-1200 uncertainty_ns=900 "
             "rejected_samples=0 last_sample_error=none\r\n"
             "NVX-TIME-STATUS-EXIT status=0\r\n"
-            "NVX-SMP-LAPIC-COUNTING-OK\r\n"
-            "NVX-SMP-PROBE-OK\r\n" + _warp_probe_output(4).decode()
         )
+        counting = "NVX-SMP-LAPIC-COUNTING-OK\r\n"
+        output = counting + "NVX-SMP-PROBE-OK\r\n" + _warp_probe_output(4).decode()
 
-        def run_smp_lapic(text: str) -> MagicMock:
+        def run_smp_lapic(transcript: str, output: str) -> MagicMock:
             with patch.object(
-                microvm_tests, "run_guest_script", return_value={"text": text}
+                microvm_tests,
+                "run_guest_script",
+                return_value=_guest_script_result(output, transcript=transcript),
             ) as run:
                 microvm_tests.run_smp(
                     Path("openvmm"),
@@ -6881,23 +7192,37 @@ class MicrovmTests(unittest.TestCase):
                 )
             return run
 
-        command, script, marker = run_smp_lapic(passing).call_args.args
+        command, script, marker = run_smp_lapic(status, output).call_args.args
         self.assertEqual(command[command.index("--cmdline") + 1], "quiet loglevel=0")
         self.assertTrue(script.startswith(microvm_tests.counting_lapic_script(4)))
         self.assertIn(benchmark.smp_probe_script(4, exit_guest=False), script)
         self.assertEqual(marker, time_abi.WARP_PROBE_COMPLETION_MARKER)
-        for text, message in (
+        for label, transcript, printed, message in (
             (
-                passing.replace("NVX-SMP-LAPIC-COUNTING-OK\r\n", ""),
+                "missing",
+                status,
+                output.replace(counting, ""),
                 "without the counting-LAPIC marker",
             ),
-            (passing.replace("cpus=4 tsc_hz", "cpus=2 tsc_hz"), "cpus=2 is not 4"),
+            # Only the script's own output counts.
+            (
+                "before the start line",
+                status + counting,
+                output.replace(counting, ""),
+                "without the counting-LAPIC marker",
+            ),
+            (
+                "two CPUs",
+                status.replace("cpus=4 tsc_hz", "cpus=2 tsc_hz"),
+                output,
+                "cpus=2 is not 4",
+            ),
         ):
             with (
-                self.subTest(message=message),
+                self.subTest(label),
                 self.assertRaisesRegex(RuntimeError, message),
             ):
-                run_smp_lapic(text)
+                run_smp_lapic(transcript, printed)
 
     def test_counting_lapic_check_requires_the_counting_lapic_on_every_cpu(self):
         shell = _posix_shell()
@@ -7016,10 +7341,12 @@ class MicrovmTests(unittest.TestCase):
             1, b"Error: " + microvm_tests.COMMAND_LINE_LIMIT_ERROR + b"\n"
         )
 
-        def guest(text: str) -> dict[str, object]:
-            return {
-                "text": f"NVX-COMMAND-LINE: {text}\r\nNVX-COMMAND-LINE-LIMIT-OK\r\n"
-            }
+        def guest(text: str) -> microvm_tests.GuestScriptResult:
+            return _guest_script_result(
+                f"NVX-COMMAND-LINE: {text}\r\nNVX-COMMAND-LINE-LIMIT-OK\r\n",
+                # The echo of the staged script, cut before its marker.
+                transcript='NVX-COMMAND-LINE: %s\\n\' "$(cat /proc/cmdline)"\r\n',
+            )
 
         def run_scenario(
             longest: str, over: openvmm_process.OpenvmmProcessResult
@@ -7573,7 +7900,7 @@ class MicrovmTests(unittest.TestCase):
 
         def guest(
             command: list[str], _script: str, _marker: bytes, **_kwargs: object
-        ) -> dict[str, str]:
+        ) -> microvm_tests.GuestScriptResult:
             policy = Path(command[command.index("--network-egress-policy-file") + 1])
             name = policy.name.removeprefix("l3-l4-egress-").removesuffix(
                 "-policy.json"
@@ -7589,12 +7916,15 @@ class MicrovmTests(unittest.TestCase):
             }
             if guest_report is not None and guest_report[0] == name:
                 reports[guest_report[1]] = guest_report[2]
-            # The tty echoes script lines, which must not count as reports.
-            text = 'echo "NVX-L3-L4-PROBE icmp=echoed"\r\n' + "".join(
+            text = "".join(
                 f"NVX-L3-L4-PROBE {probe}={value}\r\n"
                 for probe, value in reports.items()
             )
-            return {"text": text + "NVX-L3-L4-EGRESS-PROTOCOLS-OK\r\n"}
+            return _guest_script_result(
+                text + "NVX-L3-L4-EGRESS-PROTOCOLS-OK\r\n",
+                # The tty echoes script lines, which must not count as reports.
+                transcript='> echo "NVX-L3-L4-PROBE icmp=echoed"\r\n',
+            )
 
         class FakeServer:
             def __init__(
@@ -8026,7 +8356,7 @@ class MicrovmTests(unittest.TestCase):
 
         def guest(
             command: list[str], _script: str, _marker: bytes, **_kwargs: object
-        ) -> dict[str, str]:
+        ) -> microvm_tests.GuestScriptResult:
             name = policy_name(command)
             current.append(name)
             reports = {
@@ -8039,12 +8369,15 @@ class MicrovmTests(unittest.TestCase):
             }
             if guest_report is not None and guest_report[0] == name:
                 reports[guest_report[1]] = guest_report[2]
-            # The tty echoes script lines, which must not count as reports.
-            text = 'echo "NVX-L3-L4-PROBE tcp-first=echoed"\r\n' + "".join(
+            text = "".join(
                 f"NVX-L3-L4-PROBE {probe}={value}\r\n"
                 for probe, value in reports.items()
             )
-            return {"text": text + "NVX-L3-L4-EGRESS-PORT-RANGES-OK\r\n"}
+            return _guest_script_result(
+                text + "NVX-L3-L4-EGRESS-PORT-RANGES-OK\r\n",
+                # The tty echoes script lines, which must not count as reports.
+                transcript='> echo "NVX-L3-L4-PROBE tcp-first=echoed"\r\n',
+            )
 
         class FakeServer:
             def __init__(
@@ -8612,7 +8945,7 @@ class MicrovmTests(unittest.TestCase):
 
         def guest(
             command: list[str], _script: str, _marker: bytes, **_kwargs: object
-        ) -> dict[str, str]:
+        ) -> microvm_tests.GuestScriptResult:
             policy = Path(command[command.index("--network-egress-policy-file") + 1])
             name = policy.name.removeprefix("ipv6-egress-").removesuffix("-policy.json")
             current.append(name)
@@ -8629,14 +8962,16 @@ class MicrovmTests(unittest.TestCase):
             dns = cases[name].dns or "none"
             if dns_report is not None and dns_report[0] == name:
                 dns = dns_report[1]
-            # The tty echoes script lines, which must not count as reports.
-            text = 'echo "NVX-IPV6-EGRESS-DNS ${dns:-none}"\r\n'
-            text += f"NVX-IPV6-EGRESS-DNS {dns}\r\n"
+            text = f"NVX-IPV6-EGRESS-DNS {dns}\r\n"
             text += "".join(
                 f"NVX-L3-L4-PROBE {probe}={value}\r\n"
                 for probe, value in reports.items()
             )
-            return {"text": text + "NVX-IPV6-EGRESS-OK\r\n"}
+            return _guest_script_result(
+                text + "NVX-IPV6-EGRESS-OK\r\n",
+                # The tty echoes script lines, which must not count as reports.
+                transcript='> echo "NVX-IPV6-EGRESS-DNS ${dns:-none}"\r\n',
+            )
 
         class FakeServer:
             def __init__(
@@ -11946,7 +12281,7 @@ class MicrovmTests(unittest.TestCase):
         with patch.object(
             microvm_tests,
             "run_guest_script",
-            return_value={"text": self._exhaustive_report(8)},
+            return_value=_guest_script_result(self._exhaustive_report(8)),
         ) as run:
             microvm_tests.run_time_abi_conformance(
                 Path("openvmm"),
@@ -11976,7 +12311,7 @@ class MicrovmTests(unittest.TestCase):
         with patch.object(
             microvm_tests,
             "run_guest_script",
-            return_value={"text": self._exhaustive_report(1)},
+            return_value=_guest_script_result(self._exhaustive_report(1)),
         ) as run:
             microvm_tests.run_time_abi_conformance(
                 Path("openvmm"),

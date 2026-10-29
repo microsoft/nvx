@@ -181,6 +181,12 @@ MICROVM_EXPLICIT_SCENARIOS = ("smp-lapic",)
 SMP_LAPIC_COUNTING_MARKER = b"NVX-SMP-LAPIC-COUNTING-OK"
 MICROVM_PROCESSOR_COUNTS = (1, 2, 4, 8)
 MICROVM_TEST_SCRIPTS_DIR = Path(__file__).with_name("microvm_test_scripts")
+# run_guest_script stores each script at GUEST_SCRIPT_PATH with a
+# here-document that GUEST_SCRIPT_DELIMITER ends, and the guest prints the
+# start line just before the script's first command.
+GUEST_SCRIPT_PATH = "/tmp/nvx-guest-script"
+GUEST_SCRIPT_DELIMITER = "NVX_GUEST_SCRIPT"
+GUEST_SCRIPT_START_MARKER = b"NVX-GUEST-SCRIPT-START"
 LIFECYCLE_COMPLETION_MARKER = b"NVX-LIFECYCLE-OK"
 SANDBOX_BLOCKS_COMPLETION_MARKER = b"NVX-SANDBOX-BLOCKS-OK"
 VIRTIO_NET_COMPLETION_MARKER = b"NVX-VIRTIO-NET-OK"
@@ -577,6 +583,14 @@ def configure_shard_parser(parser: argparse.ArgumentParser) -> None:
     )
 
 
+class GuestScriptResult(GuestCommandResult):
+    """A guest script's run. ``text`` is the whole console transcript, and
+    ``output`` what the console printed after the script's start line, which
+    is the script's own output."""
+
+    output: str
+
+
 def run_guest_script(
     command: Sequence[str],
     script: str,
@@ -587,10 +601,29 @@ def run_guest_script(
     teardown_mode: str = "guest-exit",
     log_path: Path | None = None,
     contain_process_tree: bool = False,
-) -> GuestCommandResult:
-    return _run_guest_script(
+) -> GuestScriptResult:
+    """Run ``script`` in the shell of the guest that ``command`` boots, and
+    require it to print the line ``completion_marker``.
+
+    The guest's terminal echoes console input that arrives while a command
+    runs into whatever that command prints, so a script that the console typed
+    line by line could find the echo of its later lines inside the output of
+    its earlier ones (#785). The console therefore stages the whole script at
+    GUEST_SCRIPT_PATH first. Its last line prints GUEST_SCRIPT_START_MARKER
+    and sources the script, which runs in the shell as typed lines did, but
+    only once the guest has consumed all the input. The console output after
+    that line, ``output``, is thus the script's own, and ``completion_marker``
+    must be one of its lines.
+    """
+    result = _run_guest_script(
         command,
-        script,
+        _staged_script(
+            GUEST_SCRIPT_PATH,
+            GUEST_SCRIPT_DELIMITER,
+            script,
+            # The quotes keep the start line out of this line's echo.
+            f'echo NVX-GUEST-SCRIPT-"START"; . {GUEST_SCRIPT_PATH}',
+        ),
         completion_marker,
         timeout=timeout,
         windows_cpus=windows_cpus,
@@ -599,6 +632,31 @@ def run_guest_script(
         boot_marker=BOOT_MARKER,
         contain_process_tree=contain_process_tree,
         time_abi_status=True,
+    )
+    output = _guest_script_output(result["text"])
+    if not contains_output_line(output.encode("utf-8"), completion_marker):
+        raise RuntimeError(
+            f"guest script did not print {completion_marker.decode()!r} after "
+            f"its start line\n--- OpenVMM output ---\n{result['text'][-4096:]}"
+        )
+    return GuestScriptResult(
+        text=result["text"],
+        wall_ms=result["wall_ms"],
+        peak_rss_bytes=result["peak_rss_bytes"],
+        output=output,
+    )
+
+
+def _guest_script_output(text: str) -> str:
+    """Return what the console printed after a staged script's start line."""
+    start = GUEST_SCRIPT_START_MARKER.decode()
+    lines = text.split("\n")
+    for index, line in enumerate(lines):
+        if line.removesuffix("\r") == start:
+            return "\n".join(lines[index + 1 :])
+    raise RuntimeError(
+        f"guest never printed the start line {start!r} of its script"
+        f"\n--- OpenVMM output ---\n{text[-4096:]}"
     )
 
 
@@ -651,17 +709,28 @@ def _render_script(name: str, **values: str) -> str:
     return script
 
 
+def _staged_script(path: str, delimiter: str, script: str, run: str) -> str:
+    """Return console input that stores ``script`` at ``path`` and then runs
+    the command line ``run``.
+
+    The shell reads a here-document whole before it runs the command that
+    reads it, so none of the script runs before the guest has consumed all of
+    it, and ``run`` follows it as the input's last line.
+    """
+    if not script.endswith("\n"):
+        raise ValueError("a staged guest script must end with a newline")
+    if delimiter in script.split("\n"):
+        raise ValueError(f"a staged guest script cannot hold the line {delimiter!r}")
+    return f"cat >{path} <<'{delimiter}'\n{script}{delimiter}\n{run}\n"
+
+
 def _stage_script(
     process: OpenvmmProcess,
     path: str,
     delimiter: str,
     script: str,
 ) -> None:
-    process.send_bytes(
-        f"cat >{path} <<'{delimiter}'\n".encode()
-        + script.encode()
-        + f"{delimiter}\nsh {path}\n".encode()
-    )
+    process.send_bytes(_staged_script(path, delimiter, script, f"sh {path}").encode())
 
 
 def _output_lines(output: bytes) -> list[bytes]:
@@ -1469,7 +1538,7 @@ def run_smp(
         timeout=timeout,
         log_path=log_path,
     )
-    output = result["text"].encode("utf-8")
+    output = result["output"].encode("utf-8")
     if not contains_output_line(output, SMP_PROBE_COMPLETION_MARKER):
         raise RuntimeError(
             f"{processors}-vCPU guest finished without the SMP probe marker "
@@ -1482,16 +1551,17 @@ def run_smp(
                 f"marker {SMP_LAPIC_COUNTING_MARKER.decode()!r}"
             )
         # The boot line must also report the backend's LAPIC rate for all
-        # the CPUs; the status query alone doesn't check the CPU count.
+        # the CPUs; the status query alone doesn't check the CPU count. The
+        # query ran before the script, so its lines are in the transcript.
         monitor = TimeAbiMonitor(command)
-        monitor.feed(output)
+        monitor.feed(result["text"].encode("utf-8"))
         monitor.finish()
         try:
             monitor.require_boot("the counting-LAPIC check", online_cpus=processors)
         except TimeAbiFailure as error:
             raise RuntimeError(f"{processors}-vCPU smp-lapic: {error}") from error
     check_warp_probe(
-        result["text"],
+        result["output"],
         cpus=processors,
         context=f"{processors}-vCPU boot",
         rounds=warp_rounds(processors),
@@ -1701,7 +1771,6 @@ def run_time_abi_conformance(
         "quiet loglevel=0",
         processors=processors,
     )
-    # One input line: the console echoes all of it before the check prints.
     result = run_guest_script(
         command,
         f"{TIME_ABI_EXHAUSTIVE_COMMAND}; "
@@ -1711,7 +1780,7 @@ def run_time_abi_conformance(
         timeout=timeout,
         log_path=log_path,
     )
-    _check_exhaustive_report(result["text"], processors=processors)
+    _check_exhaustive_report(result["output"], processors=processors)
 
 
 def run_virtio_net(
@@ -1799,7 +1868,7 @@ def run_command_line_limit(
             log_path=output_dir / log_name,
         )
         return _single_marker_value(
-            result["text"].encode("utf-8"), COMMAND_LINE_PREFIX
+            result["output"].encode("utf-8"), COMMAND_LINE_PREFIX
         ).decode("utf-8")
 
     padding_token = f"{COMMAND_LINE_PADDING}x"
@@ -2558,7 +2627,7 @@ def run_l3_l4_egress_protocols(
                     contain_process_tree=True,
                 )
                 host_reached = server.finish()
-            guest_reports = _egress_probe_reports(result["text"])
+            guest_reports = _egress_probe_reports(result["output"])
             _check_egress_case(
                 "protocol", case, L3_L4_EGRESS_PROBES, guest_reports, host_reached
             )
@@ -2759,7 +2828,7 @@ def run_l3_l4_egress_port_ranges(
                     contain_process_tree=True,
                 )
                 host_reached = server.finish()
-            guest_reports = _egress_probe_reports(result["text"])
+            guest_reports = _egress_probe_reports(result["output"])
             _check_egress_case(
                 "port-range",
                 case,
@@ -3199,11 +3268,11 @@ def run_ipv6_egress_policy(
                     contain_process_tree=True,
                 )
                 host_reached = server.finish()
-            guest_reports = _egress_probe_reports(result["text"])
+            guest_reports = _egress_probe_reports(result["output"])
             _check_egress_case(
                 "IPv6 egress", case, IPV6_EGRESS_PROBES, guest_reports, host_reached
             )
-            dns = _ipv6_egress_dns_report(result["text"])
+            dns = _ipv6_egress_dns_report(result["output"])
             if dns != (case.dns or "none"):
                 raise RuntimeError(
                     f"IPv6 egress case {case.name}: the guest named {dns!r} as its "
