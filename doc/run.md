@@ -1326,10 +1326,11 @@ paths that something could replace meanwhile. On Linux, OpenVMM inherits their
 descriptors, and its command line names them `/proc/self/fd/N`, as the command
 that `run` prints shows; on Windows, its command line names them by their final
 paths, `\\?\` paths that go through no link, and the checked files keep the
-images from being replaced, renamed, or deleted until the guest is ready, as
-long as `run` or `start` runs until then: if it ends before OpenVMM has opened
-them, as when it crashes, a replacement at their paths would reach OpenVMM
-([#780](https://github.com/microsoft/nvx/issues/780)).
+images from being replaced, renamed, or deleted, until the guest is ready for
+`start`, and until OpenVMM exits for `run`. OpenVMM inherits the checked files
+too, so that its copies keep the images in place even if `run` or `start` ends
+before OpenVMM has opened them, as when it crashes, until OpenVMM exits; the
+sandbox's next transition ends the OpenVMM of such a `start`.
 There, a final path with a comma, semicolon, or unbalanced brackets, or ending
 in `.vhd`, `.vhdx`, `.vmgs`, or `.iso`, which OpenVMM could not attach as a raw
 image, fails the launch. Images are attached raw: stage an image in a container
