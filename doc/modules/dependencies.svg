@@ -192,12 +192,12 @@
 <!-- nvx::host&#45;&gt;nvx::protocol -->
 <g id="edge19" class="edge">
 <title>nvx::host&#45;&gt;nvx::protocol</title>
-<g id="a_edge19"><a xlink:title="nvx::host uses nvx::protocol: 27 pairs of modules">
+<g id="a_edge19"><a xlink:title="nvx::host uses nvx::protocol: 31 pairs of modules">
 <path fill="none" stroke="#8b5cf6" d="M368.21,-186.06C380.9,-216.97 411.71,-278.56 462,-298 522.16,-321.25 597.96,-322.43 644.29,-320.33"/>
 <polygon fill="#8b5cf6" stroke="#8b5cf6" points="644.53,-322.6 650.91,-320 644.3,-318.05 644.53,-322.6"/>
 </a>
 </g>
-<text text-anchor="middle" x="505.5" y="-320" font-family="Liberation Sans,Arial,Helvetica,sans-serif" font-size="10.00" fill="#52677d">27</text>
+<text text-anchor="middle" x="505.5" y="-320" font-family="Liberation Sans,Arial,Helvetica,sans-serif" font-size="10.00" fill="#52677d">31</text>
 </g>
 <!-- nvx::host&#45;&gt;nvx::uuid -->
 <g id="edge20" class="edge">
