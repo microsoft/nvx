@@ -712,6 +712,18 @@ impl TeardownError {
     pub fn failures(&self) -> &[UnmountFailure] {
         &self.failures
     }
+
+    /// Returns the error of a teardown that failed to unmount the mapping at `target`, an
+    /// absolute path in the root, with `error`, for the tests of other modules.
+    #[cfg(test)]
+    pub(crate) fn of(target: impl Into<PathBuf>, error: MappingError) -> Self {
+        Self {
+            failures: vec![UnmountFailure {
+                target: target.into(),
+                error,
+            }],
+        }
+    }
 }
 
 impl fmt::Display for TeardownError {

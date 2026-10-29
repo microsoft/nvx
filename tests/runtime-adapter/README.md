@@ -609,10 +609,14 @@ credit that it needs, never keeps the others' output from the host.
   of the refusal, or that of the preparation or the spawn.
 - Each program enters the layered root through `nvx::guest::entry`, as a
   `worker::Entrance` describes it: in new mount, PID, and UTS namespaces, with
-  the root moved over `/`, the entry's default hostname, `nvx-sandbox`, the
-  image's own machine ID, and no time status, so that the entry binds nothing
-  into the root, and with the publication of listeners that the root
-  configuration names, published unless it names them unpublished. It runs as
+  the root moved over `/`, the sandbox's hostname, the entry's default,
+  `nvx-sandbox`, after a cold boot, and the record's in a clone, and no time
+  status, and with the publication of listeners that the root configuration
+  names, published unless it names them unpublished. After a cold boot, it sees
+  the image's own machine ID, so that the worker binds nothing into the root,
+  and in a clone, the machine ID that the record names, which the clone's
+  application bound for every execution if the record asks for a generated
+  one. It runs as
   the identity that exactly one source names: the sandbox's workload identity,
   with no supplementary groups or capabilities, or, in a sandbox without one,
   the identity that its start names, with its supplementary groups, its
@@ -806,9 +810,13 @@ after the repair's acknowledgement of the restore:
    first asks the kernel to reread the disk's partition table, so that the
    block devices of its partitions are the clone's disk's, not the template's
    placeholder's. The upper must be fresh: the assembly refuses one whose
-   `upper` or `work` directory exists and is not empty. It applies none of the
-   record's other settings: its export, its network, its hostname, and its
-   machine ID.
+   `upper` or `work` directory exists and is not empty. If the record asks for
+   a generated machine ID, the application then generates one, once, after the
+   repair's reseed, in `nvx::guest::clone::MACHINE_ID_FILE` of the runtime
+   directory, and binds it read-only over the root's `/etc/machine-id`, in the
+   worker's mount namespace, for every execution; with the image's own machine
+   ID, it binds nothing. It applies none of the record's other settings: its
+   export, and its network.
 4. Once it took what the session received while the application ran, which
    came before `Ready`, it completes the activation, which opens the fence,
    and answers `Ready`, which reports the activation after the guest agent's
@@ -820,8 +828,11 @@ after the repair's acknowledgement of the restore:
    that the record announces, the start, the executions, the probes, and the
    stop. The record's workload identity, if it has one, is the whole
    sandbox's, as a root configuration's is: every execution runs as it, and a
-   start that names an identity is refused. Without an export, the clone
-   refuses each part of a mapping table with `MapFailed`. It also answers the
+   start that names an identity is refused. Every execution takes the record's
+   hostname. Without an export, the clone refuses each part of a mapping table
+   with `MapFailed`. On the stop, the worker removes the application's binds,
+   which keep the root's mount busy, before it tears the root down, through
+   `nvx::guest::clone::Applied::teardown`. It also answers the
    [`activation` probe](#probes), with when the events of its activation and
    order happened after the repair's acknowledgement of the restore.
 
@@ -872,7 +883,7 @@ ends with one of these statuses, after a diagnostic on standard error:
 | 52 | The `Activate`'s record does not decode, breaks a limit, or is a cold boot's |
 | 53 | The record expects other resources than the clone has |
 | 54 | The root's assembly failed, its upper not fresh among its causes, or the kernel did not reread the partition table of the record's GPT disk before it |
-| 55 | The image refuses the record's workload identity: it holds no account of the identity, or not its group, or its account databases cannot be read |
+| 55 | The clone's workload cannot be activated: the image refuses the record's workload identity, as it holds no account of the identity, or not its group, or its account databases cannot be read, or the machine ID that the record asks for cannot be generated, or the record's hostname or that machine ID cannot be set for every execution |
 | 58 | The worker's own order misused the activation: it completed an activation that did not run, or started the sandbox before the clone was ready, or again |
 | 193 | A conformance check of the time ABI failed in the clone's repair, such as the finish's, which needs a running time daemon |
 | 195 | The time ABI's part of the clone's repair failed, such as the validation of the restore packet, or the record of the restore |
@@ -1367,15 +1378,18 @@ library side, `clone`, holds what the command's options choose of the clone,
 `clone::Request`: its image, an EROFS layer or a GPT disk of the length of the
 template's placeholder, its upper, on an ext4 scratch image or in RAM, its
 memory target, the template's RAM unless given, the workload identity as which
-its executions run, its overlay mode, its scratch's journal policy, and the
-bound of a GPT disk's first partition. `Request::plan` plans the image over the
-upper as a launch plans a layered root, and `Request::clone_request` returns
-NVX's `CloneRequest` of it, with the bindings that the sandbox's store stages
-for the images, as `stage` stages them, so the start hashes nothing. The
-clone's activation record names the image's own machine ID, the hostname
-`runtime-adapter`, and the guest's defaults of the other settings, unless the
-request names them; for a GPT disk, the bound of its first partition is 64 KiB
-unless the request names one, as a launch's guest takes it by default.
+its executions run, its overlay mode, its scratch's journal policy, the bound
+of a GPT disk's first partition, and the machine ID that its executions see.
+`Request::plan` plans the image over the upper as a launch plans a layered
+root, and `Request::clone_request` returns NVX's `CloneRequest` of it, with the
+bindings that the sandbox's store stages for the images, as `stage` stages
+them, so the start hashes nothing. The clone's activation record names the
+hostname `runtime-adapter`, which every execution sees, the image's own machine
+ID, unless the request asks for one that the guest generates once for the
+clone, which a read-only bind holds at the root's `/etc/machine-id` for every
+execution, and the guest's defaults of the other settings, unless the request
+names them; for a GPT disk, the bound of its first partition is 64 KiB unless
+the request names one, as a launch's guest takes it by default.
 The guest of a GPT clone rereads the disk's partition table before it
 assembles the root, since its kernel created the partitions of the template's
 placeholder.
@@ -1570,7 +1584,7 @@ the directory that `NVX_ARTIFACTS_DIR` names, and the guest agent's build from
   its record again, and releases the lease of a clone that ended, through the
   template store TEMPLATES, if given, in place of the one that the clone's
   record names.
-- `start STORE --template TEMPLATES --generation G --distro FORMAT:PATH --distro-identity UUID --upper (scratch:PATH | ram) [--memory MIB] [--workload-identity UID:GID] [--overlay-mode MODE] [--scratch-journal POLICY] [--first-partition-bound BYTES]`
+- `start STORE --template TEMPLATES --generation G --distro FORMAT:PATH --distro-identity UUID --upper (scratch:PATH | ram) [--memory MIB] [--workload-identity UID:GID] [--overlay-mode MODE] [--scratch-journal POLICY] [--first-partition-bound BYTES] [--machine-id (image | generated)]`
   starts a [clone](#clones) of the generation G of the template store
   TEMPLATES in the sandbox store STORE, which it creates if needed, and whose
   `stage` staged its images, which no one else may change: the image PATH, an
@@ -1582,7 +1596,10 @@ the directory that `NVX_ARTIFACTS_DIR` names, and the guest agent's build from
   every execution runs, and whose account the guest checks before the clone is
   ready, the overlay mode MODE and the scratch's journal policy POLICY, as a
   launch takes them, and for a GPT disk, the bound BYTES of its first
-  partition, 64 KiB by default, as a launch's guest takes it.
+  partition, 64 KiB by default, as a launch's guest takes it. Every execution
+  of the clone sees the hostname `runtime-adapter`, and the machine ID that
+  `--machine-id` chooses: the image's own, `image`, by default, or one that the
+  guest generates once for the clone, `generated`.
   Once the restore sequence started the clone's sandbox, it exchanges a `Ping`
   and the longest `Echo` with the guest agent, commits the launch, and exits,
   leaving the VM running, and the sandbox holding the lease. A clone that
@@ -1987,9 +2004,11 @@ epoch of its broker's first reset, and the clone's activation,
 root applies each record as `nvx::guest::clone::apply` does, without a root: for
 a GPT disk, it stands for the kernel's reread of the disk's partition table,
 which a test may fail; it takes as long as a test asks, but no longer than until
-the activation's deadline, as the waits for the devices do, and checks the
-account of the record's workload identity in the tests' directory of account
-databases. The tests cover:
+the activation's deadline, as the waits for the devices do, checks the account
+of the record's workload identity in the tests' directory of account databases,
+and stands for the generation of a machine ID that the record asks for, and the
+setting of the record's hostname and machine ID for every execution, which a
+test may fail. The tests cover:
 
 - the reset that the restore queued, of another instance, which the worker
   acknowledges without an attachment, and the `Activate`, whose record it
@@ -2004,9 +2023,10 @@ databases. The tests cover:
   nothing answered or applied;
 - a record that does not decode, a cold boot's, and one that expects other
   resources, which fail the activation with nothing applied, and a GPT disk
-  whose partition table the kernel does not reread, and a workload identity
-  whose account or group the image lacks, which fail its application, each
-  with the status of its class, and no `Ready`;
+  whose partition table the kernel does not reread, a workload identity whose
+  account or group the image lacks, a machine ID that cannot be generated, and
+  a hostname or machine ID that cannot be set, which fail its application,
+  each with the status of its class, and no `Ready`;
 - an `Activate` whose header announces more than 1 KiB, which the framing
   refuses before it takes any byte of its body, and which fails the activation
   with the record's status, before the clone is ready and once it is;
@@ -2040,7 +2060,8 @@ databases. The tests cover:
   the activation with the status of the host's session;
 - the record's workload identity, as which every execution runs, while a start
   that names an identity is refused with `EINVAL`, as is a start that names
-  none once the record has none;
+  none once the record has none, and the record's hostname, which every
+  execution's entry takes;
 - the `activation` probe, which the worker answers itself, with no root
   operation, executions running or not: the restore's reset, the host's first
   message, the clone's `Ready`, and its start, in that order, after the
@@ -2052,9 +2073,9 @@ Windows, without a hypervisor:
 - the command lines of `start` that the host program refuses, each with status
   2: missing options, a generation that is not a positive number, a scratch's
   journal policy for an upper in RAM, a first-partition bound for an EROFS
-  image, invalid values, and the options of other commands, and the options of
-  `start` that other commands do not take, with a clock fixture that is not a
-  host's time too;
+  image, invalid values, an option given twice, and the options of other
+  commands, and the options of `start` that other commands do not take, with a
+  clock fixture that is not a host's time too;
 - a start whose template store does not exist, or does not hold the
   generation, and whose image the plan refuses, each with status 1 before it
   needs NVX's artifacts or creates the sandbox's store;
@@ -2419,8 +2440,8 @@ and starts its clones, each in a sandbox store of its own, over a copy of the
 scratch template, which no one else may change either, or in RAM. The GPT disks
 of a template's placeholder and of the clones, which the test writes with
 `tests/common/gpt.rs`, as `tests/vm_layered.rs` writes its own, hold their
-first partition, then empty layers, at partitions that differ from one disk to
-another:
+first partition, then layers, empty but for one disk's regular file `etc`, at
+partitions that differ from one disk to another:
 
 | Test | Clones | Expects |
 | --- | --- | --- |
@@ -2429,6 +2450,8 @@ another:
 | `a_start_refuses_what_the_template_cannot_serve_before_any_vmm_starts` | An image 4 KiB longer, one 4 KiB shorter, and one 100 bytes longer, than the placeholder, a scratch image of twice the template's scratch, memory targets of 2 GiB and of 320 MiB, unstaged images, and a generation that the store does not hold, then the generation once its key is gone | For those that NVX's plan refuses, status 8, with NVX's reason, and the record of a failure of the request, at the plan, without a VM, by the evidence of a length that the request supplied, of the image's geometry, which OpenVMM cannot attach, or of invalid targets, which quarantines nothing; for the others, status 1, without a record; any lease released, and no VMM's log or record in the sandbox; for the generation without its key, status 8, and the record of a failure of the template, at the plan, by the evidence of a malformed generation, which quarantines the generation, so that a later start fails without a lease |
 | `a_clone_whose_activation_fails_ends_before_it_is_ready` | A scratch image of zeros, a journal that the record forbids, a workload identity whose account the image lacks, and, through NVX's restore sequence, a ping, a start, or the start of an execution before the `Activate` | Status 8, no `Ready`, and the record of a failure, at the activation, once the VM exited: of the request, by the evidence of an unusable root, with the guest's status 54, or of invalid settings, with 55, or, before the `Activate`, of an unknown cause, by the protocol's, with 51, which the sandbox records until the release; nothing quarantined, and the lease released, with the records |
 | `a_clone_refuses_a_scratch_image_whose_upper_an_earlier_clone_used` | Over a scratch image, in whose root the `contents` probe writes a file, then over a copy of that scratch image once the first clone stopped | The first started; then status 8, since the copy's upper is not fresh, and the record of a failure of the request, at the activation, once the VM exited, by the evidence of an unusable root, with the guest's status 54; nothing quarantined, and the lease released, with the records |
+| `clones_at_once_keep_their_own_uppers_and_machine_ids` | Three at once: over a scratch image and in RAM, each with a generated machine ID, and in RAM with the image's own; two executions in each, as user ID 0, that write a marker in the root, and try to write `/etc/machine-id` | In every execution, the hostname `runtime-adapter`, and no marker of another clone; a generated machine ID that differs between the clones, the same in each execution of a clone, held by one bind that is read-only, `nosuid`, and `nodev`, and that the write cannot change; with the image's own machine ID, none, since the image has none, no bind, and in the later execution, the ID that the first wrote; then each stop releases its lease |
+| `a_clone_whose_view_cannot_be_set_ends_before_it_is_ready` | Of a template of the EROFS image, a GPT disk whose layer holds a regular file `etc`, with the image's own machine ID, then with a generated one | The first started, with the disk's root; then status 8, since no bind can hold the machine ID below a file, and the record of a failure of the request, at the activation, once the VM exited, by the evidence of invalid settings, with the guest's status 55; nothing quarantined, and the lease released, with the records |
 | `a_clone_runs_its_executions_as_its_workload_identity_once_it_is_ready` | Over a scratch image, as nobody | An execution that runs as nobody, one that names an identity refused with `EINVAL`, and the first execution after the clone's start |
 | `a_generation_is_eligible_by_the_clock_of_its_capture` | At the host's time, then with clock fixtures: UTC a day behind, another boot an hour after the capture by UTC, and the restore window passed by each clock, or UTC before the capture | The host's monotonic clock on the boot of the capture, whatever UTC says, UTC after a reboot, with the fixture's downtime, and the store's refusal without a lease outside the window |
 | `a_clone_reads_no_more_of_its_disks_than_its_root_needs` | Over a scratch image, and in RAM | Less than an eighth of each disk read once the clone is ready, and each disk's whole length once the guest read it to its end |

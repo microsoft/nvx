@@ -104,14 +104,21 @@ pub(super) struct Sandbox {
 impl Sandbox {
     /// Returns the sandbox whose workload identity is `identity`, if it has one, and whose
     /// listeners are published as `publication` says. Its executions take the entry's default
-    /// hostname, [`DEFAULT_HOSTNAME`](entry::DEFAULT_HOSTNAME), as nothing configures another:
-    /// this is the one place that names their hostname.
+    /// hostname, [`DEFAULT_HOSTNAME`](entry::DEFAULT_HOSTNAME), since a root configuration names
+    /// no other, unless `with_hostname` names theirs, as a clone's record does.
     pub(super) fn new(identity: Option<(u32, u32)>, publication: Publication) -> Self {
         Self {
             hostname: entry::DEFAULT_HOSTNAME.as_bytes().to_vec(),
             identity,
             publication,
         }
+    }
+
+    /// Gives the sandbox's executions the hostname `hostname`, which a clone's record names.
+    #[cfg(target_arch = "x86_64")]
+    pub(super) fn with_hostname(mut self, hostname: Vec<u8>) -> Self {
+        self.hostname = hostname;
+        self
     }
 }
 
