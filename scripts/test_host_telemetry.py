@@ -1196,6 +1196,47 @@ class StorageTelemetrySamplerTests(unittest.TestCase):
         self.assertTrue(reader.reads[-1])
         self.assertFalse(any(reader.reads[1:-1]))
 
+    def test_describe_summarizes_a_window_in_one_line(self):
+        series = iter(counter_series(0, 100, 200, 300, 400))
+
+        class SeriesReader(FakeReader):
+            def read(self, *, processes: bool) -> tuple[dict[str, object], list[str]]:
+                self.reads.append(processes)
+                sample = next(series)
+                del sample["elapsed_ns"]
+                return sample, []
+
+        times = iter(range(0, 500_000_000, 100_000_000))
+        reader = SeriesReader()
+        telemetry = host_telemetry.StorageTelemetry(
+            reader, 0, interval_seconds=3600, clock=lambda: next(times)
+        )
+        telemetry.start()
+        for _ in range(3):
+            telemetry._sample(final=False)
+
+        self.assertEqual(
+            telemetry.describe(0, 400_000_000),
+            "scratch F: write 120.0 MiB/s at 30.0 ms, queue 15.0, 90% busy; "
+            "volume C: write 2.0 MiB/s at 0.1 ms, queue 0.0, 1% busy; "
+            "CPU 25% busy; cache dirty 200.0 MiB, lazy writes 10.0 MiB/s; "
+            "Defender 25.0% CPU",
+        )
+        # Describing stops the sampling.
+        self.assertEqual(reader.closed, 1)
+
+    def test_describe_appends_the_counter_errors(self):
+        times = iter(range(0, 500_000_000, 100_000_000))
+        telemetry = host_telemetry.StorageTelemetry(
+            FakeReader(), 0, interval_seconds=3600, clock=lambda: next(times)
+        )
+        telemetry.start()
+
+        self.assertEqual(
+            telemetry.describe(0, 100_000_000),
+            "CPU n/a busy (errors: F: volume counters failed: busy)",
+        )
+
 
 class PlatformTelemetryTests(unittest.TestCase):
     def test_windows_reader_keeps_disk_counters_enabled_until_closed(self):
@@ -1267,6 +1308,22 @@ class PlatformTelemetryTests(unittest.TestCase):
                 {"scratch": Path(tempfile.gettempdir())}, 0
             )
         )
+        self.assertIsNone(
+            host_telemetry.describe_volume_activity(
+                {"scratch": Path(tempfile.gettempdir())}, 0.1
+            )
+        )
+
+    @unittest.skipUnless(sys.platform == "win32", "requires Windows")
+    def test_windows_describes_a_volume_s_activity_without_privileges(self):
+        activity = host_telemetry.describe_volume_activity(
+            {"scratch": Path(tempfile.gettempdir())}, 0.2
+        )
+
+        assert activity is not None
+        self.assertRegex(activity, r"^scratch \S+ write \S+ MiB/s at ")
+        self.assertRegex(activity, r"; CPU \d+% busy")
+        self.assertNotIn("errors", activity)
 
 
 class AzureMetadataRequestTests(unittest.TestCase):

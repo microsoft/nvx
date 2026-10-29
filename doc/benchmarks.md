@@ -461,6 +461,12 @@ the default output directory, so v1 and v2 records cannot mix. Changed controls 
 disks, shared directories, the UDP server, and each benchmark-owned VMM are cleaned on success,
 failure, or interruption.
 
+An attempt that times out also describes the host in its error before the harness kills
+OpenVMM: the files of the attempt's directory, with their sizes and modification times; the
+OpenVMM processes that still run; and, on Windows, the scratch volume's write rate, latency,
+queue, and busy time, with the CPU, cache, and Defender activity, over 3 s, from the counters of
+the [snapshot lifecycle profile's](#snapshot-lifecycle-profile) storage telemetry. A stalled
+volume can block each of them, so each that does not finish within 10 s says so instead.
 ### Shell snapshot
 
 Each memory size normally uses five cold boots and five restores. Cold values

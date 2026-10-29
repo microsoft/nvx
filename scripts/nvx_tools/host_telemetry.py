@@ -15,10 +15,11 @@ addresses, Azure resource identifiers, names, or tags.
 Storage telemetry samples cumulative operating-system counters while a
 snapshot capture runs, so that each profiled capture phase can be compared
 with the disk, CPU, writeback, and Microsoft Defender activity that overlapped
-it. Windows CI jobs run as Network Service, which cannot read performance
-counters, so the sampler uses only interfaces that any account can query:
-volume performance IOCTLs, whose on-demand counters an open disk performance
-WMI data block enables, GetSystemTimes, and NtQuerySystemInformation.
+it, and for a few seconds when a device-io attempt hangs. Windows CI jobs run
+as Network Service, which cannot read performance counters, so the sampler
+uses only interfaces that any account can query: volume performance IOCTLs,
+whose on-demand counters an open disk performance WMI data block enables,
+GetSystemTimes, and NtQuerySystemInformation.
 """
 
 from __future__ import annotations
@@ -1301,6 +1302,27 @@ class StorageTelemetry:
             "phases": phases,
         }
 
+    def describe(self, start_ns: int, end_ns: int) -> str:
+        """Stop sampling and describe the counters from ``start_ns`` to
+        ``end_ns`` on the sample clock in one line."""
+        self.stop()
+        description = self._reader.description()
+        page_size = description.get("page_size_bytes")
+        window = summarize_storage_window(
+            self._samples,
+            start_ns,
+            end_ns,
+            page_size=page_size if isinstance(page_size, int) else mmap.PAGESIZE,
+        )
+        text = (
+            "no two samples bound the window"
+            if window is None
+            else describe_storage_window(window, _group(description, "volumes"))
+        )
+        if self._errors:
+            text += f" (errors: {'; '.join(self._errors)})"
+        return text
+
     def _run(self) -> None:
         while not self._stop_requested.wait(self._interval_seconds):
             if not self._sample(final=False):
@@ -1342,6 +1364,18 @@ def create_storage_telemetry(
     if sys.platform != "win32" or ctypes.sizeof(ctypes.c_void_p) != 8:
         return None
     return StorageTelemetry(WindowsCounterReader(volumes), origin_ns)
+
+
+def describe_volume_activity(volumes: Mapping[str, Path], seconds: float) -> str | None:
+    """Sample ``volumes`` for ``seconds`` and describe their activity in one
+    line, or return None where storage telemetry is unsupported."""
+    origin_ns = time.perf_counter_ns()
+    telemetry = create_storage_telemetry(volumes, origin_ns)
+    if telemetry is None:
+        return None
+    telemetry.start()
+    time.sleep(seconds)
+    return telemetry.describe(0, time.perf_counter_ns() - origin_ns)
 
 
 class _Endpoints(NamedTuple):

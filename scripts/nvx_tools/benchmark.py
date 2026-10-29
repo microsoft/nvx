@@ -12,6 +12,7 @@ import contextlib
 import ctypes
 import datetime as dt
 import errno
+import functools
 import ipaddress
 import json
 import math
@@ -31,7 +32,7 @@ import time
 from collections.abc import Callable, Generator, Sequence
 from pathlib import Path
 from string import Template
-from typing import IO, Literal, Protocol, TextIO, TypedDict, cast
+from typing import IO, Literal, NoReturn, Protocol, TextIO, TypedDict, cast
 
 from . import benchmark_host, common, host_telemetry
 from .adversarial_oracles import ProcessTreeContainment
@@ -116,6 +117,12 @@ DEVICE_IO_DURATION_SECONDS = 10.0
 DEVICE_IO_WARMUPS = 5
 DEVICE_IO_RUNS = 30
 DEVICE_IO_PORT = 5201
+# When a device-io attempt times out, it describes the host before the kill:
+# its scratch files, the OpenVMM processes, and the scratch volume's activity
+# over DEVICE_IO_HOST_STATE_SAMPLE_SECONDS. A stalled volume can block each of
+# them, so each gets at most DEVICE_IO_HOST_STATE_TIMEOUT_SECONDS.
+DEVICE_IO_HOST_STATE_SAMPLE_SECONDS = 3.0
+DEVICE_IO_HOST_STATE_TIMEOUT_SECONDS = 10.0
 DD_RATE_PATTERN = re.compile(r"([0-9.]+)\s*([KMG]?)B/s")
 VIRTFS_COMPLETION_MARKER = b"NVX-VIRTFS-WORKLOAD-COMPLETE"
 VIRTFS_ROUNDTRIP_MARKER = b"VIRTFS-LIVE-ROUNDTRIP-OK"
@@ -2632,6 +2639,7 @@ def run_guest_script(
     boot_marker: bytes = BOOT_MARKER,
     contain_process_tree: bool = False,
     time_abi_status: bool = False,
+    host_state_on_timeout: Callable[[subprocess.Popen[bytes]], str] | None = None,
 ) -> GuestCommandResult:
     """Run ``script`` once the guest boots and wait for ``completion_marker``.
 
@@ -2639,6 +2647,9 @@ def run_guest_script(
     ABI status and sends ``script`` only after the query exits, so the
     guest's tty cannot echo script bytes into the status lines. The run
     fails unless the guest reported a valid boot line.
+
+    When the workload times out, ``host_state_on_timeout`` describes the host
+    while OpenVMM still runs, and the failure includes its description.
     """
     environment = os.environ.copy()
     environment["OPENVMM_LOG"] = "off"
@@ -2724,6 +2735,16 @@ def run_guest_script(
             "peak_rss_bytes": peak_bytes,
         }
     except BaseException as error:
+        host_state = None
+        interruption: BaseException | None = None
+        if isinstance(error, TimeoutError) and host_state_on_timeout is not None:
+            try:
+                host_state = host_state_on_timeout(process)
+            except Exception as state_error:
+                host_state = f"could not be described: {state_error}"
+            except BaseException as state_interruption:
+                # A Ctrl-C while describing the host still ends OpenVMM first.
+                interruption = state_interruption
         try:
             if interaction.containment is not None:
                 interaction.containment.close(process)
@@ -2731,10 +2752,17 @@ def run_guest_script(
                 terminate(process)
         except BaseException as cleanup_error:
             cleanup_errors.append(cleanup_error)
-        if isinstance(error, Exception):
+        if interruption is not None:
+            primary_error = interruption
+        elif isinstance(error, Exception):
             tail = output[-4096:].decode("utf-8", "replace")
+            sections = [str(error)]
+            if host_state is not None:
+                sections.append(f"--- host state at the timeout ---\n{host_state}")
             if tail:
-                wrapped = RuntimeError(f"{error}\n--- OpenVMM output ---\n{tail}")
+                sections.append(f"--- OpenVMM output ---\n{tail}")
+            if len(sections) > 1:
+                wrapped = RuntimeError("\n".join(sections))
                 wrapped.__cause__ = error
                 primary_error = wrapped
             else:
@@ -3584,6 +3612,113 @@ def _print_device_io_summary(records: Sequence[dict[str, object]]) -> int:
     return sum(failures.values())
 
 
+def _raise_os_error(error: OSError) -> NoReturn:
+    raise error
+
+
+def _describe_files(root: Path) -> str:
+    """List the files under ``root`` with their sizes and modification times.
+
+    A directory that cannot be listed fails the description, rather than
+    leaving its files out, since a storage error is what it should show.
+    """
+    entries: list[str] = []
+    for directory, _, names in os.walk(root, onerror=_raise_os_error):
+        for name in sorted(names):
+            path = Path(directory) / name
+            status = path.stat()
+            modified = dt.datetime.fromtimestamp(status.st_mtime, dt.timezone.utc)
+            entries.append(
+                f"{path.relative_to(root).as_posix()} {status.st_size} bytes, "
+                f"modified {modified.isoformat(timespec='milliseconds')}"
+            )
+    return "; ".join(entries) or "none"
+
+
+def _openvmm_pids(proc: Path = Path("/proc")) -> list[int]:
+    """Return the IDs of the host's running OpenVMM processes, which Linux
+    lists in ``proc``."""
+    pids: list[int] = []
+    if os.name == "nt":
+        listing = subprocess.run(
+            ["tasklist.exe", "/FI", "IMAGENAME eq openvmm.exe", "/FO", "CSV", "/NH"],
+            capture_output=True,
+            text=True,
+            timeout=DEVICE_IO_HOST_STATE_TIMEOUT_SECONDS,
+            check=True,
+        ).stdout
+        for line in listing.splitlines():
+            fields = [field.strip('"') for field in line.split('","')]
+            if len(fields) > 1 and fields[0].lower() == "openvmm.exe":
+                pids.append(int(fields[1]))
+        return sorted(pids)
+    for entry in proc.iterdir():
+        if not entry.name.isdigit():
+            continue
+        try:
+            command = (entry / "comm").read_text(encoding="utf-8").strip()
+        except OSError:
+            continue
+        if command == "openvmm":
+            pids.append(int(entry.name))
+    return sorted(pids)
+
+
+def _describe_openvmm_processes(process: subprocess.Popen[bytes]) -> str:
+    """List the running OpenVMM processes and mark ``process`` among them."""
+    pids = _openvmm_pids()
+    return (
+        ", ".join(
+            f"{pid} (this attempt)" if pid == process.pid else str(pid) for pid in pids
+        )
+        or "none"
+    )
+
+
+def _describe_volume_activity(root: Path) -> str:
+    activity = host_telemetry.describe_volume_activity(
+        {"scratch": root}, DEVICE_IO_HOST_STATE_SAMPLE_SECONDS
+    )
+    return activity if activity is not None else "no counters on this host"
+
+
+def _device_io_host_state(root: Path, process: subprocess.Popen[bytes]) -> str:
+    """Describe the host while a hung device-io attempt's OpenVMM still runs.
+
+    ``root`` holds the attempt's block device and share. A stalled volume can
+    block each description, so each runs in its own thread, and one that does
+    not finish within ``DEVICE_IO_HOST_STATE_TIMEOUT_SECONDS`` says so.
+    """
+    parts: tuple[tuple[str, Callable[[], str]], ...] = (
+        ("files", lambda: _describe_files(root)),
+        ("OpenVMM processes", lambda: _describe_openvmm_processes(process)),
+        ("scratch volume", lambda: _describe_volume_activity(root)),
+    )
+    descriptions: dict[str, str] = {}
+
+    def describe(name: str, description: Callable[[], str]) -> None:
+        try:
+            descriptions[name] = description()
+        except Exception as error:
+            descriptions[name] = f"failed: {error}"
+
+    threads = [
+        threading.Thread(
+            target=describe, args=part, name="nvx-device-io-host-state", daemon=True
+        )
+        for part in parts
+    ]
+    deadline = time.perf_counter() + DEVICE_IO_HOST_STATE_TIMEOUT_SECONDS
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(max(0.0, deadline - time.perf_counter()))
+    unfinished = f"did not finish within {DEVICE_IO_HOST_STATE_TIMEOUT_SECONDS:g}s"
+    return "\n".join(
+        f"{name}: {descriptions.get(name, unfinished)}" for name, _ in parts
+    )
+
+
 def benchmark_device_io_workload(
     args: argparse.Namespace,
     executable: Path,
@@ -3692,6 +3827,9 @@ def benchmark_device_io_workload(
                             ),
                             windows_cpus=windows_cpus,
                             teardown_mode=args.teardown_mode,
+                            host_state_on_timeout=functools.partial(
+                                _device_io_host_state, root
+                            ),
                         )
                         if isinstance(echo_server, UdpEchoServer):
                             echo_server.check()
