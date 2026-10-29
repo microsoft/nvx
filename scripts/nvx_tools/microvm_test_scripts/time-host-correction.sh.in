@@ -1,0 +1,67 @@
+# The time-host-correction scenario's guest report (doc/ci.md): up to
+# @ATTEMPTS@ measurement windows of two time samples @SPACING_SECONDS@ seconds
+# apart. Each window reads the live time state before and after it clears an
+# earlier PLL phase offset and waits out its cached tick length, then after its samples. A changed accepted-sample
+# count, disruption counter, held correction, or clock-step state makes the
+# script retry, as does a sample that fails to pair or whose uncertainty
+# exceeds the discipline's @SAMPLE_BOUND_NS@ ns bound. Linux's frequency limit needs only one sample. The first sample after
+# a restore can read the guest's clock late in its bracket while the restored
+# memory that it touches faults in, so the report discards one sample first.
+state=/run/nvx/time/state
+state_signature() {
+    text=$1
+    for name in frequency_ppb frequency_limited host_correction_ppb discontinuities last_step_realtime_ns samples; do
+        value=$(printf '%s\n' "$text" | sed -n "s/.*[[:space:]]$name=\([^ ]*\).*/\1/p")
+        printf '%s=%s;' "$name" "$value"
+    done
+}
+# Whether an nvx-time sample report pairs the sample within the bound.
+within_bound() {
+    epsilon=$(printf '%s\n' "$1" | sed -n 's/.*[[:space:]]epsilon_ns=\([^ ]*\).*/\1/p')
+    case $epsilon in
+        '' | *[!0-9]*) return 1 ;;
+    esac
+    [ "$epsilon" -le @SAMPLE_BOUND_NS@ ]
+}
+nvx-time sample >/dev/null 2>&1 || true
+attempt=1
+index=1
+while [ "$attempt" -le @ATTEMPTS@ ]; do
+    initial_state=$(tr '\n' ' ' <"$state")
+    echo "@STATE_PREFIX@attempt=$attempt point=initial $initial_state"
+    # Clear an earlier daemon poll's PLL phase offset without changing the
+    # PLL status or held frequency; nvx-time ships in every guest image.
+    if ! nvx-time test clear-phase >/dev/null 2>&1; then
+        echo "NVX-TIME-HOST-CORRECTION-ERROR: cannot clear PLL phase offset"
+        nvx-exit 1
+        exit 1
+    fi
+    # Linux caches the old phase correction in tick_length until its next
+    # kernel-second update. Keep that wait inside the live-state bracket.
+    sleep @PHASE_SETTLE_SECONDS@
+    before_state=$(tr '\n' ' ' <"$state")
+    echo "@STATE_PREFIX@attempt=$attempt point=before $before_state"
+    first=$(nvx-time sample 2>&1)
+    echo "@SAMPLE_PREFIX@index=$index $first"
+    if grep -qx 'frequency_limited=1' "$state"; then
+        after_state=$(tr '\n' ' ' <"$state")
+        echo "@STATE_PREFIX@attempt=$attempt point=after $after_state"
+        break
+    fi
+    sleep @SPACING_SECONDS@
+    second=$(nvx-time sample 2>&1)
+    index=$((index + 1))
+    echo "@SAMPLE_PREFIX@index=$index $second"
+    after_state=$(tr '\n' ' ' <"$state")
+    echo "@STATE_PREFIX@attempt=$attempt point=after $after_state"
+    first_disruption=$(printf '%s\n' "$first" | sed -n 's/.*[[:space:]]disruption=\([^ ]*\).*/\1/p')
+    second_disruption=$(printf '%s\n' "$second" | sed -n 's/.*[[:space:]]disruption=\([^ ]*\).*/\1/p')
+    initial_signature=$(state_signature "$initial_state")
+    before_signature=$(state_signature "$before_state")
+    after_signature=$(state_signature "$after_state")
+    if [ -n "$first_disruption" ] && [ "$first_disruption" = "$second_disruption" ] && [ "$initial_signature" = "$before_signature" ] && [ "$before_signature" = "$after_signature" ] && within_bound "$first" && within_bound "$second"; then
+        break
+    fi
+    attempt=$((attempt + 1))
+    index=$((index + 1))
+done

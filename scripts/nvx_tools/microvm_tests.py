@@ -140,6 +140,7 @@ MICROVM_TEST_SCENARIOS = (
     "snapshot-tiers",
     "structured-outcome",
     "time-abi-conformance",
+    "time-host-correction",
     "virtio-net",
     "workload-identity",
 )
@@ -457,6 +458,64 @@ CPU_PROFILE_FALLBACK_LOG_FILTER = (
 DECLARED_CPU_PROFILE = re.compile(
     rb'time ABI rates declared [^\r\n]*\bcpu_profile="([a-z0-9.-]+)"'
 )
+# The time-host-correction scenario's host clock corrections, in ppm, that
+# OpenVMM's host-rate-offset-ppm hook makes it publish, against the sign of the
+# host's own correction, which an unhooked cold boot's time sample gives: a
+# cold boot's and a restore's within the guest's 500 ppm frequency limit, and
+# a restore beyond that limit. The hook itself is bounded by OpenVMM's parser.
+TIME_HOST_CORRECTION_BOOT_PPM = 200
+TIME_HOST_CORRECTION_RESTORE_PPM = 150
+TIME_HOST_CORRECTION_LIMIT_PPM = 900
+OPENVMM_HOST_RATE_OFFSET_LIMIT_PPM = 10_000
+# Seconds between the guest's two time samples of each phase.
+TIME_HOST_CORRECTION_SPACING_SECONDS = 5
+# Seconds after clearing the PLL phase offset: longer than one kernel second even at Linux's
+# slowest allowed correction, so the tick length no longer carries the cached phase correction.
+TIME_HOST_CORRECTION_PHASE_SETTLE_SECONDS = 2
+# The most measurement windows retried after host UTC reports a disruption.
+TIME_HOST_CORRECTION_ATTEMPTS = 3
+# The largest uncertainty, in ns, of a time sample that a measurement window
+# pairs: the bound of the guest's discipline (SAMPLE_BOUND_NS in
+# nvx-rs/src/guest/time/system.rs). nvx-time sample also reports a sample
+# beyond it, whose realtime bracket can widen the rate check's allowance past
+# the hooks' corrections: two samples 5 s apart, each uncertain by 1 ms, would
+# allow 400 ppm. Such a window is retried instead.
+TIME_HOST_CORRECTION_SAMPLE_BOUND_NS = 100_000
+# How far, in ppm, the correction that the guest's boot step or restore repair
+# took may be from the one that its first sample publishes, as the host's time
+# service may change it in between: half the 150 ppm of the smallest hook, by
+# which a guest that kept a stale correction would miss it.
+TIME_HOST_CORRECTION_HELD_PPM = 75
+# How far, in ppm, the guest's clock may run from the host's correction that it
+# holds, against the guest TSC counted at the declared rate, beyond the
+# uncertainty of the samples' pairing of the guest's realtime clock with that
+# TSC: the kernel runs a frequency correction to a fraction of a ppm, and a
+# guest that didn't apply it would run 150 ppm or more off it.
+TIME_HOST_CORRECTION_GUEST_PPM = 1
+# How far, in ppm, host UTC may run from its published correction against the
+# same TSC, beyond half the correction's change between the samples and their
+# pairing bounds: half the 150 ppm of the smallest hook that two samples
+# bracket, which a hook that skewed host UTC or its correction alone would
+# leave between them. The host's time service may slew host UTC between two
+# samples, by up to 25 ppm on the test VMs measured so far, which the guest's
+# discipline absorbs at its next poll.
+TIME_HOST_CORRECTION_HOST_PPM = 75
+TIME_HOST_CORRECTION_STATE_PREFIX = "NVX-TIME-HOST-CORRECTION-STATE: "
+TIME_HOST_CORRECTION_SAMPLE_PREFIX = "NVX-TIME-HOST-CORRECTION-SAMPLE: "
+# The time-state fields that must stay fixed over one measurement window.
+TIME_HOST_CORRECTION_DISCIPLINE_FIELDS = (
+    "frequency_ppb",
+    "frequency_limited",
+    "host_correction_ppb",
+    "discontinuities",
+    "last_step_realtime_ns",
+    "samples",
+)
+TIME_HOST_CORRECTION_COMPLETION_MARKER = b"NVX-TIME-HOST-CORRECTION-OK"
+# Linux's limit of the frequency correction, in ppb.
+LINUX_FREQUENCY_LIMIT_PPB = 500_000
+# The flag of a time sample that a test hook altered.
+TIME_SAMPLE_TEST_HOOKS = 0x08
 # The guest finishes a restore after the RCU grace-period release, which gives
 # up after rcu_cpu_stall_timeout (21 s), and the deferred C7 check.
 TIME_ABI_RESTORE_FINISH_SECONDS = 30.0
@@ -5119,6 +5178,547 @@ def run_cpu_profile_fallback(
             )
 
 
+def time_host_correction_hook(ppm: int) -> tuple[str, str]:
+    """Return OpenVMM's test hook that publishes host UTC as running ``ppm``
+    faster than it does, with the clock correction to match."""
+    return ("--x-time-abi-test-hook", f"host-rate-offset-ppm={ppm}")
+
+
+def time_host_correction_script(
+    spacing_seconds: int = TIME_HOST_CORRECTION_SPACING_SECONDS,
+    settle_seconds: int = TIME_HOST_CORRECTION_PHASE_SETTLE_SECONDS,
+) -> str:
+    """Return the guest's report of the time-host-correction scenario: its time
+    state, then up to ``TIME_HOST_CORRECTION_ATTEMPTS`` pairs of samples
+    ``spacing_seconds`` apart until host UTC's disruption counter and the
+    discipline are stable and both samples lie within
+    ``TIME_HOST_CORRECTION_SAMPLE_BOUND_NS``, unless Linux's limit holds its
+    frequency correction."""
+    return _render_script(
+        "time-host-correction.sh.in",
+        STATE_PREFIX=TIME_HOST_CORRECTION_STATE_PREFIX,
+        SAMPLE_PREFIX=TIME_HOST_CORRECTION_SAMPLE_PREFIX,
+        SPACING_SECONDS=str(spacing_seconds),
+        PHASE_SETTLE_SECONDS=str(settle_seconds),
+        ATTEMPTS=str(TIME_HOST_CORRECTION_ATTEMPTS),
+        SAMPLE_BOUND_NS=str(TIME_HOST_CORRECTION_SAMPLE_BOUND_NS),
+    )
+
+
+def _time_host_correction_report(
+    output: str, *, context: str
+) -> tuple[list[dict[str, str]], list[dict[str, str]]]:
+    """Return the bracket states and samples of every measurement window in
+    the time-host-correction scenario's guest report."""
+    states: list[dict[str, str]] = []
+    samples: list[dict[str, str]] = []
+    try:
+        for raw in output.splitlines():
+            line = raw.removesuffix("\r")
+            if line.startswith(TIME_HOST_CORRECTION_STATE_PREFIX):
+                states.append(
+                    parse_fields(line.removeprefix(TIME_HOST_CORRECTION_STATE_PREFIX))
+                )
+            elif line.startswith(TIME_HOST_CORRECTION_SAMPLE_PREFIX):
+                samples.append(
+                    parse_fields(line.removeprefix(TIME_HOST_CORRECTION_SAMPLE_PREFIX))
+                )
+    except ValueError as error:
+        raise RuntimeError(f"{context}: malformed guest report: {error}") from error
+    if not states or not samples:
+        raise RuntimeError(f"{context}: the guest reported no time state or sample")
+    return states, samples
+
+
+def _failed_sample(sample: dict[str, str]) -> str | None:
+    """Return the fields of an ``nvx-time sample`` report that paired no
+    sample with the guest's clocks, or None if it did."""
+    if "theta_ns" in sample and "epsilon_ns" in sample:
+        return None
+    return " ".join(f"{key}={value}" for key, value in sample.items())
+
+
+def _time_host_correction_window(
+    states: list[dict[str, str]],
+    samples: list[dict[str, str]],
+    *,
+    context: str,
+    limit: bool,
+) -> tuple[dict[str, str], list[dict[str, str]]]:
+    """Return the state and samples of the first stable and conclusive
+    measurement window.
+
+    Each window's states must keep the accepted-sample count, held correction,
+    and clock-step fields, and its samples the host disruption counter, and
+    each sample must pair within ``TIME_HOST_CORRECTION_SAMPLE_BOUND_NS``.
+    Another window is retried, up to ``TIME_HOST_CORRECTION_ATTEMPTS`` times;
+    the limited phase, which takes one sample, is not.
+    """
+    if len(states) % 3:
+        raise RuntimeError(
+            f"{context}: the guest reported {len(states)} window states, not triples"
+        )
+    windows = len(states) // 3
+    if not 1 <= windows <= TIME_HOST_CORRECTION_ATTEMPTS:
+        raise RuntimeError(
+            f"{context}: the guest reported {windows} measurement windows, not 1 to "
+            f"{TIME_HOST_CORRECTION_ATTEMPTS}"
+        )
+    for index, (initial, before, after) in enumerate(
+        zip(states[::3], states[1::3], states[2::3], strict=True), start=1
+    ):
+        if (
+            initial.get("attempt") != str(index)
+            or initial.get("point") != "initial"
+            or before.get("attempt") != str(index)
+            or before.get("point") != "before"
+            or after.get("attempt") != str(index)
+            or after.get("point") != "after"
+        ):
+            raise RuntimeError(
+                f"{context}: malformed state brackets for measurement window {index}"
+            )
+    state_reports_limit = (
+        windows == 1 and len(samples) == 1 and states[2].get("frequency_limited") == "1"
+    )
+    if limit or state_reports_limit:
+        if windows != 1 or len(samples) != 1:
+            raise RuntimeError(
+                f"{context}: the limited phase reported {windows} windows and "
+                f"{len(samples)} samples, not one of each"
+            )
+        failed = _failed_sample(samples[0])
+        if failed is not None:
+            raise RuntimeError(f"{context}: nvx-time sample failed: {failed}")
+        return states[2], samples
+    if len(samples) != 2 * windows:
+        raise RuntimeError(
+            f"{context}: the guest reported {len(samples)} time samples for "
+            f"{windows} measurement windows, not {2 * windows}"
+        )
+    reasons: list[str] = []
+    for window in range(windows):
+        initial, before, after = states[3 * window : 3 * window + 3]
+        first, second = samples[2 * window : 2 * window + 2]
+        missing = [
+            field
+            for field in TIME_HOST_CORRECTION_DISCIPLINE_FIELDS
+            if any(field not in state for state in (initial, before, after))
+        ]
+        if missing:
+            raise RuntimeError(
+                f"{context}: measurement window {window + 1} states lack "
+                + ", ".join(missing)
+            )
+        signature_initial = tuple(
+            initial[field] for field in TIME_HOST_CORRECTION_DISCIPLINE_FIELDS
+        )
+        signature_before = tuple(
+            before[field] for field in TIME_HOST_CORRECTION_DISCIPLINE_FIELDS
+        )
+        signature_after = tuple(
+            after[field] for field in TIME_HOST_CORRECTION_DISCIPLINE_FIELDS
+        )
+        first_disruption = first.get("disruption")
+        failed = next(
+            (report for report in map(_failed_sample, (first, second)) if report),
+            None,
+        )
+        if failed is not None:
+            reasons.append(f"window {window + 1}: nvx-time sample failed: {failed}")
+            continue
+        try:
+            uncertainty_ns = max(
+                int(sample["epsilon_ns"]) for sample in (first, second)
+            )
+        except (KeyError, ValueError) as error:
+            raise RuntimeError(
+                f"{context}: malformed guest report: {error!r}"
+            ) from error
+        if not signature_initial == signature_before == signature_after:
+            reasons.append(f"window {window + 1}: the discipline changed")
+        elif first_disruption is None or first_disruption != second.get("disruption"):
+            reasons.append(
+                f"window {window + 1}: host UTC's disruption counter changed"
+            )
+        elif uncertainty_ns > TIME_HOST_CORRECTION_SAMPLE_BOUND_NS:
+            reasons.append(
+                f"window {window + 1}: a sample's uncertainty of {uncertainty_ns} ns "
+                f"exceeds the {TIME_HOST_CORRECTION_SAMPLE_BOUND_NS} ns bound"
+            )
+        else:
+            return after, [first, second]
+    raise RuntimeError(
+        f"{context}: no measurement window was stable and conclusive: "
+        + "; ".join(reasons)
+    )
+
+
+def time_host_correction_host(output: str, *, context: str) -> tuple[float, int]:
+    """Return the host's own clock correction, in ppm, and the declared TSC
+    rate that the unhooked guest report publishes.
+
+    No test hook may have altered the first sample. The TSC rate determines
+    whether Linux's kHz rounding would saturate an ordinary hooked phase.
+    """
+    states, samples = _time_host_correction_report(output, context=context)
+    state, samples = _time_host_correction_window(
+        states, samples, context=context, limit=False
+    )
+    sample = samples[0]
+    try:
+        if "theta_ns" not in sample:
+            raise RuntimeError(
+                f"{context}: nvx-time sample failed: "
+                + " ".join(f"{key}={value}" for key, value in sample.items())
+            )
+        if int(sample["flags"], 16) & TIME_SAMPLE_TEST_HOOKS:
+            raise RuntimeError(
+                f"{context}: time sample flags {sample['flags']} carry the "
+                "test-hook flag, so a hook altered the host's own correction"
+            )
+        return int(sample["correction"]) / 65_536, int(state["tsc_hz"])
+    except (KeyError, ValueError) as error:
+        raise RuntimeError(f"{context}: malformed guest report: {error!r}") from error
+
+
+def time_host_correction_host_ppm(output: str, *, context: str) -> float:
+    """Return only the host correction from [`time_host_correction_host`]."""
+    return time_host_correction_host(output, context=context)[0]
+
+
+def time_host_correction_composed_ppm(host_ppm: float, hook_ppm: int) -> float:
+    """Return the published correction when OpenVMM composes the host's rate
+    with ``hook_ppm`` multiplicatively."""
+    return host_ppm + hook_ppm + host_ppm * hook_ppm / 1_000_000
+
+
+def time_host_correction_guest_ppm(correction_ppm: float, tsc_hz: int) -> float:
+    """Return the correction that Linux must hold after it rounds
+    ``tsc_hz`` down to the kHz."""
+    if tsc_hz <= 0:
+        raise RuntimeError(f"the declared TSC rate is invalid: {tsc_hz} Hz")
+    kernel_hz = tsc_hz // 1000 * 1000
+    return (1_000_000 + correction_ppm) * kernel_hz / tsc_hz - 1_000_000
+
+
+def time_host_correction_hooks(host_ppm: float, tsc_hz: int) -> tuple[int, int, int]:
+    """Return the ``host-rate-offset-ppm`` hooks, in ppm, of the
+    time-host-correction scenario's cold boot, restore, and limit restore on a
+    host whose own clock correction is ``host_ppm``.
+
+    The first two aim to make OpenVMM publish corrections of
+    ``TIME_HOST_CORRECTION_BOOT_PPM`` and ``TIME_HOST_CORRECTION_RESTORE_PPM``
+    against the sign of the host's own. OpenVMM composes the two rates
+    multiplicatively, so solve that composition for the hook. The hooks stay
+    within OpenVMM's accepted range; near its edge they publish the closest
+    correction that remains below Linux's 500 ppm limit. A host whose
+    correction cannot be brought below that limit fails here with an explicit
+    diagnostic. The last hook extends the host's own correction beyond Linux's
+    limit.
+    """
+    sign = 1 if host_ppm >= 0 else -1
+    denominator = 1_000_000 + host_ppm
+    if denominator <= 0:
+        raise RuntimeError(f"the host's own correction is invalid: {host_ppm:+.3f} ppm")
+
+    def ordinary(target_ppm: int) -> int:
+        target = -sign * target_ppm
+        hook = round((target - host_ppm) * 1_000_000 / denominator)
+        hook = max(
+            -OPENVMM_HOST_RATE_OFFSET_LIMIT_PPM,
+            min(OPENVMM_HOST_RATE_OFFSET_LIMIT_PPM, hook),
+        )
+        published = time_host_correction_composed_ppm(host_ppm, hook)
+        guest = time_host_correction_guest_ppm(published, tsc_hz)
+        if abs(guest) >= LINUX_FREQUENCY_LIMIT_PPB / 1000:
+            raise RuntimeError(
+                f"the host's own correction of {host_ppm:+.3f} ppm cannot be "
+                "composed with Linux's rounded TSC rate below its 500 ppm "
+                "limit within OpenVMM's host-rate-offset-ppm range of +/-"
+                f"{OPENVMM_HOST_RATE_OFFSET_LIMIT_PPM:,} ppm (published "
+                f"{published:+.3f} ppm, guest {guest:+.3f} ppm at {tsc_hz} Hz)"
+            )
+        return hook
+
+    return (
+        ordinary(TIME_HOST_CORRECTION_BOOT_PPM),
+        ordinary(TIME_HOST_CORRECTION_RESTORE_PPM),
+        sign * TIME_HOST_CORRECTION_LIMIT_PPM,
+    )
+
+
+def time_host_correction_frequency_allowance_ppb(
+    tsc_hz: int, correction_ppb: int
+) -> int:
+    """Return the rounding allowance between the host and kernel corrections.
+
+    Linux counts the declared TSC rate rounded down to the kHz, up to 999 Hz
+    slow. Scale that worst case at ``tsc_hz`` by the correction, and allow one
+    more ppb for the correction's integer rounding. The time ABI admits rates
+    as low as 500 MHz, where this is nearly 2,000 ppb rather than the 1,001 ppb
+    sufficient at 1 GHz.
+    """
+    if tsc_hz <= 0:
+        raise ValueError(f"invalid TSC rate {tsc_hz}")
+    numerator = 999 * (1_000_000_000 + abs(correction_ppb))
+    return (numerator + tsc_hz - 1) // tsc_hz + 1
+
+
+def check_time_host_correction(
+    output: str, *, context: str, limit: bool = False
+) -> str:
+    """Check the guest's report of the time-host-correction scenario in its
+    console ``output``, and return a summary of it.
+
+    The correction that the guest's boot step or restore repair took must be
+    the one that its first sample publishes, give or take the host's own
+    changes, so that it isn't a stale one. With ``limit``, that correction must
+    exceed Linux's limit, and the guest must hold the limit and report it.
+    Otherwise it must lie within the limit, and the guest's frequency
+    correction must be it, short of the kernel's kHz rounding of the TSC rate;
+    between its two samples, the guest's clock must run at the correction that
+    it holds against the guest TSC counted at the declared rate, as each sample
+    pairs the clock with the TSC, within an allowance below half that
+    correction, and host UTC, which each sample pairs with
+    the same TSC, at its published correction, give or take the slews of the
+    host's time service, so that the hook skewed both alike. A pair whose
+    disruption counter changes, or whose samples failed to pair or are
+    uncertain beyond the discipline's bound, is discarded in favor of one of
+    the bounded retry windows. Every sample must carry OpenVMM's test-hook
+    flag, so that the hook reached it."""
+    states, samples = _time_host_correction_report(output, context=context)
+    state, samples = _time_host_correction_window(
+        states, samples, context=context, limit=limit
+    )
+    try:
+        for sample in samples:
+            if "theta_ns" not in sample:
+                raise RuntimeError(
+                    f"{context}: nvx-time sample failed: "
+                    + " ".join(f"{key}={value}" for key, value in sample.items())
+                )
+            if int(sample["flags"], 16) & TIME_SAMPLE_TEST_HOOKS == 0:
+                raise RuntimeError(
+                    f"{context}: time sample flags {sample['flags']} lack the "
+                    "test-hook flag, so OpenVMM's hook did not reach it"
+                )
+        frequency_ppb = int(state["frequency_ppb"])
+        correction_ppb = int(state["host_correction_ppb"])
+        limited = state["frequency_limited"] == "1"
+
+        def check_held(sample: dict[str, str]) -> float:
+            published = int(sample["correction"]) / 65_536
+            if abs(correction_ppb / 1000 - published) > TIME_HOST_CORRECTION_HELD_PPM:
+                raise RuntimeError(
+                    f"{context}: the guest holds the host's correction of "
+                    f"{correction_ppb} ppb, but its first stable sample publishes "
+                    f"{published:+.3f} ppm, more than "
+                    f"{TIME_HOST_CORRECTION_HELD_PPM} ppm away: its boot step or "
+                    "restore repair kept a stale correction"
+                )
+            return published
+
+        tsc_hz = int(state["tsc_hz"])
+        required_ppm = time_host_correction_guest_ppm(correction_ppb / 1000, tsc_hz)
+        beyond = abs(required_ppm) > LINUX_FREQUENCY_LIMIT_PPB / 1000
+        if limit:
+            check_held(samples[0])
+            if not beyond:
+                raise RuntimeError(
+                    f"{context}: Linux's required correction of "
+                    f"{required_ppm:+.3f} ppm is within its limit, so this phase "
+                    "does not exercise it"
+                )
+            held = (
+                LINUX_FREQUENCY_LIMIT_PPB
+                if required_ppm > 0
+                else (-LINUX_FREQUENCY_LIMIT_PPB)
+            )
+            if not limited or frequency_ppb != held:
+                raise RuntimeError(
+                    f"{context}: Linux's required correction of "
+                    f"{required_ppm:+.3f} ppm exceeds its limit, but the guest "
+                    f"holds {frequency_ppb} ppb "
+                    f"with frequency_limited={state['frequency_limited']}, not "
+                    f"{held} ppb with frequency_limited=1"
+                )
+            return (
+                f"{context}: host_correction_ppb={correction_ppb} "
+                f"frequency_ppb={frequency_ppb} frequency_limited=1"
+            )
+        if limited or beyond:
+            raise RuntimeError(
+                f"{context}: Linux's required correction of {required_ppm:+.3f} "
+                f"ppm reaches its limit (frequency_limited="
+                f"{state['frequency_limited']}), so "
+                "this phase cannot check the guest's rate"
+            )
+        first, second = samples
+        published_ppm = check_held(first)
+        allowance_ppb = time_host_correction_frequency_allowance_ppb(
+            tsc_hz, correction_ppb
+        )
+        if abs(frequency_ppb - correction_ppb) > allowance_ppb:
+            raise RuntimeError(
+                f"{context}: the guest holds a frequency correction of "
+                f"{frequency_ppb} ppb, not the host's correction of "
+                f"{correction_ppb} ppb (allowance {allowance_ppb} ppb at "
+                f"{tsc_hz} Hz)"
+            )
+        # The guest TSC, counted at the declared rate, paces both clocks: each
+        # sample pairs it with host UTC and, at host UTC less theta, with the
+        # guest's realtime clock, within its uncertainty less the pairing bound.
+        elapsed_ns = (int(second["tsc"]) - int(first["tsc"])) * 1e9 / tsc_hz
+        utc_ns = int(second["utc_ns"]) - int(first["utc_ns"])
+        realtime_ns = utc_ns - (int(second["theta_ns"]) - int(first["theta_ns"]))
+        realtime_error_ns = sum(
+            int(sample["epsilon_ns"]) - int(sample["pairing_ns"]) for sample in samples
+        )
+        pairing_error_ns = sum(int(sample["pairing_ns"]) for sample in samples)
+        first_ppm, second_ppm = (
+            int(sample["correction"]) / 65_536 for sample in samples
+        )
+    except (KeyError, ValueError, ZeroDivisionError) as error:
+        raise RuntimeError(f"{context}: malformed guest report: {error!r}") from error
+    if elapsed_ns <= 0:
+        raise RuntimeError(
+            f"{context}: the guest TSC did not advance between the samples"
+        )
+    seconds = elapsed_ns / 1e9
+    held_ppm = correction_ppb / 1000
+    guest_ppm = (realtime_ns / elapsed_ns - 1) * 1e6
+    guest_limit = TIME_HOST_CORRECTION_GUEST_PPM + realtime_error_ns / elapsed_ns * 1e6
+    # A guest that ignored the correction that it holds would run its clock at
+    # the TSC's own rate, about 0 ppm, so an allowance of half the correction or
+    # more could not tell it from one that applied the correction.
+    conclusive_ppm = abs(held_ppm) / 2
+    if guest_limit >= conclusive_ppm:
+        raise RuntimeError(
+            f"{context}: the allowance of {guest_limit:.3f} ppm for the guest's "
+            f"clock in {seconds:.1f} s is not below {conclusive_ppm:.3f} ppm, half "
+            f"the host's correction of {held_ppm:+.3f} ppm that it holds, so its "
+            "rate check is inconclusive"
+        )
+    if abs(guest_ppm - held_ppm) > guest_limit:
+        raise RuntimeError(
+            f"{context}: the guest's clock ran at {guest_ppm:+.3f} ppm against its "
+            f"TSC in {seconds:.1f} s, not at the host's correction of "
+            f"{held_ppm:+.3f} ppm that it holds, within {guest_limit:.3f} ppm"
+        )
+    host_ppm = (utc_ns / elapsed_ns - 1) * 1e6
+    published_ppm = (first_ppm + second_ppm) / 2
+    host_limit = (
+        TIME_HOST_CORRECTION_HOST_PPM
+        + abs(second_ppm - first_ppm) / 2
+        + pairing_error_ns / elapsed_ns * 1e6
+    )
+    if abs(host_ppm - published_ppm) > host_limit:
+        raise RuntimeError(
+            f"{context}: host UTC ran at {host_ppm:+.3f} ppm against the guest TSC "
+            f"in {seconds:.1f} s, not at its published correction of "
+            f"{published_ppm:+.3f} ppm, within {host_limit:.3f} ppm"
+        )
+    return (
+        f"{context}: host_correction_ppb={correction_ppb} frequency_ppb={frequency_ppb} "
+        f"guest_ppm={guest_ppm:+.3f} host_ppm={host_ppm:+.3f} "
+        f"published_ppm={published_ppm:+.3f} in {seconds:.1f} s"
+    )
+
+
+def run_time_host_correction(
+    executable: Path,
+    kernel: Path,
+    initrd: Path,
+    backend: str,
+    *,
+    memory_mib: int,
+    timeout: float,
+    output_dir: Path,
+) -> None:
+    """Check that the guest applies the host's clock correction that OpenVMM
+    publishes with each time sample, through the ``host-rate-offset-ppm`` test
+    hook, which publishes host UTC as running faster or slower than it does.
+
+    An unhooked cold boot's time sample gives the host's own correction, from
+    which ``time_host_correction_hooks`` chooses the hooks. A cold boot with the
+    hook must hold the published correction from its boot step on, and keep its
+    clock on the hooked host UTC. A snapshot, captured without the hook,
+    restored with another rate must hold the destination's correction from its
+    repair on, and pass the warp probe and its restore checks; restored with a
+    rate beyond Linux's 500 ppm limit, in the direction of the host's own
+    correction, it must hold the limit and report it."""
+    boot_command = workload_boot_command(
+        executable,
+        backend,
+        kernel,
+        initrd,
+        memory_mib,
+        "quiet loglevel=0",
+        processors=1,
+    )
+    completion = f"echo {TIME_HOST_CORRECTION_COMPLETION_MARKER.decode()}\nnvx-exit 0\n"
+    context = "host clock correction probe"
+    probe = run_guest_script(
+        boot_command,
+        time_host_correction_script(spacing_seconds=0) + completion,
+        TIME_HOST_CORRECTION_COMPLETION_MARKER,
+        timeout=timeout,
+        log_path=output_dir / "time-host-correction-probe.log",
+    )
+    host_ppm, tsc_hz = time_host_correction_host(probe["output"], context=context)
+    boot_ppm, restore_ppm, limit_ppm = time_host_correction_hooks(host_ppm, tsc_hz)
+    print(f"{context}: the host's own correction is {host_ppm:+.3f} ppm", flush=True)
+    context = f"host clock correction cold boot (hook {boot_ppm:+d} ppm)"
+    result = run_guest_script(
+        [*boot_command, *time_host_correction_hook(boot_ppm)],
+        time_host_correction_script() + completion,
+        TIME_HOST_CORRECTION_COMPLETION_MARKER,
+        timeout=timeout,
+        log_path=output_dir / "time-host-correction-boot.log",
+    )
+    print(check_time_host_correction(result["output"], context=context), flush=True)
+    with tempfile.TemporaryDirectory(prefix="nvx-time-host-correction-") as temporary:
+        snapshot_path = Path(temporary) / "snapshot"
+        capture_snapshot(
+            [*boot_command, "--snapshot-destination", str(snapshot_path)],
+            snapshot_path,
+            timeout=timeout,
+            processors=1,
+            post_restore_script=time_host_correction_script() + post_restore_checks(),
+            log_path=output_dir / "time-host-correction-capture.log",
+        )
+        for name, ppm, limit in (
+            ("restore", restore_ppm, False),
+            ("limit", limit_ppm, True),
+        ):
+            context = f"host clock correction {name} (hook {ppm:+d} ppm)"
+            restore_command = [
+                *snapshot_restore_command(
+                    executable, backend, snapshot_path, processors=1
+                ),
+                *time_host_correction_hook(ppm),
+            ]
+            output = _measure_restore(
+                restore_command,
+                context=context,
+                environment=_restore_environment(),
+                timeout=timeout,
+                log_path=output_dir / f"time-host-correction-{name}.log",
+                failure_marker=WARP_PROBE_FAILURE_MARKER,
+            )
+            print(
+                check_time_host_correction(
+                    output.decode("utf-8", "replace"), context=context, limit=limit
+                ),
+                flush=True,
+            )
+            _check_restore_warp(output, processors=1, context=context)
+            _check_restore_status(
+                output, restore_command, processors=1, context=context
+            )
+
+
 def _restore_vp_bindings(output: bytes) -> list[int]:
     """Return the VP indices bound by one profiled OpenVMM process."""
     bound: list[int] = []
@@ -9582,6 +10182,20 @@ def _run_scenarios(
             memory_mib=args.memory_mib,
             timeout=args.timeout,
             log_path=output_dir / "time-abi-conformance.log",
+        )
+    if "time-host-correction" in scenarios:
+        report.start(
+            "time-host-correction",
+            f"Running microVM host clock correction correctness on OpenVMM/{args.backend}",
+        )
+        run_time_host_correction(
+            executable,
+            kernel,
+            initrd,
+            args.backend,
+            memory_mib=args.memory_mib,
+            timeout=args.timeout,
+            output_dir=output_dir,
         )
     if "virtio-net" in scenarios:
         report.start(

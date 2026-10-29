@@ -63,21 +63,22 @@
         "snapshot-tiers": 6.8,
         "structured-outcome": 0.6,
         "time-abi-conformance": 0.7,
+        "time-host-correction": 14.0,
         "virtio-net": 3.8,
         "workload-identity": 0.7
       },
       "shards": [
         {
-          "seconds": 251.4,
+          "seconds": 258.5,
           "scenarios": [
             "command-line-limit",
             "console-snapshot",
             "directional-network-policy",
-            "endpoint-policy-snapshot",
             "filesystem-comma-paths",
             "filesystem-snapshot",
             "managed-lifecycle",
             "network-snapshot",
+            "platform-aggregate-export",
             "platform-restore-processors",
             "restore-downtime",
             "restore-memory",
@@ -85,15 +86,17 @@
             "smp-snapshot",
             "snapshot-core",
             "snapshot-tiers",
-            "time-abi-conformance"
+            "time-abi-conformance",
+            "time-host-correction"
           ]
         },
         {
-          "seconds": 251.4,
+          "seconds": 258.3,
           "scenarios": [
             "console-exit",
             "cpu-profile-fallback",
             "denied-filesystem-paths",
+            "endpoint-policy-snapshot",
             "filesystem-owner",
             "filesystem-policy",
             "filesystem-shares",
@@ -105,7 +108,6 @@
             "l3-l4-egress-port-ranges",
             "l3-l4-egress-protocols",
             "lifecycle",
-            "platform-aggregate-export",
             "platform-filesystem",
             "platform-network-policy",
             "platform-zero-fill",
@@ -161,16 +163,17 @@
         "snapshot-tiers": 6.3,
         "structured-outcome": 0.5,
         "time-abi-conformance": 0.8,
+        "time-host-correction": 14.0,
         "virtio-net": 3.7,
         "workload-identity": 0.6
       },
       "shards": [
         {
-          "seconds": 232.5,
+          "seconds": 239.3,
           "scenarios": [
             "console-snapshot",
             "directional-network-policy",
-            "endpoint-policy-snapshot",
+            "filesystem-comma-paths",
             "filesystem-shares",
             "filesystem-snapshot",
             "network-snapshot",
@@ -183,17 +186,18 @@
             "smp",
             "smp-snapshot",
             "snapshot-core",
-            "snapshot-tiers"
+            "snapshot-tiers",
+            "time-host-correction"
           ]
         },
         {
-          "seconds": 232.5,
+          "seconds": 239.7,
           "scenarios": [
             "command-line-limit",
             "console-exit",
             "cpu-profile-fallback",
             "denied-filesystem-paths",
-            "filesystem-comma-paths",
+            "endpoint-policy-snapshot",
             "filesystem-owner",
             "filesystem-policy",
             "guest-boot",
@@ -259,15 +263,17 @@
         "snapshot-tiers": 12.0,
         "structured-outcome": 0.8,
         "time-abi-conformance": 1.6,
+        "time-host-correction": 14.0,
         "virtio-net": 4.5,
         "workload-identity": 1.1
       },
       "shards": [
         {
-          "seconds": 331.7,
+          "seconds": 338.7,
           "scenarios": [
             "console-snapshot",
             "denied-filesystem-paths",
+            "directional-network-policy",
             "endpoint-policy-snapshot",
             "filesystem-policy",
             "filesystem-snapshot",
@@ -286,12 +292,11 @@
           ]
         },
         {
-          "seconds": 331.7,
+          "seconds": 338.7,
           "scenarios": [
             "command-line-limit",
             "console-exit",
             "cpu-profile-fallback",
-            "directional-network-policy",
             "filesystem-comma-paths",
             "filesystem-owner",
             "filesystem-shares",
@@ -310,6 +315,7 @@
             "snapshot-core",
             "structured-outcome",
             "time-abi-conformance",
+            "time-host-correction",
             "virtio-net",
             "workload-identity"
           ]

@@ -9,7 +9,8 @@
 //! be `0x`-prefixed hexadecimal, as other guest programs read their arguments. The packet and
 //! sample hooks read their fixtures as port B delivers a record, zero-filled past its end.
 //! `console` writes its whole line, as the program writes every event, which is shorter than
-//! the 638 bytes after which the C program's buffer cut an asynchronous line.
+//! the 638 bytes after which the C program's buffer cut an asynchronous line. `clear-phase`
+//! removes an in-flight kernel PLL phase offset without changing its held frequency correction.
 
 use std::ffi::{CStr, CString, OsStr};
 use std::fs;
@@ -65,6 +66,7 @@ pub(super) fn run(arguments: &[&[u8]], out: &mut dyn Write) -> Result<(), Comman
         b"exhaustive-report" => test_exhaustive_report(arguments, out),
         b"exhaustive-summary" => test_exhaustive_summary(arguments, out),
         b"timer-list" => test_timer_list(arguments, out),
+        b"clear-phase" => test_clear_phase(arguments),
         b"correction" => test_correction(arguments, out),
         b"frequency" => test_frequency(arguments, out),
         b"event" => test_event(arguments, out),
@@ -408,6 +410,23 @@ fn test_timer_list(arguments: &[&[u8]], out: &mut dyn Write) -> Result<(), Comma
     Ok(())
 }
 
+/// Clears the kernel PLL's phase offset without changing its status or held frequency.
+fn test_clear_phase(arguments: &[&[u8]]) -> Result<(), CommandError> {
+    test_clear_phase_with(arguments, |adjustment| {
+        sys::adjust_clock(adjustment).map(drop)
+    })
+}
+
+/// Runs the clear-phase hook through `adjust`, separated so that its privileged operation is
+/// testable without changing the host's clock.
+fn test_clear_phase_with(
+    arguments: &[&[u8]],
+    adjust: impl FnOnce(ClockAdjustment) -> Result<(), Errno>,
+) -> Result<(), CommandError> {
+    exactly::<0>(arguments)?;
+    adjust(ClockAdjustment::ClearPhase).map_err(|_| CommandError::Operation)
+}
+
 /// Plans and prints one step or slew correction, with the `adjtimex` modes and status that the
 /// system layer would apply, for a discipline that holds a frequency correction and adds a host's
 /// error.
@@ -446,7 +465,7 @@ fn test_correction(arguments: &[&[u8]], out: &mut dyn Write) -> Result<(), Comma
                 hold.estimated_error_us
             );
         }
-        ClockAdjustment::Query | ClockAdjustment::Frequency(_) => {}
+        ClockAdjustment::Query | ClockAdjustment::Frequency(_) | ClockAdjustment::ClearPhase => {}
     }
     Ok(())
 }
@@ -845,6 +864,27 @@ mod tests {
         let mut out = Vec::new();
         run(arguments, &mut out).unwrap();
         out
+    }
+
+    #[test]
+    fn clear_phase_changes_only_the_pll_offset() {
+        let mut adjustment = None;
+        assert_eq!(
+            test_clear_phase_with(&[], |value| {
+                adjustment = Some(value);
+                Ok(())
+            }),
+            Ok(())
+        );
+        assert_eq!(adjustment, Some(ClockAdjustment::ClearPhase));
+        assert_eq!(
+            test_clear_phase_with(&[b"extra"], |_| panic!("unexpected adjustment")),
+            Err(CommandError::Usage)
+        );
+        assert_eq!(
+            test_clear_phase_with(&[], |_| Err(Errno::EPERM)),
+            Err(CommandError::Operation)
+        );
     }
 
     #[test]

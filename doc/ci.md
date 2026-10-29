@@ -166,6 +166,53 @@ check on every CPU, a summary with `status=ok`, the requested CPU count, and
 no failures, and exit status 0; a failure lists each failing check with the
 guest's detail. The guest command fits on one console line, so the console's
 echo of it ends before the check prints.
+The `time-host-correction` scenario checks that the guest applies the host's
+clock correction that OpenVMM publishes with each
+[time sample](design/3.2-clock-and-time.md#329-time-samples), through OpenVMM's
+`host-rate-offset-ppm` test hook, which publishes host UTC as running that many
+ppm faster than it does, with the correction to match, and sets the time
+samples' test-hook flag. A one-vCPU cold boot without the hook first reads the
+host's own correction from a time sample, which must lack that flag. A one-vCPU
+cold boot and a restore of a snapshot captured without the hook then target
+corrections of 200 and 150 ppm against the sign of the host's own. The harness
+solves OpenVMM's multiplicative composition of the host and hook rates, keeps
+the hook within OpenVMM's +/-10,000 ppm range, and requires the correction that
+Linux holds after rounding the declared TSC rate to the kHz to stay below its
+500 ppm limit; otherwise it fails before OpenVMM starts. A restore with a
+900 ppm hook in the direction of the host's own correction publishes one
+beyond that limit. These three each print the guest's time state and take up to
+three pairs of time samples 5 s apart with `nvx-time sample`, or one sample
+when Linux's limit holds the guest's frequency correction, after one that they
+discard: the first sample after a restore can read the guest's clock late while
+the restored memory that it touches faults in. Before each pair the script reads
+the live state, calls `nvx-time test clear-phase` to clear any PLL phase offset
+that an earlier discipline poll left with `ADJ_OFFSET | ADJ_NANO`, without
+changing `STA_PLL | STA_FREQHOLD` or the held frequency, waits two seconds
+for Linux's cached tick length to drop the old phase correction, and reads the
+state again; it reads a third state after the pair. A changed accepted-sample
+count,
+held correction, clock-step state, or sample disruption counter discards and
+retries the window, as does a sample that fails to pair or whose uncertainty
+exceeds the 100 µs that the guest's discipline accepts, since `nvx-time sample`
+reports one beyond it too. Every sample must carry the test-hook
+flag. The correction that the guest's boot
+step or restore repair took must lie within 75 ppm, half the 150 ppm of the
+smallest hook, of the one that the first stable sample publishes, so that it
+isn't a stale one. Between the stable pair, which pairs host UTC and
+the guest's clock with the guest TSC, both must run at their corrections
+against the TSC counted at the declared rate. The guest's clock must run at the
+one that it holds, within 1 ppm beyond the uncertainty of its pairings; a guest
+that didn't apply the hook's correction would run 150 ppm or more off it. That
+allowance, at most 41 ppm for two samples 5 s apart within the bound, must stay
+below half the held correction, or the check fails as inconclusive. Host
+UTC must run at its published one, within 75 ppm beyond half that correction's
+change and the pairing bounds, so that the hook skewed both alike: 75 ppm is
+half the 150 ppm that a hook that skewed only one of them would leave, and the
+host's time service may slew host UTC between two samples, by up to 25 ppm on
+the test VMs measured so far. The 900 ppm restore exceeds Linux's limit
+whatever the host's own correction, and the guest must hold the limit and
+report `frequency_limited=1`. Both restores must also pass the warp probe and
+their restore checks.
 The `cpu-profile-fallback` scenario covers `--cpu-profile auto`'s fallback to a
 host profile on a CPU that no built-in profile serves, on runners that
 built-in profiles serve. It cold boots one vCPU with OpenVMM's

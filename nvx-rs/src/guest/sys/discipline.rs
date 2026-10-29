@@ -28,6 +28,9 @@ pub(crate) enum ClockAdjustment {
     /// Sets the frequency correction and the error estimates, and selects the phase-locked loop
     /// in nanosecond mode with its frequency held.
     Frequency(FrequencyHold),
+    /// Clears the phase offset through the phase-locked loop in nanosecond mode, without changing
+    /// its status or held frequency correction.
+    ClearPhase,
     /// Slews the wall clock by `offset_ns` through the phase-locked loop in nanosecond mode, with
     /// its frequency held, and sets its time constant, the frequency correction, and the error
     /// estimates.
@@ -63,6 +66,7 @@ impl ClockAdjustment {
             Self::Query => 0,
             Self::Step { .. } => libc::ADJ_SETOFFSET | libc::ADJ_NANO,
             Self::Frequency(_) => HOLD,
+            Self::ClearPhase => libc::ADJ_OFFSET | libc::ADJ_NANO,
             Self::Slew { .. } => HOLD | libc::ADJ_OFFSET | libc::ADJ_TIMECONST | libc::ADJ_NANO,
         }
     }
@@ -70,7 +74,7 @@ impl ClockAdjustment {
     /// Returns the discipline status that the adjustment sets, or zero for one that sets none.
     pub(crate) fn status(self) -> i32 {
         match self {
-            Self::Query | Self::Step { .. } => 0,
+            Self::Query | Self::Step { .. } | Self::ClearPhase => 0,
             Self::Frequency(_) | Self::Slew { .. } => PLL_NANOSECONDS,
         }
     }
@@ -112,6 +116,7 @@ pub(crate) fn adjust_clock(adjustment: ClockAdjustment) -> Result<ClockDisciplin
             };
         }
         ClockAdjustment::Frequency(hold) => hold.apply(&mut value),
+        ClockAdjustment::ClearPhase => {}
         ClockAdjustment::Slew {
             offset_ns,
             time_constant,
@@ -147,6 +152,7 @@ mod tests {
             estimated_error_us: 1,
         };
         let frequency = ClockAdjustment::Frequency(hold);
+        let clear_phase = ClockAdjustment::ClearPhase;
         let slew = ClockAdjustment::Slew {
             offset_ns: 5,
             time_constant: 4,
@@ -155,6 +161,8 @@ mod tests {
         assert_eq!((step.modes(), step.status()), (0x2100, 0));
         // The status holds the frequency, `STA_FREQHOLD`, with the loop and nanoseconds.
         assert_eq!((frequency.modes(), frequency.status()), (0x001e, 0x2081));
+        // Clearing the nanosecond offset changes neither status nor frequency.
+        assert_eq!((clear_phase.modes(), clear_phase.status()), (0x2001, 0));
         assert_eq!((slew.modes(), slew.status()), (0x203f, 0x2081));
         assert_eq!(
             (
