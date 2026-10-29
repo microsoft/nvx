@@ -6,6 +6,11 @@ fail() {
     exit "$code"
 }
 
+# The probes keep their results in TMPDIR, or else in the guest's private
+# /tmp. The host's /tmp is shared, so the tests that run this script in the
+# host's shell give each run a TMPDIR of its own (#1007).
+probe_dir=${TMPDIR:-/tmp}
+
 probe_tcp() {
     if response=$(wget -T 2 -qO- "http://@GATEWAY_IPV4@:$2/$1" 2>/dev/null); then
         if [ "$response" = "NVX-EGRESS-PROBE-$1" ]; then
@@ -15,7 +20,7 @@ probe_tcp() {
         fi
     else
         echo blocked
-    fi >"/tmp/nvx-egress-$1"
+    fi >"$probe_dir/nvx-egress-$1"
 }
 
 # Only the host can observe UDP delivery. A denied flow may return 1; sender
@@ -27,7 +32,7 @@ probe_udp() {
     case "$status" in
     0 | 1) echo sent ;;
     *) echo "failed-$status" ;;
-    esac >"/tmp/nvx-egress-$1"
+    esac >"$probe_dir/nvx-egress-$1"
 }
 
 probe_icmp() {
@@ -35,10 +40,10 @@ probe_icmp() {
         echo reached
     else
         echo blocked
-    fi >/tmp/nvx-egress-icmp
+    fi >"$probe_dir/nvx-egress-icmp"
 }
 
-rm -f /tmp/nvx-egress-*
+rm -f "$probe_dir"/nvx-egress-*
 probe_tcp tcp-named @NAMED_PORT@ &
 probe_tcp tcp-other @OTHER_PORT@ &
 probe_udp udp-named @NAMED_PORT@ &
@@ -46,8 +51,8 @@ probe_udp udp-other @OTHER_PORT@ &
 probe_icmp &
 wait
 for probe in tcp-named tcp-other udp-named udp-other icmp; do
-    [ -s "/tmp/nvx-egress-$probe" ] || fail 70
-    echo "NVX-L3-L4-PROBE $probe=$(cat "/tmp/nvx-egress-$probe")"
+    [ -s "$probe_dir/nvx-egress-$probe" ] || fail 70
+    echo "NVX-L3-L4-PROBE $probe=$(cat "$probe_dir/nvx-egress-$probe")"
 done
 
 echo NVX-L3-L4-EGRESS-PROTOCOLS-OK
