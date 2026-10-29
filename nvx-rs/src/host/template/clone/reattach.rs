@@ -47,12 +47,13 @@ pub enum ReattachedClone<S> {
         report: Option<Report>,
     },
     /// The clone failed, as the record of its failure in its sandbox tells, which the reattach
-    /// found, or wrote: the launch of a caller that crashed, which the reattach ended; a VM that
-    /// exited once its launch committed, with a status of the guest's that is evidence, or
-    /// without a report of the guest's own end; a check of the clone that failed; a VM that
-    /// runs under another runtime identity; or a record of a failure of the clone that cannot be
-    /// read, which the record that the reattach wrote replaces. The failure's teardown tells
-    /// whether a VM of the clone may still run: until it is resolved, the sandbox keeps the
+    /// found, or wrote: the launch of a caller that crashed, which the reattach ended, or which a
+    /// recovery of the sandbox ended before, whose VM ended with a status of the guest's that is
+    /// evidence; a VM that exited once its launch committed, with a status of the guest's that is
+    /// evidence, or without a report of the guest's own end; a check of the clone that failed; a
+    /// VM that runs under another runtime identity; or a record of a failure of the clone that
+    /// cannot be read, which the record that the reattach wrote replaces. The failure's teardown
+    /// tells whether a VM of the clone may still run: until it is resolved, the sandbox keeps the
     /// store's records of the VM, and with them the clone's lease, for a later reattach.
     Failed(CloneFailure),
     /// Whether the clone's VMM, whose launch committed, runs cannot be determined, for the reason
@@ -93,6 +94,14 @@ pub enum ReattachedClone<S> {
 ///   a VMM that exited before its restore-ready event, attributes as the restore sequence does. One
 ///   that it cannot end yet fails the same way with [`Evidence::LostStatus`], whose teardown is
 ///   unresolved: its journal remains, and the lease with it, for a later reattach.
+/// - A launch that a recovery of the sandbox ended before the reattach, as [`supervisor::reattach`]
+///   ends one, and of which the store holds no record, fails at the stage of its progress, with
+///   [`ErrorCode::Exited`], if OpenVMM's outcome report gives a status of the guest's that is
+///   evidence, and is [`ReattachedClone::Ended`] otherwise. Once the launch began, which removes
+///   the report of an earlier VM of the sandbox before it creates the clone's progress log, a
+///   report that the sandbox holds is the clone's VM's, even if no record kept the spawn of its
+///   VMM, as a crash of the launch's caller before the journal or the progress log recorded it
+///   leaves it.
 /// - A VMM whose launch committed, and that exited, fails at [`Stage::Run`] with
 ///   [`ErrorCode::Exited`] if OpenVMM's outcome report gives a status of the guest's that is
 ///   evidence, as a status of the clone's repair is at any point, and with
@@ -339,8 +348,15 @@ pub(super) fn reattach_clone_syncing<C: CloneControl>(
                     Teardown::Unresolved(_) | Teardown::Pending => Teardown::Exited,
                     ref teardown => teardown.clone(),
                 },
-                // A VM of the clone ran only once its launch spawned it, as in `exit_fault`.
-                Err(_) if progress >= Progress::Spawned => Teardown::Exited,
+                // A VM of the clone ran once its launch spawned it, and so did one whose report the
+                // sandbox holds once the launch began, as in `exit_fault`, though no record kept
+                // its spawn.
+                Err(_)
+                    if progress >= Progress::Spawned
+                        || (progress > Progress::Planned && recorder.observed().is_some()) =>
+                {
+                    Teardown::Exited
+                }
                 Err(_) => Teardown::NoVm,
             },
             Reattached::Indeterminate(reason) => Teardown::Unresolved(reason),
@@ -406,7 +422,7 @@ pub(super) fn reattach_clone_syncing<C: CloneControl>(
                 // A report is of the clone's VM only once its launch began, as in `exit_fault`.
                 None => Ok(ReattachedClone::Ended {
                     progress,
-                    report: (progress >= Progress::Spawned)
+                    report: (progress > Progress::Planned)
                         .then(|| recorder.observed().cloned())
                         .flatten(),
                 }),
@@ -436,8 +452,11 @@ fn exit_fault(
     unheld: bool,
 ) -> Option<(Fault, Option<u8>)> {
     // A report is of the clone's VM only once its launch began, which removes the report of an
-    // earlier VM of the sandbox.
-    if progress < Progress::Spawned {
+    // earlier VM of the sandbox before it creates the clone's progress log, as
+    // `CloneRecords::read` takes it: a VMM that the launch spawned wrote it, though no record may
+    // keep the spawn, if the launch's caller crashed before the journal or the progress log
+    // recorded it, and a recovery of the sandbox then removed the journal.
+    if progress <= Progress::Planned {
         return None;
     }
     let (evidence, status) = recorder.reported(recorder.observed(), progress);
