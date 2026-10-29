@@ -49,12 +49,13 @@ Usage: $0 --backend kvm|mshv [options]
 Bootstrap a Linux host for NVX.
 
 Development-host mode, the default, prepares an existing NVX checkout for the
-current user: it installs the build dependencies, Docker with Buildx, and the
-pinned Rust tools, grants the user Docker and backend device access, and builds
-and validates NVX. Runner mode prepares a host for NVX GitHub Actions jobs and
-needs no checkout: it installs the build dependencies and a read-only Rust
-toolchain, and, with --runner-name, registers a runner whose jobs run as the
-dedicated ${runner_service_account} account, without sudo or Docker access.
+current user: it installs the build dependencies, the pinned Rust tools, and,
+unless the host has Docker, Docker with Buildx, grants the user Docker and
+backend device access, and builds and validates NVX. Runner mode prepares a
+host for NVX GitHub Actions jobs and needs no checkout: it installs the build
+dependencies and a read-only Rust toolchain, and, with --runner-name,
+registers a runner whose jobs run as the dedicated ${runner_service_account}
+account, without sudo or Docker access.
 
 Options:
     --backend BACKEND       Virtualization backend: kvm or mshv
@@ -708,17 +709,24 @@ configure_runner_service() {
     run_as_root systemctl start "$service_name"
 }
 
+# Development hosts build guest artifacts with Docker and Buildx. The
+# distribution's Docker packages can replace another Docker installation, such
+# as Docker's own docker-ce, so a host that has a Docker CLI keeps its Docker.
+needs_docker_packages() {
+    [ "$runner_only" = false ] && ! command -v docker >/dev/null 2>&1
+}
+
 # Installs the build dependencies of both modes and each mode's own: Docker
-# with Buildx, with which a development host builds guest artifacts, or, with
-# tdnf, the Actions runner's dependencies, which installdependencies.sh does
-# not install on Azure Linux.
+# with Buildx on a development host that lacks Docker, or, with tdnf, the
+# Actions runner's dependencies, which installdependencies.sh does not install
+# on Azure Linux.
 install_packages() {
     if command -v apt-get >/dev/null 2>&1; then
         set -- bc binutils bison build-essential ca-certificates cmake cpio curl \
             diffutils flex git gzip iproute2 iptables libarchive-tools libelf-dev \
             libssl-dev make ninja-build patch perl pkg-config protobuf-compiler \
             python3 rsync tar util-linux xz-utils zstd
-        if [ "$runner_only" = false ]; then
+        if needs_docker_packages; then
             set -- "$@" docker-buildx docker.io
         fi
         run_as_root apt-get update
@@ -733,7 +741,7 @@ install_packages() {
             which xz zstd
         if [ "$runner_only" = true ]; then
             set -- "$@" icu lttng-ust
-        else
+        elif needs_docker_packages; then
             set -- "$@" docker-buildx docker-cli moby-engine
         fi
         run_as_root tdnf install -y "$@"
@@ -744,7 +752,7 @@ install_packages() {
             ninja-build openssl openssl-devel patch perl pkgconf \
             pkgconf-pkg-config protobuf-compiler python3 rsync shadow-utils tar \
             util-linux which xz zstd
-        if [ "$runner_only" = false ]; then
+        if needs_docker_packages; then
             set -- "$@" docker-buildx moby-engine
         fi
         run_as_root dnf install -y "$@"

@@ -1246,7 +1246,8 @@ class LinuxSetupTests(unittest.TestCase):
         harness = (
             "set -eu\n"
             + "".join(
-                _shell_function(source, name) for name in ("die", "install_packages")
+                _shell_function(source, name)
+                for name in ("die", "needs_docker_packages", "install_packages")
             )
             + 'run_as_root() { printf "%s\\n" "$*"; }\n'
             + "runner_only=$1\ninstall_packages\n"
@@ -1266,36 +1267,43 @@ class LinuxSetupTests(unittest.TestCase):
             manager = managers[0]
             base: set[tuple[str, ...]] = set()
             for runner_only in ("false", "true"):
-                with (
-                    self.subTest(manager=manager, runner_only=runner_only),
-                    tempfile.TemporaryDirectory() as temporary,
-                ):
-                    for name in managers:
-                        stub = Path(temporary) / name
-                        stub.write_text("#!/bin/sh\n", encoding="utf-8")
-                        stub.chmod(0o755)
-                    result = subprocess.run(
-                        [*shells[0], "-c", harness, "packages", runner_only],
-                        env={"PATH": temporary},
-                        capture_output=True,
-                        text=True,
-                        timeout=30,
-                        check=False,
-                    )
-                    self.assertEqual(result.returncode, 0, result.stderr)
-                    *before, install = result.stdout.splitlines()
-                    self.assertEqual(
-                        before, ["apt-get update"] if manager == "apt-get" else []
-                    )
-                    self.assertTrue(install.startswith(installers[manager]))
-                    packages = install.removeprefix(installers[manager]).split()
-                    extra: list[str] = []
-                    if runner_only == "false":
-                        extra = docker[manager]
-                    elif manager == "tdnf":
-                        extra = ["icu", "lttng-ust"]
-                    self.assertEqual(packages[len(packages) - len(extra) :], extra)
-                    base.add(tuple(packages[: len(packages) - len(extra)]))
+                for has_docker in (False, True):
+                    with (
+                        self.subTest(
+                            manager=manager,
+                            runner_only=runner_only,
+                            has_docker=has_docker,
+                        ),
+                        tempfile.TemporaryDirectory() as temporary,
+                    ):
+                        commands = (*managers, *(("docker",) if has_docker else ()))
+                        for name in commands:
+                            stub = Path(temporary) / name
+                            stub.write_text("#!/bin/sh\n", encoding="utf-8")
+                            stub.chmod(0o755)
+                        result = subprocess.run(
+                            [*shells[0], "-c", harness, "packages", runner_only],
+                            env={"PATH": temporary},
+                            capture_output=True,
+                            text=True,
+                            timeout=30,
+                            check=False,
+                        )
+                        self.assertEqual(result.returncode, 0, result.stderr)
+                        *before, install = result.stdout.splitlines()
+                        self.assertEqual(
+                            before, ["apt-get update"] if manager == "apt-get" else []
+                        )
+                        self.assertTrue(install.startswith(installers[manager]))
+                        packages = install.removeprefix(installers[manager]).split()
+                        extra: list[str] = []
+                        if runner_only == "false" and not has_docker:
+                            # A host that has Docker keeps it.
+                            extra = docker[manager]
+                        elif runner_only == "true" and manager == "tdnf":
+                            extra = ["icu", "lttng-ust"]
+                        self.assertEqual(packages[len(packages) - len(extra) :], extra)
+                        base.add(tuple(packages[: len(packages) - len(extra)]))
             # Both modes install the same build dependencies.
             self.assertEqual(len(base), 1, base)
 

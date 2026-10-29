@@ -38,7 +38,7 @@ load `mshv_root` when the device is missing. They differ in everything else:
 | Runs as | Root, or a user whose `sudo` may prompt | The SSH administrator with passwordless `sudo`, never root |
 | NVX checkout | Required: the one that contains the script, or `--workspace PATH` | Not used |
 | Rust tools | The current user's, with the musl target of the guest binaries | Root-owned and read-only to jobs under `/opt/nvx`, with OpenVMM's test targets and the pinned sccache |
-| Docker | Installs Docker with Buildx and adds the user to `docker` | Keeps `nvx-runner` out of `docker` |
+| Docker | Installs Docker with Buildx unless the host has a Docker CLI, and adds the user to `docker` | Keeps `nvx-runner` out of `docker` |
 | Backend device | Adds the user to the backend's group | Makes the backend's group the only supplementary group of `nvx-runner` |
 | Completes with | A build of NVX and its guests, unless `--skip-build`, and `NVX_SETUP_COMPLETE=1` | With `--runner-name`, a registered runner service, and `NVX_RUNNER_SETUP_COMPLETE=1` |
 | `--check-only` prints | `NVX_SETUP_CHECK=ok` | `NVX_RUNNER_SETUP_COMPLETE=1` |
@@ -60,10 +60,11 @@ invocations:
 | `setup-linux-runner.sh --backend BACKEND [OPTIONS]` | `setup-linux.sh --runner-only --backend BACKEND [OPTIONS]` |
 
 Their options, output markers, and exit statuses are otherwise unchanged.
-Development-host mode also accepts `--backend kvm` now, and its check mode
-also requires the musl target that it installs. A runner that the former
-script configured needs no migration: runner-only mode manages the same
-account, toolchain, installation, and service.
+Development-host mode also accepts `--backend kvm` now, keeps a Docker
+installation that the host already has, and its check mode also requires the
+musl target that it installs. A runner that the former script configured needs
+no migration: runner-only mode manages the same account, toolchain,
+installation, and service.
 
 ## GitHub Actions runners
 
@@ -241,9 +242,12 @@ ssh HOST powershell.exe -NoProfile -ExecutionPolicy Bypass `
 Development-host mode prepares a Linux/KVM or Linux/MSHV checkout for the user
 who runs the script. It installs native build dependencies, Docker with Buildx,
 and the Rust and cargo-nextest releases that the manifest pins, and configures
-group-based access to Docker and to the backend's device. Its udev rule lets
-only the backend's group open the device, so another user of the host needs
-that group too, even where the device was open to everyone before.
+group-based access to Docker and to the backend's device. A host that already
+has a Docker CLI keeps its Docker, such as Docker's own `docker-ce`, which the
+distribution's packages would replace; install Buildx for it if it lacks the
+plugin. The udev rule lets only the backend's group open the device, so
+another user of the host needs that group too, even where the device was open
+to everyone before.
 
 Run the complete bootstrap from the checkout, naming the host's backend:
 
