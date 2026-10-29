@@ -213,9 +213,10 @@ hypervisor identity, and runs the cross-vCPU warp test that the
 [time ABI](design/3.2-clock-and-time.md#327-cross-processor-consistency) uses to enforce its 1 µs
 skew bound. `nvx-time` implements the time ABI's
 [guest obligations](design/3.2-clock-and-time.md#3210-guest-obligations): the conformance
-checks, the violation watcher, the restore packet v4 and time-sample parsers,
-the snapshot agent's time steps, and the wall-clock discipline. Before
-shell-ready it only steps the clock to host UTC; the other boot checks run in
+checks, the violation watcher, the restore packet v5 and time-sample v2
+parsers, the snapshot agent's time steps, and the wall-clock discipline, which
+applies the host's clock correction. Before shell-ready it only steps the
+clock to host UTC and sets its rate; the other boot checks run in
 the background, and the production console shows no time ABI line except a
 violation event. `nvx-time status` prints every recorded check (boot, capture,
 and restore) and the runtime state on demand, after waiting for pending
