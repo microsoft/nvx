@@ -467,6 +467,12 @@ OpenVMM processes that still run; and, on Windows, the scratch volume's write ra
 queue, and busy time, with the CPU, cache, and Defender activity, over 3 s, from the counters of
 the [snapshot lifecycle profile's](#snapshot-lifecycle-profile) storage telemetry. A stalled
 volume can block each of them, so each that does not finish within 10 s says so instead.
+`nvx-device-io` reports a file benchmark's progress on standard error, which the guest console
+shows: `nvx-device-io: opened` once it has opened, and when creating, sized the file,
+`nvx-device-io: transferred N blocks` once its timed loop ends, and, for a write,
+`nvx-device-io: flushed` or `nvx-device-io: flush failed`, so the console of a hung attempt
+shows the phase that it hung in.
+
 ### Shell snapshot
 
 Each memory size normally uses five cold boots and five restores. Cold values

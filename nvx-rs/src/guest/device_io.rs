@@ -16,7 +16,14 @@
 //! mapping. The program exits with 0, 2 for a usage error, 3 when it cannot open, connect, size,
 //! map, or time, 4 when a transfer or send is incomplete, a file is shorter than TEXT, or reading
 //! standard input or unmapping fails, or 255 when it cannot print the result. It prints nothing
-//! else.
+//! else on standard output.
+//!
+//! A file benchmark also reports its progress on standard error, so that the console of a
+//! benchmark that hangs shows where: `nvx-device-io: opened` once it has opened, and when
+//! creating, sized its file, `nvx-device-io: transferred N blocks` once its timed loop ends, and,
+//! when writing, `nvx-device-io: flushed` or `nvx-device-io: flush failed` once its flush returns.
+//! A failure to write a progress line is ignored, and a standard error whose reader is gone raises
+//! no `SIGPIPE`, so that only standard output's failures end the program.
 
 use std::ffi::{CStr, CString};
 use std::io::Write;
@@ -102,24 +109,31 @@ pub fn main() -> ExitCode {
         run(
             args,
             &mut sys::DirectStdout,
+            &mut sys::write_standard_error_without_sigpipe,
             &mut sys::discard_standard_input,
         )
     })
 }
 
-/// Parses and runs one benchmark, and prints its result to `out`. A mapped write calls `hold`
-/// after it prints, and holds the mapping until `hold` returns, which `main` makes the end of
-/// standard input.
+/// Parses and runs one benchmark, and prints its result to `out`. A file benchmark passes each
+/// progress line to `progress`. A mapped write calls `hold` after it prints, and holds the mapping
+/// until `hold` returns, which `main` makes the end of standard input.
 fn run(
     args: &[CString],
     out: &mut dyn Write,
+    progress: &mut dyn FnMut(&[u8]),
     hold: &mut dyn FnMut() -> Result<(), Errno>,
 ) -> Result<(), CommandError> {
     let (device, operation, bytes_per_operation, measurement) =
         match parse(args).ok_or(CommandError::Usage)? {
             Benchmark::File(benchmark) => {
                 let operation = if benchmark.writing { "write" } else { "read" };
-                ("file", operation, BLOCK_SIZE, measure_file(&benchmark)?)
+                (
+                    "file",
+                    operation,
+                    BLOCK_SIZE,
+                    measure_file(&benchmark, progress)?,
+                )
             }
             Benchmark::Network(benchmark) => (
                 "network",
@@ -295,11 +309,15 @@ fn start() -> Result<u64, CommandError> {
     }
 }
 
-/// Transfers blocks of the benchmark's file until its duration has passed.
+/// Transfers blocks of the benchmark's file until its duration has passed, and passes its progress
+/// lines to `progress`.
 ///
 /// The file closes when this returns, before the caller prints the result, and a close error is
 /// ignored, as in the C program.
-fn measure_file(benchmark: &FileBenchmark<'_>) -> Result<Measurement, CommandError> {
+fn measure_file(
+    benchmark: &FileBenchmark<'_>,
+    progress: &mut dyn FnMut(&[u8]),
+) -> Result<Measurement, CommandError> {
     let mut flags = if benchmark.writing {
         OpenFlags::O_RDWR
     } else {
@@ -317,6 +335,7 @@ fn measure_file(benchmark: &FileBenchmark<'_>) -> Result<Measurement, CommandErr
         file.truncate(benchmark.size_bytes)
             .map_err(|_| CommandError::Setup)?;
     }
+    progress(b"nvx-device-io: opened\n");
     let mut block = Block([0; BLOCK_SIZE]);
     fill_pattern(&mut block.0);
     let mut offsets = Offsets::new(benchmark.size_bytes / BLOCK_SIZE as u64);
@@ -340,9 +359,15 @@ fn measure_file(benchmark: &FileBenchmark<'_>) -> Result<Measurement, CommandErr
         }
     }
     ended = now();
+    progress(format!("nvx-device-io: transferred {operations} blocks\n").as_bytes());
     if benchmark.writing {
-        // The C program ignored the result of this flush, which starts after the timing ends.
-        let _ = file.sync();
+        // The flush starts after the timing ends. As in the C program, its failure fails nothing,
+        // but the progress line reports it.
+        let flushed: &[u8] = match file.sync() {
+            Ok(_) => b"nvx-device-io: flushed\n",
+            Err(_) => b"nvx-device-io: flush failed\n",
+        };
+        progress(flushed);
     }
     Ok(Measurement {
         operations,
@@ -459,6 +484,20 @@ mod tests {
     /// Stands for the input that ends a mapped write's hold, which a benchmark never waits for.
     fn never_holds() -> Result<(), Errno> {
         panic!("only a mapped write holds its mapping")
+    }
+
+    /// Stands for the progress of a file benchmark, which a mapped write never reports.
+    fn no_progress(line: &[u8]) {
+        panic!("only a file benchmark reports progress: {line:?}")
+    }
+
+    /// Returns the progress lines of a file benchmark that `report` received.
+    fn progress_lines(report: &[u8]) -> Vec<String> {
+        String::from_utf8(report.to_vec())
+            .unwrap()
+            .lines()
+            .map(str::to_owned)
+            .collect()
     }
 
     #[test]
@@ -628,8 +667,14 @@ mod tests {
         let file = directory.path().join("disk");
         let path = file.to_str().unwrap();
         let mut out = Vec::new();
+        let mut report = Vec::new();
         let write = ["file", path, "write", "1", "8192", "buffered", "create"];
-        let status = ExitStatus::from(run(&args(&write), &mut out, &mut never_holds));
+        let status = ExitStatus::from(run(
+            &args(&write),
+            &mut out,
+            &mut |line| report.extend_from_slice(line),
+            &mut never_holds,
+        ));
         assert_eq!(status, ExitStatus::Success);
         let line = String::from_utf8(out).unwrap();
         assert!(
@@ -641,28 +686,65 @@ mod tests {
             "{line}"
         );
         assert_eq!(fs::metadata(&file).unwrap().len(), 8192);
+        let operations = line
+            .split_once("\"operations\":")
+            .and_then(|(_, rest)| rest.split_once(','))
+            .map(|(count, _)| count)
+            .unwrap();
+        assert_eq!(
+            progress_lines(&report),
+            [
+                "nvx-device-io: opened".to_owned(),
+                format!("nvx-device-io: transferred {operations} blocks"),
+                "nvx-device-io: flushed".to_owned(),
+            ]
+        );
 
+        // A read reports no flush, and a failed print still reports the progress before it.
         let read = ["file", path, "read", "1", "8192", "buffered", "existing"];
+        let mut report = Vec::new();
         let status = ExitStatus::from(run(
             &args(&read),
             &mut Failing(sys::Errno::ENOSPC),
+            &mut |line| report.extend_from_slice(line),
             &mut never_holds,
         ));
         assert_eq!(status, ExitStatus::OutputFailure);
+        let lines = progress_lines(&report);
+        assert_eq!(lines.len(), 2, "{lines:?}");
+        assert_eq!(lines[0], "nvx-device-io: opened");
+        assert!(
+            lines[1].starts_with("nvx-device-io: transferred ") && lines[1].ends_with(" blocks"),
+            "{lines:?}"
+        );
 
+        // A file that cannot open reports no progress.
         let missing = directory.path().join("missing");
         let mut arguments = read;
         arguments[1] = missing.to_str().unwrap();
-        let status = ExitStatus::from(run(&args(&arguments), &mut Vec::new(), &mut never_holds));
-        assert_eq!(status, ExitStatus::SetupFailure);
+        let mut report = Vec::new();
+        let status = ExitStatus::from(run(
+            &args(&arguments),
+            &mut Vec::new(),
+            &mut |line| report.extend_from_slice(line),
+            &mut never_holds,
+        ));
+        assert_eq!((status, report), (ExitStatus::SetupFailure, Vec::new()));
 
-        // An empty file cannot transfer a block.
+        // An empty file opens but cannot transfer a block.
         fs::write(&missing, b"").unwrap();
         arguments[4] = "4096";
         let mut out = Vec::new();
-        let status = ExitStatus::from(run(&args(&arguments), &mut out, &mut never_holds));
+        let mut report = Vec::new();
+        let status = ExitStatus::from(run(
+            &args(&arguments),
+            &mut out,
+            &mut |line| report.extend_from_slice(line),
+            &mut never_holds,
+        ));
         assert_eq!(status, ExitStatus::TransferFailure);
         assert!(out.is_empty());
+        assert_eq!(progress_lines(&report), ["nvx-device-io: opened"]);
     }
 
     #[test]
@@ -676,6 +758,7 @@ mod tests {
         let status = ExitStatus::from(run(
             &args(&["map", path, "NVX-MAPPED"]),
             &mut out,
+            &mut no_progress,
             &mut || {
                 // The page cache already holds the write while the mapping is held.
                 assert!(fs::read(&file).unwrap().starts_with(b"NVX-MAPPED."));
@@ -702,12 +785,14 @@ mod tests {
         let status = ExitStatus::from(run(
             &args(&["map", path, "NVX"]),
             &mut Failing(Errno::ENOSPC),
+            &mut no_progress,
             &mut never_holds,
         ));
         assert_eq!(status, ExitStatus::OutputFailure);
         let status = ExitStatus::from(run(
             &args(&["map", path, "NVX"]),
             &mut Vec::new(),
+            &mut no_progress,
             &mut || Err(Errno::EIO),
         ));
         assert_eq!(status, ExitStatus::TransferFailure);
@@ -720,14 +805,24 @@ mod tests {
         ] {
             let arguments = ["map", target.to_str().unwrap(), "NVX"];
             let mut out = Vec::new();
-            let status = ExitStatus::from(run(&args(&arguments), &mut out, &mut never_holds));
+            let status = ExitStatus::from(run(
+                &args(&arguments),
+                &mut out,
+                &mut no_progress,
+                &mut never_holds,
+            ));
             assert_eq!((status, out), (expected, Vec::new()), "{target:?}");
         }
         let short = directory.path().join("short");
         fs::write(&short, b"NVX").unwrap();
         let arguments = ["map", short.to_str().unwrap(), "NVX-MAPPED"];
         let mut out = Vec::new();
-        let status = ExitStatus::from(run(&args(&arguments), &mut out, &mut never_holds));
+        let status = ExitStatus::from(run(
+            &args(&arguments),
+            &mut out,
+            &mut no_progress,
+            &mut never_holds,
+        ));
         assert_eq!((status, out), (ExitStatus::TransferFailure, Vec::new()));
         assert_eq!(fs::read(&short).unwrap(), b"NVX");
     }

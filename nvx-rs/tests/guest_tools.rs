@@ -384,6 +384,22 @@ where
     I: IntoIterator<Item = S>,
     S: AsRef<OsStr>,
 {
+    let (result, progress) = device_io_with_progress(arguments, expected);
+    assert!(progress.is_empty(), "expected no stderr, got {progress:?}");
+    result
+}
+
+/// Runs `nvx-device-io` with `arguments`, checks that it exits with `expected`, and returns its
+/// result line, which must be its only standard output, and the progress lines of its stderr.
+#[cfg(target_arch = "x86_64")]
+fn device_io_with_progress<I, S>(
+    arguments: I,
+    expected: i32,
+) -> (Option<serde_json::Value>, Vec<String>)
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
     let Output {
         status,
         stdout,
@@ -393,14 +409,15 @@ where
             .args(arguments)
             .stdout(Stdio::piped()),
     );
+    let progress = String::from_utf8(stderr).unwrap();
     assert!(
-        status.code() == Some(expected) && stderr.is_empty(),
-        "expected exit status {expected} and no stderr, got {status}, stdout {:?}, stderr {:?}",
+        status.code() == Some(expected),
+        "expected exit status {expected}, got {status}, stdout {:?}, stderr {progress:?}",
         String::from_utf8_lossy(&stdout),
-        String::from_utf8_lossy(&stderr),
     );
+    let progress = progress.lines().map(str::to_owned).collect();
     if stdout.is_empty() {
-        return None;
+        return (None, progress);
     }
     let line = String::from_utf8(stdout).unwrap();
     let keys = [
@@ -417,7 +434,7 @@ where
         rest = &rest[position + key.len()..];
     }
     assert_eq!(rest, "", "{line}");
-    Some(serde_json::from_str(&line).unwrap())
+    (Some(serde_json::from_str(&line).unwrap()), progress)
 }
 
 #[test]
@@ -457,7 +474,8 @@ fn device_io_measures_a_file() {
         ["file", path, operation, "50", "65536", "buffered", creation].map(str::to_owned)
     };
     for (operation, creation) in [("write", "create"), ("read", "existing")] {
-        let result = device_io(arguments(operation, creation), 0).expect("a result line");
+        let (result, progress) = device_io_with_progress(arguments(operation, creation), 0);
+        let result = result.expect("a result line");
         assert_eq!(result["device"], "file");
         assert_eq!(result["operation"], operation);
         assert_eq!(result["bytes_per_operation"], 4096);
@@ -466,6 +484,15 @@ fn device_io_measures_a_file() {
             result["elapsed_ns"].as_u64().unwrap() >= 50_000_000,
             "{result}"
         );
+        // The progress lines name each phase, and only a write flushes.
+        let mut expected = vec![
+            "nvx-device-io: opened".to_owned(),
+            format!("nvx-device-io: transferred {} blocks", result["operations"]),
+        ];
+        if operation == "write" {
+            expected.push("nvx-device-io: flushed".to_owned());
+        }
+        assert_eq!(progress, expected);
     }
     assert_eq!(fs::metadata(&file).unwrap().len(), 65536);
     let contents = fs::read(&file).unwrap();
@@ -475,14 +502,17 @@ fn device_io_measures_a_file() {
     // The first offset of a 64 KiB file is its first block.
     assert_eq!(&contents[..4096], pattern);
 
-    // A missing file cannot open, and an empty one cannot transfer a block.
+    // A missing file cannot open, and an empty one opens but cannot transfer a block.
     let missing = directory.path().join("missing");
     let mut arguments = arguments("read", "existing");
     arguments[1] = missing.to_str().unwrap().to_owned();
     assert_eq!(device_io(&arguments, 3), None);
     fs::write(&missing, b"").unwrap();
     arguments[4] = "4096".to_owned();
-    assert_eq!(device_io(&arguments, 4), None);
+    assert_eq!(
+        device_io_with_progress(&arguments, 4),
+        (None, vec!["nvx-device-io: opened".to_owned()])
+    );
 }
 
 #[test]
@@ -606,19 +636,65 @@ fn device_io_exits_255_when_it_cannot_print() {
             .arg("create")
             .stdout(fs::File::create("/dev/full").unwrap()),
     );
-    assert_eq!(
-        (output.status.code(), output.stderr),
-        (Some(255), Vec::new())
-    );
+    // The progress lines precede the result that cannot print.
+    assert_eq!(output.status.code(), Some(255));
+    assert_progress(&output.stderr, true);
     // A closed pipe raises SIGPIPE, whose default disposition the program keeps.
     use std::os::unix::process::ExitStatusExt;
     let path = file.to_str().unwrap();
     let arguments = ["file", path, "read", "1", "4096", "buffered", "existing"];
     let (status, stderr) = run_to("nvx-device-io", arguments, broken_pipe());
-    assert_eq!((status.signal(), stderr), (Some(13), Vec::new()));
+    assert_eq!(status.signal(), Some(13));
+    assert_progress(&stderr, false);
     // With inherited SIG_IGN, write reports EPIPE and the tool returns its output-failure status.
     let (status, stderr) = run_to_ignoring_sigpipe("nvx-device-io", arguments, broken_pipe());
-    assert_eq!((status.code(), stderr), (Some(255), Vec::new()));
+    assert_eq!(status.code(), Some(255));
+    assert_progress(&stderr, false);
+}
+
+#[test]
+#[cfg(target_arch = "x86_64")]
+fn device_io_ignores_a_closed_stderr() {
+    // The progress lines are diagnostics: a stderr whose reader is gone raises no SIGPIPE, even
+    // under the default disposition, which ends the program at a closed stdout.
+    let directory = tempfile::tempdir().unwrap();
+    let file = directory.path().join("disk");
+    let path = file.to_str().unwrap();
+    let stderr = broken_pipe();
+    let child = {
+        let _spawning = SPAWNING.read().unwrap();
+        Command::new(binary("nvx-device-io"))
+            .args(["file", path, "write", "1", "4096", "buffered", "create"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(stderr)
+            .spawn()
+            .unwrap()
+    };
+    let output = child.wait_with_output().unwrap();
+    assert_eq!(output.status.code(), Some(0), "{:?}", output.status);
+    let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(result["device"], "file");
+    assert_eq!(result["operation"], "write");
+    assert!(result["operations"].as_u64().unwrap() > 0, "{result}");
+}
+
+/// Checks that `stderr` holds the progress lines of a completed file benchmark, with a flush when
+/// it `wrote`.
+#[cfg(target_arch = "x86_64")]
+fn assert_progress(stderr: &[u8], wrote: bool) {
+    let progress = String::from_utf8_lossy(stderr);
+    let lines: Vec<&str> = progress.lines().collect();
+    assert_eq!(lines.len(), if wrote { 3 } else { 2 }, "{progress:?}");
+    assert_eq!(lines[0], "nvx-device-io: opened", "{progress:?}");
+    let blocks = lines[1]
+        .strip_prefix("nvx-device-io: transferred ")
+        .and_then(|rest| rest.strip_suffix(" blocks"))
+        .unwrap_or_else(|| panic!("{progress:?}"));
+    assert!(blocks.parse::<u64>().unwrap() > 0, "{progress:?}");
+    if wrote {
+        assert_eq!(lines[2], "nvx-device-io: flushed", "{progress:?}");
+    }
 }
 
 /// Lays out the direct agent's private helper configuration: the little-endian flags and entry
