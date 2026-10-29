@@ -2,13 +2,12 @@
 //! the identities that they hold, and their reading and writing in format [`FORMAT`].
 
 use std::fmt;
-use std::path::Path;
 
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
 use super::FORMAT;
-use super::files::{read_private, write_private};
+use super::files::StoreFile;
 use super::identity::{IdentityCheck, RuntimeIdentity};
 use crate::error::{Error, ErrorCode, Result};
 use crate::host::filesystem::FileIdentity;
@@ -285,7 +284,7 @@ impl LaunchJournal {
 
 /// A record of the store, in format [`FORMAT`].
 pub(super) trait Record: Serialize + DeserializeOwned {
-    /// What messages call the record.
+    /// What messages call the record, and the [`StoreFile`] that holds it.
     const DESCRIPTION: &'static str;
 
     /// Explains why the record, which parsed, is invalid, if it is.
@@ -314,17 +313,17 @@ impl Record for LaunchJournal {
     }
 }
 
-/// Reads the record at `path`, or returns `None` if the file does not exist.
+/// Reads the record that `file` holds, or returns `None` if the file does not exist.
 ///
 /// A record of another format fails before its fields are read, with a message that names its
 /// format, and the code [`ErrorCode::FormatUnsupported`]: the store reads format [`FORMAT`] only,
 /// and migrates no other. A record file that is not private to the current user fails as well,
 /// since others could have written it, and so does one that is not a regular file, without waiting
-/// on it. Every failure to read or check the record is an [`ErrorKind::Io`](crate::ErrorKind::Io)
-/// error.
-pub(super) fn read<T: Record>(path: &Path) -> Result<Option<T>> {
-    let description = T::DESCRIPTION;
-    let Some(text) = read_private(path, description)? else {
+/// on it, as [`StoreFile::read`] reads it. Every failure to read or check the record is an
+/// [`ErrorKind::Io`](crate::ErrorKind::Io) error.
+pub(super) fn read<T: Record>(file: &StoreFile) -> Result<Option<T>> {
+    let (path, description) = (file.path(), file.description());
+    let Some(text) = file.read()? else {
         return Ok(None);
     };
     let malformed = || format!("the {description} {} is malformed", path.display());
@@ -355,11 +354,11 @@ pub(super) fn read<T: Record>(path: &Path) -> Result<Option<T>> {
     }
 }
 
-/// Atomically replaces the record at `path` with `record`, as pretty JSON and a newline.
-pub(super) fn write<T: Record>(path: &Path, record: &T) -> Result<()> {
+/// Atomically replaces the record that `file` holds with `record`, as pretty JSON and a newline.
+pub(super) fn write<T: Record>(file: &StoreFile, record: &T) -> Result<()> {
     let mut text = serde_json::to_vec_pretty(record).map_err(|error| {
-        Error::other(format!("cannot encode the {}", T::DESCRIPTION)).with_source(error)
+        Error::other(format!("cannot encode the {}", file.description())).with_source(error)
     })?;
     text.push(b'\n');
-    write_private(path, &text)
+    file.replace(&text)
 }

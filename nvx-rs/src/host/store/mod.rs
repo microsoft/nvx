@@ -249,12 +249,13 @@ use std::time::{Duration, Instant};
 
 pub use self::caller::CallerFiles;
 use self::caller::{is_report_staging, is_store_temporary};
-use self::files::{io_error, remove_if_present};
+use self::files::{StoreFile, io_error, remove_if_present};
 pub use self::identity::{
     ArtifactIdentity, IdentityCheck, IdentityPart, MAX_IDENTITY_LEN, RuntimeIdentity,
 };
 use self::lease::{Lease, clone_socket_name, is_clone_socket, open_payload};
 pub use self::lifecycle::{Lingering, RemovalError};
+use self::record::Record;
 pub use self::record::{
     LaunchId, LaunchJournal, LaunchState, LogClaim, MAX_ENDPOINT_LEN, RuntimeRecord,
 };
@@ -520,6 +521,36 @@ impl SandboxStore {
         self.dir.join(name)
     }
 
+    /// Returns the store's file `name`, one of [`FILE_NAMES`], which messages call `description`.
+    fn file(&self, name: &str, description: &'static str) -> StoreFile {
+        StoreFile::new(self.path(name), description)
+    }
+
+    /// Returns the sandbox's lock file, [`LOCK_NAME`].
+    fn lock_file(&self) -> StoreFile {
+        self.file(LOCK_NAME, "sandbox lock")
+    }
+
+    /// Returns the launch journal, [`JOURNAL_NAME`].
+    fn journal_file(&self) -> StoreFile {
+        self.file(JOURNAL_NAME, LaunchJournal::DESCRIPTION)
+    }
+
+    /// Returns the runtime record, [`RUNTIME_NAME`].
+    fn runtime_file(&self) -> StoreFile {
+        self.file(RUNTIME_NAME, RuntimeRecord::DESCRIPTION)
+    }
+
+    /// Returns the file that holds the launch capability, [`CAPABILITY_NAME`].
+    fn capability_file(&self) -> StoreFile {
+        self.file(CAPABILITY_NAME, "sandbox control capability")
+    }
+
+    /// Returns the VMM's log, [`LOG_NAME`].
+    fn log_file(&self) -> StoreFile {
+        self.file(LOG_NAME, "log")
+    }
+
     /// Returns the path of the VMM's log.
     pub fn log_path(&self) -> PathBuf {
         self.path(LOG_NAME)
@@ -582,29 +613,26 @@ impl SandboxStore {
     /// Reads the runtime record, which names the sandbox's VM from the commit of its launch until
     /// its runtime is cleared.
     pub fn runtime(&self) -> Result<Option<RuntimeRecord>> {
-        record::read(&self.path(RUNTIME_NAME))
+        record::read(&self.runtime_file())
     }
 
     /// Reads the journal of a launch in progress, or of one that was interrupted.
     pub fn journal(&self) -> Result<Option<LaunchJournal>> {
-        record::read(&self.path(JOURNAL_NAME))
+        record::read(&self.journal_file())
     }
 
     /// Reads the launch capability of the sandbox's VM.
     pub fn read_capability(&self) -> Result<[u8; CAPABILITY_LEN]> {
-        let path = self.capability_path();
-        let description = "sandbox control capability";
-        let Some(bytes) = files::read_private(&path, description)? else {
-            return Err(io_error(format!(
-                "cannot read the {description} {}",
-                path.display()
-            ))(io::Error::from(io::ErrorKind::NotFound)));
+        let file = self.capability_file();
+        let Some(bytes) = file.read()? else {
+            return Err(file.read_failed()(io::Error::from(io::ErrorKind::NotFound)));
         };
         match <[u8; CAPABILITY_LEN]>::try_from(bytes.as_slice()) {
             Ok(capability) if capability != [0; CAPABILITY_LEN] => Ok(capability),
             _ => Err(Error::io(format!(
-                "the sandbox control capability {} is invalid",
-                path.display()
+                "the {} {} is invalid",
+                file.description(),
+                file.path().display()
             ))),
         }
     }
@@ -643,15 +671,10 @@ impl SandboxStore {
     /// then: the open then fails with an I/O error whose cause is the denied access, while a
     /// removed lock file that the lock's own handle keeps is taken for a replaced one.
     fn take_lock(&self, deadline: Option<Instant>) -> Result<Taken> {
-        let path = self.path(LOCK_NAME);
+        let lock = self.lock_file();
+        let path = lock.path();
         let failed = |error| store_error(format!("cannot lock {}", path.display()))(error);
-        let file = files::open_lock(&path).map_err(failed)?;
-        if let Some(problem) = platform::private_file_problem(&file).map_err(failed)? {
-            return Err(Error::io(format!(
-                "the sandbox lock {} {problem}",
-                path.display()
-            )));
-        }
+        let file = lock.open_lock(failed)?;
         match deadline {
             None => file.lock().map_err(failed)?,
             Some(deadline) => loop {
@@ -669,7 +692,7 @@ impl SandboxStore {
             },
         }
         let locked = platform::opened_file_id(&file).map_err(failed)?;
-        match platform::file_id(&path) {
+        match platform::file_id(path) {
             Ok(current) if current == locked => Ok(Taken::Locked(file)),
             Ok(_) => Ok(Taken::Replaced),
             Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(Taken::Replaced),
@@ -945,10 +968,11 @@ impl LockedStore {
         let endpoint = platform::control_endpoint(listening)
             .map_err(|error| Error::io("cannot choose a control endpoint").with_source(error))?;
         let (log, claim) = self.create_log()?;
-        files::write_private(&self.capability_path(), capability)?;
+        let capability_file = self.capability_file();
+        capability_file.replace(capability)?;
         let journal = LaunchJournal::prepared(launch.clone(), endpoint, runtime.clone(), claim);
-        if let Err(error) = record::write(&self.path(JOURNAL_NAME), &journal) {
-            let _ = remove_if_present(&self.capability_path());
+        if let Err(error) = record::write(&self.journal_file(), &journal) {
+            let _ = capability_file.remove_if_present();
             return Err(error);
         }
         // A lease reserves one launch, which has begun.
@@ -962,10 +986,16 @@ impl LockedStore {
 
     /// Replaces the log of the previous launch with a fresh file, and claims it.
     fn create_log(&self) -> Result<(File, LogClaim)> {
-        let path = self.log_path();
-        let failed = |error| io_error(format!("cannot create the log {}", path.display()))(error);
-        remove_if_present(&path)?;
-        let log = files::create_new(&path).map_err(failed)?;
+        let file = self.log_file();
+        let failed = |error| {
+            io_error(format!(
+                "cannot create the {} {}",
+                file.description(),
+                file.path().display()
+            ))(error)
+        };
+        file.remove_if_present()?;
+        let log = file.create_new().map_err(failed)?;
         platform::claim_log(&log).map_err(failed)?;
         let (device, index) = platform::opened_file_identity(&log).map_err(failed)?;
         let claim = LogClaim {
@@ -992,7 +1022,7 @@ impl LockedStore {
         match self.runtime()? {
             None => self.end_launch(&journal),
             Some(runtime) if runtime.launch() == journal.launch() => {
-                remove_if_present(&self.path(JOURNAL_NAME))?;
+                self.journal_file().remove_if_present()?;
                 Ok(Recovery::Clean)
             }
             Some(runtime) => Err(Error::io(format!(
@@ -1012,14 +1042,13 @@ impl LockedStore {
             None => self.end_unidentified(journal),
         };
         if !matches!(recovery, Recovery::Indeterminate(_)) {
-            for name in [CAPABILITY_NAME, SOCKET_NAME] {
-                remove_if_present(&self.path(name))?;
-            }
+            self.capability_file().remove_if_present()?;
+            remove_if_present(&self.socket_path())?;
             self.remove_clone_socket(journal.endpoint())?;
             self.remove_report_staging()?;
             // The journal goes last, so that an interrupted removal leaves it for a later
             // recovery to finish.
-            remove_if_present(&self.path(JOURNAL_NAME))?;
+            self.journal_file().remove_if_present()?;
         }
         Ok(recovery)
     }
@@ -1143,14 +1172,13 @@ impl LockedStore {
     /// does, given `record`, the runtime record that the caller read under this lock, if any, whose
     /// control endpoint is the VM's.
     pub(crate) fn clear_runtime_of(&mut self, record: Option<&RuntimeRecord>) -> Result<()> {
-        for name in [CAPABILITY_NAME, SOCKET_NAME] {
-            remove_if_present(&self.path(name))?;
-        }
+        self.capability_file().remove_if_present()?;
+        remove_if_present(&self.socket_path())?;
         if let Some(record) = record {
             self.remove_clone_socket(record.endpoint())?;
         }
         self.remove_report_staging()?;
-        remove_if_present(&self.path(RUNTIME_NAME))
+        self.runtime_file().remove_if_present()
     }
 
     /// Removes the control socket at `endpoint`, the control endpoint that a launch of the
@@ -1276,7 +1304,7 @@ impl Launch<'_> {
             .process()
             .map_err(|error| Error::io("cannot identify the VMM process").with_source(error))?;
         let journal = self.journal.spawned(process.reference().clone());
-        record::write(&self.locked.path(JOURNAL_NAME), &journal)?;
+        record::write(&self.locked.journal_file(), &journal)?;
         self.journal = journal;
         Ok(process)
     }
@@ -1295,8 +1323,8 @@ impl Launch<'_> {
             ));
         };
         let runtime = RuntimeRecord::committed(&self.journal, process.clone());
-        record::write(&self.locked.path(RUNTIME_NAME), &runtime)?;
-        let _ = remove_if_present(&self.locked.path(JOURNAL_NAME));
+        record::write(&self.locked.runtime_file(), &runtime)?;
+        let _ = self.locked.journal_file().remove_if_present();
         Ok(runtime)
     }
 

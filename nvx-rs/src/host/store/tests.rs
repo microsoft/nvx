@@ -982,8 +982,8 @@ fn a_journal_that_its_runtime_record_supersedes_is_removed() {
     drop(launch);
     // The launch wrote its runtime record and crashed before it removed its journal.
     let committed = RuntimeRecord::committed(&journal, journal.process().unwrap().clone());
-    record::write(&store.path(RUNTIME_NAME), &committed).unwrap();
-    record::write(&store.path(JOURNAL_NAME), &journal).unwrap();
+    record::write(&store.runtime_file(), &committed).unwrap();
+    record::write(&store.journal_file(), &journal).unwrap();
     assert_eq!(locked.recover().unwrap(), Recovery::Clean);
     assert!(store.journal().unwrap().is_none());
     assert_eq!(store.runtime().unwrap(), Some(committed));
@@ -994,7 +994,7 @@ fn a_journal_that_its_runtime_record_supersedes_is_removed() {
         runtime(),
         *journal.log(),
     );
-    record::write(&store.path(JOURNAL_NAME), &other).unwrap();
+    record::write(&store.journal_file(), &other).unwrap();
     let error = locked.recover().unwrap_err();
     assert_eq!(error.kind(), ErrorKind::Io);
     assert!(error.message().contains("names launch"), "{error}");

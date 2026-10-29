@@ -1,12 +1,17 @@
 //! The private files of the store: their creation, atomic replacement, reading, and removal, and
 //! the syncs of their directories.
 //!
+//! The sandbox's store opens, creates, replaces, and reads its lock, its records, its capability,
+//! and its log only as [`StoreFile`]s, each of which holds a file's path with what messages call
+//! it, so that no read or lock of one of them skips the checks that refuse a file that others may
+//! open.
+//!
 //! The template store, [`template::Store`](crate::host::template::Store), keeps its own records
 //! with the same lock files, atomic replacements, removals, and syncs.
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::error::{Error, Result};
 use crate::host::{filesystem, platform};
@@ -27,7 +32,7 @@ const PRIVATE_FILE_MODE: u32 = 0o600;
 
 /// Returns options that create a file readable only by the current user (mode 0600 on Unix)
 /// and that open no link that its path names on Unix.
-pub(super) fn private_options() -> OpenOptions {
+fn private_options() -> OpenOptions {
     let mut options = OpenOptions::new();
     options.write(true);
     #[cfg(unix)]
@@ -159,48 +164,6 @@ pub(crate) fn write_private(path: &Path, contents: &[u8]) -> Result<()> {
     written.map_err(io_error(format!("cannot write {}", path.display())))
 }
 
-/// Reads the file at `path`, the store's `description`, or returns `None` if it does not exist.
-///
-/// The open does not wait, as it would on Unix for a FIFO without a writer, and a file that is
-/// not a regular file is refused before anything is read from it, as a FIFO whose writer keeps
-/// it open would keep a read waiting. A file that is not private to the current user is refused,
-/// since others could have written it: on Windows, a file's own access control list decides who
-/// may open it, whatever the store's directory allows.
-pub(super) fn read_private(path: &Path, description: &str) -> Result<Option<Vec<u8>>> {
-    let failed = || io_error(format!("cannot read the {description} {}", path.display()));
-    let mut options = OpenOptions::new();
-    options.read(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-
-        // Reads of a regular file do not depend on the flag.
-        options.custom_flags(nix::fcntl::OFlag::O_NONBLOCK.bits());
-    }
-    let mut file = match options.open(path) {
-        Ok(file) => file,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
-        // A socket refuses an open.
-        #[cfg(unix)]
-        Err(error) if error.raw_os_error() == Some(nix::errno::Errno::ENXIO as i32) => {
-            return Err(failed()(not_regular()));
-        }
-        Err(error) => return Err(failed()(error)),
-    };
-    if !file.metadata().map_err(failed())?.file_type().is_file() {
-        return Err(failed()(not_regular()));
-    }
-    if let Some(problem) = platform::private_file_problem(&file).map_err(failed())? {
-        return Err(Error::io(format!(
-            "the {description} {} {problem}",
-            path.display()
-        )));
-    }
-    let mut contents = Vec::new();
-    file.read_to_end(&mut contents).map_err(failed())?;
-    Ok(Some(contents))
-}
-
 /// Makes the changes to the entries of the directory `dir` so far durable, such as files that
 /// were renamed into it or removed from it: a crash that keeps a later change keeps them too, even
 /// one on another filesystem.
@@ -232,5 +195,132 @@ pub(crate) fn remove_if_present(path: &Path) -> Result<()> {
             Err(io_error(format!("cannot remove {}", path.display()))(error))
         }
         _ => Ok(()),
+    }
+}
+
+/// One file of a sandbox's store: its path, and what messages call it.
+///
+/// [`SandboxStore`](super::SandboxStore) builds one for each file that it creates and reads, its
+/// lock, its launch journal, its runtime record, its capability, and its log, and opens, creates,
+/// replaces, and reads those files only through it, so that each of them is created readable only
+/// by the current user, replaced atomically, read only if it is a regular file that others may not
+/// open, and locked only if others may not open it, and that every message about it calls it by
+/// its description.
+#[derive(Debug)]
+pub(super) struct StoreFile {
+    /// The file's path.
+    path: PathBuf,
+    /// What messages call the file, such as `sandbox runtime record`.
+    description: &'static str,
+}
+
+impl StoreFile {
+    /// Returns the file at `path`, which messages call `description`.
+    pub(super) fn new(path: PathBuf, description: &'static str) -> Self {
+        Self { path, description }
+    }
+
+    /// Returns the file's path.
+    pub(super) fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// Returns what messages call the file.
+    pub(super) fn description(&self) -> &'static str {
+        self.description
+    }
+
+    /// Creates the file, which must not exist, readable only by the current user, as
+    /// [`create_new`] does.
+    pub(super) fn create_new(&self) -> io::Result<File> {
+        create_new(&self.path)
+    }
+
+    /// Opens the file as a lock, creating it readable only by the current user if it does not
+    /// exist, as [`open_lock`] does, and refuses it if it is not private to the current user, since
+    /// others could hold its lock.
+    ///
+    /// `failed` maps the failures to open the file and to check it, as the caller maps those of
+    /// the lock that it then takes.
+    pub(super) fn open_lock(&self, failed: impl Fn(io::Error) -> Error) -> Result<File> {
+        let file = open_lock(&self.path).map_err(&failed)?;
+        if let Some(problem) = platform::private_file_problem(&file).map_err(failed)? {
+            return Err(self.not_private(&problem));
+        }
+        Ok(file)
+    }
+
+    /// Atomically replaces the file with `contents`, readable only by the current user, as
+    /// [`write_private`] does.
+    pub(super) fn replace(&self, contents: &[u8]) -> Result<()> {
+        write_private(&self.path, contents)
+    }
+
+    /// Reads the file, or returns `None` if it does not exist.
+    ///
+    /// The open does not wait, as it would on Unix for a FIFO without a writer, and a file that is
+    /// not a regular file is refused before anything is read from it, as a FIFO whose writer keeps
+    /// it open would keep a read waiting. A file that is not private to the current user is
+    /// refused, since others could have written it: on Windows, a file's own access control list
+    /// decides who may open it, whatever the store's directory allows.
+    pub(super) fn read(&self) -> Result<Option<Vec<u8>>> {
+        let mut options = OpenOptions::new();
+        options.read(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+
+            // Reads of a regular file do not depend on the flag.
+            options.custom_flags(nix::fcntl::OFlag::O_NONBLOCK.bits());
+        }
+        let mut file = match options.open(&self.path) {
+            Ok(file) => file,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            // A socket refuses an open.
+            #[cfg(unix)]
+            Err(error) if error.raw_os_error() == Some(nix::errno::Errno::ENXIO as i32) => {
+                return Err(self.read_failed()(not_regular()));
+            }
+            Err(error) => return Err(self.read_failed()(error)),
+        };
+        if !file
+            .metadata()
+            .map_err(self.read_failed())?
+            .file_type()
+            .is_file()
+        {
+            return Err(self.read_failed()(not_regular()));
+        }
+        if let Some(problem) = platform::private_file_problem(&file).map_err(self.read_failed())? {
+            return Err(self.not_private(&problem));
+        }
+        let mut contents = Vec::new();
+        file.read_to_end(&mut contents)
+            .map_err(self.read_failed())?;
+        Ok(Some(contents))
+    }
+
+    /// Removes the file if it exists, as [`remove_if_present`] does.
+    pub(super) fn remove_if_present(&self) -> Result<()> {
+        remove_if_present(&self.path)
+    }
+
+    /// Builds an error mapper that keeps the I/O source of a failure to read the file.
+    pub(super) fn read_failed(&self) -> impl FnOnce(io::Error) -> Error {
+        io_error(format!(
+            "cannot read the {} {}",
+            self.description,
+            self.path.display()
+        ))
+    }
+
+    /// Returns the error of the file, which is not private to the current user for the reason
+    /// that `problem` gives.
+    fn not_private(&self, problem: &str) -> Error {
+        Error::io(format!(
+            "the {} {} {problem}",
+            self.description,
+            self.path.display()
+        ))
     }
 }
