@@ -3581,6 +3581,9 @@ class BenchmarkHostTests(unittest.TestCase):
                 )
                 if system["system"] == "Windows":
                     self.assertIsNotNone(system["revision"])
+                # Each Linux/MSHV series records its hypervisor's build.
+                if benchmark_host.records_hypervisor_build(platform):
+                    self.assertIsNotNone(host["hypervisor_build"])
 
     def test_identical_hosts_match_within_the_memory_tolerance(self):
         # Kernels reserve different amounts of a VM's memory: the same VM

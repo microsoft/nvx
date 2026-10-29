@@ -17,6 +17,7 @@
     "release": "6.18.34.mshv3-1.azl3",
     "revision": null
   },
+  "hypervisor_build": "10.0.26100.9444",
   "azure": {
     "vm_size": "Standard_D8s_v5",
     "os_disk": {
