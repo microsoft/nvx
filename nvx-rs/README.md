@@ -95,7 +95,7 @@ changes only when the module's purpose does.
 | Module | Purpose |
 | --- | --- |
 | [`nvx::protocol`](#nvxprotocol) | The codec of the control console's `NVXS` records, `NVXC` frames, and payloads, which the host, the guest agent, and the fake OpenVMM share |
-| [`nvx::protocol::cmdline`](#nvxprotocolcmdline) | The kernel command line as Linux reads it, with the virtio-mmio devices and the guest's DNS server that it names |
+| [`nvx::protocol::cmdline`](#nvxprotocolcmdline) | The kernel command line as Linux and the guest's init read it, with the virtio-mmio devices and the guest's DNS server that it names |
 | [`nvx::protocol::export`](#nvxprotocolexport) | The boot tokens of the host export, the virtio-fs device from which a guest maps host paths, and the guest's parser of them |
 | [`nvx::protocol::nvxs`](#nvxprotocolnvxs) | The NVXS session, independent of any application protocol: its records and the state machines of its host and guest roles |
 | [`nvx::protocol::root`](#nvxprotocolroot) | The boot tokens that tell the guest which image its layered root assembles and where the root keeps its upper |
@@ -173,6 +173,11 @@ with dashes and underscores alike.
 `VirtioMmioDevice::parse` reads a `virtio_mmio.device` value,
 `SIZE@BASE:IRQ[:ID]`, as the virtio-mmio driver reads it, for a device of any
 type, and `virtio_mmio_devices` reads every such parameter of a command line.
+
+`init_tokens` splits a command line into `Token`s as NVX's guest init splits
+it, for the readers of the boot tokens that the init consumes: at spaces, tabs,
+and newlines alone, without quoting, and past a NUL or `--`, with each token's
+name up to its first `=`, which the init compares byte for byte.
 
 `dns_server` reads the guest's DNS server from OpenVMM's `virtnet_dns=` token,
 `DNS_TOKEN`, strictly, as OpenVMM renders and reads it: in a command line split

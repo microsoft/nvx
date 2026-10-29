@@ -1,6 +1,7 @@
-//! The kernel command line as Linux reads it: the parameters into which the kernel splits it, and
-//! the virtio-mmio devices that its `virtio_mmio.device` parameters describe; and the guest's DNS
-//! server, which OpenVMM names in it.
+//! The kernel command line as Linux and the guest's init read it: the parameters into which the
+//! kernel splits it, the virtio-mmio devices that its `virtio_mmio.device` parameters describe,
+//! and the tokens into which the guest's init splits it; and the guest's DNS server, which
+//! OpenVMM names in it.
 //!
 //! A reader that splits a command line by rules of its own may find parameters that the kernel
 //! never sees, or miss ones that it applies: the kernel splits at more bytes than ASCII
@@ -14,6 +15,14 @@
 //! - [`VirtioMmioDevice::parse`] reads the value of a `virtio_mmio.device` parameter as the
 //!   virtio-mmio driver's `vm_cmdline_set` reads it, for a device of any type, and
 //!   [`virtio_mmio_devices`] reads those of every such parameter of a command line.
+//!
+//! NVX's guest init reads its own boot tokens, such as those of a layered root and of the host
+//! export, by other rules: its shell splits the command line at spaces, tabs, and newlines alone,
+//! without quoting and past a `--`, and matches a token by its name, up to its first `=`, byte for
+//! byte. This module reads a command line by those rules too, for the readers of those tokens,
+//! which must read them as the init does:
+//!
+//! - [`init_tokens`] splits a command line into [`Token`]s as the init's shell splits it.
 //!
 //! The kernel leaves OpenVMM's `virtnet_dns=` token to the guest, which reads it from the whole
 //! command line, as OpenVMM checks it:
@@ -228,6 +237,40 @@ pub fn virtio_mmio_devices(command_line: &[u8]) -> impl Iterator<Item = VirtioMm
     parameters(command_line)
         .filter(|parameter| parameter.is_named(VIRTIO_MMIO_DEVICE))
         .filter_map(|parameter| parameter.value.and_then(VirtioMmioDevice::parse))
+}
+
+/// A token of a kernel command line, as the guest's init splits the command line, which
+/// [`init_tokens`] returns.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct Token<'a> {
+    /// The name: the token's text up to its first `=`, even if the token starts with it, or all
+    /// of it.
+    pub name: &'a [u8],
+    /// The value: the text after that `=`, or `None` if the token has none.
+    pub value: Option<&'a [u8]>,
+}
+
+/// Returns the tokens of `command_line`, in order, as the guest's init splits it: as its shell
+/// splits the command line into fields, with the default `IFS` and without pathname expansion.
+///
+/// A token ends at a space, a tab, or a newline, the only bytes at which the command line splits,
+/// and no token is empty. Unlike [`parameters`], the split takes no other byte for whitespace,
+/// such as a carriage return or 0xa0, honors no quotes, and reads past a NUL and a `--`. A token's
+/// name ends at its first `=`, and a token without one has no value.
+pub fn init_tokens(command_line: &[u8]) -> impl Iterator<Item = Token<'_>> {
+    command_line
+        .split(|byte| matches!(byte, b' ' | b'\t' | b'\n'))
+        .filter(|token| !token.is_empty())
+        .map(|token| match token.iter().position(|&byte| byte == b'=') {
+            Some(equals) => Token {
+                name: &token[..equals],
+                value: Some(&token[equals + 1..]),
+            },
+            None => Token {
+                name: token,
+                value: None,
+            },
+        })
 }
 
 /// Returns the DNS server that the `virtnet_dns=` token of `command_line`, such as the guest's
