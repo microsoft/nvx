@@ -716,17 +716,39 @@ KVM, whose restore series have no stability guard, validation accepts every atte
 Before updating the run-scoped `benchmark-<platform>-<run-id>` artifact, each platform
 uploads its raw results and lifecycle profiles to the immutable
 `benchmark-diagnostics-<platform>-<run-id>-attempt-<run-attempt>` artifact, including
-after a benchmark failure. When a Windows benchmark fails, the artifact also holds
-`windows-storage-events.txt`: the Storport and System storage events since the job
-started, including request timeouts, resets, I/Os that took more than 30 s, and
-per-disk latency histograms, which a runner's reimage would erase. The job warns when
-an I/O took more than 30 s. Both artifacts are retained for one day. Rerunning a
+after a benchmark failure. Both artifacts are retained for one day. Rerunning a
 workflow cannot overwrite an earlier attempt's diagnostics. Downstream gates still
 use the run-scoped artifact so a failed-jobs-only rerun can reuse successful
 platform results from an earlier workflow attempt. The `acceptance-attempt-N.json`
 files and the `performance-attempt-N` and `shell-snapshot-restore-attempt-N`
 directories identify the bounded remeasurements within one workflow attempt, not the
 workflow's `github.run_attempt`.
+
+A storage stall on a Windows runner leaves events that a reimage of the runner erases, so when a
+Windows platform job's benchmark fails, the job saves the storage events of its window in the
+diagnostics artifact's `storage-events` directory. The window starts with the job's first step,
+which records the time in `NVX_JOB_STARTED_AT`, and ends as the events are saved. The diagnostics
+upload, which runs whatever failed, keeps them, and both uploads precede the scratch removal,
+which a stalled volume can hold up past the job's timeout, when no later step runs.
+`python scripts\nvx.py performance storage-events --since <time> --output-dir <dir>` exports,
+with `wevtutil`, the `Microsoft-Windows-Storage-Storport/Operational` events and the System
+log's events of the storage drivers and file systems as rendered XML, in
+`storport-operational.xml` and `system-storage.xml`, and writes `storage-events.txt`, which the
+job log repeats up to its list of every event. It counts each log's events by ID, and then lists
+the notable ones: I/Os that took longer than Storport's threshold, 30 seconds by default (event
+557), request timeouts (500), resets (550), the resets that storage miniports such as `storvsc`
+issue (129), and the hourly latency summaries (505) that counted I/Os above a second, by latency
+bucket. Storport names each device by its SCSI port, path, target, and LUN, which host
+provenance records for the benchmark's volumes, so the summary names the volume, such as
+`workspace/scratch F:`, of each device that it knows. A stalled volume can stall what reads it
+too, so the command abandons a query after 120 seconds, and probes the volumes only once the
+events are saved, for at most 30 seconds, after which the summary says why it names none. It also
+abandons a write of its files after 30 seconds, as the workspace can share that volume, and the
+summary in the job log and a warning then name the file. I/Os
+slower than Storport's threshold also raise a `Slow storage I/O` warning with their count and
+the slowest, and a log that can't be read raises a `Storage events` warning. Network Service,
+the runners' account, may read both logs as a service account; locally, reading the Storport log
+takes an elevated prompt or membership in Event Log Readers.
 
 Lifecycle JSON results and workload `benchmark-metadata.json` files record host
 provenance under `host`: the runner name from `RUNNER_NAME`, the machine name, the

@@ -615,75 +615,26 @@ runs:
           }
         }
 
-    - name: Remove Windows benchmark scratch
-      if: always() && runner.os == 'Windows'
-      shell: powershell
-      run: |
-        $ErrorActionPreference = "Stop"
-        if ($env:NVX_BENCHMARK_SCRATCH_DIR -and
-            (Test-Path -LiteralPath $env:NVX_BENCHMARK_SCRATCH_DIR)) {
-          try {
-            Remove-Item -LiteralPath $env:NVX_BENCHMARK_SCRATCH_DIR -Recurse -Force
-          }
-          catch {
-            Write-Output "::warning::Could not remove benchmark scratch: $($_.Exception.Message)"
-          }
-        }
-
-    # A hung attempt can come from a stalled disk, which only the runner's
-    # event logs record, and a reimage erases them. Keep the job's storage
-    # events: Storport's request timeouts (500), resets (550), I/Os that took
-    # more than 30 s (557), and per-disk latency histograms (505), and the
-    # System log's disk, storvsc, and NTFS warnings and errors.
+    # A storage stall leaves events that a reimage of the runner erases, so a
+    # failed benchmark keeps those of the job's window, which its platform job
+    # records the start of, and warns of slow I/O (doc/benchmarks.md).
     - name: Save Windows storage events
       if: failure() && runner.os == 'Windows'
       shell: powershell
       run: |
         $ErrorActionPreference = "Stop"
-        $Output = "data/runs/${{ inputs.platform }}/windows-storage-events.txt"
-        try {
-          $Worker = Get-CimInstance Win32_Process -Filter "Name = 'Runner.Worker.exe'" |
-            Sort-Object CreationDate -Descending | Select-Object -First 1
+        $ScratchArgs = @()
+        if ($env:NVX_BENCHMARK_SCRATCH_DIR) {
+          $ScratchArgs = @("--scratch-dir", $env:NVX_BENCHMARK_SCRATCH_DIR)
         }
-        catch {
-          $Worker = $null
-        }
-        $Since = if ($Worker) { $Worker.CreationDate } else { (Get-Date).AddHours(-2) }
-        $Lines = [System.Collections.Generic.List[string]]::new()
-        $Lines.Add("Storage events since $($Since.ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ'))")
-        $LongIo = 0
-        foreach ($Query in @(
-            @{ LogName = "Microsoft-Windows-Storage-Storport/Operational"; StartTime = $Since },
-            @{ LogName = "System"; StartTime = $Since; Level = 1, 2, 3 })) {
-          $Lines.Add("--- $($Query.LogName) ---")
-          try {
-            $Records = @(Get-WinEvent -FilterHashtable $Query -ErrorAction Stop |
-              Sort-Object TimeCreated)
-          }
-          catch {
-            if ($_.FullyQualifiedErrorId -notlike "NoMatchingEventsFound*") {
-              $Lines.Add("Could not read the log: $($_.Exception.Message)")
-            }
-            continue
-          }
-          foreach ($Record in $Records) {
-            if ($Query.LogName -eq "System" -and
-                $Record.ProviderName -notmatch "disk|stor|ntfs|volmgr|volsnap|partmgr") {
-              continue
-            }
-            if ($Query.LogName -ne "System" -and $Record.Id -eq 557) { $LongIo++ }
-            $Message = if ($Record.Message) { $Record.Message -replace "\s+", " " } else { "" }
-            $Lines.Add(("{0} {1} {2} {3}" -f
-              $Record.TimeCreated.ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ss.fffZ"),
-              $Record.ProviderName, $Record.Id, $Message))
-          }
-        }
-        New-Item -ItemType Directory -Force -Path (Split-Path $Output) | Out-Null
-        $Lines | Set-Content -LiteralPath $Output -Encoding UTF8
-        if ($LongIo -gt 0) {
-          Write-Output "::warning::$LongIo storage I/O(s) took more than 30 s during this job; see windows-storage-events.txt in the benchmark diagnostics"
-        }
+        python scripts\nvx.py performance storage-events `
+          --since $env:NVX_JOB_STARTED_AT `
+          --output-dir "data/runs/${{ inputs.platform }}/storage-events" `
+          @ScratchArgs
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+    # The uploads precede the scratch removal, which a stalled volume can hold
+    # up past the job's timeout, when no later step runs.
     - name: Upload benchmark diagnostics
       if: always()
       uses: actions/upload-artifact@v7
@@ -703,3 +654,18 @@ runs:
         if-no-files-found: error
         overwrite: true
         retention-days: 1
+
+    - name: Remove Windows benchmark scratch
+      if: always() && runner.os == 'Windows'
+      shell: powershell
+      run: |
+        $ErrorActionPreference = "Stop"
+        if ($env:NVX_BENCHMARK_SCRATCH_DIR -and
+            (Test-Path -LiteralPath $env:NVX_BENCHMARK_SCRATCH_DIR)) {
+          try {
+            Remove-Item -LiteralPath $env:NVX_BENCHMARK_SCRATCH_DIR -Recurse -Force
+          }
+          catch {
+            Write-Output "::warning::Could not remove benchmark scratch: $($_.Exception.Message)"
+          }
+        }
