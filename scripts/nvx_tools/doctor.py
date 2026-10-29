@@ -900,6 +900,34 @@ def kernel_frequency() -> KernelFrequency | str:
     )
 
 
+@dataclass(frozen=True)
+class BootCorrection:
+    """The time service's frequency correction averaged since boot: how fast
+    CLOCK_MONOTONIC_RAW ran against CLOCK_MONOTONIC, in ppm, as chronyd's
+    estimate says how fast it runs now, over ``seconds``."""
+
+    ppm: float
+    seconds: float
+
+
+def boot_correction() -> BootCorrection | None:
+    """Return the time service's frequency correction averaged since boot, or
+    None where the host has no CLOCK_MONOTONIC_RAW.
+
+    Both clocks exclude suspend, and after a small offset at boot only the
+    time service's gradual adjustments separate them, so their difference
+    over the uptime averages the reference's wander out without saved state.
+    Slews just after boot or a live migration bias it.
+    """
+    if sys.platform == "win32":
+        return None
+    raw = time.clock_gettime_ns(time.CLOCK_MONOTONIC_RAW)
+    monotonic = time.clock_gettime_ns(time.CLOCK_MONOTONIC)
+    if raw <= 0:
+        return None
+    return BootCorrection((raw - monotonic) / raw * 1e6, raw / 1e9)
+
+
 def _deviation_ppm(rate: float, declared_hz: int) -> float:
     return (rate - declared_hz) / declared_hz * 1e6
 
@@ -1117,6 +1145,20 @@ def check_rate(context: DoctorContext) -> CheckResult:
             )
         elif kernel is not None:
             detail += f"; no kernel PLL frequency: {kernel} (evidence)"
+    boot = None if host_is_windows() else boot_correction()
+    if boot is not None:
+        hours = boot.seconds / 3600
+        boot_rate = _corrected_rate(stable_rate, boot.ppm)
+        detail += (
+            f"; {boot_rate:.0f} Hz against {stability_clock['name']} corrected by "
+            f"the average correction since boot, {boot.ppm:+.3f} ppm over "
+            f"{hours:.1f} h"
+        )
+        if declared_hz is not None:
+            boot_deviation = abs(_deviation_ppm(boot_rate, declared_hz))
+            detail += f", {boot_deviation:.3f} ppm from the backend's rate"
+        detail += " (evidence)"
+        context.facts["boot_correction"] = f"{boot.ppm:+.3f} ppm over {hours:.1f} h"
     if clocksource:
         detail += f"; host clocksource {clocksource} (evidence)"
     if warning:
@@ -1382,6 +1424,7 @@ def summary_markdown(
         ("rate_deviation_ppm", "Rate deviation from the backend (ppm)"),
         ("rate_agreement_ppm", "Interval rate agreement (ppm)"),
         ("rate_uncertainty_ppm", "Largest interval uncertainty (ppm)"),
+        ("boot_correction", "Average correction since boot (evidence)"),
         ("host_skew_ns", "Host skew (ns)"),
         ("guest_warp_ns", "Guest warp offset (ns)"),
         ("invariant_tsc", "Host invariant TSC (evidence)"),

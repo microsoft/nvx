@@ -7,6 +7,7 @@ import contextlib
 import dataclasses
 import io
 import json
+import math
 import queue
 import re
 import shutil
@@ -15,6 +16,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import types
 import unittest
 from collections.abc import Sequence
@@ -2568,6 +2570,7 @@ class DoctorTests(unittest.TestCase):
             | Sequence[doctor.ChronyFrequency | str] = "chronyc is not installed",
             clock: FakeClock | None = None,
             kernel: doctor.KernelFrequency | str = PLL_OFF,
+            boot: doctor.BootCorrection | None = None,
         ) -> doctor.CheckResult:
             """Run H4; a list of chronyd readings answers its re-reads too."""
             clock = clock or FakeClock()
@@ -2583,12 +2586,14 @@ class DoctorTests(unittest.TestCase):
                     side_effect=readings,
                 ) as frequency,
                 patch.object(doctor, "kernel_frequency", return_value=kernel) as pll,
+                patch.object(doctor, "boot_correction", return_value=boot) as average,
                 patch.object(doctor.time, "monotonic", clock.monotonic),
                 patch.object(doctor.time, "sleep", clock.sleep),
             ):
                 result = doctor.check_rate(context)
             # Windows reads QueryPerformanceCounter, which no daemon steers.
             self.assertEqual(frequency.called, not windows)
+            self.assertEqual(average.called, not windows)
             # H4 reads the kernel's PLL only without chronyd's estimate.
             first = readings[0] if readings else chrony
             self.assertEqual(pll.called, not windows and isinstance(first, str))
@@ -2801,6 +2806,29 @@ class DoctorTests(unittest.TestCase):
             result.detail,
         )
         self.assertEqual(context.facts["rate_reference"], "kernel PLL -44.300 ppm")
+        # #1008: the average correction since boot, CLOCK_MONOTONIC_RAW's rate
+        # against CLOCK_MONOTONIC over the uptime, averages the reference's
+        # wander out. On azure-mshv-1, it read +43.559 ppm over 38.5 h while
+        # chronyd's estimate wandered. It is evidence only.
+        boot = doctor.BootCorrection(43.559, 138_435.1)
+        average = (
+            "2300100190 Hz against CLOCK_MONOTONIC_RAW corrected by the average "
+            "correction since boot, +43.559 ppm over 38.5 h"
+        )
+        context = ci_context("mshv")
+        context.facts["native_tsc_hz"] = "2300000507"
+        wandering = doctor.ChronyFrequency("PHC0", 189.3, 1)
+        result = check(context, slewed, chrony=wandering, boot=boot)
+        self.assertTrue(result.passed, result.detail)
+        self.assertIn("189.115 ppm from the backend's 2300000507 Hz", result.detail)
+        self.assertIn(
+            f"; {average}, 43.340 ppm from the backend's rate (evidence)",
+            result.detail,
+        )
+        self.assertEqual(context.facts["boot_correction"], "+43.559 ppm over 38.5 h")
+        # Without H3, it has no rate to compare.
+        result = check(ci_context("mshv"), slewed, chrony=wandering, boot=boot)
+        self.assertIn(f"; {average} (evidence)", result.detail)
         # chronyd's estimate gates the backend's rate, whatever the window
         # reads, and its skew bounds the estimate: the rate passes only when
         # every rate within the skew lies within the limit.
@@ -3062,6 +3090,31 @@ class DoctorTests(unittest.TestCase):
             self.assertEqual(
                 doctor.kernel_frequency(), "adjtimex is unavailable: no libc"
             )
+
+    def test_boot_correction_averages_the_clocks_since_boot(self):
+        if sys.platform == "win32":
+            # Windows has no CLOCK_MONOTONIC_RAW, and no daemon steers
+            # QueryPerformanceCounter.
+            self.assertIsNone(doctor.boot_correction())
+            return
+        # azure-mshv-1, 38.5 h after boot: CLOCK_MONOTONIC trailed
+        # CLOCK_MONOTONIC_RAW by 6.03 s.
+        clocks = {
+            time.CLOCK_MONOTONIC_RAW: 138_435_100_000_000,
+            time.CLOCK_MONOTONIC: 138_429_069_887_000,
+        }
+        with patch.object(
+            doctor.time, "clock_gettime_ns", side_effect=clocks.__getitem__
+        ):
+            correction = doctor.boot_correction()
+        assert correction is not None
+        self.assertAlmostEqual(correction.ppm, 43.559, places=3)
+        self.assertEqual(correction.seconds, 138_435.1)
+        # This host's clocks give a finite average over its uptime.
+        correction = doctor.boot_correction()
+        assert correction is not None
+        self.assertTrue(math.isfinite(correction.ppm))
+        self.assertGreater(correction.seconds, 0)
 
     def test_rate_check_continues_when_the_clocksource_is_unreadable(self):
         # #507: the host clocksource is evidence only, so an unreadable
