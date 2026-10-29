@@ -25,6 +25,7 @@ use crate::host::platform::{self, parse_hex_id};
 use crate::host::process::BootId;
 use crate::host::store::files::{open_lock, write_private};
 use crate::host::store::lease::{ID_LEN, hex, read_private, read_record, store_error};
+use crate::host::store::regular::{identity_at, identity_of};
 
 pub use self::capture::{CAPTURE_RECORD_NAME, CAPTURES_NAME, Capture, Created, TRANSACTION_NAME};
 pub use self::leases::{Acquired, LEASES_NAME, Retirement, TOMBSTONES_NAME};
@@ -878,8 +879,8 @@ fn take_lock(dir: &Path, deadline: Option<Instant>) -> Result<File> {
                 }
             },
         }
-        let locked = platform::opened_file_identity(&file).map_err(failed)?;
-        match platform::file_identity(&path) {
+        let locked = identity_of(&file).map_err(failed)?;
+        match identity_at(&path) {
             Ok(current) if current == locked => return Ok(file),
             Ok(_) => {}
             Err(error) if error.kind() == io::ErrorKind::NotFound => {}

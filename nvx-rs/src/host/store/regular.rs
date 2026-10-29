@@ -1,6 +1,7 @@
 //! The files that the template modules read, and that a sandbox's store reads as its clone
-//! binding: regular files that are not links, which they read within a bound, and the identity of
-//! a file that a template module holds open.
+//! binding: regular files that are not links, which they read within a bound, and the identities
+//! by which the template modules and the stores tell files apart: of a file that one holds open,
+//! and of the file that a path names.
 
 use std::fs::{File, OpenOptions};
 use std::io::{self, Read};
@@ -89,4 +90,37 @@ pub(crate) fn read_at_most(file: File, limit: u64, what: &str) -> io::Result<Vec
 pub(crate) fn identity_of(file: &File) -> io::Result<(u64, u128)> {
     let seal = FileSeal::of(file)?;
     Ok((seal.device(), seal.file_id()))
+}
+
+/// Returns the identity of the file or directory that `path` names, following links, as
+/// [`identity_of`] gives it for the object open.
+///
+/// On Windows, the object is opened without access rights, as [`platform::file_identity`] opens
+/// it, which succeeds even while another process holds it open without sharing it. A file whose
+/// deletion is pending, which a file system without POSIX deletion keeps under its name until its
+/// last handle closes, refuses even that open, with a denied access.
+pub(crate) fn identity_at(path: &Path) -> io::Result<(u64, u128)> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+
+        let metadata = std::fs::metadata(path)?;
+        Ok((metadata.dev(), u128::from(metadata.ino())))
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+
+        /// `FILE_FLAG_BACKUP_SEMANTICS`, which opens a directory too.
+        const BACKUP_SEMANTICS: u32 = 0x0200_0000;
+        let file = OpenOptions::new()
+            .access_mode(0)
+            .custom_flags(BACKUP_SEMANTICS)
+            .open(path)?;
+        identity_of(&file)
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        platform::file_identity(path).map(|(device, index)| (device, u128::from(index)))
+    }
 }

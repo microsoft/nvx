@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use super::caller::{is_report_staging, is_store_temporary};
+use super::regular;
 use super::{
     CLONE_BINDING_NAME, CallerFiles, FILE_NAMES, JOURNAL_NAME, LOCK_NAME, LockedStore,
     RUNTIME_NAME, Races, SandboxStore, Taken, absolute, pause, transition_in_progress,
@@ -246,8 +247,8 @@ impl LockedStore {
             return;
         }
         let path = self.path(LOCK_NAME);
-        let held = platform::opened_file_identity(&self.lock);
-        if matches!((held, platform::file_identity(&path)), (Ok(held), Ok(current)) if held == current)
+        let held = regular::identity_of(&self.lock);
+        if matches!((held, regular::identity_at(&path)), (Ok(held), Ok(current)) if held == current)
         {
             let _ = fs::remove_file(&path);
         }

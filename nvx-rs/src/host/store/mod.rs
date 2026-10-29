@@ -250,6 +250,7 @@ pub use self::lifecycle::{Lingering, RemovalError};
 pub use self::record::{
     LaunchId, LaunchJournal, LaunchState, LogClaim, MAX_ENDPOINT_LEN, RuntimeRecord,
 };
+use self::regular::{identity_at, identity_of};
 use super::filesystem::FileIdentity;
 use super::platform;
 use super::process::{BootId, Process, ProcessRef};
@@ -595,8 +596,8 @@ impl SandboxStore {
                 }
             },
         }
-        let locked = platform::opened_file_identity(&file).map_err(failed)?;
-        match platform::file_identity(&path) {
+        let locked = identity_of(&file).map_err(failed)?;
+        match identity_at(&path) {
             Ok(current) if current == locked => Ok(Taken::Locked(file)),
             Ok(_) => Ok(Taken::Replaced),
             Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(Taken::Replaced),
