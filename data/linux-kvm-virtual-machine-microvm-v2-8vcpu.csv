@@ -398,3 +398,4 @@ linux-kvm-virtual-machine,2,8,2489955f1d1222f2a633ea3ef83dbb6261c7a317,shell_sna
 linux-kvm-virtual-machine,2,8,ded1cc3ee0b8a0fcdfbfda19624dc48b79facd00,shell_snapshot_restore_512_mib,ms,lower,62.1
 linux-kvm-virtual-machine,2,8,2c42ee047b2f748448bfd30252c7e526fd88e1c5,shell_snapshot_restore_512_mib,ms,lower,83.5
 linux-kvm-virtual-machine,2,8,225d900638bfe2c0a73726a05e94293667b01005,shell_snapshot_restore_512_mib,ms,lower,81.9
+linux-kvm-virtual-machine,2,8,bbf04515d2d84ea158d4258a77f620bd32ba6780,shell_snapshot_restore_512_mib,ms,lower,82.5
