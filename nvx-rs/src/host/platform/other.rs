@@ -108,7 +108,7 @@ impl Directory {
     }
 
     /// Never called: no directory is open.
-    pub(crate) fn entry_identity(&self, _name: &str) -> io::Result<Option<(u64, u64)>> {
+    pub(crate) fn entry_identity(&self, _name: &str) -> io::Result<Option<(u64, u128)>> {
         match *self {}
     }
 

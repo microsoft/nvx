@@ -381,7 +381,7 @@ impl LockedStore {
             move |error: io::Error| RemovalError::Io { path, error }
         };
         let directory = platform::Directory::open(dir).map_err(failed)?;
-        let held = platform::opened_file_identity(&self.lock).map_err(entry_failed(LOCK_NAME))?;
+        let held = regular::identity_of(&self.lock).map_err(entry_failed(LOCK_NAME))?;
         if directory
             .entry_identity(LOCK_NAME)
             .map_err(entry_failed(LOCK_NAME))?

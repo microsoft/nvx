@@ -69,6 +69,7 @@ use windows_sys::Win32::System::WindowsProgramming::QueryInterruptTimePrecise;
 
 use super::Transport;
 use super::inherit::Inherited;
+use crate::host::seal::FileSeal;
 use crate::hypervisor::Hypervisor;
 
 /// Whether this host can run NVX microVMs.
@@ -1407,10 +1408,12 @@ impl Directory {
             .map(Self)
     }
 
-    /// Returns the volume serial number and file index of its entry `name`, not following a link
-    /// or other reparse point, as [`opened_file_identity`] gives them, or `None` if it has no such
-    /// entry.
-    pub(crate) fn entry_identity(&self, name: &str) -> io::Result<Option<(u64, u64)>> {
+    /// Returns the identity of its entry `name`, not following a link or other reparse point, as
+    /// the entry's [`FileSeal`] holds it, or `None` if it has no such entry: the volume serial
+    /// number and the 128-bit file ID of `FILE_ID_INFO`, which tell the files of ReFS volumes
+    /// apart where their 64-bit file indexes may not, or those of `BY_HANDLE_FILE_INFORMATION` on
+    /// a volume that has no file ID information.
+    pub(crate) fn entry_identity(&self, name: &str) -> io::Result<Option<(u64, u128)>> {
         use windows_sys::Wdk::Storage::FileSystem::{
             FILE_OPEN_REPARSE_POINT, FILE_SYNCHRONOUS_IO_NONALERT,
         };
@@ -1422,7 +1425,10 @@ impl Directory {
             FILE_READ_ATTRIBUTES | SYNCHRONIZE,
             FILE_OPEN_REPARSE_POINT | FILE_SYNCHRONOUS_IO_NONALERT,
         ) {
-            Ok(entry) => handle_identity(raw(&entry)).map(Some),
+            Ok(entry) => {
+                let seal = FileSeal::of(&fs::File::from(entry))?;
+                Ok(Some((seal.device(), seal.file_id())))
+            }
             Err(STATUS_OBJECT_NAME_NOT_FOUND) => Ok(None),
             Err(status) => Err(status_error(status)),
         }

@@ -430,7 +430,7 @@ fn a_removal_makes_the_absence_of_the_clone_binding_durable_before_it_removes_an
     assert_eq!(
         synced.into_inner(),
         [(
-            Some(platform::file_identity(&dir.join(LOCK_NAME)).unwrap()),
+            Some(regular::identity_at(&dir.join(LOCK_NAME)).unwrap()),
             sorted(&[BOOT, CONFIG, LOCK_NAME, LOG_NAME])
         )]
     );

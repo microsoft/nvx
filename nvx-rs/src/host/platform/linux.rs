@@ -655,14 +655,14 @@ impl Directory {
             .map(Self)
     }
 
-    /// Returns the device and inode of its entry `name`, not following a link, as
-    /// [`opened_file_identity`] gives them, or `None` if it has no such entry.
-    pub(crate) fn entry_identity(&self, name: &str) -> io::Result<Option<(u64, u64)>> {
+    /// Returns the device and inode of its entry `name`, not following a link, as the entry's
+    /// [`FileSeal`](crate::host::seal::FileSeal) holds them, or `None` if it has no such entry.
+    pub(crate) fn entry_identity(&self, name: &str) -> io::Result<Option<(u64, u128)>> {
         use nix::fcntl::AtFlags;
         use nix::sys::stat::fstatat;
 
         match fstatat(&self.0, name, AtFlags::AT_SYMLINK_NOFOLLOW) {
-            Ok(status) => Ok(Some((status.st_dev, status.st_ino))),
+            Ok(status) => Ok(Some((status.st_dev, u128::from(status.st_ino)))),
             Err(Errno::ENOENT) => Ok(None),
             Err(errno) => Err(errno.into()),
         }
