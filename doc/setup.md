@@ -114,6 +114,17 @@ cargo install --locked cargo-nextest --version \
   "$(sed -n 's/^cargo_nextest\.version=//p' scripts/setup/tool-versions.conf)"
 ```
 
+The hypervisor and the kernel also decide what NVX's benchmarks measure. CI measures the
+Linux/MSHV series on Azure Linux 3 with hypervisor build `10.0.26100.9444`, from `mshv`
+`26100.9444.2609032029.1`, and the `6.18.34.mshv3-1.azl3` kernel: the releases that
+[`setup-mshv.sh`](../scripts/setup/azure/linux/setup-mshv.sh) pins and that the
+[expected benchmark host](benchmarks.md#expected-benchmark-hosts) requires. The older `mshv2`
+software of #415, such as the `6.6.137.mshv2-2.azl3` kernel, measured snapshot-restore
+guest-exit teardown about four times slower than the `6.6.148-200.azl3` kernel, and the 8-vCPU
+512 MiB shell restore 1.7 times slower, so compare a host's results with CI's only on the same
+software. On Azure Linux, `rpm -q mshv kernel-mshv` reports the installed releases, and
+benchmark results record the running hypervisor's build.
+
 ### Windows / WHP
 
 Enable hardware virtualization in the host firmware. Then enable **Windows Hypervisor Platform**
