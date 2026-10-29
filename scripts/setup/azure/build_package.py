@@ -18,6 +18,24 @@ import yaml
 ROOT = Path(__file__).resolve().parent
 SETUP = ROOT.parent
 REPO = SETUP.parent.parent
+# The stdlib-only guest package. Guests run its commands from their bootstrap
+# directory as ``python -I -B <directory> <command>``: isolated mode keeps
+# environment variables and user site-packages out, and this zipapp-style
+# entry point at the directory's root imports the package next to it.
+GUEST_PACKAGE = "nvx_azure"
+GUEST_ENTRY_POINT = (
+    b'"""Run an NVX Azure bootstrap command from this directory."""\n\n'
+    b"import sys\n\nfrom nvx_azure.cli import main\n\nsys.exit(main())\n"
+)
+COMMON_MODULES = ("__init__.py", "cli.py", "common.py")
+LINUX_MODULES = (
+    *COMMON_MODULES,
+    "linux_bootstrap.py",
+    "linux_disk.py",
+    "linux_firewall.py",
+    "linux_mshv.py",
+)
+LINUX_ENTRY_POINT = "/usr/bin/python3 -I -B /opt/nvx-bootstrap"
 
 
 class LinuxDisk(TypedDict):
@@ -422,13 +440,16 @@ def source(path: str) -> bytes:
         location = SETUP / path
     elif path == "rust-toolchain.toml":
         location = REPO / path
-    elif path.startswith(("linux/", "windows/")) and ".." not in Path(path).parts:
+    elif (
+        path.startswith(("linux/", "windows/", GUEST_PACKAGE + "/"))
+        and ".." not in Path(path).parts
+    ):
         location = ROOT / path
     else:
         raise ValueError(f"Unsupported package source: {path}")
     data = location.read_bytes()
-    if path.endswith(".sh") and b"\r" in data:
-        raise ValueError(f"Shell source must use LF line endings: {path}")
+    if path.endswith((".sh", ".py")) and b"\r" in data:
+        raise ValueError(f"Shell and Python sources must use LF line endings: {path}")
     if path.endswith(".ps1"):
         data = data.replace(b"\r\n", b"\n")
     return data
@@ -461,6 +482,12 @@ def gzip_bytes(data: bytes) -> bytes:
     return stream.getvalue()
 
 
+def guest_modules(names: tuple[str, ...]) -> dict[str, bytes]:
+    return {
+        f"{GUEST_PACKAGE}/{name}": source(f"{GUEST_PACKAGE}/{name}") for name in names
+    }
+
+
 def linux_payload(
     config: LinuxConfig,
 ) -> tuple[bytes, dict[str, bytes], dict[str, bytes]]:
@@ -468,20 +495,16 @@ def linux_payload(
         "config.json": configuration_bytes(config),
         "setup-linux.sh": source("setup-linux.sh"),
         "tool-versions.conf": source("tool-versions.conf"),
-        "setup-data-disk.sh": source("linux/setup-data-disk.sh"),
-        "bootstrap-runner.sh": source("linux/bootstrap-runner.sh"),
-        "block-runner-metadata.sh": source("linux/block-runner-metadata.sh"),
+        "__main__.py": GUEST_ENTRY_POINT,
+        **guest_modules(LINUX_MODULES),
     }
-    if config["kernelMode"] == "azurelinux-mshv":
-        files["setup-mshv.sh"] = source("linux/setup-mshv.sh")
-        files["verify-mshv.sh"] = source("linux/verify-mshv.sh")
     entries = [
         {
             "path": "/opt/nvx-bootstrap/" + name,
             "owner": "root:root",
             "permissions": "0600"
-            if name.endswith(".json")
-            else ("0644" if name.endswith(".conf") else "0755"),
+            if name == "config.json"
+            else ("0755" if name.endswith(".sh") else "0644"),
             "encoding": "gz+b64",
             "content": base64.b64encode(gzip_bytes(data)).decode(),
         }
@@ -491,7 +514,7 @@ def linux_payload(
         "[Unit]\nDescription=Configure the NVX CI runner\nWants=network-online.target\n"
         "After=network-online.target cloud-final.service waagent.service\n\n"
         "[Service]\nType=oneshot\nRemainAfterExit=yes\n"
-        "ExecStart=/opt/nvx-bootstrap/bootstrap-runner.sh\n"
+        f"ExecStart={LINUX_ENTRY_POINT} linux-bootstrap\n"
         "Restart=on-failure\nRestartSec=60\nTimeoutStartSec=4h\n\n"
         "[Install]\nWantedBy=multi-user.target\n"
     )
@@ -511,7 +534,7 @@ def linux_payload(
             "content": (
                 "[Unit]\nDescription=Block Azure metadata for NVX CI runner jobs\n\n"
                 "[Service]\nType=oneshot\nRemainAfterExit=yes\n"
-                "ExecStart=/opt/nvx-bootstrap/block-runner-metadata.sh\n\n"
+                f"ExecStart={LINUX_ENTRY_POINT} linux-block-metadata\n\n"
                 "[Install]\nWantedBy=multi-user.target\n"
             ),
         }

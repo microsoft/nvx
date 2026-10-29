@@ -51,12 +51,7 @@ runs:
           scripts/setup/setup-linux.sh
         ${SHELLCHECK} --shell=bash \
           .github/actions/run-benchmark/forward-signals.sh \
-          .github/specula/setup-runner.sh guest/ubuntu/nvx-bashrc \
-          scripts/setup/azure/linux/bootstrap-runner.sh \
-          scripts/setup/azure/linux/block-runner-metadata.sh \
-          scripts/setup/azure/linux/setup-data-disk.sh \
-          scripts/setup/azure/linux/setup-mshv.sh \
-          scripts/setup/azure/linux/verify-mshv.sh
+          .github/specula/setup-runner.sh guest/ubuntu/nvx-bashrc
         python -m pyright --pythonplatform Linux
         python -m pyright --pythonplatform Windows
         python -m ruff format --check scripts .github/specula
@@ -72,12 +67,7 @@ runs:
           scripts/setup/setup-linux.sh
         ${SHFMT} -d -ln bash -i 4 -ci \
           .github/actions/run-benchmark/forward-signals.sh \
-          .github/specula/setup-runner.sh guest/ubuntu/nvx-bashrc \
-          scripts/setup/azure/linux/bootstrap-runner.sh \
-          scripts/setup/azure/linux/block-runner-metadata.sh \
-          scripts/setup/azure/linux/setup-data-disk.sh \
-          scripts/setup/azure/linux/setup-mshv.sh \
-          scripts/setup/azure/linux/verify-mshv.sh
+          .github/specula/setup-runner.sh guest/ubuntu/nvx-bashrc
 
     - name: Check Markdown links
       shell: bash

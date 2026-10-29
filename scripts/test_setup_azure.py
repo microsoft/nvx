@@ -1,31 +1,23 @@
 import base64
-import contextlib
 import gzip
 import hashlib
 import io
 import json
 import os
-import re
 import shutil
 import subprocess
 import sys
 import tempfile
 import unittest
-import urllib.request
 import zipfile
 from pathlib import Path
-from types import CodeType
-from typing import Literal, Protocol, TypedDict, cast, overload
+from typing import Literal, TypedDict, cast, overload
 from unittest.mock import patch
 
 import yaml
 
 from scripts.powershell_testing import run_powershell
 from scripts.setup.azure import build_package as builder
-
-
-class HttpOpener(Protocol):
-    def open(self, request: urllib.request.Request, timeout: int) -> io.StringIO: ...
 
 
 class CloudFiles(TypedDict):
@@ -50,55 +42,6 @@ class PackageTests(unittest.TestCase):
     ) -> builder.RunnerConfig:
         return builder.load_config(builder.ROOT / platform / "config.example.json")
 
-    def embedded_linux(self, index: int) -> CodeType:
-        chunks = re.findall(
-            r"<<'PY'\n(.*?)\nPY",
-            builder.source("linux/bootstrap-runner.sh").decode(),
-            re.S,
-        )
-        self.assertEqual(len(chunks), 3)
-        return compile(chunks[index], "bootstrap-runner.sh:python", "exec")
-
-    def execute_linux(
-        self, index: int, config: builder.LinuxConfig, opener: HttpOpener | None = None
-    ) -> str:
-        with tempfile.TemporaryDirectory() as temporary:
-            path = Path(temporary) / "config.json"
-            path.write_bytes(builder.configuration_bytes(config))
-            output = io.StringIO()
-            with (
-                patch.object(sys, "argv", ["bootstrap", str(path)]),
-                contextlib.redirect_stdout(output),
-            ):
-                if opener is None:
-                    exec(self.embedded_linux(index), {})
-                else:
-                    with patch.object(
-                        urllib.request, "build_opener", return_value=opener
-                    ):
-                        exec(self.embedded_linux(index), {})
-            return output.getvalue()
-
-    def linux_metadata(self, config: builder.LinuxConfig) -> dict[str, object]:
-        disk = {
-            "diskSizeGB": "512",
-            "managedDisk": {"storageAccountType": "Premium_LRS"},
-            "caching": "None",
-            "writeAcceleratorEnabled": "false",
-        }
-        return {
-            "subscriptionId": config["subscriptionId"],
-            "resourceGroupName": config["resourceGroup"].upper(),
-            "vmScaleSetName": config["vmssName"].upper(),
-            "name": config["vmssName"] + "_7",
-            "vmSize": "Standard_D8s_v5",
-            "storageProfile": {
-                "osDisk": {**disk, "diskSizeGB": "128", "caching": "ReadWrite"},
-                "dataDisks": [{**disk, "lun": "0"}],
-                "resourceDisk": {"size": ""},
-            },
-        }
-
     def execute_windows(self, script: str, **environment: str) -> str:
         powershell = shutil.which("powershell.exe")
         if os.name != "nt" or powershell is None:
@@ -120,296 +63,136 @@ class PackageTests(unittest.TestCase):
         self.assertIn(sentinel, result.stdout)
         return result.stdout
 
-    def shell_function(self, path: str, name: str) -> str:
-        source = builder.source(path).decode()
-        start = source.index(f"\n{name}() {{\n") + 1
-        return source[start : source.index("\n}\n", start) + 3]
-
-    def execute_bash(
-        self, script: str, *arguments: str
-    ) -> subprocess.CompletedProcess[bytes]:
-        shell = shutil.which("bash")
-        if shell is None:
-            self.skipTest("Bash is unavailable")
-        result = subprocess.run(
-            [shell, "-s", "--", *arguments],
-            input=(script + "\nprintf '%s\\n' NVX_AZURE_LINUX_MOCK_OK\n").encode(),
-            capture_output=True,
-            timeout=30,
-            check=False,
-        )
-        if result.returncode == 0:
-            self.assertIn(b"NVX_AZURE_LINUX_MOCK_OK", result.stdout)
-        return result
-
-    def test_embedded_linux_configuration_reader(self):
-        config = self.configuration("linux")
-        values = self.execute_linux(0, config).splitlines()
-        self.assertEqual(
-            values,
-            [
-                "kvm",
-                "ciadmin",
-                "microsoft/nvx",
-                "",
-                "/opt/nvx-runner",
-                "0",
-                "/mnt/data",
-                "preinstalled",
-            ],
-        )
-
-    def test_linux_rejects_reserved_administrator_before_host_setup(self):
-        for administrator in ("root", "nvx-runner"):
-            with self.subTest(administrator=administrator):
-                config = self.configuration("linux")
-                config["adminUsername"] = administrator
-                with self.assertRaisesRegex(ValueError, "root or nvx-runner"):
-                    builder.normalize_config(config)
-                with self.assertRaisesRegex(SystemExit, "root or nvx-runner"):
-                    self.execute_linux(0, config)
-
-    def test_embedded_linux_passes_only_extra_labels_to_generic_setup(self):
-        config = self.configuration("linux")
-        config["runnerLabels"].append("isolated")
-        self.assertEqual(self.execute_linux(0, config).splitlines()[3], "isolated")
-
-    def test_embedded_linux_maps_runner_roles_to_the_setup_switch(self):
-        bootstrap = builder.source("linux/bootstrap-runner.sh").decode()
-        self.assertIn("registration_arguments+=(--benchmark-runner)", bootstrap)
-        metadata = self.linux_metadata(self.configuration("linux"))
-
-        class Opener:
-            def open(
-                self, request: urllib.request.Request, timeout: int
-            ) -> io.StringIO:
-                return io.StringIO(json.dumps(metadata))
-
-        for role, benchmark in (
-            (None, "false"),
-            ("general", "false"),
-            ("benchmark", "true"),
-        ):
-            with self.subTest(role=role):
-                config = self.configuration("linux")
-                if role is not None:
-                    config["runnerLabels"].append(role)
-                values = self.execute_linux(0, config).splitlines()
-                self.assertEqual(values[3], "")
-                instance = self.execute_linux(1, config, Opener()).splitlines()
-                self.assertEqual(instance[1], benchmark)
-
-        config = self.configuration("linux")
-        config["runnerLabels"].extend(("general", "benchmark"))
-        with self.assertRaisesRegex(SystemExit, "both general and benchmark"):
-            self.execute_linux(0, config)
-
-    def test_embedded_linux_metadata_identity(self):
-        config = self.configuration("linux")
-        metadata = self.linux_metadata(config)
-
-        class Opener:
-            def open(
-                self, request: urllib.request.Request, timeout: int
-            ) -> io.StringIO:
-                return io.StringIO(json.dumps(metadata))
-
-        self.assertEqual(
-            self.execute_linux(1, config, Opener()).splitlines()[0], "nvx-linux-8"
-        )
-        config["runnerNumberOffset"] = 0
-        self.assertEqual(
-            self.execute_linux(1, config, Opener()).splitlines()[0], "nvx-linux-7"
-        )
-        metadata["vmScaleSetName"] = "another-vmss"
-        with self.assertRaisesRegex(SystemExit, "does not identify"):
-            self.execute_linux(1, config, Opener())
-
-    def test_embedded_linux_selects_one_benchmark_runner(self):
-        config = self.configuration("linux")
-        config["runnerLabels"].extend(("general", "isolated"))
-        config["benchmarkRunnerName"] = "nvx-linux-8"
-        metadata = self.linux_metadata(config)
-
-        class Opener:
-            def open(
-                self, request: urllib.request.Request, timeout: int
-            ) -> io.StringIO:
-                return io.StringIO(json.dumps(metadata))
-
-        self.assertEqual(self.execute_linux(0, config).splitlines()[3], "isolated")
-        self.assertEqual(
-            self.execute_linux(1, config, Opener()).splitlines()[1], "true"
-        )
-        metadata["name"] = config["vmssName"] + "_8"
-        self.assertEqual(
-            self.execute_linux(1, config, Opener()).splitlines()[1], "false"
-        )
-        config["runnerNumberOffset"] = 0
-        self.assertEqual(
-            self.execute_linux(1, config, Opener()).splitlines()[1], "true"
-        )
-
-    def test_embedded_linux_projects_only_safe_host_metadata(self):
-        config = self.configuration("linux")
-        metadata = self.linux_metadata(config)
-        metadata["tags"] = "private-tag"
-        metadata["userData"] = "private-user-data"
-
-        class Opener:
-            def open(
-                self, request: urllib.request.Request, timeout: int
-            ) -> io.StringIO:
-                return io.StringIO(json.dumps(metadata))
-
-        snapshot = self.execute_linux(1, config, Opener()).splitlines()[2]
-        self.assertEqual(
-            set(json.loads(snapshot)),
-            {"vmSize", "storageProfile"},
-        )
-        for private in ("private-tag", "private-user-data", config["vmssName"]):
-            self.assertNotIn(private, snapshot)
-        metadata["vmSize"] = "Standard_E8-4s_v5"
-        self.assertEqual(
-            json.loads(self.execute_linux(1, config, Opener()).splitlines()[2])[
-                "vmSize"
-            ],
-            metadata["vmSize"],
-        )
-        invalid_metadata: tuple[dict[str, object], ...] = (
-            {"vmSize": "invalid-size"},
-            {"storageProfile": {"dataDisks": []}},
-        )
-        for invalid in invalid_metadata:
-            with self.subTest(invalid=invalid):
-                original = metadata.copy()
-                metadata.update(invalid)
-                with self.assertRaisesRegex(SystemExit, "Azure compute metadata"):
-                    self.execute_linux(1, config, Opener())
-                metadata = original
-
-    def test_embedded_linux_registration_flow(self):
-        requests: list[urllib.request.Request] = []
-
-        class Opener:
-            def open(
-                self, request: urllib.request.Request, timeout: int
-            ) -> io.StringIO:
-                requests.append(request)
-                if "/metadata/identity/" in request.full_url:
-                    data = {"access_token": "test-managed-identity"}
-                elif ".vault.azure.net/" in request.full_url:
-                    self.assert_header(request, "Bearer test-managed-identity")
-                    data = {"value": "test-github-bootstrap"}
-                elif request.full_url.endswith("/registration-token"):
-                    self.assert_header(request, "Bearer test-github-bootstrap")
-                    if request.get_method() != "POST":
-                        raise AssertionError("Registration must use POST")
-                    data = {"token": "test-registration"}
-                else:
-                    raise AssertionError("Unexpected URL")
-                return io.StringIO(json.dumps(data))
-
-            def assert_header(
-                self, request: urllib.request.Request, expected: str
-            ) -> None:
-                if request.get_header("Authorization") != expected:
-                    raise AssertionError("Wrong authorization header")
-
-        self.assertEqual(
-            self.execute_linux(2, self.configuration("linux"), Opener()).strip(),
-            "test-registration",
-        )
-        self.assertEqual(len(requests), 3)
-
-    def test_embedded_linux_empty_credential_fails(self):
-        requests: list[urllib.request.Request] = []
-
-        class Opener:
-            def open(
-                self, request: urllib.request.Request, timeout: int
-            ) -> io.StringIO:
-                requests.append(request)
-                data = (
-                    {"access_token": "test-managed-identity"}
-                    if "/metadata/identity/" in request.full_url
-                    else {"value": ""}
+    def linux_guest_files(self, payload: bytes) -> tuple[CloudFiles, dict[str, bytes]]:
+        cloud = cast(CloudFiles, yaml.safe_load(payload))
+        files: dict[str, bytes] = {}
+        for entry in cloud["write_files"]:
+            if entry.get("encoding") == "gz+b64":
+                self.assertTrue(entry["path"].startswith("/opt/nvx-bootstrap/"))
+                files[entry["path"].removeprefix("/opt/nvx-bootstrap/")] = (
+                    gzip.decompress(base64.b64decode(entry["content"], validate=True))
                 )
-                return io.StringIO(json.dumps(data))
-
-        with self.assertRaisesRegex(SystemExit, "no runner bootstrap credential"):
-            self.execute_linux(2, self.configuration("linux"), Opener())
-        self.assertEqual(len(requests), 2)
+        return cloud, files
 
     def test_linux_files_round_trip(self):
         config = self.configuration("linux")
         with tempfile.TemporaryDirectory() as temporary:
             manifest = builder.build_package(config, temporary)
-            cloud = cast(
-                CloudFiles,
-                yaml.safe_load((Path(temporary) / "cloud-init.yaml").read_text()),
+            cloud, names = self.linux_guest_files(
+                (Path(temporary) / "cloud-init.yaml").read_bytes()
             )
+            # setup-linux.sh runner mode requires diff, and the controller python3.
             self.assertIn("diffutils", cloud["packages"])
-            names: dict[str, bytes] = {}
-            for entry in cloud["write_files"]:
-                if entry.get("encoding") == "gz+b64":
-                    content = gzip.decompress(
-                        base64.b64decode(entry["content"], validate=True)
-                    )
-                    name = entry["path"].split("/")[-1]
-                    names[name] = content
-                    self.assertEqual(
-                        hashlib.sha256(content).hexdigest(),
-                        manifest["guestFiles"][name],
-                    )
-                    expected_mode = (
-                        "0600"
-                        if name == "config.json"
-                        else ("0644" if name == "tool-versions.conf" else "0755")
-                    )
-                    self.assertEqual(entry["permissions"], expected_mode)
+            self.assertIn("python3", cloud["packages"])
+            modules = {f"nvx_azure/{name}" for name in builder.LINUX_MODULES}
             self.assertEqual(
                 set(names),
                 {
                     "config.json",
                     "setup-linux.sh",
                     "tool-versions.conf",
-                    "bootstrap-runner.sh",
-                    "block-runner-metadata.sh",
-                    "setup-data-disk.sh",
+                    "__main__.py",
+                    *modules,
                 },
             )
-            metadata_unit = next(
-                entry
+            self.assertEqual(set(manifest["guestFiles"]), set(names))
+            for entry in cloud["write_files"]:
+                if entry.get("encoding") != "gz+b64":
+                    continue
+                name = entry["path"].removeprefix("/opt/nvx-bootstrap/")
+                self.assertEqual(entry["owner"], "root:root")
+                self.assertEqual(
+                    hashlib.sha256(names[name]).hexdigest(),
+                    manifest["guestFiles"][name],
+                )
+                expected_mode = (
+                    "0600"
+                    if name == "config.json"
+                    else ("0755" if name.endswith(".sh") else "0644")
+                )
+                self.assertEqual(entry["permissions"], expected_mode)
+            # Only the shared installer remains a shell program.
+            self.assertEqual(
+                [name for name in names if name.endswith(".sh")],
+                ["setup-linux.sh"],
+            )
+            for module in modules:
+                self.assertEqual(names[module], builder.source(module))
+            self.assertEqual(names["__main__.py"], builder.GUEST_ENTRY_POINT)
+            units = {
+                entry["path"].removeprefix("/etc/systemd/system/"): entry
                 for entry in cloud["write_files"]
-                if entry["path"]
-                == "/etc/systemd/system/nvx-runner-metadata-block.service"
+                if entry["path"].startswith("/etc/systemd/system/")
+            }
+            self.assertEqual(
+                set(units),
+                {
+                    "setup-nvx-github-runner.service",
+                    "nvx-runner-metadata-block.service",
+                },
             )
-            self.assertEqual(metadata_unit["permissions"], "0644")
-            self.assertIn(
-                "ExecStart=/opt/nvx-bootstrap/block-runner-metadata.sh",
-                metadata_unit["content"],
-            )
-            bootstrap = names["bootstrap-runner.sh"]
-            self.assertLess(
-                bootstrap.index(b'systemctl restart "$metadata_service"'),
-                bootstrap.index(b"runner_token=$("),
-            )
-            self.assertIn(b'systemctl enable "$metadata_service"', bootstrap)
-            self.assertIn(b"Requires=%s", bootstrap)
-            self.assertIn(b"ExecStartPre=+%s", bootstrap)
+            for unit, command in (
+                ("setup-nvx-github-runner.service", "linux-bootstrap"),
+                ("nvx-runner-metadata-block.service", "linux-block-metadata"),
+            ):
+                self.assertEqual(units[unit]["permissions"], "0644")
+                self.assertIn(
+                    "\nExecStart=/usr/bin/python3 -I -B /opt/nvx-bootstrap "
+                    + command
+                    + "\n",
+                    units[unit]["content"],
+                )
             self.assertEqual(json.loads(names["config.json"]), config)
             self.assertEqual(names["setup-linux.sh"], builder.source("setup-linux.sh"))
-            # Both setup passes configure a runner host, not a development host.
-            self.assertIn(b"setup_arguments=(\n    --runner-only\n", bootstrap)
-            self.assertEqual(
-                bootstrap.count(b'sh "$setup_root/setup-linux.sh"'),
-                2,
-            )
             self.assertEqual(
                 names["tool-versions.conf"], builder.source("tool-versions.conf")
             )
             self.assertLessEqual(manifest["customDataBytes"], 65535)
+
+    def test_packaged_linux_guest_runs_in_isolated_mode(self):
+        _, files, _ = builder.linux_payload(self.configuration("linux"))
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "nvx-bootstrap"
+            for name, data in files.items():
+                (root / name).parent.mkdir(parents=True, exist_ok=True)
+                (root / name).write_bytes(data)
+            result = subprocess.run(
+                [sys.executable, "-I", "-B", str(root), "--help"],
+                capture_output=True,
+                text=True,
+                timeout=60,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            for command in (
+                "linux-bootstrap",
+                "linux-refresh-metadata",
+                "linux-block-metadata",
+                "linux-verify-mshv",
+            ):
+                self.assertIn(command, result.stdout)
+            # Every packaged module imports from the guest directory alone.
+            modules = ", ".join(
+                "nvx_azure." + name.removesuffix(".py")
+                for name in builder.LINUX_MODULES
+                if name != "__init__.py"
+            )
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    "-I",
+                    "-B",
+                    "-c",
+                    f"import sys; sys.path.insert(0, sys.argv[1]); import {modules}",
+                    str(root),
+                ],
+                capture_output=True,
+                text=True,
+                timeout=60,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(list(root.rglob("__pycache__")), [])
 
     def test_linux_gzip_headers_are_independent_of_builder_platform(self):
         original_compress = gzip.compress
@@ -442,863 +225,31 @@ class PackageTests(unittest.TestCase):
                     self.assertEqual(compressed[9], 255)
                     self.assertEqual(
                         gzip.decompress(compressed),
-                        files[entry["path"].split("/")[-1]],
+                        files[entry["path"].removeprefix("/opt/nvx-bootstrap/")],
                     )
         self.assertEqual(outputs[0], outputs[1])
 
-    def test_mshv_modes(self):
+    def test_mshv_modes_share_the_guest_files(self):
         config = self.configuration("linux")
         config["backend"] = "mshv"
         config["runnerLabels"] = ["linux", "mshv", "virtual-machine"]
-        modes: tuple[tuple[str, set[str]], ...] = (
-            ("preinstalled", set()),
-            ("azurelinux-mshv", {"setup-mshv.sh", "verify-mshv.sh"}),
-        )
-        for mode, additional in modes:
-            with self.subTest(mode=mode):
+        guest_files: list[dict[str, str]] = []
+        for mode in ("preinstalled", "azurelinux-mshv"):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as temporary:
                 config["kernelMode"] = mode
-                with tempfile.TemporaryDirectory() as temporary:
-                    manifest = builder.build_package(config, temporary)
-                    self.assertEqual(
-                        set(manifest["guestFiles"])
-                        - {
-                            "config.json",
-                            "setup-linux.sh",
-                            "tool-versions.conf",
-                            "setup-data-disk.sh",
-                            "bootstrap-runner.sh",
-                            "block-runner-metadata.sh",
-                        },
-                        additional,
-                    )
-                    self.assertLessEqual(manifest["customDataBytes"], 65535)
-
-    def test_linux_runner_metadata_firewall_is_idempotent_and_fail_closed(self):
-        source = builder.source("linux/block-runner-metadata.sh").decode()
-        lock = "exec 9>/run/nvx-runner-metadata.lock"
-        self.assertEqual(source.count(lock), 1)
-        source = source.replace(lock, 'exec 9>"$test_lock"')
-        mock = r"""
-set -euo pipefail
-initial=$1
-fail_insert=$2
-fail_probe=$3
-fail_delete=$4
-test_lock=$5
-rules=()
-if [ -n "$initial" ]; then read -r -a rules <<<"$initial"; fi
-insertions=0
-locked=0
-protection_required=0
-assert_protected() {
-    local item
-    for item in "${rules[@]}"; do
-        case "$item" in
-            old | pending | stable) return ;;
-            ACCEPT) break ;;
-        esac
-    done
-    echo 'ERROR: metadata protection was removed during replacement' >&2
-    exit 99
-}
-for item in "${rules[@]}"; do
-    case "$item" in old | pending | stable) protection_required=1 ;; esac
-done
-dump_state() {
-    local status=$?
-    printf 'RULES:%s\n' "${rules[*]}"
-    if [ "$protection_required" -eq 1 ]; then assert_protected; fi
-    return "$status"
-}
-trap dump_state EXIT
-id() {
-    case "$*" in
-        -u) printf '0\n' ;;
-        '-u nvx-runner') printf '1001\n' ;;
-        *) return 1 ;;
-    esac
-}
-flock() {
-    [ "$*" = '-x -w 30 9' ] || return 1
-    locked=1
-}
-iptables() {
-    [ "$locked" -eq 1 ] || {
-        echo 'ERROR: firewall operation without update lock' >&2
-        return 2
-    }
-    [ "$1 $2" = '-w 10' ] || return 2
-    local operation=$3 kind index item
-    shift 3
-    [ "$1" = OUTPUT ] || return 2
-    shift
-    if [ "$operation" = -I ]; then
-        [ "$1" = 1 ] || return 2
-        shift
-    fi
-    case "$*" in
-        '-d 169.254.169.254/32 -m owner --uid-owner 1001 -j REJECT') kind=old ;;
-        '-d 169.254.169.254/32 -m owner --uid-owner 1001 -m comment --comment nvx-runner-metadata-pending -j REJECT')
-            kind=pending ;;
-        '-d 169.254.169.254/32 -m owner --uid-owner 1001 -m comment --comment nvx-runner-metadata -j REJECT')
-            kind=stable ;;
-        *) echo "ERROR: unexpected firewall match: $*" >&2; return 2 ;;
-    esac
-    case "$operation" in
-        -C)
-            if { [ "$fail_probe" = pending ] && [ "$insertions" -eq 1 ] && [ "$kind" = pending ]; } ||
-                { [ "$fail_probe" = stable ] && [ "$insertions" -eq 2 ] && [ "$kind" = stable ]; }; then
-                return 2
-            fi
-            for item in "${rules[@]}"; do
-                if [ "$item" = "$kind" ]; then return 0; fi
-            done
-            return 1 ;;
-        -I)
-            insertions=$((insertions + 1))
-            if [ "$insertions" -eq "$fail_insert" ]; then
-                echo 'ERROR: mock firewall insertion failed' >&2
-                return 1
-            fi
-            rules=("$kind" "${rules[@]}")
-            protection_required=1
-            assert_protected ;;
-        -D)
-            if [ "$fail_delete" -eq 1 ]; then
-                echo 'ERROR: mock firewall deletion failed' >&2
-                return 1
-            fi
-            for index in "${!rules[@]}"; do
-                if [ "${rules[index]}" = "$kind" ]; then
-                    unset 'rules[index]'
-                    rules=("${rules[@]}")
-                    assert_protected
-                    return
-                fi
-            done
-            echo 'ERROR: missing rule for deletion' >&2
-            return 1 ;;
-        *) echo 'ERROR: unexpected firewall operation' >&2; return 2 ;;
-    esac
-}
-"""
-        cases = (
-            ("", "0", "none", "0", True),
-            ("old", "0", "none", "0", True),
-            ("stable", "0", "none", "0", True),
-            ("pending", "0", "none", "0", True),
-            ("ACCEPT old stable pending old", "0", "none", "0", True),
-            ("", "1", "none", "0", False),
-            ("old", "1", "none", "0", False),
-            ("old", "2", "none", "0", False),
-            ("old", "0", "pending", "0", False),
-            ("old", "0", "stable", "0", False),
-            ("old", "0", "none", "1", False),
-        )
-        for initial, insertion, probe, deletion, succeeds in cases:
-            with (
-                self.subTest(
-                    initial=initial, insertion=insertion, probe=probe, deletion=deletion
-                ),
-                tempfile.TemporaryDirectory() as temporary,
-            ):
-                result = self.execute_bash(
-                    mock + source,
-                    initial,
-                    insertion,
-                    probe,
-                    deletion,
-                    (Path(temporary) / "metadata.lock").as_posix(),
-                )
-                self.assertEqual(
-                    result.returncode == 0,
-                    succeeds,
-                    (result.stdout + result.stderr).decode(),
-                )
-                [state] = [
-                    line.removeprefix("RULES:").split()
-                    for line in result.stdout.decode().splitlines()
-                    if line.startswith("RULES:")
-                ]
-                self.assertEqual(state.count("ACCEPT"), initial.split().count("ACCEPT"))
-                self.assertNotEqual(result.returncode, 99, result.stderr.decode())
-                if succeeds:
-                    self.assertEqual(state[0], "stable")
-                    self.assertEqual(state.count("stable"), 1)
-                    self.assertNotIn("old", state)
-                    self.assertNotIn("pending", state)
-                else:
-                    if initial:
-                        self.assertTrue(
-                            {"old", "pending", "stable"}.intersection(state)
-                        )
-                    if insertion == "1":
-                        self.assertEqual(state, initial.split())
-                    self.assertIn(b"ERROR:", result.stderr)
-
-    def test_linux_partitioning_tools_use_distribution_packages(self):
-        source = builder.source("linux/setup-data-disk.sh").decode()
-        self.assertLess(
-            source.index("\nensure_partitioning_tool\n"), source.index('\nDISK=""')
-        )
-        function = self.shell_function(
-            "linux/setup-data-disk.sh", "ensure_partitioning_tool"
-        )
-        mock = r"""
-set -euo pipefail
-manager=$1
-installed=$2
-install_result=$3
-supply_tool=$4
-command() {
-    if [ "$1" = -v ]; then
-        case "$2" in
-            sfdisk) [ "$installed" -eq 1 ]; return ;;
-            apt-get | tdnf | dnf) [ "$manager" = "$2" ]; return ;;
-        esac
-    fi
-    builtin command "$@"
-}
-install_mock() {
-    case "$*" in
-        'apt-get install -y fdisk')
-            [ "$DEBIAN_FRONTEND" = noninteractive ] ;;
-        'tdnf install -y util-linux' | 'dnf install -y util-linux') ;;
-        *) echo 'ERROR: unexpected package installation' >&2; return 1 ;;
-    esac
-    echo "$*"
-    if [ "$install_result" -ne 0 ]; then
-        echo 'ERROR: mock package installation failed' >&2
-        return 1
-    fi
-    installed=$supply_tool
-}
-apt-get() { install_mock apt-get "$@"; }
-tdnf() { install_mock tdnf "$@"; }
-dnf() { install_mock dnf "$@"; }
-"""
-        cases = (
-            ("none", "1", "0", "1", None),
-            ("apt-get", "0", "0", "1", "apt-get install -y fdisk"),
-            ("tdnf", "0", "0", "1", "tdnf install -y util-linux"),
-            ("dnf", "0", "0", "1", "dnf install -y util-linux"),
-            ("none", "0", "0", "0", "no supported package manager"),
-            ("apt-get", "0", "1", "0", "mock package installation failed"),
-            ("apt-get", "0", "0", "0", "unavailable after installing"),
-        )
-        for manager, installed, status, supplied, expected in cases:
-            with self.subTest(manager=manager, installed=installed, status=status):
-                result = self.execute_bash(
-                    mock + function + "\nensure_partitioning_tool\n",
-                    manager,
-                    installed,
-                    status,
-                    supplied,
-                )
-                succeeds = installed == "1" or (
-                    manager != "none" and status == "0" and supplied == "1"
-                )
-                self.assertEqual(
-                    result.returncode == 0,
-                    succeeds,
-                    (result.stdout + result.stderr).decode(),
-                )
-                if expected is not None:
-                    self.assertIn(
-                        expected,
-                        (result.stdout if succeeds else result.stderr).decode(),
-                    )
-                if installed == "1":
-                    self.assertNotIn(b"install -y", result.stdout)
-
-    def test_linux_initialization_requires_verified_blankness_or_owned_marker(self):
-        source = builder.source("linux/setup-data-disk.sh").decode()
-        start = source.index('\n    if has_signatures "$DISKDEV"; then')
-        end = source.index('\n    echo "Atomically creating a GPT', start)
-        guard = source[start:end]
-        self.assertIn('verify_blank_device "$DISKDEV"', guard)
-        table_id = source.split("INIT_TABLE_ID=", 1)[1].splitlines()[0]
-        functions = self.shell_function(
-            "linux/setup-data-disk.sh", "has_signatures"
-        ) + self.shell_function("linux/setup-data-disk.sh", "verify_blank_device")
-        mock = r"""
-set -euo pipefail
-DISKDEV=$1
-device_size=$2
-marker=$3
-INIT_TABLE_ID=$4
-blockdev() {
-    [ "$*" = "--getsize64 $DISKDEV" ] || return 1
-    if [ "$device_size" = error ]; then
-        echo 'ERROR: mock device size probe failed' >&2
-        return 1
-    fi
-    printf '%s\n' "$device_size"
-}
-wipefs() {
-    [ "$*" = "-n $DISKDEV" ] || return 1
-    if [ "$marker" != none ]; then echo 'recognized GPT signature'; fi
-}
-sfdisk() {
-    [ "$*" = "--dump $DISKDEV" ] || {
-        echo 'ERROR: unexpected destructive disk operation' >&2
-        exit 91
-    }
-    if [ "$marker" = other ]; then
-        echo 'label-id: unrelated'
-    else
-        printf 'label-id: %s\n' "$INIT_TABLE_ID"
-    fi
-    if [ "$marker" = partitioned ]; then
-        echo '/dev/mock1 : start=2048, size=2048'
-    fi
-}
-"""
-        zeros = b"\0" * (2 * 1024 * 1024)
-        raw_data = zeros[:-1] + b"X"
-        cases: tuple[tuple[str, bytes | None, str, str, bool], ...] = (
-            ("zero", zeros, str(len(zeros)), "none", True),
-            ("unrecognized-tail", raw_data, str(len(raw_data)), "none", False),
-            ("owned-recovery", raw_data, str(len(raw_data)), "owned", True),
-            ("unknown-marker", raw_data, str(len(raw_data)), "other", False),
-            (
-                "owned-with-partition",
-                raw_data,
-                str(len(raw_data)),
-                "partitioned",
-                False,
-            ),
-            ("short-read", zeros[:1024], str(len(zeros)), "none", False),
-            ("read-error", None, str(len(zeros)), "none", False),
-            ("empty-size", zeros, "0", "none", False),
-            ("size-error", zeros, "error", "none", False),
-        )
-        for case, contents, size, marker, succeeds in cases:
-            with self.subTest(case=case), tempfile.TemporaryDirectory() as temporary:
-                disk = Path(temporary) / "disk"
-                if contents is not None:
-                    disk.write_bytes(contents)
-                result = self.execute_bash(
-                    mock + functions + guard + "\necho INITIALIZATION_ALLOWED=1\n",
-                    disk.as_posix(),
-                    size,
-                    marker,
-                    table_id,
-                )
-                self.assertEqual(
-                    result.returncode == 0,
-                    succeeds,
-                    (result.stdout + result.stderr).decode(),
-                )
-                if succeeds:
-                    self.assertIn(b"INITIALIZATION_ALLOWED=1", result.stdout)
-                else:
-                    self.assertNotIn(b"INITIALIZATION_ALLOWED=1", result.stdout)
-                    self.assertIn(b"ERROR:", result.stderr)
-
-    def test_linux_metadata_refresh_updates_snapshot_without_provisioning(self):
-        source = builder.source("linux/bootstrap-runner.sh").decode()
-        for original_path, replacement in (
-            (
-                "exec >>/var/log/nvx-runner-bootstrap.log 2>&1",
-                'exec >>"$test_root/bootstrap.log" 2>&1',
-            ),
-            (
-                "metadata_directory=/var/lib/nvx-ci-host-metadata",
-                'metadata_directory="$test_root/metadata"',
-            ),
-        ):
-            self.assertEqual(source.count(original_path), 1)
-            source = source.replace(original_path, replacement)
-        mock = r"""
-set -euo pipefail
-test_root=$1
-scenario=$2
-python3() {
-    local count
-    count=$(cat "$test_root/python-calls")
-    count=$((count + 1))
-    printf '%s\n' "$count" >"$test_root/python-calls"
-    case "$count" in
-        1) printf '%s\n' kvm ciadmin microsoft/nvx '' /opt/nvx-runner 0 /mnt/data preinstalled ;;
-        2)
-            if [ "$scenario" = query-failure ]; then
-                echo 'ERROR: metadata endpoint unavailable' >&2
-                return 1
-            fi
-            printf '%s\n' nvx-linux-8 false
-            cat "$test_root/fresh.json" ;;
-        *) echo 'ERROR: unexpected credential query' >&2; return 1 ;;
-    esac
-}
-id() { printf '%s\n' 1001; }
-install() { command install -d -m 0755 -- "${@: -1}"; }
-unexpected() {
-    printf '%s\n' "$*" >>"$test_root/lifecycle-calls"
-    echo "ERROR: unexpected provisioning operation: $*" >&2
-    return 1
-}
-bash() { unexpected bash "$@"; }
-sudo() { unexpected sudo "$@"; }
-systemctl() { unexpected systemctl "$@"; }
-shutdown() { unexpected shutdown "$@"; }
-(
-    cd "$test_root"
-    set -- --refresh-metadata ./config.json
-    . ./bootstrap.sh
-)
-"""
-        original = {"storageProfile": {"osDisk": {"caching": "ReadWrite"}}}
-        fresh = {"storageProfile": {"osDisk": {"caching": "ReadOnly"}}}
-        for scenario in ("success", "query-failure"):
-            with (
-                self.subTest(scenario=scenario),
-                tempfile.TemporaryDirectory() as temporary,
-            ):
-                root = Path(temporary)
-                metadata = root / "metadata"
-                metadata.mkdir()
-                snapshot = metadata / "compute.json"
-                snapshot.write_text(json.dumps(original), encoding="utf-8")
-                (root / "fresh.json").write_text(json.dumps(fresh), encoding="utf-8")
-                (root / "config.json").write_text("{}", encoding="utf-8")
-                (root / "python-calls").write_text("0", encoding="ascii")
-                (root / "bootstrap.sh").write_bytes(source.encode())
-                result = self.execute_bash(mock, root.as_posix(), scenario)
-                self.assertEqual(
-                    result.returncode == 0,
-                    scenario == "success",
-                    (result.stdout + result.stderr).decode()
-                    + (root / "bootstrap.log").read_text(),
-                )
-                self.assertEqual(
-                    json.loads(snapshot.read_text()),
-                    fresh if scenario == "success" else original,
-                )
-                self.assertEqual((root / "python-calls").read_text().strip(), "2")
-                self.assertFalse((root / "lifecycle-calls").exists())
-                if scenario == "query-failure":
-                    self.assertIn(
-                        "ERROR: metadata endpoint unavailable",
-                        (root / "bootstrap.log").read_text(),
-                    )
-
-    def test_linux_runner_finalization_does_not_restart_registered_service(self):
-        source = builder.source("linux/bootstrap-runner.sh").decode()
-        tail = source[
-            source.index('\nread -r service_name <"$runner_directory/.service"') :
-        ]
-        original = 'drop_in="/etc/systemd/system/${service_name}.d"'
-        self.assertEqual(tail.count(original), 1)
-        tail = tail.replace(
-            original, 'drop_in="${test_systemd_root}/${service_name}.d"'
-        )
-        mock = r"""
-set -euo pipefail
-runner_directory=$1
-config_path="$runner_directory/config.json"
-test_systemd_root=$2
-scenario=$3
-metadata_service=nvx-runner-metadata-block.service
-setup_root=/opt/nvx-bootstrap
-disabled=0
-verified=0
-systemctl() {
-    case "$*" in
-        'show actions.runner.test.pool.service --property=User --value')
-            if [ "$scenario" = wrong-user ]; then echo root; else echo nvx-runner; fi ;;
-        daemon-reload) ;;
-        'is-active --quiet actions.runner.test.pool.service')
-            if [ "$scenario" = inactive ]; then
-                echo 'ERROR: mock runner is inactive' >&2
-                return 1
-            fi
-            verified=1 ;;
-        'disable setup-nvx-github-runner.service')
-            [ "$verified" -eq 1 ] || return 1
-            if [ "$scenario" = disable-failure ]; then
-                echo 'ERROR: mock provisioning disable failed' >&2
-                return 1
-            fi
-            disabled=1 ;;
-        *) echo "ERROR: unexpected service operation: $*" >&2; return 1 ;;
-    esac
-}
-"""
-        for scenario in ("success", "wrong-user", "inactive", "disable-failure"):
-            with (
-                self.subTest(scenario=scenario),
-                tempfile.TemporaryDirectory() as temporary,
-            ):
-                root = Path(temporary)
-                runner = root / "runner"
-                runner.mkdir()
-                (runner / ".service").write_bytes(b"actions.runner.test.pool.service\n")
-                result = self.execute_bash(
-                    mock + tail + '\ntest "$disabled" -eq 1\n',
-                    runner.as_posix(),
-                    (root / "systemd").as_posix(),
-                    scenario,
-                )
-                self.assertEqual(
-                    result.returncode == 0,
-                    scenario == "success",
-                    (result.stdout + result.stderr).decode(),
-                )
-                if scenario == "success":
-                    self.assertIn(b"NVX_CLOUD_RUNNER_SETUP_COMPLETE=1", result.stdout)
-                    drop_in = (
-                        root
-                        / "systemd"
-                        / "actions.runner.test.pool.service.d"
-                        / "azure-metadata.conf"
-                    )
-                    self.assertIn(
-                        "Requires=nvx-runner-metadata-block.service",
-                        drop_in.read_text(),
-                    )
-                    self.assertIn(
-                        "ExecStartPre=+/opt/nvx-bootstrap/bootstrap-runner.sh "
-                        f'--refresh-metadata "{runner.as_posix()}/config.json"',
-                        drop_in.read_text(),
-                    )
-                else:
-                    self.assertNotIn(
-                        b"NVX_CLOUD_RUNNER_SETUP_COMPLETE=1", result.stdout
-                    )
-
-    def test_linux_disk_checks_identity_before_fstab_and_after_mount(self):
-        source = builder.source("linux/setup-data-disk.sh").decode()
-        tail = source[source.index('\nif mountpoint -q "$MOUNTPOINT"; then') :]
-        self.assertIn("/etc/fstab", tail)
-        tail = tail.replace("/etc/fstab", '"$test_fstab"').replace(
-            "/var/log/setup-datadisk-e2fsck.log", '"$test_log"'
-        )
-        function = self.shell_function(
-            "linux/setup-data-disk.sh", "verify_mount_identity"
-        )
-        mock = r"""
-set -euo pipefail
-MOUNTPOINT=$1
-test_fstab=$2
-test_log=$3
-mounted=$4
-mock_mounted_device=$5
-mock_target_device=$6
-TARGETDEV=/dev/mock-selected
-mount_calls=0
-mountpoint() { [ "$mounted" -eq 1 ]; }
-findmnt() {
-    case "$*" in
-        '-rn -S /dev/mock-selected') return 1 ;;
-        "-rn -o MAJ:MIN --target $MOUNTPOINT")
-            [ "$mock_mounted_device" != query-failure ] || return 1
-            printf '%s\n' "$mock_mounted_device" ;;
-        *) echo 'ERROR: unexpected findmnt query' >&2; return 1 ;;
-    esac
-}
-lsblk() {
-    [ "$*" = '-dno MAJ:MIN /dev/mock-selected' ] || return 1
-    printf '%s\n' "$mock_target_device"
-}
-blkid() {
-    case "$*" in
-        '-s PARTUUID -o value /dev/mock-selected') echo selected-part ;;
-        '-s UUID -o value /dev/mock-selected') echo selected-filesystem ;;
-        *) echo 'ERROR: unexpected filesystem probe' >&2; return 1 ;;
-    esac
-}
-e2fsck() { [ "$*" = '-n /dev/mock-selected' ]; }
-mount() {
-    [ "$*" = "$MOUNTPOINT" ] || return 1
-    mounted=1
-    mount_calls=$((mount_calls + 1))
-}
-chown() { [ "$1" = root:root ]; }
-chmod() { [ "$1" = 0644 ]; }
-restorecon() { [ "$*" = "$test_fstab" ]; }
-systemctl() { [ "$*" = daemon-reload ]; }
-"""
-        for mounted, device, target, succeeds in (
-            ("1", "8:1", "8:1", True),
-            ("1", "8:9", "8:1", False),
-            ("0", "8:1", "8:1", True),
-            ("0", "8:9", "8:1", False),
-            ("1", "query-failure", "8:1", False),
-            ("1", "8:1", "", False),
-        ):
-            with (
-                self.subTest(mounted=mounted, device=device, target=target),
-                tempfile.TemporaryDirectory() as temporary,
-            ):
-                root = Path(temporary)
-                fstab = root / "fstab"
-                original = (
-                    f"UUID=original {(root / 'mount').as_posix()} ext4 defaults 0 2\n"
-                )
-                fstab.write_text(original)
-                result = self.execute_bash(
-                    mock + function + tail,
-                    (root / "mount").as_posix(),
-                    fstab.as_posix(),
-                    (root / "fsck.log").as_posix(),
-                    mounted,
-                    device,
-                    target,
-                )
-                self.assertEqual(
-                    result.returncode == 0,
-                    succeeds,
-                    (result.stdout + result.stderr).decode(),
-                )
-                if not succeeds and mounted == "1":
-                    self.assertEqual(fstab.read_text(), original)
-                if succeeds:
-                    self.assertIn("PARTUUID=selected-part", fstab.read_text())
-                    self.assertIn(b"setup-datadisk.sh finished OK", result.stdout)
-                else:
-                    self.assertNotIn(b"setup-datadisk.sh finished OK", result.stdout)
-                    self.assertIn(b"ERROR:", result.stderr)
-
-    def test_mshv_default_requires_active_dom0_selection(self):
-        functions = self.shell_function(
-            "linux/setup-mshv.sh", "fail"
-        ) + self.shell_function("linux/setup-mshv.sh", "verify_dom0_default")
-        mock = r"""
-set -euo pipefail
-GRUB_CFG=$1
-mock_saved_entry=$2
-mock_next_entry=$3
-set_result=$4
-persist=$5
-set_calls=0
-grub2-set-default() {
-    [ "$*" = Dom0 ] || return 1
-    set_calls=$((set_calls + 1))
-    [ "$set_result" -eq 0 ] || return 1
-    if [ "$persist" -eq 1 ]; then mock_saved_entry=Dom0; fi
-}
-grub2-editenv() {
-    [ "$*" = '- list' ] || return 1
-    printf 'saved_entry=%s\nnext_entry=%s\n' "$mock_saved_entry" "$mock_next_entry"
-}
-"""
-        saved = 'load_env\nset default="${saved_entry}"\n'
-        conditional = (
-            'load_env\nif [ "${next_entry}" ]; then\n'
-            '  set default="${next_entry}"\nelse\n'
-            '  set default="${saved_entry}"\nfi\n'
-        )
-        cases = (
-            ('set default="Dom0"\n', "Linux", "", "0", "1", True, 0),
-            ('set default="0"\n', "Dom0", "", "0", "1", False, 0),
-            ('set default="Dom00"\n', "Dom0", "", "0", "1", False, 0),
-            (saved, "Linux", "", "0", "1", True, 1),
-            (conditional, "Linux", "", "0", "1", True, 1),
-            (conditional, "Dom0", "Linux", "0", "1", False, 1),
-            ('set default="${saved_entry}"\n', "Dom0", "", "0", "1", False, 0),
-            (
-                'load_env -f /another/grubenv\nset default="${saved_entry}"\n',
-                "Dom0",
-                "",
-                "0",
-                "1",
-                False,
-                0,
-            ),
-            (saved, "Linux", "", "1", "1", False, 1),
-            (saved, "Dom00", "", "0", "0", False, 1),
-            ('set default="Dom0"\nset default="0"\n', "Dom0", "", "0", "1", False, 0),
-        )
-        for config, saved_entry, next_entry, status, persist, succeeds, calls in cases:
-            with (
-                self.subTest(config=config, next_entry=next_entry, status=status),
-                tempfile.TemporaryDirectory() as temporary,
-            ):
-                path = Path(temporary) / "grub.cfg"
-                path.write_bytes(config.encode())
-                result = self.execute_bash(
-                    mock
-                    + functions
-                    + "\nverify_dom0_default\n"
-                    + f'test "$set_calls" -eq {calls}\n',
-                    path.as_posix(),
-                    saved_entry,
-                    next_entry,
-                    status,
-                    persist,
-                )
-                self.assertEqual(
-                    result.returncode == 0,
-                    succeeds,
-                    (result.stdout + result.stderr).decode(),
-                )
-                if not succeeds:
-                    self.assertIn(b"ERROR:", result.stdout)
-
-    def mshv_pins(self) -> dict[str, str]:
-        """Return the releases that setup-mshv.sh pins, by package name."""
-        source = builder.source("linux/setup-mshv.sh").decode()
-        body = re.search(r"^MSHV_PINS=\(\n(.*?)^\)$", source, re.M | re.S)
-        assert body is not None
-        pins: dict[str, str] = {}
-        for line in body[1].splitlines():
-            name, separator, release = line.strip().partition("=")
-            self.assertEqual(separator, "=", line)
-            pins[name] = release
-        return pins
-
-    def test_mshv_installation_installs_only_the_pinned_boot_components(self):
-        source = builder.source("linux/setup-mshv.sh").decode()
-        self.assertNotIn("cloud-hypervisor", source)
-        self.assertNotIn("kata", source)
-        pins = self.mshv_pins()
+                manifest = builder.build_package(config, temporary)
+                self.assertLessEqual(manifest["customDataBytes"], 65535)
+                guest_files.append(manifest["guestFiles"])
+        # Only the configuration differs: every mode ships the MSHV module.
+        self.assertIn("nvx_azure/linux_mshv.py", guest_files[0])
         self.assertEqual(
-            list(pins), ["mshv", "mshv-bootloader-lx", "kernel-mshv", "edk2-hvloader"]
+            {
+                name
+                for name in guest_files[0]
+                if guest_files[0][name] != guest_files[1][name]
+            },
+            {"config.json"},
         )
-        packages = [f"{name}-{release}.x86_64" for name, release in pins.items()]
-        start = source.index("MSHV_PINS=(")
-        definition = source[start : source.index("\n)\n", start) + 3]
-        start = source.index('echo "--- installing MSHV boot components ---"')
-        verified = 'echo "installed the pinned MSHV stack"\n'
-        end = source.index(verified, start) + len(verified)
-        mock = r"""
-set -euo pipefail
-succeeds_after=@SUCCEEDS_AFTER@
-query_status=@QUERY_STATUS@
-rpm_packages=$(
-    cat <<'EOF'
-@INSTALLED@
-EOF
-)
-attempts=0
-dnf() {
-    [ "$*" = 'install -y @PACKAGES@' ] || {
-        echo 'ERROR: unexpected MSHV package request' >&2
-        return 1
-    }
-    attempts=$((attempts + 1))
-    [ "$attempts" -ge "$succeeds_after" ]
-}
-rpm() {
-    if [ "$*" = -qa ]; then
-        printf '%s\n' "$rpm_packages"
-        return 0
-    fi
-    [ "$*" = '-q --queryformat %{NAME}-%{VERSION}-%{RELEASE}.%{ARCH}\n @NAMES@' ] || {
-        echo 'ERROR: unexpected MSHV package query' >&2
-        return 1
-    }
-    printf '%s\n' "$rpm_packages"
-    return "$query_status"
-}
-sleep() { [ "$*" = 30 ]; }
-""".replace("@PACKAGES@", " ".join(packages)).replace("@NAMES@", " ".join(pins))
-        # rpm lists every installed release of a name, and reports a missing
-        # name on stdout.
-        newer_kernel = "kernel-mshv-6.18.40.mshv3-1.azl3.x86_64"
-        newer_mshv = "mshv-26100.9500.2610010000.1-1.azl3.x86_64"
-        missing = "package edk2-hvloader is not installed"
-        cases = (
-            ("1", packages, "0", None),
-            ("3", packages, "0", None),
-            ("4", packages, "0", "could not install MSHV boot components"),
-            (
-                "1",
-                [*packages, newer_kernel],
-                "0",
-                "the installed MSHV stack is not the pinned one",
-            ),
-            (
-                "1",
-                [newer_mshv, *packages[1:]],
-                "0",
-                "the installed MSHV stack is not the pinned one",
-            ),
-            ("1", [*packages[:3], missing], "1", "a pinned MSHV package is not"),
-        )
-        for succeeds_after, installed, query_status, error in cases:
-            with self.subTest(succeeds_after=succeeds_after, installed=installed[-1]):
-                # The case is part of the script: WSL's bash.exe splits
-                # arguments at newlines.
-                case = (
-                    mock.replace("@SUCCEEDS_AFTER@", succeeds_after)
-                    .replace("@QUERY_STATUS@", query_status)
-                    .replace("@INSTALLED@", "\n".join(installed))
-                )
-                result = self.execute_bash(
-                    case
-                    + self.shell_function("linux/setup-mshv.sh", "fail")
-                    + definition
-                    + source[start:end]
-                    + f'\ntest "$attempts" -eq {min(int(succeeds_after), 3)}\n'
-                )
-                output = (result.stdout + result.stderr).decode()
-                self.assertEqual(result.returncode == 0, error is None, output)
-                # The log names each pinned package before it installs them.
-                self.assertIn(
-                    "pinned MSHV stack:\n"
-                    + "".join(f"  {package}\n" for package in packages),
-                    output,
-                )
-                if error is None:
-                    self.assertIn("installed the pinned MSHV stack", output)
-                else:
-                    self.assertIn(f"ERROR: {error}", output)
-                    self.assertNotIn("installed the pinned MSHV stack", output)
-
-    def test_mshv_pins_install_the_expected_benchmark_host(self):
-        # The pins install the host of the Linux/MSHV series' history, so a
-        # pin moves only with a new expected host (#980).
-        host = json.loads(
-            (
-                builder.ROOT.parents[2]
-                / "data"
-                / "linux-mshv-virtual-machine-host.json"
-            ).read_text(encoding="utf-8")
-        )
-        pins = self.mshv_pins()
-
-        self.assertEqual(pins["kernel-mshv"], host["os"]["release"])
-        # The mshv package's version starts with the hypervisor's build and
-        # service: mshv 26100.9444.2609032029.1 is hypervisor 10.0.26100.9444.
-        _, _, build, service = host["hypervisor_build"].split(".")
-        self.assertTrue(pins["mshv"].startswith(f"{build}.{service}."), pins["mshv"])
-        self.assertEqual(pins["mshv-bootloader-lx"], pins["mshv"])
-
-    def test_mshv_verification_does_not_require_other_runtimes(self):
-        source = builder.source("linux/verify-mshv.sh").decode()
-        self.assertNotIn("cloud-hypervisor", source)
-        self.assertNotIn("kata", source)
-        self.assertEqual(source.count("[ -e /dev/mshv ]"), 1)
-        self.assertEqual(source.count('exit "$rc"'), 1)
-        source = source.replace("[ -e /dev/mshv ]", "test_mshv_device").replace(
-            'exit "$rc"', 'return "$rc"'
-        )
-        mock = r"""
-set -euo pipefail
-device_present=$1
-test_mshv_device() { [ "$device_present" -eq 1 ]; }
-uname() { [ "$*" = -r ] && echo 6.6.148-test.mshv; }
-dmesg() { echo 'mshv: running as root partition'; }
-ls() { [ "$*" = '-l /dev/mshv /dev/mshv_diag' ]; }
-rpm() { [ "$*" = -qa ] && printf 'kernel-mshv-1\nedk2-hvloader-1\n'; }
-"""
-        for present in ("0", "1"):
-            with self.subTest(device=present):
-                result = self.execute_bash(
-                    mock + "\nverify_mshv() {\n" + source + "\n}\nverify_mshv\n",
-                    present,
-                )
-                self.assertEqual(
-                    result.returncode == 0,
-                    present == "1",
-                    (result.stdout + result.stderr).decode(),
-                )
-                self.assertIn(
-                    b"RESULT: PASS" if present == "1" else b"RESULT: FAIL",
-                    result.stdout,
-                )
 
     def test_windows_package_round_trip(self):
         config = self.configuration("windows")

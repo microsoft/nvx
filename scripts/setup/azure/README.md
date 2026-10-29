@@ -11,14 +11,25 @@ Do not maintain a second copy of the runner setup or its tool versions here.
 
 | Component | Responsibility |
 | --- | --- |
-| `linux/bootstrap-runner.sh` | Validate Azure instance identity, prepare the attached disk and backend, derive a runner name, and register using managed identity and Key Vault. |
-| `linux/block-runner-metadata.sh` | Block the dedicated runner account from Azure instance metadata with a verified, reboot-persistent IPv4 owner rule. |
-| `linux/setup-data-disk.sh` | Find an Azure managed disk by LUN, preserve recognized ext4 data, and initialize only a blank or owned incomplete disk. |
-| `linux/setup-mshv.sh`, `linux/verify-mshv.sh` | Optional Azure Linux 3 Dom0 boot preparation and post-boot verification. This differs from `../setup-linux.sh`, which requires an MSHV kernel that is already running. |
+| `nvx_azure/` | Standard-library Python package that guests run as `python -I -B <bootstrap directory> <command>`. `cli.py` dispatches the commands; `common.py` holds the shared identity, label, metadata-snapshot, HTTP/token, and checked-subprocess helpers. |
+| `nvx_azure/linux_bootstrap.py` | Validate Azure instance identity, refresh the compute snapshot, prepare the attached disk and backend, derive a runner name, and register using managed identity and Key Vault. |
+| `nvx_azure/linux_firewall.py` | Block the dedicated runner account from Azure instance metadata with a verified, reboot-persistent IPv4 owner rule. |
+| `nvx_azure/linux_disk.py` | Find an Azure managed disk by LUN, preserve recognized ext4 data, and initialize only a blank or owned incomplete disk. |
+| `nvx_azure/linux_mshv.py` | Optional Azure Linux 3 Dom0 boot preparation and post-boot verification. This differs from `../setup-linux.sh`, which requires an MSHV kernel that is already running. |
 | `windows/bootstrap-runner.ps1` | Validate instance identity; set up disk, WHP/Hyper-V features, reboot continuation, and the Network Service runner. |
 | `windows/setup-data-disk.ps1` | Safely prepare an Azure managed NTFS data disk and handle temporary-drive/pagefile conflicts. |
 | `windows/vmss-bootstrap.ps1`, `windows/install-package.ps1` | Run through Custom Script, configure OpenSSH, verify and unpack the source bundle, and start Windows bootstrap. |
 | `build_package.py` | Validate configuration and generate deterministic guest payloads, hashes, and a partial VMSS model patch without accessing Azure or GitHub. |
+
+Linux guests run every step as
+`/usr/bin/python3 -I -B /opt/nvx-bootstrap <command>`. Cloud-init installs the
+distribution's `python3` and writes all guest files from the same payload
+before the provisioning unit starts after `cloud-final.service`. Isolated mode
+ignores `PYTHON*` variables and user site-packages, `-B` keeps bytecode out of
+the root-owned directory, and the package needs only the standard library of
+Python 3.10 or later; the packager's PyYAML dependency never reaches a guest.
+External storage, firewall, package, and boot utilities remain checked
+subprocesses that receive explicit argument lists.
 
 ## Configuration
 
@@ -62,7 +73,7 @@ merging workflows that require it, in the order documented in the
 Linux additionally selects `backend` (`kvm` or `mshv`), `kernelMode`, and
 `dataDisk.mountPoint` below `/mnt` or `/srv`. `kernelMode: "preinstalled"`
 expects the selected device to be ready. `azurelinux-mshv` installs the
-Azure Linux 3 MSHV host stack that `linux/setup-mshv.sh` pins, the exact
+Azure Linux 3 MSHV host stack that `nvx_azure/linux_mshv.py` pins, the exact
 releases of `mshv`, `mshv-bootloader-lx`, `kernel-mshv`, and `edk2-hvloader`,
 logs them, and fails unless exactly those releases are installed. It then
 checks the Dom0 boot entry, requests a reboot,
@@ -122,7 +133,7 @@ a missing or invalid snapshot fails the host check without querying metadata.
 Linux jobs run as `nvx-runner`, whose metadata block is installed before
 registration. The runner service requires the block on every start; root
 retains metadata access for bootstrap and token retrieval. Before every runner
-start, a root-only `bootstrap-runner.sh --refresh-metadata` hook refreshes the
+start, a root-only `linux-refresh-metadata` command refreshes the
 snapshot without running disk setup, provisioning, or registration. A failed
 refresh prevents the runner service from starting. Metadata-rule updates
 keep existing protection until a replacement is installed and verified; failures
@@ -161,8 +172,9 @@ For Windows, pass the edited Windows configuration instead. Packaging makes
 no Azure or GitHub API calls. It rejects unknown or credential-like
 configuration values, generates SHA-256 hashes for the exact source files
 and payload, and enforces Azure's 65,535-byte decoded custom-data limit.
-Packaged PowerShell source uses canonical LF line endings so checkout-specific
-CRLF conversion does not change the distributed bytes or hashes.
+Packaged Python and shell sources must use LF line endings, and packaged
+PowerShell source uses canonical LF line endings, so checkout-specific CRLF
+conversion does not change the distributed bytes or hashes.
 Embedded gzip files use a fixed timestamp, no filename, and a host-neutral
 header rather than the platform-dependent shortcut in Python 3.11/3.12.
 The output directory must be outside the repository.
@@ -170,7 +182,7 @@ It must be new or empty so files from another platform cannot be reused.
 
 | Output | Role |
 | --- | --- |
-| `cloud-init.yaml` (Linux) | Root-owned setup scripts, tool manifest, private configuration, and a startup service. |
+| `cloud-init.yaml` (Linux) | Root-owned Python bootstrap package, generic setup script, tool manifest, private configuration, and startup and metadata-block units. |
 | `custom-data.json`, `sources.zip` (Windows) | Custom Script input and the hash-verified source/configuration bundle. |
 | `extension-command.txt` (Windows) | Command for a compatible VMSS Custom Script extension to invoke the payload. |
 | `model-patch.json`, `manifest.json` | Partial VMSS custom-data patch and exact target, toolchain, size, and hash evidence. |
@@ -215,11 +227,12 @@ the runner identity, and the expected online GitHub registration.
 Offline validation:
 
 ```powershell
-python -m unittest scripts.test_setup_azure scripts.test_tool_versions -v
+python -m unittest scripts.test_setup_azure scripts.test_setup_azure_linux scripts.test_tool_versions -v
 ```
 
 The tests exercise configuration, exact package contents and size limits,
-identity-to-name mapping, secret retrieval with mocked endpoints, and
-installer behavior without touching a VMSS. Validate real disk, feature
-reboots, and runner registration on an isolated new instance before rolling
-out a configuration change.
+identity-to-name mapping, secret retrieval with mocked endpoints, and each
+guest controller's decisions against fake commands, without touching a VMSS
+or the host's disks, firewall, boot configuration, or services. Validate real
+disk, feature reboots, and runner registration on an isolated new instance
+before rolling out a configuration change.
