@@ -18,7 +18,8 @@ uptime_before="$(awk '{ print int($1); exit }' /proc/uptime)"
 sleep 1
 uptime_after="$(awk '{ print int($1); exit }' /proc/uptime)"
 [ $((uptime_after - uptime_before)) -ge 1 ] || fail 43
-for octal in 000 015 012 177 377; do
+# The last byte ends the debug port's line, so that the marker starts one.
+for octal in 000 015 012 177 377 012; do
     printf "\\$octal" | dd of=/dev/port bs=1 seek=233 count=1 conv=notrunc 2>/dev/null
 done
 echo NVX-LIFECYCLE-OK

@@ -54,6 +54,8 @@ while ! awk -v pattern=":$port_hex\$" \
     tries=$((tries + 1))
     sleep 0.05
 done
+# The terminal would echo the host's release into the lines after it.
+stty -echo || fail "the terminal kept echoing" 85
 echo NVX-PLATFORM-NETWORK-LISTENING
 # The host's release says whether it exchanged a line with the server through
 # a forward. Its request may still be on the way when the release arrives, so

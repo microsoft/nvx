@@ -97,6 +97,14 @@ intervals stay quiet. An OpenVMM exit
 status of 193, 194, or 195 is reported as the guest's time ABI conformance,
 runtime-violation, or restore-repair power-off, together with the event that
 preceded it, instead of as a generic exit status.
+The guest's terminal also echoes console input that arrives while a command
+runs into whatever that command prints (#785), so the test runners never
+type a guest script line by line. They stage it whole in a file with a
+here-document, then run it with the last input line. When a scenario parses
+the script's output, that line first prints `NVX-GUEST-SCRIPT-START` and then
+sources the script into the shell, and the scenario reads only what follows.
+A staged script that waits for a line from the host turns the terminal's
+echo off before it announces that it waits.
 The `smp`, `smp-snapshot`, and `restore-processors` scenarios run the guest
 warp probe, `/sbin/nvx-time-probe warp --bound-ns 1000`, over every pair of
 online CPUs after each boot or restore, in two rounds with all vCPUs halted

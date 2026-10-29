@@ -116,6 +116,8 @@ allow)
     wait_for_socket "^0100007F:$private_hex\$" 0A /proc/net/tcp || fail 96
     wait_for_socket "^00000000000000000000000001000000:$private_hex\$" 0A \
         /proc/net/tcp6 || fail 96
+    # The terminal would echo the host's release into the lines after it.
+    stty -echo || fail 78
     echo NVX-HOST-LOOPBACK-INGRESS-READY
 
     read -r release || fail 76

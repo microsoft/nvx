@@ -48,6 +48,8 @@ rm -f /tmp/nvx-ingress-tcp /tmp/nvx-ingress-udp
 } | nc -u -l -p @UDP_PORT@ -w 20 >/tmp/nvx-ingress-udp 2>/dev/null &
 wait_for_socket @TCP_PORT@ 0A /proc/net/tcp /proc/net/tcp6 || fail 74
 wait_for_socket @UDP_PORT@ 07 /proc/net/udp /proc/net/udp6 || fail 75
+# The terminal would echo the host's release into the lines after it.
+stty -echo || fail 85
 echo NVX-PRIVATE-INGRESS-LISTENING
 
 read -r release || fail 76
