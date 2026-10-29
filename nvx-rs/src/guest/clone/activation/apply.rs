@@ -6,10 +6,15 @@
 mod tests;
 
 use std::fmt;
+use std::fs;
 use std::io;
+use std::net::IpAddr;
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+#[cfg(doc)]
+use super::super::Devices;
 #[cfg(doc)]
 use super::Activation;
 use crate::activation::{self, ActivationRecord, Configuration, MachineIdMode, WorkloadIdentity};
@@ -17,24 +22,33 @@ use crate::gpt::Expected;
 #[cfg(doc)]
 use crate::guest::entry::AccountMode;
 use crate::guest::entry::{self, Entry, Identity, MachineId, RuntimeBinds};
-use crate::guest::mappings;
+use crate::guest::mappings::{self, Access, SourceRoot};
 use crate::guest::root::{self, Assembly, AssemblyError, Device, Root, TeardownError};
+use crate::protocol::cmdline::write_resolver;
 
 /// The name of the file, in the template's [runtime directory](RootTemplate::runtime), to which
 /// [`apply`](fn@apply) writes the machine ID that it generates for a record that asks for one, as
 /// NVX's managed agent writes its own to `/run/nvx/workload-machine-id`.
 pub const MACHINE_ID_FILE: &str = "workload-machine-id";
 
+/// The name of the file, in the template's [runtime directory](RootTemplate::runtime), to which
+/// [`apply`](fn@apply) writes the resolver file that names the DNS server of a record's network,
+/// which every execution sees read-only at `/etc/resolv.conf`.
+pub const RESOLVER_FILE: &str = "resolv.conf";
+
+/// The mode of the resolver file, whatever the umask: every execution may read it.
+const RESOLVER_MODE: u32 = 0o444;
+
 /// The inputs of a clone's root assembly that its guest takes from its own configuration, which
 /// its template captured, so that every clone of the template has the same: the runtime
 /// directory, the block devices, which their MMIO windows name, with the sizes that they must
-/// have, and how long the assembly waits for each. [`apply`](fn@apply) takes the rest from the
-/// activation record.
+/// have, how long the assembly waits for each, and the host filesystem device, which its
+/// virtio-fs tag names. [`apply`](fn@apply) takes the rest from the activation record.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct RootTemplate {
     /// The runtime directory, below which the root is mounted, as [`Assembly::runtime`] tells,
     /// and in which the application writes a machine ID that it generates, as
-    /// [`MACHINE_ID_FILE`].
+    /// [`MACHINE_ID_FILE`], and a resolver file, as [`RESOLVER_FILE`].
     pub runtime: PathBuf,
     /// The `distro` block device, the template's placeholder, which holds each clone's image.
     pub distro: Device,
@@ -44,22 +58,34 @@ pub struct RootTemplate {
     /// How long the assembly waits for each device to appear, until the deadline that
     /// [`apply`](fn@apply) takes at the latest.
     pub timeout: Duration,
+    /// The virtio-fs tag of the host filesystem device, from which the template's capture found
+    /// nothing mounted, as [`Devices::filesystem_tag`] names it, and through which the host
+    /// attaches the export of a record that has one.
+    pub filesystem_tag: String,
 }
 
 /// A clone's root and workload, which [`apply`](fn@apply) activated: the [`Root`] that it
-/// assembled, which owns the root's mounts, the runtime's binds that it made on the root, in the
-/// caller's mount namespace, the identity in which every execution runs, if the record has a
-/// workload identity, and the workload's hostname and machine ID, the record's.
+/// assembled, which owns the root's mounts, the host export's among them, the root of the host
+/// export, if the record has one, the runtime's binds that it made on the root, in the caller's
+/// mount namespace, the identity in which every execution runs, if the record has a workload
+/// identity, the workload's hostname and machine ID, the record's, the resolver file that names
+/// the DNS server of the record's network, if it names one, and the endpoint of its proxy, if any.
 ///
 /// Without a workload identity, the adapter gives each execution its own identity, which
 /// [`Entry::check`] checks when the adapter prepares the execution's entry, as at a cold boot.
 /// Every execution's entry takes the [hostname](Self::hostname), through [`Entry::hostname`], and
-/// sees the [machine ID](Self::machine_id) through the runtime's binds, which each execution's
-/// mount namespace copies from the caller's. [`teardown`](Self::teardown) removes the binds, then
-/// tears the root down, and dropping it does the same, ignoring failures, as dropping a [`Root`]
-/// does.
+/// sees the [machine ID](Self::machine_id) and the [resolver file](Self::resolver) through the
+/// runtime's binds, which each execution's mount namespace copies from the caller's. The adapter
+/// [takes](Self::take_export) the export's root, from which it maps the host's mapping table once
+/// the clone is ready, and tells its workloads the [proxy's endpoint](Self::proxy) as at a cold
+/// boot. [`teardown`](Self::teardown) closes the export's root, if the adapter did not take it,
+/// removes the binds, then tears the root down, and dropping it does the same, ignoring failures,
+/// as dropping a [`Root`] does.
 #[derive(Debug)]
 pub struct Applied {
+    /// The root of the host export, which keeps the export's mount busy, so that a drop closes it
+    /// before the root drops, unless the adapter took it.
+    export: Option<SourceRoot>,
     /// The runtime's binds on the root, which a drop removes before the root drops: the binds
     /// keep the root's mount busy.
     binds: Binds,
@@ -71,6 +97,12 @@ pub struct Applied {
     hostname: Vec<u8>,
     /// The machine ID that every execution sees at `/etc/machine-id`.
     machine_id: MachineId,
+    /// The resolver file that every execution sees at `/etc/resolv.conf`, if the record's
+    /// network names a DNS server.
+    resolver: Option<PathBuf>,
+    /// The endpoint of the proxy through which the workload reaches the network, if the record's
+    /// network names one.
+    proxy: Option<String>,
 }
 
 impl Applied {
@@ -107,30 +139,66 @@ impl Applied {
         &self.machine_id
     }
 
-    /// Removes the runtime's binds, then tears the root down, as [`Root::teardown`] does, in the
-    /// caller's mount namespace, which must be the one where the application made them: the binds
-    /// keep the root's mount busy, and a teardown detaches no busy mount.
+    /// Returns the resolver file, of [`RESOLVER_FILE`], that names the DNS server of the record's
+    /// network, which the application wrote once, and bound read-only over the root's
+    /// `/etc/resolv.conf`, for every execution. Returns `None` if the record's network names no
+    /// DNS server, or the record has no network, so that every execution sees the image's own
+    /// `/etc/resolv.conf`.
+    pub fn resolver(&self) -> Option<&Path> {
+        self.resolver.as_deref()
+    }
+
+    /// Returns the endpoint of the proxy through which the workload reaches the network, as the
+    /// guest sees it, if the record's network names one. The application leaves it to the
+    /// adapter, which tells its workloads as at a cold boot.
+    pub fn proxy(&self) -> Option<&str> {
+        self.proxy.as_deref()
+    }
+
+    /// Takes the root of the host export, if the record has an export, and the adapter did not
+    /// take it before: the [`SourceRoot`] from which the adapter maps the host's mapping table
+    /// with [`Root::map`] once the clone is ready, as at a cold boot.
     ///
-    /// It attempts both steps, whatever failed before, and fails with the binds that stay
-    /// mounted, and the unmounts of the root's teardown that failed, whose mounts stay.
+    /// The export's root keeps the export's mount busy, so the adapter drops it before the
+    /// [teardown](Self::teardown), which otherwise fails to unmount the export, and leaves it
+    /// mounted, as [`Root::mount_export`] tells.
+    pub fn take_export(&mut self) -> Option<SourceRoot> {
+        self.export.take()
+    }
+
+    /// Closes the root of the host export, unless the adapter [took](Self::take_export) it,
+    /// removes the runtime's binds, then tears the root down, as [`Root::teardown`] does, which
+    /// unmounts the host export too, in the caller's mount namespace, which must be the one where
+    /// the application made the binds: the export's root and the binds keep the root's mounts
+    /// busy, and a teardown detaches no busy mount.
+    ///
+    /// It attempts both the removal and the teardown, whatever failed before, and fails with the
+    /// binds that stay mounted, and the unmounts of the root's teardown that failed, whose mounts
+    /// stay.
     pub fn teardown(self) -> Result<(), AppliedTeardownError> {
         let Self {
-            mut binds, root, ..
+            export,
+            mut binds,
+            root,
+            ..
         } = self;
-        teardown_with(&mut LiveSystem, binds.take(), root)
+        teardown_with(&mut LiveSystem, export, binds.take(), root)
     }
 
     /// Returns the assembled root, the runtime's binds on it, and the identity in which every
     /// execution runs, if any, for an adapter that keeps them apart: it then removes the binds
     /// with [`RuntimeBinds::remove`] before it tears the root down, in the same mount namespace,
-    /// since dropping them leaves them mounted.
+    /// since dropping them leaves them mounted. It closes the root of the host export, unless the
+    /// adapter [took](Self::take_export) it.
     pub fn into_parts(self) -> (Root, RuntimeBinds, Option<Identity>) {
         let Self {
+            export,
             mut binds,
             root,
             identity,
             ..
         } = self;
+        drop(export);
         (root, binds.take(), identity)
     }
 }
@@ -206,7 +274,8 @@ impl std::error::Error for AppliedTeardownError {}
 ///    the record expects of it, if any, and the bound of its first partition; its upper, a tmpfs,
 ///    or the scratch, with the record's journal policy; and its overlay mode; and, from
 ///    `template`, the runtime directory, the devices, and the timeout. It takes the workload's
-///    hostname and machine-ID mode from the record too;
+///    hostname and machine-ID mode, whether it has an export, and its network's DNS server and
+///    proxy endpoint from the record too;
 /// 2. for a GPT disk, asks the kernel to reread the disk's partition table, once the distro
 ///    device appeared, so that the block devices of the disk's partitions are those of the
 ///    clone's disk, rather than those of the template's placeholder, which the kernel created
@@ -237,26 +306,48 @@ impl std::error::Error for AppliedTeardownError {}
 ///    template share it, to [`MACHINE_ID_FILE`] in the template's runtime directory. A file there
 ///    already, as once a boot generated its ID, or one that cannot be created or written, fails
 ///    with [`ApplyError::MachineId`], once the application tore the root down;
-/// 6. binds the runtime's files into the root, for every execution, with
+/// 6. if the record has an export, mounts the host export, through the template's host filesystem
+///    device, which [`RootTemplate::filesystem_tag`] names, with [`Root::mount_export`], whatever
+///    the export's shape: at `hostfs/root` in the runtime directory, outside the root, where only
+///    the guest's root user reaches it, read-write. The record names no mode of the mount, and none
+///    is needed: OpenVMM limits each of the export's children to its own access, and each mapping
+///    takes its own, so the mount only lets the read-write children through. OpenVMM resolves an
+///    export's path again at each launch and restore, so the directories above an export's
+///    directory must be ones that no guest may change. Whoever names an export must not name one
+///    inside a directory that a writable export of another sandbox or clone holds. A failure fails
+///    with [`ApplyError::Export`], once the application tore the root down, which unmounts an
+///    export that it mounted;
+/// 7. if the record's network names a DNS server, writes a resolver file that names it, as
+///    [`write_resolver`] writes one, to [`RESOLVER_FILE`] in the template's runtime directory: a
+///    new file, of mode 0444, whatever the umask, so that every execution may read it. A file
+///    there already, or one that cannot be created or written, fails with
+///    [`ApplyError::Network`], once the application tore the root down;
+/// 8. binds the runtime's files into the root, for every execution, with one
 ///    [`Entry::bind_runtime`], in the caller's mount namespace, of which each execution's starts
-///    as a copy: a generated machine ID's file, read-only over the root's `/etc/machine-id`, and,
-///    with the image's own machine ID, nothing. The entry checks the record's hostname first,
-///    which every execution's entry then takes, through [`Entry::hostname`]. A failure fails with
+///    as a copy: a generated machine ID's file, read-only over the root's `/etc/machine-id`, then
+///    the resolver file, read-only over the root's `/etc/resolv.conf`, and, with the image's own
+///    machine ID and without a resolver file, nothing. The entry checks the record's hostname
+///    first, which every execution's entry then takes, through [`Entry::hostname`]. A failure to
+///    bind the resolver file fails with [`ApplyError::Network`], and any other with
 ///    [`ApplyError::View`], once the binds that it made were removed, and the application tore
 ///    the root down.
 ///
 /// The activation answers a retry of the Activate without applying the record again, so every
-/// execution, and every retry, sees the same machine ID. A failure after the generation leaves
-/// the machine ID's file, since the activation fails finally, and the adapter ends the VM.
+/// execution, and every retry, sees the same machine ID and resolver file. A failure after the
+/// generation, or after the resolver file's write, leaves that file, since the activation fails
+/// finally, and the adapter ends the VM.
 ///
-/// It applies none of the record's other settings: its export, and its network. It starts no
-/// process, generates at most one ID, after the activation accepted the record, and never powers
-/// the VM off: a failure, which the adapter reports to [`Activation::complete`], fails the
-/// activation finally, and the adapter ends the VM.
+/// It returns the root of the host export, the [`SourceRoot`] from which the adapter maps the
+/// host's mapping table once the clone is ready, as at a cold boot, and the endpoint of the
+/// network's proxy, which it leaves to the adapter, which tells its workloads as at a cold boot.
+/// It applies none of the record's other settings: the publication of the workload's listeners.
+/// It starts no process, generates at most one ID, after the activation accepted the record, and
+/// never powers the VM off: a failure, which the adapter reports to [`Activation::complete`],
+/// fails the activation finally, and the adapter ends the VM.
 ///
 /// It needs the guest's root user, in the guest's initial mount namespace, as
-/// [`root::assemble`] does, and the bind of a generated machine ID needs Linux 6.8 or later, as
-/// [`Entry::bind_runtime`] does.
+/// [`root::assemble`] does, and the binds of a generated machine ID and of a resolver file need
+/// Linux 6.8 or later, as [`Entry::bind_runtime`] does.
 pub fn apply(
     record: &ActivationRecord,
     template: &RootTemplate,
@@ -264,11 +355,14 @@ pub fn apply(
 ) -> Result<Applied, ApplyError> {
     let activated = apply_with(&mut LiveSystem, record, template, deadline)?;
     Ok(Applied {
+        export: activated.export,
         binds: Binds(Some(activated.binds)),
         root: activated.root,
         identity: activated.identity,
         hostname: activated.hostname,
         machine_id: activated.machine_id,
+        resolver: activated.resolver,
+        proxy: activated.proxy,
     })
 }
 
@@ -319,6 +413,24 @@ pub enum ApplyError {
         /// The unmounts of the root's teardown that failed, if any, whose mounts stay.
         teardown: Option<TeardownError>,
     },
+    /// The host export could not be mounted, as this error tells: the template's host filesystem
+    /// device has no export attached, or the root refused the mount. The application then tore
+    /// the root down, which unmounts the export if it was mounted.
+    Export {
+        /// Why the export could not be mounted, as [`Root::mount_export`] tells.
+        error: root::Error,
+        /// The unmounts of the root's teardown that failed, if any, whose mounts stay.
+        teardown: Option<TeardownError>,
+    },
+    /// The record's network settings could not be applied, as this error tells: the resolver
+    /// file that names the network's DNS server could not be written, or bound over the root's
+    /// `/etc/resolv.conf`. The application then tore the root down.
+    Network {
+        /// Why the network settings could not be applied.
+        error: NetworkError,
+        /// The unmounts of the root's teardown that failed, if any, whose mounts stay.
+        teardown: Option<TeardownError>,
+    },
 }
 
 impl fmt::Display for ApplyError {
@@ -351,6 +463,14 @@ impl fmt::Display for ApplyError {
                 )?;
                 teardown
             }
+            Self::Export { error, teardown } => {
+                write!(formatter, "the host export cannot be mounted: {error}")?;
+                teardown
+            }
+            Self::Network { error, teardown } => {
+                write!(formatter, "the network settings cannot be applied: {error}")?;
+                teardown
+            }
         };
         match teardown {
             Some(teardown) => write!(formatter, "; then {teardown}"),
@@ -362,10 +482,46 @@ impl fmt::Display for ApplyError {
 impl std::error::Error for ApplyError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Self::Gpt(error) => Some(error),
+            Self::Gpt(error) | Self::Export { error, .. } => Some(error),
             Self::Assembly(error) => Some(error),
             Self::Account { error, .. } | Self::View { error, .. } => Some(error),
             Self::MachineId { error, .. } => Some(error),
+            Self::Network { error, .. } => Some(error),
+        }
+    }
+}
+
+/// Why the network settings of a record could not be applied, which an [`ApplyError::Network`]
+/// holds.
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum NetworkError {
+    /// The resolver file that names the network's DNS server could not be written to
+    /// [`RESOLVER_FILE`] in the template's runtime directory, as this error tells: a file is
+    /// there already, or the file cannot be created or written.
+    Write(io::Error),
+    /// The resolver file could not be bound over the root's `/etc/resolv.conf`, as
+    /// [`Entry::bind_runtime`] tells: with an [`entry::Error::Resolver`], or an
+    /// [`entry::Error::Rollback`] of one, after which the entry removed the binds that it made,
+    /// unless the error names those that stay.
+    Bind(entry::Error),
+}
+
+impl fmt::Display for NetworkError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Write(error) => write!(formatter, "the resolver file cannot be written: {error}"),
+            Self::Bind(error) => error.fmt(formatter),
+        }
+    }
+}
+
+impl std::error::Error for NetworkError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Write(error) => Some(error),
+            // The entry's error names the resolver file already, so it stands for this one.
+            Self::Bind(error) => error.source(),
         }
     }
 }
@@ -375,6 +531,9 @@ impl std::error::Error for ApplyError {
 trait System {
     /// What an assembly mounted: a [`Root`], in a VM.
     type Root;
+
+    /// The root of a host export that a mount returned: a [`SourceRoot`], in a VM.
+    type Export;
 
     /// The runtime's binds that a bind made: [`RuntimeBinds`], in a VM.
     type Binds;
@@ -404,6 +563,22 @@ trait System {
     /// does.
     fn generate(&mut self, path: &Path) -> io::Result<MachineId>;
 
+    /// Mounts the host export, the virtio-fs device `tag`, with `access`, for `root`, and returns
+    /// the export's root, as [`Root::mount_export`] does.
+    fn mount_export(
+        &mut self,
+        root: &mut Self::Root,
+        tag: &str,
+        access: Access,
+    ) -> Result<Self::Export, root::Error>;
+
+    /// Closes `export`, the root of a host export, which keeps the export's mount busy until then.
+    fn close(&mut self, export: Self::Export);
+
+    /// Writes a resolver file that names `server` to a new file at `path`, as
+    /// [`write_resolver_file`] does.
+    fn write_resolver(&mut self, path: &Path, server: IpAddr) -> io::Result<()>;
+
     /// Binds the runtime's files of `view` into `root`, for every execution, in the caller's
     /// mount namespace, as [`Entry::bind_runtime`] does with the view's [entry](View::entry).
     fn bind(&mut self, root: &Self::Root, view: &View) -> Result<Self::Binds, entry::Error>;
@@ -420,6 +595,7 @@ struct LiveSystem;
 
 impl System for LiveSystem {
     type Root = Root;
+    type Export = SourceRoot;
     type Binds = RuntimeBinds;
 
     fn reread(
@@ -447,6 +623,23 @@ impl System for LiveSystem {
         MachineId::generate(path)
     }
 
+    fn mount_export(
+        &mut self,
+        root: &mut Root,
+        tag: &str,
+        access: Access,
+    ) -> Result<SourceRoot, root::Error> {
+        root.mount_export(tag, access)
+    }
+
+    fn close(&mut self, export: SourceRoot) {
+        drop(export);
+    }
+
+    fn write_resolver(&mut self, path: &Path, server: IpAddr) -> io::Result<()> {
+        write_resolver_file(path, server)
+    }
+
     fn bind(&mut self, root: &Root, view: &View) -> Result<RuntimeBinds, entry::Error> {
         view.entry(root.path()).bind_runtime()
     }
@@ -461,8 +654,8 @@ impl System for LiveSystem {
 }
 
 /// The workload's view of its root, which the application sets for every execution: the
-/// identity of the entry through which it binds the runtime's files, the hostname, and the
-/// machine ID.
+/// identity of the entry through which it binds the runtime's files, the hostname, the machine
+/// ID, and the resolver file.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct View {
     /// The identity of the entry that binds the runtime's files: the record's workload identity,
@@ -473,26 +666,36 @@ struct View {
     hostname: Vec<u8>,
     /// The machine ID that every execution sees.
     machine_id: MachineId,
+    /// The resolver file that every execution sees at `/etc/resolv.conf`, if the record's
+    /// network names a DNS server.
+    resolver: Option<PathBuf>,
 }
 
 impl View {
     /// Returns the entry into the root at `root` that binds the view's runtime files, and checks
     /// its hostname, with [`Entry::bind_runtime`].
     fn entry(&self, root: &Path) -> Entry {
-        Entry::new(root, self.identity.clone())
+        let entry = Entry::new(root, self.identity.clone())
             .hostname(self.hostname.clone())
-            .machine_id(self.machine_id.clone())
+            .machine_id(self.machine_id.clone());
+        match &self.resolver {
+            Some(resolver) => entry.resolver(resolver.clone()),
+            None => entry,
+        }
     }
 }
 
 /// What an application activated through a system, which an [`Applied`] holds in a VM: the
-/// root, the runtime's binds on it, the identity in which every execution runs, if any, and the
-/// workload's hostname and machine ID.
+/// root, the root of the host export, if any, the runtime's binds on the root, the identity in
+/// which every execution runs, if any, the workload's hostname and machine ID, the resolver file,
+/// if any, and the proxy's endpoint, if any.
 #[derive(Debug)]
 #[cfg_attr(test, derive(PartialEq, Eq))]
-struct Activated<R, B> {
+struct Activated<R, E, B> {
     /// The assembled root.
     root: R,
+    /// The root of the host export, if the record has an export.
+    export: Option<E>,
     /// The runtime's binds on the root.
     binds: B,
     /// The identity in which every execution runs, if the record has a workload identity.
@@ -501,7 +704,14 @@ struct Activated<R, B> {
     hostname: Vec<u8>,
     /// The machine ID that every execution sees.
     machine_id: MachineId,
+    /// The resolver file that every execution sees, if the record's network names a DNS server.
+    resolver: Option<PathBuf>,
+    /// The endpoint of the proxy, if the record's network names one.
+    proxy: Option<String>,
 }
+
+/// What an application through a system of type `S` activated.
+type ActivatedBy<S> = Activated<<S as System>::Root, <S as System>::Export, <S as System>::Binds>;
 
 /// Applies `record` with `template` by `deadline`, if any, through `system`, as
 /// [`apply`](fn@apply) does, and returns what it activated.
@@ -510,7 +720,7 @@ fn apply_with<S: System>(
     record: &ActivationRecord,
     template: &RootTemplate,
     deadline: Option<Instant>,
-) -> Result<Activated<S::Root, S::Binds>, ApplyError> {
+) -> Result<ActivatedBy<S>, ApplyError> {
     let configuration = record.configuration();
     let assembly = assembly(template, configuration);
     let workload = &configuration.workload;
@@ -520,7 +730,7 @@ fn apply_with<S: System>(
             .reread(assembly.distro, assembly.timeout, deadline)
             .map_err(ApplyError::Gpt)?;
     }
-    let root = system
+    let mut root = system
         .assemble(&assembly, deadline)
         .map_err(ApplyError::Assembly)?;
     if let Some(identity) = &identity
@@ -541,40 +751,123 @@ fn apply_with<S: System>(
             }
         }
     };
+    // The record names no mode of the export's mount: OpenVMM bounds each child's access.
+    let export = match configuration.export {
+        Some(_) => {
+            let tag = &template.filesystem_tag;
+            match system.mount_export(&mut root, tag, Access::ReadWrite) {
+                Ok(export) => Some(export),
+                Err(error) => {
+                    let teardown = system.teardown(root).err();
+                    return Err(ApplyError::Export { error, teardown });
+                }
+            }
+        }
+        None => None,
+    };
+    let network = configuration.network.as_ref();
+    let resolver = match network.and_then(|network| network.dns) {
+        Some(server) => {
+            let path = template.runtime.join(RESOLVER_FILE);
+            if let Err(error) = system.write_resolver(&path, server) {
+                let teardown = discard(system, export, root);
+                let error = NetworkError::Write(error);
+                return Err(ApplyError::Network { error, teardown });
+            }
+            Some(path)
+        }
+        None => None,
+    };
     let view = View {
         identity: identity.clone().unwrap_or_else(|| Identity::new(0, 0)),
         hostname: workload.hostname.clone(),
         machine_id,
+        resolver,
     };
     let binds = match system.bind(&root, &view) {
         Ok(binds) => binds,
         Err(error) => {
-            let teardown = system.teardown(root).err();
-            return Err(ApplyError::View { error, teardown });
+            let teardown = discard(system, export, root);
+            return Err(if is_resolver(&error) {
+                let error = NetworkError::Bind(error);
+                ApplyError::Network { error, teardown }
+            } else {
+                ApplyError::View { error, teardown }
+            });
         }
     };
     Ok(Activated {
         root,
+        export,
         binds,
         identity,
         hostname: view.hostname,
         machine_id: view.machine_id,
+        resolver: view.resolver,
+        proxy: network.and_then(|network| network.proxy.clone()),
     })
 }
 
-/// Removes `binds`, then tears `root` down, through `system`, as [`Applied::teardown`] does,
-/// attempting both whatever failed before.
+/// Closes `export`, the root of the host export, if any, then tears `root` down, through
+/// `system`, once an application failed, and returns the unmounts of the teardown that failed, if
+/// any.
+fn discard<S: System>(
+    system: &mut S,
+    export: Option<S::Export>,
+    root: S::Root,
+) -> Option<TeardownError> {
+    if let Some(export) = export {
+        system.close(export);
+    }
+    system.teardown(root).err()
+}
+
+/// Returns whether `error`, why [`Entry::bind_runtime`] failed, is the failure of the resolver
+/// file's bind, possibly with binds that stay mounted.
+fn is_resolver(error: &entry::Error) -> bool {
+    match error {
+        entry::Error::Resolver(_) => true,
+        entry::Error::Rollback { error, .. } => is_resolver(error),
+        _ => false,
+    }
+}
+
+/// Closes `export`, the root of the host export, if any, removes `binds`, then tears `root` down,
+/// through `system`, as [`Applied::teardown`] does, attempting the removal and the teardown
+/// whatever failed before.
 fn teardown_with<S: System>(
     system: &mut S,
+    export: Option<S::Export>,
     binds: S::Binds,
     root: S::Root,
 ) -> Result<(), AppliedTeardownError> {
+    if let Some(export) = export {
+        system.close(export);
+    }
     let binds = system.remove(binds).err();
     let root = system.teardown(root).err();
     if binds.is_none() && root.is_none() {
         return Ok(());
     }
     Err(AppliedTeardownError { binds, root })
+}
+
+/// Writes a resolver file that names `server` as the guest's one DNS server, as [`write_resolver`]
+/// writes one, to a new file at `path`, with mode 0444 whatever the process's umask, so that
+/// every execution may read it.
+///
+/// A file, or a symbolic link, at `path` already fails the call with `AlreadyExists`, and is left
+/// alone, so each activation writes its resolver file once.
+fn write_resolver_file(path: &Path, server: IpAddr) -> io::Result<()> {
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(RESOLVER_MODE)
+        .open(path)?;
+    // The umask narrows the mode that creates the file, which could keep executions of other
+    // users from reading it.
+    file.set_permissions(fs::Permissions::from_mode(RESOLVER_MODE))?;
+    write_resolver(&mut file, server)
 }
 
 /// Returns the assembly of the root that `configuration` sets, with `template`'s runtime

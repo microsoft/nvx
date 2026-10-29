@@ -613,10 +613,12 @@ credit that it needs, never keeps the others' output from the host.
   `nvx-sandbox`, after a cold boot, and the record's in a clone, and no time
   status, and with the publication of listeners that the root configuration
   names, published unless it names them unpublished. After a cold boot, it sees
-  the image's own machine ID, so that the worker binds nothing into the root,
-  and in a clone, the machine ID that the record names, which the clone's
-  application bound for every execution if the record asks for a generated
-  one. It runs as
+  the image's own machine ID and `/etc/resolv.conf`, so that the worker binds
+  nothing into the root, and in a clone, the machine ID that the record names,
+  which the clone's application bound for every execution if the record asks
+  for a generated one, and, if the record's network names a DNS server, the
+  resolver file that names it, which the application bound over the root's
+  `/etc/resolv.conf`. It runs as
   the identity that exactly one source names: the sandbox's workload identity,
   with no supplementary groups or capabilities, or, in a sandbox without one,
   the identity that its start names, with its supplementary groups, its
@@ -801,39 +803,52 @@ after the repair's acknowledgement of the restore:
    side effect.
 3. It applies the record with `nvx::guest::clone::apply`, with
    `worker::capture::root_template` of the template's configuration: its
-   runtime directory, the `distro` and scratch block devices, and its device
-   timeout. The application assembles the root, an EROFS image or a GPT disk
-   over a tmpfs or the scratch, in the record's overlay mode, waiting for each
-   device until the activation's deadline at the latest, so that it ends by
-   then, and checks the account of the record's workload identity, if it has
-   one, in the assembled root, in existing-account mode. For a GPT disk, it
-   first asks the kernel to reread the disk's partition table, so that the
+   runtime directory, the `distro` and scratch block devices, its device
+   timeout, and the tag of the host filesystem device,
+   `worker::capture::FILESYSTEM_TAG`. The application assembles the root, an
+   EROFS image or a GPT disk over a tmpfs or the scratch, in the record's
+   overlay mode, waiting for each device until the activation's deadline at the
+   latest, so that it ends by then, and checks the account of the record's
+   workload identity, if it has one, in the assembled root, in existing-account
+   mode. For a GPT disk, it first asks the kernel to reread the disk's partition
+   table, so that the
    block devices of its partitions are the clone's disk's, not the template's
    placeholder's. The upper must be fresh: the assembly refuses one whose
    `upper` or `work` directory exists and is not empty. If the record asks for
    a generated machine ID, the application then generates one, once, after the
    repair's reseed, in `nvx::guest::clone::MACHINE_ID_FILE` of the runtime
-   directory, and binds it read-only over the root's `/etc/machine-id`, in the
-   worker's mount namespace, for every execution; with the image's own machine
-   ID, it binds nothing. It applies none of the record's other settings: its
-   export, and its network.
-4. Once it took what the session received while the application ran, which
-   came before `Ready`, it completes the activation, which opens the fence,
-   and answers `Ready`, which reports the activation after the guest agent's
-   build, to the `Activate` and to each retry of it, byte for byte, that came
-   meanwhile, which joins the application. Anything else that came meanwhile,
-   a reset included, fails the activation, as before the application, so the
-   host waits for `Ready` before it sends the mapping table or the start.
-5. It then serves the host's order, as after a cold boot: the mapping table
-   that the record announces, the start, the executions, the probes, and the
-   stop. The record's workload identity, if it has one, is the whole
-   sandbox's, as a root configuration's is: every execution runs as it, and a
-   start that names an identity is refused. Every execution takes the record's
-   hostname. Without an export, the clone refuses each part of a mapping table
-   with `MapFailed`. On the stop, the worker removes the application's binds,
-   which keep the root's mount busy, before it tears the root down, through
-   `nvx::guest::clone::Applied::teardown`. It also answers the
-   [`activation` probe](#probes), with when the events of its activation and
+   directory. If the record has an export, it mounts the host export through the
+   host filesystem device, read-write, at `hostfs/root` of the runtime
+   directory, outside the root, where only the guest's root user reaches it, as
+   the worker of a VM that boots cold mounts the one that its kernel command
+   line names. If the record's network names a DNS server, it writes a resolver
+   file that names it, of mode 0444, in `nvx::guest::clone::RESOLVER_FILE` of
+   the runtime directory. It then binds the generated machine ID read-only over
+   the root's `/etc/machine-id`, and the resolver file read-only over its
+   `/etc/resolv.conf`, in the worker's mount namespace, for every execution;
+   with the image's own machine ID and without a DNS server, it binds nothing.
+4. Once it took what the session received while the application ran, which came
+   before `Ready`, it completes the activation, which opens the fence, and
+   answers `Ready`, which reports the activation after the guest agent's build,
+   to the `Activate` and to each retry of it, byte for byte, that came
+   meanwhile, which joins the application. Anything else that came meanwhile, a
+   reset included, fails the activation, as before the application, so the host
+   waits for `Ready` before it sends the mapping table or the start.
+5. It then serves the host's order, as after a cold boot: the mapping table that
+   the record announces, which it applies from the record's export, the start,
+   the executions, the probes, and the stop. The record's workload identity, if
+   it has one, is the whole sandbox's, as a root configuration's is: every
+   execution runs as it, and a start that names an identity is refused. Every
+   execution takes the record's hostname. The host tells the workloads the
+   endpoint of the network's proxy, as after a cold boot: the host program's
+   `exec` adds it to each execution's environment, so the worker leaves each
+   execution's environment exactly its start's. The application does not apply
+   the publication of the record's listeners, so a clone's executions enter the
+   root with listeners published, the entry's default, which refuses the most.
+   On the stop, the worker closes the export's root and removes the
+   application's binds, which keep the root's mounts busy, before it tears the
+   root down, through `nvx::guest::clone::Applied::teardown`. It also answers
+   the [`activation` probe](#probes), with when the events of its activation and
    order happened after the repair's acknowledgement of the restore.
 
 Until the clone is ready, its session takes nothing but that `Activate`:
@@ -884,6 +899,8 @@ ends with one of these statuses, after a diagnostic on standard error:
 | 53 | The record expects other resources than the clone has |
 | 54 | The root's assembly failed, its upper not fresh among its causes, or the kernel did not reread the partition table of the record's GPT disk before it |
 | 55 | The clone's workload cannot be activated: the image refuses the record's workload identity, as it holds no account of the identity, or not its group, or its account databases cannot be read, or the machine ID that the record asks for cannot be generated, or the record's hostname or that machine ID cannot be set for every execution |
+| 56 | The record's host export cannot be mounted |
+| 57 | The record's network settings cannot be applied: the resolver file that names its DNS server cannot be written, or set for every execution |
 | 58 | The worker's own order misused the activation: it completed an activation that did not run, or started the sandbox before the clone was ready, or again |
 | 193 | A conformance check of the time ABI failed in the clone's repair, such as the finish's, which needs a running time daemon |
 | 195 | The time ABI's part of the clone's repair failed, such as the validation of the restore packet, or the record of the restore |
@@ -896,14 +913,12 @@ the time ABI could not repair, ends with the violation's status instead, as
 `worker::capture::capture_status` tells. `nvx::protocol::status` documents
 the statuses of a clone's repair, from 40 to 45, which
 `nvx::guest::clone::RepairError::status` selects, the time ABI's own, from 193
-to 195, and those of a clone's activation, from 50 to 58, of which the worker
-leaves 56 and 57, the export's and the network's, to the activation of those
-settings. A
-stage whose failure may leave the worker some of the permission for the time
-ABI's ports fails with the time ABI's port error, and the worker then starts no
-thread or process before it ends. A violation of the time ABI in enforcing
-mode, in the capture's preparation or in the time daemon, stops the VM with the
-time ABI's own status, from 193 to 195, instead.
+to 195, and those of a clone's activation, from 50 to 58. A stage whose
+failure may leave the worker some of the permission for the time ABI's ports
+fails with the time ABI's port error, and the worker then starts no thread or
+process before it ends. A violation of the time ABI in enforcing mode, in the
+capture's preparation or in the time daemon, stops the VM with the time ABI's
+own status, from 193 to 195, instead.
 
 ## Host program
 
@@ -1772,7 +1787,8 @@ process's status, the outcomes of attempts, the entry's refusals, and the
 probe's arguments. Those of `worker::capture` check that closing the worker's
 fence acquires it, the status of each stage of a capture, which no other
 outcome of the worker shares, a template's devices, the template's own root
-configuration, and the inputs of a clone's root that it gives, and that the
+configuration, and the inputs of a clone's root that it gives, the tag of the
+host filesystem device among them, and that the
 worker attaches its session, takes the broker's reset, and acknowledges it,
 which the stream sent, before the capture runs, without reading anything more
 of the session, and keeps the session, active in the broker's first epoch, and
@@ -2006,9 +2022,10 @@ a GPT disk, it stands for the kernel's reread of the disk's partition table,
 which a test may fail; it takes as long as a test asks, but no longer than until
 the activation's deadline, as the waits for the devices do, checks the account
 of the record's workload identity in the tests' directory of account databases,
-and stands for the generation of a machine ID that the record asks for, and the
-setting of the record's hostname and machine ID for every execution, which a
-test may fail. The tests cover:
+and stands for the generation of a machine ID that the record asks for, the
+mount of the record's export, the write of the resolver file that names its
+network's DNS server, and the setting of the record's hostname and machine ID
+for every execution, each of which a test may fail. The tests cover:
 
 - the reset that the restore queued, of another instance, which the worker
   acknowledges without an attachment, and the `Activate`, whose record it
@@ -2024,9 +2041,10 @@ test may fail. The tests cover:
 - a record that does not decode, a cold boot's, and one that expects other
   resources, which fail the activation with nothing applied, and a GPT disk
   whose partition table the kernel does not reread, a workload identity whose
-  account or group the image lacks, a machine ID that cannot be generated, and
-  a hostname or machine ID that cannot be set, which fail its application,
-  each with the status of its class, and no `Ready`;
+  account or group the image lacks, a machine ID that cannot be generated, a
+  hostname or machine ID that cannot be set, an export that cannot be mounted,
+  and a resolver file that cannot be written, which fail its application, each
+  with the status of its class, and no `Ready`;
 - an `Activate` whose header announces more than 1 KiB, which the framing
   refuses before it takes any byte of its body, and which fails the activation
   with the record's status, before the clone is ready and once it is;
@@ -2065,7 +2083,12 @@ test may fail. The tests cover:
 - the `activation` probe, which the worker answers itself, with no root
   operation, executions running or not: the restore's reset, the host's first
   message, the clone's `Ready`, and its start, in that order, after the
-  repair's acknowledgement, and the start of the first execution after them.
+  repair's acknowledgement, and the start of the first execution after them;
+- the mapping table of the record's export, which the host sends in parts once
+  the clone is ready, and which the worker applies in order, from the export
+  that the application mounted, before it starts the sandbox, and the endpoint
+  of the network's proxy, which the worker leaves to the host: an execution's
+  environment is exactly its start's.
 
 `tests/clone_start.rs` checks, in the host-only configuration, on Linux and
 Windows, without a hypervisor:

@@ -29,7 +29,9 @@
 //! activation, retries of the `Activate`, the order that the worker serves once the clone is
 //! ready, the status of each class of the activation's failures, which the worker answers with
 //! nothing, before any side effect where the class allows, its deadline, also once the stream
-//! takes nothing more, and the record's workload identity, as which every execution runs.
+//! takes nothing more, the record's workload identity, as which every execution runs, and the
+//! mapping table of the record's export, which the worker applies from the export that the
+//! application mounted, while it leaves the endpoint of the network's proxy to the host.
 //!
 //! The worker's executions run behind the test broker too, whose host side drives the engine's
 //! peers through the host program's own `exec::HostExecution`: the tests cover several executions
@@ -1131,7 +1133,11 @@ enum Operation {
     /// A clone's setting of its record's hostname and machine ID for every execution, last.
     #[cfg(target_arch = "x86_64")]
     View,
-    /// The host export's mount.
+    /// A clone's write of the resolver file that names its record's DNS server, once it mounted
+    /// its record's export, if any.
+    #[cfg(target_arch = "x86_64")]
+    Resolver,
+    /// The host export's mount: the one that the kernel command line names, or a clone's record's.
     MountExport,
     /// A probe.
     Probe,
@@ -1347,12 +1353,14 @@ impl RootOperations for FakeRoot {
     /// the gate, if any: for a GPT disk, it stands for the kernel's reread of the disk's partition
     /// table first, which fails as the kernel does while a partition is open if the test fails
     /// [`Operation::Reread`]; it then takes as long as the assembly, but no longer than until
-    /// `deadline`, as the waits for the devices do, and checks the account of the record's
-    /// workload identity, if it has one, in existing-account mode, in the
-    /// [accounts' root](accounts), which stands for the root that it assembled. It then stands for
-    /// the generation of the machine ID that the record asks for, if any, and the setting of the
-    /// record's hostname and machine ID for every execution, which fail if the test fails
-    /// [`Operation::MachineId`] and [`Operation::View`].
+    /// `deadline`, as the waits for the devices do, and checks the account of the record's workload
+    /// identity, if it has one, in existing-account mode, in the [accounts' root](accounts), which
+    /// stands for the root that it assembled. It then stands for the generation of the machine ID
+    /// that the record asks for, if any, the mount of the record's export through the template's
+    /// host filesystem device, if it has one, the write of the resolver file that names the DNS
+    /// server of the record's network, if it names one, and the setting of the record's hostname
+    /// and machine ID for every execution, which fail if the test fails [`Operation::MachineId`],
+    /// [`Operation::MountExport`], [`Operation::Resolver`], and [`Operation::View`].
     #[cfg(target_arch = "x86_64")]
     fn apply(
         &mut self,
@@ -1361,8 +1369,8 @@ impl RootOperations for FakeRoot {
         deadline: Option<Instant>,
     ) -> Result<Option<entry::Identity>, nvx::guest::clone::ApplyError> {
         use nvx::activation::MachineIdMode;
-        use nvx::guest::clone::ApplyError;
-        use nvx::guest::root::{DeviceStep, Error, Role};
+        use nvx::guest::clone::{ApplyError, NetworkError};
+        use nvx::guest::root::{DeviceStep, Error, Mount, Role};
 
         let applied = (record.clone(), template.clone());
         self.calls.push(Call::Apply(Box::new(applied)));
@@ -1405,6 +1413,26 @@ impl RootOperations for FakeRoot {
             self.result(Operation::MachineId)
                 .map_err(|problem| ApplyError::MachineId {
                     error: io::Error::other(problem),
+                    teardown: None,
+                })?;
+        }
+        if configuration.export.is_some() {
+            self.result(Operation::MountExport)
+                .map_err(|problem| ApplyError::Export {
+                    error: Error::Mount {
+                        mount: Mount::Export {
+                            tag: template.filesystem_tag.clone(),
+                        },
+                        error: io::Error::other(problem),
+                    },
+                    teardown: None,
+                })?;
+        }
+        let network = configuration.network.as_ref();
+        if network.is_some_and(|network| network.dns.is_some()) {
+            self.result(Operation::Resolver)
+                .map_err(|problem| ApplyError::Network {
+                    error: NetworkError::Write(io::Error::other(problem)),
                     teardown: None,
                 })?;
         }
@@ -4009,6 +4037,7 @@ fn the_worker_runs_executions_on_a_tty() {
 /// clone is ready, applies its record, and then serves the host's order, as after a cold boot.
 #[cfg(target_arch = "x86_64")]
 mod clones {
+    use std::net::{IpAddr, Ipv4Addr};
     use std::num::NonZeroU64;
 
     use nvx::activation::{
@@ -4088,6 +4117,31 @@ mod clones {
         let mut configuration = record.configuration().clone();
         change(&mut configuration);
         ActivationRecord::new(record.restore().cloned(), configuration).unwrap()
+    }
+
+    /// Returns the record of `record`'s transaction with an aggregate export, whose mapping table
+    /// holds `mappings` mappings.
+    fn exported(record: &ActivationRecord, mappings: usize) -> ActivationRecord {
+        changed(record, |configuration| {
+            configuration.export = Some(activation::Export {
+                kind: activation::ExportKind::Aggregate,
+                plan: activation::Identity::from_bytes([0x33; 32]),
+            });
+            configuration.mappings = mappings;
+        })
+    }
+
+    /// Returns the record of `record`'s transaction with a network whose DNS server is
+    /// `10.0.0.3`, which publishes no listener, and whose proxy's endpoint is `proxy`, if any.
+    fn networked(record: &ActivationRecord, proxy: Option<&str>) -> ActivationRecord {
+        changed(record, |configuration| {
+            configuration.network = Some(activation::Network {
+                policy: activation::Identity::from_bytes([0x55; 32]),
+                dns: Some(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3))),
+                publication: activation::Publication::Unpublished,
+                proxy: proxy.map(str::to_owned),
+            });
+        })
     }
 
     /// Returns the activation of a clone that the worker repaired, with [`RESOURCES`], behind the
@@ -4241,12 +4295,23 @@ mod clones {
         /// worker activated the clone with `record`, which announces no mapping, and started the
         /// sandbox. The host waits for Ready before it starts the sandbox.
         fn activated(root: FakeRoot, record: &ActivationRecord) -> Self {
+            Self::mapped(root, record, &[])
+        }
+
+        /// Starts a clone's worker with the root operations `root`, and returns the host, once the
+        /// worker activated the clone with `record`, applied `parts`, the parts of the mapping
+        /// table that the record announces, in order, and started the sandbox.
+        fn mapped(root: FakeRoot, record: &ActivationRecord, parts: &[Vec<u8>]) -> Self {
             let (mut broker, working) = start_clone(root, ACTIVATION_TIMEOUT);
             broker.reset(RESTORED);
             let replies = broker.exchange(&[activate(record)], OUTER_MAX_PAYLOAD, 1);
             assert_eq!(replies, [activated(record)]);
-            let replies = broker.exchange(&[Message::Start], OUTER_MAX_PAYLOAD, 1);
-            assert_eq!(replies, [Message::Started]);
+            let mut messages = parts.iter().cloned().map(Message::Maps).collect::<Vec<_>>();
+            messages.push(Message::Start);
+            let mut expected = parts.iter().map(|_| Message::Mapped).collect::<Vec<_>>();
+            expected.push(Message::Started);
+            let replies = broker.exchange(&messages, OUTER_MAX_PAYLOAD, expected.len());
+            assert_eq!(replies, expected);
             Self {
                 broker,
                 working: Some(working),
@@ -4385,7 +4450,8 @@ mod clones {
         // The application fails once the kernel refused to reread a GPT disk's partition table,
         // and refuses a workload identity whose account the image lacks, or whose primary group
         // it lacks, a machine ID that it cannot generate, and a hostname or machine ID that it
-        // cannot set for every execution, before Ready.
+        // cannot set for every execution, an export that it cannot mount, and a resolver file
+        // that it cannot write, before Ready.
         let gpt = changed(&clone, |configuration| {
             configuration.image = activation::Image::Gpt {
                 binding: activation::Identity::from_bytes([0x11; 32]),
@@ -4421,6 +4487,16 @@ mod clones {
                 generated,
                 FakeRoot::failing(Operation::View, "the image's machine ID is a directory"),
                 status::ACTIVATION_WORKLOAD,
+            ),
+            (
+                exported(&clone, 1),
+                FakeRoot::failing(Operation::MountExport, "the export's device is missing"),
+                status::ACTIVATION_EXPORT,
+            ),
+            (
+                networked(&clone, None),
+                FakeRoot::failing(Operation::Resolver, "a resolver file exists already"),
+                status::ACTIVATION_NETWORK,
             ),
         ];
         for (record, root, expected) in cases {
@@ -4825,5 +4901,37 @@ mod clones {
             "{:?}",
             root.calls
         );
+    }
+
+    #[test]
+    fn a_clone_maps_its_record_s_table_from_its_export_and_leaves_the_proxy_to_the_host() {
+        // The application mounted the record's export, and wrote the resolver file of its
+        // network's DNS server, before Ready. The host then sends the mapping table that the
+        // record announces, in parts, as after a cold boot: the worker applies each part's
+        // mappings from the export, and starts the sandbox once it applied every one.
+        let table = table(3);
+        let parts = parts(&table, 2);
+        assert_eq!(parts.len(), 2);
+        let record = exported(&record(1, Some(WORKLOAD)), table.len());
+        let record = networked(&record, Some("http://10.0.0.1:3128"));
+        let mut host = Host::mapped(FakeRoot::booting(&layout()), &record, &parts);
+        // The host tells the workloads the endpoint of the network's proxy, as after a cold boot:
+        // an execution's environment is exactly its start's, which names no proxy here.
+        let printing = start_of(1, vec![b"/usr/bin/env".to_vec()]).with_environment(["NAME=value"]);
+        host.start(printing, Vec::new());
+        host.run_until(|host| host.outcome(1).is_some());
+        check_lossless(&host, 1, Status::Exited(0));
+        assert_eq!(host.executions[&1].output(Stream::Stdout), b"NAME=value\n");
+        let (root, worked) = host.stop();
+        assert_eq!(worked.unwrap(), Worked::Stopped);
+        let identity = entry::Identity::new(WORKLOAD.0, WORKLOAD.1);
+        let expected = [
+            applied(&record),
+            Call::Map(mappings(&table[..2])),
+            Call::Map(mappings(&table[2..])),
+            Call::Prepare(cloned(identity, b"clone")),
+            Call::Teardown,
+        ];
+        assert_eq!(root.calls, expected);
     }
 }
