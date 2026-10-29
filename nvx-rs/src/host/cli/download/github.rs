@@ -18,6 +18,7 @@ use serde_json::Value;
 use super::{Asset, Releases, remove_stale, system_program};
 use crate::ErrorCode;
 use crate::host::cli::{Exit, Result, check_interrupt, io_error};
+use crate::host::supervisor::spawn_command;
 
 /// The base URL of the GitHub REST API.
 const API: &str = "https://api.github.com";
@@ -321,7 +322,8 @@ impl Curl {
         remove_stale(request.output)?;
         remove_stale(request.headers)?;
         let config = self.config(request)?;
-        let mut child = Command::new(&self.program)
+        let mut command = Command::new(&self.program);
+        command
             .args(["--disable", "--config", "-"])
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
@@ -329,17 +331,16 @@ impl Curl {
                 Stdio::inherit()
             } else {
                 Stdio::piped()
-            })
-            .spawn()
-            .map_err(|error| {
-                Exit::error(
-                    ErrorCode::Unavailable,
-                    format!(
-                        "{context} needs curl, which did not run: {}: {error}",
-                        self.program.display()
-                    ),
-                )
-            })?;
+            });
+        let mut child = spawn_command(&mut command).map_err(|error| {
+            Exit::error(
+                ErrorCode::Unavailable,
+                format!(
+                    "{context} needs curl, which did not run: {}: {error}",
+                    self.program.display()
+                ),
+            )
+        })?;
         if let Some(mut stdin) = child.stdin.take() {
             // `curl` reports a configuration that it did not receive whole.
             let _ = stdin.write_all(config.as_bytes());

@@ -11,7 +11,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 
 use sha2::{Digest, Sha256};
 
@@ -19,6 +19,7 @@ use super::system_program;
 use crate::ErrorCode;
 use crate::host::artifacts::CHECKSUMS_NAME;
 use crate::host::cli::{Exit, Result, check_interrupt, io_error};
+use crate::host::supervisor::spawn_command;
 
 /// The directory beside the package into which `tar` extracts it.
 const EXTRACTION_DIR: &str = "package";
@@ -75,11 +76,15 @@ pub(super) fn extract(archive: &Path) -> Result<PathBuf> {
 /// standard output.
 fn tar(directory: &Path, arguments: &[&str]) -> Result<String> {
     let program = system_program("tar");
-    let output = Command::new(&program)
+    let mut command = Command::new(&program);
+    command
         .args(arguments)
         .current_dir(directory)
         .stdin(Stdio::null())
-        .output()
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let output = spawn_command(&mut command)
+        .and_then(Child::wait_with_output)
         .map_err(|error| {
             Exit::error(
                 ErrorCode::Unavailable,
