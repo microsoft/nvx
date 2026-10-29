@@ -118,6 +118,17 @@ class AzureProvenanceTests(unittest.TestCase):
     def setUp(self) -> None:
         host_telemetry._azure_vm_provenance.cache_clear()
         self.addCleanup(host_telemetry._azure_vm_provenance.cache_clear)
+        snapshots = tempfile.TemporaryDirectory()
+        self.addCleanup(snapshots.cleanup)
+        for name in (
+            "WINDOWS_AZURE_METADATA_SNAPSHOT",
+            "LINUX_AZURE_METADATA_SNAPSHOT",
+        ):
+            snapshot_patch = patch.object(
+                host_telemetry, name, Path(snapshots.name) / name / "compute.json"
+            )
+            snapshot_patch.start()
+            self.addCleanup(snapshot_patch.stop)
 
     def test_keeps_only_vm_size_and_disk_performance_settings(self):
         provenance = host_telemetry.azure_compute_provenance(IMDS_COMPUTE)
@@ -184,8 +195,8 @@ class AzureProvenanceTests(unittest.TestCase):
             ):
                 host_telemetry.azure_compute_provenance(compute)
 
-    def test_windows_runner_uses_only_the_trusted_snapshot(self):
-        safe = {
+    def test_provisioned_runner_uses_only_the_trusted_snapshot(self):
+        safe: dict[str, object] = {
             "vmSize": IMDS_COMPUTE["vmSize"],
             "storageProfile": {
                 "osDisk": {
@@ -209,15 +220,24 @@ class AzureProvenanceTests(unittest.TestCase):
                 "resourceDisk": {"size": "614400"},
             },
         }
+        for platform_name, constant in (
+            ("win32", "WINDOWS_AZURE_METADATA_SNAPSHOT"),
+            ("linux", "LINUX_AZURE_METADATA_SNAPSHOT"),
+        ):
+            with self.subTest(platform=platform_name):
+                self.check_trusted_snapshot(platform_name, constant, safe)
+
+    def check_trusted_snapshot(
+        self, platform_name: str, constant: str, safe: dict[str, object]
+    ) -> None:
+        host_telemetry._azure_vm_provenance.cache_clear()
         with tempfile.TemporaryDirectory() as temporary:
             snapshot = Path(temporary) / "compute.json"
             snapshot.write_text(json.dumps(safe), encoding="utf-8")
             with (
-                patch.object(host_telemetry.sys, "platform", "win32"),
+                patch.object(host_telemetry.sys, "platform", platform_name),
                 patch.object(host_telemetry, "may_be_azure_vm", return_value=True),
-                patch.object(
-                    host_telemetry, "WINDOWS_AZURE_METADATA_SNAPSHOT", snapshot
-                ),
+                patch.object(host_telemetry, constant, snapshot),
                 patch.object(host_telemetry, "read_azure_compute_metadata") as read,
             ):
                 expected = host_telemetry.azure_compute_provenance(safe)

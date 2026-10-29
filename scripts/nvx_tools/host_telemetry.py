@@ -64,6 +64,7 @@ AZURE_IMDS_TIMEOUT_SECONDS = 2.0
 AZURE_IMDS_ATTEMPTS = 3
 AZURE_CHASSIS_ASSET_TAG = "7783-7084-3265-9085-8269-3286-77"
 WINDOWS_AZURE_METADATA_SNAPSHOT = Path(r"C:\ProgramData\NvxCiHostMetadata\compute.json")
+LINUX_AZURE_METADATA_SNAPSHOT = Path("/var/lib/nvx-ci-host-metadata/compute.json")
 DEFENDER_PROCESS_NAMES = frozenset({"msmpeng.exe", "mpdefendercoreservice.exe"})
 MIB = 1024 * 1024
 GIB = 1024 * MIB
@@ -386,9 +387,9 @@ def physical_memory_bytes() -> int | None:
 def azure_vm_provenance() -> dict[str, object] | None:
     """Return the Azure VM size and disks, or None off Azure.
 
-    The instance metadata service is queried once per process, with up to
-    ``AZURE_IMDS_ATTEMPTS`` attempts when it can't be reached: unavailable
-    metadata fails the benchmark host check.
+    Provisioned runners read their administrator-owned metadata snapshot.
+    Other hosts query instance metadata once per process, with up to
+    ``AZURE_IMDS_ATTEMPTS`` attempts: unavailable metadata fails the host check.
     """
     return copy.deepcopy(_azure_vm_provenance())
 
@@ -397,9 +398,14 @@ def azure_vm_provenance() -> dict[str, object] | None:
 def _azure_vm_provenance() -> dict[str, object] | None:
     if not may_be_azure_vm():
         return None
-    if sys.platform == "win32" and WINDOWS_AZURE_METADATA_SNAPSHOT.parent.is_dir():
+    snapshot = (
+        WINDOWS_AZURE_METADATA_SNAPSHOT
+        if sys.platform == "win32"
+        else LINUX_AZURE_METADATA_SNAPSHOT
+    )
+    if snapshot.parent.is_dir():
         try:
-            with WINDOWS_AZURE_METADATA_SNAPSHOT.open("rb") as stream:
+            with snapshot.open("rb") as stream:
                 payload = stream.read(65537)
             if len(payload) > 65536:
                 raise ValueError("snapshot exceeds 65536 bytes")

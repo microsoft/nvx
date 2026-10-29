@@ -47,7 +47,12 @@ explicit `general` has the same result. Append `benchmark` instead for the one
 dedicated benchmark runner in each backend pool. The two role labels are
 mutually exclusive. The adapter removes the role from the optional labels and
 selects the generic setup's benchmark switch when needed; the setup script then
-registers exactly one role along with the required platform labels. Changing
+registers exactly one role along with the required platform labels. On either
+platform, a configuration with an explicit `general` label can set
+`benchmarkRunnerName` to one full runner name; only that instance receives
+`benchmark` instead of `general`. The name uses the same prefix and numeric
+offset as every other runner in the pool. A dedicated benchmark scale set can
+continue to use the global `benchmark` label. Changing
 the name, backend, or labels of a registered runner requires a fresh
 registration token. Add `general` to existing non-benchmark runners before
 merging workflows that require it, in the order documented in the
@@ -83,11 +88,7 @@ The owned interrupted-initialization recovery path remains separate.
 Windows uses WHP and defines `dataDisk.driveLetter`,
 `dataDisk.temporaryDriveFallback`, optional
 `benchmarkScratchDirectory` on the managed data volume, `sshDefaultShell`,
-`publicKeys`, and `benchmarkRunnerName`. When the scale set uses the `general`
-label, `benchmarkRunnerName` selects one runner by its full name
-(`runnerNamePrefix` plus the VMSS instance number and `runnerNumberOffset`);
-only that runner receives `benchmark` instead of `general`. A dedicated
-benchmark scale set can continue to use the global `benchmark` label.
+`publicKeys`.
 Omitted or null scratch paths resolve to
 `<driveLetter>:\nvx-benchmark-scratch` before validation and are passed
 explicitly to setup. Scratch must neither contain the runner installation nor
@@ -113,9 +114,16 @@ benchmark host telemetry uses it without querying instance metadata.
 Missing or invalid snapshots fail the benchmark host check on provisioned
 Windows runners. Older Windows hosts without this directory continue to use
 instance metadata until they receive the updated bootstrap.
+Linux bootstrap similarly writes only the VM size and disk performance settings
+to `/var/lib/nvx-ci-host-metadata/compute.json`, owned by root and readable but
+not writable by jobs. Provisioned Linux and Windows jobs use these snapshots;
+a missing or invalid snapshot fails the host check without querying metadata.
 Linux jobs run as `nvx-runner`, whose metadata block is installed before
 registration. The runner service requires the block on every start; root
-retains metadata access for bootstrap and token retrieval. Metadata-rule updates
+retains metadata access for bootstrap and token retrieval. Before every runner
+start, a root-only `bootstrap-runner.sh --refresh-metadata` hook refreshes the
+snapshot without running disk setup, provisioning, or registration. A failed
+refresh prevents the runner service from starting. Metadata-rule updates
 keep existing protection until a replacement is installed and verified; failures
 stop setup without deleting that protection. Successful Linux registration
 disables the provisioning unit without restarting the runner;
@@ -172,6 +180,17 @@ create scale sets, disks, vaults, or identities, attach disks, deploy an
 extension, reimage instances, or update a running runner. Azure may omit
 customData from model reads; a successful model update alone is not proof
 that an existing guest has run the new setup.
+
+To stage initialization without upgrading running instances, first set the VMSS
+model upgrade policy to `Manual`, retaining
+`automaticOSUpgradePolicy.enableAutomaticOSUpgrade: true`. Then apply only the
+generated custom-data model patch; do not call `update-instances`, reimage, or
+restart. Remove obsolete bootstrap-only extensions from the staged model when
+their responsibilities have moved into this package, preserving unrelated
+extensions. Automatic OS image upgrades remain enabled and apply the latest model
+when the next image arrives. Regenerate and stage the package whenever its
+configuration or source changes: a repository commit does not update an already
+embedded payload.
 
 Disk initialization can format **blank** managed disks or partitions bearing
 the helper's interrupted-initialization marker; existing incompatible or

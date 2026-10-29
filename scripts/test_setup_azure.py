@@ -78,6 +78,26 @@ class PackageTests(unittest.TestCase):
                         exec(self.embedded_linux(index), {})
             return output.getvalue()
 
+    def linux_metadata(self, config: builder.LinuxConfig) -> dict[str, object]:
+        disk = {
+            "diskSizeGB": "512",
+            "managedDisk": {"storageAccountType": "Premium_LRS"},
+            "caching": "None",
+            "writeAcceleratorEnabled": "false",
+        }
+        return {
+            "subscriptionId": config["subscriptionId"],
+            "resourceGroupName": config["resourceGroup"].upper(),
+            "vmScaleSetName": config["vmssName"].upper(),
+            "name": config["vmssName"] + "_7",
+            "vmSize": "Standard_D8s_v5",
+            "storageProfile": {
+                "osDisk": {**disk, "diskSizeGB": "128", "caching": "ReadWrite"},
+                "dataDisks": [{**disk, "lun": "0"}],
+                "resourceDisk": {"size": ""},
+            },
+        }
+
     def execute_windows(self, script: str, **environment: str) -> str:
         powershell = shutil.which("powershell.exe")
         if os.name != "nt" or powershell is None:
@@ -139,7 +159,6 @@ class PackageTests(unittest.TestCase):
                 "0",
                 "/mnt/data",
                 "preinstalled",
-                "false",
             ],
         )
 
@@ -161,6 +180,14 @@ class PackageTests(unittest.TestCase):
     def test_embedded_linux_maps_runner_roles_to_the_setup_switch(self):
         bootstrap = builder.source("linux/bootstrap-runner.sh").decode()
         self.assertIn("registration_arguments+=(--benchmark-runner)", bootstrap)
+        metadata = self.linux_metadata(self.configuration("linux"))
+
+        class Opener:
+            def open(
+                self, request: urllib.request.Request, timeout: int
+            ) -> io.StringIO:
+                return io.StringIO(json.dumps(metadata))
+
         for role, benchmark in (
             (None, "false"),
             ("general", "false"),
@@ -172,7 +199,8 @@ class PackageTests(unittest.TestCase):
                     config["runnerLabels"].append(role)
                 values = self.execute_linux(0, config).splitlines()
                 self.assertEqual(values[3], "")
-                self.assertEqual(values[8], benchmark)
+                instance = self.execute_linux(1, config, Opener()).splitlines()
+                self.assertEqual(instance[1], benchmark)
 
         config = self.configuration("linux")
         config["runnerLabels"].extend(("general", "benchmark"))
@@ -181,12 +209,7 @@ class PackageTests(unittest.TestCase):
 
     def test_embedded_linux_metadata_identity(self):
         config = self.configuration("linux")
-        metadata = {
-            "subscriptionId": config["subscriptionId"],
-            "resourceGroupName": config["resourceGroup"].upper(),
-            "vmScaleSetName": config["vmssName"].upper(),
-            "name": config["vmssName"] + "_7",
-        }
+        metadata = self.linux_metadata(config)
 
         class Opener:
             def open(
@@ -194,12 +217,79 @@ class PackageTests(unittest.TestCase):
             ) -> io.StringIO:
                 return io.StringIO(json.dumps(metadata))
 
-        self.assertEqual(self.execute_linux(1, config, Opener()).strip(), "nvx-linux-8")
+        self.assertEqual(
+            self.execute_linux(1, config, Opener()).splitlines()[0], "nvx-linux-8"
+        )
         config["runnerNumberOffset"] = 0
-        self.assertEqual(self.execute_linux(1, config, Opener()).strip(), "nvx-linux-7")
+        self.assertEqual(
+            self.execute_linux(1, config, Opener()).splitlines()[0], "nvx-linux-7"
+        )
         metadata["vmScaleSetName"] = "another-vmss"
         with self.assertRaisesRegex(SystemExit, "does not identify"):
             self.execute_linux(1, config, Opener())
+
+    def test_embedded_linux_selects_one_benchmark_runner(self):
+        config = self.configuration("linux")
+        config["runnerLabels"].extend(("general", "isolated"))
+        config["benchmarkRunnerName"] = "nvx-linux-8"
+        metadata = self.linux_metadata(config)
+
+        class Opener:
+            def open(
+                self, request: urllib.request.Request, timeout: int
+            ) -> io.StringIO:
+                return io.StringIO(json.dumps(metadata))
+
+        self.assertEqual(self.execute_linux(0, config).splitlines()[3], "isolated")
+        self.assertEqual(
+            self.execute_linux(1, config, Opener()).splitlines()[1], "true"
+        )
+        metadata["name"] = config["vmssName"] + "_8"
+        self.assertEqual(
+            self.execute_linux(1, config, Opener()).splitlines()[1], "false"
+        )
+        config["runnerNumberOffset"] = 0
+        self.assertEqual(
+            self.execute_linux(1, config, Opener()).splitlines()[1], "true"
+        )
+
+    def test_embedded_linux_projects_only_safe_host_metadata(self):
+        config = self.configuration("linux")
+        metadata = self.linux_metadata(config)
+        metadata["tags"] = "private-tag"
+        metadata["userData"] = "private-user-data"
+
+        class Opener:
+            def open(
+                self, request: urllib.request.Request, timeout: int
+            ) -> io.StringIO:
+                return io.StringIO(json.dumps(metadata))
+
+        snapshot = self.execute_linux(1, config, Opener()).splitlines()[2]
+        self.assertEqual(
+            set(json.loads(snapshot)),
+            {"vmSize", "storageProfile"},
+        )
+        for private in ("private-tag", "private-user-data", config["vmssName"]):
+            self.assertNotIn(private, snapshot)
+        metadata["vmSize"] = "Standard_E8-4s_v5"
+        self.assertEqual(
+            json.loads(self.execute_linux(1, config, Opener()).splitlines()[2])[
+                "vmSize"
+            ],
+            metadata["vmSize"],
+        )
+        invalid_metadata: tuple[dict[str, object], ...] = (
+            {"vmSize": "invalid-size"},
+            {"storageProfile": {"dataDisks": []}},
+        )
+        for invalid in invalid_metadata:
+            with self.subTest(invalid=invalid):
+                original = metadata.copy()
+                metadata.update(invalid)
+                with self.assertRaisesRegex(SystemExit, "Azure compute metadata"):
+                    self.execute_linux(1, config, Opener())
+                metadata = original
 
     def test_embedded_linux_registration_flow(self):
         requests: list[urllib.request.Request] = []
@@ -705,6 +795,93 @@ sfdisk() {
                     self.assertNotIn(b"INITIALIZATION_ALLOWED=1", result.stdout)
                     self.assertIn(b"ERROR:", result.stderr)
 
+    def test_linux_metadata_refresh_updates_snapshot_without_provisioning(self):
+        source = builder.source("linux/bootstrap-runner.sh").decode()
+        for original_path, replacement in (
+            (
+                "exec >>/var/log/nvx-runner-bootstrap.log 2>&1",
+                'exec >>"$test_root/bootstrap.log" 2>&1',
+            ),
+            (
+                "metadata_directory=/var/lib/nvx-ci-host-metadata",
+                'metadata_directory="$test_root/metadata"',
+            ),
+        ):
+            self.assertEqual(source.count(original_path), 1)
+            source = source.replace(original_path, replacement)
+        mock = r"""
+set -euo pipefail
+test_root=$1
+scenario=$2
+python3() {
+    local count
+    count=$(cat "$test_root/python-calls")
+    count=$((count + 1))
+    printf '%s\n' "$count" >"$test_root/python-calls"
+    case "$count" in
+        1) printf '%s\n' kvm ciadmin microsoft/nvx '' /opt/nvx-runner 0 /mnt/data preinstalled ;;
+        2)
+            if [ "$scenario" = query-failure ]; then
+                echo 'ERROR: metadata endpoint unavailable' >&2
+                return 1
+            fi
+            printf '%s\n' nvx-linux-8 false
+            cat "$test_root/fresh.json" ;;
+        *) echo 'ERROR: unexpected credential query' >&2; return 1 ;;
+    esac
+}
+id() { printf '%s\n' 1001; }
+install() { command install -d -m 0755 -- "${@: -1}"; }
+unexpected() {
+    printf '%s\n' "$*" >>"$test_root/lifecycle-calls"
+    echo "ERROR: unexpected provisioning operation: $*" >&2
+    return 1
+}
+bash() { unexpected bash "$@"; }
+sudo() { unexpected sudo "$@"; }
+systemctl() { unexpected systemctl "$@"; }
+shutdown() { unexpected shutdown "$@"; }
+(
+    cd "$test_root"
+    set -- --refresh-metadata ./config.json
+    . ./bootstrap.sh
+)
+"""
+        original = {"storageProfile": {"osDisk": {"caching": "ReadWrite"}}}
+        fresh = {"storageProfile": {"osDisk": {"caching": "ReadOnly"}}}
+        for scenario in ("success", "query-failure"):
+            with (
+                self.subTest(scenario=scenario),
+                tempfile.TemporaryDirectory() as temporary,
+            ):
+                root = Path(temporary)
+                metadata = root / "metadata"
+                metadata.mkdir()
+                snapshot = metadata / "compute.json"
+                snapshot.write_text(json.dumps(original), encoding="utf-8")
+                (root / "fresh.json").write_text(json.dumps(fresh), encoding="utf-8")
+                (root / "config.json").write_text("{}", encoding="utf-8")
+                (root / "python-calls").write_text("0", encoding="ascii")
+                (root / "bootstrap.sh").write_bytes(source.encode())
+                result = self.execute_bash(mock, root.as_posix(), scenario)
+                self.assertEqual(
+                    result.returncode == 0,
+                    scenario == "success",
+                    (result.stdout + result.stderr).decode()
+                    + (root / "bootstrap.log").read_text(),
+                )
+                self.assertEqual(
+                    json.loads(snapshot.read_text()),
+                    fresh if scenario == "success" else original,
+                )
+                self.assertEqual((root / "python-calls").read_text().strip(), "2")
+                self.assertFalse((root / "lifecycle-calls").exists())
+                if scenario == "query-failure":
+                    self.assertIn(
+                        "ERROR: metadata endpoint unavailable",
+                        (root / "bootstrap.log").read_text(),
+                    )
+
     def test_linux_runner_finalization_does_not_restart_registered_service(self):
         source = builder.source("linux/bootstrap-runner.sh").decode()
         tail = source[
@@ -718,6 +895,7 @@ sfdisk() {
         mock = r"""
 set -euo pipefail
 runner_directory=$1
+config_path="$runner_directory/config.json"
 test_systemd_root=$2
 scenario=$3
 metadata_service=nvx-runner-metadata-block.service
@@ -776,6 +954,11 @@ systemctl() {
                     )
                     self.assertIn(
                         "Requires=nvx-runner-metadata-block.service",
+                        drop_in.read_text(),
+                    )
+                    self.assertIn(
+                        "ExecStartPre=+/opt/nvx-bootstrap/bootstrap-runner.sh "
+                        f'--refresh-metadata "{runner.as_posix()}/config.json"',
                         drop_in.read_text(),
                     )
                 else:
@@ -2568,39 +2751,36 @@ if (-not $rejected) { throw 'Firewall creation failure was ignored' }
                 ):
                     builder.normalize_config(config)
 
-    def test_windows_benchmark_name_selects_one_general_runner(self):
-        config = self.configuration("windows")
-        config["runnerLabels"].extend(("general", "isolated"))
-        config["benchmarkRunnerName"] = "nvx-windows-5"
-        self.assertEqual(
-            builder.normalize_config(config).get("benchmarkRunnerName"),
-            "nvx-windows-5",
-        )
-        for name in (
-            "nvx-windows-0",
-            "nvx-windows-05",
-            "nvx-windows-other",
-            "other-5",
-            None,
-        ):
-            with self.subTest(name=name):
-                invalid = dict(config)
-                invalid["benchmarkRunnerName"] = name
-                with self.assertRaisesRegex(ValueError, "benchmarkRunnerName"):
-                    builder.normalize_config(invalid)
-        for labels in (
-            ["windows", "whp", "virtual-machine"],
-            ["windows", "whp", "virtual-machine", "benchmark"],
-        ):
-            with self.subTest(labels=labels):
-                invalid = dict(config)
-                invalid["runnerLabels"] = labels
-                with self.assertRaisesRegex(ValueError, "requires general labels"):
-                    builder.normalize_config(invalid)
-        linux = dict(self.configuration("linux"))
-        linux["benchmarkRunnerName"] = "nvx-windows-5"
-        with self.assertRaisesRegex(ValueError, "Unknown"):
-            builder.normalize_config(linux)
+    def test_benchmark_name_selects_one_general_runner(self):
+        for platform in ("linux", "windows"):
+            config = self.configuration(platform)
+            prefix = config["runnerNamePrefix"]
+            config["runnerLabels"].extend(("general", "isolated"))
+            config["benchmarkRunnerName"] = prefix + "-5"
+            self.assertEqual(
+                builder.normalize_config(config).get("benchmarkRunnerName"),
+                prefix + "-5",
+            )
+            for name in (
+                prefix + "-0",
+                prefix + "-05",
+                prefix + "-other",
+                "other-5",
+                None,
+            ):
+                with self.subTest(platform=platform, name=name):
+                    invalid = dict(config)
+                    invalid["benchmarkRunnerName"] = name
+                    with self.assertRaisesRegex(ValueError, "benchmarkRunnerName"):
+                        builder.normalize_config(invalid)
+            for role in (None, "benchmark"):
+                with self.subTest(platform=platform, role=role):
+                    invalid = dict(config)
+                    invalid["runnerLabels"] = config["runnerLabels"][:3] + (
+                        [] if role is None else [role]
+                    )
+                    with self.assertRaisesRegex(ValueError, "requires general labels"):
+                        builder.normalize_config(invalid)
 
     def test_windows_drive_and_path_validation(self):
         for update in (
