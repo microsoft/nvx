@@ -277,9 +277,13 @@ class MutantsWorkflowStepTests(unittest.TestCase):
                 self.assertEqual(result.returncode, expected)
 
     def _merge(
-        self, shards: Mapping[str, Mapping[str, str]], count: int
+        self,
+        shards: Mapping[str, Mapping[str, str]],
+        count: int,
+        mutants: str = "success",
     ) -> tuple[subprocess.CompletedProcess[str], dict[str, str], str]:
-        """Merges the outcome lists of `shards` of `count` jobs, and returns the
+        """Merges the outcome lists of `shards`, keyed by shard index, of `count`
+        jobs whose matrix ended with the result `mutants`, and returns the
         result, the merged lists, and the summary."""
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -294,6 +298,7 @@ class MutantsWorkflowStepTests(unittest.TestCase):
                     "TARGETS": "",
                     "OS": "ubuntu-latest",
                     "SHARDS": str(count),
+                    "MUTANTS_RESULT": mutants,
                 },
                 root,
             )
@@ -304,15 +309,17 @@ class MutantsWorkflowStepTests(unittest.TestCase):
         return result, merged, summary
 
     def test_the_outcomes_of_every_shard_merge(self):
+        # Each shard's artifact holds its cargo-mutants output under its index.
         result, merged, summary = self._merge(
             {
-                "nvx-rs-mutants-shard-0-7": {
+                "0": {
+                    "outcomes.json": "{}",
                     "caught.txt": "src/a.rs:2:1: b\nsrc/a.rs:1:1: a\n",
                     "missed.txt": "src/a.rs:9:1: m\n",
                     "timeout.txt": "",
                     "unviable.txt": "",
                 },
-                "nvx-rs-mutants-shard-1-7": {"caught.txt": "src/a.rs:3:1: c\n"},
+                "1": {"outcomes.json": "{}", "caught.txt": "src/a.rs:3:1: c\n"},
             },
             2,
         )
@@ -332,13 +339,36 @@ class MutantsWorkflowStepTests(unittest.TestCase):
         self.assertIn("src/a.rs:9:1: m\n", summary)
 
     def test_shards_that_report_nothing_fail_the_merge(self):
+        # A shard reports with its outcomes.json; lists without one don't count.
         result, merged, summary = self._merge(
-            {"nvx-rs-mutants-shard-0-7": {"caught.txt": "src/a.rs:1:1: a\n"}}, 3
+            {
+                "0": {"outcomes.json": "{}", "caught.txt": "src/a.rs:1:1: a\n"},
+                "2": {"caught.txt": "src/a.rs:5:1: e\n"},
+            },
+            3,
         )
         self.assertEqual(result.returncode, 1)
         self.assertIn("::error::Only 1 of 3 shards reported", result.stdout)
         self.assertEqual(merged["caught.txt"], "src/a.rs:1:1: a\n")
         self.assertNotIn("Missed mutants", summary)
+
+    def test_a_mutants_job_that_did_not_succeed_fails_the_merge(self):
+        # The merge runs whatever the shards' result, and fails before it merges
+        # anything unless every shard succeeded.
+        for mutants in ("failure", "skipped"):
+            with self.subTest(mutants=mutants):
+                result, merged, summary = self._merge(
+                    {"0": {"outcomes.json": "{}", "caught.txt": "src/a.rs:1:1: a\n"}},
+                    1,
+                    mutants,
+                )
+                self.assertEqual(result.returncode, 1)
+                self.assertIn(
+                    f"::error::The mutants job did not succeed ({mutants}).",
+                    result.stdout,
+                )
+                self.assertEqual(merged, {})
+                self.assertEqual(summary, "")
 
 
 if __name__ == "__main__":
