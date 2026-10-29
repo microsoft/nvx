@@ -1,7 +1,8 @@
 //! The host program's step hook, for tests: the values of `RUNTIME_ADAPTER_STEP_HOOK` that set it,
-//! and those that the host program refuses, and a pause, which waits until its file is gone, on
-//! Windows until a pending deletion of the file completes, and says how long it paused. The tests
-//! need no hypervisor; the VM tests pause launches and stops with the hook, and end them.
+//! and those that the host program refuses, a start's, which it takes at `checked` alone, and a
+//! pause, which waits until its file is gone, on Windows until a pending deletion of the file
+//! completes, and says how long it paused. The tests need no hypervisor; the VM tests pause
+//! launches and stops with the hook, and end them.
 #![cfg(feature = "host")]
 
 use std::ffi::OsStr;
@@ -12,6 +13,8 @@ use std::process::Command;
 use std::thread;
 use std::time::{Duration, Instant};
 
+use nvx::host::artifacts::Artifacts;
+use runtime_adapter::clone::HOST_TIME_VARIABLE;
 use runtime_adapter::hook::{Action, HOOK_EXIT, STEP_HOOK, Step, StepHook};
 
 #[test]
@@ -203,4 +206,62 @@ fn the_host_program_refuses_a_command_whose_step_hook_it_cannot_read() {
             );
         }
     }
+}
+
+#[test]
+fn a_start_takes_a_step_hook_at_checked_alone() {
+    let directory = Path::new(env!("CARGO_TARGET_TMPDIR")).join("step-hook-start");
+    let _ = fs::remove_dir_all(&directory);
+    fs::create_dir_all(&directory).unwrap();
+    let image = directory.join("distro.erofs");
+    fs::write(&image, vec![0; 4096]).unwrap();
+    let store = directory.join("store");
+    let start = |value: &str| {
+        Command::new(env!("CARGO_BIN_EXE_runtime-adapter-host"))
+            .arg("start")
+            .arg(&store)
+            .arg("--template")
+            .arg(directory.join("templates"))
+            .args(["--generation", "1", "--distro"])
+            .arg(format!("erofs:{}", image.display()))
+            .args([
+                "--distro-identity",
+                "0a490905-41be-ed5f-984e-63eb7e5e20b1",
+                "--upper",
+                "ram",
+            ])
+            .env(STEP_HOOK, value)
+            .env_remove(Artifacts::ENV_DIR)
+            .env_remove(HOST_TIME_VARIABLE)
+            .output()
+            .unwrap()
+    };
+
+    // A hook at a step that a start does not stop at is a usage error, as one that names no step.
+    for (value, problem) in [
+        (
+            "spawned:exit",
+            "names the step spawned, but a start takes the hook at checked alone",
+        ),
+        ("ready:exit", "names the step ready"),
+        ("commit:pause:pause", "names the step commit"),
+        ("found:exit", "names the step found"),
+        ("nowhere:exit", "names the step \"nowhere\""),
+    ] {
+        let output = start(value);
+        assert_eq!(output.status.code(), Some(2), "{value:?}: {output:?}");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains(problem) && stderr.contains("usage: runtime-adapter-host"),
+            "{value:?}: {stderr}"
+        );
+    }
+
+    // One at `checked` makes a start, whose selection the template store, which does not exist,
+    // refuses before the start plans the clone.
+    let output = start("checked:exit");
+    assert_eq!(output.status.code(), Some(10), "{output:?}");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("failure.stage=selection\n"), "{stdout}");
+    assert!(!store.exists(), "the start created the sandbox's store");
 }

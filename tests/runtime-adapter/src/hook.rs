@@ -1,7 +1,8 @@
 //! The host program's step hook, for tests: at a named [`Step`] of a launch, or of a command that
 //! reattaches to a VM, it pauses the program, so that a test can act between two steps, as when it
 //! replaces a staged image once the launch has checked it, or ends a clone's VM once a stop found
-//! it, or it exits the program without unwinding, as a crash would end it there.
+//! it, or it exits the program without unwinding, as a crash would end it there. A clone's start
+//! takes it at [`Step::Checked`] alone.
 //!
 //! The variable [`STEP_HOOK`] names the step, and what the hook does at it, its [`Action`]:
 //!
@@ -15,7 +16,8 @@
 //!
 //! Without the variable, the hook does nothing. `runtime-adapter-host launch`, `reattach`, and
 //! `stop` read it, and refuse a value that names no step or action, as they refuse a command line
-//! that is not a command.
+//! that is not a command. `runtime-adapter-host start` reads it too, and refuses one that names
+//! another step than `checked`.
 
 use std::env;
 use std::ffi::OsStr;
@@ -41,7 +43,9 @@ pub enum Step {
     /// `checked`: the launch has checked the bindings of its images, and the export of its shares,
     /// if any, and holds the checked files, which claim the scratch image, but has begun nothing
     /// in the sandbox's store, and has spawned nothing. A launch without a layered root, which
-    /// checks nothing, reaches it too.
+    /// checks nothing, reaches it too. A clone's start reaches it once NVX's `ClonePlan` checked
+    /// the clone against the leased generation, and holds the files that its checks opened, but
+    /// before the start records the clone, and before the clone's launch checks its export again.
     Checked,
     /// `spawned`: the VMM runs, and the launch's journal records it, but the launch has not
     /// connected to the VM.

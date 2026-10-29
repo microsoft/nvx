@@ -620,6 +620,16 @@ fn a_launch_shares_host_paths_inside_the_authorized_directories() {
     assert_eq!(export.children[0].denied, [canonical(&dir.join("secret"))]);
     assert_eq!(export.children[0].write, [canonical(&dir.join("inner"))]);
 
+    // It shows an allowed path inside a hidden one again: here `out/sub` in `out`, which it hides.
+    let out = sources.join("out");
+    let mut shown = sharing(&sources);
+    shown.add_denied(out.clone());
+    shown.add_allowed(out.join("sub"));
+    let shown = shown.plan().unwrap().unwrap();
+    assert_eq!(shown.children[2].denied, [canonical(&out)]);
+    assert_eq!(shown.children[2].allowed, [canonical(&out.join("sub"))]);
+    assert!(export.children.iter().all(|child| child.allowed.is_empty()));
+
     // A target may lie below a path that the container root creates, though not at it.
     let mut below = sharing(&sources);
     retarget(&mut below, 2, "/etc/app/file.txt");
@@ -781,6 +791,15 @@ fn a_launch_refuses_shares_that_it_cannot_export() {
         &|request| request.add_denied(unborn.clone()),
         &format!("--deny entry {} does not exist", unborn.display()),
     );
+    // An allowed path that no hidden path holds, which has nothing to show again.
+    let marker = dir.join("marker");
+    refused(
+        &|request| request.add_allowed(marker.clone()),
+        &format!(
+            "--allow entry {} lies inside no --deny entry, so it has nothing to show again",
+            marker.display()
+        ),
+    );
 
     // A link inside an authorized directory to one outside it.
     #[cfg(unix)]
@@ -827,7 +846,7 @@ fn the_host_program_refuses_shares_before_it_touches_the_store() {
     };
     let root = sources.as_os_str().to_owned();
     let (dir, out) = (sources.join("dir"), sources.join("out"));
-    let cases: [(Vec<OsString>, String); 4] = [
+    let cases: [(Vec<OsString>, String); 5] = [
         (
             vec![
                 "--share".into(),
@@ -861,6 +880,17 @@ fn the_host_program_refuses_shares_before_it_touches_the_store() {
                 root.clone(),
             ],
             "where the host cannot keep it read-only".to_owned(),
+        ),
+        (
+            vec![
+                "--share".into(),
+                shared(&dir, ":/srv/dir"),
+                "--allow".into(),
+                dir.join("marker").into(),
+                "--share-root".into(),
+                root.clone(),
+            ],
+            "lies inside no --deny entry".to_owned(),
         ),
         (
             vec![
@@ -1589,7 +1619,7 @@ fn the_host_program_refuses_a_network_before_it_launches() {
 fn the_host_program_refuses_options_that_do_not_make_a_command() {
     let launch = ["launch", "store", "--guest-agent", "agent"];
     let uuid = "0a490905-41be-ed5f-984e-63eb7e5e20b1";
-    let cases: [(&[&str], &str); 37] = [
+    let cases: [(&[&str], &str); 38] = [
         (
             &["--distro", "erofs:image", "--upper", "ram"],
             "--distro needs --distro-identity",
@@ -1715,6 +1745,7 @@ fn the_host_program_refuses_options_that_do_not_make_a_command() {
         (&["--distro"], "\"--distro\" needs a value"),
         (&["--share", "a:/b"], "--share needs --distro"),
         (&["--deny", "secret"], "--deny needs --share"),
+        (&["--allow", "secret/shown"], "--allow needs --share"),
         (&["--reserved", "/opt/adapter"], "--reserved needs --share"),
         (&["--share-root", "sources"], "--share-root needs --share"),
         (

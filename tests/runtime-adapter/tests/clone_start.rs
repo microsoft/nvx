@@ -220,6 +220,10 @@ fn the_host_program_refuses_options_that_do_not_make_a_start() {
             "--deny needs --share",
         ),
         (
+            with(&["--upper", "ram", "--allow", "secret/shown"]),
+            "--allow needs --share",
+        ),
+        (
             with(&["--upper", "ram", "--reserved", "/opt/adapter"]),
             "--reserved needs --share",
         ),
@@ -417,6 +421,7 @@ fn the_host_program_refuses_options_that_do_not_make_a_run() {
             "--machine-id takes image or generated, not \"random\"",
         ),
         (with(&["--deny", "/srv"]), "--deny needs --share"),
+        (with(&["--allow", "/srv/a"]), "--allow needs --share"),
         (
             with(&["--network", "a.json", "--network", "b.json"]),
             "unexpected option \"--network\" of run",
@@ -953,7 +958,7 @@ fn a_start_refuses_shares_that_it_cannot_export_before_anything_else() {
     let inner = directory.join("sources").join("inner");
     fs::create_dir(&inner).unwrap();
     let (sources, outside) = (sources.to_str().unwrap(), outside.to_str().unwrap());
-    let cases: [(Vec<String>, String); 5] = [
+    let cases: [(Vec<String>, String); 6] = [
         (
             vec![format!("{outside}:/srv/data")],
             format!(
@@ -972,6 +977,17 @@ fn a_start_refuses_shares_that_it_cannot_export_before_anything_else() {
                 format!("{}:/srv/data/inner:ro", inner.display()),
             ],
             "where the host cannot keep it read-only".to_owned(),
+        ),
+        (
+            vec![
+                format!("{sources}:/srv/data"),
+                "--allow".to_owned(),
+                inner.display().to_string(),
+            ],
+            format!(
+                "--allow entry {} lies inside no --deny entry",
+                inner.display()
+            ),
         ),
         (
             vec![

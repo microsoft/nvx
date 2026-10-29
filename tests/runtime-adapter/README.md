@@ -1253,17 +1253,19 @@ the root, read-only or read-write. Neither exposes its fields: each field has a
 getter and a setter, and each list of `HostFsSharing` a method that adds an
 entry, as its option does. `HostFsSharing::plan` plans their export with NVX's
 `nvx::host::filesystem::plan`, through an `ExportRequest` of a mapping for each
-share at its target, the host paths that it hides inside the shares, and the
-guest targets that the root keeps: those of NVX's container root,
-`ReservedTargets::CONTAINER_ROOT`, and the trees that the adapter keeps for
-itself. Each share must lie inside a host directory that the adapter
-authorizes, once links are resolved: `HostFsSharing::plan` refuses one outside
-them before it plans, and checks the export's directories and files, which the
-planner resolves anew, again. The planner refuses what it cannot export, such
-as a target that takes or covers a reserved tree, or a read-only share inside
-a read-write one, which the host could not keep read-only, and a hidden
-path that does not exist inside a share, which nothing would hide once a
-workload creates it.
+share at its target, the host paths that it hides inside the shares, the host
+paths inside hidden ones that it shows again, with the directories on the way
+to them listing only them, and the guest targets that the root keeps: those of
+NVX's container root, `ReservedTargets::CONTAINER_ROOT`, and the trees that
+the adapter keeps for itself. Each share must lie inside a host directory that
+the adapter authorizes, once links are resolved: `HostFsSharing::plan` refuses
+one outside them before it plans, and checks the export's directories and
+files, which the planner resolves anew, again. The planner refuses what it
+cannot export, such as a target that takes or covers a reserved tree, or a
+read-only share inside a read-write one, which the host could not keep
+read-only, a hidden path that does not exist inside a share, which nothing
+would hide once a workload creates it, and a path to show again that lies
+inside no hidden one.
 
 `LayeredLaunch::share` attaches the export to the launch, which
 `LayeredLaunch::export` returns, and announces its table, of at most 4,096
@@ -1369,6 +1371,15 @@ The steps of a launch, in order, then that of a command that reattaches, are:
 
 A value that names no step or action is a usage error. Without the variable,
 the hook does nothing.
+
+`start` takes the hook too, at `checked` alone, which it reaches once NVX's
+`ClonePlan` checked the [clone](#clones) against the leased generation: the
+bindings of its images, whose checked files the plan holds, and which claim its
+scratch image, if it has one, its processor and memory targets, its network,
+and the export of its shares, if any. The start has recorded nothing of the
+clone yet, and spawned nothing, and the clone's launch checks the export again,
+so a test may change a shared object there. A start refuses a hook at another
+step as a usage error.
 
 ### Templates
 
@@ -1787,15 +1798,16 @@ Each command of `runtime-adapter-host` but `stage`, `list`, `inspect`, and
   bindings that it checked.
 
   SHARES,
-  `--share HOST:TARGET[:ro]... [--deny PATH]... [--reserved TARGET]... [--share-root DIR]...`,
+  `--share HOST:TARGET[:ro]... [--deny PATH]... [--allow PATH]... [--reserved TARGET]... [--share-root DIR]...`,
   shares each host directory or regular file HOST with the root, at the
   absolute guest path TARGET, which starts at the last `:/`, read-only with
   `:ro`, as [Shares](#shares) describes. Each HOST must lie inside a host
   directory DIR that the adapter authorizes, the export hides each host path
-  PATH inside the shares, and no TARGET may take or cover a guest tree that the
-  container root keeps, or a tree TARGET that the adapter keeps. The launch
-  refuses shares that it cannot export before it touches STORE, and checks the
-  export before it spawns the VM.
+  PATH of `--deny` inside the shares, but shows each host path PATH of
+  `--allow` inside a hidden one again, and no TARGET may take or cover a guest
+  tree that the container root keeps, or a tree TARGET that the adapter keeps.
+  The launch refuses shares that it cannot export before it touches STORE, and
+  checks the export before it spawns the VM.
 
   Once attached, the launch follows the [host's order](#the-hosts-order): it
   sends the root configuration, checks that the guest agent that assembled the
@@ -2047,8 +2059,9 @@ unless the teardown ended with 4, 8, or 9, which `run` then exits with, after
 the diagnostic. A
 value of `RUNTIME_ADAPTER_HOST_TIME` that is not a host's time is a
 usage error, as is a value of `RUNTIME_ADAPTER_STEP_HOOK` that sets no step
-hook, with status 2. Without arguments, the program reports the contract that
-it was built against.
+hook, or that sets one at another step than `checked` for a start, with
+status 2. Without arguments, the program reports the contract that it was
+built against.
 
 ## Tests
 
@@ -2516,7 +2529,8 @@ Windows:
 - shares: their text, `HOST:TARGET[:ro]`; the export of a table of shares
   inside an authorized directory, which maps each at its target, parents
   first, hides a denied path, and narrows the writes of a read-only directory
-  to the read-write share inside it; the root configuration that announces the
+  to the read-write share inside it, and an export that shows an allowed path
+  inside a hidden one again; the root configuration that announces the
   table, OpenVMM's arguments that attach the export, a launch that shares
   nothing, the export that the launch verifies before it prepares anything,
   and a table that the guest would refuse;
@@ -2525,7 +2539,8 @@ Windows:
   not one, or a share that is not accessible; reserved trees that are not
   canonical guest paths, targets that take or cover the adapter's or the
   container root's reserved targets, a read-only share inside a read-write
-  one, and a hidden path that does not exist inside a share;
+  one, a hidden path that does not exist inside a share, and an allowed path
+  that lies inside no hidden one;
 - the networks that a launch reads: the OpenVMM arguments of each element of a
   policy, which NVX's lowering renders after the plan's block devices, a policy
   that lets nothing through, which attaches no network device, the proxy's
@@ -2587,10 +2602,12 @@ host-only configuration, on Linux and Windows, without a hypervisor:
 Windows, the [step hook](#the-step-hook): the values of
 `RUNTIME_ADAPTER_STEP_HOOK` that set it, with each step and action, a path with
 colons, and those that set none, which the host program refuses with status
-2 for `launch`, `reattach`, and `stop`; and a pause, which does nothing, and
-pauses for no time, at another step, creates its file with its step's name at
-its own, waits until the file is gone, on Windows until a pending deletion of
-the file completes, and says how long it paused, and which a file that is
+2 for `launch`, `reattach`, and `stop`; a start's, which the host program takes
+at `checked`, and refuses at the other steps with status 2; and a pause, which
+does nothing, and pauses for no time, at another step, creates its file with
+its step's name at its own, waits until the file is gone, on Windows until a
+pending deletion of the file completes, and says how long it paused, and which
+a file that is
 there already fails.
 
 `tests/vm_steps.rs` checks the step hook on a real hypervisor, in the
@@ -2985,9 +3002,9 @@ layered roots, captures of templates, and the starts and runs of their clones.
 | `layered_launch` | `a_launch_reads_only_the_networks_that_the_plan_takes` | A launch refuses the network files that the plan refuses, each for the plan's reason |
 | `layered_launch` | `a_launch_records_what_it_launched` | A launch's record holds the bindings that it checked, over a scratch image and over RAM, and a VM without a layered root has one too |
 | `layered_launch` | `a_launch_refuses_images_that_are_not_staged_or_changed_since` | A launch refuses images that the store does not stage, of another format or identity, and images that changed, were replaced, or are gone since they were staged |
-| `layered_launch` | `a_launch_refuses_shares_that_it_cannot_export` | A launch refuses shares outside the authorized directories, inaccessible ones, reserved targets, a read-only share inside a read-write one, and a hidden path that does not exist |
+| `layered_launch` | `a_launch_refuses_shares_that_it_cannot_export` | A launch refuses shares outside the authorized directories, inaccessible ones, reserved targets, a read-only share inside a read-write one, a hidden path that does not exist, and an allowed path inside no hidden one |
 | `layered_launch` | `a_launch_renders_each_element_of_its_network_through_the_plan` | OpenVMM's arguments of each element of a policy, after the plan's block devices, the proxy's URL, and the publication of listeners, as NVX's lowering renders them |
-| `layered_launch` | `a_launch_shares_host_paths_inside_the_authorized_directories` | The export of shares inside an authorized directory maps each at its target, parents first, hides a denied path, and comes with the root configuration and OpenVMM's arguments that attach it |
+| `layered_launch` | `a_launch_shares_host_paths_inside_the_authorized_directories` | The export of shares inside an authorized directory maps each at its target, parents first, hides a denied path, shows an allowed path inside a hidden one again, and comes with the root configuration and OpenVMM's arguments that attach it |
 | `layered_launch` | `a_layered_launch_hands_openvmm_the_checked_images` | OpenVMM's arguments name the checked files, by the descriptors that OpenVMM inherits on Linux and by their final paths on Windows, without a workload identity or a managed lifecycle |
 | `layered_launch` | `a_layered_launch_passes_what_the_guest_checks_as_it_is` | A launch passes on the options that the guest checks as they are |
 | `layered_launch` | `a_layered_launch_plans_its_blocks_and_boot_tokens_with_the_adapters_plan` | The adapter's plan of a layered launch: its block devices and boot tokens, without the sandbox profile's settings, and the sizes of the images |
