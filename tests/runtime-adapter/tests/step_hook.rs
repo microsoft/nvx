@@ -2,7 +2,7 @@
 //! and those that the host program refuses, a start's, which it takes at `checked` alone, and a
 //! pause, which waits until its file is gone, on Windows until a pending deletion of the file
 //! completes, and says how long it paused. The tests need no hypervisor; the VM tests pause
-//! launches and stops with the hook, and end them.
+//! launches, starts, and stops with the hook, and end them.
 #![cfg(feature = "host")]
 
 use std::ffi::OsStr;
