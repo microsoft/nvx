@@ -79,6 +79,10 @@ class OpenvmmProcess:
         """
         if output_read_delay < 0:
             raise ValueError("OpenVMM output read delay cannot be negative")
+        # The monitor exists before OpenVMM does, so that nothing that it
+        # raises leaves OpenVMM running outside the cleanup below (#720).
+        self._monitor = TimeAbiMonitor(command)
+        self._query_status = time_abi_status and self._monitor.cold_boot
         process_environment = os.environ.copy()
         process_environment["OPENVMM_LOG"] = "off"
         if environment is not None:
@@ -111,8 +115,6 @@ class OpenvmmProcess:
         self._search_offset = 0
         self._log_path = log_path
         self._finished = False
-        self._monitor = TimeAbiMonitor(command)
-        self._query_status = time_abi_status and self._monitor.cold_boot
         self._status_sent = False
 
     @property

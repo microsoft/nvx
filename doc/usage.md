@@ -80,8 +80,8 @@ match codes, and stable fragments of messages, such as the names of options,
 fields, and files, never whole messages. A code keeps its meaning and is never
 reused, and a later release may add codes, which callers treat as failures of
 the command. The usage errors that `nvx.py` itself reports, as `argparse` does,
-carry no code, and neither does an interruption, which prints `Interrupted`
-and exits with status 130. The
+carry no code, and neither does an interruption by SIGINT or, outside
+Windows, SIGTERM, which prints `Interrupted` and exits with status 130. The
 [`nvx-rs` README](../nvx-rs/README.md#error-codes) gives the `ErrorKind` of
 each code for callers of the `nvx` library.
 
@@ -447,6 +447,14 @@ is authorized for the organization when it enforces single sign-on.
 | `package` | Stage a binary distribution. |
 | `archive-release` | Create a deterministic archive from a staged distribution. |
 | `verify` | Verify source and submodule inputs. |
+
+Ctrl-C, that is SIGINT, interrupts a command, and so does SIGTERM outside
+Windows, which is how CI ends a cancelled step (see
+[Cancellation](ci.md#cancellation)). The command then runs its cleanup, as
+`test-microvm` and `benchmark` stop their OpenVMM processes and remove their
+scratch directories, prints `Interrupted`, and exits with status 130. On
+Linux, the OpenVMM processes that they start, and the process trees that they
+contain, end with `nvx.py` even when something kills it outright.
 
 ## Initialization and verification
 
@@ -1166,7 +1174,8 @@ follow one another without gaps, so they add up to the run's time:
   outcome.
 
 Every span has its `started_at`, its `seconds`, rounded to the millisecond, its
-`outcome`, `passed`, `failed`, or `interrupted`, for example by `SIGINT`, and
+`outcome`, `passed`, `failed`, or `interrupted`, for example by `SIGINT` or
+`SIGTERM`, and
 an `error`: for a failure, the exception's type and message, cut to 1,000
 characters, and otherwise `null`. A `scenario` record also has the
 `scenario`, the `guest`, `backend`, and `kernel`, and its `processors`: the

@@ -299,11 +299,18 @@ Every job that uses the `validate-runner` action first ends, on Linux, any
 OpenVMM process that its runner's account still runs, with a warning that
 names it, and fails if one survives SIGKILL or the processes can't be listed.
 A runner runs one job at a time, so such a process is left from an
-earlier job: when a job is cancelled, the runner signals only the step's shell,
-so the test harness keeps running, and it can start a VM after the runner's
-orphan cleanup has listed the job's processes; the cleanup then kills the
-harness, and the VM runs on (#768). The action then reports the Linux
-runner's kernel, CPU, clocksource, and TSC flags, and qualifies the runner
+earlier job. Before a cancellation reached the test harness (see
+[Cancellation](#cancellation)), the harness of a cancelled job kept running
+and could start a VM after the runner's orphan cleanup had listed the job's
+processes; the cleanup then killed the harness, and the VM ran on for 8 days
+(#768). It still ends a VM that escapes both the harness's cleanup and its
+parent-death signal. The action next removes the account's `nvx-*` and
+`openvmm-*` directories in Python's temporary directory, where the test
+harness runs its scenarios, with a notice that names each one, and fails if it
+can't list them: a harness that something killed outright left them behind,
+and on October 28, 2026, the ten Linux runners held 64 of them (#946). It then
+reports the Linux runner's kernel, CPU, clocksource, and TSC flags, and
+qualifies the runner
 for the time ABI with `nvx.py doctor --checks H1 H2 H4 --ci-schedule` (see
 [Host qualification](#host-qualification)): the backend, the CPU fingerprint
 and generation, and the TSC rate stability on its short schedule. The microVM
@@ -1012,6 +1019,54 @@ SHA-specific development release. Performance persistence records that same
 SHA after applying the results to the current `dev` history: it drops rows
 already present for the same platform, ABI, processor count, commit, and
 metric, but otherwise appends them and pushes a baseline update.
+
+## Cancellation
+
+When a run is cancelled, as a push to a pull request cancels the run of its
+previous head, the runner
+[cancels each running step](https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-cancellation):
+it sends SIGINT to the step's shell, SIGTERM if the shell still runs 7.5 s
+later, and kills the shell's process tree another 2.5 s later. After the
+job's last step, the runner's orphan cleanup kills every process that the job
+started and that still runs. `nvx.py` handles SIGTERM as it handles SIGINT:
+either one interrupts its command, which then stops the OpenVMM processes and
+removes the scratch directories that it started and created, and exits with
+status 130 (see [Commands](usage.md#commands)).
+
+The runner signals only the step's shell, though, and Bash runs a trap only
+once the command in its foreground ends, so a harness that a Linux step ran in
+the foreground never learned of the cancellation: it ran on until the orphan
+cleanup killed it, which left the scratch directories of its scenario behind.
+The Linux steps that run `test-microvm` therefore `exec` it, so that it is the
+step's process. The Linux steps of `run-benchmark`, which run the harness among
+other commands, `exec` it as their last command or source
+`.github/actions/run-benchmark/forward-signals.sh`, whose `run_harness` runs
+the harness in the background, with the SIGINT that Bash ignores there
+restored, and passes SIGINT and SIGTERM on to it as SIGTERM, which, unlike
+SIGINT, the harness never ignores, not even before it has restored SIGINT. A
+signal that arrives as `run_harness` starts the harness, before it knows the
+harness's PID, reaches the harness once it does. The step then ends once the
+harness exits, even if the signal came too late to stop it, and a signal that
+arrives between two harness runs ends the step at once.
+
+On Linux, OpenVMM also ends with `nvx.py` when something kills `nvx.py`
+before its cleanup runs, as the orphan cleanup does. Where the host has
+util-linux's `setpriv`, as the runners do, `nvx.py` starts OpenVMM through
+`setpriv --pdeathsig KILL`, so that the kernel kills OpenVMM when `nvx.py`
+exits, and through a shell that starts OpenVMM only if `nvx.py` is still its
+parent, since an `nvx.py` that died before `setpriv` armed the signal sent
+none. A contained process tree, such as `nvx-rs run` and the
+OpenVMM that it starts, runs under a supervisor that the kernel sends SIGTERM
+when `nvx.py` exits, and which then kills the whole tree. The supervisor runs
+without the job's `RUNNER_TRACKING_ID`, which it gives back to the command,
+because the orphan cleanup kills the processes whose environment holds it and
+could kill the supervisor before it ended a tree that the cleanup didn't list,
+such as an OpenVMM that started after the listing. The kernel sends
+these signals when the thread that started the process exits, so only a
+process that the main thread starts gets them, and `nvx.py` starts its VMs
+from its main thread. The `validate-runner` action of the runner's next job
+ends the OpenVMM processes and removes the scratch directories that still
+escape all of this.
 
 ## OpenVMM VMM tests
 

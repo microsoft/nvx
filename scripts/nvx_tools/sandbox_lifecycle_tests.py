@@ -1071,10 +1071,14 @@ class LifecycleAcceptance:
 
 def run_acceptance(acceptance: LifecycleAcceptance) -> None:
     """Runs an acceptance, then removes its fixture, which a failure keeps only
-    if its cleanup leaves a sandbox's state behind."""
+    if its cleanup leaves a sandbox's state behind.
+
+    An interruption, as when CI cancels the job (#946), stops the sandboxes
+    that the acceptance started, as a failure does, and then propagates as it
+    is, after a warning that names any cleanup errors."""
     try:
         acceptance.run()
-    except Exception as error:
+    except BaseException as error:
         errors = acceptance.clean_up()
         try:
             acceptance.write_checks()
@@ -1087,8 +1091,14 @@ def run_acceptance(acceptance: LifecycleAcceptance) -> None:
             errors.append(RuntimeError(f"fixture preserved for recovery: {preserved}"))
         else:
             shutil.rmtree(acceptance.root, ignore_errors=True)
-        if errors:
+        if errors and isinstance(error, Exception):
             raise RuntimeError(f"{error}; cleanup: {format_errors(errors)}") from error
+        if errors:
+            print(
+                f"warning: cleanup after the interruption: {format_errors(errors)}",
+                file=sys.stderr,
+                flush=True,
+            )
         raise
     acceptance.write_checks()
     shutil.rmtree(acceptance.root)

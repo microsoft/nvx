@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import contextlib
 import ctypes
 import hashlib
 import json
@@ -31,13 +32,17 @@ PROCESS_CLEANUP_GRACE_SECONDS = (
     PROCESS_TERMINATION_WAIT_SECONDS * 2 + PROCESS_READER_JOIN_SECONDS * 2
 )
 _LINUX_CHILD_SUBREAPER = 36
+_LINUX_PARENT_DEATH_SIGNAL = 1
 _LINUX_EXITED_TASK_STATES = frozenset({"Z", "X", "x"})
 _WINDOWS_CREATE_SUSPENDED = 0x00000004
+# The runner's orphan cleanup kills the processes whose environment names the
+# job in this variable. A supervisor gets it under the other name, and gives it
+# back to its command (see ProcessTreeContainment.environment).
+_RUNNER_TRACKING_ID = "RUNNER_TRACKING_ID"
+_SUPERVISED_RUNNER_TRACKING_ID = "NVX_SUPERVISED_RUNNER_TRACKING_ID"
 
 
-def _enable_linux_child_subreaper() -> None:
-    if not sys.platform.startswith("linux"):
-        return
+def _linux_prctl(option: int, argument: int, name: str) -> None:
     libc = ctypes.CDLL(None, use_errno=True)
     prctl = libc.prctl
     prctl.argtypes = (
@@ -48,9 +53,68 @@ def _enable_linux_child_subreaper() -> None:
         ctypes.c_ulong,
     )
     prctl.restype = ctypes.c_int
-    if prctl(_LINUX_CHILD_SUBREAPER, 1, 0, 0, 0) != 0:
+    if prctl(option, argument, 0, 0, 0) != 0:
         error = ctypes.get_errno()
-        raise OSError(error, "prctl(PR_SET_CHILD_SUBREAPER) failed")
+        raise OSError(error, f"prctl({name}) failed")
+
+
+def _enable_linux_child_subreaper() -> None:
+    if not sys.platform.startswith("linux"):
+        return
+    _linux_prctl(_LINUX_CHILD_SUBREAPER, 1, "PR_SET_CHILD_SUBREAPER")
+
+
+def _set_linux_parent_death_signal(signum: int) -> None:
+    """Have the kernel send this process ``signum`` when its parent exits.
+
+    The kernel sends it only for an exit after this call, and when the thread
+    that started this process exits, not only the whole parent process.
+    """
+    _linux_prctl(_LINUX_PARENT_DEATH_SIGNAL, signum, "PR_SET_PDEATHSIG")
+
+
+# Run once setpriv has armed the parent-death signal, with the ID of the
+# process that started setpriv and the command: the command runs only while
+# that process is still the parent, since one that died before then sent no
+# signal.
+_OWNED_EXEC = '[ "$PPID" = "$1" ] || exit 1; shift; exec "$@"'
+
+
+def killed_with_parent(command: Sequence[str]) -> list[str]:
+    """Return a command line that runs ``command`` until its parent exits.
+
+    On Linux, setpriv(1) makes SIGKILL the parent-death signal of the
+    command, which survives the execs that follow, so that the command ends
+    even with a parent that is killed outright, as the runner's orphan
+    cleanup kills the test harness of a cancelled CI job (#946). A parent
+    that dies before setpriv arms the signal sends none, so a shell then
+    starts the command only if this process is still its parent. setpriv and
+    the shell keep vfork and cost two execs, where a preexec_fn that called
+    prctl would make each spawn fork the whole harness. The kernel sends the
+    signal when the thread that started the command exits, so only the main
+    thread, which lives as long as its process, gets the wrapper. The
+    command line is unchanged elsewhere, and without setpriv.
+    """
+    if (
+        not sys.platform.startswith("linux")
+        or threading.current_thread() is not threading.main_thread()
+    ):
+        return list(command)
+    setpriv = shutil.which("setpriv")
+    if setpriv is None:
+        return list(command)
+    return [
+        setpriv,
+        "--pdeathsig",
+        "KILL",
+        "--",
+        "/bin/sh",
+        "-c",
+        _OWNED_EXEC,
+        "sh",
+        str(os.getpid()),
+        *command,
+    ]
 
 
 def _resource_sample(path: Path) -> dict[str, object]:
@@ -534,15 +598,49 @@ def _redeliver_linux_signal(signum: int) -> None:
     raise ScriptError(f"failed to redeliver signal {signum} to process supervisor")
 
 
-def supervise_linux_process(command: Sequence[str]) -> int:
-    """Run and fully reap one process tree inside a private subreaper."""
+class _SupervisorOrphaned(BaseException):
+    """The process that started a supervisor exited before its process tree."""
+
+
+def supervise_linux_process(command: Sequence[str], *, parent: int | None) -> int:
+    """Run and fully reap one process tree inside a private subreaper.
+
+    ``parent`` names the process that started the supervisor. Once it exits,
+    even when something kills it outright, as the runner's orphan cleanup
+    kills the test harness of a cancelled CI job (#946), the supervisor
+    kills the whole tree and then ends by SIGTERM: the kernel sends it
+    SIGTERM, its parent-death signal, and a signal that finds it with
+    another parent ends the tree instead of reaching the command. Without
+    ``parent``, the tree outlives the process that started the supervisor.
+    The command gets back the runner's tracking ID that the supervisor runs
+    without.
+    """
     if not command:
         raise ValueError("supervised command is required")
     _enable_linux_child_subreaper()
-    process = subprocess.Popen(command)
+    environment = dict(os.environ)
+    tracking = environment.pop(_SUPERVISED_RUNNER_TRACKING_ID, None)
+    if tracking is not None:
+        environment[_RUNNER_TRACKING_ID] = tracking
+    process: subprocess.Popen[bytes] | None = None
+    orphaned = False
+    # Signals that arrive before the command starts reach it once it does.
+    pending: list[int] = []
     previous_handlers: dict[int, object] = {}
 
+    def check_parent() -> None:
+        nonlocal orphaned
+        if parent is not None and not orphaned and os.getppid() != parent:
+            orphaned = True
+            raise _SupervisorOrphaned
+
     def forward_signal(signum: int, _frame: object) -> None:
+        if orphaned or (process is not None and process.returncode is not None):
+            return
+        check_parent()
+        if process is None:
+            pending.append(signum)
+            return
         try:
             process.send_signal(signum)
         except ProcessLookupError:
@@ -554,8 +652,20 @@ def supervise_linux_process(command: Sequence[str]) -> int:
         forwarded_signals.insert(0, sighup)
     for signum in forwarded_signals:
         previous_handlers[signum] = signal.signal(signum, forward_signal)
-    returncode = process.wait()
     try:
+        try:
+            if parent is not None:
+                _set_linux_parent_death_signal(int(signal.SIGTERM))
+                # A parent that exited before that call sends no signal.
+                check_parent()
+            process = subprocess.Popen(command, env=environment)
+            for signum in pending:
+                with contextlib.suppress(ProcessLookupError):
+                    process.send_signal(signum)
+            returncode = process.wait()
+        except _SupervisorOrphaned:
+            # Nothing waits for the tree any more.
+            returncode = -int(signal.SIGTERM)
         _reap_linux_children(os.getpid())
     finally:
         for signum, handler in previous_handlers.items():
@@ -788,7 +898,34 @@ class ProcessTreeContainment:
         if not sys.platform.startswith("linux"):
             return list(command)
         supervisor = Path(__file__).with_name("process_supervisor.py")
-        return [sys.executable, "-I", str(supervisor), "--", *command]
+        # The kernel sends the supervisor its parent-death signal when the
+        # thread that started it exits, which would end the tree early, so
+        # only the main thread, which lives as long as this process, ties the
+        # tree to this process (see killed_with_parent).
+        parent = (
+            [str(os.getpid())]
+            if threading.current_thread() is threading.main_thread()
+            else []
+        )
+        return [sys.executable, "-I", str(supervisor), *parent, "--", *command]
+
+    def environment(self, environment: Mapping[str, str]) -> dict[str, str]:
+        """Return the environment of the supervisor of a command whose
+        environment is ``environment``.
+
+        The runner's orphan cleanup kills each process whose environment names
+        the job in RUNNER_TRACKING_ID. It would kill the supervisor too, maybe
+        before the supervisor ended a tree that the cleanup didn't list, such
+        as an OpenVMM that started after the listing (#946). So on Linux, the
+        supervisor runs without that ID, and gives it back to the command,
+        which the cleanup tracks as before.
+        """
+        supervisor = dict(environment)
+        if sys.platform.startswith("linux") and _RUNNER_TRACKING_ID in supervisor:
+            supervisor[_SUPERVISED_RUNNER_TRACKING_ID] = supervisor.pop(
+                _RUNNER_TRACKING_ID
+            )
+        return supervisor
 
     @property
     def creationflags(self) -> int:
@@ -926,7 +1063,11 @@ def run_bounded_process(
         process = subprocess.Popen(
             process_command,
             cwd=cwd,
-            env=dict(environment),
+            env=(
+                containment.environment(environment)
+                if containment is not None
+                else dict(environment)
+            ),
             stdin=subprocess.PIPE if stdin_data is not None else subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,

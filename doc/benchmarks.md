@@ -882,7 +882,11 @@ After the merge, `dev` pushes restart the series' ten-point warmup.
 
 The lifecycle benchmark uses the optimized 128 MiB shell-ready guest as one baseline across KVM,
 MSHV, and WHP. Host timing starts immediately before `Popen`, so cold-start and restore values
-include OpenVMM process startup and VM construction. Snapshot generation uses OpenVMM's monotonic
+include OpenVMM process startup and VM construction. On Linux, that startup includes the execs of
+`setpriv` and of a shell that checks that the coordinator still runs, which make the coordinator's
+exit kill OpenVMM (see [Cancellation](ci.md#cancellation)). On a Xeon Silver 4114 host, they added
+2.1 ms to the time until OpenVMM ran with Dash as `/bin/sh`, and 3.5 ms with Bash, which the Azure
+Linux runners use. Snapshot generation uses OpenVMM's monotonic
 process clock from the beginning of input gating, after the guest requests the snapshot, through
 atomic publication. It does not include delivery of `nvx-snapshot` over the polling console.
 Host request-to-publication and first publication observation (polled every 1 ms) remain diagnostics.

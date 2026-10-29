@@ -7,9 +7,12 @@ import argparse
 import json
 import os
 import shlex
+import signal
 import subprocess
 import sys
-from collections.abc import Sequence
+import threading
+from collections.abc import Generator, Sequence
+from contextlib import contextmanager
 from pathlib import Path
 
 from nvx_tools import nvx_rs
@@ -938,10 +941,34 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
+@contextmanager
+def _sigterm_interrupts() -> Generator[None]:
+    """Let SIGTERM interrupt a command as SIGINT does, so that its cleanup runs.
+
+    A cancelled CI step gets SIGINT and, if it still runs 7.5 s later, SIGTERM
+    (see doc/ci.md#cancellation). On SIGTERM, Python exits without unwinding,
+    which would leave the command's OpenVMM processes and scratch directories
+    behind. As Python does for SIGINT, an ignored SIGTERM stays ignored.
+    """
+    if (
+        os.name != "posix"
+        or threading.current_thread() is not threading.main_thread()
+        or signal.getsignal(signal.SIGTERM) != signal.SIG_DFL
+    ):
+        yield
+        return
+    signal.signal(signal.SIGTERM, signal.default_int_handler)
+    try:
+        yield
+    finally:
+        signal.signal(signal.SIGTERM, signal.SIG_DFL)
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     args = parse_args(argv)
     try:
-        result = args.handler(args)
+        with _sigterm_interrupts():
+            result = args.handler(args)
     except KeyboardInterrupt:
         print("Interrupted", file=sys.stderr)
         return 130

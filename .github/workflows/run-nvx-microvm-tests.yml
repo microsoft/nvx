@@ -179,11 +179,14 @@ jobs:
           backend: ${{ inputs.backend }}
           verify-openvmm: "true"
 
+      # The runner signals only a step's shell when the job is cancelled, so
+      # the Linux steps exec the test harness, which can then stop OpenVMM and
+      # remove its scratch directories (doc/ci.md#cancellation).
       - name: Run NVX microVM tests on Linux
         if: runner.os != 'Windows' && !inputs.guests-and-sandboxes
         shell: bash
         run: >-
-          python3 scripts/nvx.py test-microvm
+          exec python3 scripts/nvx.py test-microvm
           --backend "${{ inputs.backend }}"
           ${{ inputs.debug-kernel && '--debug-kernel' || '' }}
           ${{ inputs.shard && format('--shard {0}/{1}', inputs.shard, inputs.shard-count) || '' }}
@@ -203,7 +206,7 @@ jobs:
         if: runner.os != 'Windows' && inputs.guests-and-sandboxes && !inputs.debug-kernel
         shell: bash
         run: >-
-          python3 scripts/nvx.py test-microvm
+          exec python3 scripts/nvx.py test-microvm
           --backend "${{ inputs.backend }}"
           --scenario managed-exec-config
           --scenario sandbox-lifecycle
@@ -225,7 +228,7 @@ jobs:
         if: runner.os != 'Windows' && inputs.guests-and-sandboxes && !inputs.debug-kernel
         shell: bash
         run: >-
-          python3 scripts/nvx.py test-microvm
+          exec python3 scripts/nvx.py test-microvm
           --backend "${{ inputs.backend }}"
           --guest ubuntu
           --processors 1
@@ -257,7 +260,7 @@ jobs:
         if: runner.os != 'Windows' && inputs.guests-and-sandboxes && !inputs.debug-kernel
         shell: bash
         run: >-
-          python3 scripts/nvx.py test-microvm
+          exec python3 scripts/nvx.py test-microvm
           --backend "${{ inputs.backend }}"
           --guest azurelinux
           --processors 1
@@ -291,7 +294,7 @@ jobs:
         if: inputs.backend == 'kvm' && inputs.guests-and-sandboxes && !inputs.debug-kernel
         shell: bash
         run: >-
-          python3 scripts/nvx.py test-microvm
+          exec python3 scripts/nvx.py test-microvm
           --backend kvm
           --guest ubuntu
           --scenario managed-lifecycle

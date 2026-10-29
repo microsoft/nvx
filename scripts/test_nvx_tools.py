@@ -141,6 +141,46 @@ def _composite_action_script(action: str, step_name: str) -> str:
     return "\n".join(line[8:] for line in lines[start:end])
 
 
+_FORWARD_SIGNALS_SOURCE = 'source "${GITHUB_ACTION_PATH}/forward-signals.sh"\n'
+
+
+def _harness_in_foreground(script: str) -> str:
+    """Return a Linux run-benchmark step script whose run_harness runs the
+    harness in the foreground, so that a test can stub the harness with a
+    shell function, which the exec in forward-signals.sh would bypass."""
+    if script.count(_FORWARD_SIGNALS_SOURCE) != 1:
+        raise AssertionError(f"the step doesn't source forward-signals.sh:\n{script}")
+    return script.replace(_FORWARD_SIGNALS_SOURCE, 'run_harness() { "$@"; }\n')
+
+
+_FORWARD_SIGNALS = (
+    BuildConstants.REPO_ROOT
+    / ".github"
+    / "actions"
+    / "run-benchmark"
+    / "forward-signals.sh"
+)
+
+# A harness for run_harness that handles SIGTERM as SIGINT, as nvx.py does,
+# and cleans up when either one interrupts it, unless it ignores both. Its
+# arguments are the files that it creates as it starts and as it cleans up,
+# how long it then runs, its exit status, and "handle" or "ignore".
+_CANCELLABLE_HARNESS = (
+    "import pathlib, signal, sys, time\n"
+    "signal.signal(signal.SIGTERM, signal.default_int_handler)\n"
+    "if sys.argv[5] == 'ignore':\n"
+    "    signal.signal(signal.SIGINT, signal.SIG_IGN)\n"
+    "    signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+    "try:\n"
+    "    pathlib.Path(sys.argv[1]).touch()\n"
+    "    time.sleep(float(sys.argv[3]))\n"
+    "except KeyboardInterrupt:\n"
+    "    pathlib.Path(sys.argv[2]).touch()\n"
+    "    sys.exit(130)\n"
+    "sys.exit(int(sys.argv[4]))\n"
+)
+
+
 def _workflow_step(workflow: str, job_name: str, step_name: str) -> str:
     lines = _workflow_job(workflow, job_name).splitlines()
     start = lines.index(f"      - name: {step_name}")
@@ -755,6 +795,56 @@ class CliTests(unittest.TestCase):
                         set(option.findall(section(title, level))),
                         set(option.findall(usage_of(*command))),
                     )
+
+    @unittest.skipUnless(os.name == "posix", "SIGTERM is a POSIX signal")
+    def test_sigterm_interrupts_a_command_as_sigint_does(self):
+        # A cancelled CI step gets SIGINT and then SIGTERM (#946). Either one
+        # unwinds the command, so that its cleanup stops OpenVMM and removes
+        # its scratch directories, and nvx.py then exits as after Ctrl-C.
+        previous = signal.signal(signal.SIGTERM, signal.SIG_DFL)
+        self.addCleanup(signal.signal, signal.SIGTERM, previous)
+        cleaned: list[bool] = []
+
+        def interrupted(_args: argparse.Namespace) -> int:
+            try:
+                # Without its handler, SIGTERM would end this test process.
+                self.assertIs(
+                    signal.getsignal(signal.SIGTERM), signal.default_int_handler
+                )
+                os.kill(os.getpid(), signal.SIGTERM)
+                deadline = time.monotonic() + 10
+                while time.monotonic() < deadline:
+                    time.sleep(0.01)
+                self.fail("SIGTERM did not interrupt the command")
+            finally:
+                cleaned.append(True)
+
+        stderr = io.StringIO()
+        with (
+            patch.object(
+                nvx, "parse_args", return_value=argparse.Namespace(handler=interrupted)
+            ),
+            contextlib.redirect_stderr(stderr),
+        ):
+            self.assertEqual(nvx.main([]), 130)
+        self.assertEqual(cleaned, [True])
+        self.assertEqual(stderr.getvalue(), "Interrupted\n")
+        self.assertEqual(signal.getsignal(signal.SIGTERM), signal.SIG_DFL)
+
+        # As Python does for SIGINT, nvx.py leaves an ignored SIGTERM ignored.
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+
+        def ignored(_args: argparse.Namespace) -> int:
+            self.assertEqual(signal.getsignal(signal.SIGTERM), signal.SIG_IGN)
+            os.kill(os.getpid(), signal.SIGTERM)
+            time.sleep(0.05)
+            return 0
+
+        with patch.object(
+            nvx, "parse_args", return_value=argparse.Namespace(handler=ignored)
+        ):
+            self.assertEqual(nvx.main([]), 0)
+        self.assertEqual(signal.getsignal(signal.SIGTERM), signal.SIG_IGN)
 
     def test_check_required_ci_rejects_malformed_run_flags(self):
         # microsoft/nvx#496: an empty or malformed --run-* value must not be
@@ -12288,6 +12378,147 @@ python3() {
             environment["PATH"] = f"{stubs}{os.pathsep}{environment['PATH']}"
             self.assertNotEqual(run(environment).returncode, 0)
 
+    def test_linux_runners_remove_scratch_left_by_earlier_jobs(self):
+        validate_runner = (
+            BuildConstants.REPO_ROOT
+            / ".github"
+            / "actions"
+            / "validate-runner"
+            / "action.yml"
+        ).read_text(encoding="utf-8")
+
+        # #946: a harness that the runner's orphan cleanup killed left its
+        # scenario's scratch directory behind, and the ten Linux runners held
+        # 64 of them. The next job removes the account's harness directories,
+        # once it has ended the OpenVMM processes that could still use them.
+        name = "Remove scratch left by earlier jobs"
+        self.assertLess(
+            validate_runner.index(
+                "    - name: Terminate OpenVMM left by earlier jobs\n"
+            ),
+            validate_runner.index(f"    - name: {name}\n"),
+        )
+        self.assertLess(
+            validate_runner.index(f"    - name: {name}\n"),
+            validate_runner.index("    - name: Report host TSC\n"),
+        )
+        step = validate_runner.split(f"    - name: {name}\n", 1)[1]
+        step = step.split("\n\n", 1)[0]
+        self.assertIn("      if: runner.os != 'Windows'\n", step)
+        self.assertIn("      shell: bash\n", step)
+        script = "\n".join(
+            line.removeprefix("        ")
+            for line in step.split("      run: |\n", 1)[1].splitlines()
+        )
+        temporary_line = (
+            "temporary=$(python3 -c 'import tempfile; print(tempfile.gettempdir())')\n"
+        )
+        self.assertIn(temporary_line, script)
+        # Each scratch directory that the harness creates in the temporary
+        # directory has a prefix that the step removes.
+        for module in (
+            "benchmark",
+            "managed_exec_tests",
+            "microvm_tests",
+            "sandbox_lifecycle_tests",
+            "sandbox_proxy_tests",
+        ):
+            source = (
+                BuildConstants.REPO_ROOT / "scripts" / "nvx_tools" / f"{module}.py"
+            ).read_text(encoding="utf-8")
+            calls = re.findall(
+                r"(?:TemporaryDirectory|mkdtemp)\((.*?)\)", source, re.DOTALL
+            )
+            self.assertTrue(calls, module)
+            for arguments in calls:
+                with self.subTest(module=module, arguments=arguments):
+                    self.assertRegex(arguments, r'^\s*prefix=f?"(nvx|openvmm)-')
+                    self.assertNotIn("dir=", arguments)
+        if sys.platform != "linux":
+            return
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            scratch = root / "tmp"
+            scratch.mkdir()
+            # The step never sees the temporary directory of this host.
+            check = script.replace(
+                temporary_line, f"temporary={shlex.quote(str(scratch))}\n", 1
+            )
+
+            def run(
+                environment: dict[str, str] | None = None,
+            ) -> subprocess.CompletedProcess[str]:
+                return subprocess.run(
+                    ["bash", "-c", check],
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                    check=False,
+                    env=environment,
+                )
+
+            left = [
+                scratch / "nvx-restore-downtime-duijv83o",
+                scratch / "openvmm-device-io-ep0lqoc8",
+            ]
+            for directory in left:
+                (directory / "snapshot").mkdir(parents=True)
+                (directory / "snapshot" / "memory.bin").write_bytes(bytes(16))
+            # A directory that even its owner can't empty as it is.
+            locked = left[0] / "locked"
+            locked.mkdir()
+            (locked / "file").write_text("locked", encoding="utf-8")
+            locked.chmod(0o500)
+            # Neither a file nor a link to a directory is a harness directory.
+            outside = root / "outside"
+            outside.mkdir()
+            (outside / "data").write_text("outside", encoding="utf-8")
+            other = scratch / "other-directory"
+            other.mkdir()
+            file = scratch / "nvx-file"
+            file.write_text("file", encoding="utf-8")
+            link = scratch / "nvx-link"
+            link.symlink_to(outside, target_is_directory=True)
+
+            result = run()
+            self.assertEqual(result.returncode, 0, result.stderr)
+            for directory in left:
+                self.assertFalse(directory.exists())
+                self.assertIn(
+                    f"::notice::Removing {directory}, last modified ", result.stdout
+                )
+            self.assertIn(", which an earlier job left behind\n", result.stdout)
+            self.assertNotIn("::warning::", result.stdout)
+            self.assertTrue(other.is_dir())
+            self.assertEqual(file.read_text(encoding="utf-8"), "file")
+            self.assertTrue(link.is_symlink())
+            self.assertEqual((outside / "data").read_text(encoding="utf-8"), "outside")
+            # Without leftover directories, the step says nothing.
+            result = run()
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout, "")
+            # A directory that the step can't remove warns but doesn't fail the
+            # job, and a failure to list the directories fails it.
+            stubs = root / "stubs"
+            stubs.mkdir()
+            stuck = scratch / "nvx-stuck"
+            stuck.mkdir()
+            (stubs / "rm").write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+            (stubs / "rm").chmod(0o755)
+            environment = dict(os.environ)
+            environment["PATH"] = f"{stubs}{os.pathsep}{environment['PATH']}"
+            result = run(environment)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn(
+                f"::warning::Could not remove {stuck}, which an earlier job left behind",
+                result.stdout,
+            )
+            (stubs / "rm").unlink()
+            (stubs / "find").write_text("#!/bin/sh\nexit 2\n", encoding="utf-8")
+            (stubs / "find").chmod(0o755)
+            self.assertNotEqual(run(environment).returncode, 0)
+
     def test_runners_qualify_their_host_time_before_every_job(self):
         validate_runner = (
             BuildConstants.REPO_ROOT
@@ -13587,7 +13818,9 @@ function python {
             / "run-benchmark"
             / "action.yml"
         ).read_text(encoding="utf-8")
-        script = _composite_action_script(action, "Run Linux acceptance test")
+        script = _harness_in_foreground(
+            _composite_action_script(action, "Run Linux acceptance test")
+        )
         platform = "linux-kvm-virtual-machine"
         for name, value in (
             ("backend", "kvm"),
@@ -13820,7 +14053,9 @@ python3() {
             }
         )
         for step, suite, processor_counts, scenarios in RESTORE_REMEASUREMENT_STEPS:
-            script = _composite_action_script(action, f"Run Linux {step}")
+            script = _harness_in_foreground(
+                _composite_action_script(action, f"Run Linux {step}")
+            )
             for name, value in (
                 ("backend", "mshv"),
                 ("platform", platform),
@@ -13878,6 +14113,224 @@ python3() {
                     self._assert_restore_attempts(
                         root, platform, suite, processor_counts, measured, published
                     )
+
+    def test_a_cancellation_reaches_the_linux_test_harness(self):
+        # #946: the runner signals only a cancelled step's shell, and Bash
+        # runs a trap only once its foreground command ends, so the harness
+        # ran on until the runner's orphan cleanup killed it, which left its
+        # scratch directories behind. Each Linux step execs the harness, or
+        # runs it with run_harness, which passes a cancellation on to it.
+        github = BuildConstants.REPO_ROOT / ".github"
+        workflow = yaml.safe_load(
+            (github / "workflows" / "run-nvx-microvm-tests.yml").read_text(
+                encoding="utf-8"
+            )
+        )
+        harness = "python3 scripts/nvx.py test-microvm"
+        steps = [
+            step
+            for job in workflow["jobs"].values()
+            for step in job["steps"]
+            if step.get("shell") == "bash" and harness in step.get("run", "")
+        ]
+        self.assertTrue(steps)
+        for step in steps:
+            with self.subTest(step=step["name"]):
+                self.assertTrue(step["run"].startswith(f"exec {harness} "))
+
+        action = yaml.safe_load(
+            (github / "actions" / "run-benchmark" / "action.yml").read_text(
+                encoding="utf-8"
+            )
+        )
+        harness = "python3 scripts/nvx.py benchmark"
+        scripts = {
+            step["name"]: step["run"]
+            for step in action["runs"]["steps"]
+            if step.get("shell") == "bash" and harness in step.get("run", "")
+        }
+        self.assertEqual(
+            set(scripts),
+            {
+                "Run Linux acceptance test",
+                "Run Linux performance suite",
+                "Run Linux multi-vCPU shell restore",
+                "Run Linux device operation rates",
+            },
+        )
+        for name, script in scripts.items():
+            with self.subTest(step=name):
+                commands = [
+                    line.strip() for line in script.splitlines() if harness in line
+                ]
+                if commands == [f"exec {harness} \\"]:
+                    continue
+                self.assertTrue(commands)
+                self.assertTrue(
+                    all(command == f"run_harness {harness} \\" for command in commands)
+                )
+                self.assertLess(
+                    script.index(_FORWARD_SIGNALS_SOURCE), script.index("run_harness")
+                )
+        # The quality checks lint the file that the steps source.
+        quality = (github / "actions" / "check-quality" / "action.yml").read_text(
+            encoding="utf-8"
+        )
+        for linter in ("${SHELLCHECK} --shell=bash", "${SHFMT} -d -ln bash"):
+            with self.subTest(linter=linter):
+                checked = quality.split(linter, 1)[1].split("\n\n", 1)[0]
+                checked = checked.split("${", 1)[0]
+                self.assertIn(
+                    ".github/actions/run-benchmark/forward-signals.sh", checked
+                )
+
+    @unittest.skipUnless(sys.platform.startswith("linux"), "Linux signals")
+    def test_run_harness_passes_a_cancellation_on_to_the_harness(self):
+        if signal.getsignal(signal.SIGINT) == signal.SIG_IGN:
+            self.skipTest("Bash cannot trap a SIGINT that this process ignores")
+        for name, signum, delay, status, mode, expected in (
+            # The runner's SIGINT, and its SIGTERM, reach the harness, which
+            # cleans up, and the step then fails with the status of the
+            # signal.
+            ("sigint", signal.SIGINT, 60, 0, "handle", 130),
+            ("sigterm", signal.SIGTERM, 60, 0, "handle", 143),
+            # Without a cancellation, run_harness returns the harness's
+            # status, which set -e turns into the step's.
+            ("success", None, 0, 0, "handle", 0),
+            ("failure", None, 0, 3, "handle", 3),
+            # A cancellation that doesn't stop the harness, as one that
+            # arrives as it exits, still ends the step once it exits.
+            ("late", signal.SIGINT, 1, 0, "ignore", 130),
+            # A cancellation between two harness runs ends the step.
+            ("between", signal.SIGINT, 0, 0, "handle", 130),
+        ):
+            with (
+                self.subTest(name=name),
+                tempfile.TemporaryDirectory() as temporary,
+            ):
+                root = Path(temporary)
+                started, cleaned = root / "started", root / "cleaned"
+                waiting, finished = root / "waiting", root / "finished"
+                run = shlex.join(
+                    [
+                        "run_harness",
+                        sys.executable,
+                        "-c",
+                        _CANCELLABLE_HARNESS,
+                        str(started),
+                        str(cleaned),
+                        str(delay),
+                        str(status),
+                        mode,
+                    ]
+                )
+                script = (
+                    "set -euo pipefail\n"
+                    f"source {shlex.quote(str(_FORWARD_SIGNALS))}\n"
+                    + (
+                        f"{run}\ntouch {shlex.quote(str(waiting))}\nsleep 2\n"
+                        if name == "between"
+                        else ""
+                    )
+                    + f"{run}\ntouch {shlex.quote(str(finished))}\n"
+                )
+                shell = subprocess.Popen(
+                    ["bash", "--noprofile", "--norc", "-c", script]
+                )
+                try:
+                    if signum is not None:
+                        ready = waiting if name == "between" else started
+                        deadline = time.monotonic() + 30
+                        while not ready.exists():
+                            self.assertLess(time.monotonic(), deadline)
+                            time.sleep(0.01)
+                        if name == "between":
+                            started.unlink()
+                        shell.send_signal(signum)
+                    self.assertEqual(shell.wait(timeout=30), expected)
+                finally:
+                    if shell.poll() is None:
+                        shell.kill()
+                        shell.wait()
+                self.assertEqual(finished.exists(), expected == 0)
+                if name in ("sigint", "sigterm"):
+                    self.assertTrue(cleaned.exists())
+                if name == "between":
+                    # The step ended before it started the second harness.
+                    self.assertFalse(started.exists())
+
+    def test_run_harness_passes_on_a_cancellation_that_arrives_as_it_starts(self):
+        # A cancellation that arrived once run_harness had started the
+        # harness, but before it knew the harness's PID, ended the step at
+        # once and left the harness to run on. Passed on as SIGINT, it would
+        # also be lost on a harness that had yet to restore the SIGINT that
+        # Bash ignores in a background command.
+        if sys.platform != "linux":
+            self.skipTest("Linux signals")
+        if signal.getsignal(signal.SIGINT) == signal.SIG_IGN:
+            self.skipTest("Bash cannot trap a SIGINT that this process ignores")
+        for signum, expected in ((signal.SIGINT, 130), (signal.SIGTERM, 143)):
+            with (
+                self.subTest(signal=signum.name),
+                tempfile.TemporaryDirectory() as temporary,
+            ):
+                root = Path(temporary)
+                started, cleaned = root / "started", root / "cleaned"
+                recorded, finished = root / "harness-pid", root / "finished"
+                # With functrace, a DEBUG trap runs before each command of
+                # run_harness too, so the shell signals itself right after it
+                # starts the harness, before the first command that runs once
+                # $! holds the harness's PID.
+                script = (
+                    "set -euo pipefail\n"
+                    f"source {shlex.quote(str(_FORWARD_SIGNALS))}\n"
+                    "cancel() {\n"
+                    f'    if [[ -n "${{!:-}}" && ! -e {shlex.quote(str(recorded))} ]]; then\n'
+                    f'        echo "$!" >{shlex.quote(str(recorded))}\n'
+                    f'        kill -{signum.name.removeprefix("SIG")} "$$"\n'
+                    "    fi\n"
+                    "}\n"
+                    "set -T\n"
+                    "trap cancel DEBUG\n"
+                    + shlex.join(
+                        [
+                            "run_harness",
+                            sys.executable,
+                            "-c",
+                            _CANCELLABLE_HARNESS,
+                            str(started),
+                            str(cleaned),
+                            "60",
+                            "0",
+                            "handle",
+                        ]
+                    )
+                    + f"\ntouch {shlex.quote(str(finished))}\n"
+                )
+                shell = subprocess.Popen(
+                    ["bash", "--noprofile", "--norc", "-c", script]
+                )
+                try:
+                    # Unless the signal reached it, the harness runs for a
+                    # minute.
+                    self.assertEqual(shell.wait(timeout=30), expected)
+                finally:
+                    if shell.poll() is None:
+                        shell.kill()
+                        shell.wait()
+                    outlived = False
+                    if recorded.exists():
+                        pid = int(recorded.read_text(encoding="utf-8"))
+                        with contextlib.suppress(ProcessLookupError):
+                            os.kill(pid, 0)
+                            outlived = True
+                            os.kill(pid, signal.SIGKILL)
+                self.assertTrue(recorded.exists(), "the shell never cancelled itself")
+                # The step ended only once the harness had exited.
+                self.assertFalse(outlived)
+                self.assertFalse(finished.exists())
+                # The signal stopped the harness as it started, or it cleaned up.
+                self.assertTrue(cleaned.exists() or not started.exists())
 
     @unittest.skipUnless(os.name == "nt", "requires Windows PowerShell")
     def test_windows_restore_suites_preserve_attempts_and_publish_only_valid_data(
