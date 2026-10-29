@@ -172,13 +172,25 @@ jobs:
             exit "${status}"
           fi
 
+      # Nested under the shard's index so that downloading one shard's
+      # artifact, as well as several, lands it at shards/<index>/: a lone
+      # matching artifact extracts straight into the download path, with no
+      # directory of its own (actions/download-artifact#319).
+      - name: Stage the outcomes for upload
+        if: ${{ !cancelled() && hashFiles('build/mutants/mutants.out/outcomes.json') != '' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "build/shard/${{ matrix.index }}"
+          cp -r build/mutants/mutants.out/. "build/shard/${{ matrix.index }}/"
+
       # A rerun of the job replaces the outcomes of its earlier attempt.
       - name: Upload the outcomes
         if: ${{ !cancelled() && hashFiles('build/mutants/mutants.out/outcomes.json') != '' }}
         uses: actions/upload-artifact@v7
         with:
           name: nvx-rs-mutants-shard-${{ matrix.index }}-${{ github.run_id }}
-          path: build/mutants/mutants.out
+          path: build/shard
           if-no-files-found: error
           overwrite: true
           retention-days: 30
@@ -191,12 +203,16 @@ jobs:
     timeout-minutes: 10
     steps:
       # The latest outcomes of each shard, also when an earlier attempt of the
-      # run reported them.
+      # run reported them. merge-multiple extracts every matching artifact's
+      # files straight into path, so a shard's own index directory (added at
+      # upload) is what tells the shards apart, not a per-artifact directory
+      # download-artifact only adds when several artifacts match.
       - name: Download the outcomes
         uses: actions/download-artifact@v8
         with:
           pattern: nvx-rs-mutants-shard-*-${{ github.run_id }}
           path: shards
+          merge-multiple: true
 
       - name: Merge the outcomes of the shards
         shell: bash
@@ -206,16 +222,25 @@ jobs:
           TARGETS: ${{ needs.plan.outputs.targets }}
           OS: ${{ needs.plan.outputs.os }}
           SHARDS: ${{ needs.plan.outputs.shards }}
+          MUTANTS_RESULT: ${{ needs.mutants.result }}
         run: |
           set -euo pipefail
-          shopt -s nullglob
-          shards=(shards/*/)
+          if [[ "${MUTANTS_RESULT}" != success ]]; then
+            echo "::error::The mutants job did not succeed (${MUTANTS_RESULT})."
+            exit 1
+          fi
+          reported=()
+          for (( index = 0; index < SHARDS; index++ )); do
+            if [[ -f "shards/${index}/outcomes.json" ]]; then
+              reported+=("${index}")
+            fi
+          done
           mkdir -p mutants
           for outcome in caught missed timeout unviable; do
             lists=()
-            for shard in "${shards[@]}"; do
-              if [[ -f "${shard}${outcome}.txt" ]]; then
-                lists+=("${shard}${outcome}.txt")
+            for index in "${reported[@]}"; do
+              if [[ -f "shards/${index}/${outcome}.txt" ]]; then
+                lists+=("shards/${index}/${outcome}.txt")
               fi
             done
             if (( ${#lists[@]} )); then
@@ -228,7 +253,7 @@ jobs:
             echo "## nvx-rs mutants"
             echo
             echo "Files \`${FILES}\`, test arguments \`${TESTS:-(none)}\`, cargo test" \
-              "arguments \`${TARGETS:-(none)}\`, on ${OS}: ${#shards[@]} of ${SHARDS}" \
+              "arguments \`${TARGETS:-(none)}\`, on ${OS}: ${#reported[@]} of ${SHARDS}" \
               "shards reported."
             echo
             echo "| Outcome | Mutants |"
@@ -248,8 +273,8 @@ jobs:
               echo "</details>"
             fi
           } >> "${GITHUB_STEP_SUMMARY}"
-          if (( ${#shards[@]} != SHARDS )); then
-            echo "::error::Only ${#shards[@]} of ${SHARDS} shards reported their outcomes."
+          if (( ${#reported[@]} != SHARDS )); then
+            echo "::error::Only ${#reported[@]} of ${SHARDS} shards reported their outcomes."
             exit 1
           fi
 
