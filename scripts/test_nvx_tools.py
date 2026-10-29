@@ -7485,9 +7485,10 @@ class CiConfigurationTests(unittest.TestCase):
     def test_nvx_rs_checks_the_runtime_adapter_in_each_configuration(self):
         # The runtime adapter builds on the nvx crate as an independent adapter
         # does, with a lockfile of its own and default features off. Each
-        # configuration is linted, built, tested, and checked with the minimum
-        # Rust version of nvx; the guest-only one builds the static musl
-        # executable that guests run, so it needs Linux.
+        # configuration is linted, built, tested, documented with warnings
+        # denied, and checked with the minimum Rust version of nvx; the
+        # guest-only one builds the static musl executable that guests run, so
+        # it needs Linux.
         root = BuildConstants.REPO_ROOT
         action = (
             root / ".github" / "actions" / "check-nvx-rs" / "action.yml"
@@ -7524,6 +7525,8 @@ class CiConfigurationTests(unittest.TestCase):
                     "-- -D warnings",
                     f"cargo {toolchain} build --locked{options}",
                     f"cargo {toolchain} test --locked{options}",
+                    f'RUSTDOCFLAGS="-D warnings" cargo {toolchain} doc --locked '
+                    f"--no-deps{options}",
                     f"cargo {msrv} check --locked --all-targets{options}",
                 ):
                     self.assertIn(command, script)

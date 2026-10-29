@@ -1,9 +1,9 @@
 //! The adapter's messages about executions: programs that the guest runs for the host, whose
 //! standard streams and outcome the execution engine of `nvx::exec` carries. The host's side of an
-//! execution is the engine's [`Peer`], and the guest's side its [`Runner`], which the guest agent's
-//! worker binds to the program through `nvx::guest::exec::binding`. A [`HostExecution`] holds the
-//! peer with a sink of the program's output and a source of its input, as the host program's
-//! driver, `host::Executions`, and the in-process tests of the worker run it.
+//! execution is the engine's [`Peer`], and the guest's side its [`Runner`](nvx::exec::Runner),
+//! which the guest agent's worker binds to the program through `nvx::guest::exec::binding`. A
+//! [`HostExecution`] holds the peer with a sink of the program's output and a source of its input,
+//! as the host program's driver, `host::Executions`, and the in-process tests of the worker run it.
 //!
 //! Each message of the engine travels in a frame of its own kind. Its body starts with the
 //! execution's [`Key`]: the execution's ID, then its generation, each a `u64`:
@@ -480,7 +480,7 @@ impl<'a> HostMessage<'a> {
     }
 }
 
-/// A message of the guest's side of an execution, its [`Runner`], to the host's.
+/// A message of the guest's side of an execution, its [`Runner`](nvx::exec::Runner), to the host's.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GuestMessage<'a> {
     /// Credit of the program's standard input.
@@ -499,8 +499,8 @@ pub enum GuestMessage<'a> {
 
 impl<'a> GuestMessage<'a> {
     /// Returns the runner's `message` about the execution `key`, whose output, if any, is at the
-    /// start of `buffer`, as [`Runner::next_message`] returns it, or `None` for a message that
-    /// the framing does not know.
+    /// start of `buffer`, as [`Runner::next_message`](nvx::exec::Runner::next_message) returns
+    /// it, or `None` for a message that the framing does not know.
     pub fn from_runner(key: Key, message: runner::Message, buffer: &'a [u8]) -> Option<Self> {
         Some(match message {
             runner::Message::Credit { units } => Self::Credit(key, units),
