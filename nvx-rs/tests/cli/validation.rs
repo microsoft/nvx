@@ -3,6 +3,7 @@
 //! was, with no state directory, and launches no OpenVMM.
 
 use crate::harness::{Content, Hosts, LAYER, Outcome, Root, SCRATCH, UUID, in_parallel};
+use crate::lifecycle::provision;
 
 /// An environment file of one entry.
 const ENVIRONMENT: Content = Content::Text(r#"["A=1"]"#);
@@ -650,6 +651,25 @@ fn sandbox_refusals() -> Vec<Refusal> {
             &["--mount-owner caller", "Linux"],
         )
         .on(Hosts::Windows),
+        // Caller ownership squashes guest root to the owner of a share, so it refuses one that
+        // root owns, as `/` is whoever runs the tests.
+        refusal(
+            "caller owner of a root-owned share",
+            "unsupported",
+            sandbox_run(&["--mount", "/data,/", "--mount-owner", "caller"]),
+            &["--mount-owner caller", "UID 0 or GID 0"],
+        )
+        .on(Hosts::Posix),
+        refusal(
+            "caller owner of a root-owned share at provision",
+            "unsupported",
+            provision(
+                "{root/state}",
+                &["--mount", "/data,/", "--mount-owner", "caller"],
+            ),
+            &["--mount-owner caller", "UID 0 or GID 0"],
+        )
+        .on(Hosts::Posix),
         refusal(
             "network options without --net",
             "unsupported",
