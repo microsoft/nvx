@@ -1129,7 +1129,7 @@ mod tests {
     }
 
     /// Spawns `spec`, reads its launch report to the end, reaps it, and returns both.
-    fn run(spec: ChildSpec) -> (Option<(i32, i32)>, Option<ChildStatus>) {
+    fn run(spec: ChildSpec) -> (Option<(u32, i32)>, Option<ChildStatus>) {
         let Started {
             process,
             report: mut reader,
@@ -1139,7 +1139,7 @@ mod tests {
         reader.read_to_end(&mut report).unwrap();
         let report = (report.len() == REPORT_LENGTH).then(|| {
             (
-                i32::from_ne_bytes(report[..4].try_into().unwrap()),
+                u32::from_ne_bytes(report[..4].try_into().unwrap()),
                 i32::from_ne_bytes(report[4..].try_into().unwrap()),
             )
         });

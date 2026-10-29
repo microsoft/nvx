@@ -414,7 +414,7 @@ impl Binding {
                 self.runner.launched(match report {
                     Ok(None) => Ok(()),
                     Ok(Some(failure)) => Err(LaunchFailure::new(
-                        failure.stage().code().unsigned_abs(),
+                        failure.stage().code(),
                         failure.raw_os_error(),
                     )),
                     Err(error) => Err(LaunchFailure::new(0, error.raw_os_error().unwrap_or(0))),

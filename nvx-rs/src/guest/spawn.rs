@@ -159,7 +159,7 @@ impl LaunchStage {
     ];
 
     /// Returns the stage's number in a launch report: its position, from 1.
-    pub(crate) fn code(self) -> i32 {
+    pub(crate) fn code(self) -> u32 {
         match self {
             Self::ProcessGroup => 1,
             Self::Session => 2,
@@ -186,7 +186,7 @@ impl LaunchStage {
     }
 
     /// Returns the stage that a launch report numbers `code`, if any.
-    fn from_code(code: i32) -> Option<Self> {
+    fn from_code(code: u32) -> Option<Self> {
         Self::ALL.into_iter().find(|stage| stage.code() == code)
     }
 }
@@ -627,7 +627,7 @@ impl LaunchReport {
         if length == 0 {
             return Ok(None);
         }
-        let stage = i32::from_ne_bytes(bytes[..4].try_into().expect("four bytes"));
+        let stage = u32::from_ne_bytes(bytes[..4].try_into().expect("four bytes"));
         let error = i32::from_ne_bytes(bytes[4..].try_into().expect("four bytes"));
         match LaunchStage::from_code(stage) {
             Some(stage) if length == REPORT_LENGTH => Ok(Some(LaunchFailure { stage, error })),
@@ -958,7 +958,7 @@ mod tests {
         for (bytes, expected) in [
             (Vec::new(), Ok(None)),
             (
-                [18i32.to_ne_bytes(), 2i32.to_ne_bytes()].concat(),
+                [18u32.to_ne_bytes(), 2i32.to_ne_bytes()].concat(),
                 Ok(Some(LaunchFailure {
                     stage: LaunchStage::WorkingDirectory,
                     error: 2,
@@ -966,11 +966,11 @@ mod tests {
             ),
             (vec![1, 0, 0], Err(Errno::EPROTO as i32)),
             (
-                [22i32.to_ne_bytes(), 2i32.to_ne_bytes()].concat(),
+                [22u32.to_ne_bytes(), 2i32.to_ne_bytes()].concat(),
                 Err(Errno::EPROTO as i32),
             ),
             (
-                [0i32.to_ne_bytes(), 2i32.to_ne_bytes()].concat(),
+                [0u32.to_ne_bytes(), 2i32.to_ne_bytes()].concat(),
                 Err(Errno::EPROTO as i32),
             ),
         ] {
@@ -991,7 +991,7 @@ mod tests {
 
     #[test]
     fn launch_stages_are_numbered_in_their_order() {
-        let codes: Vec<i32> = LaunchStage::ALL.iter().map(|stage| stage.code()).collect();
+        let codes: Vec<u32> = LaunchStage::ALL.iter().map(|stage| stage.code()).collect();
         assert_eq!(codes, (1..=21).collect::<Vec<_>>());
         // The entry's view comes after the cgroup, which a child joins before it drops its
         // privileges, and its identity before the working directory, which it enters as that
