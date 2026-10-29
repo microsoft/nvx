@@ -495,6 +495,77 @@ fn records_and_capabilities_that_are_not_regular_files_fail_at_once() {
     }
 }
 
+#[test]
+fn failures_to_read_the_records_and_the_capability_name_them() {
+    let (_directory, store) = store();
+    let read = |name: &str| match name {
+        RUNTIME_NAME => store.runtime().map(drop),
+        JOURNAL_NAME => store.journal().map(drop),
+        _ => store.read_capability().map(drop),
+    };
+    let files = [
+        (RUNTIME_NAME, "sandbox runtime record"),
+        (JOURNAL_NAME, "sandbox launch journal"),
+        (CAPABILITY_NAME, "sandbox control capability"),
+    ];
+    // A missing record is none, but a missing capability fails, as its launch needs it.
+    assert!(store.runtime().unwrap().is_none());
+    assert!(store.journal().unwrap().is_none());
+    let path = store.path(CAPABILITY_NAME);
+    let error = store.read_capability().unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::Io);
+    assert_eq!(
+        error.message(),
+        format!(
+            "cannot read the sandbox control capability {}",
+            path.display()
+        )
+    );
+    let cause = std::error::Error::source(&error)
+        .and_then(|source| source.downcast_ref::<io::Error>())
+        .map(io::Error::kind);
+    assert_eq!(cause, Some(io::ErrorKind::NotFound), "{error}");
+    // A capability of another length, or an all-zero one, is invalid.
+    for invalid in [&CAPABILITY[1..], &[0; CAPABILITY_LEN][..]] {
+        fs::write(&path, invalid).unwrap();
+        let error = store.read_capability().unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::Io);
+        assert_eq!(
+            error.message(),
+            format!(
+                "the sandbox control capability {} is invalid",
+                path.display()
+            )
+        );
+    }
+    fs::remove_file(&path).unwrap();
+    // A record that does not parse is malformed.
+    for (name, description) in &files[..2] {
+        let path = store.path(name);
+        fs::write(&path, b"{").unwrap();
+        let error = read(name).unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::Io);
+        assert_eq!(
+            error.message(),
+            format!("the {description} {} is malformed", path.display())
+        );
+        fs::remove_file(&path).unwrap();
+    }
+    // A directory in the place of a record or of the capability cannot be read as one: Unix opens
+    // it, and refuses it as no regular file, and Windows refuses to open it.
+    for (name, description) in files {
+        let path = store.path(name);
+        fs::create_dir(&path).unwrap();
+        let error = read(name).unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::Io);
+        assert_eq!(
+            error.message(),
+            format!("cannot read the {description} {}", path.display())
+        );
+        fs::remove_dir(&path).unwrap();
+    }
+}
+
 #[cfg(target_os = "linux")]
 #[test]
 fn the_store_is_private_to_the_current_user() {
@@ -652,17 +723,32 @@ fn the_store_is_private_to_the_current_user() {
             "{name}"
         );
     }
+    let refused = |description: &str, name: &str| {
+        format!(
+            "the {description} {} allows other users",
+            store.path(name).display()
+        )
+    };
     let error = store.journal().unwrap_err();
-    assert!(error.message().ends_with("allows other users"), "{error}");
+    assert_eq!(
+        error.message(),
+        refused("sandbox launch journal", JOURNAL_NAME)
+    );
     let error = locked.recover().unwrap_err();
-    assert!(error.message().ends_with("allows other users"), "{error}");
+    assert_eq!(
+        error.message(),
+        refused("sandbox launch journal", JOURNAL_NAME)
+    );
     let error = store.read_capability().unwrap_err();
-    assert!(error.message().ends_with("allows other users"), "{error}");
+    assert_eq!(
+        error.message(),
+        refused("sandbox control capability", CAPABILITY_NAME)
+    );
     // So is a lock file whose own list allows others, who could hold its lock.
     drop(locked);
     platform::set_access(&store.path(LOCK_NAME), "D:P(A;;FA;;;WD)").unwrap();
     let error = store.lock(None).unwrap_err();
-    assert!(error.message().ends_with("allows other users"), "{error}");
+    assert_eq!(error.message(), refused("sandbox lock", LOCK_NAME));
 }
 
 #[test]
@@ -896,8 +982,8 @@ fn a_journal_that_its_runtime_record_supersedes_is_removed() {
     drop(launch);
     // The launch wrote its runtime record and crashed before it removed its journal.
     let committed = RuntimeRecord::committed(&journal, journal.process().unwrap().clone());
-    record::write(&store.path(RUNTIME_NAME), &committed).unwrap();
-    record::write(&store.path(JOURNAL_NAME), &journal).unwrap();
+    record::write(&store.runtime_file(), &committed).unwrap();
+    record::write(&store.journal_file(), &journal).unwrap();
     assert_eq!(locked.recover().unwrap(), Recovery::Clean);
     assert!(store.journal().unwrap().is_none());
     assert_eq!(store.runtime().unwrap(), Some(committed));
@@ -908,7 +994,7 @@ fn a_journal_that_its_runtime_record_supersedes_is_removed() {
         runtime(),
         *journal.log(),
     );
-    record::write(&store.path(JOURNAL_NAME), &other).unwrap();
+    record::write(&store.journal_file(), &other).unwrap();
     let error = locked.recover().unwrap_err();
     assert_eq!(error.kind(), ErrorKind::Io);
     assert!(error.message().contains("names launch"), "{error}");
