@@ -137,12 +137,14 @@ impl ClonePlan {
     /// the template has a NIC: `--restore-network-policy`, with which the policy of the clone's
     /// network replaces the template's complete deny-all policy on the NIC, and the options of that
     /// policy, without `--net` and the guest's address, which OpenVMM takes from the snapshot. The
-    /// clone's export, if it has one, follows, bound to the
-    /// template's dormant filesystem slot: `--mount` with
-    /// [`GUEST_EXPORT`](crate::host::filesystem::GUEST_EXPORT), the exported directory, and its
-    /// mode, `rw` if a mapping writes it, and `ro` otherwise, then its hidden, re-exposed, and
-    /// writable paths, and the caller owner, as its [plan](ClonePlan::export) holds them; without
-    /// an export, the slot stays dormant. Then come `--single-process`, the template's backend,
+    /// clone's export, if it has one, follows, bound to the template's dormant filesystem slot as a
+    /// cold launch attaches it, as its [plan](ClonePlan::export) holds it,
+    /// [`ExportPlan::openvmm_arguments`](crate::host::filesystem::ExportPlan::openvmm_arguments):
+    /// `--mount-aggregate` with [`GUEST_EXPORT`](crate::host::filesystem::GUEST_EXPORT), a
+    /// `--mount-child` of each of its directories and files, with its mode, `rw` if a mapping
+    /// writes it, and `ro` otherwise, and `file` for a file, then their hidden, re-exposed, and
+    /// writable paths, and the caller owner; without an export, the slot stays dormant. Then come
+    /// `--single-process`, the template's backend,
     /// CPU profile, and processor capacity, `--restore-snapshot` with the directory of the
     /// generation's snapshot, [`ClonePlan::snapshot`], for a template that records its processors
     /// online at boot, [`TemplateKey::boot_processors`], `--restore-processors` with the processor
@@ -215,8 +217,9 @@ impl ClonePlan {
     ///   [`Evidence::EndpointBind`]; as
     ///   [`ExportPlan::verify`](crate::host::filesystem::ExportPlan::verify) fails for the clone's
     ///   export, if it has one: with [`ErrorKind::Other`](crate::ErrorKind::Other) for a
-    ///   directory, or a mapped or hidden object that the guest could move, that is no longer the
-    ///   object that the export's plan found, or that its path no longer reaches, and with
+    ///   directory or a file of the export that is no longer the kind of object that the export's
+    ///   plan found, a mapped or hidden object that the guest could move that is no longer the
+    ///   object that the plan found, or an object that its path no longer reaches, and with
     ///   [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported) for a read-only mapping that
     ///   the host cannot keep read-only, or an owner that the host no longer supports,
     ///   [`Evidence::InvalidMappings`], and with [`ErrorKind::Io`](crate::ErrorKind::Io) if an

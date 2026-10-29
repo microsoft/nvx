@@ -1184,7 +1184,7 @@ fn a_clone_with_an_export_binds_it_to_its_template_s_dormant_filesystem_slot() {
     complete_snapshot(&fixture);
     let (image, binding) = fixture.image("distro.erofs", IMAGE_LEN);
     let mut acquired = fixture.acquire("sandbox");
-    let export = fixture.data_export("data");
+    let (export, _) = fixture.aggregate_export("aggregate");
     let request = with_export(tmpfs_request(&image, &binding), &export);
     let plan = fixture.plan(&mut acquired, &request, NO_CONTENT).unwrap();
     let runtime = plan.key().runtime().clone();
@@ -1203,28 +1203,22 @@ fn a_clone_with_an_export_binds_it_to_its_template_s_dormant_filesystem_slot() {
     vmm.reference = Some(reference.clone());
     vmm.started();
     // The clone in RAM declares its scratch absent, and the export follows the clone's block
-    // device: its directory on the dormant slot, writable, since the guest writes a directory in
-    // it, to which the export narrows the guest's writes.
-    let data = &export.children[0].root;
-    let mount = format!("{},{},rw", filesystem::GUEST_EXPORT, data.display());
-    let work = data.join("work");
+    // device, as a cold launch attaches it: the aggregate, on the dormant slot, with its
+    // directories and files, their modes and policies.
     let arguments = made.take().unwrap().arguments;
     let devices = arguments
         .iter()
         .position(|argument| argument == "--single-process")
         .unwrap();
+    assert_eq!(arguments[4], "--restore-absent-scratch");
+    assert_eq!(arguments[5..devices], export.openvmm_arguments());
     assert_eq!(
-        arguments[4..devices],
-        [
-            "--restore-absent-scratch",
-            "--mount",
-            mount.as_str(),
-            "--mount-write",
-            work.to_str().unwrap()
-        ]
+        arguments[5..7],
+        ["--mount-aggregate", filesystem::GUEST_EXPORT]
     );
-    // The restore sequence sends the export's table once the clone is ready.
-    assert_eq!(restoring.table, data_table());
+    // The restore sequence sends the export's table once the clone is ready, as a cold launch's
+    // guest receives it.
+    assert_eq!(restoring.table, export.guest_table());
     assert_eq!(
         restoring.abandon().unwrap(),
         Recovery::Terminated(reference)
@@ -1307,7 +1301,11 @@ fn a_clone_whose_exported_objects_changed_since_its_plan_starts_nothing() {
     let export = fixture.data_export("replaced");
     let data = export.children[0].root.clone();
     let plan = fixture
-        .plan(&mut replaced, &with_export(request, &export), NO_CONTENT)
+        .plan(
+            &mut replaced,
+            &with_export(request.clone(), &export),
+            NO_CONTENT,
+        )
         .unwrap();
     fs::remove_dir_all(&data).unwrap();
     fs::write(&data, b"file").unwrap();
@@ -1320,6 +1318,24 @@ fn a_clone_whose_exported_objects_changed_since_its_plan_starts_nothing() {
         changed(&data)
     );
     assert_unlaunched(&fixture, &replaced);
+    // A file of an aggregate, which a directory has replaced since the plan, and which would
+    // grant the whole directory.
+    let mut swapped = fixture.acquire("swapped");
+    let (export, [_, notes, ..]) = fixture.aggregate_export("swapped");
+    let plan = fixture
+        .plan(&mut swapped, &with_export(request, &export), NO_CONTENT)
+        .unwrap();
+    fs::remove_file(&notes).unwrap();
+    fs::create_dir(&notes).unwrap();
+    assert_eq!(
+        refused_at(
+            plan.launch_with(&mut swapped, Path::new(OPENVMM), &runtime, hooks),
+            Stage::Launch,
+            Evidence::InvalidMappings,
+        ),
+        changed(&notes)
+    );
+    assert_unlaunched(&fixture, &swapped);
 }
 
 #[test]

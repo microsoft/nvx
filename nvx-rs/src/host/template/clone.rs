@@ -33,7 +33,7 @@ use std::io;
 use std::path::{Component, Path, PathBuf};
 use std::time::Instant;
 
-use self::export::DirectoryExport;
+use self::export::CloneExport;
 use self::failure::{Attribute, Fault, host_evidence};
 use super::key::TemplateKey;
 use super::manifest::{BlockGeometry, PROCESSOR_COUNTS};
@@ -95,8 +95,8 @@ pub struct CloneRequest {
     /// [`filesystem::plan`] planned for the container root,
     /// [`ReservedTargets::CONTAINER_ROOT`](crate::host::filesystem::ReservedTargets::CONTAINER_ROOT),
     /// or `None` for a clone that shares none, whose restore leaves the template's filesystem slot
-    /// dormant. The slot binds one directory, so the plan must export exactly one, and no file,
-    /// as [`ClonePlan`] describes.
+    /// dormant. The restore binds the export to the slot as a cold launch attaches it, an
+    /// aggregate of the plan's directories and files, as [`ClonePlan`] describes.
     pub export: Option<ExportPlan>,
     /// The processor target: the processors online in the clone's VM once restored, a prefix of
     /// the template's processor capacity, of which the restore brings online those beyond the
@@ -205,30 +205,33 @@ pub enum CloneUpper {
 ///   so a template serves the clones of every network policy at its guest's address: egress
 ///   rules, a proxy, ingress, host-loopback access, and host-loopback forwards alike.
 /// - The export, if the request has one, must be a plan that [`filesystem::plan`] could have made
-///   for the container root, as [`ExportPlan::check`] finds it, of exactly one child, a
-///   directory: a template's filesystem slot is dormant, and a restore binds one directory to it,
-///   which is then the export's root, in which the sources of the plan's binds name their paths
-///   without the child's index, as the mapping table, [`table`](Self::table), sends them. The
-///   directory may neither lie inside the template store's directory nor hold it, by the paths
-///   that the plan and the store's directory resolve to, so that no guest reaches the payload of
-///   a generation through it, nor let the guest write in a directory through which the store's
-///   path leads, links and `..` included, since the host reaches the store, and OpenVMM its
-///   snapshots, by that path. Nor may it be, or hold, the directory of the clone's sandbox, which
-///   the lease names by its resolved path, and in which the host writes the clone's records,
-///   which the guest could otherwise change, or turn elsewhere, into a leased snapshot, say,
-///   though a directory inside the sandbox's, among the caller's files, may be exported. These
-///   checks compare paths, so an alias of the store that an administrator configures is outside
-///   them, as the directories above the store are: a bind mount or a mount point of the store,
-///   or of a directory above or inside it, a loopback share, or a hard link of a payload.
-///   Whoever names an export must not name such an alias, nor a directory that holds one. The
-///   launch checks the plan's host objects again, with [`ExportPlan::verify`], before it
-///   restores the clone, but OpenVMM resolves an export's path again at each launch and restore,
-///   so the directories above the export's directory must be ones that no guest may change, as
-///   those above the clone's block devices must, which
-///   [Block devices by path](Store#block-devices-by-path) describes: whoever names an export
-///   must not name one inside a directory that a writable export of another sandbox or clone
-///   holds, whose guest could replace the directory with a link, and turn the export elsewhere,
-///   to a leased payload, say. A request without an export leaves the slot dormant.
+///   for the container root, as [`ExportPlan::check`] finds it: an aggregate of up to
+///   [`MAX_CHILDREN`](crate::host::filesystem::MAX_CHILDREN) host directories and files, each
+///   read-only or read-write, with OpenVMM's hidden, re-exposed, and writable paths, and its owner.
+///   A template's filesystem slot is dormant, and the restore of a template, a platform snapshot,
+///   binds the aggregate to it as a cold launch attaches one, so the sources of the plan's binds
+///   name their paths by their child's index, as the mapping table, [`table`](Self::table), sends
+///   them, as at a cold launch. None of its directories and files may lie inside the template
+///   store's directory, nor any of its directories hold it, by the paths that the plan and the
+///   store's directory resolve to, so that no guest reaches the payload of a generation through it,
+///   nor may the export let the guest write in a directory through which the store's path leads,
+///   links and `..` included, since the host reaches the store, and OpenVMM its snapshots, by that
+///   path. Nor may any of its directories be, or hold, the directory of the clone's sandbox, which
+///   the lease names by its resolved path, and in which the host writes the clone's records, which
+///   the guest could otherwise change, or turn elsewhere, into a leased snapshot, say, though a
+///   directory inside the sandbox's, among the caller's files, may be exported. These checks
+///   compare paths, so an alias of the store that an administrator configures is outside them, as
+///   the directories above the store are: a bind mount or a mount point of the store, or of a
+///   directory above or inside it, a loopback share, or a hard link of a payload. Whoever names an
+///   export must not name such an alias, nor a directory that holds one. The launch checks the
+///   plan's host objects again, with [`ExportPlan::verify`], before it restores the clone, but
+///   OpenVMM resolves an export's paths again at each launch and restore, so the directories above
+///   the export's directories and files must be ones that no guest may change, as those above the
+///   clone's block devices must, which [Block devices by path](Store#block-devices-by-path)
+///   describes: whoever names an export must not name one inside a directory that a writable export
+///   of another sandbox or clone holds, whose guest could replace the directory with a link, and
+///   turn the export elsewhere, to a leased payload, say. A request without an export leaves the
+///   slot dormant.
 /// - The activation record, which the clone's guest applies in place of the configuration that
 ///   the template captured, names the restore, with a fresh transaction ID, the clone's image,
 ///   upper, export, and settings, its network, and the resources that the clone must
@@ -321,7 +324,7 @@ pub struct ClonePlan {
     devices: SandboxPlan,
     /// The clone's export, which its restore binds to the template's dormant filesystem slot, if
     /// it has one.
-    export: Option<DirectoryExport>,
+    export: Option<CloneExport>,
 }
 
 /// How a plan reaches the clone's files: as the checks of their bindings reach them, or, in tests,
@@ -375,20 +378,20 @@ impl ClonePlan {
     ///   attach as a raw image, and an upper on a scratch image without the image's binding, or one
     ///   in RAM with a binding, [`Evidence::InvalidSettings`]; and an export plan that
     ///   [`filesystem::plan`] could not have made for the container root, as [`ExportPlan::check`]
-    ///   finds it, such as one that maps paths but exports no directory or file, or exports some
-    ///   but maps no path, and one that exports more than one directory or file, or a file, which
-    ///   the template's dormant filesystem slot does not bind, [`Evidence::InvalidMappings`];
+    ///   finds it, such as one that maps paths but exports no directory or file, exports some but
+    ///   maps no path, or exports more directories and files than OpenVMM attaches,
+    ///   [`Evidence::InvalidMappings`];
     /// - with [`ErrorKind::Other`] for a lease of another store, and a lock that is not the one
     ///   that acquired the lease, before the launch that it reserves began,
     ///   [`Evidence::HostFailure`];
-    /// - with [`ErrorKind::Unsupported`] for an export whose directory, by the path that its plan
-    ///   resolved, lies inside the template store's directory, [`Store::dir`], by the path that
-    ///   it resolves to, or holds it, or is or holds the directory of the clone's sandbox,
-    ///   [`Lease::sandbox`], or that lets the guest write in a directory through which the store's
-    ///   path leads, as the host resolves it, links and `..` included, which the guest could then
-    ///   turn elsewhere, or keep the host from following, [`Evidence::InvalidMappings`],
-    ///   and with [`ErrorKind::Io`] if the store's directory, or a directory through which its
-    ///   path leads, cannot be resolved, the host's evidence;
+    /// - with [`ErrorKind::Unsupported`] for an export of which a directory or a file, by the path
+    ///   that its plan resolved, lies inside the template store's directory, [`Store::dir`], by the
+    ///   path that it resolves to, or of which a directory holds it, or is or holds the directory
+    ///   of the clone's sandbox, [`Lease::sandbox`], or that lets the guest write in a directory
+    ///   through which the store's path leads, as the host resolves it, links and `..` included,
+    ///   which the guest could then turn elsewhere, or keep the host from following,
+    ///   [`Evidence::InvalidMappings`], and with [`ErrorKind::Io`] if the store's directory, or a
+    ///   directory through which its path leads, cannot be resolved, the host's evidence;
     /// - with [`ErrorKind::NotFound`] if the store no longer indexes the leased generation, and as
     ///   [`Store::index`] fails, the host's evidence; with [`ErrorKind::Io`] if it indexes it with
     ///   another key than the lease names, [`Evidence::MalformedGeneration`]; and as
@@ -649,19 +652,18 @@ impl ClonePlan {
     /// restore binds to the template's dormant filesystem slot, or `None` for a clone that shares
     /// none, whose slot stays dormant.
     pub fn export(&self) -> Option<&ExportPlan> {
-        self.export.as_ref().map(DirectoryExport::plan)
+        self.export.as_ref().map(CloneExport::plan)
     }
 
     /// Returns the clone's mapping table, which its restore sequence sends once the clone is
     /// ready, before its sandbox starts, as [`Activated::start`] describes: the binds of the
-    /// export plan, in their order, each from its path in the exported directory, without the
-    /// child's index, which a directory export's root does not list, and with an empty source for
-    /// the directory itself. A clone without an export has an empty table, and the sequence sends
-    /// none.
+    /// export plan, in their order, each from its path in the export, by its child's index, as a
+    /// cold launch's guest receives them, [`ExportPlan::guest_table`]. A clone without an export
+    /// has an empty table, and the sequence sends none.
     pub fn table(&self) -> Vec<HostMap> {
         self.export
             .as_ref()
-            .map_or_else(Vec::new, DirectoryExport::table)
+            .map_or_else(Vec::new, CloneExport::table)
     }
 
     /// Returns the clone's activation record, which its guest applies in place of the
@@ -676,7 +678,7 @@ impl ClonePlan {
     /// guest expects of the disk, each if the adapter's plan names one, and the request's bound of
     /// the disk's first partition; the upper, a tmpfs, or the scratch image, with the identity of
     /// its binding and the request's journal policy; the request's overlay mode and workload view;
-    /// the export, if the request has one, a directory, with the identity of its plan, and the
+    /// the export, if the request has one, an aggregate, with the identity of its plan, and the
     /// number of its mappings, the binds of the plan, from 1 to
     /// [`MAX_MAPPINGS`](crate::activation::MAX_MAPPINGS), or no export and no mappings; the
     /// clone's network, if the template has a NIC, with the identity of the network, whose policy
@@ -729,7 +731,7 @@ fn devices_of(request: &CloneRequest) -> SandboxPlan {
 
 /// Refuses a request that no clone takes, as [`ClonePlan::new`] describes, without reading or
 /// opening anything, and returns the request's export, if it has one, which the checks admitted.
-fn check_request(request: &CloneRequest) -> Result<Option<DirectoryExport>, Fault> {
+fn check_request(request: &CloneRequest) -> Result<Option<CloneExport>, Fault> {
     let adapter = &request.adapter;
     if adapter.settings().is_some() {
         return Err(Fault::new(
@@ -779,7 +781,7 @@ fn check_request(request: &CloneRequest) -> Result<Option<DirectoryExport>, Faul
     request
         .export
         .as_ref()
-        .map(DirectoryExport::new)
+        .map(CloneExport::new)
         .transpose()
         .attribute(Evidence::InvalidMappings)
 }
