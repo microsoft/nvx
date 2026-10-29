@@ -162,8 +162,9 @@ publishes. A pull request changes it to start another series, such as
 `tests/runtime-adapter/Cargo.lock`. The `bundled` feature of the published
 crate downloads the release that
 [`nvx-rs/artifacts.json`](../nvx-rs/artifacts.json) pins and fails unless that
-release declares the crate's control contract, which CI checks before it
-publishes. When the contract has changed, a pull request repins the release;
+release declares the crate's microVM, time, restore-packet, control-session,
+and control contracts, which CI checks before it publishes. When a contract has
+changed, publication stays blocked until a pull request repins a compatible release;
 see [Bundled artifacts](../nvx-rs/README.md#bundled-artifacts).
 
 When CI cannot publish, as when the newest version on crates.io records no

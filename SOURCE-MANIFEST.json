@@ -6,6 +6,8 @@
   },
   "openvmm": {
     "microvm_abi_version": 2,
+    "time_abi_version": 2,
+    "restore_packet_version": 5,
     "control_session_protocol_version": 1,
     "control_contract_revision": "nvx-microvm-v2-control-v2"
   },

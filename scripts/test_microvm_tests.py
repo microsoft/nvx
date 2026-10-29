@@ -6854,7 +6854,7 @@ class MicrovmTests(unittest.TestCase):
         self.assertEqual(script.count("|| fail 55"), 1)
 
     def test_snapshot_core_reads_the_entropy_that_nvx_time_kept(self):
-        # Restore packet v4 is consumed by nvx-time capture, which leaves the
+        # The restore packet is consumed by nvx-time capture, which leaves the
         # entropy of an untiered restore in /run/nvx/restore-entropy.
         shell = _posix_shell()
         if shell is None:

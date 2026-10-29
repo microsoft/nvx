@@ -771,6 +771,8 @@ def _write_release_fixture(
         "distribution": {"name": "nvx", "version": "0.1.0"},
         "openvmm": {
             "microvm_abi_version": 2,
+            "time_abi_version": 2,
+            "restore_packet_version": 5,
             "control_session_protocol_version": 1,
             "control_contract_revision": "nvx-microvm-v2-control-v2",
         },
@@ -17494,6 +17496,8 @@ class BuildTests(unittest.TestCase):
             manifest["openvmm"],
             {
                 "microvm_abi_version": 2,
+                "time_abi_version": 2,
+                "restore_packet_version": 5,
                 "control_session_protocol_version": 1,
                 "control_contract_revision": "nvx-microvm-v2-control-v2",
             },
@@ -24859,7 +24863,7 @@ class BenchmarkTests(unittest.TestCase):
 
         self.assertEqual(command[command.index("--processors") + 1], "8")
         self.assertEqual(command[command.index("--restore-processors") + 1], "4")
-        # Restore packet v4 gives every restore fresh entropy.
+        # The restore packet gives every restore fresh entropy.
         self.assertNotIn("--restore-entropy", command)
 
     def test_snapshot_restore_command_sets_memory_target_separately(self):
@@ -24928,7 +24932,7 @@ class BenchmarkTests(unittest.TestCase):
         self.assertEqual(benchmark.network_gateway("10.0.0.2/24"), "10.0.0.1")
 
     def test_benchmark_command_lines_carry_no_clock_tuning(self):
-        # Under time ABI v1 the hypervisor identity gives Linux its TSC and
+        # Under the time ABI the hypervisor identity gives Linux its TSC and
         # LAPIC rates and trust, so the lifecycle line tunes no clock and the
         # cold-start clocksource variant selects tsc on every backend.
         for token in (

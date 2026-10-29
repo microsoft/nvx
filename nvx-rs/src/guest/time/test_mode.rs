@@ -21,8 +21,8 @@ use std::sync::mpsc;
 use super::cpu_mask::CpuMask;
 use super::daemon::{self, Promoter};
 use super::decoders::{
-    self, GENERATION_ID_SIZE, PACKET_HEADER_SIZE, PacketHeader, RestorePacket, SAMPLE_SIZE,
-    TimeSample,
+    self, ClockRates, GENERATION_ID_SIZE, GuestReads, PACKET_HEADER_SIZE, PacketHeader,
+    RestorePacket, SAMPLE_SIZE, TimeSample,
 };
 use super::events::{CheckId, DETAIL_MAX, EventSource, ViolationCode, escape_text, format_event};
 use super::state::TimeState;
@@ -166,16 +166,14 @@ fn test_packet(arguments: &[&[u8]], out: &mut dyn Write) -> Result<(), CommandEr
     }
     let _ = write!(
         out,
-        "ok flags={} online={} ranges={} generation={} rate_deviation={} \
-         frequency={} downtime_ns={} utc_ns={} generation_id={}",
+        "ok flags={} online={} ranges={} generation={} rate_deviation={} downtime_ns={} \
+         generation_id={}",
         header.flags,
         header.online_vp_count,
         header.range_count,
         header.generation,
         header.rate_deviation,
-        decoders::restore_frequency(header.rate_deviation),
         header.downtime_ns,
-        header.utc_ns,
         decoders::format_hex(packet.generation_id())
     );
     for (start, length) in packet.ranges {
@@ -190,6 +188,7 @@ fn test_sample(arguments: &[&[u8]], out: &mut dyn Write) -> Result<(), CommandEr
     let [path, generation] = exactly(arguments)?;
     let bytes = record(&read_fixture(path)?, 0, SAMPLE_SIZE);
     let generation: u64 = number(generation)?;
+    let bound = |bound: Option<u32>| bound.map_or_else(|| "unknown".to_owned(), |b| b.to_string());
     match TimeSample::parse(&bytes) {
         Err(error) => {
             let _ = writeln!(out, "error {error}");
@@ -198,21 +197,66 @@ fn test_sample(arguments: &[&[u8]], out: &mut dyn Write) -> Result<(), CommandEr
             let _ = writeln!(out, "error generation {}", sample.generation);
         }
         Ok(sample) => {
+            let host = &sample.host;
             let _ = writeln!(
                 out,
-                "ok flags={} generation={} utc_ns={}",
-                sample.flags, sample.generation, sample.utc_ns
+                "ok flags={} generation={} status={} utc_ns={} tsc={} pairing_ns={} \
+                 disruption={} correction={} correction_bound={} max_error_us={}",
+                sample.flags,
+                sample.generation,
+                host.status,
+                sample.utc_ns,
+                sample.tsc,
+                sample.pairing_ns,
+                host.disruption,
+                host.correction,
+                bound(host.correction_bound),
+                bound(host.max_error_us)
             );
         }
     }
     Ok(())
 }
 
-/// Computes and prints a synthetic clock pairing.
+/// Pairs a synthetic time sample's guest TSC and host UTC with synthetic reads of the guest's
+/// clocks, and prints the offset and its uncertainty, or why the pairing failed.
 fn test_pair(arguments: &[&[u8]], out: &mut dyn Write) -> Result<(), CommandError> {
-    let [t0, t1, utc_ns] = exactly(arguments)?;
-    let (theta, epsilon) = decoders::pair_clocks(number(t0)?, number(t1)?, number(utc_ns)?);
-    let _ = writeln!(out, "theta_ns={theta} epsilon_ns={epsilon}");
+    let [
+        utc_ns,
+        tsc,
+        pairing_ns,
+        before,
+        after,
+        realtime_ns,
+        realtime_tsc,
+        half_cycles,
+        tsc_hz,
+        frequency,
+    ] = exactly(arguments)?;
+    let sample = TimeSample {
+        flags: 0,
+        generation: 0,
+        utc_ns: number(utc_ns)?,
+        tsc: number(tsc)?,
+        pairing_ns: number(pairing_ns)?,
+        host: decoders::HostClock::default(),
+    };
+    let reads = GuestReads {
+        before: number(before)?,
+        after: number(after)?,
+        realtime_ns: number(realtime_ns)?,
+        realtime_tsc: number(realtime_tsc)?,
+        realtime_half_cycles: number(half_cycles)?,
+    };
+    let rates = ClockRates {
+        tsc_hz: number(tsc_hz)?,
+        frequency: number(frequency)?,
+    };
+    match decoders::pair_sample(&sample, &reads, rates) {
+        Ok((theta, epsilon)) => writeln!(out, "theta_ns={theta} epsilon_ns={epsilon}"),
+        Err(error) => writeln!(out, "error {error}"),
+    }
+    .ok();
     Ok(())
 }
 
@@ -365,10 +409,17 @@ fn test_timer_list(arguments: &[&[u8]], out: &mut dyn Write) -> Result<(), Comma
 }
 
 /// Plans and prints one step or slew correction, with the `adjtimex` modes and status that the
-/// system layer would apply.
+/// system layer would apply, for a discipline that holds a frequency correction and adds a host's
+/// error.
 fn test_correction(arguments: &[&[u8]], out: &mut dyn Write) -> Result<(), CommandError> {
-    let [theta, epsilon, speed] = exactly(arguments)?;
-    let correction = decoders::plan_correction(number(theta)?, number(epsilon)?, speed == b"fast");
+    let [theta, epsilon, speed, frequency, host_error_us] = exactly(arguments)?;
+    let correction = decoders::plan_correction(
+        number(theta)?,
+        number(epsilon)?,
+        speed == b"fast",
+        number(frequency)?,
+        number(host_error_us)?,
+    );
     let modes = correction.modes();
     match correction {
         ClockAdjustment::Step {
@@ -383,30 +434,34 @@ fn test_correction(arguments: &[&[u8]], out: &mut dyn Write) -> Result<(), Comma
         ClockAdjustment::Slew {
             offset_ns,
             time_constant,
-            maximum_error_us,
-            estimated_error_us,
+            hold,
         } => {
             let _ = writeln!(
                 out,
                 "slew modes=0x{modes:x} offset={offset_ns} status=0x{:x} \
-                 constant={time_constant} maxerror={maximum_error_us} \
-                 esterror={estimated_error_us}",
-                correction.status()
+                 constant={time_constant} freq={} maxerror={} esterror={}",
+                correction.status(),
+                hold.scaled_ppm,
+                hold.maximum_error_us,
+                hold.estimated_error_us
             );
         }
-        ClockAdjustment::Query | ClockAdjustment::Frequency { .. } => {}
+        ClockAdjustment::Query | ClockAdjustment::Frequency(_) => {}
     }
     Ok(())
 }
 
-/// Converts one restore rate deviation to the frequency correction and its parts per billion.
+/// Converts one host clock correction, against the TSC counted at a declared rate, to the
+/// frequency correction that the discipline holds, its parts per billion, and whether Linux's
+/// limit clamped it.
 fn test_frequency(arguments: &[&[u8]], out: &mut dyn Write) -> Result<(), CommandError> {
-    let [rate_deviation] = exactly(arguments)?;
-    let frequency = decoders::restore_frequency(number(rate_deviation)?);
+    let [correction, tsc_hz] = exactly(arguments)?;
+    let (frequency, limited) = decoders::guest_frequency(number(correction)?, number(tsc_hz)?);
     let _ = writeln!(
         out,
-        "frequency={frequency} ppb={}",
-        decoders::frequency_to_ppb(frequency)
+        "frequency={frequency} ppb={} limited={}",
+        decoders::frequency_to_ppb(frequency),
+        u8::from(limited)
     );
     Ok(())
 }
@@ -804,16 +859,52 @@ mod tests {
 
     #[test]
     fn malformed_hooks_fail_with_the_usage_status() {
+        /// The arguments of a well-formed `pair` hook.
+        const PAIR: [&[u8]; 11] = [
+            b"pair",
+            b"1000000000000000000",
+            b"1000000",
+            b"500",
+            b"999000",
+            b"1002000",
+            b"999999999999000000",
+            b"1004000",
+            b"40",
+            b"2000000000",
+            b"0",
+        ];
         let mut out = Vec::new();
         assert_eq!(run(&[], &mut out), Err(CommandError::Usage));
         assert_eq!(run(&[b"unknown"], &mut out), Err(CommandError::Usage));
         assert_eq!(run(&[b"pair", b"1"], &mut out), Err(CommandError::Usage));
+        // Time ABI 1's pairing of a realtime bracket is no longer a hook.
         assert_eq!(
-            run(&[b"pair", b"1000", b"+3000", b"5000"], &mut out),
+            run(&[b"pair", b"1000", b"3000", b"5000"], &mut out),
+            Err(CommandError::Usage)
+        );
+        let mut plus = PAIR;
+        plus[2] = b"+1000000";
+        assert_eq!(run(&plus, &mut out), Err(CommandError::Usage));
+        let mut negative = PAIR;
+        negative[3] = b"-500";
+        assert_eq!(run(&negative, &mut out), Err(CommandError::Usage));
+        assert_eq!(
+            run(&[b"frequency", b"-40000000"], &mut out),
             Err(CommandError::Usage)
         );
         assert_eq!(
-            run(&[b"frequency", b"2147483648"], &mut out),
+            run(
+                &[b"frequency", b"9223372036854775808", b"2100000000"],
+                &mut out
+            ),
+            Err(CommandError::Usage)
+        );
+        assert_eq!(
+            run(&[b"frequency", b"0", b"-1"], &mut out),
+            Err(CommandError::Usage)
+        );
+        assert_eq!(
+            run(&[b"correction", b"-5", b"10", b"slow"], &mut out),
             Err(CommandError::Usage)
         );
         assert_eq!(
@@ -847,8 +938,8 @@ mod tests {
             Err(CommandError::Usage)
         );
         assert!(out.is_empty());
-        assert_eq!(run(&[b"pair", b"1000", b"3000", b"5000"], &mut out), Ok(()));
-        assert_eq!(out, b"theta_ns=3000 epsilon_ns=1000\n");
+        assert_eq!(run(&PAIR, &mut out), Ok(()));
+        assert_eq!(out, b"theta_ns=1002000 epsilon_ns=1524\n");
     }
 
     #[test]
@@ -970,27 +1061,42 @@ mod tests {
     #[test]
     fn corrections_print_the_kernel_modes() {
         let mut out = Vec::new();
-        run(&[b"correction", b"128000000", b"10", b"fast"], &mut out).unwrap();
-        run(&[b"correction", b"-5", b"10", b"slow"], &mut out).unwrap();
+        run(
+            &[b"correction", b"128000000", b"10", b"fast", b"0", b"0"],
+            &mut out,
+        )
+        .unwrap();
+        run(
+            &[b"correction", b"-5", b"10", b"slow", b"65536", b"7"],
+            &mut out,
+        )
+        .unwrap();
         assert_eq!(
             String::from_utf8(out).unwrap(),
             "step modes=0x2100 sec=0 nsec=128000000\n\
-             slew modes=0x203d offset=-5 status=0x2001 constant=6 maxerror=1 esterror=1\n"
+             slew modes=0x203f offset=-5 status=0x2081 constant=6 freq=65536 maxerror=8 \
+             esterror=1\n"
         );
     }
 
     #[test]
     fn ported_corrections_print_exact_results() {
         let mut out = Vec::new();
-        run(&[b"correction", b"127999999", b"10002", b"fast"], &mut out).unwrap();
-        run(&[b"correction", b"-500", b"20", b"slow"], &mut out).unwrap();
-        run(&[b"correction", b"128000000", b"10", b"fast"], &mut out).unwrap();
-        run(&[b"correction", b"-1128000000", b"10", b"slow"], &mut out).unwrap();
+        for arguments in [
+            [&b"127999999"[..], b"10002", b"fast"],
+            [b"-500", b"20", b"slow"],
+            [b"128000000", b"10", b"fast"],
+            [b"-1128000000", b"10", b"slow"],
+        ] {
+            let hook = [&[&b"correction"[..]][..], &arguments, &[b"0", b"0"]].concat();
+            run(&hook, &mut out).unwrap();
+        }
         assert_eq!(
             String::from_utf8(out).unwrap(),
-            "slew modes=0x203d offset=127999999 status=0x2001 constant=4 \
+            "slew modes=0x203f offset=127999999 status=0x2081 constant=4 freq=0 \
              maxerror=128011 esterror=11\n\
-             slew modes=0x203d offset=-500 status=0x2001 constant=6 maxerror=1 esterror=1\n\
+             slew modes=0x203f offset=-500 status=0x2081 constant=6 freq=0 maxerror=1 \
+             esterror=1\n\
              step modes=0x2100 sec=0 nsec=128000000\n\
              step modes=0x2100 sec=-2 nsec=872000000\n"
         );
@@ -998,19 +1104,45 @@ mod tests {
 
     #[test]
     fn pairing_and_frequency_hooks_preserve_signed_arithmetic() {
+        let pair = |tsc: &[u8]| {
+            hook(&[
+                b"pair",
+                b"1000000000000000000",
+                tsc,
+                b"500",
+                b"999000",
+                b"1002000",
+                b"999999999999000000",
+                b"1004000",
+                b"40",
+                b"2000000000",
+                b"0",
+            ])
+        };
+        assert_eq!(pair(b"1000000"), b"theta_ns=1002000 epsilon_ns=1524\n");
         assert_eq!(
-            hook(&[b"pair", b"10000", b"10400", b"9000"]),
-            b"theta_ns=-1200 epsilon_ns=200\n"
+            pair(b"995999"),
+            b"error time sample TSC 995999 is outside the guest's reads 999000 to 1002000\n"
         );
-        for (deviation, expected) in [
+        for (correction, tsc_hz, expected) in [
             (
                 b"13107200".as_slice(),
-                b"frequency=-13107200 ppb=-200000\n".as_slice(),
+                b"2100000000".as_slice(),
+                b"frequency=13107200 ppb=200000 limited=0\n".as_slice(),
             ),
-            (b"-40000000", b"frequency=32768000 ppb=500000\n"),
-            (b"-65536", b"frequency=65536 ppb=1000\n"),
+            (
+                b"39321600",
+                b"2100000000",
+                b"frequency=32768000 ppb=500000 limited=1\n",
+            ),
+            (b"0", b"2194843123", b"frequency=-3673 ppb=-56 limited=0\n"),
+            (
+                b"-65536",
+                b"2000000000",
+                b"frequency=-65536 ppb=-1000 limited=0\n",
+            ),
         ] {
-            assert_eq!(hook(&[b"frequency", deviation]), expected);
+            assert_eq!(hook(&[b"frequency", correction, tsc_hz]), expected);
         }
     }
 }

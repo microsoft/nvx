@@ -36,7 +36,7 @@ echo "NVX-SNAPSHOT-CPU-$((process_cpu_restored - process_cpu_before))-$((thread_
 echo "NVX-SNAPSHOT-TIMER-WAIT-$((timer_wait_after - timer_wait_before))"
 generation_id_after="$(/sbin/nvx-time generation-id)" || fail 50
 [ "$generation_id_before" != "$generation_id_after" ] || fail 51
-# nvx-time capture consumed restore packet v4 and, for an untiered restore
+# nvx-time capture consumed the restore packet and, for an untiered restore
 # without targets, left its 64 entropy bytes to the caller. The generation ID
 # is their first 16 bytes.
 entropy=/run/nvx/restore-entropy

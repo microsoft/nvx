@@ -99,7 +99,7 @@ mod bundle {
         .unwrap_or_else(|error| fail(format!("{MANIFEST} is not valid JSON: {error}")));
         if !crate::contract::manifest_is_compatible(&manifest) {
             fail(format!(
-                "{} does not declare the {} control contract",
+                "{} does not declare the compatible OpenVMM contracts ({})",
                 source.join(MANIFEST).display(),
                 crate::contract::CONTROL_CONTRACT_REVISION
             ));

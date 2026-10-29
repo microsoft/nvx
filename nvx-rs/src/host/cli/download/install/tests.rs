@@ -7,6 +7,7 @@ use serde_json::json;
 use super::*;
 use crate::contract::{
     CONTROL_CONTRACT_REVISION, CONTROL_SESSION_PROTOCOL_VERSION, MICROVM_ABI_VERSION,
+    RESTORE_PACKET_VERSION, TIME_ABI_VERSION,
 };
 
 /// Returns the manifest of a package that declares the guests of `sections` and, if
@@ -15,6 +16,8 @@ fn manifest(sections: &[&str], compatible: bool) -> Value {
     let mut manifest = json!({
         "openvmm": {
             "microvm_abi_version": MICROVM_ABI_VERSION,
+            "time_abi_version": TIME_ABI_VERSION,
+            "restore_packet_version": RESTORE_PACKET_VERSION,
             "control_session_protocol_version": CONTROL_SESSION_PROTOCOL_VERSION,
             "control_contract_revision": if compatible { CONTROL_CONTRACT_REVISION } else { "other" },
         },

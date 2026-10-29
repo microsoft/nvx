@@ -22,8 +22,8 @@
 //! - [`CONTROL_CONTRACT_REVISION`] is the revision of the control contract that the session
 //!   carries: the requests, responses, and features of the guest agent. It changes with them.
 //!
-//! A release declares the microVM ABI version, the control session version, and the control
-//! contract revision of its artifacts in its `SOURCE-MANIFEST.json`.
+//! A release declares the microVM ABI, time ABI, restore-packet, control-session, and control
+//! contract versions of its artifacts in its `SOURCE-MANIFEST.json`.
 //!
 //! The compatibility key of a template, `nvx::host::template::TemplateKey`, holds the boot and
 //! control versions, and the versions of the contracts through which a template's clones are
@@ -70,11 +70,16 @@ pub const DEVICE_STATE_SCHEMA_VERSION: u64 = 1;
 /// Version of the time ABI that this crate speaks: the guest's clocks and timers, and their repair
 /// after a restore. It must match `TIME_ABI_VERSION` in OpenVMM's
 /// `vmm_core/virt/src/time_abi/mod.rs`.
-pub const TIME_ABI_VERSION: u64 = 1;
+///
+/// Version 2 pairs each time sample's host UTC with the guest TSC on the host, and publishes the
+/// host's clock correction with it, which the guest applies instead of estimating it.
+pub const TIME_ABI_VERSION: u64 = 2;
 /// Version of the restore packet that OpenVMM gives a restored guest, and that this crate's guest
 /// decodes. It must match `RESTORE_PACKET_VERSION` in OpenVMM's
 /// `vm/devices/chipset_resources/src/microvm_time.rs`.
-pub const RESTORE_PACKET_VERSION: u64 = 4;
+///
+/// Version 5 carries no host UTC: the guest takes a time sample to set its clock.
+pub const RESTORE_PACKET_VERSION: u64 = 5;
 
 /// Returns whether the `openvmm` section of an NVX `SOURCE-MANIFEST.json` declares this contract.
 #[cfg(feature = "host")]
@@ -85,8 +90,43 @@ pub fn manifest_is_compatible(manifest: &serde_json::Value) -> bool {
             .and_then(|section| section.get(name))
     };
     field("microvm_abi_version").and_then(serde_json::Value::as_u64) == Some(MICROVM_ABI_VERSION)
+        && field("time_abi_version").and_then(serde_json::Value::as_u64) == Some(TIME_ABI_VERSION)
+        && field("restore_packet_version").and_then(serde_json::Value::as_u64)
+            == Some(RESTORE_PACKET_VERSION)
         && field("control_session_protocol_version").and_then(serde_json::Value::as_u64)
             == Some(CONTROL_SESSION_PROTOCOL_VERSION)
         && field("control_contract_revision").and_then(serde_json::Value::as_str)
             == Some(CONTROL_CONTRACT_REVISION)
+}
+
+#[cfg(all(test, feature = "host"))]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+
+    #[test]
+    fn release_manifests_must_match_every_bundled_contract() {
+        let manifest = json!({
+            "openvmm": {
+                "microvm_abi_version": MICROVM_ABI_VERSION,
+                "time_abi_version": TIME_ABI_VERSION,
+                "restore_packet_version": RESTORE_PACKET_VERSION,
+                "control_session_protocol_version": CONTROL_SESSION_PROTOCOL_VERSION,
+                "control_contract_revision": CONTROL_CONTRACT_REVISION,
+            }
+        });
+        assert!(manifest_is_compatible(&manifest));
+        for field in [
+            "microvm_abi_version",
+            "time_abi_version",
+            "restore_packet_version",
+            "control_session_protocol_version",
+            "control_contract_revision",
+        ] {
+            let mut incompatible = manifest.clone();
+            incompatible["openvmm"][field] = serde_json::Value::Null;
+            assert!(!manifest_is_compatible(&incompatible), "{field}");
+        }
+    }
 }

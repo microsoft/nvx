@@ -359,7 +359,7 @@ pub fn check_manifest(path: &Path) -> Result<()> {
         Ok(())
     } else {
         Err(Error::unavailable(format!(
-            "NVX manifest {} does not declare the {} control contract",
+            "NVX manifest {} does not declare the compatible OpenVMM contracts ({})",
             path.display(),
             contract::CONTROL_CONTRACT_REVISION
         )))

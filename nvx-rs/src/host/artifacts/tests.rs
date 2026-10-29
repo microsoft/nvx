@@ -8,6 +8,7 @@ use crate::ErrorKind;
 use crate::host::store::ArtifactIdentity;
 
 const COMPATIBLE_MANIFEST: &str = r#"{"openvmm":{"microvm_abi_version":2,
+        "time_abi_version":2,"restore_packet_version":5,
         "control_session_protocol_version":1,
         "control_contract_revision":"nvx-microvm-v2-control-v2"}}"#;
 
@@ -200,7 +201,8 @@ fn incompatible_manifests_are_unavailable() {
     let manifest = directory.path().join(MANIFEST_NAME);
     fs::write(
         &manifest,
-        r#"{"openvmm":{"microvm_abi_version":2,"control_session_protocol_version":2,
+        r#"{"openvmm":{"microvm_abi_version":2,"time_abi_version":2,
+               "restore_packet_version":5,"control_session_protocol_version":2,
                "control_contract_revision":"nvx-microvm-v2-control-v2"}}"#,
     )
     .unwrap();

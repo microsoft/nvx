@@ -1,4 +1,4 @@
-"""Harness checks of the NVX time ABI v1 guest obligations.
+"""Harness checks of the NVX time ABI v2 guest obligations.
 
 A conforming guest reports each conformance check with an ``NVX-TIME-ABI``
 marker and each runtime violation with an ``NVX-TIME-ABI-VIOLATION`` event, and
@@ -794,7 +794,7 @@ class TimeAbiMonitor:
     def _missing_reason(self) -> str:
         if self.report_only:
             return "the guest ran nvx-time in report-only mode"
-        return "the guest image or OpenVMM does not implement time ABI v1"
+        return "the guest image or OpenVMM does not implement time ABI v2"
 
     def require_boot(
         self,
