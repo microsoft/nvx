@@ -756,8 +756,21 @@ still 13% with a warm sccache, which would take over 2 GiB of the repository's
 repositories pay for, or a self-hosted Windows runner without a hypervisor
 would cost about as much as another general WHP runner.
 
-The WHP microVM tests bound every run that skips both OpenVMM suites, so each
-backend runs them in two jobs, and the first of them in shards (see
+Since the `nvx-rs` handoff and the package jobs shorten the rest of the runs
+that restore the VMM tests from the [cache](#openvmm-vmm-test-cache), the
+Linux leg, which took a median 17.0 minutes from October 23 to 28, 2026, ends
+last in most of those that run the unit tests, 26 of the 89 such runs of that
+window (#982). On an MSHV runner with a warm sccache, it would take about 6.5
+minutes, but the replay below estimates that those runs would then end with
+the Windows leg, which took 14.2 minutes on a WHP runner, at a median of 15.9
+minutes instead of 18.1, while its 6.5 minutes on MSHV's general runners,
+which also run the pull requests' debug kernel, would make 177 instead of 149
+of the 287 runs that used them wait 2 minutes or more for one. The Linux leg
+therefore stays on `ubuntu-latest`, and the OpenVMM unit tests remain the
+bound of the runs that restore the VMM tests and run them.
+
+The WHP microVM tests bounded every run that skipped both OpenVMM suites, so
+each backend runs them in two jobs, and the first of them in shards (see
 [MicroVM test shards](#microvm-test-shards)). In reference run
 [39585909588](https://github.com/microsoft/nvx/actions/runs/39585909588), the
 single WHP job took 15.1 minutes: 0.8 minutes of setup, 10.1 minutes of
@@ -820,6 +833,20 @@ instead of 8.8, and the median of the runs that build the VMM tests and run
 the unit tests to 24.4 minutes, against 23.7 with the jobs on MSHV. A fifth
 general KVM runner would then lower KVM's waits to 79 runs and a p90 of 3.9
 minutes, so it is the next step if KVM queueing still bounds the runs.
+
+With the `nvx-rs` handoff, the package jobs, and the pull requests' debug
+kernel on MSHV, the replay, with the six general WHP runners of today,
+estimates that the runs of that window that skipped both OpenVMM suites and
+ran the benchmarks would have taken a median of 12.3 minutes, or 11.0 without
+queueing, against the 17.4 and 15.5 that they took, and those that ran no
+benchmark 9.1, against 12.9. The WHP platform job, which takes about 8.4
+minutes on WHP's one benchmark runner once OpenVMM is built, still ends last
+in nearly all of the former. The runs that restored the VMM tests from the
+cache would have taken a median of 14.2 minutes without queueing, against
+16.5, and 13.8 when they ran no OpenVMM unit tests, ending with the KVM
+VMM-test leg, the WHP platform job, or, after a cold build of the Ubuntu and
+Azure Linux images, a guest and sandbox job. Those that ran the unit tests end
+with them, as described above, at a median of 18.1 minutes.
 
 ## MicroVM test shards
 
