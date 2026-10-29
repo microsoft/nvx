@@ -1,7 +1,7 @@
 //! Checks and rendering of a recorded export plan.
 
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use super::guest_path::depth;
 use super::host_path::{display_path, relative_text};
