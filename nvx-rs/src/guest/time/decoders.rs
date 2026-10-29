@@ -5,18 +5,19 @@ use std::ops::RangeInclusive;
 
 use super::cpu_mask::CpuMask;
 use super::events::ViolationCode;
+use super::state::HostClockStatus;
 use super::{MAX_CPUS, NSEC_PER_SEC, NSEC_PER_USEC};
 use crate::guest::kernel_text::{
     self, ClockEventState, SyslogLine, TickDevice, TickMode, TimerList,
 };
 use crate::guest::parse::parse_decimal;
 use crate::guest::reseed::Seed;
-use crate::guest::sys::ClockAdjustment;
 use crate::guest::sys::x86::{CpuidResult, cpuid};
+use crate::guest::sys::{ClockAdjustment, FrequencyHold};
 use crate::protocol::cmdline::{self, Parameter};
 
 /// Fixed restore-packet header length.
-pub(crate) const PACKET_HEADER_SIZE: usize = 32;
+pub(crate) const PACKET_HEADER_SIZE: usize = 24;
 /// Encoded length of one memory range.
 pub(crate) const PACKET_RANGE_SIZE: usize = 16;
 /// Entropy payload length appended to every restore packet: a restore's [`Seed`].
@@ -24,13 +25,13 @@ pub(crate) const PACKET_ENTROPY_SIZE: usize = 64;
 // The packet's entropy is decoded straight into a seed.
 const _: () = assert!(PACKET_ENTROPY_SIZE == Seed::LENGTH);
 /// Fixed host time-sample record length.
-pub(crate) const SAMPLE_SIZE: usize = 16;
+pub(crate) const SAMPLE_SIZE: usize = 48;
 /// VM generation identifier length.
 pub(crate) const GENERATION_ID_SIZE: usize = 16;
 
 /// The magic number that starts every restore packet.
 const PACKET_MAGIC: [u8; 3] = *b"OVR";
-/// The restore-packet version of time ABI version one,
+/// The restore-packet version of time ABI version two,
 /// [`RESTORE_PACKET_VERSION`](crate::contract::RESTORE_PACKET_VERSION), which a template's
 /// compatibility key records.
 const PACKET_VERSION: u8 = {
@@ -44,22 +45,35 @@ const PACKET_DOWNTIME_UTC: u8 = 0x01;
 pub(crate) const PACKET_MEMORY_TARGET: u8 = 0x02;
 /// Restore flag requiring a snapshot acknowledgement.
 pub(crate) const PACKET_ACK_REQUIRED: u8 = 0x04;
-/// Mask of restore flags defined by ABI version one.
+/// Mask of restore flags defined by the ABI.
 const PACKET_KNOWN_FLAGS: u8 = 0x0f;
 /// The online VP counts that a restore packet may give.
 const PACKET_ONLINE_VP_COUNTS: [u8; 5] = [0, 1, 2, 4, 8];
-/// The time-sample version of time ABI version one.
-const SAMPLE_VERSION: u8 = 1;
+/// The time-sample version of time ABI version two.
+const SAMPLE_VERSION: u8 = 2;
 /// Time-sample flag reserved for host test hooks.
 const SAMPLE_TEST_HOOKS: u8 = 0x08;
+/// The encoding of an unknown bound in a time sample.
+const SAMPLE_UNKNOWN: u32 = u32::MAX;
 /// Maximum signed restore rate deviation, equivalent to 250 ppm.
 const RATE_DEVIATION_LIMIT: i32 = 16_384_000;
 /// One part per million in Linux's frequency correction, which `adjtimex` scales by 2^16.
 const SCALED_PPM: i64 = 1 << 16;
+/// One, in Linux's frequency unit: a million parts per million, scaled by 2^16.
+const SCALED_ONE: i128 = SCALED_PPM as i128 * 1_000_000;
 /// Parts per billion in a part per million.
 const PPB_PER_PPM: i64 = 1000;
 /// Linux's limit of the frequency correction, 500 ppm.
 const FREQUENCY_LIMIT: i64 = 500 * SCALED_PPM;
+/// Hz in a kHz, the unit to which Linux reads the TSC rate from the frequency MSR.
+const HZ_PER_KHZ: u64 = 1000;
+/// The time ABI's bound on the skew between any two processors' TSCs, in nanoseconds, by which a
+/// sample's guest TSC, of the first processor, may lie outside the reading processor's reads.
+const SKEW_BOUND_NS: u64 = 1000;
+/// The most, in parts per million, by which the realtime clock's rate may differ from its
+/// frequency correction's while the kernel slews an offset below the step threshold at the fast
+/// time constant: 128 ms per 2^6 seconds.
+const SLEW_RATE_PPM: i128 = 2000;
 /// Seconds in a day.
 const SECONDS_PER_DAY: u64 = 24 * 60 * 60;
 /// Maximum accepted downtime of thirty days.
@@ -109,11 +123,6 @@ impl<'a, E: Copy> Fields<'a, E> {
         Ok(field)
     }
 
-    /// Reads the next 16-bit field.
-    fn u16(&mut self) -> Result<u16, E> {
-        self.bytes().map(u16::from_le_bytes)
-    }
-
     /// Reads the next 32-bit field.
     fn u32(&mut self) -> Result<u32, E> {
         self.bytes().map(u32::from_le_bytes)
@@ -128,6 +137,11 @@ impl<'a, E: Copy> Fields<'a, E> {
     fn u64(&mut self) -> Result<u64, E> {
         self.bytes().map(u64::from_le_bytes)
     }
+
+    /// Reads the next signed 64-bit field.
+    fn i64(&mut self) -> Result<i64, E> {
+        self.bytes().map(i64::from_le_bytes)
+    }
 }
 
 /// Why a restore packet is invalid. Its `Display` is the diagnostic that repair reports.
@@ -137,7 +151,7 @@ pub(crate) enum PacketError {
     IncompleteHeader,
     /// The magic number is not `OVR`.
     Magic([u8; 3]),
-    /// The version is not version one's.
+    /// The version is not the time ABI's.
     Version(u8),
     /// The flags set reserved bits.
     ReservedFlags(u8),
@@ -153,8 +167,6 @@ pub(crate) enum PacketError {
     RateDeviation(i32),
     /// The downtime exceeds 30 days.
     Downtime(u64),
-    /// The UTC time is zero or does not fit the clocks' signed nanoseconds.
-    Utc(u64),
     /// The packet ends before the memory ranges and the entropy that its header gives.
     IncompleteBody,
     /// The memory range at this index is empty, or ends past the address space.
@@ -192,7 +204,6 @@ impl Display for PacketError {
                 formatter,
                 "restore packet downtime {downtime} ns exceeds 30 days"
             ),
-            Self::Utc(utc) => write!(formatter, "restore packet UTC {utc} is invalid"),
             Self::IncompleteBody => formatter.write_str("restore packet body is incomplete"),
             Self::Range(index) => write!(formatter, "restore memory range {index} is invalid"),
         }
@@ -201,7 +212,7 @@ impl Display for PacketError {
 
 impl std::error::Error for PacketError {}
 
-/// The validated header of a version-one restore packet.
+/// The validated header of a restore packet.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct PacketHeader {
     /// Packet behavior flags.
@@ -216,8 +227,6 @@ pub(crate) struct PacketHeader {
     pub(crate) rate_deviation: i32,
     /// Restore downtime in nanoseconds.
     pub(crate) downtime_ns: u64,
-    /// Host UTC at packet creation in nanoseconds.
-    pub(crate) utc_ns: u64,
 }
 
 impl PacketHeader {
@@ -233,7 +242,6 @@ impl PacketHeader {
             generation: fields.u32()?,
             rate_deviation: fields.i32()?,
             downtime_ns: fields.u64()?,
-            utc_ns: fields.u64()?,
         };
         if magic != PACKET_MAGIC {
             return Err(PacketError::Magic(magic));
@@ -262,9 +270,6 @@ impl PacketHeader {
         if header.downtime_ns > DOWNTIME_LIMIT_NS {
             return Err(PacketError::Downtime(header.downtime_ns));
         }
-        if header.utc_ns == 0 || i64::try_from(header.utc_ns).is_err() {
-            return Err(PacketError::Utc(header.utc_ns));
-        }
         Ok(header)
     }
 
@@ -290,7 +295,7 @@ impl PacketHeader {
     }
 }
 
-/// A validated version-one restore packet.
+/// A validated restore packet.
 ///
 /// It is neither `Clone` nor comparable, since its entropy is a [`Seed`], which has one owner.
 #[derive(Debug)]
@@ -335,66 +340,122 @@ impl RestorePacket {
 pub(crate) enum TimeSampleError {
     /// The sample is shorter than its record.
     Incomplete,
-    /// The version is not version one's.
+    /// The version is not version two's.
     Version(u8),
-    /// The flags set bits other than the test-hook flag, or the reserved field is not zero.
+    /// The flags set bits other than the test-hook flag, or the reserved byte is not zero.
     Flags {
         /// The sample's flags.
         flags: u8,
-        /// The sample's reserved field.
-        reserved: u16,
+        /// The sample's reserved byte.
+        reserved: u8,
     },
+    /// The host clock status is not one that version two defines.
+    Status(u8),
     /// The UTC time is zero or does not fit the clocks' signed nanoseconds.
     Utc(u64),
+    /// The sample's guest TSC lies outside the guest's reads of its TSC around the sample's
+    /// latch, by more than the sample's pairing uncertainty and the skew bound allow.
+    Tsc {
+        /// The sample's guest TSC.
+        tsc: u64,
+        /// The guest's TSC before the latch.
+        before: u64,
+        /// The guest's TSC after the latch.
+        after: u64,
+    },
 }
 
 impl Display for TimeSampleError {
-    /// Writes the diagnostic, such as `time sample version is 2`.
+    /// Writes the diagnostic, such as `time sample version is 1`.
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match *self {
             Self::Incomplete => formatter.write_str("time sample is incomplete"),
             Self::Version(version) => write!(formatter, "time sample version is {version}"),
             Self::Flags { flags, reserved } => write!(
                 formatter,
-                "time sample flags 0x{flags:02x} or reserved 0x{reserved:04x}"
+                "time sample flags 0x{flags:02x} or reserved 0x{reserved:02x}"
             ),
+            Self::Status(status) => write!(formatter, "time sample host status is {status}"),
             Self::Utc(utc) => write!(formatter, "time sample UTC {utc} is invalid"),
+            Self::Tsc { tsc, before, after } => write!(
+                formatter,
+                "time sample TSC {tsc} is outside the guest's reads {before} to {after}"
+            ),
         }
     }
 }
 
 impl std::error::Error for TimeSampleError {}
 
+/// The discipline of host UTC that a time sample publishes.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct HostClock {
+    /// The status of host UTC.
+    pub(crate) status: HostClockStatus,
+    /// A counter that changes when host UTC steps, the host resumes from a suspension, or the
+    /// guest TSC's offset from the host's changes.
+    pub(crate) disruption: u32,
+    /// How fast host UTC runs against the guest TSC counted at the declared rate, minus one, in
+    /// parts per million scaled by 2^16.
+    pub(crate) correction: i64,
+    /// A bound on the error of `correction`, in parts per million scaled by 2^16, if the host
+    /// knows one.
+    pub(crate) correction_bound: Option<u32>,
+    /// The host time service's bound on the error of host UTC, in microseconds, if it reports
+    /// one.
+    pub(crate) max_error_us: Option<u32>,
+}
+
+impl HostClock {
+    /// Returns the host's bound on the error of host UTC that the guest adds to its own maximum
+    /// error, in microseconds: the time service's while it synchronizes host UTC, and otherwise
+    /// none.
+    pub(crate) fn error_us(&self) -> i64 {
+        match (self.status, self.max_error_us) {
+            (HostClockStatus::Synchronized, Some(error)) => i64::from(error),
+            _ => 0,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-/// One host clock sample paired with guest clock brackets.
+/// One host time sample: host UTC paired with the guest TSC, and the discipline of host UTC.
 pub(crate) struct TimeSample {
     /// Sample feature/test flags.
     pub(crate) flags: u8,
     /// VM generation associated with the sample.
     pub(crate) generation: u32,
-    /// Host UTC sample in nanoseconds.
+    /// Host UTC at the latch, in nanoseconds since the Unix epoch.
     pub(crate) utc_ns: u64,
-    /// Guest realtime immediately before requesting the sample.
-    pub(crate) t0: i64,
-    /// Guest realtime immediately after requesting the sample.
-    pub(crate) t1: i64,
+    /// The guest TSC, of the first processor, at the instant of `utc_ns`.
+    pub(crate) tsc: u64,
+    /// The most the instants of `tsc` and `utc_ns` can differ, in nanoseconds.
+    pub(crate) pairing_ns: u32,
+    /// The discipline of host UTC.
+    pub(crate) host: HostClock,
 }
 
 impl TimeSample {
-    /// Decodes and validates the sample record at the start of `bytes`, without the guest's
-    /// brackets.
+    /// Decodes and validates the sample record at the start of `bytes`.
     pub(crate) fn parse(bytes: &[u8]) -> Result<Self, TimeSampleError> {
         let mut fields = Fields::new(bytes, TimeSampleError::Incomplete);
-        let [version, flags] = fields.bytes()?;
-        let reserved = fields.u16()?;
+        let [version, flags, status, reserved] = fields.bytes()?;
         let generation = fields.u32()?;
         let utc_ns = fields.u64()?;
+        let tsc = fields.u64()?;
+        let pairing_ns = fields.u32()?;
+        let disruption = fields.u32()?;
+        let correction = fields.i64()?;
+        let bound = |value: u32| (value != SAMPLE_UNKNOWN).then_some(value);
+        let correction_bound = bound(fields.u32()?);
+        let max_error_us = bound(fields.u32()?);
         if version != SAMPLE_VERSION {
             return Err(TimeSampleError::Version(version));
         }
         if flags & !SAMPLE_TEST_HOOKS != 0 || reserved != 0 {
             return Err(TimeSampleError::Flags { flags, reserved });
         }
+        let status = HostClockStatus::from_byte(status).ok_or(TimeSampleError::Status(status))?;
         if utc_ns == 0 || i64::try_from(utc_ns).is_err() {
             return Err(TimeSampleError::Utc(utc_ns));
         }
@@ -402,10 +463,129 @@ impl TimeSample {
             flags,
             generation,
             utc_ns,
-            t0: 0,
-            t1: 0,
+            tsc,
+            pairing_ns,
+            host: HostClock {
+                status,
+                disruption,
+                correction,
+                correction_bound,
+                max_error_us,
+            },
         })
     }
+}
+
+/// The guest's reads around the latch of one time sample, with which it pairs the sample's
+/// guest TSC with its realtime clock.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct GuestReads {
+    /// The TSC right before the selector write that latched the sample.
+    pub(crate) before: u64,
+    /// The TSC right after the selector write.
+    pub(crate) after: u64,
+    /// The realtime clock, in nanoseconds, read right after the selector write.
+    pub(crate) realtime_ns: i64,
+    /// The TSC at the realtime read: the midpoint of the TSC reads around it.
+    pub(crate) realtime_tsc: u64,
+    /// Half the TSC cycles between the TSC reads around the realtime read.
+    pub(crate) realtime_half_cycles: u64,
+}
+
+/// The rates with which the guest's realtime clock counts its TSC.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ClockRates {
+    /// The declared TSC rate `F`, in Hz, which the frequency MSR reports.
+    pub(crate) tsc_hz: u64,
+    /// The kernel's frequency correction, in parts per million scaled by 2^16.
+    pub(crate) frequency: i64,
+}
+
+/// Divides `numerator` by the positive `denominator`, rounding to the nearest, half away from
+/// zero.
+fn divide_rounded(numerator: i128, denominator: i128) -> i128 {
+    let half = denominator / 2;
+    if numerator >= 0 {
+        (numerator + half) / denominator
+    } else {
+        (numerator - half) / denominator
+    }
+}
+
+/// Divides the nonnegative `numerator` by the positive `denominator`, rounding up.
+fn divide_up(numerator: i128, denominator: i128) -> i128 {
+    (numerator + denominator - 1) / denominator
+}
+
+/// Saturates `value` to an `i64`.
+fn saturate(value: i128) -> i64 {
+    value.clamp(i64::MIN.into(), i64::MAX.into()) as i64
+}
+
+/// Returns the rate at which the kernel counts the TSC for the declared rate `tsc_hz`: Linux
+/// reads the frequency MSR to the kHz.
+pub(crate) const fn kernel_tsc_hz(tsc_hz: u64) -> u64 {
+    tsc_hz / HZ_PER_KHZ * HZ_PER_KHZ
+}
+
+/// Pairs `sample` with the guest's realtime clock through `reads`, taken at `rates`, and returns
+/// the offset of host UTC from the guest's realtime clock at the sample's guest TSC, `theta`,
+/// and its uncertainty, `epsilon`, both in nanoseconds.
+///
+/// The sample's guest TSC must lie between the reads around the latch, give or take the sample's
+/// pairing uncertainty and the skew bound, since the host reads its UTC while it handles the
+/// selector write. The guest's realtime clock at that TSC extrapolates its read after the latch
+/// at the kernel's rate, and `epsilon` adds to the host's pairing uncertainty the cross-CPU skew
+/// bound, half the reads around the realtime read, and what a slew can change the rate by over
+/// the extrapolation.
+pub(crate) fn pair_sample(
+    sample: &TimeSample,
+    reads: &GuestReads,
+    rates: ClockRates,
+) -> Result<(i64, i64), TimeSampleError> {
+    const NSEC: i128 = NSEC_PER_SEC as i128;
+    let tsc_hz = i128::from(rates.tsc_hz.max(1));
+    let kernel_hz = i128::from(kernel_tsc_hz(rates.tsc_hz).max(HZ_PER_KHZ));
+    let pairing = i128::from(sample.pairing_ns);
+    let tolerance = divide_up((pairing + i128::from(SKEW_BOUND_NS)) * tsc_hz, NSEC);
+    let tsc = i128::from(sample.tsc);
+    if tsc < i128::from(reads.before) - tolerance || tsc > i128::from(reads.after) + tolerance {
+        return Err(TimeSampleError::Tsc {
+            tsc: sample.tsc,
+            before: reads.before,
+            after: reads.after,
+        });
+    }
+    // The kernel's correction never exceeds its limit, which bounds the arithmetic.
+    let frequency = i128::from(rates.frequency.clamp(-FREQUENCY_LIMIT, FREQUENCY_LIMIT));
+    let elapsed = divide_rounded((i128::from(reads.realtime_tsc) - tsc) * NSEC, kernel_hz);
+    let extrapolated = elapsed + divide_rounded(elapsed * frequency, SCALED_ONE);
+    let realtime = i128::from(reads.realtime_ns) - extrapolated;
+    let theta = i128::from(sample.utc_ns) - realtime;
+    let local = divide_up(i128::from(reads.realtime_half_cycles) * NSEC, kernel_hz);
+    let slew = divide_up(extrapolated.abs() * SLEW_RATE_PPM, 1_000_000);
+    Ok((
+        saturate(theta),
+        saturate(pairing + i128::from(SKEW_BOUND_NS) + local + slew),
+    ))
+}
+
+/// Returns the frequency correction, in parts per million scaled by 2^16, that runs the wall
+/// clock at host UTC's rate when host UTC runs `correction` faster than the TSC counted at the
+/// declared rate `tsc_hz`, and whether Linux's ±500 ppm limit clamped it.
+///
+/// The kernel counts the TSC at `F_k`, the declared rate `F` to the kHz, so the correction is
+/// `(1 + correction) * F_k / F - 1`, rounded to the nearest.
+pub(crate) fn guest_frequency(correction: i64, tsc_hz: u64) -> (i64, bool) {
+    let tsc_hz_wide = i128::from(tsc_hz.max(1));
+    // A correction beyond 100% is beyond the limit too, which bounds the arithmetic.
+    let correction = i128::from(correction).clamp(-SCALED_ONE, SCALED_ONE);
+    let numerator =
+        (SCALED_ONE + correction) * i128::from(kernel_tsc_hz(tsc_hz)) - SCALED_ONE * tsc_hz_wide;
+    let frequency = divide_rounded(numerator, tsc_hz_wide);
+    let limit = i128::from(FREQUENCY_LIMIT);
+    let held = frequency.clamp(-limit, limit);
+    (held as i64, held != frequency)
 }
 
 /// Encodes bytes as lowercase hexadecimal without separators.
@@ -430,25 +610,17 @@ pub(crate) fn parse_hex<const N: usize>(text: &[u8]) -> Option<[u8; N]> {
     Some(bytes)
 }
 
-/// Computes clock offset and half-round-trip uncertainty with wrapping C arithmetic.
-pub(crate) fn pair_clocks(t0: i64, t1: i64, utc_ns: u64) -> (i64, i64) {
-    let epsilon = t1.wrapping_sub(t0) / 2;
-    (
-        (utc_ns as i64).wrapping_sub(t0.wrapping_add(epsilon)),
-        epsilon,
-    )
-}
-
-/// Converts host rate deviation into a clamped Linux frequency correction.
-pub(crate) fn restore_frequency(rate_deviation: i32) -> i64 {
-    (-i64::from(rate_deviation)).clamp(-FREQUENCY_LIMIT, FREQUENCY_LIMIT)
-}
-
 /// Converts Linux scaled-ppm frequency into rounded parts per billion.
 pub(crate) fn frequency_to_ppb(frequency: i64) -> i64 {
-    let scaled = frequency * PPB_PER_PPM;
-    let half = SCALED_PPM / 2;
-    (scaled + if scaled >= 0 { half } else { -half }) / SCALED_PPM
+    saturate(divide_rounded(
+        i128::from(frequency) * i128::from(PPB_PER_PPM),
+        i128::from(SCALED_PPM),
+    ))
+}
+
+/// Converts a bound in Linux's scaled-ppm unit into parts per billion, rounded up.
+pub(crate) fn bound_to_ppb(bound: u32) -> u64 {
+    (u64::from(bound) * PPB_PER_PPM as u64).div_ceil(SCALED_PPM as u64)
 }
 
 /// Splits a signed nanosecond offset into whole seconds, rounded toward negative infinity, and
@@ -460,10 +632,41 @@ pub(crate) fn split_offset(offset_ns: i64) -> (i64, i64) {
     )
 }
 
+/// Rounds nonnegative nanoseconds up to microseconds, saturating.
+fn ceil_us(nanoseconds: i64) -> i64 {
+    nanoseconds.saturating_add(NSEC_PER_USEC - 1) / NSEC_PER_USEC
+}
+
+/// Returns the frequency hold of a wall clock that is `offset` nanoseconds off host UTC, give or
+/// take the uncertainty `epsilon`, with the frequency correction `frequency`, in scaled ppm, and
+/// a host whose UTC is within `host_error_us` microseconds of the reference: the maximum error
+/// adds the host's to the offset and its uncertainty, and the estimated error is the uncertainty.
+pub(crate) fn frequency_hold(
+    offset: u64,
+    epsilon: i64,
+    frequency: i64,
+    host_error_us: i64,
+) -> FrequencyHold {
+    let offset = i64::try_from(offset).unwrap_or(i64::MAX);
+    FrequencyHold {
+        scaled_ppm: frequency,
+        maximum_error_us: ceil_us(offset.saturating_add(epsilon)).saturating_add(host_error_us),
+        estimated_error_us: ceil_us(epsilon),
+    }
+}
+
 /// Selects and parameterizes a step or slew of the wall clock for the offset `theta` and the
 /// uncertainty `epsilon`, both in nanoseconds: a step at or above the step threshold, and
-/// otherwise a slew with the fast or slow time constant.
-pub(crate) fn plan_correction(theta: i64, epsilon: i64, fast: bool) -> ClockAdjustment {
+/// otherwise a slew with the fast or slow time constant, which also holds the frequency
+/// correction `frequency` with error estimates that add `host_error_us`, as [`frequency_hold`]
+/// derives them. A step leaves its caller to hold the frequency after it.
+pub(crate) fn plan_correction(
+    theta: i64,
+    epsilon: i64,
+    fast: bool,
+    frequency: i64,
+    host_error_us: i64,
+) -> ClockAdjustment {
     let magnitude = theta.unsigned_abs();
     if magnitude >= STEP_THRESHOLD_NS {
         let (seconds, nanoseconds) = split_offset(theta);
@@ -472,7 +675,6 @@ pub(crate) fn plan_correction(theta: i64, epsilon: i64, fast: bool) -> ClockAdju
             nanoseconds,
         };
     }
-    let ceil_us = |nanoseconds: i64| nanoseconds.saturating_add(NSEC_PER_USEC - 1) / NSEC_PER_USEC;
     ClockAdjustment::Slew {
         offset_ns: theta,
         time_constant: if fast {
@@ -480,9 +682,7 @@ pub(crate) fn plan_correction(theta: i64, epsilon: i64, fast: bool) -> ClockAdju
         } else {
             SLOW_TIME_CONSTANT
         },
-        // Below the step threshold, the magnitude fits an `i64`.
-        maximum_error_us: ceil_us((magnitude as i64).saturating_add(epsilon)),
-        estimated_error_us: ceil_us(epsilon),
+        hold: frequency_hold(magnitude, epsilon, frequency, host_error_us),
     }
 }
 
@@ -869,7 +1069,7 @@ pub(crate) fn check_cpuinfo(
     }
 }
 
-/// Validates the kernel command line required by time ABI version one: the kernel must apply none
+/// Validates the kernel command line required by the time ABI: the kernel must apply none
 /// of the clock parameters that the ABI forbids among the parameters that it reads from the
 /// command line, as [`cmdline::parameters`] reads them, in quotes, after any of its whitespace,
 /// and up to a `--`.
@@ -970,16 +1170,15 @@ mod tests {
     /// A valid packet header without memory ranges, of generation 1.
     fn valid_header() -> [u8; PACKET_HEADER_SIZE] {
         let mut bytes = [0; PACKET_HEADER_SIZE];
-        bytes[..4].copy_from_slice(b"OVR\x04");
+        bytes[..4].copy_from_slice(b"OVR\x05");
         bytes[8..12].copy_from_slice(&1_u32.to_le_bytes());
-        bytes[24..32].copy_from_slice(&1_u64.to_le_bytes());
         bytes
     }
 
     #[test]
     fn packets_decode_their_header_then_their_body() {
         let header = PacketHeader::parse(&valid_header()).unwrap();
-        assert_eq!((header.generation, header.utc_ns), (1, 1));
+        assert_eq!((header.generation, header.downtime_ns), (1, 0));
         assert_eq!(header.body_size(), PACKET_ENTROPY_SIZE);
         let entropy: Vec<u8> = (0..64).collect();
         let packet = RestorePacket::parse(header, &entropy).unwrap();
@@ -990,9 +1189,13 @@ mod tests {
             PacketError::IncompleteBody
         );
         assert_eq!(
-            PacketHeader::parse(&valid_header()[..31]),
+            PacketHeader::parse(&valid_header()[..23]),
             Err(PacketError::IncompleteHeader)
         );
+        // A packet of version 4, which carried host UTC, is refused.
+        let mut bytes = valid_header();
+        bytes[3] = 4;
+        assert_eq!(PacketHeader::parse(&bytes), Err(PacketError::Version(4)));
     }
 
     #[test]
@@ -1012,21 +1215,215 @@ mod tests {
         assert_eq!(error.to_string(), "restore memory range 0 is invalid");
     }
 
+    /// A valid time sample of generation 4, as OpenVMM's `TimeSample::encode` writes it.
+    fn valid_sample() -> [u8; SAMPLE_SIZE] {
+        let mut bytes = [0; SAMPLE_SIZE];
+        bytes[..4].copy_from_slice(&[2, 8, 1, 0]);
+        bytes[4..8].copy_from_slice(&4_u32.to_le_bytes());
+        bytes[8..16].copy_from_slice(&1_790_841_600_123_456_789_u64.to_le_bytes());
+        bytes[16..24].copy_from_slice(&123_456_789_u64.to_le_bytes());
+        bytes[24..28].copy_from_slice(&640_u32.to_le_bytes());
+        bytes[28..32].copy_from_slice(&3_u32.to_le_bytes());
+        bytes[32..40].copy_from_slice(&(-6_552_945_i64).to_le_bytes());
+        bytes[40..44].copy_from_slice(&66_u32.to_le_bytes());
+        bytes[44..48].copy_from_slice(&u32::MAX.to_le_bytes());
+        bytes
+    }
+
     #[test]
-    fn samples_check_their_version_flags_and_time() {
-        let mut sample = [0_u8; SAMPLE_SIZE];
-        sample[0] = 1;
-        sample[8] = 1;
-        assert_eq!(TimeSample::parse(&sample).unwrap().utc_ns, 1);
+    fn samples_decode_every_field_of_version_two() {
         assert_eq!(
-            TimeSample::parse(&sample[..15]),
+            TimeSample::parse(&valid_sample()),
+            Ok(TimeSample {
+                flags: 8,
+                generation: 4,
+                utc_ns: 1_790_841_600_123_456_789,
+                tsc: 123_456_789,
+                pairing_ns: 640,
+                host: HostClock {
+                    status: HostClockStatus::Synchronized,
+                    disruption: 3,
+                    correction: -6_552_945,
+                    correction_bound: Some(66),
+                    max_error_us: None,
+                },
+            })
+        );
+        assert_eq!(
+            TimeSample::parse(&valid_sample()[..47]),
             Err(TimeSampleError::Incomplete)
         );
-        sample[2] = 1;
+    }
+
+    #[test]
+    fn samples_check_their_version_flags_status_and_time() {
+        let mutated = |offset: usize, bytes: &[u8]| {
+            let mut sample = valid_sample();
+            sample[offset..offset + bytes.len()].copy_from_slice(bytes);
+            TimeSample::parse(&sample).unwrap_err().to_string()
+        };
+        assert_eq!(mutated(0, &[1]), "time sample version is 1");
+        assert_eq!(mutated(1, &[1]), "time sample flags 0x01 or reserved 0x00");
+        assert_eq!(mutated(3, &[1]), "time sample flags 0x08 or reserved 0x01");
+        assert_eq!(mutated(2, &[4]), "time sample host status is 4");
+        assert_eq!(mutated(8, &[0; 8]), "time sample UTC 0 is invalid");
         assert_eq!(
-            TimeSample::parse(&sample).unwrap_err().to_string(),
-            "time sample flags 0x00 or reserved 0x0001"
+            mutated(8, &u64::MAX.to_le_bytes()),
+            format!("time sample UTC {} is invalid", u64::MAX)
         );
+    }
+
+    #[test]
+    fn the_host_error_counts_only_while_a_time_service_synchronizes_the_host() {
+        let host = |status, max_error_us| HostClock {
+            status,
+            max_error_us,
+            ..HostClock::default()
+        };
+        assert_eq!(
+            host(HostClockStatus::Synchronized, Some(12_500)).error_us(),
+            12_500
+        );
+        assert_eq!(host(HostClockStatus::Synchronized, None).error_us(), 0);
+        assert_eq!(
+            host(HostClockStatus::FreeRunning, Some(16_000_000)).error_us(),
+            0
+        );
+        assert_eq!(host(HostClockStatus::Unknown, Some(5)).error_us(), 0);
+    }
+
+    /// A sample of guest TSC 1,000,000 at host UTC 10^18, paired within 500 ns.
+    fn paired_sample(tsc: u64) -> TimeSample {
+        TimeSample {
+            utc_ns: 1_000_000_000_000_000_000,
+            tsc,
+            pairing_ns: 500,
+            ..TimeSample::parse(&valid_sample()).unwrap()
+        }
+    }
+
+    /// The guest's reads around the latch of [`paired_sample`]: its TSC 1,000 cycles before and
+    /// 2,000 after the sample's, and its realtime clock 4,000 cycles after, within 40 cycles.
+    const READS: GuestReads = GuestReads {
+        before: 999_000,
+        after: 1_002_000,
+        realtime_ns: 999_999_999_999_000_000,
+        realtime_tsc: 1_004_000,
+        realtime_half_cycles: 40,
+    };
+
+    /// A 2 GHz TSC, without a frequency correction.
+    const RATES: ClockRates = ClockRates {
+        tsc_hz: 2_000_000_000,
+        frequency: 0,
+    };
+
+    #[test]
+    fn a_pairing_extrapolates_the_realtime_clock_back_to_the_sample() {
+        // The realtime read is 4,000 cycles, 2 µs, after the sample's TSC, so the guest's clock
+        // was 999_999_999_998_998_000 then, 1_002_000 ns behind host UTC. The uncertainty adds
+        // 1 µs of cross-CPU skew, 20 ns of the realtime read, and 4 ns of a slew over the
+        // 2 µs, to the host's 500 ns.
+        assert_eq!(
+            pair_sample(&paired_sample(1_000_000), &READS, RATES),
+            Ok((1_002_000, 1_524))
+        );
+        // The kernel counts the TSC at the declared rate to the kHz, with its frequency
+        // correction.
+        let late = GuestReads {
+            realtime_tsc: 1_000_000 + 2_000_000_000,
+            ..READS
+        };
+        let (theta, _) = pair_sample(
+            &paired_sample(1_000_000),
+            &late,
+            ClockRates {
+                tsc_hz: 2_000_000_999,
+                frequency: 0,
+            },
+        )
+        .unwrap();
+        assert_eq!(theta, 1_000_000 + 1_000_000_000);
+        let (theta, epsilon) = pair_sample(
+            &paired_sample(1_000_000),
+            &GuestReads {
+                realtime_tsc: 1_000_000 + 20_000_000,
+                ..READS
+            },
+            ClockRates {
+                frequency: 6_553_600,
+                ..RATES
+            },
+        )
+        .unwrap();
+        assert_eq!(theta, 1_000_000 + 10_001_000);
+        assert_eq!(epsilon, 500 + 1_000 + 20 + 20_002);
+    }
+
+    #[test]
+    fn a_sample_outside_the_guest_reads_is_refused() {
+        // The tolerance is 1.5 µs, the pairing and the skew bound: 3,000 cycles at 2 GHz.
+        for tsc in [996_000, 1_005_000] {
+            assert!(
+                pair_sample(&paired_sample(tsc), &READS, RATES).is_ok(),
+                "{tsc}"
+            );
+        }
+        for tsc in [995_999, 1_005_001, 0, u64::MAX] {
+            let error = pair_sample(&paired_sample(tsc), &READS, RATES).unwrap_err();
+            assert_eq!(
+                error,
+                TimeSampleError::Tsc {
+                    tsc,
+                    before: 999_000,
+                    after: 1_002_000,
+                }
+            );
+            assert_eq!(
+                error.to_string(),
+                format!("time sample TSC {tsc} is outside the guest's reads 999000 to 1002000")
+            );
+        }
+    }
+
+    #[test]
+    fn the_guest_frequency_applies_the_host_correction_to_the_kernel_rate() {
+        // A declared rate of whole kHz: the correction itself.
+        assert_eq!(
+            guest_frequency(13_107_200, 2_100_000_000),
+            (13_107_200, false)
+        );
+        assert_eq!(
+            guest_frequency(-6_552_945, 2_000_000_000),
+            (-6_552_945, false)
+        );
+        // The kernel's rate, to the kHz, is 123 Hz slow: about 0.056 ppm.
+        assert_eq!(guest_frequency(0, 2_194_843_123), (-3_673, false));
+        assert_eq!(
+            guest_frequency(13_107_200, 2_194_843_123),
+            (13_103_527, false)
+        );
+        // Linux's limit of 500 ppm holds the frequency, and the call reports it.
+        assert_eq!(
+            guest_frequency(39_321_600, 2_100_000_000),
+            (32_768_000, true)
+        );
+        assert_eq!(
+            guest_frequency(-39_321_600, 2_100_000_000),
+            (-32_768_000, true)
+        );
+        assert_eq!(guest_frequency(i64::MAX, 2_100_000_000), (32_768_000, true));
+    }
+
+    #[test]
+    fn rates_convert_to_parts_per_billion() {
+        assert_eq!(frequency_to_ppb(13_107_200), 200_000);
+        assert_eq!(frequency_to_ppb(-6_552_945), -99_990);
+        assert_eq!(frequency_to_ppb(-3_673), -56);
+        assert_eq!(frequency_to_ppb(i64::MIN), -(1_i64 << 47) * 1000);
+        assert_eq!(bound_to_ppb(66), 2);
+        assert_eq!(bound_to_ppb(13_107_200), 200_000);
+        assert_eq!(bound_to_ppb(0), 0);
     }
 
     #[test]
@@ -1041,18 +1438,42 @@ mod tests {
     #[test]
     fn correction_boundary_matches_the_abi() {
         assert!(matches!(
-            plan_correction(128_000_000, 10, true),
+            plan_correction(128_000_000, 10, true, 0, 0),
             ClockAdjustment::Step { .. }
         ));
         assert!(matches!(
-            plan_correction(127_999_999, 10, true),
+            plan_correction(127_999_999, 10, true, 0, 0),
             ClockAdjustment::Slew { .. }
         ));
         assert_eq!(
-            plan_correction(-1_128_000_000, 0, false),
+            plan_correction(-1_128_000_000, 0, false, 0, 0),
             ClockAdjustment::Step {
                 seconds: -2,
                 nanoseconds: 872_000_000,
+            }
+        );
+    }
+
+    #[test]
+    fn a_slew_holds_the_frequency_with_the_host_error() {
+        assert_eq!(
+            plan_correction(-1_500, 2_100, false, 13_107_200, 12_500),
+            ClockAdjustment::Slew {
+                offset_ns: -1_500,
+                time_constant: 6,
+                hold: FrequencyHold {
+                    scaled_ppm: 13_107_200,
+                    maximum_error_us: 4 + 12_500,
+                    estimated_error_us: 3,
+                },
+            }
+        );
+        assert_eq!(
+            frequency_hold(0, 524, -3_673, 0),
+            FrequencyHold {
+                scaled_ppm: -3_673,
+                maximum_error_us: 1,
+                estimated_error_us: 1,
             }
         );
     }
@@ -1066,25 +1487,62 @@ mod tests {
 
     #[test]
     fn extreme_clock_arithmetic_neither_wraps_nor_panics() {
-        assert_eq!(pair_clocks(i64::MIN, i64::MAX, 0), (i64::MIN, 0));
         assert_eq!(
-            plan_correction(i64::MIN, 0, true),
+            plan_correction(i64::MIN, 0, true, 0, 0),
             ClockAdjustment::Step {
                 seconds: -9_223_372_037,
                 nanoseconds: 145_224_192,
             }
         );
-        let slew = plan_correction(-5, i64::MAX, true);
+        let slew = plan_correction(-5, i64::MAX, true, 7, i64::MAX);
         assert_eq!(
             slew,
             ClockAdjustment::Slew {
                 offset_ns: -5,
                 time_constant: 4,
-                maximum_error_us: i64::MAX / 1000,
-                estimated_error_us: i64::MAX / 1000,
+                hold: FrequencyHold {
+                    scaled_ppm: 7,
+                    maximum_error_us: i64::MAX,
+                    estimated_error_us: i64::MAX / 1000,
+                },
             }
         );
-        assert_eq!((slew.modes(), slew.status()), (0x203d, 0x2001));
+        assert_eq!((slew.modes(), slew.status()), (0x203f, 0x2081));
+        let extreme = TimeSample {
+            utc_ns: i64::MAX as u64,
+            pairing_ns: u32::MAX,
+            ..paired_sample(u64::MAX)
+        };
+        let reads = GuestReads {
+            before: u64::MAX,
+            after: u64::MAX,
+            realtime_ns: i64::MIN,
+            realtime_tsc: 0,
+            realtime_half_cycles: u64::MAX,
+        };
+        let (theta, epsilon) = pair_sample(
+            &extreme,
+            &reads,
+            ClockRates {
+                tsc_hz: u64::MAX,
+                frequency: i64::MAX,
+            },
+        )
+        .unwrap();
+        assert_eq!(theta, i64::MAX);
+        assert!(epsilon > i64::from(u32::MAX), "{epsilon}");
+        let (theta, epsilon) = pair_sample(
+            &extreme,
+            &reads,
+            ClockRates {
+                tsc_hz: 0,
+                frequency: i64::MIN,
+            },
+        )
+        .unwrap();
+        assert_eq!((theta, epsilon), (i64::MIN, i64::MAX));
+        assert_eq!(guest_frequency(i64::MIN, u64::MAX), (-32_768_000, true));
+        assert_eq!(guest_frequency(0, 0), (-32_768_000, true));
     }
 
     #[test]
@@ -1615,7 +2073,7 @@ mod tests {
     }
 
     /// Returns whether the kernel applies, in the parameter `name` with `value`, a clock
-    /// parameter that time ABI v1 forbids, as `init/main.c` matches parameters with their
+    /// parameter that the time ABI forbids, as `init/main.c` matches parameters with their
     /// handlers: an `early_param` by `parameq` of its name, which NVX applies to
     /// `lapic_timer_hz` too, and a `__setup` string by `parameqn` of the parameter's text over the
     /// string's length, which passes the rest of the text to the handler.

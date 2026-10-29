@@ -8,7 +8,7 @@ use crate::guest::kernel_text;
 // Each CPU that the time ABI covers is one bit of the mask.
 const _: () = assert!(MAX_CPUS == u64::BITS as usize);
 
-/// A set of CPUs below `MAX_CPUS`, the CPUs that time ABI version one covers.
+/// A set of CPUs below `MAX_CPUS`, the CPUs that the time ABI covers.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub(crate) struct CpuMask(u64);
 

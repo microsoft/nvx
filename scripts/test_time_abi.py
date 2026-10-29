@@ -873,7 +873,7 @@ class MonitorTests(unittest.TestCase):
         with self.assertRaisesRegex(
             TimeAbiFailure,
             "did not report the NVX-TIME-ABI boot marker before nvx-time status "
-            "exited; the guest image or OpenVMM does not implement time ABI v1",
+            "exited; the guest image or OpenVMM does not implement time ABI v2",
         ):
             quiet.feed(b"NVX-TIME-STATUS-EXIT status=0\r\n")
 

@@ -42,9 +42,12 @@ const HYPERV_VENDOR: [u32; 3] = [
 const HYPERV_MAXIMUM_LEAF: u32 = cpuid::LEAF_HYPERVISOR + 5;
 /// The interface signature of Hyper-V's CPUID leaf 0x40000001, "Hv#1".
 const HYPERV_INTERFACE: u32 = u32::from_le_bytes(*b"Hv#1");
-/// The build of leaf 0x40000002, OpenVMM's NVX build: "NVX", then version 1.0 as the major
-/// version in the upper half of EBX.
-const HYPERV_BUILD: [u32; 2] = [u32::from_le_bytes(*b"NVX\0"), 1 << 16];
+/// The build of leaf 0x40000002, OpenVMM's NVX build: "NVX", then the time ABI version as the
+/// major version in the upper half of EBX, version 2.0.
+const HYPERV_BUILD: [u32; 2] = [
+    u32::from_le_bytes(*b"NVX\0"),
+    (crate::contract::TIME_ABI_VERSION as u32) << 16,
+];
 /// The partition privileges of leaf 0x40000003's EAX: the hypercall, VP-index, frequency, and
 /// TSC invariant-control MSRs.
 const HYPERV_PRIVILEGES: u32 = (1 << cpuid::HYPERV_EAX_HYPERCALL)
@@ -1291,7 +1294,7 @@ mod tests {
         assert_eq!(HYPERV_MAXIMUM_LEAF, 0x4000_0005);
         assert_eq!(HYPERV_VENDOR, [0x7263_694d, 0x666f_736f, 0x7648_2074]);
         assert_eq!(HYPERV_INTERFACE, 0x3123_7648);
-        assert_eq!(HYPERV_BUILD, [0x0058_564e, 0x0001_0000]);
+        assert_eq!(HYPERV_BUILD, [0x0058_564e, 0x0002_0000]);
         assert_eq!(HYPERV_PRIVILEGES, 0x8860);
         assert_eq!(HYPERV_FEATURES, 0x100);
     }

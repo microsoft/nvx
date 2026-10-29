@@ -292,13 +292,18 @@ fn cmd_status(runtime: &Runtime<'_>, out: &mut dyn Write) -> Result<(), CommandE
     }
 }
 
-/// Prints one raw host time sample and its derived pairing.
+/// Prints one raw host time sample, its pairing with the guest's clocks, and the frequency
+/// correction that its host clock correction asks for.
 fn cmd_sample(
     runtime: &Runtime<'_>,
     out: &mut dyn Write,
     err: &mut dyn Write,
 ) -> Result<(), CommandError> {
-    let sample = {
+    let rates = system::clock_rates(runtime).map_err(|error| {
+        report(err, &[format!("nvx-time: {error}\n").as_bytes()]);
+        CommandError::Operation
+    })?;
+    let taken = {
         let ports = runtime
             .open_ports()
             .map_err(|error| port_failure(err, error))?;
@@ -320,19 +325,46 @@ fn cmd_sample(
             );
             CommandError::Operation
         })?;
-        system::take_sample(&ports)
+        system::take_sample(&ports, runtime.ops)
     };
-    let sample = sample.map_err(|error| {
+    let (sample, reads) = taken.map_err(|error| {
         report(err, &[format!("nvx-time: {error}\n").as_bytes()]);
         CommandError::Operation
     })?;
-    let (theta, epsilon) = decoders::pair_clocks(sample.t0, sample.t1, sample.utc_ns);
-    let line = format!(
-        "flags=0x{:02x} generation={} utc_ns={} t0={} t1={} theta_ns={} epsilon_ns={}\n",
-        sample.flags, sample.generation, sample.utc_ns, sample.t0, sample.t1, theta, epsilon
+    let host = &sample.host;
+    let bound = |bound: Option<u32>| bound.map_or_else(|| "unknown".to_owned(), |b| b.to_string());
+    let mut line = format!(
+        "flags=0x{:02x} generation={} status={} utc_ns={} tsc={} pairing_ns={} disruption={} \
+         correction={} correction_bound={} max_error_us={} before={} after={} realtime_ns={}",
+        sample.flags,
+        sample.generation,
+        host.status,
+        sample.utc_ns,
+        sample.tsc,
+        sample.pairing_ns,
+        host.disruption,
+        host.correction,
+        bound(host.correction_bound),
+        bound(host.max_error_us),
+        reads.before,
+        reads.after,
+        reads.realtime_ns
     );
+    let pairing = decoders::pair_sample(&sample, &reads, rates);
+    if let Ok((theta, epsilon)) = pairing {
+        let (frequency, limited) = decoders::guest_frequency(host.correction, rates.tsc_hz);
+        let _ = write!(
+            line,
+            " theta_ns={theta} epsilon_ns={epsilon} frequency={frequency} frequency_limited={}",
+            u8::from(limited)
+        );
+    }
+    line.push('\n');
     let _ = out.write_all(line.as_bytes());
-    Ok(())
+    pairing.map(drop).map_err(|error| {
+        report(err, &[format!("nvx-time: {error}\n").as_bytes()]);
+        CommandError::Operation
+    })
 }
 
 /// Reads and prints the VM generation ID.

@@ -134,7 +134,7 @@ changes only when the module's purpose does.
 | [`nvx::guest::cgroup`](#nvxguestcgroup) | Cgroup v2 handles through which a guest init or agent places, accounts, kills, and settles its executions |
 | [`nvx::guest::exec`](#nvxguestexec) | `Execution`: drives one program as an execution, for any guest init or agent |
 | [`nvx::guest::exec::binding`](#nvxguestexecbinding) | `Binding`: an `nvx::exec::Runner` bound to an `Execution`, the glue that a guest adapter would otherwise write |
-| [`nvx::guest::time`](#nvxguesttime) | x86_64: the steps of NVX time ABI v1 as typed calls in the caller's process, for any guest init or agent |
+| [`nvx::guest::time`](#nvxguesttime) | x86_64: the steps of NVX time ABI v2 as typed calls in the caller's process, for any guest init or agent |
 | [`nvx::guest::clone`](#nvxguestclone) | x86_64: the preparation of a template's guest for a capture, and the repair and activation of each clone |
 | [`nvx::guest::reseed`](#nvxguestreseed) | A restore's fresh entropy, and the reseed of the kernel's random number generator with it |
 | [`nvx::guest::root`](#nvxguestroot) | The operations of a layered root: its bootstrap, assembly, shares, export, mappings, and teardown |
@@ -1188,7 +1188,7 @@ binding could not read the launch report.
 
 ### `nvx::guest::time`
 
-x86_64: `TimeAbi`, the steps of NVX time ABI v1 as typed calls in the caller's
+x86_64: `TimeAbi`, the steps of NVX time ABI v2 as typed calls in the caller's
 process, for any guest init or agent: the cold-boot time step and, separately,
 the start of the time daemon in a child process that the caller supervises, the
 VM generation ID, a `CaptureRequest` that repairs a `Restore`, and a
@@ -2467,8 +2467,9 @@ Without `NVX_BUNDLE_DIR`, the build script downloads the release package that
 [`artifacts.json`](artifacts.json) pins with `curl` and extracts it with `tar`;
 Windows packages are ZIP archives, which need bsdtar (Windows' own `tar`) or
 `unzip`. Every staged file must match the source's `SHA256SUMS`, a download
-must match its pinned digest, and the release must declare the control contract
-of `nvx::contract`. The build script extracts and verifies only the files that
+must match its pinned digest, and the release must declare the microVM, time,
+restore-packet, control-session, and control contracts of `nvx::contract`. The
+build script extracts and verifies only the files that
 the bundle holds, so a release that ships `bin/nvx-rs[.exe]` stages as the
 older release that `artifacts.json` pins, which doesn't. The build scripts of
 dependents receive the staged
@@ -2515,7 +2516,7 @@ disk's block device.
 | `nvx-device-io file ...`, `nvx-device-io network ...`, `nvx-device-io map PATH TEXT` | The benchmark helper that measures file and UDP round-trip I/O and prints one JSON line, and reports a file benchmark's progress on stderr; `map` writes TEXT at the start of a file through a shared mapping and holds the dirty mapping until its standard input ends, for the microVM scenarios (x86_64) |
 | `nvx-managed-agent CONTROL_TTY ROOTFS HOSTNAME UID GID USER HOME` | Serves the managed control session and supervises sequential workloads; `--exec-config-fd FD -- WORKLOAD ...` is the direct agent's internal launch helper |
 | `nvx-ingress [inherit] GATEWAY_IPV4` | Announces reachable TCP listeners and settled UDP sockets to the portable-network gateway, from a privileged source port that it binds, or, with `inherit`, from its standard input, a socket that a clone's application bound to one; `test DIRECTORY` runs synthetic procfs snapshots |
-| `nvx-time [--report-only] COMMAND` | Enforces NVX time ABI v1: runs its conformance checks, repairs the wall clock after a restore, publishes the time state, and runs the discipline and violation-watcher daemon; `test NAME ...` runs its decoder and process test hooks (x86_64) |
+| `nvx-time [--report-only] COMMAND` | Enforces NVX time ABI v2: runs its conformance checks, repairs the wall clock after a restore, publishes the time state, and runs the discipline and violation-watcher daemon; `test NAME ...` runs its decoder and process test hooks (x86_64) |
 | `nvx-time-probe latency\|warp\|clock ...` | Diagnoses clock-read latency, cross-CPU TSC warp and offset, the clocks, CPUID, clock events, kernel messages, and optionally MSRs (x86_64) |
 
 Each binary's command line, exit statuses, and byte output are compatibility

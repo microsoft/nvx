@@ -3,18 +3,21 @@
 
 use std::ffi::{CStr, CString};
 use std::fmt::{self, Display};
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Mutex, PoisonError};
 
+use super::Phase;
 use super::api::Violation;
-use super::decoders::{self, SAMPLE_SIZE, TimeSample, TimeSampleError};
+use super::decoders::{
+    self, ClockRates, GuestReads, HostClock, SAMPLE_SIZE, TimeSample, TimeSampleError,
+};
 use super::events::{EventSource, ViolationCode, format_event};
-use super::state::TimeState;
-use super::{NSEC_PER_MSEC, Phase};
+use super::state::{SampleRejection, TimeState};
+use crate::guest::sys::x86::{self, msr};
 use crate::guest::sys::{
     self, ClockAdjustment, ClockDiscipline, CreatedFile, Errno, FileDescriptor, FileLock,
-    ForkResult, Mode, MsrAccess, MsrFile, OpenFlags, Port, PortAccess, PortError, TimeValLike,
-    kernel,
+    ForkResult, FrequencyHold, Mode, MsrAccess, MsrFile, OpenFlags, Port, PortAccess, PortError,
+    TimeValLike, kernel,
 };
 use crate::protocol::status;
 
@@ -116,16 +119,27 @@ const KERNEL_LOG_PRIORITY: &[u8] = b"<2>";
 /// The priority prefix of a diagnostic that the program writes to the kernel log: `KERN_ERR`.
 const DIAGNOSTIC_PRIORITY: &[u8] = b"<3>";
 
-/// Number of host samples considered when selecting the narrowest.
-const SAMPLE_ATTEMPTS: usize = 3;
+/// Number of host samples that boot, restore repair, and each discipline poll take at most.
+pub(crate) const SAMPLE_ATTEMPTS: usize = 3;
+/// The largest uncertainty of a time sample that the guest accepts, in nanoseconds: the host
+/// pairs its UTC with the guest TSC within 100 µs.
+pub(crate) const SAMPLE_BOUND_NS: i64 = 100_000;
+/// The smallest declared TSC rate, in Hz, that pairs a time sample: any lower rate is a misread
+/// of the frequency MSR.
+const MIN_TSC_HZ: u64 = 1_000_000;
 
 /// Seconds after which RCU reports a CPU stall in NVX's guest kernels, which the checks require
 /// and the daemon assumes when it cannot read the setting.
 pub(crate) const DEFAULT_STALL_TIMEOUT_S: i64 = 21;
 
-/// The privileged operations of the time tools, which a fake replaces in tests, so that their
-/// retry and failure paths are testable.
+/// The privileged operations of the time tools, and the clock reads with which the guest pairs a
+/// time sample, which a fake replaces in tests, so that their retry and failure paths are
+/// testable.
 pub(crate) trait PrivilegedOps: Sync {
+    /// Reads the time-stamp counter after the instructions before it.
+    fn read_tsc(&self) -> u64;
+    /// Reads the realtime clock, in nanoseconds since the Unix epoch.
+    fn realtime_ns(&self) -> i64;
     /// Takes the calling thread's permission for the time ABI's ports, for one transaction,
     /// which [`PortAccess::release`] ends.
     fn open_ports(&self) -> Result<PortAccess<'_>, PortError>;
@@ -163,6 +177,14 @@ pub(crate) enum MsrDescriptor {
 pub(crate) struct RealOps;
 
 impl PrivilegedOps for RealOps {
+    fn read_tsc(&self) -> u64 {
+        x86::rdtsc_lfence()
+    }
+
+    fn realtime_ns(&self) -> i64 {
+        clock_ns(sys::Clock::Realtime)
+    }
+
     fn open_ports(&self) -> Result<PortAccess<'_>, PortError> {
         PortAccess::request()
     }
@@ -236,6 +258,8 @@ pub(crate) struct Runtime<'a> {
     violation: Mutex<Option<Violation>>,
     /// Current VM generation.
     generation: AtomicU32,
+    /// The declared TSC rate, `F`, in Hz, once known, or zero.
+    tsc_hz: AtomicU64,
     /// Whether an asynchronous child may have interrupted console output.
     async_output: AtomicBool,
     /// Serializes multi-destination violation records.
@@ -251,6 +275,7 @@ impl<'a> Runtime<'a> {
             strict: false,
             violation: Mutex::new(None),
             generation: AtomicU32::new(0),
+            tsc_hz: AtomicU64::new(0),
             async_output: AtomicBool::new(false),
             report_lock: Mutex::new(()),
         }
@@ -292,6 +317,34 @@ impl<'a> Runtime<'a> {
     /// Publishes the current VM generation to concurrent checks.
     pub(crate) fn set_generation(&self, value: u32) {
         self.generation.store(value, Ordering::Relaxed);
+    }
+
+    /// Records the declared TSC rate, `F`, in Hz, that the boot checks validated, unless it is
+    /// zero, for none.
+    pub(crate) fn set_tsc_hz(&self, value: u64) {
+        if value != 0 {
+            self.tsc_hz.store(value, Ordering::Relaxed);
+        }
+    }
+
+    /// Returns the declared TSC rate, `F`, in Hz: the one that the runtime recorded, or else the
+    /// frequency MSR's, of CPU 0, which it then records.
+    pub(crate) fn tsc_hz(&self) -> Result<u64, SampleError> {
+        let recorded = self.tsc_hz.load(Ordering::Relaxed);
+        if recorded != 0 {
+            return Ok(recorded);
+        }
+        let read = self
+            .ops
+            .open_msr(0, MsrAccess::Read)
+            .and_then(|descriptor| self.ops.read_msr(&descriptor, msr::HV_TSC_FREQUENCY));
+        match read {
+            Ok(rate) if rate >= MIN_TSC_HZ => {
+                self.tsc_hz.store(rate, Ordering::Relaxed);
+                Ok(rate)
+            }
+            read => Err(SampleError::TscRate(read)),
+        }
     }
 
     /// Marks whether console output may need a leading newline.
@@ -670,27 +723,45 @@ pub(crate) fn portb_lock_failure(error: Errno) -> Vec<u8> {
     describe(b"portb lock: ", error)
 }
 
-/// Requests and decodes one host time sample, bracketed by realtime reads.
-pub(crate) fn take_sample(ports: &PortAccess<'_>) -> Result<TimeSample, TimeSampleError> {
+/// Latches and decodes one host time sample: brackets the selector write with TSC reads, then
+/// reads the realtime clock between two more, with which the guest pairs the sample's guest TSC,
+/// before it reads the time window.
+pub(crate) fn take_sample(
+    ports: &PortAccess<'_>,
+    ops: &dyn PrivilegedOps,
+) -> Result<(TimeSample, GuestReads), TimeSampleError> {
     let mut bytes = [0_u8; SAMPLE_SIZE];
-    let t0 = clock_ns(sys::Clock::Realtime);
+    let before = ops.read_tsc();
     ports.write_u8(Port::PortbStatus, SELECT_TIME_SAMPLE);
-    let t1 = clock_ns(sys::Clock::Realtime);
+    let after = ops.read_tsc();
+    let realtime_ns = ops.realtime_ns();
+    let end = ops.read_tsc();
     portb_read(ports, Port::PortbWindow, &mut bytes);
-    Ok(TimeSample {
-        t0,
-        t1,
-        ..TimeSample::parse(&bytes)?
-    })
+    let half_cycles = end.saturating_sub(after).div_ceil(2);
+    let reads = GuestReads {
+        before,
+        after,
+        realtime_ns,
+        realtime_tsc: after.saturating_add(half_cycles),
+        realtime_half_cycles: half_cycles,
+    };
+    Ok((TimeSample::parse(&bytes)?, reads))
 }
 
-/// Narrowest valid sample observed during one attempt group.
-#[derive(Clone, Copy, Debug)]
+/// Narrowest valid sample observed during one attempt group, and the frequency correction that
+/// its host clock correction asks for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct BestSample {
     /// Guest-to-host offset in nanoseconds.
     pub(crate) theta: i64,
-    /// Half-round-trip uncertainty in nanoseconds.
+    /// Pairing uncertainty in nanoseconds.
     pub(crate) epsilon: i64,
+    /// The discipline of host UTC that the sample published.
+    pub(crate) host: HostClock,
+    /// The frequency correction, in scaled ppm, that runs the wall clock at host UTC's rate.
+    pub(crate) frequency: i64,
+    /// Whether Linux's ±500 ppm limit clamped `frequency`.
+    pub(crate) limited: bool,
 }
 
 /// Whether the selected sample satisfied the requested uncertainty bound.
@@ -707,6 +778,9 @@ pub(crate) enum SampleResult {
 pub(crate) enum SampleError {
     /// The thread could not take, or give up, the permission for the ports.
     Ports(PortError),
+    /// The guest could not read the declared TSC rate, with which it pairs a sample, from the
+    /// frequency MSR: the error, or the implausible rate that it read.
+    TscRate(Result<u64, Errno>),
     /// The port window, of this status, offers no time sample.
     NoTimeWindow(u8),
     /// A sample came from another VM generation, which a restore must handle first.
@@ -720,11 +794,32 @@ pub(crate) enum SampleError {
     Invalid(Option<TimeSampleError>),
 }
 
+impl SampleError {
+    /// Returns how the discipline records the rejection of a poll's sample that failed so.
+    pub(crate) fn rejection(&self) -> SampleRejection {
+        match self {
+            Self::Invalid(Some(TimeSampleError::Tsc { .. })) => SampleRejection::Tsc,
+            _ => SampleRejection::Invalid,
+        }
+    }
+}
+
 impl Display for SampleError {
     /// Writes the diagnostic, such as `time sample generation 7, expected 6`.
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match *self {
             Self::Ports(error) => error.fmt(formatter),
+            Self::TscRate(Err(error)) => write!(
+                formatter,
+                "MSR {:#010x} read: {}",
+                msr::HV_TSC_FREQUENCY,
+                error.desc()
+            ),
+            Self::TscRate(Ok(rate)) => write!(
+                formatter,
+                "MSR {:#010x} (TSC rate) is {rate} Hz",
+                msr::HV_TSC_FREQUENCY
+            ),
             Self::NoTimeWindow(status) => write!(
                 formatter,
                 "portb status 0x{status:02x} has no time-sample window"
@@ -741,6 +836,15 @@ impl Display for SampleError {
 
 impl std::error::Error for SampleError {}
 
+/// Returns the rates with which the guest's realtime clock counts its TSC: the declared TSC rate,
+/// and the kernel's frequency correction.
+pub(crate) fn clock_rates(runtime: &Runtime<'_>) -> Result<ClockRates, SampleError> {
+    Ok(ClockRates {
+        tsc_hz: runtime.tsc_hz()?,
+        frequency: current_frequency(runtime),
+    })
+}
+
 /// Selects the lowest-uncertainty valid sample from a bounded attempt count, in one port
 /// transaction, which ends before this returns.
 pub(crate) fn best_sample(
@@ -749,18 +853,22 @@ pub(crate) fn best_sample(
     bound_ns: i64,
     generation: u32,
 ) -> Result<(SampleResult, BestSample), SampleError> {
+    let rates = clock_rates(runtime)?;
     let ports = runtime.open_ports().map_err(SampleError::Ports)?;
-    let selected = select_sample(&ports, attempts, bound_ns, generation);
+    let selected = select_sample(&ports, runtime.ops, attempts, bound_ns, generation, rates);
     ports.release().map_err(SampleError::Ports)?;
     selected
 }
 
-/// Selects the lowest-uncertainty valid sample through `ports`, as [`best_sample`] does.
-fn select_sample(
+/// Selects the lowest-uncertainty valid sample through `ports`, pairing each with the guest's
+/// clocks at `rates`, as [`best_sample`] does.
+pub(crate) fn select_sample(
     ports: &PortAccess<'_>,
+    ops: &dyn PrivilegedOps,
     attempts: usize,
     bound_ns: i64,
     generation: u32,
+    rates: ClockRates,
 ) -> Result<(SampleResult, BestSample), SampleError> {
     let status = ports.read_u8(Port::PortbStatus);
     if status & PORTB_TIME_WINDOW == 0 {
@@ -769,8 +877,8 @@ fn select_sample(
     let mut best: Option<BestSample> = None;
     let mut invalid = None;
     for _ in 0..attempts {
-        let sample = match take_sample(ports) {
-            Ok(sample) => sample,
+        let (sample, reads) = match take_sample(ports, ops) {
+            Ok(taken) => taken,
             Err(error) => {
                 invalid = Some(error);
                 continue;
@@ -782,8 +890,21 @@ fn select_sample(
                 expected: generation,
             });
         }
-        let (theta, epsilon) = decoders::pair_clocks(sample.t0, sample.t1, sample.utc_ns);
-        let candidate = BestSample { theta, epsilon };
+        let (theta, epsilon) = match decoders::pair_sample(&sample, &reads, rates) {
+            Ok(pairing) => pairing,
+            Err(error) => {
+                invalid = Some(error);
+                continue;
+            }
+        };
+        let (frequency, limited) = decoders::guest_frequency(sample.host.correction, rates.tsc_hz);
+        let candidate = BestSample {
+            theta,
+            epsilon,
+            host: sample.host,
+            frequency,
+            limited,
+        };
         if best.is_none_or(|best| epsilon < best.epsilon) {
             best = Some(candidate);
         }
@@ -807,11 +928,11 @@ pub(crate) fn step_clock(runtime: &Runtime<'_>, offset_ns: i64) -> Result<(), Er
         .map(drop)
 }
 
-/// Programs Linux's scaled-ppm frequency correction.
-pub(crate) fn set_frequency(runtime: &Runtime<'_>, scaled_ppm: i64) -> Result<(), Errno> {
+/// Holds Linux's scaled-ppm frequency correction, with its error estimates.
+pub(crate) fn hold_frequency(runtime: &Runtime<'_>, hold: FrequencyHold) -> Result<(), Errno> {
     runtime
         .ops
-        .adjust_clock(ClockAdjustment::Frequency { scaled_ppm })
+        .adjust_clock(ClockAdjustment::Frequency(hold))
         .map(drop)
 }
 
@@ -823,20 +944,41 @@ pub(crate) fn current_frequency(runtime: &Runtime<'_>) -> i64 {
         .map_or(0, |discipline| discipline.scaled_ppm)
 }
 
-/// Takes the initial bounded sample and steps realtime to it.
+/// Steps the wall clock to host UTC by `sample`'s offset, and then holds the frequency
+/// correction that its host clock correction asks for, with error estimates of its uncertainty
+/// and the host's error.
+pub(crate) fn synchronize(runtime: &Runtime<'_>, sample: &BestSample) -> Result<(), Errno> {
+    step_clock(runtime, sample.theta)?;
+    hold_frequency(
+        runtime,
+        decoders::frequency_hold(0, sample.epsilon, sample.frequency, sample.host.error_us()),
+    )
+}
+
+/// Takes the initial sample within the bound, steps realtime to it, and holds the frequency
+/// correction that the host's clock correction asks for.
 pub(crate) fn initial_sample(runtime: &Runtime<'_>) -> Result<BestSample, Vec<u8>> {
-    let (_, sample) = {
+    let (result, sample) = {
         let _lock = lock_portb().map_err(portb_lock_failure)?;
         best_sample(
             runtime,
             SAMPLE_ATTEMPTS,
-            NSEC_PER_MSEC,
+            SAMPLE_BOUND_NS,
             runtime.generation(),
         )
         .map_err(|error| error.to_string().into_bytes())?
     };
-    step_clock(runtime, sample.theta).map_err(|error| describe(b"adjtimex step: ", error))?;
+    if result == SampleResult::Wide {
+        return Err(wide_sample(sample.epsilon));
+    }
+    synchronize(runtime, &sample).map_err(|error| describe(b"adjtimex: ", error))?;
     Ok(sample)
+}
+
+/// Formats the diagnostic of a selected sample of the uncertainty `epsilon`, wider than the
+/// bound.
+pub(crate) fn wide_sample(epsilon: i64) -> Vec<u8> {
+    format!("time sample uncertainty {epsilon} ns exceeds {SAMPLE_BOUND_NS} ns").into_bytes()
 }
 
 /// Writes `entropy` at the start of the restored entropy file, and reports a failure to write
@@ -880,8 +1022,9 @@ pub(crate) mod tests {
 
     use super::*;
     use crate::guest::sys::PortBackend;
-    use crate::guest::sys::x86::msr;
+    use crate::guest::time::NSEC_PER_MSEC;
     use crate::guest::time::events::CheckId;
+    use crate::guest::time::state::HostClockStatus;
 
     /// Privileged operations that record their requests and replay canned port input.
     pub(crate) struct FakeOps {
@@ -903,9 +1046,24 @@ pub(crate) mod tests {
         pub(crate) kernel_log: Mutex<Vec<u8>>,
         /// Console output, in order.
         pub(crate) console: Mutex<Vec<u8>>,
+        /// What the frequency MSR reads: the declared TSC rate, or an error.
+        pub(crate) tsc_hz: Result<u64, Errno>,
+        /// The next TSC read, which each read advances by [`FakeOps::TSC_STEP`].
+        pub(crate) tsc: AtomicU64,
+        /// What every read of the realtime clock returns.
+        pub(crate) realtime_ns: i64,
     }
 
     impl FakeOps {
+        /// The fake's declared TSC rate: 2 GHz, two cycles a nanosecond.
+        pub(crate) const TSC_HZ: u64 = 2_000_000_000;
+        /// The fake's first TSC read.
+        pub(crate) const TSC_START: u64 = 1_000_000;
+        /// The cycles by which each TSC read advances the next.
+        pub(crate) const TSC_STEP: u64 = 100;
+        /// The fake's realtime clock.
+        pub(crate) const REALTIME_NS: i64 = 1_790_841_600_000_000_000;
+
         /// Returns a fake whose port reads return `input`.
         pub(crate) fn new(input: impl IntoIterator<Item = u32>) -> Self {
             Self {
@@ -918,6 +1076,9 @@ pub(crate) mod tests {
                 power: AtomicUsize::new(0),
                 kernel_log: Mutex::new(Vec::new()),
                 console: Mutex::new(Vec::new()),
+                tsc_hz: Ok(Self::TSC_HZ),
+                tsc: AtomicU64::new(Self::TSC_START),
+                realtime_ns: Self::REALTIME_NS,
             }
         }
 
@@ -927,6 +1088,50 @@ pub(crate) mod tests {
             let permissions = self.permissions.lock().unwrap();
             permissions.iter().filter(|(.., enable)| *enable).count() / 2
         }
+    }
+
+    /// Returns the port input of a time sample of `generation` whose guest TSC is `tsc` and whose
+    /// host UTC is `utc_ns`, paired within `pairing_ns`, and which publishes `host`: the window's
+    /// four-byte reads.
+    pub(crate) fn sample_input(
+        generation: u32,
+        utc_ns: u64,
+        tsc: u64,
+        pairing_ns: u32,
+        host: HostClock,
+    ) -> Vec<u32> {
+        let unknown = |bound: Option<u32>| bound.unwrap_or(u32::MAX);
+        let mut sample = [0_u8; SAMPLE_SIZE];
+        sample[..4].copy_from_slice(&[2, 0, host_status_byte(host.status), 0]);
+        sample[4..8].copy_from_slice(&generation.to_le_bytes());
+        sample[8..16].copy_from_slice(&utc_ns.to_le_bytes());
+        sample[16..24].copy_from_slice(&tsc.to_le_bytes());
+        sample[24..28].copy_from_slice(&pairing_ns.to_le_bytes());
+        sample[28..32].copy_from_slice(&host.disruption.to_le_bytes());
+        sample[32..40].copy_from_slice(&host.correction.to_le_bytes());
+        sample[40..44].copy_from_slice(&unknown(host.correction_bound).to_le_bytes());
+        sample[44..48].copy_from_slice(&unknown(host.max_error_us).to_le_bytes());
+        sample
+            .chunks(size_of::<u32>())
+            .map(|word| u32::from_ne_bytes(word.try_into().unwrap()))
+            .collect()
+    }
+
+    /// Returns the byte that encodes `status` in a time sample.
+    fn host_status_byte(status: HostClockStatus) -> u8 {
+        match status {
+            HostClockStatus::Unknown => 0,
+            HostClockStatus::Synchronized => 1,
+            HostClockStatus::FreeRunning => 2,
+            HostClockStatus::Unreliable => 3,
+        }
+    }
+
+    /// Returns a guest TSC midway between the fake's reads around the selector write of the
+    /// `index`th time sample that it latches, counting from zero: each sample reads the TSC three
+    /// times.
+    pub(crate) fn sample_tsc(index: u64) -> u64 {
+        FakeOps::TSC_START + 3 * index * FakeOps::TSC_STEP + FakeOps::TSC_STEP / 2
     }
 
     impl PortBackend for FakeOps {
@@ -957,6 +1162,14 @@ pub(crate) mod tests {
     }
 
     impl PrivilegedOps for FakeOps {
+        fn read_tsc(&self) -> u64 {
+            self.tsc.fetch_add(Self::TSC_STEP, Ordering::Relaxed)
+        }
+
+        fn realtime_ns(&self) -> i64 {
+            self.realtime_ns
+        }
+
         fn open_ports(&self) -> Result<PortAccess<'_>, PortError> {
             PortAccess::with_backend(self)
         }
@@ -965,8 +1178,11 @@ pub(crate) mod tests {
             Ok(MsrDescriptor::Fake)
         }
 
-        fn read_msr(&self, _: &MsrDescriptor, _: u32) -> Result<u64, Errno> {
-            Err(Errno::EIO)
+        fn read_msr(&self, _: &MsrDescriptor, register: u32) -> Result<u64, Errno> {
+            match register {
+                msr::HV_TSC_FREQUENCY => self.tsc_hz,
+                _ => Err(Errno::EIO),
+            }
         }
 
         fn write_msr(&self, _: &MsrDescriptor, _: u32, _: u64) -> Result<(), Errno> {
@@ -1006,13 +1222,20 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn packet_without_ranges_costs_exactly_twenty_four_data_reads() {
-        let ops = FakeOps::new(0..24);
+    fn packet_without_ranges_costs_exactly_twenty_two_data_reads() {
+        let ops = FakeOps::new(0..22);
         let ports = ops.open_ports().unwrap();
         let mut header = [0; decoders::PACKET_HEADER_SIZE];
         let mut entropy = [0; decoders::PACKET_ENTROPY_SIZE];
         portb_read(&ports, Port::PortbData, &mut header);
         portb_read(&ports, Port::PortbData, &mut entropy);
+        ports.release().unwrap();
+        assert!(ops.input.lock().unwrap().is_empty());
+        // A time sample costs twelve.
+        let ops = FakeOps::new(0..12);
+        let ports = ops.open_ports().unwrap();
+        let mut sample = [0; SAMPLE_SIZE];
+        portb_read(&ports, Port::PortbWindow, &mut sample);
         ports.release().unwrap();
         assert!(ops.input.lock().unwrap().is_empty());
     }
@@ -1131,16 +1354,25 @@ pub(crate) mod tests {
         assert_eq!(sys::check_released(), Err(PortError::Revoke(Errno::ENOMEM)));
     }
 
+    /// The host clock of the fake's samples: synchronized, 100 ppm fast, to 1 ppb, within 2 ms.
+    const HOST: HostClock = HostClock {
+        status: HostClockStatus::Synchronized,
+        disruption: 1,
+        correction: 6_553_600,
+        correction_bound: Some(66),
+        max_error_us: Some(2_000),
+    };
+
+    /// Returns the port input of port B's status, with the time window, then of `samples`.
+    fn window_input(samples: impl IntoIterator<Item = Vec<u32>>) -> Vec<u32> {
+        std::iter::once(u32::from(PORTB_TIME_WINDOW))
+            .chain(samples.into_iter().flatten())
+            .collect()
+    }
+
     #[test]
     fn a_sample_from_another_generation_is_a_generation_error() {
-        let mut sample = [0_u8; SAMPLE_SIZE];
-        sample[0] = 1;
-        sample[4..8].copy_from_slice(&7_u32.to_le_bytes());
-        sample[8..16].copy_from_slice(&1_u64.to_le_bytes());
-        let words = sample
-            .chunks(size_of::<u32>())
-            .map(|word| u32::from_ne_bytes(word.try_into().unwrap()));
-        let ops = FakeOps::new(std::iter::once(u32::from(PORTB_TIME_WINDOW)).chain(words));
+        let ops = FakeOps::new(window_input([sample_input(7, 1, sample_tsc(0), 0, HOST)]));
         let runtime = Runtime::new(&ops, false);
         let error = best_sample(&runtime, 1, NSEC_PER_MSEC, 6).unwrap_err();
         assert_eq!(
@@ -1158,11 +1390,137 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_sample_pairs_its_guest_tsc_with_the_realtime_clock() {
+        // The sample's TSC is midway between the reads around the selector write, 100 cycles,
+        // 50 ns, before the realtime read, whose own reads are 100 cycles apart.
+        let utc_ns = FakeOps::REALTIME_NS as u64 + 1_000;
+        let ops = FakeOps::new(window_input([sample_input(
+            0,
+            utc_ns,
+            sample_tsc(0),
+            400,
+            HOST,
+        )]));
+        let runtime = Runtime::new(&ops, false);
+        let (result, sample) = best_sample(&runtime, 3, SAMPLE_BOUND_NS, 0).unwrap();
+        assert_eq!(result, SampleResult::Accepted);
+        assert_eq!(
+            sample,
+            BestSample {
+                theta: 1_050,
+                epsilon: 400 + 1_000 + 25 + 1,
+                host: HOST,
+                frequency: 6_553_600,
+                limited: false,
+            }
+        );
+        // One transaction latched one sample, after the rate's MSR read and a query of the
+        // frequency.
+        assert_eq!(ops.transactions(), 1);
+        assert_eq!(
+            ops.output.lock().unwrap().as_slice(),
+            [(Port::PortbStatus, SELECT_TIME_SAMPLE)]
+        );
+        assert_eq!(
+            ops.adjustments.lock().unwrap().as_slice(),
+            [ClockAdjustment::Query]
+        );
+    }
+
+    #[test]
+    fn a_sample_outside_the_guest_tsc_reads_is_rejected() {
+        // The tolerance is the pairing and the skew bound, 1.4 µs: 2,800 cycles.
+        let ops = FakeOps::new(window_input([sample_input(
+            0,
+            1,
+            FakeOps::TSC_START - 2_801,
+            400,
+            HOST,
+        )]));
+        let runtime = Runtime::new(&ops, false);
+        let error = best_sample(&runtime, 1, SAMPLE_BOUND_NS, 0).unwrap_err();
+        assert_eq!(
+            error,
+            SampleError::Invalid(Some(TimeSampleError::Tsc {
+                tsc: FakeOps::TSC_START - 2_801,
+                before: FakeOps::TSC_START,
+                after: FakeOps::TSC_START + FakeOps::TSC_STEP,
+            }))
+        );
+        assert_eq!(error.rejection(), SampleRejection::Tsc);
+        assert_eq!(
+            SampleError::Invalid(Some(TimeSampleError::Version(1))).rejection(),
+            SampleRejection::Invalid
+        );
+        assert_eq!(
+            SampleError::NoTimeWindow(0).rejection(),
+            SampleRejection::Invalid
+        );
+    }
+
+    #[test]
+    fn a_wide_sample_gives_way_to_a_narrow_one() {
+        let utc_ns = FakeOps::REALTIME_NS as u64;
+        let wide = sample_input(0, utc_ns, sample_tsc(0), 150_000, HOST);
+        let ops = FakeOps::new(window_input([wide.clone()]));
+        let runtime = Runtime::new(&ops, false);
+        let (result, sample) = best_sample(&runtime, 1, SAMPLE_BOUND_NS, 0).unwrap();
+        assert_eq!((result, sample.epsilon), (SampleResult::Wide, 151_026));
+        let narrow = sample_input(0, utc_ns, sample_tsc(1), 600, HOST);
+        let ops = FakeOps::new(window_input([wide, narrow]));
+        let runtime = Runtime::new(&ops, false);
+        let (result, sample) = best_sample(&runtime, 3, SAMPLE_BOUND_NS, 0).unwrap();
+        assert_eq!((result, sample.epsilon), (SampleResult::Accepted, 1_626));
+        assert_eq!(ops.output.lock().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn a_sample_needs_the_declared_tsc_rate() {
+        for (rate, message) in [
+            (
+                Err(Errno::EACCES),
+                format!("MSR 0x40000022 read: {}", Errno::EACCES.desc()),
+            ),
+            (
+                Ok(999_999),
+                "MSR 0x40000022 (TSC rate) is 999999 Hz".to_owned(),
+            ),
+        ] {
+            let mut ops = FakeOps::new(window_input([]));
+            ops.tsc_hz = rate;
+            let runtime = Runtime::new(&ops, false);
+            let error = best_sample(&runtime, 1, SAMPLE_BOUND_NS, 0).unwrap_err();
+            assert_eq!(error, SampleError::TscRate(rate));
+            assert_eq!(error.to_string(), message);
+            // The sample took no port transaction.
+            assert!(ops.permissions.lock().unwrap().is_empty());
+        }
+        // The rate that the boot checks recorded needs no MSR.
+        let mut ops = FakeOps::new([]);
+        ops.tsc_hz = Err(Errno::EIO);
+        let runtime = Runtime::new(&ops, false);
+        runtime.set_tsc_hz(0);
+        assert!(runtime.tsc_hz().is_err());
+        runtime.set_tsc_hz(3_000_000_000);
+        assert_eq!(runtime.tsc_hz(), Ok(3_000_000_000));
+        // The MSR's rate is read once.
+        let ops = FakeOps::new([]);
+        let runtime = Runtime::new(&ops, false);
+        assert_eq!(runtime.tsc_hz(), Ok(FakeOps::TSC_HZ));
+        assert_eq!(runtime.tsc_hz.load(Ordering::Relaxed), FakeOps::TSC_HZ);
+    }
+
+    #[test]
     fn privileged_adjustment_and_power_paths_are_injectable() {
         let ops = FakeOps::new([]);
         let runtime = Runtime::new(&ops, false);
         step_clock(&runtime, -1_128_000_000).unwrap();
-        set_frequency(&runtime, 65_536).unwrap();
+        let hold = FrequencyHold {
+            scaled_ppm: 65_536,
+            maximum_error_us: 3,
+            estimated_error_us: 1,
+        };
+        hold_frequency(&runtime, hold).unwrap();
         assert_eq!(current_frequency(&runtime), 0);
         assert_eq!(
             ops.adjustments.lock().unwrap().as_slice(),
@@ -1171,12 +1529,45 @@ pub(crate) mod tests {
                     seconds: -2,
                     nanoseconds: 872_000_000,
                 },
-                ClockAdjustment::Frequency { scaled_ppm: 65_536 },
+                ClockAdjustment::Frequency(hold),
                 ClockAdjustment::Query,
             ]
         );
         runtime.ops.power_off(PowerOffStatus::Repair);
         assert_eq!(ops.power.load(Ordering::Relaxed), 195);
+    }
+
+    #[test]
+    fn a_synchronization_steps_then_holds_the_host_frequency() {
+        let ops = FakeOps::new([]);
+        let runtime = Runtime::new(&ops, false);
+        let sample = BestSample {
+            theta: -1_128_000_000,
+            epsilon: 1_500,
+            host: HOST,
+            frequency: 6_553_600,
+            limited: false,
+        };
+        synchronize(&runtime, &sample).unwrap();
+        assert_eq!(
+            ops.adjustments.lock().unwrap().as_slice(),
+            [
+                ClockAdjustment::Step {
+                    seconds: -2,
+                    nanoseconds: 872_000_000,
+                },
+                // The maximum error adds the synchronized host's 2 ms.
+                ClockAdjustment::Frequency(FrequencyHold {
+                    scaled_ppm: 6_553_600,
+                    maximum_error_us: 2 + 2_000,
+                    estimated_error_us: 2,
+                }),
+            ]
+        );
+        assert_eq!(
+            String::from_utf8(wide_sample(100_001)).unwrap(),
+            "time sample uncertainty 100001 ns exceeds 100000 ns"
+        );
     }
 
     #[test]

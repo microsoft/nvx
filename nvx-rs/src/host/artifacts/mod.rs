@@ -352,16 +352,18 @@ fn read_json(path: &Path, description: &str) -> Result<Value> {
 }
 
 /// Checks that an NVX `SOURCE-MANIFEST.json` declares the control contract this crate speaks,
-/// failing with [`ErrorKind::Unavailable`](crate::ErrorKind::Unavailable).
+/// failing with [`ErrorKind::Unavailable`](crate::ErrorKind::Unavailable) that names each
+/// mismatching contract field.
 pub fn check_manifest(path: &Path) -> Result<()> {
     let manifest = read_json(path, "NVX manifest")?;
-    if contract::manifest_is_compatible(&manifest) {
+    let mismatches = contract::manifest_mismatches(&manifest);
+    if mismatches.is_empty() {
         Ok(())
     } else {
         Err(Error::unavailable(format!(
-            "NVX manifest {} does not declare the {} control contract",
+            "NVX manifest {} does not declare the compatible OpenVMM contracts ({})",
             path.display(),
-            contract::CONTROL_CONTRACT_REVISION
+            mismatches.join("; ")
         )))
     }
 }

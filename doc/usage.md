@@ -361,9 +361,10 @@ before it shipped lack, and installs the packaged OpenVMM at
 of the artifacts in `build/`. It installs everything or, if a step fails,
 nothing, and fails on a directory where the release has a file rather than
 delete what the directory holds. It leaves the checkout's `nvx-rs` alone, which
-Cargo builds; see [nvx-rs](#nvx-rs). It warns when the release declares another
-microVM ABI or control contract than the `nvx-rs` that installs it speaks, as a
-fallback release may.
+Cargo builds; see [nvx-rs](#nvx-rs). It warns when the release declares other
+OpenVMM contracts than the `nvx-rs` that installs it speaks, such as another
+microVM ABI, time ABI, restore packet, or control contract, as a fallback
+release may, and names each field of its manifest that differs.
 
 `run`, `sandbox run`, and `sandbox start` install the release of the checkout
 themselves, before they launch, when an artifact that they run is missing from

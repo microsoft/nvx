@@ -121,8 +121,9 @@ archive marks the executables in `bin/` executable.
 into the checkout, everything or nothing. It leaves the checkout's `nvx-rs`,
 which Cargo builds, alone, and so installs releases from before packages
 shipped `nvx-rs` too. It warns when a release, such as that of an ancestor,
-declares another microVM ABI or control contract than the `nvx-rs` that
-installs it speaks.
+declares other OpenVMM contracts than the `nvx-rs` that installs it speaks,
+such as another microVM ABI, time ABI, restore packet, or control contract,
+and names each field of its manifest that differs.
 
 CI follows the binary-only path. On a `dev` push that changes more than
 documentation, on a ready pull request from a branch of this repository that
@@ -162,8 +163,9 @@ publishes. A pull request changes it to start another series, such as
 `tests/runtime-adapter/Cargo.lock`. The `bundled` feature of the published
 crate downloads the release that
 [`nvx-rs/artifacts.json`](../nvx-rs/artifacts.json) pins and fails unless that
-release declares the crate's control contract, which CI checks before it
-publishes. When the contract has changed, a pull request repins the release;
+release declares the crate's microVM, time, restore-packet, control-session,
+and control contracts, which CI checks before it publishes. When a contract has
+changed, publication stays blocked until a pull request repins a compatible release;
 see [Bundled artifacts](../nvx-rs/README.md#bundled-artifacts).
 
 When CI cannot publish, as when the newest version on crates.io records no
