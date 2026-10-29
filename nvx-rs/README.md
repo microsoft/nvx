@@ -684,21 +684,21 @@ which nothing formats, copies, or reads, or RAM, whose restore declares the
 template's scratch absent, so that OpenVMM attaches it with no file and the plan
 creates none;
 its export, if it has one, an `ExportPlan` that `filesystem::plan` made for the
-container root, which must export exactly one directory, since the template's
-dormant filesystem slot binds one directory and no file, and which must neither
-overlap the template store, by the paths that the plan and the store's directory
-resolve to, nor let the guest write in a directory through which the store's
-path leads, links included, since the host reaches the store, and OpenVMM its
-snapshots, by that path, nor be or hold the directory of the clone's sandbox, in
-which the host writes the clone's records, checks of paths that leave two rules
-to whoever names the export, as they leave the directories above the store: the
-export must not reach the store through an alias of it that an administrator
-configures, such as a bind mount or a mount point of the store, or of a
-directory above or inside it, a loopback share, or a hard link of a payload, nor
-lie inside a directory that a writable export of another sandbox or clone holds,
-since OpenVMM resolves an export's path again at each launch and restore, so
-that the directories above the export's directory must be ones that no guest may
-change, as those above a clone's block devices must; and a fresh capability.
+container root, an aggregate of up to 256 host directories and files, as a cold
+launch exports, none of which may overlap the template store, by the paths that
+the plan and the store's directory resolve to, let the guest write in a
+directory through which the store's path leads, links included, since the host
+reaches the store, and OpenVMM its snapshots, by that path, or be, hold, or for
+a file lie in the directory of the clone's sandbox, in which the host writes the
+clone's records, checks of paths that leave two rules to whoever names the
+export, as they leave the directories above the store: the export must not
+reach the store through an alias of it that an administrator configures, such as
+a bind mount or a mount point of the store, or of a directory above or inside
+it, a loopback share, or a hard link of a payload, nor lie inside a directory
+that a writable export of another sandbox or clone holds, since OpenVMM resolves
+an export's paths again at each launch and restore, so that the directories
+above the export's directories and files must be ones that no guest may change,
+as those above a clone's block devices must; and a fresh capability.
 
 It builds the clone's activation record, `ClonePlan::activation`, which the
 clone's guest applies in place of the configuration that the template captured,
@@ -709,8 +709,8 @@ the image, an EROFS layer or a GPT disk, as its binding names it, with its
 binding's identity and the filesystem UUID or disk GUID that the adapter's plan
 expects of it, and for a GPT disk the bound of its first partition, whose
 partition table the guest checks with `nvx::gpt` as at a cold launch; a tmpfs,
-or the scratch image's binding identity with the journal policy; the export, a
-directory, with its plan's identity, and its mappings, the plan's binds, from 1
+or the scratch image's binding identity with the journal policy; the export, an
+aggregate, with its plan's identity, and its mappings, the plan's binds, from 1
 to 4,096, or no export and no mappings, which leaves the slot dormant; the
 clone's network, with its identity, the DNS server that OpenVMM serves the guest
 at a gateway under its policy, if any, whether the guest publishes its
@@ -743,8 +743,9 @@ named pipe of a random name on Windows; and it runs `supervisor::launch` with
 OpenVMM's restore of the clone's devices, with `--restore-absent-scratch` for a
 clone in RAM, and of its network, whose policy `--restore-network-policy`
 installs on the template's NIC in place of the complete deny-all policy, its
-export bound to the dormant slot, `--mount` with
-the directory, and its hidden, re-exposed, and writable paths and its owner,
+export bound to the dormant slot as a cold launch attaches it,
+`--mount-aggregate` with a `--mount-child` of each of its directories and files,
+their hidden, re-exposed, and writable paths, and its owner,
 `--restore-snapshot` with the generation's snapshot in place, which no clone
 copies or changes, so that clones of one generation restore it at once,
 `--restore-memory` with the memory target, `--restore-processors` with the
@@ -784,16 +785,16 @@ in at most `MAX_ACTIVATION_SESSIONS` sessions by the same deadline, and retries
 nothing else.
 
 `Activated::start` then sends the clone's mapping table, if it has an export,
-through `CloneControl::map`, in order, from paths in the exported directory,
-which name no child's index, with an empty source for the directory itself, and
-starts the sandbox once the guest applied every mapping, both by a
-Ready-to-Start deadline from the check of Ready, `READY_TO_START_TIMEOUT`, 30
-seconds by default, never sending either again, and `Started::commit` commits
-the launch, which writes its runtime record. A failure, a partial or failed
-mapping table included, ends the launch as `Starting::abandon` does; a crash
-before the commit leaves the launch's journal, whose recovery ends the VMM,
-while the lease lasts until the release, and a crash after it leaves a VM that
-reattaches, and keeps its lease while it runs.
+through `CloneControl::map`, in order, as a cold launch's guest receives it,
+each path by its child's index, and starts the sandbox once the guest applied
+every mapping, both by a Ready-to-Start deadline from the check of Ready,
+`READY_TO_START_TIMEOUT`, 30 seconds by default, never sending either again,
+and `Started::commit` commits the launch, which writes its runtime record. A
+failure, a partial or failed mapping table included, ends the launch as
+`Starting::abandon` does; a crash before the commit leaves the launch's
+journal, whose recovery ends the VMM, while the lease lasts until the release,
+and a crash after it leaves a VM that reattaches, and keeps its lease while it
+runs.
 
 A failure of a clone is a `CloneFailure`, whose `Evidence` attributes it to an
 `Outcome`, at a `Stage`, once the clone got as far as its `Progress`: the
@@ -1032,8 +1033,8 @@ failure.
 Linux 6.8 or later. NVX's managed agent applies its host mapping table through
 it, beneath `/` in direct mode and beneath the container's assembled root in
 sandbox mode, and refuses an empty source, since its export is an aggregate,
-whose root lists its children; a layered `Root` applies its live shares and
-mappings through it.
+whose root lists its children; NVX's hosts, whose exports are all aggregates,
+send none; a layered `Root` applies its live shares and mappings through it.
 
 ### `nvx::guest::nvxs`
 

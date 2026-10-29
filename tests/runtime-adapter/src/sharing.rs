@@ -1,7 +1,8 @@
 //! The host directories and regular files that the host program shares with a layered root, as
 //! [`HostFsSharing`]: each a [`Share`] at an absolute guest path in the root, read-only or
 //! read-write, inside the host directories that the adapter authorizes, with host paths hidden
-//! inside them, and never at the guest targets that the root keeps for itself.
+//! inside them, and paths inside hidden ones shown again, and never at the guest targets that the
+//! root keeps for itself.
 //!
 //! [`HostFsSharing::plan`] plans their export with NVX's `filesystem::plan`, an `ExportPlan`,
 //! which a launch attaches itself, since an adapter's plan holds none; see
@@ -85,8 +86,9 @@ impl Share {
 }
 
 /// The host paths that a launch shares with the root, as the host program's options give them:
-/// the shares, the host paths hidden inside them, the guest trees that the adapter keeps for
-/// itself, and the host directories that the adapter authorizes.
+/// the shares, the host paths hidden inside them, those inside hidden ones that stay visible, the
+/// guest trees that the adapter keeps for itself, and the host directories that the adapter
+/// authorizes.
 ///
 /// Each list has a getter, named after it, a setter, which replaces it, and a method that adds an
 /// entry after the others, as its option does. [`plan`](Self::plan) plans the export of the
@@ -97,6 +99,8 @@ pub struct HostFsSharing {
     shares: Vec<Share>,
     /// Host paths that the export hides inside the shares: `--deny`.
     denied: Vec<PathBuf>,
+    /// Host paths inside hidden ones that the export shows again: `--allow`.
+    allowed: Vec<PathBuf>,
     /// Absolute guest paths of the trees that the adapter keeps for itself, beside those that the
     /// container root keeps: `--reserved`.
     reserved: Vec<String>,
@@ -135,6 +139,22 @@ impl HostFsSharing {
     /// Adds `path` after the other host paths that the export hides, as `--deny` does.
     pub fn add_denied(&mut self, path: impl Into<PathBuf>) {
         self.denied.push(path.into());
+    }
+
+    /// Returns the host paths inside hidden ones that the export shows again: `--allow`.
+    pub fn allowed(&self) -> &[PathBuf] {
+        &self.allowed
+    }
+
+    /// Sets the host paths inside hidden ones that the export shows again to `allowed`, in place
+    /// of the earlier ones.
+    pub fn set_allowed(&mut self, allowed: Vec<PathBuf>) {
+        self.allowed = allowed;
+    }
+
+    /// Adds `path` after the other host paths that the export shows again, as `--allow` does.
+    pub fn add_allowed(&mut self, path: impl Into<PathBuf>) {
+        self.allowed.push(path.into());
     }
 
     /// Returns the absolute guest paths of the trees that the adapter keeps for itself, beside
@@ -178,9 +198,11 @@ impl HostFsSharing {
     /// Each share must lie inside one of the [`roots`](Self::roots) once links are resolved, which
     /// this checks before it plans, and again of the directories and files that the plan exports,
     /// which `filesystem::plan` resolves anew. The plan maps each share at its target, read-only or
-    /// read-write, hides the [`denied`](Self::denied) paths inside the shares, and refuses targets
-    /// that the container root keeps, `ReservedTargets::CONTAINER_ROOT`, or that would take or
-    /// cover one of the [`reserved`](Self::reserved) trees.
+    /// read-write, hides the [`denied`](Self::denied) paths inside the shares, but for the
+    /// [`allowed`](Self::allowed) paths inside them, which stay visible, with the directories on
+    /// the way to them listing only them, and refuses targets that the container root keeps,
+    /// `ReservedTargets::CONTAINER_ROOT`, or that would take or cover one of the
+    /// [`reserved`](Self::reserved) trees.
     ///
     /// Fails with [`ErrorKind::Unsupported`](nvx::ErrorKind::Unsupported) for a reserved tree that
     /// is not an absolute and canonical guest path, a root that is not an accessible directory, a
@@ -242,6 +264,10 @@ impl HostFsSharing {
         request.denied = PathList {
             name: "--deny",
             paths: &self.denied,
+        };
+        request.allowed = PathList {
+            name: "--allow",
+            paths: &self.allowed,
         };
         let export = filesystem::plan(&request)?;
         for child in export.iter().flat_map(|export| &export.children) {

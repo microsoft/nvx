@@ -21,12 +21,13 @@
 //! A launch may also share host directories and files with the root, as
 //! [`HostFsSharing`](crate::sharing::HostFsSharing): each at an absolute guest path in the root,
 //! read-only or read-write, inside the host directories that the adapter authorizes, with host
-//! paths hidden inside them, and never at the guest targets that the root keeps for itself; see
-//! [`crate::sharing`]. NVX's `filesystem::plan` plans their export, an `ExportPlan`, which the
-//! launch attaches itself, since an adapter's plan holds none: OpenVMM exports the shares through
-//! its aggregate virtio-fs device, and appends the boot tokens with which the guest mounts the
-//! export, out of the root. The root configuration announces how many mappings the export's table
-//! holds, which the host sends once the guest is ready; see [`LayeredLaunch::table`].
+//! paths hidden inside them, and paths inside hidden ones shown again, and never at the guest
+//! targets that the root keeps for itself; see [`crate::sharing`]. NVX's `filesystem::plan` plans
+//! their export, an `ExportPlan`, which the launch attaches itself, since an adapter's plan holds
+//! none: OpenVMM exports the shares through its aggregate virtio-fs device, and appends the boot
+//! tokens with which the guest mounts the export, out of the root. The root configuration
+//! announces how many mappings the export's table holds, which the host sends once the guest is
+//! ready; see [`LayeredLaunch::table`].
 //!
 //! A launch may give the VM a network: a `SandboxNetwork`, the guest's address and the policy that
 //! OpenVMM enforces there, which [`read_network`] reads from a file in the serde form of a plan's

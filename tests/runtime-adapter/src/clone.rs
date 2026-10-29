@@ -16,8 +16,9 @@
 //! staging hashes, and a start never does. NVX's `ClonePlan` then checks the request against the
 //! leased generation before any VMM starts, from the metadata of the clone's files alone, takes
 //! only a network at the guest's address of the template's NIC, whose policy the clone's restore
-//! installs on the NIC in place of the template's complete deny-all policy, and only an export of
-//! one directory, which the clone's restore binds to the template's dormant filesystem slot.
+//! installs on the NIC in place of the template's complete deny-all policy, and only an export
+//! that a cold launch attaches, which the clone's restore attaches to the template's dormant
+//! filesystem slot as an aggregate.
 //!
 //! A clone's [record](CloneRecord) names the template store and the generation that the clone
 //! leases, beside the plan and the bindings, as the record of a launch names what it launched, so
@@ -129,9 +130,8 @@ impl Request {
     /// whose restore leaves the template's filesystem slot dormant.
     ///
     /// Fails as `HostFsSharing::plan` does, such as for a share outside every host directory that
-    /// the adapter authorizes. The plan of an export that the template's dormant filesystem slot
-    /// cannot bind, of more than one directory or file, or of a file, is NVX's `ClonePlan` to
-    /// refuse.
+    /// the adapter authorizes. An export that no clone takes, such as one that holds the template
+    /// store, or lies inside it, is NVX's `ClonePlan` to refuse.
     pub fn export(&self) -> Result<Option<ExportPlan>> {
         self.sharing.plan()
     }

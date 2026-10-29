@@ -34,12 +34,12 @@
 //! - [`ClonePlan::new`] plans the clone of a leased generation, as a [`CloneRequest`] asks, under
 //!   the lock that acquired the lease, before the clone's launch: it checks the clone's image
 //!   against its binding, its upper, in RAM or on the caller's scratch image, which it claims, its
-//!   memory target against the template, and its export, if it has one, a plan of one directory,
-//!   which the template's dormant filesystem slot binds, and refuses a request that the template
-//!   cannot serve, such as an image longer than the template's placeholder, the capacity of every
-//!   clone's image, or of other block sizes, a network that attaches a NIC where the template has
-//!   none, none where it has one, or one at another guest address than the template's, or an
-//!   export of several directories or of a file, before any VMM starts.
+//!   memory target against the template, and its export, if it has one, an aggregate of host
+//!   directories and files, as a cold launch exports it, which the template's dormant filesystem
+//!   slot binds, and refuses a request that the template cannot serve, such as an image longer
+//!   than the template's placeholder, the capacity of every clone's image, or of other block
+//!   sizes, or a network that attaches a NIC where the template has none, none where it has one,
+//!   or one at another guest address than the template's, before any VMM starts.
 //! - [`ClonePlan::launch`] launches the clone, as the launch that its lease reserves, once the
 //!   objects of its export are still those that its plan found: OpenVMM restores the generation's
 //!   snapshot in place with the clone's devices and export, and the clone's activation record

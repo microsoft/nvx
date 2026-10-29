@@ -56,8 +56,8 @@ const NETWORK_DOMAIN: &[u8] = b"nvx network policy\0";
 /// - the upper: a tmpfs, or the scratch, with the identity of its binding and the request's
 ///   journal policy;
 /// - the request's overlay mode and workload view;
-/// - the export, if the request has one: a directory, which stage 1's rule allows a clone alone,
-///   with the identity of its plan, and the number of its mappings, the plan's binds, from 1 to
+/// - the export, if the request has one: an aggregate, as every export plan is, with the identity
+///   of its plan, and the number of its mappings, the plan's binds, from 1 to
 ///   [`MAX_MAPPINGS`](crate::activation::MAX_MAPPINGS); or no export, and no mappings;
 /// - the clone's network, if the template has a NIC, whose policy the restore enforces there in
 ///   place of the template's complete deny-all policy: the identity of the network, its guest's
@@ -126,7 +126,7 @@ pub(super) fn build(
         None => (None, 0),
         Some(plan) => (
             Some(Export {
-                kind: ExportKind::Directory,
+                kind: ExportKind::Aggregate,
                 plan: export_identity(plan).on_host()?,
             }),
             plan.binds.len(),

@@ -1253,17 +1253,19 @@ the root, read-only or read-write. Neither exposes its fields: each field has a
 getter and a setter, and each list of `HostFsSharing` a method that adds an
 entry, as its option does. `HostFsSharing::plan` plans their export with NVX's
 `nvx::host::filesystem::plan`, through an `ExportRequest` of a mapping for each
-share at its target, the host paths that it hides inside the shares, and the
-guest targets that the root keeps: those of NVX's container root,
-`ReservedTargets::CONTAINER_ROOT`, and the trees that the adapter keeps for
-itself. Each share must lie inside a host directory that the adapter
-authorizes, once links are resolved: `HostFsSharing::plan` refuses one outside
-them before it plans, and checks the export's directories and files, which the
-planner resolves anew, again. The planner refuses what it cannot export, such
-as a target that takes or covers a reserved tree, or a read-only share inside
-a read-write one, which the host could not keep read-only, and a hidden
-path that does not exist inside a share, which nothing would hide once a
-workload creates it.
+share at its target, the host paths that it hides inside the shares, the host
+paths inside hidden ones that it shows again, with the directories on the way
+to them listing only them, and the guest targets that the root keeps: those of
+NVX's container root, `ReservedTargets::CONTAINER_ROOT`, and the trees that
+the adapter keeps for itself. Each share must lie inside a host directory that
+the adapter authorizes, once links are resolved: `HostFsSharing::plan` refuses
+one outside them before it plans, and checks the export's directories and
+files, which the planner resolves anew, again. The planner refuses what it
+cannot export, such as a target that takes or covers a reserved tree, or a
+read-only share inside a read-write one, which the host could not keep
+read-only, a hidden path that does not exist inside a share, which nothing
+would hide once a workload creates it, and a path to show again that lies
+inside no hidden one.
 
 `LayeredLaunch::share` attaches the export to the launch, which
 `LayeredLaunch::export` returns, and announces its table, of at most 4,096
@@ -1279,7 +1281,9 @@ the parts that it may write, still name what they named when the export was
 planned. Once the guest is ready, the launch sends the table,
 `LayeredLaunch::table`, in the [host's order](#the-hosts-order): each mapping
 before those inside its target. A [clone's](#clones) start takes the same
-shares, whose export NVX binds to the template's dormant filesystem slot.
+shares, whose export NVX attaches to the template's dormant filesystem slot as
+an aggregate, as a launch attaches it, and whose table it sends as a launch
+sends it.
 
 ### Networks
 
@@ -1369,6 +1373,15 @@ The steps of a launch, in order, then that of a command that reattaches, are:
 
 A value that names no step or action is a usage error. Without the variable,
 the hook does nothing.
+
+`start` takes the hook too, at `checked` alone, which it reaches once NVX's
+`ClonePlan` checked the [clone](#clones) against the leased generation: the
+bindings of its images, whose checked files the plan holds, and which claim its
+scratch image, if it has one, its processor and memory targets, its network,
+and the export of its shares, if any. The start has recorded nothing of the
+clone yet, and spawned nothing, and the clone's launch checks the export again,
+so a test may change a shared object there. A start refuses a hook at another
+step as a usage error.
 
 ### Templates
 
@@ -1601,11 +1614,13 @@ be the template's scratch's, its length included, its processor target,
 1, 2, 4, or 8, from the template's processors online at boot to its capacity,
 which the restore brings online, and the clone's repair verifies, its memory
 target, whole blocks of 128 MiB, from the template's RAM to its capacity, and
-its export, if it has one: the template's filesystem slot, which its capture
-left dormant, binds one directory, so the export must have exactly one, the
-export's root, with any other shares inside it, and the directory may neither
-lie inside the template store's directory nor hold it, so that no clone
-reaches the payload of a generation. A clone that
+its export, if it has one, which it checks as a cold launch's: from 1 to 256
+directories and files, the outermost shares, each of which the template's
+filesystem slot, which its capture left dormant, attaches as a child of an
+aggregate, with from 1 to 4,096 mappings, none of them at a target that the
+container root keeps, and none of the directories and files may lie inside the
+template store's directory or hold it, so that no clone reaches the payload of
+a generation. A clone that
 the template cannot serve fails there, before any VMM starts. The command then records the clone in the
 sandbox's store, as `clone::CloneRecord`, in the format of a launch's
 [record](#layered-roots), in the mode `clone`, with the template's kernel
@@ -1619,9 +1634,11 @@ generation's snapshot in place, through NVX's supervisor, as the launch that the
 lease reserves, with the clone's image at the capacity of the template's
 placeholder, over the scratch image, or, for a clone in RAM, with the
 template's scratch absent, which OpenVMM attaches with no file, so that no
-file of the host backs it, with the export's directory on the template's
-filesystem slot,
-and the template's NIC, if it has one, under the policy of the clone's
+file of the host backs it, with the export on the template's filesystem slot,
+which OpenVMM attaches as an aggregate, as a cold launch attaches it: each
+directory and file a child, read-only or read-write, with the paths that the
+export hides, shows again, or lets the guest write, and the template's NIC, if
+it has one, under the policy of the clone's
 network, which `--restore-network-policy` installs in place of the template's
 complete deny-all policy, and the restore sequence activates the clone through
 the
@@ -1629,8 +1646,9 @@ adapter's clone order, `host::CloneOrder`, which sends the clone's activation
 record in an `Activate`, checks the guest agent's build in its `Ready`, sends
 the export's mapping table, which the record announces, in order, as a launch
 sends its own, and then `Start`. The record names the export by the identity of
-its plan, and the table holds its mappings, of the directory itself, from an
-empty source, and of the paths inside it. A clone without shares has no
+its plan, and the table holds its mappings, each from a source that names its
+child by the child's index, as a cold launch's table does. A clone without
+shares has no
 export: its restore leaves the slot dormant, its record announces no mapping,
 and the sequence sends no table. If the guest fails a mapping, the sequence
 sends no more of the table, nor `Start`, and the clone fails, once the clone
@@ -1787,15 +1805,16 @@ Each command of `runtime-adapter-host` but `stage`, `list`, `inspect`, and
   bindings that it checked.
 
   SHARES,
-  `--share HOST:TARGET[:ro]... [--deny PATH]... [--reserved TARGET]... [--share-root DIR]...`,
+  `--share HOST:TARGET[:ro]... [--deny PATH]... [--allow PATH]... [--reserved TARGET]... [--share-root DIR]...`,
   shares each host directory or regular file HOST with the root, at the
   absolute guest path TARGET, which starts at the last `:/`, read-only with
   `:ro`, as [Shares](#shares) describes. Each HOST must lie inside a host
   directory DIR that the adapter authorizes, the export hides each host path
-  PATH inside the shares, and no TARGET may take or cover a guest tree that the
-  container root keeps, or a tree TARGET that the adapter keeps. The launch
-  refuses shares that it cannot export before it touches STORE, and checks the
-  export before it spawns the VM.
+  PATH of `--deny` inside the shares, but shows each host path PATH of
+  `--allow` inside a hidden one again, and no TARGET may take or cover a guest
+  tree that the container root keeps, or a tree TARGET that the adapter keeps.
+  The launch refuses shares that it cannot export before it touches STORE, and
+  checks the export before it spawns the VM.
 
   Once attached, the launch follows the [host's order](#the-hosts-order): it
   sends the root configuration, checks that the guest agent that assembled the
@@ -2047,8 +2066,9 @@ unless the teardown ended with 4, 8, or 9, which `run` then exits with, after
 the diagnostic. A
 value of `RUNTIME_ADAPTER_HOST_TIME` that is not a host's time is a
 usage error, as is a value of `RUNTIME_ADAPTER_STEP_HOOK` that sets no step
-hook, with status 2. Without arguments, the program reports the contract that
-it was built against.
+hook, or that sets one at another step than `checked` for a start, with
+status 2. Without arguments, the program reports the contract that it was
+built against.
 
 ## Tests
 
@@ -2516,7 +2536,8 @@ Windows:
 - shares: their text, `HOST:TARGET[:ro]`; the export of a table of shares
   inside an authorized directory, which maps each at its target, parents
   first, hides a denied path, and narrows the writes of a read-only directory
-  to the read-write share inside it; the root configuration that announces the
+  to the read-write share inside it, and an export that shows an allowed path
+  inside a hidden one again; the root configuration that announces the
   table, OpenVMM's arguments that attach the export, a launch that shares
   nothing, the export that the launch verifies before it prepares anything,
   and a table that the guest would refuse;
@@ -2525,7 +2546,8 @@ Windows:
   not one, or a share that is not accessible; reserved trees that are not
   canonical guest paths, targets that take or cover the adapter's or the
   container root's reserved targets, a read-only share inside a read-write
-  one, and a hidden path that does not exist inside a share;
+  one, a hidden path that does not exist inside a share, and an allowed path
+  that lies inside no hidden one;
 - the networks that a launch reads: the OpenVMM arguments of each element of a
   policy, which NVX's lowering renders after the plan's block devices, a policy
   that lets nothing through, which attaches no network device, the proxy's
@@ -2587,10 +2609,12 @@ host-only configuration, on Linux and Windows, without a hypervisor:
 Windows, the [step hook](#the-step-hook): the values of
 `RUNTIME_ADAPTER_STEP_HOOK` that set it, with each step and action, a path with
 colons, and those that set none, which the host program refuses with status
-2 for `launch`, `reattach`, and `stop`; and a pause, which does nothing, and
-pauses for no time, at another step, creates its file with its step's name at
-its own, waits until the file is gone, on Windows until a pending deletion of
-the file completes, and says how long it paused, and which a file that is
+2 for `launch`, `reattach`, and `stop`; a start's, which the host program takes
+at `checked`, and refuses at the other steps with status 2; and a pause, which
+does nothing, and pauses for no time, at another step, creates its file with
+its step's name at its own, waits until the file is gone, on Windows until a
+pending deletion of the file completes, and says how long it paused, and which
+a file that is
 there already fails.
 
 `tests/vm_steps.rs` checks the step hook on a real hypervisor, in the
@@ -2879,16 +2903,16 @@ directory that the starts authorize:
 | `a_clone_whose_vm_exits_once_a_stop_found_it_fails_before_its_lease_is_released` | In RAM, then a `stop` that the step hook pauses at `found`, while the test terminates the clone's VMM | Status 8, `reattached=live` and `stopped=exited`, and the record of a failure of an unknown cause, at the run, by the evidence of the clone's lost status, without a status of the guest's, once the VM exited, which quarantines nothing; the lease released, with the records; then another clone that starts and stops |
 | `a_tombstone_leaves_the_running_clone_of_its_generation_to_its_lease` | Over a scratch image, then a tombstone of its generation, through NVX's store | A start whose selection the store refuses, with status 10 and the record of an `ineligible` generation, by the evidence of its tombstone, without a lease; the running clone, which reattaches, probes, runs an execution, and stops, which releases its lease; and the generation's snapshot unchanged |
 | `the_lease_of_a_start_that_ended_before_its_record_is_released_through_its_template_store` | In RAM, in a sandbox that NVX's store leased a generation to, as a start that ended before it recorded the clone leaves it: first moved, with another sandbox at its lease's path, which holds a lease of its own, then none; then in place, without a record of a clone, then with the record of an earlier clone, of another template | For the moved sandbox, a `stop` and a `reattach` that refuse it, since the sandbox at its lease's path does not hold its lease, and leave that sandbox's lease; in place, a stop that finds the clone `ended` at `planned`, and keeps the lease, whose template store no record names; a stop with another template store, which the release refuses; a `reattach` or a `stop` with `--template` naming the lease's own, which releases it; and a start and a stop in the sandbox after each |
-| `a_clone_maps_its_export_beneath_its_root_before_its_sandbox_starts` | Over a scratch image, sharing one host directory: the directory itself, read-only, a read-write directory inside it, at its target there, a read-only file, and a read-write directory, with a file hidden | Started, with four mappings, and a record that names the export, a directory, by the identity of its plan, with four mappings; on Linux, the VMM's one `--mount`, of the directory, read-write; the export mounted once, read-write, `nosuid`, and `nodev`, below a `hostfs` of mode 0700 that root owns; the mappings below the root, and nothing else, in the table's order, each with its access, `nosuid`, and `nodev`, showing what the host holds but for the hidden file, with the missing targets created empty in the upper; the same from an execution as user ID 0; and writes through the writable mappings alone, which the host's directory holds, before and after the stop |
-| `clones_at_once_see_only_their_own_exports` | Four at once: one with a read-write export of its own and a generated machine ID, two over the same read-only export, over a scratch image and in RAM, and one without an export | Each with an export started with one mapping, and a record that names it by the identity of its plan, the same for the clones of one export, and on Linux, one `--mount`, read-write or read-only, as the mapping needs; each export mounted read-write, even where its mapping is read-only; below the root, the mapping, beside the bind of a generated machine ID; each clone's own directory, with its access; without an export, no export in the record, no mapping, no `--mount` on Linux, no export mounted, and nothing below the root; the `entries` probe, whose helper writes the root's machine ID, failing with `EROFS` where the generated one is bound; the host's directories with what the writable export took alone; then each stop releases its lease |
-| `a_start_refuses_an_export_that_a_dormant_filesystem_slot_cannot_bind_before_any_vmm_starts` | Sharing two host directories, and sharing a file alone | Status 8, with NVX's reason, and the record of a failure of the request, at the plan, without a VM, by the evidence of invalid mappings, which quarantines nothing; the lease released, and the host's directories unchanged |
+| `a_clone_maps_an_aggregate_of_directories_and_files_beneath_its_root_before_its_sandbox_starts` | Over a scratch image, sharing directories and files of a host directory: a read-only directory, with a read-write directory inside it, at its target there, a read-only file, a read-write file, and a read-write directory, with a file of the first hidden, and of the last a directory hidden, but a file in it shown again | Started, with five mappings, and a record that names the export, an aggregate, by the identity of its plan, with five mappings; on Linux, the VMM's `--mount-aggregate` and one `--mount-child` per directory and file, in order, the first directory read-write, each file with its access and `file`, then the hidden paths, the one shown again, and the one that the guest may write, and no `--mount`; the export mounted once, read-write, `nosuid`, and `nodev`, below a `hostfs` of mode 0700 that root owns; the mappings below the root, and nothing else, in the table's order, each with its access, `nosuid`, and `nodev`, showing what the host holds but for the hidden files, and the hidden directory, which lists the file shown again alone, with the missing targets created empty in the upper; the same from an execution as user ID 0; and writes through the writable mappings alone, which the host's directory holds, before and after the stop |
+| `clones_at_once_see_only_their_own_exports` | Four at once: one with a read-write export of its own and a generated machine ID, two over the same read-only export, over a scratch image and in RAM, and one without an export | Each with an export started with one mapping, and a record that names it, an aggregate, by the identity of its plan, the same for the clones of one export, and on Linux, the VMM's `--mount-aggregate`, with one `--mount-child`, read-write or read-only, as the mapping needs; each export mounted read-write, even where its mapping is read-only; below the root, the mapping, beside the bind of a generated machine ID; each clone's own directory, with its access; without an export, no export in the record, no mapping, none of OpenVMM's options of an export on Linux, no export mounted, and nothing below the root; the `entries` probe, whose helper writes the root's machine ID, failing with `EROFS` where the generated one is bound; the host's directories with what the writable export took alone; then each stop releases its lease |
+| `a_start_refuses_an_export_whose_mapped_objects_changed_before_any_vmm_starts` | Sharing a read-write directory, a directory inside it at a target of its own, and a read-only file; while the step hook pauses each start at `checked`, a directory replaces the file, then another directory the one inside the read-write directory | Status 8, with NVX's reason, and the record of a failure of the request, at the launch, without a VM, by the evidence of invalid mappings, which quarantines nothing; no VMM's log, launch journal, runtime record, or record of the clone's launch in the sandbox, and the lease released |
 | `a_clone_whose_mapping_fails_ends_before_its_sandbox_starts` | Over a scratch image, sharing a host directory whose second mapping puts a directory onto a file of the image | Status 8, a `Ready`, but no start, and the record of a failure of an unknown cause, at the start, at the clone's `Ready`, by the evidence of the protocol, once the VM exited with the guest's success, or NVX terminated it, with the guest's report that the table failed after its first mapping; nothing quarantined, and the lease released, with the records; the host's directory unchanged |
 | `a_template_without_a_nic_serves_clones_without_a_network` | Two at once, without a network, and with one that lets nothing through; then, once they stopped, one of each network with a NIC of the template scenarios | The first two started, with no network in their records, on Linux no argument of a network of their VMMs, no network device, and the image's own `/etc/resolv.conf`, an empty file of mode 0644, which no bind holds, and root may write; then for each of the others, status 8, with NVX's reason, and the record of a failure of the request, at the plan, without a VM, by the evidence of invalid settings, which quarantines nothing; the lease released |
 | `one_template_serves_the_clones_of_every_network_policy_at_its_guest_s_address` | Of a template of host-loopback access both ways, with a forward: in turn, one of each network with a NIC, of egress allowed, with outbound host-loopback access or without, of one TCP rule to the gateway, with outbound host-loopback access, of a proxy, of ingress allowed, of host-loopback access both ways, and of that access with a forward; then one at the guest's address `192.0.2.3/24`, one of a network that lets nothing through, and one without a network | Each of the first started, with one network device, on Linux the VMM's `--restore-network-policy`, then the arguments of the clone's own policy, without `--net`, and a record that names the policy, the gateway's DNS server for the networks with egress allowed, the proxy's URL for the proxy-only one, and a publication of the guest's listeners for those with ingress or host-loopback access both ways; an execution's TCP connections to the gateway, at the ports of the host's listeners on host loopback, that reach the allow rule's alone, the proxy's alone, every one with egress and outbound host-loopback access, and none otherwise, as the host's listeners confirm; a listener of the guest, as nobody, that the host reaches at its port of host loopback, with a line each way, exactly with host-loopback access both ways, once the clone's announcer announced it, and through the forward's port; and executions as user ID 0 that ask for `CAP_NET_BIND_SERVICE` or `CAP_NET_RAW` refused with `EPERM` where the listeners are published, and started elsewhere, as one that asks for `CAP_CHOWN` everywhere; then for each of the others, status 8, with NVX's reason, and the record of a failure of the request, at the plan, without a VM, by the evidence of invalid settings, which quarantines nothing; the lease released; each clone's policy differs from the others' |
 | `a_forward_whose_port_another_socket_holds_fails_the_clone_as_the_host_s` | Of a template of a network with egress allowed, one of host-loopback access both ways, with a forward of a port of host loopback that a listener of the host holds; then, once the listener closed, one of the same network | Status 8, with OpenVMM's cause, that it cannot create the forward's socket, and the record of a failure of the host, at the restore, once the VMM exited before its restore-ready event, by the evidence of the forward's bind, which quarantines nothing; the lease released, with the records; then a clone that starts and stops |
 | `a_clone_binds_the_resolver_of_its_policy_s_dns_server_read_only` | Of a template of a proxy-only network, two at once, of a network with egress allowed, with a generated machine ID, and with the image's own; then, once they stopped, a GPT disk whose layer holds a regular file `etc`, with the image's own machine ID | Each of the first two started, with a record that names the gateway's DNS server, one network device, and at `/etc/resolv.conf`, a file of mode 0444 that names the server, held by a bind that is read-only, `nosuid`, and `nodev`, after the bind of the generated machine ID, below the root, whose file system refuses a write as root, with nothing in the upper there; and a TCP connection to the server's DNS port, which the gateway's DNS proxy accepts without the host's resolver; then status 8, since no bind can hold the resolver configuration below a file, and the record of a failure of the request, at the activation, once the VM exited, by the evidence of invalid settings, with the guest's status 57; nothing quarantined, and the lease released, with the records |
 | `a_clone_s_executions_find_the_proxy_of_its_policy` | Of a template of a network with egress allowed, one of a proxy-only network, with an execution as user ID 0 that runs `env`, then one that names its own `HTTPS_PROXY` | A record that names the proxy's URL, `http://192.0.2.1:PORT`, at the port of the proxy's listener, and no DNS server; the first execution with its own entry, then the URL in `http_proxy`, `https_proxy`, `HTTP_PROXY`, and `HTTPS_PROXY`; the second with exactly its own environment; one network device, and the image's own `/etc/resolv.conf`, which no bind holds |
-| `a_clone_of_a_template_with_a_nic_maps_its_export_beside_its_resolver` | Of a template of a network with egress allowed, one with a generated machine ID, sharing a host directory read-write | Started, with one mapping, and a record that names the export and the gateway's DNS server; on Linux, the VMM's one `--mount`, read-write, and its `--restore-network-policy`, then the arguments of the clone's policy; below the root, the binds of the machine ID and of the resolver configuration, then the export's mapping; the export's directory, and a write through it, which the host's directory holds after the stop |
+| `a_clone_of_a_template_with_a_nic_maps_its_export_beside_its_resolver` | Of a template of a network with egress allowed, one with a generated machine ID, sharing a host directory read-write | Started, with one mapping, and a record that names the export and the gateway's DNS server; on Linux, the VMM's `--mount-aggregate`, with one `--mount-child`, read-write, and its `--restore-network-policy`, then the arguments of the clone's policy; below the root, the binds of the machine ID and of the resolver configuration, then the export's mapping; the export's directory, and a write through it, which the host's directory holds after the stop |
 | `a_selection_that_names_no_template_leases_nothing` | A start that names a template store that does not exist, then, once `remove` retired the generation, which no lease kept, a start of it | Status 10, with the record of a selection that names no template, by the evidence `no-store`, then `retired`, without a lease or a VM; and a store that indexes no generation |
 | `a_run_runs_one_execution_in_its_clone_then_tears_the_clone_down` | A run over a scratch image, as nobody, whose execution names its environment and its working directory, and ends with status 3, then a run in RAM, as nobody, whose execution names an identity of its own | Each with status 0, in one command: the preflight's `staged`, the clone started as a start starts one, the execution, and a stop that releases the lease, without a VM; the first execution's output, of the Ubuntu image's root, as nobody, in its working directory, with its environment, and its status; the second refused with `EINVAL`; no lease left, and the payload with nothing but the capture's files |
 | `a_run_whose_clone_does_not_start_runs_nothing` | A run that names a template store that does not exist, one with a clock fixture past the restore window, and one over a scratch image of zeros | Once the preflight staged the images, status 10, with the record of a selection that names no template, by the evidence `no-store`, then of an `expired` generation, without a lease or a VM; then status 8, with the record of a failure of the request at the activation, once the VM exited, the lease released, and no execution or stop |
@@ -2952,7 +2976,7 @@ layered roots, captures of templates, and the starts and runs of their clones.
 | `clone_start` | `the_host_program_refuses_options_that_do_not_make_a_run` | The command lines of `run` that the host program refuses, its execution's included, each with status 2, and a clock fixture that is not a host's time |
 | `clone_start` | `the_host_program_refuses_options_that_do_not_make_a_start` | The command lines of `start` that the host program refuses, each with status 2, and a clock fixture that is not a host's time |
 | `host_session` | `a_clone_s_order_ends_its_table_at_a_mapping_that_the_guest_fails_and_stops_the_guest` | A clone's order sends no more of its table, nor `Start`, once the guest fails a mapping, and asks the guest to stop |
-| `host_session` | `a_clone_s_order_maps_the_root_of_its_export_with_an_empty_source` | A clone's order sends the mapping of its export's root, whose source is empty, in its table |
+| `host_session` | `a_clone_s_order_maps_its_export_s_children_by_their_indices` | A clone's order sends its table as a cold launch's, whose sources name each path by the index of the export's child that holds it |
 | `host_session` | `a_clone_s_order_sends_its_record_first_then_starts_its_sandbox_as_after_a_cold_boot` | A clone's order sends its activation record first, returns the activation that `Ready` reports, then sends the table in parts and `Start`, and fails on a refusal, a deadline, another build, or an answer that does not decode |
 | `host_session` | `a_clone_s_session_that_ends_after_its_bootstrap_is_lost_and_the_next_takes_the_same_record` | A clone's session that a reset, the end of its stream, or its transport ended is lost, and the next session sends the same record first |
 | `host_session` | `a_mapping_that_the_guest_fails_ends_the_table_and_the_host_stops_the_guest` | A mapping that the guest fails, at the first, a middle, or the last part, ends the table without `Start`, and the host stops the guest and learns how the stop ended |
@@ -2985,9 +3009,9 @@ layered roots, captures of templates, and the starts and runs of their clones.
 | `layered_launch` | `a_launch_reads_only_the_networks_that_the_plan_takes` | A launch refuses the network files that the plan refuses, each for the plan's reason |
 | `layered_launch` | `a_launch_records_what_it_launched` | A launch's record holds the bindings that it checked, over a scratch image and over RAM, and a VM without a layered root has one too |
 | `layered_launch` | `a_launch_refuses_images_that_are_not_staged_or_changed_since` | A launch refuses images that the store does not stage, of another format or identity, and images that changed, were replaced, or are gone since they were staged |
-| `layered_launch` | `a_launch_refuses_shares_that_it_cannot_export` | A launch refuses shares outside the authorized directories, inaccessible ones, reserved targets, a read-only share inside a read-write one, and a hidden path that does not exist |
+| `layered_launch` | `a_launch_refuses_shares_that_it_cannot_export` | A launch refuses shares outside the authorized directories, inaccessible ones, reserved targets, a read-only share inside a read-write one, a hidden path that does not exist, and an allowed path inside no hidden one |
 | `layered_launch` | `a_launch_renders_each_element_of_its_network_through_the_plan` | OpenVMM's arguments of each element of a policy, after the plan's block devices, the proxy's URL, and the publication of listeners, as NVX's lowering renders them |
-| `layered_launch` | `a_launch_shares_host_paths_inside_the_authorized_directories` | The export of shares inside an authorized directory maps each at its target, parents first, hides a denied path, and comes with the root configuration and OpenVMM's arguments that attach it |
+| `layered_launch` | `a_launch_shares_host_paths_inside_the_authorized_directories` | The export of shares inside an authorized directory maps each at its target, parents first, hides a denied path, shows an allowed path inside a hidden one again, and comes with the root configuration and OpenVMM's arguments that attach it |
 | `layered_launch` | `a_layered_launch_hands_openvmm_the_checked_images` | OpenVMM's arguments name the checked files, by the descriptors that OpenVMM inherits on Linux and by their final paths on Windows, without a workload identity or a managed lifecycle |
 | `layered_launch` | `a_layered_launch_passes_what_the_guest_checks_as_it_is` | A launch passes on the options that the guest checks as they are |
 | `layered_launch` | `a_layered_launch_plans_its_blocks_and_boot_tokens_with_the_adapters_plan` | The adapter's plan of a layered launch: its block devices and boot tokens, without the sandbox profile's settings, and the sizes of the images |
@@ -3055,7 +3079,7 @@ layered roots, captures of templates, and the starts and runs of their clones.
 | `vm_template` | `a_template_without_a_network_has_no_nic` | `create` captures a template without a NIC, whose key holds what it asked for, its processor online at boot among it, and serves it again without a capture |
 | `vm_template` | `the_networks_of_every_policy_at_one_guest_s_address_share_one_template` | `create` of a network of any policy captures one template, whose NIC the capture attaches under the complete deny-all policy, and the creations of the networks of every other policy at the same guest's address serve it without a capture |
 | `vm_clone` | `a_clone_binds_the_resolver_of_its_policy_s_dns_server_read_only` | A clone of a network with egress allowed binds a resolver file that names the gateway's DNS server read-only at `/etc/resolv.conf`, and a TCP connection to the server's DNS port opens, which the gateway's DNS proxy accepts; one whose resolver cannot be bound ends with status 57 |
-| `vm_clone` | `a_clone_maps_its_export_beneath_its_root_before_its_sandbox_starts` | A clone maps its export's mappings beneath its root before its sandbox starts, each with its access, a denied file hidden, and writes reach the host's directory through the writable ones alone |
+| `vm_clone` | `a_clone_maps_an_aggregate_of_directories_and_files_beneath_its_root_before_its_sandbox_starts` | A clone maps an aggregate of host directories and files beneath its root before its sandbox starts, each with its access, a hidden file, and a hidden directory that shows a file again, and writes reach the host's directories and file through the writable ones alone |
 | `vm_clone` | `a_clone_of_a_template_with_a_nic_maps_its_export_beside_its_resolver` | A clone of a template with a NIC maps its export below the binds of its machine ID and of its resolver configuration |
 | `vm_clone` | `a_clone_reads_no_more_of_its_disks_than_its_root_needs` | A clone's restore reads less than an eighth of each disk, before the guest reads each to its end |
 | `vm_clone` | `a_clone_refuses_a_scratch_image_whose_upper_an_earlier_clone_used` | A scratch image whose upper an earlier clone used ends the clone before it is ready, with status 54 |
@@ -3076,7 +3100,7 @@ layered roots, captures of templates, and the starts and runs of their clones.
 | `vm_clone` | `a_run_whose_clone_does_not_start_runs_nothing` | A run whose selection the store refuses ends with status 10, and one whose clone fails with status 8, without an execution or a stop |
 | `vm_clone` | `a_run_whose_clone_s_vm_exits_during_its_execution_ends_with_the_clone_s_failure` | A run whose clone's VM exits during its execution ends with the clone's failure, status 8, once its stop found that the VM exited, quarantines nothing, and releases its lease |
 | `vm_clone` | `a_selection_that_names_no_template_leases_nothing` | A start of a template store that does not exist, or of a generation that `remove` retired, ends with status 10 and the refusal's record, without a lease or a VM |
-| `vm_clone` | `a_start_refuses_an_export_that_a_dormant_filesystem_slot_cannot_bind_before_any_vmm_starts` | An export of two directories, or of a file alone, is refused with status 8 before any VMM starts |
+| `vm_clone` | `a_start_refuses_an_export_whose_mapped_objects_changed_before_any_vmm_starts` | An export whose mapped file, or pinned directory, another object replaced once NVX's plan checked the clone is refused with status 8 at the clone's launch, before any VMM starts |
 | `vm_clone` | `a_start_refuses_what_the_template_cannot_serve_before_any_vmm_starts` | Images, scratch images, and memory targets that the template cannot serve are refused with status 8 before any VMM starts, unstaged images with status 1, and a generation that the store does not hold with status 10 |
 | `vm_clone` | `a_template_without_a_nic_serves_clones_without_a_network` | A template without a NIC serves clones without a network, or with one that lets nothing through, and refuses those of a network with a NIC with status 8 |
 | `vm_clone` | `a_tombstone_leaves_the_running_clone_of_its_generation_to_its_lease` | A tombstone refuses new clones of its generation with status 10, while the running clone serves on, and releases its lease once it stops |

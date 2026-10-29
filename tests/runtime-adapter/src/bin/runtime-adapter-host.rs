@@ -46,17 +46,19 @@
 //!   that the checks opened, which it holds until the guest has assembled the root, or until it has
 //!   torn down a launch that failed, and records the plan, with its network, and the bindings.
 //!
-//!   SHARES, `--share HOST:TARGET[:ro]... [--deny PATH]... [--reserved TARGET]...
-//!   [--share-root DIR]...`, shares each host directory or regular file HOST with the root, at the
-//!   absolute guest path TARGET, read-only with `:ro`, and read-write otherwise. The guest path
-//!   starts at the last `:/`. Each HOST must lie inside a host directory DIR, which the adapter
-//!   authorizes, once links are resolved: the launch refuses one outside them before it plans the
-//!   export, with NVX's `filesystem::plan`. The export hides each host path PATH inside the
-//!   shares, and no TARGET may take or cover a guest tree that the container root keeps, or a tree
-//!   TARGET that `--reserved` keeps for the adapter. The launch refuses a request that
-//!   `filesystem::plan` refuses, such as one with a read-only share inside a read-write one,
-//!   before it spawns the VM, and checks the export with `ExportPlan::verify` before it spawns it.
-//!   OpenVMM exports the shares; see `runtime_adapter::sharing::HostFsSharing`.
+//!   SHARES, `--share HOST:TARGET[:ro]... [--deny PATH]... [--allow PATH]...
+//!   [--reserved TARGET]... [--share-root DIR]...`, shares each host directory or regular file
+//!   HOST with the root, at the absolute guest path TARGET, read-only with `:ro`, and read-write
+//!   otherwise. The guest path starts at the last `:/`. Each HOST must lie inside a host directory
+//!   DIR, which the adapter authorizes, once links are resolved: the launch refuses one outside
+//!   them before it plans the export, with NVX's `filesystem::plan`. The export hides each host
+//!   path PATH of `--deny` inside the shares, but shows again each host path PATH of `--allow`
+//!   inside a hidden one, with the directories on the way to it listing only it, and no TARGET may
+//!   take or cover a guest tree that the container root keeps, or a tree TARGET that `--reserved`
+//!   keeps for the adapter. The launch refuses a request that `filesystem::plan` refuses, such as
+//!   one with a read-only share inside a read-write one, before it spawns the VM, and checks the
+//!   export with `ExportPlan::verify` before it spawns it. OpenVMM exports the shares; see
+//!   `runtime_adapter::sharing::HostFsSharing`.
 //!
 //!   Once attached, the launch follows the host's order; see `runtime_adapter::host`. It sends the
 //!   root configuration, which announces how many mappings the export's table holds, and waits for
@@ -158,9 +160,9 @@
 //!   `stage` stages them, its processor target, 1, 2, 4, or 8, from the template's processors
 //!   online at boot to its capacity, which the restore brings online, its memory target, in whole
 //!   blocks, from the template's RAM to its
-//!   capacity, and its export, if it has one, which must export exactly one directory, which
-//!   neither lies inside the template store's directory nor holds it: the export's root, which
-//!   the clone's restore binds to the template's dormant filesystem slot.
+//!   capacity, and its export, if it has one, which must be one that a cold launch attaches, of
+//!   directories and files that neither lie inside the template store's directory nor hold it:
+//!   the clone's restore attaches it to the template's dormant filesystem slot as an aggregate.
 //!   A request that the template cannot serve fails there, before any VMM starts. The command
 //!   records the clone in STORE, with the template store and the generation; see
 //!   `runtime_adapter::clone::CloneRecord`. Once NVX checked the export again, with
@@ -401,9 +403,12 @@
 //! For tests, `launch`, `reattach`, and `stop` take a step hook from the variable
 //! `RUNTIME_ADAPTER_STEP_HOOK`, which pauses the command at a named step, for a time that a launch
 //! leaves out of its deadline, or exits it there without unwinding, with status 5; see
-//! `runtime_adapter::hook`. `start` and `run` take the
-//! host's time, at which the store checks the generation's eligibility, from the variable
-//! `RUNTIME_ADAPTER_HOST_TIME`, if it is set, as a clock fixture, such as another boot's; see
+//! `runtime_adapter::hook`. `start` takes one at `checked` alone: once NVX's `ClonePlan` checked
+//! the clone against the leased generation, and holds the files that its checks opened, before the
+//! start records the clone, and before the clone's launch checks its export again. `start` and
+//! `run` take the host's time, at which the store checks the generation's eligibility, from the
+//! variable `RUNTIME_ADAPTER_HOST_TIME`, if it is set, as a clock fixture, such as another boot's;
+//! see
 //! `runtime_adapter::clone::HOST_TIME_VARIABLE`.
 //!
 //! They exit with 0 once they did what they were asked, `exec` once every execution finished,
@@ -420,8 +425,8 @@
 //! does once its execution failed to run, after the teardown, unless the teardown ended with 4, 8,
 //! or 9, as when the clone's VM exited during the execution, which `run` then exits with, after
 //! the diagnostic. Anything else is a usage error, with status 2, as is a value of
-//! `RUNTIME_ADAPTER_STEP_HOOK` that sets no step hook, or of `RUNTIME_ADAPTER_HOST_TIME` that is
-//! not a host's time.
+//! `RUNTIME_ADAPTER_STEP_HOOK` that sets no step hook, or a step hook of a start at another step
+//! than `checked`, or a value of `RUNTIME_ADAPTER_HOST_TIME` that is not a host's time.
 
 use std::env;
 use std::error::Error;
@@ -463,7 +468,7 @@ use runtime_adapter::clone::{CloneRecord, host_time_from_env};
 use runtime_adapter::exec::{self, AccountMode, HostExecution, Start};
 use runtime_adapter::frame::{MAX_BODY, Message};
 use runtime_adapter::generations::{self, Entry};
-use runtime_adapter::hook::{Step, StepHook};
+use runtime_adapter::hook::{STEP_HOOK, Step, StepHook};
 use runtime_adapter::host::{self, Client, ClientError, CloneOrder, Executions, OrderError};
 use runtime_adapter::initramfs;
 use runtime_adapter::layered::{Bindings, LaunchRecord, LayeredLaunch, read_network, with_proxy};
@@ -562,8 +567,8 @@ const USAGE: &str = concat!(
     "            [--overlay-mode MODE] [--scratch-journal POLICY]",
     " [--first-partition-bound BYTES]\n",
     "            [--workload-identity UID:GID] [--network FILE]\n",
-    "            [--share HOST:TARGET[:ro]... [--deny PATH]... [--reserved TARGET]...",
-    " [--share-root DIR]...]]\n",
+    "            [--share HOST:TARGET[:ro]... [--deny PATH]... [--allow PATH]...\n",
+    "             [--reserved TARGET]... [--share-root DIR]...]]\n",
     "       runtime-adapter-host (create | refresh) STORE --guest-agent PATH --distro FORMAT:PATH",
     " --distro-identity UUID\n",
     "           [--hypervisor NAME] [--guest-build BUILD] [--cpu-profile PROFILE]",
@@ -583,8 +588,8 @@ const USAGE: &str = concat!(
     " [--scratch-journal POLICY]\n",
     "           [--first-partition-bound BYTES] [--machine-id (image | generated)]",
     " [--network FILE]\n",
-    "           [--share HOST:TARGET[:ro]... [--deny PATH]... [--reserved TARGET]...",
-    " [--share-root DIR]...]\n",
+    "           [--share HOST:TARGET[:ro]... [--deny PATH]... [--allow PATH]...\n",
+    "            [--reserved TARGET]... [--share-root DIR]...]\n",
     "       runtime-adapter-host run STORE --template TEMPLATES --generation G",
     " --distro FORMAT:PATH\n",
     "           --distro-identity UUID --upper (scratch:PATH | ram) [--guest-build BUILD]",
@@ -593,8 +598,8 @@ const USAGE: &str = concat!(
     " [--scratch-journal POLICY]\n",
     "           [--first-partition-bound BYTES] [--machine-id (image | generated)]",
     " [--network FILE]\n",
-    "           [--share HOST:TARGET[:ro]... [--deny PATH]... [--reserved TARGET]...",
-    " [--share-root DIR]...] EXECUTION\n",
+    "           [--share HOST:TARGET[:ro]... [--deny PATH]... [--allow PATH]...\n",
+    "            [--reserved TARGET]... [--share-root DIR]...] EXECUTION\n",
     "       runtime-adapter-host probe STORE PROBE... [--guest-build BUILD]\n",
     "       runtime-adapter-host exec STORE [--guest-build BUILD] EXECUTION [';' EXECUTION]...\n",
     "           EXECUTION: [--identity UID:GID [--groups GID,...] [--capabilities N,...]",
@@ -693,6 +698,8 @@ enum Command {
         request: Box<CloneOptions>,
         /// The host's time, for tests, if `RUNTIME_ADAPTER_HOST_TIME` sets one.
         time: Option<HostTime>,
+        /// The step hook, for tests, if `RUNTIME_ADAPTER_STEP_HOOK` sets one, at `checked`.
+        hook: Option<StepHook>,
     },
     /// Start a clone of a generation of a template, run one execution in its root, and tear it
     /// down.
@@ -952,7 +959,7 @@ struct Options {
     machine_id: Option<MachineIdMode>,
     /// `--workload-identity`.
     workload_identity: Option<(u32, u32)>,
-    /// `--share`, `--deny`, `--reserved`, and `--share-root`, in order.
+    /// `--share`, `--deny`, `--allow`, `--reserved`, and `--share-root`, in order.
     sharing: HostFsSharing,
     /// `--network`.
     network: Option<PathBuf>,
@@ -1047,7 +1054,8 @@ fn main() -> ExitCode {
             guest_build,
             request,
             time,
-        } => start(&store, &guest_build, &request, time),
+            hook,
+        } => start(&store, &guest_build, &request, time, hook.as_ref()),
         Command::Run {
             store,
             guest_build,
@@ -1073,7 +1081,7 @@ fn main() -> ExitCode {
 }
 
 /// Parses the program's arguments, with the step hook that `RUNTIME_ADAPTER_STEP_HOOK` sets for a
-/// launch, or a reattach or a stop, or says why they are not a command.
+/// launch, a start, a reattach, or a stop, or says why they are not a command.
 fn parse(arguments: Vec<OsString>) -> Result<Command, String> {
     let mut arguments = arguments.into_iter();
     let Some(name) = arguments.next() else {
@@ -1238,6 +1246,7 @@ fn parse(arguments: Vec<OsString>) -> Result<Command, String> {
             guest_build,
             request: Box::new(clone_options(&name, options)?),
             time: host_time_from_env()?,
+            hook: start_hook()?,
         },
         "probe" if probes.is_empty() => return Err("probe needs a probe".to_owned()),
         "probe" => Command::Probe {
@@ -1374,6 +1383,7 @@ fn parse_option(
             options.sharing.add_share(share);
         }
         ("launch" | "start", "--deny") => options.sharing.add_denied(value),
+        ("launch" | "start", "--allow") => options.sharing.add_allowed(value),
         ("launch" | "start", "--reserved") => options.sharing.add_reserved(text(value)?),
         ("launch" | "start", "--share-root") => options.sharing.add_root(value),
         ("launch" | "create" | "start", "--network") if options.network.is_none() => {
@@ -1424,10 +1434,11 @@ fn parse_option(
 }
 
 /// Says why the options of `sharing`, of a launch, a start, or a run, are not a command's:
-/// `--deny`, `--reserved`, or `--share-root` without a `--share`.
+/// `--deny`, `--allow`, `--reserved`, or `--share-root` without a `--share`.
 fn check_shares(sharing: &HostFsSharing) -> Result<(), String> {
     let options = [
         ("--deny", !sharing.denied().is_empty()),
+        ("--allow", !sharing.allowed().is_empty()),
         ("--reserved", !sharing.reserved().is_empty()),
         ("--share-root", !sharing.roots().is_empty()),
     ];
@@ -1437,6 +1448,19 @@ fn check_shares(sharing: &HostFsSharing) -> Result<(), String> {
         return Err(format!("{option} needs --share"));
     }
     Ok(())
+}
+
+/// Returns the step hook that `RUNTIME_ADAPTER_STEP_HOOK` sets for a start, if any, or says why it
+/// sets none: a start takes it at `checked` alone, once NVX's `ClonePlan` checked the clone.
+fn start_hook() -> Result<Option<StepHook>, String> {
+    match StepHook::from_env()? {
+        Some(hook) if hook.step != Step::Checked => Err(format!(
+            "{STEP_HOOK} names the step {}, but a start takes the hook at {} alone",
+            hook.step,
+            Step::Checked
+        )),
+        hook => Ok(hook),
+    }
 }
 
 /// Parses the arguments of `exec` after its sandbox store `store`: its executions, each ended by
@@ -2364,12 +2388,13 @@ impl Drop for TemporaryDirectory {
 /// Starts a clone of the generation of the template store that `clone` names, as it asks, in the
 /// sandbox store `store`, which it creates if needed, with the guest agent's build `guest_build`,
 /// at the host's time `time`, or at the time that `HostTime::now` samples without one, as
-/// [`start_clone`] does, and leaves it running.
+/// [`start_clone`] does, with the step hook `hook`, if any, and leaves it running.
 fn start(
     store: &Path,
     guest_build: &str,
     clone: &CloneOptions,
     time: Option<HostTime>,
+    hook: Option<&StepHook>,
 ) -> Result<ExitCode, String> {
     // A network that the plan refuses fails the start before anything else, as it fails a launch,
     // then an image, or shares, that it refuses.
@@ -2377,7 +2402,7 @@ fn start(
     // The clone keeps running once the command lets go of its VM, its session, and its sandbox's
     // lock, as once a launch committed.
     Ok(
-        match start_clone(store, guest_build, clone, planned, time)? {
+        match start_clone(store, guest_build, clone, planned, time, hook)? {
             Ok(_running) => ExitCode::SUCCESS,
             Err(status) => status,
         },
@@ -2401,7 +2426,8 @@ struct Running {
 /// Starts a clone of the generation of the template store that `clone` names, as `planned`, its
 /// plan, asks, in the sandbox store `store`, which it creates if needed, with the guest agent's
 /// build `guest_build`, at the host's time `time`, or at the time that `HostTime::now` samples
-/// without one, and prints what it did. Returns the clone, which runs, once it committed the
+/// without one, and prints what it did. The step hook `hook`, if any, acts at `checked`, once
+/// NVX's `ClonePlan` checked the clone. Returns the clone, which runs, once it committed the
 /// clone's launch, or the status with which the command ends otherwise: once the template store
 /// refused the selection, or the clone failed, as [`clone_failed`] ends it.
 fn start_clone(
@@ -2410,6 +2436,7 @@ fn start_clone(
     clone: &CloneOptions,
     planned: PlannedClone,
     time: Option<HostTime>,
+    hook: Option<&StepHook>,
 ) -> Result<Result<Running, ExitCode>, String> {
     let PlannedClone {
         request,
@@ -2508,6 +2535,7 @@ fn start_clone(
         memory,
         runtime: &runtime,
         guest_build,
+        hook,
     };
     match clone.run(&mut acquired) {
         Ok((vmm, client)) => Ok(Ok(Running {
@@ -2618,6 +2646,8 @@ struct CloneLaunch<'a> {
     runtime: &'a Runtime,
     /// The guest agent's build.
     guest_build: &'a str,
+    /// The step hook, if any, which acts at `checked` alone.
+    hook: Option<&'a StepHook>,
 }
 
 impl CloneLaunch<'_> {
@@ -2625,7 +2655,8 @@ impl CloneLaunch<'_> {
     /// generation, activates it, maps its export's table, if it has one, starts its sandbox,
     /// exchanges a `Ping` and the longest `Echo` with its guest agent, and commits the launch,
     /// leaving the clone running. Returns the clone's VM, and the session of the adapter's order
-    /// in which its sandbox started.
+    /// in which its sandbox started. The step hook, if any, acts once the plan checked the clone,
+    /// before the clone is recorded.
     ///
     /// Fails with the clone's failure, as NVX's plan, launch, restore sequence, and commit return
     /// it, or as `Started::fail` records it for a guest agent that does not answer the command
@@ -2642,6 +2673,7 @@ impl CloneLaunch<'_> {
             memory,
             runtime,
             guest_build,
+            hook,
         } = self;
         let staged = Staged::read(acquired.locked.dir())
             .map_err(|error| Failed::Command(describe(&error)))?;
@@ -2665,6 +2697,10 @@ impl CloneLaunch<'_> {
             Instant::now() + LOCK_TIMEOUT,
         )
         .map_err(Failed::Clone)?;
+        // The plan checked the clone against the generation, and holds the files that the checks
+        // opened, but nothing records the clone yet, and nothing runs: a test may change what the
+        // clone's launch checks again.
+        step(hook, Step::Checked).map_err(Failed::Command)?;
         // The mappings that the clone's record announces, which the restore sequence sends.
         let mappings = clone_plan.activation().configuration().mappings;
         let record = CloneRecord {
@@ -3402,7 +3438,7 @@ fn run(
         locked,
         vmm,
         mut client,
-    } = match start_clone(store, guest_build, clone, planned, time)? {
+    } = match start_clone(store, guest_build, clone, planned, time, None)? {
         Ok(running) => running,
         Err(status) => return Ok(status),
     };
