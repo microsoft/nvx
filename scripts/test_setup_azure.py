@@ -952,44 +952,135 @@ grub2-editenv() {
                 if not succeeds:
                     self.assertIn(b"ERROR:", result.stdout)
 
-    def test_mshv_installation_requests_only_boot_components(self):
+    def mshv_pins(self) -> dict[str, str]:
+        """Return the releases that setup-mshv.sh pins, by package name."""
+        source = builder.source("linux/setup-mshv.sh").decode()
+        body = re.search(r"^MSHV_PINS=\(\n(.*?)^\)$", source, re.M | re.S)
+        assert body is not None
+        pins: dict[str, str] = {}
+        for line in body[1].splitlines():
+            name, separator, release = line.strip().partition("=")
+            self.assertEqual(separator, "=", line)
+            pins[name] = release
+        return pins
+
+    def test_mshv_installation_installs_only_the_pinned_boot_components(self):
         source = builder.source("linux/setup-mshv.sh").decode()
         self.assertNotIn("cloud-hypervisor", source)
         self.assertNotIn("kata", source)
+        pins = self.mshv_pins()
+        self.assertEqual(
+            list(pins), ["mshv", "mshv-bootloader-lx", "kernel-mshv", "edk2-hvloader"]
+        )
+        packages = [f"{name}-{release}.x86_64" for name, release in pins.items()]
+        start = source.index("MSHV_PINS=(")
+        definition = source[start : source.index("\n)\n", start) + 3]
         start = source.index('echo "--- installing MSHV boot components ---"')
-        end = source.index('echo "--- installed MSHV stack ---"', start)
+        verified = 'echo "installed the pinned MSHV stack"\n'
+        end = source.index(verified, start) + len(verified)
         mock = r"""
 set -euo pipefail
-succeeds_after=$1
+succeeds_after=@SUCCEEDS_AFTER@
+query_status=@QUERY_STATUS@
+rpm_packages=$(
+    cat <<'EOF'
+@INSTALLED@
+EOF
+)
 attempts=0
 dnf() {
-    [ "$*" = 'install -y mshv mshv-bootloader-lx kernel-mshv edk2-hvloader' ] || {
+    [ "$*" = 'install -y @PACKAGES@' ] || {
         echo 'ERROR: unexpected MSHV package request' >&2
         return 1
     }
     attempts=$((attempts + 1))
     [ "$attempts" -ge "$succeeds_after" ]
 }
+rpm() {
+    if [ "$*" = -qa ]; then
+        printf '%s\n' "$rpm_packages"
+        return 0
+    fi
+    [ "$*" = '-q --queryformat %{NAME}-%{VERSION}-%{RELEASE}.%{ARCH}\n @NAMES@' ] || {
+        echo 'ERROR: unexpected MSHV package query' >&2
+        return 1
+    }
+    printf '%s\n' "$rpm_packages"
+    return "$query_status"
+}
 sleep() { [ "$*" = 30 ]; }
-"""
-        for succeeds_after in ("1", "3", "4"):
-            with self.subTest(succeeds_after=succeeds_after):
+""".replace("@PACKAGES@", " ".join(packages)).replace("@NAMES@", " ".join(pins))
+        # rpm lists every installed release of a name, and reports a missing
+        # name on stdout.
+        newer_kernel = "kernel-mshv-6.18.40.mshv3-1.azl3.x86_64"
+        newer_mshv = "mshv-26100.9500.2610010000.1-1.azl3.x86_64"
+        missing = "package edk2-hvloader is not installed"
+        cases = (
+            ("1", packages, "0", None),
+            ("3", packages, "0", None),
+            ("4", packages, "0", "could not install MSHV boot components"),
+            (
+                "1",
+                [*packages, newer_kernel],
+                "0",
+                "the installed MSHV stack is not the pinned one",
+            ),
+            (
+                "1",
+                [newer_mshv, *packages[1:]],
+                "0",
+                "the installed MSHV stack is not the pinned one",
+            ),
+            ("1", [*packages[:3], missing], "1", "a pinned MSHV package is not"),
+        )
+        for succeeds_after, installed, query_status, error in cases:
+            with self.subTest(succeeds_after=succeeds_after, installed=installed[-1]):
+                # The case is part of the script: WSL's bash.exe splits
+                # arguments at newlines.
+                case = (
+                    mock.replace("@SUCCEEDS_AFTER@", succeeds_after)
+                    .replace("@QUERY_STATUS@", query_status)
+                    .replace("@INSTALLED@", "\n".join(installed))
+                )
                 result = self.execute_bash(
-                    mock
+                    case
                     + self.shell_function("linux/setup-mshv.sh", "fail")
+                    + definition
                     + source[start:end]
-                    + f'\ntest "$attempts" -eq {min(int(succeeds_after), 3)}\n',
-                    succeeds_after,
+                    + f'\ntest "$attempts" -eq {min(int(succeeds_after), 3)}\n'
                 )
-                self.assertEqual(
-                    result.returncode == 0,
-                    succeeds_after != "4",
-                    (result.stdout + result.stderr).decode(),
+                output = (result.stdout + result.stderr).decode()
+                self.assertEqual(result.returncode == 0, error is None, output)
+                # The log names each pinned package before it installs them.
+                self.assertIn(
+                    "pinned MSHV stack:\n"
+                    + "".join(f"  {package}\n" for package in packages),
+                    output,
                 )
-                if succeeds_after == "4":
-                    self.assertIn(
-                        b"could not install MSHV boot components", result.stdout
-                    )
+                if error is None:
+                    self.assertIn("installed the pinned MSHV stack", output)
+                else:
+                    self.assertIn(f"ERROR: {error}", output)
+                    self.assertNotIn("installed the pinned MSHV stack", output)
+
+    def test_mshv_pins_install_the_expected_benchmark_host(self):
+        # The pins install the host of the Linux/MSHV series' history, so a
+        # pin moves only with a new expected host (#980).
+        host = json.loads(
+            (
+                builder.ROOT.parents[2]
+                / "data"
+                / "linux-mshv-virtual-machine-host.json"
+            ).read_text(encoding="utf-8")
+        )
+        pins = self.mshv_pins()
+
+        self.assertEqual(pins["kernel-mshv"], host["os"]["release"])
+        # The mshv package's version starts with the hypervisor's build and
+        # service: mshv 26100.9444.2609032029.1 is hypervisor 10.0.26100.9444.
+        _, _, build, service = host["hypervisor_build"].split(".")
+        self.assertTrue(pins["mshv"].startswith(f"{build}.{service}."), pins["mshv"])
+        self.assertEqual(pins["mshv-bootloader-lx"], pins["mshv"])
 
     def test_mshv_verification_does_not_require_other_runtimes(self):
         source = builder.source("linux/verify-mshv.sh").decode()

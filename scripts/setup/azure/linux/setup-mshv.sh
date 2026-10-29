@@ -18,6 +18,19 @@ set -euo pipefail
 
 GRUB_CFG=/boot/grub2/grub.cfg
 LOG=/var/log/enable-mshv.log
+# The MSHV host stack that CI measures, as name=version-release: the
+# hypervisor and its loader, the root partition's kernel, and the EFI loader
+# that starts the hypervisor. The expected Linux/MSHV benchmark host,
+# data/linux-mshv-virtual-machine-host.json, requires this hypervisor build
+# and kernel series, so move a pin only in the pull request that accepts the
+# new host and resets the series (doc/benchmarks.md, "Expected benchmark
+# hosts"). Unpinned, every reimage installed the newest releases (#980).
+MSHV_PINS=(
+    mshv=26100.9444.2609032029.1-1.azl3
+    mshv-bootloader-lx=26100.9444.2609032029.1-1.azl3
+    kernel-mshv=6.18.34.mshv3-1.azl3
+    edk2-hvloader=20240524git3e722403cd16-21.azl3
+)
 
 exec > >(tee -a "$LOG") 2>&1
 echo "=== enable-mshv started at $(date --iso-8601=seconds) ==="
@@ -47,9 +60,17 @@ echo "preflight OK (arch=$arch, UEFI, ESP mounted, nested virt available)"
 
 # ---------------------------------------------------------------- step 2
 echo "--- installing MSHV boot components ---"
+mshv_names=()
+mshv_packages=()
+for pin in "${MSHV_PINS[@]}"; do
+    mshv_names+=("${pin%%=*}")
+    mshv_packages+=("${pin%%=*}-${pin#*=}.x86_64")
+done
+echo "pinned MSHV stack:"
+printf '  %s\n' "${mshv_packages[@]}"
 installed=0
 for attempt in 1 2 3; do
-    if dnf install -y mshv mshv-bootloader-lx kernel-mshv edk2-hvloader; then
+    if dnf install -y "${mshv_packages[@]}"; then
         installed=1
         break
     fi
@@ -63,6 +84,18 @@ done
 
 echo "--- installed MSHV stack ---"
 rpm -qa | grep -Ei 'mshv|hvloader' | sort || true
+
+# Fail closed unless exactly the pinned releases are installed. kernel-mshv is
+# an install-only package, so dnf keeps another release beside the pinned one,
+# and GRUB could boot it.
+installed_stack=$(
+    rpm -q --queryformat '%{NAME}-%{VERSION}-%{RELEASE}.%{ARCH}\n' "${mshv_names[@]}" |
+        sort
+) || fail "a pinned MSHV package is not installed: ${installed_stack//$'\n'/, }"
+pinned_stack=$(printf '%s\n' "${mshv_packages[@]}" | sort)
+[ "$installed_stack" = "$pinned_stack" ] ||
+    fail "the installed MSHV stack is not the pinned one: ${installed_stack//$'\n'/, }"
+echo "installed the pinned MSHV stack"
 
 # Confirm the pieces the Dom0 boot path actually depends on. A partial
 # install would otherwise only show up as a silent fail-open boot.
