@@ -84,6 +84,9 @@ RATE_AGREEMENT_PPM = 1.0
 GUEST_FREQUENCY_LIMIT_PPM = 500.0
 RESTORE_TOLERANCE_PPM = 250.0
 RATE_TOLERANCE_PPM = GUEST_FREQUENCY_LIMIT_PPM - RESTORE_TOLERANCE_PPM
+# H4 warns above the time ABI v1's limit, which bounded the TSC's error alone:
+# one run can't tell that error from the wander of the host's reference clock.
+RATE_WARNING_PPM = 100.0
 # chronyd's tracking report, `chronyc -c tracking`, has 14 comma-separated
 # fields, among them the reference's name (1), the frequency in ppm, positive
 # when the undisciplined clock runs fast (7), its skew in ppm (9), and the
@@ -145,6 +148,8 @@ class CheckResult:
     check: str
     passed: bool
     detail: str
+    # A concern that doesn't fail the check, which the detail also states.
+    warning: str = ""
 
     def line(self) -> str:
         status = "pass" if self.passed else "fail"
@@ -179,6 +184,11 @@ def host_clocksource() -> str:
 
 def _escape_markdown(text: str) -> str:
     return text.replace("|", "\\|").replace("\n", " ")
+
+
+def _annotation(text: str) -> str:
+    """Escape text for the message of a GitHub Actions workflow command."""
+    return text.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
 
 
 def probe_path(directory: Path) -> Path:
@@ -945,6 +955,7 @@ def check_rate(context: DoctorContext) -> CheckResult:
         f"{uncertainty_ppm:.3f} ppm"
     )
     problems: list[str] = []
+    warning = ""
     if not MIN_TSC_HZ <= measured <= MAX_TSC_HZ:
         problems.append(f"[E_TSC_RATE_IMPLAUSIBLE] measured {measured:.0f} Hz")
     if uncertainty_ppm > RATE_UNCERTAINTY_PPM:
@@ -987,6 +998,14 @@ def check_rate(context: DoctorContext) -> CheckResult:
                 f"{deviation_ppm:.3f} ppm from the measured rate{within}, which "
                 f"straddles the limit of {RATE_TOLERANCE_PPM:g} ppm{reread_problem}"
             )
+        elif deviation_ppm > RATE_WARNING_PPM:
+            warning = (
+                f"the backend rate is {deviation_ppm:.3f} ppm from the measured "
+                f"rate, more than {RATE_WARNING_PPM:g} ppm: the host's clock "
+                f"correction uses {deviation_ppm / RATE_TOLERANCE_PPM:.0%} of the "
+                f"guest's {RATE_TOLERANCE_PPM:g} ppm budget, and one run can't "
+                "tell the TSC's error from the reference clock's wander"
+            )
     detail += reread_evidence
     if isinstance(chrony, ChronyFrequency):
         detail += (
@@ -997,9 +1016,11 @@ def check_rate(context: DoctorContext) -> CheckResult:
         detail += f"; no chronyd frequency estimate: {chrony} (evidence)"
     if clocksource:
         detail += f"; host clocksource {clocksource} (evidence)"
+    if warning:
+        detail = f"warning: {warning}; {detail}"
     if problems:
-        return CheckResult("H4", False, "; ".join(problems) + f"; {detail}")
-    return CheckResult("H4", True, detail)
+        return CheckResult("H4", False, "; ".join(problems) + f"; {detail}", warning)
+    return CheckResult("H4", True, detail, warning)
 
 
 def check_host_skew(context: DoctorContext) -> CheckResult:
@@ -1224,6 +1245,12 @@ def run_checks(context: DoctorContext, checks: Sequence[str]) -> list[CheckResul
             result = CheckResult(check, False, first)
         results.append(result)
         print(result.line(), flush=True)
+        if result.warning and os.environ.get("GITHUB_ACTIONS") == "true":
+            print(
+                f"::warning title=Time ABI host qualification ({context.backend})::"
+                + _annotation(f"{check} {CHECK_TITLES[check]}: {result.warning}"),
+                flush=True,
+            )
     return results
 
 
@@ -1243,6 +1270,11 @@ def summary_markdown(
             f"{'pass' if result.passed else '**fail**'} | "
             f"{_escape_markdown(result.detail)} |"
         )
+    for result in results:
+        if result.warning:
+            lines.extend(
+                ("", f"**{result.check} warning:** {_escape_markdown(result.warning)}")
+            )
     reported = (
         ("generation", "Generation"),
         ("cpu", "CPU"),

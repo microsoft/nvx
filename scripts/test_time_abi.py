@@ -2814,6 +2814,9 @@ class DoctorTests(unittest.TestCase):
                 result = check(context, steady, chrony=estimate, clock=clock)
                 self.assertEqual(result.passed, passed, result.detail)
                 self.assertIn(message, result.detail)
+                # Only a deviation that passes above 100 ppm warns.
+                deviation = float(context.facts["rate_deviation_ppm"])
+                self.assertEqual(bool(result.warning), passed and deviation > 100)
                 # A range that straddles the limit stays inconclusive when
                 # chronyd's estimate doesn't move for the 60 s of re-reads.
                 straddles = "straddles" in message
@@ -2859,6 +2862,8 @@ class DoctorTests(unittest.TestCase):
                 self.assertEqual(result.passed, passed, result.detail)
                 self.assertIn(message, result.detail)
                 self.assertEqual(clock.sleeps, [2.0] * (len(readings) - 1))
+                # The settled +117.1 ppm passes with a warning.
+                self.assertEqual(bool(result.warning), passed)
                 # Only chronyd's estimate changes, so H4 corrects the same
                 # samples by the estimate that it uses.
                 self.assertEqual(context.facts["measured_tsc_hz"], measured)
@@ -2884,6 +2889,30 @@ class DoctorTests(unittest.TestCase):
             result.detail,
         )
         self.assertEqual(context.facts["rate_deviation_ppm"], "250.027")
+        self.assertEqual(result.warning, "")
+        # #1008: above the time ABI v1's 100 ppm, H4 passes with a warning
+        # that leads its detail and says how much of the guest's budget the
+        # host's correction uses; 100 ppm itself doesn't warn.
+        for rate, warning in (
+            (
+                2300230569.0,
+                "the backend rate is 100.027 ppm from the measured rate, more than "
+                "100 ppm: the host's clock correction uses 40% of the guest's "
+                "250 ppm budget, and one run can't tell the TSC's error from the "
+                "reference clock's wander",
+            ),
+            (2300230507.0, ""),
+        ):
+            with self.subTest(rate=rate):
+                context = ci_context("mshv")
+                context.facts["native_tsc_hz"] = "2300000507"
+                result = check(context, records([rate] * 2, interval_s=1.0))
+                self.assertTrue(result.passed, result.detail)
+                self.assertEqual(result.warning, warning)
+                self.assertEqual(
+                    result.detail.startswith(f"warning: {warning}; tsc_hz="),
+                    bool(warning),
+                )
 
     def test_chrony_frequency_reads_a_synchronized_tracking_report(self):
         report = (
@@ -3285,6 +3314,41 @@ class DoctorTests(unittest.TestCase):
             'check=H2 status=fail detail="float division by zero"', stdout.getvalue()
         )
         self.assertIn("check=H5 status=pass", stdout.getvalue())
+
+    def test_warnings_reach_the_line_the_summary_and_ci_annotations(self):
+        warning = "the host's clock correction uses 60% of the guest's 250 ppm budget"
+
+        def warned(context: doctor.DoctorContext) -> doctor.CheckResult:
+            del context
+            return doctor.CheckResult(
+                "H4", True, f"warning: {warning}; tsc_hz=2300000000", warning
+            )
+
+        context = doctor_context(self.root, "mshv")
+        results: list[doctor.CheckResult] = []
+        for actions, annotated in (("true", True), ("", False)):
+            with self.subTest(actions=actions):
+                stdout = io.StringIO()
+                with (
+                    patch.dict(doctor.CHECKS, {"H4": warned}),
+                    patch.dict(doctor.os.environ, {"GITHUB_ACTIONS": actions}),
+                    contextlib.redirect_stdout(stdout),
+                ):
+                    results = doctor.run_checks(context, ("H4",))
+                lines = stdout.getvalue().splitlines()
+                # The check passes, and its line states the warning.
+                self.assertEqual(lines[0], results[0].line())
+                self.assertIn('status=pass detail="warning: ', lines[0])
+                # In GitHub Actions, an annotation repeats it, escaped.
+                annotation = (
+                    "::warning title=Time ABI host qualification (mshv)::H4 host TSC "
+                    "rate stability: the host's clock correction uses 60%25 of the "
+                    "guest's 250 ppm budget"
+                )
+                self.assertEqual(lines[1:], [annotation] if annotated else [])
+        summary = doctor.summary_markdown("mshv", results, {})
+        self.assertIn("(mshv): passed", summary)
+        self.assertIn(f"\n\n**H4 warning:** {warning}\n", summary)
 
     def test_run_selects_the_cpu_fingerprint_or_runs_without_openvmm(self):
         seen: list[Path | None] = []
