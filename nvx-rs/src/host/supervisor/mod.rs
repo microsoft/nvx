@@ -75,6 +75,16 @@
 //! inherits none of them. On Windows, the allowed handles join the explicit list of handles that
 //! the VMM inherits, and stay inheritable only while it is created; see [`Inherited`].
 //!
+//! On Windows, the VMM's standard handles are inheritable while it is created too, and a process
+//! that another thread of the caller creates in that window without a list of handles, as
+//! `std::process::Command` creates one, inherits them all, and holds them until it exits: it holds
+//! the VMM's log, and so its launch's claim, after the VMM exits, and a recovery cannot end the
+//! launch until it does. Each spawn of a VMM holds a [`SpawnLock`] throughout that window, so a
+//! caller that launches VMMs spawns its other processes with [`spawn_command`], or under a lock of
+//! its own from [`lock_spawns`], and keeps them out of it. On Linux, the lock holds nothing: a
+//! process that another thread spawns holds the VMM's log only from its fork until its exec, and
+//! recovery checks a held claim again for long enough to see the claim released.
+//!
 //! # Exit waits and stops
 //!
 //! A [`Vmm`] holds its VMM through a [`Process`]: a pidfd on Linux and a process handle on
@@ -204,7 +214,7 @@ use std::io;
 use std::time::{Duration, Instant};
 
 use super::launch::timeout_problem;
-pub use super::platform::inherit::Inherited;
+pub use super::platform::inherit::{Inherited, SpawnLock, lock_spawns, spawn_command};
 use super::process::{Process, ProcessRef};
 pub use super::spawn::{Launched, VmmCommand, spawn};
 use super::store::{

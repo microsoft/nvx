@@ -543,6 +543,16 @@ inherits nothing else of the caller's: on Linux, they must be close-on-exec, a
 flag that only the VMM's own process clears; on Windows, they join the VMM's
 explicit handle list.
 
+On Windows, the VMM's standard handles and its allowed handles are inheritable
+while it is created, and a process that another thread creates meanwhile
+without a handle list, as `std::process::Command` creates one, inherits them
+and holds them until it exits: the VMM's log among them, which keeps a recovery
+from ending the launch until then. Each spawn of a VMM holds a `SpawnLock`
+throughout that window, so a caller that launches VMMs spawns its other
+processes with `spawn_command`, which spawns a `std::process::Command` under
+one, or under one that `lock_spawns` returns. On other hosts, the lock holds
+nothing.
+
 `Vmm::stop` runs one graceful step of the caller's and waits for the VMM's exit
 event until a deadline, and takes a bounded forced step through the VMM's
 verified identity only on request.

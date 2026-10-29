@@ -7,7 +7,6 @@ use std::os::windows::io::{
     AsHandle, AsRawHandle, BorrowedHandle, FromRawHandle, OwnedHandle, RawHandle,
 };
 use std::path::Path;
-use std::sync::{Mutex, PoisonError};
 use std::thread;
 use std::time::{Duration, Instant};
 use std::{mem, ptr};
@@ -72,7 +71,7 @@ use windows_sys::Win32::System::Threading::{
 use windows_sys::Win32::System::WindowsProgramming::QueryInterruptTimePrecise;
 
 use super::Transport;
-use super::inherit::Inherited;
+use super::inherit::{Inherited, lock_spawns};
 use crate::hypervisor::Hypervisor;
 
 /// Whether this host can run NVX microVMs.
@@ -592,16 +591,10 @@ impl Drop for AttributeList {
     }
 }
 
-/// Serializes the spawns of VMMs, each from before it makes the first handle of its caller
-/// inheritable, its standard handles among them, until it has closed or restored them all. Two
-/// spawns that allow the same handle would otherwise take each other's temporary inheritability
-/// for the handle's own: one could find the handle no longer inheritable when it creates its
-/// process, and fail, and then leave the handle inheritable for good.
-static INHERITANCE: Mutex<()> = Mutex::new(());
-
 /// Handles of a caller that a spawn makes inheritable for as long as it needs them, and whose
-/// earlier inheritability it restores when dropped. The spawn holds [`INHERITANCE`] meanwhile,
-/// so that no other spawn of a VMM takes their temporary inheritability for their own.
+/// earlier inheritability it restores when dropped. The spawn holds a
+/// [`SpawnLock`](super::inherit::SpawnLock) meanwhile, so that no other spawn of a VMM takes their
+/// temporary inheritability for their own.
 struct InheritableForSpawn {
     /// Each handle, and whether it was inheritable before.
     handles: Vec<(HANDLE, bool)>,
@@ -658,11 +651,13 @@ impl Drop for InheritableForSpawn {
 /// A handle in the list must be inheritable while the process is created. The `stdio` handles
 /// are inheritable from here until the spawn closes them, and the handles `inherit` from here
 /// until the spawn restores their earlier inheritability, right after the process is created.
-/// The spawn holds [`INHERITANCE`] throughout that window, so spawns of VMMs run it one at a time,
-/// and two that allow the same handle restore what it was before either. A process that the
-/// caller spawns concurrently without a handle list, as `std::process` does, inherits them if it
-/// is created in that window, and holds them until it exits, the log of OpenVMM's standard output
-/// and error among them; a process that it spawns with a handle list does not.
+/// The spawn holds a [`SpawnLock`](super::inherit::SpawnLock) throughout that window, so spawns
+/// of VMMs run it one at a time, and two that allow the same handle restore what it was before
+/// either. A process that the caller spawns concurrently without a handle list, as
+/// `std::process` does, inherits them if it is created in that window, and holds them until it
+/// exits, the log of OpenVMM's standard output and error among them, unless the caller spawns it
+/// under a `SpawnLock`, as [`spawn_command`](super::inherit::spawn_command) does; a process that
+/// it spawns with a handle list does not.
 ///
 /// Fails with [`io::ErrorKind::InvalidInput`] for a batch file, as [`refuse_batch_file`] says.
 pub(crate) fn spawn_detached(
@@ -759,7 +754,7 @@ fn spawn_listed(
     // No handle may be inheritable for this spawn outside the lock. Locals are dropped in the
     // reverse of their order, so every return restores the handles `inherit`, and closes the
     // `stdio` handles, which it moves here for that, before it releases the lock.
-    let lock = INHERITANCE.lock().unwrap_or_else(PoisonError::into_inner);
+    let lock = lock_spawns();
     let stdio = stdio;
     let standard = stdio
         .each_ref()
@@ -2213,6 +2208,7 @@ mod tests {
     use std::io::{Read, Write};
 
     use super::*;
+    use crate::host::platform::inherit::spawn_command;
 
     thread_local! {
         /// What a spawn of this thread runs in its window, once its handles are inheritable and
@@ -2769,6 +2765,35 @@ mod tests {
     }
 
     #[test]
+    fn a_process_spawned_under_the_spawn_lock_does_not_inherit_a_vmms_log() {
+        let directory = tempfile::tempdir().unwrap();
+        let held = HeldSpawn::start(directory.path());
+        // The spawn of the other process waits for the window to close.
+        let other = thread::spawn(|| spawn_command(&mut sleeper()).map(Running));
+        thread::sleep(Duration::from_millis(500));
+        let waited = !other.is_finished();
+        let (log, identity) = held.finish();
+        let mut other = other.join().unwrap().unwrap();
+        // The log's claim is released once the stand-in has exited, while the other process
+        // runs.
+        let released = claim_released_within(&log, identity, WINDOW_TIMEOUT);
+        let running = other.0.try_wait().unwrap().is_none();
+        drop(other);
+        assert!(
+            waited,
+            "a spawn under the spawn lock did not wait for the window"
+        );
+        assert!(
+            released,
+            "a process spawned under the spawn lock held the log"
+        );
+        assert!(
+            running,
+            "the process spawned under the spawn lock exited early"
+        );
+    }
+
+    #[test]
     fn a_process_spawned_without_the_spawn_lock_in_a_window_holds_the_vmms_log() {
         let directory = tempfile::tempdir().unwrap();
         let held = HeldSpawn::start(directory.path());
@@ -2786,5 +2811,45 @@ mod tests {
         assert!(running, "the process spawned in the window exited early");
         assert!(kept, "a process spawned in the window did not hold the log");
         assert!(released, "the log stayed held after the process exited");
+    }
+
+    #[test]
+    fn a_thread_that_holds_the_spawn_lock_spawns_under_it_until_its_last_lock_is_dropped() {
+        let first = lock_spawns();
+        let second = lock_spawns();
+        // Neither a spawn of a VMM nor a spawn under the lock waits for the thread's own hold.
+        let (stdin, _stdin_writer) = io::pipe().unwrap();
+        let (_stdout_reader, stdout) = io::pipe().unwrap();
+        let stderr = stdout.try_clone().unwrap();
+        let system = std::env::var_os("SystemRoot").unwrap();
+        let cmd = Path::new(&system).join("System32").join("cmd.exe");
+        let vmm = spawn_detached(
+            &cmd,
+            &["/c", "exit", "0"].map(OsString::from),
+            &std::env::temp_dir(),
+            [stdin.into(), stdout.into(), stderr.into()],
+            &[],
+            false,
+        )
+        .unwrap();
+        let other = spawn_command(&mut sleeper()).map(Running).unwrap();
+        // The hold lasts until the thread's last lock is dropped, whichever that is.
+        let (taken, acquired) = std::sync::mpsc::channel();
+        let waiter = thread::spawn(move || {
+            let _lock = lock_spawns();
+            let _ = taken.send(());
+        });
+        drop(first);
+        let early = acquired.recv_timeout(Duration::from_millis(200)).is_ok();
+        drop(second);
+        let late = acquired.recv_timeout(WINDOW_TIMEOUT).is_ok();
+        waiter.join().unwrap();
+        assert!(vmm.terminate(WINDOW_TIMEOUT), "the stand-in did not exit");
+        drop(other);
+        assert!(
+            !early,
+            "another thread took the lock while this one held it"
+        );
+        assert!(late, "another thread could not take the lock once released");
     }
 }
