@@ -707,10 +707,16 @@ workflow's `github.run_attempt`.
 Lifecycle JSON results and workload `benchmark-metadata.json` files record host
 provenance under `host`: the runner name from `RUNNER_NAME`, the machine name, the
 operating system with its kernel release or Windows build and cumulative-update
-revision (UBR), the CPU model with its vendor, family, model, stepping, and microcode
-revision, the logical processor count, and physical memory, and the
+revision (UBR), the hypervisor that a Linux host runs under, the CPU model with its
+vendor, family, model, stepping, and microcode revision, the logical processor count,
+and physical memory, and the
 volume, file system, size, system-volume flag, disk number, and SCSI address behind
-the workspace, temporary, and scratch directories. The disk number and SCSI address
+the workspace, temporary, and scratch directories. On x86-64 Linux, the coordinator runs
+CPUID without privileges, from a private page that it makes executable only after writing
+the code into it. It records the hypervisor's vendor under `hypervisor.vendor`, `null`
+without a hypervisor, and a Microsoft hypervisor's version under `hypervisor.build`, such
+as `10.0.26100.9444`. A kernel that forbids executable anonymous memory leaves a
+`hypervisor.error`, and other hosts record no hypervisor. The disk number and SCSI address
 tell the Azure OS disk from a data-disk LUN or the temporary disk. On a possible Azure
 VM, the coordinator queries the instance metadata service once, directly rather than
 through a proxy and with up to three attempts when the service doesn't respond, and

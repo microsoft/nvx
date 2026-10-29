@@ -28,6 +28,17 @@ from nvx_tools import host_telemetry  # noqa: E402
 MIB = 1024 * 1024
 GIB = 1024 * MIB
 TICKS_PER_SECOND = 10_000_000
+
+
+def word(text: bytes) -> int:
+    """Return the CPUID register that holds ``text``, padded with NULs."""
+    return int.from_bytes(text.ljust(4, b"\0"), "little")
+
+
+CpuidLeaves = dict[int, tuple[int, int, int, int]]
+"""The EAX, EBX, ECX, and EDX that CPUID returns for each leaf."""
+
+
 SUBSCRIPTION = "00000000-1111-2222-3333-444444444444"
 RESOURCE_GROUP = f"/subscriptions/{SUBSCRIPTION}/resourceGroups/nvx-runners-rg"
 IMDS_COMPUTE: dict[str, object] = {
@@ -470,6 +481,9 @@ class HostProvenanceTests(unittest.TestCase):
         self.assertEqual(provenance["logical_processors"], os.cpu_count())
         self.assertEqual(provenance["azure"], {"vm_size": "Standard_D16ds_v5"})
         self.assertEqual(
+            provenance["hypervisor"], host_telemetry.hypervisor_provenance()
+        )
+        self.assertEqual(
             set(cast(dict[str, object], provenance["cpu"])),
             {"vendor", "family", "model", "stepping", "microcode"},
         )
@@ -606,6 +620,123 @@ class HostProvenanceTests(unittest.TestCase):
                 host_telemetry.os_version(),
                 {"system": "Linux", "release": "6.6.157.1-1.azl3", "revision": None},
             )
+
+    def test_identifies_the_hypervisor_from_cpuid(self):
+        def host(
+            leaves: CpuidLeaves, hypervisor: bool = True
+        ) -> tuple[host_telemetry.Cpuid, list[int]]:
+            # CPUID.1:ECX[31] reports a hypervisor.
+            table = {1: (0x000C06F2, 0, (1 << 31) if hypervisor else 0, 0), **leaves}
+            calls: list[int] = []
+
+            def cpuid(leaf: int, subleaf: int) -> tuple[int, int, int, int]:
+                self.assertEqual(subleaf, 0)
+                calls.append(leaf)
+                return table.get(leaf, (0, 0, 0, 0))
+
+            return cpuid, calls
+
+        microsoft = (0x4000000C, word(b"Micr"), word(b"osof"), word(b"t Hv"))
+        hv1 = (word(b"Hv#1"), 0, 0, 0)
+        cases: tuple[tuple[str, CpuidLeaves, dict[str, object]], ...] = (
+            # Leaf 0x40000002 as azure-mshv-4 and azure-mshv-scus-1 report it
+            # (#980): build 26100, version 10.0, service pack 9, service 9444.
+            (
+                "MSHV root partition",
+                {
+                    0x40000000: microsoft,
+                    0x40000001: hv1,
+                    0x40000002: (0x65F4, 0x000A0000, 9, 0x24E4),
+                },
+                {"vendor": "Microsoft Hv", "build": "10.0.26100.9444"},
+            ),
+            # prometheus30's older hypervisor, of the same build number.
+            (
+                "older service",
+                {
+                    0x40000000: microsoft,
+                    0x40000001: hv1,
+                    0x40000002: (0x65F4, 0x000A0000, 30, 0x7530),
+                },
+                {"vendor": "Microsoft Hv", "build": "10.0.26100.30000"},
+            ),
+            # The service branch, EDX[31:24], is not part of the version.
+            (
+                "service branch",
+                {
+                    0x40000000: microsoft,
+                    0x40000001: hv1,
+                    0x40000002: (26100, 0x000A0000, 0, 0x01001234),
+                },
+                {"vendor": "Microsoft Hv", "build": "10.0.26100.4660"},
+            ),
+            # Only the Microsoft hypervisor interface defines leaf 0x40000002.
+            (
+                "another interface",
+                {
+                    0x40000000: (0x40000001, word(b"KVMK"), word(b"VMKV"), word(b"M")),
+                    0x40000001: (0x01007AFB, 0, 0, 0),
+                    0x40000002: (1, 2, 3, 4),
+                },
+                {"vendor": "KVMKVMKVM", "build": None},
+            ),
+            (
+                "no version leaf",
+                {0x40000000: (0x40000001, *microsoft[1:]), 0x40000001: hv1},
+                {"vendor": "Microsoft Hv", "build": None},
+            ),
+        )
+        for name, leaves, expected in cases:
+            with self.subTest(name):
+                cpuid, _ = host(leaves)
+                self.assertEqual(host_telemetry.identify_hypervisor(cpuid), expected)
+        cpuid, calls = host({0x40000000: microsoft}, hypervisor=False)
+        self.assertEqual(
+            host_telemetry.identify_hypervisor(cpuid), {"vendor": None, "build": None}
+        )
+        # Without a hypervisor, the hypervisor leaves hold no hypervisor data.
+        self.assertEqual(calls, [1])
+
+    def test_reads_the_hypervisor_only_on_x86_64_linux(self):
+        cpuid_error = OSError(13, "mprotect failed: Permission denied")
+        for system, machine, error, expected in (
+            ("win32", "AMD64", None, None),
+            ("linux", "aarch64", None, None),
+            (
+                "linux",
+                "x86_64",
+                cpuid_error,
+                {"error": f"CPUID is unavailable: {cpuid_error}"},
+            ),
+        ):
+            with (
+                self.subTest(system=system, machine=machine),
+                patch.object(host_telemetry.sys, "platform", system),
+                patch.object(host_telemetry.platform, "machine", return_value=machine),
+                patch.object(
+                    host_telemetry, "_linux_cpuid", side_effect=error
+                ) as linux_cpuid,
+            ):
+                self.assertEqual(host_telemetry.hypervisor_provenance(), expected)
+                self.assertEqual(linux_cpuid.called, error is not None)
+
+    @unittest.skipUnless(
+        sys.platform == "linux" and platform.machine() == "x86_64",
+        "Python runs CPUID only on x86-64 Linux",
+    )
+    def test_runs_cpuid_on_this_host(self):
+        with host_telemetry._linux_cpuid() as cpuid:
+            _, ebx, ecx, edx = cpuid(0, 0)
+            hypervisor = host_telemetry.identify_hypervisor(cpuid)
+
+        # The vendor of leaf 0 is in EBX, EDX, and ECX.
+        self.assertEqual(
+            host_telemetry._register_text(ebx, edx, ecx),
+            host_telemetry.cpu_signature()["vendor"],
+        )
+        self.assertEqual(host_telemetry.hypervisor_provenance(), hypervisor)
+        if hypervisor["vendor"] == "Microsoft Hv":
+            self.assertRegex(str(hypervisor["build"]), r"^\d+\.\d+\.\d+\.\d+$")
 
     def test_volume_errors_are_recorded_instead_of_raised(self):
         reader = (
@@ -759,6 +890,34 @@ class HostProvenanceTests(unittest.TestCase):
         self.assertEqual(rows["CPU"], "unknown CPU")
         self.assertEqual(
             rows["Azure metadata"], "Azure instance metadata is unavailable: x"
+        )
+        self.assertNotIn("Hypervisor", rows)
+
+    def test_provenance_rows_describe_the_hypervisor(self):
+        for hypervisor, description in (
+            (
+                {"vendor": "Microsoft Hv", "build": "10.0.26100.9444"},
+                "Microsoft Hv 10.0.26100.9444",
+            ),
+            ({"vendor": "KVMKVMKVM", "build": None}, "KVMKVMKVM"),
+            ({"vendor": None, "build": None}, "none"),
+            (
+                {"error": "CPUID is unavailable: [Errno 13] mprotect failed"},
+                "CPUID is unavailable: [Errno 13] mprotect failed",
+            ),
+        ):
+            with self.subTest(hypervisor=hypervisor):
+                rows = host_telemetry.host_provenance_rows(
+                    {"os": "Linux-6.18.34.mshv3-1.azl3", "hypervisor": hypervisor}
+                )
+                self.assertEqual(
+                    [label for label, _ in rows][2:4],
+                    ["Operating system", "Hypervisor"],
+                )
+                self.assertEqual(dict(rows)["Hypervisor"], description)
+        self.assertNotIn(
+            "Hypervisor",
+            dict(host_telemetry.host_provenance_rows({"hypervisor": None})),
         )
 
 
