@@ -67,6 +67,15 @@ jobs:
     runs-on: ${{ fromJSON(inputs.runner) }}
     timeout-minutes: 60
     steps:
+      # A failed benchmark keeps the storage events of the job's window, which
+      # starts here (doc/benchmarks.md).
+      - name: Record Windows job start
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          "NVX_JOB_STARTED_AT=$([DateTime]::UtcNow.ToString('o'))" |
+            Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
       - name: Checkout
         uses: actions/checkout@v5
         with:

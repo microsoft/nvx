@@ -1314,18 +1314,22 @@ def describe_capture_telemetry(sample: dict[str, object]) -> str | None:
     )
 
 
+class ProcessExitTimeout(RuntimeError):
+    """A killed process was still running when ``terminate()`` stopped waiting."""
+
+
 def terminate(process: subprocess.Popen[bytes]) -> None:
     """Kill ``process`` and wait until it has exited.
 
-    Raises if the process still runs ``TERMINATION_TIMEOUT_SECONDS`` after
-    the kill, and warns when its exit took longer than
-    ``SLOW_TERMINATION_SECONDS``.
+    Raises ``ProcessExitTimeout`` if the process still runs
+    ``TERMINATION_TIMEOUT_SECONDS`` after the kill, and warns when its exit
+    took longer than ``SLOW_TERMINATION_SECONDS``.
     """
     killed = time.perf_counter()
     if process.poll() is None:
         process.kill()
     if not _wait_for_exit(process, TERMINATION_TIMEOUT_SECONDS):
-        raise RuntimeError(
+        raise ProcessExitTimeout(
             f"process {process.pid} did not exit within "
             f"{TERMINATION_TIMEOUT_SECONDS:g}s of being killed"
         )
@@ -1396,6 +1400,129 @@ def _wait_for_windows_process(pid: int, timeout: float) -> bool:
     if result == wait_timeout:
         return False
     raise ctypes.WinError(error)
+
+
+def terminate_after_failure(
+    process: subprocess.Popen[bytes], error: BaseException | None = None
+) -> list[BaseException]:
+    """Kill ``process`` after ``error``, and return the failure of the kill
+    rather than raise it over ``error``. A process that ``terminate()`` gave
+    up on, as ``error`` reports, isn't killed again."""
+    if isinstance(error, ProcessExitTimeout):
+        return []
+    try:
+        terminate(process)
+    except ProcessExitTimeout as cleanup_error:
+        return [cleanup_error]
+    return []
+
+
+def append_cleanup_failures(
+    error: BaseException, cleanup_errors: Sequence[BaseException]
+) -> BaseException:
+    """Return ``error`` with ``cleanup_errors`` appended to its message, after
+    those that an earlier call appended, under one heading.
+
+    An error whose message doesn't come from its arguments, such as an
+    ``OSError`` with an errno, would hide what is appended, so the result is
+    then a new error of its type, or a ``RuntimeError``, with the combined
+    message, which the caller raises in its place and which ``error``
+    caused.
+    """
+    previous: tuple[BaseException, ...] = getattr(error, "cleanup_errors", ())
+    summary = "\n".join(
+        f"- {type(cleanup_error).__name__}: {cleanup_error}"
+        for cleanup_error in cleanup_errors
+    )
+    heading = "" if previous else "\n--- cleanup failures ---"
+    message = f"{error}{heading}\n{summary}"
+    arguments = error.args
+    error.args = (message, *arguments[1:])
+    combined = error
+    if str(error) != message:
+        error.args = arguments
+        combined = RuntimeError(message)
+        if isinstance(error, OSError):
+            with contextlib.suppress(Exception):
+                combined = type(error)(message)
+        combined.__cause__ = error
+    combined.cleanup_errors = (*previous, *cleanup_errors)  # type: ignore[attr-defined]
+    return combined
+
+
+def combined_failure(cleanup_errors: Sequence[BaseException]) -> BaseException:
+    """Return the first of ``cleanup_errors``, with the others appended."""
+    first, *others = cleanup_errors
+    return append_cleanup_failures(first, others) if others else first
+
+
+def with_output(
+    error: Exception, tail: str, cleanup_errors: Sequence[BaseException] = ()
+) -> BaseException:
+    """Return ``error`` with OpenVMM's output ``tail`` and then
+    ``cleanup_errors`` appended to its message: when there is output, or
+    when the message of ``error`` can't show them, as a new error, which the
+    caller raises from ``error``."""
+    primary: BaseException = (
+        RuntimeError(f"{error}\n--- OpenVMM output ---\n{tail}") if tail else error
+    )
+    if cleanup_errors:
+        primary = append_cleanup_failures(primary, cleanup_errors)
+    return primary
+
+
+def raise_with_output(
+    error: Exception, tail: str, cleanup_errors: Sequence[BaseException] = ()
+) -> NoReturn:
+    """Raise ``error`` with OpenVMM's output ``tail`` and then
+    ``cleanup_errors`` appended to its message."""
+    primary = with_output(error, tail, cleanup_errors)
+    if primary is error:
+        raise error
+    raise primary from error
+
+
+def run_cleanup(*steps: Callable[[], object] | None) -> list[BaseException]:
+    """Run each of ``steps`` that there is, even after one fails, and return
+    their failures."""
+    cleanup_errors: list[BaseException] = []
+    for step in steps:
+        if step is None:
+            continue
+        try:
+            step()
+        except Exception as cleanup_error:
+            cleanup_errors.append(cleanup_error)
+    return cleanup_errors
+
+
+def finish_cleanup(
+    failure: BaseException | None, *steps: Callable[[], object] | None
+) -> None:
+    """Run ``steps`` as ``run_cleanup()`` does, and append their failures to
+    ``failure``, the error that the cleanup follows, or raise the first, with
+    the others appended, when there is none.
+
+    An OpenVMM that outlives its kill can keep its output reader from
+    stopping, so closing the interaction fails just when the error that the
+    failure path raises must surface with its output and the kill's failure.
+    """
+    cleanup_errors = run_cleanup(*steps)
+    if not cleanup_errors:
+        return
+    if failure is None:
+        raise combined_failure(cleanup_errors)
+    combined = append_cleanup_failures(failure, cleanup_errors)
+    if combined is not failure:
+        # The message of ``failure`` can't show the failures, so the error
+        # that it caused, which does, replaces it.
+        raise combined
+
+
+def save_log(log_path: Path, contents: bytes | bytearray) -> None:
+    """Write OpenVMM's output ``contents`` to ``log_path``."""
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    log_path.write_bytes(contents)
 
 
 def wait_for_process_exit(process: subprocess.Popen[bytes], timeout: float) -> int:
@@ -2027,6 +2154,14 @@ def measure_once(
                 profile.finish_restore(marker_reached, readiness_counters)
             )
 
+    def write_log() -> None:
+        if log_path is not None:
+            output.drain(
+                OUTPUT_DRAIN_TIMEOUT_SECONDS, on_console=scan_console_unchecked
+            )
+            save_log(log_path, output.contents())
+
+    raised: BaseException | None = None
     try:
         while True:
             remaining = deadline - time.monotonic()
@@ -2054,13 +2189,18 @@ def measure_once(
             if failure_marker is not None:
                 failure = completed_output_line_with_prefix(console, failure_marker)
                 if failure is not None:
-                    terminate(process)
+                    cleanup_errors = terminate_after_failure(process)
                     output.drain(
                         OUTPUT_DRAIN_TIMEOUT_SECONDS, on_console=scan_console_unchecked
                     )
-                    raise GuestFailureReported(
+                    reported = GuestFailureReported(
                         failure.decode("utf-8", "replace"),
                         output.tail(),
+                    )
+                    raise (
+                        append_cleanup_failures(reported, cleanup_errors)
+                        if cleanup_errors
+                        else reported
                     )
             marker_seen = (
                 contains_output_line(console, marker)
@@ -2115,25 +2255,25 @@ def measure_once(
                     raise monitor.exit_error(returncode, when="during teardown")
                 finish_output(returncode, marker_reached, readiness_counters)
                 return elapsed_ms, peak_bytes, teardown_ms, wall_ms
-    except GuestFailureReported:
+    except GuestFailureReported as error:
+        raised = error
         raise
     except Exception as error:
-        terminate(process)
+        cleanup_errors = terminate_after_failure(process, error)
         output.drain(OUTPUT_DRAIN_TIMEOUT_SECONDS, on_console=scan_console_unchecked)
-        tail = output.tail()
-        if tail:
-            raise RuntimeError(f"{error}\n--- OpenVMM output ---\n{tail}") from error
-        raise
+        raised = with_output(error, output.tail(), cleanup_errors)
+        if raised is error:
+            raise
+        raise raised from error
     finally:
-        if log_path is not None:
-            output.drain(
-                OUTPUT_DRAIN_TIMEOUT_SECONDS, on_console=scan_console_unchecked
-            )
-            log_path.parent.mkdir(parents=True, exist_ok=True)
-            log_path.write_bytes(output.contents())
-        interaction.close()
-        if cleanup_managed_network:
-            cleanup_managed_tap(process.pid)
+        finish_cleanup(
+            raised,
+            write_log,
+            interaction.close,
+            (lambda: cleanup_managed_tap(process.pid))
+            if cleanup_managed_network
+            else None,
+        )
 
 
 def benchmark(
@@ -2615,14 +2755,7 @@ def _raise_guest_script_failure(
 ) -> None:
     if primary_error is not None:
         if cleanup_errors:
-            cleanup_summary = "\n".join(
-                f"- {type(error).__name__}: {error}" for error in cleanup_errors
-            )
-            primary_error.args = (
-                f"{primary_error}\n--- cleanup failures ---\n{cleanup_summary}",
-                *primary_error.args[1:],
-            )
-            primary_error.cleanup_errors = tuple(cleanup_errors)  # type: ignore[attr-defined]
+            primary_error = append_cleanup_failures(primary_error, cleanup_errors)
         raise primary_error.with_traceback(primary_error.__traceback__)
 
     if len(cleanup_errors) == 1:
@@ -2820,6 +2953,7 @@ def capture_automatic_snapshot(
     ).start()
     deadline = time.monotonic() + timeout
     output = bytearray()
+    raised: BaseException | None = None
     try:
         while True:
             remaining = deadline - time.monotonic()
@@ -2846,13 +2980,14 @@ def capture_automatic_snapshot(
                 )
         _require_snapshot_artifacts(snapshot_path, "snapshot")
     except Exception as error:
-        terminate(process)
+        cleanup_errors = terminate_after_failure(process, error)
         tail = output[-4096:].decode("utf-8", "replace")
-        if tail:
-            raise RuntimeError(f"{error}\n--- OpenVMM output ---\n{tail}") from error
-        raise
+        raised = with_output(error, tail, cleanup_errors)
+        if raised is error:
+            raise
+        raise raised from error
     finally:
-        interaction.close()
+        finish_cleanup(raised, interaction.close)
 
 
 def _device_restore_markers(
@@ -2907,6 +3042,7 @@ def capture_device_restore_snapshot(
     ).start()
     deadline = time.monotonic() + timeout
     output = bytearray()
+    raised: BaseException | None = None
     try:
         while True:
             remaining = deadline - time.monotonic()
@@ -2941,15 +3077,14 @@ def capture_device_restore_snapshot(
         _require_snapshot_artifacts(snapshot_path, f"{device}/{mode} snapshot")
         return markers
     except Exception as error:
-        terminate(process)
+        cleanup_errors = terminate_after_failure(process, error)
         tail = output[-4096:].decode("utf-8", "replace")
-        if tail:
-            raise RuntimeError(f"{error}\n--- OpenVMM output ---\n{tail}") from error
-        raise
+        raised = with_output(error, tail, cleanup_errors)
+        if raised is error:
+            raise
+        raise raised from error
     finally:
-        log_path.parent.mkdir(parents=True, exist_ok=True)
-        log_path.write_bytes(output)
-        interaction.close()
+        finish_cleanup(raised, lambda: save_log(log_path, output), interaction.close)
 
 
 def run_device_restore_sample(
@@ -2981,6 +3116,7 @@ def run_device_restore_sample(
     phase_times: dict[str, int] = {}
     sequence = 0
     peak_bytes = 0
+    raised: BaseException | None = None
 
     def observe_line(raw_line: bytes, observed_ns: int) -> None:
         nonlocal sequence
@@ -3073,15 +3209,14 @@ def run_device_restore_sample(
         validate_device_restore_sample(sample, device, mode)
         return sample
     except Exception as error:
-        terminate(process)
+        cleanup_errors = terminate_after_failure(process, error)
         tail = output[-4096:].decode("utf-8", "replace")
-        if tail:
-            raise RuntimeError(f"{error}\n--- OpenVMM output ---\n{tail}") from error
-        raise
+        raised = with_output(error, tail, cleanup_errors)
+        if raised is error:
+            raise
+        raise raised from error
     finally:
-        log_path.parent.mkdir(parents=True, exist_ok=True)
-        log_path.write_bytes(output)
-        interaction.close()
+        finish_cleanup(raised, lambda: save_log(log_path, output), interaction.close)
 
 
 def benchmark_device_restore_profile(
@@ -5278,6 +5413,15 @@ def capture_snapshot(
         snapshot_requested = True
         deadline = time.monotonic() + timeout
 
+    def stop_storage() -> None:
+        if storage is not None:
+            storage.stop()
+
+    def write_log() -> None:
+        if log_path is not None:
+            save_log(log_path, output.contents())
+
+    raised: BaseException | None = None
     try:
         while True:
             peak_bytes = _try_peak_rss(process, peak_bytes)
@@ -5396,19 +5540,14 @@ def capture_snapshot(
             peak_bytes,
         )
     except Exception as error:
-        terminate(process)
+        cleanup_errors = terminate_after_failure(process, error)
         output.drain(OUTPUT_DRAIN_TIMEOUT_SECONDS)
-        tail = output.tail()
-        if tail:
-            raise RuntimeError(f"{error}\n--- OpenVMM output ---\n{tail}") from error
-        raise
+        raised = with_output(error, output.tail(), cleanup_errors)
+        if raised is error:
+            raise
+        raise raised from error
     finally:
-        if storage is not None:
-            storage.stop()
-        if log_path is not None:
-            log_path.parent.mkdir(parents=True, exist_ok=True)
-            log_path.write_bytes(output.contents())
-        interaction.close()
+        finish_cleanup(raised, stop_storage, write_log, interaction.close)
 
 
 def capture_telemetry_volumes(snapshot_path: Path) -> dict[str, Path]:

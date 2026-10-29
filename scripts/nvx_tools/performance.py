@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import datetime as dt
 import json
 import math
 import os
@@ -18,7 +19,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import cast
 
-from . import benchmark_host, host_telemetry
+from . import benchmark_host, host_telemetry, storage_events
 from .build_constants import BuildConstants
 from .common import bytes_to_mib, positive_int, sha256_file
 
@@ -3027,6 +3028,38 @@ def check_host(
     return 1 if changed else 0
 
 
+def save_storage_events(
+    since: dt.datetime, output_dir: Path, scratch_dir: Path | None = None
+) -> int:
+    """Save the storage events of a Windows job's window, from ``since`` to
+    now, in ``output_dir``, print their summary, and warn of slow I/O and of
+    an unreadable log. A failed job saves them as diagnostics, so an
+    unreadable log doesn't fail the save; other hosts have no such events."""
+    if sys.platform != "win32":
+        print("ERROR: storage events are recorded only on Windows", file=sys.stderr)
+        return 2
+
+    def volumes() -> dict[str, Path]:
+        # Resolving a path on a stalled volume can wait for it, so this runs
+        # only after the export, and within its bound.
+        volumes = benchmark_host.benchmark_volumes(scratch_dir)
+        system_root = os.environ.get("SystemRoot")
+        if system_root:
+            volumes["system"] = Path(system_root)
+        return volumes
+
+    report = storage_events.save_storage_events(since, output_dir, volumes)
+    for line in report.lines():
+        print(line)
+    if report.unsaved:
+        print(f"Saved only part of the storage events in {output_dir}")
+    else:
+        print(f"Saved the storage events in {output_dir}")
+    for title, message in report.warnings():
+        print(_annotation("warning", title, message))
+    return 0
+
+
 def _non_negative_float(value: str) -> float:
     parsed = float(value)
     if not math.isfinite(parsed) or parsed < 0:
@@ -3174,6 +3207,26 @@ def configure_parser(parser: argparse.ArgumentParser) -> None:
         "--output", type=Path, help="write this host as a host file to this path"
     )
     check.add_argument("--summary", type=Path)
+
+    events = commands.add_parser(
+        "storage-events",
+        help=("save the Windows storage events of a job's window and warn of slow I/O"),
+    )
+    events.add_argument(
+        "--since",
+        type=storage_events.parse_utc,
+        required=True,
+        help="start of the window, an ISO 8601 time with a UTC offset or Z",
+    )
+    events.add_argument("--output-dir", type=Path, required=True)
+    events.add_argument(
+        "--scratch-dir",
+        type=Path,
+        help=(
+            "benchmark scratch directory, whose volume the summary names "
+            "(default: the system temporary directory)"
+        ),
+    )
     parser.set_defaults(handler=command_performance)
 
 
@@ -3251,6 +3304,8 @@ def command_performance(args: argparse.Namespace) -> int:
                 output=args.output,
                 summary_path=args.summary,
             )
+        if args.performance_command == "storage-events":
+            return save_storage_events(args.since, args.output_dir, args.scratch_dir)
         persist_results(
             args.source_dir,
             args.history_dir,

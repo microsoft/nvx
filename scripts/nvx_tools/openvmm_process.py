@@ -13,7 +13,14 @@ from pathlib import Path
 from types import TracebackType
 from typing import NamedTuple
 
-from .benchmark import InteractiveProcess, terminate
+from .benchmark import (
+    InteractiveProcess,
+    append_cleanup_failures,
+    combined_failure,
+    raise_with_output,
+    run_cleanup,
+    terminate_after_failure,
+)
 from .common import remaining_timeout
 from .time_abi import (
     GUEST_BOOT_MARKERS,
@@ -106,15 +113,20 @@ class OpenvmmProcess:
             if output_read_delay:
                 time.sleep(output_read_delay)
             self._reader.start()
-        except BaseException:
-            terminate(self._interaction.process)
-            self._interaction.close()
-            self._log.close()
-            raise
+        except BaseException as error:
+            cleanup_errors = terminate_after_failure(self._interaction.process)
+            cleanup_errors += run_cleanup(self._interaction.close, self._log.close)
+            if not cleanup_errors:
+                raise
+            combined = append_cleanup_failures(error, cleanup_errors)
+            if combined is error:
+                raise
+            raise combined from error
         self._output = bytearray()
         self._search_offset = 0
         self._log_path = log_path
         self._finished = False
+        self._released = False
         self._status_sent = False
 
     @property
@@ -286,22 +298,45 @@ class OpenvmmProcess:
         It never raises a time ABI failure, so the error that led here on a
         failure path surfaces unmasked. Every scenario's success path ends in
         ``wait``, which scans the output to EOF and checks the exit status
-        (``test_every_openvmm_process_success_path_waits``).
+        (``test_every_openvmm_process_success_path_waits``). It releases the
+        interaction and the log even if OpenVMM outlives its kill, and then
+        raises the first failure, the kill's ``ProcessExitTimeout`` before
+        those of the interaction's shutdown and of the log, with the others
+        appended.
         """
+        cleanup_errors = self._release()
+        if cleanup_errors:
+            raise combined_failure(cleanup_errors)
+
+    def _release(self) -> list[BaseException]:
+        """Stop OpenVMM if it still runs, release the interaction and the log
+        once, and return the failures of the kill, of the shutdown, of the
+        drain, and of the log's close.
+
+        An OpenVMM that outlives its kill can keep its output open, so its
+        reader may not stop either, and every failure is kept.
+        """
+        if self._released:
+            return []
+        self._released = True
+        cleanup_errors: list[BaseException] = []
         if not self._finished and self.process.poll() is None:
-            terminate(self.process)
+            cleanup_errors = terminate_after_failure(self.process)
+
+        def drain() -> None:
+            if not self._log.closed:
+                self._drain_available()
+
         try:
-            # The reader queues its last chunks while the interaction shuts down, so
-            # drain only after it has stopped. Drain even if that shutdown fails, and
-            # release the transcript either way.
-            try:
-                self._interaction.close()
-            finally:
-                if not self._log.closed:
-                    self._drain_available()
+            # The reader queues its last chunks while the interaction shuts down,
+            # so drain only after it has stopped. Drain even if that shutdown
+            # fails, and release the transcript either way.
+            cleanup_errors += run_cleanup(
+                self._interaction.close, drain, self._close_log
+            )
         finally:
-            self._close_log()
             self._finished = True
+        return cleanup_errors
 
     def _drain_available(self) -> None:
         """Keep the output still queued; failure paths only, so no scan.
@@ -338,11 +373,9 @@ class OpenvmmProcess:
             self._log.close()
 
     def _fail(self, error: Exception):
-        self.close()
+        cleanup_errors = self._release()
         tail = self._output[-4096:].decode("utf-8", "replace")
-        if tail:
-            raise RuntimeError(f"{error}\n--- OpenVMM output ---\n{tail}") from error
-        raise error
+        raise_with_output(error, tail, cleanup_errors)
 
     def __enter__(self) -> OpenvmmProcess:
         return self
@@ -350,10 +383,20 @@ class OpenvmmProcess:
     def __exit__(
         self,
         _exc_type: type[BaseException] | None,
-        _exc_value: BaseException | None,
+        exc_value: BaseException | None,
         _traceback: TracebackType | None,
     ) -> None:
-        self.close()
+        if exc_value is None:
+            self.close()
+            return
+        # The error that left the block stays the one that surfaces, unless
+        # its message can't show the cleanup failures, which the error that it
+        # caused then shows.
+        cleanup_errors = self._release()
+        if cleanup_errors:
+            combined = append_cleanup_failures(exc_value, cleanup_errors)
+            if combined is not exc_value:
+                raise combined
 
 
 class TcpConsole:

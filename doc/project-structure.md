@@ -145,6 +145,7 @@ nvx/
 |   |   |-- sandbox_lifecycle_tests.py Managed sandbox lifecycle and security tests
 |   |   |-- sandbox_proxy_tests.py Proxy-only sandbox networking tests
 |   |   |-- sandbox_ram_upper_tests.py Sandboxes whose overlay upper is in RAM
+|   |   |-- storage_events.py    Storage events of a failed Windows benchmark job's window
 |   |   |-- time_abi.py          Time ABI harness checks and CPU profile guidance
 |   |   `-- ubuntu.py            Verified Ubuntu rootfs and EROFS preparation
 |   |-- setup/                   Host and Actions runner bootstrap scripts
@@ -312,7 +313,9 @@ point used by local children and administrator-owned remote wrappers.
 `host_telemetry.py` records the benchmark host's provenance and, on Windows, the
 storage activity during profiled snapshot captures, as
 [Snapshot lifecycle profile](benchmarks.md#snapshot-lifecycle-profile) and
-[CI collection](benchmarks.md#ci-collection) describe. The `test_*.py` files
+[CI collection](benchmarks.md#ci-collection) describe. `storage_events.py` saves
+the storage events of a failed Windows benchmark job, as
+[CI collection](benchmarks.md#ci-collection) describes. The `test_*.py` files
 beside `nvx.py` are the tooling's unit tests.
 
 The `setup/` scripts bootstrap development hosts and GitHub Actions runners

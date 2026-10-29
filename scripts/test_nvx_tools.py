@@ -4,6 +4,7 @@
 import argparse
 import ast
 import contextlib
+import errno
 import hashlib
 import http.client
 import http.server
@@ -56,6 +57,7 @@ from nvx_tools import (  # noqa: E402
     microvm_durations,
     microvm_shards,
     nvx_rs,
+    openvmm_process,
     openvmm_test_shards,
     performance,
     release,
@@ -13186,6 +13188,53 @@ Write-Output (Get-ExpectedRunnerLabels -BenchmarkRunner)
                         script.index("performance validate-workload"),
                     )
 
+    def test_failed_windows_benchmarks_keep_the_jobs_storage_events(self):
+        github = BuildConstants.REPO_ROOT / ".github"
+        action = (github / "actions" / "run-benchmark" / "action.yml").read_text(
+            encoding="utf-8"
+        )
+        platform = (github / "workflows" / "run-platform.yml").read_text(
+            encoding="utf-8"
+        )
+
+        # The window starts with the job, which records its start first.
+        start = _workflow_steps(platform, "run")[0]
+        self.assertTrue(start.startswith("      - name: Record Windows job start\n"))
+        self.assertIn("        if: runner.os == 'Windows'", start)
+        self.assertIn(
+            "\"NVX_JOB_STARTED_AT=$([DateTime]::UtcNow.ToString('o'))\"", start
+        )
+        self.assertIn("Out-File -FilePath $env:GITHUB_ENV", start)
+        save = _composite_action_step(action, "Save Windows storage events")
+        self.assertIn("      if: failure() && runner.os == 'Windows'", save)
+        script = _composite_action_script(action, "Save Windows storage events")
+        self.assertIn("python scripts\\nvx.py performance storage-events", script)
+        self.assertIn("--since $env:NVX_JOB_STARTED_AT", script)
+        self.assertIn(
+            '--output-dir "data/runs/${{ inputs.platform }}/storage-events"', script
+        )
+        # The scratch directory still exists, and names its volume.
+        self.assertIn(
+            '$ScratchArgs = @("--scratch-dir", $env:NVX_BENCHMARK_SCRATCH_DIR)',
+            script,
+        )
+        # The diagnostics upload, which runs whatever failed, keeps the events,
+        # and both uploads precede the scratch removal, which a stalled volume
+        # can hold up past the job's timeout, when no later step runs.
+        steps = [
+            action.index(f"- name: {name}")
+            for name in (
+                "Save Windows storage events",
+                "Upload benchmark diagnostics",
+                "Upload benchmark results",
+                "Remove Windows benchmark scratch",
+            )
+        ]
+        self.assertEqual(steps, sorted(steps))
+        upload = _composite_action_step(action, "Upload benchmark diagnostics")
+        self.assertIn("      if: always()", upload)
+        self.assertIn("        path: data/runs/${{ inputs.platform }}", upload)
+
     def test_windows_benchmarks_use_provisioned_data_volume_scratch(self):
         action = (
             BuildConstants.REPO_ROOT
@@ -13208,9 +13257,10 @@ Write-Output (Get-ExpectedRunnerLabels -BenchmarkRunner)
         self.assertIn('"NVX_BENCHMARK_SCRATCH_DIR=$Scratch"', prepare)
         self.assertIn("::warning::NVX_BENCHMARK_SCRATCH is not provisioned", prepare)
         self.assertIn("      if: always() && runner.os == 'Windows'", cleanup)
+        # The cleanup follows the uploads, as a stalled volume can hold it up.
         self.assertLess(
+            action.index("- name: Upload benchmark results"),
             action.index("- name: Remove Windows benchmark scratch"),
-            action.index("- name: Upload benchmark diagnostics"),
         )
         for step in (
             "Run Windows acceptance test",
@@ -13316,66 +13366,67 @@ function python {
                     {"scratch": scratch},
                 )
 
-    def test_failed_windows_benchmarks_keep_their_storage_events(self):
-        action = (
-            BuildConstants.REPO_ROOT
-            / ".github"
-            / "actions"
-            / "run-benchmark"
-            / "action.yml"
-        ).read_text(encoding="utf-8")
-        step = _composite_action_step(action, "Save Windows storage events")
-        script = _composite_action_script(action, "Save Windows storage events")
-
-        self.assertIn("      if: failure() && runner.os == 'Windows'", step)
-        self.assertIn(
-            '$Output = "data/runs/${{ inputs.platform }}/windows-storage-events.txt"',
-            script,
-        )
-        self.assertLess(
-            action.index("- name: Save Windows storage events"),
-            action.index("- name: Upload benchmark diagnostics"),
-        )
-
     @unittest.skipUnless(os.name == "nt", "requires Windows PowerShell")
-    def test_windows_storage_events_step_writes_both_logs(self):
-        action = (
-            BuildConstants.REPO_ROOT
-            / ".github"
-            / "actions"
-            / "run-benchmark"
-            / "action.yml"
-        ).read_text(encoding="utf-8")
-        script = _composite_action_script(
-            action, "Save Windows storage events"
-        ).replace("${{ inputs.platform }}", "windows-whp-virtual-machine")
+    def test_windows_storage_events_steps_save_the_jobs_window(self):
+        github = BuildConstants.REPO_ROOT / ".github"
+        action = (github / "actions" / "run-benchmark" / "action.yml").read_text(
+            encoding="utf-8"
+        )
+        platform = yaml.safe_load(
+            (github / "workflows" / "run-platform.yml").read_text(encoding="utf-8")
+        )
+        record = next(
+            step["run"]
+            for step in platform["jobs"]["run"]["steps"]
+            if step.get("name") == "Record Windows job start"
+        )
+        save = _composite_action_script(action, "Save Windows storage events")
+        output_argument = '"data/runs/${{ inputs.platform }}/storage-events"'
+        self.assertEqual(save.count(output_argument), 1)
 
         with tempfile.TemporaryDirectory() as temporary:
-            result = subprocess.run(
-                ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script],
-                cwd=temporary,
-                capture_output=True,
-                text=True,
-                timeout=120,
-                check=False,
+            output = Path(temporary) / "storage-events"
+            github_env = Path(temporary) / "github-env"
+            environment = dict(os.environ)
+            # The step's python is the interpreter that runs these tests.
+            environment["PATH"] = os.pathsep.join(
+                (str(Path(sys.executable).parent), environment.get("PATH", ""))
             )
-            output = (
-                Path(temporary)
-                / "data"
-                / "runs"
-                / "windows-whp-virtual-machine"
-                / "windows-storage-events.txt"
-            )
-            lines = output.read_text(encoding="utf-8-sig").splitlines()
+            environment["GITHUB_ENV"] = str(github_env)
+            environment["NVX_BENCHMARK_SCRATCH_DIR"] = temporary
 
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertRegex(lines[0], r"^Storage events since \d{4}-\d\d-\d\dT")
-        self.assertIn("--- Microsoft-Windows-Storage-Storport/Operational ---", lines)
-        self.assertIn("--- System ---", lines)
-        self.assertLess(
-            lines.index("--- Microsoft-Windows-Storage-Storport/Operational ---"),
-            lines.index("--- System ---"),
+            def run(script: str) -> subprocess.CompletedProcess[str]:
+                return subprocess.run(
+                    [
+                        "powershell.exe",
+                        "-NoProfile",
+                        "-NonInteractive",
+                        "-Command",
+                        script,
+                    ],
+                    cwd=BuildConstants.REPO_ROOT,
+                    env=environment,
+                    capture_output=True,
+                    text=True,
+                    timeout=300,
+                    check=False,
+                )
+
+            recorded = run(record)
+            self.assertEqual(recorded.returncode, 0, recorded.stderr)
+            name, _, started = (
+                github_env.read_text(encoding="utf-8-sig").strip().partition("=")
+            )
+            self.assertEqual(name, "NVX_JOB_STARTED_AT")
+            environment[name] = started
+            saved = run(save.replace(output_argument, f'"{output}"'))
+            summary = (output / "storage-events.txt").read_text(encoding="utf-8")
+
+        self.assertEqual(saved.returncode, 0, saved.stdout + saved.stderr)
+        self.assertRegex(
+            summary.splitlines()[0], r"^Storage events from \d{4}-\d\d-\d\dT"
         )
+        self.assertIn(f"storage events in {output}", saved.stdout)
 
     @unittest.skipUnless(os.name == "nt", "requires Windows PowerShell")
     def test_windows_benchmark_scratch_steps_manage_per_job_directories(self):
@@ -22592,7 +22643,8 @@ class BenchmarkTests(unittest.TestCase):
         with (
             patch.object(benchmark, "_wait_for_exit", return_value=False) as wait,
             self.assertRaisesRegex(
-                RuntimeError, "process 4321 did not exit within 30s of being killed"
+                benchmark.ProcessExitTimeout,
+                "process 4321 did not exit within 30s of being killed",
             ),
         ):
             benchmark.terminate(process)
@@ -25227,6 +25279,449 @@ class BenchmarkTests(unittest.TestCase):
         create_archive.assert_called_once_with(
             Path("dist/package"),
             Path("dist/package.zip"),
+        )
+
+
+class CleanupAfterKillTests(unittest.TestCase):
+    """A failure path keeps its error when OpenVMM outlives its kill."""
+
+    class StuckInteraction:
+        """An OpenVMM that printed ``console`` and outlives its kill, whose
+        output reader, with ``reader_stuck``, doesn't stop either."""
+
+        def __init__(self, console: bytes, reader_stuck: bool = False) -> None:
+            self.process = MagicMock(pid=4321)
+            self.process.poll.return_value = None
+            self.console = console
+            self.reader_stuck = reader_stuck
+            self.closed = False
+            self.closes = 0
+
+        def read_output(self, chunks: queue.Queue[bytes | None]) -> None:
+            chunks.put(self.console)
+
+        def read_stderr(self, chunks: queue.Queue[bytes | None]) -> None:
+            del chunks
+
+        def write_input(self, data: bytes) -> None:
+            raise AssertionError(f"unexpected input: {data!r}")
+
+        def close(self) -> None:
+            self.closed = True
+            self.closes += 1
+            if self.reader_stuck:
+                raise RuntimeError("OpenVMM output reader did not stop")
+
+    EXIT_TIMEOUT = "process 4321 did not exit within 30s of being killed"
+    READER_STUCK = "RuntimeError: OpenVMM output reader did not stop"
+
+    def outliving_kill(self) -> Any:
+        def outlive(*_args: object, **_kwargs: object) -> None:
+            raise benchmark.ProcessExitTimeout(self.EXIT_TIMEOUT)
+
+        return patch.object(benchmark, "terminate", side_effect=outlive)
+
+    def test_a_launch_failure_keeps_its_error_when_openvmm_outlives_the_kill(self):
+        with (
+            patch.object(
+                benchmark,
+                "InteractiveProcess",
+                return_value=self.StuckInteraction(b"booting\n"),
+            ),
+            patch.object(benchmark, "OUTPUT_DRAIN_TIMEOUT_SECONDS", 0.05),
+            self.outliving_kill() as terminate,
+            self.assertRaises(RuntimeError) as raised,
+        ):
+            benchmark.measure_once(["openvmm"], environment={}, timeout=0.2)
+
+        terminate.assert_called_once()
+        self.assertEqual(
+            str(raised.exception),
+            "guest marker was not observed within 0.2s\n"
+            "--- OpenVMM output ---\nbooting\n\n"
+            f"--- cleanup failures ---\n- ProcessExitTimeout: {self.EXIT_TIMEOUT}",
+        )
+        self.assertIsInstance(raised.exception.__cause__, TimeoutError)
+
+    def test_a_guest_failure_report_survives_an_openvmm_that_outlives_the_kill(self):
+        with (
+            patch.object(
+                benchmark,
+                "InteractiveProcess",
+                return_value=self.StuckInteraction(b"NVX-TEST-FAIL broken\n"),
+            ),
+            patch.object(benchmark, "OUTPUT_DRAIN_TIMEOUT_SECONDS", 0.05),
+            self.outliving_kill() as terminate,
+            self.assertRaises(benchmark.GuestFailureReported) as reported,
+        ):
+            benchmark.measure_once(
+                ["openvmm"],
+                environment={},
+                timeout=5,
+                failure_marker=b"NVX-TEST-FAIL",
+            )
+
+        terminate.assert_called_once()
+        self.assertEqual(reported.exception.line, "NVX-TEST-FAIL broken")
+        self.assertTrue(
+            str(reported.exception).endswith(
+                f"\n--- cleanup failures ---\n- ProcessExitTimeout: {self.EXIT_TIMEOUT}"
+            ),
+            str(reported.exception),
+        )
+
+    def test_a_teardown_timeout_kills_an_openvmm_that_outlives_the_kill_once(self):
+        with (
+            patch.object(
+                benchmark,
+                "InteractiveProcess",
+                return_value=self.StuckInteraction(benchmark.BOOT_MARKER + b"\n"),
+            ),
+            patch.object(benchmark, "OUTPUT_DRAIN_TIMEOUT_SECONDS", 0.05),
+            patch.object(benchmark, "live_peak_rss_bytes", return_value=1024),
+            patch.object(
+                benchmark,
+                "wait_for_process_exit",
+                side_effect=subprocess.TimeoutExpired("openvmm", 15),
+            ),
+            self.outliving_kill() as terminate,
+            self.assertRaises(RuntimeError) as raised,
+        ):
+            benchmark.measure_once(
+                ["openvmm"], environment={}, timeout=5, guest_exit_prequeued=True
+            )
+
+        terminate.assert_called_once()
+        self.assertTrue(
+            str(raised.exception).startswith(
+                f"{self.EXIT_TIMEOUT}\n--- OpenVMM output ---\n"
+            ),
+            str(raised.exception),
+        )
+
+    def test_cleanup_runs_every_step_and_keeps_the_error_that_it_follows(self):
+        calls: list[str] = []
+
+        def step(name: str, error: Exception | None = None) -> Callable[[], None]:
+            def run() -> None:
+                calls.append(name)
+                if error is not None:
+                    raise error
+
+            return run
+
+        failure = ValueError("scenario failed")
+        benchmark.append_cleanup_failures(
+            failure, [benchmark.ProcessExitTimeout(self.EXIT_TIMEOUT)]
+        )
+        benchmark.finish_cleanup(
+            failure,
+            step("log", OSError("disk full")),
+            None,
+            step("close", RuntimeError("OpenVMM output reader did not stop")),
+        )
+        self.assertEqual(calls, ["log", "close"])
+        # The failures join the kill's under one heading.
+        self.assertEqual(
+            str(failure),
+            "scenario failed\n--- cleanup failures ---\n"
+            f"- ProcessExitTimeout: {self.EXIT_TIMEOUT}\n- OSError: disk full\n"
+            f"- {self.READER_STUCK}",
+        )
+        # Without an error to follow, the first failure surfaces with the others.
+        with self.assertRaises(OSError) as raised:
+            benchmark.finish_cleanup(
+                None,
+                step("log", OSError("disk full")),
+                step("close", RuntimeError("OpenVMM output reader did not stop")),
+            )
+        self.assertEqual(
+            str(raised.exception),
+            f"disk full\n--- cleanup failures ---\n- {self.READER_STUCK}",
+        )
+        benchmark.finish_cleanup(None, step("close"))
+
+    def test_cleanup_failures_reach_an_error_whose_message_has_an_errno(self):
+        # An OSError with an errno takes its message from its errno, not its
+        # arguments, so its failures go into an OSError that it caused.
+        def full() -> OSError:
+            return OSError(errno.ENOSPC, "No space left on device", "source.log")
+
+        def fail(error: BaseException) -> Callable[[], None]:
+            def run() -> None:
+                raise error
+
+            return run
+
+        original = full()
+        combined = benchmark.append_cleanup_failures(
+            original, [RuntimeError("OpenVMM output reader did not stop")]
+        )
+        expected = f"{full()}\n--- cleanup failures ---\n- {self.READER_STUCK}"
+        self.assertIs(type(combined), OSError)
+        self.assertIs(combined.__cause__, original)
+        self.assertEqual(str(combined), expected)
+        self.assertEqual(str(original), str(full()))
+        # A cleanup whose first failure is such an error raises the combined
+        # one, and so does a cleanup that follows such an error.
+        reader = RuntimeError("OpenVMM output reader did not stop")
+        with self.assertRaises(OSError) as raised:
+            benchmark.finish_cleanup(None, fail(full()), fail(reader))
+        self.assertEqual(str(raised.exception), expected)
+        with self.assertRaises(OSError) as raised:
+            try:
+                raise full()
+            except OSError as failure:
+                reader = RuntimeError("OpenVMM output reader did not stop")
+                benchmark.finish_cleanup(failure, fail(reader))
+                raise
+        self.assertEqual(str(raised.exception), expected)
+        self.assertIsInstance(raised.exception.__cause__, OSError)
+
+    def test_a_launch_failure_keeps_its_error_when_the_reader_does_not_stop_either(
+        self,
+    ):
+        with (
+            patch.object(
+                benchmark,
+                "InteractiveProcess",
+                return_value=self.StuckInteraction(b"booting\n", reader_stuck=True),
+            ),
+            patch.object(benchmark, "OUTPUT_DRAIN_TIMEOUT_SECONDS", 0.05),
+            self.outliving_kill() as terminate,
+            self.assertRaises(RuntimeError) as raised,
+        ):
+            benchmark.measure_once(["openvmm"], environment={}, timeout=0.2)
+
+        terminate.assert_called_once()
+        self.assertEqual(
+            str(raised.exception),
+            "guest marker was not observed within 0.2s\n"
+            "--- OpenVMM output ---\nbooting\n\n"
+            f"--- cleanup failures ---\n- ProcessExitTimeout: {self.EXIT_TIMEOUT}\n"
+            f"- {self.READER_STUCK}",
+        )
+        self.assertIsInstance(raised.exception.__cause__, TimeoutError)
+
+    def test_a_snapshot_capture_keeps_its_error_and_log_past_a_stuck_reader(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            log_path = Path(temporary) / "source.log"
+            with (
+                patch.object(
+                    benchmark,
+                    "InteractiveProcess",
+                    return_value=self.StuckInteraction(b"booting\n", reader_stuck=True),
+                ),
+                self.outliving_kill() as terminate,
+                self.assertRaises(RuntimeError) as raised,
+            ):
+                benchmark.capture_device_restore_snapshot(
+                    ["openvmm"],
+                    Path(temporary) / "snapshot",
+                    "blk",
+                    "cold",
+                    timeout=0.2,
+                    log_path=log_path,
+                )
+
+            terminate.assert_called_once()
+            # The log is written before the interaction's shutdown fails.
+            self.assertEqual(log_path.read_bytes(), b"booting\n")
+        self.assertEqual(
+            str(raised.exception),
+            "blk/cold source snapshot did not finish within 0.2s\n"
+            "--- OpenVMM output ---\nbooting\n\n"
+            f"--- cleanup failures ---\n- ProcessExitTimeout: {self.EXIT_TIMEOUT}\n"
+            f"- {self.READER_STUCK}",
+        )
+        self.assertIsInstance(raised.exception.__cause__, TimeoutError)
+
+    def test_an_openvmm_process_closes_and_keeps_its_error_past_a_failed_kill(self):
+        interaction = self.StuckInteraction(b"booting\n")
+        with tempfile.TemporaryDirectory() as temporary:
+            log_path = Path(temporary) / "process.log"
+            with (
+                patch.object(
+                    openvmm_process, "InteractiveProcess", return_value=interaction
+                ),
+                self.outliving_kill() as terminate,
+                self.assertRaises(RuntimeError) as raised,
+                openvmm_process.OpenvmmProcess(["openvmm"], log_path) as process,
+            ):
+                process.wait_for(b"NEVER", 0.2)
+
+            terminate.assert_called_once()
+            self.assertTrue(interaction.closed)
+            self.assertEqual(log_path.read_bytes(), b"booting\n")
+        self.assertEqual(
+            str(raised.exception),
+            "marker b'NEVER' was not observed within 0.2s\n"
+            "--- OpenVMM output ---\nbooting\n\n"
+            f"--- cleanup failures ---\n- ProcessExitTimeout: {self.EXIT_TIMEOUT}",
+        )
+
+    def test_an_openvmm_process_reports_a_failed_kill_after_its_block(self):
+        interaction = self.StuckInteraction(b"booting\n")
+        with tempfile.TemporaryDirectory() as temporary:
+            log_path = Path(temporary) / "process.log"
+            with (
+                patch.object(
+                    openvmm_process, "InteractiveProcess", return_value=interaction
+                ),
+                self.outliving_kill(),
+            ):
+                # A block that leaves OpenVMM running fails only on the kill.
+                with self.assertRaisesRegex(
+                    benchmark.ProcessExitTimeout, f"^{re.escape(self.EXIT_TIMEOUT)}$"
+                ):
+                    with openvmm_process.OpenvmmProcess(["openvmm"], log_path):
+                        pass
+                # The error that leaves a block stays the one that surfaces.
+                with self.assertRaises(ValueError) as raised:
+                    with openvmm_process.OpenvmmProcess(["openvmm"], log_path):
+                        raise ValueError("scenario failed")
+        self.assertEqual(
+            str(raised.exception),
+            "scenario failed\n--- cleanup failures ---\n"
+            f"- ProcessExitTimeout: {self.EXIT_TIMEOUT}",
+        )
+
+    def test_an_openvmm_process_keeps_its_error_past_a_failed_kill_and_shutdown(self):
+        # An OpenVMM that outlives its kill can keep its output open, so its
+        # reader doesn't stop either, and neither failure hides the other.
+        interaction = self.StuckInteraction(b"booting\n", reader_stuck=True)
+        with tempfile.TemporaryDirectory() as temporary:
+            log_path = Path(temporary) / "process.log"
+            with (
+                patch.object(
+                    openvmm_process, "InteractiveProcess", return_value=interaction
+                ),
+                self.outliving_kill() as terminate,
+                self.assertRaises(RuntimeError) as raised,
+                openvmm_process.OpenvmmProcess(["openvmm"], log_path) as process,
+            ):
+                process.wait_for(b"NEVER", 0.2)
+
+            terminate.assert_called_once()
+            # The failure path releases the process, and the block's exit
+            # doesn't release it again.
+            self.assertEqual(interaction.closes, 1)
+            self.assertEqual(log_path.read_bytes(), b"booting\n")
+        self.assertEqual(
+            str(raised.exception),
+            "marker b'NEVER' was not observed within 0.2s\n"
+            "--- OpenVMM output ---\nbooting\n\n"
+            f"--- cleanup failures ---\n- ProcessExitTimeout: {self.EXIT_TIMEOUT}\n"
+            f"- {self.READER_STUCK}",
+        )
+
+    def test_an_openvmm_process_reports_a_failed_kill_and_shutdown_after_its_block(
+        self,
+    ):
+        def stuck(*_arguments: object) -> CleanupAfterKillTests.StuckInteraction:
+            return self.StuckInteraction(b"", reader_stuck=True)
+
+        with (
+            tempfile.TemporaryDirectory() as temporary,
+            patch.object(openvmm_process, "InteractiveProcess", side_effect=stuck),
+            self.outliving_kill(),
+        ):
+            log_path = Path(temporary) / "process.log"
+            with self.assertRaises(benchmark.ProcessExitTimeout) as closed:
+                with openvmm_process.OpenvmmProcess(["openvmm"], log_path):
+                    pass
+            with self.assertRaises(ValueError) as raised:
+                with openvmm_process.OpenvmmProcess(["openvmm"], log_path):
+                    raise ValueError("scenario failed")
+        self.assertEqual(
+            str(closed.exception),
+            f"{self.EXIT_TIMEOUT}\n--- cleanup failures ---\n- {self.READER_STUCK}",
+        )
+        self.assertEqual(
+            str(raised.exception),
+            "scenario failed\n--- cleanup failures ---\n"
+            f"- ProcessExitTimeout: {self.EXIT_TIMEOUT}\n- {self.READER_STUCK}",
+        )
+
+    def test_an_openvmm_process_reports_its_cleanup_after_an_errno_error(self):
+        def stuck(*_arguments: object) -> CleanupAfterKillTests.StuckInteraction:
+            return self.StuckInteraction(b"", reader_stuck=True)
+
+        full = OSError(errno.ENOSPC, "No space left on device", "source.log")
+        with (
+            tempfile.TemporaryDirectory() as temporary,
+            patch.object(openvmm_process, "InteractiveProcess", side_effect=stuck),
+            self.outliving_kill(),
+            self.assertRaises(OSError) as raised,
+            openvmm_process.OpenvmmProcess(["openvmm"], Path(temporary) / "log"),
+        ):
+            raise full
+        # The block's error can't show the failures, so the error that it
+        # caused, which does, surfaces in its place.
+        self.assertIs(raised.exception.__cause__, full)
+        self.assertEqual(
+            str(raised.exception),
+            f"{full}\n--- cleanup failures ---\n"
+            f"- ProcessExitTimeout: {self.EXIT_TIMEOUT}\n- {self.READER_STUCK}",
+        )
+
+    def test_an_openvmm_process_keeps_its_error_past_a_failed_transcript_close(
+        self,
+    ):
+        class FullLog(io.BytesIO):
+            """A transcript whose close fails to flush it."""
+
+            def close(self) -> None:
+                super().close()
+                raise OSError(errno.ENOSPC, "No space left on device", "log")
+
+        with (
+            tempfile.TemporaryDirectory() as temporary,
+            patch.object(
+                openvmm_process,
+                "InteractiveProcess",
+                return_value=self.StuckInteraction(b"booting\n"),
+            ),
+            self.outliving_kill(),
+            self.assertRaises(ValueError) as raised,
+            openvmm_process.OpenvmmProcess(
+                ["openvmm"], Path(temporary) / "log"
+            ) as process,
+        ):
+            process._log.close()
+            cast(Any, process)._log = FullLog()
+            raise ValueError("scenario failed")
+        full = OSError(errno.ENOSPC, "No space left on device", "log")
+        self.assertEqual(
+            str(raised.exception),
+            "scenario failed\n--- cleanup failures ---\n"
+            f"- ProcessExitTimeout: {self.EXIT_TIMEOUT}\n- OSError: {full}",
+        )
+
+    def test_a_failed_openvmm_launch_keeps_its_error_past_a_failed_kill_and_shutdown(
+        self,
+    ):
+        interaction = self.StuckInteraction(b"", reader_stuck=True)
+        with (
+            tempfile.TemporaryDirectory() as temporary,
+            patch.object(
+                openvmm_process, "InteractiveProcess", return_value=interaction
+            ),
+            patch.object(
+                openvmm_process.time, "sleep", side_effect=RuntimeError("interrupted")
+            ),
+            self.outliving_kill() as terminate,
+            self.assertRaises(RuntimeError) as raised,
+        ):
+            log_path = Path(temporary) / "process.log"
+            openvmm_process.OpenvmmProcess(["openvmm"], log_path, output_read_delay=1)
+
+        terminate.assert_called_once()
+        self.assertEqual(interaction.closes, 1)
+        self.assertEqual(
+            str(raised.exception),
+            "interrupted\n--- cleanup failures ---\n"
+            f"- ProcessExitTimeout: {self.EXIT_TIMEOUT}\n- {self.READER_STUCK}",
         )
 
 
