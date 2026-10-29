@@ -442,6 +442,16 @@ impl Command {
 
     /// Makes the child join `cgroup` once it has placed its descriptors, before the rest of its
     /// stages and its program, so that the program and its descendants start in it.
+    ///
+    /// The child joins in one of its own launch stages, which [`spawn`](Self::spawn) does not
+    /// wait for, and which follows the release of its [barrier](Self::barrier), if it waits at
+    /// one. So until the child's [`LaunchReport`] arrives, the cgroup may not hold the child yet:
+    /// a check of the cgroup's occupancy, a kill of its processes, or its removal can miss the
+    /// child then, and so can a [settlement](crate::guest::cgroup::ExecutionCgroup::settle). A
+    /// caller that needs the child in the cgroup first waits for the report. Or it spawns the
+    /// child with a barrier instead of the cgroup, places it with
+    /// [`ExecutionCgroup::place`](crate::guest::cgroup::ExecutionCgroup::place), and then releases
+    /// the barrier.
     pub fn cgroup(mut self, cgroup: Cgroup) -> Self {
         self.spec.set_cgroup(cgroup.procs);
         self
@@ -1214,6 +1224,43 @@ mod tests {
         assert_eq!(read_all(stdout), b"released");
         assert_eq!(sys::wait(process), Some(ChildStatus::Exited(0)));
         assert!(marker.exists());
+    }
+
+    #[test]
+    fn a_child_joins_its_cgroup_once_its_barrier_is_released() {
+        let directory = tempfile::tempdir().unwrap();
+        let cgroup = directory.path().join("cgroup");
+        std::fs::create_dir(&cgroup).unwrap();
+        let procs = cgroup.join("cgroup.procs");
+        std::fs::write(&procs, b"").unwrap();
+        // The child starts with a copy of `writer`, which it closes just before it waits at its
+        // barrier: once `reader` hangs up, every stage before the barrier has run.
+        let (reader, writer) = std::io::pipe().unwrap();
+        let mut spawned = shell("exit 0")
+            .barrier()
+            .cgroup(Cgroup::open(&cgroup).unwrap())
+            .spawn()
+            .unwrap();
+        drop(writer);
+        let (id, process) = (spawned.id(), spawned.process());
+        let barrier = spawned.take_barrier().unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while !sys::hung_up(std::os::fd::AsFd::as_fd(&reader)).unwrap() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the child does not wait at its barrier"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(!report_arrived(&spawned));
+        assert!(std::fs::read(&procs).unwrap().is_empty());
+        barrier.release().unwrap();
+        assert_eq!(spawned.into_report().wait().unwrap(), None);
+        assert_eq!(
+            std::fs::read(&procs).unwrap(),
+            format!("{id}\n").into_bytes()
+        );
+        assert_eq!(sys::wait(process), Some(ChildStatus::Exited(0)));
     }
 
     #[test]
