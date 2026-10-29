@@ -1213,7 +1213,19 @@ backend and splits the backend's suite into COUNT shards. The
 test hook, which makes OpenVMM's default CPU profile selection, `auto`, fall
 back to a host profile on a host that a built-in profile serves, checks the
 fallback's warning, captures the guest, and restores it on the snapshot's host
-profile. The `managed-lifecycle` scenario boots a guest whose init hands
+profile. The `time-host-correction` scenario reads the host's own clock
+correction from a time sample of an unhooked cold boot, then cold boots with
+OpenVMM's `host-rate-offset-ppm` test hook. The harness composes the host and
+hook rates as OpenVMM does, checks Linux's correction after the TSC rate's kHz
+rounding, clears an earlier poll's PLL phase offset through the `nvx-time`
+binary that every guest ships, waits out Linux's cached tick length, and retries
+a sample pair when host UTC, the accepted-sample count, or the live discipline
+state changes.
+It checks that the guest holds the published correction and runs its clock at
+the hooked rate of host UTC, then restores a snapshot with another rate, and
+with one beyond Linux's 500 ppm limit, which the guest must hold at the limit
+and report. The
+`managed-lifecycle` scenario boots a guest whose init hands
 the boot to the managed agent, and runs the ignored `nvx-rs` test
 `tests/managed_lifecycle.rs` with Cargo, which starts OpenVMM with the
 scenario's command line and drives the guest's control session; the scenario
