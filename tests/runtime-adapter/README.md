@@ -37,7 +37,7 @@ Each configuration enables one side of `nvx`:
 | Configuration | Cargo options | `nvx` features | Modules | Binary |
 | --- | --- | --- | --- | --- |
 | Protocol-only | none | none | `frame`, `root`, `probe`, `exec`, `template` | none |
-| Host-only | `--features host` | `host` | `frame`, `root`, `probe`, `exec`, `template`, `host`, `runtime`, `initramfs`, `staged`, `sharing`, `layered`, `hook` | `runtime-adapter-host` |
+| Host-only | `--features host` | `host` | `frame`, `root`, `probe`, `exec`, `template`, `host`, `runtime`, `initramfs`, `staged`, `sharing`, `layered`, `capture`, `generations`, `hook` | `runtime-adapter-host` |
 | Guest-only | `--features guest --target x86_64-unknown-linux-musl` | `guest` | `frame`, `root`, `probe`, `exec`, `template`, `guest`, `worker` | `runtime-adapter-guest`, a static executable |
 
 ## Framing
@@ -1401,6 +1401,63 @@ before it creates the store. A capture that fails leaves the store's
 generations as they were, and the command's diagnostic names the log of the VMM
 of the class's latest capture, when the class's slot keeps one.
 
+`runtime-adapter-host refresh` takes the options of `create`, and captures a
+new generation of the template's class with `Store::refresh_template`, whether
+or not the store holds an eligible one. Only `create`, for a class of which the
+store holds no eligible generation, and `refresh` capture templates: no other
+command captures one, and no restore triggers a capture. Both print the
+generation that they served only once the store has committed it.
+
+#### The template store
+
+The adapter keeps its template store where its caller says: in the directory
+STORE that each template command names, as the sandbox commands name a
+sandbox's store. It is a directory of its own, apart from every sandbox's
+store, private to the current user, whose parent exists. `create` and
+`refresh` create it if needed, while `list`, `inspect`, and `remove` only open
+it, and fail if it holds no template store. On Linux, the control socket of a
+capture's VMM, `captures/C/transaction/control.sock` in the store, must fit a
+Unix socket's path, so NVX refuses to capture into a store whose absolute path
+is longer than 56 bytes.
+
+#### Eviction
+
+The adapter keeps, of each capture class, the generation that it served last,
+and none that it supersedes. Once `create` or `refresh` has served a
+generation of a class, which the store held already or has just published, it
+retires every other generation of the class that the store published before
+it, or that a tombstone quarantines, with `generations::evict`, and prints
+which: those that are gone, and those that leases keep. `remove` retires the
+generation that it names. A retirement, NVX's `Store::retire`, tombstones the
+generation first, so that it takes no new lease, and deletes it, with its
+payload, once no lease of it remains: it never moves or deletes a generation
+that a clone leases. A generation that leases keep stays tombstoned, and the
+next retirement of it, by a `remove` that names it, or by the next eviction of
+its class, deletes it once its clones have released them. A retirement that a
+crash interrupts once it has removed its generation from the store's index
+leaves the generation's tombstone alone: the generation is gone, with its
+payload, its leases, and the class that its entry recorded. So each eviction
+also retires every such tombstone, of a generation below the index's next one
+that the index no longer lists, whatever the class that it serves, and lists it
+among those that are gone. An eviction that fails leaves the generations that
+it did not retire to the next one, and fails nothing that the command served,
+which the store has committed.
+
+#### Listings
+
+`runtime-adapter-host list` and `inspect` report what the store records of its
+generations, from its index, its tombstones, and the records of its leases
+alone, with `generations::entries` and `generations::entry`: each generation's
+store generation, the identities of its compatibility key and of its capture
+class, its state, `available` or `tombstoned`, whether a clone may restore it at
+the host's time, and why, as `Generation::eligibility` decides it, and its
+leases, and, from `inspect`, each lease's sandbox and launch, and the metadata
+of the capture: its storage generation, its time contract's host, boot, clock,
+anchors, and lineage counter, and the lengths of its saved state and of its
+RAM. They read no generation's payload, neither its snapshot nor its key, whose
+decoding checks the digest of the key's kernel command line, so they load no VM
+state, and hash nothing. They take no lock, so each record is as they read it.
+
 ### Clones
 
 `runtime-adapter-host start` starts a clone of a generation of a template store
@@ -1564,8 +1621,9 @@ before.
 
 ### Commands
 
-Each command of `runtime-adapter-host` but `stage` takes NVX's artifacts from
-the directory that `NVX_ARTIFACTS_DIR` names, and the guest agent's build from
+Each command of `runtime-adapter-host` but `stage`, `list`, `inspect`, and
+`remove`, which need no artifacts, takes NVX's artifacts from the directory that
+`NVX_ARTIFACTS_DIR` names, and the guest agent's build from
 `--guest-build BUILD`, the crate's version by default:
 
 - `stage STORE --distro FORMAT:PATH --distro-identity UUID [--upper scratch:PATH]`
@@ -1646,7 +1704,27 @@ the directory that `NVX_ARTIFACTS_DIR` names, and the guest agent's build from
   policy lets nothing through, and none without a network. The command reads
   the network before anything else, as a launch does, and checks the class
   before it creates the store, then prints the generation once the store has
-  committed it.
+  committed it, and [evicts](#eviction) the generations of the class that it
+  supersedes.
+- `refresh STORE --guest-agent PATH --distro FORMAT:PATH --distro-identity UUID [--hypervisor NAME] [--cpu-profile PROFILE] [--processors N] [--memory MIB] [--memory-capacity MIB] [--scratch-length BYTES] [--network FILE]`
+  takes the options of `create`, and captures a new generation of the
+  template's class in STORE, whether or not the store holds an eligible one,
+  then prints it once the store has committed it, and evicts the generations of
+  the class that it supersedes, as `create` does.
+- `list STORE` reports each generation of the template store STORE, in the
+  order of their publication, from the store's records alone, as
+  [Listings](#listings) describes.
+- `inspect STORE GENERATION` reports the generation of STORE whose store
+  generation is GENERATION, a positive number, as `list` does, with its leases
+  and the metadata of its capture. It fails for a generation that the store
+  does not hold.
+- `remove STORE GENERATION` retires the generation GENERATION of STORE: it
+  tombstones the generation, so that it takes no new lease, and deletes it once
+  no lease of it remains. While leases remain, it reports them, and leaves the
+  generation tombstoned, with its payload, which a later `remove`, or the next
+  [eviction](#eviction) of its class, deletes once they drained. A generation
+  that the store no longer holds is retired already, and one that it never
+  published fails the removal.
 - `reattach STORE [--template TEMPLATES]` takes the sandbox's lock, and
   reattaches to its VM, which
   another process launched, and which it holds, although the VM is not its
@@ -1759,10 +1837,15 @@ the stop began, which stopped nothing),
 `outcome` (such as `success 0`, or `guest-exit 14` once the assembly failed),
 `teardown` (`complete` or `incomplete`: whether the VMM's teardown of the VM
 completed, which the outcome report records apart from the root's), `created`
-(`captured` once a capture made the template's generation, or `existing` once
-the store held it), `generation` (the generation's number in the template
-store, which `create` served or `start` leased), `key` and `class` (the
-identities of its compatibility key and of its capture class, in hexadecimal),
+(`captured` once a capture made the template's generation, as a refresh's
+always does, or `existing` once the store held it), `generation` (the
+generation's number in the template store, which `create` or `refresh` served,
+`inspect` reports, or `start` leased), `key` and `class` (the identities of its
+compatibility key and of its capture class, in hexadecimal), `retired` and
+`draining` (the generations that the eviction of a creation or a refresh
+retired: those of the class that are gone, with those whose interrupted
+retirement it completed, and those that leases keep, each list separated by
+commas, or `none`),
 `lease` (the identity of the lease that `start` took, 32 hexadecimal digits),
 `downtime` and `source` (the downtime of the leased generation's capture at the
 host's time, in nanoseconds, and the clock that measured it, `monotonic` or
@@ -1776,9 +1859,26 @@ failed, `plan`, `launch`, `restore`, `activation`, `start`, `commit`, `run`, or
 spells it; its `status`, the status with which the guest ended the VM, as the
 VM's outcome report gives it, or `none`; its `teardown`, how the teardown that
 followed ended, `no-vm`, `exited`, `terminated`, or `unresolved`; and its
-`code`, the code of the failure's error, such as `runtime-mismatch`), and
+`code`, the code of the failure's error, such as `runtime-mismatch`),
 `quarantined` (whether the command quarantined the generation of a clone that
-failed: `yes`, for a failure of the template, or `no`). Values
+failed: `yes`, for a failure of the template, or `no`), `store` (the identity
+of the template store), `generations` (the store generations that `list`
+found, or `none`), `generation.G.KEY` (what `list` found of the generation G,
+with the KEYs `key`, `class`, `state`, `eligibility`, `reason`, and `leases`,
+which `inspect` prints of its generation), `state` (`available`, or
+`tombstoned` once a tombstone quarantines the generation), `eligibility` and
+`reason` (`eligible`, `early`, or `expired`, at the host's time, and NVX's
+reason, with the capture's downtime), `leases` (the identities of the
+generation's leases, or `none`), `lease.ID.sandbox` and `lease.ID.launch` (the
+sandbox that holds the lease ID, and the launch of its clone that the lease
+reserves), `storage` (the capture's storage generation), `time.host`,
+`time.boot`, `time.clock`, `time.utc`, `time.monotonic`, and `time.lineage`
+(the capture's time contract: the identities of the host and of its boot, the
+host's monotonic clock, the capture's anchor in UTC and by that clock, in
+nanoseconds, and its time lineage counter), `length.state` and `length.memory`
+(the lengths of the snapshot's saved state and of its RAM, in bytes), and
+`removed` (`retired`, once the generation is gone, or `draining`, with the
+leases that keep it). Values
 escape `\`, newlines, and carriage returns as `\\`, `\n`, and `\r`, and each
 byte of a program's output that is not part of UTF-8 text as `\xHH`. The
 commands exit with 0 once they did what they were asked, `exec` once every
@@ -1787,8 +1887,9 @@ booted cold mismatched, with 4 when the guest reported that a stage of the root
 failed, and the VM ended with the stage's status and a complete teardown, with
 5 when the [step hook](#the-step-hook) ended a command, with 6 when the guest
 failed a mapping of the table, and the VM stopped gracefully, with a success
-and a complete teardown, with 8 when a clone failed, once nothing of it runs
-and the command released its lease, with 9 when a clone failed, and its
+and a complete teardown, with 7 when `remove` found leases that keep the
+generation, which it tombstoned, with 8 when a clone failed, once nothing of it
+runs and the command released its lease, with 9 when a clone failed, and its
 teardown is unresolved, so that the sandbox keeps the lease, and with 1, after
 a diagnostic on standard error, when they
 fail. A value of `RUNTIME_ADAPTER_HOST_TIME` that is not a host's time is a
@@ -1834,7 +1935,11 @@ parameter outside the allowlist at its start, in its middle, or at its end, or
 within a platform token's value, after a vertical tab or the byte 0xa0, which
 the kernel takes for whitespace and a split at ASCII whitespace does not, for a
 platform token that the no-break space's first byte leaves without UTF-8 text,
-for a double quote, and for `--`. In
+for a double quote, and for `--`. In the host-only configuration, those of
+`generations` check which generations an eviction retires: those of the served
+generation's class that it supersedes, and, whatever their class, the
+tombstones that interrupted retirements left alone, but not those of the
+generations that the store published after the eviction read its index. In
 the guest-only configuration, the unit tests of `worker::probes`
 cover what the probes read: the mount table with its escapes, the kernel's
 records of a process, `os-release`, and the guest's memory, and the probes and
@@ -2287,6 +2392,23 @@ and Windows:
   artifacts or creates the store, and with one that the plan takes, or none,
   which goes on to need NVX's artifacts.
 
+`tests/template_operations.rs` checks the template operations, in the
+host-only configuration, on Linux and Windows, without a hypervisor:
+
+- `list`, `inspect`, and `remove` of a directory that does not exist, and of a
+  private one that holds no template store, which each refuses with status 1,
+  and creates nothing;
+- `list` of a template store without generations, which prints the store and
+  none, and `inspect` and `remove` of a generation that it never published,
+  which fail with status 1, and tombstone nothing;
+- `refresh` with a network that the plan refuses, which it refuses with status
+  1 before it needs NVX's artifacts or creates the store, as `create` does, and
+  with one that the plan takes, or none, which goes on to need them;
+- the command lines of `refresh`, `list`, `inspect`, and `remove` that the host
+  program refuses, each with status 2: a missing store or generation, a
+  generation that is not a positive 64-bit number, and arguments or options
+  that the command does not take.
+
 `tests/step_hook.rs` checks, in the host-only configuration, on Linux and
 Windows, the [step hook](#the-step-hook): the values of
 `RUNTIME_ADAPTER_STEP_HOOK` that set it, with each step and action, a path with
@@ -2499,7 +2621,8 @@ layer before any mount: `noload` is not permission to ignore required recovery.
 ### Template scenarios
 
 `tests/vm_template.rs` creates [templates](#templates) on a real hypervisor, in
-the host-only configuration, through `runtime-adapter-host create`. Each test
+the host-only configuration, through `runtime-adapter-host create`, and runs
+`refresh`, `list`, `inspect`, and `remove` on them. Each test
 stages its placeholder, a copy of NVX's Ubuntu EROFS image with its manifest,
 in a directory that only its user may change, as a platform stages its trusted
 artifacts, and creates a template of it in a template store of its own:
@@ -2515,6 +2638,9 @@ artifacts, and creates a template of it in a template store of its own:
 | `ingress_is_refused_before_any_vm_starts` | Ingress allowed | NVX's refusal, with status 1, a store without a generation, and no VMM's log or transaction in any slot |
 | `host_loopback_both_ways_is_refused_before_any_vm_starts` | Host-loopback access both ways | NVX's refusal, with status 1, a store without a generation, and no VMM's log or transaction in any slot |
 | `a_class_that_no_capture_takes_is_refused_before_the_store` | 3 processors | NVX's refusal of the class, with status 1, before the store exists |
+| `a_refresh_captures_and_retires_the_generations_that_it_supersedes` | A creation, then two refreshes, the second while a clone leases the second generation, then a creation once the clone released it | `list` and `inspect` of the first generation; each refresh captures a new generation, although the store holds an eligible one, and its eviction retires the first generation, and leaves the leased second one, tombstoned, with its payload; the creation serves the third without a capture, and its eviction deletes the second |
+| `a_removal_reports_busy_while_leases_keep_the_generation` | A creation, two clones' leases of its generation, a removal, a second creation, then a removal after each release | `list` and `inspect` with the leases; the removal tombstones the generation, which keeps its payload and takes no new lease, and reports busy, with status 7 and its leases; the second creation captures a new generation, and leaves the first to its leases; a removal reports busy while a lease remains, and deletes the generation once none does; a second removal finds it retired, one of a generation that the store never published fails, and a generation that no lease keeps goes at once |
+| `a_refresh_refuses_a_class_that_no_capture_takes_before_the_store` | A refresh of 3 processors | NVX's refusal of the class, with status 1, before the store exists |
 
 Unless a test says otherwise, a template has 1 processor, 256 MiB of RAM, its
 capacity, and a 64 MiB scratch. A captured template is the store's one
@@ -2529,6 +2655,15 @@ placeholder's identity nor a root's tokens. Its class's slot then holds no
 transaction and records no launch, and a second creation prints `existing`,
 with the same generation, key, and class, without a capture: the slot's log of
 the VMM stays as the capture left it.
+
+The scenarios of the operations lease generations to clones through NVX's
+store, as a clone's start does, but launch nothing, and release the leases as
+a clone's teardown does. They check what `list` and `inspect` print against
+what the store records: each generation's key, class, state, eligibility at
+the host's time, by its monotonic clock, since this host and boot captured it,
+and leases, and, from `inspect`, the capture's storage generation, time
+contract, and lengths; and what each eviction and removal printed against the
+generations and payloads that the store then holds.
 
 ### Clone scenarios
 

@@ -108,8 +108,8 @@ pub(crate) struct Sandbox {
     /// The test's directory.
     pub(crate) root: PathBuf,
     /// The store of the commands that the test runs: the sandbox's store, which the launch
-    /// creates, or a template store, which `create` creates, whose captures run their VMs in its
-    /// slots.
+    /// creates, or a template store, which `create` or `refresh` creates, whose captures run their
+    /// VMs in its slots.
     pub(crate) store: PathBuf,
     /// The number of commands that the test ran.
     commands: usize,
@@ -196,6 +196,17 @@ impl Sandbox {
         let mut arguments: Vec<&OsStr> = guest.iter().map(OsString::as_os_str).collect();
         arguments.extend(options);
         let started = self.start("create", &arguments, &[]);
+        self.finish(started, status)
+    }
+
+    /// Refreshes a template of the guest agent in the sandbox's store, a template store, as
+    /// [`create`](Self::create) creates one, with `options` too, checks that the refresh exits
+    /// with `status`, and returns what it printed.
+    pub(crate) fn refresh(&mut self, options: &[&OsStr], status: i32) -> Printed {
+        let guest = guest_options();
+        let mut arguments: Vec<&OsStr> = guest.iter().map(OsString::as_os_str).collect();
+        arguments.extend(options);
+        let started = self.start("refresh", &arguments, &[]);
         self.finish(started, status)
     }
 
