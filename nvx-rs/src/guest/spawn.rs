@@ -78,6 +78,13 @@ use super::sys::{
 /// [`NoNewPrivileges`](Self::NoNewPrivileges), are an execution's [entry](super::entry), which
 /// [`Command::enter`] asks for; the child of an entry also takes the [`Signals`](Self::Signals)
 /// step, which [`Command::reset_signals`] asks for otherwise.
+///
+/// Each stage has a number, its [`code`](Self::code), with which the child's launch report names
+/// the stage that failed, and which a [`Binding`](super::exec::binding::Binding) reports to its
+/// runner as the stage of a [`LaunchFailure`](crate::exec::LaunchFailure).
+/// [`from_code`](Self::from_code) turns a number back into its stage. The numbers are part of the
+/// API: a stage keeps its number, and a new stage takes a number of its own, wherever it comes in
+/// the order.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum LaunchStage {
@@ -158,8 +165,10 @@ impl LaunchStage {
         Self::Exec,
     ];
 
-    /// Returns the stage's number in a launch report: its position, from 1.
-    pub(crate) fn code(self) -> i32 {
+    /// Returns the stage's number: from 1, for [`ProcessGroup`](Self::ProcessGroup), to 21, for
+    /// [`Exec`](Self::Exec), in the order of the stages. A stage that NVX adds takes 22, then 23,
+    /// and so on, wherever it comes in the order, and no stage is numbered 0.
+    pub const fn code(self) -> u32 {
         match self {
             Self::ProcessGroup => 1,
             Self::Session => 2,
@@ -185,8 +194,29 @@ impl LaunchStage {
         }
     }
 
-    /// Returns the stage that a launch report numbers `code`, if any.
-    fn from_code(code: i32) -> Option<Self> {
+    /// Returns the stage that `code` numbers, or `None` if no stage has that number, such as 0,
+    /// which a [`Binding`](super::exec::binding::Binding) reports for a launch whose report it
+    /// could not read.
+    ///
+    /// ```
+    /// use nvx::exec::{LaunchFailure, Outcome};
+    /// use nvx::guest::spawn::LaunchStage;
+    ///
+    /// /// Returns whether the program of `outcome` did not start because its working directory
+    /// /// was missing or out of its reach.
+    /// fn lacks_working_directory(outcome: &Outcome) -> bool {
+    ///     outcome.launch_failure().is_some_and(|failure| {
+    ///         LaunchStage::from_code(failure.stage()) == Some(LaunchStage::WorkingDirectory)
+    ///     })
+    /// }
+    ///
+    /// let failure = LaunchFailure::new(LaunchStage::WorkingDirectory.code(), 2);
+    /// assert!(lacks_working_directory(
+    ///     &Outcome::new(None).with_launch_failure(failure)
+    /// ));
+    /// assert_eq!(LaunchStage::from_code(0), None);
+    /// ```
+    pub fn from_code(code: u32) -> Option<Self> {
         Self::ALL.into_iter().find(|stage| stage.code() == code)
     }
 }
@@ -634,7 +664,7 @@ impl LaunchReport {
         if length == 0 {
             return Ok(None);
         }
-        let stage = i32::from_ne_bytes(bytes[..4].try_into().expect("four bytes"));
+        let stage = u32::from_ne_bytes(bytes[..4].try_into().expect("four bytes"));
         let error = i32::from_ne_bytes(bytes[4..].try_into().expect("four bytes"));
         match LaunchStage::from_code(stage) {
             Some(stage) if length == REPORT_LENGTH => Ok(Some(LaunchFailure { stage, error })),
@@ -1071,7 +1101,7 @@ mod tests {
         for (bytes, expected) in [
             (Vec::new(), Ok(None)),
             (
-                [18i32.to_ne_bytes(), 2i32.to_ne_bytes()].concat(),
+                [18u32.to_ne_bytes(), 2i32.to_ne_bytes()].concat(),
                 Ok(Some(LaunchFailure {
                     stage: LaunchStage::WorkingDirectory,
                     error: 2,
@@ -1079,11 +1109,11 @@ mod tests {
             ),
             (vec![1, 0, 0], Err(Errno::EPROTO as i32)),
             (
-                [22i32.to_ne_bytes(), 2i32.to_ne_bytes()].concat(),
+                [22u32.to_ne_bytes(), 2i32.to_ne_bytes()].concat(),
                 Err(Errno::EPROTO as i32),
             ),
             (
-                [0i32.to_ne_bytes(), 2i32.to_ne_bytes()].concat(),
+                [0u32.to_ne_bytes(), 2i32.to_ne_bytes()].concat(),
                 Err(Errno::EPROTO as i32),
             ),
         ] {
@@ -1103,13 +1133,53 @@ mod tests {
     }
 
     #[test]
-    fn launch_stages_are_numbered_in_their_order() {
-        let codes: Vec<i32> = LaunchStage::ALL.iter().map(|stage| stage.code()).collect();
-        assert_eq!(codes, (1..=21).collect::<Vec<_>>());
+    fn launch_stages_keep_their_numbers() {
+        // Callers tell a failed stage by its number, so no stage changes its number: a new stage
+        // takes 22, then 23, and so on, wherever it comes in the order.
+        let numbers = [
+            (LaunchStage::ProcessGroup, 1),
+            (LaunchStage::Session, 2),
+            (LaunchStage::Barrier, 3),
+            (LaunchStage::Descriptors, 4),
+            (LaunchStage::Cgroup, 5),
+            (LaunchStage::Propagation, 6),
+            (LaunchStage::Hostname, 7),
+            (LaunchStage::MoveRoot, 8),
+            (LaunchStage::Proc, 9),
+            (LaunchStage::Sys, 10),
+            (LaunchStage::Devices, 11),
+            (LaunchStage::Root, 12),
+            (LaunchStage::Bounding, 13),
+            (LaunchStage::Identity, 14),
+            (LaunchStage::Capabilities, 15),
+            (LaunchStage::NoNewPrivileges, 16),
+            (LaunchStage::Credentials, 17),
+            (LaunchStage::WorkingDirectory, 18),
+            (LaunchStage::PhysicalWorkingDirectory, 19),
+            (LaunchStage::Signals, 20),
+            (LaunchStage::Exec, 21),
+        ];
+        assert_eq!(numbers.map(|(stage, _)| stage), LaunchStage::ALL);
+        for (stage, number) in numbers {
+            assert_eq!(stage.code(), number, "{stage:?}");
+            assert_eq!(LaunchStage::from_code(number), Some(stage), "{number}");
+        }
+        for number in [0, 22, u32::MAX] {
+            assert_eq!(LaunchStage::from_code(number), None, "{number}");
+        }
+    }
+
+    #[test]
+    fn launch_stages_are_in_their_order() {
         // The entry's view comes after the cgroup, which a child joins before it drops its
         // privileges, and its identity before the working directory, which it enters as that
         // identity. The signals take their defaults last, just before the program.
-        let position = |stage: LaunchStage| stage.code();
+        let position = |stage: LaunchStage| {
+            LaunchStage::ALL
+                .iter()
+                .position(|other| *other == stage)
+                .unwrap()
+        };
         assert!(position(LaunchStage::Cgroup) < position(LaunchStage::Identity));
         assert!(position(LaunchStage::MoveRoot) < position(LaunchStage::Proc));
         assert!(position(LaunchStage::NoNewPrivileges) < position(LaunchStage::WorkingDirectory));

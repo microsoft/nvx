@@ -14,6 +14,14 @@
 //! the streams that [hung up](crate::exec::Runner::output_hung_up), which no process holds any
 //! more.
 //!
+//! A launch that failed reaches the runner as a [`LaunchFailure`] whose
+//! [stage](LaunchFailure::stage) is the [number](crate::guest::spawn::LaunchStage::code) of the
+//! [`LaunchStage`](crate::guest::spawn::LaunchStage) that failed, which
+//! [`LaunchStage::from_code`](crate::guest::spawn::LaunchStage::from_code) turns back into the
+//! stage, or 0, which numbers no stage, if the binding could not read the launch report. The
+//! numbers are part of the API: a stage keeps its number, and a new stage takes a number of its
+//! own.
+//!
 //! The adapter hands the binding the peer's messages, frames the runner's
 //! [messages](crate::exec::runner::Message) that [`next`](Binding::next) returns, and drives the
 //! binding without blocking, as it would the execution alone: it calls `next` until that returns
@@ -414,7 +422,7 @@ impl Binding {
                 self.runner.launched(match report {
                     Ok(None) => Ok(()),
                     Ok(Some(failure)) => Err(LaunchFailure::new(
-                        failure.stage().code().unsigned_abs(),
+                        failure.stage().code(),
                         failure.raw_os_error(),
                     )),
                     Err(error) => Err(LaunchFailure::new(0, error.raw_os_error().unwrap_or(0))),

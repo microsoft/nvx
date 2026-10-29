@@ -1,16 +1,16 @@
 //! Checks of bound executions of real programs, each with a peer in the same process: streams
 //! beyond their windows, input beyond its window, an input that the program closes early, one
 //! that closes with its last byte while output waits, and one whose write fails, a program that
-//! the caller started itself, settlement before reuse and the fences of failed cleanups, the
-//! bounded wait for output that a descendant holds once an execution does not settle, due
-//! settlement checks while output drains slowly, statuses that the execution or the caller
-//! collects, which reach the runner ahead of queued output and of its timeout, even in a first
-//! call after it, and while the launch report is late, the bounded wait for a launch report that a
-//! process holds for good, the bounds on the steps and on the writes of one call, output that
-//! flows while the caller hands over input before every call, and two executions in one loop, one
-//! of them with a stalled sink or a pipe writer that escaped its kill. The loop waits only for
-//! what the bindings and peers say that they wait on, so a step that nothing leads to stalls a
-//! check rather than passing it.
+//! the caller started itself, a launch stage that fails, which the peer learns by its number,
+//! settlement before reuse and the fences of failed cleanups, the bounded wait for output that a
+//! descendant holds once an execution does not settle, due settlement checks while output drains
+//! slowly, statuses that the execution or the caller collects, which reach the runner ahead of
+//! queued output and of its timeout, even in a first call after it, and while the launch report
+//! is late, the bounded wait for a launch report that a process holds for good, the bounds on the
+//! steps and on the writes of one call, output that flows while the caller hands over input
+//! before every call, and two executions in one loop, one of them with a stalled sink or a pipe
+//! writer that escaped its kill. The loop waits only for what the bindings and peers say that
+//! they wait on, so a step that nothing leads to stalls a check rather than passing it.
 
 use std::ffi::CString;
 use std::os::fd::OwnedFd;
@@ -26,7 +26,7 @@ use crate::exec::{Limits, Outcome, Peer, Timers, Window, peer};
 use crate::guest::cgroup::{ExecutionCgroup, Layout, Scope};
 use crate::guest::exec::{Options, Pipes};
 use crate::guest::process::Child;
-use crate::guest::spawn::Command;
+use crate::guest::spawn::{Command, LaunchStage};
 use crate::guest::sys::{self, ProcessId};
 
 /// How long a test waits for its executions before it fails.
@@ -452,6 +452,30 @@ fn an_adopted_program_runs_bound_as_a_spawned_one_does() {
     assert_eq!(outcome.status(), Some(Status::Exited(3)));
     assert_eq!(outcome.cause(), None);
     assert!(outcome.is_reusable());
+    assert!(side.failures.is_empty(), "{:?}", side.failures);
+}
+
+#[test]
+fn a_failed_launch_stage_reaches_the_peer_by_its_number() {
+    let temporary = tempfile::tempdir().unwrap();
+    let cgroup = fake_cgroup(temporary.path(), "0\n");
+    let mut side = Side::start(
+        shell("exit 0").working_directory(c"/nonexistent/directory".to_owned()),
+        false,
+        Options::new().cgroup(&cgroup, Scope::Execution),
+        limits(16 * 1024),
+        timers(),
+    );
+    let outcome = finish(&mut side);
+    assert_eq!(Some(outcome), side.terminal);
+    let failure = outcome.launch_failure().expect("the launch failed");
+    // The caller tells the stage through NVX's numbering, rather than a number of its own.
+    assert_eq!(
+        LaunchStage::from_code(failure.stage()),
+        Some(LaunchStage::WorkingDirectory)
+    );
+    assert_eq!(failure.error(), nix::errno::Errno::ENOENT as i32);
+    assert_eq!(outcome.status(), Some(Status::Exited(125)));
     assert!(side.failures.is_empty(), "{:?}", side.failures);
 }
 
