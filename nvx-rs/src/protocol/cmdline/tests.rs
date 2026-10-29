@@ -3,6 +3,10 @@
 //! `lib/kstrtox.c`, and `drivers/virtio/virtio_mmio.c`; and, for the DNS server, OpenVMM's
 //! rendering and reading of its `virtnet_dns=` token, `openvmm_defs::microvm`'s
 //! `command_line_fragment_with` and `microvm_command_line_dns_server`, whose vectors they take.
+//! The [`model`] of `next_arg` and `parse_args` transcribes the kernel's code, and `parameters` must
+//! read every command line as it does.
+
+use proptest::prelude::*;
 
 use super::*;
 
@@ -16,7 +20,8 @@ const NETWORK: (&str, &str) = (
     "virtnet_ip6=fd00::a00:2/120 virtnet_gw6=fd00::a00:1",
 );
 
-/// Checks that the kernel splits `command_line` into the parameters `expected`.
+/// Checks that the kernel splits `command_line` into the parameters `expected`: that the model
+/// reads them, and that [`parameters`] does.
 fn assert_parameters(command_line: &[u8], expected: &[(&str, Option<&str>)]) {
     let expected: Vec<_> = expected
         .iter()
@@ -31,6 +36,61 @@ fn assert_parameters(command_line: &[u8], expected: &[(&str, Option<&str>)]) {
         "{}",
         command_line.escape_ascii()
     );
+    let expected: Vec<_> = expected
+        .iter()
+        .map(|parameter| (parameter.name.to_vec(), parameter.value.map(<[u8]>::to_vec)))
+        .collect();
+    assert_eq!(
+        model::read(command_line).parameters,
+        expected,
+        "the model reads {}",
+        command_line.escape_ascii()
+    );
+}
+
+/// Returns the parameters that [`parameters`] reads from `command_line`, as the model reads them:
+/// the name of each, and its value, if it has one.
+fn owned(command_line: &[u8]) -> Vec<(Vec<u8>, Option<Vec<u8>>)> {
+    parameters(command_line)
+        .map(|parameter| (parameter.name.to_vec(), parameter.value.map(<[u8]>::to_vec)))
+        .collect()
+}
+
+/// Returns a strategy for command lines: mostly the bytes that `next_arg` treats apart, letters,
+/// and parameters that NVX reserves, and now and then any byte.
+fn command_line() -> impl Strategy<Value = Vec<u8>> {
+    /// The pieces of the command lines: a quote, an equals sign, dashes, an underscore, the
+    /// whitespace of `isspace`, a UTF-8 character that ends with its no-break space, a NUL, and
+    /// letters and parameter names.
+    const PIECES: [&[u8]; 19] = [
+        b"\"",
+        b"=",
+        b"-",
+        b"--",
+        b"_",
+        b" ",
+        b"\t",
+        b"\n",
+        b"\x0b",
+        b"\x0c",
+        b"\r",
+        b"\xa0",
+        b"\xc3\xa0",
+        b"\0",
+        b"a",
+        b"b",
+        b"nvx_x=",
+        b"tsc=",
+        b"hostname",
+    ];
+    prop::collection::vec(
+        prop_oneof![
+            8 => prop::sample::select(PIECES.to_vec()).prop_map(<[u8]>::to_vec),
+            1 => any::<u8>().prop_map(|byte| vec![byte]),
+        ],
+        0..32,
+    )
+    .prop_map(|pieces| pieces.concat())
 }
 
 /// Returns the device of `size` bytes at `base` with `irq`, and with `id` if any.
@@ -118,6 +178,95 @@ fn parameter_names_compare_as_the_kernel_compares_them() {
         "",
     ] {
         assert!(!named(name, VIRTIO_MMIO_DEVICE), "{name}");
+    }
+}
+
+#[test]
+fn the_kernel_leaves_what_follows_a_delimiter_to_init() {
+    let cases: [(&[u8], Option<&[u8]>); 8] = [
+        (b"a -- b  c", Some(b"b  c")),
+        (b"a \"--\"\tb", Some(b"b")),
+        (b"a\xa0--\xa0b", Some(b"b")),
+        (b"--", Some(b"")),
+        (b"a --=1 b", None),
+        (b"a ---- b", None),
+        (b"a=\"-- b\"", None),
+        (b"a", None),
+    ];
+    for (command_line, rest) in cases {
+        assert_eq!(
+            model::read(command_line).rest.as_deref(),
+            rest,
+            "{}",
+            command_line.escape_ascii()
+        );
+    }
+}
+
+#[test]
+fn the_model_compares_names_as_the_kernel_does() {
+    // `parameq` compares whole names, and `parameqn` their first bytes, with dashes and
+    // underscores alike; past its end, a string reads as its NUL.
+    assert!(model::parameq(b"virtio-mmio.device", b"virtio_mmio.device"));
+    assert!(model::parameq(b"a_b", b"a-b"));
+    assert!(!model::parameq(b"tsc", b"tsc_early_khz"));
+    assert!(!model::parameq(b"tsc_early_khz", b"tsc"));
+    assert!(model::parameqn(b"notsc=1", b"notsc", 5));
+    assert!(model::parameqn(b"notscx", b"notsc", 5));
+    assert!(!model::parameqn(b"nots", b"notsc", 5));
+    assert!(model::parameqn(b"tsc=unstable", b"tsc=", 4));
+    assert!(!model::parameqn(b"tsc", b"tsc=", 4));
+    // `repair_env_string` restores the equals sign of a parameter with a value.
+    assert_eq!(model::line(b"tsc", Some(b"unstable")), b"tsc=unstable");
+    assert_eq!(model::line(b"a", Some(b"")), b"a=");
+    assert_eq!(model::line(b"quiet", None), b"quiet");
+    assert_eq!(
+        model::read(b"\"tsc=unstable\" a=\"b c\"").lines(),
+        [&b"tsc=unstable"[..], b"a=b c"]
+    );
+}
+
+#[test]
+fn parameters_follow_the_model_on_every_short_command_line() {
+    /// The bytes that `next_arg` treats apart, and a letter.
+    const ALPHABET: [u8; 7] = [b'"', b'=', b'-', b' ', 0xa0, 0, b'a'];
+    for length in 0..=6 {
+        for mut index in 0..ALPHABET.len().pow(length) {
+            let command_line: Vec<u8> = (0..length)
+                .map(|_| {
+                    let byte = ALPHABET[index % ALPHABET.len()];
+                    index /= ALPHABET.len();
+                    byte
+                })
+                .collect();
+            assert_eq!(
+                owned(&command_line),
+                model::read(&command_line).parameters,
+                "{}",
+                command_line.escape_ascii()
+            );
+        }
+    }
+}
+
+proptest! {
+    /// `parameters` reads every command line as the kernel's `parse_args` and `next_arg` read it.
+    #[test]
+    fn parameters_follow_the_model(command_line in command_line()) {
+        prop_assert_eq!(owned(&command_line), model::read(&command_line).parameters);
+    }
+
+    /// `Parameter::is_named` compares names as the kernel's `parameq` does.
+    #[test]
+    fn names_compare_as_the_model_compares_them(
+        name in "[-_.ab]{0,5}",
+        other in "[-_.ab]{0,5}",
+    ) {
+        let parameter = Parameter { name: name.as_bytes(), value: None };
+        prop_assert_eq!(
+            parameter.is_named(&other),
+            model::parameq(name.as_bytes(), other.as_bytes())
+        );
     }
 }
 

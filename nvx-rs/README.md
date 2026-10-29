@@ -2465,3 +2465,13 @@ whatever the entrypoint, as [Distro bindings](#distro-bindings) describes. The
 CLI tests check that `sandbox` records the preceding mount while `run`
 forwards absolute policy paths independently of option order, for OpenVMM to
 attribute by containment.
+
+The tests of the kernel command line take their expectations from the C code
+with which Linux 6.18 reads it
+([microsoft/nvx#723](https://github.com/microsoft/nvx/issues/723)), which
+`protocol::cmdline::model` transcribes for the tests: `isspace`, `next_arg`,
+and the loop of `parse_args`, which split the command line into parameters,
+and `parameq`, `parameqn`, and `repair_env_string`, with which the kernel
+matches parameters with their handlers. `nvx::protocol::cmdline::parameters`
+must read as the model does every command line of up to six bytes among a
+letter and those that `next_arg` treats apart, and random ones.
