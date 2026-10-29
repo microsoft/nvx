@@ -60,7 +60,7 @@ CHECK_TITLES: Mapping[str, str] = {
     "H1": "backend device or API",
     "H2": "CPU fingerprint, generation, and profile",
     "H3": "OpenVMM time ABI preflight",
-    "H4": "host TSC rate stability",
+    "H4": "host TSC rate and clock correction",
     "H5": "host cross-CPU TSC skew",
     "H6": "guest warp probe",
     "H7": "host UTC synchronization",
@@ -73,7 +73,9 @@ PROBE_PREFIX = "NVX-HOST-TIME-PROBE "
 VERIFY_PREFIX = "NVX-TIME-ABI-VERIFY:"
 CPU_PROFILE_PREFIX = "NVX-CPU-PROFILE:"
 RUST_ESCAPE = re.compile(r"\\(u\{[0-9a-fA-F]{1,6}\}|.)")
-# H4's rate stability bounds (doc/ci.md, "Host qualification").
+# H4's bounds (doc/ci.md, "Host qualification"): the TSC keeps its rate
+# across idle, its rate against host UTC stays within the guest's correction
+# budget, and the host publishes a synchronized clock correction.
 RATE_UNCERTAINTY_PPM = 0.25
 RATE_AGREEMENT_PPM = 1.0
 # H4's limit is the guest's budget for the host's clock correction. The
@@ -137,6 +139,7 @@ WINDOWS_PROCESSOR_KEY = r"HARDWARE\DESCRIPTION\System\CentralProcessor\0"
 ADJTIMEX_TIME_ERROR = 5
 ADJTIMEX_STA_PLL = 0x0001
 ADJTIMEX_STA_UNSYNC = 0x0040
+ADJTIMEX_STA_CLOCKERR = 0x1000
 # adjtimex's frequency is in ppm scaled by 2^16, and its tick is the
 # microseconds that the clock advances per USER_HZ tick, 100 per second, so
 # 10,000 leaves the clock's rate alone.
@@ -865,6 +868,113 @@ def _adjtimex() -> tuple[int, _Timex]:
 
 
 @dataclass(frozen=True)
+class HostClockDiscipline:
+    """How the host's time service disciplines host UTC, as OpenVMM reads it
+    and publishes it with each time sample."""
+
+    # "synchronized", "free-running", "unreliable", or "unknown".
+    status: str
+    # How fast host UTC runs against the host's undisciplined clock, minus one.
+    correction_ppm: float
+    # The time service's maximum error of host UTC in microseconds, if known.
+    max_error_us: int | None
+    # What the host reported.
+    detail: str
+
+
+def _linux_clock_discipline() -> HostClockDiscipline:
+    try:
+        _, timex = _adjtimex()
+    except ScriptError as error:
+        return HostClockDiscipline("unknown", 0.0, None, str(error))
+    status_bits = int(timex.status)
+    if status_bits & ADJTIMEX_STA_CLOCKERR:
+        status = "unreliable"
+    elif status_bits & ADJTIMEX_STA_UNSYNC:
+        status = "free-running"
+    else:
+        status = "synchronized"
+    correction_ppm = (
+        int(timex.freq) / ADJTIMEX_SCALED_PPM
+        + (int(timex.tick) - ADJTIMEX_NOMINAL_TICK) * 1e6 / ADJTIMEX_NOMINAL_TICK
+    )
+    maximum = int(timex.maxerror)
+    return HostClockDiscipline(
+        status,
+        correction_ppm,
+        maximum if maximum >= 0 else None,
+        f"adjtimex status=0x{status_bits:04x} freq={int(timex.freq)} "
+        f"tick={int(timex.tick)} maxerror={maximum}",
+    )
+
+
+def windows_adjustment_ppm(adjustment: int, increment: int) -> float:
+    """Return how much faster than the performance counter host UTC runs, in
+    ppm, under the precise Windows time adjustment that OpenVMM reads.
+
+    The counter ticks ``increment`` times a second, and host UTC counts a
+    second for every ``adjustment`` of its ticks, so a larger adjustment slows
+    host UTC.
+    """
+    return (increment - adjustment) / adjustment * 1e6
+
+
+def _windows_clock_discipline() -> HostClockDiscipline:
+    if sys.platform != "win32":
+        return HostClockDiscipline(
+            "unknown", 0.0, None, "GetSystemTimeAdjustmentPrecise is Windows-only"
+        )
+    adjustment = ctypes.c_uint64()
+    increment = ctypes.c_uint64()
+    disabled = ctypes.c_int()
+    try:
+        function = ctypes.WinDLL("kernelbase").GetSystemTimeAdjustmentPrecise
+        function.argtypes = (
+            ctypes.POINTER(ctypes.c_uint64),
+            ctypes.POINTER(ctypes.c_uint64),
+            ctypes.POINTER(ctypes.c_int),
+        )
+        function.restype = ctypes.c_int
+        read = bool(
+            function(
+                ctypes.byref(adjustment),
+                ctypes.byref(increment),
+                ctypes.byref(disabled),
+            )
+        )
+    except (AttributeError, OSError) as error:
+        return HostClockDiscipline(
+            "unknown",
+            0.0,
+            None,
+            f"GetSystemTimeAdjustmentPrecise is unavailable: {error}",
+        )
+    detail = (
+        f"GetSystemTimeAdjustmentPrecise adjustment={adjustment.value} "
+        f"increment={increment.value} disabled={disabled.value}"
+    )
+    if not read or increment.value == 0:
+        return HostClockDiscipline("unknown", 0.0, None, detail)
+    if disabled.value:
+        return HostClockDiscipline("free-running", 0.0, None, detail)
+    if adjustment.value == 0:
+        return HostClockDiscipline("unknown", 0.0, None, detail)
+    return HostClockDiscipline(
+        "synchronized",
+        windows_adjustment_ppm(adjustment.value, increment.value),
+        None,
+        detail,
+    )
+
+
+def host_clock_discipline() -> HostClockDiscipline:
+    """Return the host clock correction that OpenVMM publishes."""
+    if host_is_windows():
+        return _windows_clock_discipline()
+    return _linux_clock_discipline()
+
+
+@dataclass(frozen=True)
 class KernelFrequency:
     """The frequency correction of the kernel's PLL in ppm, positive when it
     speeds the clock up: adjtimex's frequency plus its tick's."""
@@ -1130,6 +1240,26 @@ def check_rate(context: DoctorContext) -> CheckResult:
                 f"guest's {RATE_TOLERANCE_PPM:g} ppm budget, and one run can't "
                 "tell the TSC's error from the reference clock's wander"
             )
+    # Independently of the rate budget above, the guest needs host UTC to have
+    # a correction maintained by a time service. Read the same host state that
+    # OpenVMM publishes with every time sample.
+    discipline = host_clock_discipline()
+    context.facts["host_clock_status"] = discipline.status
+    context.facts["host_correction_ppm"] = f"{discipline.correction_ppm:+.3f}"
+    maximum = (
+        ""
+        if discipline.max_error_us is None
+        else f", maximum error {discipline.max_error_us} us"
+    )
+    discipline_detail = (
+        f"; host UTC is {discipline.status}, correction "
+        f"{discipline.correction_ppm:+.3f} ppm{maximum} ({discipline.detail})"
+    )
+    if discipline.status != "synchronized":
+        problems.append(
+            "the host publishes no synchronized clock correction: host UTC is "
+            f"{discipline.status}"
+        )
     detail += reread_evidence
     if isinstance(chrony, ChronyFrequency):
         detail += (
@@ -1159,12 +1289,13 @@ def check_rate(context: DoctorContext) -> CheckResult:
             detail += f", {boot_deviation:.3f} ppm from the backend's rate"
         detail += " (evidence)"
         context.facts["boot_correction"] = f"{boot.ppm:+.3f} ppm over {hours:.1f} h"
+    detail += discipline_detail
     if clocksource:
         detail += f"; host clocksource {clocksource} (evidence)"
+    if problems:
+        return CheckResult("H4", False, "; ".join(problems) + f"; {detail}")
     if warning:
         detail = f"warning: {warning}; {detail}"
-    if problems:
-        return CheckResult("H4", False, "; ".join(problems) + f"; {detail}", warning)
     return CheckResult("H4", True, detail, warning)
 
 
@@ -1425,6 +1556,8 @@ def summary_markdown(
         ("rate_agreement_ppm", "Interval rate agreement (ppm)"),
         ("rate_uncertainty_ppm", "Largest interval uncertainty (ppm)"),
         ("boot_correction", "Average correction since boot (evidence)"),
+        ("host_clock_status", "Host UTC"),
+        ("host_correction_ppm", "Host clock correction (ppm)"),
         ("host_skew_ns", "Host skew (ns)"),
         ("guest_warp_ns", "Guest warp offset (ns)"),
         ("invariant_tsc", "Host invariant TSC (evidence)"),

@@ -13747,10 +13747,10 @@ python3() {
         ).read_text(encoding="utf-8")
 
         # The doctor follows the host TSC report on Linux: the backend, the CPU
-        # fingerprint and generation, and the TSC rate stability. Jobs that
-        # haven't downloaded OpenVMM skip its CPU profile check (H2) and
-        # preflight (H3), and only jobs that ask for it run the guest warp
-        # probe (H6).
+        # fingerprint and generation, and the TSC rate stability and the host's
+        # clock correction. Jobs that haven't downloaded OpenVMM skip its CPU
+        # profile check (H2) and preflight (H3), and only jobs that ask for it
+        # run the guest warp probe (H6).
         self.assertLess(
             validate_runner.index("    - name: Report host TSC\n"),
             validate_runner.index("    - name: Qualify host time on Linux\n"),
