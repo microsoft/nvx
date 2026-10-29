@@ -15,6 +15,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import types
 import unittest
 from collections.abc import Sequence
 from pathlib import Path
@@ -1922,6 +1923,10 @@ def completed(stdout: str, returncode: int = 0, stderr: str = ""):
     return subprocess.CompletedProcess(["x"], returncode, stdout, stderr)
 
 
+# Why a host whose chronyd keeps the kernel's PLL off has no PLL frequency.
+PLL_OFF = "the kernel PLL is off (adjtimex status=0x0000)"
+
+
 class FakeClock:
     """A monotonic clock that advances only when something sleeps."""
 
@@ -2562,6 +2567,7 @@ class DoctorTests(unittest.TestCase):
             | str
             | Sequence[doctor.ChronyFrequency | str] = "chronyc is not installed",
             clock: FakeClock | None = None,
+            kernel: doctor.KernelFrequency | str = PLL_OFF,
         ) -> doctor.CheckResult:
             """Run H4; a list of chronyd readings answers its re-reads too."""
             clock = clock or FakeClock()
@@ -2576,12 +2582,16 @@ class DoctorTests(unittest.TestCase):
                     return_value=None if readings else chrony,
                     side_effect=readings,
                 ) as frequency,
+                patch.object(doctor, "kernel_frequency", return_value=kernel) as pll,
                 patch.object(doctor.time, "monotonic", clock.monotonic),
                 patch.object(doctor.time, "sleep", clock.sleep),
             ):
                 result = doctor.check_rate(context)
             # Windows reads QueryPerformanceCounter, which no daemon steers.
             self.assertEqual(frequency.called, not windows)
+            # H4 reads the kernel's PLL only without chronyd's estimate.
+            first = readings[0] if readings else chrony
+            self.assertEqual(pll.called, not windows and isinstance(first, str))
             self.assertEqual(
                 run.call_args.args[1:],
                 (
@@ -2623,7 +2633,8 @@ class DoctorTests(unittest.TestCase):
         self.assertIn("0.013 ppm from the backend's 2793437000 Hz", result.detail)
         self.assertIn("host clocksource tsc (evidence)", result.detail)
         self.assertIn(
-            "no chronyd frequency estimate: chronyc is not installed (evidence)",
+            "no chronyd frequency estimate: chronyc is not installed (evidence); "
+            f"no kernel PLL frequency: {PLL_OFF} (evidence)",
             result.detail,
         )
         self.assertEqual(context.facts["rate_agreement_ppm"], "0.125")
@@ -2745,19 +2756,51 @@ class DoctorTests(unittest.TestCase):
         self.assertEqual(
             context.facts["rate_reference"], "chronyd +44.300 ppm (skew 4.200 ppm)"
         )
-        # Without chronyd's estimate, the slewed window is all H4 can measure.
+        # Without chronyd's estimate or a kernel PLL, the slewed window is all
+        # H4 can measure; a chronyd that isn't synchronized leaves the kernel
+        # clock unsynchronized too.
         context = ci_context("mshv")
         context.facts["native_tsc_hz"] = "2300000507"
-        result = check(context, slewed, chrony="chronyd is not synchronized")
+        unsynchronized = (
+            "the kernel clock is not synchronized (adjtimex state=5 status=0x0041)"
+        )
+        result = check(
+            context,
+            slewed,
+            chrony="chronyd is not synchronized",
+            kernel=unsynchronized,
+        )
         self.assertFalse(result.passed)
         self.assertIn(
             "the backend rate is 946.078 ppm from the measured rate (limit 250 ppm)",
             result.detail,
         )
         self.assertIn(
-            "no chronyd frequency estimate: chronyd is not synchronized (evidence)",
+            "no chronyd frequency estimate: chronyd is not synchronized (evidence); "
+            f"no kernel PLL frequency: {unsynchronized} (evidence)",
             result.detail,
         )
+        # #1008: a kernel PLL that another time service drives, such as
+        # systemd-timesyncd, keeps its frequency estimate apart from the
+        # offsets that it slews, so H4 corrects CLOCK_MONOTONIC_RAW by that
+        # instead of reading the slewed window.
+        context = ci_context("mshv")
+        context.facts["native_tsc_hz"] = "2300000507"
+        result = check(context, slewed, kernel=doctor.KernelFrequency(-44.3))
+        self.assertTrue(result.passed, result.detail)
+        self.assertIn(
+            "tsc_hz=2300101895 against CLOCK_MONOTONIC_RAW corrected by the kernel "
+            "PLL's frequency of -44.300 ppm from 3 samples 1 s apart",
+            result.detail,
+        )
+        self.assertIn("44.082 ppm from the backend's 2300000507 Hz", result.detail)
+        self.assertIn(
+            "no chronyd frequency estimate: chronyc is not installed (evidence); "
+            "2302176486 Hz against CLOCK_MONOTONIC, which the kernel PLL also slews "
+            "(evidence)",
+            result.detail,
+        )
+        self.assertEqual(context.facts["rate_reference"], "kernel PLL -44.300 ppm")
         # chronyd's estimate gates the backend's rate, whatever the window
         # reads, and its skew bounds the estimate: the rate passes only when
         # every rate within the skew lies within the limit.
@@ -2981,6 +3024,45 @@ class DoctorTests(unittest.TestCase):
         with patch.object(doctor.shutil, "which", return_value=None):
             self.assertEqual(doctor.chrony_frequency(), "chronyc is not installed")
 
+    def test_kernel_frequency_reads_a_synchronized_kernel_pll(self):
+        # adjtimex's state and the status, freq, and tick of its struct timex.
+        def kernel(state: int, status: int, freq: int, tick: int = 10_000):
+            timex = types.SimpleNamespace(status=status, freq=freq, tick=tick)
+            return patch.object(doctor, "_adjtimex", return_value=(state, timex))
+
+        # systemd-timesyncd sets STA_PLL and STA_NANO. The frequency is in ppm
+        # scaled by 2^16, and each microsecond of tick above 10,000 adds
+        # 100 ppm, as chronyd's ticks of 9,999 take 100 ppm away.
+        for tick, ppm in ((10_000, -44.25), (10_001, 55.75), (9_999, -144.25)):
+            with self.subTest(tick=tick), kernel(0, 0x2001, -2_899_968, tick):
+                self.assertEqual(doctor.kernel_frequency(), doctor.KernelFrequency(ppm))
+        for state, status, reason in (
+            # chronyd keeps the PLL off, and slews through the frequency.
+            (0, 0x0000, "the kernel PLL is off (adjtimex status=0x0000)"),
+            (
+                5,
+                0x2041,
+                "the kernel clock is not synchronized (adjtimex state=5 status=0x2041)",
+            ),
+            (
+                5,
+                0x2001,
+                "the kernel clock is not synchronized (adjtimex state=5 status=0x2001)",
+            ),
+            (
+                0,
+                0x0041,
+                "the kernel clock is not synchronized (adjtimex state=0 status=0x0041)",
+            ),
+        ):
+            with self.subTest(state=state, status=status):
+                with kernel(state, status, -2_899_968):
+                    self.assertEqual(doctor.kernel_frequency(), reason)
+        with patch.object(doctor.ctypes, "CDLL", side_effect=OSError("no libc")):
+            self.assertEqual(
+                doctor.kernel_frequency(), "adjtimex is unavailable: no libc"
+            )
+
     def test_rate_check_continues_when_the_clocksource_is_unreadable(self):
         # #507: the host clocksource is evidence only, so an unreadable
         # sysfs file must not fail H4; the native probe still runs and the
@@ -3031,6 +3113,7 @@ class DoctorTests(unittest.TestCase):
                         "chrony_frequency",
                         return_value="chronyc is not installed",
                     ),
+                    patch.object(doctor, "kernel_frequency", return_value=PLL_OFF),
                 ):
                     result = doctor.check_rate(context)
                 self.assertTrue(run.called)

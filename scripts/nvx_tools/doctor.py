@@ -135,7 +135,13 @@ WINDOWS_PROCESSOR = re.compile(r"Family (\d+) Model (\d+) Stepping (\d+), (\S+)"
 # The registry key of the first processor's identity on Windows.
 WINDOWS_PROCESSOR_KEY = r"HARDWARE\DESCRIPTION\System\CentralProcessor\0"
 ADJTIMEX_TIME_ERROR = 5
+ADJTIMEX_STA_PLL = 0x0001
 ADJTIMEX_STA_UNSYNC = 0x0040
+# adjtimex's frequency is in ppm scaled by 2^16, and its tick is the
+# microseconds that the clock advances per USER_HZ tick, 100 per second, so
+# 10,000 leaves the clock's rate alone.
+ADJTIMEX_SCALED_PPM = 1 << 16
+ADJTIMEX_NOMINAL_TICK = 10_000
 # Every H7 failure to read the host's synchronization state starts with this
 # phrase; a clock that is not synchronized starts "host UTC is not
 # synchronized" instead.
@@ -816,6 +822,84 @@ def reread_chrony_frequency(
     return None, time.monotonic() - start
 
 
+class _Timex(ctypes.Structure):
+    """Linux's struct timex, as glibc declares it."""
+
+    _fields_ = [
+        ("modes", ctypes.c_uint),
+        ("offset", ctypes.c_long),
+        ("freq", ctypes.c_long),
+        ("maxerror", ctypes.c_long),
+        ("esterror", ctypes.c_long),
+        ("status", ctypes.c_int),
+        ("constant", ctypes.c_long),
+        ("precision", ctypes.c_long),
+        ("tolerance", ctypes.c_long),
+        ("time", ctypes.c_long * 2),  # struct timeval
+        ("tick", ctypes.c_long),
+        ("ppsfreq", ctypes.c_long),
+        ("jitter", ctypes.c_long),
+        ("shift", ctypes.c_int),
+        ("stabil", ctypes.c_long),
+        ("jitcnt", ctypes.c_long),
+        ("calcnt", ctypes.c_long),
+        ("errcnt", ctypes.c_long),
+        ("stbcnt", ctypes.c_long),
+        ("tai", ctypes.c_int),
+        ("padding", ctypes.c_int * 11),
+    ]
+
+
+def _adjtimex() -> tuple[int, _Timex]:
+    """Return adjtimex's clock state and struct timex without changing the
+    clock, or raise ScriptError naming why adjtimex can't."""
+    timex = _Timex()
+    try:
+        libc = ctypes.CDLL(None, use_errno=True)
+        state = int(libc.adjtimex(ctypes.byref(timex)))
+    except (AttributeError, OSError) as error:
+        raise ScriptError(f"adjtimex is unavailable: {error}") from error
+    if state < 0:
+        raise ScriptError(f"adjtimex failed: {os.strerror(ctypes.get_errno())}")
+    return state, timex
+
+
+@dataclass(frozen=True)
+class KernelFrequency:
+    """The frequency correction of the kernel's PLL in ppm, positive when it
+    speeds the clock up: adjtimex's frequency plus its tick's."""
+
+    ppm: float
+
+
+def kernel_frequency() -> KernelFrequency | str:
+    """Return a synchronized kernel PLL's frequency correction, or why there is
+    none.
+
+    A time service such as systemd-timesyncd or ntpd steers the clock through
+    the kernel's PLL, which keeps its frequency estimate in adjtimex's
+    frequency and slews offsets apart from it. chronyd keeps the PLL off and
+    slews through that frequency, which then carries its slews.
+    """
+    try:
+        state, timex = _adjtimex()
+    except ScriptError as error:
+        return str(error)
+    status = int(timex.status)
+    if state >= ADJTIMEX_TIME_ERROR or status & ADJTIMEX_STA_UNSYNC:
+        return (
+            f"the kernel clock is not synchronized (adjtimex state={state} "
+            f"status=0x{status:04x})"
+        )
+    if not status & ADJTIMEX_STA_PLL:
+        return f"the kernel PLL is off (adjtimex status=0x{status:04x})"
+    tick = int(timex.tick)
+    return KernelFrequency(
+        int(timex.freq) / ADJTIMEX_SCALED_PPM
+        + (tick - ADJTIMEX_NOMINAL_TICK) * 1e6 / ADJTIMEX_NOMINAL_TICK
+    )
+
+
 def _deviation_ppm(rate: float, declared_hz: int) -> float:
     return (rate - declared_hz) / declared_hz * 1e6
 
@@ -929,6 +1013,9 @@ def check_rate(context: DoctorContext) -> CheckResult:
                     f"re-read it for {seconds:.0f} s (evidence)"
                 )
                 chrony = estimate
+    # Without chronyd's estimate, a kernel PLL that another time service
+    # drives keeps its own, apart from the offsets that it slews.
+    kernel = kernel_frequency() if isinstance(chrony, str) else None
     if isinstance(chrony, ChronyFrequency):
         measured = _corrected_rate(stable_rate, chrony.ppm)
         reference = (
@@ -939,6 +1026,15 @@ def check_rate(context: DoctorContext) -> CheckResult:
         context.facts["rate_reference"] = (
             f"chronyd {chrony.ppm:+.3f} ppm (skew {chrony.skew_ppm:.3f} ppm)"
         )
+    elif isinstance(kernel, KernelFrequency):
+        # The PLL runs the kernel's clock at CLOCK_MONOTONIC_RAW's rate times
+        # (1 + ppm), as chronyd's estimate of -ppm would.
+        measured = _corrected_rate(stable_rate, -kernel.ppm)
+        reference = (
+            f"against {stability_clock['name']} corrected by the kernel PLL's "
+            f"frequency of {kernel.ppm:+.3f} ppm"
+        )
+        context.facts["rate_reference"] = f"kernel PLL {kernel.ppm:+.3f} ppm"
     else:
         measured = window_rate
         reference = f"against {rate_clock['name']}"
@@ -1014,6 +1110,13 @@ def check_rate(context: DoctorContext) -> CheckResult:
         )
     elif chrony is not None:
         detail += f"; no chronyd frequency estimate: {chrony} (evidence)"
+        if isinstance(kernel, KernelFrequency):
+            detail += (
+                f"; {window_rate:.0f} Hz against {rate_clock['name']}, which the "
+                "kernel PLL also slews (evidence)"
+            )
+        elif kernel is not None:
+            detail += f"; no kernel PLL frequency: {kernel} (evidence)"
     if clocksource:
         detail += f"; host clocksource {clocksource} (evidence)"
     if warning:
@@ -1136,21 +1239,10 @@ def check_guest_warp(context: DoctorContext) -> CheckResult:
 def _linux_clock_state() -> tuple[int, int]:
     """Return adjtimex's clock state and status without changing the clock."""
     try:
-        libc = ctypes.CDLL(None, use_errno=True)
-        buffer = ctypes.create_string_buffer(256)
-        state = int(libc.adjtimex(buffer))
-    except (AttributeError, OSError) as error:
-        raise ScriptError(
-            f"{UTC_UNVERIFIED}: adjtimex is unavailable: {error}"
-        ) from error
-    if state < 0:
-        raise ScriptError(
-            f"{UTC_UNVERIFIED}: adjtimex failed: {os.strerror(ctypes.get_errno())}"
-        )
-    # struct timex: unsigned modes, then the long offset, freq, maxerror, and
-    # esterror fields, then the int status.
-    status = int.from_bytes(buffer.raw[40:44], sys.byteorder)
-    return state, status
+        state, timex = _adjtimex()
+    except ScriptError as error:
+        raise ScriptError(f"{UTC_UNVERIFIED}: {error}") from error
+    return state, int(timex.status)
 
 
 def _windows_time_source() -> tuple[bool, str]:
