@@ -530,6 +530,10 @@ pub enum Status {
 
 /// Why a workload's program did not start: the adapter's number of the launch stage that failed,
 /// and the operating system's error number of the failure.
+///
+/// NVX's guest binding, `guest::exec::binding` (Linux, feature `guest`), numbers the stages as
+/// `guest::spawn::LaunchStage::code` does, which `LaunchStage::from_code` reverses, and reports 0
+/// for a launch whose report it could not read.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct LaunchFailure {
     /// The adapter's number of the stage that failed.

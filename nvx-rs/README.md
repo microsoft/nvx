@@ -907,7 +907,9 @@ default disposition and blocks none, and an `entry::Prepared` execution to
 enter, without NVX's control protocol, managed agent, or workload identity.
 
 Its `LaunchReport` tells whether the program started, or which `LaunchStage`
-failed and why.
+failed and why. Each stage keeps its number, `LaunchStage::code`, which
+`LaunchStage::from_code` turns back into the stage, and a new stage takes a
+number of its own.
 
 NVX's managed agent is one caller.
 
@@ -999,6 +1001,10 @@ It feeds the execution's events back to the runner, statuses that a caller who
 reaps hands over with `observe` included, and never blocks: the caller polls its
 descriptors and its input writer until its deadline, and each call takes a
 bounded number of steps, so that no execution holds the caller's loop.
+
+A launch that failed reaches the runner with the number of the `LaunchStage`
+that failed, `LaunchStage::code`, or with 0, which numbers no stage, if the
+binding could not read the launch report.
 
 ### `nvx::guest::time`
 
