@@ -32,8 +32,9 @@ impl Received {
 /// A canned response: its status, its other headers, and its body.
 type Canned = (u16, Vec<(String, String)>, Vec<u8>);
 
-/// An HTTP server on the loopback interface that answers each request with the canned response
-/// of its path, or else with 404, and records the requests that it receives.
+/// An HTTP server on the loopback interface that answers the requests of a path with the canned
+/// responses of that path in turn, the last one again once they run out, or else with 404, and
+/// records the requests that it receives.
 struct Server {
     /// The requests that it received, in order.
     received: Arc<Mutex<Vec<Received>>>,
@@ -65,7 +66,8 @@ impl Server {
     }
 }
 
-/// Reads one request from `stream`, records it in `log`, and answers it from `routes`.
+/// Reads one request from `stream`, records it in `log`, and answers it from `routes`, with the
+/// canned response of its path that follows those of the earlier requests of that path.
 fn answer(
     mut stream: TcpStream,
     routes: &[(String, Canned)],
@@ -89,13 +91,23 @@ fn answer(
             headers.push((name.trim().to_ascii_lowercase(), value.trim().to_owned()));
         }
     }
-    log.lock().unwrap().push(Received {
-        path: path.clone(),
-        headers,
-    });
-    let (status, extra, body) = routes.iter().find(|(route, _)| *route == path).map_or_else(
+    let earlier = {
+        let mut log = log.lock().unwrap();
+        let earlier = log.iter().filter(|request| request.path == path).count();
+        log.push(Received {
+            path: path.clone(),
+            headers,
+        });
+        earlier
+    };
+    let answers: Vec<&Canned> = routes
+        .iter()
+        .filter(|(route, _)| *route == path)
+        .map(|(_, canned)| canned)
+        .collect();
+    let (status, extra, body) = answers.get(earlier).or(answers.last()).map_or_else(
         || (404, Vec::new(), br#"{"message": "Not Found"}"#.to_vec()),
-        |(_, canned)| canned.clone(),
+        |&canned| canned.clone(),
     );
     let mut head = format!(
         "HTTP/1.1 {status} Status\r\nContent-Length: {}\r\nConnection: close\r\n",
@@ -249,6 +261,110 @@ fn requests_without_a_token_carry_none() {
     assert_eq!(requests.len(), 1);
     assert_eq!(requests[0].path, "/repos/octo/nvx");
     assert_eq!(requests[0].header("authorization"), None);
+}
+
+#[test]
+fn redirects_resolve_relative_locations_against_the_urls_of_their_requests() {
+    let (listener, api) = Server::bind();
+    let server = Server::serve(
+        listener,
+        vec![
+            (
+                "/repos/octo/nvx/releases/assets/7".to_owned(),
+                (
+                    302,
+                    vec![("Location".to_owned(), "../../downloads/./7".to_owned())],
+                    Vec::new(),
+                ),
+            ),
+            (
+                "/repos/octo/nvx/downloads/7".to_owned(),
+                (
+                    307,
+                    vec![("Location".to_owned(), "/packages/7?part=1".to_owned())],
+                    Vec::new(),
+                ),
+            ),
+            (
+                "/packages/7?part=1".to_owned(),
+                (200, Vec::new(), b"hello".to_vec()),
+            ),
+        ],
+    );
+    let scratch = tempfile::tempdir().unwrap();
+    let github = GitHub::at(&api, "octo/nvx", None, scratch.path(), Curl::plain()).unwrap();
+    let asset = Asset {
+        tag: "v0.1.0-dev.a1b2c3d4e5f6".to_owned(),
+        name: "nvx-0.1.0-linux-kvm.tar.gz".to_owned(),
+        url: format!("{api}/repos/octo/nvx/releases/assets/7"),
+        size: 5,
+    };
+    let destination = scratch.path().join(&asset.name);
+    github.download(&asset, &destination).unwrap();
+    assert_eq!(fs::read(&destination).unwrap(), b"hello");
+    let paths: Vec<String> = server
+        .received()
+        .into_iter()
+        .map(|request| request.path)
+        .collect();
+    assert_eq!(
+        paths,
+        [
+            "/repos/octo/nvx/releases/assets/7",
+            "/repos/octo/nvx/downloads/7",
+            "/packages/7?part=1",
+        ]
+    );
+}
+
+#[test]
+fn the_last_response_to_a_retried_request_counts() {
+    let (listener, api) = Server::bind();
+    let path = "/repos/octo/nvx/releases/tags/v0.1.0-dev.a1b2c3d4e5f6";
+    // The status, the header, and the message of the first response, which `curl` retries, would
+    // each change the error.
+    let server = Server::serve(
+        listener,
+        vec![
+            (
+                path.to_owned(),
+                (
+                    503,
+                    vec![("X-RateLimit-Remaining".to_owned(), "0".to_owned())],
+                    br#"{"message": "Unavailable"}"#.to_vec(),
+                ),
+            ),
+            (
+                path.to_owned(),
+                (
+                    403,
+                    Vec::new(),
+                    br#"{"message": "Resource not accessible"}"#.to_vec(),
+                ),
+            ),
+        ],
+    );
+    let scratch = tempfile::tempdir().unwrap();
+    let github = GitHub::at(
+        &api,
+        "octo/nvx",
+        Some("secret".to_owned()),
+        scratch.path(),
+        Curl::plain(),
+    )
+    .unwrap();
+    match github.release("v0.1.0-dev.a1b2c3d4e5f6") {
+        Err(Failure::Http(403, error)) => assert_eq!(
+            error.message(),
+            Some(
+                "GitHub release query failed with HTTP 403: Resource not accessible; the \
+                 configured GitHub token lacks access; grant it read access to the repository \
+                 contents and authorize it for organization single sign-on"
+            )
+        ),
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(server.received().len(), 2);
 }
 
 #[test]
