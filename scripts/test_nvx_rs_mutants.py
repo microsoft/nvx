@@ -277,14 +277,22 @@ class MutantsWorkflowStepTests(unittest.TestCase):
                 self.assertEqual(result.returncode, expected)
 
     def _merge(
-        self, shards: Mapping[str, Mapping[str, str]], count: int
+        self,
+        shards: Mapping[str, Mapping[str, str]],
+        count: int,
+        mutants_result: str = "success",
     ) -> tuple[subprocess.CompletedProcess[str], dict[str, str], str]:
-        """Merges the outcome lists of `shards` of `count` jobs, and returns the
-        result, the merged lists, and the summary."""
+        """Merges the outcome files of `shards`, which maps the index of each
+        shard to its files, for `count` shards whose mutants job ended with
+        `mutants_result`, and returns the result, the merged lists, and the
+        summary.
+
+        The download merges the artifacts of the shards into shards/, where
+        each artifact holds its shard's outcomes under the shard's index."""
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            for shard, lists in shards.items():
-                _write(root / "shards" / shard, lists)
+            for index, files in shards.items():
+                _write(root / "shards" / index, files)
             result, _, summary = self._run(
                 "summarize",
                 "Merge the outcomes of the shards",
@@ -294,6 +302,7 @@ class MutantsWorkflowStepTests(unittest.TestCase):
                     "TARGETS": "",
                     "OS": "ubuntu-latest",
                     "SHARDS": str(count),
+                    "MUTANTS_RESULT": mutants_result,
                 },
                 root,
             )
@@ -306,13 +315,14 @@ class MutantsWorkflowStepTests(unittest.TestCase):
     def test_the_outcomes_of_every_shard_merge(self):
         result, merged, summary = self._merge(
             {
-                "nvx-rs-mutants-shard-0-7": {
+                "0": {
+                    "outcomes.json": "{}\n",
                     "caught.txt": "src/a.rs:2:1: b\nsrc/a.rs:1:1: a\n",
                     "missed.txt": "src/a.rs:9:1: m\n",
                     "timeout.txt": "",
                     "unviable.txt": "",
                 },
-                "nvx-rs-mutants-shard-1-7": {"caught.txt": "src/a.rs:3:1: c\n"},
+                "1": {"outcomes.json": "{}\n", "caught.txt": "src/a.rs:3:1: c\n"},
             },
             2,
         )
@@ -333,12 +343,32 @@ class MutantsWorkflowStepTests(unittest.TestCase):
 
     def test_shards_that_report_nothing_fail_the_merge(self):
         result, merged, summary = self._merge(
-            {"nvx-rs-mutants-shard-0-7": {"caught.txt": "src/a.rs:1:1: a\n"}}, 3
+            {
+                "0": {"outcomes.json": "{}\n", "caught.txt": "src/a.rs:1:1: a\n"},
+                # A shard without outcomes.json reported nothing, and the merge
+                # leaves its lists out.
+                "1": {"caught.txt": "src/a.rs:2:1: b\n"},
+            },
+            3,
         )
         self.assertEqual(result.returncode, 1)
         self.assertIn("::error::Only 1 of 3 shards reported", result.stdout)
         self.assertEqual(merged["caught.txt"], "src/a.rs:1:1: a\n")
+        self.assertIn("on ubuntu-latest: 1 of 3 shards reported.", summary)
         self.assertNotIn("Missed mutants", summary)
+
+    def test_a_mutants_job_that_did_not_succeed_fails_the_merge(self):
+        shards = {"0": {"outcomes.json": "{}\n", "caught.txt": "src/a.rs:1:1: a\n"}}
+        for mutants_result in ("failure", "cancelled", "skipped"):
+            with self.subTest(mutants_result=mutants_result):
+                result, merged, summary = self._merge(shards, 1, mutants_result)
+                self.assertEqual(result.returncode, 1)
+                self.assertIn(
+                    f"::error::The mutants job did not succeed ({mutants_result}).",
+                    result.stdout,
+                )
+                # The merge stops before it merges or summarizes anything.
+                self.assertEqual((merged, summary), ({}, ""))
 
 
 if __name__ == "__main__":
