@@ -158,7 +158,7 @@ impl Request {
 /// `layered::LaunchRecord`, in its format, [`RECORD_FORMAT`]:
 ///
 /// ```json
-/// {"format": 2, "mode": "clone", "kernelCommandLine": "nvx_sandbox=1 ...",
+/// {"format": 1, "mode": "clone", "kernelCommandLine": "nvx_sandbox=1 ...",
 ///  "plan": PLAN, "bindings": {"distro": DISTRO_BINDING, "scratch": SCRATCH_BINDING},
 ///  "rootConfiguration": null,
 ///  "template": {"store": "/templates/store", "generation": 1}}
