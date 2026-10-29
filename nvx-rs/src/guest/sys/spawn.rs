@@ -40,6 +40,9 @@ const PWD_PREFIX: &[u8] = b"PWD=";
 /// Capacity of the physical working directory in its entry, with its terminating NUL: Linux's
 /// `PATH_MAX`.
 const PHYSICAL_PWD_CAPACITY: usize = 4096;
+/// Linux's `NAME_MAX`: the longest name of a file, in bytes, without its terminating NUL, and the
+/// longest name of a program that a search looks for, as `execvp`'s does.
+const NAME_MAX: usize = nix::libc::NAME_MAX as usize;
 /// The lowest descriptor number above the standard streams'.
 const FIRST_NONSTANDARD: RawFd = 3;
 /// Exit status of a child whose launch stage failed.
@@ -919,9 +922,10 @@ unsafe fn exec(
 /// or returns why not. An empty directory, such as the one between two adjacent colons, stands for
 /// the working directory, so its path is the name alone.
 ///
-/// A path that does not fit in `buffer` with its terminating NUL is skipped as one that `run`
-/// refused with `ENAMETOOLONG`, which the kernel does for every path that a search's buffer of
-/// [`PATH_MAX`] bytes cannot hold.
+/// A name longer than [`NAME_MAX`] fails with `ENAMETOOLONG` before any path, as `execvp`'s
+/// does. A path that does not fit in `buffer` with its terminating NUL is skipped as one that
+/// `run` refused with `ENAMETOOLONG`, which the kernel does for every path that a search's buffer
+/// of [`PATH_MAX`] bytes cannot hold.
 ///
 /// A path that does not exist, `ENOENT`, `ENOTDIR`, or `ENAMETOOLONG`, is skipped, as is one that
 /// the child may not run, `EACCES`, which the search remembers. Any other failure, such as
@@ -935,6 +939,9 @@ fn search(
     mut run: impl FnMut(&CStr) -> Errno,
 ) -> Errno {
     let name = name.to_bytes();
+    if name.len() > NAME_MAX {
+        return Errno::ENAMETOOLONG;
+    }
     let mut refused = false;
     let mut last = Errno::ENOENT;
     for directory in path.to_bytes().split(|&byte| byte == b':') {
@@ -1548,6 +1555,17 @@ mod tests {
             assert_eq!(tried, ["/bin/prog"], "{path:?}");
             assert_eq!(failure, outcome, "{path:?}");
         }
+    }
+
+    #[test]
+    fn a_search_refuses_a_name_longer_than_name_max_before_any_path() {
+        let name = |length: usize| CString::new("n".repeat(length)).unwrap();
+        let (tried, error) = searched(&name(NAME_MAX + 1), c"/bin", PATH_MAX, Errno::ENOENT);
+        assert!(tried.is_empty());
+        assert_eq!(error, Errno::ENAMETOOLONG);
+        let (tried, error) = searched(&name(NAME_MAX), c"/bin", PATH_MAX, Errno::ENOENT);
+        assert_eq!(tried, [format!("/bin/{}", "n".repeat(NAME_MAX))]);
+        assert_eq!(error, Errno::ENOENT);
     }
 
     #[test]

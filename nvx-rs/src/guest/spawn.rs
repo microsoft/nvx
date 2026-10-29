@@ -327,7 +327,9 @@ impl Command {
     /// one buffer of `PATH_MAX` bytes, 4096, which the command prepares before the child starts,
     /// and in which the child builds each path in turn, so that the child allocates nothing. A
     /// path that does not fit in the buffer with its terminating NUL is one that the kernel
-    /// refuses with `ENAMETOOLONG`, and the child skips it as such without trying it.
+    /// refuses with `ENAMETOOLONG`, and the child skips it as such without trying it. A name
+    /// longer than `NAME_MAX`, 255 bytes, fails the [stage](LaunchStage::Exec) with
+    /// `ENAMETOOLONG` before the child tries a path, as it does in `execvp`.
     ///
     /// The child skips a path that does not exist, which `ENOENT`, `ENOTDIR`, or `ENAMETOOLONG`
     /// reports, and one that it may not run, `EACCES`, which it remembers. Any other failure,
@@ -895,6 +897,25 @@ mod tests {
         assert_eq!(
             search_error(searched_for("prog", &[&long, &missing])),
             Errno::ENOENT as i32
+        );
+    }
+
+    #[test]
+    fn a_search_refuses_a_name_longer_than_name_max() {
+        let directory = tempfile::tempdir().unwrap();
+        let found = directory.path().display().to_string();
+        let missing = directory.path().join("missing").display().to_string();
+        // The longest name that a search looks for, 255 bytes, is found.
+        let longest = "n".repeat(255);
+        std::os::unix::fs::symlink("/bin/sh", directory.path().join(&longest)).unwrap();
+        let (failure, status, output, _) = run(searched_for(&longest, &[&missing, &found]));
+        assert_eq!((failure, status), (None, Some(ChildStatus::Exited(0))));
+        assert_eq!(output, b"ran");
+        // A longer name fails before any path, even where the last path's error would be
+        // `ENOENT`.
+        assert_eq!(
+            search_error(searched_for(&"n".repeat(256), &[&found, &missing])),
+            Errno::ENAMETOOLONG as i32
         );
     }
 
