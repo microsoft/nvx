@@ -811,21 +811,21 @@ after the repair's acknowledgement of the restore:
    overlay mode, waiting for each device until the activation's deadline at the
    latest, so that it ends by then, and checks the account of the record's
    workload identity, if it has one, in the assembled root, in existing-account
-   mode. For a GPT disk, it first asks the kernel to reread the disk's partition
-   table, so that the
-   block devices of its partitions are the clone's disk's, not the template's
-   placeholder's. The upper must be fresh: the assembly refuses one whose
-   `upper` or `work` directory exists and is not empty. If the record asks for
-   a generated machine ID, the application then generates one, once, after the
-   repair's reseed, in `nvx::guest::clone::MACHINE_ID_FILE` of the runtime
-   directory. If the record has an export, it mounts the host export through the
-   host filesystem device, read-write, at `hostfs/root` of the runtime
-   directory, outside the root, where only the guest's root user reaches it, as
-   the worker of a VM that boots cold mounts the one that its kernel command
-   line names. If the record's network names a DNS server, it writes a resolver
-   file that names it, of mode 0444, in `nvx::guest::clone::RESOLVER_FILE` of
-   the runtime directory. It then binds the generated machine ID read-only over
-   the root's `/etc/machine-id`, and the resolver file read-only over its
+   mode. For a GPT disk, it first asks the kernel to reread the disk's
+   partition table, so that the block devices of its partitions are the clone's
+   disk's, not the template's placeholder's. The upper must be fresh: the
+   assembly refuses one whose `upper` or `work` directory exists and is not
+   empty. If the record asks for a generated machine ID, the application then
+   generates one, once, after the repair's reseed, in
+   `nvx::guest::clone::MACHINE_ID_FILE` of the runtime directory. If the record
+   has an export, it mounts the host export through the host filesystem device,
+   read-write, at `hostfs/root` of the runtime directory, outside the root,
+   where only the guest's root user reaches it, as the worker of a VM that
+   boots cold mounts the one that its kernel command line names. If the
+   record's network names a DNS server, it writes a resolver file that names
+   it, of mode 0444, in `nvx::guest::clone::RESOLVER_FILE` of the runtime
+   directory. It then binds the generated machine ID read-only over the root's
+   `/etc/machine-id`, and the resolver file read-only over its
    `/etc/resolv.conf`, in the worker's mount namespace, for every execution;
    with the image's own machine ID and without a DNS server, it binds nothing.
 4. Once it took what the session received while the application ran, which came
@@ -835,22 +835,23 @@ after the repair's acknowledgement of the restore:
    meanwhile, which joins the application. Anything else that came meanwhile, a
    reset included, fails the activation, as before the application, so the host
    waits for `Ready` before it sends the mapping table or the start.
-5. It then serves the host's order, as after a cold boot: the mapping table that
-   the record announces, which it applies from the record's export, the start,
-   the executions, the probes, and the stop. The record's workload identity, if
-   it has one, is the whole sandbox's, as a root configuration's is: every
-   execution runs as it, and a start that names an identity is refused. Every
-   execution takes the record's hostname. The host tells the workloads the
-   endpoint of the network's proxy, as after a cold boot: the host program's
-   `exec` adds it to each execution's environment, so the worker leaves each
-   execution's environment exactly its start's. The application does not apply
-   the publication of the record's listeners, so a clone's executions enter the
-   root with listeners published, the entry's default, which refuses the most.
-   On the stop, the worker closes the export's root and removes the
-   application's binds, which keep the root's mounts busy, before it tears the
-   root down, through `nvx::guest::clone::Applied::teardown`. It also answers
-   the [`activation` probe](#probes), with when the events of its activation and
-   order happened after the repair's acknowledgement of the restore.
+5. It then serves the host's order, as after a cold boot: the mapping table
+   that the record announces, which it applies from the record's export, the
+   start, the executions, the probes, and the stop. The record's workload
+   identity, if it has one, is the whole sandbox's, as a root configuration's
+   is: every execution runs as it, and a start that names an identity is
+   refused. Every execution takes the record's hostname. The host tells the
+   workloads the endpoint of the network's proxy, as after a cold boot: the
+   host program's `exec` adds it to each execution's environment, so the worker
+   leaves each execution's environment exactly its start's. The application
+   does not apply the publication of the record's listeners, so a clone's
+   executions enter the root with listeners published, the entry's default,
+   which refuses the most. On the stop, the worker closes the export's root and
+   removes the application's binds, which keep the root's mounts busy, before
+   it tears the root down, through `nvx::guest::clone::Applied::teardown`. It
+   also answers the [`activation` probe](#probes), with when the events of its
+   activation and order happened after the repair's acknowledgement of the
+   restore.
 
 Until the clone is ready, its session takes nothing but that `Activate`:
 another reset, any other message, a `Stop` and a `Ping` included, an
@@ -1442,17 +1443,18 @@ the bindings of its images, which no one else may change, the geometry of its
 image, which must be the placeholder's, its length included, and that of its
 scratch image, which must be the template's scratch's, and its memory target,
 whole blocks of 128 MiB, from the template's RAM to its capacity. A clone that
-the template cannot serve fails there, before any VMM starts. The command then records the clone in the
-sandbox's store, as `clone::CloneRecord`, in the format of a launch's
-[record](#layered-roots), in the mode `clone`, with the template's kernel
-command line, the plan and the bindings, so that `probe` and `exec` read the
-plan back, no root configuration, and the template store and the generation, so
-that a later stop finds the store whose lease it releases. OpenVMM restores the
-generation's snapshot in place, through NVX's supervisor, as the launch that the
-lease reserves, and the restore sequence activates the clone through the
-adapter's clone order, `host::CloneOrder`, which sends the clone's activation
-record in an `Activate`, checks the guest agent's build in its `Ready`, and
-sends `Start`, with no mapping table: the command maps nothing into a clone.
+the template cannot serve fails there, before any VMM starts. The command then
+records the clone in the sandbox's store, as `clone::CloneRecord`, in the
+format of a launch's [record](#layered-roots), in the mode `clone`, with the
+template's kernel command line, the plan and the bindings, so that `probe` and
+`exec` read the plan back, no root configuration, and the template store and
+the generation, so that a later stop finds the store whose lease it releases.
+OpenVMM restores the generation's snapshot in place, through NVX's supervisor,
+as the launch that the lease reserves, and the restore sequence activates the
+clone through the adapter's clone order, `host::CloneOrder`, which sends the
+clone's activation record in an `Activate`, checks the guest agent's build in
+its `Ready`, and sends `Start`, with no mapping table: the command maps nothing
+into a clone.
 
 A clone that fails, from its plan to its commit, fails with NVX's
 `CloneFailure`, which attributes the failure, by the evidence that the host saw
@@ -1464,19 +1466,19 @@ the clone failed, how far it got, and how the teardown that followed ended. The
 command prints the failure's record, then releases the lease, `Store::release`,
 which removes the records with it, once the failure's teardown is resolved, and
 nothing of the clone runs: the clone had no VM, its VM exited, or NVX
-terminated it. A failure whose teardown is unresolved, such as that of a commit,
-or one that NVX could not record before it ended the clone's VM, leaves the
-lease, and the records, to a later reattach. Once it released the
-sandbox's lock, which comes after the template store's in NVX's lock order, the
-command quarantines the generation through its tombstone,
-`CloneFailure::quarantine`, for a failure of the template alone. A guest agent
-that does not answer the command's `Ping` or `Echo` once the clone's sandbox
-started fails the clone so, through `Started::fail`, which ends the launch,
-with the evidence that NVX's restore sequence gives the failures of its own
-sessions: the passing of the deadline, the loss of the session, or a failure
-of the protocol. A start that fails otherwise, at a step of the adapter's own
-before the clone's launch, such as the read of the images that the sandbox
-stages, releases the lease, since nothing of the clone runs.
+terminated it. A failure whose teardown is unresolved, such as that of a
+commit, or one that NVX could not record before it ended the clone's VM, leaves
+the lease, and the records, to a later reattach. Once it released the sandbox's
+lock, which comes after the template store's in NVX's lock order, the command
+quarantines the generation through its tombstone, `CloneFailure::quarantine`,
+for a failure of the template alone. A guest agent that does not answer the
+command's `Ping` or `Echo` once the clone's sandbox started fails the clone so,
+through `Started::fail`, which ends the launch, with the evidence that NVX's
+restore sequence gives the failures of its own sessions: the passing of the
+deadline, the loss of the session, or a failure of the protocol. A start that
+fails otherwise, at a step of the adapter's own before the clone's launch, such
+as the read of the images that the sandbox stages, releases the lease, since
+nothing of the clone runs.
 
 The commands that reattach take the lock of a clone's sandbox through the path
 of its lease, which they read under the lock, as a release requires. A sandbox
@@ -1608,13 +1610,13 @@ the directory that `NVX_ARTIFACTS_DIR` names, and the guest agent's build from
   template store TEMPLATES, if given, in place of the one that the clone's
   record names.
 - `start STORE --template TEMPLATES --generation G --distro FORMAT:PATH --distro-identity UUID --upper (scratch:PATH | ram) [--memory MIB] [--workload-identity UID:GID] [--overlay-mode MODE] [--scratch-journal POLICY] [--first-partition-bound BYTES] [--machine-id (image | generated)]`
-  starts a [clone](#clones) of the generation G of the template store
-  TEMPLATES in the sandbox store STORE, which it creates if needed, and whose
-  `stage` staged its images, which no one else may change: the image PATH, an
-  EROFS file system, `erofs`, or a GPT disk, `gpt`, of which the guest expects
-  the identity UUID, the file system's UUID or the disk's GUID, of the length
-  of the template's placeholder, whatever the placeholder's format, over the
-  ext4 scratch image PATH, or RAM, with a memory target of MIB mebibytes, the
+  starts a [clone](#clones) of the generation G of the template store TEMPLATES
+  in the sandbox store STORE, which it creates if needed, and whose `stage`
+  staged its images, which no one else may change: the image PATH, an EROFS
+  file system, `erofs`, or a GPT disk, `gpt`, of which the guest expects the
+  identity UUID, the file system's UUID or the disk's GUID, of the length of
+  the template's placeholder, whatever the placeholder's format, over the ext4
+  scratch image PATH, or RAM, with a memory target of MIB mebibytes, the
   template's RAM by default, the workload identity UID:GID, if given, as which
   every execution runs, and whose account the guest checks before the clone is
   ready, the overlay mode MODE and the scratch's journal policy POLICY, as a
@@ -1622,13 +1624,13 @@ the directory that `NVX_ARTIFACTS_DIR` names, and the guest agent's build from
   partition, 64 KiB by default, as a launch's guest takes it. Every execution
   of the clone sees the hostname `runtime-adapter`, and the machine ID that
   `--machine-id` chooses: the image's own, `image`, by default, or one that the
-  guest generates once for the clone, `generated`.
-  Once the restore sequence started the clone's sandbox, it exchanges a `Ping`
-  and the longest `Echo` with the guest agent, commits the launch, and exits,
-  leaving the VM running, and the sandbox holding the lease. A clone that
-  fails, such as one whose activation failed before it was ready, and whose VM
-  ended with the status of the failure's class, from 50 to 58, ends as
-  [Clones](#clones) describes, with the record of its failure.
+  guest generates once for the clone, `generated`. Once the restore sequence
+  started the clone's sandbox, it exchanges a `Ping` and the longest `Echo`
+  with the guest agent, commits the launch, and exits, leaving the VM running,
+  and the sandbox holding the lease. A clone that fails, such as one whose
+  activation failed before it was ready, and whose VM ended with the status of
+  the failure's class, from 50 to 58, ends as [Clones](#clones) describes, with
+  the record of its failure.
 - `stop STORE [--template TEMPLATES]` reattaches and attaches as `reattach`
   does, then stops the VM:
   the adapter's `Stop`, which the guest agent confirms with `Stopped` before it
@@ -1644,11 +1646,11 @@ the directory that `NVX_ARTIFACTS_DIR` names, and the guest agent's build from
   each PROBE in the VM's layered root, in order, and prints the facts that it
   found. A PROBE is the text of a [probe](#probes): its name, then its
   arguments, each after one space. A probe that fails fails the command.
-- `exec STORE EXECUTION [; EXECUTION]...` reattaches and attaches as
-  `reattach` does, then runs each EXECUTION in the VM's layered root, all at
-  once, over that one session, through `host::Executions`, and prints their
-  outputs and outcomes once every one finished. It runs at most 8 executions,
-  as many as the guest runs at once. An EXECUTION,
+- `exec STORE EXECUTION [; EXECUTION]...` reattaches and attaches as `reattach`
+  does, then runs each EXECUTION in the VM's layered root, all at once, over
+  that one session, through `host::Executions`, and prints their outputs and
+  outcomes once every one finished. It runs at most 8 executions, as many as
+  the guest runs at once. An EXECUTION,
   `[--identity UID:GID [--groups GID,...] [--capabilities N,...] [--numeric]] [--cwd DIR] [--env NAME=VALUE]... -- PROGRAM [ARG]...`,
   runs PROGRAM with its ARGs, up to a lone `;`, which a shell takes quoted, as
   `find -exec` takes them, without standard input. Without `--identity`, it
@@ -1662,15 +1664,16 @@ the directory that `NVX_ARTIFACTS_DIR` names, and the guest agent's build from
   it in `http_proxy`, `https_proxy`, `HTTP_PROXY`, and `HTTPS_PROXY`, unless
   the entries name any of them. Before it starts any execution, the command
   checks that the framing still carries each start with the proxy's URL, and
-  runs none of the executions if one no longer fits. It runs for at most a minute, with 16 KiB
-  chunks and the credit of 4 of them for its input and 8 for its output, which
-  its standard output and error share. The command keeps at most 16 MiB of each
-  stream, and cancels an execution whose stream would exceed them. Execution N,
-  from 1, has the key `(B + N, E)`: E is the epoch of the command's attachment,
-  and B the first 8 bytes of the broker instance's ID, as a little-endian
-  number. The guest refuses a key that it heard of before, and the epochs of a
-  broker instance only advance, while a broker restored from a snapshot has a
-  new instance ID, so no command repeats the key of another's execution.
+  runs none of the executions if one no longer fits. It runs for at most a
+  minute, with 16 KiB chunks and the credit of 4 of them for its input and 8
+  for its output, which its standard output and error share. The command keeps
+  at most 16 MiB of each stream, and cancels an execution whose stream would
+  exceed them. Execution N, from 1, has the key `(B + N, E)`: E is the epoch of
+  the command's attachment, and B the first 8 bytes of the broker instance's
+  ID, as a little-endian number. The guest refuses a key that it heard of
+  before, and the epochs of a broker instance only advance, while a broker
+  restored from a snapshot has a new instance ID, so no command repeats the key
+  of another's execution.
 
 `reattach`, `stop`, `probe`, and `exec` find a VM that booted cold under
 another runtime identity mismatched, and then signal nothing: the VM keeps
@@ -2024,16 +2027,17 @@ On x86_64, `tests/guest_session.rs` also runs the worker of a clone, which a
 restore of a template's snapshot started, with `worker::work_clone`, behind its
 test broker, with the session that the template's VM attached, active in the
 epoch of its broker's first reset, and the clone's activation,
-`nvx::guest::clone::Activation::with_resources`, behind a closed fence. The fake
-root applies each record as `nvx::guest::clone::apply` does, without a root: for
-a GPT disk, it stands for the kernel's reread of the disk's partition table,
-which a test may fail; it takes as long as a test asks, but no longer than until
-the activation's deadline, as the waits for the devices do, checks the account
-of the record's workload identity in the tests' directory of account databases,
-and stands for the generation of a machine ID that the record asks for, the
-mount of the record's export, the write of the resolver file that names its
-network's DNS server, and the setting of the record's hostname and machine ID
-for every execution, each of which a test may fail. The tests cover:
+`nvx::guest::clone::Activation::with_resources`, behind a closed fence. The
+fake root applies each record as `nvx::guest::clone::apply` does, without a
+root: for a GPT disk, it stands for the kernel's reread of the disk's partition
+table, which a test may fail; it takes as long as a test asks, but no longer
+than until the activation's deadline, as the waits for the devices do, checks
+the account of the record's workload identity in the tests' directory of
+account databases, and stands for the generation of a machine ID that the
+record asks for, the mount of the record's export, the write of the resolver
+file that names its network's DNS server, and the setting of the record's
+hostname and machine ID for every execution, each of which a test may fail. The
+tests cover:
 
 - the reset that the restore queued, of another instance, which the worker
   acknowledges without an attachment, and the `Activate`, whose record it
