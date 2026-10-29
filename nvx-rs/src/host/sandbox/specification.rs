@@ -11,6 +11,7 @@ use super::mount::{aggregate_child_name, parse_mount_value, validate_mount_targe
 use super::tests::{exported, host_text};
 use super::*;
 use crate::ErrorKind;
+use crate::protocol::cmdline::model;
 
 const UUID: &str = "11111111-2222-3333-4444-555555555555";
 
@@ -611,6 +612,59 @@ fn caller_parameters_follow_linux_and_guest_rules() {
     assert!(adapter.kernel_command_line("nvx_custom=adapter").is_ok());
 }
 
+#[test]
+fn the_reproduction_of_microsoft_nvx_723_is_refused() {
+    // `à`, U+00E0, is C3 A0 in UTF-8, and the kernel takes the byte 0xa0 for whitespace; it also
+    // drops the quote that starts a parameter.
+    let launch = launch(SandboxSettings::default());
+    for user in [
+        "quiet\u{e0}nvx_entrypoint=/bin/other",
+        r#""nvx_entrypoint=/bin/other""#,
+    ] {
+        refused(launch.plan().kernel_command_line(user));
+        refused(launch.plan().one_shot_kernel_command_line(user));
+    }
+    refused(SandboxLaunch::new(
+        vec![SandboxLayer::new(LayerRole::Distro, "distro.erofs", UUID)],
+        "scratch.ext4",
+        SandboxSettings {
+            args: vec!["x\u{e0}tsc=unstable".to_owned()],
+            ..SandboxSettings::default()
+        },
+    ));
+    for target in ["/data/\u{e0}x", r#"/data/a"b"#] {
+        refused(validate_mount_target(target));
+    }
+    // The kernel honors quoted values, so a caller's command line may hold them.
+    for user in [r#"a="b c" d"#, r#"quiet a="b c""#] {
+        let command_line = launch.plan().kernel_command_line(user).unwrap();
+        assert!(
+            command_line.starts_with(&format!("{user} ")),
+            "{command_line}"
+        );
+    }
+}
+
+/// Returns a strategy for a value that becomes part of a kernel token, such as an argument:
+/// mostly characters that it may hold, and now and then a NUL, a quote, a character that the
+/// kernel reads as whitespace, whole or in part, or Unicode whitespace at which it splits nothing.
+/// U+00A0, U+00E0, U+0120, and U+2020 end with the byte 0xa0 in UTF-8, and U+0800 holds it
+/// before its last byte.
+fn token_value() -> impl Strategy<Value = String> {
+    prop::collection::vec(
+        prop_oneof![
+            12 => prop::char::range('a', 'z'),
+            3 => prop::sample::select(vec!['/', '-', '_', '.', '=', '\u{e9}', '\u{4e2d}']),
+            2 => prop::sample::select(vec![
+                '\0', '\t', '\n', '\u{b}', '\u{c}', '\r', ' ', '"', '\u{a0}', '\u{e0}',
+                '\u{120}', '\u{2020}', '\u{800}', '\u{2003}',
+            ]),
+        ],
+        1..12,
+    )
+    .prop_map(String::from_iter)
+}
+
 proptest! {
     #[test]
     fn non_root_workload_identities_round_trip(uid in 1..u32::MAX, gid in 1..u32::MAX) {
@@ -776,6 +830,60 @@ proptest! {
             };
             refused(launch.plan().kernel_command_line(&user));
             refused(launch.plan().one_shot_kernel_command_line(&user));
+        }
+    }
+
+    /// A value that becomes one kernel token, an entrypoint, an argument, or a share's target, is
+    /// one parameter for the kernel: a value in which the kernel would end a parameter, with
+    /// whitespace, a quote, or a NUL, is refused, and the kernel reads every token of the command
+    /// lines of a launch whose values are accepted as one parameter, whole.
+    #[test]
+    fn accepted_values_stay_one_kernel_parameter(
+        entrypoint in token_value(),
+        argument in token_value(),
+        first in token_value(),
+        second in token_value(),
+    ) {
+        let splits = |value: &str| {
+            value.bytes().any(|byte| matches!(byte, b'\0' | b'"') || model::isspace(byte))
+        };
+        let entrypoint = format!("/{entrypoint}");
+        let targets = [format!("/share-0/{first}"), format!("/share-1/{second}")];
+        let launch = SandboxLaunch::new(
+            vec![SandboxLayer::new(LayerRole::Distro, "distro.erofs", UUID)],
+            "scratch.ext4",
+            SandboxSettings {
+                entrypoint: entrypoint.clone(),
+                args: vec![argument.clone()],
+                ..SandboxSettings::default()
+            },
+        );
+        if splits(&entrypoint) || splits(&argument) {
+            prop_assert!(launch.is_err(), "{:?} {:?}", entrypoint, argument);
+        }
+        for target in &targets {
+            if splits(target) {
+                prop_assert!(validate_mount_target(target).is_err(), "{:?}", target);
+            }
+        }
+        let accepted = targets.iter().all(|target| validate_mount_target(target).is_ok());
+        let (Ok(launch), true) = (launch, accepted) else {
+            return Ok(());
+        };
+        let shares: Vec<_> = targets
+            .iter()
+            .zip(["/host-0", "/host-1"])
+            .map(|(target, root)| (target.as_str(), root, MountAccess::ReadWrite, MountKind::Directory))
+            .collect();
+        let launch = launch.with_export(Some(exported(&shares))).unwrap();
+        for command_line in [
+            launch.plan().kernel_command_line("quiet").unwrap(),
+            launch.plan().one_shot_kernel_command_line("quiet").unwrap(),
+        ] {
+            let reading = model::read(command_line.as_bytes());
+            prop_assert_eq!(&reading.rest, &None);
+            let tokens: Vec<&[u8]> = command_line.split(' ').map(str::as_bytes).collect();
+            prop_assert_eq!(reading.lines(), tokens);
         }
     }
 }

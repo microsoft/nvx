@@ -16,6 +16,7 @@ use crate::error::{Error, Result};
 use crate::hypervisor::Hypervisor;
 use crate::net::{is_valid_guest_network, is_valid_hostname};
 use crate::protocol::WORKLOAD_ACCOUNT_TOKEN;
+use crate::protocol::cmdline::{self, Parameter};
 
 /// Bytes of the x86 kernel command line available to caller tokens, including the NUL.
 pub const COMMAND_LINE_BUDGET: usize = 1024;
@@ -39,6 +40,9 @@ pub const DEFAULT_MEMORY_MIB: u32 = 256;
 pub const DEFAULT_HOSTNAME: &str = "nvx-sandbox";
 /// Default guest network address.
 pub const DEFAULT_GUEST_NETWORK: &str = "10.0.0.2/24";
+/// The name of the kernel parameter that sets the workload hostname, which follows the extra
+/// kernel parameters on every command line.
+const HOSTNAME_PARAMETER: &str = "hostname";
 
 /// The identity that workloads run as: a non-root user and group ID.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -306,7 +310,7 @@ impl LaunchSpec {
 /// Returns the start of every kernel command line that `extra` parameters and `hostname`
 /// determine alone: the parameters and the workload hostname.
 pub fn base_command_line(extra: &str, hostname: &str) -> String {
-    let hostname = format!("hostname={hostname}");
+    let hostname = format!("{HOSTNAME_PARAMETER}={hostname}");
     match extra.trim() {
         "" => hostname,
         extra => format!("{extra} {hostname}"),
@@ -316,11 +320,17 @@ pub fn base_command_line(extra: &str, hostname: &str) -> String {
 /// Describes why `extra` kernel parameters are unacceptable for VMs named `hostname`, if they
 /// are.
 ///
-/// The parameters must not contain NUL characters, quotes, or the `--` delimiter, and `nvx_*`,
-/// `tsc=`, and `hostname=` tokens are reserved. They share the guest's 1024-byte kernel command
-/// line with the `hostname=` token and the tokens that configure the guest agent, so parameters
-/// and a hostname that alone leave no room in it are refused too. The description continues a
-/// sentence whose subject names the parameters.
+/// The parameters are checked as the guest's kernel reads them in the command line that
+/// [`base_command_line`] renders, as [`cmdline::parameters`] reads it: trimmed, split at every
+/// byte that the kernel takes for whitespace, including the 0xa0 that ends the UTF-8 encoding of
+/// characters such as `à`, with names that match whether they spell a dash or an underscore. The
+/// parameters must not contain NUL characters, quotes, or the `--` delimiter, after which the
+/// kernel would leave the `hostname=` parameter that follows them to init. The parameters named
+/// `tsc` or `hostname`, with or without a value, and those whose names start with `nvx_` or
+/// `nvx-` are reserved. They share the guest's 1024-byte kernel command line with the `hostname=`
+/// parameter and the tokens that configure the guest agent, so parameters and a hostname that
+/// alone leave no room in it are refused too. The description continues a sentence whose subject
+/// names the parameters.
 pub fn kernel_parameters_problem(extra: &str, hostname: &str) -> Option<String> {
     if extra.contains('\0') {
         return Some("contains a NUL character".to_owned());
@@ -328,28 +338,46 @@ pub fn kernel_parameters_problem(extra: &str, hostname: &str) -> Option<String> 
     if extra.contains(['"', '\'']) {
         return Some("must not contain quotes".to_owned());
     }
-    let token_problem = extra.split_whitespace().find_map(|token| {
-        if token == "--" {
-            Some("must not contain the -- delimiter".to_owned())
-        } else if token.starts_with("nvx_")
-            || token.starts_with("tsc=")
-            || token.starts_with("hostname=")
-        {
-            Some(format!("uses the reserved token {token:?}"))
-        } else {
-            None
-        }
-    });
-    if token_problem.is_some() {
-        return token_problem;
+    let extra = extra.trim();
+    if let Some(reserved) =
+        cmdline::parameters(extra.as_bytes()).find(|&parameter| is_reserved(parameter))
+    {
+        return Some(format!("uses the reserved token {:?}", text(reserved)));
     }
     // Every VM's command line starts with these parameters and the hostname, and ends with a
     // NUL; launching then checks the tokens that each VM adds.
-    (base_command_line(extra, hostname).len() + 1 > COMMAND_LINE_BUDGET).then(|| {
+    let command_line = base_command_line(extra, hostname);
+    // None of the parameters is named `hostname`, so the kernel reads none only when a `--` ends
+    // its parameters before the hostname's.
+    if !cmdline::parameters(command_line.as_bytes())
+        .any(|parameter| parameter.is_named(HOSTNAME_PARAMETER))
+    {
+        return Some("must not contain the -- delimiter".to_owned());
+    }
+    (command_line.len() + 1 > COMMAND_LINE_BUDGET).then(|| {
         format!(
             "and the hostname leave no room in the {COMMAND_LINE_BUDGET}-byte kernel command line"
         )
     })
+}
+
+/// Returns whether extra kernel parameters may not hold `parameter`: the workload hostname's,
+/// which the launch sets; `tsc`, which time ABI v1 governs; and those that configure the guest,
+/// whose names start with `nvx_` or, since the kernel matches them alike, `nvx-`.
+fn is_reserved(parameter: Parameter<'_>) -> bool {
+    parameter.name.starts_with(b"nvx_")
+        || parameter.name.starts_with(b"nvx-")
+        || parameter.is_named("tsc")
+        || parameter.is_named(HOSTNAME_PARAMETER)
+}
+
+/// Returns the text of `parameter` as the kernel reads it: `NAME=VALUE`, or `NAME` alone.
+fn text(parameter: Parameter<'_>) -> String {
+    let name = String::from_utf8_lossy(parameter.name);
+    match parameter.value {
+        Some(value) => format!("{name}={}", String::from_utf8_lossy(value)),
+        None => name.into_owned(),
+    }
 }
 
 /// Describes why a start, control, or stop timeout, or the extra time to wait for a workload's
@@ -399,9 +427,12 @@ fn process_command_line_units(program: &OsStr, arguments: &[OsString]) -> usize 
 
 #[cfg(test)]
 mod tests {
+    use proptest::prelude::*;
+
     use super::*;
     use crate::ErrorKind;
     use crate::host::filesystem::{Bind, ExportChild, Owner};
+    use crate::protocol::cmdline::model;
 
     fn spec() -> LaunchSpec {
         LaunchSpec::new(
@@ -625,11 +656,169 @@ mod tests {
     }
 
     #[test]
+    fn kernel_parameters_are_read_as_the_kernel_reads_them() {
+        let hostname = DEFAULT_HOSTNAME;
+        // `à`, U+00E0, is C3 A0 in UTF-8, and the kernel takes the byte 0xa0 for whitespace, so it
+        // reads the text after it as another parameter (microsoft/nvx#723). So do U+00A0 and
+        // U+0120, and the vertical tab, the form feed, and the carriage return.
+        for (extra, problem) in [
+            (
+                "quiet\u{e0}tsc=unstable",
+                "uses the reserved token \"tsc=unstable\"",
+            ),
+            ("quiet\u{e0}--", "must not contain the -- delimiter"),
+            (
+                "quiet\u{a0}-- loglevel=0",
+                "must not contain the -- delimiter",
+            ),
+            (
+                "quiet\u{a0}hostname=other",
+                "uses the reserved token \"hostname=other\"",
+            ),
+            (
+                "quiet\u{120}nvx_maps=5",
+                "uses the reserved token \"nvx_maps=5\"",
+            ),
+            (
+                "quiet\u{b}nvx_workload_account=create",
+                "uses the reserved token \"nvx_workload_account=create\"",
+            ),
+            (
+                "quiet\u{c}tsc=reliable",
+                "uses the reserved token \"tsc=reliable\"",
+            ),
+            (
+                "quiet\rhostname=other",
+                "uses the reserved token \"hostname=other\"",
+            ),
+            // The kernel matches names whether they spell a dash or an underscore. A launch also
+            // reserves `tsc` and `hostname` without a value: the early handler of `hostname`
+            // copies the value that such a parameter lacks.
+            ("nvx-maps=5", "uses the reserved token \"nvx-maps=5\""),
+            ("tsc", "uses the reserved token \"tsc\""),
+            ("quiet hostname", "uses the reserved token \"hostname\""),
+            // The command line starts with the parameters trimmed of any whitespace.
+            (
+                "\u{2003}tsc=unstable",
+                "uses the reserved token \"tsc=unstable\"",
+            ),
+        ] {
+            assert_eq!(
+                kernel_parameters_problem(extra, hostname).as_deref(),
+                Some(problem),
+                "{extra:?}"
+            );
+        }
+        // The kernel reads one parameter where none of its whitespace separates two, and a `--`
+        // with a value is no delimiter.
+        for extra in [
+            "quiet\u{2003}tsc=unstable",
+            "quiet\u{3000}nvx_maps=5",
+            "quiet\u{800}tsc=unstable",
+            "x=tsc=unstable",
+            "tscx=1",
+            "hostnames=a",
+            "xnvx_maps=5",
+            "a--",
+            "--=1",
+        ] {
+            assert_eq!(
+                kernel_parameters_problem(extra, hostname),
+                None,
+                "{extra:?}"
+            );
+        }
+    }
+
+    /// Returns a strategy for what the kernel takes for whitespace between two parameters: an
+    /// ASCII byte that `isspace` accepts, or a character above U+007F whose code point ends with
+    /// the six bits 0x20, which UTF-8 encodes in a last byte of 0xa0.
+    fn kernel_separator() -> impl Strategy<Value = String> {
+        prop_oneof![
+            prop::sample::select(vec![' ', '\t', '\n', '\u{b}', '\u{c}', '\r']),
+            (0x80_u32..0x11_0000)
+                .prop_filter_map("a surrogate", |code| char::from_u32((code & !0x3f) | 0x20)),
+        ]
+        .prop_map(String::from)
+    }
+
+    /// Returns a strategy for extra kernel parameters: mostly letters, equals signs, dashes,
+    /// underscores, the names that a launch reserves, and the whitespace of the kernel and of
+    /// Unicode, and now and then a quote or a NUL.
+    fn extra_parameters() -> impl Strategy<Value = String> {
+        /// The pieces of the parameters. U+0800 holds the byte 0xa0 before its last byte, and
+        /// U+2003 and U+3000 hold none.
+        const PIECES: [&str; 23] = [
+            "a", "b", "=", "-", "--", "_", "nvx_", "nvx-", "tsc", "hostname", " ", "\t", "\n",
+            "\u{b}", "\u{c}", "\r", "\u{a0}", "\u{e0}", "\u{120}", "\u{2020}", "\u{800}",
+            "\u{2003}", "\u{3000}",
+        ];
+        prop::collection::vec(
+            prop_oneof![
+                24 => prop::sample::select(PIECES.to_vec()),
+                1 => prop::sample::select(vec!["\"", "'", "\0"]),
+            ],
+            0..24,
+        )
+        .prop_map(|pieces| pieces.concat())
+    }
+
+    proptest! {
+        /// No reserved parameter passes, whatever separates it from the parameter before it.
+        #[test]
+        fn reserved_parameters_are_refused_whatever_separates_them(
+            before in "[a-z]{1,8}",
+            separator in kernel_separator(),
+            reserved in prop::sample::select(vec![
+                "tsc=unstable",
+                "tsc",
+                "hostname=other",
+                "hostname",
+                "nvx_maps=5",
+                "nvx-maps=5",
+                "nvx_workload_account=create",
+                "--",
+            ]),
+            after in "( [a-z]{1,8})?",
+        ) {
+            let extra = format!("{before}{separator}{reserved}{after}");
+            prop_assert!(kernel_parameters_problem(&extra, DEFAULT_HOSTNAME).is_some(), "{:?}", extra);
+        }
+
+        /// The parameters that a launch accepts are those in which the kernel reads no reserved
+        /// parameter, as it compares names, and after which it reads the `hostname=` parameter:
+        /// the parameters hold no NUL and no quote, and no `--` ends them.
+        #[test]
+        fn the_kernel_reads_the_hostname_after_accepted_parameters(extra in extra_parameters()) {
+            let hostname = DEFAULT_HOSTNAME;
+            let reading = model::read(base_command_line(&extra, hostname).as_bytes());
+            let reserved = |name: &[u8]| {
+                model::parameqn(name, b"nvx_", 4)
+                    || model::parameq(name, b"tsc")
+                    || model::parameq(name, b"hostname")
+            };
+            let readable = !extra.contains(['\0', '"', '\''])
+                && reading.rest.is_none()
+                && reading.parameters.split_last().is_some_and(|((name, value), others)| {
+                    name == b"hostname"
+                        && value.as_deref() == Some(hostname.as_bytes())
+                        && !others.iter().any(|(name, _)| reserved(name))
+                });
+            prop_assert_eq!(
+                kernel_parameters_problem(&extra, hostname).is_none(),
+                readable,
+                "{:?}",
+                extra
+            );
+        }
+    }
+
+    #[test]
     fn every_command_line_checks_the_specification() {
         let endpoint = "/state/t/control.sock";
         let report = Path::new("/state/t/outcome.json");
         spec().check().unwrap();
-        let changes: [fn(&mut LaunchSpec); 9] = [
+        let changes: [fn(&mut LaunchSpec); 11] = [
             |spec| spec.memory_mib = 0,
             |spec| spec.identity.uid = 0,
             |spec| spec.identity.gid = 0,
@@ -640,6 +829,9 @@ mod tests {
             |spec| spec.kernel_parameters = "nvx_maps=5".to_owned(),
             |spec| spec.kernel_parameters = "nvx_workload_account=create".to_owned(),
             |spec| spec.kernel_parameters = "quiet hostname=other".to_owned(),
+            // The kernel reads the byte 0xa0 of `à` as whitespace (microsoft/nvx#723).
+            |spec| spec.kernel_parameters = "quiet\u{e0}tsc=unstable".to_owned(),
+            |spec| spec.kernel_parameters = "quiet\u{e0}--".to_owned(),
         ];
         for change in changes {
             let mut spec = spec();

@@ -13,6 +13,7 @@ use crate::guest::parse::parse_decimal;
 use crate::guest::reseed::Seed;
 use crate::guest::sys::ClockAdjustment;
 use crate::guest::sys::x86::{CpuidResult, cpuid};
+use crate::protocol::cmdline::{self, Parameter};
 
 /// Fixed restore-packet header length.
 pub(crate) const PACKET_HEADER_SIZE: usize = 32;
@@ -868,29 +869,53 @@ pub(crate) fn check_cpuinfo(
     }
 }
 
-/// Validates the kernel command line required by time ABI version one.
+/// Validates the kernel command line required by time ABI version one: the kernel must apply none
+/// of the clock parameters that the ABI forbids among the parameters that it reads from the
+/// command line, as [`cmdline::parameters`] reads them, in quotes, after any of its whitespace,
+/// and up to a `--`.
+///
+/// The ABI forbids `tsc_early_khz`, `nolapic`, and `nolapic_timer`, whose `early_param` handlers
+/// the kernel matches by their names, and `lapic_timer_hz`, the clock token that OpenVMM refuses
+/// with `tsc_early_khz`, by its name too; `notsc`, whose `__setup` handler the kernel matches with
+/// every parameter that starts with it; and `tsc=unstable`, an `hpet=` list with an option that
+/// starts with `force`, as `hpet_setup` reads it, and a `clocksource=` other than `tsc`, whose
+/// `__setup` handlers take the values. Names match whether they spell a dash or an underscore.
+/// The diagnostic quotes the parameter as the kernel reads it, `NAME=VALUE` without its quotes.
+///
+/// `text` is what `/proc/cmdline` holds: the command line that the kernel read, and the newline
+/// that procfs writes after it, which the check drops, so that a quote that the command line
+/// leaves open holds the value that the kernel read.
 pub(crate) fn check_cmdline(text: &[u8]) -> Result<(), Vec<u8>> {
-    const PREFIXES: [&[u8]; 2] = [b"tsc_early_khz=", b"lapic_timer_hz="];
-    const TOKENS: [&[u8]; 5] = [
-        b"notsc",
-        b"nolapic",
-        b"nolapic_timer",
-        b"tsc=unstable",
-        b"hpet=force",
+    /// The forbidden parameters that the kernel, or OpenVMM for `lapic_timer_hz`, matches by name.
+    const NAMES: [&str; 4] = [
+        "tsc_early_khz",
+        "lapic_timer_hz",
+        "nolapic",
+        "nolapic_timer",
     ];
-    let forbidden = |token: &&[u8]| {
-        token
-            .strip_prefix(b"clocksource=")
-            .is_some_and(|value| value != b"tsc")
-            || PREFIXES.iter().any(|prefix| token.starts_with(prefix))
-            || TOKENS.contains(token)
+    let forbidden = |parameter: &Parameter<'_>| {
+        let value = |name: &str| parameter.value.filter(|_| parameter.is_named(name));
+        NAMES.iter().any(|name| parameter.is_named(name))
+            || parameter.name.starts_with(b"notsc")
+            || value("tsc") == Some(b"unstable".as_slice())
+            || value("hpet").is_some_and(|options| {
+                options
+                    .split(|&byte| byte == b',')
+                    .any(|option| option.starts_with(b"force"))
+            })
+            || value("clocksource").is_some_and(|source| source != b"tsc")
     };
-    match text.split(u8::is_ascii_whitespace).find(forbidden) {
-        Some(token) => Err([
-            b"command line contains ".as_slice(),
-            &token[..token.len().min(QUOTED_TOKEN_MAX)],
-        ]
-        .concat()),
+    let command_line = text.strip_suffix(b"\n").unwrap_or(text);
+    match cmdline::parameters(command_line).find(forbidden) {
+        Some(parameter) => {
+            let mut quoted = parameter.name.to_vec();
+            if let Some(value) = parameter.value {
+                quoted.push(b'=');
+                quoted.extend_from_slice(value);
+            }
+            quoted.truncate(QUOTED_TOKEN_MAX);
+            Err([b"command line contains ".as_slice(), &quoted].concat())
+        }
         None => Ok(()),
     }
 }
@@ -937,7 +962,10 @@ pub(crate) fn parse_restore_record(text: &[u8]) -> Option<(u64, CpuMask)> {
 
 #[cfg(test)]
 mod tests {
+    use proptest::prelude::*;
+
     use super::*;
+    use crate::protocol::cmdline::model;
 
     /// A valid packet header without memory ranges, of generation 1.
     fn valid_header() -> [u8; PACKET_HEADER_SIZE] {
@@ -1512,6 +1540,166 @@ mod tests {
             b"generation=3\nnew_cpus=\ntrailing=value\n",
         ] {
             assert_eq!(parse_restore_record(record), None, "{record:?}");
+        }
+    }
+
+    #[test]
+    fn the_command_line_is_checked_as_the_kernel_reads_it() {
+        // The kernel applies these parameters however the command line separates, quotes, or
+        // spells them: `à` is C3 A0 in UTF-8, and the kernel takes the byte 0xa0, as it does the
+        // vertical tab, for whitespace (microsoft/nvx#723).
+        let cases: [(&[u8], &[u8]); 21] = [
+            (b"quiet \xc3\xa0tsc=unstable", b"tsc=unstable"),
+            (b"quiet\xc3\xa0tsc=unstable", b"tsc=unstable"),
+            (b"quiet\x0btsc_early_khz=2100000", b"tsc_early_khz=2100000"),
+            (b"quiet\xa0notsc", b"notsc"),
+            (b"\"tsc=unstable\"", b"tsc=unstable"),
+            (b"tsc=\"unstable\"", b"tsc=unstable"),
+            (b"a \"clocksource=hpet\" b", b"clocksource=hpet"),
+            (b"tsc-early-khz=2100000", b"tsc-early-khz=2100000"),
+            (b"lapic-timer-hz=200000000", b"lapic-timer-hz=200000000"),
+            (b"nolapic-timer", b"nolapic-timer"),
+            (b"nolapic=1", b"nolapic=1"),
+            (b"tsc_early_khz", b"tsc_early_khz"),
+            // `__setup("notsc", ...)` takes every parameter that starts with it, and
+            // `hpet_setup` every option of its list that starts with `force`.
+            (b"notsc=1", b"notsc=1"),
+            (b"notscx", b"notscx"),
+            (b"hpet=verbose,force", b"hpet=verbose,force"),
+            (b"hpet=forced", b"hpet=forced"),
+            (b"clocksource=tsc clocksource=hpet", b"clocksource=hpet"),
+            (b"clocksource=", b"clocksource="),
+            (b"nolapic_timer\n", b"nolapic_timer"),
+            (b"hpet=force\0", b"hpet=force"),
+            // The newline that procfs writes after the command line is not in a quote that the
+            // command line leaves open.
+            (b"quiet tsc=\"unstable\n", b"tsc=unstable"),
+        ];
+        for (command_line, quoted) in cases {
+            assert_eq!(
+                check_cmdline(command_line).unwrap_err(),
+                [b"command line contains ".as_slice(), quoted].concat(),
+                "{}",
+                command_line.escape_ascii()
+            );
+        }
+        // The kernel leaves what follows a `--` to init, reads text in quotes as a value of
+        // another parameter, and applies these parameters to no clock.
+        for command_line in [
+            &b"earlycon=xe9 console=hvc0 quiet clocksource=tsc tsc=reliable\n"[..],
+            b"quiet -- tsc=unstable notsc",
+            b"quiet\xa0--\xa0tsc=unstable",
+            b"a=\"tsc=unstable notsc\" b",
+            b"xnotsc tscx=unstable tsc=unstable2 hpet=disable,verbose clocksource nolapicx",
+            b"quiet\xe2\x80\x83tsc=unstable",
+            b"quiet\0 tsc=unstable",
+            b"quiet clocksource=\"tsc\n",
+            b"",
+        ] {
+            assert_eq!(
+                check_cmdline(command_line),
+                Ok(()),
+                "{}",
+                command_line.escape_ascii()
+            );
+        }
+        let long = [b"notsc".as_slice(), &[b'x'; QUOTED_TOKEN_MAX]].concat();
+        assert_eq!(
+            check_cmdline(&long).unwrap_err(),
+            [
+                b"command line contains ".as_slice(),
+                &long[..QUOTED_TOKEN_MAX]
+            ]
+            .concat()
+        );
+    }
+
+    /// Returns whether the kernel applies, in the parameter `name` with `value`, a clock
+    /// parameter that time ABI v1 forbids, as `init/main.c` matches parameters with their
+    /// handlers: an `early_param` by `parameq` of its name, which NVX applies to
+    /// `lapic_timer_hz` too, and a `__setup` string by `parameqn` of the parameter's text over the
+    /// string's length, which passes the rest of the text to the handler.
+    fn applies_forbidden_clock(name: &[u8], value: Option<&[u8]>) -> bool {
+        let line = model::line(name, value);
+        let early = |string: &str| model::parameq(name, string.as_bytes());
+        let setup = |string: &str| {
+            model::parameqn(&line, string.as_bytes(), string.len()).then(|| &line[string.len()..])
+        };
+        [
+            "tsc_early_khz",
+            "lapic_timer_hz",
+            "nolapic",
+            "nolapic_timer",
+        ]
+        .into_iter()
+        .any(early)
+            || setup("notsc").is_some()
+            || setup("tsc=") == Some(b"unstable".as_slice())
+            || setup("hpet=").is_some_and(|argument| {
+                argument
+                    .split(|&byte| byte == b',')
+                    .any(|option| option.starts_with(b"force"))
+            })
+            || setup("clocksource=").is_some_and(|argument| argument != b"tsc")
+    }
+
+    /// Returns a strategy for command lines of the clock parameters, others, their values,
+    /// quotes, the `--` delimiter, and the kernel's whitespace.
+    fn clock_command_line() -> impl Strategy<Value = Vec<u8>> {
+        /// The pieces of the command lines.
+        const PIECES: [&[u8]; 29] = [
+            b"tsc",
+            b"notsc",
+            b"nolapic",
+            b"_timer",
+            b"-timer",
+            b"tsc_early_khz",
+            b"tsc-early",
+            b"_khz",
+            b"lapic_timer_hz",
+            b"hpet",
+            b"clocksource",
+            b"x",
+            b"=",
+            b"unstable",
+            b"reliable",
+            b"force",
+            b",",
+            b"verbose",
+            b"1",
+            b"\"",
+            b"--",
+            b"-",
+            b"_",
+            b" ",
+            b"\t",
+            b"\n",
+            b"\x0b",
+            b"\xa0",
+            b"\xc3\xa0",
+        ];
+        prop::collection::vec(prop::sample::select(PIECES.to_vec()), 0..16)
+            .prop_map(|pieces| pieces.concat())
+    }
+
+    proptest! {
+        /// The check of what `/proc/cmdline` holds, a command line and the newline that procfs
+        /// writes after it, fails exactly when the kernel applies, in the command line, a clock
+        /// parameter that the ABI forbids.
+        #[test]
+        fn the_check_fails_when_the_kernel_applies_a_forbidden_clock(
+            command_line in clock_command_line(),
+        ) {
+            let applied = model::read(&command_line)
+                .parameters
+                .iter()
+                .any(|(name, value)| applies_forbidden_clock(name, value.as_deref()));
+            prop_assert_eq!(
+                check_cmdline(&[command_line.as_slice(), b"\n"].concat()).is_err(),
+                applied,
+                "{}",
+                command_line.escape_ascii()
+            );
         }
     }
 }
