@@ -1210,7 +1210,14 @@ fn launch(
                 // The guest has assembled the root, so OpenVMM holds the images: the checked files
                 // can go, which releases their guards, while OpenVMM keeps the scratch image's
                 // claim.
-                drop(prepared);
+                if let Some(prepared) = prepared.take() {
+                    prepared.release(starting.process()).map_err(|error| {
+                        failed(format!(
+                            "cannot release the checked files: {}",
+                            describe(&error)
+                        ))
+                    })?;
+                }
                 deadline += step(hook, Step::Ready)?;
             }
             Err(OrderError::Root(failure)) => {

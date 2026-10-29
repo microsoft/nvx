@@ -154,10 +154,19 @@ fn start_locked(
                 }
             })
         });
-    let Err(error) = ready else {
+    // The start holds the checked files until the guest is ready, or until it has ended an
+    // OpenVMM whose start failed.
+    let mut prepared = Some(prepared);
+    let ready = ready.and_then(|()| {
         // The guest is ready, so OpenVMM holds the images: the checked files can go, which
         // releases their guards, while OpenVMM keeps the scratch image's claim.
-        drop(prepared);
+        prepared
+            .take()
+            .expect("the start holds the checked files until the guest is ready")
+            .release(starting.process())
+            .map_err(error_with_cause)
+    });
+    let Err(error) = ready else {
         return starting.commit().map(drop).map_err(error_with_cause);
     };
     // OpenVMM closes the control endpoint as it tears the VM down, before it publishes its

@@ -1431,11 +1431,11 @@ container format by the file's extension, which `/proc/self/fd/N` lacks, so a
 caller whose images use a container format, such as a fixed VHD, stages a raw
 file. The paths in the arguments hold for the launch alone: the plan, which
 callers persist, keeps the real paths. The caller adds its own arguments,
-starts the VMM, and drops the prepared launch once the guest reports
-authenticated Ready, or once it has torn down a launch that failed; the VMM's
-own opens then keep the images, and what it inherited keeps the scratch
-image's claim. Staging, the checks, and the preparation of a launch read no
-content of the images.
+starts the VMM, and releases the prepared launch with `PreparedLaunch::release`
+once the guest reports authenticated Ready, or drops it once it has torn down a
+launch that failed; the VMM's own opens then keep the images, and what it
+inherited keeps the scratch image's claim. Staging, the checks, and the
+preparation of a launch read no content of the images.
 
 The clone of a template takes its block devices by path instead, as the
 template's capture does, since OpenVMM opens the files of a restore itself:
@@ -1447,8 +1447,8 @@ template recorded for its own, which `CheckedDistro::geometry` and
 `nvx-rs sandbox provision` records the scratch image's binding under
 `scratch_binding` in `config.json`, at the image's resolved path, and `start`
 checks it after the distro binding, and launches OpenVMM through a prepared
-launch, which it drops once the guest is ready or OpenVMM has exited. A
-scratch image that changed fails as a distro layer does, such as with
+launch, which it releases once the guest is ready, or drops once OpenVMM has
+exited. A scratch image that changed fails as a distro layer does, such as with
 `IMAGE changed after its scratch binding was made: its length differs;
 deprovision the sandbox and provision it again`, and one that another sandbox
 claims with `another sandbox claims the ext4 scratch image IMAGE`. `run` binds

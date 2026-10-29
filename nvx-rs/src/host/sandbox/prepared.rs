@@ -42,9 +42,10 @@
 //! renders them, and the plan, which callers persist, keeps the real paths. The caller adds its own
 //! arguments, such as its boot console, CPU profile, and guest control, starts the VMM with
 //! [`PreparedLaunch::inherited`] as its allowlist, and holds the prepared launch until the guest
-//! reports authenticated Ready, or until it has torn down a launch that failed. Dropping it then
-//! closes the checked files, which releases the guards, while the VMM keeps its own opens of the
-//! images, and the claim of the scratch image, which it inherited.
+//! reports authenticated Ready, when [`PreparedLaunch::release`] closes the checked files, which
+//! releases the guards, or until it has torn down a launch that failed, when dropping the prepared
+//! launch closes them. The VMM keeps its own opens of the images, and the claim of the scratch
+//! image, which it inherited.
 //!
 //! A plan never names a root identity for the workload: [`SandboxPlan::new`] refuses a zero UID
 //! or GID, so the VMM's `--microvm-workload-identity` never encodes root, and an adapter's plan,
@@ -62,6 +63,7 @@ use super::scratch::CheckedScratch;
 #[cfg(windows)]
 use super::{reject_container_path, reject_disk_path};
 use crate::error::Result;
+use crate::host::process::Process;
 #[cfg(windows)]
 #[cfg(windows)]
 use crate::host::seal;
@@ -76,8 +78,9 @@ use crate::host::sys;
 /// returned. The caller then starts the VMM with [`openvmm_arguments`](Self::openvmm_arguments),
 /// its own arguments, and [`kernel_command_line`](Self::kernel_command_line), with
 /// [`inherited`](Self::inherited) as the allowlist of its
-/// [`VmmCommand`](crate::host::supervisor::VmmCommand), and drops the prepared launch once the
-/// guest reports authenticated Ready, or once a launch that failed is torn down:
+/// [`VmmCommand`](crate::host::supervisor::VmmCommand), and [releases](Self::release) the
+/// prepared launch once the guest reports authenticated Ready, or drops it once a launch that
+/// failed is torn down:
 ///
 /// ```no_run
 /// use std::ffi::OsString;
@@ -109,7 +112,7 @@ use crate::host::sys;
 /// command.inherit = prepared.inherited();
 /// let launched = supervisor::spawn(&command, capability, File::create("openvmm.log")?)?;
 /// // ... record the VMM, and wait for the guest's authenticated Ready ...
-/// drop(prepared);
+/// prepared.release(&launched.process()?)?;
 /// launched.detach();
 /// # Ok(())
 /// # }
@@ -316,6 +319,22 @@ impl PreparedLaunch {
         }
         #[cfg(not(any(target_os = "linux", windows)))]
         Vec::new()
+    }
+
+    /// Releases the checked files once the VMM has opened the images, when the guest reports
+    /// authenticated Ready: closes them, as dropping the prepared launch does, which releases
+    /// their guards. The VMM keeps its own opens of the images, and the scratch image's claim,
+    /// which it inherited.
+    ///
+    /// `vmm` must be the VMM that inherited [`inherited`](Self::inherited), held as its launch
+    /// holds it: through [`Starting::process`](crate::host::supervisor::Starting::process), or
+    /// [`Launched::process`](crate::host::supervisor::Launched::process). A launch that failed
+    /// needs no release: dropping the prepared launch once the launch is torn down closes the
+    /// checked files.
+    pub fn release(self, vmm: &Process) -> Result<()> {
+        let _ = vmm;
+        drop(self);
+        Ok(())
     }
 }
 
