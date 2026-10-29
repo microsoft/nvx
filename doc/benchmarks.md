@@ -707,10 +707,16 @@ workflow's `github.run_attempt`.
 Lifecycle JSON results and workload `benchmark-metadata.json` files record host
 provenance under `host`: the runner name from `RUNNER_NAME`, the machine name, the
 operating system with its kernel release or Windows build and cumulative-update
-revision (UBR), the CPU model with its vendor, family, model, stepping, and microcode
-revision, the logical processor count, and physical memory, and the
+revision (UBR), the hypervisor that a Linux host runs under, the CPU model with its
+vendor, family, model, stepping, and microcode revision, the logical processor count,
+and physical memory, and the
 volume, file system, size, system-volume flag, disk number, and SCSI address behind
-the workspace, temporary, and scratch directories. The disk number and SCSI address
+the workspace, temporary, and scratch directories. On x86-64 Linux, the coordinator runs
+CPUID without privileges, from a private page that it makes executable only after writing
+the code into it. It records the hypervisor's vendor under `hypervisor.vendor`, `null`
+without a hypervisor, and a Microsoft hypervisor's version under `hypervisor.build`, such
+as `10.0.26100.9444`. A kernel that forbids executable anonymous memory leaves a
+`hypervisor.error`, and other hosts record no hypervisor. The disk number and SCSI address
 tell the Azure OS disk from a data-disk LUN or the temporary disk. On a possible Azure
 VM, the coordinator queries the instance metadata service once, directly rather than
 through a proxy and with up to three attempts when the service doesn't respond, and
@@ -823,13 +829,14 @@ Each tracked series names the host that measured its history in `data/<platform>
 such as [`data/windows-whp-virtual-machine-host.json`](../data/windows-whp-virtual-machine-host.json).
 The file is the identity of that host's provenance: the runner and machine names; the CPU's
 vendor, family, model, stepping, brand string, and microcode revision; the logical processors
-and memory; the operating system with its kernel release, or its Windows build and UBR; the
-Azure VM size and the Azure disks that can back the benchmark's volumes; and the mount point,
-file system, and system-volume flag of the workspace, temporary, and scratch volumes. The OS
-disk counts when a volume is the system volume, and the data and temporary disks when a volume
-is on another disk, so the data disk of a Linux runner, whose scratch is on tmpfs, doesn't.
-Paths, device names, SCSI addresses, and volume sizes are left out because they differ between
-identical VMs.
+and memory; the operating system with its kernel release, or its Windows build and UBR; on
+Linux/MSHV, the build of the Microsoft hypervisor beneath the kernel; the Azure VM size and the
+Azure disks that can back the benchmark's volumes; and the mount point, file system, and
+system-volume flag of the workspace, temporary, and scratch volumes. The OS disk counts when a
+volume is the system volume, and the data and temporary disks when a volume is on another
+disk, so the data disk of a Linux runner, whose scratch is on tmpfs, doesn't. Paths, device
+names, SCSI addresses, and volume sizes are left out because they differ between identical
+VMs.
 
 Before its first benchmark, the platform job's `Check Linux benchmark host` or `Check Windows
 benchmark host` step runs `nvx.py performance check-host`, which compares the runner with the
@@ -840,6 +847,7 @@ file. Each field is required or advisory:
 | CPU | Vendor, family, model, stepping, and brand string | Microcode revision |
 | Processors and memory | Logical processors; memory within 5% | |
 | Linux | Kernel major and minor version and flavor, the release tokens that contain letters, such as `mshv3` and `azl3` | Kernel patch release |
+| Linux/MSHV | Hypervisor build, the whole version of CPUID leaf `0x40000002`, such as `10.0.26100.9444` | |
 | Windows | Build, such as `10.0.26100` | Cumulative-update revision (UBR) |
 | Azure | VM size; each disk's SKU, size, caching, write accelerator, ephemeral option, and limits | |
 | Volumes | Mount point, file system, and system-volume flag | |
@@ -851,10 +859,20 @@ which the diagnostics artifact also keeps as `<platform>-host.json`. The memory 
 absorbs kernel reservations, which differ between VMs of one size: the KVM and MSHV runners,
 both `Standard_D8s_v5`, report 31.3 and 30.9 GiB. The kernel flavor is required because the
 `azure-mshv-scus` runners of #415, on `6.6.137.mshv2-2.azl3` rather than `6.6.148-200.azl3`,
-measured guest-exit teardown several times slower. An advisory difference, such as a
-microcode or Windows cumulative update, a kernel patch release, or a VM replaced by an
-identical one, only warns. To acknowledge it, replace the file with the runner's host; that
-needs no history reset.
+measured guest-exit teardown several times slower. The hypervisor build is required because
+the hypervisor comes from the `mshv` package and the kernel from `kernel-mshv`, so an update
+can replace one without the other, and the kernel release doesn't show a new hypervisor
+(#980). The provenance reads it from CPUID without privileges, as `major.minor.build.service`,
+the version that OpenVMM's CPU fingerprint records, and the service number counts:
+`10.0.26100.9444` and `10.0.26100.30000` are both build 26100. A hypervisor that can't be read
+records an unknown build, which matches none, not even another unknown one. KVM and Windows
+hosts don't record it: a KVM VM's hypervisor is its cloud host's, and a Windows build and UBR
+identify Windows' own hypervisor.
+An advisory difference, such as a microcode or Windows cumulative update, a kernel patch
+release, or a VM replaced by an identical one, only warns. To acknowledge it, replace the file
+with the runner's host; that needs no history reset. Host files and results that predate the
+hypervisor build don't record it, which also only warns, so adding the build to an expected
+host needs no history reset either.
 
 `performance collect` writes the host that results record next to them as
 `<platform>-host.json`. It refuses inputs of which only some record a host, and refuses to
@@ -871,6 +889,12 @@ pull request that, in one change:
    summary or diagnostics artifact.
 2. Resets the series by truncating each of its history files, such as
    `data/<platform>-microvm-v2-1vcpu.csv`, to its header line.
+3. For a Linux/MSHV host with another hypervisor build or kernel, moves the pins of the MSHV
+   packages in [`setup-mshv.sh`](../scripts/setup/azure/linux/setup-mshv.sh) to the new host's
+   releases, which a test compares with the host file. Runners install the pinned releases
+   whenever they're provisioned, as after a reimage, so that a reimage alone never moves the
+   series to another hypervisor
+   ([Azure CI runner provisioning](../scripts/setup/azure/README.md#configuration)).
 
 The pull request's platform job compares the runner with the new file, and the gate treats the
 reset metrics as warmup. The gate compares the pull request's expected hosts with the base

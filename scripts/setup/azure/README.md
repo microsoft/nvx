@@ -56,8 +56,17 @@ merging workflows that require it, in the order documented in the
 Linux additionally selects `backend` (`kvm` or `mshv`), `kernelMode`, and
 `dataDisk.mountPoint` below `/mnt` or `/srv`. `kernelMode: "preinstalled"`
 expects the selected device to be ready. `azurelinux-mshv` installs the
-Azure Linux 3 MSHV boot components, checks the Dom0 boot entry, requests a reboot,
+Azure Linux 3 MSHV host stack that `linux/setup-mshv.sh` pins, the exact
+releases of `mshv`, `mshv-bootloader-lx`, `kernel-mshv`, and `edk2-hvloader`,
+logs them, and fails unless exactly those releases are installed. It then
+checks the Dom0 boot entry, requests a reboot,
 and verifies `/dev/mshv` afterwards; it is not an Ubuntu kernel installer.
+The pins are the hypervisor and kernel that the Linux/MSHV benchmark series
+measures, so a reimage reinstalls them instead of the newest releases. Move
+them only in the pull request that accepts the new expected benchmark host
+([Expected benchmark hosts](../../../doc/benchmarks.md#expected-benchmark-hosts)),
+and regenerate the package for the scale set. If Azure Linux stops publishing
+a pinned release, provisioning fails until the pin moves.
 It does not install or require cloud-hypervisor or Kata.
 Place `runnerDirectory` under the mounted data directory if runner work
 and cache must use that disk; merely mounting it does not move `_work`.
