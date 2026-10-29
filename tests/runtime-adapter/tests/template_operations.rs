@@ -214,6 +214,10 @@ fn the_host_program_refuses_command_lines_of_the_operations() {
             "--processors takes a positive number, not \"0\"",
         ),
         (
+            with(&["--boot-processors", "one"]),
+            "--boot-processors takes a positive number, not \"one\"",
+        ),
+        (
             with(&["--memory", "256M"]),
             "--memory takes a positive number of MiB, not \"256M\"",
         ),

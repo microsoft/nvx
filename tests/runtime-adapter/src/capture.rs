@@ -4,8 +4,8 @@
 //! create` asks.
 //!
 //! A [`Request`] holds what the host program's options choose of a template: its placeholder, the
-//! backend, the CPU profile, the processors, all online at boot, the RAM and its capacity, the
-//! length of the dormant scratch, and the network, if any. [`Request::capture`] returns NVX's
+//! backend, the CPU profile, the processors and those online at boot, the RAM and its capacity,
+//! the length of the dormant scratch, and the network, if any. [`Request::capture`] returns NVX's
 //! `Capture` of it: the adapter's plan of the placeholder, which the host program plans as it
 //! plans an image, with the network, the placeholder's binding, which the host program stages as
 //! it stages an image, NVX's artifacts with the initramfs of the adapter's VMs, and the class of
@@ -15,7 +15,9 @@
 //! - the runtime identity of the adapter's VMs, which [`crate::runtime`] gives, and the guest
 //!   agent's build, as `runtime-adapter-guest/BUILD`;
 //! - the backend and the CPU profile, as OpenVMM's `--hypervisor` and `--cpu-profile` take them;
-//! - the processors, all online at boot, and the RAM and its capacity;
+//! - the processors, the template's processor capacity, and those online at boot, the fewest that
+//!   its clones take, from which a restore brings each clone's processor target online, and the
+//!   RAM and its capacity;
 //! - the geometries of the placeholder and of the dormant scratch, as OpenVMM presents a sandbox
 //!   block device, which [`geometry`] gives;
 //! - the network, which the adapter's plan renders too, and no other invariant setting.
@@ -23,8 +25,9 @@
 //! The capture's VM boots NVX's kernel with the initramfs of the adapter's VMs, which puts the
 //! guest agent in place of NVX's agents; see [`crate::initramfs`]. NVX gives it the kernel command
 //! line `nvx_sandbox=1`, with which NVX's `/init` hands it to the guest agent's PID 1 of a layered
-//! root, and OpenVMM adds the platform tier's tokens, `nvx_snapshot_tier=platform` among them: the
-//! worker then captures the VM before it assembles any root, and the capture ends the VM.
+//! root, and for a template whose processors are not all online at boot, `maxcpus=` with those
+//! that are, and OpenVMM adds the platform tier's tokens, `nvx_snapshot_tier=platform` among them:
+//! the worker then captures the VM before it assembles any root, and the capture ends the VM.
 
 use std::path::{Path, PathBuf};
 
@@ -45,8 +48,13 @@ use crate::runtime::Runtime;
 /// selects without the option.
 pub const DEFAULT_CPU_PROFILE: &str = "auto";
 
-/// The processors of a template, unless the host program names another number.
+/// The processors of a template, its processor capacity, unless the host program names another
+/// number.
 pub const DEFAULT_PROCESSORS: u32 = 1;
+
+/// The processors of a template that are online at boot, unless the host program names another
+/// number: 1, with which the template serves clones of every processor count up to its capacity.
+pub const DEFAULT_BOOT_PROCESSORS: u32 = 1;
 
 /// The length of a template's dormant scratch, in bytes, unless the host program names another:
 /// 64 MiB, the length of the scratch template that NVX's CI makes with the guest artifacts.
@@ -75,8 +83,11 @@ pub struct Request {
     pub hypervisor: Hypervisor,
     /// The CPU profile, as OpenVMM's `--cpu-profile` takes it: `auto`, `host`, or a profile ID.
     pub cpu_profile: String,
-    /// The processors, all online at boot.
+    /// The processors: the processor capacity, the most that a clone of the template takes.
     pub processors: u32,
+    /// The processors online at boot, at most [`processors`](Self::processors): the fewest that a
+    /// clone of the template takes.
+    pub boot_processors: u32,
     /// The RAM at boot, in bytes.
     pub memory: u64,
     /// The RAM capacity, in bytes, to which a restore may expand the RAM.
@@ -126,7 +137,7 @@ impl Request {
             hypervisor: self.hypervisor,
             cpu_profile: self.cpu_profile.clone(),
             processors: self.processors,
-            boot_processors: self.processors,
+            boot_processors: self.boot_processors,
             memory: self.memory,
             memory_capacity: self.memory_capacity,
             distro: geometry(adapter.distro().path(), binding.image().length())?,

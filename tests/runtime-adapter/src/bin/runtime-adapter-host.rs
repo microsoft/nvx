@@ -69,16 +69,18 @@
 //!   nor `Start`, asks the guest agent to stop, which tears down the root, waits for the VM to
 //!   end, abandons it, and checks that the VM ended with success and a complete teardown.
 //! - `runtime-adapter-host create STORE --guest-agent PATH --distro FORMAT:PATH --distro-identity
-//!   UUID [--hypervisor NAME] [--cpu-profile PROFILE] [--processors N] [--memory MIB]
-//!   [--memory-capacity MIB] [--scratch-length BYTES] [--network FILE]` serves a template of the
-//!   guest agent PATH from the template store STORE, an `nvx::host::template::Store`, which it
-//!   creates if needed: a generation of the template's class that the store holds, and that is
-//!   eligible at the host's time, or else a new one, which the store captures and publishes, with
-//!   `Store::create_template`. The options choose the class; see `runtime_adapter::capture`. The
-//!   placeholder is the raw file PATH, an EROFS filesystem, `erofs`, or a GPT disk, `gpt`, with
-//!   the identity UUID, a trusted artifact of the platform, whose length is the capacity of every
-//!   clone's image. The template's VM runs on the hypervisor NAME, as a launch's does, with the CPU
-//!   profile PROFILE, `auto` by default, N processors, 1 by default, all online at boot, MIB
+//!   UUID [--hypervisor NAME] [--cpu-profile PROFILE] [--processors N] [--boot-processors B]
+//!   [--memory MIB] [--memory-capacity MIB] [--scratch-length BYTES] [--network FILE]` serves a
+//!   template of the guest agent PATH from the template store STORE, an
+//!   `nvx::host::template::Store`, which it creates if needed: a generation of the template's
+//!   class that the store holds, and that is eligible at the host's time, or else a new one,
+//!   which the store captures and publishes, with `Store::create_template`. The options choose
+//!   the class; see `runtime_adapter::capture`. The placeholder is the raw file PATH, an EROFS
+//!   filesystem, `erofs`, or a GPT disk, `gpt`, with the identity UUID, a trusted artifact of the
+//!   platform, whose length is the capacity of every clone's image. The template's VM runs on the
+//!   hypervisor NAME, as a launch's does, with the CPU profile PROFILE, `auto` by default, N
+//!   processors, 1 by default, of which B are online at boot, 1 by default, the fewest that its
+//!   clones take, since each clone's restore brings its own processor target online, up to N, MIB
 //!   mebibytes of RAM, 256 by default, and a RAM capacity of MIB mebibytes, its RAM by default, to
 //!   which a restore may expand it, and a dormant scratch of BYTES bytes, 64 MiB by default. It has
 //!   one NIC under the policy of the network FILE, which the creation reads as a launch reads its
@@ -120,9 +122,10 @@
 //!   launched and which it holds although it is not its child, attaches a new session to it, in
 //!   the session's next epoch, and exchanges a `Ping`, leaving the VM running.
 //! - `runtime-adapter-host start STORE --template TEMPLATES --generation G --distro FORMAT:PATH
-//!   --distro-identity UUID --upper (scratch:PATH | ram) [--memory MIB] [--workload-identity
-//!   UID:GID] [--overlay-mode MODE] [--scratch-journal POLICY] [--first-partition-bound BYTES]
-//!   [--machine-id (image | generated)] [--network FILE] [SHARES]` starts a clone of the
+//!   --distro-identity UUID --upper (scratch:PATH | ram) [--processors N] [--memory MIB]
+//!   [--workload-identity UID:GID] [--overlay-mode MODE] [--scratch-journal POLICY]
+//!   [--first-partition-bound BYTES] [--machine-id (image | generated)] [--network FILE] [SHARES]`
+//!   starts a clone of the
 //!   generation G of the template store TEMPLATES, an `nvx::host::template::Store`, in the sandbox
 //!   store STORE, which it creates if needed; see `runtime_adapter::clone`. The clone's VM has the
 //!   network of the file FILE, if given, which the command reads first, as `launch` reads its
@@ -131,20 +134,25 @@
 //!   that lets nothing through. SHARES, as `launch` takes them, share
 //!   host paths with the clone's root: the command plans their export as a launch does, with
 //!   NVX's `filesystem::plan`, and refuses shares that it cannot export before anything but its
-//!   network. It then reads the generation from the store's index, and, unless MIB mebibytes are
-//!   given, its compatibility key, whose RAM is then the clone's memory target, before it needs
-//!   NVX's artifacts. A key that cannot be read is left to NVX's plan, which reads it again, and
-//!   attributes the failure, to the generation or to the host, as it does for every clone. The
-//!   store then leases the generation to the sandbox, at the host's time, with `Store::acquire`,
-//!   which refuses a generation that a tombstone quarantines, or that is not eligible then, and
-//!   NVX's `ClonePlan` checks the clone against the generation, from the metadata of its files
+//!   network. It then reads the generation from the store's index, and, unless N and MIB
+//!   mebibytes are both given, its compatibility key, before it needs NVX's artifacts: the key's
+//!   processors online at boot, or all of its processors for a template that records none, are
+//!   then the clone's processor target unless N is given, and its RAM the clone's memory target
+//!   unless MIB mebibytes are given. A key that cannot be read is left to NVX's plan, which reads
+//!   it again, and attributes the failure, to the generation or to the host, as it does for every
+//!   clone. The store then leases the generation to the sandbox, at the host's time, with
+//!   `Store::acquire`, which refuses a generation that a tombstone quarantines, or that is not
+//!   eligible then, and NVX's `ClonePlan` checks the clone against the generation, from the
+//!   metadata of its files
 //!   alone: its network, which must be the one that the template's key records, its image, the
 //!   raw file PATH, an EROFS filesystem, `erofs`, or a GPT disk, `gpt`, of
 //!   which the guest expects the identity UUID, no longer than the template's placeholder,
 //!   whatever the placeholder's format, and of its block sizes, its upper, the ext4 scratch image
 //!   PATH, of the geometry of the template's scratch, or RAM, which needs no file, with the
 //!   bindings that STORE stages for the images, as
-//!   `stage` stages them, its memory target, in whole blocks, from the template's RAM to its
+//!   `stage` stages them, its processor target, 1, 2, 4, or 8, from the template's processors
+//!   online at boot to its capacity, which the restore brings online, its memory target, in whole
+//!   blocks, from the template's RAM to its
 //!   capacity, and its export, if it has one, which must export exactly one directory, which
 //!   neither lies inside the template store's directory nor holds it: the export's root, which
 //!   the clone's restore binds to the template's dormant filesystem slot.
@@ -230,9 +238,10 @@
 //!   before, and the epochs of a broker instance only advance, while a broker restored from a
 //!   snapshot has a new instance ID, so no command repeats the key of another's execution.
 //! - `runtime-adapter-host run STORE --template TEMPLATES --generation G --distro FORMAT:PATH
-//!   --distro-identity UUID --upper (scratch:PATH | ram) [--memory MIB] [--workload-identity
-//!   UID:GID] [--overlay-mode MODE] [--scratch-journal POLICY] [--first-partition-bound BYTES]
-//!   [--machine-id (image | generated)] [--network FILE] [SHARES] EXECUTION` runs one execution in
+//!   --distro-identity UUID --upper (scratch:PATH | ram) [--processors N] [--memory MIB]
+//!   [--workload-identity UID:GID] [--overlay-mode MODE] [--scratch-journal POLICY]
+//!   [--first-partition-bound BYTES] [--machine-id (image | generated)] [--network FILE] [SHARES]
+//!   EXECUTION` runs one execution in
 //!   a clone of the generation G of the template store TEMPLATES, in the sandbox store STORE,
 //!   which it creates if needed, then tears the clone down. The EXECUTION is one of `exec`'s, whose
 //!   options may come among the start's, in any order, and whose PROGRAM and ARGs are every
@@ -438,7 +447,8 @@ use nvx::uuid::Uuid;
 use nvx::{ErrorCode, ErrorKind, Hypervisor};
 use runtime_adapter::GUEST_BUILD;
 use runtime_adapter::capture::{
-    DEFAULT_CPU_PROFILE, DEFAULT_PROCESSORS, DEFAULT_SCRATCH_LENGTH, Request,
+    DEFAULT_BOOT_PROCESSORS, DEFAULT_CPU_PROFILE, DEFAULT_PROCESSORS, DEFAULT_SCRATCH_LENGTH,
+    Request,
 };
 use runtime_adapter::clone::{CloneRecord, host_time_from_env};
 use runtime_adapter::exec::{self, AccountMode, HostExecution, Start};
@@ -549,8 +559,9 @@ const USAGE: &str = concat!(
     " --distro-identity UUID\n",
     "           [--hypervisor NAME] [--guest-build BUILD] [--cpu-profile PROFILE]",
     " [--processors N]\n",
-    "           [--memory MIB] [--memory-capacity MIB] [--scratch-length BYTES]",
-    " [--network FILE]\n",
+    "           [--boot-processors N] [--memory MIB] [--memory-capacity MIB]",
+    " [--scratch-length BYTES]\n",
+    "           [--network FILE]\n",
     "       runtime-adapter-host list STORE\n",
     "       runtime-adapter-host (inspect | remove) STORE GENERATION\n",
     "       runtime-adapter-host (reattach | stop) STORE [--guest-build BUILD]",
@@ -558,8 +569,8 @@ const USAGE: &str = concat!(
     "       runtime-adapter-host start STORE --template TEMPLATES --generation G",
     " --distro FORMAT:PATH\n",
     "           --distro-identity UUID --upper (scratch:PATH | ram) [--guest-build BUILD]",
-    " [--memory MIB]\n",
-    "           [--workload-identity UID:GID] [--overlay-mode MODE]",
+    " [--processors N]\n",
+    "           [--memory MIB] [--workload-identity UID:GID] [--overlay-mode MODE]",
     " [--scratch-journal POLICY]\n",
     "           [--first-partition-bound BYTES] [--machine-id (image | generated)]",
     " [--network FILE]\n",
@@ -568,8 +579,8 @@ const USAGE: &str = concat!(
     "       runtime-adapter-host run STORE --template TEMPLATES --generation G",
     " --distro FORMAT:PATH\n",
     "           --distro-identity UUID --upper (scratch:PATH | ram) [--guest-build BUILD]",
-    " [--memory MIB]\n",
-    "           [--workload-identity UID:GID] [--overlay-mode MODE]",
+    " [--processors N]\n",
+    "           [--memory MIB] [--workload-identity UID:GID] [--overlay-mode MODE]",
     " [--scratch-journal POLICY]\n",
     "           [--first-partition-bound BYTES] [--machine-id (image | generated)]",
     " [--network FILE]\n",
@@ -813,8 +824,10 @@ struct Template {
     identity: Uuid,
     /// The CPU profile.
     cpu_profile: String,
-    /// The processors, all online at boot.
+    /// The processors: the processor capacity.
     processors: u32,
+    /// The processors online at boot.
+    boot_processors: u32,
     /// The RAM, in bytes.
     memory: u64,
     /// The RAM capacity, in bytes.
@@ -938,6 +951,8 @@ struct Options {
     cpu_profile: Option<String>,
     /// `--processors`.
     processors: Option<u32>,
+    /// `--boot-processors`.
+    boot_processors: Option<u32>,
     /// `--memory`, in bytes.
     memory: Option<u64>,
     /// `--memory-capacity`, in bytes.
@@ -1196,6 +1211,7 @@ fn parse(arguments: Vec<OsString>) -> Result<Command, String> {
                         .cpu_profile
                         .unwrap_or_else(|| DEFAULT_CPU_PROFILE.to_owned()),
                     processors: options.processors.unwrap_or(DEFAULT_PROCESSORS),
+                    boot_processors: options.boot_processors.unwrap_or(DEFAULT_BOOT_PROCESSORS),
                     memory,
                     memory_capacity: options.memory_capacity.unwrap_or(memory),
                     scratch_length: options.scratch_length.unwrap_or(DEFAULT_SCRATCH_LENGTH),
@@ -1357,16 +1373,11 @@ fn parse_option(
         ("create", "--cpu-profile") if options.cpu_profile.is_none() => {
             options.cpu_profile = Some(text(value)?);
         }
-        ("create", "--processors") if options.processors.is_none() => {
-            let value = text(value)?;
-            let processors = value
-                .parse::<u32>()
-                .ok()
-                .filter(|processors| *processors > 0);
-            options.processors =
-                Some(processors.ok_or_else(|| {
-                    format!("--processors takes a positive number, not {value:?}")
-                })?);
+        ("create" | "start", "--processors") if options.processors.is_none() => {
+            options.processors = Some(count(option, &text(value)?)?);
+        }
+        ("create", "--boot-processors") if options.boot_processors.is_none() => {
+            options.boot_processors = Some(count(option, &text(value)?)?);
         }
         ("create" | "start", "--memory") if options.memory.is_none() => {
             options.memory = Some(mebibytes(option, &text(value)?)?);
@@ -1643,6 +1654,7 @@ fn clone_options(name: &str, options: Options) -> Result<CloneOptions, String> {
             format,
             identity,
             scratch,
+            processors: options.processors,
             memory: options.memory,
             workload_identity: options.workload_identity,
             overlay_mode: options.overlay_mode,
@@ -1718,6 +1730,16 @@ fn mebibytes(option: &str, value: &str) -> Result<u64, String> {
         .filter(|mebibytes| *mebibytes > 0)
         .and_then(|mebibytes| mebibytes.checked_mul(MIB))
         .ok_or_else(|| format!("{option} takes a positive number of MiB, not {value:?}"))
+}
+
+/// Returns `value`, the value of `option`, a positive number of processors, or says why it is not
+/// one.
+fn count(option: &str, value: &str) -> Result<u32, String> {
+    value
+        .parse::<u32>()
+        .ok()
+        .filter(|count| *count > 0)
+        .ok_or_else(|| format!("{option} takes a positive number, not {value:?}"))
 }
 
 /// Stages the image `distro`, in `format`, of which the guest expects `identity`, and the ext4
@@ -2085,6 +2107,7 @@ fn create(
         hypervisor,
         cpu_profile: template.cpu_profile.clone(),
         processors: template.processors,
+        boot_processors: template.boot_processors,
         memory: template.memory,
         memory_capacity: template.memory_capacity,
         scratch_length: template.scratch_length,
@@ -2415,14 +2438,26 @@ fn start_clone(
             &error,
         )));
     };
-    // The clone's memory target is the request's, or else the template's RAM, which the
-    // generation's key gives. A key that cannot be read gives none: NVX's plan reads the key
+    // The clone's processor and memory targets are the request's, or else the template's, which
+    // the generation's key gives: its processors online at boot, all of them for a template that
+    // records none, and its RAM. A key that cannot be read gives none: NVX's plan reads the key
     // again, once the store leased the generation, and attributes the failure, to the generation
-    // or to the host, before it checks a memory target.
-    let memory = clone
-        .request
+    // or to the host, before it checks a target.
+    let targets = &clone.request;
+    let key = if targets.processors.is_none() || targets.memory.is_none() {
+        templates.read_key(&generation).ok()
+    } else {
+        None
+    };
+    let processors = targets.processors.or_else(|| {
+        key.as_ref().map(|key| match key.boot_processors() {
+            0 => key.processors(),
+            boot => boot,
+        })
+    });
+    let memory = targets
         .memory
-        .or_else(|| templates.read_key(&generation).ok().map(|key| key.memory()));
+        .or_else(|| key.as_ref().map(|key| key.memory()));
     let runtime = runtime(guest_build)?;
     runtime
         .artifacts
@@ -2460,6 +2495,7 @@ fn start_clone(
         request: &request,
         plan,
         export,
+        processors,
         memory,
         runtime: &runtime,
         guest_build,
@@ -2563,6 +2599,9 @@ struct CloneLaunch<'a> {
     plan: nvx::host::sandbox::SandboxPlan,
     /// The export of the host paths that the clone shares with its root, if any.
     export: Option<ExportPlan>,
+    /// The clone's processor target, or none if the request names none, and the generation's
+    /// key, whose processors online at boot it would be, cannot be read.
+    processors: Option<u32>,
     /// The clone's memory target, in bytes, or none if the request names none, and the
     /// generation's key, whose RAM it would be, cannot be read.
     memory: Option<u64>,
@@ -2590,6 +2629,7 @@ impl CloneLaunch<'_> {
             request,
             plan,
             export,
+            processors,
             memory,
             runtime,
             guest_build,
@@ -2597,10 +2637,17 @@ impl CloneLaunch<'_> {
         let staged = Staged::read(acquired.locked.dir())
             .map_err(|error| Failed::Command(describe(&error)))?;
         let bindings = staged.map_or_else(Bindings::default, |staged| staged.bindings(&plan));
-        // No template serves a memory target of 0, which stands for the one of a key that could
-        // not be read: the plan fails as it reads the key again, before it checks the target.
+        // No template serves a processor or memory target of 0, which stands for the one of a key
+        // that could not be read: the plan fails as it reads the key again, before it checks the
+        // targets.
         let clone_request = request
-            .clone_request(plan.clone(), export, &bindings, memory.unwrap_or(0))
+            .clone_request(
+                plan.clone(),
+                export,
+                &bindings,
+                processors.unwrap_or(0),
+                memory.unwrap_or(0),
+            )
             .map_err(|error| Failed::Command(binding_error(&error)))?;
         let clone_plan = ClonePlan::new(
             templates,

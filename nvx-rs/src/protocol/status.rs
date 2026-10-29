@@ -35,8 +35,9 @@ pub const TIME_REPAIR: u8 = 195;
 /// The restore cannot be repaired: it holds no fresh entropy, as when its capture wrote the
 /// entropy to a file, or its capture finished it already.
 pub const REPAIR_RESTORE: u8 = 40;
-/// The online CPUs cannot be read, are not a prefix of the CPUs, or do not meet the restore's
-/// processor target, which repair does not activate.
+/// The online CPUs cannot be read or are not a prefix of the CPUs, the restore's processor target
+/// is below them, or the repair could not bring the target's CPUs online: a write of a CPU's
+/// state failed, or the online CPUs are not the target's prefix once it brought them online.
 pub const REPAIR_PROCESSORS: u8 = 41;
 /// The restore's memory target is refused, before any memory block was added: the kernel's
 /// memory block size is not the snapshot ABI's, the restore lists ranges without a target, or
@@ -96,7 +97,7 @@ pub fn describe(status: u8) -> Option<&'static str> {
         TIME_VIOLATION => "the time ABI's violation watcher observed a violation",
         TIME_REPAIR => "the time ABI's part of a restore's repair failed",
         REPAIR_RESTORE => "a clone's restore cannot be repaired",
-        REPAIR_PROCESSORS => "a clone's online CPUs do not meet its restore",
+        REPAIR_PROCESSORS => "a clone's online CPUs do not meet its restore's processor target",
         REPAIR_MEMORY_TARGET => "a clone's memory target is refused",
         REPAIR_MEMORY => "a clone's memory activation failed",
         REPAIR_RESEED => "a clone's reseed failed",

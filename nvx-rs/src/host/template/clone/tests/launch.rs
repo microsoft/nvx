@@ -1049,6 +1049,59 @@ fn a_clone_of_a_template_with_a_nic_restores_its_policy_without_its_address() {
 }
 
 #[test]
+fn a_clone_of_a_template_with_processors_offline_at_boot_restores_its_processor_target() {
+    let fixture = Fixture::with(|class, spec, _| set_processors(class, spec, 4, 1));
+    let (snapshot, _) = complete_snapshot(&fixture);
+    let (image, binding) = fixture.image("distro.erofs", IMAGE_LEN);
+    let mut acquired = fixture.acquire("sandbox");
+    let request = CloneRequest {
+        processors: 2,
+        ..tmpfs_request(&image, &binding)
+    };
+    let plan = fixture.plan(&mut acquired, &request, NO_CONTENT).unwrap();
+    let runtime = plan.key().runtime().clone();
+    let mut vmm = VmmDir::new();
+    let dir = vmm.path().to_owned();
+    let made = RefCell::new(None);
+    let command = fake_vmm(&dir, &made);
+    let hooks = Hooks {
+        command: &command,
+        ..Hooks::LAUNCH
+    };
+    let restoring = plan
+        .launch_with(&mut acquired, Path::new(OPENVMM), &runtime, hooks)
+        .unwrap();
+    vmm.reference = Some(restoring.starting().process().reference().clone());
+    // The VM keeps the template's processor capacity, of which the restore brings the target's
+    // prefix online. The clone in RAM declares the template's scratch absent among its devices,
+    // as any clone in RAM does.
+    let arguments = made.take().unwrap().arguments;
+    let at = arguments
+        .iter()
+        .position(|argument| argument == "--processors")
+        .unwrap();
+    assert!(
+        arguments[..at]
+            .iter()
+            .any(|argument| argument == "--restore-absent-scratch"),
+        "{arguments:?}"
+    );
+    assert_eq!(
+        arguments[at..at + 8],
+        [
+            "--processors",
+            "4",
+            "--restore-snapshot",
+            snapshot.to_str().unwrap(),
+            "--restore-processors",
+            "2",
+            "--restore-memory",
+            "512M",
+        ]
+    );
+}
+
+#[test]
 fn a_clone_on_a_scratch_image_passes_its_claim_to_its_vmm() {
     let fixture = Fixture::new();
     complete_snapshot(&fixture);

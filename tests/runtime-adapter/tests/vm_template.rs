@@ -7,10 +7,11 @@
 //! of it, with a [`Network`], or without one, in a template store of its own. A template that the
 //! store captured is the store's one generation, whose payload holds the record of its capture,
 //! its key, and its snapshot, and whose key holds what the scenario asked for: the runtime of the
-//! adapter's VMs, with the guest agent's build, the backend, the processors, all online at boot,
-//! the RAM and its capacity, the geometries of the placeholder and of the dormant scratch, a NIC
-//! exactly when the network lets something through, and a kernel command line of the platform
-//! tier's tokens alone, which names neither the placeholder's identity nor a root. The slot of the
+//! adapter's VMs, with the guest agent's build, the backend, the processors and those online at
+//! boot, the RAM and its capacity, the geometries of the placeholder and of the dormant scratch, a
+//! NIC exactly when the network lets something through, and a kernel command line of the platform
+//! tier's tokens alone, with `maxcpus=` for a template whose processors are not all online at
+//! boot, which names neither the placeholder's identity nor a root. The slot of the
 //! template's class then holds no transaction, and records no launch, and a second creation serves
 //! the generation without a capture. NVX refuses a network whose policy no template takes before
 //! any VM starts, and the host program refuses a class that no capture takes before it creates the
@@ -151,15 +152,17 @@ impl Network {
     }
 }
 
-/// A template that a scenario creates: its network, and the processors, the RAM, the RAM
-/// capacity, and the length of the dormant scratch that the creation names, or else the host
-/// program's defaults.
+/// A template that a scenario creates: its network, and the processors, those online at boot, the
+/// RAM, the RAM capacity, and the length of the dormant scratch that the creation names, or else
+/// the host program's defaults.
 #[derive(Clone, Copy, Debug)]
 struct Template {
     /// The network.
     network: Network,
-    /// The processors, all online at boot, or 1 by default.
+    /// The processors, or 1 by default.
     processors: Option<u32>,
+    /// The processors online at boot, or 1 by default.
+    boot_processors: Option<u32>,
     /// The RAM, in bytes, or [`DEFAULT_MEMORY`] by default.
     memory: Option<u64>,
     /// The RAM capacity, in bytes, or the RAM by default.
@@ -174,6 +177,7 @@ impl Template {
         Self {
             network,
             processors: None,
+            boot_processors: None,
             memory: None,
             memory_capacity: None,
             scratch_length: None,
@@ -183,6 +187,11 @@ impl Template {
     /// Returns the processors of the template.
     fn processors(&self) -> u32 {
         self.processors.unwrap_or(1)
+    }
+
+    /// Returns the processors of the template that are online at boot.
+    fn boot_processors(&self) -> u32 {
+        self.boot_processors.unwrap_or(1)
     }
 
     /// Returns the RAM of the template, in bytes.
@@ -231,8 +240,9 @@ impl Templates {
     }
 
     /// Returns the options of a creation or a refresh of `template`, which name its placeholder,
-    /// and the network that it writes to a file of the test's, if any, and the processors, the
-    /// RAM, its capacity, and the length of the scratch that the template names.
+    /// and the network that it writes to a file of the test's, if any, and the processors, those
+    /// online at boot, the RAM, its capacity, and the length of the scratch that the template
+    /// names.
     fn options(&self, template: &Template) -> Vec<OsString> {
         let mut distro = OsString::from("erofs:");
         distro.push(&self.placeholder);
@@ -244,6 +254,7 @@ impl Templates {
         ];
         let numbers = [
             ("--processors", template.processors.map(u64::from)),
+            ("--boot-processors", template.boot_processors.map(u64::from)),
             ("--memory", template.memory.map(|memory| memory / MIB)),
             (
                 "--memory-capacity",
@@ -378,8 +389,12 @@ fn assert_captured(templates: &Templates, created: &Printed, template: &Template
     assert_eq!(key.hypervisor(), Hypervisor::from_env_or_default().unwrap());
     let processors = template.processors();
     assert_eq!(key.processors(), processors);
-    // Every processor is online at boot, so a restore activates none.
-    assert_eq!(key.boot_processors(), 0);
+    // A template whose processors are all online at boot records none, and a restore brings
+    // none online; one that boots with fewer records them, and a restore may bring the others
+    // online.
+    let boot = template.boot_processors();
+    let limited = boot < processors;
+    assert_eq!(key.boot_processors(), if limited { boot } else { 0 });
     assert_eq!(key.memory(), template.memory());
     assert_eq!(key.memory_capacity(), template.memory_capacity());
     let placeholder = fs::metadata(&templates.placeholder).unwrap().len();
@@ -396,8 +411,9 @@ fn assert_captured(templates: &Templates, created: &Printed, template: &Template
     assert_eq!(key.has_network(), template.network.has_nic());
 
     // The kernel command line, which every clone restores: the platform tier's tokens alone,
-    // which OpenVMM's capture admits, with the processors, and the NIC's addresses exactly when
-    // the template has a NIC, but neither the placeholder's identity nor a root's tokens.
+    // which OpenVMM's capture admits, with the processors, those online at boot when they are
+    // fewer, and the NIC's addresses exactly when the template has a NIC, but neither the
+    // placeholder's identity nor a root's tokens.
     let command_line = key.command_line();
     let tokens: Vec<Vec<u8>> = cmdline::parameters(command_line.as_bytes())
         .map(|parameter| token(&parameter))
@@ -418,6 +434,16 @@ fn assert_captured(templates: &Templates, created: &Printed, template: &Template
             tokens.iter().any(|token| token == expected.as_bytes()),
             "{expected} in {command_line}"
         );
+    }
+    let limits: Vec<&Vec<u8>> = tokens
+        .iter()
+        .filter(|token| token.starts_with(b"maxcpus="))
+        .collect();
+    let expected = format!("maxcpus={boot}");
+    match limits.as_slice() {
+        [] => assert!(!limited, "{command_line}"),
+        [limit] => assert!(limited && **limit == expected.as_bytes(), "{command_line}"),
+        _ => panic!("{command_line} limits the processors online at boot more than once"),
     }
     assert_eq!(
         tokens.iter().any(|token| token.starts_with(b"virtnet_ip=")),
@@ -494,7 +520,8 @@ fn refuses(name: &str, template: Template, problem: &str) {
 #[test]
 #[ignore = "boots a VM; see the module documentation for what it needs"]
 fn a_template_without_a_network_has_no_nic() {
-    // Every processor is online at boot, and a restore may expand the RAM to its capacity.
+    // One of its processors is online at boot, the host program's default, of which a restore
+    // may bring the other online, and a restore may expand the RAM to its capacity.
     let template = Template {
         processors: Some(2),
         memory: Some(2 * MEMORY_BLOCK_SIZE),
@@ -503,6 +530,17 @@ fn a_template_without_a_network_has_no_nic() {
         ..Template::new(Network::None)
     };
     captures("tpl-none", template);
+}
+
+#[test]
+#[ignore = "boots a VM; see the module documentation for what it needs"]
+fn a_template_whose_processors_are_all_online_at_boot_limits_none() {
+    let template = Template {
+        processors: Some(2),
+        boot_processors: Some(2),
+        ..Template::new(Network::None)
+    };
+    captures("tpl-online", template);
 }
 
 #[test]
@@ -558,15 +596,19 @@ fn host_loopback_both_ways_is_refused_before_any_vm_starts() {
 #[test]
 #[ignore = "needs NVX's artifacts; see the module documentation"]
 fn a_class_that_no_capture_takes_is_refused_before_the_store() {
-    let mut templates = Templates::new("tpl-class");
-    let template = Template {
-        processors: Some(3),
-        ..Template::new(Network::None)
-    };
-    templates.create(&template, FAILED);
-    let stderr = templates.sandbox.stderr();
-    assert!(stderr.contains("needs 1, 2, 4, or 8 of each"), "{stderr}");
-    assert!(!templates.sandbox.store.exists());
+    // Processors that a microVM cannot have, and more online at boot than in all.
+    for (processors, boot_processors) in [(3, None), (2, Some(4))] {
+        let mut templates = Templates::new("tpl-class");
+        let template = Template {
+            processors: Some(processors),
+            boot_processors,
+            ..Template::new(Network::None)
+        };
+        templates.create(&template, FAILED);
+        let stderr = templates.sandbox.stderr();
+        assert!(stderr.contains("needs 1, 2, 4, or 8 of each"), "{stderr}");
+        assert!(!templates.sandbox.store.exists());
+    }
 }
 
 /// Returns the store generation `number`.

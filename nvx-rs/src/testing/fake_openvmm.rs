@@ -101,7 +101,8 @@
 //! share, `--snapshot-destination`, `--snapshot-tier platform`,
 //! `--snapshot-block-identity generation` with a nonzero `--snapshot-generation-id` of 32
 //! hexadecimal digits, the options of a cold boot of a run with a `--memory-capacity` that is a
-//! multiple of 128 MiB, `nvx_sandbox=1` alone on the kernel command line, `--virtio-console none`,
+//! multiple of 128 MiB, `nvx_sandbox=1` on the kernel command line, alone or followed by a
+//! canonical `maxcpus=` of 1, 2, 4, or 8 of its `--processors`, `--virtio-console none`,
 //! the control console with its capability on standard input, and an outcome report. On Unix, the
 //! control console's socket must be in the directory of the snapshot's destination, as above. The
 //! fake serves no control session of a capture, which the host opens none of. Like OpenVMM, it
@@ -191,6 +192,10 @@ const LOGICAL_BLOCK_SIZE: u64 = 512;
 
 /// Name of the scenario of a template's capture, next to the kernel.
 const CAPTURE_SCENARIO_NAME: &str = "fake-openvmm-capture.json";
+
+/// The refusal of a capture whose kernel command line is not a template's.
+const CAPTURE_COMMAND_LINE: &str = "a capture's kernel command line is nvx_sandbox=1, alone or \
+                                    with a canonical maxcpus= of 1, 2, 4, or 8 of its processors";
 
 /// Prefix of the name of the file that backs the RAM of a capture's VM, beside the snapshot's
 /// destination, which the process ID of the VMM follows.
@@ -1219,9 +1224,30 @@ fn parse(program: &str, arguments: &[String]) -> Result<Options, String> {
             ram_overlay_requested(&tokens)?,
         )?;
         if capture {
-            // A template's VM boots the invariant configuration alone, without a tenant.
-            if tokens != ["nvx_sandbox=1"] {
-                return Err("a capture's kernel command line is nvx_sandbox=1 alone".to_owned());
+            // A template's VM boots the invariant configuration alone, without a tenant, with at
+            // most the limit of its processors online at boot, which OpenVMM records in the
+            // canonical form alone.
+            let processors = values
+                .get("--processors")
+                .and_then(|given| given.first())
+                .and_then(|given| given.parse::<u32>().ok());
+            let invariant = match tokens.as_slice() {
+                ["nvx_sandbox=1"] => true,
+                ["nvx_sandbox=1", limit] => limit
+                    .strip_prefix("maxcpus=")
+                    .and_then(|count| {
+                        count
+                            .parse::<u32>()
+                            .ok()
+                            .filter(|parsed| parsed.to_string() == count)
+                    })
+                    .is_some_and(|count| {
+                        [1, 2, 4, 8].contains(&count) && processors.is_some_and(|all| count <= all)
+                    }),
+                _ => false,
+            };
+            if !invariant {
+                return Err(CAPTURE_COMMAND_LINE.to_owned());
             }
             let roles: BTreeSet<&str> = blocks.iter().map(|block| block.role.as_str()).collect();
             if roles != BTreeSet::from(["distro", "scratch"]) {
@@ -3028,6 +3054,15 @@ mod tests {
         assert!(options.children.is_empty());
     }
 
+    #[test]
+    fn captures_may_limit_the_processors_online_at_boot() {
+        // The capture of `CAPTURE` has 2 processors.
+        for command_line in ["nvx_sandbox=1 maxcpus=1", "nvx_sandbox=1 maxcpus=2"] {
+            let (_temporary, options) = parse_capture(&capture_with("--cmdline", command_line));
+            assert_eq!(options.err(), None, "{command_line}");
+        }
+    }
+
     #[cfg(unix)]
     #[test]
     fn captures_listen_in_the_directory_of_their_snapshot_destination() {
@@ -3186,7 +3221,25 @@ mod tests {
             ),
             (
                 capture_with("--cmdline", "nvx_sandbox=1 nvx_hostname=tenant"),
-                "a capture's kernel command line is nvx_sandbox=1 alone".to_owned(),
+                CAPTURE_COMMAND_LINE.to_owned(),
+            ),
+            // OpenVMM records a limit of the processors online at boot in its canonical form
+            // alone, of a count that a microVM supports, and at most its processors.
+            (
+                capture_with("--cmdline", "nvx_sandbox=1 maxcpus=01"),
+                CAPTURE_COMMAND_LINE.to_owned(),
+            ),
+            (
+                capture_with("--cmdline", "nvx_sandbox=1 maxcpus=3"),
+                CAPTURE_COMMAND_LINE.to_owned(),
+            ),
+            (
+                capture_with("--cmdline", "nvx_sandbox=1 maxcpus=4"),
+                CAPTURE_COMMAND_LINE.to_owned(),
+            ),
+            (
+                capture_with("--cmdline", "nvx_sandbox=1 maxcpus=1 maxcpus=1"),
+                CAPTURE_COMMAND_LINE.to_owned(),
             ),
             (
                 capture_with("--snapshot-destination", "{dir}/transaction"),

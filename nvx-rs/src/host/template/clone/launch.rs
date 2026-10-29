@@ -139,8 +139,11 @@ impl ClonePlan {
     /// mode, `rw` if a mapping writes it, and `ro` otherwise, then its hidden, re-exposed, and
     /// writable paths, and the caller owner, as its [plan](ClonePlan::export) holds them; without
     /// an export, the slot stays dormant. Then come `--single-process`, the template's backend,
-    /// CPU profile, and processors, `--restore-snapshot` with the directory of the generation's
-    /// snapshot, [`ClonePlan::snapshot`], `--restore-memory` with the memory target,
+    /// CPU profile, and processor capacity, `--restore-snapshot` with the directory of the
+    /// generation's snapshot, [`ClonePlan::snapshot`], for a template that records its processors
+    /// online at boot, [`TemplateKey::boot_processors`], `--restore-processors` with the processor
+    /// target, which brings online those of the target beyond them, `--restore-memory` with the
+    /// memory target,
     /// `--restore-ready-path` with the endpoint of the restore-ready event, a boot console that
     /// discards its output, as cold boots have, the control console at the launch's endpoint,
     /// which authenticates with the capability that the VMM reads from its standard input, and the
@@ -272,6 +275,7 @@ impl ClonePlan {
             snapshot,
             image,
             upper,
+            processors,
             memory,
             activation,
             capability,
@@ -348,6 +352,7 @@ impl ClonePlan {
             devices,
             key: &key,
             snapshot,
+            processors,
             memory,
             ready: &ready,
             report: locked.outcome_path(),
@@ -638,6 +643,8 @@ struct Restore<'a> {
     key: &'a TemplateKey,
     /// The directory of the snapshot that the VMM restores.
     snapshot: PathBuf,
+    /// The processor target.
+    processors: u32,
     /// The memory target, in bytes.
     memory: u64,
     /// The endpoint of the restore-ready event.
@@ -652,20 +659,27 @@ impl Restore<'_> {
     fn arguments(&self, endpoint: &str) -> Vec<OsString> {
         let key = self.key;
         let profile = key.cpu_profile();
-        let processors = key.processors().to_string();
+        let capacity = key.processors().to_string();
+        let processors = self.processors.to_string();
         let memory = format!("{}M", self.memory / MIB);
         let listen = format!("listen={endpoint}");
-        let mut arguments: Vec<OsString> = self.devices.iter().map(OsString::from).collect();
-        for argument in [
+        let mut options = vec![
             OsStr::new("--single-process"),
             OsStr::new("--hypervisor"),
             OsStr::new(key.hypervisor().as_str()),
             OsStr::new("--cpu-profile"),
             OsStr::new(&profile),
             OsStr::new("--processors"),
-            OsStr::new(&processors),
+            OsStr::new(&capacity),
             OsStr::new("--restore-snapshot"),
             self.snapshot.as_os_str(),
+        ];
+        // A template that records no processors online at boot has all of them online, which
+        // OpenVMM restores without the option, and refuses with it.
+        if key.boot_processors() != 0 {
+            options.extend([OsStr::new("--restore-processors"), OsStr::new(&processors)]);
+        }
+        options.extend([
             OsStr::new("--restore-memory"),
             OsStr::new(&memory),
             OsStr::new("--restore-ready-path"),
@@ -677,9 +691,9 @@ impl Restore<'_> {
             OsStr::new("--microvm-control-auth-stdin"),
             OsStr::new("--microvm-report"),
             self.report.as_os_str(),
-        ] {
-            arguments.push(argument.to_owned());
-        }
+        ]);
+        let mut arguments: Vec<OsString> = self.devices.iter().map(OsString::from).collect();
+        arguments.extend(options.into_iter().map(OsStr::to_owned));
         arguments
     }
 }

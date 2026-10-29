@@ -3,11 +3,12 @@
 //!
 //! A [`Request`] holds what the host program's options choose of a clone: its image, an EROFS
 //! layer or a GPT disk no longer than the template's placeholder, its upper, on an ext4 scratch
-//! image or in RAM, its memory target, the workload identity as which its executions run, its
-//! overlay mode, its scratch's journal policy, the bound of a GPT disk's first partition, the
-//! machine ID that its executions see, the image's own or one that its guest generates, the host
-//! paths that it shares with its root, as a launch shares them, `sharing::HostFsSharing`, and its
-//! network, as a launch reads it, `layered::read_network`, which must be the template's.
+//! image or in RAM, its processor and memory targets, the workload identity as which its
+//! executions run, its overlay mode, its scratch's journal policy, the bound of a GPT disk's
+//! first partition, the machine ID that its executions see, the image's own or one that its
+//! guest generates, the host paths that it shares with its root, as a launch shares them,
+//! `sharing::HostFsSharing`, and its network, as a launch reads it, `layered::read_network`,
+//! which must be the template's.
 //! [`Request::plan`] plans the image over the upper, with the network, as a launch plans a layered
 //! root, [`Request::export`] plans the export of the shares as a launch plans it, and
 //! [`Request::clone_request`] returns NVX's `nvx::host::template::CloneRequest` of both, with the
@@ -77,6 +78,8 @@ pub struct Request {
     pub identity: Uuid,
     /// The ext4 scratch image of the upper, or `None` for an upper in RAM.
     pub scratch: Option<PathBuf>,
+    /// The processor target, or `None` for the template's processors online at boot.
+    pub processors: Option<u32>,
     /// The memory target, in bytes, or `None` for the template's RAM.
     pub memory: Option<u64>,
     /// The workload identity as which every execution runs, if any: its user ID and its group ID.
@@ -135,7 +138,7 @@ impl Request {
     /// Returns NVX's request of the clone of `plan`, the [plan](Self::plan) of this request, and
     /// of `export`, the [export](Self::export) of its shares, if any, with the bindings that the
     /// sandbox's store stages for its images, `bindings`, as `staged::Staged::bindings` finds
-    /// them, and the memory target `memory`, in bytes.
+    /// them, the processor target `processors`, and the memory target `memory`, in bytes.
     ///
     /// The record of the clone's activation names the workload identity, if any, the
     /// [`CLONE_HOSTNAME`], the request's machine ID, the overlay's mode, and the scratch's
@@ -151,6 +154,7 @@ impl Request {
         plan: SandboxPlan,
         export: Option<ExportPlan>,
         bindings: &Bindings,
+        processors: u32,
         memory: u64,
     ) -> Result<CloneRequest> {
         let binding = bindings
@@ -180,6 +184,7 @@ impl Request {
             policy_revision: DISTRO_POLICY_REVISION,
             scratch,
             export,
+            processors,
             memory,
             workload: WorkloadView {
                 hostname: CLONE_HOSTNAME.as_bytes().to_vec(),

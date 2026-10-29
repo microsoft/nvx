@@ -1,8 +1,8 @@
 //! The plan of a clone, [`ClonePlan`]: the generation of a template that a clone leased, with the
-//! clone's own image, upper, memory target, and export, which the plan checks against the
-//! generation before the clone's launch, so that a request that the template cannot serve fails
-//! before any VMM starts; and the clone's launch, [`ClonePlan::launch`], OpenVMM's restore of the
-//! generation's snapshot with what the plan checked.
+//! clone's own image, upper, processor and memory targets, and export, which the plan checks
+//! against the generation before the clone's launch, so that a request that the template cannot
+//! serve fails before any VMM starts; and the clone's launch, [`ClonePlan::launch`], OpenVMM's
+//! restore of the generation's snapshot with what the plan checked.
 
 #[cfg(all(test, any(target_os = "linux", windows)))]
 mod tests;
@@ -36,7 +36,7 @@ use std::time::Instant;
 use self::export::DirectoryExport;
 use self::failure::{Attribute, Fault, host_evidence};
 use super::key::TemplateKey;
-use super::manifest::BlockGeometry;
+use super::manifest::{BlockGeometry, PROCESSOR_COUNTS};
 use super::plan::MEMORY_BLOCK_SIZE;
 use super::store::{Acquired, Generation, Lease, Store};
 use crate::activation::{ActivationRecord, Journal, OverlayMode, WorkloadView};
@@ -68,10 +68,11 @@ const MAX_PATH_LINKS: usize = 64;
 /// What the clone of a sandbox restores of the generation of a template that it leased: the
 /// adapter's plan of the clone's image and upper, the binding of the image, the binding of the
 /// scratch image of an upper on one, the export of the host paths that the clone shares with its
-/// root, if any, and the memory target, which [`ClonePlan::new`] checks against the generation,
-/// and the settings of the clone's activation that the template does not fix, which the clone's
-/// [activation record](ClonePlan::activation) names: the workload's view of its VM, the overlay's
-/// mode, the journal policy of a scratch image, and the bound of a GPT disk's first partition.
+/// root, if any, and the processor and memory targets, which [`ClonePlan::new`] checks against the
+/// generation, and the settings of the clone's activation that the template does not fix, which
+/// the clone's [activation record](ClonePlan::activation) names: the workload's view of its VM,
+/// the overlay's mode, the journal policy of a scratch image, and the bound of a GPT disk's first
+/// partition.
 #[derive(Debug, Clone)]
 pub struct CloneRequest {
     /// The adapter's plan, which [`SandboxPlan::adapter`] makes, of the clone's image, its
@@ -98,6 +99,10 @@ pub struct CloneRequest {
     /// dormant. The slot binds one directory, so the plan must export exactly one, and no file,
     /// as [`ClonePlan`] describes.
     pub export: Option<ExportPlan>,
+    /// The processor target: the processors online in the clone's VM once restored, a prefix of
+    /// the template's processor capacity, of which the restore brings online those beyond the
+    /// template's processors online at boot.
+    pub processors: u32,
     /// The memory target, in bytes: the RAM of the clone's VM once restored, to which the restore
     /// expands the template's RAM in whole blocks.
     pub memory: u64,
@@ -187,6 +192,10 @@ pub enum CloneUpper {
 ///   held open, and other names, but not a mount or a network share that exposes the store's
 ///   directories elsewhere: a store's directories must not be exposed that way. The plan holds
 ///   the checked image, and with it the claim. Nothing reads, formats, or copies the image.
+/// - The processor target must be 1, 2, 4, or 8, from the template's processors online at boot to
+///   its processor capacity, as its key records them, [`TemplateKey::boot_processors`] and
+///   [`TemplateKey::processors`]. A template whose processors are all online at boot records none
+///   online at boot, and serves the target of its capacity alone.
 /// - The memory target must be whole blocks of [`MEMORY_BLOCK_SIZE`], and of the template's own
 ///   memory blocks, from the template's RAM to its RAM capacity.
 /// - The network of the adapter's plan must be the template's: lowered to OpenVMM's arguments, as
@@ -265,6 +274,7 @@ pub enum CloneUpper {
 ///     policy_revision: DISTRO_POLICY_REVISION,
 ///     scratch: None,
 ///     export: None,
+///     processors: 2,
 ///     memory: 8 * MEMORY_BLOCK_SIZE,
 ///     workload: WorkloadView {
 ///         hostname: b"clone".to_vec(),
@@ -301,6 +311,8 @@ pub struct ClonePlan {
     image: CheckedDistro,
     /// The clone's upper, with the file of its `scratch` block device.
     upper: CloneUpper,
+    /// The processor target.
+    processors: u32,
     /// The memory target, in bytes.
     memory: u64,
     /// The clone's activation record.
@@ -398,9 +410,10 @@ impl ClonePlan {
     ///   [`TemplateKey::network_arguments`]: a network for a template without a NIC, none for a
     ///   template with a NIC, or one with another guest network than the template's NIC, whose
     ///   address OpenVMM restores from the snapshot, or another policy,
-    ///   [`Evidence::InvalidSettings`]; and a memory target that is not whole blocks of
-    ///   [`MEMORY_BLOCK_SIZE`] and of the template's memory blocks, from the template's RAM to its
-    ///   RAM capacity, [`Evidence::InvalidTargets`];
+    ///   [`Evidence::InvalidSettings`]; and a processor target other than 1, 2, 4, or 8, or
+    ///   outside the template's processors online at boot and its processor capacity, and a
+    ///   memory target that is not whole blocks of [`MEMORY_BLOCK_SIZE`] and of the template's
+    ///   memory blocks, from the template's RAM to its RAM capacity, [`Evidence::InvalidTargets`];
     /// - with [`ErrorKind::Io`] for a template whose command line names the DNS server of its
     ///   guest's resolver in another form than OpenVMM writes: more than once, without a NIC, or
     ///   other than as one IP address in its canonical spelling, [`Evidence::MalformedGeneration`];
@@ -574,6 +587,7 @@ impl ClonePlan {
             snapshot,
             image,
             upper,
+            processors: request.processors,
             memory: request.memory,
             activation,
             capability,
@@ -626,6 +640,11 @@ impl ClonePlan {
         }
     }
 
+    /// Returns the processor target: the processors online in the clone's VM once restored.
+    pub fn processors(&self) -> u32 {
+        self.processors
+    }
+
     /// Returns the memory target, in bytes.
     pub fn memory(&self) -> u64 {
         self.memory
@@ -669,8 +688,8 @@ impl ClonePlan {
     /// enforces there, as the template's key records it, the DNS server with which the template's
     /// guest configured its resolver at boot, if the template's
     /// [command line](TemplateKey::command_line) names one, unpublished listeners, and the URL of
-    /// the policy's proxy as the guest sees it, if any; and the template's processors, all online,
-    /// and the memory target, as the resources that the clone must have.
+    /// the policy's proxy as the guest sees it, if any; and the processor target, which the
+    /// restore brings online, and the memory target, as the resources that the clone must have.
     ///
     /// The identity of a binding, or of an export plan, is the SHA-256 digest of a domain of its
     /// kind and of its serde form, a few hundred bytes of metadata: the plan reads no content to
@@ -696,6 +715,7 @@ impl fmt::Debug for ClonePlan {
             .field("snapshot", &self.snapshot)
             .field("image", &self.image)
             .field("upper", &self.upper)
+            .field("processors", &self.processors)
             .field("memory", &self.memory)
             .field("activation", &self.activation)
             .field("export", &self.export())
@@ -960,6 +980,24 @@ fn check_template(
         return Err(Fault::new(
             Evidence::InvalidSettings,
             Error::unsupported(problem),
+        ));
+    }
+    let processors = request.processors;
+    let capacity = key.processors();
+    // A template that records no processors online at boot has all of them online, and a restore
+    // brings none online.
+    let boot = match key.boot_processors() {
+        0 => capacity,
+        boot => boot,
+    };
+    if !PROCESSOR_COUNTS.contains(&processors) || processors < boot || processors > capacity {
+        return Err(Fault::new(
+            Evidence::InvalidTargets,
+            Error::unsupported(format!(
+                "a clone of the template's generation {name} cannot restore with a processor \
+                 target of {processors}: a target must be 1, 2, 4, or 8, from the template's \
+                 processors online at boot, {boot}, to its capacity, {capacity}"
+            )),
         ));
     }
     let memory = request.memory;
