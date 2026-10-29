@@ -1679,7 +1679,10 @@ package's members, whose names must be relative and canonical below one root,
 and extracts it into a private directory below `build/`. Every extracted file
 must be a regular file that `SHA256SUMS` lists with its digest. On Windows,
 `curl` and `tar` are those of `%SystemRoot%\System32`, whose `tar` reads the
-ZIP package of `windows-whp`.
+ZIP package of `windows-whp`. `download` reads the status and the redirect of
+each response from the headers that `curl` dumps, rather than from its
+`--write-out`, with which the `curl` 8.8.0 of some Windows releases fails every
+HTTPS request.
 
 `run`, `sandbox run`, and `sandbox start` download the release themselves,
 before they launch, when an artifact that they run is missing from a root that

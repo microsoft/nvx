@@ -32,8 +32,9 @@ impl Received {
 /// A canned response: its status, its other headers, and its body.
 type Canned = (u16, Vec<(String, String)>, Vec<u8>);
 
-/// An HTTP server on the loopback interface that answers each request with the canned response
-/// of its path, or else with 404, and records the requests that it receives.
+/// An HTTP server on the loopback interface that answers the requests of a path with the canned
+/// responses of that path in turn, the last one again once they run out, or else with 404, and
+/// records the requests that it receives.
 struct Server {
     /// The requests that it received, in order.
     received: Arc<Mutex<Vec<Received>>>,
@@ -65,7 +66,8 @@ impl Server {
     }
 }
 
-/// Reads one request from `stream`, records it in `log`, and answers it from `routes`.
+/// Reads one request from `stream`, records it in `log`, and answers it from `routes`, with the
+/// canned response of its path that follows those of the earlier requests of that path.
 fn answer(
     mut stream: TcpStream,
     routes: &[(String, Canned)],
@@ -89,13 +91,23 @@ fn answer(
             headers.push((name.trim().to_ascii_lowercase(), value.trim().to_owned()));
         }
     }
-    log.lock().unwrap().push(Received {
-        path: path.clone(),
-        headers,
-    });
-    let (status, extra, body) = routes.iter().find(|(route, _)| *route == path).map_or_else(
+    let earlier = {
+        let mut log = log.lock().unwrap();
+        let earlier = log.iter().filter(|request| request.path == path).count();
+        log.push(Received {
+            path: path.clone(),
+            headers,
+        });
+        earlier
+    };
+    let answers: Vec<&Canned> = routes
+        .iter()
+        .filter(|(route, _)| *route == path)
+        .map(|(_, canned)| canned)
+        .collect();
+    let (status, extra, body) = answers.get(earlier).or(answers.last()).map_or_else(
         || (404, Vec::new(), br#"{"message": "Not Found"}"#.to_vec()),
-        |(_, canned)| canned.clone(),
+        |&canned| canned.clone(),
     );
     let mut head = format!(
         "HTTP/1.1 {status} Status\r\nContent-Length: {}\r\nConnection: close\r\n",
@@ -252,6 +264,110 @@ fn requests_without_a_token_carry_none() {
 }
 
 #[test]
+fn redirects_resolve_relative_locations_against_the_urls_of_their_requests() {
+    let (listener, api) = Server::bind();
+    let server = Server::serve(
+        listener,
+        vec![
+            (
+                "/repos/octo/nvx/releases/assets/7".to_owned(),
+                (
+                    302,
+                    vec![("Location".to_owned(), "../../downloads/./7".to_owned())],
+                    Vec::new(),
+                ),
+            ),
+            (
+                "/repos/octo/nvx/downloads/7".to_owned(),
+                (
+                    307,
+                    vec![("Location".to_owned(), "/packages/7?part=1".to_owned())],
+                    Vec::new(),
+                ),
+            ),
+            (
+                "/packages/7?part=1".to_owned(),
+                (200, Vec::new(), b"hello".to_vec()),
+            ),
+        ],
+    );
+    let scratch = tempfile::tempdir().unwrap();
+    let github = GitHub::at(&api, "octo/nvx", None, scratch.path(), Curl::plain()).unwrap();
+    let asset = Asset {
+        tag: "v0.1.0-dev.a1b2c3d4e5f6".to_owned(),
+        name: "nvx-0.1.0-linux-kvm.tar.gz".to_owned(),
+        url: format!("{api}/repos/octo/nvx/releases/assets/7"),
+        size: 5,
+    };
+    let destination = scratch.path().join(&asset.name);
+    github.download(&asset, &destination).unwrap();
+    assert_eq!(fs::read(&destination).unwrap(), b"hello");
+    let paths: Vec<String> = server
+        .received()
+        .into_iter()
+        .map(|request| request.path)
+        .collect();
+    assert_eq!(
+        paths,
+        [
+            "/repos/octo/nvx/releases/assets/7",
+            "/repos/octo/nvx/downloads/7",
+            "/packages/7?part=1",
+        ]
+    );
+}
+
+#[test]
+fn the_last_response_to_a_retried_request_counts() {
+    let (listener, api) = Server::bind();
+    let path = "/repos/octo/nvx/releases/tags/v0.1.0-dev.a1b2c3d4e5f6";
+    // The status, the header, and the message of the first response, which `curl` retries, would
+    // each change the error.
+    let server = Server::serve(
+        listener,
+        vec![
+            (
+                path.to_owned(),
+                (
+                    503,
+                    vec![("X-RateLimit-Remaining".to_owned(), "0".to_owned())],
+                    br#"{"message": "Unavailable"}"#.to_vec(),
+                ),
+            ),
+            (
+                path.to_owned(),
+                (
+                    403,
+                    Vec::new(),
+                    br#"{"message": "Resource not accessible"}"#.to_vec(),
+                ),
+            ),
+        ],
+    );
+    let scratch = tempfile::tempdir().unwrap();
+    let github = GitHub::at(
+        &api,
+        "octo/nvx",
+        Some("secret".to_owned()),
+        scratch.path(),
+        Curl::plain(),
+    )
+    .unwrap();
+    match github.release("v0.1.0-dev.a1b2c3d4e5f6") {
+        Err(Failure::Http(403, error)) => assert_eq!(
+            error.message(),
+            Some(
+                "GitHub release query failed with HTTP 403: Resource not accessible; the \
+                 configured GitHub token lacks access; grant it read access to the repository \
+                 contents and authorize it for organization single sign-on"
+            )
+        ),
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(server.received().len(), 2);
+}
+
+#[test]
 fn requests_to_github_speak_https_alone() {
     let scratch = tempfile::tempdir().unwrap();
     let github = GitHub::at(
@@ -291,7 +407,7 @@ fn configurations_quote_their_values_and_carry_the_token_when_asked() {
     for line in [
         "url = \"https://api.github.com/repos/octo/nvx\"",
         "output = \"C:\\\\scratch\\\\response\"",
-        "write-out = \"%{http_code}\\n%{redirect_url}\\n\"",
+        "dump-header = \"headers\"",
         "header = \"Accept: application/vnd.github+json\"",
         "header = \"Authorization: Bearer se\\\"cr\\\\et\"",
         "proto = \"=https\"",
@@ -305,6 +421,8 @@ fn configurations_quote_their_values_and_carry_the_token_when_asked() {
         );
     }
     assert!(!config.contains("progress-bar") && !config.contains("noproxy"));
+    // With any `write-out`, the `curl` 8.8.0 of some Windows releases fails every HTTPS request.
+    assert!(!config.contains("write-out"), "{config}");
     let anonymous = curl
         .config(&Request {
             token: None,
@@ -330,24 +448,126 @@ fn configurations_quote_their_values_and_carry_the_token_when_asked() {
 }
 
 #[test]
-fn the_headers_of_the_last_response_count() {
+fn responses_are_the_last_whose_headers_curl_dumped() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("headers");
-    fs::write(
-        &path,
-        "HTTP/1.1 503 Busy\r\nX-RateLimit-Remaining: 0\r\n\r\nHTTP/1.1 200 OK\r\nContent-Type: \
-         text/plain\r\n\r\n",
-    )
-    .unwrap();
+    let url = "https://api.github.com/repos/octo/nvx/releases/assets/7";
+    let read = |headers: &str| {
+        fs::write(&path, headers).unwrap();
+        read_response(&path, url).unwrap()
+    };
+    // A response that `curl` retried, an interim one, and the redirect that counts, whose status
+    // line is that of HTTP/2.
     assert_eq!(
-        read_headers(&path).unwrap(),
-        [("content-type".to_owned(), "text/plain".to_owned())]
+        read(
+            "HTTP/1.1 503 Busy\r\nX-RateLimit-Remaining: 0\r\nLocation: https://example.com/\r\n\
+             \r\nHTTP/2 103 \r\nlink: </style.css>\r\n\r\nHTTP/2 302 \r\nlocation: \
+             ../packages/7?sig=a%2Fb\r\ncontent-type: text/plain\r\n\r\n"
+        ),
+        Some(Response {
+            status: 302,
+            location: Some(
+                "https://api.github.com/repos/octo/nvx/releases/packages/7?sig=a%2Fb".to_owned()
+            ),
+            headers: vec![
+                ("location".to_owned(), "../packages/7?sig=a%2Fb".to_owned()),
+                ("content-type".to_owned(), "text/plain".to_owned()),
+            ],
+        })
     );
-    assert!(
-        read_headers(&directory.path().join("missing"))
-            .unwrap()
-            .is_empty()
+    // Only a redirect redirects, to its first location, if that is not empty.
+    for (headers, status, location) in [
+        ("HTTP/1.1 201 Created\r\nLocation: /x\r\n\r\n", 201, None),
+        ("HTTP/1.1 304 Not Modified\r\n\r\n", 304, None),
+        ("HTTP/1.1 302 Found\r\nLocation: \r\n\r\n", 302, None),
+        (
+            "HTTP/1.1 301 Moved\r\nLocation: /x\r\nLocation: /y\r\n\r\n",
+            301,
+            Some("https://api.github.com/x"),
+        ),
+    ] {
+        let response = read(headers).unwrap();
+        assert_eq!(
+            (response.status, response.location.as_deref()),
+            (status, location),
+            "{headers:?}"
+        );
+    }
+    // Without a valid last status line, there is no response.
+    for headers in [
+        "",
+        "Content-Type: text/plain\r\n\r\n",
+        "HTTP/1.1 200 OK\r\n\r\nHTTP/1.1 2000 OK\r\n\r\n",
+        "HTTP/1.1 099 Early\r\n\r\n",
+        "HTTP/1.1\r\n\r\n",
+    ] {
+        assert_eq!(read(headers), None, "{headers:?}");
+    }
+    assert_eq!(
+        read_response(&directory.path().join("missing"), url).unwrap(),
+        None
     );
+}
+
+#[test]
+fn locations_resolve_as_rfc_3986_resolves_references() {
+    // The examples of RFC 3986, section 5.4, with `http:g` as a strict parser resolves it.
+    let base = "http://a/b/c/d;p?q";
+    for (reference, expected) in [
+        ("g:h", "g:h"),
+        ("g", "http://a/b/c/g"),
+        ("./g", "http://a/b/c/g"),
+        ("g/", "http://a/b/c/g/"),
+        ("/g", "http://a/g"),
+        ("//g", "http://g"),
+        ("?y", "http://a/b/c/d;p?y"),
+        ("g?y", "http://a/b/c/g?y"),
+        ("#s", "http://a/b/c/d;p?q#s"),
+        ("g#s", "http://a/b/c/g#s"),
+        ("g?y#s", "http://a/b/c/g?y#s"),
+        (";x", "http://a/b/c/;x"),
+        ("g;x", "http://a/b/c/g;x"),
+        ("g;x?y#s", "http://a/b/c/g;x?y#s"),
+        ("", "http://a/b/c/d;p?q"),
+        (".", "http://a/b/c/"),
+        ("./", "http://a/b/c/"),
+        ("..", "http://a/b/"),
+        ("../", "http://a/b/"),
+        ("../g", "http://a/b/g"),
+        ("../..", "http://a/"),
+        ("../../", "http://a/"),
+        ("../../g", "http://a/g"),
+        ("../../../g", "http://a/g"),
+        ("../../../../g", "http://a/g"),
+        ("/./g", "http://a/g"),
+        ("/../g", "http://a/g"),
+        ("g.", "http://a/b/c/g."),
+        (".g", "http://a/b/c/.g"),
+        ("g..", "http://a/b/c/g.."),
+        ("..g", "http://a/b/c/..g"),
+        ("./../g", "http://a/b/g"),
+        ("./g/.", "http://a/b/c/g/"),
+        ("g/./h", "http://a/b/c/g/h"),
+        ("g/../h", "http://a/b/c/h"),
+        ("g;x=1/./y", "http://a/b/c/g;x=1/y"),
+        ("g;x=1/../y", "http://a/b/c/y"),
+        ("g?y/./x", "http://a/b/c/g?y/./x"),
+        ("g?y/../x", "http://a/b/c/g?y/../x"),
+        ("g#s/./x", "http://a/b/c/g#s/./x"),
+        ("g#s/../x", "http://a/b/c/g#s/../x"),
+        ("http:g", "http:g"),
+    ] {
+        assert_eq!(resolved(base, reference), expected, "{reference}");
+    }
+    // The scheme turns lowercase, and the rest stays as it is.
+    assert_eq!(
+        resolved(
+            "https://api.github.com/repos/octo/nvx/releases/assets/7",
+            "HTTPS://Objects.Example.com:443/a/../b?sig=x%2Fy%3D#top"
+        ),
+        "https://Objects.Example.com:443/b?sig=x%2Fy%3D#top"
+    );
+    assert_eq!(resolved("http://[::1]:8080", "x"), "http://[::1]:8080/x");
 }
 
 #[test]
