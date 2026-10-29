@@ -480,7 +480,9 @@ mod reference_tests {
         assert_eq!(unknown.unwrap_err().to_string(), "unknown");
     }
 
-    /// Returns a command that runs for a minute unless it is killed.
+    /// Returns a command that runs for a minute unless it is killed. The tests spawn it under a
+    /// `SpawnLock`, so that on Windows it cannot hold the log of a VMM that another test spawns
+    /// meanwhile.
     #[cfg(any(target_os = "linux", windows))]
     fn sleeper() -> std::process::Command {
         let mut command = if cfg!(windows) {
@@ -501,7 +503,7 @@ mod reference_tests {
     #[cfg(any(target_os = "linux", windows))]
     #[test]
     fn polling_follows_a_real_process_until_it_exits() {
-        let mut child = sleeper().spawn().unwrap();
+        let mut child = platform::inherit::spawn_command(&mut sleeper()).unwrap();
         let pid = child.id();
         let start_time = platform::process_start_time(pid).unwrap().unwrap();
         let runs =
@@ -517,7 +519,7 @@ mod reference_tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn hosts_without_pidfds_poll_and_never_signal() {
-        let mut child = sleeper().spawn().unwrap();
+        let mut child = platform::inherit::spawn_command(&mut sleeper()).unwrap();
         let pid = child.id();
         let process = Process {
             reference: ProcessRef {

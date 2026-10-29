@@ -2289,12 +2289,7 @@ mod tests {
 
     #[test]
     fn windows_refuses_to_terminate_a_process_that_exited_with_access_denied() {
-        let mut child = std::process::Command::new("ping")
-            .args(["-n", "60", "127.0.0.1"])
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .spawn()
-            .unwrap();
+        let mut child = spawn_command(&mut sleeper()).unwrap();
         let pid = child.id();
         let start_time = process_start_time(pid).unwrap().unwrap();
         let process = open_process(pid, start_time).unwrap().unwrap();
@@ -2323,12 +2318,7 @@ mod tests {
 
     #[test]
     fn a_wait_with_less_than_a_millisecond_left_ends_at_its_deadline() {
-        let mut child = std::process::Command::new("ping")
-            .args(["-n", "60", "127.0.0.1"])
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .spawn()
-            .unwrap();
+        let mut child = spawn_command(&mut sleeper()).unwrap();
         let pid = child.id();
         let start_time = process_start_time(pid).unwrap().unwrap();
         let process = open_process(pid, start_time).unwrap().unwrap();

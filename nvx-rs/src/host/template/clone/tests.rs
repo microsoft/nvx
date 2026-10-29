@@ -36,6 +36,8 @@ use crate::host::store::{
 use crate::host::template::store::{CAPTURES_NAME, SNAPSHOT_NAME, TRANSACTION_NAME};
 use crate::host::template::test_support::{MIB, ManifestSpec, class, network_class};
 use crate::host::template::{CaptureClass, HostTime, KEY_NAME};
+#[cfg(windows)]
+use crate::host::test_support::junction;
 use crate::host::test_support::released;
 use crate::protocol::root::RootImage;
 use crate::uuid::Uuid;
@@ -101,25 +103,6 @@ fn stage(path: &Path, length: u64) {
     #[cfg(unix)]
     std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
     options.open(path).unwrap().set_len(length).unwrap();
-}
-
-/// Makes `link` a junction to the directory `target`, quoting both paths, since `cmd` splits its
-/// arguments at commas and semicolons.
-#[cfg(windows)]
-fn junction(link: &Path, target: &Path) {
-    use std::os::windows::process::CommandExt;
-    use std::process::{Command, Stdio};
-
-    let status = Command::new("cmd")
-        .raw_arg(format!(
-            "/C mklink /J \"{}\" \"{}\"",
-            link.display(),
-            target.display()
-        ))
-        .stdout(Stdio::null())
-        .status()
-        .unwrap();
-    assert!(status.success(), "cannot link {}", link.display());
 }
 
 /// Returns the physical block size that OpenVMM presents for the files of the directory `dir`:
@@ -704,21 +687,7 @@ fn link_dir(target: &Path, link: &Path) {
     #[cfg(unix)]
     std::os::unix::fs::symlink(target, link).unwrap();
     #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        use std::process::{Command, Stdio};
-
-        let status = Command::new("cmd")
-            .raw_arg(format!(
-                "/C mklink /J \"{}\" \"{}\"",
-                link.display(),
-                target.display()
-            ))
-            .stdout(Stdio::null())
-            .status()
-            .unwrap();
-        assert!(status.success(), "cannot link {}", link.display());
-    }
+    junction(link, target);
 }
 
 #[test]

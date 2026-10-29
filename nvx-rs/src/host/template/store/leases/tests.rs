@@ -1994,7 +1994,7 @@ impl Transaction {
         if let Some(sandbox) = sandbox {
             command.env(ROLE_SANDBOX, sandbox);
         }
-        let mut child = command.spawn().unwrap();
+        let mut child = supervisor::spawn_command(&mut command).unwrap();
         let input = child.stdin.take().unwrap();
         let mut output = BufReader::new(child.stdout.take().unwrap());
         let mut line = String::new();
@@ -2395,7 +2395,8 @@ fn run_clone_role(
     sandbox: &Path,
     vmm: &Path,
 ) -> Option<ProcessRef> {
-    let output = Command::new(env::current_exe().unwrap())
+    let mut command = Command::new(env::current_exe().unwrap());
+    command
         .args(role("clone_role"))
         .env(ROLE_STORE, store.dir())
         .env(ROLE_GENERATION, generation.to_string())
@@ -2403,7 +2404,11 @@ fn run_clone_role(
         .env(ROLE_CRASH, step)
         .env(ROLE_VMM, vmm)
         .stdin(Stdio::null())
-        .output()
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let output = supervisor::spawn_command(&mut command)
+        .unwrap()
+        .wait_with_output()
         .unwrap();
     let stdout = String::from_utf8_lossy(&output.stdout);
     let crashed = format!("{CRASHED}{step}");

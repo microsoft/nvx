@@ -118,21 +118,7 @@ pub(super) fn link_dir(target: &Path, link: &Path) {
     #[cfg(unix)]
     std::os::unix::fs::symlink(target, link).unwrap();
     #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        use std::process::{Command, Stdio};
-
-        let status = Command::new("cmd")
-            .raw_arg(format!(
-                "/C mklink /J \"{}\" \"{}\"",
-                link.display(),
-                target.display()
-            ))
-            .stdout(Stdio::null())
-            .status()
-            .unwrap();
-        assert!(status.success(), "cannot link {}", link.display());
-    }
+    crate::host::test_support::junction(link, target);
 }
 
 /// Links `link` to the file `target` with a symbolic link, and returns whether it could: Windows

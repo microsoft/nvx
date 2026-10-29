@@ -10,6 +10,7 @@ use std::thread;
 use std::time::Duration;
 
 use super::*;
+use crate::host::platform::inherit::spawn_command;
 use crate::host::store::{
     CAPABILITY_NAME, CLONE_ACTIVATION_NAME, CLONE_FAILURE_NAME, CLONE_PROGRESS_NAME,
     CLONE_SCRATCH_NAME, CONSOLE_NAME, LOG_NAME, OUTCOME_NAME, RESTORE_READY_NAME, SOCKET_NAME,
@@ -101,7 +102,8 @@ impl Transition {
     /// Starts a transition that takes the lock `lock` of the sandbox in `dir`, and returns once
     /// it is about to wait for the lock.
     fn start(dir: &Path, lock: &str) -> Self {
-        let mut child = Command::new(env::current_exe().unwrap())
+        let mut command = Command::new(env::current_exe().unwrap());
+        command
             .args([
                 "--exact",
                 "host::store::lifecycle::tests::transition_role",
@@ -112,9 +114,8 @@ impl Transition {
             .env(ROLE_DIR, dir)
             .env(ROLE_LOCK, lock)
             .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .spawn()
-            .unwrap();
+            .stdout(Stdio::piped());
+        let mut child = spawn_command(&mut command).unwrap();
         let mut output = BufReader::new(child.stdout.take().unwrap());
         let mut line = String::new();
         while line.trim_end() != WAITING {
@@ -495,20 +496,7 @@ fn link_dir(target: &Path, link: &Path) {
     #[cfg(unix)]
     std::os::unix::fs::symlink(target, link).unwrap();
     #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-
-        let status = Command::new("cmd")
-            .raw_arg(format!(
-                "/C mklink /J \"{}\" \"{}\"",
-                link.display(),
-                target.display()
-            ))
-            .stdout(Stdio::null())
-            .status()
-            .unwrap();
-        assert!(status.success(), "cannot link {}", link.display());
-    }
+    crate::host::test_support::junction(link, target);
 }
 
 /// Makes the link `link`, which [`link_dir`] made, name the directory `target` instead.

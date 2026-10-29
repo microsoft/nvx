@@ -43,11 +43,9 @@ fn archive(source: &Path, archive: &Path) {
     } else {
         command.arg("-czf");
     }
-    let status = command
-        .arg(archive)
-        .arg(ROOT)
-        .current_dir(source)
-        .status()
+    let status = spawn_command(command.arg(archive).arg(ROOT).current_dir(source))
+        .unwrap()
+        .wait()
         .unwrap();
     assert!(status.success());
 }

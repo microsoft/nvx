@@ -973,9 +973,6 @@ fn read_refuses_a_link() {
 #[cfg(windows)]
 #[test]
 fn read_refuses_a_junction() {
-    use std::os::windows::process::CommandExt;
-    use std::process::{Command, Stdio};
-
     let directory = tempfile::tempdir().unwrap();
     let target = directory.path().join("target");
     fs::create_dir(&target).unwrap();
@@ -985,16 +982,7 @@ fn read_refuses_a_junction() {
     )
     .unwrap();
     let path = directory.path().join(MANIFEST_NAME);
-    let status = Command::new("cmd")
-        .raw_arg(format!(
-            "/C mklink /J \"{}\" \"{}\"",
-            path.display(),
-            target.display()
-        ))
-        .stdout(Stdio::null())
-        .status()
-        .unwrap();
-    assert!(status.success(), "cannot link {}", path.display());
+    crate::host::test_support::junction(&path, &target);
     read_refusal(directory.path(), ErrorCode::Io);
 }
 
