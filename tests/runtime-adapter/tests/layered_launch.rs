@@ -326,11 +326,11 @@ fn a_layered_launch_hands_openvmm_the_checked_images() {
         report.clone().into(),
     ];
     assert_eq!(arguments, expected);
-    // OpenVMM inherits the checked files on Linux, and on Windows the scratch image's claim, which
-    // no argument names.
+    // OpenVMM inherits the checked files, and on Windows the scratch image's claim too, which no
+    // argument names.
     assert_eq!(
         prepared.inherited().len(),
-        if cfg!(windows) { 1 } else { 2 }
+        if cfg!(windows) { 3 } else { 2 }
     );
 
     // An upper in RAM hands OpenVMM the image alone, and claims nothing, while the image's checks
@@ -355,10 +355,7 @@ fn a_layered_launch_hands_openvmm_the_checked_images() {
     ];
     assert_eq!(arguments[..4], blocks);
     assert_eq!(arguments[4], "--single-process");
-    assert_eq!(
-        prepared.inherited().len(),
-        if cfg!(windows) { 0 } else { 1 }
-    );
+    assert_eq!(prepared.inherited().len(), 1);
 }
 
 #[test]

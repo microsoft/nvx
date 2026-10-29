@@ -69,9 +69,9 @@ fn start_locked(
     // The checks read no content of the distro layer, its manifest, or the scratch image, and
     // never verify them again. The prepared launch holds the files that they return, and hands
     // OpenVMM those objects: on Linux, OpenVMM inherits their descriptors; on Windows, it opens
-    // them by their final paths, which the files keep anything from replacing before OpenVMM,
-    // whose opens share them, has opened them. The scratch image's check also claims it for this
-    // sandbox, until OpenVMM exits.
+    // them by their final paths, which the files, and OpenVMM's copies of them, keep anything from
+    // replacing before OpenVMM, whose opens share them, has opened them, even if the start ends
+    // first. The scratch image's check also claims it for this sandbox, until OpenVMM exits.
     let binding = config.distro_binding()?;
     let scratch_binding = config.scratch_binding()?;
     let distro = binding
@@ -158,8 +158,9 @@ fn start_locked(
     // OpenVMM whose start failed.
     let mut prepared = Some(prepared);
     let ready = ready.and_then(|()| {
-        // The guest is ready, so OpenVMM holds the images: the checked files can go, which
-        // releases their guards, while OpenVMM keeps the scratch image's claim.
+        // The guest is ready, so OpenVMM holds the images: the checked files can go, with
+        // OpenVMM's copies of them on Windows, which releases their guards, while OpenVMM keeps
+        // the scratch image's claim.
         prepared
             .take()
             .expect("the start holds the checked files until the guest is ready")

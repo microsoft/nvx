@@ -40,7 +40,7 @@
 //!   launch checks the layer through [`seal`], which seals open files from their metadata alone,
 //!   and [`sandbox::scratch`] binds and claims a scratch image. A
 //!   [`PreparedLaunch`](sandbox::PreparedLaunch) hands the VMM the files that those checks
-//!   opened, through the [`supervisor`]'s allowlist on Linux.
+//!   opened, which it inherits through the [`supervisor`]'s allowlist.
 //! - `cli` (feature `cli`) is the `nvx-rs` command-line interface, which runs microVMs and
 //!   sandboxes, looks up and downloads artifacts, and compiles egress policies.
 //!

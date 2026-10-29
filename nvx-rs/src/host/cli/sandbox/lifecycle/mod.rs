@@ -50,7 +50,8 @@
 //! [`fn@crate::host::cli::sandbox::lifecycle::start`] hands OpenVMM, through a [`crate::host::sandbox::PreparedLaunch`] of the checked files, the objects that
 //! the checks found, rather than paths that something could replace meanwhile, and claims the
 //! scratch image for this sandbox while OpenVMM runs. It holds the checked files until the guest
-//! is ready, or until it has ended an OpenVMM whose start failed.
+//! is ready, when it releases them, and on Windows OpenVMM's copies of them, or until it has ended
+//! an OpenVMM whose start failed.
 
 mod directory;
 mod outcome;

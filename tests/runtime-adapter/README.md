@@ -1154,8 +1154,11 @@ Linux, OpenVMM inherits the checked files' descriptors, which its arguments
 name as `/proc/self/fd/N`, and nothing else of the host program's; on Windows,
 its arguments name the checked files by their final paths, which the checked
 files keep anything else from taking while they are open, and OpenVMM inherits
-the scratch image's claim. The launch holds the checked files until the guest
-has assembled the root, or until it has torn down a launch that failed.
+the checked files and the scratch image's claim, so that its copies hold the
+paths even if the host program ends before OpenVMM has opened the images. The
+launch holds the checked files until the guest has assembled the root, when
+`PreparedLaunch::release` closes them, and on Windows OpenVMM's copies of them,
+or until it has torn down a launch that failed.
 
 ### Shares
 

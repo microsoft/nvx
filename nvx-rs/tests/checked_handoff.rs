@@ -400,9 +400,10 @@ fn set_inheritable(pipe: &io::PipeWriter, inheritable: bool) {
 }
 
 /// Returns whether the handle `value` of process `pid` refers to the object of this process's
-/// handle `value`, as a handle that the process inherited from this one does.
+/// handle `ours`, as a handle that the process inherited from this one, under the value that it
+/// has here, does.
 #[cfg(windows)]
-fn holds(pid: u32, value: usize) -> bool {
+fn holds(pid: u32, value: usize, ours: usize) -> bool {
     use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
     use std::ptr;
 
@@ -413,7 +414,6 @@ fn holds(pid: u32, value: usize) -> bool {
         GetCurrentProcess, OpenProcess, PROCESS_DUP_HANDLE,
     };
 
-    let ours = value as HANDLE;
     // SAFETY: OpenProcess has no memory-safety preconditions.
     let process = unsafe { OpenProcess(PROCESS_DUP_HANDLE, 0, pid) };
     assert!(
@@ -429,7 +429,7 @@ fn holds(pid: u32, value: usize) -> bool {
     let duplicated = unsafe {
         DuplicateHandle(
             process.as_raw_handle(),
-            ours,
+            value as HANDLE,
             GetCurrentProcess(),
             &mut copy,
             0,
@@ -444,7 +444,7 @@ fn holds(pid: u32, value: usize) -> bool {
     // SAFETY: the copy is new, and nothing else owns it.
     let copy = unsafe { OwnedHandle::from_raw_handle(copy) };
     // SAFETY: both handles are open.
-    unsafe { CompareObjectHandles(copy.as_raw_handle(), ours) != 0 }
+    unsafe { CompareObjectHandles(copy.as_raw_handle(), ours as HANDLE) != 0 }
 }
 
 #[test]
@@ -540,7 +540,8 @@ fn a_prepared_launch_hands_the_vmm_its_checked_images_alone() {
 
     // The VMM holds its standard streams and the checked files under their numbers, and nothing
     // else of this process's: on Linux, the checked descriptors, which the arguments name; on
-    // Windows, the claim's handle of the scratch image, which no argument names.
+    // Windows, the handles of the checked files, which hold the images' final paths for it, and
+    // the claim's handle of the scratch image, though no argument names a handle.
     #[cfg(target_os = "linux")]
     {
         use std::os::fd::{AsFd, AsRawFd};
@@ -582,24 +583,24 @@ fn a_prepared_launch_hands_the_vmm_its_checked_images_alone() {
             .iter()
             .map(|inherited| inherited.as_handle().as_raw_handle() as usize)
             .collect();
-        assert_eq!(inherited.len(), 1);
-        assert!(
-            holds(pid, inherited[0]),
-            "the VMM does not hold the scratch image's claim"
-        );
-        let mut ours = vec![
+        let checked = [
             prepared.distro().file().as_raw_handle() as usize,
-            unrelated.as_raw_handle() as usize,
+            prepared.scratch().unwrap().file().as_raw_handle() as usize,
         ];
-        ours.extend(
-            prepared
-                .scratch()
-                .map(|scratch| scratch.file().as_raw_handle() as usize),
-        );
-        for value in ours {
-            assert_ne!(value, inherited[0]);
-            assert!(!holds(pid, value), "the VMM holds handle {value:#x}");
+        assert_eq!(inherited.len(), 3);
+        assert_eq!(inherited[..2], checked);
+        for &value in &inherited {
+            assert!(
+                holds(pid, value, value),
+                "the VMM does not hold handle {value:#x}"
+            );
         }
+        let unrelated = unrelated.as_raw_handle() as usize;
+        assert!(!inherited.contains(&unrelated));
+        assert!(
+            !holds(pid, unrelated, unrelated),
+            "the VMM holds handle {unrelated:#x}"
+        );
     }
 
     // The VMM opens its block devices as OpenVMM does, and finds the objects that the launch
@@ -608,13 +609,17 @@ fn a_prepared_launch_hands_the_vmm_its_checked_images_alone() {
     let report = vmm.report(BLOCKS_REPORT);
     assert_eq!(report, staged_blocks());
 
-    // On Windows, while the launch holds the checked files, nothing writes the distro layer, and
-    // nothing removes or renames either image, while the VMM reads and writes the scratch image.
-    // Once the guest is ready, the launch releases them, and what the VMM holds, its own opens
-    // and the scratch image's claim that it inherited, shares renames.
+    // On Windows, while the launch and the VMM hold the checked files, nothing writes the distro
+    // layer, and nothing removes or renames either image, while the VMM reads and writes the
+    // scratch image. Once the guest is ready, the launch releases them, its own and the VMM's
+    // copies, while the VMM keeps the scratch image's claim, and what the VMM then holds, its own
+    // opens and the claim's handle, shares renames.
     #[cfg(windows)]
-    {
-        let moved = |path: &Path| path.with_extension("moved");
+    let moved = |path: &Path| path.with_extension("moved");
+    #[cfg(windows)]
+    let inherited = {
+        use std::os::windows::io::{AsHandle, AsRawHandle};
+
         assert!(
             OpenOptions::new()
                 .append(true)
@@ -625,14 +630,36 @@ fn a_prepared_launch_hands_the_vmm_its_checked_images_alone() {
             assert!(fs::rename(&path, moved(&path)).is_err());
             assert!(fs::remove_file(&path).is_err());
         }
-        drop(prepared);
+        // Each value that the VMM inherited, with a handle of this process's own to its object,
+        // which outlives the release.
+        prepared
+            .inherited()
+            .iter()
+            .map(|inherited| {
+                let handle = inherited.as_handle();
+                (
+                    handle.as_raw_handle() as usize,
+                    handle.try_clone_to_owned().unwrap(),
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    let process = vmm.launched.as_ref().unwrap().process().unwrap();
+    prepared.release(&process).unwrap();
+    #[cfg(windows)]
+    {
+        use std::os::windows::io::AsRawHandle;
+
+        let held: Vec<bool> = inherited
+            .iter()
+            .map(|(value, object)| holds(pid, *value, object.as_raw_handle() as usize))
+            .collect();
+        assert_eq!(held, [false, false, true]);
+        drop(inherited);
         for path in [staged.distro(), staged.scratch()] {
-            fs::rename(&path, moved(&path)).unwrap();
-            fs::rename(moved(&path), &path).unwrap();
+            rename_away_and_back(&path);
         }
     }
-    #[cfg(target_os = "linux")]
-    drop(prepared);
 
     // The VMM wrote the checked scratch image, whatever has its path now.
     File::create(vmm.path().join(EXIT_MARKER)).unwrap();
@@ -703,6 +730,34 @@ fn a_vmm_keeps_the_scratch_images_claim_once_its_launcher_is_gone() {
     );
     launched.kill_and_wait();
     drop(check_written().unwrap());
+}
+
+/// Renames the file at `path` away and back, which no process that holds it without sharing its
+/// deletion allows, as the checked files of a launch hold it on Windows.
+///
+/// Waits up to [`TIMEOUT`] for a process that another test's thread spawned with `std::process`,
+/// such as `cmd` for a junction, to exit: such a process inherits every handle of this one that
+/// is inheritable as it starts, as the checked files of a launch are while its VMM is spawned,
+/// and holds them until it exits.
+#[cfg(windows)]
+fn rename_away_and_back(path: &Path) {
+    use windows_sys::Win32::Foundation::ERROR_SHARING_VIOLATION;
+
+    let moved = path.with_extension("moved");
+    let deadline = Instant::now() + TIMEOUT;
+    loop {
+        match fs::rename(path, &moved) {
+            Ok(()) => break,
+            Err(error)
+                if error.raw_os_error() == Some(ERROR_SHARING_VIOLATION as i32)
+                    && Instant::now() < deadline =>
+            {
+                thread::sleep(Duration::from_millis(10));
+            }
+            Err(error) => panic!("cannot rename {}: {error}", path.display()),
+        }
+    }
+    fs::rename(&moved, path).unwrap();
 }
 
 /// Makes `link` a junction to the directory `target`, which needs no privilege.

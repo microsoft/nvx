@@ -278,11 +278,19 @@ fn prepared_launches_hand_the_vmm_the_checked_files() {
             .collect();
         assert_ne!(expected, rendered);
         assert_eq!(prepared.openvmm_arguments(), expected);
-        // The VMM inherits the claim's handle of the scratch image alone, which no argument
-        // names, and which is not its guard.
+        // The VMM inherits the checked files, which hold their final paths for it, and the
+        // claim's handle of the scratch image, which no argument names, and which is not its
+        // guard.
         let inherited: Vec<usize> = prepared.inherited().iter().map(raw).collect();
         let scratch = prepared.scratch().unwrap();
-        assert_eq!(inherited, [raw(scratch.claim())]);
+        assert_eq!(
+            inherited,
+            [
+                raw(prepared.distro().file()),
+                raw(scratch.file()),
+                raw(scratch.claim())
+            ]
+        );
         assert_ne!(raw(scratch.claim()), raw(scratch.file()));
     }
 
@@ -309,15 +317,14 @@ fn an_upper_in_ram_takes_no_scratch_image() {
     .unwrap();
     let prepared = PreparedLaunch::new(plan.clone(), distro, None, "").unwrap();
     assert!(prepared.scratch().is_none());
+    // The VMM inherits the checked layer alone.
+    assert_eq!(prepared.inherited().len(), 1);
     let blocks = values(prepared.openvmm_arguments(), "--microvm-sandbox-block");
     #[cfg(target_os = "linux")]
-    {
-        assert_eq!(
-            blocks,
-            [format!("distro:file:/proc/self/fd/{distro_number},ro")]
-        );
-        assert_eq!(prepared.inherited().len(), 1);
-    }
+    assert_eq!(
+        blocks,
+        [format!("distro:file:/proc/self/fd/{distro_number},ro")]
+    );
     #[cfg(windows)]
     {
         assert_eq!(
@@ -327,7 +334,8 @@ fn an_upper_in_ram_takes_no_scratch_image() {
                 final_path(&staged, "distro.erofs")
             )]
         );
-        assert!(prepared.inherited().is_empty());
+        let inherited: Vec<usize> = prepared.inherited().iter().map(raw).collect();
+        assert_eq!(inherited, [raw(prepared.distro().file())]);
     }
     assert_eq!(
         prepared.kernel_command_line(),
@@ -629,6 +637,55 @@ fn prepared_launches_accept_balanced_brackets_in_final_paths() {
             ),
         ]
     );
+}
+
+#[cfg(windows)]
+#[test]
+fn a_release_through_a_process_that_inherited_nothing_closes_none_of_its_handles() {
+    use std::ffi::OsString;
+
+    use crate::host::supervisor::{self, VmmCommand};
+    use crate::protocol::CAPABILITY_LEN;
+
+    let staged = Staged::new();
+    let launch = staged.launch();
+    let (binding, distro) = staged.checked_distro("distro.erofs");
+    let prepared = PreparedLaunch::new(
+        launch.bound_plan(&binding).unwrap(),
+        distro,
+        Some(staged.checked_scratch("scratch.ext4")),
+        "",
+    )
+    .unwrap();
+    // A process that runs until it is ended, and that inherited none of the prepared launch's
+    // handles, whose own handles the release must leave alone.
+    let system = std::env::var_os("SystemRoot").unwrap();
+    let command = VmmCommand::new(
+        Path::new(&system).join("System32").join("PING.EXE"),
+        ["-n", "60", "127.0.0.1"].map(OsString::from).to_vec(),
+        staged.directory.path(),
+    );
+    let log = fs::File::create(staged.path("other.log")).unwrap();
+    let other = supervisor::spawn(&command, &[1; CAPABILITY_LEN], log).unwrap();
+    let process = other.process().unwrap();
+    let released = failure(prepared.release(&process));
+    other.kill_and_wait();
+    assert_eq!(
+        released,
+        (
+            ErrorKind::Io,
+            format!(
+                "cannot release the guard of {}, which VMM process {} inherited",
+                staged.text("distro.erofs"),
+                process.reference().pid
+            )
+        )
+    );
+    // The release closed the checked files nonetheless, which no longer hold the images.
+    for name in ["distro.erofs", "scratch.ext4"] {
+        fs::rename(staged.path(name), staged.path("moved")).unwrap();
+        fs::rename(staged.path("moved"), staged.path(name)).unwrap();
+    }
 }
 
 #[test]

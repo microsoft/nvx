@@ -181,7 +181,9 @@ pub struct DistroBinding {
 /// The file is the object that the check compared with the binding, open for reading, whatever
 /// later takes its path. On Windows, it denies other opens for writing or deleting the layer, so
 /// that nothing modifies, renames, or replaces the layer while it is held; OpenVMM's read-only
-/// open of the layer shares it. Dropping it closes the file.
+/// open of the layer shares it. Dropping it closes the file, and a VMM that inherited it from a
+/// [`PreparedLaunch`](super::PreparedLaunch) keeps its copy until the prepared launch is released
+/// or the VMM exits.
 ///
 /// A [`PreparedLaunch`](super::PreparedLaunch) takes it, with the path at which the check opened
 /// the layer and the format and identity that the binding names, and hands the layer to the VMM.

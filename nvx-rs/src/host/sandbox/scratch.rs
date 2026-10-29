@@ -37,11 +37,13 @@
 //!   Two guards exclude each other, since each asks for the delete access that the other denies.
 //!   The check then makes sure that no other process has the image open for writing, as the VMM
 //!   of another sandbox does: an open that denies writing succeeds only then. It then opens the
-//!   image for writing, sharing every access, as the claim's handle, which the VMM inherits and
-//!   never uses: so the VMM holds the claim from its start, even if the caller ends before the VMM
-//!   has opened the image, which would release the guard. Once the VMM has opened the image, at
-//!   authenticated Ready, the caller releases the guard, and the VMM's handles, open for writing,
-//!   keep the claim.
+//!   image for writing, sharing every access, as the claim's handle. The VMM inherits the guard
+//!   and the claim's handle, and uses neither: so it holds the claim, and its copy of the guard the
+//!   image's path, from its start, even if the caller ends before the VMM has opened the image,
+//!   which closes the caller's own. Once the VMM has opened the image, at authenticated Ready, the
+//!   caller releases the guard, its own and the VMM's copy, through
+//!   [`PreparedLaunch::release`](super::PreparedLaunch::release), and the VMM's handles, open for
+//!   writing, keep the claim.
 //!
 //! Claims exclude the launches of NVX: a process that writes the image without claiming it, which
 //! on Linux takes no `flock` lock and on Windows does not keep the image open, is not kept out.
@@ -126,11 +128,12 @@ pub struct ScratchBinding {
 /// A scratch image that [`ScratchBinding::check`] found unchanged and claimed, held open.
 ///
 /// On Linux, the file is the image, open for reading and writing, whose open file description
-/// holds the claim. On Windows, it is the image's guard, which holds no access to its content and
-/// denies deleting and renaming it, so that the image's path names the checked image while the
-/// guard is held, and the checked scratch also holds the claim's handle, open for writing, which
-/// the VMM inherits. Dropping it closes them, which releases the claim unless a VMM that inherited
-/// it still holds it; see [Claims](self#claims).
+/// holds the claim, and which the VMM inherits. On Windows, it is the image's guard, which holds
+/// no access to its content and denies deleting and renaming it, so that the image's path names
+/// the checked image while the guard is held, and the checked scratch also holds the claim's
+/// handle, open for writing; the VMM inherits both. Dropping it closes them, which releases the
+/// claim, and on Windows the guard, unless a VMM that inherited them still holds them; see
+/// [Claims](self#claims).
 ///
 /// A [`PreparedLaunch`](super::PreparedLaunch) takes it, with the path at which the check opened
 /// the image, and hands the image to the VMM.
