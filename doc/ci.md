@@ -532,20 +532,22 @@ then restores executable permissions on Linux.
 The microVM test jobs run their sandboxes and microVMs with
 [`nvx-rs`](../nvx-rs/README.md#the-nvx-rs-cli), and compile their egress
 policies with it, so they take `nvx-rs` the same way, and every release
-package ships it. Each NVX CLI job builds it for its operating system with
-`--release --locked --features cli`, puts it at `nvx-rs/target/release/`,
-where the microVM tests look for it, and runs the CLI tests with it, with `NVX_RS`
-naming it for the tests that run it directly: `nvx-cli-linux` builds a static
+package ships it. One GitHub-hosted job per operating system builds it with
+`--release --locked --features cli` and puts it at `nvx-rs/target/release/`,
+where the microVM tests look for it: `build-nvx-rs-linux-musl` builds a static
 `x86_64-unknown-linux-musl` executable, which runs on every self-hosted Linux
-runner, and `nvx-cli-windows` an `x86_64-pc-windows-msvc` executable with a
-static C runtime, which needs no Visual C++ redistributable. Each job records
-the build's provenance with
-[`record-nvx-rs-provenance`](usage.md#record-nvx-rs-provenance), and, once the
-tests pass, uploads the executable and the provenance as the one-day
+runner, and `build-nvx-rs-windows-msvc` an `x86_64-pc-windows-msvc` executable
+with a static C runtime, which needs no Visual C++ redistributable. Each job
+records the build's provenance with
+[`record-nvx-rs-provenance`](usage.md#record-nvx-rs-provenance) and uploads
+the executable and the provenance as the one-day
 `nvx-rs-linux-musl-executable` and `nvx-rs-linux-musl-provenance` artifacts, or
 the `nvx-rs-windows-msvc-*` pair. The workflows that take them name the pair by
 its base name, `nvx-rs-linux-musl` or `nvx-rs-windows-msvc`, as they name the
-OpenVMM artifacts. Each microVM test job of that operating system downloads
+OpenVMM artifacts. The NVX CLI job of each operating system downloads both, the
+executable where the build put it and the provenance into `build/`, and runs
+the CLI tests with that executable, with `NVX_RS` naming it for the tests that
+run it directly. Each microVM test job of that operating system downloads
 the executable into `nvx-rs/target/release/` and restores its executable
 permission on Linux, where the scenarios and the sandbox steps run it. The
 platform jobs run no sandbox or microVM with it, but their
@@ -600,15 +602,17 @@ from, so queueing a fork's pull request runs its code on the fleet, as the
 
 A `dev` push, a pull request that is ready for review, a merge group, or a
 scheduled or manually dispatched full run starts these jobs at once: `quality`,
-`nvx-rs`, `nvx-cli-linux`, and `nvx-cli-windows` on GitHub-hosted runners, and
-`openvmm-changes`, which classifies a push, pull request, or merge group and
-selects every suite for a full run (see
+`nvx-rs`, `build-nvx-rs-linux-musl`, and `build-nvx-rs-windows-msvc` on
+GitHub-hosted runners, and `openvmm-changes`, which classifies a push, pull
+request, or merge group and selects every suite for a full run (see
 [Change classification](#change-classification)). A merge group also starts
-`cancel-superseded-merge-groups` on a GitHub-hosted runner, which nothing
-waits for (see [Superseded merge groups](#superseded-merge-groups)). When the
-classification finishes, the jobs that it selects start: `artifacts`,
-`distro-artifacts`, and `debug-kernel` restore or build the guest artifacts
-on GitHub-hosted runners (see
+`cancel-superseded-merge-groups` on a GitHub-hosted runner, which nothing waits
+for (see [Superseded merge groups](#superseded-merge-groups)). Each NVX CLI
+job, `nvx-cli-linux` or `nvx-cli-windows`, starts on a GitHub-hosted runner
+when the `nvx-rs` build of its operating system ends. When
+`openvmm-changes` finishes, the jobs that it selects start: `artifacts`,
+`distro-artifacts`, and `debug-kernel` restore or build the guest artifacts on
+GitHub-hosted runners (see
 [Guest artifact handoff](#guest-artifact-handoff)), the three OpenVMM binary
 producers restore or build OpenVMM on a KVM, an MSHV, and a WHP runner,
 `build-openvmm-vmm-tests-linux` and `build-openvmm-vmm-tests-windows` restore
@@ -619,7 +623,7 @@ or build the Linux VMM tests on a KVM runner and the WHP ones on a WHP runner
 Alpine initramfs, and the Linux VMM-test build, and `openvmm-vmm-tests-windows`,
 whose legs run the [shards](#openvmm-vmm-test-shards) of the WHP tests, for
 `artifacts` and the Windows VMM-test build. Each microVM test and platform
-job waits for `artifacts`, its OpenVMM producer, and the NVX CLI job of its
+job waits for `artifacts`, its OpenVMM producer, and the `nvx-rs` build of its
 operating system. The microVM guest and sandbox jobs and the platform jobs
 also wait for `distro-artifacts`, and the debug-kernel jobs for
 `debug-kernel`. `Performance regression gate`,
@@ -639,20 +643,20 @@ only `Required status check` waits for it.
 The NVX CLI tests do not depend on the backend, so they run once per operating
 system in `nvx-cli-linux` and `nvx-cli-windows` rather than in every
 hypervisor job. Each checks out OpenVMM, whose pinned CPU profiles a test
-reads, and uses Python 3.12, the release that the self-hosted runners provide;
-the Windows job also installs the pinned Rust release with the minimal profile
-for the curl shim test and the `nvx-rs` build. The tests that run Windows
-PowerShell, or PowerShell 7 where it is installed, give a launch 120 s by
-default, `POWERSHELL_TIMEOUT` in `scripts/powershell_testing.py`: a launch
-takes a few seconds at most, but a GitHub-hosted runner has held one up for
-more than 30 s (#1030). Only the storage events test, whose save step queries
-the host's event logs for up to 120 s each, gives its launches 300 s. A launch
-that outlasts its limit fails its test with what PowerShell printed until the
-test killed it, which the test also writes to stderr at once: unittest reports
-failures only once the run ends, which a job that reaches its own time limit
-never does. Each job first builds the
-`nvx-rs` executable that the microVM tests run, tests with it, and hands it to the
-microVM test and platform jobs of its operating system, as described above.
+reads, uses Python 3.12, the release that the self-hosted runners provide, and
+installs the pinned Rust release with the minimal profile, with which the
+comparisons below, and on Windows the curl shim test, build. The tests that
+run Windows PowerShell, or PowerShell 7 where it is installed, give a launch
+120 s by default, `POWERSHELL_TIMEOUT` in `scripts/powershell_testing.py`: a
+launch takes a few seconds at most, but a GitHub-hosted runner has held one up
+for more than 30 s (#1030). Only the storage events test, whose save step
+queries the host's event logs for up to 120 s each, gives its launches 300 s.
+A launch that outlasts its limit fails its test with what PowerShell printed
+until the test killed it, which the test also writes to stderr at once:
+unittest reports failures only once the run ends, which a job that reaches its
+own time limit never does. Each job tests the `nvx-rs` executable that the
+microVM tests of its operating system run, which the `nvx-rs` build job of that
+operating system hands it, as described above.
 Each also runs the ignored `nvx-rs` test `tests/openvmm_vectors.rs`, which
 compares the submodule's control-session protocol vectors, and the lines of its
 platform allowlist of kernel command-line tokens, with the copies that the
@@ -665,11 +669,21 @@ submodule's built-in CPU profiles with the copy of their identities from which
 `nvx-rs run` guides a failed cold boot on a CPU that none serves.
 Fork pull requests lack the OpenVMM deploy key, so the CLI jobs run, like the
 hypervisor jobs, only for pushes, merge groups, full runs, and same-repository
-pull requests.
-Because the microVM and platform jobs of each operating system wait for its CLI
-job, a broken CLI does not occupy the hypervisor runners.
+pull requests, and so do the `nvx-rs` builds, which only those jobs use.
 `Required status check`, the development release, and performance persistence
-require both CLI jobs.
+require both `nvx-rs` builds and both CLI jobs.
+
+The microVM and platform jobs of each operating system wait for its `nvx-rs`
+build, but not for its CLI tests (#982). In the successful first-attempt runs
+from October 23 to 28, 2026, when they still waited for the whole CLI job,
+`nvx-cli-windows` took a median 5.8 minutes, of which the CLI tests took 4.0,
+while its `nvx-rs` was built 1.4 minutes in, and `nvx-cli-linux` took 2.9
+minutes, its CLI tests 2.0. In the 67 runs that skipped both OpenVMM suites
+and ran the benchmarks, `Platform / Windows / WHP / Virtual machine` waited for
+the Windows CLI job in all but one and finished last in all but one, and
+starting it once `nvx-rs` is built would have ended those runs about 4 minutes
+earlier. A broken CLI no longer keeps the hypervisor jobs of a run off their
+runners, but only 4 of the 304 runs of that window failed a CLI job.
 
 The KVM and MSHV pools have five runners each, and the WHP pool has seven. In
 each pool, one runner carries `benchmark` and runs only the platform job, and
@@ -1794,10 +1808,10 @@ artifacts that they use: the reusable workflows and actions that these reach,
 the files that the cache keys there hash and the source identity's, the CLI
 modules of the `nvx.py` commands that they run, which the tests map from
 `nvx.py`'s parser, with every module that those import and every file that
-those read beside them, and the `nvx` crate, from which the NVX CLI jobs build
-the executable. The tests also check that no other file of `nvx-rs` selects
-the VMM tests or changes a guest image key, while every one selects the NVX
-microVM tests and the platform jobs.
+those read beside them, and the `nvx` crate, from which the `nvx-rs` build
+jobs build the executable. The tests also check that no other file of `nvx-rs`
+selects the VMM tests or changes a guest image key, while every one selects the
+NVX microVM tests and the platform jobs.
 
 ### Development releases and performance history
 

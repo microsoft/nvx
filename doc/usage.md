@@ -913,8 +913,9 @@ the executable's SHA-256 to the digest of this checkout's `nvx-rs` sources,
 the Rust release that `rust-toolchain.toml` pins, the target, and the `cli`
 feature, so record it right after building `nvx-rs` from this checkout. For
 `x86_64-unknown-linux-musl`, the target of the Linux release packages, the
-executable must be static. CI's NVX CLI jobs record the builds that they hand
-to the packages, and `nvx.py` records the builds that it makes itself.
+executable must be static. CI's `nvx-rs` build jobs record the builds that
+they hand to the packages, and `nvx.py` records the builds that it makes
+itself.
 
 ### `build`
 

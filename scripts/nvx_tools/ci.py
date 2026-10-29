@@ -115,6 +115,8 @@ OPENVMM_TEST_RUN_TARGET_OPTIONS = {
 REQUIRED_CI_RESULT_ENVIRONMENTS = {
     "quality": "QUALITY_RESULT",
     "nvx-rs": "NVX_RS_RESULT",
+    "build-nvx-rs-linux-musl": "BUILD_NVX_RS_LINUX_MUSL_RESULT",
+    "build-nvx-rs-windows-msvc": "BUILD_NVX_RS_WINDOWS_MSVC_RESULT",
     "nvx-cli-linux": "NVX_CLI_LINUX_RESULT",
     "nvx-cli-windows": "NVX_CLI_WINDOWS_RESULT",
     "openvmm-changes": "CHANGES_RESULT",
@@ -149,8 +151,14 @@ REQUIRED_CI_BUILD_JOBS = (
     "build-openvmm-linux-musl",
     "build-openvmm-windows-msvc",
 )
-# GitHub-hosted, once per OS; the microVM and platform jobs of each OS wait for
-# its result.
+# GitHub-hosted, once per OS: each builds the nvx-rs that the microVM jobs of
+# its OS run, and that they wait for, and the NVX CLI job of its OS tests with.
+REQUIRED_CI_NVX_RS_BUILD_JOBS = (
+    "build-nvx-rs-linux-musl",
+    "build-nvx-rs-windows-msvc",
+)
+# GitHub-hosted, once per OS, after the nvx-rs build of its OS; no hypervisor
+# job waits for it.
 REQUIRED_CI_CLI_JOBS = ("nvx-cli-linux", "nvx-cli-windows")
 REQUIRED_CI_OPENVMM_TEST_JOBS = ("openvmm-unit-tests",)
 # OpenVMM VMM tests boot the NVX guest artifacts, so they need the job that
@@ -555,7 +563,7 @@ def required_ci_expected_results(
     expected.update(
         {
             job: "success" if repository_jobs_enabled else "skipped"
-            for job in REQUIRED_CI_CLI_JOBS
+            for job in (*REQUIRED_CI_NVX_RS_BUILD_JOBS, *REQUIRED_CI_CLI_JOBS)
         }
     )
     expected.update(

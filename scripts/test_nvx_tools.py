@@ -8462,7 +8462,11 @@ class CiConfigurationTests(unittest.TestCase):
             "openvmm-changes",
         }
         # Jobs that succeed whenever the repository's jobs run.
-        repository = always_successful | set(ci.REQUIRED_CI_CLI_JOBS)
+        repository = (
+            always_successful
+            | set(ci.REQUIRED_CI_NVX_RS_BUILD_JOBS)
+            | set(ci.REQUIRED_CI_CLI_JOBS)
+        )
         builds = set(ci.REQUIRED_CI_BUILD_JOBS)
         openvmm_tests = set(ci.REQUIRED_CI_OPENVMM_TEST_JOBS)
         # The VMM tests' build boots no guest, so it runs whenever a change
@@ -9724,7 +9728,7 @@ class CiConfigurationTests(unittest.TestCase):
         self.assertIn(f"path: {agent}\n", upload)
         self.assertIn(
             "needs: [artifacts, distro-artifacts, build-openvmm-windows-msvc, "
-            "nvx-cli-windows, openvmm-changes]",
+            "build-nvx-rs-windows-msvc, openvmm-changes]",
             _workflow_job(workflow, "nvx-microvm-guests-whp"),
         )
 
@@ -9915,12 +9919,13 @@ class CiConfigurationTests(unittest.TestCase):
             return inputs.union(*map(command_files, commands))
 
         # Every job that runs nvx-rs or ships it takes the executable that the
-        # NVX CLI jobs build from the nvx-rs crate with the pinned Rust
+        # nvx-rs build jobs build from the nvx-rs crate with the pinned Rust
         # release, and its provenance.
-        nvx_rs_inputs = job_inputs(
-            *ci.REQUIRED_CI_CLI_JOBS, tests_only=frozenset({"validate-nvx"})
-        ) | {"nvx-rs/example", "rust-toolchain.toml"}
-        for job in ci.REQUIRED_CI_CLI_JOBS:
+        nvx_rs_inputs = job_inputs(*ci.REQUIRED_CI_NVX_RS_BUILD_JOBS) | {
+            "nvx-rs/example",
+            "rust-toolchain.toml",
+        }
+        for job in ci.REQUIRED_CI_NVX_RS_BUILD_JOBS:
             with self.subTest(job=job):
                 definition = _workflow_job(workflow, job)
                 self.assertIn("rust-toolchain.toml", definition)
@@ -10948,18 +10953,21 @@ python3() {
                     guest_producer = ""
                 else:
                     guest_producer = "distro-artifacts, "
-                cli = (
-                    "nvx-cli-windows"
+                # Each waits for the nvx-rs build of its OS, which it runs or
+                # packages, but not for the CLI tests that run with it.
+                nvx_rs = (
+                    "build-nvx-rs-windows-msvc"
                     if producer == "build-openvmm-windows-msvc"
-                    else "nvx-cli-linux"
+                    else "build-nvx-rs-linux-musl"
                 )
                 self.assertIn(
-                    f"needs: [artifacts, {guest_producer}{producer}, {cli}, "
+                    f"needs: [artifacts, {guest_producer}{producer}, {nvx_rs}, "
                     "openvmm-changes]",
                     job,
                 )
                 self.assertIn(f"needs.{producer}.result == 'success'", job)
-                self.assertIn(f"needs.{cli}.result == 'success'", job)
+                self.assertIn(f"needs.{nvx_rs}.result == 'success'", job)
+                self.assertNotIn("nvx-cli", job)
                 self.assertIn(f"uses: ./.github/workflows/{reusable_workflow}", job)
                 self.assertIn(f"openvmm-artifact: {artifact}", job)
                 for unrelated_producer in producers.keys() - {producer}:
@@ -12869,18 +12877,19 @@ python3() {
         # which a runner's workspace holds at the pinned revision only after
         # the job checks it out. The tests do not depend on the backend, so
         # one GitHub-hosted job per OS runs them instead of every hypervisor
-        # job, and the microVM and platform jobs of each OS wait for it.
+        # job, with the nvx-rs that the build job of its OS hands over. No
+        # hypervisor job waits for them.
         workflows = BuildConstants.REPO_ROOT / ".github" / "workflows"
         workflow = (workflows / "ci.yml").read_text(encoding="utf-8")
         self.assertEqual(ci.REQUIRED_CI_CLI_JOBS, ("nvx-cli-linux", "nvx-cli-windows"))
-        for job_name, runner in (
-            ("nvx-cli-linux", "ubuntu-latest"),
-            ("nvx-cli-windows", "windows-latest"),
+        for job_name, runner, nvx_rs_build in (
+            ("nvx-cli-linux", "ubuntu-latest", "build-nvx-rs-linux-musl"),
+            ("nvx-cli-windows", "windows-latest", "build-nvx-rs-windows-msvc"),
         ):
             with self.subTest(job=job_name):
                 job = _workflow_job(workflow, job_name)
                 self.assertIn(f"    runs-on: {runner}\n", job)
-                self.assertNotIn("    needs:", job)
+                self.assertIn(f"    needs: [{nvx_rs_build}]\n", job)
                 self.assertIn(
                     "github.event.pull_request.head.repo.full_name "
                     "== github.repository",
@@ -12890,21 +12899,22 @@ python3() {
                 for prerequisite in (
                     "uses: ./.github/actions/checkout-openvmm",
                     "uses: actions/setup-python@v6",
+                    "rustup toolchain install",
                 ):
                     self.assertLess(
                         job.index(prerequisite),
                         job.index("uses: ./.github/actions/validate-nvx"),
                     )
-                # The release that the self-hosted runners provide.
+                # The release that the self-hosted runners provide, and the
+                # Rust release that rust-toolchain.toml pins, with which the
+                # curl shim test and the comparisons of OpenVMM's data build.
                 self.assertIn('python-version: "3.12"', job)
+                self.assertIn("rust-toolchain.toml", job)
+                self.assertIn("--profile minimal --no-self-update", job)
+                # It hands nothing over: it tests the build of its OS.
+                self.assertNotIn("- name: Build nvx-rs", job)
+                self.assertNotIn("uses: actions/upload-artifact", job)
                 self.assertIn(job_name, ci.REQUIRED_CI_RESULT_ENVIRONMENTS)
-        windows = _workflow_job(workflow, "nvx-cli-windows")
-        self.assertIn("rust-toolchain.toml", windows)
-        self.assertIn("--profile minimal --no-self-update", windows)
-        self.assertLess(
-            windows.index("rustup toolchain install"),
-            windows.index("uses: ./.github/actions/validate-nvx"),
-        )
 
         configurations = {
             name: (workflows / name).read_text(encoding="utf-8")
@@ -12922,22 +12932,14 @@ python3() {
             ),
             len(ci.REQUIRED_CI_CLI_JOBS),
         )
+        # A hypervisor job waits for the nvx-rs build that it uses, if any,
+        # but never for the CLI tests, so that it starts as soon as the build
+        # is handed over.
         for job_name in (
             *ci.REQUIRED_CI_MICROVM_TEST_JOBS,
             *ci.REQUIRED_CI_MICROVM_DEBUG_JOBS,
             *ci.REQUIRED_CI_MICROVM_DEBUG_PUSH_JOBS,
             *ci.REQUIRED_CI_PLATFORM_JOBS,
-        ):
-            cli = "nvx-cli-windows" if job_name.endswith("-whp") else "nvx-cli-linux"
-            with self.subTest(consumer=job_name):
-                job = _workflow_job(workflow, job_name)
-                needs = re.search(r"^    needs: \[(.+)\]$", job, re.MULTILINE)
-                assert needs is not None
-                self.assertIn(cli, needs.group(1).split(", "))
-                self.assertIn(f"        needs.{cli}.result == 'success' &&\n", job)
-                for other in set(ci.REQUIRED_CI_CLI_JOBS) - {cli}:
-                    self.assertNotIn(other, job)
-        for job_name in (
             *ci.REQUIRED_CI_OPENVMM_TEST_BUILD_JOBS,
             *ci.REQUIRED_CI_OPENVMM_ARTIFACT_TEST_JOBS,
             "openvmm-unit-tests",
@@ -12993,10 +12995,11 @@ python3() {
 
     def test_ci_hands_nvx_rs_to_the_microvm_and_platform_jobs(self):
         # The microVM scenarios and steps run nvx-rs, and find it where
-        # `cargo build --release` puts it. Each NVX CLI job builds it for its
-        # OS, records its provenance, tests with it, and hands both to the
-        # microVM jobs, which run it, and to the platform jobs, which package
-        # it, as the OpenVMM build jobs hand over OpenVMM.
+        # `cargo build --release` puts it. One GitHub-hosted job per OS builds
+        # it, records its provenance, and hands both to the microVM jobs,
+        # which run it, to the platform jobs, which package it, and to the NVX
+        # CLI job of its OS, which tests with it, as the OpenVMM build jobs
+        # hand over OpenVMM.
         github = BuildConstants.REPO_ROOT / ".github"
         workflow = (github / "workflows" / "ci.yml").read_text(encoding="utf-8")
         microvm = (github / "workflows" / "run-nvx-microvm-tests.yml").read_text(
@@ -13009,31 +13012,46 @@ python3() {
             encoding="utf-8"
         )
         builds = {
-            "nvx-cli-linux": (
+            "build-nvx-rs-linux-musl": (
+                "nvx-cli-linux",
                 "nvx-rs-linux-musl",
                 "nvx-rs/target/release/nvx-rs",
                 "x86_64-unknown-linux-musl",
             ),
-            "nvx-cli-windows": (
+            "build-nvx-rs-windows-msvc": (
+                "nvx-cli-windows",
                 "nvx-rs-windows-msvc",
                 "nvx-rs/target/release/nvx-rs.exe",
                 "x86_64-pc-windows-msvc",
             ),
         }
-        current = builds["nvx-cli-windows" if os.name == "nt" else "nvx-cli-linux"]
+        self.assertEqual(ci.REQUIRED_CI_NVX_RS_BUILD_JOBS, tuple(builds))
+        current = builds[
+            "build-nvx-rs-windows-msvc"
+            if os.name == "nt"
+            else "build-nvx-rs-linux-musl"
+        ]
         self.assertEqual(
             nvx_rs.binary_path().relative_to(BuildConstants.REPO_ROOT).as_posix(),
-            current[1],
+            current[2],
         )
         # Packages ship the build for the release target of their OS.
-        self.assertEqual(nvx_rs.release_target(), current[2])
+        self.assertEqual(nvx_rs.release_target(), current[3])
         self.assertEqual(
             set(nvx_rs.RELEASE_TARGETS.values()),
-            {target for _, _, target in builds.values()},
+            {target for *_, target in builds.values()},
         )
-        for job_name, (artifact, path, target) in builds.items():
+        for job_name, (cli, artifact, path, target) in builds.items():
             with self.subTest(job=job_name):
                 job = _workflow_job(workflow, job_name)
+                self.assertIn(job_name, ci.REQUIRED_CI_RESULT_ENVIRONMENTS)
+                # It waits for no job, and runs whenever the CLI job does.
+                self.assertNotIn("    needs:", job)
+                self.assertIn(
+                    "github.event.pull_request.head.repo.full_name "
+                    "== github.repository",
+                    job,
+                )
                 build = _workflow_step(workflow, job_name, "Build nvx-rs")
                 record = _workflow_step(workflow, job_name, "Record nvx-rs provenance")
                 upload = _workflow_step(workflow, job_name, "Upload nvx-rs executable")
@@ -13053,22 +13071,43 @@ python3() {
                 self.assertIn(f"path: build/{nvx_rs.PROVENANCE_NAME}\n", provenance)
                 for step in (upload, provenance):
                     self.assertIn("if-no-files-found: error", step)
-                # The build is recorded as it is built, the CLI tests run with
-                # it, and only a validated build leaves the job.
-                validate = job.index("uses: ./.github/actions/validate-nvx")
+                # The build is recorded as it is built, and leaves the job
+                # with its provenance without waiting for any test.
                 self.assertLess(
                     job.index("- name: Build nvx-rs"),
                     job.index("- name: Record nvx-rs provenance"),
                 )
-                self.assertLess(job.index("- name: Record nvx-rs provenance"), validate)
-                self.assertGreater(
-                    job.index("- name: Upload nvx-rs executable"), validate
+                for step_name in (
+                    "Upload nvx-rs executable",
+                    "Upload nvx-rs provenance",
+                ):
+                    self.assertLess(
+                        job.index("- name: Record nvx-rs provenance"),
+                        job.index(f"- name: {step_name}"),
+                    )
+                for unrelated in ("validate-nvx", "checkout-openvmm", "cargo test"):
+                    self.assertNotIn(unrelated, job)
+
+                # The CLI job of its OS tests with the build that it hands
+                # over, which it downloads where the build put it, with its
+                # provenance, before the tests.
+                cli_job = _workflow_job(workflow, cli)
+                validate = cli_job.index("uses: ./.github/actions/validate-nvx")
+                executable = _workflow_step(workflow, cli, "Download nvx-rs executable")
+                record_download = _workflow_step(
+                    workflow, cli, "Download nvx-rs provenance"
                 )
-                self.assertGreater(
-                    job.index("- name: Upload nvx-rs provenance"), validate
-                )
+                self.assertIn(f"name: {artifact}-executable\n", executable)
+                self.assertIn("path: nvx-rs/target/release\n", executable)
+                self.assertIn(f"name: {artifact}-provenance\n", record_download)
+                self.assertIn("path: build\n", record_download)
+                for step_name in (
+                    "Download nvx-rs executable",
+                    "Download nvx-rs provenance",
+                ):
+                    self.assertLess(cli_job.index(f"- name: {step_name}"), validate)
         # Self-contained executables run on every self-hosted runner.
-        linux = _workflow_step(workflow, "nvx-cli-linux", "Build nvx-rs")
+        linux = _workflow_step(workflow, "build-nvx-rs-linux-musl", "Build nvx-rs")
         self.assertEqual(linux.count("x86_64-unknown-linux-musl"), 3)
         self.assertIn("rust-toolchain.toml", linux)
         self.assertIn(
@@ -13076,23 +13115,40 @@ python3() {
             "nvx-rs \\\n            nvx-rs/target/release/nvx-rs",
             linux,
         )
-        # The tests that run nvx-rs directly need NVX_RS to name the build.
-        self.assertIn(
-            'echo "NVX_RS=${GITHUB_WORKSPACE}/nvx-rs/target/release/nvx-rs" '
-            '>> "${GITHUB_ENV}"',
-            linux,
+        windows = _workflow_job(workflow, "build-nvx-rs-windows-msvc")
+        windows_build = _workflow_step(
+            workflow, "build-nvx-rs-windows-msvc", "Build nvx-rs"
         )
-        windows = _workflow_job(workflow, "nvx-cli-windows")
-        windows_build = _workflow_step(workflow, "nvx-cli-windows", "Build nvx-rs")
         self.assertIn("RUSTFLAGS: -C target-feature=+crt-static", windows_build)
-        self.assertIn(
-            '"NVX_RS=$env:GITHUB_WORKSPACE\\nvx-rs\\target\\release\\nvx-rs.exe" |\n'
-            "            Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append",
-            windows_build,
-        )
         self.assertLess(
             windows.index("- name: Install the pinned Rust release"),
             windows.index("- name: Build nvx-rs"),
+        )
+        # The tests that run nvx-rs directly need NVX_RS to name the build,
+        # which loses its executable permission on its way to Linux.
+        linux_cli = _workflow_job(workflow, "nvx-cli-linux")
+        self.assertIn(
+            "    env:\n"
+            "      NVX_RS: ${{ github.workspace }}/nvx-rs/target/release/nvx-rs\n",
+            linux_cli,
+        )
+        self.assertIn(
+            "    env:\n"
+            "      NVX_RS: ${{ github.workspace }}\\nvx-rs\\target\\release\\"
+            "nvx-rs.exe\n",
+            _workflow_job(workflow, "nvx-cli-windows"),
+        )
+        self.assertIn(
+            "run: chmod +x nvx-rs/target/release/nvx-rs\n",
+            _workflow_step(workflow, "nvx-cli-linux", "Make nvx-rs executable"),
+        )
+        self.assertLess(
+            linux_cli.index("- name: Download nvx-rs executable"),
+            linux_cli.index("- name: Make nvx-rs executable"),
+        )
+        self.assertLess(
+            linux_cli.index("- name: Make nvx-rs executable"),
+            linux_cli.index("uses: ./.github/actions/validate-nvx"),
         )
 
         for job_name in (
@@ -13101,7 +13157,11 @@ python3() {
             *ci.REQUIRED_CI_MICROVM_DEBUG_PUSH_JOBS,
             *ci.REQUIRED_CI_PLATFORM_JOBS,
         ):
-            cli = "nvx-cli-windows" if job_name.endswith("-whp") else "nvx-cli-linux"
+            nvx_rs_build = (
+                "build-nvx-rs-windows-msvc"
+                if job_name.endswith("-whp")
+                else "build-nvx-rs-linux-musl"
+            )
             with self.subTest(consumer=job_name):
                 job = _workflow_job(workflow, job_name)
                 self.assertIn(
@@ -13110,10 +13170,29 @@ python3() {
                     else "uses: ./.github/workflows/run-nvx-microvm-tests.yml",
                     job,
                 )
+                needs = re.search(r"^    needs: \[(.+)\]$", job, re.MULTILINE)
+                assert needs is not None
+                self.assertIn(nvx_rs_build, needs.group(1).split(", "))
+                self.assertIn(
+                    f"        needs.{nvx_rs_build}.result == 'success' &&\n", job
+                )
+                for other in set(ci.REQUIRED_CI_NVX_RS_BUILD_JOBS) - {nvx_rs_build}:
+                    self.assertNotIn(other, job)
                 self.assertEqual(
                     re.findall(r"^      nvx-rs-artifact: (\S+)$", job, re.MULTILINE),
-                    [builds[cli][0]],
+                    [builds[nvx_rs_build][1]],
                 )
+        # Only a pushed commit whose builds succeeded is released or recorded.
+        for consumer in ("release", "performance-persist", "required-status-check"):
+            job = _workflow_job(workflow, consumer)
+            for nvx_rs_build in ci.REQUIRED_CI_NVX_RS_BUILD_JOBS:
+                with self.subTest(consumer=consumer, build=nvx_rs_build):
+                    self.assertIn(f"      - {nvx_rs_build}\n", job)
+                    if consumer != "required-status-check":
+                        self.assertIn(
+                            f"        needs.{nvx_rs_build}.result == 'success' &&\n",
+                            job,
+                        )
 
         for configuration in (microvm, platform):
             self.assertIn(

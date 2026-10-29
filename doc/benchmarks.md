@@ -648,8 +648,9 @@ follow the same flow with their own platform jobs:
 - `Persist performance baseline` (`performance-persist`, `dev` pushes only) consumes them and
   persists them to `data/*.csv`.
 - `Publish development release` (`release`, `dev` pushes only) doesn't read them, but it and
-  `performance-persist` run only when both NVX CLI jobs and the three platform jobs succeeded
-  and every correctness job, `nvx-microvm-tests-kvm` included, succeeded or was skipped.
+  `performance-persist` run only when both `nvx-rs` builds, both NVX CLI jobs, and the three
+  platform jobs succeeded and every correctness job, `nvx-microvm-tests-kvm` included, succeeded
+  or was skipped.
 - `Required status check` fails unless every job that the change schedules, including
   `platform-kvm`, `performance-gate`, and `nvx-microvm-tests-kvm`, has its expected result.
 

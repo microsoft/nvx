@@ -76,7 +76,7 @@ BUILD_COMMAND = (
 # The features of the nvx-rs that BUILD_COMMAND builds and that releases ship.
 FEATURES = ("cli",)
 # The Rust targets of the nvx-rs that releases ship, by operating system, as
-# CI's NVX CLI jobs build it: a static musl executable, which runs on every
+# CI's nvx-rs build jobs build it: a static musl executable, which runs on every
 # x86-64 Linux host, and an MSVC executable that links the C runtime
 # statically, which runs without the Visual C++ redistributable.
 RELEASE_TARGETS = {

@@ -132,11 +132,11 @@ and `windows-whp` platform jobs each stage
 `dist/nvx-<version>-<platform>` with `--binary-only`, then archive it as
 `.tar.gz` on Linux and `.zip` on Windows through the
 [`package-release`](../.github/actions/package-release/action.yml) action,
-with the `nvx-rs` and provenance that the NVX CLI job of their operating
-system built and tested. Only `dev` pushes upload the archives, so pull
-requests and full runs prove that their packages build without publishing
-them. The development release job checks that each package ships OpenVMM and
-`nvx-rs` before it publishes them.
+with the `nvx-rs` and provenance that the `nvx-rs` build job of their
+operating system built and its NVX CLI job tested. Only `dev` pushes upload
+the archives, so pull requests and full runs prove that their packages build
+without publishing them. The development release job checks that each package
+ships OpenVMM and `nvx-rs` before it publishes them.
 [Continuous integration](ci.md) describes the jobs that gate and publish the
 resulting development release.
 

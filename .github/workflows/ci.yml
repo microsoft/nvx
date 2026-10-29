@@ -119,13 +119,15 @@ jobs:
       - name: Check nvx-rs
         uses: ./.github/actions/check-nvx-rs
 
-  # The NVX CLI tests do not depend on the backend, so they run once per OS on
-  # GitHub-hosted runners rather than in every hypervisor job. They read
-  # OpenVMM's pinned CPU profiles from the submodule, so they follow its
-  # checkout, which needs the deploy key that fork pull requests lack. The
-  # microVM and platform jobs of each OS wait for its result.
-  nvx-cli-linux:
-    name: NVX CLI / Linux
+  # The microVM tests run their microVMs and sandboxes with nvx-rs, and every
+  # release package ships it, so one GitHub-hosted job per OS builds it, as the
+  # OpenVMM producers build OpenVMM, and hands it to the microVM and platform
+  # jobs of its OS as soon as it is built, and to the NVX CLI job of its OS,
+  # which tests with it (doc/ci.md#job-graph-and-runner-capacity). The jobs
+  # that it feeds run only for pushes, merge groups, full runs, and
+  # same-repository pull requests, so it does too.
+  build-nvx-rs-linux-musl:
+    name: nvx-rs binary / Linux musl
     if: >-
       ${{
         (
@@ -145,23 +147,14 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Checkout OpenVMM
-        uses: ./.github/actions/checkout-openvmm
-        with:
-          ssh-key: ${{ secrets.OPENVMM_DEPLOY_KEY }}
-
       # The release that the self-hosted runners provide.
       - name: Set up Python
         uses: actions/setup-python@v6
         with:
           python-version: "3.12"
 
-      # The microVM tests run their microVMs and sandboxes with nvx-rs. A
-      # static musl build runs on every self-hosted Linux runner, so the
-      # microVM jobs take this one, as they take OpenVMM from its build jobs.
-      # It goes where `cargo build --release` puts it, where nvx.py, and so
-      # the CLI tests, look for it, and NVX_RS names it for the tests that run
-      # it directly.
+      # A static musl build runs on every self-hosted Linux runner. It goes
+      # where `cargo build --release` puts it, where nvx.py looks for it.
       - name: Build nvx-rs
         shell: bash
         run: |
@@ -174,7 +167,6 @@ jobs:
             --manifest-path nvx-rs/Cargo.toml --target x86_64-unknown-linux-musl
           install -D -m 0755 nvx-rs/target/x86_64-unknown-linux-musl/release/nvx-rs \
             nvx-rs/target/release/nvx-rs
-          echo "NVX_RS=${GITHUB_WORKSPACE}/nvx-rs/target/release/nvx-rs" >> "${GITHUB_ENV}"
 
       # Packages ship the build with its provenance, which binds it to the
       # nvx-rs sources, the pinned Rust release, the target, and the features.
@@ -183,6 +175,171 @@ jobs:
         run: >-
           python3 scripts/nvx.py record-nvx-rs-provenance
           --target x86_64-unknown-linux-musl
+
+      - name: Upload nvx-rs executable
+        uses: actions/upload-artifact@v7
+        with:
+          name: nvx-rs-linux-musl-executable
+          path: nvx-rs/target/release/nvx-rs
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 1
+
+      - name: Upload nvx-rs provenance
+        uses: actions/upload-artifact@v7
+        with:
+          name: nvx-rs-linux-musl-provenance
+          path: build/nvx-rs.provenance.json
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 1
+
+  build-nvx-rs-windows-msvc:
+    name: nvx-rs binary / Windows MSVC
+    if: >-
+      ${{
+        (
+          github.event_name != 'pull_request' ||
+          github.event.pull_request.draft == false
+        ) &&
+        (
+          github.event_name != 'pull_request' ||
+          github.event.pull_request.head.repo.full_name == github.repository
+        )
+      }}
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      # The release that the self-hosted runners provide.
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      # The next step builds nvx-rs with the release that rust-toolchain.toml
+      # pins, which rustup would otherwise install with its default profile.
+      - name: Install the pinned Rust release
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+          $channel = Select-String -LiteralPath "rust-toolchain.toml" `
+            -Pattern '^channel = "([^"]+)"' | Select-Object -First 1
+          if ($null -eq $channel) {
+            throw "rust-toolchain.toml does not pin a Rust release"
+          }
+          rustup toolchain install $channel.Matches[0].Groups[1].Value `
+            --profile minimal --no-self-update
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      # As on Linux. The static C runtime spares the self-hosted runners the
+      # Visual C++ redistributable.
+      - name: Build nvx-rs
+        shell: powershell
+        env:
+          RUSTFLAGS: -C target-feature=+crt-static
+        run: |
+          $ErrorActionPreference = "Stop"
+          cargo build --release --locked --features cli --manifest-path nvx-rs/Cargo.toml
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Record nvx-rs provenance
+        shell: powershell
+        run: |
+          python scripts\nvx.py record-nvx-rs-provenance --target x86_64-pc-windows-msvc
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Upload nvx-rs executable
+        uses: actions/upload-artifact@v7
+        with:
+          name: nvx-rs-windows-msvc-executable
+          path: nvx-rs/target/release/nvx-rs.exe
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 1
+
+      - name: Upload nvx-rs provenance
+        uses: actions/upload-artifact@v7
+        with:
+          name: nvx-rs-windows-msvc-provenance
+          path: build/nvx-rs.provenance.json
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 1
+
+  # The NVX CLI tests do not depend on the backend, so they run once per OS on
+  # GitHub-hosted runners rather than in every hypervisor job, with the nvx-rs
+  # that the microVM jobs of the OS run. They read OpenVMM's pinned CPU
+  # profiles from the submodule, so they follow its checkout, which needs the
+  # deploy key that fork pull requests lack.
+  nvx-cli-linux:
+    name: NVX CLI / Linux
+    needs: [build-nvx-rs-linux-musl]
+    if: >-
+      ${{
+        (
+          github.event_name != 'pull_request' ||
+          github.event.pull_request.draft == false
+        ) &&
+        (
+          github.event_name != 'pull_request' ||
+          github.event.pull_request.head.repo.full_name == github.repository
+        )
+      }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # The build that the microVM jobs run, which a step below downloads where
+    # `cargo build --release` puts it, and where nvx.py, and so the CLI tests,
+    # look for it, named for the tests that run it directly.
+    env:
+      NVX_RS: ${{ github.workspace }}/nvx-rs/target/release/nvx-rs
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - name: Checkout OpenVMM
+        uses: ./.github/actions/checkout-openvmm
+        with:
+          ssh-key: ${{ secrets.OPENVMM_DEPLOY_KEY }}
+
+      # The release that the self-hosted runners provide.
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      # The steps that compare OpenVMM's data test nvx-rs with Cargo, with the
+      # release that rust-toolchain.toml pins, which rustup would otherwise
+      # install with its default profile.
+      - name: Install the pinned Rust release
+        shell: bash
+        run: |
+          set -euo pipefail
+          toolchain=$(sed -n 's/^channel = "\([^"]*\)".*/\1/p' rust-toolchain.toml)
+          test -n "${toolchain}"
+          rustup toolchain install "${toolchain}" --profile minimal --no-self-update
+
+      - name: Download nvx-rs executable
+        uses: actions/download-artifact@v8
+        with:
+          name: nvx-rs-linux-musl-executable
+          path: nvx-rs/target/release
+
+      - name: Download nvx-rs provenance
+        uses: actions/download-artifact@v8
+        with:
+          name: nvx-rs-linux-musl-provenance
+          path: build
+
+      - name: Make nvx-rs executable
+        shell: bash
+        run: chmod +x nvx-rs/target/release/nvx-rs
 
       - name: Validate NVX CLI
         uses: ./.github/actions/validate-nvx
@@ -207,26 +364,9 @@ jobs:
           cargo test --locked --manifest-path nvx-rs/Cargo.toml
           --no-default-features --test openvmm_cpu_profiles -- --ignored
 
-      - name: Upload nvx-rs executable
-        uses: actions/upload-artifact@v7
-        with:
-          name: nvx-rs-linux-musl-executable
-          path: nvx-rs/target/release/nvx-rs
-          if-no-files-found: error
-          overwrite: true
-          retention-days: 1
-
-      - name: Upload nvx-rs provenance
-        uses: actions/upload-artifact@v7
-        with:
-          name: nvx-rs-linux-musl-provenance
-          path: build/nvx-rs.provenance.json
-          if-no-files-found: error
-          overwrite: true
-          retention-days: 1
-
   nvx-cli-windows:
     name: NVX CLI / Windows
+    needs: [build-nvx-rs-windows-msvc]
     if: >-
       ${{
         (
@@ -240,6 +380,9 @@ jobs:
       }}
     runs-on: windows-latest
     timeout-minutes: 15
+    # As on Linux.
+    env:
+      NVX_RS: ${{ github.workspace }}\nvx-rs\target\release\nvx-rs.exe
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -257,9 +400,10 @@ jobs:
         with:
           python-version: "3.12"
 
-      # The curl shim test compiles the shim, and the next step builds nvx-rs,
-      # with the release that rust-toolchain.toml pins, which rustup would
-      # otherwise install with its default profile.
+      # The curl shim test compiles the shim, and the steps that compare
+      # OpenVMM's data test nvx-rs with Cargo, with the release that
+      # rust-toolchain.toml pins, which rustup would otherwise install with its
+      # default profile.
       - name: Install the pinned Rust release
         shell: powershell
         run: |
@@ -273,24 +417,17 @@ jobs:
             --profile minimal --no-self-update
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-      # As on Linux, for the microVM jobs and the CLI tests. The static C
-      # runtime spares the self-hosted runners the Visual C++ redistributable.
-      - name: Build nvx-rs
-        shell: powershell
-        env:
-          RUSTFLAGS: -C target-feature=+crt-static
-        run: |
-          $ErrorActionPreference = "Stop"
-          cargo build --release --locked --features cli --manifest-path nvx-rs/Cargo.toml
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          "NVX_RS=$env:GITHUB_WORKSPACE\nvx-rs\target\release\nvx-rs.exe" |
-            Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+      - name: Download nvx-rs executable
+        uses: actions/download-artifact@v8
+        with:
+          name: nvx-rs-windows-msvc-executable
+          path: nvx-rs/target/release
 
-      - name: Record nvx-rs provenance
-        shell: powershell
-        run: |
-          python scripts\nvx.py record-nvx-rs-provenance --target x86_64-pc-windows-msvc
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Download nvx-rs provenance
+        uses: actions/download-artifact@v8
+        with:
+          name: nvx-rs-windows-msvc-provenance
+          path: build
 
       - name: Validate NVX CLI
         uses: ./.github/actions/validate-nvx
@@ -312,24 +449,6 @@ jobs:
           cargo test --locked --manifest-path nvx-rs/Cargo.toml --no-default-features `
             --test openvmm_cpu_profiles -- --ignored
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-
-      - name: Upload nvx-rs executable
-        uses: actions/upload-artifact@v7
-        with:
-          name: nvx-rs-windows-msvc-executable
-          path: nvx-rs/target/release/nvx-rs.exe
-          if-no-files-found: error
-          overwrite: true
-          retention-days: 1
-
-      - name: Upload nvx-rs provenance
-        uses: actions/upload-artifact@v7
-        with:
-          name: nvx-rs-windows-msvc-provenance
-          path: build/nvx-rs.provenance.json
-          if-no-files-found: error
-          overwrite: true
-          retention-days: 1
 
   openvmm-changes:
     name: Detect CI workload inputs
@@ -1645,7 +1764,7 @@ jobs:
   # persistence read, succeeds only when every shard does.
   nvx-microvm-tests-kvm:
     name: NVX microVM tests / Linux / KVM / Shard ${{ matrix.shard }} of ${{ strategy.job-total }}
-    needs: [artifacts, build-openvmm-linux-gnu, nvx-cli-linux, openvmm-changes]
+    needs: [artifacts, build-openvmm-linux-gnu, build-nvx-rs-linux-musl, openvmm-changes]
     if: >-
       ${{
         always() &&
@@ -1660,7 +1779,7 @@ jobs:
         ) &&
         needs.artifacts.result == 'success' &&
         needs.build-openvmm-linux-gnu.result == 'success' &&
-        needs.nvx-cli-linux.result == 'success' &&
+        needs.build-nvx-rs-linux-musl.result == 'success' &&
         (
           needs.openvmm-changes.result != 'success' ||
           needs.openvmm-changes.outputs.run-microvm-tests == 'true'
@@ -1684,7 +1803,7 @@ jobs:
 
   nvx-microvm-tests-mshv:
     name: NVX microVM tests / Linux / MSHV / Shard ${{ matrix.shard }} of ${{ strategy.job-total }}
-    needs: [artifacts, build-openvmm-linux-gnu, nvx-cli-linux, openvmm-changes]
+    needs: [artifacts, build-openvmm-linux-gnu, build-nvx-rs-linux-musl, openvmm-changes]
     if: >-
       ${{
         always() &&
@@ -1699,7 +1818,7 @@ jobs:
         ) &&
         needs.artifacts.result == 'success' &&
         needs.build-openvmm-linux-gnu.result == 'success' &&
-        needs.nvx-cli-linux.result == 'success' &&
+        needs.build-nvx-rs-linux-musl.result == 'success' &&
         (
           needs.openvmm-changes.result != 'success' ||
           needs.openvmm-changes.outputs.run-microvm-tests == 'true'
@@ -1723,7 +1842,7 @@ jobs:
 
   nvx-microvm-tests-whp:
     name: NVX microVM tests / Windows / WHP / Shard ${{ matrix.shard }} of ${{ strategy.job-total }}
-    needs: [artifacts, build-openvmm-windows-msvc, nvx-cli-windows, openvmm-changes]
+    needs: [artifacts, build-openvmm-windows-msvc, build-nvx-rs-windows-msvc, openvmm-changes]
     if: >-
       ${{
         always() &&
@@ -1738,7 +1857,7 @@ jobs:
         ) &&
         needs.artifacts.result == 'success' &&
         needs.build-openvmm-windows-msvc.result == 'success' &&
-        needs.nvx-cli-windows.result == 'success' &&
+        needs.build-nvx-rs-windows-msvc.result == 'success' &&
         (
           needs.openvmm-changes.result != 'success' ||
           needs.openvmm-changes.outputs.run-microvm-tests == 'true'
@@ -1767,7 +1886,7 @@ jobs:
   # only this job waits for distro-artifacts.
   nvx-microvm-guests-kvm:
     name: NVX microVM tests / Linux / KVM / Guests and sandboxes
-    needs: [artifacts, distro-artifacts, build-openvmm-linux-gnu, nvx-cli-linux, openvmm-changes]
+    needs: [artifacts, distro-artifacts, build-openvmm-linux-gnu, build-nvx-rs-linux-musl, openvmm-changes]
     if: >-
       ${{
         always() &&
@@ -1783,7 +1902,7 @@ jobs:
         needs.artifacts.result == 'success' &&
         needs.distro-artifacts.result == 'success' &&
         needs.build-openvmm-linux-gnu.result == 'success' &&
-        needs.nvx-cli-linux.result == 'success' &&
+        needs.build-nvx-rs-linux-musl.result == 'success' &&
         (
           needs.openvmm-changes.result != 'success' ||
           needs.openvmm-changes.outputs.run-microvm-tests == 'true'
@@ -1802,7 +1921,7 @@ jobs:
 
   nvx-microvm-guests-mshv:
     name: NVX microVM tests / Linux / MSHV / Guests and sandboxes
-    needs: [artifacts, distro-artifacts, build-openvmm-linux-gnu, nvx-cli-linux, openvmm-changes]
+    needs: [artifacts, distro-artifacts, build-openvmm-linux-gnu, build-nvx-rs-linux-musl, openvmm-changes]
     if: >-
       ${{
         always() &&
@@ -1818,7 +1937,7 @@ jobs:
         needs.artifacts.result == 'success' &&
         needs.distro-artifacts.result == 'success' &&
         needs.build-openvmm-linux-gnu.result == 'success' &&
-        needs.nvx-cli-linux.result == 'success' &&
+        needs.build-nvx-rs-linux-musl.result == 'success' &&
         (
           needs.openvmm-changes.result != 'success' ||
           needs.openvmm-changes.outputs.run-microvm-tests == 'true'
@@ -1837,7 +1956,7 @@ jobs:
 
   nvx-microvm-guests-whp:
     name: NVX microVM tests / Windows / WHP / Guests and sandboxes
-    needs: [artifacts, distro-artifacts, build-openvmm-windows-msvc, nvx-cli-windows, openvmm-changes]
+    needs: [artifacts, distro-artifacts, build-openvmm-windows-msvc, build-nvx-rs-windows-msvc, openvmm-changes]
     if: >-
       ${{
         always() &&
@@ -1853,7 +1972,7 @@ jobs:
         needs.artifacts.result == 'success' &&
         needs.distro-artifacts.result == 'success' &&
         needs.build-openvmm-windows-msvc.result == 'success' &&
-        needs.nvx-cli-windows.result == 'success' &&
+        needs.build-nvx-rs-windows-msvc.result == 'success' &&
         (
           needs.openvmm-changes.result != 'success' ||
           needs.openvmm-changes.outputs.run-microvm-tests == 'true'
@@ -1874,7 +1993,7 @@ jobs:
   # pushes and full runs run every backend.
   nvx-microvm-debug-kvm:
     name: NVX microVM tests / Linux / KVM / Debug kernel
-    needs: [artifacts, debug-kernel, build-openvmm-linux-gnu, nvx-cli-linux, openvmm-changes]
+    needs: [artifacts, debug-kernel, build-openvmm-linux-gnu, build-nvx-rs-linux-musl, openvmm-changes]
     if: >-
       ${{
         always() &&
@@ -1890,7 +2009,7 @@ jobs:
         needs.artifacts.result == 'success' &&
         needs.debug-kernel.result == 'success' &&
         needs.build-openvmm-linux-gnu.result == 'success' &&
-        needs.nvx-cli-linux.result == 'success' &&
+        needs.build-nvx-rs-linux-musl.result == 'success' &&
         (
           needs.openvmm-changes.result != 'success' ||
           needs.openvmm-changes.outputs.run-microvm-tests == 'true'
@@ -1909,7 +2028,7 @@ jobs:
 
   nvx-microvm-debug-mshv:
     name: NVX microVM tests / Linux / MSHV / Debug kernel
-    needs: [artifacts, debug-kernel, build-openvmm-linux-gnu, nvx-cli-linux, openvmm-changes]
+    needs: [artifacts, debug-kernel, build-openvmm-linux-gnu, build-nvx-rs-linux-musl, openvmm-changes]
     if: >-
       ${{
         always() &&
@@ -1919,7 +2038,7 @@ jobs:
         needs.artifacts.result == 'success' &&
         needs.debug-kernel.result == 'success' &&
         needs.build-openvmm-linux-gnu.result == 'success' &&
-        needs.nvx-cli-linux.result == 'success' &&
+        needs.build-nvx-rs-linux-musl.result == 'success' &&
         (
           needs.openvmm-changes.result != 'success' ||
           needs.openvmm-changes.outputs.run-microvm-tests == 'true'
@@ -1938,7 +2057,7 @@ jobs:
 
   nvx-microvm-debug-whp:
     name: NVX microVM tests / Windows / WHP / Debug kernel
-    needs: [artifacts, debug-kernel, build-openvmm-windows-msvc, nvx-cli-windows, openvmm-changes]
+    needs: [artifacts, debug-kernel, build-openvmm-windows-msvc, build-nvx-rs-windows-msvc, openvmm-changes]
     if: >-
       ${{
         always() &&
@@ -1948,7 +2067,7 @@ jobs:
         needs.artifacts.result == 'success' &&
         needs.debug-kernel.result == 'success' &&
         needs.build-openvmm-windows-msvc.result == 'success' &&
-        needs.nvx-cli-windows.result == 'success' &&
+        needs.build-nvx-rs-windows-msvc.result == 'success' &&
         (
           needs.openvmm-changes.result != 'success' ||
           needs.openvmm-changes.outputs.run-microvm-tests == 'true'
@@ -1976,7 +2095,7 @@ jobs:
   # history, runs them for every change but documentation.
   platform-kvm:
     name: Platform / Linux / KVM / Virtual machine
-    needs: [artifacts, distro-artifacts, build-openvmm-linux-gnu, nvx-cli-linux, openvmm-changes]
+    needs: [artifacts, distro-artifacts, build-openvmm-linux-gnu, build-nvx-rs-linux-musl, openvmm-changes]
     if: >-
       ${{
         always() &&
@@ -1992,7 +2111,7 @@ jobs:
         needs.artifacts.result == 'success' &&
         needs.distro-artifacts.result == 'success' &&
         needs.build-openvmm-linux-gnu.result == 'success' &&
-        needs.nvx-cli-linux.result == 'success' &&
+        needs.build-nvx-rs-linux-musl.result == 'success' &&
         (
           needs.openvmm-changes.result != 'success' ||
           needs.openvmm-changes.outputs.run-benchmarks == 'true'
@@ -2017,7 +2136,7 @@ jobs:
 
   platform-mshv:
     name: Platform / Linux / MSHV / Virtual machine
-    needs: [artifacts, distro-artifacts, build-openvmm-linux-musl, nvx-cli-linux, openvmm-changes]
+    needs: [artifacts, distro-artifacts, build-openvmm-linux-musl, build-nvx-rs-linux-musl, openvmm-changes]
     if: >-
       ${{
         always() &&
@@ -2033,7 +2152,7 @@ jobs:
         needs.artifacts.result == 'success' &&
         needs.distro-artifacts.result == 'success' &&
         needs.build-openvmm-linux-musl.result == 'success' &&
-        needs.nvx-cli-linux.result == 'success' &&
+        needs.build-nvx-rs-linux-musl.result == 'success' &&
         (
           needs.openvmm-changes.result != 'success' ||
           needs.openvmm-changes.outputs.run-benchmarks == 'true'
@@ -2058,7 +2177,7 @@ jobs:
 
   platform-whp:
     name: Platform / Windows / WHP / Virtual machine
-    needs: [artifacts, distro-artifacts, build-openvmm-windows-msvc, nvx-cli-windows, openvmm-changes]
+    needs: [artifacts, distro-artifacts, build-openvmm-windows-msvc, build-nvx-rs-windows-msvc, openvmm-changes]
     if: >-
       ${{
         always() &&
@@ -2074,7 +2193,7 @@ jobs:
         needs.artifacts.result == 'success' &&
         needs.distro-artifacts.result == 'success' &&
         needs.build-openvmm-windows-msvc.result == 'success' &&
-        needs.nvx-cli-windows.result == 'success' &&
+        needs.build-nvx-rs-windows-msvc.result == 'success' &&
         (
           needs.openvmm-changes.result != 'success' ||
           needs.openvmm-changes.outputs.run-benchmarks == 'true'
@@ -2103,6 +2222,8 @@ jobs:
       - debug-kernel
       - quality
       - nvx-rs
+      - build-nvx-rs-linux-musl
+      - build-nvx-rs-windows-msvc
       - nvx-cli-linux
       - nvx-cli-windows
       - openvmm-changes
@@ -2134,6 +2255,8 @@ jobs:
         needs.debug-kernel.result == 'success' &&
         needs.quality.result == 'success' &&
         needs.nvx-rs.result == 'success' &&
+        needs.build-nvx-rs-linux-musl.result == 'success' &&
+        needs.build-nvx-rs-windows-msvc.result == 'success' &&
         needs.nvx-cli-linux.result == 'success' &&
         needs.nvx-cli-windows.result == 'success' &&
         (
@@ -2250,6 +2373,8 @@ jobs:
     needs:
       - quality
       - nvx-rs
+      - build-nvx-rs-linux-musl
+      - build-nvx-rs-windows-msvc
       - nvx-cli-linux
       - nvx-cli-windows
       - openvmm-changes
@@ -2304,6 +2429,8 @@ jobs:
           RUN_BENCHMARKS: ${{ needs.openvmm-changes.outputs.run-benchmarks }}
           QUALITY_RESULT: ${{ needs.quality.result }}
           NVX_RS_RESULT: ${{ needs.nvx-rs.result }}
+          BUILD_NVX_RS_LINUX_MUSL_RESULT: ${{ needs.build-nvx-rs-linux-musl.result }}
+          BUILD_NVX_RS_WINDOWS_MSVC_RESULT: ${{ needs.build-nvx-rs-windows-msvc.result }}
           NVX_CLI_LINUX_RESULT: ${{ needs.nvx-cli-linux.result }}
           NVX_CLI_WINDOWS_RESULT: ${{ needs.nvx-cli-windows.result }}
           CHANGES_RESULT: ${{ needs.openvmm-changes.result }}
@@ -2347,6 +2474,8 @@ jobs:
     name: Persist performance baseline
     needs:
       - debug-kernel
+      - build-nvx-rs-linux-musl
+      - build-nvx-rs-windows-msvc
       - nvx-cli-linux
       - nvx-cli-windows
       - openvmm-changes
@@ -2376,6 +2505,8 @@ jobs:
         github.ref == 'refs/heads/dev' &&
         !cancelled() &&
         needs.debug-kernel.result == 'success' &&
+        needs.build-nvx-rs-linux-musl.result == 'success' &&
+        needs.build-nvx-rs-windows-msvc.result == 'success' &&
         needs.nvx-cli-linux.result == 'success' &&
         needs.nvx-cli-windows.result == 'success' &&
         (

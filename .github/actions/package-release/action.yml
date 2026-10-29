@@ -15,8 +15,9 @@ inputs:
 runs:
   using: composite
   steps:
-    # Every package ships the nvx-rs that the NVX CLI job of its OS built and
-    # tested, with its provenance, from where nvx.py package looks for them.
+    # Every package ships the nvx-rs that the nvx-rs build job of its OS built
+    # and its NVX CLI job tested, with its provenance, from where nvx.py
+    # package looks for them.
     - name: Download nvx-rs executable
       uses: actions/download-artifact@v8
       with:
