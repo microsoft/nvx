@@ -272,6 +272,93 @@ fn decode_exec_header(payload: &[u8], max_cwd: usize) -> Result<ExecHeader, Prot
     })
 }
 
+/// An `EXEC` payload as both decoders read it, with each string as one decoder holds it.
+struct DecodedExec<S> {
+    /// Timeout in milliseconds; zero disables it.
+    timeout_ms: u32,
+    /// Flags of an extended payload; zero for a legacy one.
+    flags: u16,
+    /// The absolute program, followed by its arguments.
+    argv: Vec<S>,
+    /// Absolute guest directory to start the program in; `None` selects `/`.
+    cwd: Option<S>,
+    /// The explicit `KEY=VALUE` entries, or `None` for the default environment.
+    environment: Option<Vec<S>>,
+}
+
+/// Decodes an `EXEC` payload, whose working directory may be 1 to `max_cwd` bytes long, as both
+/// decoders read it: it checks the payload's bytes, and converts each string to `S` as soon as it
+/// reads it.
+///
+/// It refuses what [`decode_exec_header`] refuses, an empty argument, working directory, or
+/// entry, or one longer than [`MAX_ARGUMENT_BYTES`], one that contains NUL characters or that `S`
+/// refuses, a relative program or working directory, an entry without a name, a name that
+/// repeats, and trailing bytes.
+fn decode_exec<S: ExecString>(
+    payload: &[u8],
+    max_cwd: usize,
+) -> Result<DecodedExec<S>, ProtocolError> {
+    let ExecHeader {
+        timeout_ms,
+        count,
+        flags,
+        environment_count,
+        cwd_len,
+        mut offset,
+    } = decode_exec_header(payload, max_cwd)?;
+    let mut argv = Vec::with_capacity(count);
+    for _ in 0..count {
+        argv.push(prefixed_string::<S>(payload, &mut offset, "arguments")?);
+    }
+    if argv.first().and_then(|program| program.as_ref().first()) != Some(&b'/') {
+        return Err(violation("exec program must be an absolute guest path"));
+    }
+    let cwd = if flags & EXEC_CWD_PRESENT == 0 {
+        None
+    } else {
+        let what = "working directory";
+        let cwd = S::convert(bytes_at(payload, offset, cwd_len, what)?.to_vec(), what)?;
+        offset = offset
+            .checked_add(cwd_len)
+            .ok_or_else(|| violation("the exec request is truncated"))?;
+        if cwd.as_ref().first() != Some(&b'/') {
+            return Err(violation(
+                "exec working directory must be an absolute guest path",
+            ));
+        }
+        Some(cwd)
+    };
+    let mut environment = Vec::with_capacity(environment_count);
+    let mut names = BTreeSet::new();
+    for _ in 0..environment_count {
+        let entry = prefixed_string::<S>(payload, &mut offset, "environment entries")?;
+        // Like the guest agent, refuse entries without a name and repeated names.
+        let bytes = entry.as_ref();
+        let Some(name) = bytes
+            .iter()
+            .position(|&byte| byte == b'=')
+            .filter(|&at| at != 0)
+            .map(|at| &bytes[..at])
+        else {
+            return Err(S::unnamed_entry());
+        };
+        if !names.insert(name.to_vec()) {
+            return Err(S::repeated_name(name));
+        }
+        environment.push(entry);
+    }
+    if offset != payload.len() {
+        return Err(violation("the exec request has trailing bytes"));
+    }
+    Ok(DecodedExec {
+        timeout_ms,
+        flags,
+        argv,
+        cwd,
+        environment: (flags & EXEC_ENVIRONMENT_PRESENT != 0).then_some(environment),
+    })
+}
+
 /// Decodes the payload of an `EXEC` request.
 ///
 /// It refuses what the guest agent refuses: a truncated payload, a number of arguments outside 1
@@ -282,58 +369,18 @@ fn decode_exec_header(payload: &[u8], max_cwd: usize) -> Result<ExecHeader, Prot
 /// relative program or working directory, an entry without a name, a name that repeats, and
 /// trailing bytes.
 pub fn decode_exec_payload(payload: &[u8]) -> Result<ExecPayload, ProtocolError> {
-    let ExecHeader {
+    let DecodedExec {
         timeout_ms,
-        count,
         flags,
-        environment_count,
-        cwd_len,
-        mut offset,
-    } = decode_exec_header(payload, MAX_ARGUMENT_BYTES)?;
-    let mut argv = Vec::with_capacity(count);
-    for _ in 0..count {
-        argv.push(prefixed_text(payload, &mut offset, "arguments")?);
-    }
-    if !argv[0].starts_with('/') {
-        return Err(violation("exec program must be an absolute guest path"));
-    }
-    let cwd = if flags & EXEC_CWD_PRESENT == 0 {
-        None
-    } else {
-        let cwd = text_at(payload, offset, cwd_len, "working directory")?;
-        offset += cwd_len;
-        if !cwd.starts_with('/') {
-            return Err(violation(
-                "exec working directory must be an absolute guest path",
-            ));
-        }
-        Some(cwd)
-    };
-    let mut environment = Vec::with_capacity(environment_count);
-    let mut names = BTreeSet::new();
-    for _ in 0..environment_count {
-        let entry = prefixed_text(payload, &mut offset, "environment entries")?;
-        // Like the guest agent, refuse entries without a name and repeated names.
-        let Some((name, _)) = entry.split_once('=').filter(|(name, _)| !name.is_empty()) else {
-            return Err(violation(
-                "exec environment entries must be KEY=VALUE strings",
-            ));
-        };
-        if !names.insert(name.to_owned()) {
-            return Err(violation(format!(
-                "exec environment names must be unique, but {name:?} repeats"
-            )));
-        }
-        environment.push(entry);
-    }
-    if offset != payload.len() {
-        return Err(violation("the exec request has trailing bytes"));
-    }
+        argv,
+        cwd,
+        environment,
+    } = decode_exec::<String>(payload, MAX_ARGUMENT_BYTES)?;
     Ok(ExecPayload {
         timeout_ms,
         argv,
         cwd,
-        environment: (flags & EXEC_ENVIRONMENT_PRESENT != 0).then_some(environment),
+        environment,
         inherit_default_env: flags & EXEC_ENVIRONMENT_PRESENT == 0
             || flags & EXEC_INHERIT_DEFAULT_ENV != 0,
     })
@@ -341,89 +388,88 @@ pub fn decode_exec_payload(payload: &[u8]) -> Result<ExecPayload, ProtocolError>
 
 /// Decodes an `EXEC` payload with exactly the C guest agent's byte-oriented acceptance rules.
 ///
-/// This differs from [`decode_exec_payload`] only where Linux permits bytes that are not UTF-8
-/// and at the C guest's 4096-byte working-directory boundary. The host-facing decoder remains
-/// text-oriented, so this guest decoder does not broaden host behavior.
+/// It reads the payload as [`decode_exec_payload`] does, with the same checks in the same order,
+/// and accepts what that decoder accepts and the strings that are not UTF-8, which Linux permits.
+/// It bounds the working directory by [`MAX_GUEST_CWD_BYTES`], the C guest's bound, which equals
+/// the [`MAX_ARGUMENT_BYTES`] of the host's decoder. Its `inherit_default_env` follows
+/// [`EXEC_INHERIT_DEFAULT_ENV`] alone, so unlike the host's, it is false without explicit entries.
+/// The host-facing decoder remains text-oriented, so this guest decoder does not broaden host
+/// behavior.
 pub fn decode_guest_exec_payload(payload: &[u8]) -> Result<GuestExecPayload, ProtocolError> {
-    let ExecHeader {
+    let DecodedExec {
         timeout_ms,
-        count,
         flags,
-        environment_count,
-        cwd_len,
-        mut offset,
-    } = decode_exec_header(payload, MAX_GUEST_CWD_BYTES)?;
-    let mut argv = Vec::with_capacity(count);
-    for _ in 0..count {
-        argv.push(prefixed_bytes(payload, &mut offset, "arguments")?);
-    }
-    if argv.first().and_then(|argument| argument.first()) != Some(&b'/') {
-        return Err(violation("exec program must be an absolute guest path"));
-    }
-    let cwd = if flags & EXEC_CWD_PRESENT == 0 {
-        None
-    } else {
-        let cwd = bytes_at(payload, offset, cwd_len, "working directory")?.to_vec();
-        offset = offset
-            .checked_add(cwd_len)
-            .ok_or_else(|| violation("the exec request is truncated"))?;
-        if cwd.first() != Some(&b'/') {
-            return Err(violation(
-                "exec working directory must be an absolute guest path",
-            ));
-        }
-        Some(cwd)
-    };
-    let mut environment = Vec::with_capacity(environment_count);
-    let mut names = BTreeSet::new();
-    for _ in 0..environment_count {
-        let entry = prefixed_bytes(payload, &mut offset, "environment entries")?;
-        let Some(equals) = entry
-            .iter()
-            .position(|&byte| byte == b'=')
-            .filter(|&at| at != 0)
-        else {
-            return Err(violation(
-                "exec environment entries must be KEY=VALUE byte strings",
-            ));
-        };
-        if !names.insert(entry[..equals].to_vec()) {
-            return Err(violation("exec environment names must be unique"));
-        }
-        environment.push(entry);
-    }
-    if offset != payload.len() {
-        return Err(violation("the exec request has trailing bytes"));
-    }
+        argv,
+        cwd,
+        environment,
+    } = decode_exec::<Vec<u8>>(payload, MAX_GUEST_CWD_BYTES)?;
     Ok(GuestExecPayload {
         timeout_ms,
         argv,
         cwd,
-        environment: (flags & EXEC_ENVIRONMENT_PRESENT != 0).then_some(environment),
+        environment,
         inherit_default_env: flags & EXEC_INHERIT_DEFAULT_ENV != 0,
     })
 }
 
-/// Reads the text at `offset` that its `u32` length precedes, of 1 to [`MAX_ARGUMENT_BYTES`]
-/// bytes, and advances `offset` past it.
-fn prefixed_text(payload: &[u8], offset: &mut usize, what: &str) -> Result<String, ProtocolError> {
-    utf8_text(prefixed_bytes(payload, offset, what)?, what)
+/// A string of an `EXEC` payload, such as an argument, the working directory, or an environment
+/// entry, as one decoder holds it. Each decoder's implementation holds what it does differently
+/// from the other: the host's reads UTF-8 text, the guest's reads Linux byte strings, and they
+/// word the refusals of an entry's name differently.
+trait ExecString: AsRef<[u8]> + Sized {
+    /// Converts the bytes of a string of the payload, which `what` names, as soon as they are
+    /// read.
+    fn convert(bytes: Vec<u8>, what: &str) -> Result<Self, ProtocolError>;
+
+    /// Returns the error of an environment entry without a name before its first `=`.
+    fn unnamed_entry() -> ProtocolError;
+
+    /// Returns the error of an environment entry whose name, `name`, an earlier entry has.
+    fn repeated_name(name: &[u8]) -> ProtocolError;
 }
 
-/// Reads the `length` bytes at `offset` as text. Like the guest agent, refuses a NUL byte, which
-/// it rejects in every argument, working directory, and environment entry.
-fn text_at(
+/// The host's decoder refuses bytes that are not UTF-8, and names a variable that repeats.
+impl ExecString for String {
+    fn convert(bytes: Vec<u8>, what: &str) -> Result<Self, ProtocolError> {
+        String::from_utf8(bytes).map_err(|_| violation(format!("exec {what} must be valid UTF-8")))
+    }
+
+    fn unnamed_entry() -> ProtocolError {
+        violation("exec environment entries must be KEY=VALUE strings")
+    }
+
+    fn repeated_name(name: &[u8]) -> ProtocolError {
+        // The name of a UTF-8 entry ends before an ASCII `=`, so it is UTF-8 too.
+        let name = String::from_utf8_lossy(name);
+        violation(format!(
+            "exec environment names must be unique, but {name:?} repeats"
+        ))
+    }
+}
+
+/// The guest's decoder keeps Linux byte strings as they are.
+impl ExecString for Vec<u8> {
+    fn convert(bytes: Vec<u8>, _what: &str) -> Result<Self, ProtocolError> {
+        Ok(bytes)
+    }
+
+    fn unnamed_entry() -> ProtocolError {
+        violation("exec environment entries must be KEY=VALUE byte strings")
+    }
+
+    fn repeated_name(_name: &[u8]) -> ProtocolError {
+        violation("exec environment names must be unique")
+    }
+}
+
+/// Reads the string at `offset` that its `u32` length precedes, of 1 to [`MAX_ARGUMENT_BYTES`]
+/// bytes, as `S`, and advances `offset` past it.
+fn prefixed_string<S: ExecString>(
     payload: &[u8],
-    offset: usize,
-    length: usize,
+    offset: &mut usize,
     what: &str,
-) -> Result<String, ProtocolError> {
-    utf8_text(bytes_at(payload, offset, length, what)?.to_vec(), what)
-}
-
-/// Converts the bytes of a field to text, refusing bytes that are not UTF-8.
-fn utf8_text(bytes: Vec<u8>, what: &str) -> Result<String, ProtocolError> {
-    String::from_utf8(bytes).map_err(|_| violation(format!("exec {what} must be valid UTF-8")))
+) -> Result<S, ProtocolError> {
+    S::convert(prefixed_bytes(payload, offset, what)?, what)
 }
 
 /// Reads one little-endian length-prefixed byte string and advances `offset`.
