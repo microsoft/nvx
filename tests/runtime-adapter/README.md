@@ -1281,7 +1281,9 @@ the parts that it may write, still name what they named when the export was
 planned. Once the guest is ready, the launch sends the table,
 `LayeredLaunch::table`, in the [host's order](#the-hosts-order): each mapping
 before those inside its target. A [clone's](#clones) start takes the same
-shares, whose export NVX binds to the template's dormant filesystem slot.
+shares, whose export NVX attaches to the template's dormant filesystem slot as
+an aggregate, as a launch attaches it, and whose table it sends as a launch
+sends it.
 
 ### Networks
 
@@ -1612,11 +1614,13 @@ be the template's scratch's, its length included, its processor target,
 1, 2, 4, or 8, from the template's processors online at boot to its capacity,
 which the restore brings online, and the clone's repair verifies, its memory
 target, whole blocks of 128 MiB, from the template's RAM to its capacity, and
-its export, if it has one: the template's filesystem slot, which its capture
-left dormant, binds one directory, so the export must have exactly one, the
-export's root, with any other shares inside it, and the directory may neither
-lie inside the template store's directory nor hold it, so that no clone
-reaches the payload of a generation. A clone that
+its export, if it has one, which it checks as a cold launch's: from 1 to 256
+directories and files, the outermost shares, each of which the template's
+filesystem slot, which its capture left dormant, attaches as a child of an
+aggregate, with from 1 to 4,096 mappings, none of them at a target that the
+container root keeps, and none of the directories and files may lie inside the
+template store's directory or hold it, so that no clone reaches the payload of
+a generation. A clone that
 the template cannot serve fails there, before any VMM starts. The command then records the clone in the
 sandbox's store, as `clone::CloneRecord`, in the format of a launch's
 [record](#layered-roots), in the mode `clone`, with the template's kernel
@@ -1630,9 +1634,11 @@ generation's snapshot in place, through NVX's supervisor, as the launch that the
 lease reserves, with the clone's image at the capacity of the template's
 placeholder, over the scratch image, or, for a clone in RAM, with the
 template's scratch absent, which OpenVMM attaches with no file, so that no
-file of the host backs it, with the export's directory on the template's
-filesystem slot,
-and the template's NIC, if it has one, under the policy of the clone's
+file of the host backs it, with the export on the template's filesystem slot,
+which OpenVMM attaches as an aggregate, as a cold launch attaches it: each
+directory and file a child, read-only or read-write, with the paths that the
+export hides, shows again, or lets the guest write, and the template's NIC, if
+it has one, under the policy of the clone's
 network, which `--restore-network-policy` installs in place of the template's
 complete deny-all policy, and the restore sequence activates the clone through
 the
@@ -1640,8 +1646,9 @@ adapter's clone order, `host::CloneOrder`, which sends the clone's activation
 record in an `Activate`, checks the guest agent's build in its `Ready`, sends
 the export's mapping table, which the record announces, in order, as a launch
 sends its own, and then `Start`. The record names the export by the identity of
-its plan, and the table holds its mappings, of the directory itself, from an
-empty source, and of the paths inside it. A clone without shares has no
+its plan, and the table holds its mappings, each from a source that names its
+child by the child's index, as a cold launch's table does. A clone without
+shares has no
 export: its restore leaves the slot dormant, its record announces no mapping,
 and the sequence sends no table. If the guest fails a mapping, the sequence
 sends no more of the table, nor `Start`, and the clone fails, once the clone
@@ -2969,7 +2976,7 @@ layered roots, captures of templates, and the starts and runs of their clones.
 | `clone_start` | `the_host_program_refuses_options_that_do_not_make_a_run` | The command lines of `run` that the host program refuses, its execution's included, each with status 2, and a clock fixture that is not a host's time |
 | `clone_start` | `the_host_program_refuses_options_that_do_not_make_a_start` | The command lines of `start` that the host program refuses, each with status 2, and a clock fixture that is not a host's time |
 | `host_session` | `a_clone_s_order_ends_its_table_at_a_mapping_that_the_guest_fails_and_stops_the_guest` | A clone's order sends no more of its table, nor `Start`, once the guest fails a mapping, and asks the guest to stop |
-| `host_session` | `a_clone_s_order_maps_the_root_of_its_export_with_an_empty_source` | A clone's order sends the mapping of its export's root, whose source is empty, in its table |
+| `host_session` | `a_clone_s_order_maps_its_export_s_children_by_their_indices` | A clone's order sends its table as a cold launch's, whose sources name each path by the index of the export's child that holds it |
 | `host_session` | `a_clone_s_order_sends_its_record_first_then_starts_its_sandbox_as_after_a_cold_boot` | A clone's order sends its activation record first, returns the activation that `Ready` reports, then sends the table in parts and `Start`, and fails on a refusal, a deadline, another build, or an answer that does not decode |
 | `host_session` | `a_clone_s_session_that_ends_after_its_bootstrap_is_lost_and_the_next_takes_the_same_record` | A clone's session that a reset, the end of its stream, or its transport ended is lost, and the next session sends the same record first |
 | `host_session` | `a_mapping_that_the_guest_fails_ends_the_table_and_the_host_stops_the_guest` | A mapping that the guest fails, at the first, a middle, or the last part, ends the table without `Start`, and the host stops the guest and learns how the stop ended |

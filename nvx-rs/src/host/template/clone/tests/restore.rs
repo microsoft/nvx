@@ -1441,10 +1441,10 @@ fn a_clone_with_an_export_gets_its_mapping_table_once_ready_and_its_start_once_i
     let started = activated.start(&mut control).unwrap();
     // In the session in which the clone answered, the table follows its Ready, in order, and the
     // start follows once the guest applied every mapping, both by the Ready-to-Start deadline.
-    // The table's first mapping, the exported directory itself, keeps its empty source through
-    // the `MAPS` payloads that carry it.
+    // The table names each path by its child's index, as a cold launch's does, through the
+    // `MAPS` payloads that carry it.
     control.assert_activates_first();
-    assert_eq!(data_table()[0].source, "");
+    assert_eq!(data_table().to_vec(), export.guest_table());
     assert_eq!(
         control.calls[2..],
         [

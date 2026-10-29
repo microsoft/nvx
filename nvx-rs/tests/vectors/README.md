@@ -63,10 +63,11 @@ the key that the vector's bytes decode to.
   bytes of an earlier version that it refuses become its rejection vectors.
   Version 1 has two exceptions. `MAPS|ROOT_SOURCE` of `nvxc-v1.txt` was the
   rejection vector `INVALID_MAPS|EMPTY_SOURCE` until an empty source came to
-  name the export's root. Only the clone of a template whose export is a
-  directory sends one, to the template's own guest, which deploys with the
-  host and whose build the template's key names, so the C agent of earlier
-  releases, which refuses it, never receives one. And `CLASS|NETWORK` of
+  name the export's root, for a host whose export is one directory. NVX's
+  hosts, whose exports are aggregates, send none, and a host whose export is
+  one directory sends one only to a guest that deploys with it, so the C agent
+  of earlier releases, which refuses it, never receives one. And
+  `CLASS|NETWORK` of
   `template-key-v1.txt` came to encode its network in place as the template
   captures it, under the complete deny-all policy: the encodings of a key and
   of a class have not been released, so a template store that an earlier build

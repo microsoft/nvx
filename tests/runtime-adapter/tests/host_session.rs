@@ -1995,12 +1995,14 @@ fn a_clone_s_order_ends_its_table_at_a_mapping_that_the_guest_fails_and_stops_th
 }
 
 #[test]
-fn a_clone_s_order_maps_the_root_of_its_export_with_an_empty_source() {
-    // The table of a directory export maps the directory itself with an empty source, which the
-    // order sends in its part, as the guest decodes it, and which the guest applies.
+fn a_clone_s_order_maps_its_export_s_children_by_their_indices() {
+    // A clone's table is a cold launch's: its sources name each path by the index of the export's
+    // child that holds it, which the order sends in its part, as the guest decodes it, and which
+    // the guest applies.
     let table = vec![
-        mapping("", "/data", true),
-        mapping("work", "/data/work", false),
+        mapping("0", "/data", true),
+        mapping("1", "/notes.txt", false),
+        mapping("0/work", "/work", false),
     ];
     let parts = encode_maps(&table).unwrap();
     assert_eq!(parts.len(), 1);
@@ -2013,8 +2015,9 @@ fn a_clone_s_order_maps_the_root_of_its_export_with_an_empty_source() {
             .map(|map| (map.source.as_slice(), map.target.as_slice(), map.read_only))
             .collect::<Vec<_>>(),
         [
-            (b"".as_slice(), b"/data".as_slice(), true),
-            (b"work".as_slice(), b"/data/work".as_slice(), false),
+            (b"0".as_slice(), b"/data".as_slice(), true),
+            (b"1".as_slice(), b"/notes.txt".as_slice(), false),
+            (b"0/work".as_slice(), b"/work".as_slice(), false),
         ]
     );
     let (mut broker, client) = attached(FIRST, usize::MAX);

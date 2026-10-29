@@ -160,9 +160,9 @@
 //!   `stage` stages them, its processor target, 1, 2, 4, or 8, from the template's processors
 //!   online at boot to its capacity, which the restore brings online, its memory target, in whole
 //!   blocks, from the template's RAM to its
-//!   capacity, and its export, if it has one, which must export exactly one directory, which
-//!   neither lies inside the template store's directory nor holds it: the export's root, which
-//!   the clone's restore binds to the template's dormant filesystem slot.
+//!   capacity, and its export, if it has one, which must be one that a cold launch attaches, of
+//!   directories and files that neither lie inside the template store's directory nor hold it:
+//!   the clone's restore attaches it to the template's dormant filesystem slot as an aggregate.
 //!   A request that the template cannot serve fails there, before any VMM starts. The command
 //!   records the clone in STORE, with the template store and the generation; see
 //!   `runtime_adapter::clone::CloneRecord`. Once NVX checked the export again, with

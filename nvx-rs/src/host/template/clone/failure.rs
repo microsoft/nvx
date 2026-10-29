@@ -98,11 +98,11 @@ pub enum Evidence {
     /// that the guest refused, as its
     /// [`ACTIVATION_RECORD`](crate::protocol::status::ACTIVATION_RECORD) tells.
     InvalidActivate,
-    /// The request's mappings are invalid: an export that no clone takes, such as one of more
-    /// than one directory or of a file, or one that overlaps the template store; an export whose
-    /// read-only mappings the host cannot keep read-only, or whose objects are no longer those
-    /// that its plan found, a missing one included; a mapping table that the guest refused, as
-    /// the adapter's framing tells; or a host export that the guest cannot mount, as its
+    /// The request's mappings are invalid: an export that no clone takes, such as one that
+    /// overlaps the template store; an export whose read-only mappings the host cannot keep
+    /// read-only, or whose objects are no longer those that its plan found, a missing one
+    /// included; a mapping table that the guest refused, as the adapter's framing tells; or a
+    /// host export that the guest cannot mount, as its
     /// [`ACTIVATION_EXPORT`](crate::protocol::status::ACTIVATION_EXPORT) tells.
     InvalidMappings,
     /// The request's image is one that the template cannot serve, as a diagnostic tells. No
