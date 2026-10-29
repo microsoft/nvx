@@ -728,6 +728,35 @@ fn directories_are_identified_as_their_seals_identify_them() {
     assert_eq!(hold_directory(directory.path()).unwrap().0, expected);
 }
 
+#[cfg(any(target_os = "linux", windows))]
+#[test]
+fn lock_files_are_identified_as_their_seals_identify_them() {
+    use crate::host::seal::{FileSeal, open_metadata_only};
+
+    // The lock, the path, and the directory's entry identify a lock file alike, and two files of
+    // one directory apart: on Windows, by the 128-bit file ID of `FILE_ID_INFO`, which tells the
+    // files of ReFS volumes apart where their 64-bit file indexes may not.
+    let (_directory, dir) = sandbox();
+    let other = "other.lock";
+    fs::write(dir.join(other), b"").unwrap();
+    let locked = SandboxStore::lock_existing(&dir, &files(), None).unwrap();
+    let directory = platform::Directory::open(&dir).unwrap();
+    let identities = [LOCK_NAME, other].map(|name| {
+        let path = dir.join(name);
+        let seal = FileSeal::of(&open_metadata_only(&path).unwrap()).unwrap();
+        let expected = (seal.device(), seal.file_id());
+        assert_eq!(regular::identity_at(&path).unwrap(), expected, "{name}");
+        assert_eq!(
+            directory.entry_identity(name).unwrap(),
+            Some(expected),
+            "{name}"
+        );
+        expected
+    });
+    assert_ne!(identities[0], identities[1]);
+    assert_eq!(regular::identity_of(&locked.lock).unwrap(), identities[0]);
+}
+
 #[test]
 fn a_removal_needs_the_configuration_record() {
     let (_directory, dir) = sandbox();
