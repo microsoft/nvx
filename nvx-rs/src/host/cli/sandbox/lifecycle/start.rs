@@ -139,12 +139,12 @@ fn start_locked(
         Ok(vmm)
     })
     .map_err(error_with_cause)?;
-    let pid = starting.process().reference().pid;
+    let endpoint = starting.endpoint().to_owned();
     let maps = prepared.plan().mapping_table();
     // Whether the guest agent acknowledged a request to shut down after a mapping failed.
     let mut stopping = false;
     let ready =
-        check_ready(starting.endpoint(), pid, &capability, timeout).and_then(|mut session| {
+        check_ready(&endpoint, starting.child(), &capability, timeout).and_then(|mut session| {
             // Workloads run only once the guest agent has mapped every share in order, so a
             // mapping that fails ends the start. A sandbox without shares maps nothing.
             if maps.is_empty() {
@@ -178,7 +178,8 @@ fn start_locked(
     };
     // OpenVMM closes the control endpoint as it tears the VM down, before it publishes its
     // outcome report and exits, so only a closed endpoint, or a guest that shuts down, warrants
-    // waiting for it.
+    // waiting for it. The session reports an OpenVMM that exited before it served the endpoint
+    // as a closed endpoint too, whose wait then ends at once.
     let grace = if stopping || matches!(error, Exit::EndpointClosed) {
         timeout
     } else {
@@ -231,16 +232,17 @@ fn binding_error(error: crate::Error) -> Exit {
     }
 }
 
-/// Waits until the guest of a VM that starts answers on `endpoint`, which OpenVMM process `pid`
-/// serves, checks that it provides the features of [`REQUIRED_FEATURES`], and returns the session,
-/// on which the caller sends the guest what it needs before the launch commits.
+/// Waits until the guest of a VM that starts answers on `endpoint`, which `launched`, the OpenVMM
+/// process of the start, serves, or until OpenVMM exits, checks that the guest provides the
+/// features of [`REQUIRED_FEATURES`], and returns the session, on which the caller sends the
+/// guest what it needs before the launch commits.
 fn check_ready(
     endpoint: &str,
-    pid: u32,
+    launched: &mut Launched,
     capability: &[u8; CAPABILITY_LEN],
     timeout: f64,
 ) -> Result<Session> {
-    let mut session = Session::connect(endpoint, pid, capability, timeout)?;
+    let mut session = Session::connect_launched(endpoint, launched, capability, timeout)?;
     session.ping(timeout)?;
     let features = session.features(timeout)?;
     let missing = features.missing(REQUIRED_FEATURES);

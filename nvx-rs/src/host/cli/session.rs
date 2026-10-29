@@ -19,7 +19,10 @@
 //! - A session whose transfer failed is closed, and refuses further requests.
 //!
 //! Unlike the Python session, it also hands the guest agent a host mapping table, as `start`
-//! does for the shares of a sandbox: in order, and in as many requests as it takes.
+//! does for the shares of a sandbox: in order, and in as many requests as it takes. And
+//! [`Session::connect_launched`], with which `start` waits for the endpoint of the OpenVMM that
+//! it launched, stops waiting once that OpenVMM exits, as `nvx::host::session::connect` does,
+//! where Python waited until its timeout.
 //!
 //! The transports also wait in slices of at most 250 ms, as Python's do, so that Ctrl-C ends a
 //! wait within that time, except while a request is being sent, which its timeout bounds.
@@ -35,6 +38,7 @@ use crate::ErrorCode;
 use crate::host::platform::{self, Transport};
 use crate::host::sandbox::options::validate_exec_environment;
 use crate::host::session::{ControlSession, SessionError};
+use crate::host::supervisor::Launched;
 use crate::protocol::{
     APP_ERROR, APP_EXEC, APP_EXIT, APP_FEATURES, APP_HEADER_LEN, APP_MAPS, APP_PING, APP_READY,
     APP_STDERR, APP_STDOUT, APP_STOP, APP_STOPPED, CAPABILITY_LEN, GuestFeatures, HostMap,
@@ -200,6 +204,40 @@ impl Session {
         capability: &[u8; CAPABILITY_LEN],
         timeout: f64,
     ) -> Result<Self> {
+        Self::connect_unless_exited(endpoint, pid, capability, timeout, || false)
+    }
+
+    /// Connects to `endpoint`, which `launched`, the OpenVMM process that a start launched,
+    /// serves, as [`connect`](Self::connect) does, but stops waiting for the endpoint once
+    /// OpenVMM has exited, as `nvx::host::session::connect` does: an OpenVMM that exits before it
+    /// serves its endpoint, as one that refuses its configuration does, then ends the wait at
+    /// once, rather than at its timeout. A check that fails keeps the wait going until the
+    /// timeout, as there.
+    pub(crate) fn connect_launched(
+        endpoint: &str,
+        launched: &mut Launched,
+        capability: &[u8; CAPABILITY_LEN],
+        timeout: f64,
+    ) -> Result<Self> {
+        let pid = launched.id();
+        Self::connect_unless_exited(endpoint, pid, capability, timeout, || {
+            launched
+                .wait_timeout(Duration::ZERO)
+                .is_ok_and(|status| status.is_some())
+        })
+    }
+
+    /// Connects as [`connect`](Self::connect) does, but fails as soon as `exited`, which it calls
+    /// after each attempt that finds no endpoint, tells that OpenVMM process `pid` has exited:
+    /// with [`Exit::EndpointClosed`], as the session reports the `ProcessExited` of
+    /// `nvx::host::session`.
+    fn connect_unless_exited(
+        endpoint: &str,
+        pid: u32,
+        capability: &[u8; CAPABILITY_LEN],
+        timeout: f64,
+        mut exited: impl FnMut() -> bool,
+    ) -> Result<Self> {
         let deadline = Deadline::after(timeout);
         let transport = loop {
             check_interrupt()?;
@@ -215,6 +253,10 @@ impl Session {
                             .is_some_and(|code| raised_at_once(code as u32))
                     {
                         return Err(Exit::from_os_error(error));
+                    }
+                    // An OpenVMM that has exited serves no endpoint, whatever time is left.
+                    if exited() {
+                        return Err(Exit::EndpointClosed);
                     }
                     if deadline.passed() {
                         return Err(Exit::error(

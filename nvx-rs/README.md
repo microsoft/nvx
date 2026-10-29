@@ -2160,6 +2160,10 @@ guest agents of NVX advertise bits 0, 4, and 6 in sandbox mode.
 - `start` refuses a control endpoint that another process serves, which it
   treats as one that has not appeared yet, and, on Windows, starts OpenVMM
   without a console window, as `nvx::host::supervisor` starts it.
+- `start` stops waiting for the control endpoint once the OpenVMM that it
+  launched exits, as `nvx::host::session::connect` does, and fails at once
+  with `exited`, where `nvx.py` waited until `--timeout` passed before it
+  reported the exit.
 - `exec` refuses more than 1 MiB of workload output, which the guest agent
   never forwards.
 - The state directory holds the store's files: `sandbox.lock` replaces the

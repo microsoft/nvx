@@ -728,6 +728,45 @@ fn check_writes_to_a_slow_endpoint(
     assert!(reader.join().unwrap() > 0, "the endpoint read nothing");
 }
 
+/// Checks the wait for `endpoint`, which never appears, of a start that checks after each
+/// attempt whether the OpenVMM that it launched has exited, as [`Session::connect_launched`]
+/// checks it: an OpenVMM that exits ends the wait at once, as a closed endpoint, rather than at
+/// the timeout, and one that runs on keeps it going until the timeout.
+#[cfg(any(unix, windows))]
+fn check_waits_for_openvmm_that_exits(endpoint: &str) {
+    let mut checks = 0;
+    let started = Instant::now();
+    let failure =
+        Session::connect_unless_exited(endpoint, std::process::id(), &CAPABILITY, 60.0, || {
+            checks += 1;
+            checks == 3
+        })
+        .err()
+        .unwrap();
+    assert!(
+        started.elapsed() < Duration::from_secs(30),
+        "{:?}",
+        started.elapsed()
+    );
+    assert!(matches!(failure, Exit::EndpointClosed), "{failure:?}");
+    assert_eq!(checks, 3);
+    let mut checks = 0;
+    let started = Instant::now();
+    let failure =
+        Session::connect_unless_exited(endpoint, std::process::id(), &CAPABILITY, 0.2, || {
+            checks += 1;
+            false
+        })
+        .err()
+        .unwrap();
+    assert!(started.elapsed() >= Duration::from_millis(200));
+    assert_eq!(
+        failure.message().unwrap(),
+        format!("managed control endpoint did not become available: {endpoint}")
+    );
+    assert_ne!(checks, 0);
+}
+
 #[test]
 fn response_that_does_not_arrive_times_out() {
     let (mut session, worker) = session_with(|guest| {
@@ -953,6 +992,13 @@ mod endpoints {
     }
 
     #[test]
+    fn waits_for_an_endpoint_end_once_openvmm_exits() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("control.sock");
+        check_waits_for_openvmm_that_exits(path.to_str().unwrap());
+    }
+
+    #[test]
     #[cfg(target_os = "linux")]
     fn writes_to_a_slow_endpoint_end_by_their_deadline() {
         // A blocking send restarts its timeout whenever the endpoint makes room.
@@ -1115,6 +1161,11 @@ mod endpoints {
             failure.message().unwrap(),
             r"managed control endpoint did not become available: \\.\pipe\nvx-cli-session-test-missing"
         );
+    }
+
+    #[test]
+    fn waits_for_an_endpoint_end_once_openvmm_exits() {
+        check_waits_for_openvmm_that_exits(r"\\.\pipe\nvx-cli-session-test-exited");
     }
 
     #[test]
