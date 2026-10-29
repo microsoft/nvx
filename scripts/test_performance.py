@@ -365,6 +365,34 @@ WHP_RUNNER_HOST: dict[str, object] = {
 }
 KVM_SERIES = "linux-kvm-virtual-machine"
 WHP_SERIES = "windows-whp-virtual-machine"
+MSHV_SERIES = "linux-mshv-virtual-machine"
+# azure-mshv-4, the MSHV benchmark runner, on 2026-10-28 (#980): its kernel
+# and the Microsoft hypervisor beneath it, which CPUID leaf 0x40000002 reports.
+MSHV_RUNNER_HOST: dict[str, object] = {
+    **copy.deepcopy(KVM_RUNNER_HOST),
+    "runner_name": "azure-mshv-4",
+    "machine_name": "esaurez-nvx-ci-linux-vmss000005",
+    "os": "Linux-6.18.34.mshv3-1.azl3-x86_64-with-glibc2.38",
+    "os_version": {
+        "system": "Linux",
+        "release": "6.18.34.mshv3-1.azl3",
+        "revision": None,
+    },
+    "hypervisor": {"vendor": "Microsoft Hv", "build": "10.0.26100.9444"},
+    "cpu_model": "INTEL(R) XEON(R) PLATINUM 8573C",
+    "cpu": {
+        "vendor": "GenuineIntel",
+        "family": 6,
+        "model": 207,
+        "stepping": 2,
+        "microcode": "0xffffffff",
+    },
+    "memory_bytes": 33186406400,
+}
+# The provenance that NVX recorded before it read the hypervisor.
+MSHV_RUNNER_HOST_BEFORE_980 = {
+    key: value for key, value in MSHV_RUNNER_HOST.items() if key != "hypervisor"
+}
 
 
 def changed_host(
@@ -3731,6 +3759,106 @@ class BenchmarkHostTests(unittest.TestCase):
             with self.subTest(release=release):
                 self.assertEqual(benchmark_host.kernel_series(release), series)
 
+    def test_mshv_hosts_record_the_hypervisor_build(self):
+        mshv = self.identity(MSHV_RUNNER_HOST, MSHV_SERIES)
+
+        self.assertEqual(mshv["hypervisor_build"], "10.0.26100.9444")
+        # The host file lists it after the operating system.
+        keys = list(mshv)
+        self.assertEqual(keys[keys.index("os") + 1], "hypervisor_build")
+        with tempfile.TemporaryDirectory() as temporary:
+            path = benchmark_host.host_file(Path(temporary), MSHV_SERIES)
+            benchmark_host.write_host(path, mshv)
+            self.assertEqual(benchmark_host.read_host(path, MSHV_SERIES), mshv)
+        # A hypervisor that couldn't be read is unknown, while provenance that
+        # predates the build records none.
+        unreadable = changed_host(
+            MSHV_RUNNER_HOST, ("hypervisor",), {"error": "CPUID is unavailable: x"}
+        )
+        self.assertIsNone(self.identity(unreadable, MSHV_SERIES)["hypervisor_build"])
+        self.assertNotIn(
+            "hypervisor_build", self.identity(MSHV_RUNNER_HOST_BEFORE_980, MSHV_SERIES)
+        )
+        # A KVM VM's hypervisor is its cloud host's, and a Windows build and
+        # UBR identify Windows' own.
+        for platform in (KVM_SERIES, "linux-kvm-baremetal", WHP_SERIES):
+            with self.subTest(platform=platform):
+                self.assertNotIn(
+                    "hypervisor_build", self.identity(MSHV_RUNNER_HOST, platform)
+                )
+        for platform in ("linux-mshv", "linux-mshv-baremetal"):
+            with self.subTest(platform=platform):
+                self.assertTrue(benchmark_host.records_hypervisor_build(platform))
+
+    def test_another_hypervisor_build_is_another_host(self):
+        # The whole version counts: prometheus30's 10.0.26100.30000 is build
+        # 26100 too.
+        for build, result in (
+            ("10.0.26100.9444", benchmark_host.MATCH),
+            ("10.0.26100.30000", benchmark_host.MISMATCH),
+            ("10.0.26100.9445", benchmark_host.MISMATCH),
+            (None, benchmark_host.MISMATCH),
+        ):
+            with self.subTest(build=build):
+                fields = self.compare(
+                    MSHV_RUNNER_HOST,
+                    changed_host(MSHV_RUNNER_HOST, ("hypervisor", "build"), build),
+                    MSHV_SERIES,
+                )
+                labels = [field.label for field in fields]
+                self.assertEqual(
+                    labels[labels.index("Linux kernel") + 1], "Hypervisor build"
+                )
+                field = fields[labels.index("Hypervisor build")]
+                self.assertEqual(field.result, result)
+                self.assertEqual(
+                    benchmark_host.mismatches(fields),
+                    [] if result == benchmark_host.MATCH else [field],
+                )
+                self.assertEqual(benchmark_host.drift(fields), [])
+        unknown = self.compare(
+            MSHV_RUNNER_HOST,
+            changed_host(MSHV_RUNNER_HOST, ("hypervisor",), {"error": "x"}),
+            MSHV_SERIES,
+        )
+        self.assertEqual(
+            [field.describe() for field in benchmark_host.mismatches(unknown)],
+            ["Hypervisor build: expected 10.0.26100.9444, found unknown"],
+        )
+        # An unknown build matches none, not even another unknown one, so an
+        # expected host whose hypervisor couldn't be read never passes.
+        unreadable = changed_host(MSHV_RUNNER_HOST, ("hypervisor",), {"error": "x"})
+        self.assertEqual(
+            [
+                field.describe()
+                for field in benchmark_host.mismatches(
+                    self.compare(unreadable, unreadable, MSHV_SERIES)
+                )
+            ],
+            ["Hypervisor build: expected unknown, found unknown"],
+        )
+
+    def test_hosts_that_predate_the_hypervisor_build_only_drift(self):
+        # Adding the build to an expected host, or comparing it with results
+        # that a dev run in flight recorded before it, needs no history reset.
+        legacy = self.identity(MSHV_RUNNER_HOST_BEFORE_980, MSHV_SERIES)
+        current = self.identity(MSHV_RUNNER_HOST, MSHV_SERIES)
+        for expected, actual, description in (
+            (legacy, current, "expected not recorded, found 10.0.26100.9444"),
+            (current, legacy, "expected 10.0.26100.9444, found not recorded"),
+        ):
+            with self.subTest(description=description):
+                fields = benchmark_host.compare_hosts(expected, actual)
+                self.assertEqual(benchmark_host.mismatches(fields), [])
+                self.assertEqual(
+                    [field.describe() for field in benchmark_host.drift(fields)],
+                    [f"Hypervisor build: {description}"],
+                )
+        with tempfile.TemporaryDirectory() as temporary:
+            path = benchmark_host.host_file(Path(temporary), MSHV_SERIES)
+            benchmark_host.write_host(path, legacy)
+            self.assertEqual(benchmark_host.read_host(path, MSHV_SERIES), legacy)
+
     def test_host_files_reject_unknown_and_malformed_fields(self):
         host = self.identity(KVM_RUNNER_HOST)
         cpu = cast(dict[str, object], host["cpu"])
@@ -3743,6 +3871,11 @@ class BenchmarkHostTests(unittest.TestCase):
                 "volumes is missing",
             ),
             ({**host, "platform": WHP_SERIES}, "describes platform"),
+            # Only Linux/MSHV hosts record the hypervisor build.
+            (
+                {**host, "hypervisor_build": "10.0.26102.3669"},
+                "hypervisor_build is missing",
+            ),
             ([host], "the document is missing"),
         )
         with tempfile.TemporaryDirectory() as temporary:
@@ -3754,6 +3887,17 @@ class BenchmarkHostTests(unittest.TestCase):
                         benchmark_host.HostFileError, re.escape(message)
                     ):
                         benchmark_host.read_host(path, KVM_SERIES)
+            mshv = self.identity(MSHV_RUNNER_HOST, MSHV_SERIES)
+            for build in (26100, ""):
+                with self.subTest(build=build):
+                    path.write_text(
+                        json.dumps({**mshv, "hypervisor_build": build}),
+                        encoding="utf-8",
+                    )
+                    with self.assertRaisesRegex(
+                        benchmark_host.HostFileError, "hypervisor_build is missing"
+                    ):
+                        benchmark_host.read_host(path, MSHV_SERIES)
             path.write_text("{", encoding="utf-8")
             with self.assertRaisesRegex(benchmark_host.HostFileError, "cannot read"):
                 benchmark_host.read_host(path, KVM_SERIES)
@@ -3761,17 +3905,23 @@ class BenchmarkHostTests(unittest.TestCase):
                 benchmark_host.read_host(path.with_name("missing.json"), KVM_SERIES)
 
     def check_host(
-        self, root: Path, provenance: dict[str, object], *, expected: bool = True
+        self,
+        root: Path,
+        provenance: dict[str, object],
+        *,
+        expected: bool = True,
+        platform: str = KVM_SERIES,
+        expected_host: dict[str, object] = KVM_RUNNER_HOST,
     ) -> tuple[int, str, str, dict[str, object]]:
         history = root / "data"
         if expected:
             benchmark_host.write_host(
-                benchmark_host.host_file(history, KVM_SERIES),
-                self.identity(KVM_RUNNER_HOST),
+                benchmark_host.host_file(history, platform),
+                self.identity(expected_host, platform),
             )
         scratch = root / "scratch"
         scratch.mkdir()
-        output = root / "runs" / f"{KVM_SERIES}-host.json"
+        output = root / "runs" / f"{platform}-host.json"
         summary = root / "summary.md"
         stdout = io.StringIO()
         with (
@@ -3783,7 +3933,7 @@ class BenchmarkHostTests(unittest.TestCase):
             contextlib.redirect_stdout(stdout),
         ):
             status = performance.check_host(
-                KVM_SERIES,
+                platform,
                 history,
                 scratch_dir=scratch,
                 output=output,
@@ -3880,6 +4030,69 @@ class BenchmarkHostTests(unittest.TestCase):
         )
         self.assertIn("`: match.", summary)
         self.assertEqual(actual, self.identity(KVM_RUNNER_HOST))
+
+    def test_check_host_requires_the_mshv_hypervisor_build(self):
+        # A reimage of azure-mshv-4 that brings another hypervisor but keeps
+        # the kernel (#980).
+        provenance = changed_host(
+            MSHV_RUNNER_HOST, ("hypervisor", "build"), "10.0.26100.30000"
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            status, output, summary, actual = self.check_host(
+                Path(temporary),
+                provenance,
+                platform=MSHV_SERIES,
+                expected_host=MSHV_RUNNER_HOST,
+            )
+
+        self.assertEqual(status, 1)
+        errors = [line for line in output.splitlines() if line.startswith("::error")]
+        self.assertEqual(len(errors), 1)
+        self.assertIn(
+            "in 1 required field(s): Hypervisor build: expected 10.0.26100.9444, "
+            "found 10.0.26100.30000.",
+            errors[0],
+        )
+        self.assertEqual(actual["hypervisor_build"], "10.0.26100.30000")
+        self.assertIn(
+            "| Hypervisor build | 10.0.26100.9444 | 10.0.26100.30000 | **mismatch** |",
+            summary,
+        )
+
+        with tempfile.TemporaryDirectory() as temporary:
+            status, output, _, actual = self.check_host(
+                Path(temporary),
+                MSHV_RUNNER_HOST,
+                platform=MSHV_SERIES,
+                expected_host=MSHV_RUNNER_HOST,
+            )
+
+        self.assertEqual(status, 0)
+        self.assertNotIn("::", output)
+        self.assertIn(
+            "MATCH: Hypervisor build: expected 10.0.26100.9444, found 10.0.26100.9444",
+            output,
+        )
+        self.assertEqual(actual, self.identity(MSHV_RUNNER_HOST, MSHV_SERIES))
+
+    def test_check_host_warns_about_an_expected_host_without_the_build(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            status, output, summary, actual = self.check_host(
+                Path(temporary),
+                MSHV_RUNNER_HOST,
+                platform=MSHV_SERIES,
+                expected_host=MSHV_RUNNER_HOST_BEFORE_980,
+            )
+
+        self.assertEqual(status, 0)
+        self.assertNotIn("::error", output)
+        self.assertIn(
+            "Hypervisor build: expected not recorded, found 10.0.26100.9444. "
+            "Update the file",
+            output,
+        )
+        self.assertIn("needs no history reset", summary)
+        self.assertEqual(actual["hypervisor_build"], "10.0.26100.9444")
 
     def test_check_host_requires_an_expected_host(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -4114,20 +4327,22 @@ class BenchmarkHostTests(unittest.TestCase):
         commits: Sequence[str],
         host: dict[str, object] | None,
         p50: float = 10.0,
+        platform: str = KVM_SERIES,
     ) -> Path:
-        path = directory / f"{KVM_SERIES}-microvm-v2-1vcpu.csv"
+        path = directory / f"{platform}-microvm-v2-1vcpu.csv"
         performance.write_results(
             path,
             [
                 performance.Result(
-                    commit, "openvmm_cold_start", "ms", "lower", p50, KVM_SERIES, 2, 1
+                    commit, "openvmm_cold_start", "ms", "lower", p50, platform, 2, 1
                 )
                 for commit in commits
             ],
         )
         if host is not None:
             benchmark_host.write_host(
-                benchmark_host.host_file(directory, KVM_SERIES), self.identity(host)
+                benchmark_host.host_file(directory, platform),
+                self.identity(host, platform),
             )
         return path
 
@@ -4182,6 +4397,67 @@ class BenchmarkHostTests(unittest.TestCase):
                 ["base", "new"],
             )
 
+    def test_persist_accepts_hosts_that_predate_the_hypervisor_build(self):
+        # A history whose expected host predates the build accepts results
+        # that record it, and a history whose host records it accepts the
+        # results of a dev run that was in flight when the build was added.
+        for history_host, result_host in (
+            (MSHV_RUNNER_HOST_BEFORE_980, MSHV_RUNNER_HOST),
+            (MSHV_RUNNER_HOST, MSHV_RUNNER_HOST_BEFORE_980),
+        ):
+            with (
+                self.subTest(history_records="hypervisor" in history_host),
+                tempfile.TemporaryDirectory() as temporary,
+            ):
+                root = Path(temporary)
+                history = self.write_series(
+                    root / "data", ["base"], history_host, platform=MSHV_SERIES
+                )
+                self.write_series(
+                    root / "results", ["new"], result_host, platform=MSHV_SERIES
+                )
+                stdout = io.StringIO()
+                with contextlib.redirect_stdout(stdout):
+                    performance.persist_results(
+                        root / "results", root / "data", require_host=True
+                    )
+
+                self.assertIn(
+                    "::warning title=Benchmark host drift::", stdout.getvalue()
+                )
+                self.assertIn("Hypervisor build: expected ", stdout.getvalue())
+                self.assertEqual(
+                    [row.commit for row in performance.read_results(history)],
+                    ["base", "new"],
+                )
+
+    def test_persist_refuses_results_of_another_hypervisor_build(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            history = self.write_series(
+                root / "data", ["base"], MSHV_RUNNER_HOST, platform=MSHV_SERIES
+            )
+            self.write_series(
+                root / "results",
+                ["new"],
+                changed_host(
+                    MSHV_RUNNER_HOST, ("hypervisor", "build"), "10.0.26100.30000"
+                ),
+                platform=MSHV_SERIES,
+            )
+            with self.assertRaisesRegex(
+                performance.PerformanceError,
+                "refusing to persist the linux-mshv-virtual-machine results: "
+                "their host differs from .* in required fields: Hypervisor build: "
+                "expected 10.0.26100.9444, found 10.0.26100.30000$",
+            ):
+                performance.persist_results(
+                    root / "results", root / "data", require_host=True
+                )
+            self.assertEqual(
+                [row.commit for row in performance.read_results(history)], ["base"]
+            )
+
     def test_persist_requires_both_hosts_when_asked(self):
         for recorded, expected in ((False, True), (True, False)):
             with (
@@ -4224,12 +4500,20 @@ class BenchmarkHostTests(unittest.TestCase):
                     )
 
     def gate(
-        self, root: Path, candidate_host: dict[str, object], *, reset: bool
+        self,
+        root: Path,
+        candidate_host: dict[str, object],
+        *,
+        reset: bool,
+        platform: str = KVM_SERIES,
+        base_host: dict[str, object] = KVM_RUNNER_HOST,
     ) -> tuple[int, str, str]:
         commits = [f"base-{index}" for index in range(10)]
-        self.write_series(root / "baseline", commits, KVM_RUNNER_HOST)
-        self.write_series(root / "data", [] if reset else commits, candidate_host)
-        self.write_series(root / "results", ["pr"], candidate_host)
+        self.write_series(root / "baseline", commits, base_host, platform=platform)
+        self.write_series(
+            root / "data", [] if reset else commits, candidate_host, platform=platform
+        )
+        self.write_series(root / "results", ["pr"], candidate_host, platform=platform)
         summary = root / "summary.md"
         stdout = io.StringIO()
         with contextlib.redirect_stdout(stdout):
@@ -4343,6 +4627,47 @@ class BenchmarkHostTests(unittest.TestCase):
         self.assertNotIn("::error", output)
         self.assertNotIn("accepts a new expected host", summary)
         self.assertIn("| OK |", summary)
+
+    def test_gate_needs_no_reset_to_add_the_hypervisor_build(self):
+        # The base branch's expected host predates the build, and the pull
+        # request's records the runner's (#980).
+        with tempfile.TemporaryDirectory() as temporary:
+            status, output, summary = self.gate(
+                Path(temporary),
+                MSHV_RUNNER_HOST,
+                reset=False,
+                platform=MSHV_SERIES,
+                base_host=MSHV_RUNNER_HOST_BEFORE_980,
+            )
+
+        self.assertEqual(status, 0)
+        self.assertNotIn("::error", output)
+        self.assertNotIn("accepts a new expected host", summary)
+        self.assertIn("| OK |", summary)
+
+    def test_gate_requires_a_new_hypervisor_build_to_reset_its_series(self):
+        new_build = changed_host(
+            MSHV_RUNNER_HOST, ("hypervisor", "build"), "10.0.26100.30000"
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            status, output, summary = self.gate(
+                Path(temporary),
+                new_build,
+                reset=False,
+                platform=MSHV_SERIES,
+                base_host=MSHV_RUNNER_HOST,
+            )
+
+        self.assertEqual(status, 1)
+        self.assertIn(
+            "This change accepts a new expected host for linux-mshv-virtual-machine, "
+            "so each of its metrics must restart its warmup: Hypervisor build: "
+            "expected 10.0.26100.9444, found 10.0.26100.30000.",
+            summary,
+        )
+        self.assertIn(
+            "::error title=Benchmark host changed without a history reset::", output
+        )
 
 
 if __name__ == "__main__":

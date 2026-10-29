@@ -9,11 +9,12 @@ records, and the regression gate requires a pull request that changes a
 required field to reset the series' history.
 
 Required fields identify the CPU, the processors and memory, the Azure VM size,
-the operating system build, and the storage behind the benchmark's volumes; a
-difference means that the series would continue on another host. Advisory
-fields change with maintenance that keeps what the series measures, such as a
-replaced VM, a microcode update, a Linux kernel patch release, or a Windows
-cumulative update; a difference only warns.
+the operating system build, the build of the Microsoft hypervisor of a
+Linux/MSHV host, and the storage behind the benchmark's volumes; a difference
+means that the series would continue on another host. Advisory fields change
+with maintenance that keeps what the series measures, such as a replaced VM, a
+microcode update, a Linux kernel patch release, or a Windows cumulative update;
+a difference only warns.
 """
 
 from __future__ import annotations
@@ -58,6 +59,7 @@ _VOLUME_LABELS = {
     "scratch": "Benchmark scratch volume",
 }
 _RELEASE_TOKEN = re.compile(r"[^.+~_-]+")
+_HYPERVISOR_BUILD = "hypervisor_build"
 
 
 class HostFileError(ValueError):
@@ -83,6 +85,15 @@ def host_file(directory: Path, platform: str) -> Path:
     return directory / f"{platform}{HOST_FILE_SUFFIX}"
 
 
+def records_hypervisor_build(platform: str) -> bool:
+    """Return whether the hosts of ``platform``'s series record the build of
+    the Microsoft hypervisor that runs them and their VMs: those of Linux/MSHV,
+    whose hypervisor comes from its own package, apart from the kernel (#980).
+    A Windows build and UBR already identify its hypervisor, and a KVM VM's
+    hypervisor is its cloud host's."""
+    return platform == "linux-mshv" or platform.startswith("linux-mshv-")
+
+
 def benchmark_volumes(
     scratch: Path | None = None, temporary: Path | None = None
 ) -> dict[str, Path]:
@@ -106,27 +117,31 @@ def host_identity(platform: str, host: Mapping[str, object]) -> dict[str, object
     differ between identical VMs. Of the Azure disks, it keeps those that can
     back the benchmark's volumes: the OS disk when a volume is the system
     volume, and the data and temporary disks when a volume is on another disk.
+    A Linux/MSHV host also keeps its hypervisor build, which is unknown when
+    the hypervisor couldn't be read; provenance that predates it records none.
     """
     cpu = _object(host.get("cpu"))
     volumes = _object(host.get("volumes"))
     memory = _integer(host.get("memory_bytes"))
-    return _normalized_host(
-        {
-            "platform": platform,
-            "runner_name": host.get("runner_name"),
-            "machine_name": host.get("machine_name"),
-            "cpu": {**cpu, "brand": host.get("cpu_model")},
-            "logical_processors": host.get("logical_processors"),
-            "memory_gib": None if memory is None else round(memory / _GIB, 1),
-            "os": host.get("os_version"),
-            "azure": _benchmark_disks(host.get("azure"), volumes),
-            "volumes": volumes,
-        }
-    )
+    identity: dict[str, object] = {
+        "platform": platform,
+        "runner_name": host.get("runner_name"),
+        "machine_name": host.get("machine_name"),
+        "cpu": {**cpu, "brand": host.get("cpu_model")},
+        "logical_processors": host.get("logical_processors"),
+        "memory_gib": None if memory is None else round(memory / _GIB, 1),
+        "os": host.get("os_version"),
+        "azure": _benchmark_disks(host.get("azure"), volumes),
+        "volumes": volumes,
+    }
+    if records_hypervisor_build(platform) and "hypervisor" in host:
+        identity[_HYPERVISOR_BUILD] = _object(host["hypervisor"]).get("build")
+    return _normalized_host(identity)
 
 
 def read_host(path: Path, platform: str) -> dict[str, object]:
-    """Read ``platform``'s host file, rejecting unknown or malformed fields."""
+    """Read ``platform``'s host file, rejecting unknown or malformed fields. A
+    Linux/MSHV host file may lack the hypervisor build if it predates it."""
     try:
         document: object = json.loads(path.read_text(encoding="utf-8"))
     except FileNotFoundError as error:
@@ -226,6 +241,8 @@ def compare_hosts(
         same=_same_memory,
     )
     fields.extend(_compare_os(_object(expected.get("os")), _object(actual.get("os"))))
+    if _HYPERVISOR_BUILD in expected or _HYPERVISOR_BUILD in actual:
+        fields.append(_compare_hypervisor_build(expected, actual))
     fields.extend(_compare_azure(expected.get("azure"), actual.get("azure")))
     expected_volumes = _object(expected.get("volumes"))
     actual_volumes = _object(actual.get("volumes"))
@@ -374,6 +391,33 @@ def _compare_os(
     return fields
 
 
+def _compare_hypervisor_build(
+    expected: Mapping[str, object], actual: Mapping[str, object]
+) -> HostField:
+    """Compare the whole version of the hypervisor, service included: both
+    10.0.26100.9444 and 10.0.26100.30000 are build 26100. An unknown build
+    matches none, not even another unknown one, so a host whose hypervisor
+    couldn't be read never passes. A host file that predates the field,
+    which records none, only warns, so that adding the field to an expected
+    host needs no history reset (#980)."""
+
+    def describe(host: Mapping[str, object]) -> str:
+        if _HYPERVISOR_BUILD not in host:
+            return "not recorded"
+        return _describe(host[_HYPERVISOR_BUILD])
+
+    if _HYPERVISOR_BUILD not in expected or _HYPERVISOR_BUILD not in actual:
+        result = DRIFT
+    elif (
+        expected[_HYPERVISOR_BUILD] is not None
+        and expected[_HYPERVISOR_BUILD] == actual[_HYPERVISOR_BUILD]
+    ):
+        result = MATCH
+    else:
+        result = MISMATCH
+    return HostField("Hypervisor build", describe(expected), describe(actual), result)
+
+
 def _compare_azure(expected: object, actual: object) -> list[HostField]:
     """Compare the Azure VM sizes and the disks behind the benchmark's volumes;
     ``None`` is a host that isn't an Azure VM."""
@@ -519,8 +563,9 @@ def _normalized_host(document: object) -> dict[str, object]:
     system = _object(host.get("os"))
     volumes = _object(host.get("volumes"))
     azure = host.get("azure")
-    return {
-        "platform": _text(host.get("platform")),
+    platform = _text(host.get("platform"))
+    normalized: dict[str, object] = {
+        "platform": platform,
         "runner_name": _text(host.get("runner_name")),
         "machine_name": _text(host.get("machine_name")),
         "cpu": {
@@ -538,13 +583,16 @@ def _normalized_host(document: object) -> dict[str, object]:
             "release": _text(system.get("release")),
             "revision": _integer(system.get("revision")),
         },
-        "azure": None if azure is None else _normalized_azure(_object(azure)),
-        "volumes": {
-            role: _normalized_volume(volumes[role])
-            for role in VOLUME_ROLES
-            if role in volumes
-        },
     }
+    if _HYPERVISOR_BUILD in host and records_hypervisor_build(platform or ""):
+        normalized[_HYPERVISOR_BUILD] = _text(host[_HYPERVISOR_BUILD])
+    normalized["azure"] = None if azure is None else _normalized_azure(_object(azure))
+    normalized["volumes"] = {
+        role: _normalized_volume(volumes[role])
+        for role in VOLUME_ROLES
+        if role in volumes
+    }
+    return normalized
 
 
 def _normalized_volume(value: object) -> dict[str, object]:
