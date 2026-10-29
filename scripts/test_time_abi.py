@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import contextlib
 import dataclasses
 import io
@@ -98,6 +99,76 @@ def write_openvmm_profiles(
             json.dumps(document), encoding="utf-8"
         )
     return checkout
+
+
+# A Rust integer constant, `[pub] const NAME: TYPE = EXPRESSION;`.
+RUST_INTEGER_CONSTANT = re.compile(
+    r"^\s*(?:pub(?:\([^)]*\))?\s+)?const\s+(\w+)\s*:\s*[iu](?:8|16|32|64|128|size)"
+    r"\s*=\s*([^;]+);",
+    re.MULTILINE,
+)
+
+
+def rust_integer_constants(source: str) -> dict[str, int]:
+    """Return the integer constants of a Rust source whose values are integer
+    literals, or sums, differences, products, and left shifts of literals and
+    of earlier such constants."""
+    constants: dict[str, int] = {}
+
+    def evaluate(node: ast.expr) -> int:
+        if isinstance(node, ast.Constant) and type(node.value) is int:
+            return node.value
+        if isinstance(node, ast.Name):
+            return constants[node.id]
+        if isinstance(node, ast.BinOp):
+            left, right = evaluate(node.left), evaluate(node.right)
+            if isinstance(node.op, ast.Add):
+                return left + right
+            if isinstance(node.op, ast.Sub):
+                return left - right
+            if isinstance(node.op, ast.Mult):
+                return left * right
+            if isinstance(node.op, ast.LShift):
+                return left << right
+        raise ValueError(f"unsupported expression {ast.dump(node)}")
+
+    for name, expression in RUST_INTEGER_CONSTANT.findall(source):
+        try:
+            constants[name] = evaluate(ast.parse(expression.strip(), mode="eval").body)
+        except (KeyError, SyntaxError, ValueError):
+            continue
+    return constants
+
+
+def pinned_openvmm_file(test: unittest.TestCase, path: str) -> str:
+    """Return the file at ``path`` in the OpenVMM submodule's pinned revision.
+
+    The file is read from the gitlink's commit, not from the submodule's
+    working tree, which can hold another revision: a self-hosted CI runner
+    keeps an earlier job's OpenVMM checkout until the job checks out its own.
+    Skips ``test`` where the submodule lacks the pinned revision.
+    """
+    root = Path(__file__).resolve().parents[1]
+    submodule = root / "openvmm"
+    if not (submodule / ".git").exists():
+        test.skipTest("the OpenVMM submodule is not initialized")
+
+    def git(directory: Path, *arguments: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            ["git", "-C", str(directory), *arguments],
+            capture_output=True,
+            encoding="utf-8",
+            check=False,
+        )
+
+    pin = git(root, "rev-parse", ":openvmm").stdout.strip()
+    if not pin or git(submodule, "cat-file", "-e", f"{pin}^{{commit}}").returncode:
+        test.skipTest(
+            f"the OpenVMM submodule lacks its pinned revision {pin or '(unknown)'}"
+        )
+    shown = git(submodule, "show", f"{pin}:{path}")
+    test.assertEqual(shown.returncode, 0, f"{path} at {pin}: {shown.stderr}")
+    return shown.stdout
 
 
 class FieldParsingTests(unittest.TestCase):
@@ -2401,6 +2472,36 @@ class DoctorTests(unittest.TestCase):
             result = doctor.check_openvmm_preflight(context_with_files())
         self.assertTrue(result.passed, result.detail)
 
+    def test_the_rate_limit_is_the_guests_frequency_budget(self):
+        # #1008: H4's limit is what the guest's wall-clock discipline leaves
+        # for the host's clock correction: Linux's frequency limit, to which
+        # nvx-rs clamps the correction, less a restore's rate deviation,
+        # which nvx-rs's restore packet decoder bounds by the time ABI's
+        # restore tolerance, the one that OpenVMM's rate policy applies.
+        root = Path(__file__).resolve().parents[1]
+        decoders = rust_integer_constants(
+            (root / "nvx-rs" / "src" / "guest" / "time" / "decoders.rs").read_text(
+                encoding="utf-8"
+            )
+        )
+        scaled_ppm = decoders["SCALED_PPM"]
+        self.assertEqual(scaled_ppm, 1 << 16)
+        self.assertEqual(
+            decoders["FREQUENCY_LIMIT"], doctor.GUEST_FREQUENCY_LIMIT_PPM * scaled_ppm
+        )
+        self.assertEqual(
+            decoders["RATE_DEVIATION_LIMIT"], doctor.RESTORE_TOLERANCE_PPM * scaled_ppm
+        )
+        self.assertEqual(
+            doctor.RATE_TOLERANCE_PPM,
+            (decoders["FREQUENCY_LIMIT"] - decoders["RATE_DEVIATION_LIMIT"])
+            / scaled_ppm,
+        )
+        rate = rust_integer_constants(
+            pinned_openvmm_file(self, "vmm_core/virt/src/time_abi/rate.rs")
+        )
+        self.assertEqual(rate["TSC_TOLERANCE_PPM"], doctor.RESTORE_TOLERANCE_PPM)
+
     def test_rate_check_applies_the_spec_bounds_to_sleep_separated_samples(self):
         def records(
             rates: list[float],
@@ -2556,7 +2657,7 @@ class DoctorTests(unittest.TestCase):
                 records([2793437000.0] * 2, interval_s=1.0, bracket=400),
                 "inconclusive: an interval's uncertainty is 0.401 ppm > 0.25 ppm",
             ),
-            (records([2794000000.0] * 12), "201.544 ppm from the measured rate"),
+            (records([2794200000.0] * 12), "273.140 ppm from the measured rate"),
             (records([100_000_000.0] * 12), "[E_TSC_RATE_IMPLAUSIBLE]"),
         ):
             with self.subTest(message=message):
@@ -2623,7 +2724,7 @@ class DoctorTests(unittest.TestCase):
         result = check(context, slewed, chrony="chronyd is not synchronized")
         self.assertFalse(result.passed)
         self.assertIn(
-            "the backend rate is 946.078 ppm from the measured rate (limit 100 ppm)",
+            "the backend rate is 946.078 ppm from the measured rate (limit 250 ppm)",
             result.detail,
         )
         self.assertIn(
@@ -2641,32 +2742,42 @@ class DoctorTests(unittest.TestCase):
                 True,
                 "79.786 ppm from the",
             ),
-            (
-                doctor.ChronyFrequency("PHC0", 90, 15),
-                "2300000507",
-                False,
-                "the measurement is inconclusive: the backend rate is 89.788 ppm "
-                "from the measured rate, 74.785 to 104.791 ppm within chronyd's "
-                "skew of 15.000 ppm, which straddles the limit of 100 ppm",
-            ),
+            # #1008: the 100 ppm of the time ABI v1 bounded the TSC's error
+            # alone, which a measurement can't tell from the reference's
+            # wander; azure-mshv-1 failed at +127.9 ppm, 117.3 to 138.6 ppm
+            # within chronyd's skew.
             (
                 doctor.ChronyFrequency("PHC0", 150, 1),
                 "2300000507",
+                True,
+                "149.802 ppm from the",
+            ),
+            (
+                doctor.ChronyFrequency("PHC0", 240, 15),
+                "2300000507",
                 False,
-                "the backend rate is 149.802 ppm from the measured rate, 148.802 "
-                "to 150.802 ppm within chronyd's skew of 1.000 ppm (limit 100 ppm)",
+                "the measurement is inconclusive: the backend rate is 239.837 ppm "
+                "from the measured rate, 224.830 to 254.845 ppm within chronyd's "
+                "skew of 15.000 ppm, which straddles the limit of 250 ppm",
+            ),
+            (
+                doctor.ChronyFrequency("PHC0", 300, 1),
+                "2300000507",
+                False,
+                "the backend rate is 299.870 ppm from the measured rate, 298.869 "
+                "to 300.870 ppm within chronyd's skew of 1.000 ppm (limit 250 ppm)",
             ),
             # The correction isn't linear in the frequency: the estimate's
-            # upper bound, 100 ppm from the declared rate, corrects the rate
-            # by 100.010 ppm, and a range that includes the declared rate
+            # upper bound, 250 ppm from the declared rate, corrects the rate
+            # by 250.063 ppm, and a range that includes the declared rate
             # starts at zero.
             (
-                doctor.ChronyFrequency("PHC0", 0, 100),
+                doctor.ChronyFrequency("PHC0", 0, 250),
                 "2300000000",
                 False,
                 "the measurement is inconclusive: the backend rate is 0.000 ppm "
-                "from the measured rate, 0.000 to 100.010 ppm within chronyd's "
-                "skew of 100.000 ppm, which straddles the limit of 100 ppm",
+                "from the measured rate, 0.000 to 250.063 ppm within chronyd's "
+                "skew of 250.000 ppm, which straddles the limit of 250 ppm",
             ),
         ):
             with self.subTest(estimate=estimate):
@@ -2676,16 +2787,17 @@ class DoctorTests(unittest.TestCase):
                 self.assertEqual(result.passed, passed, result.detail)
                 self.assertIn(message, result.detail)
         # The deviation keeps three decimals, so a failure never reads as the
-        # limit itself: #768's second failure was 100.027 ppm.
+        # limit itself: #768's second failure was 100.027 ppm, at the 100 ppm
+        # limit of the time.
         context = ci_context("mshv")
         context.facts["native_tsc_hz"] = "2300000507"
-        result = check(context, records([2300230569.0] * 2, interval_s=1.0))
+        result = check(context, records([2300575569.0] * 2, interval_s=1.0))
         self.assertFalse(result.passed)
         self.assertIn(
-            "the backend rate is 100.027 ppm from the measured rate (limit 100 ppm)",
+            "the backend rate is 250.027 ppm from the measured rate (limit 250 ppm)",
             result.detail,
         )
-        self.assertEqual(context.facts["rate_deviation_ppm"], "100.027")
+        self.assertEqual(context.facts["rate_deviation_ppm"], "250.027")
 
     def test_chrony_frequency_reads_a_synchronized_tracking_report(self):
         report = (

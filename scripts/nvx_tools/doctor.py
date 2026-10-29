@@ -75,7 +75,14 @@ RUST_ESCAPE = re.compile(r"\\(u\{[0-9a-fA-F]{1,6}\}|.)")
 # H4's rate stability bounds (doc/ci.md, "Host qualification").
 RATE_UNCERTAINTY_PPM = 0.25
 RATE_AGREEMENT_PPM = 1.0
-RATE_TOLERANCE_PPM = 100.0
+# H4's limit is the guest's budget for the host's clock correction. The
+# guest's wall-clock discipline follows host UTC, so it applies that
+# correction on top of a restore's rate deviation, which the time ABI's
+# restore tolerance bounds, within Linux's frequency limit
+# (doc/design/3.2-clock-and-time.md, "Wall-clock discipline").
+GUEST_FREQUENCY_LIMIT_PPM = 500.0
+RESTORE_TOLERANCE_PPM = 250.0
+RATE_TOLERANCE_PPM = GUEST_FREQUENCY_LIMIT_PPM - RESTORE_TOLERANCE_PPM
 # chronyd's tracking report, `chronyc -c tracking`, has 14 comma-separated
 # fields, among them the reference's name (1), the frequency in ppm, positive
 # when the undisciplined clock runs fast (7), its skew in ppm (9), and the
