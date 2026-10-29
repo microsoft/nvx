@@ -24,14 +24,14 @@
 <!-- nvx::host&#45;&gt;nvx::host::filesystem -->
 <g id="edge33" class="edge">
 <title>nvx::host&#45;&gt;nvx::host::filesystem</title>
-<path fill="none" stroke="#a8b8ca" d="M38.76,-999.02C44.3,-1046.45 68.17,-1237.65 109,-1390 117.88,-1423.12 132.43,-1460.44 141.18,-1481.69"/>
-<polygon fill="#a8b8ca" stroke="#a8b8ca" points="139.1,-1482.62 143.69,-1487.75 143.3,-1480.87 139.1,-1482.62"/>
+<path fill="none" stroke="#a8b8ca" d="M38.74,-999.05C44.23,-1046.62 67.88,-1238.34 109,-1391 117.85,-1423.84 132.41,-1460.81 141.17,-1481.86"/>
+<polygon fill="#a8b8ca" stroke="#a8b8ca" points="139.07,-1482.75 143.69,-1487.86 143.27,-1480.99 139.07,-1482.75"/>
 </g>
 <!-- nvx::host&#45;&gt;nvx::host::instance -->
 <g id="edge39" class="edge">
 <title>nvx::host&#45;&gt;nvx::host::instance</title>
-<path fill="none" stroke="#a8b8ca" d="M40.32,-999.07C49.6,-1035.36 80.23,-1153.91 109,-1251 120.19,-1288.77 134.62,-1332.62 142.58,-1356.42"/>
-<polygon fill="#a8b8ca" stroke="#a8b8ca" points="140.51,-1357.42 144.74,-1362.86 144.83,-1355.97 140.51,-1357.42"/>
+<path fill="none" stroke="#a8b8ca" d="M40.33,-999.07C49.63,-1035.35 80.34,-1153.88 109,-1251 120.28,-1289.23 134.77,-1333.65 142.69,-1357.58"/>
+<polygon fill="#a8b8ca" stroke="#a8b8ca" points="140.54,-1358.31 144.74,-1363.77 144.86,-1356.88 140.54,-1358.31"/>
 </g>
 <!-- nvx::host&#45;&gt;nvx::host::launch -->
 <g id="edge43" class="edge">
@@ -336,20 +336,20 @@
 <!-- nvx::host::instance&#45;&gt;nvx::host::instance::execution -->
 <g id="edge40" class="edge">
 <title>nvx::host::instance&#45;&gt;nvx::host::instance::execution</title>
-<path fill="none" stroke="#a8b8ca" d="M174.72,-1385.04C189.4,-1391.54 208.6,-1399.7 226,-1406 227.98,-1406.72 230.02,-1407.43 232.08,-1408.13"/>
-<polygon fill="#a8b8ca" stroke="#a8b8ca" points="231.44,-1410.32 238.33,-1410.21 232.87,-1406 231.44,-1410.32"/>
+<path fill="none" stroke="#a8b8ca" d="M175.78,-1386.09C190.33,-1392.29 209.05,-1399.97 226,-1406 227.99,-1406.71 230.03,-1407.41 232.09,-1408.11"/>
+<polygon fill="#a8b8ca" stroke="#a8b8ca" points="231.46,-1410.29 238.34,-1410.16 232.88,-1405.97 231.46,-1410.29"/>
 </g>
 <!-- nvx::host::instance&#45;&gt;nvx::host::instance::files -->
 <g id="edge41" class="edge">
 <title>nvx::host::instance&#45;&gt;nvx::host::instance::files</title>
-<path fill="none" stroke="#a8b8ca" d="M184.33,-1378.33C202.33,-1380.63 224.38,-1383.46 242.29,-1385.75"/>
-<polygon fill="#a8b8ca" stroke="#a8b8ca" points="242.44,-1388.06 249.18,-1386.63 243.02,-1383.55 242.44,-1388.06"/>
+<path fill="none" stroke="#a8b8ca" d="M184.33,-1379.06C202.33,-1381.22 224.38,-1383.87 242.29,-1386.01"/>
+<polygon fill="#a8b8ca" stroke="#a8b8ca" points="242.45,-1388.33 249.18,-1386.84 243,-1383.81 242.45,-1388.33"/>
 </g>
 <!-- nvx::host::instance&#45;&gt;nvx::host::instance::locked -->
 <g id="edge42" class="edge">
 <title>nvx::host::instance&#45;&gt;nvx::host::instance::locked</title>
-<path fill="none" stroke="#a8b8ca" d="M184.33,-1369.94C201.69,-1367.86 222.82,-1365.32 240.36,-1363.22"/>
-<polygon fill="#a8b8ca" stroke="#a8b8ca" points="240.96,-1365.44 247.15,-1362.4 240.42,-1360.92 240.96,-1365.44"/>
+<path fill="none" stroke="#a8b8ca" d="M184.33,-1370.67C201.69,-1368.45 222.82,-1365.74 240.36,-1363.5"/>
+<polygon fill="#a8b8ca" stroke="#a8b8ca" points="240.99,-1365.71 247.15,-1362.63 240.41,-1361.2 240.99,-1365.71"/>
 </g>
 <!-- nvx::host::network&#45;&gt;nvx::host::network::address -->
 <g id="edge45" class="edge">
@@ -558,8 +558,8 @@
 <!-- nvx::host::store&#45;&gt;nvx::host::store::vmm -->
 <g id="edge89" class="edge">
 <title>nvx::host::store&#45;&gt;nvx::host::store::vmm</title>
-<path fill="none" stroke="#a8b8ca" d="M176.87,-537.94C181.76,-535.8 186.44,-532.9 190,-529 230.38,-484.69 184.52,-442.28 226,-399 230.64,-394.16 236.75,-390.78 243.09,-388.42"/>
-<polygon fill="#a8b8ca" stroke="#a8b8ca" points="243.96,-390.53 249.46,-386.39 242.58,-386.2 243.96,-390.53"/>
+<path fill="none" stroke="#a8b8ca" d="M176.88,-537.95C181.77,-535.8 186.45,-532.91 190,-529 230.63,-484.33 183.86,-441.25 226,-398 230.65,-393.22 236.77,-389.96 243.11,-387.73"/>
+<polygon fill="#a8b8ca" stroke="#a8b8ca" points="243.91,-389.86 249.48,-385.82 242.6,-385.5 243.91,-389.86"/>
 </g>
 <!-- nvx::host::sys&#45;&gt;nvx::host::sys::fs -->
 <g id="edge92" class="edge">
@@ -598,52 +598,64 @@
 <polygon fill="#a8b8ca" stroke="#a8b8ca" points="242.49,-189.93 249.37,-189.82 243.92,-185.61 242.49,-189.93"/>
 </g>
 <!-- nvx::host::template&#45;&gt;nvx::host::template::eligibility -->
-<g id="edge99" class="edge">
+<g id="edge101" class="edge">
 <title>nvx::host::template&#45;&gt;nvx::host::template::eligibility</title>
 <path fill="none" stroke="#a8b8ca" d="M184.66,-143.47C200.23,-147.33 218.78,-151.93 235.04,-155.97"/>
 <polygon fill="#a8b8ca" stroke="#a8b8ca" points="234.53,-158.18 241.38,-157.54 235.62,-153.77 234.53,-158.18"/>
 </g>
 <!-- nvx::host::template&#45;&gt;nvx::host::template::key -->
-<g id="edge100" class="edge">
+<g id="edge102" class="edge">
 <title>nvx::host::template&#45;&gt;nvx::host::template::key</title>
 <path fill="none" stroke="#a8b8ca" d="M184.66,-135C202.65,-135 224.63,-135 242.45,-135"/>
 <polygon fill="#a8b8ca" stroke="#a8b8ca" points="242.81,-137.28 249.31,-135 242.81,-132.73 242.81,-137.28"/>
 </g>
 <!-- nvx::host::template&#45;&gt;nvx::host::template::manifest -->
-<g id="edge101" class="edge">
+<g id="edge103" class="edge">
 <title>nvx::host::template&#45;&gt;nvx::host::template::manifest</title>
 <path fill="none" stroke="#a8b8ca" d="M184.66,-126.53C200.36,-122.64 219.08,-117.99 235.44,-113.93"/>
 <polygon fill="#a8b8ca" stroke="#a8b8ca" points="236.06,-116.13 241.82,-112.35 234.96,-111.71 236.06,-116.13"/>
 </g>
 <!-- nvx::host::template&#45;&gt;nvx::host::template::plan -->
-<g id="edge102" class="edge">
+<g id="edge104" class="edge">
 <title>nvx::host::template&#45;&gt;nvx::host::template::plan</title>
 <path fill="none" stroke="#a8b8ca" d="M165.73,-123.84C180.53,-113.42 203.92,-98.01 226,-88 231.41,-85.55 237.32,-83.37 243.12,-81.47"/>
 <polygon fill="#a8b8ca" stroke="#a8b8ca" points="243.81,-83.64 249.34,-79.53 242.45,-79.3 243.81,-83.64"/>
 </g>
 <!-- nvx::host::template&#45;&gt;nvx::host::template::store -->
-<g id="edge103" class="edge">
+<g id="edge105" class="edge">
 <title>nvx::host::template&#45;&gt;nvx::host::template::store</title>
 <path fill="none" stroke="#a8b8ca" d="M158.23,-123.97C170.63,-107.1 196.56,-74.97 226,-57 231.18,-53.84 237.07,-51.3 242.94,-49.28"/>
 <polygon fill="#a8b8ca" stroke="#a8b8ca" points="243.75,-51.41 249.27,-47.28 242.38,-47.07 243.75,-51.41"/>
 </g>
 <!-- nvx::host::template&#45;&gt;nvx::host::template::wire -->
-<g id="edge106" class="edge">
+<g id="edge108" class="edge">
 <title>nvx::host::template&#45;&gt;nvx::host::template::wire</title>
 <path fill="none" stroke="#a8b8ca" d="M155.14,-123.89C164.9,-101.84 189.72,-52.43 226,-26 231.01,-22.35 236.92,-19.58 242.87,-17.48"/>
 <polygon fill="#a8b8ca" stroke="#a8b8ca" points="243.8,-19.57 249.32,-15.45 242.43,-15.23 243.8,-19.57"/>
 </g>
+<!-- nvx::host::template::clone&#45;&gt;nvx::host::template::clone::launch -->
+<g id="edge99" class="edge">
+<title>nvx::host::template::clone&#45;&gt;nvx::host::template::clone::launch</title>
+<path fill="none" stroke="#a8b8ca" d="M303.51,-200.07C322.63,-202.33 348.81,-205.42 369.73,-207.89"/>
+<polygon fill="#a8b8ca" stroke="#a8b8ca" points="369.6,-210.17 376.32,-208.67 370.13,-205.65 369.6,-210.17"/>
+</g>
+<!-- nvx::host::template::clone&#45;&gt;nvx::host::template::clone::record -->
+<g id="edge100" class="edge">
+<title>nvx::host::template::clone&#45;&gt;nvx::host::template::clone::record</title>
+<path fill="none" stroke="#a8b8ca" d="M303.51,-193.72C322.76,-191.3 349.17,-187.97 370.16,-185.33"/>
+<polygon fill="#a8b8ca" stroke="#a8b8ca" points="370.6,-187.56 376.77,-184.49 370.03,-183.05 370.6,-187.56"/>
+</g>
 <!-- nvx::host::template::store&#45;&gt;nvx::host::template::store::capture -->
-<g id="edge104" class="edge">
+<g id="edge106" class="edge">
 <title>nvx::host::template::store&#45;&gt;nvx::host::template::store::capture</title>
-<path fill="none" stroke="#a8b8ca" d="M303.51,-45.07C321.63,-47.21 346.11,-50.1 366.42,-52.5"/>
-<polygon fill="#a8b8ca" stroke="#a8b8ca" points="366.42,-54.79 373.14,-53.3 366.95,-50.27 366.42,-54.79"/>
+<path fill="none" stroke="#a8b8ca" d="M303.51,-45.28C321.71,-47.57 346.32,-50.67 366.69,-53.24"/>
+<polygon fill="#a8b8ca" stroke="#a8b8ca" points="366.41,-55.49 373.14,-54.05 366.97,-50.98 366.41,-55.49"/>
 </g>
 <!-- nvx::host::template::store&#45;&gt;nvx::host::template::store::leases -->
-<g id="edge105" class="edge">
+<g id="edge107" class="edge">
 <title>nvx::host::template::store&#45;&gt;nvx::host::template::store::leases</title>
-<path fill="none" stroke="#a8b8ca" d="M303.51,-38.72C322.63,-36.31 348.81,-33.02 369.73,-30.38"/>
-<polygon fill="#a8b8ca" stroke="#a8b8ca" points="370.16,-32.62 376.32,-29.55 369.59,-28.11 370.16,-32.62"/>
+<path fill="none" stroke="#a8b8ca" d="M303.51,-38.93C322.63,-36.67 348.81,-33.58 369.73,-31.11"/>
+<polygon fill="#a8b8ca" stroke="#a8b8ca" points="370.13,-33.35 376.32,-30.33 369.6,-28.83 370.13,-33.35"/>
 </g>
 <!-- nvx::host -->
 <g id="node1" class="node">
@@ -1000,8 +1012,8 @@
 <g id="node40" class="node">
 <title>nvx::host::instance</title>
 <g id="a_node40"><a xlink:title="nvx::host::instance (pub)">
-<path fill="#ede9fe" stroke="#8b5cf6" stroke-width="1.2" d="M176.67,-1385C176.67,-1385 122.33,-1385 122.33,-1385 118.67,-1385 115,-1381.33 115,-1377.67 115,-1377.67 115,-1370.33 115,-1370.33 115,-1366.67 118.67,-1363 122.33,-1363 122.33,-1363 176.67,-1363 176.67,-1363 180.33,-1363 184,-1366.67 184,-1370.33 184,-1370.33 184,-1377.67 184,-1377.67 184,-1381.33 180.33,-1385 176.67,-1385"/>
-<text text-anchor="middle" x="149.5" y="-1370.6" font-family="Liberation Sans,Arial,Helvetica,sans-serif" font-size="13.00" fill="#14283f">instance</text>
+<path fill="#ede9fe" stroke="#8b5cf6" stroke-width="1.2" d="M176.67,-1386C176.67,-1386 122.33,-1386 122.33,-1386 118.67,-1386 115,-1382.33 115,-1378.67 115,-1378.67 115,-1371.33 115,-1371.33 115,-1367.67 118.67,-1364 122.33,-1364 122.33,-1364 176.67,-1364 176.67,-1364 180.33,-1364 184,-1367.67 184,-1371.33 184,-1371.33 184,-1378.67 184,-1378.67 184,-1382.33 180.33,-1386 176.67,-1386"/>
+<text text-anchor="middle" x="149.5" y="-1371.6" font-family="Liberation Sans,Arial,Helvetica,sans-serif" font-size="13.00" fill="#14283f">instance</text>
 </a>
 </g>
 </g>
@@ -1548,73 +1560,91 @@
 </a>
 </g>
 </g>
-<!-- nvx::host::template::eligibility -->
+<!-- nvx::host::template::clone::launch -->
 <g id="node100" class="node">
+<title>nvx::host::template::clone::launch</title>
+<g id="a_node100"><a xlink:title="nvx::host::template::clone::launch (pub(self))">
+<path fill="#ede9fe" stroke="#8b5cf6" stroke-width="1.2" stroke-dasharray="5,2" d="M427.17,-223C427.17,-223 383.83,-223 383.83,-223 380.17,-223 376.5,-219.33 376.5,-215.67 376.5,-215.67 376.5,-208.33 376.5,-208.33 376.5,-204.67 380.17,-201 383.83,-201 383.83,-201 427.17,-201 427.17,-201 430.83,-201 434.5,-204.67 434.5,-208.33 434.5,-208.33 434.5,-215.67 434.5,-215.67 434.5,-219.33 430.83,-223 427.17,-223"/>
+<text text-anchor="middle" x="405.5" y="-208.6" font-family="Liberation Sans,Arial,Helvetica,sans-serif" font-size="13.00" fill="#14283f">launch</text>
+</a>
+</g>
+</g>
+<!-- nvx::host::template::clone::record -->
+<g id="node101" class="node">
+<title>nvx::host::template::clone::record</title>
+<g id="a_node101"><a xlink:title="nvx::host::template::clone::record (pub(self))">
+<path fill="#ede9fe" stroke="#8b5cf6" stroke-width="1.2" stroke-dasharray="5,2" d="M426.67,-192C426.67,-192 384.33,-192 384.33,-192 380.67,-192 377,-188.33 377,-184.67 377,-184.67 377,-177.33 377,-177.33 377,-173.67 380.67,-170 384.33,-170 384.33,-170 426.67,-170 426.67,-170 430.33,-170 434,-173.67 434,-177.33 434,-177.33 434,-184.67 434,-184.67 434,-188.33 430.33,-192 426.67,-192"/>
+<text text-anchor="middle" x="405.5" y="-177.6" font-family="Liberation Sans,Arial,Helvetica,sans-serif" font-size="13.00" fill="#14283f">record</text>
+</a>
+</g>
+</g>
+<!-- nvx::host::template::eligibility -->
+<g id="node102" class="node">
 <title>nvx::host::template::eligibility</title>
-<g id="a_node100"><a xlink:title="nvx::host::template::eligibility (pub(self))">
+<g id="a_node102"><a xlink:title="nvx::host::template::eligibility (pub(self))">
 <path fill="#ede9fe" stroke="#8b5cf6" stroke-width="1.2" stroke-dasharray="5,2" d="M304.17,-177C304.17,-177 248.83,-177 248.83,-177 245.17,-177 241.5,-173.33 241.5,-169.67 241.5,-169.67 241.5,-162.33 241.5,-162.33 241.5,-158.67 245.17,-155 248.83,-155 248.83,-155 304.17,-155 304.17,-155 307.83,-155 311.5,-158.67 311.5,-162.33 311.5,-162.33 311.5,-169.67 311.5,-169.67 311.5,-173.33 307.83,-177 304.17,-177"/>
 <text text-anchor="middle" x="276.5" y="-162.6" font-family="Liberation Sans,Arial,Helvetica,sans-serif" font-size="13.00" fill="#14283f">eligibility</text>
 </a>
 </g>
 </g>
 <!-- nvx::host::template::key -->
-<g id="node101" class="node">
+<g id="node103" class="node">
 <title>nvx::host::template::key</title>
-<g id="a_node101"><a xlink:title="nvx::host::template::key (pub(self))">
+<g id="a_node103"><a xlink:title="nvx::host::template::key (pub(self))">
 <path fill="#ede9fe" stroke="#8b5cf6" stroke-width="1.2" stroke-dasharray="5,2" d="M296.17,-146C296.17,-146 256.83,-146 256.83,-146 253.17,-146 249.5,-142.33 249.5,-138.67 249.5,-138.67 249.5,-131.33 249.5,-131.33 249.5,-127.67 253.17,-124 256.83,-124 256.83,-124 296.17,-124 296.17,-124 299.83,-124 303.5,-127.67 303.5,-131.33 303.5,-131.33 303.5,-138.67 303.5,-138.67 303.5,-142.33 299.83,-146 296.17,-146"/>
 <text text-anchor="middle" x="276.5" y="-131.6" font-family="Liberation Sans,Arial,Helvetica,sans-serif" font-size="13.00" fill="#14283f">key</text>
 </a>
 </g>
 </g>
 <!-- nvx::host::template::manifest -->
-<g id="node102" class="node">
+<g id="node104" class="node">
 <title>nvx::host::template::manifest</title>
-<g id="a_node102"><a xlink:title="nvx::host::template::manifest (pub(self))">
+<g id="a_node104"><a xlink:title="nvx::host::template::manifest (pub(self))">
 <path fill="#ede9fe" stroke="#8b5cf6" stroke-width="1.2" stroke-dasharray="5,2" d="M303.67,-115C303.67,-115 249.33,-115 249.33,-115 245.67,-115 242,-111.33 242,-107.67 242,-107.67 242,-100.33 242,-100.33 242,-96.67 245.67,-93 249.33,-93 249.33,-93 303.67,-93 303.67,-93 307.33,-93 311,-96.67 311,-100.33 311,-100.33 311,-107.67 311,-107.67 311,-111.33 307.33,-115 303.67,-115"/>
 <text text-anchor="middle" x="276.5" y="-100.6" font-family="Liberation Sans,Arial,Helvetica,sans-serif" font-size="13.00" fill="#14283f">manifest</text>
 </a>
 </g>
 </g>
 <!-- nvx::host::template::plan -->
-<g id="node103" class="node">
+<g id="node105" class="node">
 <title>nvx::host::template::plan</title>
-<g id="a_node103"><a xlink:title="nvx::host::template::plan (pub(self))">
+<g id="a_node105"><a xlink:title="nvx::host::template::plan (pub(self))">
 <path fill="#ede9fe" stroke="#8b5cf6" stroke-width="1.2" stroke-dasharray="5,2" d="M296.17,-84C296.17,-84 256.83,-84 256.83,-84 253.17,-84 249.5,-80.33 249.5,-76.67 249.5,-76.67 249.5,-69.33 249.5,-69.33 249.5,-65.67 253.17,-62 256.83,-62 256.83,-62 296.17,-62 296.17,-62 299.83,-62 303.5,-65.67 303.5,-69.33 303.5,-69.33 303.5,-76.67 303.5,-76.67 303.5,-80.33 299.83,-84 296.17,-84"/>
 <text text-anchor="middle" x="276.5" y="-69.6" font-family="Liberation Sans,Arial,Helvetica,sans-serif" font-size="13.00" fill="#14283f">plan</text>
 </a>
 </g>
 </g>
 <!-- nvx::host::template::store -->
-<g id="node104" class="node">
+<g id="node106" class="node">
 <title>nvx::host::template::store</title>
-<g id="a_node104"><a xlink:title="nvx::host::template::store (pub(self))">
+<g id="a_node106"><a xlink:title="nvx::host::template::store (pub(self))">
 <path fill="#ede9fe" stroke="#8b5cf6" stroke-width="1.2" stroke-dasharray="5,2" d="M296.17,-53C296.17,-53 256.83,-53 256.83,-53 253.17,-53 249.5,-49.33 249.5,-45.67 249.5,-45.67 249.5,-38.33 249.5,-38.33 249.5,-34.67 253.17,-31 256.83,-31 256.83,-31 296.17,-31 296.17,-31 299.83,-31 303.5,-34.67 303.5,-38.33 303.5,-38.33 303.5,-45.67 303.5,-45.67 303.5,-49.33 299.83,-53 296.17,-53"/>
 <text text-anchor="middle" x="276.5" y="-38.6" font-family="Liberation Sans,Arial,Helvetica,sans-serif" font-size="13.00" fill="#14283f">store</text>
 </a>
 </g>
 </g>
 <!-- nvx::host::template::store::capture -->
-<g id="node105" class="node">
+<g id="node107" class="node">
 <title>nvx::host::template::store::capture</title>
-<g id="a_node105"><a xlink:title="nvx::host::template::store::capture (pub(self))">
-<path fill="#ede9fe" stroke="#8b5cf6" stroke-width="1.2" stroke-dasharray="5,2" d="M430.17,-68C430.17,-68 380.83,-68 380.83,-68 377.17,-68 373.5,-64.33 373.5,-60.67 373.5,-60.67 373.5,-53.33 373.5,-53.33 373.5,-49.67 377.17,-46 380.83,-46 380.83,-46 430.17,-46 430.17,-46 433.83,-46 437.5,-49.67 437.5,-53.33 437.5,-53.33 437.5,-60.67 437.5,-60.67 437.5,-64.33 433.83,-68 430.17,-68"/>
-<text text-anchor="middle" x="405.5" y="-53.6" font-family="Liberation Sans,Arial,Helvetica,sans-serif" font-size="13.00" fill="#14283f">capture</text>
+<g id="a_node107"><a xlink:title="nvx::host::template::store::capture (pub(self))">
+<path fill="#ede9fe" stroke="#8b5cf6" stroke-width="1.2" stroke-dasharray="5,2" d="M430.17,-69C430.17,-69 380.83,-69 380.83,-69 377.17,-69 373.5,-65.33 373.5,-61.67 373.5,-61.67 373.5,-54.33 373.5,-54.33 373.5,-50.67 377.17,-47 380.83,-47 380.83,-47 430.17,-47 430.17,-47 433.83,-47 437.5,-50.67 437.5,-54.33 437.5,-54.33 437.5,-61.67 437.5,-61.67 437.5,-65.33 433.83,-69 430.17,-69"/>
+<text text-anchor="middle" x="405.5" y="-54.6" font-family="Liberation Sans,Arial,Helvetica,sans-serif" font-size="13.00" fill="#14283f">capture</text>
 </a>
 </g>
 </g>
 <!-- nvx::host::template::store::leases -->
-<g id="node106" class="node">
+<g id="node108" class="node">
 <title>nvx::host::template::store::leases</title>
-<g id="a_node106"><a xlink:title="nvx::host::template::store::leases (pub(self))">
-<path fill="#ede9fe" stroke="#8b5cf6" stroke-width="1.2" stroke-dasharray="5,2" d="M427.17,-37C427.17,-37 383.83,-37 383.83,-37 380.17,-37 376.5,-33.33 376.5,-29.67 376.5,-29.67 376.5,-22.33 376.5,-22.33 376.5,-18.67 380.17,-15 383.83,-15 383.83,-15 427.17,-15 427.17,-15 430.83,-15 434.5,-18.67 434.5,-22.33 434.5,-22.33 434.5,-29.67 434.5,-29.67 434.5,-33.33 430.83,-37 427.17,-37"/>
-<text text-anchor="middle" x="405.5" y="-22.6" font-family="Liberation Sans,Arial,Helvetica,sans-serif" font-size="13.00" fill="#14283f">leases</text>
+<g id="a_node108"><a xlink:title="nvx::host::template::store::leases (pub(self))">
+<path fill="#ede9fe" stroke="#8b5cf6" stroke-width="1.2" stroke-dasharray="5,2" d="M427.17,-38C427.17,-38 383.83,-38 383.83,-38 380.17,-38 376.5,-34.33 376.5,-30.67 376.5,-30.67 376.5,-23.33 376.5,-23.33 376.5,-19.67 380.17,-16 383.83,-16 383.83,-16 427.17,-16 427.17,-16 430.83,-16 434.5,-19.67 434.5,-23.33 434.5,-23.33 434.5,-30.67 434.5,-30.67 434.5,-34.33 430.83,-38 427.17,-38"/>
+<text text-anchor="middle" x="405.5" y="-23.6" font-family="Liberation Sans,Arial,Helvetica,sans-serif" font-size="13.00" fill="#14283f">leases</text>
 </a>
 </g>
 </g>
 <!-- nvx::host::template::wire -->
-<g id="node107" class="node">
+<g id="node109" class="node">
 <title>nvx::host::template::wire</title>
-<g id="a_node107"><a xlink:title="nvx::host::template::wire (pub(self))">
+<g id="a_node109"><a xlink:title="nvx::host::template::wire (pub(self))">
 <path fill="#ede9fe" stroke="#8b5cf6" stroke-width="1.2" stroke-dasharray="5,2" d="M296.17,-22C296.17,-22 256.83,-22 256.83,-22 253.17,-22 249.5,-18.33 249.5,-14.67 249.5,-14.67 249.5,-7.33 249.5,-7.33 249.5,-3.67 253.17,0 256.83,0 256.83,0 296.17,0 296.17,0 299.83,0 303.5,-3.67 303.5,-7.33 303.5,-7.33 303.5,-14.67 303.5,-14.67 303.5,-18.33 299.83,-22 296.17,-22"/>
 <text text-anchor="middle" x="276.5" y="-7.6" font-family="Liberation Sans,Arial,Helvetica,sans-serif" font-size="13.00" fill="#14283f">wire</text>
 </a>
