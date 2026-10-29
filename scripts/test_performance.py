@@ -634,6 +634,38 @@ class PerformanceTests(unittest.TestCase):
             | performance.DEVICE_IO_METRIC_NAMES,
         )
 
+    def test_documented_gate_thresholds_match_ci_and_cli(self):
+        repository = Path(__file__).parents[1]
+        workflow = (repository / ".github" / "workflows" / "ci.yml").read_text(
+            encoding="utf-8"
+        )
+        threshold, tolerance = (
+            re.findall(rf"^[ \t]*{name}:[ \t]*(\d+)[ \t]*$", workflow, re.MULTILINE)
+            for name in (
+                "PERFORMANCE_REGRESSION_THRESHOLD",
+                "PERFORMANCE_REGRESSION_ABSOLUTE_TOLERANCE_MS",
+            )
+        )
+        benchmarks, usage = (
+            " ".join((repository / "doc" / name).read_text(encoding="utf-8").split())
+            for name in ("benchmarks.md", "usage.md")
+        )
+        defaults = nvx.parse_args(
+            ["performance", "gate", "--baseline-dir", "base", "--target-dir", "target"]
+        )
+        threshold_default = f"{defaults.threshold:g}"
+        tolerance_default = f"{defaults.absolute_tolerance_ms:g}"
+
+        self.assertEqual(len(threshold), 1)
+        self.assertEqual(len(tolerance), 1)
+        self.assertIn(f"more than {threshold[0]}% worse", benchmarks)
+        self.assertIn(f"more than {tolerance[0]} ms slower", benchmarks)
+        self.assertIn(
+            f"defaults to {threshold_default}% and {tolerance_default} ms", benchmarks
+        )
+        self.assertIn(f"`--threshold` to `{threshold_default}`", usage)
+        self.assertIn(f"`--absolute-tolerance-ms` to `{tolerance_default}`", usage)
+
     def test_collect_cli_accepts_lifecycle_input(self):
         args = nvx.parse_args(
             [
