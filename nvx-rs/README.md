@@ -386,6 +386,16 @@ the 32,767-character limit of a Windows command line, and `LaunchSpec::check`,
 which every command line applies to the memory size, the non-root identity, the
 hostname, the guest network, and the kernel parameters.
 
+`kernel_parameters_problem` checks the extra kernel parameters as the guest's
+kernel reads them, with `nvx::protocol::cmdline`: trimmed, split at every byte
+that the kernel takes for whitespace, including the 0xa0 that ends the UTF-8
+encoding of characters such as `à`, with names that match whether they spell a
+dash or an underscore. It refuses NUL characters, quotes, and the `--`
+delimiter, after which the kernel would leave the `hostname=` parameter that
+follows the extra parameters to init, and the reserved parameters: those named
+`tsc` or `hostname`, with or without a value, and those whose names start with
+`nvx_` or `nvx-`.
+
 ### `nvx::host::network`
 
 `NetworkPolicy` and `openvmm_arguments`, the one lowering of a network posture
@@ -2474,4 +2484,7 @@ and the loop of `parse_args`, which split the command line into parameters,
 and `parameq`, `parameqn`, and `repair_env_string`, with which the kernel
 matches parameters with their handlers. `nvx::protocol::cmdline::parameters`
 must read as the model does every command line of up to six bytes among a
-letter and those that `next_arg` treats apart, and random ones.
+letter and those that `next_arg` treats apart, and random ones. With the model,
+properties check that the kernel reads no reserved parameter in the extra
+parameters that a `LaunchSpec` accepts, whatever separates it, and reads the
+`hostname=` parameter after them.
