@@ -104,9 +104,9 @@ use nvx::host::template::{
     Generation, HostTime, KEY_NAME, Lease, MAX_DOWNTIME_NS, MEMORY_BLOCK_SIZE, Outcome, Progress,
     RestoreDeadlines, SNAPSHOT_NAME, Stage, Store, Teardown,
 };
-use nvx::protocol::CAPABILITY_LEN;
 use nvx::protocol::root::ImageFormat;
 use nvx::protocol::status;
+use nvx::protocol::{CAPABILITY_LEN, HostMap};
 use nvx::uuid::Uuid;
 use runtime_adapter::GUEST_BUILD;
 use runtime_adapter::capture::DEFAULT_SCRATCH_LENGTH;
@@ -1041,6 +1041,15 @@ impl CloneControl for Early {
         })
     }
 
+    fn map(
+        &mut self,
+        _session: &mut Client,
+        _table: &[HostMap],
+        _deadline: Instant,
+    ) -> io::Result<()> {
+        Err(io::Error::other("the clone is never ready"))
+    }
+
     fn start(&mut self, _session: &mut Client, _deadline: Instant) -> io::Result<()> {
         Err(io::Error::other("the clone is never ready"))
     }
@@ -1077,7 +1086,12 @@ fn refuses_early(template: &Template, early: Message) {
     let staged = Staged::read(&sandbox.store).unwrap().unwrap();
     let key = store.read_key(&template.generation()).unwrap();
     let clone = request
-        .clone_request(plan.clone(), &staged.bindings(&plan), key.memory())
+        .clone_request(
+            plan.clone(),
+            &staged.bindings(&plan),
+            key.processors(),
+            key.memory(),
+        )
         .unwrap();
     let now = HostTime::now().unwrap();
     let mut acquired = store

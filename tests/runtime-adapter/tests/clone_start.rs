@@ -463,9 +463,9 @@ fn a_clone_s_request_takes_the_staged_bindings_and_the_guest_s_defaults() {
     let plan = request.plan().unwrap();
     let staged = Staged::stage(&distro, ImageFormat::Erofs, identity(), Some(&scratch)).unwrap();
     let bindings = staged.bindings(&plan);
-    let memory = 512 << 20;
+    let (processors, memory) = (1, 512 << 20);
     let clone = request
-        .clone_request(plan.clone(), &bindings, memory)
+        .clone_request(plan.clone(), &bindings, processors, memory)
         .unwrap();
     assert_eq!(clone.adapter, plan);
     assert_eq!(clone.binding, staged.distro.binding);
@@ -492,7 +492,7 @@ fn a_clone_s_request_takes_the_staged_bindings_and_the_guest_s_defaults() {
         ..request.clone()
     };
     let clone = named
-        .clone_request(plan.clone(), &bindings, memory)
+        .clone_request(plan.clone(), &bindings, processors, memory)
         .unwrap();
     assert_eq!(
         clone.workload.identity,
@@ -519,7 +519,7 @@ fn a_clone_s_request_takes_the_staged_bindings_and_the_guest_s_defaults() {
         ),
     ] {
         let error = request
-            .clone_request(plan.clone(), &bindings, memory)
+            .clone_request(plan.clone(), &bindings, processors, memory)
             .unwrap_err();
         assert_eq!(error.kind(), nvx::ErrorKind::Unavailable, "{what}");
         assert!(
@@ -537,12 +537,12 @@ fn a_clone_s_request_takes_the_staged_bindings_and_the_guest_s_defaults() {
     };
     let plan = in_ram.plan().unwrap();
     let error = in_ram
-        .clone_request(plan.clone(), &Bindings::default(), memory)
+        .clone_request(plan.clone(), &Bindings::default(), processors, memory)
         .unwrap_err();
     assert_eq!(error.kind(), nvx::ErrorKind::Unavailable);
     let staged = Staged::stage(&distro, ImageFormat::Erofs, identity(), None).unwrap();
     let clone = in_ram
-        .clone_request(plan.clone(), &staged.bindings(&plan), memory)
+        .clone_request(plan.clone(), &staged.bindings(&plan), processors, memory)
         .unwrap();
     assert_eq!(clone.scratch, None);
     assert_eq!(clone.adapter, plan);

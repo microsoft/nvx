@@ -105,7 +105,8 @@ impl Request {
 
     /// Returns NVX's request of the clone of `plan`, the [plan](Self::plan) of this request, with
     /// the bindings that the sandbox's store stages for its images, `bindings`, as
-    /// `staged::Staged::bindings` finds them, and the memory target `memory`, in bytes.
+    /// `staged::Staged::bindings` finds them, the processor target `processors`, and the memory
+    /// target `memory`, in bytes. The request exports nothing.
     ///
     /// The record of the clone's activation names the workload identity, if any, the
     /// [`CLONE_HOSTNAME`], the request's machine ID, the overlay's mode, and the scratch's
@@ -120,6 +121,7 @@ impl Request {
         &self,
         plan: SandboxPlan,
         bindings: &Bindings,
+        processors: u32,
         memory: u64,
     ) -> Result<CloneRequest> {
         let binding = bindings
@@ -148,6 +150,8 @@ impl Request {
             binding,
             policy_revision: DISTRO_POLICY_REVISION,
             scratch,
+            export: None,
+            processors,
             memory,
             workload: WorkloadView {
                 hostname: CLONE_HOSTNAME.as_bytes().to_vec(),

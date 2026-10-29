@@ -1786,6 +1786,15 @@ fn start(
         .request
         .memory
         .or_else(|| templates.read_key(&generation).ok().map(|key| key.memory()));
+    // The processor target is the template's processors online at boot, or its capacity when it
+    // records none, as when they are all online at boot; a key that cannot be read gives none.
+    let processors = templates
+        .read_key(&generation)
+        .ok()
+        .map(|key| match key.boot_processors() {
+            0 => key.processors(),
+            boot => boot,
+        });
     let runtime = runtime(guest_build)?;
     runtime
         .artifacts
@@ -1815,6 +1824,7 @@ fn start(
         templates: &templates,
         request: &clone.request,
         plan,
+        processors,
         memory,
         runtime: &runtime,
         guest_build,
@@ -1849,6 +1859,9 @@ struct CloneLaunch<'a> {
     request: &'a runtime_adapter::clone::Request,
     /// The adapter's plan of the clone's image over its upper.
     plan: nvx::host::sandbox::SandboxPlan,
+    /// The clone's processor target, or none if the generation's key, which gives it, cannot be
+    /// read.
+    processors: Option<u32>,
     /// The clone's memory target, in bytes, or none if the request names none, and the
     /// generation's key, whose RAM it would be, cannot be read.
     memory: Option<u64>,
@@ -1873,6 +1886,7 @@ impl CloneLaunch<'_> {
             templates,
             request,
             plan,
+            processors,
             memory,
             runtime,
             guest_build,
@@ -1883,7 +1897,12 @@ impl CloneLaunch<'_> {
         // No template serves a memory target of 0, which stands for the one of a key that could
         // not be read: the plan fails as it reads the key again, before it checks the target.
         let clone_request = request
-            .clone_request(plan.clone(), &bindings, memory.unwrap_or(0))
+            .clone_request(
+                plan.clone(),
+                &bindings,
+                processors.unwrap_or(0),
+                memory.unwrap_or(0),
+            )
             .map_err(|error| Failed::Command(binding_error(&error)))?;
         let clone_plan = ClonePlan::new(
             templates,
@@ -1962,7 +1981,7 @@ fn unanswered(
 /// sequence of a clone's start, and a reattach to it, take, the one place that makes it. A clone's
 /// record announces no mapping table: the adapter maps nothing into a clone.
 fn clone_order(build: &str) -> CloneOrder<'_> {
-    CloneOrder { build, table: &[] }
+    CloneOrder { build }
 }
 
 /// Ends a command whose clone, in the sandbox of `locked`, failed with `failure`, as NVX
