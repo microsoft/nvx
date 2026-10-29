@@ -861,20 +861,28 @@ fn the_store_is_private_to_the_current_user() {
 #[cfg(target_os = "linux")]
 #[test]
 fn private_directories_belong_to_the_current_user_and_grant_others_nothing() {
+    use nix::sys::stat::Mode;
+    use nix::unistd::Uid;
+
+    // The check takes the owner and the current user as user IDs, and the permission bits of the
+    // directory's mode, without the bits of its type, as the store reads them from its metadata.
+    let owner_only_problem = |uid, mode, euid| {
+        platform::owner_only_problem(
+            Uid::from_raw(uid),
+            Mode::from_bits_truncate(mode),
+            Uid::from_raw(euid),
+        )
+    };
     // Another user's directory is refused whatever its mode, since its owner may change it.
     assert_eq!(
-        platform::owner_only_problem(1001, 0o40700, 1000),
+        owner_only_problem(1001, 0o40700, 1000),
         Some("belongs to user 1001, not to the current user 1000".to_owned())
     );
     for mode in [0o40700, 0o42700, 0o41700, 0o40500, 0o40300] {
-        assert_eq!(
-            platform::owner_only_problem(1000, mode, 1000),
-            None,
-            "{mode:o}"
-        );
+        assert_eq!(owner_only_problem(1000, mode, 1000), None, "{mode:o}");
     }
     for mode in [0o40750, 0o40705, 0o40770, 0o40701, 0o40710] {
-        let problem = platform::owner_only_problem(1000, mode, 1000).unwrap();
+        let problem = owner_only_problem(1000, mode, 1000).unwrap();
         assert!(
             problem.starts_with("is accessible to other users"),
             "{problem}"
