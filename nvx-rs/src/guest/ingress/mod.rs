@@ -13,7 +13,9 @@
 //! announces from that socket, its standard input, rather than from one of its
 //! own. A failure to bind the socket, or to run the program, is the start's
 //! own, before the clone is ready, and the caller watches the announcer that
-//! started, since the clone's listeners go unannounced once it ended.
+//! started, and must end the clone once it ended: the gateway then keeps
+//! publishing the listeners that it last announced, and learns of no later
+//! change of them.
 //!
 //! Every 100 ms it reads the kernel's socket tables. A TCP socket in the
 //! LISTEN state is a listener, and so is an unconnected UDP socket that

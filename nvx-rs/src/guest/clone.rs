@@ -187,11 +187,13 @@
 //! the [`Applied`] root and workload, which the adapter keeps, with the export's root, from which
 //! the adapter maps the host's mapping table once the clone is ready, the network's proxy
 //! endpoint, which the adapter tells its workloads as at a cold boot, and the announcer, which the
-//! adapter watches, since the workload's listeners go unpublished once it ended, and whose
-//! [`teardown`](Applied::teardown) stops the announcer, closes the export's root, and removes the
-//! binds before it tears the root down, or an [`ApplyError`], after which nothing that it mounted
-//! or bound stays mounted, unless the error holds the unmounts that failed, and no announcer that
-//! it started runs.
+//! adapter watches, and must end the clone once the announcer ended: the gateway then keeps
+//! publishing the listeners that the announcer last announced until the VM ends, and learns of no
+//! later change of them. The [`teardown`](Applied::teardown) of the [`Applied`] stops the
+//! announcer, closes the export's root, and removes the binds before it tears the root down. An
+//! application that fails returns an [`ApplyError`] instead, after which nothing that it mounted or
+//! bound stays mounted, unless the error holds the unmounts that failed, and no announcer that it
+//! started runs.
 //!
 //! # Example
 //!

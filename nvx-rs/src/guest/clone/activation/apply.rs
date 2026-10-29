@@ -88,10 +88,12 @@ pub struct RootTemplate {
 /// runtime's binds, which each execution's mount namespace copies from the caller's. The adapter
 /// [takes](Self::take_export) the export's root, from which it maps the host's mapping table once
 /// the clone is ready, and tells its workloads the [proxy's endpoint](Self::proxy) as at a cold
-/// boot. The adapter watches the [announcer](Self::announcer), whose end leaves the workload's
-/// listeners unpublished, through its pidfd. [`teardown`](Self::teardown) stops the announcer,
-/// closes the export's root, if the adapter did not take it, removes the binds, then tears the
-/// root down, and dropping it does the same, ignoring failures, as dropping a [`Root`] does.
+/// boot. The adapter watches the [announcer](Self::announcer) through its pidfd, and must end the
+/// clone once the announcer ended: the gateway then keeps publishing the listeners that the
+/// announcer last announced until the VM ends, and learns of no later change of them.
+/// [`teardown`](Self::teardown) stops the announcer, closes the export's root, if the adapter did
+/// not take it, removes the binds, then tears the root down, and dropping it does the same,
+/// ignoring failures, as dropping a [`Root`] does.
 #[derive(Debug)]
 pub struct Applied {
     /// The announcer of the workload's listeners, if the record's network publishes them, which a
@@ -170,8 +172,9 @@ impl Applied {
     }
 
     /// Returns the announcer of the workload's listeners, which the application started, if the
-    /// record's network publishes them, so that the adapter polls its
-    /// [pidfd](Announcer::pidfd): the workload's listeners go unpublished once it ended.
+    /// record's network publishes them, so that the adapter polls its [pidfd](Announcer::pidfd),
+    /// and ends the clone once the announcer ended, as it must: the gateway then keeps publishing
+    /// the listeners that the announcer last announced, and learns of no later change of them.
     pub fn announcer(&self) -> Option<&Announcer> {
         self.announcer.as_ref()
     }
