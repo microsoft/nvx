@@ -2037,6 +2037,15 @@ to the scenario tests, which reached every line and branch of production code
 that the replay reached, and caught every mutant of the CLI that the replay
 caught.
 
+The scenario tests check the same outcomes whoever runs them, unprivileged or
+as root. `--mount-owner caller` squashes guest root to the owner of a share, so
+`nvx-rs sandbox` refuses a share that UID 0 or GID 0 owns, and OpenVMM refuses
+one at launch. The shares of each root therefore belong to a user other than
+root: the user that runs the tests, or UID and GID 65533 when they run as root.
+Whoever runs the tests, the checks that refuse a command line also check that
+`sandbox run` and `provision` refuse to share `/`, which root owns, with the
+caller owner.
+
 ## Features
 
 | Feature | Contents |

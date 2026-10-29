@@ -2,7 +2,8 @@
 //!
 //! A test runs `nvx-rs --root ROOT` in a fresh [`Root`]: a repository checkout with the build
 //! provenance that names its runtime identity, a distro layer, a scratch image, and directories and
-//! a file to share, whose OpenVMM is the fake OpenVMM, `nvx-fake-openvmm`.
+//! a file to share, whose OpenVMM is the fake OpenVMM, `nvx-fake-openvmm`. The shares belong to a
+//! user other than root whoever runs the tests, as `--mount-owner caller` requires of a share.
 //!
 //! The scenario tests check what callers of `nvx-rs` rely on: how a run ended, as an [`Outcome`]
 //! reports it, with its exit status and its errors, by their codes and by stable fragments of their
@@ -107,6 +108,18 @@ const FILES: [(&str, &str); 12] = [
 /// The empty directories of a root: the one that receives outcome reports.
 const DIRECTORIES: [&str; 1] = ["reports"];
 
+/// The directories and the file of a root that the tests share, below it.
+#[cfg(unix)]
+const SHARES: [&str; 3] = ["share", "share2", "single.txt"];
+
+/// The UID and GID that own the shares of a root when the tests run as root, which owns the rest
+/// of the root: `--mount-owner caller` squashes guest root to the owner of a share, so
+/// `nvx-rs sandbox` refuses a share that UID 0 or GID 0 owns, and OpenVMM refuses one at launch.
+/// It stands for the user that runs the tests unprivileged, who then owns the whole root, and so
+/// is neither root nor `nobody` (65534), as whom sandboxes run their workloads by default.
+#[cfg(unix)]
+const SHARE_OWNER: u32 = 65533;
+
 /// The largest file whose content a [`Snapshot`] digests; it digests the length and modification
 /// time of a larger one, such as a copy of the fake OpenVMM.
 const DIGESTED_SIZE: u64 = 2 << 20;
@@ -143,7 +156,7 @@ pub(crate) struct Root {
 
 impl Root {
     /// Returns a fresh root that holds the build provenance, the files, the directories, and the
-    /// OpenVMM of a test root.
+    /// OpenVMM of a test root, whose shares belong to a user other than root.
     pub(crate) fn new() -> Self {
         let root = Self::empty();
         for (name, member, digest) in PROVENANCE {
@@ -159,7 +172,36 @@ impl Root {
             fs::create_dir_all(root.below(relative)).unwrap();
         }
         root.install_openvmm(OPENVMM);
+        #[cfg(unix)]
+        root.give_shares_away();
         root
+    }
+
+    /// Gives the shares of the root, with all that they hold, to [`SHARE_OWNER`] when the tests
+    /// run as root, so that they belong to a user other than root whoever runs the tests.
+    #[cfg(unix)]
+    fn give_shares_away(&self) {
+        use std::os::unix::fs::lchown;
+
+        if !nix::unistd::geteuid().is_root() {
+            return;
+        }
+        let mut pending: Vec<PathBuf> = SHARES.iter().map(|share| self.below(share)).collect();
+        while let Some(path) = pending.pop() {
+            if let Err(error) = lchown(&path, Some(SHARE_OWNER), Some(SHARE_OWNER)) {
+                panic!(
+                    "cannot give {} to UID and GID {SHARE_OWNER}: {error}",
+                    path.display()
+                );
+            }
+            if fs::symlink_metadata(&path).unwrap().is_dir() {
+                pending.extend(
+                    fs::read_dir(&path)
+                        .unwrap()
+                        .map(|entry| entry.unwrap().path()),
+                );
+            }
+        }
     }
 
     /// Returns a fresh, empty root.
