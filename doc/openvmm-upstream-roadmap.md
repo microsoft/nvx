@@ -9,21 +9,23 @@
 - Mapped fork tip: `a0556d7d85ce1fff89f5b45a98f15c5c79cbb6fb`, position 157. The graph, PR
   summary, and commit mapping below cover positions 001-157 and the fixups at positions
   334-340, 344, and 345.
-- NVX's pinned OpenVMM revision: `832d5bb48dadd2cc5221f2c8b8905e6b80d13d53`, position 354.
-  Positions 353 and 354, which microsoft/openvmm#4775 proposes for `feature/microvm/dev`, are
-  two commits on position 352, `b92daa350`, the head of `feature/microvm/dev` since
-  microsoft/openvmm#4773 merged positions 350-352. Those are three commits on position 349,
-  `d2338ea22`, which microsoft/openvmm#4769 merged with position 348. Positions 348 and 349 are
-  two commits on position 347, `57d0a18b3`, which microsoft/openvmm#4767 merged with position
-  346. Positions 346 and 347 are two commits on position 345, `e68871cc6`, which
-  microsoft/openvmm#4762 merged with position 344. Positions 344 and 345 are two commits on
-  position 343, `a12d9167f`, which microsoft/openvmm#4749 merged with positions 341 and 342.
-  Positions 341-343 are three commits on position 340, `2b681564d`, which microsoft/openvmm#4735
-  merged with position 339. Positions 339 and 340 are two commits on position 338, `8a0d945ed`,
-  which microsoft/openvmm#4734 merged, and position 338 is one commit on `79a501b63`, the head
-  of the `feature/microvm/release/v2.3` branch of microsoft/openvmm. The pin is 197 commits past
-  the mapped tip on the same first-parent chain. Positions 158-333, 341-343, and 346-354 are not
-  yet assigned to PRs; see [Commits after the mapped tip](#commits-after-the-mapped-tip).
+- NVX's pinned OpenVMM revision: `bd2b27a2ef9339bd16692c93facb8d84952dc9f8`, position 359.
+  Positions 355-359, which microsoft/openvmm#4794 proposes for `feature/microvm/dev`, are
+  five commits on position 354, `832d5bb48`, the head of `feature/microvm/dev` since
+  microsoft/openvmm#4775 merged positions 353 and 354. Those are two commits on position 352,
+  `b92daa350`, which microsoft/openvmm#4773 merged with positions 350 and 351. Positions
+  350-352 are three commits on position 349, `d2338ea22`, which microsoft/openvmm#4769 merged
+  with position 348. Positions 348 and 349 are two commits on position 347, `57d0a18b3`, which
+  microsoft/openvmm#4767 merged with position 346. Positions 346 and 347 are two commits on
+  position 345, `e68871cc6`, which microsoft/openvmm#4762 merged with position 344. Positions
+  344 and 345 are two commits on position 343, `a12d9167f`, which microsoft/openvmm#4749
+  merged with positions 341 and 342. Positions 341-343 are three commits on position 340,
+  `2b681564d`, which microsoft/openvmm#4735 merged with position 339. Positions 339 and 340 are
+  two commits on position 338, `8a0d945ed`, which microsoft/openvmm#4734 merged, and position
+  338 is one commit on `79a501b63`, the head of the `feature/microvm/release/v2.3` branch of
+  microsoft/openvmm. The pin is 202 commits past the mapped tip on the same first-parent chain.
+  Positions 158-333, 341-343, and 346-359 are not yet assigned to PRs; see
+  [Commits after the mapped tip](#commits-after-the-mapped-tip).
 - Upstream main: `22c0485be597f87a76771e1db03eaa823a685ffc` (2026-10-22), the fork base.
 
 ## Upstream status
@@ -313,8 +315,8 @@ The physical branch is one first-parent chain:
   -> PR14 fixup [336] -> PR09 fixup [337]
   -> PR02 fixup [338] -> PR20 fixup [339] -> PR23 fixup [340]
   -> unassigned [341-343] -> PR18 fixups [344-345]
-  -> unassigned [346-354]
-  -> 832d5bb48 (NVX pin)
+  -> unassigned [346-359]
+  -> bd2b27a2e (NVX pin)
 ```
 
 For upstream review, PR01-PR08 and PR14 can be rebased independently onto current upstream main,
@@ -336,8 +338,8 @@ PR18's position 111.
 
 ## Commits after the mapped tip
 
-The NVX pin extends the chain past position 157 without merges. Of the 197 later commits,
-positions 158-333, 341-343, and 346-354 are not yet classified or assigned to PRs, positions
+The NVX pin extends the chain past position 157 without merges. Of the 202 later commits,
+positions 158-333, 341-343, and 346-359 are not yet classified or assigned to PRs, positions
 334-337 are the fixups of the `feature/microvm/release/v2.3` rebase, position 338 is a PR02
 fixup, positions 339 and 340 are PR20 and PR23 fixups, and positions 344 and 345 are PR18
 fixups.
@@ -389,6 +391,7 @@ This table groups them by topic in chain order; ranges are inclusive, as in the
 | 350-352 | `8c1772d83..b92daa350` | 3 | HTTP blob disks bound each request in time, retry the ones that fail transiently on a new connection, and show them in inspect, so that a network path that silently stops delivering a connection's packets no longer hangs a guest's disk read (microsoft/openvmm#4773) |
 | 353 | `057a2eaa6` | 1 | Test that the microVM virtio-fs device takes a dormant slot's state into the device of an aggregate of a directory and a file, which then saves the aggregate |
 | 354 | `832d5bb48` | 1 | A platform restore may bind an aggregate, `--mount-aggregate` with its children, policy paths, and owner mode, to the filesystem slot that the snapshot left dormant, validated as at a cold boot, while the slot's device and the captured command line stay as captured; other tiers keep binding only a `--mount` (microsoft/openvmm#4775) |
+| 355-359 | `2607a7d55..bd2b27a2e` | 5 | microVM virtio devices reach only the RAM ranges of the e820 map: guest memory views that admit only a set of ranges, a virtio queue that refuses a descriptor unless its memory admits the whole buffer, an MMIO transport that restricts device DMA and marks a device that addresses other memory as needing reset, and the loader's e820 RAM ranges, to which every microVM device is restricted (microsoft/openvmm#4794) |
 
 Some of these commits change mapped work rather than add to it. Positions 246-250 remove the
 legacy microVM clock paths and change files that PR10 and PR17 also change. Position 252 makes
@@ -401,6 +404,10 @@ position 293 restricted it.
 Assigning the later commits therefore means revisiting those PRs, not only appending new ones.
 Positions 350-352, by contrast, change only `disk_blob`, which upstream main and the fork base
 have alike and no other commit of the chain changes, so they can go upstream on their own.
+Position 355 likewise changes only `guestmem`, which no other commit of the chain changes, so it
+can go upstream on its own, and position 356 adds only the virtio queue's check on top of it.
+Positions 357-359 build on the fork's virtio-mmio shared interrupt-status transport, MP-table
+loader, and microVM worker.
 
 ## PR summary
 
