@@ -352,9 +352,17 @@ pub fn capture_on_terminal(
             Capture::Repaired { repaired, fence } => (repaired, fence),
         };
         // The activation's deadline starts at the repair's acknowledgement of the restore.
+        let acknowledged = repaired.acknowledged_at();
         let activation = Activation::new(&repaired, fence, ACTIVATION_TIMEOUT, Instant::now());
         let template = root_template(&config);
-        let worked = work_clone(open_tty(tty)?, session, operations, activation, template)?;
+        let worked = work_clone(
+            open_tty(tty)?,
+            session,
+            operations,
+            activation,
+            template,
+            acknowledged,
+        )?;
         // A clone that ends before it is ready, or whose activation failed, ends even if the tty
         // sends nothing.
         let unready = matches!(worked, Worked::Abandoned | Worked::Unactivated { .. });

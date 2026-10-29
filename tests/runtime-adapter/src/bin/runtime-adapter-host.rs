@@ -95,10 +95,51 @@
 //! - `runtime-adapter-host reattach STORE` reattaches to the VM of STORE, which an earlier process
 //!   launched and which it holds although it is not its child, attaches a new session to it, in
 //!   the session's next epoch, and exchanges a `Ping`, leaving the VM running.
+//! - `runtime-adapter-host start STORE --template TEMPLATES --generation G --distro FORMAT:PATH
+//!   --distro-identity UUID --upper (scratch:PATH | ram) [--memory MIB] [--workload-identity
+//!   UID:GID] [--overlay-mode MODE] [--scratch-journal POLICY]` starts a clone of the generation G
+//!   of the template store TEMPLATES, an `nvx::host::template::Store`, in the sandbox store STORE,
+//!   which it creates if needed; see `runtime_adapter::clone`. It reads the generation from the
+//!   store's index, and, unless MIB mebibytes are given, its compatibility key, whose RAM is then
+//!   the clone's memory target, before it needs NVX's artifacts. A key that cannot be read is left
+//!   to NVX's plan, which reads it again, and attributes the failure, to the generation or to the
+//!   host, as it does for every clone. The store then leases the generation to
+//!   the sandbox, at the host's time, with `Store::acquire`, which refuses a generation that a
+//!   tombstone quarantines, or that is not eligible then, and NVX's `ClonePlan` checks the clone
+//!   against the generation, from the metadata of its files alone: its image, the raw file PATH,
+//!   an EROFS filesystem, `erofs`, of which the guest expects the identity UUID, of the length of
+//!   the template's placeholder, its upper, the ext4 scratch image PATH, of the geometry of the
+//!   template's scratch, or RAM, with the bindings that STORE stages for the images, as `stage`
+//!   stages them, and its memory target, in whole blocks, from the template's RAM to its capacity.
+//!   A request that the template cannot serve fails there, before any VMM starts. The command
+//!   records the clone in STORE, with the template store and the generation; see
+//!   `runtime_adapter::clone::CloneRecord`. OpenVMM then restores the generation's snapshot in
+//!   place, with the clone's devices, through NVX's supervisor, as the launch that the lease
+//!   reserves, and the restore sequence of `nvx::host::template` activates the clone through the
+//!   adapter's clone order, `runtime_adapter::host::CloneOrder`, with the clone's activation
+//!   record: the workload identity UID:GID, if given, as which every execution runs, whose account
+//!   the guest checks in the clone's root before it is ready, and the overlay mode MODE and the
+//!   scratch's journal policy POLICY, as a launch takes them. Once the clone is ready, the command
+//!   starts its sandbox, exchanges a `Ping` and the longest `Echo` with the guest agent, commits
+//!   the launch, and exits, leaving the VM running, and the sandbox holding the lease, which a stop
+//!   releases. A clone that fails, from its plan to its commit, fails with NVX's
+//!   `nvx::host::template::CloneFailure`, which attributes the failure by its evidence, and records
+//!   it in STORE from the clone's launch on: the command prints the failure's record, releases the
+//!   lease once the failure's teardown is resolved, and nothing of the clone runs, or keeps it, and
+//!   the records, for a later reattach, while it is not, and quarantines the generation through
+//!   its tombstone, once it released the sandbox's lock, for a failure of the template. A guest
+//!   agent that does not answer the `Ping` or the `Echo` fails the clone so, through
+//!   `Started::fail`, as the restore sequence attributes the failures of its sessions. A start
+//!   that fails otherwise, at a step of the adapter's own before the clone's launch, releases the
+//!   lease.
 //! - `runtime-adapter-host stop STORE` reattaches and attaches as `reattach` does, then stops the
 //!   VM: it asks the guest agent to stop, which first tears down a layered root, waits for the VM
 //!   to exit, and checks the VM's outcome report. A VM whose guest agent does not confirm the stop
-//!   is terminated.
+//!   is terminated. A stop of a clone releases the lease once the VM exited, and the clone's
+//!   records told how it ended, which the release removes, with the template store that the
+//!   clone's record names: a clone whose VM had exited when the stop began ended without its
+//!   holder, and one whose VM the guest ended, once the stop began, with a status that is evidence
+//!   of a failure, such as its repair's, failed, which ends the stop as it ends `start`.
 //! - `runtime-adapter-host probe STORE PROBE...` reattaches and attaches as `reattach` does, then
 //!   runs each PROBE in the VM's layered root, and prints the facts that it found. A PROBE is the
 //!   text of a probe: its name, then its arguments, each after one space; see
@@ -117,28 +158,48 @@
 //!   have none. It starts in the root's directory DIR, or `/`, with exactly the environment of its
 //!   `--env` entries, then, if the VM's network has a proxy, the proxy's URL as the guest sees it
 //!   in `http_proxy`, `https_proxy`, `HTTP_PROXY`, and `HTTPS_PROXY`, unless the entries name any
-//!   of them; see `runtime_adapter::layered::with_proxy`. Before it attaches, the command checks
-//!   that the framing still carries each start with the proxy's URL, and runs none of the
-//!   executions if one no longer fits. It runs for at most a minute, with 16 KiB chunks and the
-//!   credit of 4 of them for its input and 8 for its output, which its standard output and error
-//!   share. The command keeps at most 16 MiB of each stream, and cancels an execution whose stream
-//!   would exceed them; see `runtime_adapter::exec::MAX_CAPTURE`. Execution N, from 1, has the key
-//!   `(B + N, E)`: E is the epoch of the command's attachment, and B the first 8 bytes of the
-//!   broker instance's ID, as a little-endian number. The guest refuses a key that it heard of
+//!   of them; see `runtime_adapter::layered::with_proxy`. Before it starts any execution, the
+//!   command checks that the framing still carries each start with the proxy's URL, and runs none
+//!   of the executions if one no longer fits. It runs for at most a minute, with 16 KiB chunks
+//!   and the credit of 4 of them for its input and 8 for its output, which its standard output and
+//!   error share. The command keeps at most 16 MiB of each stream, and cancels an execution whose
+//!   stream would exceed them; see `runtime_adapter::exec::MAX_CAPTURE`. Execution N, from 1, has
+//!   the key `(B + N, E)`: E is the epoch of the command's attachment, and B the first 8 bytes of
+//!   the broker instance's ID, as a little-endian number. The guest refuses a key that it heard of
 //!   before, and the epochs of a broker instance only advance, while a broker restored from a
 //!   snapshot has a new instance ID, so no command repeats the key of another's execution.
 //!
 //! Each command but `stage` takes NVX's artifacts from the directory that `NVX_ARTIFACTS_DIR`
 //! names, a repository checkout or an extracted release, and the VM's runtime identity from NVX's
 //! identity of them, with the guest agent's build that `--guest-build BUILD` names, this crate's
-//! version by default; see `runtime_adapter::runtime`. Reattach finds a VM that another runtime
-//! identity launched mismatched, and then signals nothing: the VM keeps running.
+//! version by default; see `runtime_adapter::runtime`. Reattach finds a VM that booted cold under
+//! another runtime identity mismatched, and then signals nothing: the VM keeps running.
+//!
+//! The sandbox of a clone holds the clone's lease, through whose path the commands that reattach
+//! take the sandbox's lock. They reattach to a clone with `nvx::host::template::reattach_clone`,
+//! in a new session of the adapter's clone order, in which the clone answers the Activate of its
+//! record again, with the Ready that it answered once, and which they then use as `reattach`
+//! attaches one. The reattach ends a clone that runs under another runtime identity, without a
+//! word to its guest, or that fails the check of its Ready, through its verified identity, and
+//! finishes the record of an earlier failure of the clone, whose teardown it resolves if it can.
+//! The command then releases the lease of a clone whose VM ended without a failure, and fails;
+//! ends as `start` does for a clone that failed; and keeps the lease and the records, and fails,
+//! for a clone whose state cannot be determined. It releases a lease through the template store
+//! that the clone's record names, once the lease is of it. A sandbox whose start ended before it
+//! recorded the clone holds a lease of a template store that no record names: it records no
+//! clone, or an earlier clone's, which a release leaves, of another template store perhaps.
+//! `reattach STORE --template TEMPLATES` and `stop STORE --template TEMPLATES` release such a
+//! lease through the template store TEMPLATES, in place of the record's, which the release refuses
+//! unless the lease is of it.
 //!
 //! The commands print what they find as `KEY=VALUE` lines:
 //!
-//! - `reattached`: what reattach found: `live`, `mismatched`, `exited`, or `indeterminate`;
+//! - `reattached`: what reattach found: `live`, `mismatched`, `exited`, or `indeterminate`, and of
+//!   a clone, `live`, `ended`, `failed`, or `indeterminate`;
 //! - `differences`: the parts of the runtime identity in which a mismatched VM differs, separated
 //!   by commas;
+//! - `progress`: the step that a clone, which ended, reached: `planned`, `launching`, `spawned`,
+//!   `event`, `acknowledged`, `activating`, `ready`, `starting`, `started`, or `committed`;
 //! - `pid`: the VMM's process ID;
 //! - `instance` and `epoch`: the broker instance, in hexadecimal, and the epoch of the session
 //!   that the command attached to;
@@ -162,48 +223,83 @@
 //!     comma, or `none`;
 //!   - `settled`: `reusable` once the execution settled, or `fenced`;
 //!   - `stdout` and `stderr`: the program's standard output and error;
-//! - `stopped`: how the stop ended: `graceful`, `forced`, or `timed-out`;
+//! - `stopped`: how the stop ended: `graceful`, `forced`, or `timed-out`, or `exited` once a
+//!   clone's VM, which the command found running, had exited when the stop began, which stopped
+//!   nothing;
 //! - `outcome`: the category and status code of the VM's outcome report, such as `success 0`;
 //! - `teardown`: whether the VM's teardown completed: `complete` or `incomplete`;
 //! - `created`: how `create` served the template: `captured`, with a generation that a capture
 //!   made and the store published, or `existing`, with one that the store held;
 //! - `generation`, `key`, and `class`: the store generation of the template that `create` served,
 //!   and the identities of its compatibility key and of its capture class, each 64 hexadecimal
-//!   digits.
+//!   digits, or the store generation that `start` leased;
+//! - `lease`: the identity of the lease that `start` took, 32 hexadecimal digits;
+//! - `downtime` and `source`: the downtime of the leased generation's capture at the host's time,
+//!   in nanoseconds, and the clock that measured it: `monotonic`, the host's monotonic clock, on
+//!   the host's boot that captured the template, or `utc` otherwise;
+//! - `released`: the identity of the lease that a stop, or a start that failed, released;
+//! - `failure.KEY`: the record of a clone's failure, with these KEYs:
+//!   - `outcome`: what the failure is attributed to: `request`, `staging`, `host`, `unknown`,
+//!     `template`, or `repair`;
+//!   - `evidence`: what the host saw of it, which attributes it, such as `supplied-length`;
+//!   - `stage`: where the clone failed: `plan`, `launch`, `restore`, `activation`, `start`,
+//!     `commit`, `run`, or `reattach`;
+//!   - `progress`: the step that the clone reached, as `progress` spells it;
+//!   - `status`: the status with which the guest ended the VM, as OpenVMM's outcome report gives
+//!     it, or `none`;
+//!   - `teardown`: how the teardown that followed ended: `no-vm`, `exited`, `terminated`, or
+//!     `unresolved`;
+//!   - `code`: the code of the failure's error, such as `runtime-mismatch`;
+//! - `quarantined`: whether the command quarantined the generation of a clone that failed:
+//!   `yes`, for a failure of the template, or `no`.
 //!
 //! Values escape `\`, newlines, and carriage returns as `\\`, `\n`, and `\r`, and each byte of a
 //! program's output that is not part of UTF-8 text as `\xHH`, with two hexadecimal digits.
 //!
-//! For tests, `launch` takes a step hook from the variable `RUNTIME_ADAPTER_STEP_HOOK`, which
-//! pauses the launch at a named step, for a time that the launch leaves out of its deadline, or
-//! exits it there without unwinding, with status 5; see `runtime_adapter::hook`.
+//! For tests, `launch`, `reattach`, and `stop` take a step hook from the variable
+//! `RUNTIME_ADAPTER_STEP_HOOK`, which pauses the command at a named step, for a time that a launch
+//! leaves out of its deadline, or exits it there without unwinding, with status 5; see
+//! `runtime_adapter::hook`. `start` takes the
+//! host's time, at which the store checks the generation's eligibility, from the variable
+//! `RUNTIME_ADAPTER_HOST_TIME`, if it is set, as a clock fixture, such as another boot's; see
+//! `runtime_adapter::clone::HOST_TIME_VARIABLE`.
 //!
 //! They exit with 0 once they did what they were asked, `exec` once every execution finished,
-//! whatever its outcome, with 3 when reattach finds the VM mismatched, with 4 when the guest
-//! reported that a stage of the root failed, and the VM ended with the stage's status and a
-//! complete teardown, with 5 when the step hook ends a launch, with 6 when the guest failed a
-//! mapping of the table, and the VM stopped gracefully, with success and a complete teardown, and
+//! whatever its outcome, with 3 when reattach finds a VM that booted cold mismatched, with 4 when
+//! the guest reported that a stage of the root failed, and the VM ended with the stage's status
+//! and a complete teardown, with 5 when the step hook ends a command, with 6 when the guest failed
+//! a mapping of the table, and the VM stopped gracefully, with success and a complete teardown,
+//! with 8 when a clone failed, once nothing of it runs and the command released its lease, with 9
+//! when a clone failed, and its teardown is unresolved, so that the sandbox keeps the lease, and
 //! with 1, after a diagnostic on standard error, when they fail. Anything else is a usage error,
-//! with status 2, as is a value of `RUNTIME_ADAPTER_STEP_HOOK` that sets no step hook.
+//! with status 2, as is a value of `RUNTIME_ADAPTER_STEP_HOOK` that sets no step hook, or of
+//! `RUNTIME_ADAPTER_HOST_TIME` that is not a host's time.
 
 use std::env;
 use std::error::Error;
 use std::ffi::OsString;
 use std::fs;
 use std::io;
+use std::num::NonZeroU64;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
+use nvx::activation::StoreGeneration;
 use nvx::exec::{Cause, Key, Limits, Outcome, Status, Stream, Timers, Window};
 use nvx::host::artifacts::{Artifacts, absolute};
 use nvx::host::instance::generate_capability;
 use nvx::host::launch::{DEFAULT_MEMORY_MIB, LaunchSpec};
-use nvx::host::report;
+use nvx::host::nvxs::HostConnectionError;
+use nvx::host::report::{self, Report};
 use nvx::host::session;
-use nvx::host::store::{IdentityPart, LOG_NAME, LaunchId, LockedStore, SandboxStore};
+use nvx::host::store::{CallerFiles, IdentityPart, LOG_NAME, LaunchId, LockedStore, SandboxStore};
 use nvx::host::supervisor::{self, Reattached, Starting, StopOutcome, Vmm, VmmCommand};
-use nvx::host::template::{CAPTURES_NAME, Created, HostTime, Store, TRANSACTION_NAME};
+use nvx::host::template::{
+    Acquired, CAPTURES_NAME, CloneControl, CloneFailure, ClonePlan, Created, DowntimeSource,
+    Eligibility, Evidence, FailureRecord, HostTime, Lease, ReattachedClone, RestoreDeadlines,
+    Store, TRANSACTION_NAME, reattach_clone,
+};
 use nvx::protocol::CAPABILITY_LEN;
 use nvx::protocol::root::ImageFormat;
 use nvx::uuid::Uuid;
@@ -212,12 +308,13 @@ use runtime_adapter::GUEST_BUILD;
 use runtime_adapter::capture::{
     DEFAULT_CPU_PROFILE, DEFAULT_PROCESSORS, DEFAULT_SCRATCH_LENGTH, Request,
 };
+use runtime_adapter::clone::{CloneRecord, host_time_from_env};
 use runtime_adapter::exec::{self, AccountMode, HostExecution, Start};
 use runtime_adapter::frame::{MAX_BODY, Message};
 use runtime_adapter::hook::{Step, StepHook};
-use runtime_adapter::host::{self, Client, ClientError, Executions, OrderError};
+use runtime_adapter::host::{self, Client, ClientError, CloneOrder, Executions, OrderError};
 use runtime_adapter::initramfs;
-use runtime_adapter::layered::{LaunchRecord, LayeredLaunch, read_network, with_proxy};
+use runtime_adapter::layered::{Bindings, LaunchRecord, LayeredLaunch, read_network, with_proxy};
 use runtime_adapter::probe::{Probe, ProbeReply, escape};
 use runtime_adapter::root::{JournalPolicy, OverlayMode, RootFailure};
 use runtime_adapter::runtime::Runtime;
@@ -258,6 +355,14 @@ const ROOT_FAILED: u8 = 4;
 /// The exit status of a launch whose guest failed a mapping of the table, once the VM stopped
 /// gracefully, with success and a complete teardown.
 const TABLE_FAILED: u8 = 6;
+/// The exit status of a command whose clone failed, as NVX attributes and records the failure,
+/// once nothing of the clone runs: the failure's teardown is resolved, and the command released
+/// the clone's lease.
+const CLONE_FAILED: u8 = 8;
+/// The exit status of a command whose clone failed, once the failure's teardown is unresolved: a
+/// VM of the clone may still run, or NVX could not record the failure before it ended the VM, and
+/// the sandbox keeps the clone's lease, and NVX's records of its launch, for a later reattach.
+const CLONE_UNRESOLVED: u8 = 9;
 // The timers and limits of `exec` below are values chosen for tests that make a valid
 // configuration, within the limits that the guest and the host allow: chunks of at most
 // `exec::MAX_CHUNK` bytes, at most `worker::MAX_EXECUTION_MEMORY` bytes held in the guest for
@@ -296,7 +401,14 @@ const USAGE: &str = concat!(
     " [--processors N]\n",
     "           [--memory MIB] [--memory-capacity MIB] [--scratch-length BYTES]",
     " [--network FILE]\n",
-    "       runtime-adapter-host (reattach | stop) STORE [--guest-build BUILD]\n",
+    "       runtime-adapter-host (reattach | stop) STORE [--guest-build BUILD]",
+    " [--template TEMPLATES]\n",
+    "       runtime-adapter-host start STORE --template TEMPLATES --generation G",
+    " --distro FORMAT:PATH\n",
+    "           --distro-identity UUID --upper (scratch:PATH | ram) [--guest-build BUILD]",
+    " [--memory MIB]\n",
+    "           [--workload-identity UID:GID] [--overlay-mode MODE]",
+    " [--scratch-journal POLICY]\n",
     "       runtime-adapter-host probe STORE PROBE... [--guest-build BUILD]\n",
     "       runtime-adapter-host exec STORE [--guest-build BUILD] EXECUTION [';' EXECUTION]...\n",
     "           EXECUTION: [--identity UID:GID [--groups GID,...] [--capabilities N,...]",
@@ -357,6 +469,22 @@ enum Command {
         guest_build: String,
         /// Whether to stop the VM.
         stop: bool,
+        /// The template store through which to release a clone's lease, in place of the one that
+        /// the clone's record names.
+        template: Option<PathBuf>,
+        /// The step hook, for tests, if `RUNTIME_ADAPTER_STEP_HOOK` sets one.
+        hook: Option<StepHook>,
+    },
+    /// Start a clone of a generation of a template.
+    Start {
+        /// The sandbox's store.
+        store: PathBuf,
+        /// The guest agent's build.
+        guest_build: String,
+        /// The clone.
+        request: Box<CloneOptions>,
+        /// The host's time, for tests, if `RUNTIME_ADAPTER_HOST_TIME` sets one.
+        time: Option<HostTime>,
     },
     /// Reattach to the VM, and run probes in its layered root.
     Probe {
@@ -495,6 +623,16 @@ struct Template {
     network: Option<PathBuf>,
 }
 
+/// The clone of `start`, as its options give it.
+struct CloneOptions {
+    /// The template store.
+    templates: PathBuf,
+    /// The generation of the template store that the clone leases.
+    generation: StoreGeneration,
+    /// The clone's image, upper, memory target, and settings.
+    request: runtime_adapter::clone::Request,
+}
+
 /// The options of a command.
 #[derive(Default)]
 struct Options {
@@ -504,6 +642,10 @@ struct Options {
     hypervisor: Option<Hypervisor>,
     /// `--guest-build`.
     guest_build: Option<String>,
+    /// `--template`.
+    template: Option<PathBuf>,
+    /// `--generation`.
+    generation: Option<StoreGeneration>,
     /// `--distro`: the image's format and its file.
     distro: Option<(ImageFormat, PathBuf)>,
     /// `--distro-identity`.
@@ -586,7 +728,21 @@ fn main() -> ExitCode {
             store,
             guest_build,
             stop,
-        } => reattach(&store, &guest_build, stop),
+            template,
+            hook,
+        } => reattach(
+            &store,
+            &guest_build,
+            stop,
+            template.as_deref(),
+            hook.as_ref(),
+        ),
+        Command::Start {
+            store,
+            guest_build,
+            request,
+            time,
+        } => start(&store, &guest_build, &request, time),
         Command::Probe {
             store,
             guest_build,
@@ -605,16 +761,17 @@ fn main() -> ExitCode {
 }
 
 /// Parses the program's arguments, with the step hook that `RUNTIME_ADAPTER_STEP_HOOK` sets for a
-/// launch, or says why they are not a command.
+/// launch, or a reattach or a stop, or says why they are not a command.
 fn parse(arguments: Vec<OsString>) -> Result<Command, String> {
     let mut arguments = arguments.into_iter();
     let Some(name) = arguments.next() else {
         return Ok(Command::Report);
     };
     let name = match name.to_str() {
-        Some(name @ ("stage" | "launch" | "create" | "reattach" | "stop" | "probe" | "exec")) => {
-            name.to_owned()
-        }
+        Some(
+            name @ ("stage" | "launch" | "create" | "reattach" | "stop" | "start" | "probe"
+            | "exec"),
+        ) => name.to_owned(),
         _ => return Err(format!("unknown command {name:?}")),
     };
     let store = PathBuf::from(arguments.next().ok_or_else(|| match name.as_str() {
@@ -753,6 +910,35 @@ fn parse(arguments: Vec<OsString>) -> Result<Command, String> {
                 }),
             }
         }
+        "start" => {
+            let templates = options.template.ok_or("start needs --template")?;
+            let generation = options.generation.ok_or("start needs --generation")?;
+            let (format, distro) = options.distro.ok_or("start needs --distro")?;
+            let identity = options.identity.ok_or("start needs --distro-identity")?;
+            let scratch = options.upper.ok_or("start needs --upper")?;
+            if scratch.is_none() && options.scratch_journal.is_some() {
+                return Err("--scratch-journal needs --upper scratch:PATH".to_owned());
+            }
+            Command::Start {
+                store,
+                guest_build,
+                request: Box::new(CloneOptions {
+                    templates,
+                    generation,
+                    request: runtime_adapter::clone::Request {
+                        distro,
+                        format,
+                        identity,
+                        scratch,
+                        memory: options.memory,
+                        workload_identity: options.workload_identity,
+                        overlay_mode: options.overlay_mode,
+                        scratch_journal: options.scratch_journal,
+                    },
+                }),
+                time: host_time_from_env()?,
+            }
+        }
         "probe" if probes.is_empty() => return Err("probe needs a probe".to_owned()),
         "probe" => Command::Probe {
             store,
@@ -763,6 +949,8 @@ fn parse(arguments: Vec<OsString>) -> Result<Command, String> {
             store,
             guest_build,
             stop: stop == "stop",
+            template: options.template,
+            hook: StepHook::from_env()?,
         },
     })
 }
@@ -788,7 +976,7 @@ fn parse_option(
             let hypervisor = text(value)?.parse().map_err(|error| describe(&error))?;
             options.hypervisor = Some(hypervisor);
         }
-        ("launch" | "stage" | "create", "--distro") if options.distro.is_none() => {
+        ("launch" | "stage" | "create" | "start", "--distro") if options.distro.is_none() => {
             let value = text(value)?;
             let distro = value.split_once(':').and_then(|(format, path)| {
                 let format = ImageFormat::from_name(format)?;
@@ -798,17 +986,19 @@ fn parse_option(
                 format!("--distro takes FORMAT:PATH, with the format erofs or gpt, not {value:?}")
             })?);
         }
-        ("launch" | "stage" | "create", "--distro-identity") if options.identity.is_none() => {
+        ("launch" | "stage" | "create" | "start", "--distro-identity")
+            if options.identity.is_none() =>
+        {
             let value = text(value)?;
             let identity = Uuid::parse(&value)
                 .ok_or_else(|| format!("--distro-identity takes a UUID, not {value:?}"))?;
             options.identity = Some(identity);
         }
-        ("launch" | "stage", "--upper") if options.upper.is_none() => {
+        ("launch" | "stage" | "start", "--upper") if options.upper.is_none() => {
             let value = text(value)?;
-            // Staging binds a scratch image; only a launch puts the upper in RAM.
+            // Staging binds a scratch image; only a launch or a clone puts the upper in RAM.
             let upper = match value.split_once(':') {
-                _ if value == "ram" && name == "launch" => Some(None),
+                _ if value == "ram" && name != "stage" => Some(None),
                 Some(("scratch", path)) if !path.is_empty() => Some(Some(PathBuf::from(path))),
                 _ => None,
             };
@@ -820,14 +1010,14 @@ fn parse_option(
         ("launch", "--runtime-dir") if options.runtime.is_none() => {
             options.runtime = Some(text(value)?);
         }
-        ("launch", "--overlay-mode") if options.overlay_mode.is_none() => {
+        ("launch" | "start", "--overlay-mode") if options.overlay_mode.is_none() => {
             let value = text(value)?;
             let mode = OverlayMode::from_name(&value).ok_or_else(|| {
                 format!("--overlay-mode takes trusted-lowers or untrusted-lowers, not {value:?}")
             })?;
             options.overlay_mode = Some(mode);
         }
-        ("launch", "--scratch-journal") if options.scratch_journal.is_none() => {
+        ("launch" | "start", "--scratch-journal") if options.scratch_journal.is_none() => {
             let value = text(value)?;
             let policy = JournalPolicy::from_name(&value).ok_or_else(|| {
                 format!("--scratch-journal takes allowed or forbidden, not {value:?}")
@@ -841,7 +1031,7 @@ fn parse_option(
                 format!("--first-partition-bound takes a positive number of bytes, not {value:?}")
             })?);
         }
-        ("launch", "--workload-identity") if options.workload_identity.is_none() => {
+        ("launch" | "start", "--workload-identity") if options.workload_identity.is_none() => {
             let value = text(value)?;
             let identity = ids(&value)
                 .filter(|(uid, gid)| [uid, gid].into_iter().all(|id| (1..u32::MAX).contains(id)));
@@ -882,8 +1072,22 @@ fn parse_option(
                     format!("--processors takes a positive number, not {value:?}")
                 })?);
         }
-        ("create", "--memory") if options.memory.is_none() => {
+        ("create" | "start", "--memory") if options.memory.is_none() => {
             options.memory = Some(mebibytes(option, &text(value)?)?);
+        }
+        ("start" | "reattach" | "stop", "--template") if options.template.is_none() => {
+            options.template = Some(PathBuf::from(value));
+        }
+        ("start", "--generation") if options.generation.is_none() => {
+            let value = text(value)?;
+            let generation = value
+                .parse::<NonZeroU64>()
+                .ok()
+                .filter(|_| value.bytes().all(|byte| byte.is_ascii_digit()));
+            options.generation =
+                Some(StoreGeneration::new(generation.ok_or_else(|| {
+                    format!("--generation takes a positive number, not {value:?}")
+                })?));
         }
         ("create", "--memory-capacity") if options.memory_capacity.is_none() => {
             options.memory_capacity = Some(mebibytes(option, &text(value)?)?);
@@ -1277,13 +1481,13 @@ fn launch(
     Ok(ExitCode::SUCCESS)
 }
 
-/// Runs the step hook `hook`, if any, at the launch's `step`, and returns how long it paused the
-/// launch there, which the launch leaves out of its deadline.
+/// Runs the step hook `hook`, if any, at the command's `step`, and returns how long it paused the
+/// command there, which a launch leaves out of its deadline.
 fn step(hook: Option<&StepHook>, step: Step) -> Result<Duration, String> {
     match hook {
         Some(hook) => hook
             .at(step)
-            .map_err(|error| format!("the step hook cannot pause the launch at {step}: {error}")),
+            .map_err(|error| format!("the step hook cannot pause the command at {step}: {error}")),
         None => Ok(Duration::ZERO),
     }
 }
@@ -1517,50 +1721,636 @@ impl Drop for TemporaryDirectory {
     }
 }
 
-/// Reattaches to the VM of the sandbox store `store`, with the guest agent's build `guest_build`,
-/// attaches a session to it, and exchanges a `Ping`, then stops the VM if `stop` asks.
-fn reattach(store: &Path, guest_build: &str, stop: bool) -> Result<ExitCode, String> {
+/// Starts a clone of the generation of the template store that `clone` names, as it asks, in the
+/// sandbox store `store`, which it creates if needed, with the guest agent's build `guest_build`,
+/// at the host's time `time`, or at the time that `HostTime::now` samples without one.
+fn start(
+    store: &Path,
+    guest_build: &str,
+    clone: &CloneOptions,
+    time: Option<HostTime>,
+) -> Result<ExitCode, String> {
+    // A request that the adapter's plan refuses, and a generation that the template store does not
+    // hold, fail the start before it needs NVX's artifacts or the sandbox's store.
+    let plan = clone.request.plan().map_err(|error| describe(&error))?;
+    let templates = Store::open(&clone.templates).map_err(|error| describe(&error))?;
+    let generation = templates
+        .index()
+        .map_err(|error| describe(&error))?
+        .get(clone.generation)
+        .cloned()
+        .ok_or_else(|| {
+            format!(
+                "the template store {} holds no generation {}",
+                templates.dir().display(),
+                clone.generation
+            )
+        })?;
+    // The clone's memory target is the request's, or else the template's RAM, which the
+    // generation's key gives. A key that cannot be read gives none: NVX's plan reads the key
+    // again, once the store leased the generation, and attributes the failure, to the generation
+    // or to the host, before it checks a memory target.
+    let memory = clone
+        .request
+        .memory
+        .or_else(|| templates.read_key(&generation).ok().map(|key| key.memory()));
     let runtime = runtime(guest_build)?;
-    let store = SandboxStore::open(store).map_err(|error| describe(&error))?;
-    let mut locked = store
-        .lock(Some(Instant::now() + LOCK_TIMEOUT))
+    runtime
+        .artifacts
+        .probe()
         .map_err(|error| describe(&error))?;
-    let vmm = match hold(&mut locked, &runtime)? {
-        Ok(vmm) => vmm,
+    let now = match time {
+        Some(time) => time,
+        None => HostTime::now().map_err(|error| describe(&error))?,
+    };
+    let sandbox = SandboxStore::create(store).map_err(|error| describe(&error))?;
+    let mut acquired = templates
+        .acquire(
+            generation.generation(),
+            sandbox.dir(),
+            &CallerFiles::none(),
+            &now,
+            Some(Instant::now() + LOCK_TIMEOUT),
+        )
+        .map_err(|error| describe(&error))?;
+    println!("generation={}", generation.generation());
+    println!("lease={}", acquired.lease.id());
+    if let Eligibility::Eligible(downtime) = generation.eligibility(&now) {
+        println!("downtime={}", downtime.nanos);
+        println!("source={}", source_name(downtime.source));
+    }
+    let clone = CloneLaunch {
+        templates: &templates,
+        request: &clone.request,
+        plan,
+        memory,
+        runtime: &runtime,
+        guest_build,
+    };
+    match clone.run(&mut acquired) {
+        Ok(()) => Ok(ExitCode::SUCCESS),
+        Err(Failed::Clone(failure)) => clone_failed(Ok(&templates), acquired.locked, failure),
+        Err(Failed::Command(problem)) => {
+            // The command failed before the clone's launch, so nothing of it runs.
+            match release_lease(&templates, &mut acquired.locked) {
+                Ok(()) => Err(problem),
+                Err(release) => Err(format!("{problem}; {release}")),
+            }
+        }
+    }
+}
+
+/// How the launch of a clone failed, once the store leased its generation.
+enum Failed {
+    /// The clone failed, as NVX attributes the failure, and records it from the clone's launch on.
+    Clone(CloneFailure),
+    /// The command failed otherwise, with this problem, as a step of the adapter's own did before
+    /// the clone's launch.
+    Command(String),
+}
+
+/// The clone that `start` launches, once the store leased the generation.
+struct CloneLaunch<'a> {
+    /// The template store.
+    templates: &'a Store,
+    /// The clone, as the command's options give it.
+    request: &'a runtime_adapter::clone::Request,
+    /// The adapter's plan of the clone's image over its upper.
+    plan: nvx::host::sandbox::SandboxPlan,
+    /// The clone's memory target, in bytes, or none if the request names none, and the
+    /// generation's key, whose RAM it would be, cannot be read.
+    memory: Option<u64>,
+    /// The runtime of NVX's artifacts.
+    runtime: &'a Runtime,
+    /// The guest agent's build.
+    guest_build: &'a str,
+}
+
+impl CloneLaunch<'_> {
+    /// Plans, records, and launches the clone in the sandbox of `acquired`, which leased the
+    /// generation, activates it, starts its sandbox, exchanges a `Ping` and the longest `Echo`
+    /// with its guest agent, and commits the launch, leaving the clone running.
+    ///
+    /// Fails with the clone's failure, as NVX's plan, launch, restore sequence, and commit return
+    /// it, or as `Started::fail` records it for a guest agent that does not answer the command
+    /// once the clone's sandbox started, which ended the launch, unless its teardown is
+    /// unresolved, and with the problem of a step of the adapter's own before the launch
+    /// otherwise.
+    fn run(self, acquired: &mut Acquired) -> Result<(), Failed> {
+        let Self {
+            templates,
+            request,
+            plan,
+            memory,
+            runtime,
+            guest_build,
+        } = self;
+        let staged = Staged::read(acquired.locked.dir())
+            .map_err(|error| Failed::Command(describe(&error)))?;
+        let bindings = staged.map_or_else(Bindings::default, |staged| staged.bindings(&plan));
+        // No template serves a memory target of 0, which stands for the one of a key that could
+        // not be read: the plan fails as it reads the key again, before it checks the target.
+        let clone_request = request
+            .clone_request(plan.clone(), &bindings, memory.unwrap_or(0))
+            .map_err(|error| Failed::Command(binding_error(&error)))?;
+        let clone_plan = ClonePlan::new(
+            templates,
+            acquired,
+            &clone_request,
+            Instant::now() + LOCK_TIMEOUT,
+        )
+        .map_err(Failed::Clone)?;
+        let record = CloneRecord {
+            template: templates.dir(),
+            generation: acquired.lease.generation(),
+            kernel_command_line: clone_plan.key().command_line(),
+            plan: &plan,
+            bindings: &bindings,
+        };
+        record
+            .write(acquired.locked.dir())
+            .map_err(|error| Failed::Command(describe(&error)))?;
+        let restoring = clone_plan
+            .launch(acquired, &runtime.artifacts.openvmm, &runtime.identity)
+            .map_err(Failed::Clone)?;
+        println!("pid={}", restoring.starting().process().reference().pid);
+        let mut order = clone_order(guest_build);
+        // The restore sequence, and the commit, end the launch that they fail.
+        let activated = restoring
+            .activate(&mut order, RestoreDeadlines::default())
+            .map_err(Failed::Clone)?;
+        println!("root=ready");
+        println!("build={}", escape(guest_build));
+        let mut started = activated.start(&mut order).map_err(Failed::Clone)?;
+        println!("table=applied");
+        println!("mapped=0");
+        println!("sandbox=started");
+        let deadline = Instant::now() + SESSION_TIMEOUT;
+        let client = started.session();
+        let answered = client
+            .ping(deadline)
+            .and_then(|()| client.echo(&echo_body(), deadline));
+        if let Err(error) = answered {
+            let (evidence, error) = unanswered(&order, error, deadline);
+            return Err(Failed::Clone(started.fail(evidence, error)));
+        }
+        started.commit().map_err(Failed::Clone)?;
+        Ok(())
+    }
+}
+
+/// Returns the evidence and the error of a failure of the session of a clone whose sandbox
+/// started, in which the client failed, with `error`, a request of the command's own by
+/// `deadline`, as NVX's restore sequence attributes the failures of its own sessions: the passing
+/// of the deadline, the loss of a session that the clone's `order` takes for lost, or a failure of
+/// the protocol otherwise.
+fn unanswered(
+    order: &CloneOrder<'_>,
+    error: ClientError,
+    deadline: Instant,
+) -> (Evidence, nvx::Error) {
+    const PROBLEM: &str = "the guest agent did not answer once the clone's sandbox started";
+    let timed_out = matches!(error, ClientError::Session(HostConnectionError::TimedOut));
+    if timed_out || Instant::now() >= deadline {
+        return (
+            Evidence::Timeout,
+            nvx::Error::timed_out(PROBLEM).with_source(error),
+        );
+    }
+    let error = OrderError::Client(error);
+    let evidence = if order.lost(&error) {
+        Evidence::Reset
+    } else {
+        Evidence::Protocol
+    };
+    (evidence, nvx::Error::protocol(PROBLEM).with_source(error))
+}
+
+/// Returns the adapter's order of a clone, with the guest agent's build `build`, which the restore
+/// sequence of a clone's start, and a reattach to it, take, the one place that makes it. A clone's
+/// record announces no mapping table: the adapter maps nothing into a clone.
+fn clone_order(build: &str) -> CloneOrder<'_> {
+    CloneOrder { build, table: &[] }
+}
+
+/// Ends a command whose clone, in the sandbox of `locked`, failed with `failure`, as NVX
+/// attributes and records the failure, and returns its exit status.
+///
+/// It prints the failure's record. Once the failure's teardown is resolved, nothing of the clone
+/// runs, and it releases the clone's lease through the template store `templates`, which removes
+/// the records of the clone's launch, its failure's included, so that the sandbox may lease a
+/// generation again. While the teardown is unresolved, the sandbox keeps the lease, and the
+/// records, for a later reattach. Then, once it released the sandbox's lock, which comes after the
+/// template store's in NVX's lock order, it quarantines the leased generation through its
+/// tombstone if the failure is the template's, as `CloneFailure::quarantine` does, and prints
+/// whether it did.
+fn clone_failed(
+    templates: Result<&Store, String>,
+    mut locked: LockedStore,
+    failure: CloneFailure,
+) -> Result<ExitCode, String> {
+    print_clone_failure(failure.record());
+    let mut problem = describe(failure.error());
+    let log = locked.log_path();
+    if log.is_file() {
+        problem = format!("{problem}; see the VMM's log {}", log.display());
+    }
+    let resolved = failure.teardown().is_resolved();
+    let released = match &templates {
+        Ok(templates) if resolved => release_lease(templates, &mut locked),
+        Ok(_) => Ok(()),
+        Err(problem) => Err(format!("the sandbox keeps its lease: {problem}")),
+    };
+    drop(locked);
+    let quarantined = templates.and_then(|templates| {
+        failure
+            .quarantine(templates, Some(Instant::now() + LOCK_TIMEOUT))
+            .map_err(|error| {
+                format!(
+                    "the failure's generation was not quarantined: {}",
+                    describe(&error)
+                )
+            })
+    });
+    if let Ok(quarantined) = quarantined {
+        println!("quarantined={}", if quarantined { "yes" } else { "no" });
+    }
+    match (released, quarantined) {
+        (Ok(()), Ok(_)) => {
+            eprintln!("runtime-adapter-host: {problem}");
+            Ok(ExitCode::from(if resolved {
+                CLONE_FAILED
+            } else {
+                CLONE_UNRESOLVED
+            }))
+        }
+        (Err(release), _) => Err(format!("{problem}; {release}")),
+        (Ok(()), Err(quarantine)) => Err(format!("{problem}; {quarantine}")),
+    }
+}
+
+/// Prints the `record` of a clone's failure: its outcome, the evidence that attributes it, the
+/// stage at which the clone failed, how far the clone got, the guest's status, if OpenVMM's
+/// outcome report gives one, how the teardown that followed ended, and the error's code.
+fn print_clone_failure(record: &FailureRecord) {
+    println!("failure.outcome={}", record.outcome);
+    println!("failure.evidence={}", record.evidence);
+    println!("failure.stage={}", record.stage);
+    println!("failure.progress={}", record.progress);
+    println!(
+        "failure.status={}",
+        record
+            .status
+            .map_or("none".to_owned(), |status| status.to_string())
+    );
+    println!("failure.teardown={}", record.teardown.as_str());
+    println!("failure.code={}", record.code);
+}
+
+/// Releases the lease of the template store `templates` that the sandbox of `locked` holds, once
+/// nothing of its clone's launch runs, and prints it.
+fn release_lease(templates: &Store, locked: &mut LockedStore) -> Result<(), String> {
+    let released = templates
+        .release(locked)
+        .map_err(|error| format!("the sandbox keeps its lease: {}", describe(&error)))?;
+    if let Some(lease) = released {
+        println!("released={}", lease.id());
+    }
+    Ok(())
+}
+
+/// Returns the name of `source`, as `start` prints it.
+fn source_name(source: DowntimeSource) -> &'static str {
+    match source {
+        DowntimeSource::HostMonotonic => "monotonic",
+        DowntimeSource::Utc => "utc",
+    }
+}
+
+/// Opens the template store whose lease the sandbox of `locked` holds: `named`, which the release
+/// checks against the lease, or else the one that the record of the sandbox's clone names, once
+/// the lease is of it. A sandbox whose start ended before it recorded its clone records none, or
+/// an earlier clone, of another template store perhaps, which a release leaves: only `named` then
+/// names the lease's.
+fn clone_templates(locked: &LockedStore, named: Option<&Path>) -> Result<Store, String> {
+    if let Some(named) = named {
+        return Store::open(named).map_err(|error| describe(&error));
+    }
+    let unnamed = |problem: String| {
+        format!(
+            "{problem}, so the template store of the lease of the sandbox in {} is unknown: name \
+             it with --template TEMPLATES",
+            locked.dir().display()
+        )
+    };
+    let (templates, _) = CloneRecord::read_template(locked.dir())
+        .map_err(|error| unnamed(describe(&error)))?
+        .ok_or_else(|| unnamed("the sandbox records no clone".to_owned()))?;
+    let store = Store::open(&templates).map_err(|error| unnamed(describe(&error)))?;
+    match Lease::of(locked).map_err(|error| describe(&error))? {
+        Some(lease) if lease.store() == store.id() => Ok(store),
+        _ => Err(unnamed(format!(
+            "the sandbox's record of its clone names the template store {}, which did not grant \
+             its lease",
+            templates.display()
+        ))),
+    }
+}
+
+/// Opens the sandbox store `path`, and takes its lock, through the path of the lease that the
+/// sandbox holds, if it holds one, as a release requires, and returns whether the sandbox holds
+/// one, as it reads it under the lock: an acquisition binds the lease under the sandbox's lock
+/// too.
+///
+/// A lease names the sandbox by its path with its links resolved, so the lock that a second
+/// attempt takes through it names the sandbox as the lease does. The sandbox there must hold the
+/// same lease: a sandbox that holds a lease must not move, and the lease of one that moved names
+/// a path at which another sandbox, or none, may be, which the command must not take for it.
+fn lock_sandbox(path: &Path) -> Result<(SandboxStore, LockedStore, bool), String> {
+    let deadline = Instant::now() + LOCK_TIMEOUT;
+    let store = SandboxStore::open(path).map_err(|error| describe(&error))?;
+    let locked = store
+        .lock(Some(deadline))
+        .map_err(|error| describe(&error))?;
+    let lease = match Lease::of(&store).map_err(|error| describe(&error))? {
+        None => return Ok((store, locked, false)),
+        Some(lease) if lease.sandbox() == locked.dir() => return Ok((store, locked, true)),
+        Some(lease) => lease,
+    };
+    // The lock through the lease's path is the same lock when both paths name the sandbox.
+    drop(locked);
+    drop(store);
+    let named = lease.sandbox();
+    let moved = |problem: &str| {
+        format!(
+            "the lease of the sandbox in {} names the sandbox in {}, {problem}: a sandbox that \
+             holds a lease must not move",
+            path.display(),
+            named.display()
+        )
+    };
+    let store = SandboxStore::open(named).map_err(|error| moved(&describe(&error)))?;
+    let locked = store
+        .lock(Some(deadline))
+        .map_err(|error| describe(&error))?;
+    match Lease::of(&store).map_err(|error| describe(&error))? {
+        Some(held) if held == lease && held.sandbox() == locked.dir() => Ok((store, locked, true)),
+        Some(held) if held == lease => Err(format!(
+            "the lease of the sandbox in {} does not name it by the path through which its lock is \
+             taken",
+            named.display()
+        )),
+        _ => Err(moved("which does not hold it")),
+    }
+}
+
+/// The VM of a sandbox that a command found, as [`find`] returns it, under the sandbox's lock,
+/// which the command holds.
+struct Found {
+    /// The sandbox's store.
+    store: SandboxStore,
+    /// The sandbox's lock, which names a clone's sandbox by its lease's path.
+    locked: LockedStore,
+    /// The VM.
+    vmm: Vmm,
+    /// The session of the adapter's framing that the command holds of the VM.
+    session: Session,
+    /// Whether the VM is a clone, whose lease the sandbox holds.
+    leased: bool,
+}
+
+/// The session that a command holds of the VM that it found.
+enum Session {
+    /// None yet, of a VM that booted cold, to which the command attaches one once it needs it, as
+    /// [`Found::attach`] does.
+    Cold,
+    /// The one in which a clone answered the Activate of its record again, with the Ready that it
+    /// answered once, as `reattach_clone` checks it.
+    Clone(Box<Client>),
+}
+
+impl Found {
+    /// Returns the session that the command holds of the VM, attaching one, with the sandbox's
+    /// capability, by `deadline`, to a VM that booted cold.
+    fn attach(&mut self, deadline: Instant) -> Result<Client, String> {
+        match std::mem::replace(&mut self.session, Session::Cold) {
+            Session::Clone(client) => Ok(*client),
+            Session::Cold => {
+                let capability = self
+                    .store
+                    .read_capability()
+                    .map_err(|error| describe(&error))?;
+                connect(&self.vmm, &capability, deadline)
+            }
+        }
+    }
+}
+
+/// Finds the VM of the sandbox store `path`, under the runtime identity of `runtime`, with the
+/// guest agent's build `guest_build`, and prints what it found. Returns the VM, which runs, or the
+/// status with which the command ends otherwise.
+///
+/// It takes the sandbox's lock through the path of the lease that the sandbox holds, if it holds
+/// one, which it reads under the lock, and refuses a sandbox whose lease names a path at which no
+/// sandbox holds the same lease, as [`lock_sandbox`] does. The VM of a sandbox without a lease
+/// booted cold: it holds the VM again, as `supervisor::reattach` does, and returns a mismatched
+/// VM's status, which it leaves running. A sandbox with a lease holds a clone, which it reattaches
+/// to with `reattach_clone`, in a new session of the adapter's clone order, in which the clone
+/// answers the Activate of its record again, with its Ready, and which ends a clone that it may
+/// not keep: one that runs under another runtime identity, without a word to its guest, or that
+/// fails the check of its Ready. A clone that ended releases its lease, and one that failed, or
+/// whose earlier failure the reattach finishes, ends the command as [`clone_failed`] does, through
+/// the template store that [`clone_templates`] opens with `templates`. A clone whose state cannot
+/// be determined keeps its lease and its records, and fails the command; see [`conclude`].
+fn find(
+    path: &Path,
+    runtime: &Runtime,
+    guest_build: &str,
+    templates: Option<&Path>,
+) -> Result<Result<Found, ExitCode>, String> {
+    let (store, mut locked, leased) = lock_sandbox(path)?;
+    if !leased {
+        let vmm = match hold(&mut locked, runtime)? {
+            Ok(vmm) => vmm,
+            Err(status) => return Ok(Err(status)),
+        };
+        return Ok(Ok(Found {
+            store,
+            locked,
+            vmm,
+            session: Session::Cold,
+            leased: false,
+        }));
+    }
+    let reattached = reattach_leased(&mut locked, runtime, guest_build)?;
+    let found = match &reattached {
+        ReattachedClone::Live { .. } => "live",
+        ReattachedClone::Ended { .. } => "ended",
+        ReattachedClone::Failed(_) => "failed",
+        ReattachedClone::Indeterminate(_) => "indeterminate",
+        _ => return Err(UNKNOWN_STATE.to_owned()),
+    };
+    println!("reattached={found}");
+    let ReattachedClone::Live { vmm, session } = reattached else {
+        return conclude(reattached, locked, templates).map(Err);
+    };
+    println!("pid={}", vmm.record().process().pid);
+    print_identity(&session);
+    Ok(Ok(Found {
+        store,
+        locked,
+        vmm: *vmm,
+        session: Session::Clone(Box::new(session)),
+        leased: true,
+    }))
+}
+
+/// What a command says of a clone that `reattach_clone` found in a state that this build does not
+/// know.
+const UNKNOWN_STATE: &str = "the reattach found the clone in a state that this build does not know";
+
+/// Reattaches to the clone of the sandbox of `locked`, under the runtime identity of `runtime`,
+/// with `reattach_clone`, in a new session of the adapter's clone order, with the guest agent's
+/// build `guest_build`.
+fn reattach_leased(
+    locked: &mut LockedStore,
+    runtime: &Runtime,
+    guest_build: &str,
+) -> Result<ReattachedClone<Client>, String> {
+    let mut order = clone_order(guest_build);
+    let deadline = Instant::now() + SESSION_TIMEOUT;
+    reattach_clone(
+        locked,
+        &runtime.identity,
+        &mut order,
+        deadline,
+        FORCED_TIMEOUT,
+    )
+    .map_err(|error| describe(&error))
+}
+
+/// Ends a command on the clone of the sandbox of `locked` that `reattached`, what
+/// `reattach_clone` found of it, tells does not run, and returns the command's exit status, or
+/// fails. It releases the lease of a clone that ended, through the template store `templates`, or
+/// the one that the clone's record names, as [`clone_templates`] opens it, and fails; ends as
+/// [`clone_failed`] does for a clone that failed; and keeps the lease and the records, and fails,
+/// for a clone whose state cannot be determined, or that runs.
+fn conclude(
+    reattached: ReattachedClone<Client>,
+    mut locked: LockedStore,
+    templates: Option<&Path>,
+) -> Result<ExitCode, String> {
+    match reattached {
+        ReattachedClone::Ended { progress, report } => {
+            println!("progress={progress}");
+            if let Some(report) = &report {
+                print_outcome(report);
+            }
+            let templates = clone_templates(&locked, templates)?;
+            release_lease(&templates, &mut locked)?;
+            Err(format!(
+                "no VM of the clone runs: it ended at its step {progress}, and the sandbox's lease \
+                 is released"
+            ))
+        }
+        ReattachedClone::Failed(failure) => {
+            let templates = clone_templates(&locked, templates);
+            clone_failed(templates.as_ref().map_err(Clone::clone), locked, failure)
+        }
+        ReattachedClone::Indeterminate(reason) => Err(format!(
+            "whether the clone's VM runs cannot be determined, so the sandbox keeps its lease: \
+             {reason}"
+        )),
+        ReattachedClone::Live { .. } => Err(
+            "the clone's VM runs again, which the command did not expect, so the sandbox keeps \
+             its lease"
+                .to_owned(),
+        ),
+        _ => Err(UNKNOWN_STATE.to_owned()),
+    }
+}
+
+/// Reattaches to the VM of the sandbox store `store`, with the guest agent's build `guest_build`,
+/// runs the step hook `hook`, if any, once it found the VM, at [`Step::Found`], then attaches a
+/// session to the VM, and exchanges a `Ping`, then stops the VM if `stop` asks.
+///
+/// The stop of a clone leaves the clone's records, which the release of its lease removes, to
+/// tell how the clone ended first, as `reattach_clone` reads them. A clone's VM that had exited
+/// when the stop began ended without its holder, as it may at any time: the stop,
+/// `Vmm::stop_unless_exited`, stops nothing then, and keeps the runtime record of its launch,
+/// which tells so, and the command prints `stopped=exited`, and ends as [`find`] does for a clone
+/// that it finds so. A VM that exited once the stop began ended through the stop, unless the
+/// guest's status that ended it is evidence of a failure, which ends the command as
+/// [`clone_failed`] does. The lease of a clone that ended otherwise is released through the
+/// template store `templates`, or the one that the clone's record names, as [`clone_templates`]
+/// opens it. A VM that booted cold, whose end the command attributes to nothing, stops with
+/// `Vmm::stop`, which ends one that had exited by then as one that it stopped: its outcome report
+/// then tells how its guest ended.
+fn reattach(
+    store: &Path,
+    guest_build: &str,
+    stop: bool,
+    templates: Option<&Path>,
+    hook: Option<&StepHook>,
+) -> Result<ExitCode, String> {
+    let runtime = runtime(guest_build)?;
+    let mut found = match find(store, &runtime, guest_build, templates)? {
+        Ok(found) => found,
         Err(status) => return Ok(status),
     };
+    step(hook, Step::Found)?;
     let deadline = Instant::now() + SESSION_TIMEOUT;
-    let attached = store
-        .read_capability()
-        .map_err(|error| describe(&error))
-        .and_then(|capability| connect(&vmm, &capability, deadline))
-        .and_then(|mut client| {
-            client
-                .ping(deadline)
-                .map_err(|error| format!("the guest agent did not answer: {}", describe(&error)))?;
-            Ok(client)
-        });
+    let attached = found.attach(deadline).and_then(|mut client| {
+        client
+            .ping(deadline)
+            .map_err(|error| format!("the guest agent did not answer: {}", describe(&error)))?;
+        Ok(client)
+    });
     if !stop {
         return attached.map(|_| ExitCode::SUCCESS);
     }
+    let Found {
+        store,
+        mut locked,
+        vmm,
+        leased,
+        ..
+    } = found;
     // A VM whose guest agent cannot confirm the stop is terminated.
     let mut failure = None;
-    let stopped = vmm
-        .stop(
+    let graceful = |_: &Vmm, deadline: Instant| -> Result<(), String> {
+        failure = attached?.stop(deadline).map_err(|error| {
+            format!(
+                "the guest agent did not confirm the stop: {}",
+                describe(&error)
+            )
+        })?;
+        Ok(())
+    };
+    let stopped = if leased {
+        // A clone's VM that had exited when the stop began ended without its holder: the stop
+        // stops nothing then, and keeps the runtime record of its launch, which tells so.
+        vmm.stop_unless_exited(
             &mut locked,
             Instant::now() + STOP_TIMEOUT,
             Some(FORCED_TIMEOUT),
-            |_, deadline| {
-                failure = attached?.stop(deadline).map_err(|error| {
-                    format!(
-                        "the guest agent did not confirm the stop: {}",
-                        describe(&error)
-                    )
-                })?;
-                Ok(())
-            },
+            graceful,
         )
-        .map_err(|error| describe(&error))?;
+    } else {
+        vmm.stop(
+            &mut locked,
+            Instant::now() + STOP_TIMEOUT,
+            Some(FORCED_TIMEOUT),
+            graceful,
+        )
+        .map(Some)
+    }
+    .map_err(|error| describe(&error))?;
+    let Some(stopped) = stopped else {
+        println!("stopped=exited");
+        let reattached = reattach_leased(&mut locked, &runtime, guest_build)?;
+        return conclude(reattached, locked, templates);
+    };
     println!(
         "stopped={}",
         match stopped.outcome {
@@ -1569,6 +2359,16 @@ fn reattach(store: &Path, guest_build: &str, stop: bool) -> Result<ExitCode, Str
             StopOutcome::TimedOut => "timed-out",
         }
     );
+    // The store verified that the VM exited, unless the stop timed out.
+    if leased && stopped.outcome != StopOutcome::TimedOut {
+        match reattach_leased(&mut locked, &runtime, guest_build)? {
+            ReattachedClone::Ended { .. } => {
+                let templates = clone_templates(&locked, templates)?;
+                release_lease(&templates, &mut locked)?;
+            }
+            reattached => return conclude(reattached, locked, templates),
+        }
+    }
     if let Some(problem) = stopped.graceful_error {
         return Err(problem);
     }
@@ -1593,17 +2393,12 @@ fn reattach(store: &Path, guest_build: &str, stop: bool) -> Result<ExitCode, Str
 /// each found.
 fn probe(store: &Path, guest_build: &str, probes: &[Probe]) -> Result<ExitCode, String> {
     let runtime = runtime(guest_build)?;
-    let store = SandboxStore::open(store).map_err(|error| describe(&error))?;
-    let mut locked = store
-        .lock(Some(Instant::now() + LOCK_TIMEOUT))
-        .map_err(|error| describe(&error))?;
-    let vmm = match hold(&mut locked, &runtime)? {
-        Ok(vmm) => vmm,
+    let mut found = match find(store, &runtime, guest_build, None)? {
+        Ok(found) => found,
         Err(status) => return Ok(status),
     };
     let deadline = Instant::now() + SESSION_TIMEOUT;
-    let capability = store.read_capability().map_err(|error| describe(&error))?;
-    let mut client = connect(&vmm, &capability, deadline)?;
+    let mut client = found.attach(deadline)?;
     for probe in probes {
         let reply = client
             .probe(probe, deadline)
@@ -1625,20 +2420,16 @@ fn probe(store: &Path, guest_build: &str, probes: &[Probe]) -> Result<ExitCode, 
 /// each did once every one finished.
 fn exec(store: &Path, guest_build: &str, executions: &[Execution]) -> Result<ExitCode, String> {
     let runtime = runtime(guest_build)?;
-    let store = SandboxStore::open(store).map_err(|error| describe(&error))?;
-    let mut locked = store
-        .lock(Some(Instant::now() + LOCK_TIMEOUT))
-        .map_err(|error| describe(&error))?;
-    let vmm = match hold(&mut locked, &runtime)? {
-        Ok(vmm) => vmm,
+    let mut found = match find(store, &runtime, guest_build, None)? {
+        Ok(found) => found,
         Err(status) => return Ok(status),
     };
     // Each execution finds the URL of the proxy of the VM's network, if any, in its environment,
     // from the plan that the launch recorded. The proxy's variables lengthen a start, so the
-    // command checks every start again before it attaches, rather than fail once it sent the
-    // starts before it. A start takes its key once the command attached, and a key's encoding has
-    // the same size whatever its value.
-    let plan = LaunchRecord::read_plan(store.dir()).map_err(|error| describe(&error))?;
+    // command checks every start again before it starts any, rather than fail once it sent the
+    // starts before it, and, for a VM that booted cold, before it attaches. A start takes its key
+    // once the command attached, and a key's encoding has the same size whatever its value.
+    let plan = LaunchRecord::read_plan(found.store.dir()).map_err(|error| describe(&error))?;
     let mut starts = Vec::with_capacity(executions.len());
     for (number, execution) in (1..).zip(executions) {
         let start = execution.start(Key::new(0, 0));
@@ -1652,8 +2443,7 @@ fn exec(store: &Path, guest_build: &str, executions: &[Execution]) -> Result<Exi
         starts.push(start);
     }
     let deadline = Instant::now() + SESSION_TIMEOUT;
-    let capability = store.read_capability().map_err(|error| describe(&error))?;
-    let mut client = connect(&vmm, &capability, deadline)?;
+    let mut client = found.attach(deadline)?;
     // The keys of the attachment's executions are new to the guest: see the module documentation.
     let identity = client.identity();
     let (base, _) = identity.instance_id.split_at(8);
@@ -1799,6 +2589,23 @@ fn check_outcome(store: &SandboxStore, category: &str, status: i64) -> Result<()
             store.outcome_path().display()
         )
     })?;
+    print_outcome(&outcome);
+    if (
+        outcome.category.as_deref(),
+        outcome.status_code,
+        outcome.teardown_complete,
+    ) != (Some(category), Some(status), Some(true))
+    {
+        return Err(format!(
+            "the VM's outcome is not {category} {status} with a complete teardown"
+        ));
+    }
+    Ok(())
+}
+
+/// Prints the VM's `outcome` report: its category and status code, and whether its teardown is
+/// complete.
+fn print_outcome(outcome: &Report) {
     let found = outcome.category.as_deref().unwrap_or("none");
     let code = outcome
         .status_code
@@ -1811,14 +2618,6 @@ fn check_outcome(store: &SandboxStore, category: &str, status: i64) -> Result<()
             Some(false) | None => "incomplete",
         }
     );
-    if (found, outcome.status_code, outcome.teardown_complete)
-        != (category, Some(status), Some(true))
-    {
-        return Err(format!(
-            "the VM's outcome is not {category} {status} with a complete teardown"
-        ));
-    }
-    Ok(())
 }
 
 /// Returns the runtime of NVX's artifacts in the directory that `NVX_ARTIFACTS_DIR` names, with
@@ -1856,6 +2655,13 @@ fn attach(
 ) -> Result<Client, String> {
     let client = Client::attach(transport, capability, deadline)
         .map_err(|error| format!("cannot attach to the VM: {}", describe(&error)))?;
+    print_identity(&client);
+    Ok(client)
+}
+
+/// Prints the identity of the session that `client` attached: its broker instance, in
+/// hexadecimal, and its epoch.
+fn print_identity(client: &Client) {
     let identity = client.identity();
     let instance: String = identity
         .instance_id
@@ -1864,7 +2670,6 @@ fn attach(
         .collect();
     println!("instance={instance}");
     println!("epoch={}", identity.epoch);
-    Ok(client)
 }
 
 /// Returns the names of `parts`, separated by commas.
