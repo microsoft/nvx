@@ -13077,6 +13077,67 @@ function python {
                     {"scratch": scratch},
                 )
 
+    def test_failed_windows_benchmarks_keep_their_storage_events(self):
+        action = (
+            BuildConstants.REPO_ROOT
+            / ".github"
+            / "actions"
+            / "run-benchmark"
+            / "action.yml"
+        ).read_text(encoding="utf-8")
+        step = _composite_action_step(action, "Save Windows storage events")
+        script = _composite_action_script(action, "Save Windows storage events")
+
+        self.assertIn("      if: failure() && runner.os == 'Windows'", step)
+        self.assertIn(
+            '$Output = "data/runs/${{ inputs.platform }}/windows-storage-events.txt"',
+            script,
+        )
+        self.assertLess(
+            action.index("- name: Save Windows storage events"),
+            action.index("- name: Upload benchmark diagnostics"),
+        )
+
+    @unittest.skipUnless(os.name == "nt", "requires Windows PowerShell")
+    def test_windows_storage_events_step_writes_both_logs(self):
+        action = (
+            BuildConstants.REPO_ROOT
+            / ".github"
+            / "actions"
+            / "run-benchmark"
+            / "action.yml"
+        ).read_text(encoding="utf-8")
+        script = _composite_action_script(
+            action, "Save Windows storage events"
+        ).replace("${{ inputs.platform }}", "windows-whp-virtual-machine")
+
+        with tempfile.TemporaryDirectory() as temporary:
+            result = subprocess.run(
+                ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script],
+                cwd=temporary,
+                capture_output=True,
+                text=True,
+                timeout=120,
+                check=False,
+            )
+            output = (
+                Path(temporary)
+                / "data"
+                / "runs"
+                / "windows-whp-virtual-machine"
+                / "windows-storage-events.txt"
+            )
+            lines = output.read_text(encoding="utf-8-sig").splitlines()
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertRegex(lines[0], r"^Storage events since \d{4}-\d\d-\d\dT")
+        self.assertIn("--- Microsoft-Windows-Storage-Storport/Operational ---", lines)
+        self.assertIn("--- System ---", lines)
+        self.assertLess(
+            lines.index("--- Microsoft-Windows-Storage-Storport/Operational ---"),
+            lines.index("--- System ---"),
+        )
+
     @unittest.skipUnless(os.name == "nt", "requires Windows PowerShell")
     def test_windows_benchmark_scratch_steps_manage_per_job_directories(self):
         action = (

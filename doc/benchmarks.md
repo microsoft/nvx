@@ -707,7 +707,11 @@ KVM, whose restore series have no stability guard, validation accepts every atte
 Before updating the run-scoped `benchmark-<platform>-<run-id>` artifact, each platform
 uploads its raw results and lifecycle profiles to the immutable
 `benchmark-diagnostics-<platform>-<run-id>-attempt-<run-attempt>` artifact, including
-after a benchmark failure. Both artifacts are retained for one day. Rerunning a
+after a benchmark failure. When a Windows benchmark fails, the artifact also holds
+`windows-storage-events.txt`: the Storport and System storage events since the job
+started, including request timeouts, resets, I/Os that took more than 30 s, and
+per-disk latency histograms, which a runner's reimage would erase. The job warns when
+an I/O took more than 30 s. Both artifacts are retained for one day. Rerunning a
 workflow cannot overwrite an earlier attempt's diagnostics. Downstream gates still
 use the run-scoped artifact so a failed-jobs-only rerun can reuse successful
 platform results from an earlier workflow attempt. The `acceptance-attempt-N.json`
