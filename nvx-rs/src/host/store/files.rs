@@ -95,7 +95,10 @@ pub(crate) fn open_lock(path: &Path) -> io::Result<File> {
     #[cfg(target_os = "linux")]
     let opened = match open() {
         Err(error) if error.kind() == io::ErrorKind::PermissionDenied => {
-            platform::restore_private_file_mode(path, PRIVATE_FILE_MODE)?;
+            platform::restore_private_file_mode(
+                path,
+                nix::sys::stat::Mode::from_bits_truncate(PRIVATE_FILE_MODE),
+            )?;
             open()
         }
         opened => opened,

@@ -8,6 +8,9 @@ use std::process::Command;
 use std::thread;
 use std::time::{Duration, Instant};
 
+use nix::sys::stat::Mode;
+use nix::unistd::Uid;
+
 use super::Transport;
 use super::inherit::Inherited;
 use crate::host::sys::{self, Errno, PidFd};
@@ -24,18 +27,14 @@ const BOOT_ID_PATH: &str = "/proc/sys/kernel/random/boot_id";
 
 /// Mode of a directory that only the current user may access: read, write, and search for its
 /// owner, and nothing for anyone else.
-const PRIVATE_DIR_MODE: u32 = 0o700;
+const PRIVATE_DIR_MODE: Mode = Mode::S_IRWXU;
 
 /// Mode of the directory of a sandbox store, the exact mode that OpenVMM requires of the
 /// directory of its control socket.
-const STORE_DIR_MODE: u32 = 0o700;
-
-/// Permission bits of a mode: those of the owner, group, and others, and the setuid, setgid, and
-/// sticky bits.
-const PERMISSION_BITS: u32 = 0o7777;
+const STORE_DIR_MODE: Mode = Mode::S_IRWXU;
 
 /// Permission bits of a mode that grant access to the group and to others.
-const GROUP_AND_OTHER_BITS: u32 = 0o077;
+const GROUP_AND_OTHER_BITS: Mode = Mode::S_IRWXG.union(Mode::S_IRWXO);
 
 /// Returns the start time of a live process, `None` if the process no longer exists, or an error
 /// if its state cannot be determined.
@@ -391,7 +390,7 @@ pub(crate) fn probe_hypervisor(hypervisor: Hypervisor) -> Result<(), String> {
 
 /// Creates `path` if needed and restricts it to the current user.
 pub fn create_private_dir(path: &Path) -> io::Result<()> {
-    match DirBuilder::new().mode(PRIVATE_DIR_MODE).create(path) {
+    match DirBuilder::new().mode(PRIVATE_DIR_MODE.bits()).create(path) {
         Ok(()) => {}
         Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
         Err(error) => return Err(error),
@@ -402,7 +401,7 @@ pub fn create_private_dir(path: &Path) -> io::Result<()> {
             path.display()
         )));
     }
-    fs::set_permissions(path, Permissions::from_mode(PRIVATE_DIR_MODE))
+    fs::set_permissions(path, Permissions::from_mode(PRIVATE_DIR_MODE.bits()))
 }
 
 /// Creates the directory `path` of a sandbox store with mode 0700, or checks that an existing one
@@ -433,15 +432,15 @@ pub(crate) fn create_owner_only_dir(path: &Path) -> io::Result<Option<String>> {
 
 /// Creates the directory `path`, whose parent must exist, with exactly the mode `mode`, unless it
 /// exists already, which leaves it as it is.
-fn create_dir_of_mode(path: &Path, mode: u32) -> io::Result<()> {
-    match DirBuilder::new().mode(mode).create(path) {
+fn create_dir_of_mode(path: &Path, mode: Mode) -> io::Result<()> {
+    match DirBuilder::new().mode(mode.bits()).create(path) {
         Ok(()) => {
             if let Some(directory) = open_plain_dir(path)? {
                 // A descriptor that only locates the directory cannot change its mode itself, but
                 // its link in /proc names exactly the directory that it opened.
                 fs::set_permissions(
                     Path::new("/proc/self/fd").join(directory.as_raw_fd().to_string()),
-                    Permissions::from_mode(mode),
+                    Permissions::from_mode(mode.bits()),
                 )?;
             }
             Ok(())
@@ -451,6 +450,19 @@ fn create_dir_of_mode(path: &Path, mode: u32) -> io::Result<()> {
     }
 }
 
+/// Returns the owner of the file that `metadata` describes and the permission bits of its mode:
+/// those of the owner, group, and others, and the setuid, setgid, and sticky bits, without the
+/// bits of the file's type.
+///
+/// The checks of ownership and permissions take these types, rather than the raw integers of
+/// [`MetadataExt`], so that a mode passed as a user ID, or a user ID as a mode, fails to compile.
+fn owner_and_mode(metadata: &fs::Metadata) -> (Uid, Mode) {
+    (
+        Uid::from_raw(metadata.uid()),
+        Mode::from_bits_truncate(metadata.mode()),
+    )
+}
+
 /// Returns why the directory `path` cannot hold a sandbox store, if it cannot: unless it is
 /// private to the current user, as [`create_store_dir`] makes it, belonging to the user with mode
 /// 0700.
@@ -458,12 +470,8 @@ pub(crate) fn check_store_dir(path: &Path) -> io::Result<Option<String>> {
     let Some(directory) = open_plain_dir(path)? else {
         return Ok(Some("is not a plain directory".to_owned()));
     };
-    let metadata = directory.metadata()?;
-    Ok(store_dir_problem(
-        metadata.uid(),
-        metadata.mode(),
-        sys::effective_ids().0,
-    ))
+    let (uid, mode) = owner_and_mode(&directory.metadata()?);
+    Ok(store_dir_problem(uid, mode, Uid::effective()))
 }
 
 /// Returns why the directory `path` is not private to the current user, if it is not: unless it
@@ -473,20 +481,15 @@ pub(crate) fn check_owner_only_dir(path: &Path) -> io::Result<Option<String>> {
     let Some(directory) = open_plain_dir(path)? else {
         return Ok(Some("is not a plain directory".to_owned()));
     };
-    let metadata = directory.metadata()?;
-    Ok(owner_only_problem(
-        metadata.uid(),
-        metadata.mode(),
-        sys::effective_ids().0,
-    ))
+    let (uid, mode) = owner_and_mode(&directory.metadata()?);
+    Ok(owner_only_problem(uid, mode, Uid::effective()))
 }
 
-/// Returns why a directory of a sandbox store, which the user `uid` owns with the mode `mode`, is
-/// not private to the user `euid`, if it is not: it must belong to that user, grant no access to
-/// anyone else, and have mode 0700, which OpenVMM requires of the directory of its control
-/// socket.
-pub(crate) fn store_dir_problem(uid: u32, mode: u32, euid: u32) -> Option<String> {
-    let mode = mode & PERMISSION_BITS;
+/// Returns why a directory of a sandbox store, which the user `uid` owns with the permission bits
+/// `mode`, is not private to the user `euid`, if it is not: it must belong to that user, grant no
+/// access to anyone else, and have mode 0700, which OpenVMM requires of the directory of its
+/// control socket.
+pub(crate) fn store_dir_problem(uid: Uid, mode: Mode, euid: Uid) -> Option<String> {
     owner_only_problem(uid, mode, euid).or_else(|| {
         (mode != STORE_DIR_MODE).then(|| {
             format!(
@@ -497,15 +500,15 @@ pub(crate) fn store_dir_problem(uid: u32, mode: u32, euid: u32) -> Option<String
     })
 }
 
-/// Returns why a directory that the user `uid` owns with the mode `mode` is not private to the
-/// user `euid`, if it is not: it must belong to that user, and grant no access to anyone else.
-pub(crate) fn owner_only_problem(uid: u32, mode: u32, euid: u32) -> Option<String> {
-    let mode = mode & PERMISSION_BITS;
+/// Returns why a directory that the user `uid` owns with the permission bits `mode` is not private
+/// to the user `euid`, if it is not: it must belong to that user, and grant no access to anyone
+/// else.
+pub(crate) fn owner_only_problem(uid: Uid, mode: Mode, euid: Uid) -> Option<String> {
     if uid != euid {
         Some(format!(
             "belongs to user {uid}, not to the current user {euid}"
         ))
-    } else if mode & GROUP_AND_OTHER_BITS != 0 {
+    } else if mode.intersects(GROUP_AND_OTHER_BITS) {
         Some(format!("is accessible to other users (mode {mode:03o})"))
     } else {
         None
@@ -530,23 +533,18 @@ pub(crate) fn check_snapshot_dir(path: &Path) -> io::Result<Option<String>> {
 /// open, if one may: unless it belongs to the current user or to root, and grants neither its
 /// group nor others the permission to write it.
 pub(crate) fn foreign_writer_problem(file: &File) -> io::Result<Option<String>> {
-    let metadata = file.metadata()?;
-    Ok(foreign_writer(
-        metadata.uid(),
-        metadata.mode(),
-        sys::effective_ids().0,
-    ))
+    let (uid, mode) = owner_and_mode(&file.metadata()?);
+    Ok(foreign_writer(uid, mode, Uid::effective()))
 }
 
 /// Returns why another user than `euid`, or root, may change a file that the user `uid` owns with
-/// the mode `mode`, if one may.
-pub(crate) fn foreign_writer(uid: u32, mode: u32, euid: u32) -> Option<String> {
-    let mode = mode & PERMISSION_BITS;
-    if uid != euid && uid != 0 {
+/// the permission bits `mode`, if one may.
+pub(crate) fn foreign_writer(uid: Uid, mode: Mode, euid: Uid) -> Option<String> {
+    if uid != euid && !uid.is_root() {
         Some(format!(
             "belongs to user {uid}, neither the current user {euid} nor root"
         ))
-    } else if mode & 0o022 != 0 {
+    } else if mode.intersects(Mode::S_IWGRP | Mode::S_IWOTH) {
         Some(format!("is writable by other users (mode {mode:03o})"))
     } else {
         None
@@ -571,7 +569,7 @@ pub(crate) fn rename_no_replace(from: &Path, to: &Path) -> io::Result<()> {
 /// anything else, which includes a symbolic link or a missing file, unchanged.
 ///
 /// The file is opened only to locate it, which needs no permission on the file itself.
-pub(crate) fn restore_private_file_mode(path: &Path, mode: u32) -> io::Result<()> {
+pub(crate) fn restore_private_file_mode(path: &Path, mode: Mode) -> io::Result<()> {
     use nix::fcntl::OFlag;
 
     let opened = OpenOptions::new()
@@ -589,14 +587,14 @@ pub(crate) fn restore_private_file_mode(path: &Path, mode: u32) -> io::Result<()
         Err(error) => return Err(error),
     };
     let metadata = file.metadata()?;
-    if !metadata.file_type().is_file() || metadata.uid() != sys::effective_ids().0 {
+    if !metadata.file_type().is_file() || Uid::from_raw(metadata.uid()) != Uid::effective() {
         return Ok(());
     }
     // A descriptor that only locates the file cannot change its mode itself, but its link in
     // /proc names exactly the file that it opened.
     fs::set_permissions(
         Path::new("/proc/self/fd").join(file.as_raw_fd().to_string()),
-        Permissions::from_mode(mode),
+        Permissions::from_mode(mode.bits()),
     )
 }
 
@@ -692,7 +690,6 @@ impl Directory {
     /// checks what the entry is.
     pub(crate) fn open_file(&self, name: &str) -> io::Result<Option<File>> {
         use nix::fcntl::{OFlag, openat};
-        use nix::sys::stat::Mode;
 
         match openat(
             &self.0,
@@ -753,7 +750,6 @@ impl Directory {
     /// [`open_dir`](Self::open_dir) and [`search_dir`](Self::search_dir) do.
     fn open_dir_with(&self, name: &str, access: nix::fcntl::OFlag) -> io::Result<Option<Self>> {
         use nix::fcntl::{OFlag, openat};
-        use nix::sys::stat::Mode;
 
         match openat(
             &self.0,
@@ -788,12 +784,8 @@ impl Directory {
     /// Returns why the directory cannot hold a sandbox store, as [`check_store_dir`] returns it for
     /// a path, if it cannot: unless it belongs to the current user with mode 0700.
     pub(crate) fn store_dir_problem(&self) -> io::Result<Option<String>> {
-        let metadata = self.0.metadata()?;
-        Ok(store_dir_problem(
-            metadata.uid(),
-            metadata.mode(),
-            sys::effective_ids().0,
-        ))
+        let (uid, mode) = owner_and_mode(&self.0.metadata()?);
+        Ok(store_dir_problem(uid, mode, Uid::effective()))
     }
 }
 
@@ -1174,7 +1166,11 @@ mod tests {
         })
         .unwrap();
         let mode = fs::symlink_metadata(&path).unwrap().permissions().mode();
-        assert_eq!(mode & PERMISSION_BITS, 0o600, "{mode:o}");
+        assert_eq!(
+            Mode::from_bits_truncate(mode),
+            Mode::S_IRUSR | Mode::S_IWUSR,
+            "{mode:o}"
+        );
         UnixStream::connect(&endpoint).unwrap();
     }
 

@@ -578,21 +578,33 @@ fn the_store_is_private_to_the_current_user() {
 #[cfg(target_os = "linux")]
 #[test]
 fn stores_belong_to_the_current_user_with_mode_700() {
+    use nix::sys::stat::Mode;
+    use nix::unistd::Uid;
+
+    // The check takes the owner and the current user as user IDs, and the permission bits of the
+    // directory's mode, without the bits of its type, as the store reads them from its metadata.
+    let store_dir_problem = |uid, mode, euid| {
+        platform::store_dir_problem(
+            Uid::from_raw(uid),
+            Mode::from_bits_truncate(mode),
+            Uid::from_raw(euid),
+        )
+    };
     // Another user's directory is refused whatever its mode, since its owner may change it.
     assert_eq!(
-        platform::store_dir_problem(1001, 0o40700, 1000),
+        store_dir_problem(1001, 0o40700, 1000),
         Some("belongs to user 1001, not to the current user 1000".to_owned())
     );
-    assert_eq!(platform::store_dir_problem(1000, 0o40700, 1000), None);
+    assert_eq!(store_dir_problem(1000, 0o40700, 1000), None);
     for mode in [0o40750, 0o40705, 0o40770] {
-        let problem = platform::store_dir_problem(1000, mode, 1000).unwrap();
+        let problem = store_dir_problem(1000, mode, 1000).unwrap();
         assert!(
             problem.starts_with("is accessible to other users"),
             "{problem}"
         );
     }
     for (mode, shown) in [(0o42700, "2700"), (0o41700, "1700"), (0o40500, "500")] {
-        let problem = platform::store_dir_problem(1000, mode, 1000).unwrap();
+        let problem = store_dir_problem(1000, mode, 1000).unwrap();
         assert!(
             problem.starts_with(&format!("has mode {shown}, ")),
             "{problem}"
