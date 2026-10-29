@@ -51,6 +51,12 @@ RESTORE_MARKER = b"OPENVMM-SNAPSHOT-RESTORE-OK"
 TEARDOWN_TIMEOUT_SECONDS = 15.0
 OUTPUT_DRAIN_TIMEOUT_SECONDS = 1.0
 OUTPUT_READER_STOP_TIMEOUT_SECONDS = 5.0
+# How long terminate() waits for a killed process to exit. A killed process
+# exits only once the I/O that its threads wait for completes, so a stalled
+# disk can hold it; a hung microVM otherwise exits within tens of
+# milliseconds. A slower exit than SLOW_TERMINATION_SECONDS gets a warning.
+TERMINATION_TIMEOUT_SECONDS = 30.0
+SLOW_TERMINATION_SECONDS = 1.0
 OUTPUT_BUFFER_LIMIT_BYTES = 1024 * 1024
 PEAK_RSS_SAMPLE_ATTEMPTS = 3
 BASE_TUNING = (
@@ -1302,13 +1308,87 @@ def describe_capture_telemetry(sample: dict[str, object]) -> str | None:
 
 
 def terminate(process: subprocess.Popen[bytes]) -> None:
+    """Kill ``process`` and wait until it has exited.
+
+    Raises if the process still runs ``TERMINATION_TIMEOUT_SECONDS`` after
+    the kill, and warns when its exit took longer than
+    ``SLOW_TERMINATION_SECONDS``.
+    """
+    killed = time.perf_counter()
     if process.poll() is None:
         process.kill()
+    if not _wait_for_exit(process, TERMINATION_TIMEOUT_SECONDS):
+        raise RuntimeError(
+            f"process {process.pid} did not exit within "
+            f"{TERMINATION_TIMEOUT_SECONDS:g}s of being killed"
+        )
+    elapsed = time.perf_counter() - killed
+    if elapsed > SLOW_TERMINATION_SECONDS:
+        print(
+            f"warning: process {process.pid} took {elapsed:.3f}s to exit "
+            "after it was killed",
+            file=sys.stderr,
+            flush=True,
+        )
+
+
+def _wait_for_exit(process: subprocess.Popen[bytes], timeout: float) -> bool:
+    """Return whether ``process`` exits within ``timeout`` seconds.
+
+    On Windows, ``Popen.kill()`` of a process that is already terminating
+    stores its exit code as ``returncode``, after which ``Popen.wait()``
+    returns while the process still runs, so the wait uses the process object.
+    """
+    if os.name == "nt":
+        if not _wait_for_windows_process(process.pid, timeout):
+            return False
+        # The process object is signaled, so this records the exit code.
+        process.poll()
+        return True
     try:
-        process.wait(timeout=3)
+        process.wait(timeout=timeout)
     except subprocess.TimeoutExpired:
-        process.kill()
-        process.wait()
+        return False
+    return True
+
+
+def _wait_for_windows_process(pid: int, timeout: float) -> bool:
+    """Return whether the Windows process ``pid`` exits within ``timeout``
+    seconds.
+
+    The caller's ``Popen`` keeps a handle to the process, so ``pid`` names
+    the same process even after it exits.
+    """
+    if os.name != "nt":
+        raise RuntimeError("Windows process waits are unavailable on this host")
+    synchronize = 0x00100000
+    wait_object_0 = 0
+    wait_timeout = 0x102
+    error_invalid_parameter = 87
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.OpenProcess.argtypes = (ctypes.c_uint32, ctypes.c_int, ctypes.c_uint32)
+    kernel32.OpenProcess.restype = ctypes.c_void_p
+    kernel32.WaitForSingleObject.argtypes = (ctypes.c_void_p, ctypes.c_uint32)
+    kernel32.WaitForSingleObject.restype = ctypes.c_uint32
+    kernel32.CloseHandle.argtypes = (ctypes.c_void_p,)
+
+    handle = kernel32.OpenProcess(synchronize, False, pid)
+    if not handle:
+        error = ctypes.get_last_error()
+        # No process has the ID any more.
+        if error == error_invalid_parameter:
+            return True
+        raise ctypes.WinError(error)
+    try:
+        result = kernel32.WaitForSingleObject(handle, max(0, round(timeout * 1000)))
+        error = ctypes.get_last_error()
+    finally:
+        kernel32.CloseHandle(handle)
+    if result == wait_object_0:
+        return True
+    if result == wait_timeout:
+        return False
+    raise ctypes.WinError(error)
 
 
 def wait_for_process_exit(process: subprocess.Popen[bytes], timeout: float) -> int:

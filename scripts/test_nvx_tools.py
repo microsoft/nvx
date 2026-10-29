@@ -21456,6 +21456,96 @@ class BenchmarkTests(unittest.TestCase):
         wait.assert_not_called()
         self.assertTrue(log.endswith(b"NVX-RESTORE-PROCESSORS-FAIL unstable-tsc\r\n"))
 
+    def test_terminate_waits_for_a_killed_process_to_exit(self):
+        process = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(60)"]
+        )
+        try:
+            benchmark.terminate(process)
+            exited = process.returncode is not None
+        finally:
+            process.kill()
+            process.wait()
+
+        self.assertTrue(exited)
+        # An exited process is not killed again.
+        with patch.object(process, "kill") as kill:
+            benchmark.terminate(process)
+        kill.assert_not_called()
+
+    def test_terminate_fails_when_a_killed_process_keeps_running(self):
+        process = MagicMock(pid=4321)
+        process.poll.return_value = None
+        with (
+            patch.object(benchmark, "_wait_for_exit", return_value=False) as wait,
+            self.assertRaisesRegex(
+                RuntimeError, "process 4321 did not exit within 30s of being killed"
+            ),
+        ):
+            benchmark.terminate(process)
+
+        process.kill.assert_called_once_with()
+        wait.assert_called_once_with(process, benchmark.TERMINATION_TIMEOUT_SECONDS)
+
+    def test_terminate_warns_only_about_a_slow_exit(self):
+        for times, warning in (
+            ((10.0, 12.5), "process 4321 took 2.500s to exit after it was killed"),
+            ((10.0, 10.05), None),
+        ):
+            process = MagicMock(pid=4321)
+            process.poll.return_value = None
+            stderr = io.StringIO()
+            with (
+                patch.object(benchmark, "_wait_for_exit", return_value=True),
+                patch.object(benchmark.time, "perf_counter", side_effect=times),
+                contextlib.redirect_stderr(stderr),
+            ):
+                benchmark.terminate(process)
+
+            if warning is None:
+                self.assertEqual(stderr.getvalue(), "")
+            else:
+                self.assertIn(warning, stderr.getvalue())
+
+    def test_exit_wait_ignores_the_returncode_that_a_windows_kill_stores(self):
+        # Popen.kill() of a terminating Windows process stores its exit code,
+        # although the process still runs.
+        process = MagicMock(pid=4321, returncode=1)
+        process.poll.return_value = 1
+        with (
+            patch.object(benchmark.os, "name", "nt"),
+            patch.object(
+                benchmark, "_wait_for_windows_process", side_effect=[False, True]
+            ) as wait,
+        ):
+            self.assertFalse(benchmark._wait_for_exit(process, 2.0))
+            self.assertTrue(benchmark._wait_for_exit(process, 2.0))
+
+        self.assertEqual(wait.call_args_list, [call(4321, 2.0)] * 2)
+        process.wait.assert_not_called()
+
+    def test_exit_wait_reports_a_posix_process_that_keeps_running(self):
+        process = MagicMock(pid=4321)
+        process.wait.side_effect = [subprocess.TimeoutExpired(["openvmm"], 2.0), 0]
+        with patch.object(benchmark.os, "name", "posix"):
+            self.assertFalse(benchmark._wait_for_exit(process, 2.0))
+            self.assertTrue(benchmark._wait_for_exit(process, 2.0))
+
+        self.assertEqual(process.wait.call_args_list, [call(timeout=2.0)] * 2)
+
+    @unittest.skipUnless(sys.platform == "win32", "requires Windows")
+    def test_windows_exit_wait_waits_for_the_process_object(self):
+        process = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(60)"]
+        )
+        try:
+            self.assertFalse(benchmark._wait_for_windows_process(process.pid, 0.05))
+            process.kill()
+            self.assertTrue(benchmark._wait_for_windows_process(process.pid, 30))
+        finally:
+            process.kill()
+            process.wait()
+
     def test_guest_runner_preserves_primary_and_close_failures_with_bounded_tail(self):
         class FakeProcess:
             pid = 123

@@ -348,6 +348,11 @@ launch, or one killed after a teardown timeout, fails on a time ABI power-off st
 the status of its termination. A guest exit with a nonzero status fails the run regardless; the
 scan reads what the console delivers within a second, so that a time ABI power-off is reported
 with its event.
+When the harness kills OpenVMM, after a timeout or a failure, it waits up to 30 s for the
+process to exit. A killed process exits only once the I/O that its threads wait for completes,
+so a stalled disk can hold it, while a hung microVM otherwise exits within tens of
+milliseconds: an exit that takes longer than a second prints a warning with its time, and a
+process that still runs after 30 s fails the run's cleanup.
 Benchmarks never ask the guest for its time ABI status, as the correctness jobs do after cold
 boots and restores, so the guest prints nothing extra. Up to the marker, the scan only parses
 output the harness reads anyway, and the harness reads the rest of the console only after it
