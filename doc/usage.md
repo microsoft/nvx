@@ -4,7 +4,7 @@ NVX has two command-line interfaces, which run from the repository root:
 
 - [`nvx-rs`](#nvx-rs) runs NVX microVMs and sandboxes: [`run`](#run) boots or
   restores a microVM on the terminal, [`sandbox`](#sandbox) runs or manages
-  workloads over EROFS layers and private ext4 scratch, and
+  workloads over EROFS layers and a private ext4 scratch or tmpfs upper, and
   [`download`](#download) installs the release of the checkout, which `run`
   and `sandbox` also download into a checkout that holds no artifacts.
 - `scripts/nvx.py`, with Python 3.10 or newer, builds, tests, benchmarks, and
@@ -228,6 +228,7 @@ nvx-rs/target/release/nvx-rs sandbox
     [{run,provision,start,exec,stop,deprovision}]
     [--layer ROLE,PATH,EROFS_UUID]...
     [--scratch PATH]
+    [--upper {scratch,ram}]
     [--state-dir PATH]
     [--entrypoint PATH]
     [--arg VALUE]...
@@ -280,7 +281,8 @@ do, and their names cannot be abbreviated either.
 | --- | --- | --- |
 | `{run,provision,start,exec,stop,deprovision}` | `run` | Select a one-shot run or a managed lifecycle operation. |
 | `--layer ROLE,PATH,EROFS_UUID` | required for `run` and `provision` | Attach the `distro` EROFS layer. Only `distro` is accepted. The UUID must be lowercase hexadecimal in canonical hyphenated form; braces, prefixes, uppercase, and unhyphenated forms are refused. |
-| `--scratch PATH` | required for `run` and `provision` | Attach a preformatted ext4 scratch image as the writable overlay. |
+| `--scratch PATH` | required for `run` and `provision` with a scratch upper | Attach a preformatted ext4 scratch image as the overlay's writable upper. `--upper ram` refuses it. |
+| `--upper {scratch,ram}` | `scratch` | Select the overlay's writable upper for `run` or `provision`: `scratch`, the image of `--scratch`, or `ram`, a tmpfs in guest memory with no scratch image, which loses the workload's writes when the VM stops. A RAM upper holds at most half of the guest's RAM, and its pages count against `--memory-max`; see [Overlay upper](run.md#overlay-upper). |
 | `--state-dir PATH` | required for managed operations | Select persistent sandbox state. One-shot `run` rejects this option. |
 | `--entrypoint PATH` | `/bin/sh` | Select an absolute workload entrypoint without whitespace, control characters, double quotes, or any UTF-8 byte that Linux treats as whitespace. |
 | `--arg VALUE` | none | Append one nonempty entrypoint argument without whitespace, control characters, double quotes, or any UTF-8 byte that Linux treats as whitespace. Repeat to pass multiple arguments. |
@@ -1102,19 +1104,19 @@ python3 scripts/nvx.py test-microvm
 
 Runs NVX-owned Linux, SMP, virtio, sandbox, and snapshot correctness scenarios
 against the public OpenVMM CLI. Repeat `--scenario` to select a subset; without
-it, every scenario supported by the selected guest runs, except four that run
+it, every scenario supported by the selected guest runs, except five that run
 only when named. `smp-lapic` repeats `smp` and also asserts that every CPU
 uses the one-shot counting LAPIC. `managed-exec-config`, `sandbox-lifecycle`,
-and `sandbox-proxy-only` drive the public `nvx-rs sandbox` lifecycle
-commands (see [Run](run.md#managed-lifecycle)) and also require the
+`sandbox-proxy-only`, and `sandbox-ram-upper` drive the public `nvx-rs sandbox`
+lifecycle commands (see [Run](run.md#managed-lifecycle)) and also require the
 guest-artifact build's Ubuntu layer and scratch template, which packages
 omit. Alpine remains the
 default. Ubuntu and Azure Linux cannot act as sandbox control, so they reject
 the Alpine-control-only `sandbox-blocks` and `scratch-snapshot` scenarios and
 the sandbox-control-dependent `snapshot-tiers`, `platform-restore-processors`,
 `platform-zero-fill`, `platform-filesystem`, `platform-aggregate-export`,
-`platform-network-policy`, `managed-exec-config`, `sandbox-lifecycle`, and
-`sandbox-proxy-only` scenarios. Ubuntu also rejects
+`platform-network-policy`, `managed-exec-config`, `sandbox-lifecycle`,
+`sandbox-proxy-only`, and `sandbox-ram-upper` scenarios. Ubuntu also rejects
 the Alpine-prompt-specific `console-snapshot` scenario. `--debug-kernel` boots
 the CI debug kernel, `build/vmlinux-debug`, whose soft-lockup and hung-task
 detectors the guest's time ABI watcher reports; without `--scenario`, it runs

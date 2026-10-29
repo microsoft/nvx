@@ -144,6 +144,7 @@ nvx/
 |   |   |-- release.py           Release source collection and packaging
 |   |   |-- sandbox_lifecycle_tests.py Managed sandbox lifecycle and security tests
 |   |   |-- sandbox_proxy_tests.py Proxy-only sandbox networking tests
+|   |   |-- sandbox_ram_upper_tests.py Sandboxes whose overlay upper is in RAM
 |   |   |-- time_abi.py          Time ABI harness checks and CPU profile guidance
 |   |   `-- ubuntu.py            Verified Ubuntu rootfs and EROFS preparation
 |   |-- setup/                   Host and Actions runner bootstrap scripts
@@ -222,7 +223,8 @@ the entry script stages Alpine's musl loader and `setpriv` inside the
 workload's root.
 
 The sandbox scripts resolve fixed virtio-blk roles through
-sysfs, assemble EROFS lower layers over ext4 scratch, place the workload in its
+sysfs, assemble EROFS lower layers over the upper that the host declares, an
+ext4 scratch disk or a tmpfs, place the workload in its
 cgroup before release, construct its mount/PID/UTS namespaces, enter its
 filesystem root after dropping capabilities, and retain the agent as the outer
 PID 1. In a managed sandbox, the agent supervises `nvx-managed-agent`, which

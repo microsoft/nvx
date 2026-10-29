@@ -108,7 +108,7 @@ impl Staged {
     fn launch(&self) -> SandboxLaunch {
         SandboxLaunch::new(
             vec![self.layer("distro.erofs")],
-            &self.text("scratch.ext4"),
+            SandboxUpper::scratch(&self.text("scratch.ext4")),
             SandboxSettings::default(),
         )
         .unwrap()
@@ -530,7 +530,7 @@ fn prepared_launches_refuse_final_paths_that_openvmm_cannot_take() {
         let checked = binding.check(&layer, DISTRO_POLICY_REVISION).unwrap();
         let launch = SandboxLaunch::new(
             vec![layer],
-            &staged.text("scratch.ext4"),
+            SandboxUpper::scratch(&staged.text("scratch.ext4")),
             SandboxSettings::default(),
         )
         .unwrap();
@@ -549,7 +549,7 @@ fn prepared_launches_refuse_final_paths_that_openvmm_cannot_take() {
         let (binding, checked) = staged.checked_distro("distro.erofs");
         let launch = SandboxLaunch::new(
             vec![staged.layer("distro.erofs")],
-            &staged.text(scratch),
+            SandboxUpper::scratch(&staged.text(scratch)),
             SandboxSettings::default(),
         )
         .unwrap();
@@ -613,7 +613,7 @@ fn prepared_launches_accept_balanced_brackets_in_final_paths() {
     let (binding, checked) = staged.checked_distro("images\\distro.erofs");
     let launch = SandboxLaunch::new(
         vec![staged.layer("images\\distro.erofs")],
-        &staged.text("images\\scratch.ext4"),
+        SandboxUpper::scratch(&staged.text("images\\scratch.ext4")),
         SandboxSettings::default(),
     )
     .unwrap();

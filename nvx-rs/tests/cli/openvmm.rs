@@ -22,6 +22,10 @@ pub(crate) const SANDBOX: [&str; 3] = [
     "nvx_scratch=0xd0006000,ext4",
 ];
 
+/// The kernel command-line token with which a sandbox keeps its upper in RAM, in place of the
+/// scratch disk's, [`SANDBOX`]'s last.
+pub(crate) const RAM_UPPER: &str = "nvx_overlay_upper=ramfs";
+
 /// The kernel command-line tokens of the default workload of a sandbox: `/bin/sh` as the
 /// entrypoint, and `nvx-sandbox` as the hostname.
 pub(crate) const WORKLOAD: [&str; 2] = ["nvx_entrypoint=/bin/sh", "nvx_hostname=nvx-sandbox"];
@@ -94,6 +98,18 @@ impl Options {
             line.push_str(token);
         }
         self.with("--cmdline", [line])
+    }
+
+    /// Returns these options of a sandbox with its upper in RAM: the distro layer of the root
+    /// alone on a sandbox block device, and [`RAM_UPPER`] in place of the scratch disk's token on
+    /// the kernel command line.
+    pub(crate) fn in_ram(self) -> Self {
+        let line = self.value("--cmdline").replace(SANDBOX[2], RAM_UPPER);
+        self.with(
+            "--microvm-sandbox-block",
+            ["distro:file:{root/distro.erofs},ro"],
+        )
+        .with("--cmdline", [line])
     }
 
     /// Returns the values of `name`, none if the command line does not give it.
@@ -240,10 +256,7 @@ pub(crate) fn assert_checked_blocks(root: &Root, blocks: &[String]) {
     let [distro, scratch] = blocks else {
         panic!("not two sandbox block devices: {blocks:?}");
     };
-    let distro = distro
-        .strip_prefix("distro:file:")
-        .and_then(|rest| rest.strip_suffix(",ro"))
-        .unwrap_or_else(|| panic!("not a read-only distro layer: {distro}"));
+    let distro = checked_distro(distro);
     let scratch = scratch
         .strip_prefix("scratch:file:")
         .unwrap_or_else(|| panic!("not a scratch disk: {scratch}"));
@@ -257,18 +270,63 @@ pub(crate) fn assert_checked_blocks(root: &Root, blocks: &[String]) {
             format!(r"\\?\{}", root.expand("{root/scratch.ext4}"))
         );
     } else {
-        let descriptor = |path: &str| {
-            path.strip_prefix("/proc/self/fd/")
-                .and_then(|number| number.parse::<u32>().ok())
-                .unwrap_or_else(|| panic!("not an inherited descriptor: {path}"))
-        };
         assert_ne!(descriptor(distro), descriptor(scratch));
     }
+}
+
+/// Asserts that `blocks`, the `--microvm-sandbox-block` values of a launch whose upper is in RAM,
+/// attach the distro layer of the root alone, read-only, through a file that the launch checked,
+/// as [`assert_checked_blocks`] says.
+pub(crate) fn assert_checked_distro(root: &Root, blocks: &[String]) {
+    let [distro] = blocks else {
+        panic!("not one sandbox block device: {blocks:?}");
+    };
+    let distro = checked_distro(distro);
+    if cfg!(windows) {
+        assert_eq!(
+            distro,
+            format!(r"\\?\{}", root.expand("{root/distro.erofs}"))
+        );
+    } else {
+        descriptor(distro);
+    }
+}
+
+/// Returns the checked file of `block`, a `--microvm-sandbox-block` value that attaches a
+/// read-only distro layer.
+fn checked_distro(block: &str) -> &str {
+    block
+        .strip_prefix("distro:file:")
+        .and_then(|rest| rest.strip_suffix(",ro"))
+        .unwrap_or_else(|| panic!("not a read-only distro layer: {block}"))
+}
+
+/// Returns the number of the descriptor that `path`, `/proc/self/fd/N`, names.
+fn descriptor(path: &str) -> u32 {
+    path.strip_prefix("/proc/self/fd/")
+        .and_then(|number| number.parse::<u32>().ok())
+        .unwrap_or_else(|| panic!("not an inherited descriptor: {path}"))
 }
 
 /// Asserts that the fake OpenVMM of the launch whose records are named for `token` read the
 /// distro layer and then the scratch image of the root, whole, through its sandbox block devices.
 pub(crate) fn assert_opened_images(root: &Root, token: &str) {
+    assert_opened(
+        root,
+        token,
+        &[("distro", "distro\n"), ("scratch", "scratch\n")],
+    );
+}
+
+/// Asserts that the fake OpenVMM of the launch whose records are named for `token`, whose upper is
+/// in RAM, read the distro layer of the root alone, whole, through its sandbox block device.
+pub(crate) fn assert_opened_distro(root: &Root, token: &str) {
+    assert_opened(root, token, &[("distro", "distro\n")]);
+}
+
+/// Asserts that the fake OpenVMM of the launch whose records are named for `token` read the block
+/// devices of `expected`, each with its role and content, whole, in order.
+fn assert_opened(root: &Root, token: &str, expected: &[(&str, &str)]) {
     let opened = root.json(&format!("build/fake-openvmm-{token}-blocks.json"));
     let opened: Vec<(&str, &str)> = opened
         .as_array()
@@ -281,7 +339,7 @@ pub(crate) fn assert_opened_images(root: &Root, token: &str) {
             )
         })
         .collect();
-    assert_eq!(opened, [("distro", "distro\n"), ("scratch", "scratch\n")]);
+    assert_eq!(opened, expected);
 }
 
 /// What an outcome report of OpenVMM's says of a VM's network policy: its status, such as

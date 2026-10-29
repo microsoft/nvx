@@ -25,6 +25,7 @@ use super::mount::{
 };
 use super::{SandboxLaunch, refused};
 use crate::error::Result;
+use crate::protocol::root::RootUpper;
 
 /// The entrypoints of systemd, which the sandbox security profile does not run.
 pub const SYSTEMD_ENTRYPOINTS: [&str; 2] = ["/usr/lib/systemd/systemd", "/lib/systemd/systemd"];
@@ -127,6 +128,8 @@ pub struct SandboxOptions {
     pub layers: bool,
     /// Whether `--scratch` was given.
     pub scratch: bool,
+    /// `--upper`, if given: a launch keeps its upper on scratch without it.
+    pub upper: Option<RootUpper>,
 }
 
 impl SandboxOptions {
@@ -149,6 +152,7 @@ impl SandboxOptions {
             mount_owner: None,
             layers: false,
             scratch: false,
+            upper: None,
         }
     }
 
@@ -160,9 +164,10 @@ impl SandboxOptions {
     /// [`exec_environment_from_file`] or [`validate_exec_environment`] refuses, network policy
     /// options except for `run` and `provision`, a systemd entrypoint for `run`, `provision`,
     /// and `exec`, `--outcome-report` except for `run` and `exec`, share options without a
-    /// `--mount`, `--mount` except for `run` and `provision`, and for `run` and `provision`,
-    /// `--net` without `--network-profile` or the reverse, and a missing `--layer` or
-    /// `--scratch`.
+    /// `--mount`, `--mount` and `--upper` except for `run` and `provision`, and for `run` and
+    /// `provision`, `--net` without `--network-profile` or the reverse, a missing `--layer`, and
+    /// a missing `--scratch` for an upper on scratch, or one given for `--upper ram`, whose upper
+    /// is in RAM.
     ///
     /// Fails with [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported).
     pub fn check(&self) -> Result<Option<Vec<String>>> {
@@ -225,16 +230,33 @@ impl SandboxOptions {
                 "--mount is only valid for sandbox run or provision",
             ));
         }
+        if self.upper.is_some() && !operation.launches() {
+            return Err(refused(
+                "--upper is only valid for sandbox run or provision",
+            ));
+        }
         if operation.launches() {
             if self.net != self.network_profile {
                 return Err(refused(
                     "--net and --network-profile must be specified together",
                 ));
             }
-            if !self.layers || !self.scratch {
-                return Err(refused(format!(
-                    "sandbox {operation} requires --layer and --scratch"
-                )));
+            match self.upper.unwrap_or(RootUpper::Scratch) {
+                RootUpper::Scratch if !self.layers || !self.scratch => {
+                    return Err(refused(format!(
+                        "sandbox {operation} requires --layer and --scratch"
+                    )));
+                }
+                RootUpper::Ram if self.scratch => {
+                    return Err(refused(
+                        "--upper ram and --scratch are mutually exclusive: an upper in RAM has \
+                         no scratch image",
+                    ));
+                }
+                RootUpper::Ram if !self.layers => {
+                    return Err(refused(format!("sandbox {operation} requires --layer")));
+                }
+                RootUpper::Scratch | RootUpper::Ram => {}
             }
         }
         Ok(environment)

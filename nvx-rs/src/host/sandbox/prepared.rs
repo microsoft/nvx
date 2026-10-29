@@ -98,14 +98,17 @@ use crate::host::sys;
 /// # fn launch(
 /// #     launch: &SandboxLaunch,
 /// #     distro_binding: &DistroBinding,
-/// #     scratch_binding: &ScratchBinding,
+/// #     scratch_binding: Option<&ScratchBinding>,
 /// #     capability: &[u8; nvx::protocol::CAPABILITY_LEN],
 /// # ) -> Result<(), Box<dyn std::error::Error>> {
 /// // Check the bindings that the caller recorded when it staged the images: from their metadata
-/// // alone, and claiming the scratch image for this sandbox.
+/// // alone, and claiming the scratch image of an upper on scratch for this sandbox.
 /// let distro = distro_binding.check(launch.distro(), DISTRO_POLICY_REVISION)?;
-/// let scratch = scratch_binding.check(launch.scratch(), Instant::now() + CLAIM_RELEASE_WAIT)?;
-/// let prepared = PreparedLaunch::new(launch.bound_plan(distro_binding)?, distro, Some(scratch), "")?;
+/// let scratch = match (launch.scratch(), scratch_binding) {
+///     (Some(path), Some(binding)) => Some(binding.check(path, Instant::now() + CLAIM_RELEASE_WAIT)?),
+///     _ => None,
+/// };
+/// let prepared = PreparedLaunch::new(launch.bound_plan(distro_binding)?, distro, scratch, "")?;
 ///
 /// let mut arguments: Vec<OsString> =
 ///     prepared.openvmm_arguments().iter().map(OsString::from).collect();

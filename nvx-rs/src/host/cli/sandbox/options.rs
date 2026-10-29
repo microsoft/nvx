@@ -18,6 +18,7 @@ use crate::host::sandbox::{
     DEFAULT_ENTRYPOINT, DEFAULT_HOSTNAME, DEFAULT_WORKLOAD_IDENTITY, PIDS_MAX_LIMIT, SandboxLayer,
     SandboxNetwork, parse_workload_identity,
 };
+use crate::protocol::root::RootUpper;
 
 /// The usage and help of the parser.
 pub(in crate::host::cli) const SYNTAX: Syntax = Syntax {
@@ -31,6 +32,10 @@ options:
   -h, --help            show this help message and exit
   --layer ROLE,PATH,EROFS_UUID
   --scratch SCRATCH
+  --upper {scratch,ram}
+                        where the overlay keeps the sandbox's writes: scratch
+                        (default), on the ext4 image of --scratch, or ram, on
+                        a tmpfs in guest memory, without a scratch image
   --state-dir STATE_DIR
   --entrypoint ENTRYPOINT
   --arg SANDBOX_ARG
@@ -112,6 +117,8 @@ options:
 
 /// The operations, in the order in which usage messages list them.
 const OPERATIONS: [&str; 6] = ["run", "provision", "start", "exec", "stop", "deprovision"];
+/// The choices of `--upper`, the names of the uppers.
+const UPPERS: [&str; 2] = [RootUpper::Scratch.as_str(), RootUpper::Ram.as_str()];
 /// The choices of `--hypervisor`.
 pub(in crate::host::cli) const HYPERVISORS: [&str; 4] = ["auto", "whp", "kvm", "mshv"];
 /// The choices of `--mount-owner`.
@@ -132,9 +139,10 @@ fn seconds(value: &str) -> std::result::Result<f64, String> {
 
 /// The options of `nvx-rs sandbox`, which parse with the defaults of the former
 /// `nvx.py sandbox`.
-pub(in crate::host::cli) const OPTIONS: [Spec; 35] = [
+pub(in crate::host::cli) const OPTIONS: [Spec; 36] = [
     Spec::one("--layer"),
     Spec::one("--scratch"),
+    Spec::one("--upper"),
     Spec::one("--state-dir"),
     Spec::one("--entrypoint"),
     Spec::one("--arg"),
@@ -179,6 +187,8 @@ pub(crate) struct Options {
     pub(crate) layers: Vec<SandboxLayer>,
     /// `--scratch`, as given.
     pub(crate) scratch: Option<String>,
+    /// `--upper`, if given; a launch keeps its upper on scratch without it.
+    pub(crate) upper: Option<RootUpper>,
     /// `--state-dir`, as given.
     pub(crate) state_dir: Option<String>,
     /// `--entrypoint`.
@@ -232,6 +242,7 @@ impl Default for Options {
             operation: SandboxOperation::Run,
             layers: Vec::new(),
             scratch: None,
+            upper: None,
             state_dir: None,
             entrypoint: DEFAULT_ENTRYPOINT.to_owned(),
             args: Vec::new(),
@@ -277,6 +288,12 @@ impl Receiver for Options {
                 .layers
                 .push(SandboxLayer::parse(&text()).map_err(|error| error.message().to_owned())?),
             "--scratch" => self.scratch = Some(text()),
+            "--upper" => {
+                self.upper = Some(match choice(&text(), &UPPERS)? {
+                    "ram" => RootUpper::Ram,
+                    _ => RootUpper::Scratch,
+                });
+            }
             "--state-dir" => self.state_dir = Some(text()),
             "--entrypoint" => self.entrypoint = text(),
             "--arg" => self.args.push(text()),

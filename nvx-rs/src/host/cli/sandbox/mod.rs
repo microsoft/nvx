@@ -4,10 +4,11 @@
 //!
 //! - `run`, the default, boots a one-shot sandbox: it prints the OpenVMM command as `>> COMMAND`,
 //!   then runs it on the terminal, unless `--dry-run`, and exits with OpenVMM's status. It runs
-//!   OpenVMM through a [`PreparedLaunch`] of the distro layer that it verified and of the scratch
-//!   image, which it claims, so the command names their checked files: on Linux as
-//!   `/proc/self/fd/N`, and on Windows by their final paths. A dry run, which launches nothing,
-//!   names their paths.
+//!   OpenVMM through a [`PreparedLaunch`] of the distro layer that it verified and, for an upper
+//!   on scratch, of the scratch image, which it claims, so the command names their checked files:
+//!   on Linux as `/proc/self/fd/N`, and on Windows by their final paths. A dry run, which launches
+//!   nothing, names their paths. `--upper ram` keeps the upper in RAM, on a tmpfs that the guest
+//!   mounts, and attaches no scratch image.
 //! - `provision`, `start`, `exec`, `stop`, and `deprovision` manage a persistent sandbox in its
 //!   `--state-dir`; see [`lifecycle`].
 //!
@@ -35,8 +36,11 @@ use crate::host::sandbox::options::{
     SandboxOperation, SandboxOptions, sandbox_mounts, validate_sandbox_systemd_policy,
 };
 use crate::host::sandbox::scratch::{CLAIM_RELEASE_WAIT, ScratchBinding};
-use crate::host::sandbox::{PreparedLaunch, SandboxLaunch, SandboxPlan, SandboxSettings};
+use crate::host::sandbox::{
+    PreparedLaunch, SandboxLaunch, SandboxPlan, SandboxSettings, SandboxUpper,
+};
 use crate::host::store::RuntimeIdentity;
+use crate::protocol::root::RootUpper;
 
 pub(crate) use self::lifecycle::ProvisionConfig;
 pub(super) use self::one_shot::run_openvmm;
@@ -151,6 +155,7 @@ pub(super) fn run(root: Option<&str>, options: Options) -> Result {
         mount_owner: options.mount_owner,
         layers: !options.layers.is_empty(),
         scratch: options.scratch.is_some(),
+        upper: options.upper,
     };
     let environment = checks.check()?;
     let artifacts = Artifacts { root };
@@ -182,11 +187,15 @@ pub(super) fn run(root: Option<&str>, options: Options) -> Result {
             memory_max: options.memory_max,
             pids_max: options.pids_max,
         };
-        let launch = SandboxLaunch::new(
-            options.layers.clone(),
-            options.scratch.as_deref().unwrap_or_default(),
-            settings,
-        )?;
+        // The checks above require --scratch for an upper on scratch, and refuse it for one in
+        // RAM.
+        let upper = match options.upper.unwrap_or(RootUpper::Scratch) {
+            RootUpper::Scratch => {
+                SandboxUpper::scratch(options.scratch.as_deref().unwrap_or_default())
+            }
+            RootUpper::Ram => SandboxUpper::RAM,
+        };
+        let launch = SandboxLaunch::new(options.layers.clone(), upper, settings)?;
         validate_mounts(&mounts)?;
         launch.validated()?;
         // The shares are planned once, from their resolved host paths, and `provision` records
@@ -360,9 +369,9 @@ fn run_plan(launch: &SandboxLaunch, binding: &DistroBinding) -> Result<SandboxPl
 }
 
 /// Checks the distro layer of a one-shot run against `binding`, which the run's verification of
-/// the layer made, binds and claims its scratch image, and prepares the one-shot launch of `plan`,
-/// which delivers the shares as boot tokens, with the checked files and the user's kernel command
-/// line `cmdline`.
+/// the layer made, binds and claims the scratch image of an upper on scratch, and prepares the
+/// one-shot launch of `plan`, which delivers the shares as boot tokens, with the checked files and
+/// the user's kernel command line `cmdline`.
 ///
 /// The checks read no content, so the layer that the run verified is the one that OpenVMM gets:
 /// one that changed meanwhile fails its check.
@@ -373,9 +382,13 @@ fn prepare_run(
     cmdline: &str,
 ) -> Result<PreparedLaunch> {
     let distro = binding.check(launch.distro(), DISTRO_POLICY_REVISION)?;
-    let scratch = ScratchBinding::bind(launch.scratch())?
-        .check(launch.scratch(), Instant::now() + CLAIM_RELEASE_WAIT)?;
-    PreparedLaunch::one_shot(plan, distro, Some(scratch), cmdline).map_err(Exit::from)
+    let scratch = match launch.scratch() {
+        Some(scratch) => Some(
+            ScratchBinding::bind(scratch)?.check(scratch, Instant::now() + CLAIM_RELEASE_WAIT)?,
+        ),
+        None => None,
+    };
+    PreparedLaunch::one_shot(plan, distro, scratch, cmdline).map_err(Exit::from)
 }
 
 #[cfg(test)]

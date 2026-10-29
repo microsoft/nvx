@@ -409,9 +409,9 @@ container cgroup, the overlay root over read-only image layers with its upper
 directory on scratch, and that the memory controller kills an allocation of
 twice the limit and the pids controller stops the workload at eight
 processes. The live-share runs below repeat the profile checks. Each
-backend also runs the public `managed-exec-config`, `sandbox-lifecycle`, and
-`sandbox-proxy-only` scenarios of `test-microvm`, which drive
-`nvx-rs sandbox provision`, `start`,
+backend also runs the public `managed-exec-config`, `sandbox-lifecycle`,
+`sandbox-proxy-only`, and `sandbox-ram-upper` scenarios of `test-microvm`,
+which drive `nvx-rs sandbox run`, `provision`, `start`,
 `exec`, `stop`, and `deprovision` as subprocesses (see
 [Run](run.md#managed-lifecycle)): request-scoped working directories and
 environments, timeouts, nonzero exits, stdout and stderr, bounded output and
@@ -419,8 +419,9 @@ outcome reports, warm-guest state across requests and restarts, identity
 refusal, fail-closed lifecycle transitions, a crashed OpenVMM's stale runtime
 state, teardown that leaves no OpenVMM process, control endpoint,
 capability, or runtime record while the layer and scratch artifacts survive,
-and a proxy-only network, whose guest reaches a test proxy on host loopback at
-its gateway and no other destination.
+a proxy-only network, whose guest reaches a test proxy on host loopback at
+its gateway and no other destination, and sandboxes whose overlay upper is a
+tmpfs in guest memory, with no scratch image.
 Their bounded evidence is part of the backend's failure logs. The same
 entrypoint then verifies a live virtio-fs
 share inside the container: a read-write `/workspace` share with a denied

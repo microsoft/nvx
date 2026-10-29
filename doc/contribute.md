@@ -100,8 +100,9 @@ devices. Add those scenarios to
 `scripts/nvx_tools/microvm_test_scripts` and retain complete failure logs.
 The scenarios that drive the public `nvx-rs sandbox` commands live in
 `scripts/nvx_tools/managed_exec_tests.py`,
-`scripts/nvx_tools/sandbox_lifecycle_tests.py`, and
-`scripts/nvx_tools/sandbox_proxy_tests.py`, and `microvm_tests.py`
+`scripts/nvx_tools/sandbox_lifecycle_tests.py`,
+`scripts/nvx_tools/sandbox_proxy_tests.py`, and
+`scripts/nvx_tools/sandbox_ram_upper_tests.py`, and `microvm_tests.py`
 registers them. `sandbox` and the control protocol belong to `nvx-rs`
 ([microsoft/nvx#359](https://github.com/microsoft/nvx/issues/359)), so the
 scenarios drive them as commands, compile egress policies with

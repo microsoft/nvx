@@ -47,6 +47,20 @@ fn resource_limits_are_bounded_ascii_decimal() {
     assert!(parse(&["--pids-max".to_owned(), "4194304".to_owned()]).is_err());
 }
 
+#[test]
+fn the_upper_is_scratch_or_ram() {
+    let upper = |value: &str| {
+        parse(&["--upper".to_owned(), value.to_owned()]).map(|(options, _)| options.upper)
+    };
+    assert_eq!(parse(&[]).unwrap().0.upper, None);
+    assert_eq!(upper("scratch").unwrap(), Some(RootUpper::Scratch));
+    assert_eq!(upper("ram").unwrap(), Some(RootUpper::Ram));
+    // The option names the RAM upper `ram`, whatever its token or the guest's mount call it.
+    for value in ["ramfs", "tmpfs", "RAM", "", "scratch,ram"] {
+        assert!(upper(value).is_err(), "{value:?}");
+    }
+}
+
 proptest! {
     #[test]
     fn policy_option_sequences_record_the_preceding_mount(
@@ -109,7 +123,7 @@ fn run_checks_again_that_its_shares_do_not_overlap() {
             &path("distro.erofs"),
             "11111111-1111-1111-1111-111111111111",
         )],
-        &path("scratch.ext4"),
+        SandboxUpper::scratch(&path("scratch.ext4")),
         SandboxSettings::default(),
     )
     .unwrap()

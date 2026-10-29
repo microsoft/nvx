@@ -25,7 +25,9 @@ use std::time::{Duration, Instant};
 
 use nvx::host::sandbox::distro::{DISTRO_POLICY_REVISION, DistroBinding};
 use nvx::host::sandbox::scratch::{CLAIM_RELEASE_WAIT, ScratchBinding};
-use nvx::host::sandbox::{LayerRole, PreparedLaunch, SandboxLaunch, SandboxLayer, SandboxSettings};
+use nvx::host::sandbox::{
+    LayerRole, PreparedLaunch, SandboxLaunch, SandboxLayer, SandboxSettings, SandboxUpper,
+};
 use nvx::host::supervisor::{self, Launched, VmmCommand};
 use nvx::protocol::CAPABILITY_LEN;
 
@@ -315,7 +317,7 @@ fn launch_of(distro: &Path, scratch: &Path) -> SandboxLaunch {
             distro.to_str().unwrap(),
             UUID,
         )],
-        scratch.to_str().unwrap(),
+        SandboxUpper::scratch(scratch.to_str().unwrap()),
         SandboxSettings::default(),
     )
     .unwrap()
@@ -474,12 +476,15 @@ fn a_prepared_launch_hands_the_vmm_its_checked_images_alone() {
     // Staging binds the images, where hashing belongs; the launch checks them from their metadata
     // alone, and claims the scratch image.
     let binding = DistroBinding::verify(launch.distro()).unwrap();
-    let scratch_binding = ScratchBinding::bind(launch.scratch()).unwrap();
+    let scratch_binding = ScratchBinding::bind(launch.scratch().unwrap()).unwrap();
     let distro = binding
         .check(launch.distro(), DISTRO_POLICY_REVISION)
         .unwrap();
     let scratch = scratch_binding
-        .check(launch.scratch(), Instant::now() + CLAIM_RELEASE_WAIT)
+        .check(
+            launch.scratch().unwrap(),
+            Instant::now() + CLAIM_RELEASE_WAIT,
+        )
         .unwrap();
     let prepared = PreparedLaunch::new(
         launch.bound_plan(&binding).unwrap(),
@@ -693,9 +698,13 @@ fn a_vmm_keeps_the_scratch_images_claim_once_its_launcher_is_gone() {
     let staged = Staged::new();
     let launch = staged.launch();
     let binding = DistroBinding::verify(launch.distro()).unwrap();
-    let scratch_binding = ScratchBinding::bind(launch.scratch()).unwrap();
-    let check_scratch =
-        || scratch_binding.check(launch.scratch(), Instant::now() + CLAIM_RELEASE_WAIT);
+    let scratch_binding = ScratchBinding::bind(launch.scratch().unwrap()).unwrap();
+    let check_scratch = || {
+        scratch_binding.check(
+            launch.scratch().unwrap(),
+            Instant::now() + CLAIM_RELEASE_WAIT,
+        )
+    };
     let prepared = PreparedLaunch::new(
         launch.bound_plan(&binding).unwrap(),
         binding
@@ -739,9 +748,14 @@ fn a_vmm_keeps_the_scratch_images_claim_once_its_launcher_is_gone() {
 
     // The claim lasts while the VMM writes the image, which changes its length here, so that a
     // binding of the written image tells the claim apart, and it ends with the VMM.
-    let written = ScratchBinding::bind(launch.scratch()).unwrap();
+    let written = ScratchBinding::bind(launch.scratch().unwrap()).unwrap();
     assert_ne!(written, scratch_binding);
-    let check_written = || written.check(launch.scratch(), Instant::now() + CLAIM_RELEASE_WAIT);
+    let check_written = || {
+        written.check(
+            launch.scratch().unwrap(),
+            Instant::now() + CLAIM_RELEASE_WAIT,
+        )
+    };
     let claimed = check_written().unwrap_err();
     assert_eq!(claimed.kind(), ErrorKind::TimedOut, "{claimed}");
     File::create(vmm.path().join(EXIT_MARKER)).unwrap();
@@ -828,12 +842,15 @@ fn a_vmm_finds_the_checked_images_past_replaced_links_from_another_directory() {
         .map_or_else(|_| link.clone(), Path::to_path_buf);
     let launch = launch_of(&named.join("distro.erofs"), &named.join("scratch.ext4"));
     let binding = DistroBinding::verify(launch.distro()).unwrap();
-    let scratch_binding = ScratchBinding::bind(launch.scratch()).unwrap();
+    let scratch_binding = ScratchBinding::bind(launch.scratch().unwrap()).unwrap();
     let distro = binding
         .check(launch.distro(), DISTRO_POLICY_REVISION)
         .unwrap();
     let scratch = scratch_binding
-        .check(launch.scratch(), Instant::now() + CLAIM_RELEASE_WAIT)
+        .check(
+            launch.scratch().unwrap(),
+            Instant::now() + CLAIM_RELEASE_WAIT,
+        )
         .unwrap();
     let prepared = PreparedLaunch::new(
         launch.bound_plan(&binding).unwrap(),
@@ -894,14 +911,17 @@ fn launcher_fixture() {
     let staged = Staged::new();
     let launch = staged.launch();
     let binding = DistroBinding::verify(launch.distro()).unwrap();
-    let scratch_binding = ScratchBinding::bind(launch.scratch()).unwrap();
+    let scratch_binding = ScratchBinding::bind(launch.scratch().unwrap()).unwrap();
     let distro = binding
         .check(launch.distro(), DISTRO_POLICY_REVISION)
         .unwrap();
     // SAFETY: descriptor 0, standard input, is open, and nothing in this process reads it.
     nix::unistd::close(unsafe { OwnedFd::from_raw_fd(0) }).unwrap();
     let scratch = scratch_binding
-        .check(launch.scratch(), Instant::now() + CLAIM_RELEASE_WAIT)
+        .check(
+            launch.scratch().unwrap(),
+            Instant::now() + CLAIM_RELEASE_WAIT,
+        )
         .unwrap();
     assert_eq!(scratch.file().as_raw_fd(), 0);
     let prepared = PreparedLaunch::new(
@@ -919,7 +939,7 @@ fn launcher_fixture() {
     assert!(fs::read_link("/proc/self/fd/0").is_err());
     assert_eq!(
         scratch_binding
-            .check(launch.scratch(), Instant::now())
+            .check(launch.scratch().unwrap(), Instant::now())
             .unwrap_err()
             .kind(),
         ErrorKind::TimedOut

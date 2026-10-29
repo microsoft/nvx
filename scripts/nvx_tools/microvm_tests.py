@@ -73,6 +73,7 @@ from .nvx_rs import EgressRules, compile_egress_policy
 from .openvmm_process import OpenvmmProcess, TcpConsole
 from .sandbox_lifecycle_tests import run_sandbox_lifecycle
 from .sandbox_proxy_tests import run_sandbox_proxy_only
+from .sandbox_ram_upper_tests import run_sandbox_ram_upper
 from .shard_plans import parse_shard
 from .time_abi import (
     ABI_VERSION,
@@ -131,6 +132,7 @@ MICROVM_TEST_SCENARIOS = (
     "sandbox-blocks",
     "sandbox-lifecycle",
     "sandbox-proxy-only",
+    "sandbox-ram-upper",
     "scratch-snapshot",
     "smp",
     "smp-snapshot",
@@ -153,6 +155,7 @@ SANDBOX_CONTROL_SCENARIOS = frozenset(
         "sandbox-blocks",
         "sandbox-lifecycle",
         "sandbox-proxy-only",
+        "sandbox-ram-upper",
         "scratch-snapshot",
         "snapshot-tiers",
     )
@@ -161,7 +164,12 @@ SANDBOX_CONTROL_SCENARIOS = frozenset(
 # the guest-artifact build produces and packages omit, so they run only when
 # named.
 PUBLIC_SANDBOX_SCENARIOS = frozenset(
-    ("managed-exec-config", "sandbox-lifecycle", "sandbox-proxy-only")
+    (
+        "managed-exec-config",
+        "sandbox-lifecycle",
+        "sandbox-proxy-only",
+        "sandbox-ram-upper",
+    )
 )
 # The same-host restore cases also run on the CI debug kernel (doc/ci.md),
 # whose soft-lockup and hung-task detectors the guest's time ABI watcher
@@ -521,8 +529,9 @@ def configure_parser(parser: argparse.ArgumentParser) -> None:
         choices=(*MICROVM_TEST_SCENARIOS, *MICROVM_EXPLICIT_SCENARIOS),
         help=(
             "scenario to run; repeat to select multiple (default: all except "
-            "smp-lapic, managed-exec-config, sandbox-lifecycle, and "
-            "sandbox-proxy-only, which run only when named)"
+            "smp-lapic, managed-exec-config, sandbox-lifecycle, "
+            "sandbox-proxy-only, and sandbox-ram-upper, which run only when "
+            "named)"
         ),
     )
     parser.add_argument(
@@ -9127,6 +9136,12 @@ def _run_scenarios(
         run_sandbox_proxy_only(
             args.backend, timeout=args.timeout, output_dir=output_dir
         )
+    if "sandbox-ram-upper" in scenarios:
+        report.start(
+            "sandbox-ram-upper",
+            f"Running public RAM-upper sandboxes on OpenVMM/{args.backend}",
+        )
+        run_sandbox_ram_upper(args.backend, timeout=args.timeout, output_dir=output_dir)
     if "managed-lifecycle" in scenarios:
         report.start(
             "managed-lifecycle",

@@ -5,8 +5,9 @@
 
 use crate::harness::{Content, LAYER, OPENVMM, Root, SCRATCH, in_parallel, native};
 use crate::openvmm::{
-    NO_NETWORK, NetworkPolicy, Options, WORKLOAD, assert_checked_blocks, assert_opened_images,
-    assert_outcome_report, child, cold_boot, one_shot, restore, share_token,
+    NO_NETWORK, NetworkPolicy, Options, WORKLOAD, assert_checked_blocks, assert_checked_distro,
+    assert_opened_distro, assert_opened_images, assert_outcome_report, child, cold_boot, one_shot,
+    restore, share_token,
 };
 
 /// The snapshot that a restore restores.
@@ -212,6 +213,28 @@ fn sandbox_launches() -> Vec<Launch> {
             1,
             "",
         ),
+        // An upper in RAM attaches the distro layer alone, and needs no scratch image.
+        launch(
+            "RAM upper",
+            [
+                "sandbox",
+                "run",
+                "--layer",
+                LAYER,
+                "--upper",
+                "ram",
+                "--entrypoint",
+                "/bin/echo",
+                "--arg",
+                "hello",
+                "--arg",
+                "world",
+            ],
+            echo().in_ram(),
+            0,
+            "hello world\n",
+        )
+        .without("scratch.ext4"),
         launch(
             "missing program",
             sandbox_run("/bin/missing", &[]),
@@ -637,15 +660,23 @@ fn one_shot_runs_exit_with_the_workload_or_openvmm_status() {
         }
         let mut options = Options::parse(arguments);
         let mut expected = case.options.clone();
-        // A sandbox's OpenVMM opens the images through the files that the run checked.
-        if !expected.take("--microvm-sandbox-block").is_empty() {
-            assert_checked_blocks(&root, &options.take("--microvm-sandbox-block"));
+        // A sandbox's OpenVMM opens the images through the files that the run checked: the distro
+        // layer alone for an upper in RAM, and the scratch image too for one on scratch.
+        let blocks = expected.take("--microvm-sandbox-block");
+        if !blocks.is_empty() {
+            let checked = options.take("--microvm-sandbox-block");
             let token = case
                 .record
                 .and_then(|record| record.strip_prefix("build/fake-openvmm-"))
                 .and_then(|name| name.strip_suffix(".json"))
                 .unwrap();
-            assert_opened_images(&root, token);
+            if blocks.len() == 1 {
+                assert_checked_distro(&root, &checked);
+                assert_opened_distro(&root, token);
+            } else {
+                assert_checked_blocks(&root, &checked);
+                assert_opened_images(&root, token);
+            }
         }
         expected.assert_matches(&root, &options, case.name);
         if let Some(report) = &case.report {

@@ -1,8 +1,9 @@
 //! The configurations of every format that a build of `nvx-rs` or `nvx.py` wrote, from the
-//! hand-written `config.json` files of `tests/fixtures/state/`: `start` reads format 7, which this
-//! build writes, with shares or without, and format 1, which earlier builds wrote for a sandbox
+//! hand-written `config.json` files of `tests/fixtures/state/`: `start` reads format 7, which
+//! earlier builds wrote, with shares or without, and format 1, which they wrote for a sandbox
 //! without shares, and refuses the others, and the configurations that `nvx.py` wrote, without
-//! bindings, before it launches OpenVMM.
+//! bindings, before it launches OpenVMM. The lifecycle tests cover format 8, which this build
+//! writes.
 //!
 //! A fixture names the paths of a root as `{root/RELATIVE}`, the hypervisor that a provision
 //! records on this host as `{hypervisor}`, and the bindings of the root's distro layer and scratch

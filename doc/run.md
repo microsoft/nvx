@@ -794,8 +794,10 @@ mount -t virtiofs microvm /mnt/host
 ## Experimental single-workload sandbox
 
 The `sandbox` command of [`nvx-rs`](usage.md#nvx-rs) launches the microVM
-with one compressed EROFS distro layer and one preformatted ext4 scratch
-image. Build the distro layer with `nvx.py`:
+with one compressed EROFS distro layer under a writable upper: by default one
+preformatted ext4 scratch image, or a tmpfs in guest memory with
+`--upper ram`, as [Overlay upper](#overlay-upper) describes. Build the distro
+layer with `nvx.py`:
 
 ```bash
 python3 scripts/nvx.py build-distro-layer \
@@ -830,7 +832,9 @@ check, it requires:
   PID namespace and the `--hostname` value as its host name;
 - exactly one mount at each of `/`, `/proc`, `/sys`, `/dev`, `/dev/pts`, and
   `/dev/shm`, none of which propagates to another namespace: an overlay root
-  over the EROFS layers whose upper directory is on scratch, `nosuid,nodev,noexec`
+  over the EROFS layers, with `metacopy=on` and `xino=on`, whose upper
+  directory is on the upper that the kernel command line declares, scratch, or
+  a tmpfs for `nvx_overlay_upper=ramfs`, `nosuid,nodev,noexec`
   procfs, read-only sysfs, and a private `/dev` tmpfs that holds only `fd`,
   `full`, `null`, `ptmx`, `pts`, `random`, `shm`, `stderr`, `stdin`, `stdout`,
   `tty`, `urandom`, and `zero`, with its own devpts instance;
@@ -840,8 +844,8 @@ check, it requires:
 - no port I/O: a port read without the permission ends the reader with
   `SIGSEGV`, and a request for the permission fails;
 - the agent-owned `/container` cgroup; and
-- Ubuntu image files that the workload cannot modify, and a scratch-backed
-  `/tmp` write that lands in the overlay.
+- Ubuntu image files that the workload cannot modify, and a `/tmp` write that
+  lands in the overlay, on its upper.
 
 A managed workload that mounted into the agent's namespace would stack its
 runtime mounts on those of earlier requests, so the single-mount check also
@@ -886,7 +890,8 @@ digits. Each UID/GID is in `1..4294967294`, memory in
 `1..18446744073709551615` bytes, and the process limit in `1..4194303`
 (the guest adds init's process). The command
 validates the files before launch, orders roles independently of option order,
-attaches layers read-only, and reserves the writable slot for scratch.
+attaches layers read-only, and reserves the writable slot for scratch, which a
+RAM upper leaves empty.
 Conversion and scratch formatting stay off the start path. The Ubuntu
 converter verifies immutable inputs, applies the deny-by-default metadata
 policy, creates `/nonexistent` for UID/GID 65534, and invokes `mkfs.erofs`.
@@ -924,6 +929,65 @@ enters only the assembled root with `chroot`, because Linux cannot
 `pivot_root` away from an initramfs `rootfs`. A
 [managed](#managed-lifecycle) execution instead moves the assembled root over
 `/` in its own mount namespace.
+
+### Overlay upper
+
+The overlay keeps the workload's writes in its upper, which `--upper` selects
+for `sandbox run` and `sandbox provision`:
+
+- `scratch`, the default, keeps the upper on the ext4 image of `--scratch`,
+  which OpenVMM attaches as the `scratch` block device. What the workload
+  writes uses host storage, fails with `ENOSPC` when the image is full, and
+  survives a managed sandbox's `stop` and next `start`.
+- `ram` keeps the upper in guest memory, with no scratch image or block device.
+  The kernel command line declares `nvx_overlay_upper=ramfs`, and the guest
+  mounts a tmpfs for the upper, `nosuid` and `nodev`, at the kernel's default
+  size, half of the guest's RAM, beyond which a write fails with `ENOSPC`. Its
+  pages are charged to the workload's memory cgroup, so they count against
+  `--memory-max`, and the kernel cannot reclaim them while the files exist,
+  since the guest has no swap. Nothing that the workload writes outlives its
+  VM: each `start` of a managed sandbox begins with an empty upper.
+
+```bash
+nvx-rs/target/release/nvx-rs sandbox \
+  --layer distro,build/ubuntu-distro.erofs,11111111-1111-1111-1111-111111111111 \
+  --upper ram \
+  --entrypoint /bin/sh \
+  --memory-mib 512 \
+  --memory-max 268435456
+```
+
+`--upper ram` refuses `--scratch`, and only `run` and `provision` take
+`--upper`: a provisioned sandbox keeps the upper that its configuration
+records. OpenVMM admits a RAM upper only with exactly one read-only `distro`
+block device, and refuses it for snapshot capture and restore, and the guest
+refuses a RAM upper beside a scratch block device. With either upper, the
+overlay keeps `metacopy=on` and `xino=on`, which `/sbin/nvx-sandbox-smoke`
+checks.
+
+The explicit `test-microvm --scenario sandbox-ram-upper --backend BACKEND`
+scenario is the acceptance for the RAM upper. Like the
+[managed lifecycle](#managed-lifecycle) scenarios, it runs `nvx-rs sandbox` as
+subprocesses with the guest-artifact build's Ubuntu layer, so it also runs only
+when named, but it attaches no scratch image. It checks that `provision`
+refuses `--upper ram` beside `--scratch`, and `start` refuses `--upper`, before
+either creates any state. A one-shot `run` of `/sbin/nvx-sandbox-smoke` must
+print an OpenVMM command with one sandbox block device, the read-only distro
+layer, and `nvx_overlay_upper=ramfs` in place of the scratch token, and the
+probe must pass its profile and resource-limit checks over a tmpfs upper. The
+run's `--outcome-report`, under the scenario's temporary directory, must report
+success and a complete teardown, and also names its OpenVMM to the scenario's
+process checks and cleanup, which find VMs by that directory. A managed sandbox
+must record `ram` without a scratch image, pass the probe's managed and
+resource-limit checks, show its guest one virtio block device and the RAM
+upper's token, and read back a file that an earlier request wrote.
+Under a 32 MiB `--memory-max`, a 20 MiB file in its upper must leave no room
+for a 20 MiB allocation, which the memory controller kills, and which succeeds
+once the file is removed. After a `stop` and a new `start`, the file is gone.
+The scenario's evidence, with a `sandbox-ram-upper-` prefix, holds its bounded
+command observations, the runtime record, the output of the one-shot run, of
+the probe, of the guest's view, and of the memory check, and the outcome
+reports of the one-shot run and of both stops.
 
 ### Live host shares
 
@@ -1034,7 +1098,7 @@ inside a writable part of a share. On Windows, it refuses a path that only a
 verbatim `\\?\` path names, such as that of a directory whose name ends in a
 period or a space, which the path without the prefix would not name. The
 shares' children follow their resolved host paths. A managed sandbox stores
-the plan in its configuration, in format 7, and each `start` checks it again,
+the plan in its configuration, in format 8, and each `start` checks it again,
 as `run` does once it has verified the distro layer: it refuses a host path
 that no longer holds a directory or regular file as recorded, a recorded path
 whose file identity changed, and shares whose host paths came to overlap, such
@@ -1330,6 +1394,7 @@ it runs, a second sandbox, or a `run`, on the same image fails with
 `another sandbox claims the ext4 scratch image PATH`. On Linux, the identity is
 the device and inode number, which a file that is created once the image is
 removed can take again: such a replacement, of the same length, is not refused.
+A sandbox whose upper is in RAM has no scratch image to bind or claim.
 `run` and `start` hand OpenVMM the files that their checks opened, rather than
 paths that something could replace meanwhile. On Linux, OpenVMM inherits their
 descriptors, and its command line names them `/proc/self/fd/N`, as the command
@@ -1437,7 +1502,7 @@ PID namespace, through the guest agent's execution entry, which also makes
 every mount but `/dev` and its devpts instance `nodev`. The workload sees one
 machine ID for the life of the VM. On `stop`, the guest agent unmounts the
 mappings of the live shares, and the guest then unmounts the host export,
-overlay, layers, and scratch in dependency order before the VM powers off, as
+overlay, layers, and upper in dependency order before the VM powers off, as
 it unmounts the shares when a one-shot workload exits. The legacy
 operation-less `sandbox`
 form is `sandbox run`; it remains one-shot and rejects `--state-dir` or any

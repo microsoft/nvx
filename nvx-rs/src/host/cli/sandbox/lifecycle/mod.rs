@@ -7,9 +7,9 @@
 //!
 //! ```text
 //! <state>/
-//!   config.json          the launch that provision records, in format 7, with the export plan of
-//!                        its shares or `null` without shares, the bindings of its distro layer
-//!                        and of its scratch image, and its network
+//!   config.json          the launch that provision records, in format 8, with the export plan of
+//!                        its shares or `null` without shares, its upper, the bindings of its
+//!                        distro layer and of its scratch image, if any, and its network
 //!   sandbox.lock         the store's lock, which serializes the lifecycle transitions
 //!   launch.json          the store's journal of a start in progress, or of an interrupted one
 //!   runtime.json         the store's runtime record of the running VM, in its format 4
@@ -26,7 +26,7 @@
 //! [`provision`], [`fn@crate::host::cli::sandbox::lifecycle::start`], [`fn@crate::host::cli::sandbox::lifecycle::stop`], and [`deprovision`] hold the [`LifecycleLock`] for their
 //! whole transition, and [`exec_workload`] only while it finds the running VM, so a long workload
 //! cannot delay a stop. `config.json` also records the binding of the distro layer that
-//! `provision` verified, and that of the scratch image, which [`fn@crate::host::cli::sandbox::lifecycle::start`] checks from metadata
+//! `provision` verified, and that of the scratch image of an upper on scratch, which [`fn@crate::host::cli::sandbox::lifecycle::start`] checks from metadata
 //! alone, and the network as its typed policy, which [`fn@crate::host::cli::sandbox::lifecycle::start`] checks again, in place of the
 //! network options that `sandbox_lifecycle.py` recorded: it refuses to start a sandbox that
 //! `nvx.py` or an earlier `nvx-rs` provisioned, which has no bindings or no typed network. It
@@ -49,9 +49,10 @@
 //!
 //! [`fn@crate::host::cli::sandbox::lifecycle::start`] hands OpenVMM, through a [`crate::host::sandbox::PreparedLaunch`] of the checked files, the objects that
 //! the checks found, rather than paths that something could replace meanwhile, and claims the
-//! scratch image for this sandbox while OpenVMM runs. It holds the checked files until the guest
-//! is ready, when it releases them, and on Windows OpenVMM's copies of them, or until it has ended
-//! an OpenVMM whose start failed.
+//! scratch image, if any, for this sandbox while OpenVMM runs. It holds the checked files until
+//! the guest is ready, when it releases them, and on Windows OpenVMM's copies of them, or until it
+//! has ended an OpenVMM whose start failed. A sandbox whose upper is in RAM starts each time with
+//! an empty upper, which its stop discards.
 
 mod directory;
 mod outcome;
@@ -104,7 +105,7 @@ pub(crate) const REQUIRED_FEATURES: GuestFeatures = GuestFeatures::LAYERED_SANDB
 
 /// Records a launch and its distro layer, at the path at which it was verified, with the layer's
 /// binding, in a new state directory, as `provision` does, with the binding of its scratch image,
-/// at the path that it records for it.
+/// if its upper is on scratch, at the path that it records for it.
 pub(crate) fn provision(
     state_path: &str,
     launch: &SandboxLaunch,
@@ -126,7 +127,7 @@ pub(crate) fn provision(
     let scratch = RecordedScratch::new(launch)?;
     write_json(
         &config_path,
-        &serialize_launch(launch, distro, &scratch, config)?,
+        &serialize_launch(launch, distro, scratch.as_ref(), config)?,
     )
 }
 

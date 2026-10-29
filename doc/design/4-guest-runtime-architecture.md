@@ -17,7 +17,7 @@ isolated workload sandbox.
 ## Table of Contents
 
 - [4.1 Guest Filesystem and Image Model](4.1-guest-filesystem-and-image-model.md):
-  Explains image layers, writable scratch, overlay assembly, and live shares.
+  Explains image layers, the writable upper, overlay assembly, and live shares.
 - [4.2 Guest Agents and Workload Model](4.2-guest-agents-and-workload-model.md):
   Defines the relationship between the guest agents and the workload.
 - [4.3 Isolation and Resource Model](4.3-isolation-and-resource-model.md):

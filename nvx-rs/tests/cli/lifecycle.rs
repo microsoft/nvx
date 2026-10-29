@@ -24,8 +24,8 @@ use crate::harness::{
     in_parallel, is_hex, json,
 };
 use crate::openvmm::{
-    NO_NETWORK, NetworkPolicy, Options, WORKLOAD, assert_checked_blocks, assert_endpoint,
-    assert_opened_images, assert_outcome_report, managed,
+    NO_NETWORK, NetworkPolicy, Options, WORKLOAD, assert_checked_blocks, assert_checked_distro,
+    assert_endpoint, assert_opened_distro, assert_opened_images, assert_outcome_report, managed,
 };
 
 /// The entries of the state directory of a sandbox that never started: its configuration and
@@ -65,13 +65,13 @@ pub(crate) fn provision(state: &str, options: &[&str]) -> Vec<String> {
     sandbox("provision", state, &all)
 }
 
-/// Returns the configuration that provision records for the minimal sandbox, in format 7, with
+/// Returns the configuration that provision records for the minimal sandbox, in format 8, with
 /// placeholders, and without the bindings of its images, which [`assert_bindings`] checks.
 pub(crate) fn minimal_config() -> Value {
     json!({
         "cmdline": "",
         "export": null,
-        "format": 7,
+        "format": 8,
         "hostname": "nvx-sandbox",
         "hypervisor": HYPERVISOR,
         "layers": [{"path": "{root/distro.erofs}", "role": "distro", "uuid": UUID}],
@@ -80,6 +80,7 @@ pub(crate) fn minimal_config() -> Value {
         "network": null,
         "pids_max": null,
         "scratch": "{root/scratch.ext4}",
+        "upper": "scratch",
         "workload_gid": 65534,
         "workload_uid": 65534,
     })
@@ -640,6 +641,86 @@ fn lifecycles_of_every_configuration() {
     in_parallel(&cases, check_lifecycle);
 }
 
+/// A sandbox whose upper is in RAM needs no scratch image: provision records `ram` and neither a
+/// scratch image nor its binding, and each start attaches the distro layer alone, which OpenVMM
+/// opens, and asks the guest for the RAM upper.
+#[test]
+fn lifecycle_of_a_sandbox_whose_upper_is_in_ram() {
+    let root = Root::new();
+    root.remove("scratch.ext4");
+    let state = root.below("state");
+    operate(
+        &root,
+        "provision",
+        "state",
+        &["--layer", LAYER, "--upper", "ram"],
+    )
+    .assert_silent_success();
+    assert_eq!(entries(&state), PROVISIONED);
+    let mut config = json(&state.join("config.json"));
+    let distro = config
+        .as_object_mut()
+        .unwrap()
+        .remove("distro_binding")
+        .expect("a distro binding");
+    let layer = SandboxLayer::new(
+        LayerRole::Distro,
+        root.below("distro.erofs").to_str().unwrap(),
+        UUID,
+    );
+    assert_eq!(
+        distro,
+        serde_json::to_value(DistroBinding::verify(&layer).unwrap()).unwrap()
+    );
+    let mut expected = minimal_config();
+    for (name, value) in [
+        ("upper", json!("ram")),
+        ("scratch", Value::Null),
+        ("scratch_binding", Value::Null),
+    ] {
+        expected[name] = value;
+    }
+    assert_eq!(config, root.expand_json(&expected));
+    // The upper of each start is a new one.
+    for round in 1..=2 {
+        let context = format!("start {round}");
+        operate(&root, "start", "state", &[]).assert_silent_success();
+        assert_eq!(entries(&state), running(), "{context}");
+        let (endpoint, process) =
+            assert_runtime_record(&root, "state", &json(&state.join("runtime.json")));
+        let mut options = Options::parse(&root.openvmm_arguments("build/fake-openvmm-state.json"));
+        assert_checked_distro(&root, &options.take("--microvm-sandbox-block"));
+        assert_opened_distro(&root, "state");
+        let mut expected = managed("state", &endpoint).in_ram();
+        expected.take("--microvm-sandbox-block");
+        expected.assert_matches(&root, &options, &context);
+        let outcome = operate(
+            &root,
+            "exec",
+            "state",
+            &["--entrypoint", "/bin/echo", "--arg", "hello"],
+        );
+        outcome.assert_success();
+        assert_eq!(outcome.stdout(), "hello\n", "{context}");
+        operate(&root, "stop", "state", &[]).assert_silent_success();
+        assert!(
+            process
+                .wait(Instant::now() + Duration::from_secs(10))
+                .unwrap(),
+            "{context}: OpenVMM runs on"
+        );
+        assert_eq!(entries(&state), STOPPED, "{context}");
+        assert_outcome_report(
+            &json(&state.join("outcome.json")),
+            HYPERVISOR,
+            ("managed", "success", 0),
+            NO_NETWORK,
+        );
+    }
+    operate(&root, "deprovision", "state", &[]).assert_silent_success();
+    assert!(!state.exists());
+}
+
 /// A workload that `exec` runs in a running sandbox, and how it ends.
 struct Execution {
     /// The name of the case.
@@ -1077,12 +1158,13 @@ fn start_without_openvmm(root: &Root) {
 
 /// A start refuses a configuration of a format that it does not read, one that is not an object,
 /// one that is not strict JSON, one without the fields of its format or with fields of other
-/// types or ranges, and one whose format is not that of its shares, before it launches OpenVMM.
+/// types or ranges, one whose format is not that of its shares, and one whose upper is not as its
+/// format records it, before it launches OpenVMM.
 fn malformed_configuration(root: &Root) {
     root.nvx_rs(&provision("{root/state}", &[]))
         .assert_silent_success();
-    // Format 7 records the shares under `export`, `null` for none, and format 1 records no
-    // `export`.
+    // Format 8 records the shares under `export`, `null` for none, and the upper under `upper`;
+    // format 7 records no `upper`, and format 1 records no `export` either.
     let config = json(&root.below("state/config.json"));
     let mut without_export = config.clone();
     without_export.as_object_mut().unwrap().remove("export");
@@ -1090,22 +1172,35 @@ fn malformed_configuration(root: &Root) {
     memory_text["memory_mib"] = json!("256");
     let mut uid_beyond_32_bits = config.clone();
     uid_beyond_32_bits["workload_uid"] = json!(4_294_967_296_u64);
-    let mut format_1_with_export = config;
+    let mut without_upper = config.clone();
+    without_upper.as_object_mut().unwrap().remove("upper");
+    let mut format_7_with_upper = config.clone();
+    format_7_with_upper["format"] = json!(7);
+    let mut other_upper = config.clone();
+    other_upper["upper"] = json!("tmpfs");
+    let mut scratch_without_image = config.clone();
+    scratch_without_image["scratch"] = Value::Null;
+    // An upper in RAM has no scratch image, nor its binding.
+    let mut ram_with_scratch = config.clone();
+    ram_with_scratch["upper"] = json!("ram");
+    let mut ram_with_binding = ram_with_scratch.clone();
+    ram_with_binding["scratch"] = Value::Null;
+    let mut format_1_with_export = without_upper.clone();
     format_1_with_export["format"] = json!(1);
     let unsupported = &["unsupported format", "{root/state/config.json}"][..];
     let mismatched = &["format does not match its mounts"][..];
     let malformed = &["sandbox configuration is malformed"][..];
     for (text, code, fragments) in [
         (
-            r#"{"format": 8}"#.to_owned(),
+            r#"{"format": 9}"#.to_owned(),
             "format-unsupported",
             unsupported,
         ),
         ("[]".to_owned(), "format-unsupported", unsupported),
-        // Only the integer 7 or 1 is a format, and the configuration is strict JSON, in which no
-        // object repeats a field.
+        // Only the integers 8, 7, and 1 are formats, and the configuration is strict JSON, in
+        // which no object repeats a field.
         (
-            r#"{"format": 7.0}"#.to_owned(),
+            r#"{"format": 8.0}"#.to_owned(),
             "format-unsupported",
             unsupported,
         ),
@@ -1118,7 +1213,7 @@ fn malformed_configuration(root: &Root) {
             ][..],
         ),
         (
-            r#"{"format": 7, "format": 7}"#.to_owned(),
+            r#"{"format": 8, "format": 8}"#.to_owned(),
             "io",
             &[
                 "failed to read sandbox configuration",
@@ -1127,8 +1222,15 @@ fn malformed_configuration(root: &Root) {
             ][..],
         ),
         (r#"{"format": 1}"#.to_owned(), "io", malformed),
+        (r#"{"format": 8}"#.to_owned(), "io", malformed),
         (memory_text.to_string(), "io", malformed),
         (uid_beyond_32_bits.to_string(), "io", malformed),
+        (without_upper.to_string(), "io", malformed),
+        (format_7_with_upper.to_string(), "io", malformed),
+        (other_upper.to_string(), "io", malformed),
+        (scratch_without_image.to_string(), "io", malformed),
+        (ram_with_scratch.to_string(), "io", malformed),
+        (ram_with_binding.to_string(), "io", malformed),
         (without_export.to_string(), "format-unsupported", mismatched),
         (
             format_1_with_export.to_string(),

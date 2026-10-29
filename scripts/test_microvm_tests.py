@@ -44,6 +44,7 @@ from nvx_tools import (  # noqa: E402
     openvmm_process,
     sandbox_lifecycle_tests,
     sandbox_proxy_tests,
+    sandbox_ram_upper_tests,
     time_abi,
 )
 from nvx_tools.build_constants import (  # noqa: E402
@@ -2601,6 +2602,321 @@ class GuestConsoleEchoTests(unittest.TestCase):
                 self.assertEqual(script.count("stty -echo"), 1)
                 self.assertLess(script.index("stty -echo"), script.index(ready))
                 self.assertLess(script.index(ready), script.index(release))
+
+
+class _FakeRamUpperSandboxCli(_FakeSandboxCli):
+    """Emulates `nvx-rs sandbox --upper ram` and its guest: no scratch image,
+    a distro layer alone, the RAM upper's token, and an upper that each start
+    begins empty.
+
+    Each fault names a regression of the planner, the guest, or the record
+    that the acceptance must detect.
+    """
+
+    SMOKE_RUN = (
+        b"NVX-UBUNTU-SANDBOX-PROFILE-OK uid=65534 gid=65534\n"
+        + f"NVX-UBUNTU-SANDBOX-LIMITS-OK "
+        f"memory_max={sandbox_ram_upper_tests.MEMORY_MAX} "
+        f"pids_max={sandbox_ram_upper_tests.PIDS_MAX}\n".encode()
+        + b"NVX-UBUNTU-SANDBOX-OK uid=65534 gid=65534\n"
+    )
+
+    def _command_line(self) -> str:
+        upper = (
+            "nvx_scratch=0xd0006000,ext4"
+            if "declares-scratch" in self.faults
+            else sandbox_ram_upper_tests.RAM_UPPER_TOKEN
+        )
+        return f"nvx_sandbox=1 nvx_layer=distro,0xd0003000,erofs {upper}"
+
+    def _run(
+        self, state: Path | None, values: dict[str, str], _: list[str]
+    ) -> _CliResult:
+        assert state is None
+        assert values["--upper"] == "ram"
+        assert values["--entrypoint"] == sandbox_lifecycle_tests.PROBE
+        assert _ == [
+            "limits",
+            str(sandbox_ram_upper_tests.MEMORY_MAX),
+            str(sandbox_ram_upper_tests.PIDS_MAX),
+        ]
+        blocks = f"--microvm-sandbox-block distro:file:{values['--layer']},ro"
+        if "attaches-scratch" in self.faults:
+            blocks += " --microvm-sandbox-block scratch:file:scratch.ext4"
+        command = f">> openvmm {blocks}"
+        if "drops-report" not in self.faults:
+            report = Path(values["--outcome-report"])
+            command += f" --microvm-report {report}"
+            outcome = (
+                {"operation": "run", "category": "guest-exit", "status_code": 1}
+                if "run-reports-failure" in self.faults
+                else sandbox_ram_upper_tests.RUN_SUCCESS
+            )
+            teardown = dict.fromkeys(microvm_tests.OUTCOME_TEARDOWN_FIELDS, True)
+            if "partial-teardown" in self.faults:
+                del teardown["virtiofs_released"]
+            if "incomplete-teardown" in self.faults:
+                teardown["openvmm_process_terminated"] = False
+            report.write_text(
+                json.dumps(
+                    {
+                        "backend": values["--hypervisor"],
+                        "outcome": outcome,
+                        "teardown": teardown,
+                    }
+                ),
+                encoding="utf-8",
+            )
+        command += f" --cmdline '{self._command_line()}'\n"
+        output = b"" if "probe-fails" in self.faults else self.SMOKE_RUN
+        return 0, command.encode() + output, b""
+
+    def _provision(
+        self, state: Path | None, values: dict[str, str], _: list[str]
+    ) -> _CliResult:
+        if "--scratch" in values and "accepts-scratch" not in self.faults:
+            return self._error(
+                "unsupported",
+                "--upper ram and --scratch are mutually exclusive: an upper in RAM "
+                "has no scratch image",
+            )
+        result = super()._provision(state, values, _)
+        if result[0] == 0:
+            assert state is not None
+            path = state / "config.json"
+            config = json.loads(path.read_text(encoding="utf-8"))
+            config.update(format=8, upper="ram", scratch=None, scratch_binding=None)
+            if "records-scratch" in self.faults:
+                config.update(upper="scratch", scratch="scratch.ext4")
+            path.write_text(json.dumps(config), encoding="utf-8")
+        return result
+
+    def _start(
+        self, state: Path | None, values: dict[str, str], _: list[str]
+    ) -> _CliResult:
+        if "--upper" in values and "start-takes-upper" not in self.faults:
+            return self._error(
+                "unsupported", "--upper is only valid for sandbox run or provision"
+            )
+        result = super()._start(state, values, _)
+        # A RAM upper begins empty at each start.
+        if result[0] == 0 and state is not None and "keeps-state" not in self.faults:
+            self.guest_files.pop(state, None)
+        return result
+
+    def _exec(
+        self, state: Path | None, values: dict[str, str], arguments: list[str]
+    ) -> _CliResult:
+        assert state is not None
+        state_path = sandbox_ram_upper_tests.STATE_PATH
+        if values["--entrypoint"] != "/bin/sh" or arguments[1].startswith("test ! -e "):
+            return super()._exec(state, values, arguments)
+        _, refusal = self._running(state)
+        if refusal is not None:
+            return refusal
+        script = arguments[1]
+        if script == sandbox_ram_upper_tests.VIEW_SCRIPT:
+            devices = "vda\nvdb\n" if "has-scratch-device" in self.faults else "vda\n"
+            return 0, f"loop0\n{devices}{self._command_line()}\n".encode(), b""
+        if script == f"printf 'kept in RAM\\n' >{state_path}":
+            self.guest_files.setdefault(state, {})[state_path] = (
+                sandbox_ram_upper_tests.STATE_CONTENT
+            )
+            return 0, b"", b""
+        if script == sandbox_ram_upper_tests.CHARGE_SCRIPT:
+            if "uncharged" in self.faults:
+                return 11, b"", b""
+            return 0, sandbox_ram_upper_tests.CHARGE_MARKER + b"\n", b""
+        raise AssertionError(f"unexpected script {script!r}")
+
+
+class PublicSandboxRamUpperTests(unittest.TestCase):
+    EXPECTED_OPERATIONS = [
+        # The planner refuses a scratch image beside a RAM upper, and an upper
+        # outside run and provision.
+        "provision",
+        "start",
+        # A one-shot run.
+        "run",
+        # A managed sandbox: the probe, the guest's view, a written and a read
+        # file, and the memory charge of a file in the upper.
+        "provision",
+        "start",
+        "exec",
+        "exec",
+        "exec",
+        "exec",
+        "exec",
+        "stop",
+        # Its next start begins with an empty upper.
+        "start",
+        "exec",
+        "stop",
+        "deprovision",
+    ]
+
+    def _run(self, root: Path, fake: _FakeRamUpperSandboxCli) -> Path:
+        distro = root / "ubuntu-distro.erofs"
+        distro.write_bytes(b"distro")
+        template = root / "ubuntu-smoke-scratch.ext4"
+        template.write_bytes(bytes(4096))
+        artifacts = managed_exec_tests.WorkloadArtifacts(
+            distro, "12345678-1234-1234-1234-123456789abc", template
+        )
+        output_dir = root / "results"
+        mkdtemp = tempfile.mkdtemp
+
+        def fixture(prefix: str) -> str:
+            return mkdtemp(prefix=prefix, dir=root)
+
+        with (
+            patch.object(
+                sandbox_ram_upper_tests,
+                "load_workload_artifacts",
+                return_value=artifacts,
+            ),
+            patch.object(
+                sandbox_ram_upper_tests.tempfile, "mkdtemp", side_effect=fixture
+            ),
+            patch.object(sandbox_lifecycle_tests.subprocess, "run", side_effect=fake),
+            patch.object(
+                sandbox_lifecycle_tests.nvx_rs,
+                "require_binary",
+                return_value=Path("nvx-rs"),
+            ),
+            patch.object(
+                sandbox_lifecycle_tests,
+                "openvmm_processes",
+                side_effect=fake.processes,
+            ),
+            patch.object(
+                sandbox_lifecycle_tests,
+                "control_endpoint_present",
+                side_effect=fake.endpoint_present,
+            ),
+            patch.object(
+                sandbox_lifecycle_tests,
+                "terminate_process",
+                side_effect=fake.terminate,
+            ),
+            patch.object(
+                sandbox_lifecycle_tests, "openvmm_threads_remain", return_value=False
+            ),
+        ):
+            sandbox_ram_upper_tests.run_sandbox_ram_upper(
+                "mshv", timeout=2, output_dir=output_dir
+            )
+        return output_dir
+
+    def test_acceptance_runs_sandboxes_whose_upper_is_in_ram(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            fake = _FakeRamUpperSandboxCli()
+            output_dir = self._run(root, fake)
+            checks = json.loads(
+                (output_dir / "sandbox-ram-upper-checks.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            evidence = {path.name for path in output_dir.iterdir()}
+            fixtures = list(root.glob("nvx-public-ram-upper-*"))
+
+        self.assertEqual(fake.operations, self.EXPECTED_OPERATIONS)
+        self.assertEqual(fixtures, [])
+        self.assertFalse(any(fake.running.values()))
+        self.assertEqual(
+            evidence,
+            {
+                "sandbox-ram-upper-checks.json",
+                "sandbox-ram-upper-runtime.json",
+                "sandbox-ram-upper-run.log",
+                "sandbox-ram-upper-run-outcome.json",
+                "sandbox-ram-upper-probe.log",
+                "sandbox-ram-upper-view.log",
+                "sandbox-ram-upper-charge.log",
+                "sandbox-ram-upper-first-stop-outcome.json",
+                "sandbox-ram-upper-second-stop-outcome.json",
+            },
+        )
+        self.assertEqual(
+            [record["operation"] for record in checks], self.EXPECTED_OPERATIONS
+        )
+        # Every launch keeps its upper in RAM, and only the refused one names a
+        # scratch image.
+        launches = [
+            record["argv"]
+            for record in checks
+            if record["operation"] in {"run", "provision"}
+        ]
+        for argv in launches:
+            self.assertEqual(argv[argv.index("--upper") + 1], "ram")
+        self.assertEqual(
+            ["--scratch" in argv for argv in launches], [True, False, False]
+        )
+
+    def test_acceptance_detects_ram_upper_regressions(self):
+        regressions = {
+            "accepts-scratch": "provision returned 0, expected 1",
+            "start-takes-upper": "with error 'unsupported'",
+            "attaches-scratch": "did not attach its distro layer alone",
+            "declares-scratch": "does not declare the RAM upper alone",
+            "probe-fails": "the one-shot RAM-upper probe did not report",
+            "drops-report": "the one-shot run's OpenVMM command does not name",
+            "run-reports-failure": "the one-shot run reported",
+            "partial-teardown": "the one-shot run's teardown is",
+            "incomplete-teardown": "the one-shot run's teardown is",
+            "records-scratch": "provision recorded the RAM upper as",
+            "has-scratch-device": "has the virtio block devices ['vda', 'vdb']",
+            "uncharged": "the memory charge of the RAM upper returned status 11",
+            "keeps-state": "the restarted sandbox's empty upper returned status 1",
+        }
+        for fault, message in regressions.items():
+            with (
+                self.subTest(fault=fault),
+                tempfile.TemporaryDirectory() as temporary,
+            ):
+                root = Path(temporary)
+                fake = _FakeRamUpperSandboxCli(fault)
+                with self.assertRaisesRegex(RuntimeError, re.escape(message)):
+                    self._run(root, fake)
+                # Cleanup ends every OpenVMM process and removes the fixture.
+                self.assertFalse(any(fake.running.values()))
+                self.assertEqual(list(root.glob("nvx-public-ram-upper-*")), [])
+                self.assertTrue(
+                    (root / "results" / "sandbox-ram-upper-checks.json").is_file()
+                )
+
+    def test_charge_script_needs_a_kill_that_only_the_upper_file_causes(self):
+        shell = _posix_shell()
+        if shell is None:
+            self.skipTest("POSIX shell is unavailable")
+        # The stand-in dd is killed as the memory controller kills the real one:
+        # while the file holds the upper's pages, or always, or never.
+        for dd, expected in (
+            ('[ -e "$fill" ] && return 137; return 0', (0, "NVX-RAM-UPPER-CHARGED\n")),
+            ("return 0", (11, "")),
+            ("return 137", (12, "")),
+        ):
+            with self.subTest(dd=dd), tempfile.TemporaryDirectory() as temporary:
+                fill = f"{Path(temporary).as_posix()}/fill"
+                script = sandbox_ram_upper_tests.CHARGE_SCRIPT.replace(
+                    "/tmp/nvx-ram-upper-fill", fill
+                )
+                result = subprocess.run(
+                    [
+                        shell,
+                        "-c",
+                        f"fill='{fill}'\nhead() {{ :; }}\ndd() {{ {dd}; }}\n{script}",
+                    ],
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                    check=False,
+                )
+                self.assertEqual(
+                    (result.returncode, result.stdout), expected, result.stderr
+                )
+                self.assertFalse(Path(fill).exists())
 
 
 class GuestIdentityScriptTests(unittest.TestCase):
@@ -12740,6 +13056,36 @@ class MicrovmTests(unittest.TestCase):
             )
             lifecycle.assert_not_called()
 
+    def test_runner_dispatches_public_sandbox_ram_upper(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            output_dir = Path(temporary)
+            args = nvx.parse_args(
+                [
+                    "test-microvm",
+                    "--backend",
+                    "whp",
+                    "--scenario",
+                    "sandbox-ram-upper",
+                    "--output-dir",
+                    str(output_dir),
+                ]
+            )
+
+            def require(path: Path, _description: str) -> Path:
+                return path
+
+            with (
+                patch.object(microvm_tests, "validate_openvmm_test_backend"),
+                patch.object(microvm_tests, "require_file", side_effect=require),
+                patch.object(microvm_tests, "run_sandbox_ram_upper") as run,
+                patch.object(microvm_tests, "run_sandbox_lifecycle") as lifecycle,
+            ):
+                self.assertEqual(microvm_tests.run(args), 0)
+            run.assert_called_once_with(
+                "whp", timeout=args.timeout, output_dir=output_dir
+            )
+            lifecycle.assert_not_called()
+
     def test_runner_runs_public_sandbox_scenarios_only_when_named(self):
         def require(path: Path, _description: str) -> Path:
             return path
@@ -12757,6 +13103,7 @@ class MicrovmTests(unittest.TestCase):
                         "managed-exec-config",
                         "sandbox-lifecycle",
                         "sandbox-proxy-only",
+                        "sandbox-ram-upper",
                         "guest-boot",
                     ),
                 ),
@@ -12764,6 +13111,7 @@ class MicrovmTests(unittest.TestCase):
                 patch.object(microvm_tests, "run_guest_boot") as guest_boot,
                 patch.object(microvm_tests, "run_sandbox_lifecycle") as lifecycle,
                 patch.object(microvm_tests, "run_sandbox_proxy_only") as proxy_only,
+                patch.object(microvm_tests, "run_sandbox_ram_upper") as ram_upper,
                 patch.object(
                     microvm_tests, "run_managed_exec_configuration"
                 ) as managed_exec,
@@ -12773,9 +13121,12 @@ class MicrovmTests(unittest.TestCase):
         guest_boot.assert_called_once()
         lifecycle.assert_not_called()
         proxy_only.assert_not_called()
+        ram_upper.assert_not_called()
         managed_exec.assert_not_called()
         self.assertIn("sandbox-lifecycle", microvm_tests.SANDBOX_CONTROL_SCENARIOS)
         self.assertIn("sandbox-proxy-only", microvm_tests.SANDBOX_CONTROL_SCENARIOS)
+        self.assertIn("sandbox-ram-upper", microvm_tests.SANDBOX_CONTROL_SCENARIOS)
+        self.assertIn("sandbox-ram-upper", microvm_tests.PUBLIC_SANDBOX_SCENARIOS)
 
     def test_managed_executions_enter_through_the_agent_not_the_container_helpers(self):
         root = Path(__file__).resolve().parent.parent
