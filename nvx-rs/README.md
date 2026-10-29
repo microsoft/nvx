@@ -178,6 +178,10 @@ type, and `virtio_mmio_devices` reads every such parameter of a command line.
 it, for the readers of the boot tokens that the init consumes: at spaces, tabs,
 and newlines alone, without quoting, and past a NUL or `--`, with each token's
 name up to its first `=`, which the init compares byte for byte.
+`HostExport::parse`, `RootLayout::parse`, `parse_host_mapping_count`, and the
+time ABI's check of report-only mode read the command line with it, and so does
+the sandbox plans' check of the user's kernel parameters, which also reads the
+kernel's view and compares names as the kernel does in both.
 
 `dns_server` reads the guest's DNS server from OpenVMM's `virtnet_dns=` token,
 `DNS_TOKEN`, strictly, as OpenVMM renders and reads it: in a command line split

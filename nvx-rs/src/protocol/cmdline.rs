@@ -23,6 +23,12 @@
 //! which must read them as the init does:
 //!
 //! - [`init_tokens`] splits a command line into [`Token`]s as the init's shell splits it.
+//!   [`HostExport::parse`](super::export::HostExport::parse),
+//!   [`RootLayout::parse`](super::root::RootLayout::parse), and
+//!   [`parse_host_mapping_count`](super::parse_host_mapping_count) read their tokens with it, and
+//!   so do the time ABI's check of report-only mode, in `nvx::guest::time`, and the sandbox plans'
+//!   check of the user's kernel parameters, in `nvx::host::sandbox`, which splits them both as the
+//!   kernel and as the init does, and compares their names as the kernel does.
 //!
 //! The kernel leaves OpenVMM's `virtnet_dns=` token to the guest, which reads it from the whole
 //! command line, as OpenVMM checks it:

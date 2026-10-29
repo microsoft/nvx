@@ -782,21 +782,13 @@ impl SandboxPlan {
 }
 
 /// Returns both readers' views: Linux honors quotes, but the guest's shell bootstrap splits
-/// expanded command-line text on IFS whitespace without interpreting its quote characters.
+/// expanded command-line text on IFS whitespace without interpreting its quote characters, as
+/// [`cmdline::init_tokens`] splits it.
 fn requested_parameters(command_line: &str) -> impl Iterator<Item = cmdline::Parameter<'_>> {
-    let guest = command_line
-        .split([' ', '\t', '\n'])
-        .filter(|token| !token.is_empty())
-        .map(|token| {
-            let (name, value) = match token.split_once('=') {
-                Some((name, value)) => (name, Some(value.as_bytes())),
-                None => (token, None),
-            };
-            cmdline::Parameter {
-                name: name.as_bytes(),
-                value,
-            }
-        });
+    let guest = cmdline::init_tokens(command_line.as_bytes()).map(|token| cmdline::Parameter {
+        name: token.name,
+        value: token.value,
+    });
     cmdline::parameters(command_line.as_bytes()).chain(guest)
 }
 
