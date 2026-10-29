@@ -113,6 +113,14 @@ class Log:
             with self.path.open("a", encoding="utf-8") as stream:
                 stream.writelines(line + "\n" for line in lines)
 
+    def marker(self, name: str) -> None:
+        """Report a provisioning state as its own line, and in the log file."""
+        marker(name)
+        if self.path is not None:
+            stamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
+            with self.path.open("a", encoding="utf-8") as stream:
+                stream.write(f"[{stamp}] {name}=1\n")
+
 
 def marker(name: str) -> None:
     """Report a provisioning state on a line of its own."""

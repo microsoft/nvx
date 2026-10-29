@@ -1,277 +1,293 @@
-# Default Windows VMSS bootstrap ("cloud-init equivalent").
+# Entry point of the Windows scale-set bootstrap, which the Custom Script
+# Extension runs as SYSTEM on every provisioning and reimage.
 #
-# Runs through the Custom Script Extension on every instance. It MUST stay
-# idempotent: the extension can be re-run by the platform (extension
-# reprovisioning, OS upgrades), and the script is re-run on every reimage.
-#
-# Note that the payload this script is configured from travels in
-# osProfile.customData, which Azure only applies at provisioning time. Changes to
-# the script, to publicKeys or to extraBootstrapScriptEncoded therefore reach
-# existing instances only after `az vmss reimage` (new instances pick them up
-# automatically).
-#
-# What it does:
-#   1. Installs / enables the OpenSSH Server so `ssh` works out of the box.
-#   2. Makes PowerShell the default SSH shell (so `ssh host` lands in a
-#      PowerShell prompt, not cmd.exe).
-#   3. Installs the provided SSH public keys for administrator login.
-#   4. Opens TCP 22 in the Windows Firewall.
-#   5. Runs an optional caller-supplied extension script, so deployments can
-#      add their own setup without forking this file.
-#
-# Everything is logged to C:\WindowsAzure\Logs\vmss-bootstrap.log.
-
+# Python is not part of Windows images, and the runner toolchain installs its
+# own Python only later. This shim therefore establishes the trust that the
+# Python stager needs and an SSH recovery path that does not depend on it:
+#   1. C:\ProgramData\NvxBootstrap is a regular directory that only SYSTEM and
+#      Administrators can change and that this shim created protected, so that
+#      no other account controls an entry in it. The directory of an earlier
+#      installer is moved aside, and one that another account can change is
+#      refused.
+#   2. OpenSSH receives the administrator keys and inbound rule before the
+#      interpreter download, so a failed download does not remove SSH recovery.
+#   3. python.org's embeddable Python, pinned by version, URL, and SHA-256 in
+#      the payload, is installed in its python directory; it is reused only
+#      when its recorded archive digest and reported version still match.
+#   4. The bootstrap package from the payload matches its SHA-256 before any
+#      of its code runs.
+# It then unpacks the package with Python's own tar extractor and runs its
+# windows-stage command with that interpreter in isolated mode. The stager
+# reapplies the authoritative OpenSSH configuration, installs the package,
+# and hands the runner bootstrap to a SYSTEM task.
 [CmdletBinding()]
 param(
-    # Path to the JSON configuration written by the deployment. When present its
-    # values take precedence over the parameter defaults below. This is how the
-    # Bicep templates pass configuration, because the payload (script + keys +
-    # extension script) is far too large for a cmd.exe command line.
-    [string] $ConfigPath = 'C:\AzureData\vmss-bootstrap-config.json',
-
-    # Administrator account the SSH keys are installed for. Only used for
-    # logging/diagnostics: OpenSSH on Windows authorizes all administrators
-    # through administrators_authorized_keys.
-    [string] $AdminUsername = 'ciadmin',
-
-    # Base64 (UTF8) encoded newline-separated list of SSH public keys.
-    [string] $PublicKeysBase64 = '',
-
-    # Default shell for SSH sessions.
-    [ValidateSet('powershell', 'pwsh', 'cmd')]
-    [string] $DefaultShell = 'powershell',
-
-    # Base64 (UTF8) encoded PowerShell script executed at the end of the
-    # bootstrap. This is the supported extension point.
-    [string] $ExtraScriptBase64 = ''
+    # The decoded custom data that the extension command wrote.
+    [string]$ConfigPath = 'C:\AzureData\vmss-bootstrap-config.json'
 )
 
+Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
-
-$logDir = 'C:\WindowsAzure\Logs'
-$logFile = Join-Path $logDir 'vmss-bootstrap.log'
-if (-not (Test-Path $logDir)) {
-    New-Item -ItemType Directory -Path $logDir -Force | Out-Null
-}
+$root = 'C:\ProgramData\NvxBootstrap'
+$logPath = 'C:\WindowsAzure\Logs\vmss-bootstrap.log'
 
 function Write-Log {
-    param([string] $Message, [string] $Level = 'INFO')
-    $line = "[{0}] [{1}] {2}" -f (Get-Date -Format 'o'), $Level, $Message
-    Add-Content -Path $logFile -Value $line
-    Write-Output $line
+    param([string]$Message)
+    $line = '[{0}] {1}' -f [DateTime]::UtcNow.ToString('o'), $Message
+    New-Item -ItemType Directory -Path (Split-Path -Parent $logPath) -Force | Out-Null
+    Add-Content -LiteralPath $logPath -Value $line
+    # The host, not the pipeline, so that functions that log return only their result.
+    Write-Host $line
 }
 
-function ConvertFrom-Base64Utf8 {
-    param([string] $Value)
-    if ([string]::IsNullOrWhiteSpace($Value)) { return '' }
-    return [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($Value))
-}
-
-function Set-AuthorizedKeysAcl {
-    <#
-        sshd ignores administrators_authorized_keys unless it is writable only by
-        Administrators and SYSTEM. The ACL is rebuilt from scratch rather than
-        patched with icacls /grant, because /grant leaves unrelated explicit ACEs
-        (and therefore possibly write access for other principals) in place.
-    #>
-    param([Parameter(Mandatory = $true)][string] $Path)
-
-    # Well-known SIDs, so this does not depend on the system locale.
-    $administrators = New-Object System.Security.Principal.SecurityIdentifier('S-1-5-32-544')
-    $system = New-Object System.Security.Principal.SecurityIdentifier('S-1-5-18')
-
-    $acl = New-Object System.Security.AccessControl.FileSecurity
-    # Protect from inheritance and drop any inherited rules.
-    $acl.SetAccessRuleProtection($true, $false)
-    $acl.SetOwner($administrators)
-    foreach ($sid in @($administrators, $system)) {
-        $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule(
-            $sid,
-            [System.Security.AccessControl.FileSystemRights]::FullControl,
-            [System.Security.AccessControl.AccessControlType]::Allow)))
+function Assert-NotReparsePoint {
+    param([string]$Path, [switch]$Directory)
+    $item = Get-Item -LiteralPath $Path -Force
+    if ($item.PSIsContainer -ne [bool]$Directory -or $item.Attributes -band [IO.FileAttributes]::ReparsePoint) {
+        throw "Bootstrap path is not a regular $(if ($Directory) { 'directory' } else { 'file' }): $Path"
     }
-    Set-Acl -Path $Path -AclObject $acl
+}
 
-    # Verify, because a silently wrong ACL means sshd rejects every key.
-    $applied = (Get-Acl -Path $Path).Access |
-        Where-Object { $_.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]) -notin @($administrators, $system) }
-    if ($applied) {
-        throw "Unexpected ACEs remain on ${Path}: $(($applied | ForEach-Object { $_.IdentityReference }) -join ', ')"
+function New-RecoveryKeySecurity {
+    $security = [Security.AccessControl.FileSecurity]::new()
+    $security.SetAccessRuleProtection($true, $false)
+    $security.SetOwner([Security.Principal.SecurityIdentifier]::new('S-1-5-32-544'))
+    foreach ($sid in 'S-1-5-18', 'S-1-5-32-544') {
+        $security.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new(
+            [Security.Principal.SecurityIdentifier]::new($sid), 'FullControl', 'Allow'))
     }
-    Write-Log "ACL on $Path restricted to Administrators and SYSTEM"
+    return $security
 }
 
-Write-Log "=== vmss bootstrap starting (admin=$AdminUsername, shell=$DefaultShell) ==="
-
-# ---------------------------------------------------------------------------
-# 0. Configuration file (written by the deployment bootstrapper)
-# ---------------------------------------------------------------------------
-if ($ConfigPath -and (Test-Path $ConfigPath)) {
-    Write-Log "Reading configuration from $ConfigPath"
-    $config = Get-Content -Path $ConfigPath -Raw | ConvertFrom-Json
-
-    if ($config.adminUsername) { $AdminUsername = $config.adminUsername }
-    if ($config.defaultShell) { $DefaultShell = $config.defaultShell }
-    if ($config.extraScriptBase64) { $ExtraScriptBase64 = $config.extraScriptBase64 }
-    if ($config.publicKeys) {
-        $keyText = (@($config.publicKeys) -join "`n")
-        $PublicKeysBase64 = [System.Convert]::ToBase64String(
-            [System.Text.Encoding]::UTF8.GetBytes($keyText))
+# Establish SSH recovery before the interpreter download. The Python stager
+# repeats this authoritatively after the verified package is available.
+function Initialize-RecoverySsh {
+    param([Parameter(Mandatory = $true)]$Payload)
+    $keys = @($Payload.publicKeys | ForEach-Object { "$_" -split "`r?`n" } |
+        ForEach-Object { $_.Trim() } | Where-Object { $_ -and -not $_.StartsWith('#') } |
+        Select-Object -Unique)
+    if ($keys.Count -eq 0) {
+        Write-Log 'WARN: No public keys supplied; pre-Python SSH recovery is unavailable.'
+        return
     }
-    Write-Log "Configuration applied (admin=$AdminUsername, shell=$DefaultShell)"
-}
-else {
-    Write-Log "No configuration file at $ConfigPath; using parameter values"
+    try {
+        $capability = Get-WindowsCapability -Online -Name 'OpenSSH.Server*' | Select-Object -First 1
+        if ($null -ne $capability -and $capability.State -ne 'Installed') {
+            Add-WindowsCapability -Online -Name $capability.Name | Out-Null
+        }
+    }
+    catch { Write-Log "WARN: OpenSSH capability check failed: $($_.Exception.Message)" }
+    if (@(Get-Service -Name sshd -ErrorAction SilentlyContinue).Count -ne 1) {
+        throw 'OpenSSH Server is unavailable; pre-Python SSH recovery cannot be configured.'
+    }
+    Set-Service -Name sshd -StartupType Automatic
+    Start-Service -Name sshd
+    $ssh = Join-Path $env:ProgramData 'ssh'
+    if (-not (Test-Path -LiteralPath $ssh)) {
+        throw 'OpenSSH Server did not create its data directory.'
+    }
+    Assert-NotReparsePoint $ssh -Directory
+    $target = Join-Path $ssh 'administrators_authorized_keys'
+    if (Test-Path -LiteralPath $target) { Assert-NotReparsePoint $target }
+    $temporary = "$target.new"
+    try {
+        [IO.File]::WriteAllText($temporary, ($keys -join "`n") + "`n", [Text.UTF8Encoding]::new($false))
+        Set-Acl -LiteralPath $temporary -AclObject (New-RecoveryKeySecurity)
+        Move-Item -LiteralPath $temporary -Destination $target -Force
+    }
+    finally { if (Test-Path -LiteralPath $temporary) { Remove-Item -LiteralPath $temporary -Force } }
+    $rule = Get-NetFirewallRule -Name 'OpenSSH-Server-In-TCP' -ErrorAction SilentlyContinue
+    if ($null -eq $rule) {
+        New-NetFirewallRule -Name 'OpenSSH-Server-In-TCP' -DisplayName 'OpenSSH Server (sshd)' `
+            -Enabled True -Direction Inbound -Protocol TCP -Action Allow -LocalPort 22 | Out-Null
+    }
+    else { Enable-NetFirewallRule -Name 'OpenSSH-Server-In-TCP' | Out-Null }
+    Write-Log "Pre-Python SSH recovery configured with $($keys.Count) administrator key(s)."
 }
 
-# ---------------------------------------------------------------------------
-# 1. OpenSSH Server
-# ---------------------------------------------------------------------------
+# Owned by Administrators, with inherited full control for SYSTEM and
+# Administrators only.
+function New-TrustedSecurity {
+    $security = [Security.AccessControl.DirectorySecurity]::new()
+    $security.SetAccessRuleProtection($true, $false)
+    $security.SetOwner([Security.Principal.SecurityIdentifier]::new('S-1-5-32-544'))
+    foreach ($sid in 'S-1-5-18', 'S-1-5-32-544') {
+        $security.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new(
+            [Security.Principal.SecurityIdentifier]::new($sid), 'FullControl',
+            'ContainerInherit,ObjectInherit', 'None', 'Allow'))
+    }
+    return $security
+}
+
+function Test-TrustedSecurity {
+    param([Parameter(Mandatory = $true)]$Security)
+    $trusted = 'S-1-5-18', 'S-1-5-32-544'
+    $owner = $Security.GetOwner([Security.Principal.SecurityIdentifier])
+    if ($null -eq $owner -or $owner.Value -notin $trusted -or -not $Security.AreAccessRulesProtected) {
+        return $false
+    }
+    $rules = @($Security.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]))
+    return @($rules | Where-Object {
+        $_.AccessControlType -ne 'Allow' -or $_.IdentityReference.Value -notin $trusted
+    }).Count -eq 0
+}
+
+# Creates the directory with its protection, so that no other account can add
+# an entry to it at any moment.
+function New-ProtectedDirectory {
+    param([Parameter(Mandatory = $true)][string]$Path)
+    [void][IO.Directory]::CreateDirectory($Path, (New-TrustedSecurity))
+}
+
+function Test-TrustedMark {
+    param([Parameter(Mandatory = $true)][string]$Path)
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf) -or
+        (Get-Item -LiteralPath $Path -Force).Attributes -band [IO.FileAttributes]::ReparsePoint) {
+        return $false
+    }
+    $owner = (Get-Acl -LiteralPath $Path).GetOwner([Security.Principal.SecurityIdentifier])
+    return $null -ne $owner -and $owner.Value -in 'S-1-5-18', 'S-1-5-32-544'
+}
+
+# The stager runs code from this directory as SYSTEM, so every entry in it
+# must come from SYSTEM or Administrators. This shim creates the directory
+# protected from the start and then marks it, and uses an existing directory
+# again only with that mark. Earlier installers protected the directory only
+# after creating it, so another account may have added entries first: such a
+# directory is moved aside, never searched or deleted. A directory that
+# another account can change is refused.
+function Set-TrustedDirectory {
+    param([Parameter(Mandatory = $true)][string]$Path)
+    $mark = Join-Path $Path 'created-protected'
+    if (Test-Path -LiteralPath $Path) {
+        Assert-NotReparsePoint $Path -Directory
+        if (-not (Test-TrustedSecurity (Get-Acl -LiteralPath $Path))) {
+            throw "Bootstrap directory is not protected; refusing to use it: $Path"
+        }
+        if (Test-TrustedMark $mark) { return }
+        $aside = '{0}.legacy-{1}' -f (Split-Path -Leaf $Path), [guid]::NewGuid().ToString('N')
+        Rename-Item -LiteralPath $Path -NewName $aside
+        Write-Log "Moved the bootstrap directory of an earlier installer aside to $aside."
+    }
+    New-ProtectedDirectory $Path
+    Assert-NotReparsePoint $Path -Directory
+    # Another account may have created the directory first.
+    if (-not (Test-TrustedSecurity (Get-Acl -LiteralPath $Path))) {
+        throw "Bootstrap directory is not protected; refusing to use it: $Path"
+    }
+    [IO.File]::WriteAllText($mark, [DateTime]::UtcNow.ToString('o'))
+}
+
+function Get-Sha256 {
+    param([Parameter(Mandatory = $true)][byte[]]$Bytes)
+    $algorithm = [Security.Cryptography.SHA256]::Create()
+    try { return -join ($algorithm.ComputeHash($Bytes) | ForEach-Object { $_.ToString('x2') }) }
+    finally { $algorithm.Dispose() }
+}
+
+function Test-Python {
+    param([string]$Executable, [string]$Version)
+    if (-not (Test-Path -LiteralPath $Executable -PathType Leaf)) { return $false }
+    try { $reported = & $Executable -I -V }
+    catch { return $false }
+    return $LASTEXITCODE -eq 0 -and [string]$reported -eq "Python $Version"
+}
+
+function Install-Python {
+    param([Parameter(Mandatory = $true)]$Pin)
+    if ($Pin.version -cnotmatch '^[0-9]+\.[0-9]+\.[0-9]+$' -or $Pin.sha256 -cnotmatch '^[0-9a-f]{64}$' -or
+        $Pin.url -cnotmatch '^https://www\.python\.org/ftp/python/') {
+        throw 'The payload has no valid Python pin.'
+    }
+    $directory = Join-Path $root 'python'
+    $executable = Join-Path $directory 'python.exe'
+    $recorded = Join-Path $directory 'nvx-archive.sha256'
+    if (Test-Path -LiteralPath $directory) { Assert-NotReparsePoint $directory -Directory }
+    if ((Test-Path -LiteralPath $recorded -PathType Leaf) -and
+        ([IO.File]::ReadAllText($recorded).Trim() -ceq $Pin.sha256) -and
+        (Test-Python $executable $Pin.version)) {
+        Write-Log "Using the installed Python $($Pin.version)."
+        return $executable
+    }
+    $archive = Join-Path $root ([guid]::NewGuid().ToString('N') + '.zip')
+    $staging = Join-Path $root ([guid]::NewGuid().ToString('N'))
+    try {
+        [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor
+            [Net.SecurityProtocolType]::Tls12
+        for ($attempt = 1; ; $attempt++) {
+            try {
+                Invoke-WebRequest -UseBasicParsing -Uri $Pin.url -OutFile $archive
+                break
+            }
+            catch {
+                if ($attempt -ge 5) { throw }
+                Write-Log "Python download attempt $attempt failed: $($_.Exception.Message)"
+                Start-Sleep -Seconds (15 * $attempt)
+            }
+        }
+        $digest = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
+        if ($digest -cne $Pin.sha256) { throw "Python archive checksum mismatch: $digest" }
+        Add-Type -AssemblyName System.IO.Compression.FileSystem
+        [IO.Compression.ZipFile]::ExtractToDirectory($archive, $staging)
+        if (-not (Test-Python (Join-Path $staging 'python.exe') $Pin.version)) {
+            throw "The Python archive does not provide Python $($Pin.version)."
+        }
+        [IO.File]::WriteAllText((Join-Path $staging 'nvx-archive.sha256'), $Pin.sha256)
+        if (Test-Path -LiteralPath $directory) {
+            Assert-NotReparsePoint $directory -Directory
+            Remove-Item -LiteralPath $directory -Recurse -Force
+        }
+        Move-Item -LiteralPath $staging -Destination $directory
+    }
+    finally {
+        foreach ($path in $archive, $staging) {
+            if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path -Recurse -Force }
+        }
+    }
+    Write-Log "Installed Python $($Pin.version) from $($Pin.url)."
+    return $executable
+}
+
+function Save-Package {
+    param([Parameter(Mandatory = $true)]$Package)
+    $bytes = [Convert]::FromBase64String($Package.data)
+    if ((Get-Sha256 $bytes) -cne $Package.sha256) { throw 'Runner package checksum mismatch.' }
+    $path = Join-Path $root 'package.tar.xz'
+    if (Test-Path -LiteralPath $path) { Assert-NotReparsePoint $path }
+    $temporary = Join-Path $root ([guid]::NewGuid().ToString('N') + '.tmp')
+    try {
+        [IO.File]::WriteAllBytes($temporary, $bytes)
+        Move-Item -LiteralPath $temporary -Destination $path -Force
+    }
+    finally {
+        if (Test-Path -LiteralPath $temporary) { Remove-Item -LiteralPath $temporary -Force }
+    }
+    return $path
+}
+
 try {
-    $capability = Get-WindowsCapability -Online -Name 'OpenSSH.Server*' |
-        Select-Object -First 1
-    if ($capability -and $capability.State -ne 'Installed') {
-        Write-Log 'Installing OpenSSH.Server Windows capability'
-        Add-WindowsCapability -Online -Name $capability.Name | Out-Null
+    Write-Log '=== vmss bootstrap starting ==='
+    $payload = Get-Content -LiteralPath $ConfigPath -Raw | ConvertFrom-Json
+    Initialize-RecoverySsh $payload
+    Set-TrustedDirectory $root
+    $python = Install-Python $payload.python
+    $package = Save-Package $payload.package
+    $staging = Join-Path $root ([guid]::NewGuid().ToString('N'))
+    try {
+        # Python's own extractor, with its safe data filter, unpacks the
+        # verified package so that the stager inside it can run.
+        & $python -I -B -m tarfile --filter data -e $package $staging
+        if ($LASTEXITCODE -ne 0) { throw "Could not unpack the runner package: $LASTEXITCODE." }
+        & $python -I -B $staging windows-stage --payload $ConfigPath --package $package
+        if ($LASTEXITCODE -ne 0) { throw "Windows staging failed with exit code $LASTEXITCODE." }
     }
-    else {
-        Write-Log 'OpenSSH.Server capability already installed'
+    finally {
+        if (Test-Path -LiteralPath $staging) { Remove-Item -LiteralPath $staging -Recurse -Force }
     }
+    Write-Log '=== vmss bootstrap completed successfully ==='
 }
 catch {
-    # Some images ship sshd without exposing the capability. Only fail later if
-    # the service is genuinely missing.
-    Write-Log "OpenSSH capability check failed: $($_.Exception.Message)" 'WARN'
+    Write-Log "ERROR: $($_.Exception.Message)"
+    throw
 }
-
-$sshd = Get-Service -Name sshd -ErrorAction SilentlyContinue
-if (-not $sshd) {
-    Write-Log 'sshd service not found after capability install' 'ERROR'
-    throw 'OpenSSH Server is not available on this image. Use an image that supports OpenSSH Server.'
-}
-
-foreach ($svc in @('sshd', 'ssh-agent')) {
-    if (Get-Service -Name $svc -ErrorAction SilentlyContinue) {
-        Set-Service -Name $svc -StartupType Automatic
-        # Set-Service does not start a stopped service, and both are expected to
-        # be running for the lifetime of the instance.
-        Start-Service -Name $svc -ErrorAction SilentlyContinue
-        Write-Log "Service $svc set to Automatic startup, status $((Get-Service -Name $svc).Status)"
-    }
-}
-
-# ---------------------------------------------------------------------------
-# 2. Default shell for SSH sessions
-# ---------------------------------------------------------------------------
-$shellPath = switch ($DefaultShell) {
-    'pwsh' {
-        $pwsh = Get-Command pwsh.exe -ErrorAction SilentlyContinue
-        if ($pwsh) { $pwsh.Source }
-        else {
-            Write-Log 'pwsh.exe not found, falling back to Windows PowerShell' 'WARN'
-            Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
-        }
-    }
-    'cmd' { Join-Path $env:SystemRoot 'System32\cmd.exe' }
-    default { Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe' }
-}
-
-$sshRegPath = 'HKLM:\SOFTWARE\OpenSSH'
-if (-not (Test-Path $sshRegPath)) {
-    New-Item -Path $sshRegPath -Force | Out-Null
-}
-$shellCommandOption = if ($DefaultShell -eq 'cmd') { '/c' } else { '-Command' }
-New-ItemProperty -Path $sshRegPath -Name DefaultShell -Value $shellPath -PropertyType String -Force | Out-Null
-New-ItemProperty -Path $sshRegPath -Name DefaultShellCommandOption -Value $shellCommandOption -PropertyType String -Force | Out-Null
-Write-Log "Default SSH shell set to $shellPath (command option $shellCommandOption)"
-
-# ---------------------------------------------------------------------------
-# 3. Authorized keys
-# ---------------------------------------------------------------------------
-$sshDataDir = Join-Path $env:ProgramData 'ssh'
-if (-not (Test-Path $sshDataDir)) {
-    New-Item -ItemType Directory -Path $sshDataDir -Force | Out-Null
-}
-
-$authorizedKeysFile = Join-Path $sshDataDir 'administrators_authorized_keys'
-$publicKeys = (ConvertFrom-Base64Utf8 $PublicKeysBase64) -split "`r?`n" |
-    ForEach-Object { $_.Trim() } |
-    Where-Object { $_ -and -not $_.StartsWith('#') }
-
-if ($publicKeys.Count -gt 0) {
-    # The deployed key set is AUTHORITATIVE: the file is replaced, not merged.
-    # Merging would make key removal impossible -- dropping a key from
-    # `publicKeys` and redeploying has to actually revoke that key's access.
-    # Consequence: keys added out-of-band on the instance are removed here.
-    $desired = @($publicKeys | Select-Object -Unique)
-
-    # Write without a BOM (sshd rejects BOM-prefixed key files) and via a
-    # temporary file, so an interrupted run cannot leave a truncated key file
-    # that would lock everyone out.
-    $tempKeysFile = "$authorizedKeysFile.new"
-    [System.IO.File]::WriteAllText(
-        $tempKeysFile,
-        ($desired -join "`n") + "`n",
-        (New-Object System.Text.UTF8Encoding($false)))
-
-    Set-AuthorizedKeysAcl -Path $tempKeysFile
-    Move-Item -Path $tempKeysFile -Destination $authorizedKeysFile -Force
-    Set-AuthorizedKeysAcl -Path $authorizedKeysFile
-
-    Write-Log "Authorized keys file set to the $($desired.Count) deployed key(s)"
-}
-else {
-    Write-Log 'No public keys supplied; existing authorized keys left untouched and password authentication remains the only option' 'WARN'
-}
-
-# ---------------------------------------------------------------------------
-# 4. Firewall
-# ---------------------------------------------------------------------------
-$firewallRuleName = 'OpenSSH-Server-In-TCP'
-$rule = Get-NetFirewallRule -Name $firewallRuleName -ErrorAction SilentlyContinue
-if (-not $rule) {
-    New-NetFirewallRule -Name $firewallRuleName `
-        -DisplayName 'OpenSSH Server (sshd)' `
-        -Enabled True -Direction Inbound -Protocol TCP -Action Allow -LocalPort 22 | Out-Null
-    Write-Log 'Created inbound firewall rule for TCP 22'
-}
-else {
-    Enable-NetFirewallRule -Name $firewallRuleName
-    Write-Log 'Inbound firewall rule for TCP 22 already present and enabled'
-}
-
-# ---------------------------------------------------------------------------
-# 5. Start / restart sshd so the configuration above takes effect
-# ---------------------------------------------------------------------------
-Restart-Service -Name sshd -Force
-Write-Log "sshd status: $((Get-Service -Name sshd).Status)"
-
-# ---------------------------------------------------------------------------
-# 6. Caller-supplied extension script
-# ---------------------------------------------------------------------------
-$extraScript = ConvertFrom-Base64Utf8 $ExtraScriptBase64
-if (-not [string]::IsNullOrWhiteSpace($extraScript)) {
-    $extraScriptPath = Join-Path $logDir 'vmss-bootstrap-extra.ps1'
-    Set-Content -Path $extraScriptPath -Value $extraScript -Encoding UTF8
-    Write-Log "Running extra bootstrap script ($extraScriptPath)"
-    try {
-        & powershell.exe -ExecutionPolicy Bypass -NoProfile -File $extraScriptPath *>&1 |
-            ForEach-Object { Write-Log "[extra] $_" }
-        # $ErrorActionPreference does not turn a child process's nonzero exit
-        # into an exception, so the exit code has to be checked explicitly.
-        if ($LASTEXITCODE -ne 0) {
-            throw "Extra bootstrap script exited with code $LASTEXITCODE"
-        }
-        Write-Log 'Extra bootstrap script completed'
-    }
-    catch {
-        Write-Log "Extra bootstrap script failed: $($_.Exception.Message)" 'ERROR'
-        throw
-    }
-}
-else {
-    Write-Log 'No extra bootstrap script supplied'
-}
-
-Write-Log '=== vmss bootstrap completed successfully ==='

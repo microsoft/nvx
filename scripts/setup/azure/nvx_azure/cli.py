@@ -13,6 +13,7 @@ from pathlib import Path
 from .common import BootstrapError, fail
 
 LINUX_CONFIG = Path("/opt/nvx-bootstrap/config.json")
+WINDOWS_ROOT = Path(r"C:\ProgramData\NvxBootstrap")
 
 
 def parser() -> argparse.ArgumentParser:
@@ -34,6 +35,20 @@ def parser() -> argparse.ArgumentParser:
         ),
     ):
         subcommands.add_parser(name, help=summary, description=summary)
+    stage = subcommands.add_parser(
+        "windows-stage",
+        help="Stage the Windows bootstrap from the Custom Script Extension.",
+        description="Verify and extract the package, configure OpenSSH, and "
+        "start the bootstrap task.",
+    )
+    stage.add_argument("--payload", type=Path, required=True)
+    stage.add_argument("--package", type=Path, required=True)
+    windows = subcommands.add_parser(
+        "windows-bootstrap",
+        help="Provision this Windows instance as a CI runner.",
+        description="Provision this Windows instance as a CI runner.",
+    )
+    windows.add_argument("--config", type=Path, default=WINDOWS_ROOT / "config.json")
     return commands
 
 
@@ -51,9 +66,17 @@ def run(arguments: argparse.Namespace) -> int:
         from . import linux_firewall
 
         return linux_firewall.main()
-    from . import linux_mshv
+    if command == "linux-verify-mshv":
+        from . import linux_mshv
 
-    return 0 if linux_mshv.verify() else 1
+        return 0 if linux_mshv.verify() else 1
+    if command == "windows-stage":
+        from . import windows_stage
+
+        return windows_stage.main(arguments.payload, arguments.package)
+    from . import windows_bootstrap
+
+    return windows_bootstrap.main(arguments.config)
 
 
 def main(argv: Sequence[str] | None = None) -> int:

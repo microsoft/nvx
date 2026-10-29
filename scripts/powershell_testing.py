@@ -28,6 +28,7 @@ def run_powershell(
     *,
     cwd: Path | None = None,
     env: Mapping[str, str] | None = None,
+    input: str | None = None,
     timeout: float = POWERSHELL_TIMEOUT,
 ) -> subprocess.CompletedProcess[str]:
     """Runs a PowerShell command line and captures its output as text.
@@ -40,6 +41,7 @@ def run_powershell(
             command,
             cwd=cwd,
             env=env,
+            input=input,
             capture_output=True,
             text=True,
             timeout=timeout,

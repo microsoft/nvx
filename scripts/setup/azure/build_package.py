@@ -6,10 +6,12 @@ import gzip
 import hashlib
 import io
 import json
+import lzma
 import ntpath
 import re
+import tarfile
 import uuid
-import zipfile
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Literal, TypedDict, cast
 
@@ -36,6 +38,28 @@ LINUX_MODULES = (
     "linux_mshv.py",
 )
 LINUX_ENTRY_POINT = "/usr/bin/python3 -I -B /opt/nvx-bootstrap"
+WINDOWS_MODULES = (
+    *COMMON_MODULES,
+    "windows_bootstrap.py",
+    "windows_disk.py",
+    "windows_firewall.py",
+    "windows_stage.py",
+    "windows_system.py",
+)
+# Small PowerShell adapters for the cmdlets that the Windows modules call.
+WINDOWS_ADAPTERS = ("firewall.ps1", "openssh.ps1", "storage.ps1", "system.ps1")
+# Windows staging consumes these only from the outer Custom Script payload.
+# Keeping them out of the package avoids duplicating large SSH keys.
+WINDOWS_OUTER_ONLY_FIELDS = frozenset({"publicKeys", "sshDefaultShell"})
+# The interpreter of the Windows bootstrap, which runs before the runner
+# toolchain installs its own Python: python.org's embeddable package for x64,
+# pinned by the SHA-256 that python.org's Windows release manifest publishes
+# (https://www.python.org/ftp/python/3.14.10/windows-3.14.10.json).
+WINDOWS_PYTHON = {
+    "version": "3.14.10",
+    "url": "https://www.python.org/ftp/python/3.14.10/python-3.14.10-embeddable-amd64.zip",
+    "sha256": "b553e7dac884469b40e0740bb527271c3378f700b427e0485835f1bb6424361c",
+}
 
 
 class LinuxDisk(TypedDict):
@@ -129,8 +153,10 @@ WINDOWS_EXTENSION_COMMAND = (
     "else { $payload=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($raw.Trim())) }; "
     "$cfg=Join-Path $d 'vmss-bootstrap-config.json'; "
     "[IO.File]::WriteAllText($cfg,$payload,[Text.UTF8Encoding]::new($false)); "
-    "$s=Join-Path $d 'vmss-bootstrap.ps1'; "
-    "[IO.File]::WriteAllBytes($s,[Convert]::FromBase64String(($payload|ConvertFrom-Json).script)); "
+    "$s=Join-Path $d 'vmss-bootstrap.ps1'; $p=$payload|ConvertFrom-Json; "
+    "$b=[Convert]::FromBase64String($p.script); $i=[IO.MemoryStream]::new($b); "
+    "$g=[IO.Compression.GZipStream]::new($i,[IO.Compression.CompressionMode]::Decompress); "
+    "$o=[IO.File]::Create($s); try{$g.CopyTo($o)}finally{$o.Dispose();$g.Dispose();$i.Dispose()}; "
     '& $s -ConfigPath $cfg"'
 )
 
@@ -469,7 +495,7 @@ def rust_version() -> str:
     return releases[0].decode()
 
 
-def configuration_bytes(config: RunnerConfig) -> bytes:
+def configuration_bytes(config: Mapping[str, object]) -> bytes:
     return (json.dumps(config, sort_keys=True, indent=2) + "\n").encode()
 
 
@@ -562,37 +588,51 @@ def linux_payload(
     return data, files, {"cloud-init.yaml": data}
 
 
+def windows_package(files: dict[str, bytes]) -> bytes:
+    """Return a canonical tar.xz of the files: solid compression keeps the
+    payload within Azure's custom-data limit, and fixed metadata and order
+    keep it independent of the builder."""
+    stream = io.BytesIO()
+    with tarfile.open(fileobj=stream, mode="w", format=tarfile.USTAR_FORMAT) as archive:
+        for name in sorted(files):
+            entry = tarfile.TarInfo(name)
+            entry.size = len(files[name])
+            entry.mode = 0o644
+            entry.mtime = 0
+            archive.addfile(entry, io.BytesIO(files[name]))
+    return lzma.compress(
+        stream.getvalue(),
+        format=lzma.FORMAT_XZ,
+        check=lzma.CHECK_CRC64,
+        preset=9 | lzma.PRESET_EXTREME,
+    )
+
+
 def windows_payload(
     config: WindowsConfig,
 ) -> tuple[bytes, dict[str, bytes], dict[str, bytes]]:
+    guest_config = {
+        key: value
+        for key, value in config.items()
+        if key not in WINDOWS_OUTER_ONLY_FIELDS
+    }
     files = {
-        "config.json": configuration_bytes(config),
+        "config.json": configuration_bytes(guest_config),
         "setup-windows-whp.ps1": source("setup-windows-whp.ps1"),
         "tool-versions.conf": source("tool-versions.conf"),
-        "setup-data-disk.ps1": source("windows/setup-data-disk.ps1"),
-        "bootstrap-runner.ps1": source("windows/bootstrap-runner.ps1"),
+        "__main__.py": GUEST_ENTRY_POINT,
+        **guest_modules(WINDOWS_MODULES),
+        **{name: source(f"windows/{name}") for name in WINDOWS_ADAPTERS},
     }
-    stream = io.BytesIO()
-    with zipfile.ZipFile(stream, "w") as archive:
-        for name, data in files.items():
-            entry = zipfile.ZipInfo(name, date_time=(1980, 1, 1, 0, 0, 0))
-            entry.create_system = 3  # Unix, matching the file attributes below.
-            entry.compress_type = zipfile.ZIP_DEFLATED
-            entry.external_attr = 0o100644 << 16
-            archive.writestr(entry, data, compresslevel=9)
-    package = stream.getvalue()
-    installer = base64.b64encode(source("windows/install-package.ps1")).decode()
-    extra = (
-        "$ErrorActionPreference = 'Stop'\n"
-        f"$source = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('{installer}'))\n"
-        "& ([scriptblock]::Create($source)) -ConfigPath 'C:\\AzureData\\vmss-bootstrap-config.json'\n"
-    ).encode()
+    package = windows_package(files)
     payload = {
-        "script": base64.b64encode(source("windows/vmss-bootstrap.ps1")).decode(),
+        "script": base64.b64encode(
+            gzip_bytes(source("windows/vmss-bootstrap.ps1"))
+        ).decode(),
         "adminUsername": config["adminUsername"],
         "publicKeys": config["publicKeys"],
         "defaultShell": config["sshDefaultShell"],
-        "extraScriptBase64": base64.b64encode(extra).decode(),
+        "python": WINDOWS_PYTHON,
         "package": {
             "data": base64.b64encode(package).decode(),
             "sha256": hashlib.sha256(package).hexdigest(),
@@ -601,7 +641,7 @@ def windows_payload(
     data = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
     outputs = {
         "custom-data.json": data,
-        "sources.zip": package,
+        "sources.tar.xz": package,
         "extension-command.txt": (WINDOWS_EXTENSION_COMMAND + "\n").encode(),
     }
     return data, files, outputs

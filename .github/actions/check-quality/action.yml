@@ -85,9 +85,10 @@ runs:
         $errors = $null
         foreach ($path in @(
           "scripts/setup/setup-windows-whp.ps1",
-          "scripts/setup/azure/windows/bootstrap-runner.ps1",
-          "scripts/setup/azure/windows/install-package.ps1",
-          "scripts/setup/azure/windows/setup-data-disk.ps1",
+          "scripts/setup/azure/windows/firewall.ps1",
+          "scripts/setup/azure/windows/openssh.ps1",
+          "scripts/setup/azure/windows/storage.ps1",
+          "scripts/setup/azure/windows/system.ps1",
           "scripts/setup/azure/windows/vmss-bootstrap.ps1"
         )) {
           $tokens = $null
