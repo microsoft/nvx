@@ -5,7 +5,8 @@
 //! itself: [`GitHub`] follows each, up to [`MAX_REDIRECTS`], and only the requests to the origin
 //! of the first carry the token, as with the `credential_safe_opener` of `nvx.py`, so the host
 //! that serves a package never receives it. `curl` retries a request that fails transiently, such
-//! as one that GitHub answers with HTTP 503, and abandons one that stalls.
+//! as one that GitHub answers with HTTP 503, and abandons one that stalls. [`GitHub`] reads the
+//! status and the redirect of each response from the headers that `curl` dumps.
 
 use std::fs;
 use std::io::{self, IsTerminal, Write};
@@ -272,7 +273,8 @@ struct Request<'a> {
 struct Response {
     /// The HTTP status.
     status: u16,
-    /// The URL to which it redirects, if it does.
+    /// The URL to which it redirects, if it does: that of its `location` header, resolved against
+    /// the URL of its request, if its status is 3xx.
     location: Option<String>,
     /// Its headers, by their lowercase names, in order.
     headers: Vec<(String, String)>,
@@ -322,7 +324,7 @@ impl Curl {
         let mut child = Command::new(&self.program)
             .args(["--disable", "--config", "-"])
             .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
+            .stdout(Stdio::null())
             .stderr(if request.progress {
                 Stdio::inherit()
             } else {
@@ -355,41 +357,26 @@ impl Curl {
                 format!("{context} failed: {detail}"),
             ));
         }
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let mut lines = stdout.lines();
-        let status = lines
-            .next()
-            .and_then(|line| line.trim().parse::<u16>().ok())
-            .filter(|status| *status >= 100)
-            .ok_or_else(|| {
-                Exit::error(
-                    ErrorCode::Unavailable,
-                    format!("{context} failed: curl reported no HTTP status"),
-                )
-            })?;
-        let location = lines
-            .next()
-            .map(str::trim)
-            .filter(|location| !location.is_empty())
-            .map(str::to_owned);
-        Ok(Response {
-            status,
-            location,
-            headers: read_headers(request.headers)?,
+        read_response(request.headers, request.url)?.ok_or_else(|| {
+            Exit::error(
+                ErrorCode::Unavailable,
+                format!("{context} failed: curl reported no HTTP status"),
+            )
         })
     }
 
-    /// Returns the configuration of `request`, which `curl` reads from its standard input: it
-    /// writes the status and the redirect of the response on two lines of its standard output.
+    /// Returns the configuration of `request`, which `curl` reads from its standard input.
     fn config(&self, request: &Request<'_>) -> Result<String> {
         let mut lines = vec![
             format!("url = {}", quoted(request.url, "URL")?),
             format!("output = {}", quoted(&path_text(request.output)?, "path")?),
+            // The headers give the status and the redirect of the response, which no `write-out`
+            // reports: with one, the `curl` 8.8.0 of some Windows releases fails every HTTPS
+            // request with error 43 (curl/curl#13845).
             format!(
                 "dump-header = {}",
                 quoted(&path_text(request.headers)?, "path")?
             ),
-            "write-out = \"%{http_code}\\n%{redirect_url}\\n\"".to_owned(),
             format!("header = \"Accept: {}\"", request.accept),
             format!("header = \"X-GitHub-Api-Version: {API_VERSION}\""),
             format!("user-agent = \"{USER_AGENT}\""),
@@ -423,24 +410,51 @@ impl Curl {
     }
 }
 
-/// Returns the headers that `curl` wrote to `path`, those of the last response, by their
-/// lowercase names, in order.
-fn read_headers(path: &Path) -> Result<Vec<(String, String)>> {
+/// Returns the response to a request of `url`, the last one whose headers `curl` wrote to `path`,
+/// or `None` without a valid status line to start them.
+fn read_response(path: &Path, url: &str) -> Result<Option<Response>> {
     let bytes = match fs::read(path) {
         Ok(bytes) => bytes,
         Err(error) if error.kind() == io::ErrorKind::NotFound => Vec::new(),
         Err(error) => return Err(io_error(ErrorCode::Io, &error, path)),
     };
+    let mut status = None;
     let mut headers = Vec::new();
     for line in String::from_utf8_lossy(&bytes).lines() {
         if line.starts_with("HTTP/") {
-            // A retry writes the headers of each response; the last one counts.
+            // `curl` writes the headers of each response to a request that it retries, and those
+            // of an interim response, such as HTTP 103, or of a proxy's tunnel before the final
+            // response's; the last one counts.
+            status = status_code(line);
             headers.clear();
         } else if let Some((name, value)) = line.split_once(':') {
             headers.push((name.trim().to_ascii_lowercase(), value.trim().to_owned()));
         }
     }
-    Ok(headers)
+    let Some(status) = status else {
+        return Ok(None);
+    };
+    let location = headers
+        .iter()
+        .find(|(name, _)| name == "location")
+        .map(|(_, location)| location.as_str())
+        .filter(|location| (300..400).contains(&status) && !location.is_empty())
+        .map(|location| resolved(url, location));
+    Ok(Some(Response {
+        status,
+        location,
+        headers,
+    }))
+}
+
+/// Returns the status of the status line `line`, such as `HTTP/1.1 200 OK` or `HTTP/2 200`, if it
+/// holds one.
+fn status_code(line: &str) -> Option<u16> {
+    let code = line.split_whitespace().nth(1)?;
+    if code.len() != 3 || !code.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    code.parse().ok().filter(|status| *status >= 100)
 }
 
 /// Returns `value`, the `what` of a request, quoted for the configuration of `curl`, or fails for
@@ -478,6 +492,159 @@ fn origin(url: &str) -> Option<String> {
         scheme.to_ascii_lowercase(),
         authority.to_ascii_lowercase()
     ))
+}
+
+/// The components of a URI reference, as RFC 3986 splits it (appendix B).
+struct Reference<'a> {
+    /// The scheme, if it has one.
+    scheme: Option<&'a str>,
+    /// The authority, if it has one, which may be empty.
+    authority: Option<&'a str>,
+    /// The path, which may be empty.
+    path: &'a str,
+    /// The query, if it has one, which may be empty.
+    query: Option<&'a str>,
+    /// The fragment, if it has one, which may be empty.
+    fragment: Option<&'a str>,
+}
+
+impl<'a> Reference<'a> {
+    /// Returns the components of `text`.
+    fn of(text: &'a str) -> Self {
+        let (text, fragment) = split_at_first(text, '#');
+        let (text, query) = split_at_first(text, '?');
+        let (scheme, text) = match text.split_once(':') {
+            Some((scheme, rest)) if is_scheme(scheme) => (Some(scheme), rest),
+            _ => (None, text),
+        };
+        let (authority, path) = match text.strip_prefix("//") {
+            Some(rest) => {
+                let (authority, path) = rest.split_at(rest.find('/').unwrap_or(rest.len()));
+                (Some(authority), path)
+            }
+            None => (None, text),
+        };
+        Self {
+            scheme,
+            authority,
+            path,
+            query,
+            fragment,
+        }
+    }
+}
+
+/// Returns `text` up to its first `delimiter`, and what follows that, if it has one.
+fn split_at_first(text: &str, delimiter: char) -> (&str, Option<&str>) {
+    text.split_once(delimiter)
+        .map_or((text, None), |(head, tail)| (head, Some(tail)))
+}
+
+/// Returns whether `text` is a scheme: a letter, then letters, digits, `+`, `-`, and `.`.
+fn is_scheme(text: &str) -> bool {
+    let mut bytes = text.bytes();
+    bytes.next().is_some_and(|byte| byte.is_ascii_alphabetic())
+        && bytes.all(|byte| byte.is_ascii_alphanumeric() || b"+-.".contains(&byte))
+}
+
+/// Returns `reference`, a URI reference such as the `location` header of a redirect, resolved
+/// against the absolute URL `base` as RFC 3986 resolves it (section 5.2), with its scheme in
+/// lowercase, the canonical form in which [`GitHub::get`] expects HTTPS URLs.
+fn resolved(base: &str, reference: &str) -> String {
+    let base = Reference::of(base);
+    let reference = Reference::of(reference);
+    let (authority, path, query) = if reference.scheme.is_some() || reference.authority.is_some() {
+        (
+            reference.authority,
+            without_dot_segments(reference.path),
+            reference.query,
+        )
+    } else if reference.path.is_empty() {
+        (
+            base.authority,
+            base.path.to_owned(),
+            reference.query.or(base.query),
+        )
+    } else if reference.path.starts_with('/') {
+        (
+            base.authority,
+            without_dot_segments(reference.path),
+            reference.query,
+        )
+    } else {
+        (
+            base.authority,
+            without_dot_segments(&merged(&base, reference.path)),
+            reference.query,
+        )
+    };
+    let mut target = String::new();
+    if let Some(scheme) = reference.scheme.or(base.scheme) {
+        target.push_str(&scheme.to_ascii_lowercase());
+        target.push(':');
+    }
+    if let Some(authority) = authority {
+        target.push_str("//");
+        target.push_str(authority);
+    }
+    target.push_str(&path);
+    for (delimiter, component) in [('?', query), ('#', reference.fragment)] {
+        if let Some(component) = component {
+            target.push(delimiter);
+            target.push_str(component);
+        }
+    }
+    target
+}
+
+/// Returns the relative path `path` merged with the path of `base`, as RFC 3986 merges them
+/// (section 5.2.3).
+fn merged(base: &Reference<'_>, path: &str) -> String {
+    if base.authority.is_some() && base.path.is_empty() {
+        return format!("/{path}");
+    }
+    let directory = &base.path[..base.path.rfind('/').map_or(0, |slash| slash + 1)];
+    format!("{directory}{path}")
+}
+
+/// Returns `path` without its `.` and `..` segments, as RFC 3986 removes them (section 5.2.4).
+fn without_dot_segments(path: &str) -> String {
+    let mut input = path;
+    let mut output = String::with_capacity(path.len());
+    while !input.is_empty() {
+        if let Some(rest) = input
+            .strip_prefix("../")
+            .or_else(|| input.strip_prefix("./"))
+        {
+            input = rest;
+        } else if let Some(rest) = after_segment(input, ".") {
+            input = rest;
+        } else if let Some(rest) = after_segment(input, "..") {
+            input = rest;
+            output.truncate(output.rfind('/').unwrap_or(0));
+        } else if input == "." || input == ".." {
+            input = "";
+        } else {
+            let start = usize::from(input.starts_with('/'));
+            let end = input[start..]
+                .find('/')
+                .map_or(input.len(), |slash| start + slash);
+            output.push_str(&input[..end]);
+            input = &input[end..];
+        }
+    }
+    output
+}
+
+/// Returns the rest of `path` after `/` and the whole segment `segment` that start it, as a path
+/// that starts with `/`, if they start it.
+fn after_segment<'a>(path: &'a str, segment: &str) -> Option<&'a str> {
+    let rest = path.strip_prefix('/')?.strip_prefix(segment)?;
+    if rest.is_empty() {
+        Some("/")
+    } else {
+        rest.starts_with('/').then_some(rest)
+    }
 }
 
 /// Returns `text` percent-encoded for one segment of a URL path, as `urllib.parse.quote(text,
