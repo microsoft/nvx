@@ -666,7 +666,23 @@ from the template's RAM to its capacity; the clone's image, which the check of
 its `DistroBinding` opens; its upper, either the caller's scratch image, which
 the check of its `ScratchBinding` claims, and which nothing formats, copies, or
 reads, or for an upper in RAM a fresh sparse file, `clone-scratch.raw` in the
-sandbox's directory, which the release removes; and a fresh capability.
+sandbox's directory, which the release removes; its export, if it has one, an
+`ExportPlan` that `filesystem::plan` made for the container root, which must
+export exactly one directory, since the template's dormant filesystem slot binds
+one directory and no file, and which must neither overlap the template store, by
+the paths that the plan and the store's directory resolve to, nor let the guest
+write in a directory through which the store's path leads, links included, since
+the host reaches the store, and OpenVMM its snapshots, by that path, nor be or
+hold the directory of the clone's sandbox, in which the host writes the clone's
+records, checks of paths that leave two rules to whoever names the export, as
+they leave the directories above the store: the export must not reach the store
+through an alias of it that an administrator configures, such as a bind mount or
+a mount point of the store, or of a directory above or inside it, a loopback
+share, or a hard link of a payload, nor lie inside a directory that a writable
+export of another sandbox or clone holds, since OpenVMM resolves an export's
+path again at each launch and restore, so that the directories above the
+export's directory must be ones that no guest may change, as those above a
+clone's block devices must; and a fresh capability.
 
 It builds the clone's activation record, `ClonePlan::activation`, which the
 clone's guest applies in place of the configuration that the template captured,
@@ -677,11 +693,13 @@ the image, an EROFS layer or a GPT disk, as its binding names it, with its
 binding's identity and the filesystem UUID or disk GUID that the adapter's plan
 expects of it, and for a GPT disk the bound of its first partition, whose
 partition table the guest checks with `nvx::gpt` as at a cold launch; a tmpfs,
-or the scratch image's binding identity with the journal policy; no export; the
+or the scratch image's binding identity with the journal policy; the export, a
+directory, with its plan's identity, and its mappings, the plan's binds, from 1
+to 4,096, or no export and no mappings, which leaves the slot dormant; the
 template NIC's policy identity, as its key records it, unpublished listeners,
 and the guest's proxy URL; and the template's processors and the memory target.
-A binding's identity is the SHA-256 digest of a domain and of the binding's
-serde form, never of a file's content.
+The identity of a binding or of an export plan is the SHA-256 digest of a domain
+and of its serde form, never of a file's content.
 
 The image and the scratch device must present the `BlockGeometry` of the
 template's, which a restore compares, and be, at the paths by which OpenVMM
@@ -694,14 +712,17 @@ store's names is refused.
 
 `ClonePlan::launch` then launches the clone as the launch that its lease
 reserves, once it has checked that the sandbox's clone binding records the
-lease, and that the sandbox records no failure of the clone, which fails once
-under its lease, and returns a `Restoring`: it writes the clone's activation
-record in its canonical encoding, `clone-activation.bin`, from which a caller
-resends it unchanged; it listens for the VMM's restore-ready event, at the
-socket `restore.sock` on Linux, and at a named pipe of a random name on Windows;
-and it runs `supervisor::launch` with OpenVMM's restore of the clone's devices,
-`--restore-snapshot` with the generation's snapshot in place, which no clone
-copies or changes, so that clones of one generation restore it at once,
+lease, that the sandbox records no failure of the clone, which fails once under
+its lease, and, with `ExportPlan::verify`, that the objects of its export, if it
+has one, are still those that its plan found, and returns a `Restoring`: it
+writes the clone's activation record in its canonical encoding,
+`clone-activation.bin`, from which a caller resends it unchanged; it listens for
+the VMM's restore-ready event, at the socket `restore.sock` on Linux, and at a
+named pipe of a random name on Windows; and it runs `supervisor::launch` with
+OpenVMM's restore of the clone's devices, its export bound to the dormant slot,
+`--mount` with the directory, and its hidden, re-exposed, and writable paths and
+its owner, `--restore-snapshot` with the generation's snapshot in place, which
+no clone copies or changes, so that clones of one generation restore it at once,
 `--restore-memory` with the memory target, and `--restore-ready-path`, under the
 template's backend, CPU profile, and processors, with a boot console that
 discards its output, as cold boots have, and the control console, but no kernel,
@@ -737,10 +758,14 @@ lost, as `CloneControl::lost` tells, with a new one that sends the same record,
 in at most `MAX_ACTIVATION_SESSIONS` sessions by the same deadline, and retries
 nothing else.
 
-`Activated::start` then starts the sandbox by a Ready-to-Start deadline from the
-check of Ready, `READY_TO_START_TIMEOUT`, 30 seconds by default, never sending
-the start again, and `Started::commit` commits the launch, which writes its
-runtime record. A failure ends the launch as `Starting::abandon` does; a crash
+`Activated::start` then sends the clone's mapping table, if it has an export,
+through `CloneControl::map`, in order, from paths in the exported directory,
+which name no child's index, with an empty source for the directory itself, and
+starts the sandbox once the guest applied every mapping, both by a
+Ready-to-Start deadline from the check of Ready, `READY_TO_START_TIMEOUT`, 30
+seconds by default, never sending either again, and `Started::commit` commits
+the launch, which writes its runtime record. A failure, a partial or failed
+mapping table included, ends the launch as `Starting::abandon` does; a crash
 before the commit leaves the launch's journal, whose recovery ends the VMM,
 while the lease lasts until the release, and a crash after it leaves a VM that
 reattaches, and keeps its lease while it runs.
@@ -748,7 +773,9 @@ reattaches, and keeps its lease while it runs.
 A failure of a clone is a `CloneFailure`, whose `Evidence` attributes it to an
 `Outcome`, at a `Stage`, once the clone got as far as its `Progress`: the
 request, for a denied authorization, a stale binding, invalid targets, format,
-settings, Activate, or mappings, or an image, a scratch, or a root that the
+settings, Activate, or mappings, such as an export that no clone takes, or whose
+objects changed since its plan, or a mapping table that the guest refused, as
+`CloneControl::refused` tells, or an image, a scratch, or a root that the
 template cannot serve, and for a supplied file of the wrong identity, length, or
 geometry, which the host's staging takes instead once the caller proves it,
 `CloneFailure::with_staging_proven`; the host, for an endpoint that cannot be
@@ -954,8 +981,10 @@ descriptor of a `TargetRoot`, the root of a mount of a whole file system, which
 overlay or a guest's `/`, from a `SourceRoot`, such as the guest's mount of the
 host's export.
 
-A `Mapping` names a relative source, an absolute target, its `Access`, and
-optionally the `Kind` that its source must have.
+A `Mapping` names a relative source, or an empty one for the source root itself,
+such as a directory export's root, which the mapper opens as `.` beneath it with
+the same flags, an absolute target, its `Access`, and optionally the `Kind` that
+its source must have.
 
 The mapper opens each component with `openat2`, through no symbolic link or
 magic link, creates what a target lacks only on the root's own mounts, which
@@ -977,7 +1006,9 @@ failure.
 
 Linux 6.8 or later. NVX's managed agent applies its host mapping table through
 it, beneath `/` in direct mode and beneath the container's assembled root in
-sandbox mode, and a layered `Root` its live shares and mappings.
+sandbox mode, and refuses an empty source, since its export is an aggregate,
+whose root lists its children; a layered `Root` applies its live shares and
+mappings through it.
 
 ### `nvx::guest::nvxs`
 

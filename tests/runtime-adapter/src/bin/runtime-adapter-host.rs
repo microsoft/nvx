@@ -98,39 +98,51 @@
 //! - `runtime-adapter-host start STORE --template TEMPLATES --generation G --distro FORMAT:PATH
 //!   --distro-identity UUID --upper (scratch:PATH | ram) [--memory MIB] [--workload-identity
 //!   UID:GID] [--overlay-mode MODE] [--scratch-journal POLICY] [--first-partition-bound BYTES]
-//!   [--machine-id (image | generated)]` starts a clone of the generation G of the template store
-//!   TEMPLATES, an `nvx::host::template::Store`, in the sandbox store STORE, which it creates if
-//!   needed; see `runtime_adapter::clone`. It reads the generation from the store's index, and,
-//!   unless MIB mebibytes are given, its compatibility key, whose RAM is then the clone's memory
-//!   target, before it needs NVX's artifacts. A key that cannot be read is left to NVX's plan,
-//!   which reads it again, and attributes the failure, to the generation or to the host, as it
-//!   does for every clone. The store then leases the generation to the sandbox, at the host's
-//!   time, with `Store::acquire`, which refuses a generation that a tombstone quarantines, or that
-//!   is not eligible then, and NVX's `ClonePlan` checks the clone against the generation, from the
-//!   metadata of its files alone: its image, the raw file PATH, an EROFS filesystem, `erofs`, or a
-//!   GPT disk, `gpt`, of which the guest expects the identity UUID, of the length of the template's
-//!   placeholder, whatever the placeholder's format, its upper, the ext4 scratch image PATH, of the
-//!   geometry of the template's scratch, or RAM, with the bindings that STORE stages for the
-//!   images, as `stage` stages them, and its memory target, in whole blocks, from the template's
-//!   RAM to its capacity.
+//!   [--machine-id (image | generated)] [SHARES]` starts a clone of the generation G of the
+//!   template store TEMPLATES, an `nvx::host::template::Store`, in the sandbox store STORE, which
+//!   it creates if needed; see `runtime_adapter::clone`. SHARES, as `launch` takes them, share
+//!   host paths with the clone's root: the command plans their export as a launch does, with
+//!   NVX's `filesystem::plan`, and refuses shares that it cannot export before anything else. It
+//!   then reads the generation from the store's index, and, unless MIB mebibytes are given, its
+//!   compatibility key, whose RAM is then the clone's memory target, before it needs NVX's
+//!   artifacts. A key that cannot be read is left to NVX's plan, which reads it again, and
+//!   attributes the failure, to the generation or to the host, as it does for every clone. The
+//!   store then leases the generation to the sandbox, at the host's time, with `Store::acquire`,
+//!   which refuses a generation that a tombstone quarantines, or that is not eligible then, and
+//!   NVX's `ClonePlan` checks the clone against the generation, from the metadata of its files
+//!   alone: its image, the raw file PATH, an EROFS filesystem, `erofs`, or a GPT disk, `gpt`, of
+//!   which the guest expects the identity UUID, of the length of the template's placeholder,
+//!   whatever the placeholder's format, its upper, the ext4 scratch image PATH, of the geometry of
+//!   the template's scratch, or RAM, with the bindings that STORE stages for the images, as
+//!   `stage` stages them, its memory target, in whole blocks, from the template's RAM to its
+//!   capacity, and its export, if it has one, which must export exactly one directory, which
+//!   neither lies inside the template store's directory nor holds it: the export's root, which
+//!   the clone's restore binds to the template's dormant filesystem slot.
 //!   A request that the template cannot serve fails there, before any VMM starts. The command
 //!   records the clone in STORE, with the template store and the generation; see
-//!   `runtime_adapter::clone::CloneRecord`. OpenVMM then restores the generation's snapshot in
-//!   place, with the clone's devices, through NVX's supervisor, as the launch that the lease
-//!   reserves, and the restore sequence of `nvx::host::template` activates the clone through the
-//!   adapter's clone order, `runtime_adapter::host::CloneOrder`, with the clone's activation
-//!   record: the workload identity UID:GID, if given, as which every execution runs, whose account
-//!   the guest checks in the clone's root before it is ready, and the overlay mode MODE and the
-//!   scratch's journal policy POLICY, as a launch takes them, and for a GPT disk, the bound BYTES
-//!   of its first partition, 64 KiB unless given, as a launch's guest takes it by default. Every
-//!   execution of the clone sees the hostname `runtime-adapter`, and the machine ID that
-//!   `--machine-id` chooses: the image's own, `image`, by default, or one that the guest generates
-//!   once for the clone, `generated`, which a read-only bind holds at `/etc/machine-id`. The
-//!   guest refuses a first partition larger than BYTES, and an upper that is not fresh, whose
-//!   `upper` or `work` directory on the scratch image exists and is not empty, as an earlier
-//!   clone's would be, before the clone is ready. Once the clone is ready, the command starts its
-//!   sandbox, exchanges a `Ping` and the longest `Echo` with the guest agent, commits the launch,
-//!   and exits, leaving the VM running, and the sandbox holding the lease, which a stop releases.
+//!   `runtime_adapter::clone::CloneRecord`. Once NVX checked the export again, with
+//!   `ExportPlan::verify`, OpenVMM restores the generation's snapshot in place, with the clone's
+//!   devices, through NVX's supervisor, as the launch that the lease reserves, and the restore
+//!   sequence of `nvx::host::template` activates the clone through the adapter's clone order,
+//!   `runtime_adapter::host::CloneOrder`, with the clone's activation record: the workload
+//!   identity UID:GID, if given, as which every execution runs, whose account the guest checks in
+//!   the clone's root before it is ready, the overlay mode MODE and the scratch's journal policy
+//!   POLICY, as a launch takes them, for a GPT disk, the bound BYTES of its first partition, 64
+//!   KiB unless given, as a launch's guest takes it by default, and the export, by the identity of
+//!   its plan, with the number of its mappings. Every execution of the clone sees the hostname
+//!   `runtime-adapter`, and the machine ID that `--machine-id` chooses: the image's own, `image`,
+//!   by default, or one that the guest generates once for the clone, `generated`, which a
+//!   read-only bind holds at `/etc/machine-id`. The guest refuses a first partition larger than
+//!   BYTES, and an upper that is not fresh, whose `upper` or `work` directory on the scratch image
+//!   exists and is not empty, as an earlier clone's would be, before the clone is ready. Once the
+//!   clone is ready, the sequence sends the export's mapping table, in order, as a launch sends
+//!   its own; a clone without shares has no export: its restore leaves the slot dormant, and the
+//!   sequence sends no table. If the guest fails a mapping, the sequence sends no more of the
+//!   table, nor `Start`, and ends the clone, whose guest the clone order asks to stop, which tears
+//!   down the root, and which then fails as below. Once every mapping applied, the sequence
+//!   starts the clone's sandbox, and the command exchanges a `Ping` and the longest `Echo` with
+//!   the guest agent, commits the launch, and exits, leaving the VM running, and the sandbox
+//!   holding the lease, which a stop releases.
 //!   A clone that fails, from its plan to its commit, fails with NVX's
 //!   `nvx::host::template::CloneFailure`, which attributes the failure by its evidence, and records
 //!   it in STORE from the clone's launch on: the command prints the failure's record, releases the
@@ -297,6 +309,7 @@ use std::time::{Duration, Instant};
 use nvx::activation::{MachineIdMode, StoreGeneration};
 use nvx::exec::{Cause, Key, Limits, Outcome, Status, Stream, Timers, Window};
 use nvx::host::artifacts::{Artifacts, absolute};
+use nvx::host::filesystem::ExportPlan;
 use nvx::host::instance::generate_capability;
 use nvx::host::launch::{DEFAULT_MEMORY_MIB, LaunchSpec};
 use nvx::host::nvxs::HostConnectionError;
@@ -419,6 +432,8 @@ const USAGE: &str = concat!(
     "           [--workload-identity UID:GID] [--overlay-mode MODE]",
     " [--scratch-journal POLICY]\n",
     "           [--first-partition-bound BYTES] [--machine-id (image | generated)]\n",
+    "           [--share HOST:TARGET[:ro]... [--deny PATH]... [--reserved TARGET]...",
+    " [--share-root DIR]...]\n",
     "       runtime-adapter-host probe STORE PROBE... [--guest-build BUILD]\n",
     "       runtime-adapter-host exec STORE [--guest-build BUILD] EXECUTION [';' EXECUTION]...\n",
     "           EXECUTION: [--identity UID:GID [--groups GID,...] [--capabilities N,...]",
@@ -826,17 +841,7 @@ fn parse(arguments: Vec<OsString>) -> Result<Command, String> {
             }
         }
         "launch" => {
-            let sharing = &options.sharing;
-            let share_options = [
-                ("--deny", !sharing.denied().is_empty()),
-                ("--reserved", !sharing.reserved().is_empty()),
-                ("--share-root", !sharing.roots().is_empty()),
-            ];
-            if sharing.shares().is_empty()
-                && let Some((option, _)) = share_options.iter().find(|(_, given)| *given)
-            {
-                return Err(format!("{option} needs --share"));
-            }
+            check_shares(&options.sharing)?;
             let layered = match (options.distro, options.identity, options.upper) {
                 (Some(_), None, _) => return Err("--distro needs --distro-identity".to_owned()),
                 (Some(_), Some(_), None) => return Err("--distro needs --upper".to_owned()),
@@ -934,6 +939,7 @@ fn parse(arguments: Vec<OsString>) -> Result<Command, String> {
             if format == ImageFormat::Erofs && options.first_partition_bound.is_some() {
                 return Err("--first-partition-bound needs --distro gpt:PATH".to_owned());
             }
+            check_shares(&options.sharing)?;
             Command::Start {
                 store,
                 guest_build,
@@ -951,6 +957,7 @@ fn parse(arguments: Vec<OsString>) -> Result<Command, String> {
                         scratch_journal: options.scratch_journal,
                         first_partition_bound: options.first_partition_bound,
                         machine_id: options.machine_id.unwrap_or(MachineIdMode::Image),
+                        sharing: options.sharing,
                     },
                 }),
                 time: host_time_from_env()?,
@@ -1074,7 +1081,7 @@ fn parse_option(
                 )
             })?);
         }
-        ("launch", "--share") => {
+        ("launch" | "start", "--share") => {
             let value = text(value)?;
             let share = Share::parse(&value).ok_or_else(|| {
                 format!(
@@ -1084,9 +1091,9 @@ fn parse_option(
             })?;
             options.sharing.add_share(share);
         }
-        ("launch", "--deny") => options.sharing.add_denied(value),
-        ("launch", "--reserved") => options.sharing.add_reserved(text(value)?),
-        ("launch", "--share-root") => options.sharing.add_root(value),
+        ("launch" | "start", "--deny") => options.sharing.add_denied(value),
+        ("launch" | "start", "--reserved") => options.sharing.add_reserved(text(value)?),
+        ("launch" | "start", "--share-root") => options.sharing.add_root(value),
         ("launch" | "create", "--network") if options.network.is_none() => {
             options.network = Some(PathBuf::from(value));
         }
@@ -1135,6 +1142,22 @@ fn parse_option(
             options.guest_build = Some(text(value)?);
         }
         _ => return Err(format!("unexpected option {option:?} of {name}")),
+    }
+    Ok(())
+}
+
+/// Says why the options of `sharing`, of a launch or a start, are not a command's: `--deny`,
+/// `--reserved`, or `--share-root` without a `--share`.
+fn check_shares(sharing: &HostFsSharing) -> Result<(), String> {
+    let options = [
+        ("--deny", !sharing.denied().is_empty()),
+        ("--reserved", !sharing.reserved().is_empty()),
+        ("--share-root", !sharing.roots().is_empty()),
+    ];
+    if sharing.shares().is_empty()
+        && let Some((option, _)) = options.iter().find(|(_, given)| *given)
+    {
+        return Err(format!("{option} needs --share"));
     }
     Ok(())
 }
@@ -1762,9 +1785,11 @@ fn start(
     clone: &CloneOptions,
     time: Option<HostTime>,
 ) -> Result<ExitCode, String> {
-    // A request that the adapter's plan refuses, and a generation that the template store does not
-    // hold, fail the start before it needs NVX's artifacts or the sandbox's store.
+    // A request that the adapter's plan refuses, shares that it cannot export, and a generation
+    // that the template store does not hold, fail the start before it needs NVX's artifacts or
+    // the sandbox's store.
     let plan = clone.request.plan().map_err(|error| describe(&error))?;
+    let export = clone.request.export().map_err(|error| describe(&error))?;
     let templates = Store::open(&clone.templates).map_err(|error| describe(&error))?;
     let generation = templates
         .index()
@@ -1815,6 +1840,7 @@ fn start(
         templates: &templates,
         request: &clone.request,
         plan,
+        export,
         memory,
         runtime: &runtime,
         guest_build,
@@ -1849,6 +1875,8 @@ struct CloneLaunch<'a> {
     request: &'a runtime_adapter::clone::Request,
     /// The adapter's plan of the clone's image over its upper.
     plan: nvx::host::sandbox::SandboxPlan,
+    /// The export of the host paths that the clone shares with its root, if any.
+    export: Option<ExportPlan>,
     /// The clone's memory target, in bytes, or none if the request names none, and the
     /// generation's key, whose RAM it would be, cannot be read.
     memory: Option<u64>,
@@ -1860,8 +1888,9 @@ struct CloneLaunch<'a> {
 
 impl CloneLaunch<'_> {
     /// Plans, records, and launches the clone in the sandbox of `acquired`, which leased the
-    /// generation, activates it, starts its sandbox, exchanges a `Ping` and the longest `Echo`
-    /// with its guest agent, and commits the launch, leaving the clone running.
+    /// generation, activates it, maps its export's table, if it has one, starts its sandbox,
+    /// exchanges a `Ping` and the longest `Echo` with its guest agent, and commits the launch,
+    /// leaving the clone running.
     ///
     /// Fails with the clone's failure, as NVX's plan, launch, restore sequence, and commit return
     /// it, or as `Started::fail` records it for a guest agent that does not answer the command
@@ -1873,6 +1902,7 @@ impl CloneLaunch<'_> {
             templates,
             request,
             plan,
+            export,
             memory,
             runtime,
             guest_build,
@@ -1883,7 +1913,7 @@ impl CloneLaunch<'_> {
         // No template serves a memory target of 0, which stands for the one of a key that could
         // not be read: the plan fails as it reads the key again, before it checks the target.
         let clone_request = request
-            .clone_request(plan.clone(), &bindings, memory.unwrap_or(0))
+            .clone_request(plan.clone(), export, &bindings, memory.unwrap_or(0))
             .map_err(|error| Failed::Command(binding_error(&error)))?;
         let clone_plan = ClonePlan::new(
             templates,
@@ -1892,6 +1922,8 @@ impl CloneLaunch<'_> {
             Instant::now() + LOCK_TIMEOUT,
         )
         .map_err(Failed::Clone)?;
+        // The mappings that the clone's record announces, which the restore sequence sends.
+        let mappings = clone_plan.activation().configuration().mappings;
         let record = CloneRecord {
             template: templates.dir(),
             generation: acquired.lease.generation(),
@@ -1915,7 +1947,7 @@ impl CloneLaunch<'_> {
         println!("build={}", escape(guest_build));
         let mut started = activated.start(&mut order).map_err(Failed::Clone)?;
         println!("table=applied");
-        println!("mapped=0");
+        println!("mapped={mappings}");
         println!("sandbox=started");
         let deadline = Instant::now() + SESSION_TIMEOUT;
         let client = started.session();
@@ -1959,10 +1991,11 @@ fn unanswered(
 }
 
 /// Returns the adapter's order of a clone, with the guest agent's build `build`, which the restore
-/// sequence of a clone's start, and a reattach to it, take, the one place that makes it. A clone's
-/// record announces no mapping table: the adapter maps nothing into a clone.
+/// sequence of a clone's start, and a reattach to it, take, the one place that makes it. The
+/// sequence sends through it the clone's mapping table, which the clone's record announces if the
+/// clone has an export, and a reattach sends none.
 fn clone_order(build: &str) -> CloneOrder<'_> {
-    CloneOrder { build, table: &[] }
+    CloneOrder { build }
 }
 
 /// Ends a command whose clone, in the sandbox of `locked`, failed with `failure`, as NVX

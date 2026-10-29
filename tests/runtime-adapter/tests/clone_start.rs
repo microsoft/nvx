@@ -1,9 +1,10 @@
 //! The host program's `start` refuses options that do not make a start, and a clock fixture that is
-//! not a host's time, as usage errors, and a generation that the template store does not hold, or
-//! a template store that does not exist, before it needs NVX's artifacts or creates the sandbox's
-//! store. A clone's record names its template store and its generation, which a stop reads back,
-//! beside the plan that the other commands read, and a host's time keeps its text form, the form
-//! of the clock fixture. The tests need no hypervisor.
+//! not a host's time, as usage errors, and shares that it cannot export, a generation that the
+//! template store does not hold, or a template store that does not exist, before it needs NVX's
+//! artifacts or creates the sandbox's store. A clone's record names its template store and its
+//! generation, which a stop reads back, beside the plan that the other commands read, a clone's
+//! request carries the export of its shares, and a host's time keeps its text form, the form of
+//! the clock fixture. The tests need no hypervisor.
 #![cfg(feature = "host")]
 
 use std::fs;
@@ -21,6 +22,7 @@ use runtime_adapter::clone::{
 };
 use runtime_adapter::layered::{Bindings, LaunchRecord, RECORD_FORMAT, RECORD_NAME};
 use runtime_adapter::root::DEFAULT_FIRST_PARTITION_BOUND;
+use runtime_adapter::sharing::{HostFsSharing, Share};
 use runtime_adapter::staged::Staged;
 use serde_json::{Value, json};
 
@@ -180,13 +182,38 @@ fn the_host_program_refuses_options_that_do_not_make_a_start() {
             vec!["stop", "store", "--memory", "512"],
             "unexpected option \"--memory\" of stop",
         ),
+        // A start takes the shares of a launch, with the same rules.
+        (
+            with(&["--upper", "ram", "--deny", "secret"]),
+            "--deny needs --share",
+        ),
+        (
+            with(&["--upper", "ram", "--reserved", "/opt/adapter"]),
+            "--reserved needs --share",
+        ),
+        (
+            with(&["--upper", "ram", "--share-root", "sources"]),
+            "--share-root needs --share",
+        ),
+        (
+            with(&["--upper", "ram", "--share", ":/b:ro"]),
+            "--share takes HOST:TARGET or HOST:TARGET:ro, with an absolute guest path TARGET, \
+             not \":/b:ro\"",
+        ),
+        (
+            with(&["--upper", "ram", "--share", "a"]),
+            "--share takes HOST:TARGET or HOST:TARGET:ro",
+        ),
+        (
+            vec!["stop", "store", "--share", "a:/b"],
+            "unexpected option \"--share\" of stop",
+        ),
     ];
     // Each option that a start does not take.
-    let others: [(&str, &str); 7] = [
+    let others: [(&str, &str); 6] = [
         ("--guest-agent", "agent"),
         ("--hypervisor", "whp"),
         ("--runtime-dir", "/run/a"),
-        ("--share", "a:/b"),
         ("--network", "network.json"),
         ("--cpu-profile", "auto"),
         ("--memory-capacity", "512"),
@@ -370,6 +397,7 @@ fn a_clone_s_record_names_its_template_store_and_generation_beside_its_plan() {
         scratch_journal: None,
         first_partition_bound: None,
         machine_id: MachineIdMode::Image,
+        sharing: HostFsSharing::default(),
     };
     let plan = request.plan().unwrap();
     let staged = Staged::stage(&distro, ImageFormat::Erofs, identity(), Some(&scratch)).unwrap();
@@ -459,17 +487,19 @@ fn a_clone_s_request_takes_the_staged_bindings_and_the_guest_s_defaults() {
         scratch_journal: None,
         first_partition_bound: None,
         machine_id: MachineIdMode::Image,
+        sharing: HostFsSharing::default(),
     };
     let plan = request.plan().unwrap();
     let staged = Staged::stage(&distro, ImageFormat::Erofs, identity(), Some(&scratch)).unwrap();
     let bindings = staged.bindings(&plan);
     let memory = 512 << 20;
     let clone = request
-        .clone_request(plan.clone(), &bindings, memory)
+        .clone_request(plan.clone(), None, &bindings, memory)
         .unwrap();
     assert_eq!(clone.adapter, plan);
     assert_eq!(clone.binding, staged.distro.binding);
     assert_eq!(clone.scratch, Some(staged.scratch.unwrap().binding));
+    assert_eq!(clone.export, None);
     assert_eq!(clone.memory, memory);
     assert_eq!(
         clone.policy_revision,
@@ -492,7 +522,7 @@ fn a_clone_s_request_takes_the_staged_bindings_and_the_guest_s_defaults() {
         ..request.clone()
     };
     let clone = named
-        .clone_request(plan.clone(), &bindings, memory)
+        .clone_request(plan.clone(), None, &bindings, memory)
         .unwrap();
     assert_eq!(
         clone.workload.identity,
@@ -519,7 +549,7 @@ fn a_clone_s_request_takes_the_staged_bindings_and_the_guest_s_defaults() {
         ),
     ] {
         let error = request
-            .clone_request(plan.clone(), &bindings, memory)
+            .clone_request(plan.clone(), None, &bindings, memory)
             .unwrap_err();
         assert_eq!(error.kind(), nvx::ErrorKind::Unavailable, "{what}");
         assert!(
@@ -537,13 +567,130 @@ fn a_clone_s_request_takes_the_staged_bindings_and_the_guest_s_defaults() {
     };
     let plan = in_ram.plan().unwrap();
     let error = in_ram
-        .clone_request(plan.clone(), &Bindings::default(), memory)
+        .clone_request(plan.clone(), None, &Bindings::default(), memory)
         .unwrap_err();
     assert_eq!(error.kind(), nvx::ErrorKind::Unavailable);
     let staged = Staged::stage(&distro, ImageFormat::Erofs, identity(), None).unwrap();
     let clone = in_ram
-        .clone_request(plan.clone(), &staged.bindings(&plan), memory)
+        .clone_request(plan.clone(), None, &staged.bindings(&plan), memory)
         .unwrap();
     assert_eq!(clone.scratch, None);
     assert_eq!(clone.adapter, plan);
+
+    // A request without shares plans no export. One with shares plans their export as a launch
+    // does, of one directory here, the root of the read-only share, which holds the other, and
+    // NVX's request carries the export that it is given.
+    assert_eq!(in_ram.export().unwrap(), None);
+    let sources = directory.join("sources");
+    fs::create_dir_all(sources.join("out")).unwrap();
+    let mut sharing = HostFsSharing::default();
+    sharing.add_share(Share::new(sources.clone(), "/srv/data", true));
+    sharing.add_share(Share::new(sources.join("out"), "/srv/out", false));
+    sharing.add_root(directory.clone());
+    let shared = Request { sharing, ..in_ram };
+    let export = shared.export().unwrap().expect("the shares have an export");
+    assert_eq!(export.children.len(), 1, "{export:?}");
+    assert!(!export.children[0].file, "{export:?}");
+    let binds = export
+        .binds
+        .iter()
+        .map(|bind| (bind.source.as_str(), bind.target.as_str(), bind.read_only))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        binds,
+        [("", "/srv/data", true), ("out", "/srv/out", false)],
+        "{export:?}"
+    );
+    let clone = shared
+        .clone_request(
+            plan.clone(),
+            Some(export.clone()),
+            &staged.bindings(&plan),
+            memory,
+        )
+        .unwrap();
+    assert_eq!(clone.export, Some(export));
+}
+
+#[test]
+fn a_start_refuses_shares_that_it_cannot_export_before_anything_else() {
+    // The start plans the export of its shares before it reads the template store, which does
+    // not exist, or needs NVX's artifacts, which the commands do not name, and before it creates
+    // the sandbox's store.
+    let directory = directory("start-unshared");
+    let distro = image(directory.join("distro.erofs"), 4096);
+    let distro = format!("erofs:{}", distro.display());
+    let sources = directory.join("sources");
+    let outside = directory.join("outside");
+    for path in [&sources, &outside] {
+        fs::create_dir(path).unwrap();
+    }
+    let templates = directory.join("templates");
+    let store = directory.join("store");
+    let missing = directory.join("sources").join("missing");
+    let inner = directory.join("sources").join("inner");
+    fs::create_dir(&inner).unwrap();
+    let (sources, outside) = (sources.to_str().unwrap(), outside.to_str().unwrap());
+    let cases: [(Vec<String>, String); 5] = [
+        (
+            vec![format!("{outside}:/srv/data")],
+            format!(
+                "--share entry {outside} lies outside the host directories that --share-root \
+                 authorizes"
+            ),
+        ),
+        (
+            vec![format!("{sources}:/proc/data")],
+            "has the guest target /proc/data, which would cover the guest's /proc".to_owned(),
+        ),
+        (
+            vec![
+                format!("{sources}:/srv/data"),
+                "--share".to_owned(),
+                format!("{}:/srv/data/inner:ro", inner.display()),
+            ],
+            "where the host cannot keep it read-only".to_owned(),
+        ),
+        (
+            vec![
+                format!("{sources}:/srv/data"),
+                "--reserved".to_owned(),
+                "srv".to_owned(),
+            ],
+            "--reserved entry \"srv\" is not absolute".to_owned(),
+        ),
+        (
+            vec![format!("{}:/srv/missing", missing.display())],
+            format!("--share entry {} is not accessible", missing.display()),
+        ),
+    ];
+    for (shares, problem) in cases {
+        let mut arguments = vec![
+            "start".to_owned(),
+            store.to_str().unwrap().to_owned(),
+            "--template".to_owned(),
+            templates.to_str().unwrap().to_owned(),
+            "--generation".to_owned(),
+            "1".to_owned(),
+            "--distro".to_owned(),
+            distro.clone(),
+            "--distro-identity".to_owned(),
+            IDENTITY.to_owned(),
+            "--upper".to_owned(),
+            "ram".to_owned(),
+            "--share-root".to_owned(),
+            sources.to_owned(),
+            "--share".to_owned(),
+        ];
+        arguments.extend(shares);
+        let arguments = arguments.iter().map(String::as_str).collect::<Vec<_>>();
+        let output = host(&arguments, None);
+        assert_eq!(output.status.code(), Some(1), "{arguments:?}: {output:?}");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains(&problem), "{arguments:?}: {stderr}");
+        assert!(!stderr.contains("template store"), "{stderr}");
+        assert!(!stderr.contains("usage:"), "{stderr}");
+        assert!(!store.exists(), "the start created the sandbox's store");
+        assert!(!templates.exists());
+    }
 }

@@ -30,13 +30,14 @@
 //! with the inputs that the template's capture kept, as it activates the clone. Its first step is
 //! [`activate`], which sends the clone's activation record in an `Activate`, the first request of
 //! the session, and waits for the guest agent's `Ready`, whose build it checks as [`ready`] does,
-//! and which reports the clone's activation, for the host to check against the record. Then
-//! [`start_sandbox`] runs as after a cold boot. [`CloneOrder`] runs both steps as the adapter's
-//! framing of `nvx::host::template`'s restore sequence, which checks the activation, and which
-//! replaces a session that the order lost, as [`CloneOrder`] tells, while the clone was not ready
-//! or its `Ready` had not arrived: the clone answers the same record, byte for byte, with the same
-//! `Ready` in a new session, and has ended once the reset of a session that it took before it was
-//! ready failed its activation.
+//! and which reports the clone's activation, for the host to check against the record. Then the
+//! restore sequence sends the clone's mapping table, which [`map_table`] sends as [`start_sandbox`]
+//! does after a cold boot, and `Start`. [`CloneOrder`] runs these steps as the adapter's framing of
+//! `nvx::host::template`'s restore sequence, which checks the activation, orders the steps, and
+//! which replaces a session that the order lost, as [`CloneOrder`] tells, while the clone was not
+//! ready or its `Ready` had not arrived: the clone answers the same record, byte for byte, with the
+//! same `Ready` in a new session, and has ended once the reset of a session that it took before it
+//! was ready failed its activation.
 
 mod executions;
 mod map_reply;
@@ -455,15 +456,31 @@ pub fn ready(
 }
 
 /// Runs the rest of the host's order over `client`, once the guest agent is [`ready`]: sends the
-/// mapping table `table`, which the root configuration announced, in the parts that
-/// [`encode_maps`] splits it into, each once the guest applied the one before, then `Start`, and
-/// waits until `deadline` for `Started`. A table of no mapping sends no part.
+/// mapping table `table`, which the root configuration announced, with [`map_table`], then
+/// `Start`, and waits until `deadline` for `Started`. A table of no mapping sends no part.
 ///
 /// Fails with [`OrderError::Table`], before it sends anything, for a table that does not encode;
 /// with [`OrderError::Mapping`] once the guest fails a part, after which it sends no more of the
 /// table, nor `Start`, but asks the guest to stop; and with [`OrderError::Client`] once the client
 /// fails.
 pub fn start_sandbox(
+    client: &mut Client,
+    table: &[HostMap],
+    deadline: Instant,
+) -> Result<(), OrderError> {
+    map_table(client, table, deadline)?;
+    client.start(deadline).map_err(OrderError::Client)
+}
+
+/// Sends the mapping table `table` over `client`, once the guest agent is ready, in the parts that
+/// [`encode_maps`] splits it into, each once the guest applied the one before, until `deadline`.
+/// A table of no mapping sends no part.
+///
+/// Fails as [`start_sandbox`] does before its `Start`: with [`OrderError::Table`], before it sends
+/// anything, for a table that does not encode; with [`OrderError::Mapping`] once the guest fails a
+/// part, after which it sends no more of the table, but asks the guest to stop; and with
+/// [`OrderError::Client`] once the client fails.
+pub fn map_table(
     client: &mut Client,
     table: &[HostMap],
     deadline: Instant,
@@ -480,7 +497,7 @@ pub fn start_sandbox(
             }
         }
     }
-    client.start(deadline).map_err(OrderError::Client)
+    Ok(())
 }
 
 /// Runs the first step of [a clone's order](self#a-clones-order) over `client`, in place of
@@ -514,8 +531,9 @@ pub fn activate(
 /// [A clone's order](self#a-clones-order), as the adapter's framing of the clone's control
 /// session, through which `nvx::host::template`'s restore sequence activates the clone and starts
 /// its sandbox: it attaches a [`Client`] over each connection to the clone's control endpoint,
-/// runs [`activate`] with the guest agent's build that the host ships, then [`start_sandbox`] with
-/// the host's mapping table, which the clone's record announces.
+/// runs [`activate`] with the guest agent's build that the host ships, then [`map_table`] with the
+/// mapping table that the restore sequence gives it, which the clone's record announces, and
+/// `Start`.
 ///
 /// It takes a session for lost once a reset of the broker, the end of the broker's stream, or a
 /// failure of the transport ended it, while the client attached or awaited the clone's `Ready`:
@@ -525,12 +543,16 @@ pub fn activate(
 /// restore sequence's limit of sessions bounds. Any other failure is final: a refusal that the
 /// broker sends, a deadline that passed, a guest agent of another build, and a message that breaks
 /// the framing.
+///
+/// It takes no failure for the guest's refusal of the request's mapping table, which
+/// [`CloneControl::refused`] tells: the guest's `MapFailed` does not tell whether the request's
+/// mappings or a failure of the guest's own failed the table, so the restore sequence attributes
+/// it, as any other failure of the table, to what the host saw of it, a broken protocol, unless
+/// the deadline passed or the session was lost.
 #[derive(Clone, Copy, Debug)]
 pub struct CloneOrder<'a> {
     /// The guest agent's build that the host ships.
     pub build: &'a str,
-    /// The host's mapping table, which the clone's activation record announces.
-    pub table: &'a [HostMap],
 }
 
 impl CloneControl for CloneOrder<'_> {
@@ -555,8 +577,17 @@ impl CloneControl for CloneOrder<'_> {
         activate(session, record, self.build, deadline).map(|ready| ready.activation())
     }
 
+    fn map(
+        &mut self,
+        session: &mut Client,
+        table: &[HostMap],
+        deadline: Instant,
+    ) -> Result<(), OrderError> {
+        map_table(session, table, deadline)
+    }
+
     fn start(&mut self, session: &mut Client, deadline: Instant) -> Result<(), OrderError> {
-        start_sandbox(session, self.table, deadline)
+        session.start(deadline).map_err(OrderError::Client)
     }
 
     fn lost(&self, error: &OrderError) -> bool {

@@ -901,6 +901,101 @@ fn swapped_objects_fail_verification() {
     assert_eq!(mapping.verify().unwrap_err().kind(), ErrorKind::Other);
 }
 
+/// A path that no longer reaches its object names it no longer, but any other failure to
+/// inspect an object shows nothing of it, so it is the host's own, with its cause.
+#[test]
+fn objects_that_cannot_be_inspected_fail_verification_by_what_the_failure_shows() {
+    let directory = root();
+    let base = directory.path();
+    let policy = FilesystemPolicy {
+        readwrite_paths: vec![base.join("work"), base.join("work/src")],
+        denied_paths: vec![base.join("work/src/secret")],
+        ..FilesystemPolicy::default()
+    };
+    let mapping = plan(&policy).unwrap().unwrap();
+    mapping.verify().unwrap();
+    // A pinned object at a name that the host's file system cannot hold.
+    let mut unnamed = mapping.clone();
+    let pinned = unnamed
+        .binds
+        .iter()
+        .position(|bind| bind.identity.is_some())
+        .unwrap();
+    unnamed.binds[pinned].source = "n".repeat(300);
+    let bind = &unnamed.binds[pinned];
+    let path = unnamed.children[bind.child].root.join(&bind.source);
+    let error = unnamed.verify().unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::Io, "{error}");
+    assert_eq!(
+        error.message(),
+        format!("cannot inspect {}", path.display())
+    );
+    let source = std::error::Error::source(&error).unwrap();
+    assert!(
+        source.downcast_ref::<std::io::Error>().is_some(),
+        "{source}"
+    );
+    // A pinned object that went.
+    fs::remove_dir(base.join("work/src/secret")).unwrap();
+    let error = mapping.verify().unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::Other, "{error}");
+    assert!(error.message().contains("no longer names"), "{error}");
+    // A link in its place that names itself, which a workload that may write the directory could
+    // put there, and through which the host reaches no object.
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink("secret", base.join("work/src/secret")).unwrap();
+        let error = mapping.verify().unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::Other, "{error}");
+        assert!(error.message().contains("no longer names"), "{error}");
+        let source = std::error::Error::source(&error).unwrap();
+        assert_eq!(
+            source
+                .downcast_ref::<std::io::Error>()
+                .unwrap()
+                .raw_os_error(),
+            Some(nix::errno::Errno::ELOOP as i32)
+        );
+    }
+    // How the host failed to inspect an object tells whether its path still reaches it.
+    let path = base.join("work");
+    for (kind, expected) in [
+        (std::io::ErrorKind::NotFound, ErrorKind::Other),
+        (std::io::ErrorKind::NotADirectory, ErrorKind::Other),
+        (std::io::ErrorKind::PermissionDenied, ErrorKind::Other),
+        (std::io::ErrorKind::StorageFull, ErrorKind::Io),
+        (std::io::ErrorKind::OutOfMemory, ErrorKind::Io),
+        (std::io::ErrorKind::InvalidFilename, ErrorKind::Io),
+        (std::io::ErrorKind::Other, ErrorKind::Io),
+    ] {
+        let error = uninspected(&path, kind.into());
+        assert_eq!(error.kind(), expected, "{kind:?}");
+        let source = std::error::Error::source(&error).unwrap();
+        assert_eq!(
+            source.downcast_ref::<std::io::Error>().unwrap().kind(),
+            kind
+        );
+    }
+    // A path whose links loop, which the host reports with a code of its own.
+    #[cfg(unix)]
+    let looped = nix::errno::Errno::ELOOP as i32;
+    #[cfg(windows)]
+    let looped = windows_sys::Win32::Foundation::ERROR_CANT_RESOLVE_FILENAME as i32;
+    #[cfg(any(unix, windows))]
+    {
+        let error = uninspected(&path, std::io::Error::from_raw_os_error(looped));
+        assert_eq!(error.kind(), ErrorKind::Other, "{error}");
+        let source = std::error::Error::source(&error).unwrap();
+        assert_eq!(
+            source
+                .downcast_ref::<std::io::Error>()
+                .unwrap()
+                .raw_os_error(),
+            Some(looped)
+        );
+    }
+}
+
 /// A recorded plan with a read-only bind in a part of a child that the guest may write, which
 /// only the guest's bind mount would keep read-only, is refused before a guest runs.
 #[test]

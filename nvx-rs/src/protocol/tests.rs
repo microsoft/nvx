@@ -222,10 +222,12 @@ fn exec_payloads_match_their_vectors() {
 }
 
 /// Each `MAPS` vector decodes, with the host's and with the guest's decoder, to its values, and the
-/// host encodes a mapping table that holds its entries to its bytes.
+/// host encodes a mapping table that holds its entries to its bytes: the root of the export,
+/// which an empty source names, included.
 #[test]
 fn maps_payloads_match_their_vectors() {
-    for vector in of_kind(NVXC_V1, "MAPS", &["ONE_ENTRY", "TWO_ENTRIES", "CONTINUED"]) {
+    let names = ["ONE_ENTRY", "TWO_ENTRIES", "CONTINUED", "ROOT_SOURCE"];
+    for vector in of_kind(NVXC_V1, "MAPS", &names) {
         let name = vector.name;
         let mut values = vector.values();
         let first: u32 = values.number();
@@ -677,7 +679,6 @@ fn maps_payloads_enforce_agent_limits() {
     let limit = OUTER_MAX_PAYLOAD - APP_HEADER_LEN;
     let too_long = format!("/{}", "t".repeat(MAX_MAP_PATH_BYTES));
     for invalid in [
-        map("", "/w", false),
         map("/0", "/w", false),
         map("0", "w", false),
         map("0", &too_long, false),
@@ -695,12 +696,22 @@ fn maps_payloads_enforce_agent_limits() {
         map("0", "/w/", false),
         map("0", "/tmp/../etc", false),
         map("0", "/w/./x", false),
+        // Only an empty source names the export's root, whose target is as any other's.
+        map("/", "/w", false),
+        map("", "", false),
+        map("", "w", false),
+        map("", "/", false),
+        map("", "/w/", false),
     ] {
         assert!(
             encode_maps_payloads(std::slice::from_ref(&invalid), limit).is_err(),
             "{invalid:?}"
         );
     }
+    // An empty source names the export's root itself.
+    let root = map("", "/data", true);
+    let payloads = encode_maps_payloads(std::slice::from_ref(&root), limit).unwrap();
+    assert_eq!(decode_maps_payload(&payloads[0]).unwrap().maps, [root]);
     // Names that merely start with dots are ordinary components.
     let dotted = map("0/.config", "/home/..data/...", false);
     let payloads = encode_maps_payloads(std::slice::from_ref(&dotted), limit).unwrap();
@@ -726,7 +737,6 @@ fn maps_decoders_refuse_the_invalid_vectors() {
         "TOO_MANY_ENTRIES",
         "TRAILING_BYTE",
         "UNKNOWN_FLAG",
-        "EMPTY_SOURCE",
         "DOT_SOURCE",
         "DOT_DOT_SOURCE",
         "NUL_SOURCE",
@@ -1316,6 +1326,7 @@ fn exec_decoders_refuse_strings_with_the_same_messages() {
 #[test]
 fn host_maps_encoding_round_trips_through_the_guest_decoder() {
     let maps = [
+        map("", "/data", true),
         map("0/src", "/work", true),
         map("1/file", "/etc/value", false),
     ];
@@ -1325,6 +1336,11 @@ fn host_maps_encoding_round_trips_through_the_guest_decoder() {
     assert_eq!(
         decoded.maps,
         [
+            GuestHostMap {
+                source: Vec::new(),
+                target: b"/data".to_vec(),
+                read_only: true,
+            },
             GuestHostMap {
                 source: b"0/src".to_vec(),
                 target: b"/work".to_vec(),

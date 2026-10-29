@@ -16,7 +16,7 @@ use super::failure::{
 use super::records::{End, ProgressLog, Recorder, Tracker, abandon};
 use super::{ClonePlan, CloneUpper, MIB, Mismatch, SPARSE_WHAT, check_geometry};
 use crate::activation::ActivationRecord;
-use crate::error::{Error, Result};
+use crate::error::{Error, ErrorKind, Result};
 use crate::host::artifacts;
 use crate::host::filesystem;
 use crate::host::platform::{self, ReadyListener};
@@ -29,7 +29,7 @@ use crate::host::supervisor::{self, Inherited, Starting, VmmCommand};
 use crate::host::template::key::TemplateKey;
 use crate::host::template::manifest::BlockGeometry;
 use crate::host::template::store::{Acquired, Lease, SOCKET_PATH_LIMIT};
-use crate::protocol::CAPABILITY_LEN;
+use crate::protocol::{CAPABILITY_LEN, HostMap};
 
 /// A point of a clone's launch at which a test interrupts it, before the step that follows the
 /// point.
@@ -132,15 +132,20 @@ impl ClonePlan {
     /// which OpenVMM opens at their paths, as [Block devices by
     /// path](crate::host::template::Store#block-devices-by-path) describes, and the policy of the
     /// template's NIC, if it has one, without the guest's address, which OpenVMM takes from the
-    /// snapshot. Then come `--single-process`, the template's backend, CPU profile, and
-    /// processors, `--restore-snapshot` with the directory of the generation's snapshot,
-    /// [`ClonePlan::snapshot`], `--restore-memory` with the memory target, `--restore-ready-path`
-    /// with the endpoint of the restore-ready event, a boot console that discards its output, as
-    /// cold boots have, the control console at the launch's endpoint, which authenticates with
-    /// the capability that the VMM reads from its standard input, and the outcome report,
-    /// [`SandboxStore::outcome_path`](crate::host::store::SandboxStore::outcome_path). They name
-    /// no kernel, initramfs, kernel command line, or RAM, which the snapshot fixes. The VMM runs
-    /// in the sandbox's directory.
+    /// snapshot. The clone's export, if it has one, follows, bound to the template's dormant
+    /// filesystem slot: `--mount` with
+    /// [`GUEST_EXPORT`](crate::host::filesystem::GUEST_EXPORT), the exported directory, and its
+    /// mode, `rw` if a mapping writes it, and `ro` otherwise, then its hidden, re-exposed, and
+    /// writable paths, and the caller owner, as its [plan](ClonePlan::export) holds them; without
+    /// an export, the slot stays dormant. Then come `--single-process`, the template's backend,
+    /// CPU profile, and processors, `--restore-snapshot` with the directory of the generation's
+    /// snapshot, [`ClonePlan::snapshot`], `--restore-memory` with the memory target,
+    /// `--restore-ready-path` with the endpoint of the restore-ready event, a boot console that
+    /// discards its output, as cold boots have, the control console at the launch's endpoint,
+    /// which authenticates with the capability that the VMM reads from its standard input, and the
+    /// outcome report, [`SandboxStore::outcome_path`](crate::host::store::SandboxStore::outcome_path).
+    /// They name no kernel, initramfs, kernel command line, or RAM, which the snapshot fixes. The
+    /// VMM runs in the sandbox's directory.
     ///
     /// The claim of a scratch image passes to the VMM, which holds it until it exits. On Linux,
     /// the VMM inherits the claim's descriptor, which no argument names. On Windows, the claim's
@@ -199,8 +204,17 @@ impl ClonePlan {
     ///   not shorter than 108 bytes, as a Unix socket's address requires, or is not valid UTF-8,
     ///   as OpenVMM and the host take it, or if the path of the control socket holds a comma or an
     ///   equals sign, which OpenVMM's option `listen=<path>` cannot take,
-    ///   [`Evidence::EndpointBind`]; with [`ErrorKind::Unavailable`](crate::ErrorKind::Unavailable)
-    ///   for an `openvmm` whose path cannot be resolved, the host's evidence; with
+    ///   [`Evidence::EndpointBind`]; as
+    ///   [`ExportPlan::verify`](crate::host::filesystem::ExportPlan::verify) fails for the clone's
+    ///   export, if it has one: with [`ErrorKind::Other`](crate::ErrorKind::Other) for a
+    ///   directory, or a mapped or hidden object that the guest could move, that is no longer the
+    ///   object that the export's plan found, or that its path no longer reaches, and with
+    ///   [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported) for a read-only mapping that
+    ///   the host cannot keep read-only, or an owner that the host no longer supports,
+    ///   [`Evidence::InvalidMappings`], and with [`ErrorKind::Io`](crate::ErrorKind::Io) if an
+    ///   object cannot be inspected otherwise, the host's evidence; with
+    ///   [`ErrorKind::Unavailable`](crate::ErrorKind::Unavailable) for an `openvmm` whose path
+    ///   cannot be resolved, the host's evidence; with
     ///   [`ErrorKind::Other`](crate::ErrorKind::Other) if the sandbox's path no longer names the
     ///   directory that holds its lock, and if the progress log cannot be created, as when the
     ///   path names a directory that holds one already, the host's evidence;
@@ -266,10 +280,18 @@ impl ClonePlan {
             activation,
             capability,
             devices,
+            export,
         } = self;
-        let devices = device_arguments(&devices)
+        let mut devices = device_arguments(&devices)
             .attribute(Evidence::InvalidSettings)
             .map_err(unrecorded)?;
+        let table = match &export {
+            Some(export) => {
+                devices.extend(export.arguments());
+                export.table()
+            }
+            None => Vec::new(),
+        };
         let log = locked
             .open_dir()
             .and_then(|directory| ProgressLog::create(&directory, locked.dir(), lease.launch()))
@@ -386,13 +408,15 @@ impl ClonePlan {
             record,
             capability,
             tracker,
+            table,
         })
     }
 
     /// Refuses a launch of the plan through `lease` and `locked` that is not the one that the
     /// plan's lease reserves, or whose binding the sandbox does not record, one under `runtime`
-    /// that the template does not take, and one of a plan in RAM whose scratch device's file is
-    /// gone, as [`launch`](Self::launch) describes, without writing anything.
+    /// that the template does not take, one of a plan in RAM whose scratch device's file is gone,
+    /// and one of an export whose host objects changed since its plan found them, as
+    /// [`launch`](Self::launch) describes, without writing anything.
     fn check_launch(
         &self,
         lease: &Lease,
@@ -472,6 +496,18 @@ impl ClonePlan {
             && let Some(socket) = locked.reserved_socket()
         {
             self.check_sockets(socket, &locked.restore_ready_path())?;
+        }
+        // The objects of the export must still be those that its plan found, before each restore,
+        // as before each cold start: a refusal is of the request's mappings, which no longer name
+        // what they named, as for an object that moved or is missing, and any other failure is the
+        // host's own.
+        if let Some(export) = &self.export {
+            export.plan().verify().map_err(|error| match error.kind() {
+                ErrorKind::Other | ErrorKind::Unsupported => {
+                    Fault::new(Evidence::InvalidMappings, error)
+                }
+                _ => Fault::host(error),
+            })?;
         }
         Ok(())
     }
@@ -711,6 +747,9 @@ pub struct Restoring<'s> {
     pub(super) capability: [u8; CAPABILITY_LEN],
     /// How far the clone got, and how its failures are recorded.
     pub(super) tracker: Tracker,
+    /// The clone's mapping table, which its restore sequence sends once the clone is ready: empty
+    /// for a clone without an export.
+    pub(super) table: Vec<HostMap>,
 }
 
 impl<'s> Restoring<'s> {
