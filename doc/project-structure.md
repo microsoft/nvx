@@ -149,8 +149,7 @@ nvx/
 |   |   |-- time_abi.py          Time ABI harness checks and CPU profile guidance
 |   |   `-- ubuntu.py            Verified Ubuntu rootfs and EROFS preparation
 |   |-- setup/                   Host and Actions runner bootstrap scripts
-|   |   |-- setup-linux-mshv.sh   Linux/MSHV development-host bootstrap
-|   |   |-- setup-linux-runner.sh Linux/KVM or Linux/MSHV Actions runner bootstrap
+|   |   |-- setup-linux.sh        Linux/KVM or Linux/MSHV development-host and Actions runner bootstrap
 |   |   |-- setup-windows-whp.ps1 Windows/WHP development-host and Actions runner bootstrap
 |   |   `-- tool-versions.conf    Shared tool release and checksum pins
 |   |-- check_markdown_links.py  Markdown link, anchor, and doc/ path check run by CI

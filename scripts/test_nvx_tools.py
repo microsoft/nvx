@@ -8700,7 +8700,7 @@ class CiConfigurationTests(unittest.TestCase):
                 if name == "validate-runner":
                     inputs |= {
                         "rust-toolchain.toml",
-                        "scripts/setup/setup-linux-runner.sh",
+                        "scripts/setup/setup-linux.sh",
                         ".gitattributes",
                     }
             commands: set[str] = set()
@@ -12048,7 +12048,7 @@ python3() {
             BuildConstants.REPO_ROOT / "scripts" / "setup" / "setup-windows-whp.ps1"
         ).read_text(encoding="utf-8")
         linux_setup = (
-            BuildConstants.REPO_ROOT / "scripts" / "setup" / "setup-linux-runner.sh"
+            BuildConstants.REPO_ROOT / "scripts" / "setup" / "setup-linux.sh"
         ).read_text(encoding="utf-8")
         manifest = (
             BuildConstants.REPO_ROOT / "scripts" / "setup" / "tool-versions.conf"
@@ -12088,9 +12088,9 @@ python3() {
 
     def test_linux_unnamed_setup_defers_existing_runner_validation(self):
         linux_setup = (
-            BuildConstants.REPO_ROOT / "scripts" / "setup" / "setup-linux-runner.sh"
+            BuildConstants.REPO_ROOT / "scripts" / "setup" / "setup-linux.sh"
         ).read_text(encoding="utf-8")
-        environment_check = linux_setup.split("check_environment() {\n", 1)[1].split(
+        environment_check = linux_setup.split("check_runner_host() {\n", 1)[1].split(
             "\n}\n", 1
         )[0]
         runner_checks = environment_check.split(
@@ -12146,20 +12146,17 @@ python3() {
                     self.assertIn("work-checked", result.stdout)
 
     def test_linux_setup_installs_openvmm_perl_modules(self):
-        setup_directory = BuildConstants.REPO_ROOT / "scripts" / "setup"
-        configurations = (
-            (setup_directory / "setup-linux-runner.sh").read_text(encoding="utf-8"),
-            (setup_directory / "setup-linux-mshv.sh").read_text(encoding="utf-8"),
-        )
+        configuration = (
+            BuildConstants.REPO_ROOT / "scripts" / "setup" / "setup-linux.sh"
+        ).read_text(encoding="utf-8")
 
-        for configuration in configurations:
-            for package in (
-                "perl-FindBin",
-                "perl-IPC-Cmd",
-                "perl-Time-Piece",
-                "perl-lib",
-            ):
-                self.assertIn(package, configuration)
+        for package in (
+            "perl-FindBin",
+            "perl-IPC-Cmd",
+            "perl-Time-Piece",
+            "perl-lib",
+        ):
+            self.assertIn(package, configuration)
 
     def test_windows_runner_requires_inbox_pcat_firmware(self):
         windows_setup = (
@@ -12191,7 +12188,7 @@ python3() {
             / "action.yml"
         ).read_text(encoding="utf-8")
         linux_setup = (
-            BuildConstants.REPO_ROOT / "scripts" / "setup" / "setup-linux-runner.sh"
+            BuildConstants.REPO_ROOT / "scripts" / "setup" / "setup-linux.sh"
         ).read_text(encoding="utf-8")
 
         # Neither CI nor provisioning rejects a host without an invariant
@@ -12246,7 +12243,7 @@ python3() {
                         not invariant,
                     )
                     self.assertNotIn("::error::", result.stdout + result.stderr)
-                with self.subTest(flags=flags, check="setup-linux-runner"):
+                with self.subTest(flags=flags, check="setup-linux"):
                     result = subprocess.run(
                         [
                             "sh",
@@ -12651,7 +12648,7 @@ python3() {
 
     def test_runner_setups_install_backend_native_openvmm_targets(self):
         linux_setup = (
-            BuildConstants.REPO_ROOT / "scripts" / "setup" / "setup-linux-runner.sh"
+            BuildConstants.REPO_ROOT / "scripts" / "setup" / "setup-linux.sh"
         ).read_text(encoding="utf-8")
         windows_setup = (
             BuildConstants.REPO_ROOT / "scripts" / "setup" / "setup-windows-whp.ps1"
@@ -12677,10 +12674,11 @@ python3() {
         # Provisioning replaces a runner's registration, so the benchmark
         # runner keeps the role that CI requires only when setup registers it.
         linux_setup = (
-            BuildConstants.REPO_ROOT / "scripts" / "setup" / "setup-linux-runner.sh"
+            BuildConstants.REPO_ROOT / "scripts" / "setup" / "setup-linux.sh"
         ).read_text(encoding="utf-8")
         self.assertIn(
             "        --benchmark-runner)\n"
+            "            runner_option=$1\n"
             "            benchmark_runner=true\n"
             "            shift\n"
             "            ;;\n",
@@ -12694,21 +12692,40 @@ python3() {
             '                die "GitHub Actions runner labels are not validated"',
             linux_setup,
         )
-        start = linux_setup.index('\n[ "$benchmark_runner" = false ]')
-        end = linux_setup.index("\nfi\n", start) + len("\nfi\n")
-        labels = linux_setup[start:end]
+
+        def function(name: str) -> str:
+            body = linux_setup.split(f"\n{name}() {{\n", 1)[1].split("\n}\n", 1)[0]
+            return f"{name}() {{\n{body}\n}}\n"
+
         self.assertIn(
-            "\nexpected_runner_labels=linux,${backend},virtual-machine\n", labels
+            "\n    expected_runner_labels=linux,${backend},virtual-machine\n",
+            function("set_expected_runner_labels"),
+        )
+        self.assertIn(
+            "\n    set_expected_runner_labels\n", function("validate_options")
         )
         if os.name != "posix":
             return
 
         harness = (
             "set -eu\n"
-            "die() { printf 'error: %s\\n' \"$*\" >&2; exit 1; }\n"
-            "backend=$1\nrunner_name=$2\nbenchmark_runner=$3\n"
-            "runner_directory=/opt/nvx-runner\n"
-            f"{labels}"
+            + "".join(
+                function(name)
+                for name in (
+                    "die",
+                    "validate_runner_name",
+                    "append_runner_labels",
+                    "set_expected_runner_labels",
+                    "validate_options",
+                )
+            )
+            + "backend=$1\nrunner_name=$2\nbenchmark_runner=$3\n"
+            "configure_runner=false\n"
+            '[ -z "$runner_name" ] || configure_runner=true\n'
+            "runner_only=true\ncheck_only=false\nbundle_only=false\n"
+            "guest_bundle=\nextra_runner_labels=\n"
+            "development_option=\nrunner_option=\n"
+            "validate_options\n"
             'printf "%s\\n" "$expected_runner_labels"\n'
         )
         for backend, runner_name, benchmark_runner, expected in (
@@ -12831,8 +12848,7 @@ Write-Output (Get-ExpectedRunnerLabels -BenchmarkRunner)
             [toolchain],
         )
         for path, reader in (
-            (setup / "setup-linux-runner.sh", "\n    RUST_TOOLCHAIN=$tool_value\n"),
-            (setup / "setup-linux-mshv.sh", "\n    RUST_TOOLCHAIN=$tool_value\n"),
+            (setup / "setup-linux.sh", "\n    RUST_TOOLCHAIN=$tool_value\n"),
             (
                 setup / "setup-windows-whp.ps1",
                 '\n$RustToolchain = Get-ToolManifestValue $ToolManifest "rust.toolchain"\n',

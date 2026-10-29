@@ -48,8 +48,7 @@ runs:
           guest/common/nvx-container-launch-azurelinux \
           guest/common/nvx-sandbox-smoke guest/common/nvx-snapshot \
           guest/common/nvx-virtio-restore-probe \
-          scripts/setup/setup-linux-mshv.sh \
-          scripts/setup/setup-linux-runner.sh
+          scripts/setup/setup-linux.sh
         ${SHELLCHECK} --shell=bash \
           .github/actions/run-benchmark/forward-signals.sh \
           .github/specula/setup-runner.sh guest/ubuntu/nvx-bashrc \
@@ -70,8 +69,7 @@ runs:
           guest/common/nvx-container-launch-azurelinux \
           guest/common/nvx-sandbox-smoke guest/common/nvx-snapshot \
           guest/common/nvx-virtio-restore-probe \
-          scripts/setup/setup-linux-mshv.sh \
-          scripts/setup/setup-linux-runner.sh
+          scripts/setup/setup-linux.sh
         ${SHFMT} -d -ln bash -i 4 -ci \
           .github/actions/run-benchmark/forward-signals.sh \
           .github/specula/setup-runner.sh guest/ubuntu/nvx-bashrc \

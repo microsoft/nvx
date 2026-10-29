@@ -418,7 +418,7 @@ def load_config(path: str | Path) -> LinuxConfig | WindowsConfig:
 
 
 def source(path: str) -> bytes:
-    if path in {"setup-linux-runner.sh", "setup-windows-whp.ps1", "tool-versions.conf"}:
+    if path in {"setup-linux.sh", "setup-windows-whp.ps1", "tool-versions.conf"}:
         location = SETUP / path
     elif path == "rust-toolchain.toml":
         location = REPO / path
@@ -466,7 +466,7 @@ def linux_payload(
 ) -> tuple[bytes, dict[str, bytes], dict[str, bytes]]:
     files = {
         "config.json": configuration_bytes(config),
-        "setup-linux-runner.sh": source("setup-linux-runner.sh"),
+        "setup-linux.sh": source("setup-linux.sh"),
         "tool-versions.conf": source("tool-versions.conf"),
         "setup-data-disk.sh": source("linux/setup-data-disk.sh"),
         "bootstrap-runner.sh": source("linux/bootstrap-runner.sh"),

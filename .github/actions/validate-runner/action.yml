@@ -42,7 +42,7 @@ runs:
         test -n "${toolchain}"
         if ! rustup toolchain list | awk -v name="${toolchain}" \
           'index($1, name "-") == 1 { found = 1 } END { exit !found }'; then
-          echo "::error::Rust ${toolchain}, which rust-toolchain.toml pins, is not installed; rerun scripts/setup/setup-linux-runner.sh" >&2
+          echo "::error::Rust ${toolchain}, which rust-toolchain.toml pins, is not installed; rerun scripts/setup/setup-linux.sh --runner-only" >&2
           exit 1
         fi
         rust_version=$(rustc --version)

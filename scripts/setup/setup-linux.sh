@@ -2,6 +2,8 @@
 
 set -eu
 
+PYTHON_MINIMUM_VERSION=3.10.0
+
 script_directory=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 # The versions, artifacts, and checksums of the tools that this script
 # installs; stage the manifest next to the script.
@@ -9,17 +11,28 @@ tool_manifest=${script_directory}/tool-versions.conf
 tool_platform=linux-x86_64
 
 backend=
-benchmark_runner=false
 check_only=false
+runner_only=false
+# The last option given that only development-host or only runner mode takes.
+development_option=
+runner_option=
+
+workspace=${script_directory}/../..
+guest_bundle=
+bundle_only=false
+skip_build=false
+reconnect_required=false
+
+benchmark_runner=false
 configure_runner=false
 repository_url=https://github.com/microsoft/nvx
-legacy_runner_directory=${HOME}/actions-runner
 runner_directory=/opt/nvx-runner
 runner_directory_is_default=true
 runner_name=
 extra_runner_labels=
 runner_service_account=nvx-runner
 runner_token=
+runner_token_stdin=false
 runner_package_directory=
 removed_service_name=
 trusted_tool_root=/opt/nvx
@@ -31,11 +44,31 @@ runner_service_path=${trusted_cargo_home}/bin:/usr/local/sbin:/usr/local/bin:/us
 usage() {
     cat <<EOF
 Usage: $0 --backend kvm|mshv [options]
+       $0 --runner-only --backend kvm|mshv [runner options]
 
-Bootstrap a Linux host for NVX GitHub Actions jobs.
+Bootstrap a Linux host for NVX.
+
+Development-host mode, the default, prepares an existing NVX checkout for the
+current user: it installs the build dependencies, Docker with Buildx, and the
+pinned Rust tools, grants the user Docker and backend device access, and builds
+and validates NVX. Runner mode prepares a host for NVX GitHub Actions jobs and
+needs no checkout: it installs the build dependencies and a read-only Rust
+toolchain, and, with --runner-name, registers a runner whose jobs run as the
+dedicated ${runner_service_account} account, without sudo or Docker access.
 
 Options:
     --backend BACKEND       Virtualization backend: kvm or mshv
+    --check-only            Validate the host without changing it
+    -h, --help              Show this help
+
+Development-host options:
+    --workspace PATH        Existing NVX checkout (default: repository containing this script)
+    --guest-bundle PATH     Write or validate guest artifacts for a Windows host
+    --bundle-only           Write the bundle without provisioning or building
+    --skip-build            Configure and validate dependencies without building NVX
+
+Runner options:
+    --runner-only           Prepare an Actions runner host instead of a development host
     --runner-name NAME      Register a runner with this unique name
     --benchmark-runner      Use the backend's dedicated benchmark role instead
                             of the general role; requires --runner-name
@@ -43,8 +76,6 @@ Options:
     --repository-url URL    Runner repository URL (default: ${repository_url})
     --runner-directory PATH Runner installation path (default: ${runner_directory})
     --runner-token-stdin    Read a short-lived registration token from stdin
-    --check-only            Validate the host and configured runner without changes
-    -h, --help              Show this help
 EOF
 }
 
@@ -170,7 +201,8 @@ tool_manifest_artifact() {
 }
 
 # Pins every tool that this script installs before it inspects or changes
-# the host.
+# the host. Only runner mode installs sccache and the Actions runner, so only
+# it needs their pins.
 read_tool_versions() {
     load_tool_manifest
     tool_manifest_value rust.toolchain
@@ -181,6 +213,7 @@ read_tool_versions() {
     RUSTUP_VERSION=$tool_version
     RUSTUP_ARTIFACT=$tool_artifact
     RUSTUP_SHA256=$tool_sha256
+    [ "$runner_only" = true ] || return 0
     tool_manifest_artifact sccache
     SCCACHE_VERSION=$tool_version
     SCCACHE_ARTIFACT=$tool_artifact
@@ -232,8 +265,60 @@ append_runner_labels() {
     done
 }
 
+# Sets expected_runner_labels to the platform labels, exactly one runner role,
+# and the additional labels.
+set_expected_runner_labels() {
+    expected_runner_labels=linux,${backend},virtual-machine
+    # CI's platform jobs use a dedicated benchmark runner. Every other runner uses
+    # the complementary general role so unrelated jobs cannot occupy that runner.
+    if [ "$benchmark_runner" = true ]; then
+        expected_runner_labels=${expected_runner_labels},benchmark
+    else
+        expected_runner_labels=${expected_runner_labels},general
+    fi
+    if [ -n "$extra_runner_labels" ]; then
+        append_runner_labels "$extra_runner_labels"
+    fi
+}
+
+# Rejects options that the selected mode doesn't take, and invalid values,
+# before anything reads the manifest or inspects the host. In runner mode, it
+# also sets the runner's labels.
+validate_options() {
+    case "$backend" in
+        kvm | mshv) ;;
+        *) die "--backend must be kvm or mshv" ;;
+    esac
+    if [ "$runner_only" = false ]; then
+        [ -z "$runner_option" ] || die "${runner_option} requires --runner-only"
+        if [ "$bundle_only" = true ]; then
+            [ -n "$guest_bundle" ] || die "--bundle-only requires --guest-bundle"
+            [ "$check_only" = false ] ||
+                die "--bundle-only and --check-only cannot be combined"
+        fi
+        return 0
+    fi
+    [ -z "$development_option" ] ||
+        die "${development_option} cannot be combined with --runner-only"
+    if [ "$configure_runner" = true ]; then
+        [ -n "$runner_name" ] || die "--runner-name is required to configure a runner"
+        validate_runner_name "$runner_name"
+    fi
+    [ "$benchmark_runner" = false ] || [ -n "$runner_name" ] ||
+        die "--benchmark-runner requires --runner-name"
+    set_expected_runner_labels
+}
+
+# Runner mode runs unattended as the SSH administrator, so sudo must never
+# prompt there. Development-host mode may run as root or prompt for sudo.
 run_as_root() {
-    sudo -n "$@"
+    if [ "$runner_only" = true ]; then
+        sudo -n "$@"
+    elif [ "$(id -u)" -eq 0 ]; then
+        "$@"
+    else
+        sudo "$@"
+    fi
 }
 
 run_as_runner() {
@@ -253,6 +338,71 @@ run_runner_service() {
         cd "$runner_directory"
         run_as_root ./svc.sh "$@"
     )
+}
+
+# Runs a command as the owner of the tools that this script installs: root,
+# for a runner's trusted toolchain, or the current user on a development host.
+run_as_tool_owner() {
+    if [ "$runner_only" = true ]; then
+        run_as_root "$@"
+    else
+        "$@"
+    fi
+}
+
+# Runs a command of the Rust toolchain that this script installs: the runner's
+# trusted toolchain as root, or the current user's toolchain.
+run_rust_tool() {
+    if [ "$runner_only" = true ]; then
+        run_as_root env \
+            CARGO_HOME="$trusted_cargo_home" \
+            RUSTUP_HOME="$trusted_rustup_home" \
+            "$@"
+    else
+        "$@"
+    fi
+}
+
+# Runs a command as whoever builds NVX on this host: the runner service
+# account, with the runner service's environment, or the current session.
+run_as_builder() {
+    if [ "$runner_only" = true ]; then
+        run_as_runner "$@"
+    else
+        "$@"
+    fi
+}
+
+# Runs a command with the Rust targets that this mode's builds use appended:
+# the musl target of the guest binaries and, for runner jobs, the bare-metal
+# and UEFI targets of OpenVMM's tests.
+with_rust_targets() {
+    if [ "$runner_only" = true ]; then
+        "$@" x86_64-unknown-none x86_64-unknown-linux-musl x86_64-unknown-uefi
+    else
+        "$@" x86_64-unknown-linux-musl
+    fi
+}
+
+# Downloads a release artifact from a URL into a file and checks the pinned
+# SHA-256 checksum before anything runs or unpacks it.
+download_verified() {
+    require_command curl
+    run_as_tool_owner curl --fail --location --proto '=https' --tlsv1.2 \
+        --silent --show-error --output "$3" "$1"
+    printf '%s  %s\n' "$2" "$3" | run_as_tool_owner sha256sum --check - ||
+        die "SHA-256 checksum mismatch: $1"
+}
+
+# Adds the user who runs this script to a group. The membership applies only
+# to the user's new sessions, so setup asks them to reconnect.
+grant_group() {
+    user_name=${SUDO_USER:-$(id -un)}
+    if [ "$user_name" != root ] &&
+        ! id -nG "$user_name" | tr ' ' '\n' | grep -Fxq "$1"; then
+        run_as_root usermod -aG "$1" "$user_name"
+        reconnect_required=true
+    fi
 }
 
 validate_runner_state_paths() {
@@ -359,14 +509,11 @@ prepare_runner_package() {
         "${trusted_tool_root}/runner-package.XXXXXX")
     runner_package_archive=${runner_package_directory}/runner.tar.gz
     runner_package_root=${runner_package_directory}/root
-    runner_package_url=https://github.com/actions/runner/releases/download/v${RUNNER_VERSION}/${RUNNER_ARTIFACT}
     trap 'if [ -n "$runner_package_directory" ]; then run_as_root rm -rf "$runner_package_directory"; fi' \
         0 HUP INT TERM
-    run_as_root curl --fail --location --proto '=https' --tlsv1.2 \
-        --silent --show-error \
-        --output "$runner_package_archive" "$runner_package_url"
-    printf '%s  %s\n' "$RUNNER_SHA256" "$runner_package_archive" |
-        run_as_root sha256sum --check -
+    download_verified \
+        "https://github.com/actions/runner/releases/download/v${RUNNER_VERSION}/${RUNNER_ARTIFACT}" \
+        "$RUNNER_SHA256" "$runner_package_archive"
     run_as_root mkdir -p "$runner_package_root"
     run_as_root tar --extract --gzip \
         --file "$runner_package_archive" \
@@ -561,90 +708,75 @@ configure_runner_service() {
     run_as_root systemctl start "$service_name"
 }
 
+# Installs the build dependencies of both modes and each mode's own: Docker
+# with Buildx, with which a development host builds guest artifacts, or, with
+# tdnf, the Actions runner's dependencies, which installdependencies.sh does
+# not install on Azure Linux.
 install_packages() {
     if command -v apt-get >/dev/null 2>&1; then
+        set -- bc binutils bison build-essential ca-certificates cmake cpio curl \
+            diffutils flex git gzip iproute2 iptables libarchive-tools libelf-dev \
+            libssl-dev make ninja-build patch perl pkg-config protobuf-compiler \
+            python3 rsync tar util-linux xz-utils zstd
+        if [ "$runner_only" = false ]; then
+            set -- "$@" docker-buildx docker.io
+        fi
         run_as_root apt-get update
-        run_as_root env DEBIAN_FRONTEND=noninteractive apt-get install -y \
-            bc binutils bison build-essential ca-certificates cmake cpio curl diffutils \
-            flex git gzip iproute2 iptables \
-            libarchive-tools libelf-dev libssl-dev make ninja-build patch perl \
-            pkg-config protobuf-compiler python3 rsync tar util-linux xz-utils \
-            zstd
+        run_as_root env DEBIAN_FRONTEND=noninteractive apt-get install -y "$@"
     elif command -v tdnf >/dev/null 2>&1; then
-        run_as_root tdnf install -y \
-            bc binutils bison ca-certificates cmake cpio curl diffutils \
-            elfutils-libelf-devel findutils flex gcc \
-            gcc-c++ git glibc-devel glibc-iconv gzip icu iproute iptables \
-            kernel-headers libarchive libarchive-devel lttng-ust make \
-            ninja-build openssl openssl-devel patch perl perl-FindBin \
-            perl-IPC-Cmd perl-Time-Piece perl-lib pkgconf pkgconf-pkg-config \
-            protobuf python3 rsync shadow-utils tar \
-            util-linux which xz zstd
-    elif command -v dnf >/dev/null 2>&1; then
-        run_as_root dnf install -y \
-            bc binutils bison ca-certificates cmake cpio curl diffutils \
+        set -- bc binutils bison ca-certificates cmake cpio curl diffutils \
             elfutils-libelf-devel findutils flex gcc gcc-c++ git glibc-devel \
-            gzip iproute iptables kernel-headers libarchive libarchive-devel \
-            make ninja-build openssl openssl-devel patch perl \
-            pkgconf pkgconf-pkg-config protobuf-compiler python3 rsync \
-            shadow-utils tar util-linux which xz zstd
+            glibc-iconv gzip iproute iptables kernel-headers libarchive \
+            libarchive-devel make ninja-build openssl openssl-devel patch perl \
+            perl-FindBin perl-IPC-Cmd perl-Time-Piece perl-lib pkgconf \
+            pkgconf-pkg-config protobuf python3 rsync shadow-utils tar util-linux \
+            which xz zstd
+        if [ "$runner_only" = true ]; then
+            set -- "$@" icu lttng-ust
+        else
+            set -- "$@" docker-buildx docker-cli moby-engine
+        fi
+        run_as_root tdnf install -y "$@"
+    elif command -v dnf >/dev/null 2>&1; then
+        set -- bc binutils bison ca-certificates cmake cpio curl diffutils \
+            elfutils-libelf-devel findutils flex gcc gcc-c++ git glibc-devel gzip \
+            iproute iptables kernel-headers libarchive libarchive-devel make \
+            ninja-build openssl openssl-devel patch perl pkgconf \
+            pkgconf-pkg-config protobuf-compiler python3 rsync shadow-utils tar \
+            util-linux which xz zstd
+        if [ "$runner_only" = false ]; then
+            set -- "$@" docker-buildx moby-engine
+        fi
+        run_as_root dnf install -y "$@"
     else
         die "supported package manager not found (apt-get, dnf, or tdnf)"
     fi
 }
 
-install_rust_tools() {
-    rustup=${trusted_cargo_home}/bin/rustup
-    cargo=${trusted_cargo_home}/bin/cargo
-    rustc=${trusted_cargo_home}/bin/rustc
-    nextest=${trusted_cargo_home}/bin/cargo-nextest
+# Installs the pinned rustup with the pinned Rust release as its default
+# toolchain.
+install_rustup() {
+    if [ "$runner_only" = true ]; then
+        installer_directory=$trusted_tool_root
+    else
+        installer_directory=${TMPDIR:-/tmp}
+    fi
+    installer=$(run_as_tool_owner mktemp \
+        "${installer_directory}/rustup-init-${RUSTUP_VERSION}.XXXXXX")
+    trap 'run_as_tool_owner rm -f "$installer"' 0 HUP INT TERM
+    download_verified \
+        "https://static.rust-lang.org/rustup/archive/${RUSTUP_VERSION}/${RUSTUP_ARTIFACT}" \
+        "$RUSTUP_SHA256" "$installer"
+    run_as_tool_owner chmod 0755 "$installer"
+    run_rust_tool "$installer" -y --no-modify-path --profile minimal \
+        --default-toolchain "$RUST_TOOLCHAIN"
+    run_as_tool_owner rm -f "$installer"
+    trap - 0 HUP INT TERM
+}
+
+# Installs the pinned sccache release into the trusted toolchain.
+install_sccache() {
     sccache=${trusted_cargo_home}/bin/sccache
-    run_as_root mkdir -p "$trusted_cargo_home" "$trusted_rustup_home"
-
-    if [ ! -x "$rustup" ]; then
-        installer=${trusted_tool_root}/rustup-init-${RUSTUP_VERSION}
-        installer_url=https://static.rust-lang.org/rustup/archive/${RUSTUP_VERSION}/${RUSTUP_ARTIFACT}
-        run_as_root curl --fail --location --proto '=https' --tlsv1.2 \
-            --silent --show-error --output "$installer" "$installer_url"
-        printf '%s  %s\n' "$RUSTUP_SHA256" "$installer" |
-            run_as_root sha256sum --check -
-        run_as_root chmod 0755 "$installer"
-        run_as_root env \
-            CARGO_HOME="$trusted_cargo_home" \
-            RUSTUP_HOME="$trusted_rustup_home" \
-            "$installer" -y --no-modify-path --profile minimal \
-            --default-toolchain "$RUST_TOOLCHAIN"
-        run_as_root rm -f "$installer"
-    fi
-
-    run_as_root env \
-        CARGO_HOME="$trusted_cargo_home" \
-        RUSTUP_HOME="$trusted_rustup_home" \
-        "$rustup" toolchain install "$RUST_TOOLCHAIN" --profile minimal \
-        --no-self-update
-    run_as_root env \
-        CARGO_HOME="$trusted_cargo_home" \
-        RUSTUP_HOME="$trusted_rustup_home" \
-        "$rustup" target add --toolchain "$RUST_TOOLCHAIN" \
-        x86_64-unknown-none \
-        x86_64-unknown-linux-musl \
-        x86_64-unknown-uefi
-
-    rust_version=$(run_as_root env \
-        CARGO_HOME="$trusted_cargo_home" \
-        RUSTUP_HOME="$trusted_rustup_home" \
-        RUSTUP_TOOLCHAIN="$RUST_TOOLCHAIN" \
-        "$rustc" --version | awk '{print $2}')
-    [ "$rust_version" = "$RUST_TOOLCHAIN" ] ||
-        die "Rust ${RUST_TOOLCHAIN} is required, found ${rust_version}"
-    if [ ! -x "$nextest" ] ||
-        ! "$nextest" --version | grep -Fq "cargo-nextest ${CARGO_NEXTEST_VERSION}"; then
-        run_as_root env \
-            CARGO_HOME="$trusted_cargo_home" \
-            RUSTUP_HOME="$trusted_rustup_home" \
-            "$cargo" +"$RUST_TOOLCHAIN" install --locked --force cargo-nextest \
-            --version "$CARGO_NEXTEST_VERSION"
-    fi
     if [ ! -x "$sccache" ] ||
         ! "$sccache" --version | grep -Fq "sccache ${SCCACHE_VERSION}"; then
         (
@@ -653,13 +785,9 @@ install_rust_tools() {
             archive=${package_directory}/sccache.tar.gz
             root=${package_directory}/root
             trap 'run_as_root rm -rf "$package_directory"' 0 HUP INT TERM
-            run_as_root curl --fail --location --proto '=https' --tlsv1.2 \
-                --silent --show-error \
-                --output "$archive" \
-                "https://github.com/mozilla/sccache/releases/download/v${SCCACHE_VERSION}/${SCCACHE_ARTIFACT}"
-            actual_sha256=$(run_as_root sha256sum "$archive" | awk '{print $1}')
-            [ "$actual_sha256" = "$SCCACHE_SHA256" ] ||
-                die "sccache archive checksum mismatch: ${actual_sha256}"
+            download_verified \
+                "https://github.com/mozilla/sccache/releases/download/v${SCCACHE_VERSION}/${SCCACHE_ARTIFACT}" \
+                "$SCCACHE_SHA256" "$archive"
             run_as_root mkdir -p "$root"
             run_as_root tar --extract --gzip \
                 --file "$archive" \
@@ -670,8 +798,56 @@ install_rust_tools() {
             run_as_root install -m 0755 "$extracted" "$sccache"
         )
     fi
-    run_as_root chown -R root:root "$trusted_tool_root"
-    run_as_root chmod -R go-w "$trusted_tool_root"
+}
+
+# Installs the pinned Rust release with this mode's targets and the pinned
+# cargo-nextest: for the current user on a development host, or, for runner
+# jobs, with the pinned sccache as a toolchain that only root can modify.
+install_rust_tools() {
+    rust_bin=
+    if [ "$runner_only" = true ]; then
+        rust_bin=${trusted_cargo_home}/bin/
+        run_as_root mkdir -p "$trusted_cargo_home" "$trusted_rustup_home"
+    fi
+    if ! command -v "${rust_bin}rustup" >/dev/null 2>&1; then
+        install_rustup
+        if [ "$runner_only" = false ]; then
+            # shellcheck disable=SC1091
+            . "${HOME}/.cargo/env"
+        fi
+    fi
+
+    run_rust_tool "${rust_bin}rustup" toolchain install "$RUST_TOOLCHAIN" \
+        --profile minimal --no-self-update
+    with_rust_targets run_rust_tool "${rust_bin}rustup" target add \
+        --toolchain "$RUST_TOOLCHAIN"
+    rust_version=$(run_rust_tool env RUSTUP_TOOLCHAIN="$RUST_TOOLCHAIN" \
+        "${rust_bin}rustc" --version | awk '{print $2}')
+    [ "$rust_version" = "$RUST_TOOLCHAIN" ] ||
+        die "Rust ${RUST_TOOLCHAIN} is required, found ${rust_version}"
+    # Run cargo-nextest itself, as the invoking user: cargo reads the
+    # configuration of the current directory, such as its aliases, which
+    # another user, such as a runner's job, may control.
+    if ! "${rust_bin}cargo-nextest" --version 2>/dev/null |
+        grep -Fq "cargo-nextest ${CARGO_NEXTEST_VERSION}"; then
+        run_rust_tool "${rust_bin}cargo" +"$RUST_TOOLCHAIN" install --locked \
+            --force cargo-nextest --version "$CARGO_NEXTEST_VERSION"
+    fi
+    if [ "$runner_only" = true ]; then
+        install_sccache
+        run_as_root chown -R root:root "$trusted_tool_root"
+        run_as_root chmod -R go-w "$trusted_tool_root"
+    fi
+}
+
+# Starts Docker and lets the user who runs this script build guest artifacts
+# with it.
+configure_docker_access() {
+    require_command systemctl
+    run_as_root systemctl enable --now docker
+    getent group docker >/dev/null 2>&1 ||
+        die "the Docker package did not create its access group"
+    grant_group docker
 }
 
 restrict_docker_access() {
@@ -681,6 +857,9 @@ restrict_docker_access() {
     fi
 }
 
+# Lets only the backend's group open the backend's device, now and after every
+# boot, and makes that group the runner service account's only supplementary
+# group, or adds the user who runs this script to it.
 configure_backend_access() {
     device=/dev/${backend}
     module=${backend}
@@ -701,7 +880,11 @@ configure_backend_access() {
     run_as_root udevadm trigger --name-match="$backend"
     run_as_root chgrp "$backend" "$device"
     run_as_root chmod 0660 "$device"
-    run_as_root usermod -G "$backend" "$runner_service_account"
+    if [ "$runner_only" = true ]; then
+        run_as_root usermod -G "$backend" "$runner_service_account"
+    else
+        grant_group "$backend"
+    fi
 }
 
 install_runner() {
@@ -769,34 +952,64 @@ install_runner() {
     configure_runner_service
 }
 
-check_environment() {
+check_platform() {
     [ "$(uname -s)" = Linux ] || die "this script requires Linux"
     [ "$(uname -m)" = x86_64 ] || die "this script requires x86_64"
-    for command_name in python3 git curl diff rustup cargo cargo-nextest sccache gcc make ld \
-        bison flex cpio gzip sha256sum tar xz zstd systemctl; do
+}
+
+# Checks the Python release and the commands that both modes need, and those
+# that the caller names.
+check_host_tools() {
+    for command_name in python3 git curl rustup cargo cargo-nextest gcc make ld \
+        bison flex cpio gzip sha256sum tar xz zstd "$@"; do
         require_command "$command_name"
     done
-
     python_version=$(python3 -c \
         'import sys; print(".".join(map(str, sys.version_info[:3])))')
-    version_at_least "$python_version" 3.10.0 ||
-        die "Python 3.10.0 or newer is required"
-    rust_version=$(run_as_runner env RUSTUP_TOOLCHAIN="$RUST_TOOLCHAIN" \
-        rustc --version | awk '{print $2}')
-    [ "$rust_version" = "$RUST_TOOLCHAIN" ] ||
-        die "Rust ${RUST_TOOLCHAIN} is required, found ${rust_version}"
-    run_as_runner cargo nextest --version |
-        grep -Fq "cargo-nextest ${CARGO_NEXTEST_VERSION}" ||
-        die "cargo-nextest ${CARGO_NEXTEST_VERSION} is not installed"
-    installed_targets=$(run_as_runner env RUSTUP_TOOLCHAIN="$RUST_TOOLCHAIN" \
-        rustup target list --installed)
-    for target in \
-        x86_64-unknown-none \
-        x86_64-unknown-linux-musl \
-        x86_64-unknown-uefi; do
+    version_at_least "$python_version" "$PYTHON_MINIMUM_VERSION" ||
+        die "Python ${PYTHON_MINIMUM_VERSION} or newer is required"
+}
+
+# Checks that installed_targets lists every target given.
+check_rust_targets() {
+    for target in "$@"; do
         printf '%s\n' "$installed_targets" | grep -Fxq "$target" ||
             die "Rust target ${target} is not installed"
     done
+}
+
+# Checks that whoever builds NVX on this host runs the pinned Rust release,
+# with this mode's targets, and the pinned cargo-nextest.
+check_rust_tools() {
+    rust_version=$(run_as_builder env RUSTUP_TOOLCHAIN="$RUST_TOOLCHAIN" \
+        rustc --version | awk '{print $2}')
+    [ "$rust_version" = "$RUST_TOOLCHAIN" ] ||
+        die "Rust ${RUST_TOOLCHAIN} is required, found ${rust_version}"
+    run_as_builder cargo nextest --version |
+        grep -Fq "cargo-nextest ${CARGO_NEXTEST_VERSION}" ||
+        die "cargo-nextest ${CARGO_NEXTEST_VERSION} is not installed"
+    installed_targets=$(run_as_builder env RUSTUP_TOOLCHAIN="$RUST_TOOLCHAIN" \
+        rustup target list --installed)
+    with_rust_targets check_rust_targets
+}
+
+# Checks that whoever builds NVX on this host can open the backend's device.
+check_backend_access() {
+    device=/dev/${backend}
+    [ -c "$device" ] || die "${device} is not a character device"
+    if [ "$runner_only" = true ]; then
+        run_as_runner sh -c "test -r ${device} && test -w ${device}" ||
+            die "${runner_service_account} cannot access ${device}"
+    else
+        [ -r "$device" ] && [ -w "$device" ] ||
+            die "current session cannot access ${device}"
+    fi
+}
+
+check_runner_host() {
+    check_platform
+    check_host_tools diff sccache systemctl
+    check_rust_tools
     run_as_runner sccache --version |
         grep -Fq "sccache ${SCCACHE_VERSION}" ||
         die "sccache ${SCCACHE_VERSION} is not installed"
@@ -806,9 +1019,7 @@ check_environment() {
         die "runner service account can modify trusted Cargo"
     run_as_runner test ! -w "$trusted_rustup_home" ||
         die "runner service account can modify trusted Rustup state"
-    run_as_runner sh -c \
-        "test -r /dev/${backend} && test -w /dev/${backend}" ||
-        die "${runner_service_account} cannot access /dev/${backend}"
+    check_backend_access
     if run_as_runner sudo -n true >/dev/null 2>&1; then
         die "runner service account has passwordless sudo access"
     fi
@@ -927,6 +1138,102 @@ check_environment() {
     fi
 }
 
+# Checks that the current session can build guest artifacts with Docker and
+# Buildx.
+check_docker() {
+    require_command docker
+    docker version >/dev/null 2>&1 ||
+        die "Docker is not available to the current session"
+    docker buildx version >/dev/null 2>&1 || die "Docker Buildx is not installed"
+}
+
+check_development_host() {
+    check_platform
+    [ -f "${workspace}/scripts/nvx.py" ] ||
+        die "NVX checkout not found at ${workspace}"
+    [ -f "${workspace}/openvmm/Cargo.toml" ] ||
+        die "OpenVMM submodule is not initialized"
+    check_backend_access
+    check_host_tools
+    check_rust_tools
+    check_docker
+
+    (
+        cd "$workspace"
+        python3 scripts/nvx.py verify
+    )
+}
+
+check_build() {
+    (
+        cd "$workspace"
+        RUSTUP_TOOLCHAIN=$RUST_TOOLCHAIN cargo build --release --locked --features cli \
+            --manifest-path nvx-rs/Cargo.toml --target-dir nvx-rs/target
+        # Packaging and the adversarial executor take only an nvx-rs whose
+        # provenance binds it to the checkout's sources.
+        RUSTUP_TOOLCHAIN=$RUST_TOOLCHAIN NVX_RS=nvx-rs/target/release/nvx-rs \
+            python3 scripts/nvx.py record-nvx-rs-provenance
+        nvx-rs/target/release/nvx-rs run --hypervisor "$backend" --dry-run
+    )
+}
+
+build_nvx() {
+    check_docker
+    (
+        cd "$workspace"
+        RUSTUP_TOOLCHAIN=$RUST_TOOLCHAIN python3 scripts/nvx.py build --guest all
+    )
+}
+
+check_guest_bundle() {
+    bundle_path=$1
+    [ -d "$bundle_path" ] || die "guest bundle not found: $bundle_path"
+    for name in vmlinux vmlinux.config vmlinux.provenance.json initramfs.cpio.gz \
+        initramfs.cpio.gz.packages.json initramfs.provenance.json initramfs-ubuntu.cpio.gz \
+        initramfs-ubuntu.cpio.gz.packages.json ubuntu-distro.erofs \
+        ubuntu-distro.erofs.manifest.json initramfs-azurelinux.cpio.gz \
+        initramfs-azurelinux.cpio.gz.packages.json REVISION SHA256SUMS; do
+        [ -f "${bundle_path}/${name}" ] ||
+            die "missing guest bundle file: ${bundle_path}/${name}"
+    done
+    (
+        cd "$bundle_path"
+        sha256sum --check SHA256SUMS
+    ) || die "guest bundle checksum validation failed"
+    bundle_revision=$(cat "${bundle_path}/REVISION")
+    workspace_revision=$(git -C "$workspace" rev-parse HEAD)
+    [ "$bundle_revision" = "$workspace_revision" ] ||
+        die "guest bundle revision does not match the NVX checkout"
+}
+
+create_guest_bundle() {
+    bundle_path=$1
+    if [ -e "$bundle_path" ] &&
+        find "$bundle_path" -mindepth 1 -print -quit | grep -q .; then
+        die "guest bundle directory is not empty: $bundle_path"
+    fi
+    mkdir -p "$bundle_path"
+    for name in vmlinux vmlinux.config vmlinux.provenance.json initramfs.cpio.gz \
+        initramfs.cpio.gz.packages.json initramfs.provenance.json initramfs-ubuntu.cpio.gz \
+        initramfs-ubuntu.cpio.gz.packages.json ubuntu-distro.erofs \
+        ubuntu-distro.erofs.manifest.json initramfs-azurelinux.cpio.gz \
+        initramfs-azurelinux.cpio.gz.packages.json; do
+        source_path="${workspace}/build/${name}"
+        [ -f "$source_path" ] || die "missing guest artifact: $source_path"
+        cp "$source_path" "$bundle_path"
+    done
+    git -C "$workspace" rev-parse HEAD >"${bundle_path}/REVISION"
+    (
+        cd "$bundle_path"
+        sha256sum vmlinux vmlinux.config vmlinux.provenance.json initramfs.cpio.gz \
+            initramfs.cpio.gz.packages.json initramfs.provenance.json initramfs-ubuntu.cpio.gz \
+            initramfs-ubuntu.cpio.gz.packages.json ubuntu-distro.erofs \
+            ubuntu-distro.erofs.manifest.json initramfs-azurelinux.cpio.gz \
+            initramfs-azurelinux.cpio.gz.packages.json REVISION >SHA256SUMS
+    )
+    check_guest_bundle "$bundle_path"
+}
+
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --backend)
@@ -934,18 +1241,51 @@ while [ "$#" -gt 0 ]; do
             backend=$2
             shift 2
             ;;
+        --check-only)
+            check_only=true
+            shift
+            ;;
+        --workspace)
+            [ "$#" -ge 2 ] || die "--workspace requires a path"
+            development_option=$1
+            workspace=$2
+            shift 2
+            ;;
+        --guest-bundle)
+            [ "$#" -ge 2 ] || die "--guest-bundle requires a path"
+            development_option=$1
+            guest_bundle=$2
+            shift 2
+            ;;
+        --bundle-only)
+            development_option=$1
+            bundle_only=true
+            shift
+            ;;
+        --skip-build)
+            development_option=$1
+            skip_build=true
+            shift
+            ;;
+        --runner-only)
+            runner_only=true
+            shift
+            ;;
         --runner-name)
             [ "$#" -ge 2 ] || die "--runner-name requires a value"
+            runner_option=$1
             runner_name=$2
             configure_runner=true
             shift 2
             ;;
         --benchmark-runner)
+            runner_option=$1
             benchmark_runner=true
             shift
             ;;
         --extra-runner-labels)
             [ "$#" -ge 2 ] || die "--extra-runner-labels requires a value"
+            runner_option=$1
             extra_runner_labels=$2
             [ -n "$extra_runner_labels" ] ||
                 die "--extra-runner-labels requires a nonempty value"
@@ -953,23 +1293,21 @@ while [ "$#" -gt 0 ]; do
             ;;
         --repository-url)
             [ "$#" -ge 2 ] || die "--repository-url requires a value"
+            runner_option=$1
             repository_url=$2
             shift 2
             ;;
         --runner-directory)
             [ "$#" -ge 2 ] || die "--runner-directory requires a value"
+            runner_option=$1
             runner_directory=$2
             runner_directory_is_default=false
             shift 2
             ;;
         --runner-token-stdin)
+            runner_option=$1
+            runner_token_stdin=true
             configure_runner=true
-            IFS= read -r runner_token || die "could not read runner token from stdin"
-            runner_token=$(printf '%s' "$runner_token" | tr -d '\r\n')
-            shift
-            ;;
-        --check-only)
-            check_only=true
             shift
             ;;
         -h | --help)
@@ -982,51 +1320,87 @@ while [ "$#" -gt 0 ]; do
     esac
 done
 
-case "$backend" in
-    kvm | mshv) ;;
-    *) die "--backend must be kvm or mshv" ;;
-esac
+validate_options
+# Only a valid runner invocation consumes the token, so a misplaced option
+# never waits for one.
+if [ "$runner_token_stdin" = true ]; then
+    IFS= read -r runner_token || die "could not read runner token from stdin"
+    runner_token=$(printf '%s' "$runner_token" | tr -d '\r\n')
+fi
 read_tool_versions
-report_invariant_tsc /proc/cpuinfo
-[ "$(id -u)" -ne 0 ] || die "run this script as the SSH administrator, not root"
-require_command sudo
-sudo -n true || die "passwordless sudo is required"
-if [ "$configure_runner" = true ]; then
-    [ -n "$runner_name" ] || die "--runner-name is required to configure a runner"
-    validate_runner_name "$runner_name"
-fi
-[ "$benchmark_runner" = false ] || [ -n "$runner_name" ] ||
-    die "--benchmark-runner requires --runner-name"
-runner_cargo_home=${runner_directory}/_work/_temp/cargo-home
-runner_sccache_dir=${runner_directory}/_work/_sccache
-runner_labels_file=${runner_directory}/.nvx-labels
-expected_runner_labels=linux,${backend},virtual-machine
-# CI's platform jobs use a dedicated benchmark runner. Every other runner uses
-# the complementary general role so unrelated jobs cannot occupy that runner.
-if [ "$benchmark_runner" = true ]; then
-    expected_runner_labels=${expected_runner_labels},benchmark
-else
-    expected_runner_labels=${expected_runner_labels},general
-fi
-if [ -n "$extra_runner_labels" ]; then
-    append_runner_labels "$extra_runner_labels"
-fi
 
-if [ "$check_only" = false ]; then
-    install_packages
-    configure_runner_account
-    install_rust_tools
-    restrict_docker_access
-    configure_backend_access
-    if [ "$configure_runner" = true ]; then
-        install_runner
+if [ "$runner_only" = true ]; then
+    report_invariant_tsc /proc/cpuinfo
+    [ "$(id -u)" -ne 0 ] || die "run this script as the SSH administrator, not root"
+    require_command sudo
+    sudo -n true || die "passwordless sudo is required"
+    legacy_runner_directory=${HOME}/actions-runner
+    runner_cargo_home=${runner_directory}/_work/_temp/cargo-home
+    runner_sccache_dir=${runner_directory}/_work/_sccache
+    runner_labels_file=${runner_directory}/.nvx-labels
+
+    if [ "$check_only" = false ]; then
+        install_packages
+        configure_runner_account
+        install_rust_tools
+        restrict_docker_access
+        configure_backend_access
+        if [ "$configure_runner" = true ]; then
+            install_runner
+        fi
+    elif ! getent passwd "$runner_service_account" >/dev/null 2>&1; then
+        die "runner service account is not configured: ${runner_service_account}"
     fi
-elif ! getent passwd "$runner_service_account" >/dev/null 2>&1; then
-    die "runner service account is not configured: ${runner_service_account}"
+
+    export PATH="$runner_service_path"
+    export CARGO_HOME="$runner_cargo_home"
+    export RUSTUP_HOME="$trusted_rustup_home"
+    check_runner_host
+    printf 'NVX_RUNNER_SETUP_COMPLETE=1\n'
+    exit 0
 fi
 
-export PATH="$runner_service_path"
-export CARGO_HOME="$runner_cargo_home"
-export RUSTUP_HOME="$trusted_rustup_home"
-check_environment
-printf 'NVX_RUNNER_SETUP_COMPLETE=1\n'
+resolved_workspace=$(CDPATH='' cd -- "$workspace" 2>/dev/null && pwd) ||
+    die "workspace directory not found: $workspace"
+workspace=$resolved_workspace
+
+if [ "$bundle_only" = true ]; then
+    create_guest_bundle "$guest_bundle"
+    printf 'NVX_GUEST_BUNDLE=%s\n' "$guest_bundle"
+    exit 0
+fi
+
+if [ "$check_only" = true ]; then
+    check_development_host
+    if [ "$skip_build" = false ]; then
+        check_build
+    fi
+    if [ -n "$guest_bundle" ]; then
+        check_guest_bundle "$guest_bundle"
+    fi
+    printf 'NVX_SETUP_CHECK=ok\n'
+    exit 0
+fi
+
+if [ "$(id -u)" -ne 0 ]; then
+    require_command sudo
+fi
+install_packages
+install_rust_tools
+configure_docker_access
+configure_backend_access
+if [ "$reconnect_required" = true ]; then
+    printf '%s\n' \
+        'NVX_SETUP_RECONNECT_REQUIRED=1' \
+        "Reconnect so the docker and ${backend} group memberships apply, then rerun this script."
+    exit 20
+fi
+if [ "$skip_build" = false ]; then
+    build_nvx
+    check_build
+fi
+if [ -n "$guest_bundle" ]; then
+    create_guest_bundle "$guest_bundle"
+fi
+check_development_host
+printf 'NVX_SETUP_COMPLETE=1\n'

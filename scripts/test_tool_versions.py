@@ -7,8 +7,9 @@ platforms, that the POSIX shell and PowerShell readers in the setup scripts
 accept, reject, and resolve manifests exactly as the reference reader below
 does, that each setup script reads the manifest before it inspects or changes
 the host, that no setup lets rustup update itself, and that no script,
-workflow, or guide hard-codes a pin. Runner-label selection and fresh-install
-directory checks are exercised without provisioning a host.
+workflow, or guide hard-codes a pin. Runner-label selection, the options that
+each mode of the Linux setup accepts, and fresh-install directory checks are
+exercised without provisioning a host.
 """
 
 from __future__ import annotations
@@ -25,8 +26,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SETUP = REPO_ROOT / "scripts" / "setup"
 MANIFEST = SETUP / "tool-versions.conf"
-LINUX_RUNNER = SETUP / "setup-linux-runner.sh"
-LINUX_MSHV = SETUP / "setup-linux-mshv.sh"
+LINUX = SETUP / "setup-linux.sh"
 WINDOWS = SETUP / "setup-windows-whp.ps1"
 SPECULA = REPO_ROOT / ".github" / "specula" / "setup-runner.sh"
 COPILOT_SETUP = REPO_ROOT / ".github" / "workflows" / "copilot-setup-steps.yml"
@@ -567,20 +567,11 @@ class ToolManifestReaderTests(unittest.TestCase):
                     )
                 index += 1
 
-    def test_linux_setups_share_one_manifest_reader(self):
-        runner = LINUX_RUNNER.read_text(encoding="utf-8")
-        mshv = LINUX_MSHV.read_text(encoding="utf-8")
-        for name in _SHELL_READER_FUNCTIONS:
-            with self.subTest(function=name):
-                self.assertEqual(
-                    _shell_function(runner, name), _shell_function(mshv, name)
-                )
-
     def test_shell_reader_matches_the_reference_reader(self):
         shells = _posix_shells()
         if not shells:
             self.skipTest("a POSIX shell is unavailable")
-        source = LINUX_RUNNER.read_text(encoding="utf-8")
+        source = LINUX.read_text(encoding="utf-8")
         functions = "".join(
             _shell_function(source, name) for name in _SHELL_READER_FUNCTIONS
         )
@@ -620,7 +611,7 @@ class ToolManifestReaderTests(unittest.TestCase):
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self._assert_reader_output(result.stdout, native_paths=True)
 
-    def test_linux_setups_pin_their_tools_to_the_manifest(self):
+    def test_linux_setup_pins_its_tools_to_the_manifest(self):
         shells = _posix_shells()
         if not shells:
             self.skipTest("a POSIX shell is unavailable")
@@ -639,29 +630,32 @@ class ToolManifestReaderTests(unittest.TestCase):
             pins[f"{prefix}_VERSION"] = artifact.version
             pins[f"{prefix}_ARTIFACT"] = artifact.name
             pins[f"{prefix}_SHA256"] = artifact.sha256
-        mshv_pins = {
+        development_pins = {
             name: value
             for name, value in pins.items()
             if not name.startswith(("SCCACHE_", "RUNNER_"))
         }
         incomplete = _with_line(text, "sccache.artifacts.linux-x86_64.sha256", None)
-        for script, expected in ((LINUX_RUNNER, pins), (LINUX_MSHV, mshv_pins)):
-            source = script.read_text(encoding="utf-8")
-            # The scripts install the x86_64 Linux builds of each tool.
-            self.assertIn("\ntool_platform=linux-x86_64\n", source)
-            self.assertIn(
-                "\ntool_manifest=${script_directory}/tool-versions.conf\n", source
-            )
-            functions = "".join(
-                _shell_function(source, name)
-                for name in (*_SHELL_READER_FUNCTIONS, "read_tool_versions")
-            )
+        source = LINUX.read_text(encoding="utf-8")
+        # The script installs the x86_64 Linux builds of each tool.
+        self.assertIn("\ntool_platform=linux-x86_64\n", source)
+        self.assertIn(
+            "\ntool_manifest=${script_directory}/tool-versions.conf\n", source
+        )
+        functions = "".join(
+            _shell_function(source, name)
+            for name in (*_SHELL_READER_FUNCTIONS, "read_tool_versions")
+        )
+        for mode, runner_only, expected in (
+            ("runner", "true", pins),
+            ("development", "false", development_pins),
+        ):
             report = "".join(
                 f"printf '%s=%s\\n' {name} \"${name}\"\n" for name in expected
             )
             for case, manifest in (("canonical", text), ("incomplete", incomplete)):
-                with self.subTest(script=script.name, case=case):
-                    path = _write_case(self.root / script.stem / case, manifest)
+                with self.subTest(mode=mode, case=case):
+                    path = _write_case(self.root / mode / case, manifest)
                     result = subprocess.run(
                         [
                             *shells[0],
@@ -669,6 +663,7 @@ class ToolManifestReaderTests(unittest.TestCase):
                             "set -eu\n"
                             f"{functions}tool_manifest=$1\n"
                             "tool_platform=linux-x86_64\n"
+                            f"runner_only={runner_only}\n"
                             f"read_tool_versions\n{report}",
                             "pins",
                             path.as_posix(),
@@ -678,9 +673,9 @@ class ToolManifestReaderTests(unittest.TestCase):
                         timeout=60,
                         check=False,
                     )
-                    # Only the runner installs sccache, so only it needs the
+                    # Only runner mode installs sccache, so only it needs the
                     # sccache checksum.
-                    if case == "incomplete" and script == LINUX_RUNNER:
+                    if case == "incomplete" and mode == "runner":
                         self.assertEqual(result.returncode, 1)
                         self.assertEqual(
                             _error(result.stderr),
@@ -693,12 +688,52 @@ class ToolManifestReaderTests(unittest.TestCase):
                         [f"{name}={value}" for name, value in expected.items()],
                     )
 
-    def test_linux_setups_install_the_pinned_musl_target(self):
-        for script in (LINUX_RUNNER, LINUX_MSHV):
-            with self.subTest(script=script.name):
-                source = script.read_text(encoding="utf-8")
-                self.assertIn('target add --toolchain "$RUST_TOOLCHAIN"', source)
-                self.assertIn("x86_64-unknown-linux-musl", source)
+    def test_linux_setup_runs_cargo_as_root_only_to_install(self):
+        # cargo install starts its configuration discovery at CARGO_HOME, but
+        # other commands read the current directory's configuration, such as
+        # aliases, which another user may control.
+        source = LINUX.read_text(encoding="utf-8")
+        invocations = re.findall(r'run_rust_tool "\$\{rust_bin\}cargo"[^\n]*', source)
+        self.assertTrue(invocations)
+        for invocation in invocations:
+            with self.subTest(invocation=invocation):
+                self.assertIn(' +"$RUST_TOOLCHAIN" install ', invocation)
+
+    def test_linux_setup_installs_the_pinned_musl_target_in_both_modes(self):
+        source = LINUX.read_text(encoding="utf-8")
+        # Installation and check mode take each mode's targets from one place.
+        self.assertIn(
+            'with_rust_targets run_rust_tool "${rust_bin}rustup" target add \\\n'
+            '        --toolchain "$RUST_TOOLCHAIN"\n',
+            source,
+        )
+        self.assertIn("    with_rust_targets check_rust_targets\n", source)
+        shells = _posix_shells()
+        if not shells:
+            self.skipTest("a POSIX shell is unavailable")
+        function = _shell_function(source, "with_rust_targets")
+        for runner_only, expected in (
+            (
+                "true",
+                "x86_64-unknown-none x86_64-unknown-linux-musl x86_64-unknown-uefi",
+            ),
+            ("false", "x86_64-unknown-linux-musl"),
+        ):
+            with self.subTest(runner_only=runner_only):
+                result = subprocess.run(
+                    [
+                        *shells[0],
+                        "-c",
+                        f"set -eu\n{function}runner_only={runner_only}\n"
+                        "with_rust_targets echo\n",
+                    ],
+                    capture_output=True,
+                    text=True,
+                    timeout=60,
+                    check=False,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout.strip(), expected)
 
     def test_windows_setup_pins_its_tools_to_the_manifest(self):
         powershells = _powershells()
@@ -778,16 +813,10 @@ class ToolManifestReaderTests(unittest.TestCase):
         # rustup exits, so the setup's next rustup command can find it missing.
         for script, install, invocation in (
             (
-                LINUX_RUNNER,
+                LINUX,
                 " toolchain install ",
-                '"$rustup" toolchain install "$RUST_TOOLCHAIN" --profile minimal \\\n'
-                "        --no-self-update\n",
-            ),
-            (
-                LINUX_MSHV,
-                " toolchain install ",
-                'rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal \\\n'
-                "        --no-self-update\n",
+                'run_rust_tool "${rust_bin}rustup" toolchain install "$RUST_TOOLCHAIN" \\\n'
+                "        --profile minimal --no-self-update\n",
             ),
             (
                 SPECULA,
@@ -808,23 +837,23 @@ class ToolManifestReaderTests(unittest.TestCase):
                 self.assertIn(invocation, source)
 
     def test_setups_read_the_manifest_before_they_inspect_the_host(self):
-        runner = LINUX_RUNNER.read_text(encoding="utf-8")
-        self.assertEqual(runner.count("\nread_tool_versions\n"), 1)
+        linux = LINUX.read_text(encoding="utf-8")
+        self.assertEqual(linux.count("\nread_tool_versions\n"), 1)
+        load = linux.index("\nread_tool_versions\n")
+        # Validating the options inspects nothing but the options.
+        self.assertLess(linux.index("\nvalidate_options\n"), load)
         for later in (
-            "\nreport_invariant_tsc /proc/cpuinfo\n",
-            '\nsudo -n true || die "passwordless sudo is required"\n',
-            "\n    install_packages\n",
-        ):
-            self.assertLess(runner.index("\nread_tool_versions\n"), runner.index(later))
-        mshv = LINUX_MSHV.read_text(encoding="utf-8")
-        self.assertEqual(mshv.count("\nread_tool_versions\n"), 1)
-        for later in (
-            "\nworkspace=$(CDPATH='' cd -- \"$workspace\" 2>/dev/null && pwd) ||\n",
+            # Runner mode.
+            "\n    report_invariant_tsc /proc/cpuinfo\n",
+            '\n    sudo -n true || die "passwordless sudo is required"\n',
+            "\n        install_packages\n",
+            # Development-host mode.
+            "\nresolved_workspace=$(CDPATH='' cd -- \"$workspace\" 2>/dev/null && pwd) ||\n",
             '\nif [ "$bundle_only" = true ]; then\n',
             '\nif [ "$check_only" = true ]; then\n',
             "\ninstall_packages\n",
         ):
-            self.assertLess(mshv.index("\nread_tool_versions\n"), mshv.index(later))
+            self.assertLess(load, linux.index(later))
         windows = WINDOWS.read_text(encoding="utf-8")
         load = windows.index("\n$ToolManifest = Read-ToolManifest ")
         for later in (
@@ -854,22 +883,26 @@ class ToolManifestReaderTests(unittest.TestCase):
         self.assertEqual(len(failures), 3)
         return failures
 
-    def test_staged_linux_setups_reject_a_bad_manifest_before_anything_else(self):
+    def test_staged_linux_setup_rejects_a_bad_manifest_before_anything_else(self):
         shells = _posix_shells()
         if not shells:
             self.skipTest("a POSIX shell is unavailable")
         # A missing workspace must not hide a bad manifest.
         missing = (self.root / "no-workspace").as_posix()
-        for script, arguments in (
-            (LINUX_RUNNER, ("--backend", "kvm", "--check-only")),
-            (LINUX_MSHV, ("--check-only", "--skip-build", "--workspace", missing)),
+        for mode, arguments in (
+            ("runner", ("--runner-only", "--backend", "kvm", "--check-only")),
+            (
+                "development",
+                ("--backend", "mshv", "--check-only", "--skip-build", "--workspace")
+                + (missing,),
+            ),
         ):
             for case, text, error in self._staged_failures():
-                with self.subTest(script=script.name, case=case):
-                    directory = self.root / "staged" / script.stem / case
+                with self.subTest(mode=mode, case=case):
+                    directory = self.root / "staged" / LINUX.stem / mode / case
                     _write_case(directory, text)
-                    staged = directory / script.name
-                    shutil.copyfile(script, staged)
+                    staged = directory / LINUX.name
+                    shutil.copyfile(LINUX, staged)
                     result = subprocess.run(
                         [*shells[0], staged.as_posix(), *arguments],
                         stdin=subprocess.DEVNULL,
@@ -882,6 +915,119 @@ class ToolManifestReaderTests(unittest.TestCase):
                     self.assertEqual(result.stdout, "")
                     self.assertEqual(len(result.stderr.splitlines()), 1, result.stderr)
                     self.assertEqual(_error(result.stderr), error)
+
+    def test_staged_linux_setup_rejects_options_of_the_other_mode(self):
+        shells = _posix_shells()
+        if not shells:
+            self.skipTest("a POSIX shell is unavailable")
+        # Without a manifest next to the script, options that the script
+        # accepts stop it at the manifest, which it reads right after them.
+        directory = self.root / "options"
+        directory.mkdir()
+        staged = directory / LINUX.name
+        shutil.copyfile(LINUX, staged)
+        runner_options = (
+            ("--runner-name", "nvx-1"),
+            ("--benchmark-runner",),
+            ("--extra-runner-labels", "pool"),
+            ("--repository-url", "https://github.com/microsoft/nvx"),
+            ("--runner-directory", "/opt/nvx-runner"),
+            ("--runner-token-stdin",),
+        )
+        development_options = (
+            ("--workspace", "."),
+            ("--guest-bundle", "bundle"),
+            ("--bundle-only",),
+            ("--skip-build",),
+        )
+        cases: list[tuple[tuple[str, ...], str | None]] = [
+            ((), "--backend must be kvm or mshv"),
+            (("--backend", "whp"), "--backend must be kvm or mshv"),
+            (("--runner-only",), "--backend must be kvm or mshv"),
+            *(
+                (("--backend", "kvm", *option), f"{option[0]} requires --runner-only")
+                for option in runner_options
+            ),
+            *(
+                (
+                    ("--runner-only", "--backend", "mshv", *option),
+                    f"{option[0]} cannot be combined with --runner-only",
+                )
+                for option in development_options
+            ),
+            (
+                ("--backend", "mshv", "--bundle-only"),
+                "--bundle-only requires --guest-bundle",
+            ),
+            (
+                ("--backend", "mshv", "--bundle-only", "--guest-bundle", "bundle")
+                + ("--check-only",),
+                "--bundle-only and --check-only cannot be combined",
+            ),
+            (
+                ("--runner-only", "--backend", "kvm", "--runner-token-stdin"),
+                "--runner-name is required to configure a runner",
+            ),
+            (
+                ("--runner-only", "--backend", "kvm", "--runner-name", "bad name"),
+                "invalid runner name: bad name",
+            ),
+            (
+                ("--runner-only", "--backend", "kvm", "--benchmark-runner"),
+                "--benchmark-runner requires --runner-name",
+            ),
+            (
+                ("--runner-only", "--backend", "kvm", "--runner-name", "nvx-1")
+                + ("--extra-runner-labels", "general"),
+                "runner role label must be selected with --benchmark-runner: general",
+            ),
+            # The token is read only after the options are valid.
+            (
+                ("--runner-only", "--backend", "kvm", "--runner-name", "nvx-1")
+                + ("--runner-token-stdin",),
+                "could not read runner token from stdin",
+            ),
+            (("--backend", "kvm"), None),
+            (
+                (
+                    "--backend",
+                    "mshv",
+                    "--check-only",
+                    "--skip-build",
+                    "--workspace",
+                    ".",
+                ),
+                None,
+            ),
+            (("--backend", "mshv", "--bundle-only", "--guest-bundle", "bundle"), None),
+            (("--runner-only", "--backend", "mshv", "--check-only"), None),
+            (
+                ("--runner-only", "--backend", "kvm", "--runner-name", "nvx-1")
+                + ("--benchmark-runner", "--extra-runner-labels", "pool")
+                + ("--runner-token-stdin",),
+                None,
+            ),
+        ]
+        for arguments, error in cases:
+            with self.subTest(arguments=arguments):
+                # Only a valid invocation that reads a token gets one, so an
+                # invalid one that read standard input would report its end.
+                token = error is None and "--runner-token-stdin" in arguments
+                result = subprocess.run(
+                    [*shells[0], staged.as_posix(), *arguments],
+                    input="token\n" if token else "",
+                    capture_output=True,
+                    text=True,
+                    timeout=60,
+                    check=False,
+                )
+                self.assertEqual(result.returncode, 1, result.stderr)
+                self.assertEqual(result.stdout, "")
+                self.assertEqual(len(result.stderr.splitlines()), 1, result.stderr)
+                if error is None:
+                    self.assertEqual(_error(result.stderr), ("missing",))
+                else:
+                    self.assertEqual(result.stderr, f"error: {error}\n")
 
     def test_staged_windows_setup_rejects_a_bad_manifest_before_anything_else(self):
         powershells = _powershells()
@@ -926,7 +1072,7 @@ class ToolManifestReaderTests(unittest.TestCase):
 
 class ToolManifestConsumerTests(unittest.TestCase):
     def test_consumers_read_the_manifest(self):
-        for path in (LINUX_RUNNER, LINUX_MSHV, WINDOWS, SPECULA, COPILOT_SETUP):
+        for path in (LINUX, WINDOWS, SPECULA, COPILOT_SETUP):
             with self.subTest(path=path.name):
                 self.assertIn("tool-versions.conf", path.read_text(encoding="utf-8"))
 
@@ -1091,20 +1237,79 @@ class ToolManifestConsumerTests(unittest.TestCase):
             )
 
 
+class LinuxSetupTests(unittest.TestCase):
+    def test_linux_setup_installs_the_packages_of_each_mode(self):
+        shells = _posix_shells()
+        if os.name != "posix" or not shells:
+            self.skipTest("the harness needs a POSIX shell and executable stubs")
+        source = LINUX.read_text(encoding="utf-8")
+        harness = (
+            "set -eu\n"
+            + "".join(
+                _shell_function(source, name) for name in ("die", "install_packages")
+            )
+            + 'run_as_root() { printf "%s\\n" "$*"; }\n'
+            + "runner_only=$1\ninstall_packages\n"
+        )
+        installers = {
+            "apt-get": "env DEBIAN_FRONTEND=noninteractive apt-get install -y ",
+            "tdnf": "tdnf install -y ",
+            "dnf": "dnf install -y ",
+        }
+        docker = {
+            "apt-get": ["docker-buildx", "docker.io"],
+            "tdnf": ["docker-buildx", "docker-cli", "moby-engine"],
+            "dnf": ["docker-buildx", "moby-engine"],
+        }
+        # Azure Linux has both tdnf and dnf, and the script uses tdnf there.
+        for managers in (("apt-get",), ("tdnf", "dnf"), ("dnf",)):
+            manager = managers[0]
+            base: set[tuple[str, ...]] = set()
+            for runner_only in ("false", "true"):
+                with (
+                    self.subTest(manager=manager, runner_only=runner_only),
+                    tempfile.TemporaryDirectory() as temporary,
+                ):
+                    for name in managers:
+                        stub = Path(temporary) / name
+                        stub.write_text("#!/bin/sh\n", encoding="utf-8")
+                        stub.chmod(0o755)
+                    result = subprocess.run(
+                        [*shells[0], "-c", harness, "packages", runner_only],
+                        env={"PATH": temporary},
+                        capture_output=True,
+                        text=True,
+                        timeout=30,
+                        check=False,
+                    )
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    *before, install = result.stdout.splitlines()
+                    self.assertEqual(
+                        before, ["apt-get update"] if manager == "apt-get" else []
+                    )
+                    self.assertTrue(install.startswith(installers[manager]))
+                    packages = install.removeprefix(installers[manager]).split()
+                    extra: list[str] = []
+                    if runner_only == "false":
+                        extra = docker[manager]
+                    elif manager == "tdnf":
+                        extra = ["icu", "lttng-ust"]
+                    self.assertEqual(packages[len(packages) - len(extra) :], extra)
+                    base.add(tuple(packages[: len(packages) - len(extra)]))
+            # Both modes install the same build dependencies.
+            self.assertEqual(len(base), 1, base)
+
+
 class RunnerSetupTests(unittest.TestCase):
     def test_linux_extra_labels_keep_required_labels(self):
         shells = _posix_shells()
         if not shells:
             self.skipTest("a POSIX shell is unavailable")
-        source = LINUX_RUNNER.read_text(encoding="utf-8")
+        source = LINUX.read_text(encoding="utf-8")
         functions = "".join(
-            _shell_function(source, name) for name in ("die", "append_runner_labels")
+            _shell_function(source, name)
+            for name in ("die", "append_runner_labels", "set_expected_runner_labels")
         )
-        start = source.index(
-            "\nexpected_runner_labels=linux,${backend},virtual-machine\n"
-        )
-        end = source.index('\nif [ "$check_only" = false ]; then', start)
-        labels = source[start:end]
         self.assertIn("--extra-runner-labels)", source)
         for backend in ("kvm", "mshv"):
             for benchmark in ("false", "true"):
@@ -1124,7 +1329,7 @@ class RunnerSetupTests(unittest.TestCase):
                         script = (
                             f"set -eu\n{functions}"
                             "backend=$1\nbenchmark_runner=$2\nextra_runner_labels=$3\n"
-                            f"{labels}"
+                            "set_expected_runner_labels\n"
                             'printf "%s\\n" "$expected_runner_labels"\n'
                         )
                         result = subprocess.run(
@@ -1149,7 +1354,7 @@ class RunnerSetupTests(unittest.TestCase):
         shells = _posix_shells()
         if not shells:
             self.skipTest("a POSIX shell is unavailable")
-        source = LINUX_RUNNER.read_text(encoding="utf-8")
+        source = LINUX.read_text(encoding="utf-8")
         script = (
             "set -eu\n"
             + "".join(

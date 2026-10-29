@@ -186,6 +186,7 @@ fi
 }
 
 setup_arguments=(
+    --runner-only
     --backend "$backend"
     --repository-url "https://github.com/$repository"
     --runner-directory "$runner_directory"
@@ -193,7 +194,7 @@ setup_arguments=(
 if [ -n "$extra_runner_labels" ]; then
     setup_arguments+=(--extra-runner-labels "$extra_runner_labels")
 fi
-sudo -u "$admin_username" -H sh "$setup_root/setup-linux-runner.sh" "${setup_arguments[@]}"
+sudo -u "$admin_username" -H sh "$setup_root/setup-linux.sh" "${setup_arguments[@]}"
 
 metadata_service=nvx-runner-metadata-block.service
 systemctl enable "$metadata_service"
@@ -246,7 +247,7 @@ if [ "$benchmark_runner" = true ]; then
     registration_arguments+=(--benchmark-runner)
 fi
 printf '%s\n' "$runner_token" |
-    sudo -u "$admin_username" -H sh "$setup_root/setup-linux-runner.sh" \
+    sudo -u "$admin_username" -H sh "$setup_root/setup-linux.sh" \
         "${registration_arguments[@]}" --runner-token-stdin
 runner_token=
 
