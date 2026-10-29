@@ -634,31 +634,34 @@ collection uses `--require-shell-snapshot-restore-512`, which requires exactly
 `shell_snapshot_restore_512_mib` plus canonical one-warmup/five-sample metadata for a 2-, 4-, or
 8-vCPU guest. A `device-io` directory is recognized from metadata and must contain exactly its five
 metrics and every configured attempt. Each backend job publishes its p50 tables and one-vCPU lifecycle diagnostics to
-`$GITHUB_STEP_SUMMARY`. Pull-request regression checks compare KVM, MSHV, and WHP results with the
-latest base-branch history.
+`$GITHUB_STEP_SUMMARY`. Pull-request and merge-group regression checks compare KVM, MSHV, and
+WHP results with the latest base-branch history.
 
 These jobs consume, gate, publish, or persist the KVM benchmark results (#286); MSHV and WHP
 follow the same flow with their own platform jobs:
 - `Platform / Linux / KVM / Virtual machine` (`platform-kvm`) runs the benchmarks and publishes the
   results: the run-scoped `benchmark-linux-kvm-virtual-machine-<run-id>` artifact, the per-attempt
   diagnostics artifact, and the p50 tables in its step summary.
-- `Performance regression gate` (`performance-gate`, pull requests only) consumes the three
-  platform artifacts once all three platform jobs succeeded and gates them against the base
+- `Performance regression gate` (`performance-gate`, pull requests and merge groups only) consumes
+  the three platform artifacts once all three platform jobs succeeded and gates them against the
+  base
   branch's history. It publishes and persists nothing.
 - `Persist performance baseline` (`performance-persist`, `dev` pushes only) consumes them and
   persists them to `data/*.csv`.
 - `Publish development release` (`release`, `dev` pushes only) doesn't read them, but it and
-  `performance-persist` run only when both `nvx-rs` builds, both NVX CLI jobs, and the three
-  platform jobs succeeded and every correctness job, `nvx-microvm-tests-kvm` included, succeeded
-  or was skipped.
+  `performance-persist` run only when both `nvx-rs` builds, both NVX CLI jobs, the three
+  platform jobs, and their three package jobs succeeded and every correctness job,
+  `nvx-microvm-tests-kvm` included, succeeded or was skipped.
 - `Required status check` fails unless every job that the change schedules, including
-  `platform-kvm`, `performance-gate`, and `nvx-microvm-tests-kvm`, has its expected result.
+  `platform-kvm`, `package-kvm`, `performance-gate`, and `nvx-microvm-tests-kvm`, has its
+  expected result.
 
 Each platform job runs on its backend's dedicated benchmark runner. The job targets the
 pool's labels plus `benchmark`, which exactly one runner of each pool carries instead of
 `general`. Every other backend job requires `general`, so it cannot occupy the
 benchmark runner. Every run therefore measures the series on the same VM without waiting for
-an unrelated build or test, and the gate compares a pull request with history from that VM.
+an unrelated build or test, and the gate compares a pull request or merge group with history
+from that VM.
 Platform jobs from overlapping runs still serialize on their one eligible runner. The pools
 mix VMs whose results differ by more than the run-to-run noise: over the same `dev`
 commits, the WHP runners on Emerald Rapids hosts measured about 10% slower than those on Ice

@@ -144,6 +144,9 @@ REQUIRED_CI_RESULT_ENVIRONMENTS = {
     "platform-kvm": "PLATFORM_KVM_RESULT",
     "platform-mshv": "PLATFORM_MSHV_RESULT",
     "platform-whp": "PLATFORM_WHP_RESULT",
+    "package-kvm": "PACKAGE_KVM_RESULT",
+    "package-mshv": "PACKAGE_MSHV_RESULT",
+    "package-whp": "PACKAGE_WHP_RESULT",
     "performance-gate": "PERFORMANCE_GATE_RESULT",
 }
 REQUIRED_CI_BUILD_JOBS = (
@@ -192,7 +195,7 @@ REQUIRED_CI_MICROVM_DEBUG_PUSH_JOBS = (
 )
 REQUIRED_CI_ARTIFACT_JOB = "artifacts"
 # GitHub-hosted, beside the kernel and Alpine artifacts; only the microVM guest
-# and sandbox jobs and the platform jobs, which read the Ubuntu and Azure Linux
+# and sandbox jobs and the package jobs, which read the Ubuntu and Azure Linux
 # images, wait for it.
 REQUIRED_CI_DISTRO_ARTIFACT_JOB = "distro-artifacts"
 # GitHub-hosted, beside the shared artifacts; only the debug jobs wait for it.
@@ -205,6 +208,13 @@ REQUIRED_CI_PLATFORM_JOBS = (
     "platform-kvm",
     "platform-mshv",
     "platform-whp",
+)
+# GitHub-hosted, one per platform job, which they run beside: each packages
+# the platform's release, and runs whenever its platform job does.
+REQUIRED_CI_PACKAGE_JOBS = (
+    "package-kvm",
+    "package-mshv",
+    "package-whp",
 )
 OPENVMM_UNIT_TEST_EXCLUDED_PACKAGES = (
     "vmm_tests",
@@ -221,8 +231,9 @@ OPENVMM_UNIT_TEST_EXCLUDED_PACKAGES = (
 
 # The events whose runs check a change before it merges: a pull request, and
 # the merge group in which the merge queue tests it on the latest dev and the
-# pull requests ahead of it (doc/ci.md#merge-queue). Both run the platform jobs
-# only when one of their inputs changed, gate on their results, and run the
+# pull requests ahead of it (doc/ci.md#merge-queue). Both run the platform and
+# package jobs only when one of their inputs changed, gate on the benchmarks,
+# and run the
 # debug kernel on KVM alone, and neither publishes nor persists anything.
 CI_PRE_MERGE_EVENTS = ("pull_request", "merge_group")
 # The events whose runs the change detector classifies, and those that run the
@@ -260,20 +271,20 @@ MICROVM_TEST_INPUT_PATHS = re.compile(
     r"crate_release|create_linux_source_archive|merge_queue|nightly_ci|"
     r"performance)\.py$|adversarial_cases/))"
 )
-# Inputs of the platform jobs, which benchmark each backend and package its
-# release, and of the regression gate that reads their results: the OpenVMM
-# pin, the guests and every input of their cache keys, the nvx-rs executable
-# that the packages ship, the performance history and expected hosts, the
-# release version and license, the workflows, actions, and CLI modules that
-# these jobs and the jobs that build their artifacts run, the runners, and the
-# attributes that check out their inputs on Windows. Every module of the CLI is
-# an input but those that none of these jobs runs.
+# Inputs of the platform jobs, which benchmark each backend, of the package
+# jobs, which package its release, and of the regression gate that reads the
+# benchmark results: the OpenVMM pin, the guests and every input of their cache
+# keys, the nvx-rs executable that the packages ship, the performance history
+# and expected hosts, the release version and license, the workflows, actions,
+# and CLI modules that these jobs and the jobs that build their artifacts run,
+# the runners, and the attributes that check out their inputs on Windows. Every
+# module of the CLI is an input but those that none of these jobs runs.
 BENCHMARK_INPUT_PATHS = re.compile(
     r"^(openvmm($|/)|rust-toolchain\.toml$|scripts/setup/|\.gitattributes$|"
     r"nvx-rs/|kernel/|guest/|ubuntu/|azurelinux/|"
     r"docker/|\.dockerignore$|SOURCE-MANIFEST\.json$|"
     r"data/|VERSION$|LICENSE$|"
-    r"\.github/workflows/(ci|build-openvmm-binary|run-platform)\.yml$|"
+    r"\.github/workflows/(ci|build-openvmm-binary|package-platform|run-platform)\.yml$|"
     r"\.github/actions/(build-guest-artifacts|build-openvmm|checkout-openvmm|"
     r"gate-performance|package-release|prepare-performance-results|"
     r"run-benchmark|sccache|setup-curl|validate-runner)/|"
@@ -382,11 +393,11 @@ def classify_ci_changes(event_name: str, changed_files: Sequence[str]) -> CiChan
 
     Documentation never selects a suite. Pull requests, merge groups, and
     pushes run each test suite only when one of its own inputs changed. A pull
-    request or a merge group runs the platform jobs only when one of their
-    inputs changed, but a push runs them for every change but documentation,
-    so that every such `dev` commit publishes its development release and
-    records its performance results. The guest artifacts and the OpenVMM
-    binaries are built exactly when a job that uses them runs.
+    request or merge group runs the platform and package jobs only when one of
+    their inputs changed, but a push runs them for every change but
+    documentation, so that every such `dev` commit publishes its development
+    release and records its performance results. The guest artifacts and the
+    OpenVMM binaries are built exactly when a job that uses them runs.
     """
     if event_name not in CI_CLASSIFIED_EVENTS:
         raise ValueError(f"unsupported CI event {event_name!r}")
@@ -399,8 +410,8 @@ def classify_ci_changes(event_name: str, changed_files: Sequence[str]) -> CiChan
 
     run_openvmm_vmm_tests = changed(OPENVMM_VMM_TEST_INPUT_PATHS)
     run_microvm_tests = changed(MICROVM_TEST_INPUT_PATHS)
-    # An empty diff runs the platform jobs, as it ran every workload before
-    # the classifier selected them separately.
+    # An empty diff runs the platform and package jobs, as it ran every
+    # workload before the classifier selected them separately.
     run_benchmarks = (
         not files
         or changed(BENCHMARK_INPUT_PATHS)
@@ -455,14 +466,15 @@ def describe_ci_changes(
         return f"Jobs that use them run: {' and '.join(names)}."
 
     if changes.run_benchmarks and not files:
-        benchmarks_reason = "No file changed, so the platform jobs run."
+        benchmarks_reason = "No file changed, so the platform and package jobs run."
     elif (
         changes.run_benchmarks
         and event_name == "push"
         and not any(BENCHMARK_INPUT_PATHS.match(path) for path in inputs)
     ):
         benchmarks_reason = (
-            "A push runs the platform jobs for every change but documentation, "
+            "A push runs the platform and package jobs for every change but "
+            "documentation, "
             "so that it publishes its development release and records its "
             "performance results."
         )
@@ -477,7 +489,7 @@ def describe_ci_changes(
                     {
                         "the OpenVMM VMM tests": changes.run_openvmm_vmm_tests,
                         "the NVX microVM tests": changes.run_microvm_tests,
-                        "the platform benchmarks": changes.run_benchmarks,
+                        "the platform benchmarks and packages": changes.run_benchmarks,
                     },
                 ),
             ),
@@ -487,7 +499,7 @@ def describe_ci_changes(
                 users_reason(
                     {
                         "the NVX microVM tests": changes.run_microvm_tests,
-                        "the platform benchmarks": changes.run_benchmarks,
+                        "the platform benchmarks and packages": changes.run_benchmarks,
                     },
                 ),
             ),
@@ -510,7 +522,11 @@ def describe_ci_changes(
                 changes.run_microvm_tests,
                 inputs_reason(changes.run_microvm_tests, MICROVM_TEST_INPUT_PATHS),
             ),
-            section("Platform benchmarks", changes.run_benchmarks, benchmarks_reason),
+            section(
+                "Platform benchmarks and packages",
+                changes.run_benchmarks,
+                benchmarks_reason,
+            ),
         )
     )
 
@@ -636,7 +652,7 @@ def required_ci_expected_results(
             job: (
                 "success" if repository_jobs_enabled and run_benchmarks else "skipped"
             )
-            for job in REQUIRED_CI_PLATFORM_JOBS
+            for job in (*REQUIRED_CI_PLATFORM_JOBS, *REQUIRED_CI_PACKAGE_JOBS)
         }
     )
     return expected

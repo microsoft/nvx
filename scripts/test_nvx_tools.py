@@ -8071,6 +8071,7 @@ class CiConfigurationTests(unittest.TestCase):
                 *ci.REQUIRED_CI_MICROVM_DEBUG_JOBS,
                 *ci.REQUIRED_CI_MICROVM_DEBUG_PUSH_JOBS,
                 *ci.REQUIRED_CI_PLATFORM_JOBS,
+                *ci.REQUIRED_CI_PACKAGE_JOBS,
             },
         )
         # The microVM workflow's own default, an unsharded default run, which
@@ -8484,7 +8485,8 @@ class CiConfigurationTests(unittest.TestCase):
             ci.REQUIRED_CI_DISTRO_ARTIFACT_JOB,
             ci.REQUIRED_CI_DEBUG_KERNEL_JOB,
         }
-        platforms = set(ci.REQUIRED_CI_PLATFORM_JOBS)
+        # Each platform's package job runs whenever its platform job does.
+        platforms = set(ci.REQUIRED_CI_PLATFORM_JOBS) | set(ci.REQUIRED_CI_PACKAGE_JOBS)
         # A same-repository pull request that builds the guest artifacts also
         # rehearses their reuse.
         rehearsal = {ci.REQUIRED_CI_GUEST_ARTIFACT_REUSE_JOB}
@@ -8502,7 +8504,8 @@ class CiConfigurationTests(unittest.TestCase):
         gate = {"performance-gate"}
         # Event, same repository, the change detector's outputs (guest
         # artifacts, OpenVMM binaries, OpenVMM unit tests, OpenVMM VMM tests,
-        # NVX microVM tests, platform benchmarks), and the jobs that must
+        # NVX microVM tests, platform benchmarks and packages), and the jobs
+        # that must
         # succeed; every other required job must be skipped.
         everything = (True, True, True, True, True, True)
         cases = (
@@ -8814,7 +8817,10 @@ class CiConfigurationTests(unittest.TestCase):
                 ),
                 "run-microvm-tests",
             ),
-            **dict.fromkeys(ci.REQUIRED_CI_PLATFORM_JOBS, "run-benchmarks"),
+            **dict.fromkeys(
+                (*ci.REQUIRED_CI_PLATFORM_JOBS, *ci.REQUIRED_CI_PACKAGE_JOBS),
+                "run-benchmarks",
+            ),
         }
         self.assertEqual(set(selections.values()), set(ci.CI_CHANGE_OUTPUTS))
         for job_name, output in selections.items():
@@ -9307,10 +9313,12 @@ class CiConfigurationTests(unittest.TestCase):
         benchmarks_only = select(guest, binaries, benchmarks)
         # Each class of changed path, the outputs that a pull request selects,
         # and those that a push selects when they differ: a push runs the
-        # platform jobs, and the jobs that build their artifacts, for every
+        # platform and package jobs, and the jobs that build their artifacts,
+        # for every
         # change but documentation.
         cases: tuple[tuple[tuple[str, ...], ci.CiChanges, ci.CiChanges | None], ...] = (
-            # An empty diff runs the platform jobs, as it ran every workload.
+            # An empty diff runs the platform and package jobs, as it ran every
+            # workload.
             ((), benchmarks_only, None),
             (("doc/ci.md", "README.md", "DOC/Guide.MD"), select(), None),
             # Documentation selects no suite, even in a suite's directory.
@@ -9360,7 +9368,7 @@ class CiConfigurationTests(unittest.TestCase):
             (("nvx-rs/src/bin/nvx-time.rs",), without_unit_tests, None),
             # The shards of the WHP VMM tests, and the planner that the
             # microVM shards share, are inputs of the VMM tests and so of the
-            # microVM tests, but not of the platform jobs (#691).
+            # microVM tests, but not of the platform or package jobs (#691).
             (
                 ("scripts/nvx_tools/openvmm_test_shards.py",),
                 vmm_and_microvm,
@@ -9380,7 +9388,7 @@ class CiConfigurationTests(unittest.TestCase):
             (("ubuntu/packages.lock.json",), microvm_and_benchmarks, None),
             (("azurelinux/packages.lock.json",), microvm_and_benchmarks, None),
             # Inputs of the OpenVMM binaries, and the modules and attributes
-            # that both the microVM tests and the platform jobs take.
+            # that the microVM tests and the platform and package jobs take.
             (
                 (".github/workflows/build-openvmm-binary.yml",),
                 microvm_and_benchmarks,
@@ -9452,9 +9460,10 @@ class CiConfigurationTests(unittest.TestCase):
                 microvm_only,
                 microvm_and_benchmarks,
             ),
-            # Inputs of the platform jobs and the regression gate alone.
+            # Inputs of the platform jobs, package jobs, and regression gate alone.
             (("scripts/nvx_tools/performance.py",), benchmarks_only, None),
             ((".github/workflows/run-platform.yml",), benchmarks_only, None),
+            ((".github/workflows/package-platform.yml",), benchmarks_only, None),
             ((".github/actions/run-benchmark/action.yml",), benchmarks_only, None),
             ((".github/actions/package-release/action.yml",), benchmarks_only, None),
             ((".github/actions/gate-performance/action.yml",), benchmarks_only, None),
@@ -9468,7 +9477,7 @@ class CiConfigurationTests(unittest.TestCase):
             (("VERSION",), benchmarks_only, None),
             (("LICENSE",), benchmarks_only, None),
             # Inputs of jobs that every change runs, or that only a push runs
-            # and only after the platform jobs.
+            # and only after the platform and package jobs.
             ((".github/actions/validate-nvx/action.yml",), select(), benchmarks_only),
             ((".github/actions/check-quality/action.yml",), select(), benchmarks_only),
             (
@@ -9579,7 +9588,7 @@ class CiConfigurationTests(unittest.TestCase):
         # a change to the adapter, its suite, or the command that runs it alone
         # runs them. Neither OpenVMM suite builds or boots the adapter, and
         # neither the benchmarks nor the packages use it, so a pull request
-        # skips the platform jobs.
+        # skips the platform and package jobs.
         workflow = (
             BuildConstants.REPO_ROOT
             / ".github"
@@ -9629,6 +9638,7 @@ class CiConfigurationTests(unittest.TestCase):
                     *ci.REQUIRED_CI_OPENVMM_TEST_BUILD_JOBS,
                     *ci.REQUIRED_CI_OPENVMM_ARTIFACT_TEST_JOBS,
                     *ci.REQUIRED_CI_PLATFORM_JOBS,
+                    *ci.REQUIRED_CI_PACKAGE_JOBS,
                     "performance-gate",
                 ):
                     self.assertEqual(expected[job], "skipped", job)
@@ -9643,7 +9653,10 @@ class CiConfigurationTests(unittest.TestCase):
             "`tests/runtime-adapter/src/lib.rs`, and 3 more.\n",
             summary,
         )
-        self.assertIn("### Platform benchmarks: skip\nNo input changed.\n", summary)
+        self.assertIn(
+            "### Platform benchmarks and packages: skip\nNo input changed.\n",
+            summary,
+        )
 
     def test_runtime_adapter_scenarios_take_a_guest_agent_that_linux_builds(self):
         # The scenarios boot VMs of the artifacts that the microVM guest and
@@ -9828,7 +9841,8 @@ class CiConfigurationTests(unittest.TestCase):
         vmm_inputs |= guest_inputs["KERNEL"] | guest_inputs["ALPINE"]
         vmm_inputs |= guest_binary_inputs
 
-        # The NVX microVM tests and the platform jobs take every input of the
+        # The NVX microVM tests and the platform and package jobs take every
+        # input of the
         # jobs that they run and of the jobs that build the artifacts that they
         # use: those jobs' workflows, the reusable workflows and actions that
         # they reach, the files that the cache keys there hash, the files of the
@@ -9951,10 +9965,10 @@ class CiConfigurationTests(unittest.TestCase):
             | all_guest_inputs
             | {"tests/runtime-adapter/example"}
         )
-        # The platform jobs check their history's expected host in data/,
-        # name their packages with VERSION, and ship LICENSE; the regression
-        # gate reads their results. Pushes alone publish and persist them,
-        # after every change but documentation.
+        # The platform jobs check their history's expected host in data/, the
+        # package jobs name their packages with VERSION and ship LICENSE, and
+        # the regression gate reads the platform jobs' results. Pushes alone
+        # publish and persist them, after every change but documentation.
         run_benchmark = (github / "actions" / "run-benchmark" / "action.yml").read_text(
             encoding="utf-8"
         )
@@ -9972,6 +9986,7 @@ class CiConfigurationTests(unittest.TestCase):
         benchmark_inputs = (
             job_inputs(
                 *ci.REQUIRED_CI_PLATFORM_JOBS,
+                *ci.REQUIRED_CI_PACKAGE_JOBS,
                 "performance-gate",
                 ci.REQUIRED_CI_ARTIFACT_JOB,
                 ci.REQUIRED_CI_DISTRO_ARTIFACT_JOB,
@@ -10005,6 +10020,7 @@ class CiConfigurationTests(unittest.TestCase):
                 "scripts/nvx_tools/benchmark_scripts/example",
                 ".github/actions/gate-performance/action.yml",
                 ".github/actions/package-release/action.yml",
+                ".github/workflows/package-platform.yml",
                 ".github/workflows/run-platform.yml",
             },
             benchmark_inputs,
@@ -10071,7 +10087,8 @@ class CiConfigurationTests(unittest.TestCase):
         # runs the OpenVMM VMM tests, which boot the Alpine image, and no other
         # nvx-rs change does either. The NVX microVM tests run the nvx-rs CLI,
         # and every package ships it, so every nvx-rs change runs them and the
-        # platform jobs, and so the jobs that build their artifacts, which
+        # platform and package jobs, and so the jobs that build their artifacts,
+        # which
         # restore unchanged guest images from the cache.
         root = BuildConstants.REPO_ROOT
         identity = {
@@ -10202,6 +10219,7 @@ class CiConfigurationTests(unittest.TestCase):
                             *ci.REQUIRED_CI_BUILD_JOBS,
                             *ci.REQUIRED_CI_MICROVM_TEST_JOBS,
                             *ci.REQUIRED_CI_PLATFORM_JOBS,
+                            *ci.REQUIRED_CI_PACKAGE_JOBS,
                         ):
                             self.assertEqual(expected[job], "success", job)
                         for job in (
@@ -10264,17 +10282,18 @@ class CiConfigurationTests(unittest.TestCase):
                 "OpenVMM unit tests",
                 "OpenVMM VMM tests",
                 "NVX microVM tests",
-                "Platform benchmarks",
+                "Platform benchmarks and packages",
             ],
         )
         self.assertIn(
             "### Guest artifacts: run\nJobs that use them run: the OpenVMM VMM "
-            "tests, the NVX microVM tests, and the platform benchmarks.\n",
+            "tests, the NVX microVM tests, and the platform benchmarks and "
+            "packages.\n",
             summary,
         )
         self.assertIn(
             "### OpenVMM binaries: run\nJobs that use them run: the NVX microVM "
-            "tests and the platform benchmarks.\n",
+            "tests and the platform benchmarks and packages.\n",
             summary,
         )
         self.assertIn("### OpenVMM unit tests: skip\nNo input changed.\n", summary)
@@ -10307,16 +10326,20 @@ class CiConfigurationTests(unittest.TestCase):
         self.assertIn(
             "### Guest artifacts: skip\nNo job that uses them runs.\n", tests_only
         )
-        self.assertIn("### Platform benchmarks: skip\nNo input changed.\n", tests_only)
+        self.assertIn(
+            "### Platform benchmarks and packages: skip\nNo input changed.\n",
+            tests_only,
+        )
         push = describe("push", ["scripts/test_nvx_tools.py"])
         self.assertIn(
             "### OpenVMM binaries: run\nJobs that use them run: the platform "
-            "benchmarks.\n",
+            "benchmarks and packages.\n",
             push,
         )
         self.assertIn(
-            "### Platform benchmarks: run\nA push runs the platform jobs for every "
-            "change but documentation, so that it publishes its development "
+            "### Platform benchmarks and packages: run\nA push runs the platform "
+            "and package jobs for every change but documentation, so that it "
+            "publishes its development "
             "release and records its performance results.\n",
             push,
         )
@@ -10331,14 +10354,15 @@ class CiConfigurationTests(unittest.TestCase):
             documentation,
         )
         self.assertIn(
-            "### Platform benchmarks: skip\nOnly documentation files changed.\n",
+            "### Platform benchmarks and packages: skip\n"
+            "Only documentation files changed.\n",
             documentation,
         )
         empty = describe("pull_request", [])
         self.assertIn("### NVX microVM tests: skip\nNo file changed.\n", empty)
         self.assertIn(
-            "### Platform benchmarks: run\nNo file changed, so the platform jobs "
-            "run.\n",
+            "### Platform benchmarks and packages: run\nNo file changed, so the "
+            "platform and package jobs run.\n",
             empty,
         )
 
@@ -10382,7 +10406,7 @@ class CiConfigurationTests(unittest.TestCase):
             text = summary.read_text(encoding="utf-8")
             self.assertTrue(text.startswith("before\n### "))
             self.assertIn("### NVX microVM tests: run\n", text)
-            self.assertIn("### Platform benchmarks: skip\n", text)
+            self.assertIn("### Platform benchmarks and packages: skip\n", text)
 
     def test_classify_ci_changes_command_reads_null_delimited_paths(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -10831,6 +10855,9 @@ python3() {
         platform_workflow = (
             BuildConstants.REPO_ROOT / ".github" / "workflows" / "run-platform.yml"
         ).read_text(encoding="utf-8")
+        package_workflow = (
+            BuildConstants.REPO_ROOT / ".github" / "workflows" / "package-platform.yml"
+        ).read_text(encoding="utf-8")
         build_action = (
             BuildConstants.REPO_ROOT
             / ".github"
@@ -10940,33 +10967,57 @@ python3() {
                 "openvmm-windows-msvc",
                 "run-platform.yml",
             ),
+            "package-kvm": (
+                "build-openvmm-linux-gnu",
+                "openvmm-linux-gnu",
+                "package-platform.yml",
+            ),
+            "package-mshv": (
+                "build-openvmm-linux-musl",
+                "openvmm-linux-musl",
+                "package-platform.yml",
+            ),
+            "package-whp": (
+                "build-openvmm-windows-msvc",
+                "openvmm-windows-msvc",
+                "package-platform.yml",
+            ),
         }
         for job_name, (producer, artifact, reusable_workflow) in consumers.items():
             with self.subTest(consumer=job_name):
                 job = _workflow_job(workflow, job_name)
-                # Only the jobs that boot the Ubuntu or Azure Linux images wait
-                # for them: the default suites boot the kernel and the Alpine
-                # initramfs alone, and the debug-kernel jobs the debug kernel.
+                # Each waits for the nvx-rs build of its OS, which it runs or
+                # packages, but not for the CLI tests that run with it; the
+                # platform jobs, which neither run nor package it, wait for
+                # neither.
+                nvx_rs = (
+                    "build-nvx-rs-windows-msvc, "
+                    if producer == "build-openvmm-windows-msvc"
+                    else "build-nvx-rs-linux-musl, "
+                )
+                # Only the jobs that boot or ship the Ubuntu or Azure Linux
+                # images wait for them: the default suites and the platform
+                # jobs boot the kernel and the Alpine initramfs alone, and the
+                # debug-kernel jobs the debug kernel.
                 if job_name.startswith("nvx-microvm-debug-"):
                     guest_producer = "debug-kernel, "
                 elif job_name.startswith("nvx-microvm-tests-"):
                     guest_producer = ""
+                elif job_name.startswith("platform-"):
+                    guest_producer = ""
+                    nvx_rs = ""
                 else:
                     guest_producer = "distro-artifacts, "
-                # Each waits for the nvx-rs build of its OS, which it runs or
-                # packages, but not for the CLI tests that run with it.
-                nvx_rs = (
-                    "build-nvx-rs-windows-msvc"
-                    if producer == "build-openvmm-windows-msvc"
-                    else "build-nvx-rs-linux-musl"
-                )
                 self.assertIn(
-                    f"needs: [artifacts, {guest_producer}{producer}, {nvx_rs}, "
+                    f"needs: [artifacts, {guest_producer}{producer}, {nvx_rs}"
                     "openvmm-changes]",
                     job,
                 )
                 self.assertIn(f"needs.{producer}.result == 'success'", job)
-                self.assertIn(f"needs.{nvx_rs}.result == 'success'", job)
+                if nvx_rs:
+                    self.assertIn(
+                        f"needs.{nvx_rs.removesuffix(', ')}.result == 'success'", job
+                    )
                 self.assertNotIn("nvx-cli", job)
                 self.assertIn(f"uses: ./.github/workflows/{reusable_workflow}", job)
                 self.assertIn(f"openvmm-artifact: {artifact}", job)
@@ -10992,12 +11043,15 @@ python3() {
         self.assertEqual(build_workflow.count("overwrite: true"), 2)
         self.assertEqual(build_workflow.count("retention-days: 1"), 2)
         # The microVM workflow also downloads nvx-rs, which the benchmarks
-        # don't run, the debug kernel, which the platform jobs don't read, the
-        # Ubuntu distro layer a second time, for an unsharded default run, and
-        # on Windows the runtime adapter's guest agent.
+        # don't run, the debug kernel, which neither the platform nor package
+        # jobs read, the Ubuntu distro layer a second time for an unsharded
+        # default run, and on Windows the runtime adapter's guest agent. The
+        # platform jobs download only what they boot, and the package jobs
+        # every image that a package ships; their action downloads nvx-rs.
         for consumer_workflow, download_count in (
             (microvm_workflow, 11),
-            (platform_workflow, 7),
+            (platform_workflow, 4),
+            (package_workflow, 7),
         ):
             self.assertIn("path: openvmm/target/release", consumer_workflow)
             self.assertIn("path: build", consumer_workflow)
@@ -11014,6 +11068,7 @@ python3() {
             build_workflow,
             microvm_workflow,
             platform_workflow,
+            package_workflow,
         ):
             self.assertNotIn("path: .", configuration)
         self.assertIn("openvmm-binary-v6-${{ inputs.backend }}-", build_action)
@@ -12993,19 +13048,23 @@ python3() {
                             job.index(f"- name: {step_name}"),
                         )
 
-    def test_ci_hands_nvx_rs_to_the_microvm_and_platform_jobs(self):
+    def test_ci_hands_nvx_rs_to_the_microvm_and_package_jobs(self):
         # The microVM scenarios and steps run nvx-rs, and find it where
         # `cargo build --release` puts it. One GitHub-hosted job per OS builds
         # it, records its provenance, and hands both to the microVM jobs,
-        # which run it, to the platform jobs, which package it, and to the NVX
-        # CLI job of its OS, which tests with it, as the OpenVMM build jobs
-        # hand over OpenVMM.
+        # which run it, to the package jobs, which package it for each
+        # platform, and to the NVX CLI job of its OS, which tests with it, as
+        # the OpenVMM build jobs hand over OpenVMM. The platform jobs, which
+        # only measure, don't take it.
         github = BuildConstants.REPO_ROOT / ".github"
         workflow = (github / "workflows" / "ci.yml").read_text(encoding="utf-8")
         microvm = (github / "workflows" / "run-nvx-microvm-tests.yml").read_text(
             encoding="utf-8"
         )
         platform = (github / "workflows" / "run-platform.yml").read_text(
+            encoding="utf-8"
+        )
+        packaging = (github / "workflows" / "package-platform.yml").read_text(
             encoding="utf-8"
         )
         package = (github / "actions" / "package-release" / "action.yml").read_text(
@@ -13155,7 +13214,7 @@ python3() {
             *ci.REQUIRED_CI_MICROVM_TEST_JOBS,
             *ci.REQUIRED_CI_MICROVM_DEBUG_JOBS,
             *ci.REQUIRED_CI_MICROVM_DEBUG_PUSH_JOBS,
-            *ci.REQUIRED_CI_PLATFORM_JOBS,
+            *ci.REQUIRED_CI_PACKAGE_JOBS,
         ):
             nvx_rs_build = (
                 "build-nvx-rs-windows-msvc"
@@ -13165,8 +13224,8 @@ python3() {
             with self.subTest(consumer=job_name):
                 job = _workflow_job(workflow, job_name)
                 self.assertIn(
-                    "uses: ./.github/workflows/run-platform.yml"
-                    if job_name in ci.REQUIRED_CI_PLATFORM_JOBS
+                    "uses: ./.github/workflows/package-platform.yml"
+                    if job_name in ci.REQUIRED_CI_PACKAGE_JOBS
                     else "uses: ./.github/workflows/run-nvx-microvm-tests.yml",
                     job,
                 )
@@ -13182,6 +13241,10 @@ python3() {
                     re.findall(r"^      nvx-rs-artifact: (\S+)$", job, re.MULTILINE),
                     [builds[nvx_rs_build][1]],
                 )
+        for job_name in ci.REQUIRED_CI_PLATFORM_JOBS:
+            with self.subTest(platform=job_name):
+                self.assertNotIn("nvx-rs", _workflow_job(workflow, job_name))
+        self.assertNotIn("nvx-rs", platform)
         # Only a pushed commit whose builds succeeded is released or recorded.
         for consumer in ("release", "performance-persist", "required-status-check"):
             job = _workflow_job(workflow, consumer)
@@ -13194,7 +13257,7 @@ python3() {
                             job,
                         )
 
-        for configuration in (microvm, platform):
+        for configuration in (microvm, packaging):
             self.assertIn(
                 "      nvx-rs-artifact:\n"
                 "        description: Base name of the nvx-rs artifacts for the "
@@ -13221,11 +13284,11 @@ python3() {
         self.assertLess(download, chmod)
         self.assertLess(chmod, microvm.index("scripts/nvx.py"))
 
-        # The platform jobs package nvx-rs with its provenance: they download
+        # The package jobs package nvx-rs with its provenance: they download
         # both where nvx.py package looks for them, before they package.
         self.assertIn(
             "          nvx-rs-artifact: ${{ inputs.nvx-rs-artifact }}",
-            _workflow_step(platform, "run", "Package release").splitlines(),
+            _workflow_step(packaging, "package", "Package release").splitlines(),
         )
         steps = _composite_action_steps(package)
         names = [_yaml_scalar(step, "name") for step in steps]
@@ -13252,15 +13315,14 @@ python3() {
         # Pull requests package and archive each platform's release, which
         # proves that it builds; only a dev push uploads it for publication.
         github = BuildConstants.REPO_ROOT / ".github"
-        platform = (github / "workflows" / "run-platform.yml").read_text(
+        packaging = (github / "workflows" / "package-platform.yml").read_text(
             encoding="utf-8"
         )
         package = (github / "actions" / "package-release" / "action.yml").read_text(
             encoding="utf-8"
         )
-        step = _workflow_step(platform, "run", "Package release")
-        self.assertIn("        if: inputs.package-release\n", step)
-        self.assertNotIn("github.event_name", _yaml_scalar(step, "if"))
+        step = _workflow_step(packaging, "package", "Package release")
+        self.assertNotIn("        if:", step)
         self.assertIn(
             "          upload: ${{ github.event_name == 'push' && "
             "github.ref == 'refs/heads/dev' }}",
@@ -13281,6 +13343,108 @@ python3() {
             self.assertNotIn("upload", _yaml_scalar(steps[names.index(name)], "if"))
             self.assertIn("--binary-only", steps[names.index(name)])
             self.assertIn("archive-release", steps[names.index(name)])
+
+    def test_ci_packages_each_platform_beside_its_benchmarks(self):
+        # Packaging takes no hypervisor, so a GitHub-hosted job of the
+        # platform's OS packages each platform's release from the OpenVMM
+        # build that its platform job measures, beside that job. The platform
+        # job waits only for the kernel and the Alpine initramfs, which it
+        # boots, and its OpenVMM producer, and not for the Ubuntu and Azure
+        # Linux images or the nvx-rs that only the package ships, so that its
+        # benchmark runner starts as soon as it can (#982).
+        github = BuildConstants.REPO_ROOT / ".github"
+        workflow = (github / "workflows" / "ci.yml").read_text(encoding="utf-8")
+        jobs = yaml.safe_load(workflow)["jobs"]
+        packaging = (github / "workflows" / "package-platform.yml").read_text(
+            encoding="utf-8"
+        )
+        platforms = {
+            "platform-kvm": (
+                "package-kvm",
+                "linux-kvm",
+                "ubuntu-latest",
+                "build-openvmm-linux-gnu",
+                "openvmm-linux-gnu",
+                "build-nvx-rs-linux-musl",
+            ),
+            "platform-mshv": (
+                "package-mshv",
+                "linux-mshv",
+                "ubuntu-latest",
+                "build-openvmm-linux-musl",
+                "openvmm-linux-musl",
+                "build-nvx-rs-linux-musl",
+            ),
+            "platform-whp": (
+                "package-whp",
+                "windows-whp",
+                "windows-latest",
+                "build-openvmm-windows-msvc",
+                "openvmm-windows-msvc",
+                "build-nvx-rs-windows-msvc",
+            ),
+        }
+        self.assertEqual(tuple(platforms), ci.REQUIRED_CI_PLATFORM_JOBS)
+        self.assertEqual(
+            tuple(package for package, *_ in platforms.values()),
+            ci.REQUIRED_CI_PACKAGE_JOBS,
+        )
+        for platform_job, (
+            package_job,
+            release_platform,
+            runner,
+            producer,
+            artifact,
+            nvx_rs_build,
+        ) in platforms.items():
+            with self.subTest(platform=platform_job):
+                self.assertIn(package_job, ci.REQUIRED_CI_RESULT_ENVIRONMENTS)
+                platform = jobs[platform_job]
+                package = jobs[package_job]
+                self.assertEqual(
+                    platform["needs"], ["artifacts", producer, "openvmm-changes"]
+                )
+                self.assertEqual(
+                    package["needs"],
+                    [
+                        "artifacts",
+                        "distro-artifacts",
+                        producer,
+                        nvx_rs_build,
+                        "openvmm-changes",
+                    ],
+                )
+                self.assertEqual(platform["with"]["openvmm-artifact"], artifact)
+                self.assertNotIn("release-platform", platform["with"])
+                self.assertEqual(
+                    package["uses"], "./.github/workflows/package-platform.yml"
+                )
+                self.assertEqual(json.loads(package["with"]["runner"]), [runner])
+                self.assertEqual(package["with"]["release-platform"], release_platform)
+                self.assertEqual(package["with"]["openvmm-artifact"], artifact)
+                # A package job runs for the changes, events, and repositories
+                # for which its platform job runs, once the images and the
+                # nvx-rs that only the package ships are ready too.
+                self.assertEqual(
+                    set(_expression_conjuncts(str(package["if"]))),
+                    set(_expression_conjuncts(str(platform["if"])))
+                    | {
+                        "needs.distro-artifacts.result == 'success'",
+                        f"needs.{nvx_rs_build}.result == 'success'",
+                    },
+                )
+        # The package jobs take no hypervisor and no benchmark runner.
+        self.assertIn("    runs-on: ${{ fromJSON(inputs.runner) }}\n", packaging)
+        self.assertNotIn("validate-runner", packaging)
+        # The release ships the packages, and the performance history records
+        # a commit only when it could be released.
+        for consumer in ("release", "performance-persist", "required-status-check"):
+            job = _workflow_job(workflow, consumer)
+            for package_job in ci.REQUIRED_CI_PACKAGE_JOBS:
+                with self.subTest(consumer=consumer, package=package_job):
+                    self.assertIn(f"      - {package_job}\n", job)
+                    if consumer != "required-status-check":
+                        self.assertIn(f"needs.{package_job}.result == 'success'", job)
 
     def test_ci_preserves_failed_openvmm_test_diagnostics(self):
         workflow = (

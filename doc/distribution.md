@@ -117,31 +117,34 @@ packaged file, `bin/nvx-rs[.exe]` and its provenance included, and every
 archive marks the executables in `bin/` executable.
 
 [`download`](usage.md#download) of `nvx-rs` verifies the package against its
-`SHA256SUMS` and installs OpenVMM, the guest artifacts, and their provenance
-into the checkout, everything or nothing. It leaves the checkout's `nvx-rs`,
+`SHA256SUMS` and installs OpenVMM, the guest artifacts, including the sandbox
+scratch template when the package declares it, and their provenance into the
+checkout, everything or nothing. It leaves the checkout's `nvx-rs`,
 which Cargo builds, alone, and so installs releases from before packages
 shipped `nvx-rs` too. It warns when a release, such as that of an ancestor,
 declares another microVM ABI or control contract than the `nvx-rs` that
 installs it speaks.
 
 CI follows the binary-only path. On a `dev` push that changes more than
-documentation, on a ready pull request from a branch of this repository that
-changes an input of the platform jobs, and on scheduled or manually
-dispatched full runs, the `linux-kvm`, `linux-mshv`,
-and `windows-whp` platform jobs each stage
-`dist/nvx-<version>-<platform>` with `--binary-only`, then archive it as
+documentation, on a ready pull request from a branch of this repository or a
+merge group that changes an input of the platform or package jobs, and on
+scheduled or manually dispatched full runs, a package job for each of the
+`linux-kvm`, `linux-mshv`, and `windows-whp` platforms stages
+`dist/nvx-<version>-<platform>` with `--binary-only` on a GitHub-hosted runner
+of the platform's operating system, beside the platform job that benchmarks the
+same OpenVMM build, then archives it as
 `.tar.gz` on Linux and `.zip` on Windows through the
 [`package-release`](../.github/actions/package-release/action.yml) action,
-with the `nvx-rs` and provenance that the `nvx-rs` build job of their
+with the `nvx-rs` and provenance that the `nvx-rs` build job of that
 operating system built and its NVX CLI job tested. Only `dev` pushes upload
-the archives, so pull requests and full runs prove that their packages build
-without publishing them. The development release job checks that each package
-ships OpenVMM and `nvx-rs` before it publishes them.
+the archives, so pull requests, merge groups, and full runs prove that their
+packages build without publishing them. The development release job checks
+that each package ships OpenVMM and `nvx-rs` before it publishes them.
 [Continuous integration](ci.md) describes the jobs that gate and publish the
 resulting development release.
 
 A documentation-only push, in which every changed path is under `doc/` or ends
-in `.md`, skips the platform jobs, as
+in `.md`, skips the platform and package jobs, as
 [Change classification](ci.md#change-classification) describes. Such a commit
 gets no packages and no development release, so
 [`nvx-rs download`](usage.md#download) installs the package of its nearest

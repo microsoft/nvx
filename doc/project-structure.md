@@ -49,8 +49,9 @@ nvx/
 |   |   |-- module-diagrams.yml  Module diagrams of the nvx crate, drawn after merges
 |   |   |-- nightly-ci-report.yml Report of failed nightly CI runs
 |   |   |-- nvx-rs-mutants.yml   On-demand mutation testing of nvx-rs
+|   |   |-- package-platform.yml Reusable platform release package job
 |   |   |-- run-nvx-microvm-tests.yml Reusable NVX microVM test job
-|   |   |-- run-platform.yml     Reusable platform benchmark and package job
+|   |   |-- run-platform.yml     Reusable platform benchmark job
 |   |   `-- specula-release.yml  Specula verification of published releases
 |   |-- actionlint.yaml          Self-hosted runner labels for actionlint
 |   `-- copilot-instructions.md  Repository-wide Copilot instructions
@@ -189,11 +190,12 @@ contains downloaded and prepared upstream source trees, including Linux.
 ### `.github/`
 
 Repository automation and Copilot customizations live here. `workflows/ci.yml`
-defines the main CI pipeline and its job-level orchestration. It calls three
+defines the main CI pipeline and its job-level orchestration. It calls four
 reusable workflows: `build-openvmm-binary.yml` builds OpenVMM for one target,
+`package-platform.yml` packages one platform's release,
 `run-nvx-microvm-tests.yml` runs the NVX microVM tests on one backend, and
-`run-platform.yml` benchmarks one platform and, on `dev` pushes, packages its
-release. The full runs of `ci.yml` on `dev` also publish the `nvx` crate to
+`run-platform.yml` benchmarks one platform. The full runs of `ci.yml` on `dev`
+also publish the `nvx` crate to
 crates.io. The other workflows report failed nightly CI runs, draw the module
 diagrams of the `nvx` crate after merges, run adversarial campaigns, run the
 `nvx` crate's mutation tests, verify published releases with Specula, and

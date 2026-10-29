@@ -550,10 +550,11 @@ the CLI tests with that executable, with `NVX_RS` naming it for the tests that
 run it directly. Each microVM test job of that operating system downloads
 the executable into `nvx-rs/target/release/` and restores its executable
 permission on Linux, where the scenarios and the sandbox steps run it. The
-platform jobs run no sandbox or microVM with it, but their
-[`package-release`](../.github/actions/package-release/action.yml) step
-downloads both, the provenance into `build/`, so that each package ships the
-`nvx-rs` of its operating system. The `managed-lifecycle` scenario also builds
+platform jobs don't take it, but the package job of each platform downloads
+both through the
+[`package-release`](../.github/actions/package-release/action.yml) action,
+the provenance into `build/`, so that each package ships the `nvx-rs` of its
+operating system. The `managed-lifecycle` scenario also builds
 and runs the ignored `nvx-rs` test `tests/managed_lifecycle.rs` with Cargo on
 the runner.
 
@@ -569,8 +570,9 @@ status check` requires each `nvx-microvm-tests-*` and `nvx-microvm-guests-*`
 job that the change schedules to succeed, and an `nvx-microvm-tests-*` job
 succeeds only when each of its shards does. `Publish development release` and
 `Persist performance baseline` run only on `dev` pushes in which every microVM
-test job succeeded or was skipped. The pull-request `Performance regression
-gate` reads only the platform jobs' results and publishes nothing. The
+test job succeeded or was skipped. The pull-request and merge-group
+`Performance regression gate` reads only the platform jobs' results and
+publishes nothing. The
 counting LAPIC that the benchmarks depend on is covered by the `smp` scenario
 of those jobs.
 `smp-lapic` repeats `smp` with the counting-LAPIC facts asserted, for explicit
@@ -581,11 +583,11 @@ commit. Shared guest binaries and development release packages move through
 short-lived workflow artifacts alongside the OpenVMM handoff and benchmark
 results. Caches only accelerate reproducible build inputs and outputs; consumers
 do not depend on them as a handoff.
-Pull requests and merge groups gate regressions against recent
-matching-platform history, and successful pushes to `dev` append their p50
-values under `data/`. A pull request or a merge group that changes no input of
-the platform jobs skips them and the gate
-(see [Change classification](#change-classification)). Metadata-only
+Pull requests and merge groups gate regressions against recent matching-platform
+history, and successful pushes to `dev` append their p50 values under `data/`. A
+pull request or merge group that changes no input of the platform or package
+jobs skips those jobs and the gate (see
+[Change classification](#change-classification)). Metadata-only
 performance jobs use GitHub-hosted Ubuntu runners. Provisioning instructions
 are in the [runner bootstrap guide](../scripts/setup/README.md).
 
@@ -622,11 +624,15 @@ or build the Linux VMM tests on a KVM runner and the WHP ones on a WHP runner
 `openvmm-vmm-tests-linux` waits for `artifacts`, which builds the kernel and the
 Alpine initramfs, and the Linux VMM-test build, and `openvmm-vmm-tests-windows`,
 whose legs run the [shards](#openvmm-vmm-test-shards) of the WHP tests, for
-`artifacts` and the Windows VMM-test build. Each microVM test and platform
-job waits for `artifacts`, its OpenVMM producer, and the `nvx-rs` build of its
-operating system. The microVM guest and sandbox jobs and the platform jobs
-also wait for `distro-artifacts`, and the debug-kernel jobs for
-`debug-kernel`. `Performance regression gate`,
+`artifacts` and the Windows VMM-test build. Each microVM test job waits for
+`artifacts`, its OpenVMM producer, and the `nvx-rs` build of its operating
+system, and each platform job for `artifacts` and its OpenVMM producer alone.
+Beside each platform job, a package job on a GitHub-hosted runner of the
+platform's operating system, `package-kvm`, `package-mshv`, or `package-whp`,
+packages the platform's release once `artifacts`, `distro-artifacts`, the
+platform's OpenVMM producer, and the `nvx-rs` build of its operating system
+end. The microVM guest and sandbox jobs also wait for `distro-artifacts`, and
+the debug-kernel jobs for `debug-kernel`. `Performance regression gate`,
 `Publish development release`, `Persist performance baseline`, and `Required
 status check` wait for the jobs whose results they check, and in a full run of
 `dev`, `Package nvx crate` waits for `Required status check` and
@@ -673,17 +679,32 @@ pull requests, and so do the `nvx-rs` builds, which only those jobs use.
 `Required status check`, the development release, and performance persistence
 require both `nvx-rs` builds and both CLI jobs.
 
-The microVM and platform jobs of each operating system wait for its `nvx-rs`
-build, but not for its CLI tests (#982). In the successful first-attempt runs
+No hypervisor job waits for the CLI tests (#982): the microVM jobs of each
+operating system wait for its `nvx-rs` build, and the platform jobs, as the
+next paragraph describes, for neither. In the successful first-attempt runs
 from October 23 to 28, 2026, when they still waited for the whole CLI job,
 `nvx-cli-windows` took a median 5.8 minutes, of which the CLI tests took 4.0,
 while its `nvx-rs` was built 1.4 minutes in, and `nvx-cli-linux` took 2.9
 minutes, its CLI tests 2.0. In the 67 runs that skipped both OpenVMM suites
 and ran the benchmarks, `Platform / Windows / WHP / Virtual machine` waited for
 the Windows CLI job in all but one and finished last in all but one, and
-starting it once `nvx-rs` is built would have ended those runs about 4 minutes
+starting it once `nvx-rs` was built would have ended those runs about 4 minutes
 earlier. A broken CLI no longer keeps the hypervisor jobs of a run off their
 runners, but only 4 of the 304 runs of that window failed a CLI job.
+
+Before the package jobs, the platform jobs read the Ubuntu and Azure Linux
+images and `nvx-rs` only to package the release after they measured. The package
+jobs now package it beside them on GitHub-hosted runners, and the platform jobs
+wait only for the kernel and the Alpine initramfs, which they boot, and their
+OpenVMM producer (#982). In the 89 successful first-attempt runs of the same
+window that restored the OpenVMM VMM tests from the
+[cache](#openvmm-vmm-test-cache), `Platform / Windows / WHP / Virtual machine`
+waited in 34 for `distro-artifacts`, whose cold builds of the Ubuntu and Azure
+Linux images ended 5.5 to 7.4 minutes into the run, and it finished last in
+61. Packaging and the images' downloads also took 1.7 of the median 5.4
+minutes of the KVM platform job, 2.0 of the MSHV one's 5.8, and 0.5 of the WHP
+one's 8.9, on the benchmark runners, for which the platform jobs of
+overlapping runs queue.
 
 The KVM and MSHV pools have five runners each, and the WHP pool has seven. In
 each pool, one runner carries `benchmark` and runs only the platform job, and
@@ -885,11 +906,11 @@ components that its steps read, and waits only for the jobs that upload them:
 
 | Artifact | Files in `build/` | Producer | Jobs that download it |
 | --- | --- | --- | --- |
-| `guest-kernel` | `vmlinux`, `vmlinux.config`, `vmlinux.provenance.json` | `artifacts` | VMM tests, microVM tests, debug-kernel jobs, platform jobs |
-| `guest-alpine` | `initramfs.cpio.gz`, its `.packages.json`, `initramfs.provenance.json` | `artifacts` | VMM tests, microVM tests, debug-kernel jobs, platform jobs |
-| `guest-ubuntu` | `initramfs-ubuntu.cpio.gz` and its `.packages.json` | `distro-artifacts` | microVM guest and sandbox jobs, platform jobs |
-| `guest-ubuntu-distro` | `ubuntu-distro.erofs` and its `.manifest.json`, and `ubuntu-smoke-scratch.ext4`, the sandbox scratch template | `distro-artifacts` | microVM guest and sandbox jobs, platform jobs |
-| `guest-azurelinux` | `initramfs-azurelinux.cpio.gz` and its `.packages.json` | `distro-artifacts` | microVM guest and sandbox jobs, platform jobs |
+| `guest-kernel` | `vmlinux`, `vmlinux.config`, `vmlinux.provenance.json` | `artifacts` | VMM tests, microVM tests, debug-kernel jobs, platform jobs, package jobs |
+| `guest-alpine` | `initramfs.cpio.gz`, its `.packages.json`, `initramfs.provenance.json` | `artifacts` | VMM tests, microVM tests, debug-kernel jobs, platform jobs, package jobs |
+| `guest-ubuntu` | `initramfs-ubuntu.cpio.gz` and its `.packages.json` | `distro-artifacts` | microVM guest and sandbox jobs, package jobs |
+| `guest-ubuntu-distro` | `ubuntu-distro.erofs` and its `.manifest.json`, and `ubuntu-smoke-scratch.ext4`, the sandbox scratch template | `distro-artifacts` | microVM guest and sandbox jobs, package jobs |
+| `guest-azurelinux` | `initramfs-azurelinux.cpio.gz` and its `.packages.json` | `distro-artifacts` | microVM guest and sandbox jobs, package jobs |
 | `guest-debug-kernel` | `vmlinux-debug`, `vmlinux-debug.config`, `vmlinux-debug.provenance.json` | `debug-kernel` | debug-kernel jobs |
 
 The OpenVMM VMM tests boot only the kernel and the Alpine initramfs, and their
@@ -900,17 +921,16 @@ Alpine initramfs. The microVM default suites boot only those two, and the
 microVM guest and sandbox jobs boot every guest and run sandboxes from the
 Ubuntu distro layer over copies of the scratch template, which comes with the
 layer: the layer's Docker target formats it, its cache entry holds it, and the
-Ubuntu record gives its digest, so a merge group or a push reuses it with the
+Ubuntu record gives its digest, so a merge group or push reuses it with the
 layer. The microVM test workflow's own default, an unsharded default run, which
 no CI job selects, runs the public sandbox scenarios too, so it also downloads
-the layer. The
-platform jobs boot the kernel and the Alpine initramfs to qualify their runner
-and to benchmark, and package every guest image, and the scratch template, into
-their release. A missing artifact fails its download step, so no job runs
-without a component that it reads. The microVM test jobs also set
-`NVX_AUTO_DOWNLOAD=0`, so that `nvx-rs` never replaces a missing artifact with
-a release's, as it does in a checkout without artifacts; see
-[`download`](usage.md#download). A test in `scripts/test_nvx_tools.py` maps
+the layer. The platform jobs boot the kernel and the Alpine initramfs to
+qualify their runner and to benchmark, and the package jobs package every guest
+image and the scratch template into the release. A missing artifact fails its
+download step, so no job runs without a component that it reads. The microVM
+test jobs also set `NVX_AUTO_DOWNLOAD=0`, so that `nvx-rs` never replaces a
+missing artifact with a release's, as it does in a checkout without artifacts;
+see [`download`](usage.md#download). A test in `scripts/test_nvx_tools.py` maps
 each step of these jobs, and of that unsharded default run, to the guest files
 that it reads, through the `nvx.py` command or local action that it runs and
 the `build/` paths that it names, and fails when a job lacks a component that a
@@ -1070,8 +1090,8 @@ that latest attempt held no failed job. The only remaining retry is the
 all-jobs `gh run rerun RUN_ID`. It repeats the jobs that the original push and
 its change classification select, not the full matrix of a scheduled or manual
 run. For a non-documentation `dev` push such as run 39788615461, those jobs
-include the platform benchmarks, development release, and performance
-persistence. For
+include the platform benchmarks, package jobs, development release, and
+performance persistence. For
 an older commit, the release job uses that run's `GITHUB_SHA` to create or
 verify its
 SHA-specific development release. Performance persistence records that same
@@ -1117,10 +1137,14 @@ while a group ahead of it fails.
 A group's run then checks what the run of a same-repository pull request
 checks, but the rehearsal of the [guest artifact reuse](#guest-artifact-reuse),
 which the pull request's run made: each suite runs only when one of its inputs
-changed, the platform jobs and the performance regression gate after them
-included, the debug kernel runs on KVM alone, and the OpenVMM VMM tests are
-restored from the [cache](#openvmm-vmm-test-cache) that `dev` pushes save. A
-group publishes no development release and persists no performance results,
+changed, the platform and package jobs and the performance regression gate
+after them included, the debug kernel runs on KVM alone, and the OpenVMM VMM
+tests are restored from the [cache](#openvmm-vmm-test-cache) that `dev` pushes
+save. The two `nvx-rs` build jobs run too: each hands its executable to the
+microVM and package jobs of its operating system and to the CLI job that tests
+it. No hypervisor job waits for the CLI tests, and the platform jobs wait for
+neither `nvx-rs` nor the distro artifacts that only the packages ship. A group
+publishes no development release and persists no performance results,
 which the `dev` push of the merged commit does, and saves no cache: GitHub
 scopes a cache entry to the ref that saved it, and no other run can restore an
 entry of a group's branch, which GitHub deletes as soon as it merges or drops
@@ -1338,9 +1362,10 @@ of the group that it merges, which that group's run tested, and merges one
 pull request per push (see [Queue settings](#queue-settings)), so the push
 carries exactly the change that the group's run checked. It doesn't: a push
 still publishes the development release and records the performance history,
-and so runs the platform jobs for every change but documentation, and it saves
-the caches that later runs restore, which no group can. Skipping a push's test
-suites when the run of the group that it merged passed is left for later.
+and so runs the platform and package jobs for every change but documentation,
+and it saves the caches that later runs restore, which no group can. Skipping
+a push's test suites when the run of the group that it merged passed is left
+for later.
 
 ## Cancellation
 
@@ -1697,16 +1722,16 @@ other path selects each suite that takes it as an input:
   actions, and CLI modules that their jobs and the jobs that build their
   artifacts run, the runner setup scripts, the Rust pin, and
   `.gitattributes`, which checks out their scripts on Windows.
-- `run-benchmarks` enables the platform jobs, which benchmark each backend and
-  package its release, and so the performance regression gate of a pull
-  request or a merge group. Their inputs are the OpenVMM pin, the guests and
-  every input of their cache keys, the `nvx` crate, which every package ships,
-  the performance history and expected hosts under `data/`, `VERSION`,
-  `LICENSE`, the workflows, actions, and CLI modules that the platform jobs,
-  the gate, and the jobs that build their artifacts run, the runner setup
-  scripts, the Rust pin, and `.gitattributes`. A pull request or a merge group
-  sets it only when one of these inputs changed, but a push sets it for every
-  change but documentation; see
+- `run-benchmarks` enables the platform jobs, which benchmark each backend, the
+  package jobs, which package its release, and so the performance regression
+  gate of a pull request or merge group. Their inputs are the OpenVMM pin, the
+  guests and every input of their cache keys, the `nvx` crate, which every
+  package ships, the performance history and expected hosts under `data/`,
+  `VERSION`, `LICENSE`, the workflows, actions, and CLI modules that the
+  platform and package jobs, the gate, and the jobs that build their artifacts
+  run, the runner setup scripts, the Rust pin, and `.gitattributes`. A pull
+  request or merge group sets it only when one of these inputs changed, but a
+  push sets it for every change but documentation; see
   [Development releases and performance history](#development-releases-and-performance-history).
 - `run-openvmm-unit-tests` and `run-openvmm-vmm-tests` enable the OpenVMM
   suites. A push, pull request, or merge group sets each only when one of that
@@ -1720,22 +1745,24 @@ other path selects each suite that takes it as an input:
   partition of the shards. Of `nvx-rs`, those are only the inputs
   of the guest binaries, which `GuestRustBuildConstants.SOURCE_PATTERN`
   matches, so a change to its host side or tests runs the NVX microVM tests
-  and the platform jobs but not the VMM tests.
+  and the platform and package jobs but not the VMM tests.
 - `run-guest-artifacts` enables `artifacts`, `distro-artifacts`, and
   `debug-kernel`, which build the guest artifacts and the CI debug kernel, and
   `run-openvmm-binaries` the three OpenVMM binary producers. Neither has a
   use of its own, so the classifier sets each exactly when a job that uses its
   artifacts runs: the guest artifacts for the OpenVMM VMM tests, the NVX
-  microVM tests, or the platform jobs, and the OpenVMM binaries for the
-  microVM tests or the platform jobs. Every input of an artifact is an input
-  of each job that uses it. Every input of the VMM tests is also an input of
-  the microVM tests, which read the Ubuntu and Azure Linux images of
+  microVM tests, or the platform and package jobs, and the OpenVMM binaries
+  for the microVM tests or the platform and package jobs. Every input of an
+  artifact is an input of each job that uses it. Every input of the VMM tests is
+  also an input of the microVM tests, which read the Ubuntu and Azure Linux
+  images of
   `distro-artifacts`, so the three guest artifact jobs share the output. The
   debug kernel is built with the guest artifacts, as before, because the
   development release and performance persistence require its build too.
 
-Every CLI module is an input of the microVM tests, and of the platform jobs,
-unless none of that suite's jobs runs it, so a new module selects both until
+Every CLI module is an input of the microVM tests and of the platform and
+package jobs, unless none of that suite's jobs runs it, so a new module selects
+both until
 the classifier excludes it. The always-run quality and CLI jobs catch import
 and static-analysis failures, so `nvx.py` importing a module at startup does
 not alone make it a suite input. `microvm_tests.py` and the modules that only
@@ -1747,11 +1774,11 @@ and the partition of its [shards](#microvm-test-shards),
 [VMM test shards](#openvmm-vmm-test-shards), `openvmm_test_shards.json`, and
 `shard_plans.py`, which both partitions' planners share, are inputs of the
 VMM tests and, as every input of theirs is, of the microVM tests, but not of
-the platform jobs. `performance.py`
-is an input of the platform jobs alone. `nightly_ci.py`, which only the
-nightly report workflow runs, `crate_release.py`, which only the crate
-release jobs run, and `merge_queue.py`, which only the job that cancels the
-runs of superseded merge groups runs, are inputs of neither. Modules that both kinds
+the platform or package jobs. `performance.py` selects the platform and package
+jobs alone. `nightly_ci.py`, which only the nightly report workflow runs,
+`crate_release.py`, which only the crate release jobs run, and `merge_queue.py`,
+which only the job that cancels superseded merge-group runs uses, are inputs of
+neither. Modules that both kinds
 of job run, such as `benchmark.py`, which `microvm_tests.py` imports,
 `doctor.py`, which every runner validation runs, and `release.py`, whose
 `verify` command the OpenVMM builds run, select both.
@@ -1760,13 +1787,14 @@ A push, pull request, or merge group that changes neither OpenVMM suite's
 inputs, such as one that changes only the microVM tests, the benchmarks, the
 Ubuntu or Azure Linux guests, or the host side of `nvx-rs`, therefore skips the
 jobs of both OpenVMM suites, which occupy the WHP runners longest. A pull
-request or a merge group that changes only the microVM tests, such as their
-scenarios or the runtime adapter, also skips the platform jobs, which wait for
-their pool's single benchmark runner, and one that changes only the
-performance tooling, such as `performance.py`, the `run-benchmark` action, or
-`data/`, skips the microVM tests. One that changes the input of no suite, such
-as the CLI tests, nightly reporting, crate publication, the adversarial
-campaigns, or the GitHub-hosted checks, runs only the GitHub-hosted jobs.
+request or merge group that changes only the microVM tests, such as their
+scenarios or the runtime adapter, also skips the platform and package jobs.
+The platform jobs wait for their pool's single benchmark runner. A change only
+to the performance tooling, such as `performance.py`, the `run-benchmark`
+action, or `data/`, skips the microVM tests. One that changes the input of no
+suite, such as the CLI tests, nightly reporting, crate publication, the
+adversarial campaigns, or the GitHub-hosted checks, runs only the GitHub-hosted
+jobs.
 
 The nightly schedule runs at 05:17 UTC, and a manual workflow
 dispatch starts the same full run. Both select the full matrix before the
@@ -1802,35 +1830,36 @@ a pattern misses one. The OpenVMM suites' come from the actions that their
 jobs use, the modules that `ci.py` imports, and the guest cache keys,
 including the files of the guest binaries' source identity, and the VMM
 tests' also from the modules of the `nvx.py` commands that their jobs run,
-with the files that those read. The microVM
-tests' and the platform jobs' come from those jobs and the jobs that build the
-artifacts that they use: the reusable workflows and actions that these reach,
+with the files that those read. The inputs of the microVM tests and the
+platform and package jobs come from those jobs and the jobs that build their
+artifacts: the reusable workflows and actions that these reach,
 the files that the cache keys there hash and the source identity's, the CLI
 modules of the `nvx.py` commands that they run, which the tests map from
 `nvx.py`'s parser, with every module that those import and every file that
 those read beside them, and the `nvx` crate, from which the `nvx-rs` build
 jobs build the executable. The tests also check that no other file of `nvx-rs`
 selects the VMM tests or changes a guest image key, while every one selects the
-NVX microVM tests and the platform jobs.
+NVX microVM tests and the platform and package jobs.
 
 ### Development releases and performance history
 
 A `dev` push publishes its commit's development release and appends the
 platform jobs' results to the performance history. `Publish development
-release` and `Persist performance baseline` require all three platform jobs to
-succeed, so a push that skipped them would publish nothing partial or stale:
-it would publish no release and record no history. Its commit would have no
-release of its own, though, and [`nvx-rs download`](usage.md#download) would
-install an ancestor's, which is older still when that ancestor's release
-failed. A push therefore runs the platform jobs, and the jobs that build their
-artifacts, for every change but documentation, as every push did before the
-classifier selected the platform jobs apart from the tests. Of the 108 merges
-to `dev` from October 10 to 21, 2026 that changed more than documentation, 10
-changed no input of the platform jobs, and each of their pushes spent about
-19 benchmark-runner minutes on them: the KVM, MSHV, and WHP platform jobs take
-a median of 5.3, 5.5, and 8.6 minutes. Pull requests and merge groups publish
-and persist nothing, so they run the platform jobs only when one of their
-inputs changed.
+release` and `Persist performance baseline` require all three platform jobs
+and their package jobs to succeed, so a push that skipped them would publish
+nothing partial or stale: it would publish no release and record no history.
+Its commit would have no release of its own, though, and
+[`nvx-rs download`](usage.md#download) would install an ancestor's, which is
+older still when that ancestor's release failed. A push therefore runs the
+platform and package jobs, and the jobs that build their artifacts, for every
+change but documentation, as every push did before the classifier selected the
+platform jobs apart from the tests. Of the 108 merges to `dev` from October 10
+to 21, 2026 that changed more than documentation, 10 changed no input of the
+platform or package jobs, and each of their pushes spent about 19
+benchmark-runner minutes on them: the KVM, MSHV, and WHP platform jobs take a
+median of 5.3, 5.5, and 8.6 minutes. Pull requests and merge groups publish and
+persist nothing, so they run the platform and package jobs only when one of
+their inputs changed.
 [Development release publication](#development-release-publication) describes
 how the release job publishes.
 

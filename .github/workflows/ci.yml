@@ -121,7 +121,7 @@ jobs:
 
   # The microVM tests run their microVMs and sandboxes with nvx-rs, and every
   # release package ships it, so one GitHub-hosted job per OS builds it, as the
-  # OpenVMM producers build OpenVMM, and hands it to the microVM and platform
+  # OpenVMM producers build OpenVMM, and hands it to the microVM and package
   # jobs of its OS as soon as it is built, and to the NVX CLI job of its OS,
   # which tests with it (doc/ci.md#job-graph-and-runner-capacity). The jobs
   # that it feeds run only for pushes, merge groups, full runs, and
@@ -548,7 +548,7 @@ jobs:
 
   # The kernel and the Alpine initramfs, which every job that boots a guest
   # reads, build beside the Ubuntu and Azure Linux images, which only the
-  # microVM test and platform jobs read, so that a rebuild of those images
+  # microVM test and package jobs read, so that a rebuild of those images
   # delays neither the OpenVMM VMM tests nor the debug-kernel jobs.
   artifacts:
     name: Build kernel and Alpine artifacts
@@ -2089,12 +2089,130 @@ jobs:
   # that carries `benchmark` instead of `general`, so that no other job can
   # delay it and every workflow run measures its series on the same VM: the
   # pools mix CPU generations and VMs whose results differ by more than the
-  # run-to-run noise (#383, #415). They also package the release, so a pull
-  # request or a merge group runs them only when one of their inputs changed,
-  # but a dev push, which publishes the development release and records the
-  # history, runs them for every change but documentation.
+  # run-to-run noise (#383, #415). A pull request or merge group runs them
+  # only when one of their inputs changed, but a dev push, which records the
+  # history, runs them for every change but documentation. They wait only for
+  # the kernel and the Alpine initramfs, which they boot, and their OpenVMM
+  # producer: the package jobs package the release
+  # (doc/ci.md#job-graph-and-runner-capacity).
   platform-kvm:
     name: Platform / Linux / KVM / Virtual machine
+    needs: [artifacts, build-openvmm-linux-gnu, openvmm-changes]
+    if: >-
+      ${{
+        always() &&
+        !cancelled() &&
+        (
+          github.event_name != 'pull_request' ||
+          github.event.pull_request.draft == false
+        ) &&
+        (
+          github.event_name != 'pull_request' ||
+          github.event.pull_request.head.repo.full_name == github.repository
+        ) &&
+        needs.artifacts.result == 'success' &&
+        needs.build-openvmm-linux-gnu.result == 'success' &&
+        (
+          needs.openvmm-changes.result != 'success' ||
+          needs.openvmm-changes.outputs.run-benchmarks == 'true'
+        )
+      }}
+    uses: ./.github/workflows/run-platform.yml
+    with:
+      display-name: Linux / KVM / Virtual machine
+      runner: '["self-hosted", "linux", "kvm", "virtual-machine", "benchmark"]'
+      backend: kvm
+      benchmark-platform: linux-kvm-virtual-machine
+      openvmm-artifact: openvmm-linux-gnu
+      teardown-mode: guest-exit
+      benchmark-cpus: 0-7
+      host-cpu-reserve: 0
+      marker-timeout: 40
+    secrets:
+      OPENVMM_DEPLOY_KEY: ${{ secrets.OPENVMM_DEPLOY_KEY }}
+
+  platform-mshv:
+    name: Platform / Linux / MSHV / Virtual machine
+    needs: [artifacts, build-openvmm-linux-musl, openvmm-changes]
+    if: >-
+      ${{
+        always() &&
+        !cancelled() &&
+        (
+          github.event_name != 'pull_request' ||
+          github.event.pull_request.draft == false
+        ) &&
+        (
+          github.event_name != 'pull_request' ||
+          github.event.pull_request.head.repo.full_name == github.repository
+        ) &&
+        needs.artifacts.result == 'success' &&
+        needs.build-openvmm-linux-musl.result == 'success' &&
+        (
+          needs.openvmm-changes.result != 'success' ||
+          needs.openvmm-changes.outputs.run-benchmarks == 'true'
+        )
+      }}
+    uses: ./.github/workflows/run-platform.yml
+    with:
+      display-name: Linux / MSHV / Virtual machine
+      runner: '["self-hosted", "linux", "mshv", "virtual-machine", "benchmark"]'
+      backend: mshv
+      benchmark-platform: linux-mshv-virtual-machine
+      openvmm-artifact: openvmm-linux-musl
+      teardown-mode: guest-exit
+      benchmark-cpus: 0-7
+      host-cpu-reserve: 0
+      marker-timeout: 40
+    secrets:
+      OPENVMM_DEPLOY_KEY: ${{ secrets.OPENVMM_DEPLOY_KEY }}
+
+  platform-whp:
+    name: Platform / Windows / WHP / Virtual machine
+    needs: [artifacts, build-openvmm-windows-msvc, openvmm-changes]
+    if: >-
+      ${{
+        always() &&
+        !cancelled() &&
+        (
+          github.event_name != 'pull_request' ||
+          github.event.pull_request.draft == false
+        ) &&
+        (
+          github.event_name != 'pull_request' ||
+          github.event.pull_request.head.repo.full_name == github.repository
+        ) &&
+        needs.artifacts.result == 'success' &&
+        needs.build-openvmm-windows-msvc.result == 'success' &&
+        (
+          needs.openvmm-changes.result != 'success' ||
+          needs.openvmm-changes.outputs.run-benchmarks == 'true'
+        )
+      }}
+    uses: ./.github/workflows/run-platform.yml
+    with:
+      display-name: Windows / WHP / Virtual machine
+      runner: '["self-hosted", "windows", "whp", "virtual-machine", "benchmark"]'
+      backend: whp
+      benchmark-platform: windows-whp-virtual-machine
+      openvmm-artifact: openvmm-windows-msvc
+      teardown-mode: guest-exit
+      benchmark-cpus: 0-7
+      host-cpu-reserve: 0
+      marker-timeout: 40
+    secrets:
+      OPENVMM_DEPLOY_KEY: ${{ secrets.OPENVMM_DEPLOY_KEY }}
+
+  # Each package job packages a platform's release, which takes no hypervisor,
+  # on a GitHub-hosted runner of the platform's OS, beside the platform job
+  # that measures it, so that no benchmark runner waits for the Ubuntu and
+  # Azure Linux images, which only the package ships, or for nvx-rs. Like the
+  # platform jobs, a pull request or merge group runs them only when one of
+  # their inputs changed, but a dev push, which publishes the development
+  # release, runs
+  # them for every change but documentation.
+  package-kvm:
+    name: Package / Linux / KVM
     needs: [artifacts, distro-artifacts, build-openvmm-linux-gnu, build-nvx-rs-linux-musl, openvmm-changes]
     if: >-
       ${{
@@ -2117,25 +2235,18 @@ jobs:
           needs.openvmm-changes.outputs.run-benchmarks == 'true'
         )
       }}
-    uses: ./.github/workflows/run-platform.yml
+    uses: ./.github/workflows/package-platform.yml
     with:
-      display-name: Linux / KVM / Virtual machine
-      runner: '["self-hosted", "linux", "kvm", "virtual-machine", "benchmark"]'
-      backend: kvm
+      display-name: Linux / KVM
+      runner: '["ubuntu-latest"]'
       release-platform: linux-kvm
-      benchmark-platform: linux-kvm-virtual-machine
       openvmm-artifact: openvmm-linux-gnu
       nvx-rs-artifact: nvx-rs-linux-musl
-      teardown-mode: guest-exit
-      benchmark-cpus: 0-7
-      host-cpu-reserve: 0
-      marker-timeout: 40
-      package-release: true
     secrets:
       OPENVMM_DEPLOY_KEY: ${{ secrets.OPENVMM_DEPLOY_KEY }}
 
-  platform-mshv:
-    name: Platform / Linux / MSHV / Virtual machine
+  package-mshv:
+    name: Package / Linux / MSHV
     needs: [artifacts, distro-artifacts, build-openvmm-linux-musl, build-nvx-rs-linux-musl, openvmm-changes]
     if: >-
       ${{
@@ -2158,25 +2269,18 @@ jobs:
           needs.openvmm-changes.outputs.run-benchmarks == 'true'
         )
       }}
-    uses: ./.github/workflows/run-platform.yml
+    uses: ./.github/workflows/package-platform.yml
     with:
-      display-name: Linux / MSHV / Virtual machine
-      runner: '["self-hosted", "linux", "mshv", "virtual-machine", "benchmark"]'
-      backend: mshv
+      display-name: Linux / MSHV
+      runner: '["ubuntu-latest"]'
       release-platform: linux-mshv
-      benchmark-platform: linux-mshv-virtual-machine
       openvmm-artifact: openvmm-linux-musl
       nvx-rs-artifact: nvx-rs-linux-musl
-      teardown-mode: guest-exit
-      benchmark-cpus: 0-7
-      host-cpu-reserve: 0
-      marker-timeout: 40
-      package-release: true
     secrets:
       OPENVMM_DEPLOY_KEY: ${{ secrets.OPENVMM_DEPLOY_KEY }}
 
-  platform-whp:
-    name: Platform / Windows / WHP / Virtual machine
+  package-whp:
+    name: Package / Windows / WHP
     needs: [artifacts, distro-artifacts, build-openvmm-windows-msvc, build-nvx-rs-windows-msvc, openvmm-changes]
     if: >-
       ${{
@@ -2199,20 +2303,13 @@ jobs:
           needs.openvmm-changes.outputs.run-benchmarks == 'true'
         )
       }}
-    uses: ./.github/workflows/run-platform.yml
+    uses: ./.github/workflows/package-platform.yml
     with:
-      display-name: Windows / WHP / Virtual machine
-      runner: '["self-hosted", "windows", "whp", "virtual-machine", "benchmark"]'
-      backend: whp
+      display-name: Windows / WHP
+      runner: '["windows-latest"]'
       release-platform: windows-whp
-      benchmark-platform: windows-whp-virtual-machine
       openvmm-artifact: openvmm-windows-msvc
       nvx-rs-artifact: nvx-rs-windows-msvc
-      teardown-mode: guest-exit
-      benchmark-cpus: 0-7
-      host-cpu-reserve: 0
-      marker-timeout: 40
-      package-release: true
     secrets:
       OPENVMM_DEPLOY_KEY: ${{ secrets.OPENVMM_DEPLOY_KEY }}
 
@@ -2244,6 +2341,9 @@ jobs:
       - platform-kvm
       - platform-mshv
       - platform-whp
+      - package-kvm
+      - package-mshv
+      - package-whp
     # The VMM-test jobs must all succeed, or all be skipped because the change
     # selects no VMM tests: a failed or unexpectedly skipped one blocks this.
     if: >-
@@ -2317,7 +2417,10 @@ jobs:
         ) &&
         needs.platform-kvm.result == 'success' &&
         needs.platform-mshv.result == 'success' &&
-        needs.platform-whp.result == 'success'
+        needs.platform-whp.result == 'success' &&
+        needs.package-kvm.result == 'success' &&
+        needs.package-mshv.result == 'success' &&
+        needs.package-whp.result == 'success'
       }}
     runs-on: ubuntu-latest
     timeout-minutes: 90
@@ -2402,6 +2505,9 @@ jobs:
       - platform-kvm
       - platform-mshv
       - platform-whp
+      - package-kvm
+      - package-mshv
+      - package-whp
       - performance-gate
     if: always()
     runs-on: ubuntu-latest
@@ -2458,6 +2564,9 @@ jobs:
           PLATFORM_KVM_RESULT: ${{ needs.platform-kvm.result }}
           PLATFORM_MSHV_RESULT: ${{ needs.platform-mshv.result }}
           PLATFORM_WHP_RESULT: ${{ needs.platform-whp.result }}
+          PACKAGE_KVM_RESULT: ${{ needs.package-kvm.result }}
+          PACKAGE_MSHV_RESULT: ${{ needs.package-mshv.result }}
+          PACKAGE_WHP_RESULT: ${{ needs.package-whp.result }}
           PERFORMANCE_GATE_RESULT: ${{ needs.performance-gate.result }}
         run: >-
           python3 scripts/nvx.py check-required-ci
@@ -2496,6 +2605,9 @@ jobs:
       - platform-kvm
       - platform-mshv
       - platform-whp
+      - package-kvm
+      - package-mshv
+      - package-whp
     # The VMM-test jobs must all succeed, or all be skipped because the change
     # selects no VMM tests: a failed or unexpectedly skipped one blocks this.
     if: >-
@@ -2567,7 +2679,10 @@ jobs:
         ) &&
         needs.platform-kvm.result == 'success' &&
         needs.platform-mshv.result == 'success' &&
-        needs.platform-whp.result == 'success'
+        needs.platform-whp.result == 'success' &&
+        needs.package-kvm.result == 'success' &&
+        needs.package-mshv.result == 'success' &&
+        needs.package-whp.result == 'success'
       }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
