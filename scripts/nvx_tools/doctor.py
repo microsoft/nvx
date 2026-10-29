@@ -20,6 +20,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -90,6 +91,11 @@ RATE_TOLERANCE_PPM = GUEST_FREQUENCY_LIMIT_PPM - RESTORE_TOLERANCE_PPM
 CHRONY_TRACKING_FIELDS = 14
 CHRONY_UNSYNCHRONIZED = "Not synchronised"
 CHRONYC_TIMEOUT_SECONDS = 5.0
+# When chronyd's skew leaves H4's range straddling the limit, H4 re-reads
+# chronyd's estimate this often, for at most this long, and uses the first
+# estimate whose range is conclusive.
+CHRONY_REREAD_INTERVAL_SECONDS = 2.0
+CHRONY_REREAD_SECONDS = 60.0
 SKEW_PAIR_DURATION_MS = 5
 GUEST_VCPU_COUNTS = (8, 4, 2, 1)
 GUEST_MEMORY_MIB = 128
@@ -779,6 +785,54 @@ def chrony_frequency() -> ChronyFrequency | str:
     return ChronyFrequency(fields[1], ppm, skew_ppm)
 
 
+def reread_chrony_frequency(
+    conclusive: Callable[[ChronyFrequency], bool],
+) -> tuple[ChronyFrequency | None, float]:
+    """Re-read chronyd's frequency estimate until one is ``conclusive``.
+
+    Reads it every CHRONY_REREAD_INTERVAL_SECONDS for at most
+    CHRONY_REREAD_SECONDS, and returns the first conclusive estimate, or None,
+    with the seconds that the re-reads took.
+    """
+    start = time.monotonic()
+    while (
+        time.monotonic() - start + CHRONY_REREAD_INTERVAL_SECONDS
+        <= CHRONY_REREAD_SECONDS
+    ):
+        time.sleep(CHRONY_REREAD_INTERVAL_SECONDS)
+        estimate = chrony_frequency()
+        if isinstance(estimate, ChronyFrequency) and conclusive(estimate):
+            return estimate, time.monotonic() - start
+    return None, time.monotonic() - start
+
+
+def _deviation_ppm(rate: float, declared_hz: int) -> float:
+    return (rate - declared_hz) / declared_hz * 1e6
+
+
+def _corrected_rate(raw_rate: float, ppm: float) -> float:
+    """Return the rate against true time of a rate against
+    CLOCK_MONOTONIC_RAW, which a time service estimates runs ``ppm`` fast."""
+    # chronyd sets the kernel's frequency to -ppm, so its estimate of true
+    # time runs at CLOCK_MONOTONIC_RAW's rate times (1 - ppm).
+    return raw_rate / (1 - ppm / 1e6)
+
+
+def _chrony_deviations(
+    raw_rate: float, declared_hz: int, chrony: ChronyFrequency
+) -> tuple[float, float]:
+    """Return the nearest and the farthest deviation from ``declared_hz`` of
+    the rates within chronyd's skew of its estimate."""
+    # chronyd's skew bounds the error of its frequency estimate, so the rate
+    # lies between the rates that the estimate's bounds give.
+    low, high = (
+        _deviation_ppm(_corrected_rate(raw_rate, chrony.ppm + bound), declared_hz)
+        for bound in (-chrony.skew_ppm, chrony.skew_ppm)
+    )
+    nearest = 0.0 if low <= 0 <= high else min(abs(low), abs(high))
+    return nearest, max(abs(low), abs(high))
+
+
 def check_rate(context: DoctorContext) -> CheckResult:
     clocksource = ""
     if not host_is_windows():
@@ -833,16 +887,40 @@ def check_rate(context: DoctorContext) -> CheckResult:
     stable_rate = _window_rate(points, clock_hz)
     agreement_ppm = (max(rates) - min(rates)) / stable_rate * 1e6
     uncertainty_ppm = max(uncertainties_ppm)
+    declared = context.facts.get("native_tsc_hz") or context.facts.get("tsc_hz")
+    declared_hz = None if declared is None else int(declared)
     # Over the window, CLOCK_MONOTONIC also carries the slew with which
     # chronyd removes its current offset, which reaches hundreds of ppm for
     # seconds after its reference jumps (#768). chronyd's frequency estimate,
     # from its whole sample history, says instead how fast
     # CLOCK_MONOTONIC_RAW runs against the reference.
     chrony = None if host_is_windows() else chrony_frequency()
+    reread_problem = reread_evidence = ""
+    if isinstance(chrony, ChronyFrequency) and declared_hz is not None:
+
+        def conclusive(estimate: ChronyFrequency) -> bool:
+            nearest, farthest = _chrony_deviations(stable_rate, declared_hz, estimate)
+            return farthest <= RATE_TOLERANCE_PPM or nearest > RATE_TOLERANCE_PPM
+
+        if not conclusive(chrony):
+            # The reference's wander moves chronyd's estimate and its skew
+            # within seconds (#1008). Only the estimate changes, so the
+            # samples stand while H4 re-reads it.
+            estimate, seconds = reread_chrony_frequency(conclusive)
+            if estimate is None:
+                reread_problem = (
+                    f", and no re-read of chronyd's estimate in {seconds:.0f} s "
+                    "was conclusive"
+                )
+            else:
+                reread_evidence = (
+                    f"; chronyd's first estimate, {chrony.ppm:+.3f} ppm (skew "
+                    f"{chrony.skew_ppm:.3f} ppm), straddled the limit, so H4 "
+                    f"re-read it for {seconds:.0f} s (evidence)"
+                )
+                chrony = estimate
     if isinstance(chrony, ChronyFrequency):
-        # chronyd sets the kernel's frequency to -ppm, so its estimate of true
-        # time runs at CLOCK_MONOTONIC_RAW's rate times (1 - ppm).
-        measured = stable_rate / (1 - chrony.ppm / 1e6)
+        measured = _corrected_rate(stable_rate, chrony.ppm)
         reference = (
             f"against {stability_clock['name']} corrected by chronyd's frequency "
             f"estimate of {chrony.ppm:+.3f} ppm (skew {chrony.skew_ppm:.3f} ppm, "
@@ -879,30 +957,18 @@ def check_rate(context: DoctorContext) -> CheckResult:
             f"the TSC rate is unstable: interval rates differ by "
             f"{agreement_ppm:.3f} ppm > {RATE_AGREEMENT_PPM} ppm"
         )
-    declared = context.facts.get("native_tsc_hz") or context.facts.get("tsc_hz")
-    if declared is None:
+    if declared_hz is None:
         # validate-runner runs before the OpenVMM binary is available; the
         # VM jobs run H3 with H4 to compare against the backend's rate.
         detail += "; not compared with the backend's rate (H3 did not run)"
     else:
-        declared_hz = int(declared)
-
-        def deviation(rate: float) -> float:
-            return (rate - declared_hz) / declared_hz * 1e6
-
-        deviation_ppm = abs(deviation(measured))
+        deviation_ppm = abs(_deviation_ppm(measured, declared_hz))
         context.facts["rate_deviation_ppm"] = f"{deviation_ppm:.3f}"
         detail += f"; {deviation_ppm:.3f} ppm from the backend's {declared} Hz"
         if isinstance(chrony, ChronyFrequency):
-            # chronyd's skew bounds the error of its frequency estimate, so the
-            # rate lies between the rates that the estimate's bounds give, and
-            # passes only when that whole range lies within the limit.
-            low, high = (
-                deviation(stable_rate / (1 - (chrony.ppm + bound) / 1e6))
-                for bound in (-chrony.skew_ppm, chrony.skew_ppm)
-            )
-            nearest = 0.0 if low <= 0 <= high else min(abs(low), abs(high))
-            farthest = max(abs(low), abs(high))
+            # The rate passes only when the whole range within chronyd's skew
+            # lies within the limit.
+            nearest, farthest = _chrony_deviations(stable_rate, declared_hz, chrony)
             within = (
                 f", {nearest:.3f} to {farthest:.3f} ppm within chronyd's skew of "
                 f"{chrony.skew_ppm:.3f} ppm"
@@ -919,8 +985,9 @@ def check_rate(context: DoctorContext) -> CheckResult:
             problems.append(
                 f"the measurement is inconclusive: the backend rate is "
                 f"{deviation_ppm:.3f} ppm from the measured rate{within}, which "
-                f"straddles the limit of {RATE_TOLERANCE_PPM:g} ppm"
+                f"straddles the limit of {RATE_TOLERANCE_PPM:g} ppm{reread_problem}"
             )
+    detail += reread_evidence
     if isinstance(chrony, ChronyFrequency):
         detail += (
             f"; {window_rate:.0f} Hz against {rate_clock['name']}, which chronyd "

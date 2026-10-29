@@ -16,6 +16,7 @@ import sys
 import tempfile
 import threading
 import unittest
+from collections.abc import Sequence
 from pathlib import Path
 from typing import cast
 from unittest.mock import patch
@@ -1921,6 +1922,21 @@ def completed(stdout: str, returncode: int = 0, stderr: str = ""):
     return subprocess.CompletedProcess(["x"], returncode, stdout, stderr)
 
 
+class FakeClock:
+    """A monotonic clock that advances only when something sleeps."""
+
+    def __init__(self) -> None:
+        self.now = 0.0
+        self.sleeps: list[float] = []
+
+    def monotonic(self) -> float:
+        return self.now
+
+    def sleep(self, seconds: float) -> None:
+        self.sleeps.append(seconds)
+        self.now += seconds
+
+
 CPU = {
     "vendor": "GenuineIntel",
     "family": "6",
@@ -2542,15 +2558,26 @@ class DoctorTests(unittest.TestCase):
             probe_records: list[tuple[str, dict[str, str]]],
             clocksource: str = "tsc",
             windows: bool = False,
-            chrony: doctor.ChronyFrequency | str = "chronyc is not installed",
+            chrony: doctor.ChronyFrequency
+            | str
+            | Sequence[doctor.ChronyFrequency | str] = "chronyc is not installed",
+            clock: FakeClock | None = None,
         ) -> doctor.CheckResult:
+            """Run H4; a list of chronyd readings answers its re-reads too."""
+            clock = clock or FakeClock()
+            readings = chrony if isinstance(chrony, list | tuple) else None
             with (
                 patch.object(doctor, "run_probe", return_value=probe_records) as run,
                 patch.object(doctor, "host_clocksource", return_value=clocksource),
                 patch.object(doctor, "host_is_windows", return_value=windows),
                 patch.object(
-                    doctor, "chrony_frequency", return_value=chrony
+                    doctor,
+                    "chrony_frequency",
+                    return_value=None if readings else chrony,
+                    side_effect=readings,
                 ) as frequency,
+                patch.object(doctor.time, "monotonic", clock.monotonic),
+                patch.object(doctor.time, "sleep", clock.sleep),
             ):
                 result = doctor.check_rate(context)
             # Windows reads QueryPerformanceCounter, which no daemon steers.
@@ -2783,9 +2810,68 @@ class DoctorTests(unittest.TestCase):
             with self.subTest(estimate=estimate):
                 context = ci_context("mshv")
                 context.facts["native_tsc_hz"] = declared
-                result = check(context, steady, chrony=estimate)
+                clock = FakeClock()
+                result = check(context, steady, chrony=estimate, clock=clock)
                 self.assertEqual(result.passed, passed, result.detail)
                 self.assertIn(message, result.detail)
+                # A range that straddles the limit stays inconclusive when
+                # chronyd's estimate doesn't move for the 60 s of re-reads.
+                straddles = "straddles" in message
+                self.assertEqual(clock.sleeps, [2.0] * 30 if straddles else [])
+                self.assertEqual(
+                    "no re-read of chronyd's estimate in 60 s was conclusive"
+                    in result.detail,
+                    straddles,
+                )
+        # #1008: a range that straddles the limit makes H4 re-read chronyd's
+        # estimate every 2 s, for up to 60 s, and use the first conclusive
+        # one. On azure-mshv-1, chronyd's estimate read +189.3 ppm with a skew
+        # of 130.6 ppm, and +117.1 ppm with a skew of 55.1 ppm 50 s later.
+        straddling = doctor.ChronyFrequency("PHC0", 189.3, 130.6)
+        for readings, passed, measured, message in (
+            (
+                [
+                    straddling,
+                    straddling,
+                    "chronyc tracking exited 1: 506 Cannot talk to daemon",
+                    doctor.ChronyFrequency("PHC0", 117.1, 55.1),
+                ],
+                True,
+                "2300269362",
+                "116.893 ppm from the backend's 2300000507 Hz; chronyd's first "
+                "estimate, +189.300 ppm (skew 130.600 ppm), straddled the limit, "
+                "so H4 re-read it for 6 s (evidence)",
+            ),
+            # The first conclusive estimate decides, even when it fails.
+            (
+                [straddling, doctor.ChronyFrequency("PHC0", 300, 1)],
+                False,
+                "2300690207",
+                "the backend rate is 299.870 ppm from the measured rate, 298.869 "
+                "to 300.870 ppm within chronyd's skew of 1.000 ppm (limit 250 ppm)",
+            ),
+        ):
+            with self.subTest(readings=readings):
+                context = ci_context("mshv")
+                context.facts["native_tsc_hz"] = "2300000507"
+                clock = FakeClock()
+                result = check(context, steady, chrony=readings, clock=clock)
+                self.assertEqual(result.passed, passed, result.detail)
+                self.assertIn(message, result.detail)
+                self.assertEqual(clock.sleeps, [2.0] * (len(readings) - 1))
+                # Only chronyd's estimate changes, so H4 corrects the same
+                # samples by the estimate that it uses.
+                self.assertEqual(context.facts["measured_tsc_hz"], measured)
+                used = cast(doctor.ChronyFrequency, readings[-1])
+                self.assertEqual(
+                    context.facts["rate_reference"],
+                    f"chronyd {used.ppm:+.3f} ppm (skew {used.skew_ppm:.3f} ppm)",
+                )
+        # Without the backend's rate, H4 has no range to re-read for.
+        clock = FakeClock()
+        result = check(ci_context("mshv"), steady, chrony=straddling, clock=clock)
+        self.assertTrue(result.passed, result.detail)
+        self.assertEqual(clock.sleeps, [])
         # The deviation keeps three decimals, so a failure never reads as the
         # limit itself: #768's second failure was 100.027 ppm, at the 100 ppm
         # limit of the time.
