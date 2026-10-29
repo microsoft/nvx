@@ -6671,7 +6671,12 @@ class MicrovmTests(unittest.TestCase):
 
     def test_canceled_capture_checks_query_status_and_rcu_suppression(self):
         script = microvm_tests.canceled_capture_checks()
-        self.assertTrue(script.startswith(time_abi.status_script()))
+        query = time_abi.status_script().removesuffix("\n") + "; "
+        self.assertTrue(script.startswith(query))
+        # One console line, which the shell reads whole before it runs any of
+        # it, so that the terminal echoes none of it into the status lines.
+        self.assertEqual(script.count("\n"), 1)
+        self.assertTrue(script.endswith("\n"))
         self.assertIn(
             "$(cat /sys/module/rcupdate/parameters/rcu_cpu_stall_suppress)", script
         )
@@ -6687,7 +6692,7 @@ class MicrovmTests(unittest.TestCase):
         if shell is None:
             self.skipTest("no POSIX shell")
         answers = subprocess.run(
-            [shell, "-c", script.removeprefix(time_abi.status_script())],
+            [shell, "-c", script.removeprefix(query)],
             capture_output=True,
             check=True,
         ).stdout
@@ -6697,10 +6702,8 @@ class MicrovmTests(unittest.TestCase):
 
     def test_canceled_capture_requires_generation_zero_and_no_suppression(self):
         command = ["openvmm", "--hypervisor", "kvm", "--kernel", "vmlinux"]
-        echoed = (
-            b'~ # echo "NVX-""CANCELED-CAPTURE-RCU $(cat /sys/module/rcupdate/'
-            b'parameters/rcu_cpu_stall_suppress)"; echo "NVX-""CANCELED-CAPTURE-DONE"\r\n'
-        )
+        checks = microvm_tests.canceled_capture_checks().encode()
+        echoed = b"~ # " + checks.replace(b"\n", b"\r\n")
         microvm_tests.check_canceled_capture(
             echoed + _canceled_capture_output("kvm"), command
         )

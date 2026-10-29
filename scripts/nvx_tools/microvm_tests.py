@@ -6429,14 +6429,19 @@ RCU_STALL_SUPPRESS_PATH = "/sys/module/rcupdate/parameters/rcu_cpu_stall_suppres
 
 def canceled_capture_checks() -> str:
     """Return the guest checks after a snapshot request that OpenVMM released:
-    the time ABI status, then whether RCU stall detection is still suppressed."""
+    the time ABI status, then whether RCU stall detection is still suppressed.
+
+    They form one console line, which the shell reads whole before it runs
+    any of it, so that the terminal echoes none of it into the status lines
+    (#785).
+    """
     rcu = CANCELED_CAPTURE_RCU_PREFIX.decode()
     done = CANCELED_CAPTURE_DONE_MARKER.decode()
     # A quote pair splits each marker, so the console's echo of the command,
     # which the tty may wrap, never contains it.
     return (
-        status_script()
-        + f'echo "{rcu[:4]}""{rcu[4:]}$(cat {RCU_STALL_SUPPRESS_PATH})"; '
+        status_script().removesuffix("\n")
+        + f'; echo "{rcu[:4]}""{rcu[4:]}$(cat {RCU_STALL_SUPPRESS_PATH})"; '
         + f'echo "{done[:4]}""{done[4:]}"\n'
     )
 
