@@ -5,6 +5,7 @@
 use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 use super::{ClonePlan, CloneUpper, MIB, SPARSE_WHAT, check_geometry};
 use crate::activation::ActivationRecord;
@@ -67,7 +68,9 @@ impl ClonePlan {
     /// which a relative path names from the current directory, restores the leased generation's
     /// snapshot with the clone's devices, under the runtime identity `runtime`, which must be the
     /// template's, [`TemplateKey::runtime`], and receives the plan's capability. Returns the
-    /// launch, whose VMM runs, as a [`Restoring`].
+    /// launch, whose VMM runs, as a [`Restoring`], whose restore sequence,
+    /// [`Restoring::activate`], activates the clone, under a deadline that starts as this
+    /// launch does.
     ///
     /// The launch first checks, without writing anything, that `acquired` holds the plan's lease,
     /// under the lock that acquired it, before the launch that it reserves began, and that the
@@ -185,6 +188,8 @@ impl ClonePlan {
         runtime: &RuntimeIdentity,
         hooks: Hooks<'_>,
     ) -> Result<Restoring<'s>> {
+        // The restore-to-Ready deadline of the clone's restore sequence starts here.
+        let launched = Instant::now();
         let Acquired { lease, locked } = acquired;
         self.check_launch(lease, locked, runtime)?;
         let openvmm = artifacts::absolute(openvmm)?;
@@ -201,7 +206,8 @@ impl ClonePlan {
             devices,
         } = self;
         let devices = device_arguments(&devices)?;
-        write_private(&locked.clone_activation_path(), &activation.encode())?;
+        let record = locked.clone_activation_path();
+        write_private(&record, &activation.encode())?;
         let (ready, listener) =
             platform::listen_ready(&locked.restore_ready_path()).map_err(|error| {
                 Error::io(format!(
@@ -250,10 +256,12 @@ impl ClonePlan {
         drop(claim);
         Ok(Restoring {
             starting: starting?,
+            launched,
             ready,
             listener,
             image,
             activation,
+            record,
             capability,
         })
     }
@@ -488,7 +496,9 @@ impl Restore<'_> {
 /// The launch of a clone whose VMM restores the leased generation's snapshot, as
 /// [`ClonePlan::launch`] returns it: the [`Starting`] launch of the VMM, whose journal records
 /// the VMM's identity, the endpoint at which the launch awaits the VMM's restore-ready event, the
-/// clone's activation record and capability, and its image, open for reading.
+/// clone's activation record and capability, and its image, open for reading. Its restore
+/// sequence, [`activate`](Self::activate), then [`Activated::start`](super::Activated::start),
+/// takes the clone to its sandbox's start.
 ///
 /// It borrows the sandbox's locked store exclusively, as [`Starting`] does. Dropping it abandons
 /// the launch, as [`abandon`](Self::abandon) does, ignoring failures, and stops listening for the
@@ -496,17 +506,21 @@ impl Restore<'_> {
 /// [`LockedStore::recover`].
 pub struct Restoring<'s> {
     /// The launch, whose journal records the VMM.
-    starting: Starting<'s>,
+    pub(super) starting: Starting<'s>,
+    /// When the launch began, at which the restore-to-Ready deadline starts.
+    pub(super) launched: Instant,
     /// The endpoint of the restore-ready event, as OpenVMM's `--restore-ready-path` takes it.
-    ready: String,
+    pub(super) ready: String,
     /// The listener of the restore-ready event.
-    listener: ReadyListener,
+    pub(super) listener: ReadyListener,
     /// The clone's image, open for reading, which the plan checked.
-    image: CheckedDistro,
+    pub(super) image: CheckedDistro,
     /// The clone's activation record.
-    activation: ActivationRecord,
+    pub(super) activation: ActivationRecord,
+    /// The path of the activation record in the sandbox, which the launch wrote.
+    pub(super) record: PathBuf,
     /// The capability of the launch.
-    capability: [u8; CAPABILITY_LEN],
+    pub(super) capability: [u8; CAPABILITY_LEN],
 }
 
 impl<'s> Restoring<'s> {

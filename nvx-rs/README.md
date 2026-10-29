@@ -694,6 +694,30 @@ abrupt exit leaves, and the release makes the socket's absence durable before
 the lease ends, and removes the record and `restore.sock`, as it removes
 `clone-scratch.raw`.
 
+`Restoring::activate` then runs the clone's restore sequence through the
+adapter's framing of its control session, a `CloneControl`, by a
+restore-to-Ready deadline that runs from the launch, `RESTORE_TO_READY_TIMEOUT`,
+60 seconds by default: it reads the restore-ready event as soon as it comes,
+refusing another process's connection and bytes that differ from the event, and
+reading nothing past it, since OpenVMM on Windows waits until the host has read
+it, and then closes its end; only then connects to the clone's control endpoint,
+whose console bounds the host's authentication from the connection on; attaches
+with the launch's capability; sends the record, read again from
+`clone-activation.bin`, which must still be byte for byte the launch's, in the
+adapter's Activate, as the session's first request; and checks that Ready
+reports the record's transaction ID. It replaces a session that the adapter
+lost, as `CloneControl::lost` tells, with a new one that sends the same record,
+in at most `MAX_ACTIVATION_SESSIONS` sessions by the same deadline, and retries
+nothing else.
+
+`Activated::start` then starts the sandbox by a Ready-to-Start deadline from the
+check of Ready, `READY_TO_START_TIMEOUT`, 30 seconds by default, never sending
+the start again, and `Started::commit` commits the launch, which writes its
+runtime record. A failure ends the launch as `Starting::abandon` does; a crash
+before the commit leaves the launch's journal, whose recovery ends the VMM,
+while the lease lasts until the release, and a crash after it leaves a VM that
+reattaches, and keeps its lease while it runs.
+
 `Store::tombstone` quarantines a generation, which takes no new lease while its
 leases keep working, and `Store::retire` deletes it once its leases have
 drained, crash-safely, removing the records of leases that no clone binding

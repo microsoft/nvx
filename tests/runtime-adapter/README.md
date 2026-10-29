@@ -889,6 +889,10 @@ transport to the session's host endpoint, such as the one that
 - `configure_root` sends a root configuration, and returns how the guest
   answered: `Ready`, with the guest agent's build, or the stage of the root
   that failed;
+- `activate` sends a clone's activation record in an `Activate`, and returns
+  the guest's `Ready`, with the guest agent's build and the clone's
+  activation. A clone whose activation failed answers nothing, but ends, and
+  its session with it;
 - `map` sends a part of the host's mapping table, and returns how the guest
   answered: `Mapped`, or `MapFailed`, with how many of the table's mappings it
   applied and the problem; `start` sends `Start`, and checks that the guest
@@ -902,11 +906,11 @@ with a new message, in a new attachment.
 
 A failure of the session, a send that fails or times out, a malformed message,
 an answer whose body does not decode, and a message that only the host program
-sends, an execution's start, input, end of input, or cancellation included,
-end the client, and its later calls fail. A receive that times out doesn't: it
-keeps what arrived. A request ends the client on any failure after the framing
-accepted it, a timeout included, because an answer that arrived later would
-answer the wrong request.
+sends, an execution's start, input, end of input, or cancellation, and a
+clone's `Activate` included, end the client, and its later calls fail. A
+receive that times out doesn't: it keeps what arrived. A request ends the
+client on any failure after the framing accepted it, a timeout included,
+because an answer that arrived later would answer the wrong request.
 
 `host::Executions` is the host program's driver of
 [executions](#executions), over one attachment of the client:
@@ -973,6 +977,27 @@ lifecycle stops a guest whose mappings failed. The order fails with an
 mapping that failed with how the stop ended, a table that does not encode,
 which fails before anything is sent, or a failure of the client. The host
 program [tears the VM down](#commands) after any of them.
+
+A clone, which a restore of a [template's](#template-mode) snapshot started,
+takes the host's activation of its record instead of a root configuration:
+the guest assembles the clone's root from the record, with the inputs that the
+template's capture kept, as it activates the clone. Its first step is
+`host::activate` instead of `host::ready`: it sends the clone's activation
+record in an `Activate`, the first request of the session, and waits for
+`Ready`, whose build it checks as `host::ready` does, and which reports the
+clone's activation. Then `host::start_sandbox` runs as after a cold boot.
+`host::CloneOrder` runs both
+steps as the framing of the restore sequence of `nvx::host::template`, which
+checks the activation against the record, and which replaces a session that
+the order takes for lost: one that a reset of the broker, the end of its
+stream, or a failure of the transport ended while the host attached or
+awaited `Ready`. A clone that was ready answers the same record, byte for
+byte, with the same `Ready` in the new session, and one that took the reset
+before it was ready has ended. OpenVMM's broker ends the stream both to end an
+attachment and to refuse one, so the order takes such a refusal for a lost
+session too, whose retries the sequence's limit of sessions bounds. Any other
+failure is final: a refusal that the broker sends, a deadline that passed,
+another build, and a message that breaks the framing.
 
 ## VMs
 
@@ -1578,8 +1603,9 @@ Windows. They cover:
   payloads, a payload beyond the session's limit, which fails at its header,
   and header faults;
 - the messages that it refuses: malformed headers, which fail before their
-  body arrives, and messages that only the host program sends; and a message
-  beyond the framing's limit, which it refuses to send;
+  body arrives, and messages that only the host program sends, a clone's
+  `Activate` among them; and a message beyond the framing's limit, which it
+  refuses to send;
 - the answers that its requests check, and a request whose answer arrives too
   late;
 - a layered root: the configuration that the client sends, the guest's
@@ -1597,6 +1623,16 @@ Windows. They cover:
   teardown that failed, or as the session ends; and `Maps` or `Start` answered
   with another kind, or failures whose bodies do not decode, which end the
   client;
+- a clone's order: an attachment that waits through the session's bootstrap,
+  the record as the first request, after which the host waits for `Ready`,
+  whose activation it returns, also none, then the table in parts and `Start`;
+  a session that a later reset, the end of the stream, or a failure of the
+  transport ended, which the order takes for lost, and whose successor sends
+  the same record first; and the failures that are final: a refusal in an
+  ERROR, deadlines that pass while attaching or awaiting `Ready`, another
+  build, after which the host sends nothing more, an `Activate` answered with
+  another kind or with an activation that does not decode, and a record beyond
+  the framing's limit, which fails before it is sent;
 - the driver of executions, whose guest runs the runner of NVX's execution
   engine for each start, as the worker does, without a program: two
   executions at once, one with more output than its credit holds, each

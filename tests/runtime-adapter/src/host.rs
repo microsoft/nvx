@@ -22,6 +22,21 @@
 //! its root down, as NVX's managed lifecycle stops a guest whose mappings failed. The caller then
 //! waits for the VM to end, and ends a VM whose guest did not stop, as it ends one after any other
 //! failure of the order, an [`OrderError`].
+//!
+//! # A clone's order
+//!
+//! A clone, which a restore of a template's snapshot started, takes the host's activation of its
+//! record instead of a root configuration: the guest assembles the clone's root from the record,
+//! with the inputs that the template's capture kept, as it activates the clone. Its first step is
+//! [`activate`], which sends the clone's activation record in an `Activate`, the first request of
+//! the session, and waits for the guest agent's `Ready`, whose build it checks as [`ready`] does,
+//! and which reports the clone's activation, for the host to check against the record. Then
+//! [`start_sandbox`] runs as after a cold boot. [`CloneOrder`] runs both steps as the adapter's
+//! framing of `nvx::host::template`'s restore sequence, which checks the activation, and which
+//! replaces a session that the order lost, as [`CloneOrder`] tells, while the clone was not ready
+//! or its `Ready` had not arrived: the clone answers the same record, byte for byte, with the same
+//! `Ready` in a new session, and has ended once the reset of a session that it took before it was
+//! ready failed its activation.
 
 mod executions;
 mod map_reply;
@@ -30,8 +45,10 @@ mod order_error;
 use std::fmt;
 use std::time::Instant;
 
+use nvx::activation::ReadyActivation;
 use nvx::host::nvxs::{HostConnection, HostConnectionError};
 use nvx::host::platform::Transport;
+use nvx::host::template::CloneControl;
 use nvx::protocol::nvxs::Identity;
 use nvx::protocol::{CAPABILITY_LEN, HostMap};
 
@@ -119,8 +136,9 @@ impl From<FrameError> for ClientError {
 /// message in as many of the session's records as it takes, and [`receive`](Self::receive)
 /// returns the guest agent's next message, whether it spans records or shares one with the next
 /// message. [`ping`](Self::ping), [`echo`](Self::echo), [`configure_root`](Self::configure_root),
-/// [`map`](Self::map), [`start`](Self::start), [`probe`](Self::probe), and [`stop`](Self::stop)
-/// each send a request and wait for its answer, and [`Executions`] runs executions over the client.
+/// [`activate`](Self::activate), [`map`](Self::map), [`start`](Self::start),
+/// [`probe`](Self::probe), and [`stop`](Self::stop) each send a request and wait for its answer,
+/// and [`Executions`] runs executions over the client.
 ///
 /// Besides the session's own buffers, the client holds at most the rest of one of the guest's
 /// records and one partial message, whose header [`Decoder`] checks before it takes any byte of
@@ -215,7 +233,8 @@ impl Client {
                         | Message::ExecStart(_)
                         | Message::ExecInput(_)
                         | Message::ExecInputEnd(_)
-                        | Message::ExecCancel(_)),
+                        | Message::ExecCancel(_)
+                        | Message::Activate(_)),
                     ) => {
                         return Err(self.fail(ClientError::Unexpected(message.kind())));
                     }
@@ -275,6 +294,22 @@ impl Client {
             Message::RootFailed(body) => {
                 self.decoded(RootFailure::decode(&body).map(RootReply::Failed))
             }
+            reply => Err(self.mismatched(&request, &reply)),
+        }
+    }
+
+    /// Sends `record`, the activation record of a clone, which a restore of a template's snapshot
+    /// started, in its canonical encoding, in an `Activate`, and waits until `deadline` for the
+    /// guest agent's answer: `Ready`, with the guest agent's build and the activation that it
+    /// reports, once it activated the clone. A clone whose activation failed answers nothing, but
+    /// ends, and its session with it.
+    ///
+    /// A record of more than [`MAX_ACTIVATE_BODY`](crate::frame::MAX_ACTIVATE_BODY) bytes fails
+    /// before anything is sent, and the client stays usable.
+    pub fn activate(&mut self, record: &[u8], deadline: Instant) -> Result<Ready, ClientError> {
+        let request = Message::Activate(record.to_vec());
+        match self.request(&request, deadline)? {
+            Message::Ready(body) => self.decoded(Ready::decode(&body)),
             reply => Err(self.mismatched(&request, &reply)),
         }
     }
@@ -446,4 +481,92 @@ pub fn start_sandbox(
         }
     }
     client.start(deadline).map_err(OrderError::Client)
+}
+
+/// Runs the first step of [a clone's order](self#a-clones-order) over `client`, in place of
+/// [`ready`]: sends `record`, the clone's activation record in its canonical encoding, in an
+/// `Activate`, which must be the first request of the client's attachment, and waits until
+/// `deadline` for the guest agent's `Ready`, which it returns once it names `build`, the guest
+/// agent's build that the host ships, with the activation that it reports, which the caller checks
+/// against the record.
+///
+/// Fails with [`OrderError::Build`] for a guest agent of another build, to which it sends nothing
+/// more, and with [`OrderError::Client`] once the client fails: as the session ends once the
+/// clone's activation failed, or a reset ended the attachment.
+pub fn activate(
+    client: &mut Client,
+    record: &[u8],
+    build: &str,
+    deadline: Instant,
+) -> Result<Ready, OrderError> {
+    let ready = client
+        .activate(record, deadline)
+        .map_err(OrderError::Client)?;
+    if ready.build() != build {
+        return Err(OrderError::Build {
+            reported: ready.build().to_owned(),
+            expected: build.to_owned(),
+        });
+    }
+    Ok(ready)
+}
+
+/// [A clone's order](self#a-clones-order), as the adapter's framing of the clone's control
+/// session, through which `nvx::host::template`'s restore sequence activates the clone and starts
+/// its sandbox: it attaches a [`Client`] over each connection to the clone's control endpoint,
+/// runs [`activate`] with the guest agent's build that the host ships, then [`start_sandbox`] with
+/// the host's mapping table, which the clone's record announces.
+///
+/// It takes a session for lost once a reset of the broker, the end of the broker's stream, or a
+/// failure of the transport ended it, while the client attached or awaited the clone's `Ready`:
+/// the clone may answer the same record in a new session. OpenVMM's broker ends the stream both to
+/// end an attachment and to refuse one, as it refuses a host whose authentication outlasts the
+/// broker's deadline, so the order takes such a refusal for a lost session too, whose retries the
+/// restore sequence's limit of sessions bounds. Any other failure is final: a refusal that the
+/// broker sends, a deadline that passed, a guest agent of another build, and a message that breaks
+/// the framing.
+#[derive(Clone, Copy, Debug)]
+pub struct CloneOrder<'a> {
+    /// The guest agent's build that the host ships.
+    pub build: &'a str,
+    /// The host's mapping table, which the clone's activation record announces.
+    pub table: &'a [HostMap],
+}
+
+impl CloneControl for CloneOrder<'_> {
+    type Session = Client;
+    type Error = OrderError;
+
+    fn attach(
+        &mut self,
+        transport: Box<dyn Transport>,
+        capability: &[u8; CAPABILITY_LEN],
+        deadline: Instant,
+    ) -> Result<Client, OrderError> {
+        Client::attach(transport, capability, deadline).map_err(OrderError::Client)
+    }
+
+    fn activate(
+        &mut self,
+        session: &mut Client,
+        record: &[u8],
+        deadline: Instant,
+    ) -> Result<Option<ReadyActivation>, OrderError> {
+        activate(session, record, self.build, deadline).map(|ready| ready.activation())
+    }
+
+    fn start(&mut self, session: &mut Client, deadline: Instant) -> Result<(), OrderError> {
+        start_sandbox(session, self.table, deadline)
+    }
+
+    fn lost(&self, error: &OrderError) -> bool {
+        matches!(
+            error,
+            OrderError::Client(ClientError::Session(
+                HostConnectionError::Reset(_)
+                    | HostConnectionError::Closed
+                    | HostConnectionError::Io(_)
+            ))
+        )
+    }
 }

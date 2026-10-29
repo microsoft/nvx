@@ -1,8 +1,10 @@
 //! Tests of the plans of clones: the checks of their images, uppers, and memory targets against
 //! the generation that they lease, which read no content, the claims of their scratch images, and
-//! the sparse scratch device of an upper in RAM; and, in [`launch`], of their launches.
+//! the sparse scratch device of an upper in RAM; in [`launch`], of their launches; and in
+//! [`restore`], of their restore sequences.
 
 mod launch;
+mod restore;
 
 use std::io::Read;
 use std::net::{IpAddr, Ipv4Addr};
