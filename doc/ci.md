@@ -1831,11 +1831,12 @@ The `nvx-rs` job also checks the
 lockfile of its own, default features off, and the public API only. For each
 of its configurations, protocol-only, host-only, and, on Linux, guest-only for
 `x86_64-unknown-linux-musl`, the action runs Clippy with warnings denied, the
-build, the tests, and a check with the minimum Rust version of `nvx`, after
-rustfmt. The tests check that each configuration builds as an independent
-adapter's does: it enables only its side of `nvx`, the guest-only build pulls
-in neither Tokio nor a dependency that only the host side declares, and the
-guest binary is a static executable. They also check the adapter's own framing
+build, the tests, rustdoc with warnings denied, and a check with the
+minimum Rust version of `nvx`, after rustfmt. The tests check that each
+configuration builds as an independent adapter's does: it enables only its
+side of `nvx`, the guest-only build pulls in neither Tokio nor a
+dependency that only the host side declares, and the guest binary is a
+static executable. They also check the adapter's own framing
 over the control session between the host and the guest: in the host-only
 configuration, on Linux and Windows, that the adapter's host program attaches
 to the session and exchanges the framing with the guest agent, and in the

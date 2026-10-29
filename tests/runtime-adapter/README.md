@@ -2214,11 +2214,15 @@ configuration needs Linux and the musl target, which
 cargo fmt --all --check
 cargo clippy --locked --all-targets -- -D warnings
 cargo test --locked
+RUSTDOCFLAGS="-D warnings" cargo doc --locked --no-deps
 cargo clippy --locked --all-targets --features host -- -D warnings
 cargo test --locked --features host
+RUSTDOCFLAGS="-D warnings" cargo doc --locked --no-deps --features host
 cargo clippy --locked --all-targets --features guest \
   --target x86_64-unknown-linux-musl -- -D warnings
 cargo test --locked --features guest --target x86_64-unknown-linux-musl
+RUSTDOCFLAGS="-D warnings" cargo doc --locked --no-deps --features guest \
+  --target x86_64-unknown-linux-musl
 ```
 
 ## CI

@@ -149,7 +149,9 @@ runs:
 
     # The runtime adapter builds on nvx-rs as an independent adapter does: with a lockfile of its
     # own, default features off, and the public API only. Its tests check that each configuration
-    # builds that way, and each configuration also builds with nvx-rs's minimum Rust version.
+    # builds that way, and each configuration also builds with nvx-rs's minimum Rust version. As
+    # for nvx-rs, each configuration's documentation builds with warnings denied, with
+    # RUSTDOCFLAGS set for that command alone so that it doesn't reach the doctests.
     - name: Check the runtime adapter's protocol-only configuration
       shell: bash
       working-directory: tests/runtime-adapter
@@ -160,6 +162,8 @@ runs:
           -- -D warnings
         cargo "+${{ steps.toolchains.outputs.toolchain }}" build --locked
         cargo "+${{ steps.toolchains.outputs.toolchain }}" test --locked
+        RUSTDOCFLAGS="-D warnings" cargo "+${{ steps.toolchains.outputs.toolchain }}" doc \
+          --locked --no-deps
         cargo "+${{ steps.toolchains.outputs.msrv }}" check --locked --all-targets
 
     - name: Check the runtime adapter's host-only configuration
@@ -171,6 +175,8 @@ runs:
           --features host -- -D warnings
         cargo "+${{ steps.toolchains.outputs.toolchain }}" build --locked --features host
         cargo "+${{ steps.toolchains.outputs.toolchain }}" test --locked --features host
+        RUSTDOCFLAGS="-D warnings" cargo "+${{ steps.toolchains.outputs.toolchain }}" doc \
+          --locked --no-deps --features host
         cargo "+${{ steps.toolchains.outputs.msrv }}" check --locked --all-targets --features host
 
     # The guest agent runs in Linux guests, as a static executable that a test checks.
@@ -189,5 +195,7 @@ runs:
           --features guest --target x86_64-unknown-linux-musl
         cargo "+${{ steps.toolchains.outputs.toolchain }}" test --locked \
           --features guest --target x86_64-unknown-linux-musl
+        RUSTDOCFLAGS="-D warnings" cargo "+${{ steps.toolchains.outputs.toolchain }}" doc \
+          --locked --no-deps --features guest --target x86_64-unknown-linux-musl
         cargo "+${{ steps.toolchains.outputs.msrv }}" check --locked --all-targets \
           --features guest --target x86_64-unknown-linux-musl
