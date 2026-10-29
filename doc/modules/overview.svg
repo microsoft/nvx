@@ -104,7 +104,7 @@
 <path fill="#ede9fe" stroke="#8b5cf6" stroke-width="1.2" d="M513.5,-167C513.5,-167 370.5,-167 370.5,-167 364.5,-167 358.5,-161 358.5,-155 358.5,-155 358.5,-121 358.5,-121 358.5,-115 364.5,-109 370.5,-109 370.5,-109 513.5,-109 513.5,-109 519.5,-109 525.5,-115 525.5,-121 525.5,-121 525.5,-155 525.5,-155 525.5,-161 519.5,-167 513.5,-167"/>
 <text text-anchor="middle" x="442" y="-148.6" font-family="Liberation Sans,Arial,Helvetica,sans-serif" font-size="13.00" fill="#14283f">host</text>
 <text text-anchor="middle" x="442" y="-134.6" font-family="Liberation Sans,Arial,Helvetica,sans-serif" font-size="13.00" fill="#14283f">Launch and supervision</text>
-<text text-anchor="middle" x="442" y="-120.6" font-family="Liberation Sans,Arial,Helvetica,sans-serif" font-size="13.00" fill="#14283f">109 nested modules</text>
+<text text-anchor="middle" x="442" y="-120.6" font-family="Liberation Sans,Arial,Helvetica,sans-serif" font-size="13.00" fill="#14283f">112 nested modules</text>
 </a>
 </g>
 </g>
