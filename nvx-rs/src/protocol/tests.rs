@@ -1122,6 +1122,165 @@ fn guest_exec_decoder_refuses_what_the_c_agent_refused() {
     }
 }
 
+/// Both `EXEC` decoders refuse an argument, a working directory, or an environment entry with the
+/// same message, except where they differ by design: the host's requires each string to be UTF-8
+/// as soon as it reads it, and they word the refusals of an entry's name differently, the host's
+/// naming the variable that repeats.
+#[test]
+fn exec_decoders_refuse_strings_with_the_same_messages() {
+    const PROGRAM: &[u8] = b"/bin/true";
+    fn arguments(argv: &[&[u8]]) -> Vec<u8> {
+        raw_extended(0, 0, b"", argv, &[])
+    }
+    fn with_cwd(cwd: &[u8]) -> Vec<u8> {
+        raw_extended(EXEC_CWD_PRESENT, 0, cwd, &[PROGRAM], &[])
+    }
+    fn with_environment(entries: &[&[u8]]) -> Vec<u8> {
+        let count = u16::try_from(entries.len()).unwrap();
+        raw_extended(EXEC_ENVIRONMENT_PRESENT, count, b"", &[PROGRAM], entries)
+    }
+    fn truncated(mut payload: Vec<u8>) -> Vec<u8> {
+        payload.pop();
+        payload
+    }
+
+    let truncated_message = "the exec request is truncated";
+    let long = vec![b'a'; MAX_ARGUMENT_BYTES + 1];
+    let mut trailing = with_cwd(b"/work");
+    trailing.push(b'x');
+    for (case, payload, expected) in [
+        (
+            "NUL in an argument",
+            arguments(&[PROGRAM, b"a\0b"]),
+            "exec arguments must not contain NUL characters",
+        ),
+        (
+            "empty argument",
+            arguments(&[PROGRAM, b""]),
+            "exec arguments must be 1 to 4096 bytes",
+        ),
+        (
+            "argument over the limit",
+            arguments(&[PROGRAM, &long]),
+            "exec arguments must be 1 to 4096 bytes",
+        ),
+        (
+            "truncated argument",
+            truncated(arguments(&[PROGRAM])),
+            truncated_message,
+        ),
+        (
+            "relative program",
+            arguments(&[b"bin/true"]),
+            "exec program must be an absolute guest path",
+        ),
+        (
+            "NUL in the directory",
+            with_cwd(b"/wo\0rk"),
+            "exec working directory must not contain NUL characters",
+        ),
+        (
+            "truncated directory",
+            truncated(with_cwd(b"/work")),
+            truncated_message,
+        ),
+        (
+            "relative directory",
+            with_cwd(b"work"),
+            "exec working directory must be an absolute guest path",
+        ),
+        (
+            "NUL in an entry",
+            with_environment(&[b"KEY=embedded\0nul"]),
+            "exec environment entries must not contain NUL characters",
+        ),
+        (
+            "empty entry",
+            with_environment(&[b""]),
+            "exec environment entries must be 1 to 4096 bytes",
+        ),
+        (
+            "truncated entry",
+            truncated(with_environment(&[b"KEY=value"])),
+            truncated_message,
+        ),
+        (
+            "trailing bytes",
+            trailing,
+            "the exec request has trailing bytes",
+        ),
+    ] {
+        assert_eq!(
+            decode_exec_payload(&payload).unwrap_err().message(),
+            expected,
+            "{case}"
+        );
+        assert_eq!(
+            decode_guest_exec_payload(&payload).unwrap_err().message(),
+            expected,
+            "{case}"
+        );
+    }
+
+    let unnamed = "exec environment entries must be KEY=VALUE strings";
+    let unnamed_bytes = "exec environment entries must be KEY=VALUE byte strings";
+    for (case, payload, host, guest) in [
+        (
+            "entry without a value",
+            with_environment(&[b"NO_EQUALS"]),
+            unnamed,
+            unnamed_bytes,
+        ),
+        (
+            "entry without a name",
+            with_environment(&[b"=empty-key"]),
+            unnamed,
+            unnamed_bytes,
+        ),
+        (
+            "repeated name",
+            with_environment(&[b"VALUE=one", b"VALUE=two"]),
+            "exec environment names must be unique, but \"VALUE\" repeats",
+            "exec environment names must be unique",
+        ),
+        (
+            "argument that is not UTF-8, then a truncated one",
+            truncated(arguments(&[PROGRAM, b"\xff", b"x"])),
+            "exec arguments must be valid UTF-8",
+            truncated_message,
+        ),
+        (
+            "relative program that is not UTF-8",
+            arguments(&[b"\xff"]),
+            "exec arguments must be valid UTF-8",
+            "exec program must be an absolute guest path",
+        ),
+        (
+            "relative directory that is not UTF-8",
+            with_cwd(b"\xff"),
+            "exec working directory must be valid UTF-8",
+            "exec working directory must be an absolute guest path",
+        ),
+        (
+            "entry without a value that is not UTF-8",
+            with_environment(&[b"\xff"]),
+            "exec environment entries must be valid UTF-8",
+            unnamed_bytes,
+        ),
+    ] {
+        assert_eq!(
+            decode_exec_payload(&payload).unwrap_err().message(),
+            host,
+            "{case}"
+        );
+        assert_eq!(
+            decode_guest_exec_payload(&payload).unwrap_err().message(),
+            guest,
+            "{case}"
+        );
+    }
+}
+
 #[test]
 fn host_maps_encoding_round_trips_through_the_guest_decoder() {
     let maps = [
