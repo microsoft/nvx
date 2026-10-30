@@ -213,6 +213,11 @@ impl BitOr for MountAttributes {
 /// symbolic link and no magic link, such as procfs's `/proc/self/root`, at any component, the
 /// last included: such a path fails with `EXDEV` or `ELOOP`. It crosses into the mounts below
 /// the directory only when `cross_mounts` is set, and fails with `EXDEV` otherwise.
+///
+/// A path with a `..` after a descent, such as `a/..`, can also fail with `EAGAIN` while a
+/// rename or a mount anywhere in the system races its lookup: the kernel can then not tell that
+/// the `..` stayed beneath the directory, and the caller may retry, as openat2(2) allows. No
+/// caller in NVX passes such a path.
 pub(crate) fn open_beneath(
     directory: &FileDescriptor,
     path: &CStr,
