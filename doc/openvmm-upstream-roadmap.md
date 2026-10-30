@@ -9,14 +9,15 @@
 - Mapped fork tip: `a0556d7d85ce1fff89f5b45a98f15c5c79cbb6fb`, position 157. The graph, PR
   summary, and commit mapping below cover positions 001-157 and the fixups at positions
   334-340, 344, and 345.
-- NVX's pinned OpenVMM revision: `b58040ee46c6ed2953415b3734b0ee0c2b7485b6`, position 370.
-  Position 370, which microsoft/openvmm#4823 proposes for `feature/microvm/dev`, is one commit on
-  position 369, `5e0ab772e`, the head of `feature/microvm/dev` since microsoft/openvmm#4820
-  merged positions 368 and 369. Those are two commits on position 367, `bcfc47cff`, which
-  microsoft/openvmm#4818 merged with position 366. Positions 366 and 367 are two commits on
-  position 365, `e4c741e18`, which microsoft/openvmm#4804 merged with positions 362-364.
-  Positions 362-365 are four commits on position 361, `c32c57d12`, which microsoft/openvmm#4807
-  merged with position 360.
+- NVX's pinned OpenVMM revision: `3d7512af653717aa9123595e993a56cb8587106a`, position 372.
+  Positions 371 and 372, which microsoft/openvmm#4816 proposes for `feature/microvm/dev`, are two
+  commits on position 370, `b58040ee4`, the head of `feature/microvm/dev` since
+  microsoft/openvmm#4823 merged it. Position 370 is one commit on position 369, `5e0ab772e`, which
+  microsoft/openvmm#4820 merged with position 368. Positions 368 and 369 are two commits on
+  position 367, `bcfc47cff`, which microsoft/openvmm#4818 merged with position 366. Positions 366
+  and 367 are two commits on position 365, `e4c741e18`, which microsoft/openvmm#4804 merged with
+  positions 362-364. Positions 362-365 are four commits on position 361, `c32c57d12`, which
+  microsoft/openvmm#4807 merged with position 360.
   Positions 360 and 361 are two commits on position 359, `bd2b27a2e`, which microsoft/openvmm#4794
   merged with positions 355-358. Positions 355-359 are five commits on position 354, `832d5bb48`,
   which microsoft/openvmm#4775 merged with position 353. Positions 353 and 354 are two commits on
@@ -30,9 +31,9 @@
   microsoft/openvmm#4735 merged with position 339. Positions 339 and 340 are two commits on
   position 338, `8a0d945ed`, which microsoft/openvmm#4734 merged, and position 338 is one commit on
   `79a501b63`, the head of the `feature/microvm/release/v2.3` branch of microsoft/openvmm. The pin
-  is 213 commits past the mapped tip on the same first-parent chain. Positions 158-333, 341-343,
-  and 346-370 are not yet assigned to PRs; see
-  [Commits after the mapped tip](#commits-after-the-mapped-tip).
+  is 215 commits past the mapped tip on the same first-parent chain. Positions 158-333, 341-343,
+  and 346-370 are not yet assigned to PRs, and positions 371 and 372 port microsoft/openvmm#4803;
+  see [Commits after the mapped tip](#commits-after-the-mapped-tip).
 - Upstream main: `22c0485be597f87a76771e1db03eaa823a685ffc` (2026-10-22), the fork base.
 
 ## Upstream status
@@ -323,7 +324,8 @@ The physical branch is one first-parent chain:
   -> PR02 fixup [338] -> PR20 fixup [339] -> PR23 fixup [340]
   -> unassigned [341-343] -> PR18 fixups [344-345]
   -> unassigned [346-370]
-  -> b58040ee4 (NVX pin)
+  -> microsoft/openvmm#4803 port [371-372]
+  -> 3d7512af6 (NVX pin)
 ```
 
 For upstream review, PR01-PR08 and PR14 can be rebased independently onto current upstream main,
@@ -345,11 +347,11 @@ PR18's position 111.
 
 ## Commits after the mapped tip
 
-The NVX pin extends the chain past position 157 without merges. Of the 213 later commits,
+The NVX pin extends the chain past position 157 without merges. Of the 215 later commits,
 positions 158-333, 341-343, and 346-370 are not yet classified or assigned to PRs, positions
 334-337 are the fixups of the `feature/microvm/release/v2.3` rebase, position 338 is a PR02
-fixup, positions 339 and 340 are PR20 and PR23 fixups, and positions 344 and 345 are PR18
-fixups.
+fixup, positions 339 and 340 are PR20 and PR23 fixups, positions 344 and 345 are PR18 fixups,
+and positions 371 and 372 port microsoft/openvmm#4803.
 This table groups them by topic in chain order; ranges are inclusive, as in the
 [PR summary](#pr-summary).
 
@@ -404,6 +406,7 @@ This table groups them by topic in chain order; ranges are inclusive, as in the
 | 366-367 | `e51ab72d3..bcfc47cff` | 2 | The restore's comparison of the effective CPUID with a snapshot's record names every difference of a record that the decoder admits although no OpenVMM writes it, each entry that the record lists more than once, each of its listings that differs, and a record out of order, together with the entries that differ; and its tests check each register, value, and mask that the error names (microsoft/openvmm#4818) |
 | 368-369 | `342887c99..5e0ab772e` | 2 | The VM time keeper maps a timeout beyond what the host clock can represent to the host clock's latest time: one more than about 584 years after the last start no longer panics the task that arms it, as one armed across a restore to a far VM time panicked the keeper's task at start (microsoft/nvx#1038), and one nearly half the ring after now, which VM time's circular order puts before the start, no longer arms the host timer in the past, which made the keeper spin (microsoft/openvmm#4820) |
 | 370 | `b58040ee4` | 1 | Explicit `--host-loopback allow` requires an IPv4 network of /29 or larger: OpenVMM refuses it on a /30, which leaves no address at which Consomme presents host peers, at a cold boot and at a restore that installs a new policy on a NIC template, instead of presenting IPv4 host peers at the gateway (microsoft/openvmm#4823) |
+| 371-372 | `2dec9edcb..3d7512af6` | 2 | The KVP IC VMM test boots Windows Server 2025 instead of 2022, whose COM activation race can lose WMI's server-registration notification, so that the guest answers the test's IP information request with `0x80080005` after 120 seconds (microsoft/nvx#1035); and the check-in gates' x64 Linux KVM job downloads the Server 2025 image and keeps running the test, while the x64 Linux MSHV job excludes it because Server 2025's required initial reset fails there (microsoft/openvmm#4816, which ports microsoft/openvmm#4803) |
 
 Some of these commits change mapped work rather than add to it. Positions 246-250 remove the
 legacy microVM clock paths and change files that PR10 and PR17 also change. Position 252 makes
@@ -431,6 +434,12 @@ and the fork base have alike. Positions 043 and 301 change other parts of that f
 370 changes only how the microVM options bind their network policy to the NIC's identity, to
 which position 307 adds explicit host-loopback access and position 347 the restore that installs
 a new policy, and the CLI and Consomme references, so it builds on those fork-only commits.
+Position 371 makes the change of microsoft/openvmm#4803 unchanged. Position 372 stages the
+Server 2025 image for the x64 Linux KVM job, which runs the test, and excludes the test and its
+image from the x64 Linux MSHV job, where Server 2025's required initial reset fails. A rebase
+onto an upstream main that includes microsoft/openvmm#4803 drops position 371, as the rebases
+dropped the commits under [Landed upstream](#landed-upstream), and reconciles position 372 with
+whatever upstream changes for those jobs.
 
 ## PR summary
 
