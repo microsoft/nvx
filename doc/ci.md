@@ -1228,8 +1228,23 @@ every pull request until its timeout. The rule's settings:
   (see [Pushes outside the queue](#pushes-outside-the-queue)).
 - **Merge limits:** at least one pull request, without a wait, so that the
   queue merges each group once it and the groups ahead of it pass, and at most
-  five, GitHub's default. When several groups pass together, the queue merges
-  them in one push, which runs CI once for all of them.
+  one, rather than GitHub's default of five, since October 30, 2026. The
+  limits bound the queue's merges, not its groups' builds
+  ([GitHub's documentation](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/configuring-pull-request-merges/managing-a-merge-queue)),
+  so groups that pass together still merge one after another, each in a push
+  of its own that moves `dev` to the group's head, on which the queue built
+  the group behind it. Each pull request thus reaches `dev` in a push of its
+  own. A successful run for a non-documentation change publishes its
+  development release and measures its performance. A failure identifies the
+  newly merged pull request, but may stem from an earlier change or the
+  environment.
+  A push that merged several groups would leave the merge commits before its
+  head without a run, a release, or performance results of their own. The
+  cost is a push run for each pull request that would have shared a push, as
+  every merge had before the queue; when the pull request changes more than
+  documentation, the run's platform jobs hold each pool's single `benchmark`
+  runner for a median of 5.3 to 8.6 minutes (see
+  [Development releases and performance history](#development-releases-and-performance-history)).
 
 ### Reviews and bypasses
 
@@ -1303,13 +1318,13 @@ platform jobs waited from its creation to its start a median of 6.3 minutes,
 28.8 at the 90th percentile, and 78.3 at the 99th. The queue holds a group
 that runs them, and every group behind it, that much longer. The push could
 in principle reuse the group's results, since the queue moves `dev` to the head
-of the last group that it merges, which that group's run tested. It doesn't:
-a push still publishes the development release and records the performance
-history, and so runs the platform jobs for every change but documentation, it
-saves the caches that later runs restore, which no group can, and a push that
-merges several groups carries several pull requests' changes, of which each
-group's run checked only its own pull request's. Skipping a push's test suites
-when the run of the last group that it merged passed is left for later.
+of the group that it merges, which that group's run tested, and merges one
+pull request per push (see [Queue settings](#queue-settings)), so the push
+carries exactly the change that the group's run checked. It doesn't: a push
+still publishes the development release and records the performance history,
+and so runs the platform jobs for every change but documentation, and it saves
+the caches that later runs restore, which no group can. Skipping a push's test
+suites when the run of the group that it merged passed is left for later.
 
 ## Cancellation
 
