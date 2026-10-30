@@ -1,19 +1,20 @@
 """Reuse of the guest artifact components that a pull request's CI run built.
 
 GitHub scopes the caches that a pull request's runs save to the pull request,
-so the dev push that merges it misses them and would rebuild the guest images
-that the pull request already built. Each guest artifact job therefore records
-the exact cache keys of its components and the SHA-256 of each of their files
-in a guest artifact record, which the build-guest-artifacts action uploads
-beside the components' own artifacts. When a file of its components missed the
-cache, the job of a push looks up the latest run of its workflow for the head
-of the pull request that it merged, from the same repository and never from a
-fork, and installs every file of its components from that run's artifacts once
-each artifact matches the digest that GitHub recorded for it, the record's keys
-equal the push's own, and the files match the record, their provenance, and
-the push's sources. Any other outcome, or a time limit, leaves the components
-to the action's builds, so reuse never fails a run and never installs an
-unverified file.
+so the merge group and the dev push that merge it miss them and would rebuild
+the guest images that the pull request already built. Each guest artifact job
+therefore records the exact cache keys of its components and the SHA-256 of
+each of their files in a guest artifact record, which the build-guest-artifacts
+action uploads beside the components' own artifacts. When a file of its
+components missed the cache, the job of a push or a merge group looks up the
+latest run of its workflow for the head of the pull request that its merge
+commit merged, from the same repository and never from a fork, and installs
+every file of its components from that run's artifacts once each artifact
+matches the digest that GitHub recorded for it, the record's keys equal the
+job's own, and the files match the record, their provenance, and the job's
+sources. Any other outcome, or a time limit, leaves the components to the
+action's builds, so reuse never fails a run and never installs an unverified
+file.
 """
 
 from __future__ import annotations
@@ -47,6 +48,7 @@ from .common import (
     sha256_file,
     strict_json_object,
 )
+from .common import workflow_path as github_workflow_path
 from .release import (
     GITHUB_API_VERSION,
     GUEST_ARTIFACT_COMPONENTS,
@@ -88,8 +90,8 @@ _REHEARSAL = "Guest artifact reuse rehearsal"
 class ReuseRefused(ScriptError):
     """A reason to build guest artifact components rather than reuse a run's.
 
-    An expected reason, such as a push that merged no same-repository pull
-    request run or different cache keys, is a normal outcome; any other
+    An expected reason, such as a merge commit that merged no same-repository
+    pull request run or different cache keys, is a normal outcome; any other
     suggests a fault, which CI reports as a warning.
     """
 
@@ -205,12 +207,12 @@ class RunArtifact:
 
 @dataclass(frozen=True)
 class ReuseRequest:
-    """What to reuse, and for which push or rehearsal.
+    """What to reuse, and for which push, merge group, or rehearsal.
 
-    A push names its merge commit, whose second parent is the head of the
-    pull request that it merged; a rehearsal names that head itself. `keys`
-    gives, by name, the exact keys of the cache entries of `components`, and
-    `record` names the artifact of their record.
+    A push or a merge group names its merge commit, whose second parent is the
+    head of the pull request that it merged; a rehearsal names that head
+    itself. `keys` gives, by name, the exact keys of the cache entries of
+    `components`, and `record` names the artifact of their record.
     """
 
     repository: str
@@ -381,15 +383,10 @@ def _parse_record(contents: bytes) -> tuple[dict[str, str], dict[str, str]]:
 def workflow_path(workflow_ref: str, repository: str) -> str:
     """Return the path of the workflow that `workflow_ref`, the
     GITHUB_WORKFLOW_REF of a run of `repository`, names."""
-    reference, separator, _ = workflow_ref.partition("@")
-    path = reference.removeprefix(f"{repository}/")
-    if (
-        not separator
-        or path == reference
-        or PurePosixPath(path).parent != PurePosixPath(".github/workflows")
-    ):
-        raise ReuseRefused(f"{workflow_ref!r} names no workflow of {repository}")
-    return path
+    try:
+        return github_workflow_path(workflow_ref, repository)
+    except ScriptError as error:
+        raise ReuseRefused(str(error)) from error
 
 
 def merged_head(api: GitHubApi, repository: str, commit: str) -> str:
@@ -686,8 +683,8 @@ def _sentence(text: str) -> str:
 def _fallback(dry_run: bool) -> str:
     if dry_run:
         return (
-            "a push that merged this head would build the guest images that "
-            "missed its cache"
+            "a merge group or a push that merged this head would build the "
+            "guest images that missed its cache"
         )
     return "the action builds the guest images that missed the cache"
 
@@ -816,10 +813,11 @@ def reuse_guest_artifacts(
                     False,
                     heading,
                     "would reuse",
-                    "A push that merged this head would install every file of "
-                    f"these components from {source}: the cache keys that its "
-                    f"`{request.record}` record gives, the SHA-256 of each file, "
-                    "and their provenance check out.",
+                    "A merge group or a push that merged this head would "
+                    "install every file of these components from "
+                    f"{source}: the cache keys that its `{request.record}` "
+                    "record gives, the SHA-256 of each file, and their "
+                    "provenance check out.",
                 )
             # Outside the time limit, whose timer must not cut a rollback short.
             _install(staging, destination, files)

@@ -47,6 +47,8 @@ from nvx_tools.build_constants import (
     UbuntuBuildConstants,
 )
 from nvx_tools.ci import (
+    CI_CLASSIFIED_EVENTS,
+    CI_EVENTS,
     OPENVMM_TEST_BACKENDS,
     REQUIRED_CI_RESULT_ENVIRONMENTS,
     CiChanges,
@@ -91,6 +93,7 @@ from nvx_tools.guest_binaries import (
     test_guest_binaries,
 )
 from nvx_tools.guests import GUEST_NAMES, guest_descriptor
+from nvx_tools.merge_queue import configure_parser as configure_merge_queue_parser
 from nvx_tools.microvm_tests import configure_parser as configure_microvm_test_parser
 from nvx_tools.microvm_tests import (
     configure_shard_parser as configure_microvm_shard_parser,
@@ -574,7 +577,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     )
     classify_changes.add_argument(
         "--event-name",
-        choices=("pull_request", "push"),
+        choices=CI_CLASSIFIED_EVENTS,
         required=True,
     )
     classify_changes.add_argument(
@@ -624,7 +627,8 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         "record-guest-artifacts",
         help=(
             "record the cache keys and the SHA-256 of each file of guest "
-            "artifact components, which a dev push checks before it reuses them"
+            "artifact components, which a merge group or a dev push checks "
+            "before it reuses them"
         ),
     )
     guest_record.add_argument(
@@ -682,7 +686,10 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     guest_reuse_head = guest_reuse.add_mutually_exclusive_group(required=True)
     guest_reuse_head.add_argument(
         "--commit",
-        help="the pushed merge commit, whose second parent is the pull request head",
+        help=(
+            "the pushed or queued merge commit, whose second parent is the pull "
+            "request head"
+        ),
     )
     guest_reuse_head.add_argument("--head-sha", help="the pull request head itself")
     guest_reuse.add_argument(
@@ -704,7 +711,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     )
     required_ci.add_argument(
         "--event-name",
-        choices=("pull_request", "push", "schedule", "workflow_dispatch"),
+        choices=CI_EVENTS,
         required=True,
     )
     required_ci.add_argument(
@@ -737,6 +744,12 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help="open, update, or close the report of failed nightly CI runs",
     )
     configure_nightly_ci_parser(nightly_ci)
+
+    superseded_groups = subparsers.add_parser(
+        "cancel-superseded-merge-groups",
+        help="cancel the CI runs of the merge groups that the merge queue replaced",
+    )
+    configure_merge_queue_parser(superseded_groups)
 
     static_elf = subparsers.add_parser(
         "check-static-elf",

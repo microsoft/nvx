@@ -292,9 +292,9 @@ its checks pending. The one exception is `snapshot-tiers`' gate-timeout check,
 whose guest OpenVMM stops at the restore gate on purpose. The harness refuses
 a kernel whose `vmlinux-debug.config` lacks the detectors, because the guest's
 boot check of those detectors passes vacuously. To bound the cost, pull requests
-run the debug kernel on KVM only, while `dev` pushes and full runs run it on
-every backend; each job takes about five minutes on its own runner, in parallel
-with the other microVM jobs. The jobs gate the required status check, the
+and merge groups run the debug kernel on KVM only, while `dev` pushes and full
+runs run it on every backend; each job takes about five minutes on its own
+runner, in parallel with the other microVM jobs. The jobs gate the required status check, the
 development release, and performance persistence. The GitHub-hosted `debug-kernel` job
 builds the debug kernel beside the other guest artifact jobs
 (`build-guest-artifacts` with `components: debug-kernel`) and caches it under its
@@ -579,29 +579,36 @@ commit. Shared guest binaries and development release packages move through
 short-lived workflow artifacts alongside the OpenVMM handoff and benchmark
 results. Caches only accelerate reproducible build inputs and outputs; consumers
 do not depend on them as a handoff.
-Pull requests gate regressions against recent matching-platform history, and
-successful pushes to `dev` append their p50 values under `data/`. A pull
-request that changes no input of the platform jobs skips them and the gate
+Pull requests and merge groups gate regressions against recent
+matching-platform history, and successful pushes to `dev` append their p50
+values under `data/`. A pull request or a merge group that changes no input of
+the platform jobs skips them and the gate
 (see [Change classification](#change-classification)). Metadata-only
 performance jobs use GitHub-hosted Ubuntu runners. Provisioning instructions
 are in the [runner bootstrap guide](../scripts/setup/README.md).
 
-Persistent runners accept pushes, scheduled and manually dispatched full
-runs, and same-repository pull requests only. Fork pull requests run the
-GitHub-hosted validation jobs but do not execute code on the Azure runner
-fleet. A maintainer must stage an external contribution on a trusted
-repository branch before running the backend matrices.
+Persistent runners accept pushes, merge groups, scheduled and manually
+dispatched full runs, and same-repository pull requests only. Fork pull
+requests run the GitHub-hosted validation jobs but do not execute code on the
+Azure runner fleet. A maintainer must stage an external contribution on a
+trusted repository branch before running the backend matrices. A merge group,
+though, runs in the repository whatever repository its pull requests come
+from, so queueing a fork's pull request runs its code on the fleet, as the
+`dev` push that merged it would (see [Merge queue](#merge-queue)).
 
 ## Job graph and runner capacity
 
-A `dev` push, a pull request that is ready for review, or a scheduled or
-manually dispatched full run starts these jobs at once: `quality`, `nvx-rs`,
-`nvx-cli-linux`, and `nvx-cli-windows` on GitHub-hosted runners, and
-`openvmm-changes`, which classifies a push or pull
-request and selects every suite for a full run (see
-[Change classification](#change-classification)). When it finishes, the jobs
-that it selects start: `artifacts`, `distro-artifacts`, and `debug-kernel`
-restore or build the guest artifacts on GitHub-hosted runners (see
+A `dev` push, a pull request that is ready for review, a merge group, or a
+scheduled or manually dispatched full run starts these jobs at once: `quality`,
+`nvx-rs`, `nvx-cli-linux`, and `nvx-cli-windows` on GitHub-hosted runners, and
+`openvmm-changes`, which classifies a push, pull request, or merge group and
+selects every suite for a full run (see
+[Change classification](#change-classification)). A merge group also starts
+`cancel-superseded-merge-groups` on a GitHub-hosted runner, which nothing
+waits for (see [Superseded merge groups](#superseded-merge-groups)). When the
+classification finishes, the jobs that it selects start: `artifacts`,
+`distro-artifacts`, and `debug-kernel` restore or build the guest artifacts
+on GitHub-hosted runners (see
 [Guest artifact handoff](#guest-artifact-handoff)), the three OpenVMM binary
 producers restore or build OpenVMM on a KVM, an MSHV, and a WHP runner,
 `build-openvmm-vmm-tests-linux` and `build-openvmm-vmm-tests-windows` restore
@@ -657,7 +664,8 @@ The ignored test `tests/openvmm_cpu_profiles.rs` likewise compares the
 submodule's built-in CPU profiles with the copy of their identities from which
 `nvx-rs run` guides a failed cold boot on a CPU that none serves.
 Fork pull requests lack the OpenVMM deploy key, so the CLI jobs run, like the
-hypervisor jobs, only for pushes, full runs, and same-repository pull requests.
+hypervisor jobs, only for pushes, merge groups, full runs, and same-repository
+pull requests.
 Because the microVM and platform jobs of each operating system wait for its CLI
 job, a broken CLI does not occupy the hypervisor runners.
 `Required status check`, the development release, and performance persistence
@@ -777,8 +785,8 @@ job's result, which `Required status check`, `Publish development release`, and
 `Persist performance baseline` read, succeeds only when every shard succeeds.
 The guest and sandbox jobs and the debug-kernel jobs are not sharded: the
 debug-kernel jobs take three to five minutes, about as long as a shard, and
-still run on KVM only for pull requests and on every backend for `dev`
-pushes and full runs.
+still run on KVM only for pull requests and merge groups and on every backend
+for `dev` pushes and full runs.
 
 The first plan took the medians of the reports of 13 runs from October 21 and
 22, 2026. It started each backend from the two shards that
@@ -876,9 +884,10 @@ Alpine initramfs. The microVM default suites boot only those two, and the
 microVM guest and sandbox jobs boot every guest and run sandboxes from the
 Ubuntu distro layer over copies of the scratch template, which comes with the
 layer: the layer's Docker target formats it, its cache entry holds it, and the
-Ubuntu record gives its digest, so a push reuses it with the layer. The microVM
-test workflow's own default, an unsharded default run, which no CI job selects,
-runs the public sandbox scenarios too, so it also downloads the layer. The
+Ubuntu record gives its digest, so a merge group or a push reuses it with the
+layer. The microVM test workflow's own default, an unsharded default run, which
+no CI job selects, runs the public sandbox scenarios too, so it also downloads
+the layer. The
 platform jobs boot the kernel and the Alpine initramfs to qualify their runner
 and to benchmark, and package every guest image, and the scratch template, into
 their release. A missing artifact fails its download step, so no job runs
@@ -926,7 +935,8 @@ to 21, 2026, when one job built every guest image, 50 of the 87 `dev` pushes
 that ran it built at least one image, and the job took a median of 5.4
 minutes, and at most 11.3, instead of 0.3, which delayed every job that waits
 for it. A push therefore reuses the components that its pull request's run
-already built, when they check out.
+already built, when they check out, and so does the pull request's
+[merge group](#merge-queue), which can't restore them either.
 
 `artifacts` and `distro-artifacts` each record their components. The last
 steps of
@@ -937,30 +947,32 @@ the components' cache entries and the SHA-256 of each of their files, and
 upload it for one day under the name that the action's `record-artifact` input
 gives: `kernel-alpine-record` for the kernel and the Alpine initramfs, and
 `ubuntu-azurelinux-record` for the Ubuntu and Azure Linux images. No job of the
-run downloads a record. On a push, after the cache restores and before any
-build, [`reuse-guest-artifacts`](usage.md#reuse-guest-artifacts) runs in each
-of the two jobs when a file of its components is missing. It takes the merged
-pull request's head from the second parent of the push's merge commit, and
-the latest `pull_request` run of `ci.yml` for that head whose head repository
-is `microsoft/nvx`, so never a fork's run. It downloads the job's record from
+run downloads a record. On a push or a merge group, after the cache restores
+and before any build, [`reuse-guest-artifacts`](usage.md#reuse-guest-artifacts)
+runs in each of the two jobs when a file of its components is missing. It
+takes the merged pull request's head from the second parent of the run's merge
+commit, which the queue builds as a push's, and the latest `pull_request` run
+of `ci.yml` for that head whose head repository is `microsoft/nvx`, so never a
+fork's run. It downloads the job's record from
 that run, unless the record has expired, which it does after one day, or lacks
 the SHA-256 digest that GitHub records at upload, and compares its keys with
-the push's own keys for the job's components, so the keys of the other job's
+the run's own keys for the job's components, so the keys of the other job's
 components never matter. Only when they are equal does it download the
 components' artifacts, `guest-kernel` and `guest-alpine`, or `guest-ubuntu`,
 `guest-ubuntu-distro`, and `guest-azurelinux`, under the same conditions. It
 installs their files only when each artifact matches its digest, every file
 matches the record, and the kernel and initramfs provenance, or the Ubuntu and
-Azure Linux manifests, match the files and the push's checkout, as
+Azure Linux manifests, match the files and the run's checkout, as
 [`package`](usage.md#package) requires. Then it replaces every file of the
 job's components, not only the missing ones, because a cache restore that fails
 partway can leave a truncated file behind and still report a miss; the files
 that the cache restored have the same keys. The job then skips the builds of
 its components and, in `distro-artifacts`, the Ubuntu determinism check, which
-the run that built the images passed, as for a cache hit. It still saves the
-components in its caches for later runs, records them, and uploads them as its
-own artifacts, which its consumers download as before, so no job depends on
-another run's artifact or on a cache. The debug kernel is never reused.
+the run that built the images passed, as for a cache hit. A push still saves
+the components in its caches for later runs, and either one records them and
+uploads them as its own artifacts, which its consumers download as before, so
+no job depends on another run's artifact or on a cache. The debug kernel is
+never reused.
 
 Every other outcome builds the components that missed the cache, as before: a
 merge commit without a same-repository pull request run, an expired record or
@@ -981,21 +993,24 @@ pull request once both guest artifact jobs succeed, beside the jobs that wait
 for them. It runs `reuse-guest-artifacts --dry-run` for the pull request's
 head and each job's components, record, and keys, which selects the run in
 progress, downloads the records and the artifacts that the two jobs just
-uploaded, checks them as a push would, and reports in the job summary whether
-a push would reuse them, without installing anything. A reason not to reuse
-fails nothing, but it warns, because a run's own artifacts should always check
-out. The change detector selects the rehearsal with the guest artifacts, and
-`Required status check` requires it to succeed for a same-repository pull
-request that builds them, so a pull request that breaks the reuse command
-can't merge.
+uploaded, checks them as a merge group or a push would, and reports in the job
+summary whether those would reuse them, without installing anything. A reason
+not to reuse fails nothing, but it warns, because a run's own artifacts should
+always check out. The change detector selects the rehearsal with the guest
+artifacts, and `Required status check` requires it to succeed for a
+same-repository pull request that builds them, so a pull request that breaks
+the reuse command can't merge. Its merge group doesn't rehearse the reuse
+again, but reuses the artifacts for real (see [Merge queue](#merge-queue)).
 
 ## Run concurrency
 
 Each pull request runs in a concurrency group of its own, and a push to it
-cancels the run of the previous head, whether that run waits or runs. Pushes
-to `dev` share one group and run one at a time in the order in which they
-arrive. The group keeps up to 100 waiting runs (`queue: max`), so a merge does
-not cancel the waiting run of an earlier merge. Until October 2026 the group
+cancels the run of the previous head, whether that run waits or runs. Each
+merge group's run also has a concurrency group of its own (see
+[Merge queue](#merge-queue)). Pushes to `dev` share one group and run one at a
+time in the order in which they arrive. The group keeps up to 100 waiting runs
+(`queue: max`), so a merge does not cancel the waiting run of an earlier
+merge. Until October 2026 the group
 kept a single waiting run, which each newer push replaced: 12 of the 199 `dev`
 pushes from October 4 to 21 lost their run that way, five of them merged
 within four minutes on October 20. Those commits got no development release
@@ -1047,6 +1062,214 @@ SHA-specific development release. Performance persistence records that same
 SHA after applying the results to the current `dev` history: it drops rows
 already present for the same platform, ABI, processor count, commit, and
 metric, but otherwise appends them and pushes a baseline update.
+
+## Merge queue
+
+`dev` requires `Required status check`, but neither a merge queue nor pull
+requests that are up to date with `dev`, so a pull request's run tests its head
+merged into `dev` as `dev` was when the run started, and two pull requests that
+each pass can break `dev` together. That happened on October 25, 2026:
+[#825](https://github.com/microsoft/nvx/pull/825) added CLI tests that
+expected the old egress error messages, and
+[#828](https://github.com/microsoft/nvx/pull/828), merged 22 minutes later,
+changed them; each passed CI without the other, and the `nvx-rs` jobs failed
+in every `dev` run for about nine hours, until
+[#830](https://github.com/microsoft/nvx/pull/830) updated the tests
+([#895](https://github.com/microsoft/nvx/issues/895)). GitHub's merge queue
+closes that gap. It tests each queued pull request in a merge group: the merge
+of the pull request into the latest `dev` and the pull requests ahead of it in
+the queue, on a branch `gh-readonly-queue/dev/pr-NUMBER-BASE`. It merges a
+group only once the group's required check passes, by moving `dev` to the
+group's head, so it merges only commits that a run tested. When a
+group fails, it removes the pull request from the queue and rebuilds the
+groups behind it without it.
+
+`ci.yml` therefore runs for the `merge_group` events of `dev`, whose
+`checks_requested` activity asks for a group's checks; without them, the queue
+would wait for a `Required status check` that never reports, until its timeout
+removed the pull request. A group's run checks out the group's head, which
+`GITHUB_SHA` names, and the change detector compares it with
+`merge_group.base_sha`, the commit on which the queue built the group: the
+latest `dev` for the first group, and the head of the group ahead of it for
+every other. Each group's run therefore classifies the change of its own pull
+request, as the queue merges it, while the groups ahead check theirs. A suite
+whose inputs the pull request leaves alone gives the same result on the group
+as on the group ahead, so the queue must require every entry of a group to pass
+its checks (see [Queue settings](#queue-settings)): it then merges no group
+while a group ahead of it fails.
+
+A group's run then checks what the run of a same-repository pull request
+checks, but the rehearsal of the [guest artifact reuse](#guest-artifact-reuse),
+which the pull request's run made: each suite runs only when one of its inputs
+changed, the platform jobs and the performance regression gate after them
+included, the debug kernel runs on KVM alone, and the OpenVMM VMM tests are
+restored from the [cache](#openvmm-vmm-test-cache) that `dev` pushes save. A
+group publishes no development release and persists no performance results,
+which the `dev` push of the merged commit does, and saves no cache: GitHub
+scopes a cache entry to the ref that saved it, and no other run can restore an
+entry of a group's branch, which GitHub deletes as soon as it merges or drops
+the group. A group's run can restore the entries of `dev` alone, not those of
+its pull request's runs, so, like the `dev` push that merges the pull request,
+it installs the guest artifacts that the pull request's run built instead of
+building them again, when they check out (see
+[Guest artifact reuse](#guest-artifact-reuse)); a pull request that changes
+the key of the OpenVMM VMM tests, though, builds them in its group too. Each
+group's run has a concurrency group of its own, keyed by the run rather than
+the group's ref, so it neither waits for nor cancels another: a pull request
+that leaves the queue and returns to it on the same base gets its earlier
+group's ref again, and a group keyed by the ref would hold the new run until
+the replaced one ended. `Required status check` passes `merge_group` to
+[`check-required-ci`](usage.md#check-required-ci), which expects those jobs.
+
+A merge group runs in the repository, with the repository's secrets, whatever
+repository its pull requests come from: GitHub builds the group's branch
+there, and
+[GitHub's own documentation repository](https://github.com/github/docs/blob/main/.github/workflows/restrict-merge-queue.yml)
+relies on its merge groups' secrets for forks' pull requests. Its run
+therefore runs the repository's jobs, on the self-hosted runners and with the
+OpenVMM deploy key, for a fork's pull request too, whose own runs ran only the
+GitHub-hosted ones, and `check-required-ci` expects them whatever
+`--same-repository` says. Queueing a fork's pull request thus runs its code on
+the fleet before it merges, as the `dev` push that merged it did after, and
+that code includes the workflow: a group's run takes `ci.yml`, with its jobs'
+steps and the permissions of their tokens, from the group's head. `dev` keeps
+approvals across pushes, though (its ruleset's `dismiss_stale_reviews_on_push`
+and `require_last_push_approval` are off), so the code that the queue runs may
+postdate its review. Requiring the approval of the most recent push would make
+someone other than its pusher approve the code that a group runs with the
+repository's secrets, at the cost of another approval whenever a pull request's
+author pushes after its approval; an administrator who requires the queue
+should weigh it.
+
+### Superseded merge groups
+
+The queue builds a pull request a new group, on another base, whenever the
+queue ahead of it changes: when a group ahead fails, when a pull request ahead
+leaves the queue or another jumps it, and whenever `dev` changes outside the
+queue, as with each push to `dev` that a bypass actor makes. It deletes the
+branch of the group that it replaces, but GitHub doesn't cancel that group's
+run, which holds its runners until it ends although the queue never reads its
+checks again
+([community discussion](https://github.com/orgs/community/discussions/137976)).
+A test repository's queue showed both on October 30, 2026: a push to its base
+branch while three groups ran replaced all three within 20 seconds and deleted
+their branches, and the runs of the three replaced groups ran on to their end,
+six minutes later. A concurrency group per pull request can't cancel them: the
+only field of a group's event that names its pull request, the group's ref,
+also names the group's base, which no expression can strip, and keyed on a
+field that a rebuilt group shares, such as its commit message, a late event
+for a replaced group could cancel the live group's run instead.
+
+The first job of each group's run, `cancel-superseded-merge-groups`
+(`Cancel superseded merge group runs`), therefore runs
+[`cancel-superseded-merge-groups`](usage.md#cancel-superseded-merge-groups). It
+lists the workflow's unfinished `merge_group` runs and then the branches of the
+pull request's groups, and cancels the runs of the pull request's groups whose
+branches are gone or hold another head than the run's. The queue builds a pull
+request's groups one after another, so the group whose branch holds a run's
+head is the live one, whichever run started first; a pull request that leaves
+the queue and returns to it on the same base gets its earlier group's branch
+again, with another head, so a branch that exists may still name a replaced
+run's group. The job holds its own run to the same test, but cancels it last:
+GitHub can deliver a replaced group's event late, after the run of the group
+that replaced it looked, and only the late run itself then finds that it is
+superseded. A pull request that leaves the queue gets no new group, so the run
+of its last group runs on, unless the pull request returns to the queue, whose
+new group then cancels it, or the run's own job looks only after it left.
+
+The job runs on a GitHub-hosted runner with `actions: write`, which cancelling
+a run needs, beside the workflow's `contents: read`. That token can cancel any
+of the repository's runs, so the job checks out the group's base branch, `dev`,
+and runs the command that has merged there rather than the group's copy: a
+change to the command takes effect once it merges, and one that changes its
+options can fail the job in its own groups. The job's steps still come from the
+group's `ci.yml`, though, like every job's (see [Merge queue](#merge-queue)),
+so the checkout only keeps the command's unmerged code from the token and is no
+isolation boundary: a queued pull request that changes the job's steps, or
+gives another job the same permission, gets such a token, and only the review
+of its latest push guards against that. Nothing waits for the job, and a failed
+request only warns, and never stops the other cancellations, so it never holds
+the queue.
+
+### Queue settings
+
+An administrator requires the queue with a `merge_queue` rule in `dev`'s
+ruleset, but only once `ci.yml` on `dev` runs for merge groups: a group's run
+takes `ci.yml` from the group's head, and a `ci.yml` without the trigger
+reports no check, so the queue would hold every pull request until its
+timeout. The rule's settings:
+
+- **Merge method:** merge commits (`MERGE`), the only method that `dev`
+  allows. The queue builds each group's head as the merge commit of its pull
+  request's head into the group's base, `Merge pull request #NUMBER from
+  OWNER/BRANCH`, and moves `dev` to the head of the last group that it merges,
+  so each pull request keeps a merge commit of its own, whose second parent is
+  its head. The [guest artifact reuse](#guest-artifact-reuse) of the group's
+  run and of the `dev` push finds the pull request's run through that parent;
+  a squash or a rebase would leave none, and both would rebuild every guest
+  artifact that the pull request changed.
+- **Require all queue entries to pass required checks:** on
+  (`grouping_strategy: ALLGREEN`). Each group's run checks only its own pull
+  request's change, so the queue must not merge a group while a group ahead of
+  it fails, as it may when only the head of a group must pass (`HEADGREEN`).
+- **Status check timeout:** well beyond the slowest run of a group, which a
+  pull request's run measures. From October 16 to 29, 2026, the first
+  attempts of the 400 successful pull request runs that ran the platform jobs
+  took a median of 26.3 minutes from the creation of their first job to the
+  end of their last, 51.2 at the 90th percentile, and 100.5 at the 99th, waits
+  for runners included; the 26 that ran other self-hosted jobs but not the
+  platform jobs took 13.2, 24.8, and 35.6. A timeout of 180 minutes removes
+  only the groups whose runs a lost runner or an outage holds.
+- **Build concurrency:** 2. A group's run that selects every suite can occupy
+  every `general` KVM runner at once (see
+  [Job graph and runner capacity](#job-graph-and-runner-capacity)), so a
+  second group can only prepare behind it, and more would only queue for the
+  same runners while every push to `dev` outside the queue rebuilds them all
+  (see [Pushes outside the queue](#pushes-outside-the-queue)).
+- **Merge limits:** at least one pull request, without a wait, so that the
+  queue merges each group once it and the groups ahead of it pass, and at most
+  five, GitHub's default. When several groups pass together, the queue merges
+  them in one push, which runs CI once for all of them.
+
+### Pushes outside the queue
+
+The queue isn't the only way into `dev`: the deploy key with which
+`Persist performance baseline` and the module diagrams workflow push, and two
+user accounts, bypass `dev`'s ruleset, whose `merge_queue` rule binds them no
+more than its other rules. From October 16 to 29, 2026, `dev` took 234
+baseline commits and 23 diagram commits beside its 272 merges. Each such push
+changes the base of every group in the queue, which the queue then rebuilds on
+the new tip (see [Superseded merge groups](#superseded-merge-groups)), so it
+costs every group the run that it had made so far. A baseline commit landed a
+median of 29.2 minutes after the merge whose run it records, 16.1 at the 10th
+percentile and 99.9 at the 90th, about as long as a group's run, and the merges
+came a median of 27.6 minutes apart, 148 of 271 within 30 minutes of the one
+before. On a busy day, the baseline commit of nearly every merge would thus
+rebuild the group that the queue builds next, which would then take about two
+runs to merge. Before an administrator requires the queue, the performance
+history's commits should therefore leave `dev`, for instance to a branch of
+their own from which the gate reads the history, or wait for the nightly full
+run, so that `dev` takes pushes outside the queue only rarely.
+
+### Cost
+
+With the queue, each change runs CI three times: in its pull request, in its
+merge group, and in the `dev` push that merges it. A group's run selects what
+its pull request's run selected, on the latest `dev`, and so takes about as
+long (see [Queue settings](#queue-settings)). The tail of those runs is the
+wait of their platform jobs for their pools' single `benchmark` runners, which
+the pull requests' and the pushes' platform jobs share: the longest of a run's
+platform jobs waited from its creation to its start a median of 6.3 minutes,
+28.8 at the 90th percentile, and 78.3 at the 99th. The queue holds a group
+that runs them, and every group behind it, that much longer. The push could
+in principle reuse the group's results, since the queue moves `dev` to the head
+of the last group that it merges, which that group's run tested. It doesn't:
+a push still publishes the development release and records the performance
+history, and so runs the platform jobs for every change but documentation, it
+saves the caches that later runs restore, which no group can, and a push that
+merges several groups carries several pull requests' changes, of which each
+group's run checked only its own pull request's. Skipping a push's test suites
+when the run of the last group that it merged passed is left for later.
 
 ## Cancellation
 
@@ -1196,9 +1419,9 @@ leaves out the C toolchains and other tools of the runners, so a runner
 upgrade reuses the content built before it until the key changes, and the
 full runs below check the build every day.
 
-On a push or a pull request, a producer computes the key before it checks out
-OpenVMM and restores the newest entry of the key into the directory that it
-uploads. [`reuse-openvmm-tests`](usage.md#reuse-openvmm-tests) keeps that
+On a push, a pull request, or a merge group, a producer computes the key before
+it checks out OpenVMM and restores the newest entry of the key into the
+directory that it uploads. [`reuse-openvmm-tests`](usage.md#reuse-openvmm-tests) keeps that
 content only if it is exactly what a fresh build of the key makes: its
 manifest must record every field that the key digests, for a clean checkout,
 and the runner and options that its run script runs, which the command reads
@@ -1224,12 +1447,13 @@ entry of its own, and the restore, which takes the newest entry whose key
 starts with the key, takes the latest build. An entry that a later reuse
 refuses, for example after a change to the check that kept the version,
 therefore blocks nothing: the next `dev` push builds the tests and saves a
-newer entry. Pull requests restore the entries that `dev` pushes save but save
-none, so a pull request that changes the key builds the tests in each of its
-runs. Scheduled and manually dispatched full runs neither restore nor save the
-content: they build the tests every day, so that a breakage of the build that
-the key doesn't cover, such as a toolchain change on the runners, shows within
-a day rather than at the next pin promotion.
+newer entry. Pull requests and merge groups restore the entries that `dev`
+pushes save but save none, so a pull request that changes the key builds the
+tests in each of its runs and in its merge group's. Scheduled and manually
+dispatched full runs neither restore nor save the content: they build the
+tests every day, so that a breakage of the build that the key doesn't cover,
+such as a toolchain change on the runners, shows within a day rather than at
+the next pin promotion.
 
 This change's validation run,
 [39988095577](https://github.com/microsoft/nvx/actions/runs/39988095577), saved
@@ -1384,7 +1608,8 @@ renames one fails them until it plans the shards again:
 ## Change classification
 
 `openvmm-changes` lists the files that changed between the pull request's base
-and head, or between a push's previous and new commits, and
+and head, between a push's previous and new commits, or between a merge group's
+base and head (see [Merge queue](#merge-queue)), and
 `nvx.py classify-ci-changes` selects the suites from their paths. The detector
 uses `git diff --name-only --no-renames -z` and the classifier's `--null` option
 so both sides of a rename and unquoted filenames, including embedded newlines,
@@ -1402,25 +1627,26 @@ other path selects each suite that takes it as an input:
   artifacts run, the runner setup scripts, the Rust pin, and
   `.gitattributes`, which checks out their scripts on Windows.
 - `run-benchmarks` enables the platform jobs, which benchmark each backend and
-  package its release, and so a pull request's performance regression gate.
-  Their inputs are the OpenVMM pin, the guests and every input of their cache
-  keys, the `nvx` crate, which every package ships, the performance history
-  and expected hosts under `data/`, `VERSION`, `LICENSE`, the workflows,
-  actions, and CLI modules that the platform jobs, the gate, and the jobs that
-  build their artifacts run, the runner setup scripts, the Rust pin, and
-  `.gitattributes`. A pull request sets it only when one of these inputs
-  changed, but a push sets it for every change but documentation; see
+  package its release, and so the performance regression gate of a pull
+  request or a merge group. Their inputs are the OpenVMM pin, the guests and
+  every input of their cache keys, the `nvx` crate, which every package ships,
+  the performance history and expected hosts under `data/`, `VERSION`,
+  `LICENSE`, the workflows, actions, and CLI modules that the platform jobs,
+  the gate, and the jobs that build their artifacts run, the runner setup
+  scripts, the Rust pin, and `.gitattributes`. A pull request or a merge group
+  sets it only when one of these inputs changed, but a push sets it for every
+  change but documentation; see
   [Development releases and performance history](#development-releases-and-performance-history).
 - `run-openvmm-unit-tests` and `run-openvmm-vmm-tests` enable the OpenVMM
-  suites. A push or pull request sets each only when one of that suite's own
-  inputs changed. The unit tests depend on the OpenVMM pin, the Rust pin, the
-  runner setup scripts, `ci.yml`, the actions that their job uses, `nvx.py`,
-  and the modules that `ci.py` imports. The VMM tests also boot the kernel and
-  Alpine initramfs, so they add every input of those artifacts' cache keys and
-  the `build-guest-artifacts` action, and run their WHP tests in
-  [shards](#openvmm-vmm-test-shards), so they add the modules of the commands
-  that their jobs run and the files that those read, such as the partition of
-  the shards. Of `nvx-rs`, those are only the inputs
+  suites. A push, pull request, or merge group sets each only when one of that
+  suite's own inputs changed. The unit tests depend on the OpenVMM pin, the
+  Rust pin, the runner setup scripts, `ci.yml`, the actions that their job
+  uses, `nvx.py`, and the modules that `ci.py` imports. The VMM tests also
+  boot the kernel and Alpine initramfs, so they add every input of those
+  artifacts' cache keys and the `build-guest-artifacts` action, and run their
+  WHP tests in [shards](#openvmm-vmm-test-shards), so they add the modules of
+  the commands that their jobs run and the files that those read, such as the
+  partition of the shards. Of `nvx-rs`, those are only the inputs
   of the guest binaries, which `GuestRustBuildConstants.SOURCE_PATTERN`
   matches, so a change to its host side or tests runs the NVX microVM tests
   and the platform jobs but not the VMM tests.
@@ -1452,23 +1678,24 @@ and the partition of its [shards](#microvm-test-shards),
 VMM tests and, as every input of theirs is, of the microVM tests, but not of
 the platform jobs. `performance.py`
 is an input of the platform jobs alone. `nightly_ci.py`, which only the
-nightly report workflow runs, and `crate_release.py`, which only the crate
-release jobs run, are inputs of neither. Modules that both kinds
+nightly report workflow runs, `crate_release.py`, which only the crate
+release jobs run, and `merge_queue.py`, which only the job that cancels the
+runs of superseded merge groups runs, are inputs of neither. Modules that both kinds
 of job run, such as `benchmark.py`, which `microvm_tests.py` imports,
 `doctor.py`, which every runner validation runs, and `release.py`, whose
 `verify` command the OpenVMM builds run, select both.
 
-A push or pull request that changes neither OpenVMM suite's inputs, such as
-one that changes only the microVM tests, the benchmarks, the Ubuntu or Azure
-Linux guests, or the host side of `nvx-rs`, therefore skips the jobs of both
-OpenVMM suites, which occupy the WHP runners longest. A pull request that
-changes only the microVM tests, such as their scenarios or the runtime
-adapter, also skips the platform jobs, which wait for their pool's single
-benchmark runner, and one that changes only the performance tooling, such as
-`performance.py`, the `run-benchmark` action, or `data/`, skips the microVM
-tests. One that changes the input of no suite, such as the CLI tests, nightly
-reporting, crate publication, the adversarial campaigns, or the GitHub-hosted
-checks, runs only the GitHub-hosted jobs.
+A push, pull request, or merge group that changes neither OpenVMM suite's
+inputs, such as one that changes only the microVM tests, the benchmarks, the
+Ubuntu or Azure Linux guests, or the host side of `nvx-rs`, therefore skips the
+jobs of both OpenVMM suites, which occupy the WHP runners longest. A pull
+request or a merge group that changes only the microVM tests, such as their
+scenarios or the runtime adapter, also skips the platform jobs, which wait for
+their pool's single benchmark runner, and one that changes only the
+performance tooling, such as `performance.py`, the `run-benchmark` action, or
+`data/`, skips the microVM tests. One that changes the input of no suite, such
+as the CLI tests, nightly reporting, crate publication, the adversarial
+campaigns, or the GitHub-hosted checks, runs only the GitHub-hosted jobs.
 
 The nightly schedule runs at 05:17 UTC, and a manual workflow
 dispatch starts the same full run. Both select the full matrix before the
@@ -1484,16 +1711,17 @@ OpenVMM caches, and only pushes and pull
 requests save the guest artifact and pip caches, through the `save-cache`
 input of the
 [`build-guest-artifacts`](../.github/actions/build-guest-artifacts/action.yml)
-and [`check-quality`](../.github/actions/check-quality/action.yml) actions. A
+and [`check-quality`](../.github/actions/check-quality/action.yml) actions;
+merge groups save none (see [Merge queue](#merge-queue)). A
 full run still builds the guest artifacts that miss the cache, but installs
 the Python tools without the pip cache, which `setup-python` saves whenever it
 misses. A failed nightly run opens or updates the
 [nightly failure report](#nightly-failure-reports).
 
-For a push or pull request, the detector runs the full matrix instead when the
-comparison base or a commit is unavailable, when the diff or the classifier
-fails, or when the classifier reports an output twice or not at all, because a
-missing output would skip its jobs.
+For a push, pull request, or merge group, the detector runs the full matrix
+instead when the comparison base or a commit is unavailable, when the diff or
+the classifier fails, or when the classifier reports an output twice or not at
+all, because a missing output would skip its jobs.
 `Required status check` passes the same outputs to `check-required-ci`, which
 expects every scheduled job to succeed and every other job to be skipped. As
 in `ci.yml`, it schedules a job only when the jobs that build the artifacts
@@ -1529,8 +1757,9 @@ classifier selected the platform jobs apart from the tests. Of the 108 merges
 to `dev` from October 10 to 21, 2026 that changed more than documentation, 10
 changed no input of the platform jobs, and each of their pushes spent about
 19 benchmark-runner minutes on them: the KVM, MSHV, and WHP platform jobs take
-a median of 5.3, 5.5, and 8.6 minutes. Pull requests publish and persist
-nothing, so they run the platform jobs only when one of their inputs changed.
+a median of 5.3, 5.5, and 8.6 minutes. Pull requests and merge groups publish
+and persist nothing, so they run the platform jobs only when one of their
+inputs changed.
 [Development release publication](#development-release-publication) describes
 how the release job publishes.
 
@@ -1565,10 +1794,10 @@ gone, and any other status fails publication with its message. Every attempt
 has a timeout, and the job's timeout outlasts a publication in which every
 request takes all of its attempts, as a test checks.
 
-Pull requests never publish, so try a change to publication against a scratch
-repository, never `microsoft/nvx`: run the script with `GH_REPO` set to that
-repository, `GITHUB_SHA` to one of its commits, and packages in `dist/` that
-pass the script's checks.
+Pull requests and merge groups never publish, so try a change to publication
+against a scratch repository, never `microsoft/nvx`: run the script with
+`GH_REPO` set to that repository, `GITHUB_SHA` to one of its commits, and
+packages in `dist/` that pass the script's checks.
 
 ## Nightly failure reports
 
@@ -1601,8 +1830,9 @@ nightly run is reported within minutes of its last job. Its `workflow_run`
 trigger reacts to the run rather than to its jobs, so it also reports a run
 that was cancelled or whose jobs never started, and it adds nothing to
 `ci.yml`. Its job runs only for scheduled runs: a `dev` push's run skips it,
-pull request runs, whose branches the trigger excludes, never start the
-workflow, and a manually dispatched run notifies the person who started it.
+pull request and merge group runs, whose branches the trigger excludes, never
+start the workflow, and a manually dispatched run notifies the person who
+started it.
 The job checks out the default branch, never the run's code. Its token can
 read the repository, the run's jobs and logs, and their check annotations,
 and write issues, and no other workflow can write issues. The job runs one
@@ -1668,8 +1898,8 @@ passed, which `Required status check` confirms. Two jobs on GitHub-hosted
 Ubuntu runners, whose checkouts have the LF line endings of the commit, run
 [`publish_nvx_crate.py`](../scripts/publish_nvx_crate.py): `crate-package`,
 `Package nvx crate`, waits for that check, and `crate-release`,
-`Publish nvx crate`, waits for `crate-package`. Pushes and pull requests
-never publish the crate. A run publishes a new version only when `nvx-rs/`
+`Publish nvx crate`, waits for `crate-package`. Pushes, pull requests, and
+merge groups never publish the crate. A run publishes a new version only when `nvx-rs/`
 changed since the commit from which the newest version on crates.io was
 packed, which that version's `.cargo_vcs_info.json` records. A night without
 changes to the crate publishes nothing, and neither does a run of a commit

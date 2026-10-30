@@ -193,10 +193,13 @@ cross-vCPU TSC warps during CPU activation (#265); under it, the guest warp
 probe (H6) checks their skew against the ABI's 1 µs bound, so qualify such a
 VM with `python3 scripts/nvx.py doctor --backend <backend>` before
 registering it. CI's microVM and platform jobs run the probe on every runner.
-Persistent runners execute pushes, scheduled and manually dispatched full
-runs, and same-repository pull requests only. Fork pull requests remain on
-GitHub-hosted jobs until a maintainer stages the change on a trusted repository
-branch.
+Persistent runners execute pushes, merge groups, scheduled and manually
+dispatched full runs, and same-repository pull requests only. Fork pull
+requests remain on GitHub-hosted jobs until a maintainer stages the change on a
+trusted repository branch, or queues it: a merge group runs in the repository
+whatever repository its pull requests come from, so a queued fork's pull
+request runs its code on these runners, with the OpenVMM deploy key, before it
+merges (see [Merge queue](../../doc/ci.md#merge-queue)).
 
 Validate an installed runner without changing the host:
 

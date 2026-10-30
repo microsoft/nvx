@@ -427,10 +427,11 @@ is authorized for the organization when it enforces single sign-on.
 | `classify-ci-changes` | Select the CI suites that a list of changed files runs. |
 | `kernel-patch-identity` | Print the digest of the kernel patch paths and contents that keys the kernel cache. |
 | `guest-binary-source-identity` | Print the digest of the Rust guest binary source paths and contents that keys the guest image caches. |
-| `record-guest-artifacts` | Record the cache keys and the SHA-256 of each file of guest artifact components, which a `dev` push checks before it reuses them. |
+| `record-guest-artifacts` | Record the cache keys and the SHA-256 of each file of guest artifact components, which a merge group or a `dev` push checks before it reuses them. |
 | `reuse-guest-artifacts` | Install guest artifact components that missed the cache from the latest same-repository pull request run for the merged head. |
 | `check-required-ci` | Validate required GitHub Actions job results. |
 | `report-nightly-ci` | Open, update, or close the report of failed nightly CI runs. |
+| `cancel-superseded-merge-groups` | Cancel the CI runs of the merge groups that the merge queue replaced. |
 | `check-static-elf` | Check that executables are static ELF files without an interpreter or an executable stack. |
 | `test-openvmm-unit` | Run the OpenVMM workspace unit and documentation tests. |
 | `build-openvmm-tests` | Build OpenVMM Petri VMM tests without running them. |
@@ -539,8 +540,9 @@ holds the exact cache keys of those components' cache entries, from the JSON
 object of keys by name that `--keys` gives, and the SHA-256 of each of their
 files. It fails if a key or a file is missing. Each CI job that builds guest
 images records them, and uploads the record beside the components' own
-artifacts, so that the `dev` push that merges the pull request can check them
-before it reuses them; see [Guest artifact reuse](ci.md#guest-artifact-reuse).
+artifacts, so that the merge group and the `dev` push that merge the pull
+request can check them before they reuse them; see
+[Guest artifact reuse](ci.md#guest-artifact-reuse).
 
 ### `reuse-guest-artifacts`
 
@@ -590,7 +592,7 @@ output to `true` or `false`, and adds the outcome to the job summary; see
 
 ```text
 python3 scripts/nvx.py classify-ci-changes
-    --event-name {pull_request,push}
+    --event-name {pull_request,merge_group,push}
     --changed-files PATH
     [--null]
     [--summary PATH]
@@ -602,12 +604,13 @@ the change detector's
 `run-guest-artifacts`, `run-openvmm-binaries`, `run-openvmm-unit-tests`,
 `run-openvmm-vmm-tests`, `run-microvm-tests`, and `run-benchmarks` outputs as
 `name=true` or `name=false` lines. Documentation selects no suite. Pull
-requests and pushes run each test suite only when one of its own inputs
-changed. A pull request runs the platform benchmarks only when one of their
-inputs changed, but a push runs them for every change but documentation,
-because it publishes the development release and records the performance
-history. The guest artifacts and the OpenVMM binaries are built exactly when a
-job that uses them runs. The summary file receives a Markdown
+requests, merge groups, and pushes run each test suite only when one of its
+own inputs changed. A pull request or a merge group runs the platform
+benchmarks only when one of their inputs changed, but a push runs them for
+every change but documentation, because it publishes the development release
+and records the performance history. The guest artifacts and the OpenVMM
+binaries are built exactly when a job that uses them runs. The summary file
+receives a Markdown
 explanation of each decision. CI runs the full matrix instead when the command
 fails or omits an output; see
 [Change classification](ci.md#change-classification).
@@ -616,7 +619,7 @@ fails or omits an output; see
 
 ```text
 python3 scripts/nvx.py check-required-ci
-    --event-name {pull_request,push,schedule,workflow_dispatch}
+    --event-name {pull_request,merge_group,push,schedule,workflow_dispatch}
     --same-repository {false,true}
     --run-guest-artifacts VALUE
     --run-openvmm-binaries VALUE
@@ -633,7 +636,10 @@ variables. CI supplies the `true` or `false` suite flags that
 enabled by the event, repository, and suite flags, and `skipped` for jobs that
 are not enabled; mismatches are reported as errors and cause a nonzero exit.
 As in CI, a job that uses the guest artifacts or the OpenVMM binaries is
-enabled only when the flags enable the jobs that build them too.
+enabled only when the flags enable the jobs that build them too. A merge group
+expects the jobs of a same-repository pull request, whatever
+`--same-repository` says, but the rehearsal of the guest artifact reuse, which
+its pull request's run made; see [Merge queue](ci.md#merge-queue).
 
 ### `report-nightly-ci`
 
@@ -661,6 +667,36 @@ to a Markdown file, such as `$GITHUB_STEP_SUMMARY`. `--dry-run` prints the
 changes that the command would make, with their Markdown, and makes none; it
 accepts a run of any event, so that a past failure can preview its report,
 and, for a public repository, needs a token only for the job logs.
+
+### `cancel-superseded-merge-groups`
+
+```text
+python3 scripts/nvx.py cancel-superseded-merge-groups
+    --repository OWNER/REPOSITORY
+    --workflow-ref REF
+    --run-id ID
+    --ref REF
+    [--summary PATH]
+```
+
+Cancels the unfinished runs, whether they run or wait, of the workflow that
+`--workflow-ref`, a `GITHUB_WORKFLOW_REF` value, names, for the earlier merge
+groups of the pull request of the merge group that `--ref` names, a
+`refs/heads/gh-readonly-queue/BASE/pr-NUMBER-SHA` ref, as
+[Superseded merge groups](ci.md#superseded-merge-groups) describes. It cancels
+only the runs of the groups of the same base branch and pull request whose
+branches GitHub has deleted or given another head, as when the pull request
+returns to the queue on the same base, so that it never cancels the run of the
+pull request's live group. It holds the run `--run-id`, its caller, to the same
+test, but cancels it last: GitHub can start a replaced group's run late, after
+the run of the group that replaced it looked. It reads a token from `GH_TOKEN`
+or `GITHUB_TOKEN`, which must be able to read and cancel the repository's
+workflow runs and read its branches, and prints each run that it cancelled,
+that had completed meanwhile, or that it could not cancel, which doesn't stop
+the others. `--summary` appends the same lines to a Markdown file, such as
+`$GITHUB_STEP_SUMMARY`. A failed request warns, as a GitHub warning, but never
+fails the command, which only frees runners; a missing token or a `--ref` that
+names no merge group does.
 
 ### `check-static-elf`
 

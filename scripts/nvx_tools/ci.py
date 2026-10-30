@@ -175,8 +175,8 @@ REQUIRED_CI_MICROVM_TEST_JOBS = (
     "nvx-microvm-guests-mshv",
     "nvx-microvm-guests-whp",
 )
-# The CI debug kernel runs on KVM for every pull request and on every backend
-# for dev pushes and full runs.
+# The CI debug kernel runs on KVM for every pull request and merge group and on
+# every backend for dev pushes and full runs.
 REQUIRED_CI_MICROVM_DEBUG_JOBS = ("nvx-microvm-debug-kvm",)
 REQUIRED_CI_MICROVM_DEBUG_PUSH_JOBS = (
     "nvx-microvm-debug-mshv",
@@ -211,6 +211,17 @@ OPENVMM_UNIT_TEST_EXCLUDED_PACKAGES = (
     "flowey_core",
 )
 
+# The events whose runs check a change before it merges: a pull request, and
+# the merge group in which the merge queue tests it on the latest dev and the
+# pull requests ahead of it (doc/ci.md#merge-queue). Both run the platform jobs
+# only when one of their inputs changed, gate on their results, and run the
+# debug kernel on KVM alone, and neither publishes nor persists anything.
+CI_PRE_MERGE_EVENTS = ("pull_request", "merge_group")
+# The events whose runs the change detector classifies, and those that run the
+# full matrix instead.
+CI_CLASSIFIED_EVENTS = (*CI_PRE_MERGE_EVENTS, "push")
+CI_FULL_RUN_EVENTS = ("schedule", "workflow_dispatch")
+CI_EVENTS = (*CI_CLASSIFIED_EVENTS, *CI_FULL_RUN_EVENTS)
 # The workflow's change detector emits one output per entry, and runs the full
 # matrix when it cannot classify a change.
 CI_CHANGE_OUTPUTS = (
@@ -238,8 +249,8 @@ MICROVM_TEST_INPUT_PATHS = re.compile(
     r"sccache|setup-curl|validate-runner)/|"
     r"scripts/nvx\.py$|"
     r"scripts/nvx_tools/(?!(adversarial|adversarial_broker|adversarial_executor|"
-    r"crate_release|create_linux_source_archive|nightly_ci|performance)\.py$|"
-    r"adversarial_cases/))"
+    r"crate_release|create_linux_source_archive|merge_queue|nightly_ci|"
+    r"performance)\.py$|adversarial_cases/))"
 )
 # Inputs of the platform jobs, which benchmark each backend and package its
 # release, and of the regression gate that reads their results: the OpenVMM
@@ -260,7 +271,7 @@ BENCHMARK_INPUT_PATHS = re.compile(
     r"run-benchmark|sccache|setup-curl|validate-runner)/|"
     r"scripts/nvx\.py$|"
     r"scripts/nvx_tools/(?!(adversarial|adversarial_broker|adversarial_executor|"
-    r"crate_release|create_linux_source_archive|managed_exec_tests|"
+    r"crate_release|create_linux_source_archive|managed_exec_tests|merge_queue|"
     r"microvm_durations|microvm_shards|microvm_tests|nightly_ci|"
     r"openvmm_process|openvmm_test_shards|runtime_adapter_tests|"
     r"sandbox_lifecycle_tests|sandbox_proxy_tests|sandbox_ram_upper_tests|"
@@ -361,15 +372,15 @@ def _ci_inputs(changed_files: Sequence[str]) -> list[str]:
 def classify_ci_changes(event_name: str, changed_files: Sequence[str]) -> CiChanges:
     """Select the suites that a change between two commits runs.
 
-    Documentation never selects a suite. Pull requests and pushes run each test
-    suite only when one of its own inputs changed. A pull request runs the
-    platform jobs only when one of their inputs changed, but a push runs them
-    for every change but documentation, so that every such `dev` commit
-    publishes its development release and records its performance results. The
-    guest artifacts and the OpenVMM binaries are built exactly when a job that
-    uses them runs.
+    Documentation never selects a suite. Pull requests, merge groups, and
+    pushes run each test suite only when one of its own inputs changed. A pull
+    request or a merge group runs the platform jobs only when one of their
+    inputs changed, but a push runs them for every change but documentation,
+    so that every such `dev` commit publishes its development release and
+    records its performance results. The guest artifacts and the OpenVMM
+    binaries are built exactly when a job that uses them runs.
     """
-    if event_name not in ("pull_request", "push"):
+    if event_name not in CI_CLASSIFIED_EVENTS:
         raise ValueError(f"unsupported CI event {event_name!r}")
 
     files = [path for path in changed_files if path]
@@ -502,12 +513,7 @@ def required_ci_expected_results(
     same_repository: bool,
     changes: CiChanges,
 ) -> dict[str, str]:
-    if event_name not in (
-        "pull_request",
-        "push",
-        "schedule",
-        "workflow_dispatch",
-    ):
+    if event_name not in CI_EVENTS:
         raise ValueError(f"unsupported CI event {event_name!r}")
 
     # Each job runs only when its suite is selected and the jobs that build the
@@ -520,6 +526,8 @@ def required_ci_expected_results(
     run_benchmarks = (
         changes.run_benchmarks and run_guest_artifacts and run_openvmm_binaries
     )
+    # A merge group runs in the repository whatever repository its pull
+    # requests come from, so it runs the repository's jobs, as a push does.
     repository_jobs_enabled = event_name != "pull_request" or same_repository
     expected = {
         "quality": "success",
@@ -530,6 +538,7 @@ def required_ci_expected_results(
             "success" if run_guest_artifacts else "skipped"
         ),
         REQUIRED_CI_DEBUG_KERNEL_JOB: "success" if run_guest_artifacts else "skipped",
+        # A merge group skips the rehearsal, which its pull request's run made.
         REQUIRED_CI_GUEST_ARTIFACT_REUSE_JOB: (
             "success"
             if event_name == "pull_request" and same_repository and run_guest_artifacts
@@ -537,7 +546,7 @@ def required_ci_expected_results(
         ),
         "performance-gate": (
             "success"
-            if event_name == "pull_request"
+            if event_name in CI_PRE_MERGE_EVENTS
             and repository_jobs_enabled
             and run_benchmarks
             else "skipped"
@@ -608,7 +617,7 @@ def required_ci_expected_results(
         {
             job: (
                 "success"
-                if event_name != "pull_request" and run_microvm_tests
+                if event_name not in CI_PRE_MERGE_EVENTS and run_microvm_tests
                 else "skipped"
             )
             for job in REQUIRED_CI_MICROVM_DEBUG_PUSH_JOBS

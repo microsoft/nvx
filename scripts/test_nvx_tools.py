@@ -54,6 +54,7 @@ from nvx_tools import (  # noqa: E402
     guest_artifact_reuse,
     guest_binaries,
     guests,
+    merge_queue,
     microvm_durations,
     microvm_shards,
     nvx_rs,
@@ -300,6 +301,248 @@ def _expression_conjuncts(expression: str) -> list[str]:
             start = index + 2
     conjuncts.append(expression[start:].strip())
     return conjuncts
+
+
+_EXPRESSION_TOKEN = re.compile(
+    r"\s*(?:(?P<number>[0-9]+(?:\.[0-9]+)?)|(?P<string>'(?:[^']|'')*')|"
+    r"(?P<operator>==|!=|<=|>=|&&|\|\||[!<>().,\[\]])|"
+    r"(?P<name>[A-Za-z_][A-Za-z0-9_-]*))"
+)
+
+
+def _expression_truthy(value: Any) -> bool:
+    """Return whether GitHub treats a value as true: all but false, 0, NaN,
+    the empty string, and null."""
+    if value is None or value is False or value == "":
+        return False
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return value == value and value != 0
+    return True
+
+
+def _expression_number(value: Any) -> float:
+    if value is None:
+        return 0.0
+    if isinstance(value, (bool, int, float)):
+        return float(value)
+    if isinstance(value, str):
+        try:
+            return float(value) if value.strip() else 0.0
+        except ValueError:
+            return float("nan")
+    return float("nan")
+
+
+def _expressions_equal(left: Any, right: Any) -> bool:
+    """Compare as GitHub's `==` does: strings ignoring case, values of one
+    type directly, and values of different types as numbers."""
+    if isinstance(left, str) and isinstance(right, str):
+        return left.casefold() == right.casefold()
+    if type(left) is type(right):
+        return left == right
+    return _expression_number(left) == _expression_number(right)
+
+
+def _evaluate_expression(
+    text: str,
+    context: Mapping[str, Any],
+    functions: Mapping[str, Callable[..., Any]],
+) -> Any:
+    """Evaluate a GitHub Actions expression, as far as the CI workflow's job
+    conditions and settings use one: literals, contexts and their properties,
+    `!`, `==` and `!=`, `&&` and `||`, which return an operand as GitHub's do,
+    parentheses, and calls of `functions`."""
+    expression = " ".join(text.split())
+    if expression.startswith("${{") and expression.endswith("}}"):
+        expression = expression[3:-2].strip()
+    tokens: list[tuple[str, str]] = []
+    position = 0
+    while position < len(expression):
+        match = _EXPRESSION_TOKEN.match(expression, position)
+        if match is None or match.lastgroup is None:
+            raise AssertionError(f"cannot read {expression[position:]!r}")
+        tokens.append((match.lastgroup, match.group(match.lastgroup)))
+        position = match.end()
+    index = 0
+
+    def peek() -> str | None:
+        return tokens[index][1] if index < len(tokens) else None
+
+    def take(expected: str | None = None) -> tuple[str, str]:
+        nonlocal index
+        if index == len(tokens):
+            raise AssertionError(f"{expression!r} ends early")
+        token = tokens[index]
+        if expected is not None and token[1] != expected:
+            raise AssertionError(f"expected {expected!r} in {expression!r}")
+        index += 1
+        return token
+
+    def primary() -> Any:
+        kind, value = take()
+        if value == "(":
+            result = disjunction()
+            take(")")
+            return result
+        if kind == "number":
+            return float(value)
+        if kind == "string":
+            return value[1:-1].replace("''", "'")
+        if kind != "name":
+            raise AssertionError(f"unexpected {value!r} in {expression!r}")
+        if value in ("true", "false"):
+            return value == "true"
+        if value == "null":
+            return None
+        if peek() == "(":
+            take("(")
+            arguments: list[Any] = []
+            while peek() != ")":
+                if arguments:
+                    take(",")
+                arguments.append(disjunction())
+            take(")")
+            return functions[value](*arguments)
+        result: Any = context.get(value)
+        while peek() in (".", "["):
+            if take()[1] == ".":
+                key: Any = take()[1]
+            else:
+                key = disjunction()
+                take("]")
+            result = (
+                cast(Mapping[Any, Any], result).get(key)
+                if isinstance(result, Mapping)
+                else None
+            )
+        return result
+
+    def unary() -> Any:
+        if peek() == "!":
+            take("!")
+            return not _expression_truthy(unary())
+        return primary()
+
+    def comparison() -> Any:
+        left = unary()
+        if peek() in ("==", "!="):
+            operator = take()[1]
+            equal = _expressions_equal(left, unary())
+            return equal if operator == "==" else not equal
+        return left
+
+    def conjunction() -> Any:
+        result = comparison()
+        while peek() == "&&":
+            take("&&")
+            right = comparison()
+            result = right if _expression_truthy(result) else result
+        return result
+
+    def disjunction() -> Any:
+        result = conjunction()
+        while peek() == "||":
+            take("||")
+            right = conjunction()
+            result = result if _expression_truthy(result) else right
+        return result
+
+    result = disjunction()
+    if index != len(tokens):
+        raise AssertionError(f"unexpected {tokens[index][1]!r} in {expression!r}")
+    return result
+
+
+def _expression_string(value: Any) -> str:
+    """Return a value as GitHub writes it into a string."""
+    if value is None:
+        return ""
+    if isinstance(value, bool):
+        return str(value).lower()
+    if isinstance(value, float) and value.is_integer():
+        return str(int(value))
+    return str(value)
+
+
+def _interpolate_expressions(
+    text: str,
+    context: Mapping[str, Any],
+    functions: Mapping[str, Callable[..., Any]],
+) -> Any:
+    """Return the value of a workflow setting: that of its expression when the
+    setting is one, and otherwise its text with each expression replaced by
+    its value."""
+    pieces = re.split(r"\$\{\{(.*?)\}\}", text.strip(), flags=re.DOTALL)
+    if len(pieces) == 3 and not pieces[0] and not pieces[2]:
+        return _evaluate_expression(pieces[1], context, functions)
+    return "".join(
+        _expression_string(_evaluate_expression(piece, context, functions))
+        if index % 2
+        else piece
+        for index, piece in enumerate(pieces)
+    )
+
+
+def _job_status_functions(succeeded: bool) -> dict[str, Callable[[], Any]]:
+    """Return the status functions of a job's condition in a run that nobody
+    cancels and whose jobs never fail, once the jobs that it needs ended."""
+    return {
+        "always": lambda: True,
+        "cancelled": lambda: False,
+        "failure": lambda: False,
+        "success": lambda: succeeded,
+    }
+
+
+def _simulate_workflow_jobs(
+    workflow: Mapping[str, Any],
+    github: Mapping[str, Any],
+    outputs: Mapping[str, Mapping[str, str]],
+) -> dict[str, str]:
+    """Return the result of each job of a workflow run whose jobs all succeed
+    when they run: `success` for each job whose condition holds once the jobs
+    that it needs have their results, and `skipped` for the others. `outputs`
+    gives the outputs of jobs by name."""
+    jobs: Mapping[str, Mapping[str, Any]] = workflow["jobs"]
+
+    def needs(name: str) -> list[str]:
+        value = jobs[name].get("needs", [])
+        return [value] if isinstance(value, str) else list(value)
+
+    results: dict[str, str] = {}
+    pending = list(jobs)
+    while pending:
+        name = next(
+            (name for name in pending if all(need in results for need in needs(name))),
+            None,
+        )
+        if name is None:
+            raise AssertionError(f"these jobs wait for one another: {pending}")
+        pending.remove(name)
+        condition = " ".join(str(jobs[name].get("if", "success()")).split())
+        if condition.startswith("${{") and condition.endswith("}}"):
+            condition = condition[3:-2].strip()
+        # A condition without a status function also needs every job that it
+        # needs to succeed.
+        if not re.search(r"\b(?:always|success|failure|cancelled)\(\)", condition):
+            condition = f"success() && ({condition})"
+        none: dict[str, str] = {}
+        needed: dict[str, dict[str, Any]] = {
+            need: {
+                "result": results[need],
+                "outputs": (
+                    outputs.get(need, none) if results[need] == "success" else none
+                ),
+            }
+            for need in needs(name)
+        }
+        context: dict[str, Any] = {"github": github, "needs": needed}
+        functions = _job_status_functions(
+            all(results[need] == "success" for need in needs(name))
+        )
+        runs = _expression_truthy(_evaluate_expression(condition, context, functions))
+        results[name] = "success" if runs else "skipped"
+    return results
 
 
 def _matrix_legs(job: Mapping[str, Any]) -> list[dict[str, Any]]:
@@ -900,16 +1143,51 @@ class CliTests(unittest.TestCase):
                 for value in (f"--{output}", "true")
             ),
         ]
-        for event_name in (
+        events = (
             "pull_request",
+            "merge_group",
             "push",
             "schedule",
             "workflow_dispatch",
-        ):
+        )
+        self.assertEqual(ci.CI_EVENTS, events)
+        for event_name in events:
             argv = list(base)
             argv[argv.index("--event-name") + 1] = event_name
             with self.subTest(event_name=event_name):
                 self.assertEqual(nvx.parse_args(argv).event_name, event_name)
+        argv = list(base)
+        argv[argv.index("--event-name") + 1] = "pull_request_target"
+        with (
+            patch("sys.stderr", new_callable=io.StringIO),
+            self.assertRaises(SystemExit) as exit_context,
+        ):
+            nvx.parse_args(argv)
+        self.assertEqual(exit_context.exception.code, 2)
+
+    def test_classify_ci_changes_accepts_the_classified_events(self):
+        # Full runs select every suite without classifying a change.
+        self.assertEqual(
+            ci.CI_CLASSIFIED_EVENTS, ("pull_request", "merge_group", "push")
+        )
+        for event_name in ci.CI_EVENTS:
+            argv = [
+                "classify-ci-changes",
+                "--event-name",
+                event_name,
+                "--changed-files",
+                "changed-files",
+            ]
+            with self.subTest(event_name=event_name):
+                if event_name in ci.CI_CLASSIFIED_EVENTS:
+                    self.assertEqual(nvx.parse_args(argv).event_name, event_name)
+                    continue
+                with (
+                    patch("sys.stderr", new_callable=io.StringIO),
+                    self.assertRaises(SystemExit) as exit_context,
+                ):
+                    nvx.parse_args(argv)
+                self.assertEqual(exit_context.exception.code, 2)
 
     def test_check_required_ci_passes_each_flag_to_its_suite(self):
         # With the results that a selection expects, the command passes; with
@@ -5789,9 +6067,9 @@ class GuestArtifactReuseTests(unittest.TestCase):
                 self.assertEqual(outcome.level, "warning")
                 self.assertTrue(
                     outcome.detail.endswith(
-                        f"has no unexpired `{record}` artifact, so a push that "
-                        "merged this head would build the guest images that "
-                        "missed its cache."
+                        f"has no unexpired `{record}` artifact, so a merge group "
+                        "or a push that merged this head would build the guest "
+                        "images that missed its cache."
                     ),
                     outcome.detail,
                 )
@@ -6543,11 +6821,17 @@ class GuestArtifactReuseTests(unittest.TestCase):
             f"{_REUSE_REPOSITORY}/ci.yml@refs/heads/dev",
             f"{_REUSE_REPOSITORY}/.github/workflows/nested/ci.yml@refs/heads/dev",
         ):
-            with (
-                self.subTest(workflow_ref=workflow_ref),
-                self.assertRaises(guest_artifact_reuse.ReuseRefused),
-            ):
-                guest_artifact_reuse.workflow_path(workflow_ref, _REUSE_REPOSITORY)
+            with self.subTest(workflow_ref=workflow_ref):
+                with self.assertRaises(guest_artifact_reuse.ReuseRefused):
+                    guest_artifact_reuse.workflow_path(workflow_ref, _REUSE_REPOSITORY)
+                # The parser that the reuse shares refuses it as a plain error.
+                with self.assertRaises(common.ScriptError) as refused:
+                    common.workflow_path(workflow_ref, _REUSE_REPOSITORY)
+                self.assertNotIsInstance(
+                    refused.exception, guest_artifact_reuse.ReuseRefused
+                )
+        # The cancellation of superseded merge groups shares it too.
+        self.assertIs(merge_queue.workflow_path, common.workflow_path)
 
     def test_reuse_command_reports_its_outcome_and_never_fails(self):
         base = [
@@ -6853,6 +7137,541 @@ class GuestArtifactReuseTests(unittest.TestCase):
             server.shutdown()
             server.server_close()
             thread.join()
+
+
+_MERGE_GROUP_PARENT = "a" * 40
+_MERGE_GROUP_BRANCH = f"gh-readonly-queue/dev/pr-7-{_MERGE_GROUP_PARENT}"
+_MERGE_GROUP_WORKFLOW_REF = (
+    f"microsoft/nvx/.github/workflows/ci.yml@refs/heads/{_MERGE_GROUP_BRANCH}"
+)
+
+
+def _merge_group_run(
+    run_id: int,
+    branch: str,
+    *,
+    head: str | None = None,
+    status: str = "in_progress",
+    event: str = "merge_group",
+    workflow: str = ".github/workflows/ci.yml",
+) -> dict[str, Any]:
+    """Return a workflow run whose head, unless given, is its ID in hex."""
+    return {
+        "id": run_id,
+        "event": event,
+        "status": status,
+        "head_branch": branch,
+        "head_sha": format(run_id, "040x") if head is None else head,
+        "path": f"{workflow}@refs/heads/{branch}",
+        "html_url": f"https://github.com/microsoft/nvx/actions/runs/{run_id}",
+    }
+
+
+class _FakeMergeQueueApi:
+    """Answers the cancellation's requests from a list of runs and of the
+    branches that exist, by their heads, and records each request and
+    cancellation."""
+
+    def __init__(
+        self,
+        runs: Sequence[Mapping[str, Any]],
+        branches: Mapping[str, str],
+        *,
+        cancel_errors: Mapping[int, Exception] | None = None,
+    ) -> None:
+        self.runs = list(runs)
+        self.branches = dict(branches)
+        self.cancel_errors = dict(cancel_errors or {})
+        self.requests: list[str] = []
+        self.cancelled: list[int] = []
+
+    def get(self, path: str, params: Mapping[str, str] | None = None) -> object:
+        self.requests.append(f"GET {path}")
+        prefix = "/repos/microsoft/nvx/git/matching-refs/heads/"
+        assert path.startswith(prefix) and params is None, path
+        start = path.removeprefix(prefix)
+        return [
+            {
+                "ref": f"refs/heads/{branch}",
+                "object": {"sha": head, "type": "commit"},
+            }
+            for branch, head in self.branches.items()
+            if branch.startswith(start)
+        ]
+
+    def get_all(
+        self,
+        path: str,
+        params: Mapping[str, str] | None = None,
+        *,
+        key: str | None = None,
+        deadline: float | None = None,
+    ) -> list[object]:
+        assert params is not None and key == "workflow_runs" and deadline is None
+        self.requests.append(f"GET {path} {params['event']} {params['status']}")
+        assert path == "/repos/microsoft/nvx/actions/workflows/ci.yml/runs", path
+        return [
+            run
+            for run in self.runs
+            if run["status"] == params["status"] and run["event"] == params["event"]
+        ]
+
+    def post(self, path: str, body: Mapping[str, object]) -> object:
+        self.requests.append(f"POST {path}")
+        assert body == {}, body
+        run_id = int(path.split("/")[-2])
+        if run_id in self.cancel_errors:
+            raise self.cancel_errors[run_id]
+        self.cancelled.append(run_id)
+        return None
+
+
+class MergeQueueTests(unittest.TestCase):
+    def test_merge_group_reads_the_branch_of_a_group(self):
+        group = merge_queue.MergeGroup("dev", 7, _MERGE_GROUP_PARENT)
+        self.assertEqual(merge_queue.merge_group(_MERGE_GROUP_BRANCH), group)
+        self.assertEqual(
+            merge_queue.merge_group(f"refs/heads/{_MERGE_GROUP_BRANCH}"), group
+        )
+        self.assertEqual(group.branch, _MERGE_GROUP_BRANCH)
+        self.assertEqual(group.prefix, "gh-readonly-queue/dev/pr-7-")
+        self.assertEqual(
+            merge_queue.merge_group(f"gh-readonly-queue/release/1.0/pr-12-{'b' * 40}"),
+            merge_queue.MergeGroup("release/1.0", 12, "b" * 40),
+        )
+        for ref in (
+            "refs/heads/dev",
+            "refs/pull/7/merge",
+            "gh-readonly-queue/dev/pr-7",
+            f"gh-readonly-queue/dev/pr-07-{_MERGE_GROUP_PARENT}",
+            f"gh-readonly-queue/dev/pr-7-{'A' * 40}",
+            f"gh-readonly-queue/dev/pr-7-{_MERGE_GROUP_PARENT}0",
+            f"refs/tags/gh-readonly-queue/dev/pr-7-{_MERGE_GROUP_PARENT}",
+        ):
+            with self.subTest(ref=ref):
+                self.assertIsNone(merge_queue.merge_group(ref))
+
+    def test_cancels_the_unfinished_runs_of_the_earlier_groups(self):
+        # The groups that the queue replaced, whose branches are gone or hold
+        # another head, lose their runs, whether they run or wait; nothing
+        # else does.
+        replaced = f"gh-readonly-queue/dev/pr-7-{'b' * 40}"
+        older = f"gh-readonly-queue/dev/pr-7-{'c' * 40}"
+        # A live group of the pull request, whose run a late event may have
+        # started before this one.
+        live = f"gh-readonly-queue/dev/pr-7-{'d' * 40}"
+        other_pull_request = f"gh-readonly-queue/dev/pr-8-{'b' * 40}"
+        other_base = f"gh-readonly-queue/main/pr-7-{'b' * 40}"
+        # A run whose head GitHub didn't report is left alone while its
+        # branch exists.
+        unreported = _merge_group_run(112, live)
+        del unreported["head_sha"]
+        runs = [
+            _merge_group_run(102, older, status="queued"),
+            _merge_group_run(101, replaced),
+            _merge_group_run(103, _MERGE_GROUP_BRANCH),
+            _merge_group_run(104, live),
+            _merge_group_run(105, other_pull_request),
+            _merge_group_run(106, other_base),
+            _merge_group_run(107, replaced, status="completed"),
+            _merge_group_run(108, replaced, event="push"),
+            _merge_group_run(
+                109, replaced, workflow=".github/workflows/module-diagrams.yml"
+            ),
+            _merge_group_run(110, replaced, status="waiting"),
+            # The pull request left the queue and returned on the same parent,
+            # so this run's group has the branch of the earlier group, whose
+            # run is obsolete although its branch exists.
+            _merge_group_run(111, _MERGE_GROUP_BRANCH),
+            unreported,
+        ]
+        api = _FakeMergeQueueApi(
+            runs,
+            {
+                _MERGE_GROUP_BRANCH: format(103, "040x"),
+                live: format(104, "040x"),
+            },
+        )
+
+        report = merge_queue.cancel_superseded_merge_groups(
+            api,
+            repository="microsoft/nvx",
+            workflow_ref=_MERGE_GROUP_WORKFLOW_REF,
+            run_id=103,
+            ref=f"refs/heads/{_MERGE_GROUP_BRANCH}",
+        )
+
+        self.assertEqual(api.cancelled, [101, 102, 110, 111])
+        self.assertEqual(
+            report,
+            [
+                f"cancelled run {run_id} of `{branch}`: "
+                f"https://github.com/microsoft/nvx/actions/runs/{run_id}"
+                for run_id, branch in (
+                    (101, replaced),
+                    (102, older),
+                    (110, replaced),
+                    (111, _MERGE_GROUP_BRANCH),
+                )
+            ],
+        )
+        # It lists the runs of every unfinished status before the branches,
+        # so that a listed run of a live group finds its branch.
+        runs_path = "/repos/microsoft/nvx/actions/workflows/ci.yml/runs merge_group"
+        self.assertEqual(
+            api.requests,
+            [
+                *(
+                    f"GET {runs_path} {status}"
+                    for status in merge_queue.UNFINISHED_RUN_STATUSES
+                ),
+                "GET /repos/microsoft/nvx/git/matching-refs/heads/"
+                "gh-readonly-queue/dev/pr-7-",
+                "POST /repos/microsoft/nvx/actions/runs/101/cancel",
+                "POST /repos/microsoft/nvx/actions/runs/102/cancel",
+                "POST /repos/microsoft/nvx/actions/runs/110/cancel",
+                "POST /repos/microsoft/nvx/actions/runs/111/cancel",
+            ],
+        )
+
+    def test_a_late_run_of_a_replaced_group_cancels_itself_last(self):
+        # GitHub can deliver a replaced group's event late, so that its run
+        # starts after the run of the group that replaced it looked. Only the
+        # late run then finds that the queue replaced its group, and it
+        # cancels itself after the other runs that it finds replaced.
+        live = _merge_group_run(102, _MERGE_GROUP_BRANCH)
+        branches = {_MERGE_GROUP_BRANCH: format(102, "040x")}
+        older = f"gh-readonly-queue/dev/pr-7-{'c' * 40}"
+        for name, replaced, late in (
+            # The queue deleted the late run's branch.
+            (
+                "deleted",
+                f"gh-readonly-queue/dev/pr-7-{'b' * 40}",
+                _merge_group_run(101, f"gh-readonly-queue/dev/pr-7-{'b' * 40}"),
+            ),
+            # The pull request returned on the same parent, so the late run's
+            # branch is the live group's, with another head.
+            (
+                "reused",
+                _MERGE_GROUP_BRANCH,
+                _merge_group_run(101, _MERGE_GROUP_BRANCH),
+            ),
+        ):
+            with self.subTest(branch=name):
+                # The live group's run looks before the late run exists.
+                api = _FakeMergeQueueApi([live], branches)
+                report = merge_queue.cancel_superseded_merge_groups(
+                    api,
+                    repository="microsoft/nvx",
+                    workflow_ref=_MERGE_GROUP_WORKFLOW_REF,
+                    run_id=102,
+                    ref=f"refs/heads/{_MERGE_GROUP_BRANCH}",
+                )
+                self.assertEqual((api.cancelled, report), ([], []))
+
+                api = _FakeMergeQueueApi(
+                    [late, live, _merge_group_run(105, older, status="queued")],
+                    branches,
+                )
+                report = merge_queue.cancel_superseded_merge_groups(
+                    api,
+                    repository="microsoft/nvx",
+                    workflow_ref=_MERGE_GROUP_WORKFLOW_REF,
+                    run_id=101,
+                    ref=f"refs/heads/{replaced}",
+                )
+                self.assertEqual(api.cancelled, [105, 101])
+                self.assertEqual(
+                    report,
+                    [
+                        f"cancelled run 105 of `{older}`: "
+                        "https://github.com/microsoft/nvx/actions/runs/105",
+                        f"cancelled run 101 of `{replaced}` (this run): "
+                        "https://github.com/microsoft/nvx/actions/runs/101",
+                    ],
+                )
+
+    def test_reports_the_runs_that_it_could_not_cancel(self):
+        branches = [f"gh-readonly-queue/dev/pr-7-{digit * 40}" for digit in "bcdef"]
+        runs = [
+            _merge_group_run(run_id, branch)
+            for run_id, branch in zip(range(101, 106), branches, strict=True)
+        ]
+        api = _FakeMergeQueueApi(
+            runs,
+            {_MERGE_GROUP_BRANCH: format(200, "040x")},
+            cancel_errors={
+                101: merge_queue.GitHubApiError(409, "Cannot cancel"),
+                102: merge_queue.GitHubApiError(403, "Resource not accessible"),
+                # GitHubClient reports a request that the connection lost as
+                # a ScriptError, and a socket may fail with an OSError.
+                103: common.ScriptError(
+                    "GitHub POST /x failed: [Errno 104] Connection reset"
+                ),
+                104: TimeoutError("timed out"),
+            },
+        )
+
+        report = merge_queue.cancel_superseded_merge_groups(
+            api,
+            repository="microsoft/nvx",
+            workflow_ref=_MERGE_GROUP_WORKFLOW_REF,
+            run_id=200,
+            ref=_MERGE_GROUP_BRANCH,
+        )
+
+        # One failure never stops the others, nor loses their reports.
+        self.assertEqual(api.cancelled, [105])
+        self.assertEqual(
+            report,
+            [
+                f"run 101 of `{branches[0]}` had completed",
+                f"could not cancel run 102 of `{branches[1]}`: Resource not accessible",
+                f"could not cancel run 103 of `{branches[2]}`: "
+                "GitHub POST /x failed: [Errno 104] Connection reset",
+                f"could not cancel run 104 of `{branches[3]}`: timed out",
+                f"cancelled run 105 of `{branches[4]}`: "
+                "https://github.com/microsoft/nvx/actions/runs/105",
+            ],
+        )
+
+    def test_refuses_what_names_no_merge_group_or_workflow(self):
+        api = _FakeMergeQueueApi([], {})
+        for ref, workflow_ref, message in (
+            ("refs/heads/dev", _MERGE_GROUP_WORKFLOW_REF, "names no merge group"),
+            (
+                _MERGE_GROUP_BRANCH,
+                "other/repository/.github/workflows/ci.yml@refs/heads/dev",
+                "names no workflow of microsoft/nvx",
+            ),
+            (
+                _MERGE_GROUP_BRANCH,
+                "microsoft/nvx/scripts/ci.yml@refs/heads/dev",
+                "names no workflow of microsoft/nvx",
+            ),
+        ):
+            with (
+                self.subTest(ref=ref, workflow_ref=workflow_ref),
+                self.assertRaisesRegex(common.ScriptError, message),
+            ):
+                merge_queue.cancel_superseded_merge_groups(
+                    api,
+                    repository="microsoft/nvx",
+                    workflow_ref=workflow_ref,
+                    run_id=1,
+                    ref=ref,
+                )
+        self.assertEqual(api.requests, [])
+        group = merge_queue.MergeGroup("dev", 7, _MERGE_GROUP_PARENT)
+        with self.assertRaisesRegex(common.ScriptError, "invalid workflow run"):
+            merge_queue.superseded_runs(
+                ["run"],
+                {},
+                group=group,
+                workflow=".github/workflows/ci.yml",
+                run_id=1,
+            )
+        # A reference without its head can't tell a live group from a
+        # replaced one.
+        invalid: tuple[object, ...] = (
+            {"ref": f"refs/heads/{_MERGE_GROUP_BRANCH}"},
+            [
+                {
+                    "ref": f"refs/heads/{_MERGE_GROUP_BRANCH}",
+                    "object": dict[str, str](),
+                }
+            ],
+            [{"object": {"sha": "1" * 40}}],
+        )
+        for references in invalid:
+            api = _FakeMergeQueueApi([], {})
+            with (
+                self.subTest(references=references),
+                patch.object(api, "get", return_value=references),
+                self.assertRaisesRegex(common.ScriptError, "invalid"),
+            ):
+                merge_queue.cancel_superseded_merge_groups(
+                    api,
+                    repository="microsoft/nvx",
+                    workflow_ref=_MERGE_GROUP_WORKFLOW_REF,
+                    run_id=1,
+                    ref=_MERGE_GROUP_BRANCH,
+                )
+            self.assertEqual(api.cancelled, [])
+
+    def test_command_warns_instead_of_failing(self):
+        # Cancelling only frees runners, so a GitHub failure warns but never
+        # fails the merge group's run.
+        argv = [
+            "cancel-superseded-merge-groups",
+            "--repository",
+            "microsoft/nvx",
+            "--workflow-ref",
+            _MERGE_GROUP_WORKFLOW_REF,
+            "--run-id",
+            "103",
+            "--ref",
+            f"refs/heads/{_MERGE_GROUP_BRANCH}",
+        ]
+        replaced = f"gh-readonly-queue/dev/pr-7-{'b' * 40}"
+        for outcome, expected_output, expected_summary in (
+            (
+                common.ScriptError("GitHub GET /x failed with HTTP 502"),
+                "::warning::could not look for superseded runs: "
+                "GitHub GET /x failed with HTTP 502\n",
+                "- could not look for superseded runs: "
+                "GitHub GET /x failed with HTTP 502\n",
+            ),
+            # GitHub's error text can't end the warning or start another
+            # workflow command.
+            (
+                common.ScriptError("GitHub GET /x failed: 100%\r\n::error::text"),
+                "::warning::could not look for superseded runs: "
+                "GitHub GET /x failed: 100%25%0D%0A::error::text\n",
+                "- could not look for superseded runs: "
+                "GitHub GET /x failed: 100%\r\n::error::text\n",
+            ),
+            (
+                [f"cancelled run 101 of `{replaced}`: https://example/101"],
+                f"cancelled run 101 of `{replaced}`: https://example/101\n",
+                f"- cancelled run 101 of `{replaced}`: https://example/101\n",
+            ),
+            (
+                [],
+                "no earlier group of pull request #7 has a run left\n",
+                "No earlier group of the pull request has a run left.\n",
+            ),
+        ):
+            with (
+                self.subTest(outcome=outcome),
+                tempfile.TemporaryDirectory() as temporary,
+            ):
+                summary = Path(temporary) / "summary.md"
+                args = nvx.parse_args([*argv, "--summary", os.fspath(summary)])
+                cancel = (
+                    patch.object(
+                        merge_queue,
+                        "cancel_superseded_merge_groups",
+                        side_effect=outcome,
+                    )
+                    if isinstance(outcome, Exception)
+                    else patch.object(
+                        merge_queue,
+                        "cancel_superseded_merge_groups",
+                        return_value=outcome,
+                    )
+                )
+                stdout = io.StringIO()
+                with (
+                    patch.dict(os.environ, {"GH_TOKEN": "token"}),
+                    cancel as cancelled,
+                    contextlib.redirect_stdout(stdout),
+                ):
+                    args.handler(args)
+                self.assertEqual(stdout.getvalue(), expected_output)
+                self.assertEqual(
+                    summary.read_bytes().decode("utf-8"),
+                    f"### Superseded merge groups of #7\n{expected_summary}",
+                )
+                self.assertEqual(cancelled.call_args.kwargs["run_id"], 103)
+                self.assertEqual(
+                    cancelled.call_args.kwargs["workflow_ref"],
+                    _MERGE_GROUP_WORKFLOW_REF,
+                )
+
+    def test_command_needs_a_token_and_a_merge_group(self):
+        argv = [
+            "cancel-superseded-merge-groups",
+            "--repository",
+            "microsoft/nvx",
+            "--workflow-ref",
+            _MERGE_GROUP_WORKFLOW_REF,
+            "--run-id",
+            "1",
+            "--ref",
+        ]
+        environment = {
+            name: value
+            for name, value in os.environ.items()
+            if name not in ("GH_TOKEN", "GITHUB_TOKEN")
+        }
+        for ref, token, message in (
+            (_MERGE_GROUP_BRANCH, None, "set GH_TOKEN"),
+            ("refs/heads/dev", "token", "names no merge group"),
+        ):
+            args = nvx.parse_args([*argv, ref])
+            with (
+                self.subTest(ref=ref, token=token),
+                patch.dict(
+                    os.environ,
+                    environment | ({"GH_TOKEN": token} if token else {}),
+                    clear=True,
+                ),
+                patch.object(merge_queue, "cancel_superseded_merge_groups") as cancel,
+                self.assertRaisesRegex(common.ScriptError, message),
+            ):
+                args.handler(args)
+            cancel.assert_not_called()
+
+    def test_merge_groups_cancel_the_runs_of_superseded_groups(self):
+        workflow = yaml.safe_load(
+            (BuildConstants.REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text(
+                encoding="utf-8"
+            )
+        )
+        job = workflow["jobs"]["cancel-superseded-merge-groups"]
+        self.assertEqual(job["name"], "Cancel superseded merge group runs")
+        self.assertEqual(job["if"], "github.event_name == 'merge_group'")
+        self.assertEqual(job["runs-on"], "ubuntu-latest")
+        self.assertNotIn("needs", job)
+        # Listing and cancelling the workflow's runs needs `actions: write`,
+        # and reading the groups' branches `contents: read`.
+        self.assertEqual(job["permissions"], {"actions": "write", "contents": "read"})
+        # Nothing waits for it, so that a failure never holds the queue.
+        for name, other in workflow["jobs"].items():
+            needs = other.get("needs", [])
+            with self.subTest(job=name):
+                self.assertNotIn(
+                    "cancel-superseded-merge-groups",
+                    [needs] if isinstance(needs, str) else needs,
+                )
+        [checkout, cancel] = job["steps"]
+        self.assertEqual(checkout["uses"], "actions/checkout@v5")
+        # The token can cancel any of the repository's runs, so the job runs
+        # the command that the group's base branch has merged rather than the
+        # group's copy, although its steps still come from the group's ci.yml.
+        self.assertEqual(
+            checkout["with"],
+            {
+                "ref": "${{ github.event.merge_group.base_ref }}",
+                "persist-credentials": False,
+            },
+        )
+        self.assertEqual(
+            cancel["env"],
+            {
+                "GH_TOKEN": "${{ github.token }}",
+                "MERGE_GROUP_REF": "${{ github.event.merge_group.head_ref }}",
+            },
+        )
+        self.assertEqual(
+            cancel["run"].split(),
+            [
+                "python3",
+                "scripts/nvx.py",
+                "cancel-superseded-merge-groups",
+                "--repository",
+                '"${GITHUB_REPOSITORY}"',
+                "--workflow-ref",
+                '"${GITHUB_WORKFLOW_REF}"',
+                "--run-id",
+                '"${GITHUB_RUN_ID}"',
+                "--ref",
+                '"${MERGE_GROUP_REF}"',
+                "--summary",
+                '"${GITHUB_STEP_SUMMARY}"',
+            ],
+        )
 
 
 class CiConfigurationTests(unittest.TestCase):
@@ -7752,6 +8571,54 @@ class CiConfigurationTests(unittest.TestCase):
                 always_successful,
             ),
             ("pull_request", False, everything, always_successful | artifacts),
+            # A merge group runs a same-repository pull request's jobs, whatever
+            # repository its pull requests come from, but not the rehearsal of
+            # the guest artifact reuse, which its pull request's run made.
+            ("merge_group", True, (False,) * 6, repository),
+            (
+                "merge_group",
+                True,
+                (True, True, False, False, False, True),
+                repository | artifacts | builds | platforms | gate,
+            ),
+            (
+                "merge_group",
+                True,
+                (True, True, False, False, True, False),
+                repository | artifacts | builds | microvm,
+            ),
+            (
+                "merge_group",
+                True,
+                (True, False, False, True, False, False),
+                repository | artifacts | openvmm_artifact_tests,
+            ),
+            (
+                "merge_group",
+                True,
+                everything,
+                repository
+                | artifacts
+                | builds
+                | openvmm_tests
+                | openvmm_artifact_tests
+                | microvm
+                | platforms
+                | gate,
+            ),
+            (
+                "merge_group",
+                False,
+                everything,
+                repository
+                | artifacts
+                | builds
+                | openvmm_tests
+                | openvmm_artifact_tests
+                | microvm
+                | platforms
+                | gate,
+            ),
             ("push", True, (False,) * 6, repository),
             (
                 "push",
@@ -7975,6 +8842,8 @@ class CiConfigurationTests(unittest.TestCase):
             "(github.event_name == 'schedule' || "
             "github.event_name == 'workflow_dispatch') && "
             "format('full-{0}', github.run_id) || "
+            "github.event_name == 'merge_group' && "
+            "format('merge-group-{0}', github.run_id) || "
             "github.event.pull_request.number || github.ref",
             header,
         )
@@ -7982,6 +8851,214 @@ class CiConfigurationTests(unittest.TestCase):
             "cancel-in-progress: ${{ github.event_name == 'pull_request' }}",
             header,
         )
+
+    def test_ci_runs_the_merge_groups_of_dev(self):
+        # The merge queue waits for the required check of each of its groups,
+        # which only a run of this workflow for the group reports
+        # (doc/ci.md#merge-queue).
+        text = (
+            BuildConstants.REPO_ROOT / ".github" / "workflows" / "ci.yml"
+        ).read_text(encoding="utf-8")
+        workflow = yaml.safe_load(text)
+        # PyYAML reads the `on` key as true.
+        triggers = workflow[True]
+        self.assertEqual(
+            triggers["merge_group"],
+            {"types": ["checks_requested"], "branches": ["dev"]},
+        )
+        self.assertEqual(triggers["pull_request"]["branches"], ["dev"])
+        self.assertEqual(triggers["push"]["branches"], ["dev"])
+
+        # The detector compares a merge group's head with the commit on which
+        # the queue built it: dev, or the group of the pull request ahead.
+        detector = next(
+            step
+            for step in workflow["jobs"]["openvmm-changes"]["steps"]
+            if step.get("id") == "changes"
+        )
+        base, head, before, parent, tip = (
+            "1" * 40,
+            "2" * 40,
+            "3" * 40,
+            "4" * 40,
+            "5" * 40,
+        )
+        group = f"refs/heads/gh-readonly-queue/dev/pr-7-{parent}"
+        events = {
+            "pull_request": (
+                {
+                    "sha": tip,
+                    "event": {
+                        "pull_request": {"base": {"sha": base}, "head": {"sha": head}}
+                    },
+                },
+                base,
+                head,
+            ),
+            "merge_group": (
+                {
+                    "sha": tip,
+                    "ref": group,
+                    "event": {
+                        "merge_group": {
+                            "base_sha": parent,
+                            "head_sha": tip,
+                            "head_ref": group,
+                            "base_ref": "refs/heads/dev",
+                        }
+                    },
+                },
+                parent,
+                tip,
+            ),
+            "push": ({"sha": tip, "event": {"before": before}}, before, tip),
+        }
+        for event_name, (github, expected_base, expected_head) in events.items():
+            with self.subTest(event_name=event_name):
+                context = {"github": {"event_name": event_name, **github}}
+                for variable, expected in (
+                    ("BASE_SHA", expected_base),
+                    ("HEAD_SHA", expected_head),
+                ):
+                    self.assertEqual(
+                        _evaluate_expression(detector["env"][variable], context, {}),
+                        expected,
+                    )
+
+        # Each group's run has a concurrency group of its own, which neither
+        # waits for nor cancels another run. A pull request that returns to
+        # the queue on the same base gets its earlier group's ref again, whose
+        # run must not hold the new group's.
+        concurrency = workflow["concurrency"]
+
+        def format_expression(template: str, *values: object) -> str:
+            return template.format(*values)
+
+        functions: dict[str, Callable[..., Any]] = {"format": format_expression}
+
+        def settings(github: Mapping[str, Any], run_id: int) -> tuple[Any, ...]:
+            context: dict[str, Any] = {
+                "github": {"workflow": "CI", "run_id": run_id, **github}
+            }
+            return tuple(
+                _interpolate_expressions(str(concurrency[key]), context, functions)
+                for key in ("group", "cancel-in-progress", "queue")
+            )
+
+        def merge_group(ref: str, head: str) -> dict[str, Any]:
+            return {
+                "event_name": "merge_group",
+                "ref": ref,
+                "event": {"merge_group": {"head_ref": ref, "head_sha": head}},
+            }
+
+        first = settings(merge_group(group, tip), 101)
+        # The returning group's run, on the same ref with another head, and a
+        # second run of one group, which shares its ref and its head.
+        returned = settings(merge_group(group, before), 102)
+        repeated = settings(merge_group(group, tip), 103)
+        push = settings({"event_name": "push", "ref": "refs/heads/dev"}, 104)
+        pull_request = settings(
+            {
+                "event_name": "pull_request",
+                "ref": "refs/pull/7/merge",
+                "event": {"pull_request": {"number": 7}},
+            },
+            105,
+        )
+        self.assertEqual(first, ("ci-CI-merge-group-101", False, "max"))
+        self.assertEqual(push, ("ci-CI-refs/heads/dev", False, "max"))
+        self.assertEqual(pull_request, ("ci-CI-7", True, "single"))
+        self.assertEqual(
+            len({first[0], returned[0], repeated[0], push[0], pull_request[0]}), 5
+        )
+
+    def test_ci_job_conditions_follow_the_required_result_policy(self):
+        # Each job's condition, evaluated for each event and each selection of
+        # the change detector in a run whose jobs succeed when they run, runs
+        # exactly the jobs that check-required-ci expects, so that a condition
+        # that a merge group, which no pull request's run exercises, would
+        # take wrongly fails here rather than in the merge queue.
+        workflow = yaml.safe_load(
+            (BuildConstants.REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text(
+                encoding="utf-8"
+            )
+        )
+        repository = "microsoft/nvx"
+
+        def pull_request(full_name: str) -> dict[str, Any]:
+            return {
+                "ref": "refs/pull/7/merge",
+                "event": {
+                    "pull_request": {
+                        "number": 7,
+                        "draft": False,
+                        "head": {"repo": {"full_name": full_name}},
+                    }
+                },
+            }
+
+        scenarios: tuple[tuple[str, bool, dict[str, Any]], ...] = (
+            ("pull_request", True, pull_request(repository)),
+            ("pull_request", False, pull_request("contributor/nvx")),
+            (
+                "merge_group",
+                True,
+                {
+                    "ref": f"refs/heads/gh-readonly-queue/dev/pr-7-{'1' * 40}",
+                    "event": {"merge_group": {"base_ref": "refs/heads/dev"}},
+                },
+            ),
+            ("push", True, {"ref": "refs/heads/dev", "event": {}}),
+            ("schedule", True, {"ref": "refs/heads/dev", "event": {}}),
+            ("workflow_dispatch", True, {"ref": "refs/heads/dev", "event": {}}),
+        )
+        for event_name, same_repository, github in scenarios:
+            selections = (
+                itertools.product((False, True), repeat=len(ci.CI_CHANGE_OUTPUTS))
+                if event_name in ci.CI_CLASSIFIED_EVENTS
+                else [(True,) * len(ci.CI_CHANGE_OUTPUTS)]
+            )
+            context = {"event_name": event_name, "repository": repository, **github}
+            for flags in selections:
+                changes = ci.CiChanges(*flags)
+                outputs = {
+                    "openvmm-changes": {
+                        output: str(selected).lower()
+                        for output, selected in changes.outputs().items()
+                    }
+                }
+                with self.subTest(
+                    event_name=event_name,
+                    same_repository=same_repository,
+                    changes=changes,
+                ):
+                    results = _simulate_workflow_jobs(workflow, context, outputs)
+                    expected = ci.required_ci_expected_results(
+                        event_name, same_repository=same_repository, changes=changes
+                    )
+                    self.assertEqual({job: results[job] for job in expected}, expected)
+                    self.assertEqual(results["required-status-check"], "success")
+                    # Only a dev push publishes its release and persists its
+                    # results, and only once its platform jobs ran; only a
+                    # full run publishes the crate.
+                    published = (
+                        "success"
+                        if event_name == "push"
+                        and expected["platform-kvm"] == "success"
+                        else "skipped"
+                    )
+                    self.assertEqual(results["release"], published)
+                    self.assertEqual(results["performance-persist"], published)
+                    self.assertEqual(
+                        results["crate-package"],
+                        "success" if event_name in ci.CI_FULL_RUN_EVENTS else "skipped",
+                    )
+                    # Only a merge group cancels the runs of superseded groups.
+                    self.assertEqual(
+                        results["cancel-superseded-merge-groups"],
+                        "success" if event_name == "merge_group" else "skipped",
+                    )
 
     def test_ci_dev_pushes_queue_while_pull_requests_cancel(self):
         workflow = (
@@ -8055,6 +9132,7 @@ class CiConfigurationTests(unittest.TestCase):
             with self.subTest(job=job_name):
                 job = _workflow_job(workflow, job_name)
                 self.assertIn("github.event_name != 'pull_request' &&", job)
+                self.assertIn("github.event_name != 'merge_group' &&", job)
                 self.assertNotIn("github.event_name == 'push'", job)
 
     def test_ci_full_runs_do_not_publish_persist_or_save_caches(self):
@@ -8066,9 +9144,15 @@ class CiConfigurationTests(unittest.TestCase):
         for job_name in ("release", "performance-persist"):
             with self.subTest(job=job_name):
                 self.assertIn(push_to_dev, _workflow_job(workflow, job_name))
-        self.assertIn(
-            "github.event_name == 'pull_request' &&",
-            _workflow_job(workflow, "performance-gate"),
+        gate = yaml.safe_load(workflow)["jobs"]["performance-gate"]
+        self.assertEqual(
+            _expression_conjuncts(gate["if"])[:2],
+            [
+                "( github.event_name == 'pull_request' || "
+                "github.event_name == 'merge_group' )",
+                "( github.event_name != 'pull_request' || "
+                "github.event.pull_request.draft == false )",
+            ],
         )
 
         # Every cache write in ci.yml, and in the actions and reusable
@@ -8375,6 +9459,9 @@ class CiConfigurationTests(unittest.TestCase):
             (("scripts/nvx_tools/nightly_ci.py",), select(), benchmarks_only),
             (("scripts/test_nightly_ci.py",), select(), benchmarks_only),
             ((".github/workflows/nightly-ci-report.yml",), select(), benchmarks_only),
+            # Only the merge groups' GitHub-hosted job that cancels the runs
+            # of superseded groups runs the merge queue module.
+            (("scripts/nvx_tools/merge_queue.py",), select(), benchmarks_only),
             (("scripts/nvx_tools/crate_release.py",), select(), benchmarks_only),
             (("scripts/publish_nvx_crate.py",), select(), benchmarks_only),
             (("scripts/test_crate_release.py",), select(), benchmarks_only),
@@ -8401,6 +9488,12 @@ class CiConfigurationTests(unittest.TestCase):
                     ci.classify_ci_changes("pull_request", changed_files),
                     pull_request,
                 )
+                # A merge group checks its pull request's change as the
+                # pull request's run did, on the latest dev.
+                self.assertEqual(
+                    ci.classify_ci_changes("merge_group", changed_files),
+                    pull_request,
+                )
                 self.assertEqual(
                     ci.classify_ci_changes("push", changed_files),
                     push or pull_request,
@@ -8409,8 +9502,12 @@ class CiConfigurationTests(unittest.TestCase):
             ci.classify_ci_changes("pull_request", ["openvmm", ""]),
             ci.classify_ci_changes("pull_request", ["openvmm"]),
         )
-        with self.assertRaisesRegex(ValueError, "unsupported CI event"):
-            ci.classify_ci_changes("workflow_dispatch", ["openvmm"])
+        for event_name in ci.CI_FULL_RUN_EVENTS:
+            with (
+                self.subTest(event_name=event_name),
+                self.assertRaisesRegex(ValueError, "unsupported CI event"),
+            ):
+                ci.classify_ci_changes(event_name, ["openvmm"])
 
     def test_ci_change_classification_builds_artifacts_for_the_jobs_that_use_them(self):
         # The guest artifacts and the OpenVMM binaries have no use of their
@@ -8430,7 +9527,7 @@ class CiConfigurationTests(unittest.TestCase):
         )
         for count in range(len(paths) + 1):
             for changed_files in itertools.combinations(paths, count):
-                for event_name in ("pull_request", "push"):
+                for event_name in ci.CI_CLASSIFIED_EVENTS:
                     changes = ci.classify_ci_changes(event_name, changed_files)
                     with self.subTest(event_name=event_name, files=changed_files):
                         self.assertEqual(
@@ -8894,6 +9991,7 @@ class CiConfigurationTests(unittest.TestCase):
         for inputs in (microvm_inputs, benchmark_inputs):
             self.assertNotIn("scripts/nvx_tools/nightly_ci.py", inputs)
             self.assertNotIn("scripts/nvx_tools/crate_release.py", inputs)
+            self.assertNotIn("scripts/nvx_tools/merge_queue.py", inputs)
         # The VMM-test jobs also take the modules of the nvx.py commands that
         # they run, with every file that those read beside them, such as the
         # partition of the WHP tests' shards (#691).
@@ -9169,6 +10267,9 @@ class CiConfigurationTests(unittest.TestCase):
             )
 
         tests_only = describe("pull_request", ["scripts/test_nvx_tools.py"])
+        self.assertEqual(
+            describe("merge_group", ["scripts/test_nvx_tools.py"]), tests_only
+        )
         self.assertIn(
             "### Guest artifacts: skip\nNo job that uses them runs.\n", tests_only
         )
@@ -9342,7 +10443,7 @@ class CiConfigurationTests(unittest.TestCase):
                         target.write_text("new input\n", encoding="utf-8")
                 git("add", "--all")
                 git("commit", "--quiet", "-m", "changed paths")
-                for event in ("pull_request", "push"):
+                for event in ci.CI_CLASSIFIED_EVENTS:
                     with self.subTest(event=event):
                         output = root / f"output-{event}"
                         environment = os.environ.copy()
@@ -10236,15 +11337,22 @@ python3() {
         )
         jobs = workflow["jobs"]
         # Reading runs and downloading their artifacts needs actions: read,
-        # which no other job but the rehearsal and the release gets.
+        # which no other job but the rehearsal and the release gets, and
+        # cancelling the runs of superseded merge groups actions: write.
         self.assertEqual(workflow["permissions"], {"contents": "read"})
         self.assertEqual(
             {
-                name
+                name: job["permissions"]["actions"]
                 for name, job in jobs.items()
                 if "actions" in (job.get("permissions") or {})
             },
-            {"artifacts", "distro-artifacts", "guest-artifact-reuse", "release"},
+            {
+                "artifacts": "read",
+                "distro-artifacts": "read",
+                "guest-artifact-reuse": "read",
+                "release": "read",
+                "cancel-superseded-merge-groups": "write",
+            },
         )
         reusing: set[str] = set()
         for job_name, job in jobs.items():
@@ -10260,10 +11368,13 @@ python3() {
                     self.assertEqual(
                         job["permissions"], {"actions": "read", "contents": "read"}
                     )
-                    # Only pushes reuse; pull requests and full runs build what
-                    # misses the cache, as before.
+                    # Only pushes and merge groups reuse, since neither can
+                    # restore the pull request's caches; pull requests and full
+                    # runs build what misses the cache, as before.
                     self.assertEqual(
-                        arguments["reuse"], "${{ github.event_name == 'push' }}"
+                        arguments["reuse"],
+                        "${{ github.event_name == 'merge_group' || "
+                        "github.event_name == 'push' }}",
                     )
         self.assertEqual(reusing, {"artifacts", "distro-artifacts"})
 
@@ -11374,13 +12485,14 @@ python3() {
                     words(steps[f"Build OpenVMM tests on {system}"]["run"]),
                 )
 
-                # Pushes and pull requests restore the newest entry of the key
-                # into the directory that the job uploads.
+                # Pushes, pull requests, and merge groups restore the newest
+                # entry of the key into the directory that the job uploads.
                 restore = steps[f"Restore OpenVMM tests on {system}"]
                 self.assertEqual(restore["uses"], "actions/cache/restore@v5")
                 self.assertEqual(
                     restore["if"],
                     "github.event_name == 'pull_request' || "
+                    "github.event_name == 'merge_group' || "
                     "github.event_name == 'push'",
                 )
                 self.assertEqual(
