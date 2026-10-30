@@ -745,8 +745,9 @@ The build ended after the last WHP microVM job in 10 of the 13 runs since
 usually take runners that the microVM jobs freed, and a run then uses at most
 six. A run that restores the Windows build from the
 [cache](#openvmm-vmm-test-cache) instead ends it within about a minute, so its
-shards run beside the microVM jobs, and the last of the seven jobs to start
-waits for the first to end. When a pool has fewer
+shards run beside the microVM jobs. A `dev` push can then need all seven, so
+the last job to start waits for one to end; a pull request or merge group needs
+at most six. When a pool has fewer
 free general runners than a backend's microVM jobs, the jobs that start last
 wait for the first to end, so the backend's microVM tests take up to about
 twice as long as one of its jobs, still less than the unsharded suite.
