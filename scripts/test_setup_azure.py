@@ -375,7 +375,7 @@ class PackageTests(unittest.TestCase):
                 set(names),
                 {
                     "config.json",
-                    "setup-linux-runner.sh",
+                    "setup-linux.sh",
                     "tool-versions.conf",
                     "bootstrap-runner.sh",
                     "block-runner-metadata.sh",
@@ -402,8 +402,12 @@ class PackageTests(unittest.TestCase):
             self.assertIn(b"Requires=%s", bootstrap)
             self.assertIn(b"ExecStartPre=+%s", bootstrap)
             self.assertEqual(json.loads(names["config.json"]), config)
+            self.assertEqual(names["setup-linux.sh"], builder.source("setup-linux.sh"))
+            # Both setup passes configure a runner host, not a development host.
+            self.assertIn(b"setup_arguments=(\n    --runner-only\n", bootstrap)
             self.assertEqual(
-                names["setup-linux-runner.sh"], builder.source("setup-linux-runner.sh")
+                bootstrap.count(b'sh "$setup_root/setup-linux.sh"'),
+                2,
             )
             self.assertEqual(
                 names["tool-versions.conf"], builder.source("tool-versions.conf")
@@ -462,7 +466,7 @@ class PackageTests(unittest.TestCase):
                         set(manifest["guestFiles"])
                         - {
                             "config.json",
-                            "setup-linux-runner.sh",
+                            "setup-linux.sh",
                             "tool-versions.conf",
                             "setup-data-disk.sh",
                             "bootstrap-runner.sh",

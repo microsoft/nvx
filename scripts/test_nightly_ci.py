@@ -488,7 +488,7 @@ class ClassificationTests(unittest.TestCase):
                 failure = self.classify(
                     [
                         "Rust 1.0.0, which rust-toolchain.toml pins, is not "
-                        "installed; rerun scripts/setup/setup-linux-runner.sh",
+                        "installed; rerun scripts/setup/setup-linux.sh --runner-only",
                         "Process completed with exit code 1.",
                     ],
                     steps=(("Set up job", "success"), (step, "failure")),

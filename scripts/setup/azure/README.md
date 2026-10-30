@@ -2,8 +2,9 @@
 
 These Azure-specific adapters configure **existing** NVX CI virtual machine
 scale sets. They package the provider-neutral
-[`setup-linux-runner.sh`](../setup-linux-runner.sh) or
-[`setup-windows-whp.ps1`](../setup-windows-whp.ps1) together with the adjacent
+[`setup-linux.sh`](../setup-linux.sh), which the Linux bootstrap runs in
+runner-only mode, or [`setup-windows-whp.ps1`](../setup-windows-whp.ps1)
+together with the adjacent
 [`tool-versions.conf`](../tool-versions.conf). That manifest and
 [`rust-toolchain.toml`](../../../rust-toolchain.toml) must pin the same release.
 Do not maintain a second copy of the runner setup or its tool versions here.
@@ -13,7 +14,7 @@ Do not maintain a second copy of the runner setup or its tool versions here.
 | `linux/bootstrap-runner.sh` | Validate Azure instance identity, prepare the attached disk and backend, derive a runner name, and register using managed identity and Key Vault. |
 | `linux/block-runner-metadata.sh` | Block the dedicated runner account from Azure instance metadata with a verified, reboot-persistent IPv4 owner rule. |
 | `linux/setup-data-disk.sh` | Find an Azure managed disk by LUN, preserve recognized ext4 data, and initialize only a blank or owned incomplete disk. |
-| `linux/setup-mshv.sh`, `linux/verify-mshv.sh` | Optional Azure Linux 3 Dom0 boot preparation and post-boot verification. This differs from the checkout/build helper `../setup-linux-mshv.sh`. |
+| `linux/setup-mshv.sh`, `linux/verify-mshv.sh` | Optional Azure Linux 3 Dom0 boot preparation and post-boot verification. This differs from `../setup-linux.sh`, which requires an MSHV kernel that is already running. |
 | `windows/bootstrap-runner.ps1` | Validate instance identity; set up disk, WHP/Hyper-V features, reboot continuation, and the Network Service runner. |
 | `windows/setup-data-disk.ps1` | Safely prepare an Azure managed NTFS data disk and handle temporary-drive/pagefile conflicts. |
 | `windows/vmss-bootstrap.ps1`, `windows/install-package.ps1` | Run through Custom Script, configure OpenSSH, verify and unpack the source bundle, and start Windows bootstrap. |

@@ -70,7 +70,7 @@ rustup toolchain install "$toolchain" --profile minimal
 rustup target add --toolchain "$toolchain" x86_64-unknown-linux-musl
 ```
 
-The Linux runner setup scripts and Copilot setup install this target
+Both modes of the Linux setup script, and Copilot setup, install this target
 automatically. `build-essential` remains necessary for the kernel and as
 Rust's linker driver; no separate guest libc compiler is required.
 
@@ -140,9 +140,12 @@ SDK, and Docker Desktop using Linux containers.
 ## Automated environment bootstrap
 
 The scripts in [`scripts/setup`](../scripts/setup/README.md) prepare Linux/KVM, Linux/MSHV, and
-Windows/WHP development or GitHub Actions hosts. They install the platform build prerequisites,
-configure hypervisor access, and provide non-mutating validation modes. Runner registration
-tokens are read from standard input so they do not appear in command history.
+Windows/WHP development or GitHub Actions hosts. On Linux, `setup-linux.sh` configures a
+development host for the selected backend by default and an Actions runner with
+`--runner-only`, as `setup-windows-whp.ps1` does on Windows with `-RunnerOnly`. They install the
+platform build prerequisites, configure hypervisor access, and provide non-mutating validation
+modes. Runner registration tokens are read from standard input so they do not appear in command
+history.
 
 Linux can also emit a revision-bound, checksummed guest artifact bundle for Windows. The Windows
 script verifies that bundle before copying it into the checkout and building OpenVMM natively.
@@ -221,7 +224,7 @@ shellcheck --shell=sh \
   guest/common/nvx-container-launch-azurelinux \
   guest/common/nvx-sandbox-smoke \
   guest/common/nvx-snapshot guest/common/nvx-virtio-restore-probe \
-  scripts/setup/setup-linux-mshv.sh scripts/setup/setup-linux-runner.sh
+  scripts/setup/setup-linux.sh
 shellcheck --shell=bash \
   .github/specula/setup-runner.sh guest/ubuntu/nvx-bashrc
 python3 -m pyright --pythonplatform Linux
@@ -236,7 +239,7 @@ shfmt -d -ln posix -i 4 -ci \
   guest/common/nvx-container-launch-azurelinux \
   guest/common/nvx-sandbox-smoke \
   guest/common/nvx-snapshot guest/common/nvx-virtio-restore-probe \
-  scripts/setup/setup-linux-mshv.sh scripts/setup/setup-linux-runner.sh
+  scripts/setup/setup-linux.sh
 shfmt -d -ln bash -i 4 -ci \
   .github/specula/setup-runner.sh guest/ubuntu/nvx-bashrc
 python3 scripts/check_markdown_links.py
@@ -282,7 +285,7 @@ shfmt -w -ln posix -i 4 -ci \
   guest/common/nvx-container-launch-azurelinux \
   guest/common/nvx-sandbox-smoke \
   guest/common/nvx-snapshot guest/common/nvx-virtio-restore-probe \
-  scripts/setup/setup-linux-mshv.sh scripts/setup/setup-linux-runner.sh
+  scripts/setup/setup-linux.sh
 shfmt -w -ln bash -i 4 -ci \
   .github/specula/setup-runner.sh guest/ubuntu/nvx-bashrc
 ```
