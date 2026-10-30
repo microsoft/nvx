@@ -803,10 +803,10 @@ fn a_vmm_keeps_the_scratch_images_claim_once_its_launcher_is_gone() {
 /// Renames the file at `path` away and back, which no process that holds it without sharing its
 /// deletion allows, as the checked files of a launch hold it on Windows.
 ///
-/// Waits up to [`TIMEOUT`] for a process that another test's thread spawned with `std::process`,
-/// such as `cmd` for a junction, to exit: such a process inherits every handle of this one that
-/// is inheritable as it starts, as the checked files of a launch are while its VMM is spawned,
-/// and holds them until it exits.
+/// Waits up to [`TIMEOUT`] for a process outside the tests that has the file open to close it.
+/// Once the VMM has exited, no process of the tests holds the file: they spawn their other
+/// processes under the spawn lock, as `supervisor::spawn_command` does, so none inherits the
+/// checked files of a launch, which are inheritable while its VMM is spawned.
 #[cfg(windows)]
 fn rename_away_and_back(path: &Path) {
     use windows_sys::Win32::Foundation::ERROR_SHARING_VIOLATION;
