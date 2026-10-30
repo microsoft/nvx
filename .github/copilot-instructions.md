@@ -121,6 +121,15 @@
   run, compare its head SHA with the current pull-request head and classify an
   expected supersession separately from a failure. Use `nvx-ci-investigation` for
   failed or unexpectedly cancelled runs.
+- `dev` requires GitHub's merge queue. Merge a pull request by queueing it with
+  `gh pr merge NUMBER`, which queues it once it can merge.
+  `gh pr merge NUMBER --merge --admin` skips the queue and rebuilds every queued
+  group, so use it only when the queue itself is broken, and remove a queued
+  pull request from the queue first, since `gh pr merge` does nothing for one.
+  A merge group's run that `Cancel superseded merge group runs` cancelled
+  belongs to a group that the queue replaced or that its pull request left, so
+  check the pull request's queue outcome before treating it as a failure; see
+  [Merge queue](../doc/ci.md#merge-queue).
 - Pull-request runs must not publish development releases or persist performance
   history. Successful `dev` pushes own those operations. Do not manually edit
   `data/*.csv` unless the task explicitly concerns baseline maintenance, and change
