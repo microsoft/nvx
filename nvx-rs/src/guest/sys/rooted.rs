@@ -213,6 +213,11 @@ impl BitOr for MountAttributes {
 /// symbolic link and no magic link, such as procfs's `/proc/self/root`, at any component, the
 /// last included: such a path fails with `EXDEV` or `ELOOP`. It crosses into the mounts below
 /// the directory only when `cross_mounts` is set, and fails with `EXDEV` otherwise.
+///
+/// A path with a `..` after a descent, such as `a/..`, can also fail with `EAGAIN` while a
+/// rename or a mount anywhere in the system races its lookup: the kernel can then not tell that
+/// the `..` stayed beneath the directory, and the caller may retry, as openat2(2) allows. No
+/// caller in NVX passes such a path.
 pub(crate) fn open_beneath(
     directory: &FileDescriptor,
     path: &CStr,
@@ -578,14 +583,33 @@ mod tests {
     //! mappings' privileged tests cover the mount calls that need them.
 
     use std::os::unix::fs::PermissionsExt;
+    use std::sync::Barrier;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     use super::*;
     use crate::guest::sys::{open, path_c_string};
+
+    /// The attempts at a resolution that fails with `EAGAIN` before its result counts: a `..`
+    /// after a descent fails with it while a rename or a mount anywhere in the system, such as
+    /// another test's, races its lookup.
+    const ATTEMPTS: usize = 100;
 
     /// Opens `path` with `O_PATH`.
     fn path_descriptor(path: &std::path::Path) -> FileDescriptor {
         let flags = OpenFlags::O_PATH | OpenFlags::O_CLOEXEC;
         open(&path_c_string(path).unwrap(), flags, Mode::empty()).unwrap()
+    }
+
+    /// Returns what `attempt` returns, retrying it while it fails with `EAGAIN`, as openat2(2)
+    /// lets a caller, up to [`ATTEMPTS`] attempts in all.
+    fn retried<T>(mut attempt: impl FnMut() -> Result<T, Errno>) -> Result<T, Errno> {
+        let mut attempts = 1;
+        loop {
+            match attempt() {
+                Err(Errno::EAGAIN) if attempts < ATTEMPTS => attempts += 1,
+                result => return result,
+            }
+        }
     }
 
     /// Returns the status of `descriptor`, or `None` on a kernel without unique mount IDs.
@@ -606,7 +630,8 @@ mod tests {
         std::os::unix::fs::symlink(base, base.join("a/absolute")).unwrap();
         let directory = path_descriptor(base);
         let flags = OpenFlags::O_PATH;
-        let opened = |path: &CStr| open_beneath(&directory, path, flags, Mode::empty(), true);
+        let opened =
+            |path: &CStr| retried(|| open_beneath(&directory, path, flags, Mode::empty(), true));
         opened(c"a/b").unwrap();
         opened(c"a/file").unwrap();
         for (path, error) in [
@@ -630,6 +655,37 @@ mod tests {
         assert_eq!(proc(c"proc/1/root", true).map(drop), Err(Errno::ELOOP));
         assert_eq!(proc(c"proc", false).map(drop), Err(Errno::EXDEV));
         proc(c"proc", true).unwrap();
+    }
+
+    #[test]
+    fn a_dot_dot_after_a_descent_is_refused_while_renames_race_it() {
+        let temporary = tempfile::tempdir().unwrap();
+        let base = temporary.path();
+        std::fs::create_dir(base.join("a")).unwrap();
+        std::fs::write(base.join("file"), b"file").unwrap();
+        let directory = path_descriptor(base);
+        let flags = OpenFlags::O_PATH;
+        let resolve = || open_beneath(&directory, c"a/../..", flags, Mode::empty(), true);
+        let (started, stop) = (Barrier::new(2), AtomicBool::new(false));
+        let unexpected = std::thread::scope(|scope| {
+            // Each rename advances the system's rename count, whose change since the lookup
+            // began fails the `..` after `a` with `EAGAIN`.
+            scope.spawn(|| {
+                started.wait();
+                let (file, renamed) = (base.join("file"), base.join("renamed"));
+                while !stop.load(Ordering::Relaxed) {
+                    std::fs::rename(&file, &renamed).unwrap();
+                    std::fs::rename(&renamed, &file).unwrap();
+                }
+            });
+            started.wait();
+            let unexpected = (0..10_000)
+                .map(|_| retried(resolve).map(drop))
+                .find(|result| *result != Err(Errno::EXDEV));
+            stop.store(true, Ordering::Relaxed);
+            unexpected
+        });
+        assert_eq!(unexpected, None);
     }
 
     /// Returns the mode, without its type, of the file at `name` below `base`.
