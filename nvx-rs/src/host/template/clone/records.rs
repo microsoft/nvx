@@ -35,10 +35,10 @@
 //! a longer text, as the diagnosis of a caller that fails the clone may be, its first and its last
 //! characters, with an ellipsis between them, so that a read, which takes at most 64 KiB of a
 //! record, takes every record that a failure writes. A record of another format fails rather
-//! than being read. The failure of a VMM that exited before its restore-ready event reads the end
-//! of the launch's log for the line with which OpenVMM reported the error that ended it, which the
-//! record's message keeps, and whose time ABI code may attribute the failure, as [the attribution
-//! of evidence](Evidence#attribution) describes.
+//! than being read. The failure of a VMM that exited before its restore-ready event reads the
+//! launch's log back from its end for the line with which OpenVMM reported the error that ended
+//! it, which the record's message keeps, and whose time ABI code may attribute the failure, as
+//! [the attribution of evidence](Evidence#attribution) describes.
 //!
 //! A release of the clone's lease removes both, as it removes the clone's other files, so that
 //! the records of a clone last as long as its lease, which a failure whose teardown is unresolved
@@ -109,9 +109,11 @@ const PROGRESS_WHAT: &str = "clone progress log";
 /// What messages call the record of a clone's failure.
 const FAILURE_WHAT: &str = "clone failure record";
 
-/// The most bytes at the end of a VMM's log in which a failure looks for the line of OpenVMM's
-/// fatal error, which OpenVMM writes as it exits, followed by the error's chain alone.
-const FATAL_TAIL_BYTES: u64 = 64 * 1024;
+/// The bytes of a VMM's log that a failure reads at a time as it looks back from the log's end for
+/// the line of OpenVMM's fatal error, which OpenVMM writes as it exits, followed by the error's
+/// chain alone, of any length: the chain of a failed CPU check names every difference that the
+/// check found.
+const FATAL_BLOCK_BYTES: u64 = 64 * 1024;
 
 /// The most characters of the line of OpenVMM's fatal error that the record of a failure keeps.
 const MAX_FATAL_CHARS: usize = 1024;
@@ -392,7 +394,7 @@ impl Recorder {
 
     /// Returns `fault`, of the clone that got as far as `progress`, which is the loss of a VMM
     /// that exited before its restore-ready event, with the line with which OpenVMM reported the
-    /// error that ended the VMM after its message, if the VMM's log ends with one, as
+    /// error that ended the VMM after its message, if the VMM's log holds one, as
     /// [`read_fatal`] reads it, and the message does not hold it yet, as the message of a failure
     /// that a reattach resolves may, and with the line's evidence, if it is evidence, as [the
     /// attribution of evidence](Evidence#attribution) describes. Returns any other fault as it is.
@@ -970,31 +972,27 @@ fn read_private(path: &Path, description: &str, limit: u64) -> Result<Option<Vec
         .map_err(failed)
 }
 
-/// Returns the last line with which OpenVMM reported the error that ended it, among the last
-/// [`FATAL_TAIL_BYTES`] of the VMM's log at `path`, cut to [`MAX_FATAL_CHARS`], or none if they
-/// hold none, or the log cannot be read: the line that leads OpenVMM's fatal error, then the
-/// error's time ABI code, if it has one, as [the attribution of evidence](Evidence#attribution)
-/// describes. If the line does not name a forward that OpenVMM cannot bind,
+/// Returns the last line with which OpenVMM reported the error that ended it in the VMM's log at
+/// `path`, cut to [`MAX_FATAL_CHARS`], or none if the log holds none, or cannot be read: the line
+/// that leads OpenVMM's fatal error, then the error's time ABI code, if it has one, as [the
+/// attribution of evidence](Evidence#attribution) describes. The line is looked for back from the
+/// log's end, as [`last_line_start`] reads it, so that the error's chain, which follows the line,
+/// may be of any length. If the line does not name a forward that OpenVMM cannot bind,
 /// [`failure::FORWARD_BIND_TEXT`], but a cause of the error's chain that follows it does, the
 /// cause follows the line, after `: `, cut to [`MAX_FATAL_CHARS`] too, without the indentation and
 /// the number with which the chain lists it.
 fn read_fatal(path: &Path) -> Option<String> {
     let mut log = open_regular(path).ok()?;
-    let length = log.metadata().ok()?.len();
-    log.seek(SeekFrom::Start(length.saturating_sub(FATAL_TAIL_BYTES)))
-        .ok()?;
-    let mut tail = Vec::new();
-    log.take(FATAL_TAIL_BYTES).read_to_end(&mut tail).ok()?;
-    let text = String::from_utf8_lossy(&tail);
-    let lines: Vec<&str> = text.lines().collect();
-    let at = lines
-        .iter()
-        .rposition(|line| line.starts_with(failure::FATAL_PREFIX))?;
-    let mut fatal: String = lines[at].chars().take(MAX_FATAL_CHARS).collect();
+    let start = last_line_start(&mut log, failure::FATAL_PREFIX.as_bytes()).ok()??;
+    log.seek(SeekFrom::Start(start)).ok()?;
+    let mut rest = Vec::new();
+    log.read_to_end(&mut rest).ok()?;
+    let text = String::from_utf8_lossy(&rest);
+    let mut lines = text.lines();
+    let mut fatal: String = lines.next()?.chars().take(MAX_FATAL_CHARS).collect();
     if !fatal.contains(failure::FORWARD_BIND_TEXT) {
-        let forward = lines[at + 1..]
-            .iter()
-            .map(|line| cause(line))
+        let forward = lines
+            .map(cause)
             .find(|cause| cause.starts_with(failure::FORWARD_BIND_TEXT));
         if let Some(forward) = forward {
             fatal.push_str(": ");
@@ -1002,6 +1000,38 @@ fn read_fatal(path: &Path) -> Option<String> {
         }
     }
     Some(fatal)
+}
+
+/// Returns the offset in `log` of its last line that starts with `prefix`, or none if no line
+/// does, reading the log back from its end, [`FATAL_BLOCK_BYTES`] at a time: a line starts at
+/// the start of the log, and after each newline.
+fn last_line_start(log: &mut File, prefix: &[u8]) -> io::Result<Option<u64>> {
+    let length = log.seek(SeekFrom::End(0))?;
+    let mut block = Vec::new();
+    let mut end = length;
+    while end > 0 {
+        let start = end.saturating_sub(FATAL_BLOCK_BYTES);
+        // The block's read goes on past its end by the prefix's length, which a line that starts
+        // at its end would begin with.
+        let stop = length.min(end + prefix.len() as u64);
+        block.resize((stop - start) as usize, 0);
+        log.seek(SeekFrom::Start(start))?;
+        log.read_exact(&mut block)?;
+        let starts = block[..(end - start) as usize]
+            .iter()
+            .enumerate()
+            .rev()
+            .filter(|&(_, &byte)| byte == b'\n')
+            .map(|(newline, _)| newline + 1)
+            .chain((start == 0).then_some(0));
+        for line in starts {
+            if block[line..].starts_with(prefix) {
+                return Ok(Some(start + line as u64));
+            }
+        }
+        end = start;
+    }
+    Ok(None)
 }
 
 /// Returns the cause of an error's chain that `line` lists, as OpenVMM writes the chain after the
@@ -1530,9 +1560,9 @@ mod tests {
         );
         fs::write(&path, &log).unwrap();
         assert_eq!(read_fatal(&path).as_deref(), Some(fatal));
-        // The line is looked for at the end of a long log, and kept to its first characters.
+        // The last line of a long log is read, kept to its first characters.
         let long = format!("fatal error: {}", "x".repeat(2 * MAX_FATAL_CHARS));
-        let filler = "a line of the VMM's log\n".repeat(2 * FATAL_TAIL_BYTES as usize / 24);
+        let filler = "a line of the VMM's log\n".repeat(2 * FATAL_BLOCK_BYTES as usize / 24);
         fs::write(
             &path,
             format!("fatal error: an earlier one\n{filler}{long}\n"),
@@ -1541,9 +1571,47 @@ mod tests {
         let read = read_fatal(&path).unwrap();
         assert_eq!(read.chars().count(), MAX_FATAL_CHARS);
         assert!(long.starts_with(&read));
-        // A log without a fatal error, or one that only names it, holds none.
+        // A log without a fatal error, or one that only names it, holds none, however long.
         fs::write(&path, "the VMM exited\nwarning: fatal error: quoted\n").unwrap();
         assert_eq!(read_fatal(&path), None);
+        fs::write(
+            &path,
+            format!("{filler}warning: fatal error: quoted\n{filler}"),
+        )
+        .unwrap();
+        assert_eq!(read_fatal(&path), None);
+    }
+
+    #[test]
+    fn the_line_of_openvmm_s_fatal_error_is_read_before_a_chain_of_any_length() {
+        let (_directory, private) = private_dir();
+        let path = private.join("openvmm.log");
+        let block = FATAL_BLOCK_BYTES as usize;
+        // A failed CPU check names every difference that it found, in a cause that may take
+        // several blocks of the log, after the line, which may be the log's first.
+        let fatal = "fatal error: [E_CPU_SURFACE] failed to launch vm worker";
+        let differences = "CPUID 0x1 ECX differs; ".repeat(3 * block / 23);
+        for before in ["", "a line of the VMM's log\n"] {
+            let log = format!("{before}{fatal}\n\nCaused by:\n    {differences}\n");
+            fs::write(&path, &log).unwrap();
+            assert_eq!(read_fatal(&path).as_deref(), Some(fatal));
+        }
+        // A cause that names a forward that OpenVMM cannot bind follows the line after it.
+        let forward = "failed to create socket for port forward (Tcp 127.0.0.1:18080)";
+        let log = format!("{fatal}\n\nCaused by:\n    0: {differences}\n    1: {forward}\n");
+        fs::write(&path, &log).unwrap();
+        assert_eq!(read_fatal(&path), Some(format!("{fatal}: {forward}")));
+        // The line is read wherever a block starts around it: after the newline before the line,
+        // at the line's start, within its prefix, or after it.
+        let filler = "a line of the VMM's log\n".repeat(2 * block / 24);
+        let prefix = failure::FATAL_PREFIX.len();
+        for from_end in block - 2..=block + prefix + 2 {
+            let rest = "y".repeat(from_end - fatal.len() - 2);
+            let log = format!("{filler}{fatal}\n{rest}\n");
+            assert_eq!(log.len() - log.find(fatal).unwrap(), from_end);
+            fs::write(&path, &log).unwrap();
+            assert_eq!(read_fatal(&path).as_deref(), Some(fatal), "{from_end}");
+        }
     }
 
     #[test]
