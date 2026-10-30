@@ -69,15 +69,29 @@ impl VmmCommand<'_> {
 /// so a caller whose own output is a pipe sees its end when the caller exits rather than when the
 /// VM does. On Linux, the VMM starts in a new session, so that it outlives the caller and its
 /// terminal; on Windows, without a console window, and outside the caller's job object when
-/// `command` asks for it.
+/// `command` asks for it, in a job object of its own that is named after `log`, which limits no
+/// resource but lets no process that the VMM starts break away from it, unless `log` is not a file
+/// of a disk volume, such as `NUL` or a pipe, or what takes that name is not the user's job. A
+/// process that the caller spawns while the VMM is created, which can inherit the log as
+/// [`Inherited`] describes, never joins the VMM's job, so it holds the log's claim only if the VMM
+/// has none: see [the store](crate::host::store#the-log-claim).
 ///
 /// Record the VMM's identity right after the spawn, with
 /// [`Launch::record_process`](crate::host::store::Launch::record_process), as
 /// [`launch`](crate::host::supervisor::launch) does. Fails with [`io::ErrorKind::InvalidInput`] on
 /// Linux for a descriptor of a standard stream, 0 to 2, or one that is not close-on-exec, and on
 /// Windows for a batch file, which Windows would run through `cmd.exe` with arguments that it reads
-/// as shell syntax; and with [`io::ErrorKind::Unsupported`] for any descriptor or handle on hosts
-/// other than Linux and Windows.
+/// as shell syntax, and with [`io::ErrorKind::AlreadyExists`] on Windows if a job of the user takes
+/// the name of the job of `log` already, as described below; and with
+/// [`io::ErrorKind::Unsupported`] for any descriptor or handle on hosts other than Linux and
+/// Windows.
+///
+/// On Windows, give each VMM a log file of its own, created anew, as a store's launch does. The
+/// job of `log` is named after the file's identity, which the file keeps when it is truncated, as
+/// [`File::create`](std::fs::File::create) truncates an existing file, and its name stays taken
+/// while another spawn with the file holds the job, or while a process that inherited the job's
+/// handle in the window of such a spawn still runs, as one spawned while an earlier VMM of the
+/// file started may: a spawn with the file fails until then.
 pub fn spawn(
     command: &VmmCommand<'_>,
     capability: &[u8; CAPABILITY_LEN],
@@ -89,6 +103,7 @@ pub fn spawn(
     let stderr = log.try_clone()?;
     #[cfg(windows)]
     {
+        let job = platform::create_log_job(&log)?;
         platform::spawn_detached(
             &command.program,
             &command.arguments,
@@ -96,6 +111,7 @@ pub fn spawn(
             [stdin.into(), log.into(), stderr.into()],
             &command.inherit,
             command.breakaway_from_job,
+            job,
         )
         .map(|process| Launched { process })
     }

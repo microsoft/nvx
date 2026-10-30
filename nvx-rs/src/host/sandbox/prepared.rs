@@ -116,7 +116,9 @@ use crate::host::sys;
 /// // ... the caller's own arguments: hypervisor, memory, kernel, initrd, and guest control ...
 /// let mut command = VmmCommand::new("openvmm", arguments, ".");
 /// command.inherit = prepared.inherited();
-/// let launched = supervisor::spawn(&command, capability, File::create("openvmm.log")?)?;
+/// // A log file of its own, created anew, as `supervisor::spawn` asks of each VMM on Windows.
+/// let _ = std::fs::remove_file("openvmm.log");
+/// let launched = supervisor::spawn(&command, capability, File::create_new("openvmm.log")?)?;
 /// // ... record the VMM, and wait for the guest's authenticated Ready ...
 /// prepared.release(&launched.process()?)?;
 /// launched.detach();

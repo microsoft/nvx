@@ -3117,9 +3117,9 @@ The VM tests, `tests/vm_restart.rs`, `tests/vm_steps.rs`,
 their sandboxes and
 the fixtures of their layered roots through `tests/common`. The sandboxes start
 the host program's commands with `nvx::host::supervisor::spawn_command`, so
-that on Windows a command cannot inherit the log of a VM that a test launches
-in its own process meanwhile, which would keep that launch from ending until
-the command exits. A test that fails
+that on Windows a command cannot inherit the handles of a VM that a test
+launches in its own process meanwhile, such as its log and its capability's
+pipe, which it would hold until it exits. A test that fails
 ends the VM that it left running, and the host program that it left paused,
 and keeps the sandbox's directory, whose path it prints, unless it can confirm
 that the VM ended. The tests boot VMs, so they are ignored. They read the
