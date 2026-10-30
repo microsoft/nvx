@@ -96,6 +96,17 @@ impl Guest {
         self.distro_layer_name()
             .map(|name| format!("{name}{DISTRO_MANIFEST_SUFFIX}"))
     }
+
+    /// Returns the file name of the guest's sandbox scratch template, the empty ext4 file system
+    /// of which the sandbox scenarios of `nvx.py` boot a copy as their scratch, if the guest
+    /// provides one: only Ubuntu does, beside its distro layer.
+    #[cfg(feature = "cli")]
+    pub(crate) const fn scratch_template_name(self) -> Option<&'static str> {
+        match self {
+            Self::Ubuntu => Some("ubuntu-smoke-scratch.ext4"),
+            Self::Alpine | Self::AzureLinux => None,
+        }
+    }
 }
 
 impl fmt::Display for Guest {

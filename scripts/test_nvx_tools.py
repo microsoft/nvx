@@ -16884,8 +16884,9 @@ class BuildTests(unittest.TestCase):
                 )
             self.assertEqual(
                 str(raised.exception),
-                "build-scratch-template requires Linux; build the template, with "
-                "the Ubuntu distro layer, in Docker with `build-guest --guest all`",
+                "build-scratch-template requires Linux; install the template with "
+                "`nvx-rs download`, or build it, with the Ubuntu distro layer, in "
+                "Docker with `build-guest --guest all`",
             )
             mkfs.assert_not_called()
             run_checked.assert_not_called()
@@ -26060,6 +26061,28 @@ class ReleaseTests(unittest.TestCase):
         patcher = patch.object(nvx_rs, "binary_path", return_value=self.nvx_rs_path)
         patcher.start()
         self.addCleanup(patcher.stop)
+
+    def test_nvx_rs_installs_the_scratch_template_that_packages_declare(self):
+        # nvx-rs download installs the sandbox scratch template of a package
+        # whose manifest gives its digest under the field and the name that
+        # package writes.
+        crate = BuildConstants.REPO_ROOT / "nvx-rs" / "src" / "host"
+        install = (crate / "cli" / "download" / "install.rs").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn(
+            'const SCRATCH_TEMPLATE_FIELD: &str = "scratch_template_sha256";',
+            install,
+        )
+        guest = (crate / "artifacts" / "guest.rs").read_text(encoding="utf-8")
+        self.assertIn(
+            f'Self::Ubuntu => Some("{UbuntuBuildConstants.SCRATCH_TEMPLATE_NAME}"),',
+            guest,
+        )
+        self.assertIn(
+            UbuntuBuildConstants.SCRATCH_TEMPLATE_NAME,
+            ReleaseBuildConstants.GUEST_ARTIFACT_NAMES,
+        )
 
     def test_alpine_source_validation_rejects_malformed_manifest(self):
         with tempfile.TemporaryDirectory() as temporary:

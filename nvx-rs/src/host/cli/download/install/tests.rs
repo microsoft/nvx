@@ -25,9 +25,23 @@ fn manifest(sections: &[&str], compatible: bool) -> Value {
     manifest
 }
 
+/// Returns the manifest of a compatible package that declares the guests of `sections`, and the
+/// sandbox scratch template of the Ubuntu guest with its digest.
+fn manifest_with_scratch_template(sections: &[&str]) -> Value {
+    let mut manifest = manifest(sections, true);
+    manifest["ubuntu"][SCRATCH_TEMPLATE_FIELD] = json!("0".repeat(64));
+    manifest
+}
+
 /// Writes a package below `directory` with the guest artifacts of `sections`, which its manifest
 /// declares, and its `SHA256SUMS`, and returns it. Each file holds `package NAME`.
 fn package(directory: &Path, sections: &[&str], compatible: bool) -> PathBuf {
+    package_of(directory, &manifest(sections, compatible))
+}
+
+/// Writes a package below `directory` with the guest artifacts that `manifest` declares, the
+/// manifest, and its `SHA256SUMS`, and returns it. Each file holds `package NAME`.
+fn package_of(directory: &Path, manifest: &Value) -> PathBuf {
     let root = directory.join("nvx-0.1.0-linux-kvm");
     let path = |relative: &str| {
         relative
@@ -44,8 +58,7 @@ fn package(directory: &Path, sections: &[&str], compatible: bool) -> PathBuf {
     write(format!("bin/{}", openvmm_executable()));
     write("bin/nvx-rs".to_owned());
     write("provenance/nvx-rs.provenance.json".to_owned());
-    let manifest = manifest(sections, compatible);
-    for name in declared_names(&manifest).unwrap() {
+    for name in declared_names(manifest).unwrap() {
         write(format!("guest/{name}"));
     }
     for name in PROVENANCE {
@@ -505,6 +518,22 @@ fn manifests_declare_the_guest_artifacts_of_their_sections() {
             "initramfs-azurelinux.cpio.gz.packages.json"
         ]
     );
+    // The Ubuntu section declares the sandbox scratch template with its digest, which packages
+    // built before the template shipped lack.
+    let ubuntu = [
+        "initramfs-ubuntu.cpio.gz",
+        "initramfs-ubuntu.cpio.gz.packages.json",
+        "ubuntu-distro.erofs",
+        "ubuntu-distro.erofs.manifest.json",
+    ];
+    assert_eq!(
+        declared_names(&manifest(&["ubuntu"], true)).unwrap(),
+        ubuntu
+    );
+    assert_eq!(
+        declared_names(&manifest_with_scratch_template(&["ubuntu"])).unwrap(),
+        [&ubuntu[..], &["ubuntu-smoke-scratch.ext4"]].concat()
+    );
     let error = declared_names(&json!({"openvmm": {}, "linux": "x"})).unwrap_err();
     assert_eq!(
         error.message(),
@@ -513,7 +542,9 @@ fn manifests_declare_the_guest_artifacts_of_their_sections() {
 }
 
 #[test]
-fn a_package_without_a_manifest_ships_every_guest_artifact() {
+fn a_package_without_a_manifest_ships_every_guest_artifact_but_the_scratch_template() {
+    // A package without a manifest predates the sandbox scratch template, so a checkout's
+    // template goes, as every guest artifact that a package does not declare does.
     let directory = tempfile::tempdir().unwrap();
     let package = package(
         directory.path(),
@@ -524,11 +555,70 @@ fn a_package_without_a_manifest_ships_every_guest_artifact() {
     let dir = checkout(directory.path());
     let plan = plan(&package, &dir).unwrap();
     assert!(!plan.compatible());
-    assert!(plan.removals.is_empty());
+    assert_eq!(plan.removals, [dir.artifact("ubuntu-smoke-scratch.ext4")]);
     assert_eq!(
         plan.items.len(),
-        1 + all_guest_names().len() + PROVENANCE.len()
+        1 + all_guest_names().len() - 1 + PROVENANCE.len()
     );
+}
+
+#[test]
+fn packages_that_declare_the_scratch_template_install_it() {
+    let directory = tempfile::tempdir().unwrap();
+    let package = package_of(
+        directory.path(),
+        &manifest_with_scratch_template(&["linux", "alpine", "ubuntu"]),
+    );
+    let dir = checkout(directory.path());
+    let template = dir.artifact("ubuntu-smoke-scratch.ext4");
+    fs::write(&template, "earlier template").unwrap();
+    let plan = plan(&package, &dir).unwrap();
+    assert!(!plan.removals.contains(&template));
+    assert_eq!(
+        commit(&plan, "0123456789abcdef", Mode::Replace).unwrap(),
+        Installed::All
+    );
+    assert_eq!(
+        fs::read_to_string(&template).unwrap(),
+        "package guest/ubuntu-smoke-scratch.ext4"
+    );
+}
+
+#[test]
+fn a_package_that_declares_the_scratch_template_ships_it() {
+    let directory = tempfile::tempdir().unwrap();
+    let package = package_of(
+        directory.path(),
+        &manifest_with_scratch_template(&["ubuntu"]),
+    );
+    let missing = package.join("guest").join("ubuntu-smoke-scratch.ext4");
+    fs::remove_file(&missing).unwrap();
+    let dir = checkout(directory.path());
+    let error = plan(&package, &dir).unwrap_err();
+    assert_eq!(error.code(), Some(ErrorCode::Unavailable));
+    assert_eq!(
+        error.message().unwrap(),
+        format!(
+            "packaged guest artifact ubuntu-smoke-scratch.ext4 not found: {}",
+            missing.display()
+        )
+    );
+}
+
+#[test]
+fn packages_without_the_scratch_template_remove_the_checkouts() {
+    let directory = tempfile::tempdir().unwrap();
+    let package = package(directory.path(), &["linux", "alpine", "ubuntu"], true);
+    let dir = checkout(directory.path());
+    let template = dir.artifact("ubuntu-smoke-scratch.ext4");
+    fs::write(&template, "checkout template").unwrap();
+    let plan = plan(&package, &dir).unwrap();
+    assert!(plan.removals.contains(&template));
+    assert_eq!(
+        commit(&plan, "0123456789abcdef", Mode::Replace).unwrap(),
+        Installed::All
+    );
+    assert!(!exists(&template).unwrap());
 }
 
 #[test]
@@ -536,13 +626,14 @@ fn destinations_name_every_file_that_a_release_installs() {
     let directory = tempfile::tempdir().unwrap();
     let dir = ArtifactDir::repository(directory.path()).unwrap();
     let destinations = destinations(&dir);
-    assert_eq!(destinations.len(), 14);
+    assert_eq!(destinations.len(), 15);
     assert_eq!(destinations[0], dir.openvmm());
     for name in [
         "vmlinux",
         "vmlinux.config",
         "initramfs-ubuntu.cpio.gz",
         "ubuntu-distro.erofs.manifest.json",
+        "ubuntu-smoke-scratch.ext4",
         "initramfs-azurelinux.cpio.gz.packages.json",
         "initramfs.provenance.json",
     ] {

@@ -1868,7 +1868,11 @@ installs the package of the host's platform from the release that CI built
 from the checkout's `HEAD`, or else from the nearest of up to 20 first-parent
 ancestors that has one, into the repository checkout of the root: OpenVMM, the
 guest artifacts, and their build provenance, replacing those of the checkout,
-and removing the guest artifacts that the package does not declare. It
+and removing the guest artifacts that the package does not declare. A package
+declares the sandbox scratch template, `ubuntu-smoke-scratch.ext4`, that the
+sandbox scenarios of `nvx.py` copy, with the `scratch_template_sha256` of the
+`ubuntu` section of its `SOURCE-MANIFEST.json`, which packages built before it
+shipped lack, so their installation removes a checkout's template. It
 installs all of them or, if a step fails, none, and never installs `nvx-rs`,
 which the checkout builds. A directory where the release has a file fails the
 installation, which deletes no directory. An extracted release root is refused.

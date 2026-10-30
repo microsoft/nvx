@@ -351,9 +351,12 @@ the history with `git`. Update the checkout to install a newer release.
 
 `download` checks the size of the package, the names of its members, and every
 file against the package's `SHA256SUMS`, and then installs it: it replaces the
-packaged guest artifacts under `build/`, removes any known guest artifact that
-the release does not declare, such as the Azure Linux guest that
-source-inclusive packages omit, and installs the packaged OpenVMM at
+packaged guest artifacts under `build/`, among them the sandbox scratch
+template, `build/ubuntu-smoke-scratch.ext4`, that the sandbox scenarios of
+[`test-microvm`](#test-microvm) and the runtime adapter copy, removes any known
+guest artifact that the release does not declare, such as the Azure Linux
+guest that source-inclusive packages omit, or the template that releases built
+before it shipped lack, and installs the packaged OpenVMM at
 `openvmm/target/release/openvmm[.exe]`, executable, with the build provenance
 of the artifacts in `build/`. It installs everything or, if a step fails,
 nothing, and fails on a directory where the release has a file rather than
@@ -811,7 +814,8 @@ variables, so e2fsprogs 1.46.5 and 1.47.0 of Debian 12, Ubuntu 22.04 and
 with the Ubuntu distro layer, in the pinned Debian image, for
 [`build-guest`](#build-guest) and for CI, which caches, records, and hands it
 over with the layer. On other systems than Linux, the command fails and names
-that build of every guest.
+that build of every guest and [`download`](#download), which installs the
+template.
 
 ### `verify-guest-determinism`
 
