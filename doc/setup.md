@@ -57,8 +57,8 @@ For Debian/Ubuntu hosts:
 ```bash
 sudo apt-get update
 sudo apt-get install -y \
-  bc binutils bison build-essential ca-certificates cpio curl erofs-utils flex \
-  gzip libelf-dev libssl-dev python3 rsync tar xz-utils zstd
+  bc binutils bison build-essential ca-certificates cpio curl e2fsprogs \
+  erofs-utils flex gzip libelf-dev libssl-dev python3 rsync tar xz-utils zstd
 ```
 
 Native guest builds use the exact Rust release in `rust-toolchain.toml` and

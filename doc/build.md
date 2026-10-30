@@ -140,6 +140,7 @@ build/initramfs-ubuntu.cpio.gz
 build/initramfs-ubuntu.cpio.gz.packages.json
 build/ubuntu-distro.erofs
 build/ubuntu-distro.erofs.manifest.json
+build/ubuntu-smoke-scratch.ext4
 ```
 
 Prepare the Ubuntu sandbox layer separately on Linux without replacing an
@@ -159,7 +160,19 @@ maintainer scripts from the Ubuntu root. The Docker builder pins its Debian
 base image by digest and installs an exact `erofs-utils` version so clean EROFS
 builds use the same encoder.
 
-Check both Ubuntu outputs for deterministic rebuilds with:
+The sandbox scratch template, `build/ubuntu-smoke-scratch.ext4`, is the empty
+ext4 file system of which the sandbox scenarios boot a copy as their scratch.
+[`build-scratch-template`](usage.md#build-scratch-template) formats it on
+Linux with `mkfs.ext4` from `e2fsprogs`, with the parameters that
+`UbuntuBuildConstants` defines, so that the e2fsprogs releases of Debian,
+Ubuntu, and Azure Linux format the same bytes:
+
+```bash
+python3 scripts/nvx.py build-scratch-template
+```
+
+Check the Ubuntu outputs and the scratch template for deterministic rebuilds
+with:
 
 ```bash
 python3 scripts/nvx.py verify-guest-determinism --guest ubuntu

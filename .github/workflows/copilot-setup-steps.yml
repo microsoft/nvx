@@ -231,8 +231,8 @@ jobs:
           set -euo pipefail
           sudo apt-get update -qq
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \
-            bc binutils bison build-essential ca-certificates cpio curl erofs-utils flex \
-            gzip libelf-dev libssl-dev rsync tar xz-utils zstd
+            bc binutils bison build-essential ca-certificates cpio curl e2fsprogs \
+            erofs-utils flex gzip libelf-dev libssl-dev rsync tar xz-utils zstd
           userns_policy=/proc/sys/kernel/apparmor_restrict_unprivileged_userns
           if [[ -e "${userns_policy}" ]]; then
             sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0

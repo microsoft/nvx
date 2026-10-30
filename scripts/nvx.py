@@ -27,6 +27,7 @@ from nvx_tools.build import (
     build_initramfs,
     build_kernel,
     build_openvmm,
+    build_scratch_template,
     materialize_kernel_provenance_inputs,
     record_openvmm_provenance,
     verify_guest_determinism,
@@ -37,6 +38,7 @@ from nvx_tools.build_config import (
     DockerBuildConfig,
     KernelBuildConfig,
     OpenVmmBuildConfig,
+    ScratchTemplateBuildConfig,
 )
 from nvx_tools.build_constants import (
     BuildConstants,
@@ -197,6 +199,12 @@ def command_build_distro_layer(args: argparse.Namespace) -> None:
             output=args.output,
             replace=args.replace,
         )
+    )
+
+
+def command_build_scratch_template(args: argparse.Namespace) -> None:
+    build_scratch_template(
+        ScratchTemplateBuildConfig(output=args.output, replace=args.replace)
     )
 
 
@@ -495,6 +503,20 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     )
     distro_layer.add_argument("--replace", action="store_true")
     distro_layer.set_defaults(handler=command_build_distro_layer)
+
+    scratch_template = subparsers.add_parser(
+        "build-scratch-template",
+        help=(
+            "format the reproducible ext4 sandbox scratch template natively on Linux"
+        ),
+    )
+    scratch_template.add_argument(
+        "--output",
+        type=Path,
+        default=artifact_path(UbuntuBuildConstants.SCRATCH_TEMPLATE_NAME),
+    )
+    scratch_template.add_argument("--replace", action="store_true")
+    scratch_template.set_defaults(handler=command_build_scratch_template)
 
     determinism = subparsers.add_parser(
         "verify-guest-determinism",

@@ -1348,6 +1348,29 @@ class CliTests(unittest.TestCase):
         self.assertEqual(distro.output, Path("ubuntu.erofs"))
         self.assertTrue(distro.replace)
 
+        scratch = nvx.parse_args(["build-scratch-template"])
+        self.assertEqual(
+            scratch.output,
+            common.artifact_path(UbuntuBuildConstants.SCRATCH_TEMPLATE_NAME),
+        )
+        self.assertFalse(scratch.replace)
+        with patch("nvx.build_scratch_template") as build_scratch_template:
+            nvx.command_build_scratch_template(
+                nvx.parse_args(
+                    [
+                        "build-scratch-template",
+                        "--output",
+                        "scratch.ext4",
+                        "--replace",
+                    ]
+                )
+            )
+        build_scratch_template.assert_called_once_with(
+            build_config.ScratchTemplateBuildConfig(
+                output=Path("scratch.ext4"), replace=True
+            )
+        )
+
     def test_docker_initramfs_rejects_native_guest(self):
         with self.assertRaisesRegex(
             common.ScriptError, "Alpine Linux.*do not require Docker"
@@ -16728,6 +16751,238 @@ class BuildTests(unittest.TestCase):
             ):
                 build.build_distro_layer(
                     build_config.DistroLayerBuildConfig(output=output)
+                )
+
+    def test_scratch_template_refuses_existing_output_without_replace(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary) / "scratch.ext4"
+            output.write_bytes(b"earlier template")
+            with (
+                patch.object(build.sys, "platform", "linux"),
+                patch.object(build, "run_checked") as run_checked,
+                self.assertRaisesRegex(common.ScriptError, "refusing to replace"),
+            ):
+                build.build_scratch_template(
+                    build_config.ScratchTemplateBuildConfig(output=output)
+                )
+            run_checked.assert_not_called()
+            self.assertEqual(output.read_bytes(), b"earlier template")
+
+    def test_scratch_template_passes_every_parameter_to_mkfs(self):
+        # Neither mke2fs.conf nor the caller's e2fsprogs variables shape the
+        # template: mkfs.ext4 gets every parameter, a fixed clock, and the UUID
+        # as its hash seed, and formats a temporary file of the template's size.
+        uuid_text = "4f3c8bf7-1959-47b4-8811-62b17bbddaf4"
+        features = (
+            "none,has_journal,ext_attr,resize_inode,dir_index,filetype,extent,"
+            "64bit,flex_bg,sparse_super,large_file,huge_file,dir_nlink,"
+            "extra_isize,metadata_csum"
+        )
+        calls: list[tuple[list[str], dict[str, str], int]] = []
+
+        def mkfs(command: Sequence[str], *, env: Mapping[str, str]) -> None:
+            image = Path(command[-1])
+            calls.append(
+                ([str(part) for part in command], dict(env), image.stat().st_size)
+            )
+            with image.open("r+b") as template:
+                template.write(b"formatted")
+
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary) / "build" / "scratch.ext4"
+            stderr = io.StringIO()
+            with (
+                patch.object(build.sys, "platform", "linux"),
+                patch.object(build, "_mkfs_ext4", return_value="mkfs.ext4"),
+                patch.object(build, "run_checked", side_effect=mkfs),
+                patch.dict(
+                    build.os.environ,
+                    {
+                        "PATH": "/usr/sbin",
+                        "E2FSPROGS_FAKE_TIME": "1700000000",
+                        "MKE2FS_CONFIG": "/etc/other.conf",
+                    },
+                    clear=True,
+                ),
+                contextlib.redirect_stdout(io.StringIO()),
+                contextlib.redirect_stderr(stderr),
+            ):
+                build.build_scratch_template(
+                    build_config.ScratchTemplateBuildConfig(output=output)
+                )
+            temporary_output = output.resolve().with_name("scratch.ext4.part")
+            self.assertEqual(
+                calls,
+                [
+                    (
+                        [
+                            "mkfs.ext4",
+                            "-q",
+                            "-F",
+                            "-b",
+                            "4096",
+                            "-I",
+                            "256",
+                            "-N",
+                            "16384",
+                            "-m",
+                            "0",
+                            "-O",
+                            features,
+                            "-U",
+                            uuid_text,
+                            "-E",
+                            f"lazy_itable_init=0,lazy_journal_init=0,"
+                            f"hash_seed={uuid_text}",
+                            str(temporary_output),
+                        ],
+                        {"PATH": "/usr/sbin", "E2FSPROGS_FAKE_TIME": "1"},
+                        64 * 1024 * 1024,
+                    )
+                ],
+            )
+            self.assertFalse(temporary_output.exists())
+            self.assertTrue(output.read_bytes().startswith(b"formatted"))
+            # Other bytes than those of the pinned template are only a warning.
+            self.assertIn(
+                f"not the {UbuntuBuildConstants.SCRATCH_TEMPLATE_SHA256} that "
+                "UbuntuBuildConstants.SCRATCH_TEMPLATE_SHA256 pins",
+                stderr.getvalue(),
+            )
+
+            stderr = io.StringIO()
+            with (
+                patch.object(build.sys, "platform", "linux"),
+                patch.object(build, "_mkfs_ext4", return_value="mkfs.ext4"),
+                patch.object(build, "run_checked", side_effect=mkfs),
+                patch.object(
+                    UbuntuBuildConstants,
+                    "SCRATCH_TEMPLATE_SHA256",
+                    common.sha256_file(output),
+                ),
+                contextlib.redirect_stdout(io.StringIO()),
+                contextlib.redirect_stderr(stderr),
+            ):
+                build.build_scratch_template(
+                    build_config.ScratchTemplateBuildConfig(output=output, replace=True)
+                )
+            self.assertEqual(stderr.getvalue(), "")
+
+    def test_scratch_template_leaves_no_output_when_mkfs_fails(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary) / "scratch.ext4"
+            with (
+                patch.object(build.sys, "platform", "linux"),
+                patch.object(build, "_mkfs_ext4", return_value="mkfs.ext4"),
+                patch.object(
+                    build,
+                    "run_checked",
+                    side_effect=common.ScriptError("mkfs.ext4 failed"),
+                ),
+                self.assertRaisesRegex(common.ScriptError, "mkfs.ext4 failed"),
+            ):
+                build.build_scratch_template(
+                    build_config.ScratchTemplateBuildConfig(output=output)
+                )
+            self.assertEqual(list(Path(temporary).iterdir()), [])
+
+    def test_mkfs_ext4_is_also_found_where_path_leaves_out_sbin(self):
+        # Debian leaves /usr/sbin and /sbin, where e2fsprogs installs
+        # mkfs.ext4, out of an unprivileged user's PATH.
+        searches: list[str | None] = []
+
+        def which(name: str, path: str | None = None) -> str | None:
+            self.assertEqual(name, "mkfs.ext4")
+            searches.append(path)
+            if path is not None and "/usr/sbin" in path.split(os.pathsep):
+                return "/usr/sbin/mkfs.ext4"
+            return None
+
+        with (
+            patch.dict(
+                build.os.environ,
+                {"PATH": os.pathsep.join(("/usr/local/bin", "/usr/bin"))},
+            ),
+            patch.object(build.shutil, "which", side_effect=which),
+        ):
+            self.assertEqual(build._mkfs_ext4(), "/usr/sbin/mkfs.ext4")
+        self.assertEqual(
+            searches,
+            [os.pathsep.join(("/usr/local/bin", "/usr/bin", "/usr/sbin", "/sbin"))],
+        )
+        with (
+            patch.object(build.shutil, "which", return_value=None),
+            self.assertRaisesRegex(
+                common.ScriptError,
+                "mkfs.ext4 was not found on PATH, in /usr/sbin, or in /sbin; "
+                "install e2fsprogs",
+            ),
+        ):
+            build._mkfs_ext4()
+
+    def test_guest_determinism_builds_the_scratch_template_twice(self):
+        # Both attempts format the template, which must be the pinned one.
+        def initramfs(config: build_config.InitramfsBuildConfig) -> None:
+            assert config.output is not None
+            config.output.write_bytes(b"initramfs")
+            config.output.with_name(f"{config.output.name}.packages.json").write_bytes(
+                b"{}"
+            )
+
+        def distro(config: build_config.DistroLayerBuildConfig) -> None:
+            config.output.write_bytes(b"erofs")
+            config.output.with_name(f"{config.output.name}.manifest.json").write_bytes(
+                b"{}"
+            )
+
+        def formatter(
+            templates: tuple[bytes, ...], formatted: list[Path]
+        ) -> Callable[[build_config.ScratchTemplateBuildConfig], None]:
+            attempts = iter(templates)
+
+            def template(config: build_config.ScratchTemplateBuildConfig) -> None:
+                formatted.append(config.output)
+                config.output.write_bytes(next(attempts))
+
+            return template
+
+        for templates, pinned, message in (
+            ((b"template", b"template"), b"template", None),
+            ((b"template", b"template"), b"other", "is not reproducible"),
+            ((b"template", b"other"), b"template", "are not deterministic"),
+        ):
+            formatted: list[Path] = []
+            with (
+                self.subTest(message=message),
+                tempfile.TemporaryDirectory() as temporary,
+                patch.object(build.sys, "platform", "linux"),
+                patch.object(build, "build_initramfs", side_effect=initramfs),
+                patch.object(build, "build_distro_layer", side_effect=distro),
+                patch.object(
+                    build,
+                    "build_scratch_template",
+                    side_effect=formatter(templates, formatted),
+                ),
+                patch.object(ubuntu, "rootfs_inventory", return_value={}),
+                patch.object(
+                    UbuntuBuildConstants,
+                    "SCRATCH_TEMPLATE_SHA256",
+                    hashlib.sha256(pinned).hexdigest(),
+                ),
+                contextlib.redirect_stdout(io.StringIO()),
+            ):
+                work = Path(temporary)
+                if message is None:
+                    build.verify_guest_determinism(work, "ubuntu")
+                else:
+                    with self.assertRaisesRegex(common.ScriptError, message):
+                        build.verify_guest_determinism(work, "ubuntu")
+                self.assertEqual(
+                    formatted,
+                    [
+                        work / f"attempt-{attempt}" / "ubuntu-smoke-scratch.ext4"
+                        for attempt in (1, 2)
+                    ],
                 )
 
     def test_ubuntu_initramfs_manifest_binds_artifact_digest(self):

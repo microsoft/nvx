@@ -59,6 +59,12 @@ class DistroLayerBuildConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class ScratchTemplateBuildConfig:
+    output: Path = artifact_path(UbuntuBuildConstants.SCRATCH_TEMPLATE_NAME)
+    replace: bool = False
+
+
+@dataclass(frozen=True, slots=True)
 class KernelBuildConfig:
     work: Path = BuildConstants.BUILD_DIR / KernelBuildConstants.WORK_DIRECTORY_NAME
     output: Path = artifact_path(KernelBuildConstants.BINARY_NAME)

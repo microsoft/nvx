@@ -806,11 +806,14 @@ python3 scripts/nvx.py build-distro-layer \
 ```
 
 Read the deterministic UUID from
-`build/ubuntu-distro.erofs.manifest.json`, create scratch independently with
-`mkfs.ext4`, then launch the Ubuntu workload through the existing Alpine
-control initramfs:
+`build/ubuntu-distro.erofs.manifest.json`, create scratch, for example with
+[`build-scratch-template`](usage.md#build-scratch-template), which formats the
+sandbox scratch template at the path that `--output` gives, or with
+`mkfs.ext4` itself, then launch the Ubuntu workload through the existing
+Alpine control initramfs:
 
 ```bash
+python3 scripts/nvx.py build-scratch-template --output /var/lib/nvx/scratch.ext4
 nvx-rs/target/release/nvx-rs sandbox \
   --layer distro,build/ubuntu-distro.erofs,11111111-1111-1111-1111-111111111111 \
   --scratch /var/lib/nvx/scratch.ext4 \
