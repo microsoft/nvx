@@ -14,6 +14,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from unittest.mock import call, patch
+from urllib.parse import parse_qs, urlsplit
 
 sys.path.insert(0, str(Path(__file__).parent))
 import publish_development_release  # noqa: E402
@@ -34,6 +35,34 @@ def _http_error(status: int, message: str) -> _Result:
     """Return how `gh api` reports a response with an error status."""
     body = json.dumps({"message": message, "status": str(status)})
     return _Result(1, body, f"gh: {message} (HTTP {status})\n", 0.1)
+
+
+def _reason(result: _Result) -> str:
+    """Return how publication quotes a failure: the body that gh printed, then
+    its error."""
+    return f"{result.stdout}\n{result.stderr.strip()}"
+
+
+_UPLOAD = f'Post "https://uploads.github.com/repos/{REPOSITORY}/releases/1/assets'
+_READ = f'Get "https://api.github.com/{RELEASES}/1"'
+_TCP = "tcp 10.1.0.4:5432->140.82.112.6:443"
+# How Go and gh report requests that got no response.
+LOST_CONNECTIONS = (
+    f'{_UPLOAD}?name=a.zip": read {_TCP}: read: connection reset by peer',
+    f'{_UPLOAD}?name=a.zip": EOF',
+    f'{_UPLOAD}?name=a.zip": unexpected EOF',
+    f'{_UPLOAD}?name=a.zip": write {_TCP}: write: broken pipe',
+    f'{_UPLOAD}?name=a.zip": write {_TCP}: use of closed network connection',
+    f'{_UPLOAD}?name=a.zip": http2: client connection lost',
+    f'{_UPLOAD}?name=a.zip": http2: server sent GOAWAY and closed the connection; '
+    'LastStreamID=1, ErrCode=NO_ERROR, debug=""',
+    f'{_UPLOAD}?name=a.zip": stream error: stream ID 1; INTERNAL_ERROR; '
+    "received from peer",
+    f"{_READ}: net/http: TLS handshake timeout",
+    f"{_READ}: dial tcp 140.82.112.6:443: connect: network is unreachable",
+    "error connecting to api.github.com\n"
+    "check your internet connection or https://githubstatus.com",
+)
 
 
 @dataclass
@@ -85,6 +114,8 @@ class _ApiRequest:
     endpoint: str
     flags: frozenset[str]
     fields: dict[str, object]
+    input: Path | None
+    headers: dict[str, str]
 
 
 def _field_value(value: str) -> object:
@@ -105,6 +136,8 @@ def _parse_api_command(command: tuple[str, ...]) -> _ApiRequest:
     endpoint: str | None = None
     flags: set[str] = set()
     fields: dict[str, object] = {}
+    input_path: Path | None = None
+    headers: dict[str, str] = {}
     arguments = iter(command[1:])
     for argument in arguments:
         if argument == "--method":
@@ -114,22 +147,35 @@ def _parse_api_command(command: tuple[str, ...]) -> _ApiRequest:
         elif argument in ("--field", "--raw-field"):
             key, value = next(arguments).split("=", 1)
             fields[key] = _field_value(value) if argument == "--field" else value
+        elif argument == "--input":
+            input_path = Path(next(arguments))
+        elif argument == "--header":
+            name, value = next(arguments).split(":", 1)
+            headers[name] = value.strip()
         elif argument.startswith("-") or endpoint is not None:
             raise AssertionError(f"unexpected gh api argument {argument!r}")
         else:
             endpoint = argument
     if endpoint is None:
         raise AssertionError(f"gh api command without an endpoint: {command!r}")
-    return _ApiRequest(method, endpoint, frozenset(flags), fields)
+    return _ApiRequest(
+        method,
+        endpoint,
+        frozenset(flags),
+        fields,
+        input_path,
+        headers,
+    )
 
 
 class _FakeGitHub:
-    """Model the releases of a repository behind the gh calls of publication.
+    """Model the releases of a repository behind the `gh api` requests of
+    publication.
 
-    Each call is one operation: `list`, `create`, `read`, `upload`, `delete`,
-    or `publish`. A fault makes the next call of its operation return a given
-    result instead, after `effect` changed the releases and, if `applied` is
-    set, after GitHub carried the request out anyway.
+    Each request is one operation: `list`, `create`, `read`, `upload`,
+    `delete`, or `publish`. A fault makes the next request of its operation
+    return a given result instead, after `effect` changed the releases and, if
+    `applied` is set, after GitHub carried the request out anyway.
     """
 
     def __init__(self) -> None:
@@ -139,6 +185,8 @@ class _FakeGitHub:
         self.timeouts: list[float] = []
         self.uploads: list[str] = []
         self.created: list[dict[str, object]] = []
+        self.published: list[dict[str, object]] = []
+        self.deleted: list[int] = []
         # The states of the next uploaded assets, which are otherwise uploaded.
         self.upload_states: list[str] = []
         self.page_size = 100
@@ -210,8 +258,6 @@ class _FakeGitHub:
         )
 
     def _route(self, command: tuple[str, ...]) -> tuple[str, Callable[[], _Result]]:
-        if command[0] == "release":
-            return self._route_release(command)
         request = _parse_api_command(command)
         if request.method == "GET" and request.endpoint == f"{RELEASES}?per_page=100":
             if request.flags != frozenset({"--paginate", "--slurp"}):
@@ -223,6 +269,32 @@ class _FakeGitHub:
         if request.method == "GET" and match is not None:
             release_id = int(match.group(1))
             return "read", lambda: self._read(release_id)
+        if request.method == "PATCH" and match is not None:
+            release_id = int(match.group(1))
+            return "publish", lambda: self._publish(release_id, request.fields)
+        match = re.fullmatch(rf"{re.escape(RELEASES)}/assets/(\d+)", request.endpoint)
+        if request.method == "DELETE" and match is not None:
+            asset_id = int(match.group(1))
+            return "delete", lambda: self._delete(asset_id)
+        url = urlsplit(request.endpoint)
+        match = re.fullmatch(
+            rf"/repos/{re.escape(REPOSITORY)}/releases/(\d+)/assets",
+            url.path,
+        )
+        if (
+            request.method == "POST"
+            and url.scheme == "https"
+            and url.netloc == "uploads.github.com"
+            and match is not None
+            and request.input is not None
+        ):
+            query = parse_qs(url.query, strict_parsing=True)
+            path = request.input
+            if query != {"name": [path.name]} or "Content-Type" not in request.headers:
+                raise AssertionError(f"unexpected upload {command!r}")
+            self.uploads.append(path.name)
+            release_id = int(match.group(1))
+            return "upload", lambda: self._upload(release_id, path)
         raise AssertionError(f"unexpected gh api request {command!r}")
 
     def _list(self) -> _Result:
@@ -249,49 +321,45 @@ class _FakeGitHub:
             return _http_error(404, "Not Found")
         return _Result(0, json.dumps(release.document()), "", 0.1)
 
-    def _store_upload(self, release: _FakeRelease, path: Path) -> None:
+    def _upload(self, release_id: int, path: Path) -> _Result:
+        release = self._release(release_id)
+        if release is None:
+            return _http_error(404, "Not Found")
+        if any(asset.name == path.name for asset in release.assets):
+            body = {
+                "message": "Validation Failed",
+                "errors": [
+                    {
+                        "resource": "ReleaseAsset",
+                        "code": "already_exists",
+                        "field": "name",
+                    }
+                ],
+            }
+            return _Result(
+                1, json.dumps(body), "gh: Validation Failed (HTTP 422)\n", 0.1
+            )
         state = self.upload_states.pop(0) if self.upload_states else "uploaded"
-        self.add_asset(release, path, state=state)
+        asset = self.add_asset(release, path, state=state)
+        return _Result(0, json.dumps(asdict(asset)), "", 0.1)
 
-    def _route_release(
-        self,
-        command: tuple[str, ...],
-    ) -> tuple[str, Callable[[], _Result]]:
-        verb, tag = command[1], command[2]
-        if verb == "upload":
-            path = Path(command[3])
-            self.uploads.append(path.name)
-            return "upload", lambda: self._upload_by_tag(tag, path)
-        if verb == "delete-asset":
-            return "delete", lambda: self._delete_by_tag(tag, command[3])
-        if verb == "edit":
-            return "publish", lambda: self._edit_by_tag(tag, command)
-        raise AssertionError(f"unexpected gh release command {command!r}")
+    def _delete(self, asset_id: int) -> _Result:
+        for release in self.releases:
+            for asset in release.assets:
+                if asset.id == asset_id:
+                    release.assets.remove(asset)
+                    self.deleted.append(asset_id)
+                    return _Result(0, "", "", 0.1)
+        return _http_error(404, "Not Found")
 
-    def _by_tag(self, tag: str) -> _FakeRelease | None:
-        return next((release for release in self.releases if release.tag == tag), None)
-
-    def _upload_by_tag(self, tag: str, path: Path) -> _Result:
-        release = self._by_tag(tag)
+    def _publish(self, release_id: int, fields: dict[str, object]) -> _Result:
+        release = self._release(release_id)
         if release is None:
-            return _Result(1, "", "release not found\n", 0.1)
-        self._store_upload(release, path)
-        return _Result(0, "", "", 0.1)
-
-    def _delete_by_tag(self, tag: str, name: str) -> _Result:
-        release = self._by_tag(tag)
-        if release is None:
-            return _Result(1, "", "release not found\n", 0.1)
-        release.assets = [asset for asset in release.assets if asset.name != name]
-        return _Result(0, "", "", 0.1)
-
-    def _edit_by_tag(self, tag: str, command: tuple[str, ...]) -> _Result:
-        release = self._by_tag(tag)
-        if release is None:
-            return _Result(1, "", "release not found\n", 0.1)
-        release.draft = "--draft=false" not in command
-        release.prerelease = "--prerelease" in command
-        return _Result(0, "", "", 0.1)
+            return _http_error(404, "Not Found")
+        self.published.append(fields)
+        release.draft = fields["draft"] is True
+        release.prerelease = fields["prerelease"] is True
+        return _Result(0, json.dumps(release.document()), "", 0.1)
 
 
 class DevelopmentReleaseTests(unittest.TestCase):
@@ -351,6 +419,17 @@ class DevelopmentReleaseTests(unittest.TestCase):
             [package.path for package in packages],
         )
 
+    def _commands(self, operation: str) -> list[tuple[str, ...]]:
+        return [
+            command
+            for name, command in zip(
+                self.github.operations,
+                self.github.commands,
+                strict=True,
+            )
+            if name == operation
+        ]
+
     def _timeouts(self, operation: str) -> list[float]:
         return [
             timeout
@@ -365,9 +444,8 @@ class DevelopmentReleaseTests(unittest.TestCase):
     def test_transient_upload_failure_retries_and_succeeds(self):
         local = self._package("nvx-linux.tar.gz", b"package")
         release = self.github.add_release("v1")
-        self.github.fail(
-            "upload", self._result(1, stderr="HTTP 500: Error saving asset")
-        )
+        failure = _http_error(502, "Bad Gateway")
+        self.github.fail("upload", failure)
 
         self._upload(release, local)
 
@@ -375,8 +453,35 @@ class DevelopmentReleaseTests(unittest.TestCase):
             self.github.operations,
             ["read", "upload", "read", "upload", "read"],
         )
+        first, second = self._commands("upload")
+        self.assertEqual(first, second)
         self.assertEqual(self._timeouts("upload"), [180, 180])
         self.sleep.assert_called_once_with(10)
+        self.assertIn(
+            f"retrying in 10s: {_reason(failure)}\n",
+            self.stdout.getvalue(),
+        )
+
+    def test_upload_that_lost_its_connection_is_retried(self):
+        local = self._package("nvx-linux.tar.gz", b"package")
+        for error in LOST_CONNECTIONS:
+            with self.subTest(error=error):
+                release = self.github.add_release("v1")
+                self.github.fail("upload", self._result(1, stderr=f"{error}\n"))
+                start = len(self.github.operations)
+                self.sleep.reset_mock()
+
+                self._upload(release, local)
+
+                self.assertEqual(
+                    self.github.operations[start:],
+                    ["read", "upload", "read", "upload", "read"],
+                )
+                self.sleep.assert_called_once_with(10)
+                self.assertEqual(
+                    [asset.state for asset in release.assets],
+                    ["uploaded"],
+                )
 
     def test_upload_retry_exhaustion_fails_with_bounded_attempts(self):
         local = self._package("nvx-linux.tar.gz", b"package")
@@ -393,43 +498,28 @@ class DevelopmentReleaseTests(unittest.TestCase):
         self.assertEqual(self.github.operations.count("upload"), 3)
         self.assertEqual(self.sleep.call_args_list, [call(10), call(20)])
 
-    def test_release_not_found_upload_failure_retries_while_draft_exists(self):
+    def test_server_error_upload_failure_exhausts_bounded_attempts(self):
         local = self._package("nvx-linux.tar.gz", b"package")
         release = self.github.add_release("v1")
-        self.github.fail("upload", self._result(1, stderr="release not found\n"))
-
-        self._upload(release, local)
-
-        uploads = [
-            command for command in self.github.commands if command[1] == "upload"
-        ]
-        self.assertEqual(len(uploads), 2)
-        self.assertEqual(uploads[0], uploads[1])
-        self.assertEqual(self._timeouts("upload"), [180, 180])
-        self.sleep.assert_called_once_with(10)
-        self.assertIn("retrying in 10s: release not found", self.stdout.getvalue())
-
-    def test_release_not_found_upload_failure_exhausts_bounded_attempts(self):
-        local = self._package("nvx-linux.tar.gz", b"package")
-        release = self.github.add_release("v1")
+        failure = _http_error(502, "Bad Gateway")
         for _ in range(3):
-            self.github.fail("upload", self._result(1, stderr="release not found\n"))
+            self.github.fail("upload", failure)
 
         with self.assertRaisesRegex(
             ScriptError,
-            "after 3 attempts: release not found",
+            f"after 3 attempts: {re.escape(_reason(failure))}$",
         ):
             self._upload(release, local)
 
         self.assertEqual(self.github.operations.count("upload"), 3)
         self.assertEqual(self.sleep.call_args_list, [call(10), call(20)])
 
-    def test_release_not_found_upload_failure_stops_when_release_disappears(self):
+    def test_upload_failure_stops_when_release_disappears(self):
         local = self._package("nvx-linux.tar.gz", b"package")
         release = self.github.add_release("v1")
         self.github.fail(
             "upload",
-            self._result(1, stderr="release not found\n"),
+            _http_error(404, "Not Found"),
             effect=self.github.releases.clear,
         )
 
@@ -442,18 +532,14 @@ class DevelopmentReleaseTests(unittest.TestCase):
         self.assertEqual(self.github.operations, ["read", "upload", "read"])
         self.sleep.assert_not_called()
 
-    def test_release_not_found_upload_failure_stops_when_release_was_published(self):
+    def test_upload_failure_stops_when_release_was_published(self):
         local = self._package("nvx-linux.tar.gz", b"package")
         release = self.github.add_release("v1")
 
         def publish() -> None:
             release.draft = False
 
-        self.github.fail(
-            "upload",
-            self._result(1, stderr="release not found\n"),
-            effect=publish,
-        )
+        self.github.fail("upload", _http_error(502, "Bad Gateway"), effect=publish)
 
         with self.assertRaisesRegex(ScriptError, "release v1 was published before"):
             self._upload(release, local)
@@ -463,52 +549,111 @@ class DevelopmentReleaseTests(unittest.TestCase):
 
     def test_permanent_upload_failure_is_not_retried(self):
         local = self._package("nvx-linux.tar.gz", b"package")
-        release = self.github.add_release("v1")
-        self.github.fail(
-            "upload",
-            self._result(
-                1,
-                stderr="HTTP 403: Resource not accessible by integration",
-            ),
+        failures = (
+            _http_error(403, "Resource not accessible by integration"),
+            # The release exists, so the status of the upload is its own.
+            _http_error(404, "Not Found"),
         )
+        for failure in failures:
+            with self.subTest(failure=failure.stderr):
+                release = self.github.add_release("v1")
+                self.github.fail("upload", failure)
+                start = len(self.github.operations)
 
-        with self.assertRaisesRegex(
-            ScriptError,
-            "uploading release asset nvx-linux.tar.gz exited 1",
-        ):
-            self._upload(release, local)
+                with self.assertRaisesRegex(
+                    ScriptError,
+                    "^uploading release asset nvx-linux.tar.gz exited 1\n.*\n"
+                    f"{re.escape(failure.stderr.strip())}$",
+                ):
+                    self._upload(release, local)
 
-        self.assertEqual(self.github.operations, ["read", "upload", "read"])
+                self.assertEqual(
+                    self.github.operations[start:],
+                    ["read", "upload", "read"],
+                )
+                self.assertEqual(release.assets, [])
         self.sleep.assert_not_called()
 
-    def test_release_lookup_failure_matches_only_bare_not_found(self):
-        for output in ("release not found", "release not found\n", "Release not found"):
-            with self.subTest(output=output):
-                self.assertTrue(
-                    development_release._is_release_lookup_failure(
-                        self._result(1, stderr=output)
-                    )
+    def test_upload_rejection_that_a_later_attempt_can_overcome_is_retried(self):
+        local = self._package("nvx-linux.tar.gz", b"package")
+        taken = {
+            "message": "Validation Failed",
+            "errors": [
+                {"resource": "ReleaseAsset", "code": "already_exists", "field": "name"}
+            ],
+        }
+        rejections = (
+            _Result(1, json.dumps(taken), "gh: Validation Failed (HTTP 422)\n", 0.1),
+            _http_error(422, "Error saving asset"),
+        )
+        for rejection in rejections:
+            with self.subTest(rejection=rejection.stdout):
+                release = self.github.add_release("v1")
+                self.github.fail("upload", rejection)
+                start = len(self.github.operations)
+                self.sleep.reset_mock()
+
+                self._upload(release, local)
+
+                self.assertEqual(
+                    self.github.operations[start:],
+                    ["read", "upload", "read", "upload", "read"],
+                )
+                self.sleep.assert_called_once_with(10)
+                # The retry says why GitHub rejected the upload.
+                self.assertIn(
+                    f"retrying in 10s: {_reason(rejection)}\n",
+                    self.stdout.getvalue(),
                 )
 
-        non_matches = (
-            self._result(124, stderr="release not found", timed_out=True),
-            self._result(1, stderr="HTTP 404: Not Found"),
-            self._result(
-                1,
-                stderr="HTTP 403: Resource not accessible by integration",
-            ),
-            self._result(1, stderr="release not found: v1"),
-            self._result(1),
+    def test_transient_failures_are_timeouts_lost_connections_and_some_statuses(
+        self,
+    ):
+        transient = (
+            self._result(124, timed_out=True),
+            _http_error(408, "Request Timeout"),
+            _http_error(425, "Too Early"),
+            _http_error(429, "Too Many Requests"),
+            _http_error(500, "Server Error"),
+            self._result(1, stderr="gh: HTTP 502\n"),
+            _http_error(503, "Service Unavailable"),
+            *(self._result(1, stderr=f"{error}\n") for error in LOST_CONNECTIONS),
         )
-        for result in non_matches:
+        permanent = (
+            _http_error(400, "Bad Request"),
+            _http_error(401, "Bad credentials"),
+            _http_error(403, "Resource not accessible by integration"),
+            _http_error(404, "Not Found"),
+            _http_error(422, "Validation Failed"),
+            # The status that gh reported is the response's, not one that the
+            # body mentions.
+            _Result(1, "HTTP 502: timed out", "gh: Not Found (HTTP 404)\n", 0.1),
+            self._result(1, stderr="unexpected end of JSON input\n"),
+            self._result(1, stderr="open dist/nvx.zip: no such file or directory\n"),
+            self._result(
+                4,
+                stderr="To get started with GitHub CLI, please run:  gh auth login\n",
+            ),
+        )
+        for result in transient:
             with self.subTest(result=result):
-                self.assertFalse(development_release._is_release_lookup_failure(result))
+                self.assertTrue(development_release._is_transient_failure(result))
+                self.assertTrue(
+                    development_release._is_transient_upload_failure(result)
+                )
+        for result in permanent:
+            with self.subTest(result=result):
+                self.assertFalse(development_release._is_transient_failure(result))
+                self.assertFalse(
+                    development_release._is_transient_upload_failure(result)
+                )
 
-    def test_publication_recovers_from_release_not_found_upload(self):
+    def test_publication_recovers_from_a_failed_upload(self):
         packages = publish_development_release.release_packages(self.root, "1.2.3")
         for platform, package in packages.items():
             package.write_bytes(platform.encode("ascii"))
-        self.github.fail("upload", self._result(1, stderr="release not found\n"))
+        failure = _http_error(502, "Bad Gateway")
+        self.github.fail("upload", failure)
 
         development_release.publish_development_release(
             REPOSITORY,
@@ -547,9 +692,104 @@ class DevelopmentReleaseTests(unittest.TestCase):
         )
         self.sleep.assert_called_once_with(10)
         output = self.stdout.getvalue()
-        self.assertIn("retrying in 10s: release not found", output)
+        self.assertIn(f"retrying in 10s: {_reason(failure)}\n", output)
         self.assertIn(f"development release {TAG} is release {release.id}", output)
         self.assertIn(f"published development prerelease {TAG}", output)
+
+    def test_publication_addresses_its_release_by_id(self):
+        packages = self._packages()
+
+        self._publish(packages)
+
+        (release,) = self.github.releases
+        read = ("api", f"{RELEASES}/{release.id}")
+        uploads = [
+            (
+                "api",
+                "--method",
+                "POST",
+                f"https://uploads.github.com/repos/{REPOSITORY}/releases/"
+                f"{release.id}/assets?name={package.name}",
+                "--input",
+                str(package.path),
+                "--header",
+                f"Content-Type: {content_type}",
+            )
+            for package, content_type in zip(
+                packages,
+                ("application/x-gtar", "application/x-gtar", "application/zip"),
+                strict=True,
+            )
+        ]
+        publish = (
+            "api",
+            "--method",
+            "PATCH",
+            f"{RELEASES}/{release.id}",
+            "--field",
+            "draft=false",
+            "--field",
+            "prerelease=true",
+            "--raw-field",
+            "make_latest=false",
+        )
+        self.assertEqual(self.github.operations[:2], ["list", "create"])
+        self.assertEqual(
+            self.github.commands[2:],
+            [
+                read,
+                uploads[0],
+                read,
+                read,
+                uploads[1],
+                read,
+                read,
+                uploads[2],
+                read,
+                read,
+                publish,
+                read,
+            ],
+        )
+        self.assertEqual(
+            self.github.published,
+            [{"draft": False, "prerelease": True, "make_latest": "false"}],
+        )
+        self.assertEqual(self._timeouts("list"), [120])
+        self.assertEqual(set(self._timeouts("read")), {60})
+        self.assertEqual(self._timeouts("upload"), [180, 180, 180])
+        self.assertEqual(self._timeouts("publish"), [60])
+
+    def test_upload_url_drops_its_template_and_encodes_the_name(self):
+        release = self.github.add_release("v1").snapshot()
+
+        self.assertEqual(
+            development_release._asset_upload_url(release, "nvx 1+2.tar.gz"),
+            f"https://uploads.github.com/repos/{REPOSITORY}/releases/{release.id}"
+            "/assets?name=nvx+1%2B2.tar.gz",
+        )
+        for upload_url in ("http://uploads.github.com/assets{?name,label}", ""):
+            with (
+                self.subTest(upload_url=upload_url),
+                self.assertRaisesRegex(ScriptError, "invalid upload URL"),
+            ):
+                development_release._asset_upload_url(
+                    replace(release, upload_url=upload_url),
+                    "nvx.zip",
+                )
+
+    def test_assets_upload_with_the_content_types_of_gh_release_upload(self):
+        for name, content_type in (
+            ("nvx-0.1.0-linux-kvm.tar.gz", "application/x-gtar"),
+            ("NVX.TGZ", "application/x-gtar"),
+            ("nvx-0.1.0-windows-whp.zip", "application/zip"),
+            ("SHA256SUMS", "application/octet-stream"),
+        ):
+            with self.subTest(name=name):
+                self.assertEqual(
+                    development_release._asset_content_type(name),
+                    content_type,
+                )
 
     def test_partial_draft_resumes_without_reuploading_valid_asset(self):
         packages = self._packages()
@@ -601,7 +841,14 @@ class DevelopmentReleaseTests(unittest.TestCase):
             self.github.operations,
             ["read", "upload", "read", "delete", "read", "upload", "read"],
         )
-        self.assertEqual([asset.state for asset in release.assets], ["uploaded"])
+        (deleted,) = self.github.deleted
+        self.assertEqual(
+            self._commands("delete"),
+            [("api", "--method", "DELETE", f"{RELEASES}/assets/{deleted}")],
+        )
+        (asset,) = release.assets
+        self.assertNotEqual(asset.id, deleted)
+        self.assertEqual(asset.state, "uploaded")
         self.sleep.assert_called_once_with(10)
 
     def test_failed_upload_does_not_delete_asset_with_uncertain_ownership(self):

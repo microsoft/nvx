@@ -1,4 +1,10 @@
-"""Resumable GitHub development release publication."""
+"""Resumable GitHub development release publication.
+
+Publication finds the release that carries its tag, or creates it as a draft,
+once, and then reads and changes it only by its ID, through the REST API with
+`gh api`. `gh release` would resolve a draft's tag again on every call,
+through a lookup that reports any failure as `release not found`.
+"""
 
 from __future__ import annotations
 
@@ -10,6 +16,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import cast
+from urllib.parse import urlencode
 
 from .common import (
     ScriptError,
@@ -33,15 +40,29 @@ _TARGET_SHA_PATTERN = re.compile(r"^[0-9A-Fa-f]{40}$")
 # `gh api` reports a response with an error status as `gh: <message> (HTTP
 # <status>)`, or as `gh: HTTP <status>` when the response has no message.
 _HTTP_STATUS = re.compile(r"^gh: (?:HTTP (\d{3})|.* \(HTTP (\d{3})\))$", re.MULTILINE)
-_TRANSIENT_UPLOAD_ERROR = re.compile(
+# GitHub answers these statuses, and 5xx, to requests that can succeed later.
+_TRANSIENT_HTTP_STATUSES = frozenset({408, 425, 429})
+# How a request that got no response fails transiently: the errors with which
+# Go reports a connection that broke, was refused or closed, or timed out, an
+# HTTP/2 connection or stream that failed, and gh's for a host that it could
+# not reach. `gh release upload` repeated an upload that failed so by itself,
+# and `gh api` does not.
+_TRANSIENT_CONNECTION_ERROR = re.compile(
     r"(?:"
-    r"HTTP\s+(?:408|425|429|5\d\d)\b|"
     r"timed?\s*out|timeout|context deadline exceeded|"
     r"connection (?:aborted|refused|reset)|"
     r"temporary failure|temporarily unavailable|"
-    r"unexpected EOF|TLS handshake timeout|broken pipe|"
-    r"error saving asset|already[_ ]exists"
+    r"\bEOF\b|TLS handshake timeout|broken pipe|"
+    r"use of closed network connection|network is unreachable|"
+    r"http2: |stream error|"
+    r"error connecting to "
     r")",
+    re.IGNORECASE,
+)
+# How GitHub rejects an upload that a later attempt can complete, such as one
+# whose name an earlier attempt's asset still holds.
+_TRANSIENT_UPLOAD_ERROR = re.compile(
+    r"error saving asset|already[_ ]exists",
     re.IGNORECASE,
 )
 
@@ -153,6 +174,16 @@ def _http_status(result: _GitHubCommandResult) -> int | None:
     if match is None:
         return None
     return int(match.group(1) or match.group(2))
+
+
+def _is_transient_failure(result: _GitHubCommandResult) -> bool:
+    """Whether a request that failed can succeed if it is repeated."""
+    if result.timed_out:
+        return True
+    status = _http_status(result)
+    if status is None:
+        return _TRANSIENT_CONNECTION_ERROR.search(result.stderr) is not None
+    return status in _TRANSIENT_HTTP_STATUSES or 500 <= status <= 599
 
 
 def _release_from_document(value: object) -> _DevelopmentRelease:
@@ -386,56 +417,69 @@ def _verification_description(
 def _delete_development_release_asset(
     repository: str,
     release: _DevelopmentRelease,
-    asset_name: str,
+    asset: _DevelopmentReleaseAsset,
 ) -> None:
     result = _run_gh(
         (
-            "release",
-            "delete-asset",
-            release.tag,
-            asset_name,
-            "--repo",
-            repository,
-            "--yes",
+            "api",
+            "--method",
+            "DELETE",
+            f"repos/{repository}/releases/assets/{asset.id}",
         ),
         timeout_seconds=_GITHUB_COMMAND_TIMEOUT_SECONDS,
     )
     observed = _require_development_release(repository, release)
-    if _asset_named(observed, asset_name) is None:
+    if _asset_named(observed, asset.name) is None:
         if result.returncode != 0:
             print(
-                f">> asset {asset_name} is absent despite the delete command failure; "
+                f">> asset {asset.name} is absent despite the delete command failure; "
                 "continuing"
             )
         return
     if result.returncode != 0:
-        raise _command_error(f"deleting release asset {asset_name}", result)
-    raise ScriptError(f"release asset {asset_name} still exists after deletion")
+        raise _command_error(f"deleting release asset {asset.name}", result)
+    raise ScriptError(f"release asset {asset.name} still exists after deletion")
 
 
 def _is_transient_upload_failure(result: _GitHubCommandResult) -> bool:
-    return result.timed_out or _TRANSIENT_UPLOAD_ERROR.search(result.output) is not None
-
-
-def _is_release_lookup_failure(result: _GitHubCommandResult) -> bool:
-    """Match gh's bare `release not found` for a failed draft lookup.
-
-    gh reports every failed lookup of a draft release as `release not found`,
-    whether the lookup failed transiently (5xx, network error, or the draft
-    not being visible yet) or permanently. Callers decide which case applies.
-    """
-    return not result.timed_out and result.output.strip().lower() == "release not found"
+    return (
+        _is_transient_failure(result)
+        or _TRANSIENT_UPLOAD_ERROR.search(result.output) is not None
+    )
 
 
 def _upload_failure_reason(result: _GitHubCommandResult) -> str:
     if result.timed_out:
         return "command timed out"
-    diagnostic = diagnostic_tail(result.output, lines=5)
-    if diagnostic:
-        return diagnostic
     if result.returncode == 0:
         return "upload command completed but the asset was not verified"
-    return f"upload command exited {result.returncode}"
+    diagnostic = diagnostic_tail(result.diagnostic, lines=5)
+    return diagnostic or f"upload command exited {result.returncode}"
+
+
+def _asset_upload_url(release: _DevelopmentRelease, name: str) -> str:
+    """Return the URL to which the asset `name` of `release` uploads.
+
+    GitHub gives a release's upload URL as a URI template that ends in
+    `{?name,label}`, which gh drops before it adds the query.
+    """
+    url = release.upload_url.split("{", 1)[0]
+    if not url.startswith("https://"):
+        raise ScriptError(
+            f"development release {release.tag} has an invalid upload URL "
+            f"{release.upload_url!r}"
+        )
+    return f"{url}?{urlencode({'name': name})}"
+
+
+def _asset_content_type(name: str) -> str:
+    """Return the content type with which `gh release upload` sends an asset."""
+    lowered = name.lower()
+    if lowered.endswith((".tar.gz", ".tgz")):
+        return "application/x-gtar"
+    if lowered.endswith(".zip"):
+        return "application/zip"
+    return "application/octet-stream"
 
 
 def _upload_expected_asset(
@@ -471,12 +515,14 @@ def _upload_expected_asset(
         )
         result = _run_gh(
             (
-                "release",
-                "upload",
-                release.tag,
+                "api",
+                "--method",
+                "POST",
+                _asset_upload_url(release, local.name),
+                "--input",
                 str(local.path),
-                "--repo",
-                repository,
+                "--header",
+                f"Content-Type: {_asset_content_type(local.name)}",
             ),
             timeout_seconds=timeout_seconds,
         )
@@ -512,17 +558,10 @@ def _upload_expected_asset(
                     "is uncertain"
                 )
             print(f">> {local.name}: removing failed upload ({mismatch})")
-            _delete_development_release_asset(repository, release, local.name)
+            _delete_development_release_asset(repository, release, observed)
 
         reason = _upload_failure_reason(result)
-        # gh reports any failed lookup of a draft as "release not found"; the
-        # observation just above found the draft without the asset, so the
-        # failure is a transient lookup race and retrying is safe here.
-        retryable = (
-            result.returncode == 0
-            or _is_transient_upload_failure(result)
-            or _is_release_lookup_failure(result)
-        )
+        retryable = result.returncode == 0 or _is_transient_upload_failure(result)
         if not retryable:
             raise _command_error(f"uploading release asset {local.name}", result)
         if attempt == attempts:
@@ -599,20 +638,23 @@ def _publish_development_release_draft(
     print(f">> publishing verified development release {tag}")
     result = _run_gh(
         (
-            "release",
-            "edit",
-            tag,
-            "--repo",
-            repository,
-            "--draft=false",
-            "--prerelease",
+            "api",
+            "--method",
+            "PATCH",
+            f"repos/{repository}/releases/{release.id}",
+            "--field",
+            "draft=false",
+            "--field",
+            "prerelease=true",
+            "--raw-field",
+            "make_latest=false",
         ),
         timeout_seconds=_GITHUB_COMMAND_TIMEOUT_SECONDS,
     )
     published = _require_development_release(repository, release)
     if not published.draft and published.prerelease:
         if result.returncode != 0:
-            print(f">> release {tag} was published despite the edit command failure")
+            print(f">> release {tag} was published despite the publish command failure")
         return published
     if result.returncode != 0:
         raise _command_error(f"publishing development release {tag}", result)
