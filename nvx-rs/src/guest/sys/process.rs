@@ -347,7 +347,18 @@ pub(crate) fn try_wait(process: ProcessId) -> Result<Option<ChildStatus>, Errno>
 
 /// Sends `SIGKILL` to the process group led by `process`.
 pub(crate) fn kill_process_group(process: ProcessId) -> Result<(), Errno> {
-    kill(Pid::from_raw(-process.0.as_raw()), Signal::SIGKILL)
+    signal_process_group(process, nix::libc::SIGKILL)
+}
+
+/// Sends the signal numbered `signal` to the process group led by `process`, by the group's ID.
+///
+/// libc's `kill` is used because `nix`'s `Signal` cannot represent a real-time signal.
+pub(crate) fn signal_process_group(
+    process: ProcessId,
+    signal: nix::libc::c_int,
+) -> Result<(), Errno> {
+    // SAFETY: `kill` reads only its integer arguments.
+    Errno::result(unsafe { nix::libc::kill(-process.0.as_raw(), signal) }).map(drop)
 }
 
 /// Sends `SIGKILL` to `process` alone.
@@ -625,17 +636,28 @@ pub(crate) fn has_exited(process: ProcessId) -> Result<bool, Errno> {
     Ok(unsafe { information.si_pid() } == process.0.as_raw())
 }
 
-/// Sends `SIGKILL` through `pidfd` to the process to which it refers or, with `process_group`, to
-/// every process of the process group that the process leads, since Linux 6.9.
+/// Sends `SIGKILL` through `pidfd`, as [`signal_through_pidfd`] sends any signal.
+pub(crate) fn kill_through_pidfd(pidfd: BorrowedFd<'_>, process_group: bool) -> Result<(), Errno> {
+    signal_through_pidfd(pidfd, nix::libc::SIGKILL, process_group)
+}
+
+/// Sends the signal numbered `signal` through `pidfd` to the process to which it refers or, with
+/// `process_group`, to every process of the process group that the process leads, since Linux
+/// 6.9. A real-time signal, which `nix`'s `Signal` cannot represent, goes as any other.
 ///
 /// A pidfd names its process, and the group that the process leads, whatever later takes their
 /// IDs: the signal to the process fails with `ESRCH` once a collector has taken the process's
 /// status, and the signal to the group fails with `ESRCH` once no process of the group is left,
 /// even after a collector took the status of the process that led it. A kernel that cannot
-/// signal a group through a pidfd, before Linux 6.9, fails with `EINVAL`.
+/// signal a group through a pidfd, before Linux 6.9, fails with `EINVAL`, as it does for a number
+/// that names no signal.
 ///
 /// libc's `syscall` is used because neither `nix` nor musl wraps `pidfd_send_signal`.
-pub(crate) fn kill_through_pidfd(pidfd: BorrowedFd<'_>, process_group: bool) -> Result<(), Errno> {
+pub(crate) fn signal_through_pidfd(
+    pidfd: BorrowedFd<'_>,
+    signal: nix::libc::c_int,
+    process_group: bool,
+) -> Result<(), Errno> {
     let flags = if process_group {
         nix::libc::PIDFD_SIGNAL_PROCESS_GROUP
     } else {
@@ -647,7 +669,7 @@ pub(crate) fn kill_through_pidfd(pidfd: BorrowedFd<'_>, process_group: bool) -> 
         nix::libc::syscall(
             nix::libc::SYS_pidfd_send_signal,
             pidfd.as_raw_fd(),
-            nix::libc::SIGKILL,
+            signal,
             std::ptr::null::<nix::libc::siginfo_t>(),
             flags,
         )
@@ -828,6 +850,34 @@ mod tests {
             kill_through_pidfd(pidfd.borrowed(), false),
             Err(Errno::ESRCH)
         );
+    }
+
+    #[test]
+    fn a_real_time_signal_goes_through_a_pidfd_and_to_a_process_group() {
+        use std::os::unix::process::{CommandExt, ExitStatusExt};
+
+        // `nix`'s `Signal` cannot represent signal 40, whose default action ends the process.
+        let mut child = std::process::Command::new("/bin/sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
+        let pidfd = open_pidfd(ProcessId::from_child(&child)).unwrap();
+        // The kernel refuses a number that names no signal, and sends nothing.
+        assert_eq!(
+            signal_through_pidfd(pidfd.borrowed(), 65, false),
+            Err(Errno::EINVAL)
+        );
+        assert_eq!(signal_through_pidfd(pidfd.borrowed(), 40, false), Ok(()));
+        assert_eq!(child.wait().unwrap().signal(), Some(40));
+        let mut leader = std::process::Command::new("/bin/sleep")
+            .arg("30")
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let process = ProcessId::from_child(&leader);
+        assert_eq!(signal_process_group(process, 65), Err(Errno::EINVAL));
+        assert_eq!(signal_process_group(process, 41), Ok(()));
+        assert_eq!(leader.wait().unwrap().signal(), Some(41));
     }
 
     #[test]

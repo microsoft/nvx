@@ -1000,11 +1000,8 @@ impl Execution {
     ///
     /// The pidfd names the program alone, whatever later takes its ID, so the signal fails with
     /// `ESRCH` once a collector of the caller's has taken the status, which the execution notes.
-    /// Then, if the options say so, it signals the process group that the program leads through
-    /// the same pidfd, which names that group even if a collector takes the status meanwhile. A
-    /// kernel that cannot signal a group through a pidfd, before Linux 6.9, has the group
-    /// signalled by its ID instead, which the program, unreaped a moment before, kept from any
-    /// other group. A signal that the kernel refuses otherwise, such as one that it does not
+    /// Then, if the options say so, it [signals the process group](Self::signal_group) that the
+    /// program leads. A signal that the kernel refuses otherwise, such as one that it does not
     /// permit, is a failure to kill its target, which the next events report. Only `ESRCH` tells
     /// that the program is gone, so it still counts as unreaped then: the cause for which the
     /// execution ended it stands, and a timeout fires once.
@@ -1015,7 +1012,8 @@ impl Execution {
         let Some(pidfd) = self.child.pidfd() else {
             return false;
         };
-        match kill_through_pidfd(pidfd, false) {
+        let kill = sys::Signal::SIGKILL as i32;
+        match signal_through_pidfd(pidfd, kill, false) {
             Ok(()) => {}
             Err(Errno::ESRCH) => {
                 self.reaped = true;
@@ -1023,18 +1021,29 @@ impl Execution {
             }
             Err(error) => self.failures[KillTarget::Program.index()] = Some(error.into()),
         }
-        if self.process_group {
-            let signalled = match kill_through_pidfd(pidfd, true) {
-                Err(Errno::EINVAL) => sys::kill_process_group(self.child.process()),
-                signalled => signalled,
-            };
-            if let Err(error) = signalled
-                && error != Errno::ESRCH
-            {
-                self.failures[KillTarget::ProcessGroup.index()] = Some(error.into());
-            }
+        if self.process_group
+            && let Err(error) = self.signal_group(pidfd, kill)
+        {
+            self.failures[KillTarget::ProcessGroup.index()] = Some(error.into());
         }
         true
+    }
+
+    /// Sends `signal` to the process group that the program leads, right after the program's
+    /// `pidfd` showed the program unreaped: through the pidfd, which names that group even if a
+    /// collector takes the program's status meanwhile, or, from a kernel that cannot signal a
+    /// group through a pidfd, before Linux 6.9, by the group's ID, which the program, unreaped a
+    /// moment before, kept from any other group. A group whose processes have all ended is no
+    /// failure.
+    fn signal_group(&self, pidfd: BorrowedFd<'_>, signal: i32) -> Result<(), Errno> {
+        let signalled = match signal_through_pidfd(pidfd, signal, true) {
+            Err(Errno::EINVAL) => sys::signal_process_group(self.child.process(), signal),
+            signalled => signalled,
+        };
+        match signalled {
+            Err(Errno::ESRCH) => Ok(()),
+            signalled => signalled,
+        }
     }
 
     /// Returns whether the program's status is unknown to the execution, and no collector of
@@ -1115,14 +1124,18 @@ fn arrived(report: &LaunchReport) -> bool {
     }
 }
 
-/// Sends `SIGKILL` through `pidfd`, as [`sys::kill_through_pidfd`] does, unless a test has the
-/// kernel refuse this thread's signals.
-fn kill_through_pidfd(pidfd: BorrowedFd<'_>, process_group: bool) -> Result<(), Errno> {
+/// Sends the signal numbered `signal` through `pidfd`, as [`sys::signal_through_pidfd`] does,
+/// unless a test has the kernel refuse this thread's signals through pidfds.
+fn signal_through_pidfd(
+    pidfd: BorrowedFd<'_>,
+    signal: i32,
+    process_group: bool,
+) -> Result<(), Errno> {
     #[cfg(test)]
     if let Some(error) = REFUSED.get() {
         return Err(error);
     }
-    sys::kill_through_pidfd(pidfd, process_group)
+    sys::signal_through_pidfd(pidfd, signal, process_group)
 }
 
 #[cfg(test)]
