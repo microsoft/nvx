@@ -671,7 +671,7 @@ job, a broken CLI does not occupy the hypervisor runners.
 `Required status check`, the development release, and performance persistence
 require both CLI jobs.
 
-The KVM and MSHV pools have five runners each, and the WHP pool has ten. In
+The KVM and MSHV pools have five runners each, and the WHP pool has seven. In
 each pool, one runner carries `benchmark` and runs only the platform job, and
 the others carry `general` and run all non-benchmark backend jobs. Platform
 jobs from overlapping workflow runs still measure one after another on their
@@ -695,7 +695,7 @@ runs queue on WHP first. Dedicating the benchmark runner takes it out of its
 pool's general capacity. In the replay, which left four general WHP runners,
 the WHP non-benchmark p90 wait rose from about three to five minutes, while the
 KVM and MSHV non-benchmark waits stayed near zero. The WHP pool has since grown
-to nine general runners, more than the five that served these jobs before the
+to six general runners, more than the five that served these jobs before the
 split. A change that adds a job or a shard needs general runners to run it in
 parallel; otherwise it only queues.
 
@@ -737,7 +737,7 @@ end, about three minutes later; a run that skips the VMM tests fills the four.
 MSHV's four hold the two shards, the guest and sandbox job, and, on `dev`
 pushes and full runs, the debug-kernel job, and its VMM-test leg starts after
 the Linux build, by when the guest and sandbox job has ended. On WHP, a run
-uses at most seven of the nine general runners: one for the OpenVMM unit
+needs at most seven of the six general runners at once: one for the OpenVMM unit
 tests, up to four for the microVM jobs, and one for the Windows VMM-test build
 and then two for the [shards of the WHP VMM tests](#openvmm-vmm-test-shards).
 The build ended after the last WHP microVM job in 10 of the 13 runs since
@@ -745,7 +745,8 @@ The build ended after the last WHP microVM job in 10 of the 13 runs since
 usually take runners that the microVM jobs freed, and a run then uses at most
 six. A run that restores the Windows build from the
 [cache](#openvmm-vmm-test-cache) instead ends it within about a minute, so its
-shards run beside the microVM jobs, and it may use all seven. When a pool has fewer
+shards run beside the microVM jobs, and the last of the seven jobs to start
+waits for the first to end. When a pool has fewer
 free general runners than a backend's microVM jobs, the jobs that start last
 wait for the first to end, so the backend's microVM tests take up to about
 twice as long as one of its jobs, still less than the unsharded suite.
