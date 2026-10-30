@@ -71,7 +71,7 @@ impl VmmCommand<'_> {
 /// terminal; on Windows, without a console window, and outside the caller's job object when
 /// `command` asks for it, in a job object of its own that is named after `log`, which limits no
 /// resource but lets no process that the VMM starts break away from it, unless `log` is not a file
-/// of a disk volume, such as `NUL` or a pipe, or a job that is not the user's takes that name. A
+/// of a disk volume, such as `NUL` or a pipe, or what takes that name is not the user's job. A
 /// process that the caller spawns while the VMM is created, which can inherit the log as
 /// [`Inherited`] describes, never joins the VMM's job, so it holds the log's claim only if the VMM
 /// has none: see [the store](crate::host::store#the-log-claim).

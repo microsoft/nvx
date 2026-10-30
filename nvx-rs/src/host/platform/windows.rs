@@ -14,11 +14,12 @@ use std::{mem, ptr};
 use windows_sys::Win32::Foundation::{
     CompareObjectHandles, DUPLICATE_CLOSE_SOURCE, DUPLICATE_SAME_ACCESS, DuplicateHandle,
     ERROR_ACCESS_DENIED, ERROR_ALREADY_EXISTS, ERROR_BROKEN_PIPE, ERROR_FILE_NOT_FOUND,
-    ERROR_INVALID_PARAMETER, ERROR_IO_PENDING, ERROR_MORE_DATA, ERROR_NO_DATA,
-    ERROR_OPERATION_ABORTED, ERROR_PIPE_BUSY, ERROR_PIPE_CONNECTED, ERROR_PIPE_NOT_CONNECTED,
-    ERROR_SHARING_VIOLATION, ERROR_SUCCESS, FILETIME, FreeLibrary, GENERIC_ALL, GENERIC_READ,
-    GENERIC_WRITE, GetHandleInformation, GetLastError, HANDLE, HANDLE_FLAG_INHERIT,
-    INVALID_HANDLE_VALUE, SetHandleInformation, SetLastError, WAIT_OBJECT_0, WAIT_TIMEOUT,
+    ERROR_INVALID_HANDLE, ERROR_INVALID_PARAMETER, ERROR_IO_PENDING, ERROR_MORE_DATA,
+    ERROR_NO_DATA, ERROR_OPERATION_ABORTED, ERROR_PIPE_BUSY, ERROR_PIPE_CONNECTED,
+    ERROR_PIPE_NOT_CONNECTED, ERROR_SHARING_VIOLATION, ERROR_SUCCESS, FILETIME, FreeLibrary,
+    GENERIC_ALL, GENERIC_READ, GENERIC_WRITE, GetHandleInformation, GetLastError, HANDLE,
+    HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE, SetHandleInformation, SetLastError, WAIT_OBJECT_0,
+    WAIT_TIMEOUT,
 };
 use windows_sys::Win32::Security::{
     ACCESS_ALLOWED_ACE, ACE_HEADER, ACL, ACL_REVISION, ACL_SIZE_INFORMATION, AclSizeInformation,
@@ -1886,10 +1887,12 @@ fn log_job_id(log: &fs::File) -> io::Result<Option<(u64, u128)>> {
 /// its protected access control list allows the user alone, so that a claim check tells it from a
 /// job that another user creates under its name.
 ///
-/// Returns `None`, so that the VMM starts without a job, for a log that is not a file of a disk
-/// volume, such as `NUL` or a pipe, which has no file ID to name a job after, nor a claim of a
-/// store, and if a job that is not the user's takes the name: one that allows the user nothing,
-/// or that another user owns or may use. A claim check leaves such a job aside too. Fails with
+/// A name that is taken is judged as a claim check judges it, by [`log_job_named`], so that the
+/// VMM never starts outside a job that a claim check would take for the log's. Returns `None`,
+/// so that the VMM starts without a job, if what takes the name is not the user's job, which a
+/// claim check leaves aside too, as it does a job that a symbolic link under the name led the
+/// creation to, and for a log that is not a file of a disk volume, such as `NUL` or a pipe, which
+/// has no file ID to name a job after, nor a claim of a store. Fails with
 /// [`io::ErrorKind::AlreadyExists`] if a job of the user takes the name, as one of an earlier log
 /// of the same file ID, or of the same file before it was truncated, that a process still holds
 /// would: the VMM would share it.
@@ -1899,56 +1902,202 @@ pub(crate) fn create_log_job(log: &fs::File) -> io::Result<Option<OwnedHandle>> 
     };
     let name = log_job_name(id);
     let user = CurrentUser::get()?;
-    let (handle, error) =
-        with_owner_only_attributes(&user, JOB_OBJECT_ALL_ACCESS, 0, |attributes| {
-            // SAFETY: SetLastError has no preconditions.
-            unsafe { SetLastError(ERROR_SUCCESS) };
-            // SAFETY: the name is NUL-terminated, and the attributes hold a valid descriptor.
-            let handle = unsafe { CreateJobObjectW(attributes, name.as_ptr()) };
-            (handle, last_error())
-        })?;
-    // An existing job keeps its own descriptor, which may allow this user nothing.
-    let Some(job) = owned(handle) else {
-        return if error == ERROR_ACCESS_DENIED {
-            Ok(None)
-        } else {
-            Err(io::Error::from_raw_os_error(error as i32))
-        };
-    };
-    if error == ERROR_ALREADY_EXISTS {
-        if privacy_problem(&job, &user, Required::Private)?.is_some() {
-            return Ok(None);
+    let mut error = ERROR_SUCCESS;
+    // A job that ends between a creation that found the name taken and the judgment leaves the
+    // name free, and the creation is tried again.
+    for _ in 0..LOG_JOB_ATTEMPTS {
+        let (handle, created) =
+            with_owner_only_attributes(&user, JOB_OBJECT_ALL_ACCESS, 0, |attributes| {
+                // SAFETY: SetLastError has no preconditions.
+                unsafe { SetLastError(ERROR_SUCCESS) };
+                // SAFETY: the name is NUL-terminated, and the attributes hold a valid descriptor.
+                let handle = unsafe { CreateJobObjectW(attributes, name.as_ptr()) };
+                (handle, last_error())
+            })?;
+        error = created;
+        if let Some(job) = owned(handle)
+            && error != ERROR_ALREADY_EXISTS
+        {
+            // A link under the name leads the creation elsewhere, where a claim check takes the
+            // job for none of the log's: the VMM starts without one, and the job ends.
+            return Ok(holds_name(&job, &name)?.then_some(job));
         }
-        return Err(io::Error::new(
-            io::ErrorKind::AlreadyExists,
-            format!(
-                "the job object of the log {:016x}-{:032x} exists already, held by another spawn \
-                 with the same log file or by a process that inherited it in one; give each VMM \
-                 a log file of its own, created anew",
-                id.0, id.1
-            ),
-        ));
+        match log_job_named(&name)? {
+            LogJobName::Users(_) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::AlreadyExists,
+                    format!(
+                        "the job object of the log {:016x}-{:032x} exists already, held by \
+                         another spawn with the same log file or by a process that inherited it \
+                         in one; give each VMM a log file of its own, created anew",
+                        id.0, id.1
+                    ),
+                ));
+            }
+            LogJobName::Foreign => return Ok(None),
+            LogJobName::Free => {}
+        }
     }
-    Ok(Some(job))
+    Err(io::Error::from_raw_os_error(error as i32))
 }
 
-/// Returns how many processes the job object of the log `id` holds, or `None` if no job of the
-/// user takes its name: none does, or one that is not the user's does, which allows the user
-/// nothing, or which another user owns or may use, as [`create_log_job`] says.
-fn log_job_processes(id: (u64, u128)) -> io::Result<Option<u32>> {
-    let name = log_job_name(id);
+/// How many times [`create_log_job`] tries to create a job whose name it finds taken, and then
+/// free.
+const LOG_JOB_ATTEMPTS: usize = 3;
+
+/// What takes the name of a log's job.
+enum LogJobName {
+    /// Nothing.
+    Free,
+    /// What is not the user's job: an object of another type, a job that the user cannot query,
+    /// a job that another user owns or may use, as [`privacy_problem`] tells it, or what a
+    /// symbolic link under the name leads to, which another user may have put there, even a job
+    /// of the user, as [`holds_name`] tells it.
+    Foreign,
+    /// The user's job, open to query its processes.
+    Users(OwnedHandle),
+}
+
+/// The class of the information of `NtQueryObject` that names an object, which `ntifs.h`
+/// defines.
+const OBJECT_NAME_INFORMATION_CLASS: windows_sys::Wdk::Foundation::OBJECT_INFORMATION_CLASS = 1;
+
+/// Returns the name of the object that `handle` holds open, as the object manager names it: the
+/// name that the object holds, whatever symbolic link the name that opened it led through.
+fn object_name(handle: HANDLE) -> io::Result<Vec<u16>> {
+    use windows_sys::Wdk::Foundation::{NtQueryObject, OBJECT_NAME_INFORMATION};
+    use windows_sys::Win32::Foundation::{
+        STATUS_BUFFER_OVERFLOW, STATUS_BUFFER_TOO_SMALL, STATUS_INFO_LENGTH_MISMATCH,
+    };
+
+    let mut len: u32 = 1024;
+    loop {
+        let mut buffer = vec![0u64; (len as usize).div_ceil(mem::size_of::<u64>())];
+        let mut needed = 0;
+        // SAFETY: the handle is open, and the buffer holds `len` bytes, aligned for an
+        // OBJECT_NAME_INFORMATION.
+        let status = unsafe {
+            NtQueryObject(
+                handle,
+                OBJECT_NAME_INFORMATION_CLASS,
+                buffer.as_mut_ptr().cast(),
+                len,
+                &mut needed,
+            )
+        };
+        if matches!(
+            status,
+            STATUS_BUFFER_OVERFLOW | STATUS_BUFFER_TOO_SMALL | STATUS_INFO_LENGTH_MISMATCH
+        ) && needed > len
+        {
+            len = needed;
+            continue;
+        }
+        if status < 0 {
+            return Err(status_error(status));
+        }
+        // SAFETY: the query wrote an OBJECT_NAME_INFORMATION at the start of the buffer.
+        let name = unsafe { (*buffer.as_ptr().cast::<OBJECT_NAME_INFORMATION>()).Name };
+        if name.Buffer.is_null() {
+            return Ok(Vec::new());
+        }
+        // SAFETY: the name's units lie in the buffer, which outlives this borrow of them.
+        let units =
+            unsafe { std::slice::from_raw_parts(name.Buffer, usize::from(name.Length) / 2) };
+        return Ok(units.to_vec());
+    }
+}
+
+/// Returns the directory in which `Local\` names objects for this process, as the object manager
+/// names it, such as `\Sessions\1\BaseNamedObjects`: that of a fresh event, named at random so
+/// that no link can take its name first.
+fn local_directory() -> io::Result<Vec<u16>> {
+    let mut bytes = [0u8; 16];
+    getrandom::fill(&mut bytes).map_err(io::Error::other)?;
+    let suffix: String = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
+    let name = wide(format!(r"Local\nvx-namespace-{suffix}"));
+    // SAFETY: SetLastError has no preconditions.
+    unsafe { SetLastError(ERROR_SUCCESS) };
+    // SAFETY: the name is NUL-terminated, and no attributes ask for default security.
+    let event = owned(unsafe { CreateEventW(ptr::null(), 1, 0, name.as_ptr()) })
+        .ok_or_else(io::Error::last_os_error)?;
+    if last_error() == ERROR_ALREADY_EXISTS {
+        return Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            "the random name of a fresh event is taken",
+        ));
+    }
+    let mut directory = object_name(raw(&event))?;
+    let separator = directory
+        .iter()
+        .rposition(|&unit| unit == u16::from(b'\\'))
+        .ok_or_else(|| io::Error::other("an event of the Local namespace has no directory"))?;
+    directory.truncate(separator);
+    Ok(directory)
+}
+
+/// Returns whether `object`, which the name `name` of the `Local\` namespace, NUL-terminated,
+/// opened or created, holds that name itself, rather than one that a symbolic link under it led
+/// to. Another user that may create objects in the namespace can put such a link under a name
+/// that no object holds, to another object, such as another job of the user.
+fn holds_name(object: &OwnedHandle, name: &[u16]) -> io::Result<bool> {
+    let name = name.strip_suffix(&[0]).unwrap_or(name);
+    let leaf = name
+        .iter()
+        .rposition(|&unit| unit == u16::from(b'\\'))
+        .map_or(name, |separator| &name[separator + 1..]);
+    let mut expected = local_directory()?;
+    expected.push(u16::from(b'\\'));
+    expected.extend_from_slice(leaf);
+    Ok(object_name(raw(object))? == expected)
+}
+
+/// Returns what takes the name `name` of a log's job, NUL-terminated, as a claim check and a
+/// spawn both judge it. A job that the name leads to through a symbolic link is not the log's,
+/// even one of the user: once no process holds the log's job, another user that may create
+/// objects in the session's namespace can put a link under its name, to an empty job of the user.
+fn log_job_named(name: &[u16]) -> io::Result<LogJobName> {
+    use windows_sys::Win32::Foundation::{
+        ERROR_BAD_PATHNAME, ERROR_CANT_RESOLVE_FILENAME, ERROR_INVALID_NAME, ERROR_PATH_NOT_FOUND,
+    };
+
     // SAFETY: the name is NUL-terminated.
     let opened = unsafe { OpenJobObjectW(JOB_OBJECT_QUERY | READ_CONTROL, 0, name.as_ptr()) };
     let Some(job) = owned(opened) else {
         let error = io::Error::last_os_error();
         return match error.raw_os_error().map(|code| code as u32) {
-            Some(ERROR_FILE_NOT_FOUND | ERROR_ACCESS_DENIED) => Ok(None),
+            Some(ERROR_FILE_NOT_FOUND) => Ok(LogJobName::Free),
+            // An object that allows the user nothing, or of another type, or what a link under
+            // the name leads to instead of an object: a missing directory, a malformed name, or a
+            // loop of links.
+            Some(
+                ERROR_ACCESS_DENIED
+                | ERROR_INVALID_HANDLE
+                | ERROR_PATH_NOT_FOUND
+                | ERROR_BAD_PATHNAME
+                | ERROR_INVALID_NAME
+                | ERROR_CANT_RESOLVE_FILENAME,
+            ) => Ok(LogJobName::Foreign),
             _ => Err(error),
         };
     };
-    if privacy_problem(&job, &CurrentUser::get()?, Required::Private)?.is_some() {
-        return Ok(None);
+    if !holds_name(&job, name)? {
+        return Ok(LogJobName::Foreign);
     }
+    Ok(
+        match privacy_problem(&job, &CurrentUser::get()?, Required::Private)? {
+            Some(_) => LogJobName::Foreign,
+            None => LogJobName::Users(job),
+        },
+    )
+}
+
+/// Returns how many processes the job object of the log `id` holds, or `None` if no job of the
+/// user takes its name, as [`log_job_named`] judges it.
+fn log_job_processes(id: (u64, u128)) -> io::Result<Option<u32>> {
+    let LogJobName::Users(job) = log_job_named(&log_job_name(id))? else {
+        return Ok(None);
+    };
     // SAFETY: the structure is plain data for which all-zero bytes are valid.
     let mut accounting: JOBOBJECT_BASIC_ACCOUNTING_INFORMATION = unsafe { mem::zeroed() };
     // SAFETY: the handle is a job object open for querying, and the information has the size
@@ -1977,14 +2126,14 @@ fn log_job_processes(id: (u64, u128)) -> io::Result<Option<u32>> {
 /// while it holds processes, and the spawn closes its own: a process that another thread created
 /// while the VMM's spawn had the log's handles inheritable holds the log, and the job's handle with
 /// it, so the job can be opened by its name for as long as that process holds the log, and the
-/// process, which never joins the job, does not hold the claim. A job under the name that is not
-/// the user's, as [`create_log_job`] tells it, is not the log's, and leaves the claim to the log's
-/// handles: another user cannot end a launch whose VMM still runs by creating an empty job under
-/// that name.
+/// process, which never joins the job, does not hold the claim. What takes the name but is not the
+/// user's job, as [`log_job_named`] tells it, is not the log's job, and leaves the claim to the
+/// log's handles: another user cannot end a launch whose VMM still runs by creating an empty job
+/// under that name, or a symbolic link under it to an empty job of the user.
 ///
 /// Without the user's job, as for a VMM that no such process outlives, that a launch of an earlier
-/// version started outside one, or whose job's name another user took, and for a log that is not
-/// a file of a disk volume, which has no job, the claim is whether any process holds the log
+/// version started outside one, or whose job's name something else took, and for a log that is
+/// not a file of a disk volume, which has no job, the claim is whether any process holds the log
 /// open. The log is opened first without access rights, which takes no part in sharing checks, to
 /// check its identity and to read the file ID that names its job from the same handle; an open
 /// that shares nothing then fails with a sharing violation while any process, such as a VMM that
@@ -3180,6 +3329,157 @@ mod tests {
         }
         drop(log);
         assert!(!log_claim_held(&path, identity).unwrap());
+    }
+
+    #[test]
+    fn an_object_of_another_type_under_the_name_of_a_logs_job_is_not_the_logs() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("vmm.log");
+        let log = fs::File::create(&path).unwrap();
+        let identity = file_identity(&path).unwrap();
+        let id = opened_file_id(&log).unwrap();
+        let name = log_job_name(id);
+        // An event shares the namespace of jobs, so both the creation and the opening of a job
+        // under its name fail, with ERROR_INVALID_HANDLE.
+        // SAFETY: the name is NUL-terminated.
+        let event = owned(unsafe { CreateEventW(ptr::null(), 1, 0, name.as_ptr()) })
+            .unwrap_or_else(|| panic!("cannot create an event: {}", io::Error::last_os_error()));
+        // A spawn starts the VMM without a job...
+        assert!(create_log_job(&log).unwrap().is_none());
+        // ...and the claim is the log's handles, which this test holds.
+        assert_eq!(log_job_processes(id).unwrap(), None);
+        assert!(log_claim_held(&path, identity).unwrap());
+        drop(log);
+        assert!(!log_claim_held(&path, identity).unwrap());
+        drop(event);
+    }
+
+    /// Puts a symbolic link of the object manager under the name `name` of the `Local\`
+    /// namespace, NUL-terminated, to the object that the object manager names `target`, as
+    /// another user that may create objects in the namespace could, and returns it: the link
+    /// lasts until it is closed.
+    fn local_link(name: &[u16], target: &[u16]) -> OwnedHandle {
+        use windows_sys::Wdk::Foundation::OBJECT_ATTRIBUTES;
+        use windows_sys::Win32::Foundation::{NTSTATUS, OBJ_CASE_INSENSITIVE, UNICODE_STRING};
+
+        #[link(name = "ntdll", kind = "raw-dylib")]
+        unsafe extern "system" {
+            fn NtCreateSymbolicLinkObject(
+                link: *mut HANDLE,
+                access: u32,
+                attributes: *const OBJECT_ATTRIBUTES,
+                target: *const UNICODE_STRING,
+            ) -> NTSTATUS;
+        }
+        /// Every right to a symbolic link, which `ntifs.h` defines.
+        const SYMBOLIC_LINK_ALL_ACCESS: u32 = 0x000f_0001;
+
+        let name = name.strip_suffix(&[0]).unwrap_or(name);
+        let separator = name
+            .iter()
+            .rposition(|&unit| unit == u16::from(b'\\'))
+            .unwrap();
+        let mut path = local_directory().unwrap();
+        path.extend_from_slice(&name[separator..]);
+        let string = |units: &[u16]| UNICODE_STRING {
+            Length: u16::try_from(mem::size_of_val(units)).unwrap(),
+            MaximumLength: u16::try_from(mem::size_of_val(units)).unwrap(),
+            Buffer: units.as_ptr().cast_mut(),
+        };
+        let (path_string, target_string) = (string(&path), string(target));
+        let attributes = OBJECT_ATTRIBUTES {
+            Length: mem::size_of::<OBJECT_ATTRIBUTES>() as u32,
+            ObjectName: &path_string,
+            Attributes: OBJ_CASE_INSENSITIVE,
+            ..OBJECT_ATTRIBUTES::default()
+        };
+        let mut link = ptr::null_mut();
+        // SAFETY: the attributes, the names that they and the target point to, and the output
+        // outlive the call.
+        let status = unsafe {
+            NtCreateSymbolicLinkObject(
+                &mut link,
+                SYMBOLIC_LINK_ALL_ACCESS,
+                &attributes,
+                &target_string,
+            )
+        };
+        assert!(
+            status >= 0,
+            "cannot create a link: {}",
+            status_error(status)
+        );
+        owned(link).unwrap()
+    }
+
+    #[test]
+    fn what_a_link_under_the_name_of_a_logs_job_leads_to_is_not_the_logs() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("vmm.log");
+        let log = fs::File::create(&path).unwrap();
+        let identity = file_identity(&path).unwrap();
+        let id = opened_file_id(&log).unwrap();
+        let name = log_job_name(id);
+        // An empty job of the user, as that of another log whose VMM has exited while a process
+        // spawned in its window still holds the job.
+        let other = fs::File::create(directory.path().join("other.log")).unwrap();
+        let other = create_log_job(&other)
+            .unwrap()
+            .expect("a log on a disk volume has a job");
+        // A link under the name of the log's job, which no job holds, to that one.
+        let link = local_link(&name, &object_name(raw(&other)).unwrap());
+        // A claim check leaves the job that the link leads to aside, and the claim is the log's
+        // handles, which this test holds, where that empty job would have released it...
+        assert_eq!(log_job_processes(id).unwrap(), None);
+        assert!(log_claim_held(&path, identity).unwrap());
+        // ...and a spawn starts the VMM without a job, rather than in the other log's.
+        assert!(create_log_job(&log).unwrap().is_none());
+        drop(link);
+        // A link into a directory that does not exist leads to no object at all.
+        let directory_name = local_directory().unwrap();
+        let missing: Vec<u16> = directory_name
+            .iter()
+            .copied()
+            .chain(format!(r"\nvx-missing-{:032x}\job", id.1).encode_utf16())
+            .collect();
+        let link = local_link(&name, &missing);
+        assert_eq!(log_job_processes(id).unwrap(), None);
+        assert!(log_claim_held(&path, identity).unwrap());
+        assert!(create_log_job(&log).unwrap().is_none());
+        drop(link);
+        // A link to a name that no object holds leads the creation of a job there, which a spawn
+        // drops, and a claim check, which finds no job at the end of the link, follows the log's
+        // handles.
+        let elsewhere: Vec<u16> = directory_name
+            .iter()
+            .copied()
+            .chain(format!(r"\nvx-elsewhere-{:032x}", id.1).encode_utf16())
+            .collect();
+        let link = local_link(&name, &elsewhere);
+        assert!(create_log_job(&log).unwrap().is_none());
+        assert_eq!(log_job_processes(id).unwrap(), None);
+        assert!(log_claim_held(&path, identity).unwrap());
+        drop(link);
+        // Without the links, the log takes a job of its own.
+        drop(other);
+        assert!(create_log_job(&log).unwrap().is_some());
+        drop(log);
+        assert!(!log_claim_held(&path, identity).unwrap());
+    }
+
+    #[test]
+    fn a_vmm_never_starts_outside_a_job_that_a_claim_check_takes_for_its_logs() {
+        let directory = tempfile::tempdir().unwrap();
+        let log = fs::File::create(directory.path().join("vmm.log")).unwrap();
+        let id = opened_file_id(&log).unwrap();
+        // A job of the user that allows the user to query it alone, which a creation of the log's
+        // job cannot open, but which a claim check takes for the log's.
+        let job = job_with_descriptor(&log_job_name(id), "D:P(A;;0x20004;;;OW)");
+        assert_eq!(log_job_processes(id).unwrap(), Some(0));
+        let error = create_log_job(&log).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::AlreadyExists, "{error}");
+        drop(job);
+        assert!(create_log_job(&log).unwrap().is_some());
     }
 
     #[test]

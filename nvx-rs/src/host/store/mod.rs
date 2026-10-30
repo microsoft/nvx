@@ -153,11 +153,13 @@
 //! spawn: the job is named in that session's namespace, so a recovery from another session does
 //! not find it, and checks the log's handles, as for a VMM that an earlier version started outside
 //! a job, which such a process then holds until it exits. The job belongs to the user and allows
-//! the user alone, and a job under its name that is not the user's leaves the claim to the log's
-//! handles, so that another user cannot end a launch whose VMM still runs by creating an empty job
-//! under that name. If such a job takes the name at the spawn or at a check, though, a process
-//! spawned in the window holds the claim again until it exits, as for a VMM that an earlier version
-//! started outside a job, and recovery leaves the launch to a later recovery until then.
+//! the user alone, and what takes its name but is not the user's job, such as another user's job,
+//! an object of another type, or a symbolic link to another job of the user, leaves the claim to
+//! the log's handles, so that another user cannot end a launch whose VMM still runs by creating an
+//! empty job, or a link to one, under that name. If such an object takes the name at the spawn or
+//! at a check, though, a process spawned in the window holds the claim again until it exits, as
+//! for a VMM that an earlier version started outside a job, and recovery leaves the launch to a
+//! later recovery until then.
 //!
 //! # Recovery
 //!
