@@ -691,7 +691,7 @@ OPENVMM_KVM_TEST_FILTER = _exclude_openvmm_tests(
     f"({OPENVMM_LINUX_TEST_FILTER})"
     f"{OPENVMM_NESTED_TEST_EXCLUSION}"
     " & !test(no_vmbus_prepped_boot_no_vmbus_windows)"
-    " & !test(windows_datacenter_core_2022_x64)"
+    " & !test(windows_datacenter_core)"
     " & !test(virtio_net_windows)",
     OPENVMM_KVM_EXCLUDED_TESTS,
 )
@@ -706,7 +706,7 @@ OPENVMM_MSHV_EXCLUDED_TESTS = (
 )
 OPENVMM_MSHV_TEST_FILTER = _exclude_openvmm_tests(
     f"({OPENVMM_LINUX_TEST_FILTER}){OPENVMM_NESTED_TEST_EXCLUSION}"
-    " & !test(windows_datacenter_core_2022_x64)",
+    " & !test(windows_datacenter_core)",
     OPENVMM_MSHV_EXCLUDED_TESTS,
 )
 # ttrpc::test_ttrpc_interface stays on the Linux backends: it boots Linux
@@ -716,8 +716,8 @@ OPENVMM_MSHV_TEST_FILTER = _exclude_openvmm_tests(
 # checks for Hyper-V on Windows.
 OPENVMM_WHP_TESTS = (
     "multiarch::hibernate::openvmm_uefi_x64_guest_test_x64_hibernate_halts",
-    "multiarch::ic::openvmm_uefi_x64_windows_datacenter_core_2022_x64_kvp_ic",
     "multiarch::ic::openvmm_uefi_x64_windows_datacenter_core_2022_x64_timesync_ic",
+    "multiarch::ic::openvmm_uefi_x64_windows_datacenter_core_2025_x64_kvp_ic",
     "multiarch::openvmm_pcat_x64_freebsd_13_2_x64_boot_no_agent",
     "multiarch::openvmm_pcat_x64_freebsd_13_2_x64_iso_boot_no_agent",
     "multiarch::openvmm_pcat_x64_windows_datacenter_core_2022_x64_boot",
