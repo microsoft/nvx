@@ -191,21 +191,24 @@ into planned pull requests to `main` and marks those that stay fork-only.
 
 A pin promotion moves the `openvmm` gitlink to a reviewed OpenVMM revision:
 
-- Make the promotion a one-commit topic branch based directly on the current
-  `dev`; that commit should change only the gitlink unless the revision needs
-  coordinated NVX changes, with a subject such as `openvmm: pin auto's fallback
-  to host CPU profiles`. Never merge OpenVMM history into NVX.
+- Make the promotion a two-commit topic branch based directly on the current
+  `dev`. The first commit should change only the gitlink unless the revision
+  needs coordinated NVX changes, with a subject such as `openvmm: pin auto's
+  fallback to host CPU profiles`. The second maps the pinned commits in the
+  [OpenVMM upstream roadmap](openvmm-upstream-roadmap.md) and changes nothing
+  else, with a subject such as `doc: map the VM time fixes in the OpenVMM
+  roadmap`. Never merge OpenVMM history into NVX.
 - After committing, run `scripts/nvx.py verify`, which checks that the
   submodule checkout matches the recorded pin.
 - `nvx-rs` checks copies of OpenVMM's control-session protocol vectors, which
   the NVX CLI jobs compare with the submodule's files. When a revision changes
   them, copy them into `nvx-rs/tests/vectors/openvmm/` unchanged and record the
-  revision, in the same commit; see
+  revision, in the gitlink commit; see
   [OpenVMM's vectors](../nvx-rs/tests/vectors/README.md#openvmms-vectors).
   `nvx-rs run` also reads a copy of the identities of OpenVMM's built-in CPU
   profiles, `nvx-rs/src/host/cli/cpu_generations.json`, which the NVX CLI jobs
   compare with the pinned profiles; a revision that adds, revises, or removes
-  a profile updates it in the same commit.
+  a profile updates it in the gitlink commit.
 - In the pull request, name the OpenVMM pull request and the exact pinned
   SHA, the scope and any prerequisite revisions, and the validation you ran.
 - A gitlink change is an input of every CI suite, so its pull request runs
