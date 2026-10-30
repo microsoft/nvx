@@ -20,6 +20,7 @@ from unittest.mock import patch
 
 import yaml
 
+from scripts.powershell_testing import run_powershell
 from scripts.setup.azure import build_package as builder
 
 
@@ -103,7 +104,7 @@ class PackageTests(unittest.TestCase):
         if os.name != "nt" or powershell is None:
             self.skipTest("Windows PowerShell is unavailable")
         sentinel = "NVX_AZURE_WINDOWS_MOCK_OK"
-        result = subprocess.run(
+        result = run_powershell(
             [
                 powershell,
                 "-NoProfile",
@@ -114,10 +115,6 @@ class PackageTests(unittest.TestCase):
                 script + f"\nWrite-Output {sentinel}\n",
             ],
             env={**os.environ, **environment},
-            capture_output=True,
-            text=True,
-            timeout=30,
-            check=False,
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn(sentinel, result.stdout)
@@ -1656,7 +1653,7 @@ catch {
 if (-not $rejected) { throw 'Windows VMSS identity mismatch was accepted' }
 Write-Output NVX_AZURE_WINDOWS_MOCK_OK
 """
-            result = subprocess.run(
+            result = run_powershell(
                 [
                     powershell,
                     "-NoProfile",
@@ -1677,10 +1674,6 @@ Write-Output NVX_AZURE_WINDOWS_MOCK_OK
                     "NVX_TEST_BOOTSTRAP": str(bootstrap_root),
                     "NVX_TEST_PACKAGE": str(output),
                 },
-                capture_output=True,
-                text=True,
-                timeout=90,
-                check=False,
             )
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertIn("NVX_AZURE_WINDOWS_MOCK_OK", result.stdout)
@@ -1827,7 +1820,7 @@ if ($null -ne (Select-ManagedDataDisk -Disks @($scsi, $nvme) `
     throw 'A disk was selected despite contradictory controller mappings'
 }
 """
-        result = subprocess.run(
+        result = run_powershell(
             [
                 powershell,
                 "-NoProfile",
@@ -1843,10 +1836,6 @@ if ($null -ne (Select-ManagedDataDisk -Disks @($scsi, $nvme) `
                     builder.ROOT / "windows/setup-data-disk.ps1"
                 ),
             },
-            capture_output=True,
-            text=True,
-            timeout=30,
-            check=False,
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 

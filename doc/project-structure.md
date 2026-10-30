@@ -157,6 +157,7 @@ nvx/
 |   |-- nvx-hosts.example.json   Template for the ignored .nvx-hosts.json
 |   |-- nvx.py                   Supported command-line entry point
 |   |-- nvx_adversarial_executor.py Restricted adversarial executor entry point
+|   |-- powershell_testing.py    PowerShell launches of the unit tests, under a shared default time limit
 |   |-- publish_development_release.py Development release publisher run by CI
 |   |-- publish_nvx_crate.py     nvx crate publisher run by CI's full runs of dev
 |   `-- test_*.py                Python tooling unit tests
@@ -315,7 +316,8 @@ storage activity during profiled snapshot captures, as
 [CI collection](benchmarks.md#ci-collection) describe. `storage_events.py` saves
 the storage events of a failed Windows benchmark job, as
 [CI collection](benchmarks.md#ci-collection) describes. The `test_*.py` files
-beside `nvx.py` are the tooling's unit tests.
+beside `nvx.py` are the tooling's unit tests. They launch PowerShell through
+`powershell_testing.py`, which gives each launch a shared default time limit.
 
 The `setup/` scripts bootstrap development hosts and GitHub Actions runners
 using the [tool manifest](../scripts/setup/tool-versions.conf);

@@ -631,7 +631,13 @@ system in `nvx-cli-linux` and `nvx-cli-windows` rather than in every
 hypervisor job. Each checks out OpenVMM, whose pinned CPU profiles a test
 reads, and uses Python 3.12, the release that the self-hosted runners provide;
 the Windows job also installs the pinned Rust release with the minimal profile
-for the curl shim test and the `nvx-rs` build. Each job first builds the
+for the curl shim test and the `nvx-rs` build. The tests that run Windows
+PowerShell, or PowerShell 7 where it is installed, give a launch 120 s by
+default, `POWERSHELL_TIMEOUT` in `scripts/powershell_testing.py`: a launch
+takes a few seconds at most, but a GitHub-hosted runner has held one up for
+more than 30 s (#1030). Only the storage events test, whose save step queries
+the host's event logs for up to 120 s each, gives its launches 300 s. Each job
+first builds the
 `nvx-rs` executable that the microVM tests run, tests with it, and hands it to the
 microVM test and platform jobs of its operating system, as described above.
 Each also runs the ignored `nvx-rs` test `tests/openvmm_vectors.rs`, which
