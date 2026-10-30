@@ -1050,6 +1050,9 @@ def _packaged_source_manifest(
     ubuntu_section["distro_layer_manifest_sha256"] = sha256_file(
         release_root / "guest" / UbuntuBuildConstants.DISTRO_MANIFEST_NAME
     )
+    ubuntu_section["scratch_template_sha256"] = sha256_file(
+        release_root / "guest" / UbuntuBuildConstants.SCRATCH_TEMPLATE_NAME
+    )
     root_manifest["nvx_rs"] = {
         "executable_sha256": sha256_file(release_root / "bin" / nvx_rs_name),
         **{

@@ -449,7 +449,6 @@ def _write_release_fixture(
     for path in (
         binary,
         *(build_dir / name for name in guest_names),
-        build_dir / UbuntuBuildConstants.SCRATCH_TEMPLATE_NAME,
         root / "LICENSE",
         root / "README.md",
         root / "THIRD_PARTY_NOTICES.md",
@@ -26329,6 +26328,14 @@ class ReleaseTests(unittest.TestCase):
                     destination
                     / "guest"
                     / AzureLinuxBuildConstants.PACKAGE_MANIFEST_NAME
+                ),
+            )
+            # The package ships the sandbox scratch template, which the
+            # manifest declares with its digest.
+            self.assertEqual(
+                manifest["ubuntu"]["scratch_template_sha256"],
+                common.sha256_file(
+                    destination / "guest" / UbuntuBuildConstants.SCRATCH_TEMPLATE_NAME
                 ),
             )
             # The package ships the provenance of nvx-rs, which binds it to the

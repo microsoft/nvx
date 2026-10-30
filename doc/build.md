@@ -353,11 +353,12 @@ does not need the Azure Linux artifacts. Packaging stages and verifies a
 complete output before replacing an existing `dist/` version, which requires
 `--force`. Its `SOURCE-MANIFEST.json` records the package version and exact
 hashes for OpenVMM, Linux, the generated kernel config, each packaged guest
-initramfs and its package manifest, and the Ubuntu distro layer and its
-manifest. Its `nvx_rs` section records the `nvx-rs` executable's SHA-256, the
-digest of the `nvx-rs` sources that built it, and the build's Rust release,
-target, and features. Its `guest_rust` section pins Rust 1.95.0 and
-`x86_64-unknown-linux-musl`, and each guest's `guest_sources` includes
+initramfs and its package manifest, the Ubuntu distro layer and its manifest,
+and the sandbox scratch template, under `scratch_template_sha256` in its
+`ubuntu` section. Its `nvx_rs` section records the `nvx-rs` executable's
+SHA-256, the digest of the `nvx-rs` sources that built it, and the build's
+Rust release, target, and features. Its `guest_rust` section pins Rust 1.95.0
+and `x86_64-unknown-linux-musl`, and each guest's `guest_sources` includes
 `nvx-rs` and `rust-toolchain.toml`. The OpenVMM section advertises microVM ABI 2,
 control-session protocol 1, and contract
 `nvx-microvm-v2-control-v2`; product guest-agent metadata is intentionally not
@@ -376,6 +377,7 @@ guest/initramfs-ubuntu.cpio.gz
 guest/initramfs-ubuntu.cpio.gz.packages.json
 guest/ubuntu-distro.erofs
 guest/ubuntu-distro.erofs.manifest.json
+guest/ubuntu-smoke-scratch.ext4
 guest/initramfs-azurelinux.cpio.gz
 guest/initramfs-azurelinux.cpio.gz.packages.json
 provenance/openvmm.provenance.json

@@ -275,10 +275,12 @@ sh scripts/setup/setup-linux.sh --backend mshv \
     --guest-bundle /path/to/nvx-guest-artifacts
 ```
 
-The destination must be absent or empty. The bundle contains the kernel,
-initramfs, package manifest, the build provenance of the kernel and the Alpine
-initramfs, which managed sandboxes read as their runtime identity, the checkout
-revision, and SHA-256 checksums.
+The destination must be absent or empty. The bundle contains the kernel, the
+Alpine, Ubuntu, and Azure Linux initramfs images and their package manifests,
+the Ubuntu distro layer and its manifest, the sandbox scratch template, the
+build provenance of the kernel and the Alpine initramfs, which managed
+sandboxes read as their runtime identity, the checkout revision, and SHA-256
+checksums.
 Use `--bundle-only` with `--guest-bundle` to package artifacts produced by a
 separate `build-guest` invocation without provisioning or rebuilding the host.
 

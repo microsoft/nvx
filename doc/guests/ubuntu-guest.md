@@ -171,8 +171,10 @@ Base or the lock.
 
 Release staging rejects an Ubuntu manifest that does not match its artifact
 and the current inputs. Platform releases carry all four Ubuntu files under
-`guest/`, `nvx-rs download` installs them, and `run --guest ubuntu` fails when
-the initramfs is missing instead of falling back to Alpine.
+`guest/`, with the sandbox scratch template, `ubuntu-smoke-scratch.ext4`,
+which has no manifest; `nvx-rs download` installs the four, and
+`run --guest ubuntu` fails when the initramfs is missing instead of falling
+back to Alpine.
 [Package and source delivery](../distribution.md) describes how
 `collect-sources` materializes the corresponding Ubuntu source.
 

@@ -867,7 +867,7 @@ Ubuntu distro layer over copies of the scratch template, which comes with the
 layer: the layer's Docker target formats it, its cache entry holds it, and the
 Ubuntu record gives its digest, so a push reuses it with the layer. The platform
 jobs boot the kernel and the Alpine initramfs to qualify their runner and to
-benchmark, and package every guest image but the scratch template into their
+benchmark, and package every guest image, and the scratch template, into their
 release. A missing artifact fails its download step, so no job runs without a
 component that it reads. The microVM test jobs also set `NVX_AUTO_DOWNLOAD=0`,
 so that `nvx-rs` never replaces a missing artifact with a release's, as it does
