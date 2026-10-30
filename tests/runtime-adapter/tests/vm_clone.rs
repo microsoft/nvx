@@ -4233,10 +4233,13 @@ fn a_clone_whose_mapping_fails_ends_before_its_sandbox_starts() {
 /// it did, or until `stop`, and returns whether it did: it reads the listener's greeting, answers
 /// it, closes its side, and reads to the end. A connection that ends without the greeting, as
 /// OpenVMM's do while the guest does not listen yet, or where it admits no connection of the host,
-/// is retried.
+/// is retried. Each attempt to connect runs until it opens or fails: Windows retries a loopback
+/// connection that nothing accepts every half second for about two seconds, so an attempt that a
+/// timeout gave up on could still open once OpenVMM publishes the listener, which would then take
+/// that connection, already closed, for its one client.
 fn reach_guest(address: SocketAddr, stop: &AtomicBool) -> bool {
     while !stop.load(Ordering::SeqCst) {
-        if let Ok(mut stream) = TcpStream::connect_timeout(&address, Duration::from_secs(1)) {
+        if let Ok(mut stream) = TcpStream::connect(address) {
             stream
                 .set_read_timeout(Some(Duration::from_secs(5)))
                 .unwrap();
