@@ -16,6 +16,8 @@ from pathlib import Path
 from unittest.mock import call, patch
 from urllib.parse import parse_qs, urlsplit
 
+import yaml
+
 sys.path.insert(0, str(Path(__file__).parent))
 import publish_development_release  # noqa: E402
 from nvx_tools import development_release  # noqa: E402
@@ -756,9 +758,9 @@ class DevelopmentReleaseTests(unittest.TestCase):
             [{"draft": False, "prerelease": True, "make_latest": "false"}],
         )
         self.assertEqual(self._timeouts("list"), [120])
-        self.assertEqual(set(self._timeouts("read")), {60})
+        self.assertEqual(set(self._timeouts("read")), {20})
         self.assertEqual(self._timeouts("upload"), [180, 180, 180])
-        self.assertEqual(self._timeouts("publish"), [60])
+        self.assertEqual(self._timeouts("publish"), [20])
 
     def test_upload_url_drops_its_template_and_encodes_the_name(self):
         release = self.github.add_release("v1").snapshot()
@@ -1032,8 +1034,11 @@ class DevelopmentReleaseTests(unittest.TestCase):
         ):
             self._publish(self._packages())
 
+        # Creating is never repeated: a second request could duplicate a draft
+        # that the listing did not show yet.
         self.assertEqual(self.github.operations, ["list", "create", "list"])
         self.assertEqual(self.github.releases, [])
+        self.sleep.assert_not_called()
 
     def test_create_failure_that_left_drafts_sharing_the_tag_fails(self):
         def create_twice() -> None:
@@ -1087,6 +1092,195 @@ class DevelopmentReleaseTests(unittest.TestCase):
                 REPOSITORY,
                 release.snapshot(),
             )
+
+        self.assertEqual(self.github.operations, ["read"])
+        self.sleep.assert_not_called()
+
+    def test_transient_read_failure_is_retried_within_bounds(self):
+        release = self.github.add_release("v1")
+        failure = _http_error(502, "Bad Gateway")
+        self.github.fail("read", failure)
+        self.github.fail("read", self._result(124, elapsed=60, timed_out=True))
+
+        observed = development_release._require_development_release(
+            REPOSITORY,
+            release.snapshot(),
+        )
+
+        self.assertEqual(observed, release.snapshot())
+        self.assertEqual(self.github.operations, ["read", "read", "read"])
+        self.assertEqual(self.sleep.call_args_list, [call(5), call(10)])
+        output = self.stdout.getvalue()
+        self.assertIn(
+            "reading development release v1 failed; retrying in 5s: "
+            f"{_reason(failure)}\n",
+            output,
+        )
+        self.assertIn(
+            "reading development release v1 failed; retrying in 10s: "
+            "command timed out\n",
+            output,
+        )
+
+    def test_transient_read_failure_exhausts_bounded_attempts(self):
+        release = self.github.add_release("v1")
+        for _ in range(3):
+            self.github.fail("read", _http_error(503, "Service Unavailable"))
+
+        with self.assertRaisesRegex(
+            ScriptError,
+            r"^reading development release v1 exited 1\n.*\n"
+            r"gh: Service Unavailable \(HTTP 503\)$",
+        ):
+            development_release._require_development_release(
+                REPOSITORY,
+                release.snapshot(),
+            )
+
+        self.assertEqual(self.github.operations, ["read", "read", "read"])
+        self.assertEqual(self.sleep.call_args_list, [call(5), call(10)])
+
+    def test_listing_that_timed_out_is_retried(self):
+        release = self.github.add_release(TAG)
+        self.github.fail("list", self._result(124, elapsed=300, timed_out=True))
+
+        found = development_release._find_development_release(REPOSITORY, TAG)
+
+        self.assertEqual(found, release.snapshot())
+        self.assertEqual(self._timeouts("list"), [120, 120])
+        self.sleep.assert_called_once_with(5)
+
+    def test_deletion_that_failed_transiently_is_retried(self):
+        local = self._package("nvx-linux.tar.gz", b"package")
+        release = self.github.add_release("v1")
+        self.github.upload_states.append("new")
+        self.github.fail("delete", _http_error(502, "Bad Gateway"))
+
+        self._upload(release, local)
+
+        self.assertEqual(
+            self.github.operations,
+            ["read", "upload", "read", "delete", "delete", "read", "upload", "read"],
+        )
+        self.assertEqual(self.sleep.call_args_list, [call(5), call(10)])
+        self.assertEqual([asset.state for asset in release.assets], ["uploaded"])
+
+    def test_deletion_that_github_carried_out_despite_its_failure_continues(self):
+        local = self._package("nvx-linux.tar.gz", b"package")
+        release = self.github.add_release("v1")
+        self.github.upload_states.append("new")
+        self.github.fail("delete", self._result(124, timed_out=True), applied=True)
+
+        self._upload(release, local)
+
+        # The repeated request finds the asset gone, which the read confirms.
+        self.assertEqual(
+            self.github.operations,
+            ["read", "upload", "read", "delete", "delete", "read", "upload", "read"],
+        )
+        self.assertIn(
+            "asset nvx-linux.tar.gz is absent despite the delete command failure",
+            self.stdout.getvalue(),
+        )
+        self.assertEqual([asset.state for asset in release.assets], ["uploaded"])
+
+    def test_publication_that_failed_transiently_is_retried(self):
+        packages = self._packages()
+        release = self.github.add_release(TAG)
+        for package in packages:
+            self.github.add_asset(release, package.path)
+        self.github.fail("publish", _http_error(502, "Bad Gateway"))
+
+        self._publish(packages)
+
+        self.assertEqual(self.github.operations[-3:], ["publish", "publish", "read"])
+        self.assertFalse(release.draft)
+        self.sleep.assert_called_once_with(5)
+
+    def test_release_published_despite_failed_publish_requests_is_accepted(self):
+        packages = self._packages()
+        release = self.github.add_release(TAG)
+        for package in packages:
+            self.github.add_asset(release, package.path)
+        timeout = self._result(124, elapsed=60, timed_out=True)
+        self.github.fail("publish", timeout, applied=True)
+        self.github.fail("publish", timeout)
+        self.github.fail("publish", timeout)
+
+        self._publish(packages)
+
+        self.assertEqual(
+            self.github.operations[-4:],
+            ["publish", "publish", "publish", "read"],
+        )
+        self.assertFalse(release.draft)
+        self.assertIn(
+            f"release {TAG} was published despite the publish command failure",
+            self.stdout.getvalue(),
+        )
+
+    def test_draft_that_failed_publish_requests_left_fails_with_their_status(self):
+        packages = self._packages()
+        release = self.github.add_release(TAG)
+        for package in packages:
+            self.github.add_asset(release, package.path)
+        for _ in range(3):
+            self.github.fail("publish", _http_error(502, "Bad Gateway"))
+
+        with self.assertRaisesRegex(
+            ScriptError,
+            f"^publishing development release {re.escape(TAG)} exited 1\n.*\n"
+            r"gh: Bad Gateway \(HTTP 502\)$",
+        ):
+            self._publish(packages)
+
+        self.assertEqual(self.github.operations.count("publish"), 3)
+        self.assertTrue(release.draft)
+
+    def test_release_job_outlasts_every_attempt_of_publication(self):
+        # The job must not cancel publication while its bounded attempts are
+        # not spent: when every request takes all of its attempts, each to its
+        # timeout, and every upload leaves an invalid asset to delete. The
+        # job's checkout and artifact downloads take a minute or two.
+        d = development_release
+
+        def attempts(count: int, timeout: float, backoff: float) -> float:
+            return count * timeout + backoff * (2 ** (count - 1) - 1)
+
+        request = attempts(
+            d._GITHUB_REQUEST_ATTEMPTS,
+            d._GITHUB_COMMAND_TIMEOUT_SECONDS,
+            d._GITHUB_REQUEST_RETRY_BACKOFF_SECONDS,
+        )
+        listing = attempts(
+            d._GITHUB_REQUEST_ATTEMPTS,
+            d._GITHUB_LIST_TIMEOUT_SECONDS,
+            d._GITHUB_REQUEST_RETRY_BACKOFF_SECONDS,
+        )
+        # A package is read for, then uploaded in attempts that each read the
+        # release, delete the asset that they left, and read the release again.
+        package = request + attempts(
+            d.DEVELOPMENT_RELEASE_UPLOAD_ATTEMPTS,
+            d.DEVELOPMENT_RELEASE_UPLOAD_TIMEOUT_SECONDS + 3 * request,
+            d.DEVELOPMENT_RELEASE_RETRY_BACKOFF_SECONDS,
+        )
+        # Listing, a create request that fails, listing again, the packages,
+        # and a read before the publication, which a read follows.
+        publication = (
+            2 * listing
+            + d._GITHUB_COMMAND_TIMEOUT_SECONDS
+            + len(publish_development_release.PLATFORMS) * package
+            + 3 * request
+        )
+        workflow = (
+            BuildConstants.REPO_ROOT / ".github" / "workflows" / "ci.yml"
+        ).read_text(encoding="utf-8")
+        job = yaml.safe_load(workflow)["jobs"]["release"]
+        self.assertEqual(
+            job["steps"][-1]["uses"],
+            "./.github/actions/publish-development-release",
+        )
+        self.assertLessEqual(publication + 5 * 60, job["timeout-minutes"] * 60)
 
     def test_http_status_comes_from_the_error_that_gh_api_reported(self):
         cases: tuple[tuple[str, int | None], ...] = (
@@ -1154,11 +1348,17 @@ class DevelopmentReleaseTests(unittest.TestCase):
         )
 
         with (
-            patch.object(development_release, "_run_gh", return_value=failure),
+            patch.object(
+                development_release,
+                "_run_gh",
+                return_value=failure,
+            ) as run,
             self.assertRaises(ScriptError) as raised,
         ):
             development_release._find_development_release(REPOSITORY, TAG)
 
+        self.assertEqual(run.call_count, 3)
+        self.assertEqual(self.sleep.call_args_list, [call(5), call(10)])
         message = str(raised.exception)
         self.assertTrue(
             message.startswith(f"listing releases of {REPOSITORY} exited 1\n..."),

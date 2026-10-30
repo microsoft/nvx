@@ -29,9 +29,16 @@ DEVELOPMENT_RELEASE_UPLOAD_ATTEMPTS = 3
 DEVELOPMENT_RELEASE_UPLOAD_TIMEOUT_SECONDS = 180.0
 DEVELOPMENT_RELEASE_RETRY_BACKOFF_SECONDS = 10.0
 
-_GITHUB_COMMAND_TIMEOUT_SECONDS = 60.0
+# GitHub ends a REST request that it takes more than 10 seconds to process.
+_GITHUB_COMMAND_TIMEOUT_SECONDS = 20.0
 # Listing reads a page per 100 releases, and every development release adds one.
 _GITHUB_LIST_TIMEOUT_SECONDS = 120.0
+# The bounded attempts and the backoff of a request that repeating cannot
+# harm: a read, or a deletion or publication that names its asset or release by
+# ID. Creating the release is not one, and uploads have attempts of their own.
+# The release job's timeout covers every request's attempts at once.
+_GITHUB_REQUEST_ATTEMPTS = 3
+_GITHUB_REQUEST_RETRY_BACKOFF_SECONDS = 5.0
 # How much of a failed response's body a diagnostic quotes: a failed listing
 # leaves on stdout every page that it read.
 _DIAGNOSTIC_BODY_CHARACTERS = 1000
@@ -186,6 +193,36 @@ def _is_transient_failure(result: _GitHubCommandResult) -> bool:
     return status in _TRANSIENT_HTTP_STATUSES or 500 <= status <= 599
 
 
+def _failure_reason(result: _GitHubCommandResult) -> str:
+    if result.timed_out:
+        return "command timed out"
+    diagnostic = diagnostic_tail(result.diagnostic, lines=5)
+    return diagnostic or f"command exited {result.returncode}"
+
+
+def _run_gh_with_retries(
+    args: Sequence[str],
+    *,
+    label: str,
+    timeout_seconds: float = _GITHUB_COMMAND_TIMEOUT_SECONDS,
+) -> _GitHubCommandResult:
+    """Run a request that repeating cannot harm, again while it fails
+    transiently, up to its bounded attempts."""
+    attempt = 1
+    while True:
+        result = _run_gh(args, timeout_seconds=timeout_seconds)
+        if (
+            result.returncode == 0
+            or attempt >= _GITHUB_REQUEST_ATTEMPTS
+            or not _is_transient_failure(result)
+        ):
+            return result
+        delay = _GITHUB_REQUEST_RETRY_BACKOFF_SECONDS * (2 ** (attempt - 1))
+        print(f">> {label} failed; retrying in {delay:g}s: {_failure_reason(result)}")
+        time.sleep(delay)
+        attempt += 1
+
+
 def _release_from_document(value: object) -> _DevelopmentRelease:
     """Read a release from its REST document."""
     if not isinstance(value, dict):
@@ -289,13 +326,14 @@ def _find_development_release(
     unique only among published releases, so drafts can share one, and a tag
     that several releases carry no longer identifies the release to publish.
     """
-    result = _run_gh(
+    result = _run_gh_with_retries(
         (
             "api",
             "--paginate",
             "--slurp",
             f"repos/{repository}/releases?per_page=100",
         ),
+        label=f"listing releases of {repository}",
         timeout_seconds=_GITHUB_LIST_TIMEOUT_SECONDS,
     )
     if result.returncode != 0:
@@ -317,9 +355,9 @@ def _require_development_release(
     release: _DevelopmentRelease,
 ) -> _DevelopmentRelease:
     """Read `release` again by its ID."""
-    result = _run_gh(
+    result = _run_gh_with_retries(
         ("api", f"repos/{repository}/releases/{release.id}"),
-        timeout_seconds=_GITHUB_COMMAND_TIMEOUT_SECONDS,
+        label=f"reading development release {release.tag}",
     )
     if result.returncode == 0:
         return _parse_release(result.stdout)
@@ -419,14 +457,14 @@ def _delete_development_release_asset(
     release: _DevelopmentRelease,
     asset: _DevelopmentReleaseAsset,
 ) -> None:
-    result = _run_gh(
+    result = _run_gh_with_retries(
         (
             "api",
             "--method",
             "DELETE",
             f"repos/{repository}/releases/assets/{asset.id}",
         ),
-        timeout_seconds=_GITHUB_COMMAND_TIMEOUT_SECONDS,
+        label=f"deleting release asset {asset.name}",
     )
     observed = _require_development_release(repository, release)
     if _asset_named(observed, asset.name) is None:
@@ -449,12 +487,9 @@ def _is_transient_upload_failure(result: _GitHubCommandResult) -> bool:
 
 
 def _upload_failure_reason(result: _GitHubCommandResult) -> str:
-    if result.timed_out:
-        return "command timed out"
-    if result.returncode == 0:
+    if result.returncode == 0 and not result.timed_out:
         return "upload command completed but the asset was not verified"
-    diagnostic = diagnostic_tail(result.diagnostic, lines=5)
-    return diagnostic or f"upload command exited {result.returncode}"
+    return _failure_reason(result)
 
 
 def _asset_upload_url(release: _DevelopmentRelease, name: str) -> str:
@@ -636,7 +671,7 @@ def _publish_development_release_draft(
 ) -> _DevelopmentRelease:
     tag = release.tag
     print(f">> publishing verified development release {tag}")
-    result = _run_gh(
+    result = _run_gh_with_retries(
         (
             "api",
             "--method",
@@ -649,7 +684,7 @@ def _publish_development_release_draft(
             "--raw-field",
             "make_latest=false",
         ),
-        timeout_seconds=_GITHUB_COMMAND_TIMEOUT_SECONDS,
+        label=f"publishing development release {tag}",
     )
     published = _require_development_release(repository, release)
     if not published.draft and published.prerelease:
