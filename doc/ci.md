@@ -1132,7 +1132,14 @@ GitHub-hosted ones, and `check-required-ci` expects them whatever
 `--same-repository` says. Queueing a fork's pull request thus runs its code on
 the fleet before it merges, as the `dev` push that merged it did after, and
 that code includes the workflow: a group's run takes `ci.yml`, with its jobs'
-steps and the permissions of their tokens, from the group's head.
+steps and the permissions of their tokens, from the group's head. `dev` keeps
+approvals across pushes, though (its ruleset's `dismiss_stale_reviews_on_push`
+and `require_last_push_approval` are off), so the code that the queue runs may
+postdate its review. Requiring the approval of the most recent push would make
+someone other than its pusher approve the code that a group runs with the
+repository's secrets, at the cost of another approval whenever a pull request's
+author pushes after its approval; an administrator who requires the queue
+should weigh it.
 
 ### Superseded merge groups
 
@@ -1213,6 +1220,56 @@ timeout. The rule's settings:
   for runners included; the 26 that ran other self-hosted jobs but not the
   platform jobs took 13.2, 24.8, and 35.6. A timeout of 180 minutes removes
   only the groups whose runs a lost runner or an outage holds.
+- **Build concurrency:** 2. A group's run that selects every suite can occupy
+  every `general` KVM runner at once (see
+  [Job graph and runner capacity](#job-graph-and-runner-capacity)), so a
+  second group can only prepare behind it, and more would only queue for the
+  same runners while every push to `dev` outside the queue rebuilds them all
+  (see [Pushes outside the queue](#pushes-outside-the-queue)).
+- **Merge limits:** at least one pull request, without a wait, so that the
+  queue merges each group once it and the groups ahead of it pass, and at most
+  five, GitHub's default. When several groups pass together, the queue merges
+  them in one push, which runs CI once for all of them.
+
+### Pushes outside the queue
+
+The queue isn't the only way into `dev`: the deploy key with which
+`Persist performance baseline` and the module diagrams workflow push, and two
+user accounts, bypass `dev`'s ruleset, whose `merge_queue` rule binds them no
+more than its other rules. From October 16 to 29, 2026, `dev` took 234
+baseline commits and 23 diagram commits beside its 272 merges. Each such push
+changes the base of every group in the queue, which the queue then rebuilds on
+the new tip (see [Superseded merge groups](#superseded-merge-groups)), so it
+costs every group the run that it had made so far. A baseline commit landed a
+median of 29.2 minutes after the merge whose run it records, 16.1 at the 10th
+percentile and 99.9 at the 90th, about as long as a group's run, and the merges
+came a median of 27.6 minutes apart, 148 of 271 within 30 minutes of the one
+before. On a busy day, the baseline commit of nearly every merge would thus
+rebuild the group that the queue builds next, which would then take about two
+runs to merge. Before an administrator requires the queue, the performance
+history's commits should therefore leave `dev`, for instance to a branch of
+their own from which the gate reads the history, or wait for the nightly full
+run, so that `dev` takes pushes outside the queue only rarely.
+
+### Cost
+
+With the queue, each change runs CI three times: in its pull request, in its
+merge group, and in the `dev` push that merges it. A group's run selects what
+its pull request's run selected, on the latest `dev`, and so takes about as
+long (see [Queue settings](#queue-settings)). The tail of those runs is the
+wait of their platform jobs for their pools' single `benchmark` runners, which
+the pull requests' and the pushes' platform jobs share: the longest of a run's
+platform jobs waited from its creation to its start a median of 6.3 minutes,
+28.8 at the 90th percentile, and 78.3 at the 99th. The queue holds a group
+that runs them, and every group behind it, that much longer. The push could
+in principle reuse the group's results, since the queue moves `dev` to the head
+of the last group that it merges, which that group's run tested. It doesn't:
+a push still publishes the development release and records the performance
+history, and so runs the platform jobs for every change but documentation, it
+saves the caches that later runs restore, which no group can, and a push that
+merges several groups carries several pull requests' changes, of which each
+group's run checked only its own pull request's. Skipping a push's test suites
+when the run of the last group that it merged passed is left for later.
 
 ## Cancellation
 
