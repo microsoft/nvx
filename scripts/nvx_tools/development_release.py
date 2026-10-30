@@ -23,8 +23,16 @@ DEVELOPMENT_RELEASE_UPLOAD_TIMEOUT_SECONDS = 180.0
 DEVELOPMENT_RELEASE_RETRY_BACKOFF_SECONDS = 10.0
 
 _GITHUB_COMMAND_TIMEOUT_SECONDS = 60.0
+# Listing reads a page per 100 releases, and every development release adds one.
+_GITHUB_LIST_TIMEOUT_SECONDS = 120.0
+# How much of a failed response's body a diagnostic quotes: a failed listing
+# leaves on stdout every page that it read.
+_DIAGNOSTIC_BODY_CHARACTERS = 1000
 _REPOSITORY_PATTERN = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 _TARGET_SHA_PATTERN = re.compile(r"^[0-9A-Fa-f]{40}$")
+# `gh api` reports a response with an error status as `gh: <message> (HTTP
+# <status>)`, or as `gh: HTTP <status>` when the response has no message.
+_HTTP_STATUS = re.compile(r"^gh: (?:HTTP (\d{3})|.* \(HTTP (\d{3})\))$", re.MULTILINE)
 _TRANSIENT_UPLOAD_ERROR = re.compile(
     r"(?:"
     r"HTTP\s+(?:408|425|429|5\d\d)\b|"
@@ -52,9 +60,18 @@ class _GitHubCommandResult:
             part for part in (self.stderr.strip(), self.stdout.strip()) if part
         )
 
+    @property
+    def diagnostic(self) -> str:
+        """The end of the body that gh printed, then the error that it reported."""
+        body = self.stdout.strip()
+        if len(body) > _DIAGNOSTIC_BODY_CHARACTERS:
+            body = "..." + body[-_DIAGNOSTIC_BODY_CHARACTERS:]
+        return "\n".join(part for part in (body, self.stderr.strip()) if part)
+
 
 @dataclass(frozen=True)
 class _DevelopmentReleaseAsset:
+    id: int
     name: str
     size: int
     digest: str | None
@@ -63,10 +80,12 @@ class _DevelopmentReleaseAsset:
 
 @dataclass(frozen=True)
 class _DevelopmentRelease:
+    id: int
     tag: str
     target_commitish: str
     draft: bool
     prerelease: bool
+    upload_url: str
     assets: tuple[_DevelopmentReleaseAsset, ...]
 
 
@@ -123,29 +142,39 @@ def _command_error(label: str, result: _GitHubCommandResult) -> ScriptError:
         status = "timed out"
     else:
         status = f"exited {result.returncode}"
-    diagnostic = diagnostic_tail(result.output)
+    diagnostic = diagnostic_tail(result.diagnostic)
     suffix = f"\n{diagnostic}" if diagnostic else ""
     return ScriptError(f"{label} {status}{suffix}")
 
 
-def _parse_release(payload: str) -> _DevelopmentRelease:
-    try:
-        value: object = json.loads(payload)
-    except json.JSONDecodeError as error:
-        raise ScriptError("gh returned invalid release JSON") from error
+def _http_status(result: _GitHubCommandResult) -> int | None:
+    """Return the status of the error response that `gh api` reported, if any."""
+    match = _HTTP_STATUS.search(result.stderr)
+    if match is None:
+        return None
+    return int(match.group(1) or match.group(2))
+
+
+def _release_from_document(value: object) -> _DevelopmentRelease:
+    """Read a release from its REST document."""
     if not isinstance(value, dict):
         raise ScriptError("gh returned an invalid release document")
     document = cast(dict[str, object], value)
-    tag = document.get("tagName")
-    target = document.get("targetCommitish")
-    draft = document.get("isDraft")
-    prerelease = document.get("isPrerelease")
+    release_id = document.get("id")
+    tag = document.get("tag_name")
+    target = document.get("target_commitish")
+    draft = document.get("draft")
+    prerelease = document.get("prerelease")
+    upload_url = document.get("upload_url")
     assets_value = document.get("assets")
     if (
-        not isinstance(tag, str)
+        not isinstance(release_id, int)
+        or isinstance(release_id, bool)
+        or not isinstance(tag, str)
         or not isinstance(target, str)
         or not isinstance(draft, bool)
         or not isinstance(prerelease, bool)
+        or not isinstance(upload_url, str)
         or not isinstance(assets_value, list)
     ):
         raise ScriptError("gh returned incomplete release metadata")
@@ -155,12 +184,15 @@ def _parse_release(payload: str) -> _DevelopmentRelease:
         if not isinstance(asset_value, dict):
             raise ScriptError("gh returned an invalid release asset")
         asset = cast(dict[str, object], asset_value)
+        asset_id = asset.get("id")
         name = asset.get("name")
         size = asset.get("size")
         digest_value = asset.get("digest")
         state = asset.get("state")
         if (
-            not isinstance(name, str)
+            not isinstance(asset_id, int)
+            or isinstance(asset_id, bool)
+            or not isinstance(name, str)
             or not isinstance(size, int)
             or isinstance(size, bool)
             or not isinstance(state, str)
@@ -169,46 +201,100 @@ def _parse_release(payload: str) -> _DevelopmentRelease:
             raise ScriptError("gh returned incomplete release asset metadata")
         assets.append(
             _DevelopmentReleaseAsset(
+                asset_id,
                 name,
                 size,
                 digest_value,
                 state,
             )
         )
-    return _DevelopmentRelease(tag, target, draft, prerelease, tuple(assets))
+    return _DevelopmentRelease(
+        release_id,
+        tag,
+        target,
+        draft,
+        prerelease,
+        upload_url,
+        tuple(assets),
+    )
 
 
-def _query_development_release(
+def _parse_release(payload: str) -> _DevelopmentRelease:
+    try:
+        value: object = json.loads(payload)
+    except json.JSONDecodeError as error:
+        raise ScriptError("gh returned invalid release JSON") from error
+    return _release_from_document(value)
+
+
+def _releases_tagged(payload: str, tag: str) -> list[_DevelopmentRelease]:
+    """Return the releases that carry `tag` among the pages of a listing."""
+    try:
+        value: object = json.loads(payload)
+    except json.JSONDecodeError as error:
+        raise ScriptError("gh returned invalid release list JSON") from error
+    if not isinstance(value, list):
+        raise ScriptError("gh returned an invalid release list")
+    releases: list[_DevelopmentRelease] = []
+    for page in cast(list[object], value):
+        if not isinstance(page, list):
+            raise ScriptError("gh returned an invalid release list page")
+        for document_value in cast(list[object], page):
+            if not isinstance(document_value, dict):
+                raise ScriptError("gh returned an invalid release document")
+            document = cast(dict[str, object], document_value)
+            if document.get("tag_name") == tag:
+                releases.append(_release_from_document(document))
+    return releases
+
+
+def _find_development_release(
     repository: str,
     tag: str,
 ) -> _DevelopmentRelease | None:
+    """Find the release, draft or published, that carries `tag`.
+
+    The listing includes drafts for tokens with push access. GitHub keeps tags
+    unique only among published releases, so drafts can share one, and a tag
+    that several releases carry no longer identifies the release to publish.
+    """
     result = _run_gh(
         (
-            "release",
-            "view",
-            tag,
-            "--repo",
-            repository,
-            "--json",
-            "tagName,isDraft,isPrerelease,targetCommitish,assets",
+            "api",
+            "--paginate",
+            "--slurp",
+            f"repos/{repository}/releases?per_page=100",
         ),
-        timeout_seconds=_GITHUB_COMMAND_TIMEOUT_SECONDS,
+        timeout_seconds=_GITHUB_LIST_TIMEOUT_SECONDS,
     )
-    if result.returncode == 0:
-        return _parse_release(result.stdout)
-    if _is_release_lookup_failure(result):
-        return None
-    raise _command_error(f"querying development release {tag}", result)
+    if result.returncode != 0:
+        raise _command_error(f"listing releases of {repository}", result)
+    # A release created during the listing shifts its later pages, which then
+    # show again the release that ended the page before.
+    releases = {release.id: release for release in _releases_tagged(result.stdout, tag)}
+    if len(releases) > 1:
+        ids = ", ".join(str(release_id) for release_id in sorted(releases))
+        raise ScriptError(
+            f"releases {ids} all carry development release tag {tag}; "
+            "refusing to change any of them"
+        )
+    return next(iter(releases.values()), None)
 
 
 def _require_development_release(
     repository: str,
-    tag: str,
+    release: _DevelopmentRelease,
 ) -> _DevelopmentRelease:
-    release = _query_development_release(repository, tag)
-    if release is None:
-        raise ScriptError(f"development release {tag} disappeared")
-    return release
+    """Read `release` again by its ID."""
+    result = _run_gh(
+        ("api", f"repos/{repository}/releases/{release.id}"),
+        timeout_seconds=_GITHUB_COMMAND_TIMEOUT_SECONDS,
+    )
+    if result.returncode == 0:
+        return _parse_release(result.stdout)
+    if _http_status(result) == 404:
+        raise ScriptError(f"development release {release.tag} disappeared")
+    raise _command_error(f"reading development release {release.tag}", result)
 
 
 def _create_development_release(
@@ -221,34 +307,35 @@ def _create_development_release(
     print(f">> creating draft development release {tag}")
     result = _run_gh(
         (
-            "release",
-            "create",
-            tag,
-            "--repo",
-            repository,
-            "--target",
-            target_sha,
-            "--title",
-            title,
-            "--notes",
-            notes,
-            "--draft",
-            "--prerelease",
-            "--latest=false",
+            "api",
+            "--method",
+            "POST",
+            f"repos/{repository}/releases",
+            "--raw-field",
+            f"tag_name={tag}",
+            "--raw-field",
+            f"target_commitish={target_sha}",
+            "--raw-field",
+            f"name={title}",
+            "--raw-field",
+            f"body={notes}",
+            "--field",
+            "draft=true",
+            "--field",
+            "prerelease=true",
+            "--raw-field",
+            "make_latest=false",
         ),
         timeout_seconds=_GITHUB_COMMAND_TIMEOUT_SECONDS,
     )
-    release = _query_development_release(repository, tag)
-    if release is not None:
-        if result.returncode != 0:
-            print(
-                f">> release {tag} exists despite the create command failure; "
-                "resuming it"
-            )
-        return release
-    if result.returncode != 0:
+    if result.returncode == 0:
+        return _parse_release(result.stdout)
+    # GitHub can create the draft although the request failed on the client.
+    release = _find_development_release(repository, tag)
+    if release is None:
         raise _command_error(f"creating development release {tag}", result)
-    raise ScriptError(f"created development release {tag} was not found")
+    print(f">> release {tag} exists despite the create command failure; resuming it")
+    return release
 
 
 def _asset_named(
@@ -298,14 +385,14 @@ def _verification_description(
 
 def _delete_development_release_asset(
     repository: str,
-    tag: str,
+    release: _DevelopmentRelease,
     asset_name: str,
 ) -> None:
     result = _run_gh(
         (
             "release",
             "delete-asset",
-            tag,
+            release.tag,
             asset_name,
             "--repo",
             repository,
@@ -313,8 +400,8 @@ def _delete_development_release_asset(
         ),
         timeout_seconds=_GITHUB_COMMAND_TIMEOUT_SECONDS,
     )
-    release = _require_development_release(repository, tag)
-    if _asset_named(release, asset_name) is None:
+    observed = _require_development_release(repository, release)
+    if _asset_named(observed, asset_name) is None:
         if result.returncode != 0:
             print(
                 f">> asset {asset_name} is absent despite the delete command failure; "
@@ -353,14 +440,14 @@ def _upload_failure_reason(result: _GitHubCommandResult) -> str:
 
 def _upload_expected_asset(
     repository: str,
-    tag: str,
+    release: _DevelopmentRelease,
     local: _LocalDevelopmentReleaseAsset,
     *,
     attempts: int,
     timeout_seconds: float,
     retry_backoff_seconds: float,
 ) -> None:
-    release = _require_development_release(repository, tag)
+    release = _require_development_release(repository, release)
     existing = _asset_named(release, local.name)
     if existing is not None:
         mismatch = _asset_mismatch(existing, local)
@@ -386,7 +473,7 @@ def _upload_expected_asset(
             (
                 "release",
                 "upload",
-                tag,
+                release.tag,
                 str(local.path),
                 "--repo",
                 repository,
@@ -394,7 +481,7 @@ def _upload_expected_asset(
             timeout_seconds=timeout_seconds,
         )
 
-        observed_release = _require_development_release(repository, tag)
+        observed_release = _require_development_release(repository, release)
         observed = _asset_named(observed_release, local.name)
         mismatch = (
             _asset_mismatch(observed, local)
@@ -415,7 +502,7 @@ def _upload_expected_asset(
 
         if not observed_release.draft:
             raise ScriptError(
-                f"release {tag} was published before {local.name} was verified"
+                f"release {release.tag} was published before {local.name} was verified"
             )
         if observed is not None:
             if result.returncode != 0:
@@ -425,7 +512,7 @@ def _upload_expected_asset(
                     "is uncertain"
                 )
             print(f">> {local.name}: removing failed upload ({mismatch})")
-            _delete_development_release_asset(repository, tag, local.name)
+            _delete_development_release_asset(repository, release, local.name)
 
         reason = _upload_failure_reason(result)
         # gh reports any failed lookup of a draft as "release not found"; the
@@ -506,8 +593,9 @@ def _verify_exact_assets(
 
 def _publish_development_release_draft(
     repository: str,
-    tag: str,
+    release: _DevelopmentRelease,
 ) -> _DevelopmentRelease:
+    tag = release.tag
     print(f">> publishing verified development release {tag}")
     result = _run_gh(
         (
@@ -521,11 +609,11 @@ def _publish_development_release_draft(
         ),
         timeout_seconds=_GITHUB_COMMAND_TIMEOUT_SECONDS,
     )
-    release = _require_development_release(repository, tag)
-    if not release.draft and release.prerelease:
+    published = _require_development_release(repository, release)
+    if not published.draft and published.prerelease:
         if result.returncode != 0:
             print(f">> release {tag} was published despite the edit command failure")
-        return release
+        return published
     if result.returncode != 0:
         raise _command_error(f"publishing development release {tag}", result)
     raise ScriptError(f"development release {tag} remained a draft after publication")
@@ -569,7 +657,7 @@ def publish_development_release(
 
     short_sha = target_sha[:12]
     tag = development_release_tag(version, target_sha)
-    release = _query_development_release(repository, tag)
+    release = _find_development_release(repository, tag)
     if release is None:
         release = _create_development_release(
             repository,
@@ -578,6 +666,7 @@ def publish_development_release(
             f"NVX {version} dev {short_sha}",
             f"Automated development release for {target_sha}.",
         )
+    print(f">> development release {tag} is release {release.id}")
     _validate_release_identity(release, tag, target_sha)
 
     if not release.draft:
@@ -591,14 +680,14 @@ def publish_development_release(
     for local in local_assets:
         _upload_expected_asset(
             repository,
-            tag,
+            release,
             local,
             attempts=upload_attempts,
             timeout_seconds=upload_timeout_seconds,
             retry_backoff_seconds=retry_backoff_seconds,
         )
 
-    release = _require_development_release(repository, tag)
+    release = _require_development_release(repository, release)
     _validate_release_identity(release, tag, target_sha)
     _verify_exact_assets(release, local_assets)
     if not release.draft:
@@ -607,7 +696,7 @@ def publish_development_release(
         print(f">> development release {tag} was already published after verification")
         return
 
-    published = _publish_development_release_draft(repository, tag)
+    published = _publish_development_release_draft(repository, release)
     _validate_release_identity(published, tag, target_sha)
     _verify_exact_assets(published, local_assets)
     if published.draft or not published.prerelease:
