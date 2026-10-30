@@ -1233,10 +1233,11 @@ every pull request until its timeout. The rule's settings:
   ([GitHub's documentation](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/configuring-pull-request-merges/managing-a-merge-queue)),
   so groups that pass together still merge one after another, each in a push
   of its own that moves `dev` to the group's head, on which the queue built
-  the group behind it. Each pull request thus reaches `dev` in a push whose
-  run checks its change alone: the run publishes the pull request's
-  development release and measures its performance when it changes more than
-  documentation, and a failure of the run points at that pull request alone.
+  the group behind it. Each pull request thus reaches `dev` in a push of its
+  own. A successful run for a non-documentation change publishes its
+  development release and measures its performance. A failure identifies the
+  newly merged pull request, but may stem from an earlier change or the
+  environment.
   A push that merged several groups would leave the merge commits before its
   head without a run, a release, or performance results of their own. The
   cost is a push run for each pull request that would have shared a push, as
