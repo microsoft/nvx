@@ -603,9 +603,12 @@ scheduled or manually dispatched full run starts these jobs at once: `quality`,
 `nvx-rs`, `nvx-cli-linux`, and `nvx-cli-windows` on GitHub-hosted runners, and
 `openvmm-changes`, which classifies a push, pull request, or merge group and
 selects every suite for a full run (see
-[Change classification](#change-classification)). When it finishes, the jobs
-that it selects start: `artifacts`, `distro-artifacts`, and `debug-kernel`
-restore or build the guest artifacts on GitHub-hosted runners (see
+[Change classification](#change-classification)). A merge group also starts
+`cancel-superseded-merge-groups` on a GitHub-hosted runner, which nothing
+waits for (see [Superseded merge groups](#superseded-merge-groups)). When the
+classification finishes, the jobs that it selects start: `artifacts`,
+`distro-artifacts`, and `debug-kernel` restore or build the guest artifacts
+on GitHub-hosted runners (see
 [Guest artifact handoff](#guest-artifact-handoff)), the three OpenVMM binary
 producers restore or build OpenVMM on a KVM, an MSHV, and a WHP runner,
 `build-openvmm-vmm-tests-linux` and `build-openvmm-vmm-tests-windows` restore
@@ -1131,6 +1134,56 @@ the fleet before it merges, as the `dev` push that merged it did after, and
 that code includes the workflow: a group's run takes `ci.yml`, with its jobs'
 steps and the permissions of their tokens, from the group's head.
 
+### Superseded merge groups
+
+The queue builds a pull request a new group, on another base, whenever the
+queue ahead of it changes: when a group ahead fails, when a pull request ahead
+leaves the queue or another jumps it, and whenever `dev` changes outside the
+queue, as with each push to `dev` that a bypass actor makes. It deletes the
+branch of the group that it replaces, but GitHub doesn't cancel that group's
+run, which holds its runners until it ends although the queue never reads its
+checks again
+([community discussion](https://github.com/orgs/community/discussions/137976)).
+A test repository's queue showed both on October 30, 2026: a push to its base
+branch while three groups ran replaced all three within 20 seconds and deleted
+their branches, and the runs of the three replaced groups ran on to their end,
+six minutes later. A concurrency group per pull request can't cancel them: the
+only field of a group's event that names its pull request, the group's ref,
+also names the group's base, which no expression can strip, and keyed on a
+field that a rebuilt group shares, such as its commit message, a late event
+for a replaced group could cancel the live group's run instead.
+
+The first job of each group's run, `cancel-superseded-merge-groups`
+(`Cancel superseded merge group runs`), therefore runs
+[`cancel-superseded-merge-groups`](usage.md#cancel-superseded-merge-groups). It
+lists the workflow's unfinished `merge_group` runs and then the branches of the
+pull request's groups, and cancels the runs of the pull request's groups whose
+branches are gone or hold another head than the run's. The queue builds a pull
+request's groups one after another, so the group whose branch holds a run's
+head is the live one, whichever run started first; a pull request that leaves
+the queue and returns to it on the same base gets its earlier group's branch
+again, with another head, so a branch that exists may still name a replaced
+run's group. The job holds its own run to the same test, but cancels it last:
+GitHub can deliver a replaced group's event late, after the run of the group
+that replaced it looked, and only the late run itself then finds that it is
+superseded. A pull request that leaves the queue gets no new group, so the run
+of its last group runs on, unless the pull request returns to the queue, whose
+new group then cancels it, or the run's own job looks only after it left.
+
+The job runs on a GitHub-hosted runner with `actions: write`, which cancelling
+a run needs, beside the workflow's `contents: read`. That token can cancel any
+of the repository's runs, so the job checks out the group's base branch, `dev`,
+and runs the command that has merged there rather than the group's copy: a
+change to the command takes effect once it merges, and one that changes its
+options can fail the job in its own groups. The job's steps still come from the
+group's `ci.yml`, though, like every job's (see [Merge queue](#merge-queue)),
+so the checkout only keeps the command's unmerged code from the token and is no
+isolation boundary: a queued pull request that changes the job's steps, or
+gives another job the same permission, gets such a token, and only the review
+of its latest push guards against that. Nothing waits for the job, and a failed
+request only warns, and never stops the other cancellations, so it never holds
+the queue.
+
 ### Queue settings
 
 An administrator requires the queue with a `merge_queue` rule in `dev`'s
@@ -1568,8 +1621,9 @@ and the partition of its [shards](#microvm-test-shards),
 VMM tests and, as every input of theirs is, of the microVM tests, but not of
 the platform jobs. `performance.py`
 is an input of the platform jobs alone. `nightly_ci.py`, which only the
-nightly report workflow runs, and `crate_release.py`, which only the crate
-release jobs run, are inputs of neither. Modules that both kinds
+nightly report workflow runs, `crate_release.py`, which only the crate
+release jobs run, and `merge_queue.py`, which only the job that cancels the
+runs of superseded merge groups runs, are inputs of neither. Modules that both kinds
 of job run, such as `benchmark.py`, which `microvm_tests.py` imports,
 `doctor.py`, which every runner validation runs, and `release.py`, whose
 `verify` command the OpenVMM builds run, select both.

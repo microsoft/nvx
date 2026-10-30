@@ -48,6 +48,7 @@ from .common import (
     sha256_file,
     strict_json_object,
 )
+from .common import workflow_path as github_workflow_path
 from .release import (
     GITHUB_API_VERSION,
     GUEST_ARTIFACT_COMPONENTS,
@@ -382,15 +383,10 @@ def _parse_record(contents: bytes) -> tuple[dict[str, str], dict[str, str]]:
 def workflow_path(workflow_ref: str, repository: str) -> str:
     """Return the path of the workflow that `workflow_ref`, the
     GITHUB_WORKFLOW_REF of a run of `repository`, names."""
-    reference, separator, _ = workflow_ref.partition("@")
-    path = reference.removeprefix(f"{repository}/")
-    if (
-        not separator
-        or path == reference
-        or PurePosixPath(path).parent != PurePosixPath(".github/workflows")
-    ):
-        raise ReuseRefused(f"{workflow_ref!r} names no workflow of {repository}")
-    return path
+    try:
+        return github_workflow_path(workflow_ref, repository)
+    except ScriptError as error:
+        raise ReuseRefused(str(error)) from error
 
 
 def merged_head(api: GitHubApi, repository: str, commit: str) -> str:

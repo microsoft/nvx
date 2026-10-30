@@ -217,6 +217,20 @@ def github_job(environment: Mapping[str, str]) -> dict[str, str | None] | None:
     return {name: environment.get(variable) for name, variable in GITHUB_VARIABLES}
 
 
+def workflow_path(workflow_ref: str, repository: str) -> str:
+    """Return the path of the workflow that `workflow_ref`, the
+    GITHUB_WORKFLOW_REF of a run of `repository`, names."""
+    reference, separator, _ = workflow_ref.partition("@")
+    path = reference.removeprefix(f"{repository}/")
+    if (
+        not separator
+        or path == reference
+        or PurePosixPath(path).parent != PurePosixPath(".github/workflows")
+    ):
+        raise ScriptError(f"{workflow_ref!r} names no workflow of {repository}")
+    return path
+
+
 def openvmm_git_state(directory: Path) -> tuple[str, bool]:
     head = run_capture(["git", "-C", directory, "rev-parse", "HEAD"])
     require_success(head, "OpenVMM revision query")

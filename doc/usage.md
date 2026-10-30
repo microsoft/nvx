@@ -431,6 +431,7 @@ is authorized for the organization when it enforces single sign-on.
 | `reuse-guest-artifacts` | Install guest artifact components that missed the cache from the latest same-repository pull request run for the merged head. |
 | `check-required-ci` | Validate required GitHub Actions job results. |
 | `report-nightly-ci` | Open, update, or close the report of failed nightly CI runs. |
+| `cancel-superseded-merge-groups` | Cancel the CI runs of the merge groups that the merge queue replaced. |
 | `check-static-elf` | Check that executables are static ELF files without an interpreter or an executable stack. |
 | `test-openvmm-unit` | Run the OpenVMM workspace unit and documentation tests. |
 | `build-openvmm-tests` | Build OpenVMM Petri VMM tests without running them. |
@@ -666,6 +667,36 @@ to a Markdown file, such as `$GITHUB_STEP_SUMMARY`. `--dry-run` prints the
 changes that the command would make, with their Markdown, and makes none; it
 accepts a run of any event, so that a past failure can preview its report,
 and, for a public repository, needs a token only for the job logs.
+
+### `cancel-superseded-merge-groups`
+
+```text
+python3 scripts/nvx.py cancel-superseded-merge-groups
+    --repository OWNER/REPOSITORY
+    --workflow-ref REF
+    --run-id ID
+    --ref REF
+    [--summary PATH]
+```
+
+Cancels the unfinished runs, whether they run or wait, of the workflow that
+`--workflow-ref`, a `GITHUB_WORKFLOW_REF` value, names, for the earlier merge
+groups of the pull request of the merge group that `--ref` names, a
+`refs/heads/gh-readonly-queue/BASE/pr-NUMBER-SHA` ref, as
+[Superseded merge groups](ci.md#superseded-merge-groups) describes. It cancels
+only the runs of the groups of the same base branch and pull request whose
+branches GitHub has deleted or given another head, as when the pull request
+returns to the queue on the same base, so that it never cancels the run of the
+pull request's live group. It holds the run `--run-id`, its caller, to the same
+test, but cancels it last: GitHub can start a replaced group's run late, after
+the run of the group that replaced it looked. It reads a token from `GH_TOKEN`
+or `GITHUB_TOKEN`, which must be able to read and cancel the repository's
+workflow runs and read its branches, and prints each run that it cancelled,
+that had completed meanwhile, or that it could not cancel, which doesn't stop
+the others. `--summary` appends the same lines to a Markdown file, such as
+`$GITHUB_STEP_SUMMARY`. A failed request warns, as a GitHub warning, but never
+fails the command, which only frees runners; a missing token or a `--ref` that
+names no merge group does.
 
 ### `check-static-elf`
 

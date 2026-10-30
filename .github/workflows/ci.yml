@@ -44,6 +44,45 @@ env:
   PERFORMANCE_REGRESSION_ABSOLUTE_TOLERANCE_MS: 10
 
 jobs:
+  # The merge queue builds a pull request a new group whenever the queue ahead
+  # of it changes, as when a group ahead fails or dev changes outside the
+  # queue, and deletes the replaced group's branch but leaves its run running.
+  # Each group's run cancels the unfinished runs of its pull request's earlier
+  # groups, so that they free their runners (doc/ci.md#superseded-merge-groups).
+  # Nothing waits for it, so a failure only warns.
+  cancel-superseded-merge-groups:
+    name: Cancel superseded merge group runs
+    if: github.event_name == 'merge_group'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: write
+      contents: read
+    steps:
+      # The token can cancel any of the repository's runs, so the job runs the
+      # command that the group's base branch has merged rather than the
+      # group's copy. These steps still come from the group's ci.yml, though,
+      # so this is no isolation boundary (doc/ci.md, "Superseded merge
+      # groups").
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.merge_group.base_ref }}
+          persist-credentials: false
+
+      - name: Cancel superseded merge group runs
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MERGE_GROUP_REF: ${{ github.event.merge_group.head_ref }}
+        run: >-
+          python3 scripts/nvx.py cancel-superseded-merge-groups
+          --repository "${GITHUB_REPOSITORY}"
+          --workflow-ref "${GITHUB_WORKFLOW_REF}"
+          --run-id "${GITHUB_RUN_ID}"
+          --ref "${MERGE_GROUP_REF}"
+          --summary "${GITHUB_STEP_SUMMARY}"
+
   quality:
     name: Lint, typing, and formatting
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false

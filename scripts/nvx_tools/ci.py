@@ -249,8 +249,8 @@ MICROVM_TEST_INPUT_PATHS = re.compile(
     r"sccache|setup-curl|validate-runner)/|"
     r"scripts/nvx\.py$|"
     r"scripts/nvx_tools/(?!(adversarial|adversarial_broker|adversarial_executor|"
-    r"crate_release|create_linux_source_archive|nightly_ci|performance)\.py$|"
-    r"adversarial_cases/))"
+    r"crate_release|create_linux_source_archive|merge_queue|nightly_ci|"
+    r"performance)\.py$|adversarial_cases/))"
 )
 # Inputs of the platform jobs, which benchmark each backend and package its
 # release, and of the regression gate that reads their results: the OpenVMM
@@ -271,7 +271,7 @@ BENCHMARK_INPUT_PATHS = re.compile(
     r"run-benchmark|sccache|setup-curl|validate-runner)/|"
     r"scripts/nvx\.py$|"
     r"scripts/nvx_tools/(?!(adversarial|adversarial_broker|adversarial_executor|"
-    r"crate_release|create_linux_source_archive|managed_exec_tests|"
+    r"crate_release|create_linux_source_archive|managed_exec_tests|merge_queue|"
     r"microvm_durations|microvm_shards|microvm_tests|nightly_ci|"
     r"openvmm_process|openvmm_test_shards|runtime_adapter_tests|"
     r"sandbox_lifecycle_tests|sandbox_proxy_tests|sandbox_ram_upper_tests|"
