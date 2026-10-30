@@ -4406,13 +4406,17 @@ class MicrovmTests(unittest.TestCase):
         ):
             endpoint.close.assert_called_once_with()
 
-    def test_host_loopback_rejections_cover_snapshots_and_explicit_denial(self):
+    def test_host_loopback_rejections_cover_snapshots_narrow_networks_and_denial(
+        self,
+    ):
         with tempfile.TemporaryDirectory() as temporary:
             with patch.object(microvm_tests, "OpenvmmProcess") as process:
                 process.return_value.__enter__.return_value.wait.side_effect = [
                     openvmm_process.OpenvmmProcessResult(2, message)
                     for message in (
                         b"microVM snapshots do not support --host-loopback allow",
+                        b"--host-loopback allow requires an IPv4 network of "
+                        b"/29 or larger",
                         b"--host-loopback-forward requires explicit --host-loopback allow",
                         b"must match the guest gateway",
                     )
@@ -4427,16 +4431,22 @@ class MicrovmTests(unittest.TestCase):
                     output_dir=Path(temporary),
                 )
         commands = [call.args[0] for call in process.call_args_list]
-        self.assertEqual(len(commands), 3)
+        self.assertEqual(len(commands), 4)
         self.assertEqual(
             [command[command.index("--host-loopback") + 1] for command in commands],
-            ["allow", "deny", "deny"],
+            ["allow", "allow", "deny", "deny"],
+        )
+        self.assertEqual(
+            [command[command.index("--net") + 1] for command in commands],
+            ["192.0.2.2/24", "192.0.2.2/30", "192.0.2.2/24", "192.0.2.2/24"],
         )
         self.assertIn("--snapshot-destination", commands[0])
         self.assertIn("--pidfile", commands[0])
         self.assertNotIn("--host-loopback-forward", commands[0])
-        self.assertIn("--host-loopback-forward", commands[1])
-        self.assertIn("--network-proxy", commands[2])
+        self.assertNotIn("--snapshot-destination", commands[1])
+        self.assertNotIn("--host-loopback-forward", commands[1])
+        self.assertIn("--host-loopback-forward", commands[2])
+        self.assertIn("--network-proxy", commands[3])
 
     def test_host_loopback_rejection_requires_diagnostic_and_no_boot(self):
         diagnostic = b"microVM snapshots do not support --host-loopback allow"

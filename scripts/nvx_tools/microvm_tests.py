@@ -219,6 +219,9 @@ DIRECTIONAL_NETWORK_INGRESS_READY_MARKER = b"NVX-DIRECTIONAL-INGRESS-READY"
 DIRECTIONAL_NETWORK_GUEST_IPV4 = "192.0.2.2"
 DIRECTIONAL_NETWORK_GATEWAY_IPV4 = "192.0.2.1"
 DIRECTIONAL_NETWORK_CIDR = f"{DIRECTIONAL_NETWORK_GUEST_IPV4}/24"
+# A /30 holds only the gateway and the guest, so it leaves no address at which
+# OpenVMM could present host peers, which explicit host-loopback access needs.
+HOST_LOOPBACK_NARROW_NETWORK_CIDR = f"{DIRECTIONAL_NETWORK_GUEST_IPV4}/30"
 DIRECTIONAL_NETWORK_INGRESS_PORT = 18080
 NETWORK_NEGATIVE_OBSERVATION_TIMEOUT_SECONDS = 0.25
 NETWORK_SERVER_JOIN_TIMEOUT_SECONDS = 1.0
@@ -3976,14 +3979,22 @@ def run_host_loopback_rejections(
     timeout: float,
     output_dir: Path,
 ) -> None:
-    for name, extra, expected in (
+    for name, network, extra, expected in (
         (
             "allow-snapshot",
+            DIRECTIONAL_NETWORK_CIDR,
             ("--host-loopback", "allow", "--snapshot-destination"),
             b"microVM snapshots do not support --host-loopback allow",
         ),
         (
+            "allow-narrow-network",
+            HOST_LOOPBACK_NARROW_NETWORK_CIDR,
+            ("--host-loopback", "allow"),
+            b"--host-loopback allow requires an IPv4 network of /29 or larger",
+        ),
+        (
             "deny-forward",
+            DIRECTIONAL_NETWORK_CIDR,
             (
                 "--host-loopback",
                 "deny",
@@ -3994,6 +4005,7 @@ def run_host_loopback_rejections(
         ),
         (
             "wrong-proxy-address",
+            DIRECTIONAL_NETWORK_CIDR,
             (
                 "--host-loopback",
                 "deny",
@@ -4010,7 +4022,7 @@ def run_host_loopback_rejections(
             initrd,
             memory_mib,
             "quiet loglevel=0",
-            network=DIRECTIONAL_NETWORK_CIDR,
+            network=network,
         )
         invalid.extend(extra)
         with tempfile.TemporaryDirectory(prefix="nvx-loopback-rejection-") as temporary:
