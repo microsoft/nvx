@@ -383,7 +383,10 @@ class GitHubClient:
         *,
         key: str | None = None,
         deadline: float | None = None,
+        until: Callable[[Sequence[object]], bool] | None = None,
     ) -> list[object]:
+        """Return the items of every page of ``path``, or of the pages up to
+        the first for which ``until`` returns true."""
         items: list[object] = []
         url: str | None = self._url(path, {"per_page": "100", **(params or {})})
         while url is not None:
@@ -392,6 +395,8 @@ class GitHubClient:
             if not isinstance(page, list):
                 raise ScriptError(f"GitHub GET {path} returned an invalid page")
             items.extend(cast(list[object], page))
+            if until is not None and until(cast(list[object], page)):
+                break
             match = _NEXT_PAGE.search(link or "")
             url = match.group(1) if match else None
         return items
@@ -427,6 +432,48 @@ class GitHubClient:
             raise
         # GitHub starts job logs with a byte order mark.
         return payload.decode("utf-8-sig", errors="replace")
+
+    def download(
+        self,
+        path: str,
+        destination: Path,
+        *,
+        limit: int,
+        deadline: float | None = None,
+    ) -> None:
+        """Write the content at ``path``, such as an artifact's archive, to
+        ``destination``, and refuse content longer than ``limit`` bytes."""
+
+        def read(
+            request: urllib.request.Request, timeout: float
+        ) -> tuple[bytes, str | None]:
+            size = 0
+            # A retry writes the file anew.
+            with (
+                self._opener.open(request, timeout=timeout) as response,
+                destination.open("wb") as output,
+            ):
+                while chunk := response.read1(1024 * 1024):
+                    if deadline is not None and self._clock() >= deadline:
+                        raise TimeoutError("the download took too long")
+                    size += len(chunk)
+                    if size > limit:
+                        raise ScriptError(
+                            f"GitHub GET {path} sent more than {limit} bytes"
+                        )
+                    output.write(chunk)
+                # read1 ends quietly when the connection closes before the
+                # content that the response announced, so a retry fetches it
+                # whole.
+                announced = response.headers.get("Content-Length")
+                if announced is not None and announced.isdigit():
+                    if size < int(announced):
+                        raise http.client.HTTPException(
+                            f"the response ended after {size} of its {announced} bytes"
+                        )
+            return b"", None
+
+        self._open("GET", self._url(path, None), None, read, deadline)
 
     def exists(self, path: str) -> bool:
         try:

@@ -2581,8 +2581,12 @@ jobs:
           --run-microvm-tests "${RUN_MICROVM_TESTS}"
           --run-benchmarks "${RUN_BENCHMARKS}"
 
-  performance-persist:
-    name: Persist performance baseline
+  # A dev push records its performance results for a full run of dev to
+  # persist, rather than committing them to dev: every push to dev outside the
+  # merge queue rebuilds every queued merge group (doc/ci.md, "Development
+  # releases and performance history").
+  performance-record:
+    name: Record performance results
     needs:
       - debug-kernel
       - build-nvx-rs-linux-musl
@@ -2691,10 +2695,61 @@ jobs:
     permissions:
       contents: read
     steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - name: Prepare performance results
+        uses: ./.github/actions/prepare-performance-results
+
+      # The results must fit the history now, as when the push committed
+      # them, so that a host or a metric that the history refuses fails the
+      # push that measured it rather than a later night.
+      - name: Check the results against the history
+        shell: bash
+        run: |
+          set -euo pipefail
+          history="${RUNNER_TEMP}/performance-history"
+          mkdir -p "${history}"
+          cp data/*.csv data/*-host.json "${history}/"
+          python3 scripts/nvx.py performance persist \
+            --source-dir data/results \
+            --history-dir "${history}" \
+            --require-host
+
+      - name: Upload performance results
+        uses: actions/upload-artifact@v7
+        with:
+          name: performance-results-${{ github.run_id }}
+          path: data/results
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 7
+
+  # A full run of dev, such as the nightly one, persists the results that the
+  # dev pushes recorded and the history lacks, in one push to dev past the
+  # merge queue's rules, with the deploy key of the performance history.
+  performance-persist:
+    name: Persist performance baselines
+    if: >-
+      ${{
+        (
+          github.event_name == 'schedule' ||
+          github.event_name == 'workflow_dispatch'
+        ) &&
+        github.ref == 'refs/heads/dev'
+      }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      actions: read
+      contents: read
+    steps:
       - name: Checkout dev
         uses: actions/checkout@v5
         with:
-          ref: ${{ github.sha }}
+          ref: dev
           fetch-depth: 0
           ssh-key: ${{ secrets.PERFORMANCE_PERSIST_DEPLOY_KEY }}
 
@@ -2702,6 +2757,7 @@ jobs:
         uses: ./.github/actions/persist-performance-results
         with:
           branch: dev
+          token: ${{ github.token }}
 
   # A full run of dev publishes the nvx crate to crates.io once every job
   # passed, which Required status check confirms: a new pre-release whenever

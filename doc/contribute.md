@@ -53,7 +53,7 @@ with the deploy key and on the hypervisor runners before it merges; see
 | Review threads | Reply with the commit that addresses the comment, or with the evidence that no change is needed, then resolve the thread. |
 
 Leave the performance histories in `data/*.csv` to CI: successful `dev`
-pushes append to them.
+pushes record their results, and the nightly full run appends them.
 
 ## Draft or Ready
 

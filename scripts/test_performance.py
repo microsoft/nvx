@@ -3,23 +3,35 @@
 
 import contextlib
 import copy
+import hashlib
 import io
 import json
+import os
 import re
 import statistics
+import struct
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
-from collections.abc import Callable, Sequence
+import zipfile
+from collections.abc import Callable, Mapping, Sequence
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, cast
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).parent))
 import nvx  # noqa: E402
-from nvx_tools import benchmark, benchmark_host, performance  # noqa: E402
+from nvx_tools import (  # noqa: E402
+    benchmark,
+    benchmark_host,
+    performance,
+    performance_history,
+)
 from nvx_tools.common import sha256_file  # noqa: E402
+from nvx_tools.nightly_ci import GitHubApiError  # noqa: E402
 
 COLD_START_LOG = """
     base                     :    101.0 ms  (min 100, max 102, n=5)
@@ -2997,6 +3009,52 @@ class PerformanceTests(unittest.TestCase):
                 set(),
             )
 
+    def test_reset_check_finds_a_reset_merged_from_before_the_measurement(self):
+        # A pull request that resets latency forks before measurement A and
+        # merges after it. Its reset commit isn't on the line from A to HEAD,
+        # but its merge is: the merge matches the branch, and drops the latency
+        # row that its first parent holds. A merge that matches both of its
+        # parents, and a commit that leaves the history alone, reset nothing.
+        with tempfile.TemporaryDirectory() as temporary:
+            repo = Path(temporary)
+
+            def git(*args: str) -> str:
+                return subprocess.run(
+                    ["git", "-C", str(repo), *args],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                ).stdout.strip()
+
+            git("init", "-q")
+            git("config", "user.email", "test@example.invalid")
+            git("config", "user.name", "test")
+            history_file = repo / "data" / "linux-kvm.csv"
+            throughput = performance.Result("s0", "throughput", "MB/s", "higher", 20.0)
+            performance.write_results(
+                history_file,
+                [performance.Result("s0", "latency", "ms", "lower", 10.0), throughput],
+            )
+            git("add", "data")
+            git("commit", "-q", "-m", "seed")
+            main = git("rev-parse", "--abbrev-ref", "HEAD")
+            git("checkout", "-q", "-b", "reset")
+            performance.write_results(history_file, [throughput])
+            git("commit", "-q", "-am", "reset latency")
+            git("checkout", "-q", "-b", "alone", main)
+            git("commit", "-q", "--allow-empty", "-m", "leave the history alone")
+            git("checkout", "-q", main)
+            git("commit", "-q", "--allow-empty", "-m", "measured")
+            measured = git("rev-parse", "HEAD")
+            git("merge", "-q", "--no-ff", "alone", "-m", "merge a branch that matches")
+            git("commit", "-q", "--allow-empty", "-m", "leave the history alone")
+            git("merge", "-q", "--no-ff", "reset", "-m", "merge the reset")
+
+            self.assertEqual(
+                performance._reset_dimensions_since(repo, history_file, measured),
+                {("", 1, 1, "latency")},
+            )
+
     def test_persist_drops_rows_measured_before_a_later_history_reset(self):
         # A row measured before a commit that reset its metric must not refill the reset
         # series, or nine post-reset rows would already gate the metric. Unaffected metrics
@@ -4381,6 +4439,39 @@ class BenchmarkHostTests(unittest.TestCase):
             )
         return path
 
+    def test_persist_checks_the_hosts_of_the_given_directory(self):
+        # The nightly persistence checks each run's results against the hosts
+        # that the history expected at the run's commit, which a later host
+        # change may have replaced in data/ (#1053).
+        new_host = changed_host(KVM_RUNNER_HOST, ("cpu", "model"), 207)
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            history = self.write_series(root / "data", ["base"], new_host)
+            self.write_series(root / "results", ["old"], KVM_RUNNER_HOST)
+            hosts = root / "hosts"
+            hosts.mkdir()
+            benchmark_host.write_host(
+                benchmark_host.host_file(hosts, KVM_SERIES),
+                self.identity(KVM_RUNNER_HOST),
+            )
+
+            performance.persist_results(
+                root / "results", root / "data", require_host=True, host_dir=hosts
+            )
+
+            self.assertEqual(
+                [row.commit for row in performance.read_results(history)],
+                ["base", "old"],
+            )
+            # Without it, the history's own hosts are the expected ones.
+            with self.assertRaisesRegex(
+                performance.PerformanceError,
+                "refusing to persist the linux-kvm-virtual-machine results",
+            ):
+                performance.persist_results(
+                    root / "results", root / "data", require_host=True
+                )
+
     def test_persist_refuses_results_of_another_host(self):
         new_host = changed_host(KVM_RUNNER_HOST, ("cpu", "model"), 207)
         with tempfile.TemporaryDirectory() as temporary:
@@ -4703,6 +4794,725 @@ class BenchmarkHostTests(unittest.TestCase):
         self.assertIn(
             "::error title=Benchmark host changed without a history reset::", output
         )
+
+
+REPOSITORY = "microsoft/nvx"
+CI_WORKFLOW = ".github/workflows/ci.yml"
+SERIES_FILE = f"{KVM_SERIES}-microvm-v2-1vcpu.csv"
+
+
+class _RunsApi:
+    """Serves the CI runs of dev pushes, newest first and `page_size` to a
+    page, at most `limit` for a search of their creation times, as GitHub
+    does, their artifacts, and their archives."""
+
+    def __init__(self) -> None:
+        self.runs: list[dict[str, object]] = []
+        self.page_size = 100
+        self.limit = 1000
+        self.pages = 0
+        self.artifacts: dict[int, list[dict[str, object]]] = {}
+        self.archives: dict[int, bytes | BaseException] = {}
+        self.downloads: list[int] = []
+        self.listings: list[Mapping[str, str] | None] = []
+        self.artifact_listings: list[int] = []
+
+    def get_all(
+        self,
+        path: str,
+        params: Mapping[str, str] | None = None,
+        *,
+        key: str | None = None,
+        deadline: float | None = None,
+        until: Callable[[Sequence[object]], bool] | None = None,
+    ) -> list[object]:
+        if path == f"/repos/{REPOSITORY}/actions/workflows/ci.yml/runs":
+            self.listings.append(params)
+            # ">=SINCE" or "SINCE..UNTIL", both inclusive.
+            created = (params or {}).get("created", "")
+            since, _, until_time = created.removeprefix(">=").partition("..")
+            newest_first = sorted(
+                (
+                    run
+                    for run in self.runs
+                    if since <= cast(str, run["created_at"])
+                    and (not until_time or cast(str, run["created_at"]) <= until_time)
+                ),
+                key=lambda run: cast(int, run["id"]),
+                reverse=True,
+            )
+            runs: list[object] = [*newest_first[: self.limit]]
+            listed: list[object] = []
+            for start in range(0, len(runs), self.page_size):
+                page = runs[start : start + self.page_size]
+                self.pages += 1
+                listed.extend(page)
+                if until is not None and until(page):
+                    break
+            return listed
+        match = re.fullmatch(rf"/repos/{REPOSITORY}/actions/runs/(\d+)/artifacts", path)
+        assert match is not None, path
+        self.artifact_listings.append(int(match[1]))
+        return list(self.artifacts.get(int(match[1]), []))
+
+    def download(
+        self,
+        path: str,
+        destination: Path,
+        *,
+        limit: int,
+        deadline: float | None = None,
+    ) -> None:
+        match = re.fullmatch(rf"/repos/{REPOSITORY}/actions/artifacts/(\d+)/zip", path)
+        assert match is not None, path
+        self.downloads.append(int(match[1]))
+        payload = self.archives[int(match[1])]
+        if isinstance(payload, BaseException):
+            raise payload
+        destination.write_bytes(payload)
+
+
+class RecordedPerformanceTests(unittest.TestCase):
+    """nvx.py persist-recorded-performance, which a full run of dev runs to
+    persist the performance results that the dev pushes recorded (#1053)."""
+
+    def setUp(self) -> None:
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        self.repo = self.root / "dev"
+        self.history = self.repo / "data"
+        self.downloads = self.root / "downloads"
+        self.api = _RunsApi()
+        self.repo.mkdir()
+        self.git("init", "-q", "-b", "dev")
+        self.git("config", "user.email", "test@example.invalid")
+        self.git("config", "user.name", "test")
+        self.git("config", "commit.gpgsign", "false")
+        self.write(self.history, ["seed"], KVM_RUNNER_HOST)
+        self.commit("seed")
+
+    def git(self, *args: str) -> str:
+        return subprocess.run(
+            ["git", "-C", str(self.repo), *args],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+
+    def commit(self, message: str) -> str:
+        self.git("add", "--all")
+        self.git("commit", "-q", "--allow-empty", "-m", message)
+        return self.git("rev-parse", "HEAD")
+
+    def write(
+        self,
+        directory: Path,
+        commits: Sequence[str],
+        host: dict[str, object] | None,
+        unit: str = "ms",
+        processors: int = 1,
+        series: str = KVM_SERIES,
+    ) -> None:
+        """Write a series of `commits`' results, with their host, as data/
+        and a run's recorded results hold them."""
+        performance.write_results(
+            directory / f"{series}-microvm-v2-{processors}vcpu.csv",
+            [
+                performance.Result(
+                    commit,
+                    "openvmm_cold_start",
+                    unit,
+                    "lower",
+                    10.0,
+                    series,
+                    2,
+                    processors,
+                )
+                for commit in commits
+            ],
+        )
+        if host is not None:
+            benchmark_host.write_host(
+                benchmark_host.host_file(directory, series),
+                benchmark_host.host_identity(series, host),
+            )
+
+    def run_document(
+        self,
+        run_id: int,
+        sha: str,
+        updated: datetime | None = None,
+        created: datetime | None = None,
+    ) -> dict[str, object]:
+        updated = updated or datetime.now(timezone.utc)
+        created = created or updated
+        return {
+            "id": run_id,
+            "head_sha": sha,
+            "event": "push",
+            "head_branch": "dev",
+            "status": "completed",
+            "path": CI_WORKFLOW,
+            "repository": {"full_name": REPOSITORY},
+            "head_repository": {"full_name": REPOSITORY},
+            "html_url": f"https://github.com/{REPOSITORY}/actions/runs/{run_id}",
+            "created_at": f"{created:%Y-%m-%dT%H:%M:%SZ}",
+            "updated_at": f"{updated:%Y-%m-%dT%H:%M:%SZ}",
+        }
+
+    def record(
+        self,
+        run_id: int,
+        sha: str,
+        write: Callable[[Path], None] | None = None,
+        corrupt: bool = False,
+        updated: datetime | None = None,
+        expired: bool = False,
+        size: int | None = None,
+        created: datetime | None = None,
+        compression: int = zipfile.ZIP_STORED,
+        mangle: Callable[[bytes], bytes] | None = None,
+    ) -> bytes:
+        """Add a completed run of a push of `sha` whose artifact holds the
+        results that `write` writes, by default those of `sha`, and return the
+        artifact's archive."""
+        staging = self.root / f"staging-{run_id}"
+        staging.mkdir()
+        if write is None:
+            self.write(staging, [sha], KVM_RUNNER_HOST)
+        else:
+            write(staging)
+        archive = io.BytesIO()
+        with zipfile.ZipFile(archive, "w", compression) as bundle:
+            for path in sorted(staging.iterdir()):
+                bundle.write(path, path.name)
+        payload = archive.getvalue()
+        if mangle is not None:
+            payload = mangle(payload)
+        digest = hashlib.sha256(b"another archive" if corrupt else payload)
+        self.api.runs.append(self.run_document(run_id, sha, updated, created))
+        self.api.artifacts[run_id] = [
+            {
+                "id": 1000 + run_id,
+                "name": f"performance-results-{run_id}",
+                "expired": expired,
+                "digest": f"sha256:{digest.hexdigest()}",
+                "size_in_bytes": len(payload) if size is None else size,
+                "created_at": "2026-10-30T00:00:00Z",
+                "workflow_run": {"id": run_id},
+            }
+        ]
+        self.api.archives[1000 + run_id] = payload
+        return payload
+
+    def persist(self) -> performance_history.Persistence:
+        with contextlib.redirect_stdout(io.StringIO()):
+            return performance_history.persist_recorded_performance(
+                self.api,
+                repository=REPOSITORY,
+                workflow=CI_WORKFLOW,
+                branch="dev",
+                checkout=self.repo,
+                history_dir=self.history,
+                download_dir=self.downloads,
+                require_host=True,
+                now=datetime.now(timezone.utc),
+                deadline=time.monotonic() + 60.0,
+            )
+
+    def commits(self, path: str = SERIES_FILE) -> list[str]:
+        return [row.commit for row in performance.read_results(self.history / path)]
+
+    def test_runs_newer_than_the_history_persist_oldest_first(self):
+        a = self.commit("a")
+        self.write(self.history, ["seed", a], KVM_RUNNER_HOST)
+        b = self.commit("b, which records a's results")
+        c = self.commit("c")
+        for run_id, sha in ((3, c), (1, a), (2, b)):
+            self.record(run_id, sha)
+
+        outcome = self.persist()
+
+        self.assertEqual([run.sha for run in outcome.persisted], [b, c])
+        self.assertEqual(outcome.recorded, 1)
+        self.assertFalse(outcome.failed)
+        self.assertEqual(self.commits(), ["seed", a, b, c])
+        # The run whose commit the history reaches is never downloaded.
+        self.assertEqual(self.api.downloads, [1002, 1003])
+        # Runs are read a day of their creation at a time, newest first.
+        params = self.api.listings[0]
+        assert params is not None
+        self.assertEqual(
+            {name: params[name] for name in ("branch", "event", "status")},
+            {"branch": "dev", "event": "push", "status": "completed"},
+        )
+        self.assertTrue(params["created"].startswith(">="))
+        self.assertRegex(
+            cast(Mapping[str, str], self.api.listings[1])["created"],
+            r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ\.\.\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$",
+        )
+
+    def test_the_runs_end_with_the_first_page_that_the_history_reaches(self):
+        a = self.commit("a")
+        self.write(self.history, ["seed", a], KVM_RUNNER_HOST)
+        b = self.commit("b, which records a's results")
+        c = self.commit("c")
+        # Pages of two runs: c's and b's, then two of a's, then two more.
+        for run_id in (1, 2, 3, 4):
+            self.api.runs.append(self.run_document(run_id, a))
+        self.record(5, b)
+        self.record(6, c)
+        self.api.page_size = 2
+
+        outcome = self.persist()
+
+        self.assertEqual([run.sha for run in outcome.persisted], [b, c])
+        self.assertEqual(self.api.pages, 2)
+        self.assertEqual(len(self.api.listings), 1)
+        self.assertEqual(outcome.recorded, 2)
+
+    def test_a_rerun_persists_as_long_as_github_could_have_rerun_its_run(self):
+        # GitHub reruns a run up to 30 days after it first ran, and keeps the
+        # results that the rerun uploads for a week, so the runs are read back
+        # 38 days, a search a day.
+        b = self.commit("b")
+        c = self.commit("c")
+        now = datetime.now(timezone.utc)
+        self.record(1, b, created=now - timedelta(days=29))
+        self.record(2, c, created=now - timedelta(days=39))
+
+        outcome = self.persist()
+
+        self.assertEqual([run.sha for run in outcome.persisted], [b])
+        self.assertEqual(self.api.artifact_listings, [1])
+        self.assertEqual(len(self.api.listings), 38)
+
+    def test_a_day_of_more_runs_than_github_lists_stops_the_persistence(self):
+        b = self.commit("b")
+        for run_id in (1, 2, 3):
+            self.record(run_id, b)
+        self.api.limit = 2
+
+        with patch.object(performance_history, "_SEARCH_LIMIT", 2):
+            outcome = self.persist()
+
+        self.assertEqual(outcome.persisted, [])
+        assert outcome.stopped is not None
+        self.assertTrue(
+            outcome.stopped.startswith(
+                "could not list the runs of pushes to dev: GitHub lists no more "
+                "than 2 of the runs created since "
+            ),
+            outcome.stopped,
+        )
+        self.assertTrue(outcome.failed)
+        self.assertEqual(self.commits(), ["seed"])
+
+    def test_runs_whose_results_expired_are_skipped(self):
+        # The history went a week without a full run of dev.
+        b = self.commit("b")
+        c = self.commit("c")
+        d = self.commit("d")
+        self.record(1, b, updated=datetime.now(timezone.utc) - timedelta(days=9))
+        self.record(2, c, expired=True)
+        self.record(3, d)
+
+        outcome = self.persist()
+
+        self.assertEqual([run.sha for run in outcome.persisted], [d])
+        self.assertEqual(
+            outcome.skipped,
+            [
+                f"run 1 of {b[:12]} last ran over 8 days ago, so any results that "
+                "it recorded expired",
+                f"run 2 of {c[:12]}: its recorded results expired",
+            ],
+        )
+        self.assertFalse(outcome.failed)
+        # The first run's results can't remain, so nothing asks for them.
+        self.assertEqual(self.api.artifact_listings, [2, 3])
+        self.assertEqual(self.api.downloads, [1003])
+
+    def test_another_attempt_reuses_the_downloaded_results(self):
+        b = self.commit("b")
+        self.record(1, b)
+        before = (self.history / SERIES_FILE).read_bytes()
+        self.persist()
+
+        # The push of the first attempt failed, so the next starts again from
+        # dev's history.
+        (self.history / SERIES_FILE).write_bytes(before)
+        outcome = self.persist()
+
+        self.assertEqual([run.sha for run in outcome.persisted], [b])
+        self.assertEqual(self.api.downloads, [1001])
+        self.assertEqual(self.commits(), ["seed", b])
+
+    def test_a_later_run_persists_the_same_results_no_more(self):
+        b = self.commit("b")
+        self.record(1, b)
+        self.persist()
+        self.commit("data: update performance baselines")
+
+        outcome = self.persist()
+
+        self.assertEqual(outcome.persisted, [])
+        self.assertEqual(outcome.recorded, 1)
+        self.assertEqual(self.commits(), ["seed", b])
+
+    def test_only_completed_push_runs_of_the_first_parent_history_count(self):
+        b = self.commit("b")
+        self.git("checkout", "-q", "-b", "topic")
+        topic = self.commit("topic")
+        self.git("checkout", "-q", "dev")
+        self.git("merge", "-q", "--no-ff", "topic", "-m", "merge topic")
+        merge = self.git("rev-parse", "HEAD")
+        # A commit that dev merged in a second parent was never a push to dev.
+        self.record(1, topic)
+        self.record(2, merge)
+        for run_id, change in (
+            (3, {"event": "workflow_dispatch"}),
+            (4, {"head_branch": "topic"}),
+            (5, {"status": "in_progress"}),
+            (6, {"path": ".github/workflows/module-diagrams.yml"}),
+            (7, {"head_repository": {"full_name": "fork/nvx"}}),
+        ):
+            self.api.runs.append({**self.run_document(run_id, b), **change})
+
+        outcome = self.persist()
+
+        self.assertEqual([run.sha for run in outcome.persisted], [merge])
+        self.assertEqual(self.api.downloads, [1002])
+
+    def test_refused_results_are_skipped_and_the_later_runs_persist(self):
+        b = self.commit("b")
+        c = self.commit("c")
+        d = self.commit("d")
+        self.record(
+            1, b, write=lambda staging: self.write(staging, [c], KVM_RUNNER_HOST)
+        )
+        self.record(2, c, corrupt=True)
+        self.record(3, d)
+
+        outcome = self.persist()
+
+        self.assertEqual([run.sha for run in outcome.persisted], [d])
+        self.assertTrue(outcome.failed)
+        self.assertEqual(
+            outcome.refused,
+            [
+                f"run 1 of {b[:12]}: {SERIES_FILE} holds the results of {c[:12]}",
+                f"run 2 of {c[:12]}: artifact 1002 doesn't match its digest",
+            ],
+        )
+        self.assertEqual(self.commits(), ["seed", d])
+
+    def test_results_that_are_no_text_are_refused(self):
+        b = self.commit("b")
+        c = self.commit("c")
+
+        def write(staging: Path) -> None:
+            (staging / SERIES_FILE).write_bytes(b"\xff\xfe no UTF-8\n")
+
+        self.record(1, b, write=write)
+        self.record(2, c)
+
+        outcome = self.persist()
+
+        self.assertEqual([run.sha for run in outcome.persisted], [c])
+        [refused] = outcome.refused
+        self.assertTrue(
+            refused.startswith(
+                f"run 1 of {b[:12]}: {SERIES_FILE}: 'utf-8' codec can't decode"
+            ),
+            refused,
+        )
+        self.assertEqual(self.commits(), ["seed", c])
+
+    def test_artifacts_too_large_for_results_are_refused_unread(self):
+        b = self.commit("b")
+        c = self.commit("c")
+        self.record(1, b, size=performance_history._ARCHIVE_LIMIT_BYTES + 1)
+        self.record(2, c)
+
+        outcome = self.persist()
+
+        self.assertEqual([run.sha for run in outcome.persisted], [c])
+        self.assertEqual(
+            outcome.refused,
+            [
+                f"run 1 of {b[:12]}: artifact 1001 holds 16777217 bytes, more "
+                "than the 16777216 that recorded results may"
+            ],
+        )
+        self.assertEqual(self.api.downloads, [1002])
+
+    def test_archives_whose_members_do_not_decompress_are_refused(self):
+        def corrupt(offset: int, length: int) -> Callable[[bytes], bytes]:
+            """Overwrite the data of the archive's first member at `offset`."""
+
+            def mangle(payload: bytes) -> bytes:
+                names, extras = struct.unpack_from("<HH", payload, 26)
+                start = 30 + names + extras + offset
+                return payload[:start] + b"\xff" * length + payload[start + length :]
+
+            return mangle
+
+        # Data that each decompressor that zipfile uses can't decode.
+        cases = (
+            (zipfile.ZIP_DEFLATED, corrupt(0, 1)),
+            (zipfile.ZIP_BZIP2, corrupt(0, 1)),
+            (zipfile.ZIP_LZMA, corrupt(9, 16)),
+        )
+        commits = [self.commit(f"commit {number}") for number in range(4)]
+        for run_id, (compression, mangle) in enumerate(cases, 1):
+            self.record(
+                run_id, commits[run_id - 1], compression=compression, mangle=mangle
+            )
+        self.record(4, commits[3])
+
+        outcome = self.persist()
+
+        self.assertEqual([run.sha for run in outcome.persisted], [commits[3]])
+        self.assertEqual(len(outcome.refused), 3, outcome.refused)
+        for refused in outcome.refused:
+            self.assertIn(": its artifact is no valid ZIP archive: ", refused)
+        self.assertEqual(self.commits(), ["seed", commits[3]])
+
+    def test_a_run_that_cannot_be_fetched_stops_the_persistence(self):
+        b = self.commit("b")
+        c = self.commit("c")
+        payload = self.record(1, b)
+        self.record(2, c)
+        self.api.archives[1001] = GitHubApiError(502, "HTTP 502")
+
+        outcome = self.persist()
+
+        self.assertEqual(outcome.persisted, [])
+        self.assertEqual(outcome.stopped, f"stopped at run 1 of {b[:12]}: HTTP 502")
+        self.assertTrue(outcome.failed)
+        self.assertEqual(self.commits(), ["seed"])
+
+        # The next run persists both, in order.
+        self.api.archives[1001] = payload
+        outcome = self.persist()
+        self.assertEqual([run.sha for run in outcome.persisted], [b, c])
+        self.assertEqual(self.commits(), ["seed", b, c])
+
+    def test_results_that_github_deleted_are_refused(self):
+        b = self.commit("b")
+        c = self.commit("c")
+        self.record(1, b)
+        self.record(2, c)
+        self.api.archives[1001] = GitHubApiError(410, "HTTP 410")
+
+        outcome = self.persist()
+
+        self.assertEqual([run.sha for run in outcome.persisted], [c])
+        self.assertEqual(
+            outcome.refused, [f"run 1 of {b[:12]}: its recorded results are gone"]
+        )
+
+    def test_runs_that_recorded_no_results_are_skipped(self):
+        # A documentation change runs no platform jobs, for instance.
+        b = self.commit("b")
+        c = self.commit("c")
+        self.api.runs.append(self.run_document(1, b))
+        self.record(2, c)
+
+        outcome = self.persist()
+
+        self.assertEqual([run.sha for run in outcome.persisted], [c])
+        self.assertEqual(outcome.skipped, [f"run 1 of {b[:12]} recorded no results"])
+        self.assertFalse(outcome.failed)
+
+    def test_results_meet_the_host_that_the_history_expected_at_their_commit(self):
+        # dev accepted a new host after b, and reset the series with it, as it
+        # must. b's results come from the old host, which the history expected
+        # at b, so they aren't refused, but they stay out of the reset series;
+        # c's come from the new host.
+        new_host = changed_host(KVM_RUNNER_HOST, ("cpu", "model"), 207)
+        b = self.commit("b")
+        self.write(self.history, [], new_host)
+        c = self.commit("accept a new host")
+        self.record(1, b)
+        self.record(2, c, write=lambda staging: self.write(staging, [c], new_host))
+
+        outcome = self.persist()
+
+        self.assertEqual([run.sha for run in outcome.persisted], [c])
+        self.assertEqual(
+            outcome.skipped,
+            [
+                f"run 1 of {b[:12]}: the history expects another host of "
+                f"{KVM_SERIES} since its commit"
+            ],
+        )
+        self.assertFalse(outcome.failed)
+        self.assertEqual(self.commits(), [c])
+
+    def test_results_of_a_host_that_the_history_replaced_stay_out(self):
+        # dev accepted a second host, and a third while the series that it
+        # reset for the second was still empty, as a nightly batch can find it.
+        # The third reset removed no rows, but the second host's results must
+        # stay out of the third's series all the same.
+        second = changed_host(KVM_RUNNER_HOST, ("cpu", "model"), 207)
+        third = changed_host(KVM_RUNNER_HOST, ("cpu", "model"), 208)
+        b = self.commit("b")
+        self.write(self.history, [], second)
+        c = self.commit("accept the second host")
+        self.write(self.history, [], third)
+        d = self.commit("accept the third host")
+        e = self.commit("e")
+        self.record(1, b)
+        self.record(2, c, write=lambda staging: self.write(staging, [c], second))
+        self.record(3, d, write=lambda staging: self.write(staging, [d], third))
+        self.record(4, e, write=lambda staging: self.write(staging, [e], third))
+
+        outcome = self.persist()
+
+        self.assertEqual([run.sha for run in outcome.persisted], [d, e])
+        self.assertEqual(
+            outcome.skipped,
+            [
+                f"run {run_id} of {sha[:12]}: the history expects another host of "
+                f"{KVM_SERIES} since its commit"
+                for run_id, sha in ((1, b), (2, c))
+            ],
+        )
+        self.assertFalse(outcome.failed)
+        self.assertEqual(self.commits(), [d, e])
+
+    def test_advisory_host_edits_keep_the_results_of_the_host(self):
+        # dev records new microcode without a reset.
+        b = self.commit("b")
+        self.write(
+            self.history,
+            ["seed"],
+            changed_host(KVM_RUNNER_HOST, ("cpu", "microcode"), "0xd0003e7"),
+        )
+        self.commit("record the host's new microcode")
+        self.record(1, b)
+
+        outcome = self.persist()
+
+        self.assertEqual([run.sha for run in outcome.persisted], [b])
+        self.assertEqual(outcome.skipped, [])
+        self.assertEqual(self.commits(), ["seed", b])
+
+    def test_only_the_platform_whose_host_changed_loses_its_results(self):
+        mshv_series = f"{MSHV_SERIES}-microvm-v2-1vcpu.csv"
+        self.write(self.history, ["seed"], MSHV_RUNNER_HOST, series=MSHV_SERIES)
+        self.commit("track linux-mshv")
+        b = self.commit("b")
+        self.write(
+            self.history, [], changed_host(KVM_RUNNER_HOST, ("cpu", "model"), 207)
+        )
+        self.commit("accept a new linux-kvm host")
+
+        def write(staging: Path) -> None:
+            self.write(staging, [b], KVM_RUNNER_HOST)
+            self.write(staging, [b], MSHV_RUNNER_HOST, series=MSHV_SERIES)
+
+        self.record(1, b, write=write)
+
+        outcome = self.persist()
+
+        self.assertEqual([run.sha for run in outcome.persisted], [b])
+        self.assertEqual(
+            outcome.skipped,
+            [
+                f"run 1 of {b[:12]}: the history expects another host of "
+                f"{KVM_SERIES} since its commit"
+            ],
+        )
+        self.assertEqual(self.commits(), [])
+        self.assertEqual(self.commits(mshv_series), ["seed", b])
+
+    def test_a_run_persists_whole_or_not_at_all(self):
+        # The history's 2-processor series has another unit than the results,
+        # which persisting finds only after it took the 1-processor series.
+        self.write(self.history, ["seed"], KVM_RUNNER_HOST, unit="s", processors=2)
+        b = self.commit("b")
+
+        def write(staging: Path) -> None:
+            self.write(staging, [b], KVM_RUNNER_HOST)
+            self.write(staging, [b], KVM_RUNNER_HOST, processors=2)
+
+        self.record(1, b, write=write)
+
+        outcome = self.persist()
+
+        self.assertEqual(outcome.persisted, [])
+        [refused] = outcome.refused
+        self.assertIn("metric metadata changed for openvmm_cold_start", refused)
+        self.assertEqual(self.commits(), ["seed"])
+
+    def test_the_command_commits_what_it_persisted_and_fails_on_a_refusal(self):
+        b = self.commit("b")
+        c = self.commit("c")
+        self.record(
+            1, b, write=lambda staging: self.write(staging, [c], KVM_RUNNER_HOST)
+        )
+        self.record(2, c)
+        summary = self.root / "summary.md"
+        message = self.root / "message.txt"
+        args = nvx.parse_args(
+            [
+                "persist-recorded-performance",
+                "--repository",
+                REPOSITORY,
+                "--workflow-ref",
+                f"{REPOSITORY}/{CI_WORKFLOW}@refs/heads/dev",
+                "--history-dir",
+                str(self.history),
+                "--download-dir",
+                str(self.downloads),
+                "--require-host",
+                "--summary",
+                str(summary),
+                "--message",
+                str(message),
+            ]
+        )
+        stdout = io.StringIO()
+        with (
+            patch.dict(os.environ, {"GH_TOKEN": "token"}),
+            patch.object(performance_history, "GitHubClient", return_value=self.api),
+            contextlib.redirect_stdout(stdout),
+        ):
+            status = args.handler(args)
+
+        self.assertEqual(status, 1)
+        self.assertEqual(self.commits(), ["seed", c])
+        self.assertEqual(
+            message.read_text(encoding="utf-8"),
+            f"data: update performance baselines ({c}) [skip ci]\n\n"
+            "Persist the performance results that these dev push runs recorded:\n\n"
+            f"- {c} https://github.com/{REPOSITORY}/actions/runs/2\n",
+        )
+        self.assertIn(
+            f"- [run 2](https://github.com/{REPOSITORY}/actions/runs/2)",
+            summary.read_text(encoding="utf-8"),
+        )
+        self.assertIn(f"::error::run 1 of {b[:12]}: ", stdout.getvalue())
+
+    def test_annotations_escape_the_reasons(self):
+        outcome = performance_history.Persistence(
+            refused=["run 6 of 0123456789ab: 100% gone\nfor good"],
+            stopped="stopped at run 7: GitHub failed",
+        )
+        lines, summary = performance_history.report(outcome)
+        self.assertEqual(
+            lines,
+            [
+                "::error::run 6 of 0123456789ab: 100%25 gone%0Afor good",
+                "::error::stopped at run 7: GitHub failed",
+            ],
+        )
+        self.assertIn("Persisted no recorded results.", summary)
+        self.assertIn("- Stopped: stopped at run 7: GitHub failed", summary)
 
 
 if __name__ == "__main__":

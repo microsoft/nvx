@@ -132,11 +132,12 @@
   belongs to a group that the queue replaced or that its pull request left, so
   check the pull request's queue outcome before treating it as a failure; see
   [Merge queue](../doc/ci.md#merge-queue).
-- Pull-request runs must not publish development releases or persist performance
-  history. Successful `dev` pushes own those operations. Do not manually edit
-  `data/*.csv` unless the task explicitly concerns baseline maintenance, and change
-  an expected benchmark host, `data/*-host.json`, only to accept a new host
-  together with a reset of its series' history.
+- Pull-request and merge-group runs must not publish development releases or
+  record or persist performance history. Successful `dev` pushes publish their
+  releases and record their results, which the nightly full run persists. Do
+  not manually edit `data/*.csv` unless the task explicitly concerns baseline
+  maintenance, and change an expected benchmark host, `data/*-host.json`, only
+  to accept a new host together with a reset of its series' history.
 - Full runs of `dev`, scheduled or dispatched, publish the `nvx` crate to
   crates.io when `nvx-rs/` changed; see
   [crates.io releases](../doc/ci.md#cratesio-releases). Do not publish it by

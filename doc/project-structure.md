@@ -142,6 +142,7 @@ nvx/
 |   |   |-- nvx_rs.py            Finds and builds nvx-rs, and runs it for the microVM tests
 |   |   |-- openvmm_process.py   Foreground OpenVMM process control for tests
 |   |   |-- performance.py       CI performance collection, persistence, and gates
+|   |   |-- performance_history.py Nightly persistence of the results that dev pushes recorded
 |   |   |-- process_supervisor.py Linux supervisor for one owned process tree
 |   |   |-- release.py           Release source collection and packaging
 |   |   |-- sandbox_lifecycle_tests.py Managed sandbox lifecycle and security tests
@@ -316,7 +317,9 @@ Alpine, and Ubuntu. The adversarial controller, typed broker, credential-free
 executor, watchdog, and tracked deterministic catalogs also live in
 `nvx_tools/`; `nvx_adversarial_executor.py` is the restricted protocol entry
 point used by local children and administrator-owned remote wrappers.
-`performance.py` collects, persists, and gates CI performance results.
+`performance.py` collects, persists, and gates CI performance results, and
+`performance_history.py` persists, in a full run of `dev`, the results that the
+`dev` pushes recorded.
 `host_telemetry.py` records the benchmark host's provenance and, on Windows, the
 storage activity during profiled snapshot captures, as
 [Snapshot lifecycle profile](benchmarks.md#snapshot-lifecycle-profile) and
