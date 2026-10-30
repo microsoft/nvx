@@ -1855,13 +1855,13 @@ pub(crate) fn claim_log(_file: &fs::File) -> io::Result<()> {
 /// The right to query a job object's information, which `winnt.h` defines.
 const JOB_OBJECT_QUERY: u32 = 0x0004;
 
-/// Returns the name of the job object of the log `identity`, NUL-terminated: in the namespace of
-/// this session, after the volume serial number and the file index of the log.
-fn log_job_name(identity: (u64, u64)) -> Vec<u16> {
-    wide(format!(
-        r"Local\nvx-log-{:016x}-{:016x}",
-        identity.0, identity.1
-    ))
+/// Returns the name of the job object of the log `id`, NUL-terminated: in the namespace of this
+/// session, after the volume serial number and the file ID of the log, as [`opened_file_id`]
+/// reads them. The names of every store of the session share that namespace, so they take the
+/// 128-bit file ID, which a file system such as ReFS keeps unique where the 64-bit file index of
+/// a log's journal is not.
+fn log_job_name(id: (u64, u128)) -> Vec<u16> {
+    wide(format!(r"Local\nvx-log-{:016x}-{:032x}", id.0, id.1))
 }
 
 /// Creates the job object of the log that `log` holds open, in which [`spawn_detached`] starts
@@ -1871,11 +1871,11 @@ fn log_job_name(identity: (u64, u64)) -> Vec<u16> {
 /// access denied, so that every process that the VMM starts joins it.
 ///
 /// Fails with [`io::ErrorKind::AlreadyExists`] if a job of that name exists already, as one of an
-/// earlier log of the same identity, or of the same file before it was truncated, that a process
+/// earlier log of the same file ID, or of the same file before it was truncated, that a process
 /// still holds would: the VMM would share it.
 pub(crate) fn create_log_job(log: &fs::File) -> io::Result<OwnedHandle> {
-    let identity = opened_file_identity(log)?;
-    let name = log_job_name(identity);
+    let id = opened_file_id(log)?;
+    let name = log_job_name(id);
     // SAFETY: SetLastError has no preconditions.
     unsafe { SetLastError(ERROR_SUCCESS) };
     // SAFETY: the name is NUL-terminated, and no attributes ask for default security.
@@ -1886,20 +1886,20 @@ pub(crate) fn create_log_job(log: &fs::File) -> io::Result<OwnedHandle> {
         return Err(io::Error::new(
             io::ErrorKind::AlreadyExists,
             format!(
-                "the job object of the log {:016x}-{:016x} exists already, held by another spawn \
+                "the job object of the log {:016x}-{:032x} exists already, held by another spawn \
                  with the same log file or by a process that inherited it in one; give each VMM \
                  a log file of its own, created anew",
-                identity.0, identity.1
+                id.0, id.1
             ),
         ));
     }
     Ok(job)
 }
 
-/// Returns how many processes the job object of the log `identity` holds, or `None` if no job of
-/// that name exists.
-fn log_job_processes(identity: (u64, u64)) -> io::Result<Option<u32>> {
-    let name = log_job_name(identity);
+/// Returns how many processes the job object of the log `id` holds, or `None` if no job of that
+/// name exists.
+fn log_job_processes(id: (u64, u128)) -> io::Result<Option<u32>> {
+    let name = log_job_name(id);
     // SAFETY: the name is NUL-terminated.
     let Some(job) = owned(unsafe { OpenJobObjectW(JOB_OBJECT_QUERY, 0, name.as_ptr()) }) else {
         let error = io::Error::last_os_error();
@@ -1940,19 +1940,25 @@ fn log_job_processes(identity: (u64, u64)) -> io::Result<Option<u32>> {
 /// process, which never joins the job, does not hold the claim.
 ///
 /// Without the job, as for a VMM that no such process outlives, or that a launch of an earlier
-/// version started outside one, the claim is whether any process holds the log open. An open
-/// without access rights takes no part in sharing checks, so the identity is checked first; an
-/// open that shares nothing then fails with a sharing violation while any process, such as a VMM
-/// that inherited the log, holds it. The identity is checked again on the exclusive handle,
-/// because a rename between the opens could have replaced the file.
+/// version started outside one, the claim is whether any process holds the log open. The log is
+/// opened first without access rights, which takes no part in sharing checks, to check its
+/// identity and to read the file ID that names its job from the same handle; an open that shares
+/// nothing then fails with a sharing violation while any process, such as a VMM that inherited
+/// the log, holds it. The identity is checked again on the exclusive handle, because a rename
+/// between the opens could have replaced the file.
 pub(crate) fn log_claim_held(path: &Path, identity: (u64, u64)) -> io::Result<bool> {
     let replaced = || io::Error::other(format!("{} is not the claimed log", path.display()));
-    if file_identity(path)? != identity {
+    let log = OpenOptions::new()
+        .access_mode(0)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)?;
+    if opened_file_identity(&log)? != identity {
         return Err(replaced());
     }
-    if let Some(processes) = log_job_processes(identity)? {
+    if let Some(processes) = log_job_processes(opened_file_id(&log)?)? {
         return Ok(processes > 0);
     }
+    drop(log);
     let exclusive = OpenOptions::new()
         .read(true)
         .share_mode(0)
@@ -3067,6 +3073,14 @@ mod tests {
         // A job that no process holds is gone.
         drop(job);
         drop(create_log_job(&log).unwrap());
+    }
+
+    #[test]
+    fn the_jobs_of_logs_whose_file_ids_share_their_low_64_bits_are_distinct() {
+        // ReFS keeps the 128-bit file IDs of its files unique, but not their low 64 bits, which
+        // its file indices are, and every store of a session names its jobs in one namespace.
+        assert_ne!(log_job_name((7, 1)), log_job_name((7, (1 << 64) | 1)));
+        assert_ne!(log_job_name((7, 1)), log_job_name((8, 1)));
     }
 
     /// Returns whether any process holds the file at `path` open: an open that shares nothing
