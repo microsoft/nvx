@@ -20,6 +20,11 @@ if [ -n "$dns" ]; then
 fi
 echo "NVX-IPV6-EGRESS-DNS ${dns:-none}"
 
+# The probes keep their results in TMPDIR, or else in the guest's private
+# /tmp. The host's /tmp is shared, so the tests that run this script in the
+# host's shell give each run a TMPDIR of its own (#1007).
+probe_dir=${TMPDIR:-/tmp}
+
 probe_tcp() {
     if response=$(wget -T 2 -qO- "$2" 2>/dev/null); then
         if [ "$response" = "NVX-EGRESS-PROBE-$1" ]; then
@@ -29,7 +34,7 @@ probe_tcp() {
         fi
     else
         echo blocked
-    fi >"/tmp/nvx-egress-$1"
+    fi >"$probe_dir/nvx-egress-$1"
 }
 
 # Only the host can observe UDP delivery. A denied flow may return 1; sender
@@ -41,7 +46,7 @@ probe_udp() {
     case "$status" in
     0 | 1) echo sent ;;
     *) echo "failed-$status" ;;
-    esac >"/tmp/nvx-egress-$1"
+    esac >"$probe_dir/nvx-egress-$1"
 }
 
 probe_icmp() {
@@ -49,10 +54,10 @@ probe_icmp() {
         echo reached
     else
         echo blocked
-    fi >"/tmp/nvx-egress-$1"
+    fi >"$probe_dir/nvx-egress-$1"
 }
 
-rm -f /tmp/nvx-egress-*
+rm -f "$probe_dir"/nvx-egress-*
 probe_tcp tcp6-named 'http://[@GATEWAY_IPV6@]:@NAMED_PORT@/tcp6-named' &
 probe_tcp tcp6-other 'http://[@GATEWAY_IPV6@]:@OTHER_PORT@/tcp6-other' &
 probe_udp udp6-named @GATEWAY_IPV6@ @NAMED_PORT@ &
@@ -60,8 +65,8 @@ probe_icmp icmp6 @GATEWAY_IPV6@ &
 probe_tcp tcp4-named 'http://@GATEWAY_IPV4@:@NAMED_PORT@/tcp4-named' &
 wait
 for probe in tcp6-named tcp6-other udp6-named icmp6 tcp4-named; do
-    [ -s "/tmp/nvx-egress-$probe" ] || fail 70
-    echo "NVX-L3-L4-PROBE $probe=$(cat "/tmp/nvx-egress-$probe")"
+    [ -s "$probe_dir/nvx-egress-$probe" ] || fail 70
+    echo "NVX-L3-L4-PROBE $probe=$(cat "$probe_dir/nvx-egress-$probe")"
 done
 
 echo NVX-IPV6-EGRESS-OK

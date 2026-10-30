@@ -81,6 +81,16 @@ def _posix_shell() -> str | None:
     return shell
 
 
+def _probe_environment(probe_dir: Path) -> dict[str, str]:
+    """Return the environment of a run of an egress script in the host's
+    shell, which then keeps its probes' results in `probe_dir`.
+
+    The scripts keep the results in TMPDIR, or else in /tmp, which is private
+    to a guest but shared on the host: runs there at once would delete and
+    overwrite each other's results (#1007)."""
+    return {**os.environ, "TMPDIR": str(probe_dir)}
+
+
 def _bdi_stats(dirty: int, io: int = 0, more_io: int = 0) -> str:
     """Return a backing device's debugfs statistics whose writeback lists hold
     `dirty`, `io`, and `more_io` inodes, in the kernel's layout."""
@@ -8441,6 +8451,26 @@ class MicrovmTests(unittest.TestCase):
                     (output_dir / "l3-l4-egress-protocols-results.json").exists()
                 )
 
+    def _run_egress_script(
+        self, shell: str, script: str
+    ) -> tuple[subprocess.CompletedProcess[str], list[str]]:
+        """Run an L3/L4 egress script in the host's shell with a TMPDIR of its
+        own, which holds a stale result, and return the shell's result and the
+        names of the files that the run left in that TMPDIR."""
+        with tempfile.TemporaryDirectory() as temporary:
+            probe_dir = Path(temporary)
+            (probe_dir / "nvx-egress-stale").write_text("stale\n", encoding="utf-8")
+            result = subprocess.run(
+                [shell],
+                input=script,
+                text=True,
+                capture_output=True,
+                timeout=10,
+                check=False,
+                env=_probe_environment(probe_dir),
+            )
+            return result, sorted(path.name for path in probe_dir.iterdir())
+
     def test_l3_l4_egress_protocol_script_reports_each_probe(self):
         shell = _posix_shell()
         if shell is None:
@@ -8468,14 +8498,7 @@ class MicrovmTests(unittest.TestCase):
             "}\n"
             "ping() { return 1; }\n"
         )
-        result = subprocess.run(
-            [shell],
-            input=stubs + script,
-            text=True,
-            capture_output=True,
-            timeout=10,
-            check=False,
-        )
+        result, probes = self._run_egress_script(shell, stubs + script)
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(
@@ -8488,6 +8511,17 @@ class MicrovmTests(unittest.TestCase):
                 "NVX-L3-L4-PROBE icmp=blocked",
                 "NVX-L3-L4-EGRESS-PROTOCOLS-OK",
                 "NVX-EXIT 0",
+            ],
+        )
+        # The run replaced the stale result in its TMPDIR with its probes'.
+        self.assertEqual(
+            probes,
+            [
+                "nvx-egress-icmp",
+                "nvx-egress-tcp-named",
+                "nvx-egress-tcp-other",
+                "nvx-egress-udp-named",
+                "nvx-egress-udp-other",
             ],
         )
 
@@ -9085,14 +9119,7 @@ class MicrovmTests(unittest.TestCase):
             "    esac\n"
             "}\n"
         )
-        result = subprocess.run(
-            [shell],
-            input=stubs + script,
-            text=True,
-            capture_output=True,
-            timeout=10,
-            check=False,
-        )
+        result, probes = self._run_egress_script(shell, stubs + script)
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(
@@ -9110,6 +9137,22 @@ class MicrovmTests(unittest.TestCase):
                 "NVX-L3-L4-PROBE udp-above=failed-2",
                 "NVX-L3-L4-EGRESS-PORT-RANGES-OK",
                 "NVX-EXIT 0",
+            ],
+        )
+        # The run replaced the stale result in its TMPDIR with its probes'.
+        self.assertEqual(
+            probes,
+            [
+                "nvx-egress-tcp-above",
+                "nvx-egress-tcp-below",
+                "nvx-egress-tcp-first",
+                "nvx-egress-tcp-inside",
+                "nvx-egress-tcp-last",
+                "nvx-egress-udp-above",
+                "nvx-egress-udp-below",
+                "nvx-egress-udp-first",
+                "nvx-egress-udp-inside",
+                "nvx-egress-udp-last",
             ],
         )
 
@@ -9638,6 +9681,9 @@ class MicrovmTests(unittest.TestCase):
             .replace("/proc/", f"{root.as_posix()}/proc/")
             .replace("/etc/resolv.conf", f"{root.as_posix()}/etc/resolv.conf")
         )
+        # The root's tmp stands for the guest's /tmp, where the probes keep
+        # their results.
+        (root / "tmp").mkdir(exist_ok=True)
         return subprocess.run(
             [shell],
             input="record_exit() { printf 'NVX-EXIT %s\\n' \"$1\"; }\n"
@@ -9647,6 +9693,7 @@ class MicrovmTests(unittest.TestCase):
             capture_output=True,
             timeout=10,
             check=False,
+            env=_probe_environment(root / "tmp"),
         )
 
     def test_ipv6_egress_script_checks_the_identity_and_reports_each_probe(self):
@@ -9705,6 +9752,10 @@ class MicrovmTests(unittest.TestCase):
                 root = Path(temporary)
                 (root / "proc" / "net").mkdir(parents=True)
                 (root / "etc").mkdir()
+                (root / "tmp").mkdir()
+                (root / "tmp" / "nvx-egress-stale").write_text(
+                    "stale\n", encoding="utf-8"
+                )
                 (root / "proc" / "cmdline").write_text(
                     "quiet virtnet_ip=192.0.2.2 virtnet_mask=255.255.255.0 "
                     f"virtnet_gw=192.0.2.1{dns} virtnet_ip6=fd00::c000:202/120 "
@@ -9739,6 +9790,18 @@ class MicrovmTests(unittest.TestCase):
                         "NVX-L3-L4-PROBE tcp4-named=unexpected",
                         "NVX-IPV6-EGRESS-OK",
                         "NVX-EXIT 0",
+                    ],
+                )
+                # The run replaced the stale result in the root's tmp with its
+                # probes'.
+                self.assertEqual(
+                    sorted(path.name for path in (root / "tmp").iterdir()),
+                    [
+                        "nvx-egress-icmp6",
+                        "nvx-egress-tcp4-named",
+                        "nvx-egress-tcp6-named",
+                        "nvx-egress-tcp6-other",
+                        "nvx-egress-udp6-named",
                     ],
                 )
 
