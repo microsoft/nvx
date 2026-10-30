@@ -1513,6 +1513,44 @@ changed no input of the platform jobs, and each of their pushes spent about
 19 benchmark-runner minutes on them: the KVM, MSHV, and WHP platform jobs take
 a median of 5.3, 5.5, and 8.6 minutes. Pull requests publish and persist
 nothing, so they run the platform jobs only when one of their inputs changed.
+[Development release publication](#development-release-publication) describes
+how the release job publishes.
+
+## Development release publication
+
+`Publish development release` runs
+[`publish_development_release.py`](../scripts/publish_development_release.py),
+which publishes through the REST API with `gh api`. It lists the repository's
+releases once to find the release, draft or published, that carries the
+commit's tag, `v<VERSION>-dev.<first 12 characters of the commit>`, and
+creates a draft when none does. From then on, it reads and changes that
+release by its ID alone: it uploads each package that the draft lacks, checks
+the size and SHA-256 digest of every asset, and publishes the draft as a
+prerelease that is never marked latest, at which GitHub creates the tag. A
+rerun resumes a draft that an earlier attempt left, without uploading its
+valid assets again, refuses to replace an invalid asset that it did not
+upload, and only verifies a release that is published already. Addressing the
+release by its tag instead, as `gh release` does, would look the tag up again
+on every call, through a lookup that reports any failure to find a draft as
+`release not found` (#688).
+
+GitHub keeps tags unique only among published releases, so drafts can share
+one. When more than one release carries the tag, publication fails before it
+changes anything and names their IDs: delete all but one, and rerun the job.
+A request that times out, loses its connection, or fails with HTTP 408, 425,
+429, or 5xx is attempted up to three times, with a backoff in between, and so
+is an upload that GitHub rejects because it failed to save the asset or
+because an asset holds the name. The request that creates the draft is never
+repeated; after it fails, publication lists the releases again and resumes a
+draft that GitHub created anyway. A 404 for the release means that it is
+gone, and any other status fails publication with its message. Every attempt
+has a timeout, and the job's timeout outlasts a publication in which every
+request takes all of its attempts, as a test checks.
+
+Pull requests never publish, so try a change to publication against a scratch
+repository, never `microsoft/nvx`: run the script with `GH_REPO` set to that
+repository, `GITHUB_SHA` to one of its commits, and packages in `dist/` that
+pass the script's checks.
 
 ## Nightly failure reports
 
