@@ -587,10 +587,27 @@ mod tests {
     use super::*;
     use crate::guest::sys::{open, path_c_string};
 
+    /// The attempts at a resolution that fails with `EAGAIN` before its result counts: a `..`
+    /// after a descent fails with it while a rename or a mount anywhere in the system, such as
+    /// another test's, races its lookup.
+    const ATTEMPTS: usize = 100;
+
     /// Opens `path` with `O_PATH`.
     fn path_descriptor(path: &std::path::Path) -> FileDescriptor {
         let flags = OpenFlags::O_PATH | OpenFlags::O_CLOEXEC;
         open(&path_c_string(path).unwrap(), flags, Mode::empty()).unwrap()
+    }
+
+    /// Returns what `attempt` returns, retrying it while it fails with `EAGAIN`, as openat2(2)
+    /// lets a caller, up to [`ATTEMPTS`] attempts in all.
+    fn retried<T>(mut attempt: impl FnMut() -> Result<T, Errno>) -> Result<T, Errno> {
+        let mut attempts = 1;
+        loop {
+            match attempt() {
+                Err(Errno::EAGAIN) if attempts < ATTEMPTS => attempts += 1,
+                result => return result,
+            }
+        }
     }
 
     /// Returns the status of `descriptor`, or `None` on a kernel without unique mount IDs.
@@ -611,7 +628,8 @@ mod tests {
         std::os::unix::fs::symlink(base, base.join("a/absolute")).unwrap();
         let directory = path_descriptor(base);
         let flags = OpenFlags::O_PATH;
-        let opened = |path: &CStr| open_beneath(&directory, path, flags, Mode::empty(), true);
+        let opened =
+            |path: &CStr| retried(|| open_beneath(&directory, path, flags, Mode::empty(), true));
         opened(c"a/b").unwrap();
         opened(c"a/file").unwrap();
         for (path, error) in [
