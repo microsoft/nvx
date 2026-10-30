@@ -590,7 +590,7 @@ output to `true` or `false`, and adds the outcome to the job summary; see
 
 ```text
 python3 scripts/nvx.py classify-ci-changes
-    --event-name {pull_request,push}
+    --event-name {pull_request,merge_group,push}
     --changed-files PATH
     [--null]
     [--summary PATH]
@@ -602,12 +602,13 @@ the change detector's
 `run-guest-artifacts`, `run-openvmm-binaries`, `run-openvmm-unit-tests`,
 `run-openvmm-vmm-tests`, `run-microvm-tests`, and `run-benchmarks` outputs as
 `name=true` or `name=false` lines. Documentation selects no suite. Pull
-requests and pushes run each test suite only when one of its own inputs
-changed. A pull request runs the platform benchmarks only when one of their
-inputs changed, but a push runs them for every change but documentation,
-because it publishes the development release and records the performance
-history. The guest artifacts and the OpenVMM binaries are built exactly when a
-job that uses them runs. The summary file receives a Markdown
+requests, merge groups, and pushes run each test suite only when one of its
+own inputs changed. A pull request or a merge group runs the platform
+benchmarks only when one of their inputs changed, but a push runs them for
+every change but documentation, because it publishes the development release
+and records the performance history. The guest artifacts and the OpenVMM
+binaries are built exactly when a job that uses them runs. The summary file
+receives a Markdown
 explanation of each decision. CI runs the full matrix instead when the command
 fails or omits an output; see
 [Change classification](ci.md#change-classification).
@@ -616,7 +617,7 @@ fails or omits an output; see
 
 ```text
 python3 scripts/nvx.py check-required-ci
-    --event-name {pull_request,push,schedule,workflow_dispatch}
+    --event-name {pull_request,merge_group,push,schedule,workflow_dispatch}
     --same-repository {false,true}
     --run-guest-artifacts VALUE
     --run-openvmm-binaries VALUE
@@ -633,7 +634,10 @@ variables. CI supplies the `true` or `false` suite flags that
 enabled by the event, repository, and suite flags, and `skipped` for jobs that
 are not enabled; mismatches are reported as errors and cause a nonzero exit.
 As in CI, a job that uses the guest artifacts or the OpenVMM binaries is
-enabled only when the flags enable the jobs that build them too.
+enabled only when the flags enable the jobs that build them too. A merge group
+expects the jobs of a same-repository pull request, whatever
+`--same-repository` says, but the rehearsal of the guest artifact reuse, which
+its pull request's run made.
 
 ### `report-nightly-ci`
 

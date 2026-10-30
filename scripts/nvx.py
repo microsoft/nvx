@@ -47,6 +47,8 @@ from nvx_tools.build_constants import (
     UbuntuBuildConstants,
 )
 from nvx_tools.ci import (
+    CI_CLASSIFIED_EVENTS,
+    CI_EVENTS,
     OPENVMM_TEST_BACKENDS,
     REQUIRED_CI_RESULT_ENVIRONMENTS,
     CiChanges,
@@ -574,7 +576,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     )
     classify_changes.add_argument(
         "--event-name",
-        choices=("pull_request", "push"),
+        choices=CI_CLASSIFIED_EVENTS,
         required=True,
     )
     classify_changes.add_argument(
@@ -704,7 +706,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     )
     required_ci.add_argument(
         "--event-name",
-        choices=("pull_request", "push", "schedule", "workflow_dispatch"),
+        choices=CI_EVENTS,
         required=True,
     )
     required_ci.add_argument(

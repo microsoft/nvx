@@ -900,16 +900,51 @@ class CliTests(unittest.TestCase):
                 for value in (f"--{output}", "true")
             ),
         ]
-        for event_name in (
+        events = (
             "pull_request",
+            "merge_group",
             "push",
             "schedule",
             "workflow_dispatch",
-        ):
+        )
+        self.assertEqual(ci.CI_EVENTS, events)
+        for event_name in events:
             argv = list(base)
             argv[argv.index("--event-name") + 1] = event_name
             with self.subTest(event_name=event_name):
                 self.assertEqual(nvx.parse_args(argv).event_name, event_name)
+        argv = list(base)
+        argv[argv.index("--event-name") + 1] = "pull_request_target"
+        with (
+            patch("sys.stderr", new_callable=io.StringIO),
+            self.assertRaises(SystemExit) as exit_context,
+        ):
+            nvx.parse_args(argv)
+        self.assertEqual(exit_context.exception.code, 2)
+
+    def test_classify_ci_changes_accepts_the_classified_events(self):
+        # Full runs select every suite without classifying a change.
+        self.assertEqual(
+            ci.CI_CLASSIFIED_EVENTS, ("pull_request", "merge_group", "push")
+        )
+        for event_name in ci.CI_EVENTS:
+            argv = [
+                "classify-ci-changes",
+                "--event-name",
+                event_name,
+                "--changed-files",
+                "changed-files",
+            ]
+            with self.subTest(event_name=event_name):
+                if event_name in ci.CI_CLASSIFIED_EVENTS:
+                    self.assertEqual(nvx.parse_args(argv).event_name, event_name)
+                    continue
+                with (
+                    patch("sys.stderr", new_callable=io.StringIO),
+                    self.assertRaises(SystemExit) as exit_context,
+                ):
+                    nvx.parse_args(argv)
+                self.assertEqual(exit_context.exception.code, 2)
 
     def test_check_required_ci_passes_each_flag_to_its_suite(self):
         # With the results that a selection expects, the command passes; with
@@ -7752,6 +7787,54 @@ class CiConfigurationTests(unittest.TestCase):
                 always_successful,
             ),
             ("pull_request", False, everything, always_successful | artifacts),
+            # A merge group runs a same-repository pull request's jobs, whatever
+            # repository its pull requests come from, but not the rehearsal of
+            # the guest artifact reuse, which its pull request's run made.
+            ("merge_group", True, (False,) * 6, repository),
+            (
+                "merge_group",
+                True,
+                (True, True, False, False, False, True),
+                repository | artifacts | builds | platforms | gate,
+            ),
+            (
+                "merge_group",
+                True,
+                (True, True, False, False, True, False),
+                repository | artifacts | builds | microvm,
+            ),
+            (
+                "merge_group",
+                True,
+                (True, False, False, True, False, False),
+                repository | artifacts | openvmm_artifact_tests,
+            ),
+            (
+                "merge_group",
+                True,
+                everything,
+                repository
+                | artifacts
+                | builds
+                | openvmm_tests
+                | openvmm_artifact_tests
+                | microvm
+                | platforms
+                | gate,
+            ),
+            (
+                "merge_group",
+                False,
+                everything,
+                repository
+                | artifacts
+                | builds
+                | openvmm_tests
+                | openvmm_artifact_tests
+                | microvm
+                | platforms
+                | gate,
+            ),
             ("push", True, (False,) * 6, repository),
             (
                 "push",
@@ -8401,6 +8484,12 @@ class CiConfigurationTests(unittest.TestCase):
                     ci.classify_ci_changes("pull_request", changed_files),
                     pull_request,
                 )
+                # A merge group checks its pull request's change as the
+                # pull request's run did, on the latest dev.
+                self.assertEqual(
+                    ci.classify_ci_changes("merge_group", changed_files),
+                    pull_request,
+                )
                 self.assertEqual(
                     ci.classify_ci_changes("push", changed_files),
                     push or pull_request,
@@ -8409,8 +8498,12 @@ class CiConfigurationTests(unittest.TestCase):
             ci.classify_ci_changes("pull_request", ["openvmm", ""]),
             ci.classify_ci_changes("pull_request", ["openvmm"]),
         )
-        with self.assertRaisesRegex(ValueError, "unsupported CI event"):
-            ci.classify_ci_changes("workflow_dispatch", ["openvmm"])
+        for event_name in ci.CI_FULL_RUN_EVENTS:
+            with (
+                self.subTest(event_name=event_name),
+                self.assertRaisesRegex(ValueError, "unsupported CI event"),
+            ):
+                ci.classify_ci_changes(event_name, ["openvmm"])
 
     def test_ci_change_classification_builds_artifacts_for_the_jobs_that_use_them(self):
         # The guest artifacts and the OpenVMM binaries have no use of their
@@ -8430,7 +8523,7 @@ class CiConfigurationTests(unittest.TestCase):
         )
         for count in range(len(paths) + 1):
             for changed_files in itertools.combinations(paths, count):
-                for event_name in ("pull_request", "push"):
+                for event_name in ci.CI_CLASSIFIED_EVENTS:
                     changes = ci.classify_ci_changes(event_name, changed_files)
                     with self.subTest(event_name=event_name, files=changed_files):
                         self.assertEqual(
@@ -9169,6 +9262,9 @@ class CiConfigurationTests(unittest.TestCase):
             )
 
         tests_only = describe("pull_request", ["scripts/test_nvx_tools.py"])
+        self.assertEqual(
+            describe("merge_group", ["scripts/test_nvx_tools.py"]), tests_only
+        )
         self.assertIn(
             "### Guest artifacts: skip\nNo job that uses them runs.\n", tests_only
         )
@@ -9342,7 +9438,7 @@ class CiConfigurationTests(unittest.TestCase):
                         target.write_text("new input\n", encoding="utf-8")
                 git("add", "--all")
                 git("commit", "--quiet", "-m", "changed paths")
-                for event in ("pull_request", "push"):
+                for event in ci.CI_CLASSIFIED_EVENTS:
                     with self.subTest(event=event):
                         output = root / f"output-{event}"
                         environment = os.environ.copy()
