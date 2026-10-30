@@ -9,14 +9,15 @@
 - Mapped fork tip: `a0556d7d85ce1fff89f5b45a98f15c5c79cbb6fb`, position 157. The graph, PR
   summary, and commit mapping below cover positions 001-157 and the fixups at positions
   334-340, 344, and 345.
-- NVX's pinned OpenVMM revision: `bcfc47cff6606afadffef97551e538962895b598`, position 367.
-  Positions 366 and 367, which microsoft/openvmm#4818 proposes for `feature/microvm/dev`, are two
-  commits on position 365, `e4c741e18`, the head of `feature/microvm/dev` since
-  microsoft/openvmm#4804 merged positions 362-365. Those are four commits on position 361,
-  `c32c57d12`, which microsoft/openvmm#4807 merged with position 360. Positions 360 and 361 are
-  two commits on position 359, `bd2b27a2e`, which microsoft/openvmm#4794 merged with positions
-  355-358. Positions 355-359 are five commits on position 354, `832d5bb48`, which
-  microsoft/openvmm#4775 merged with position 353. Positions 353 and 354 are two commits on
+- NVX's pinned OpenVMM revision: `5e0ab772eeea14f4d0f5ed05474856569358f80e`, position 369.
+  Positions 368 and 369, which microsoft/openvmm#4820 proposes for `feature/microvm/dev`, are two
+  commits on position 367, `bcfc47cff`, the head of `feature/microvm/dev` since
+  microsoft/openvmm#4818 merged positions 366 and 367. Those are two commits on position 365,
+  `e4c741e18`, which microsoft/openvmm#4804 merged with positions 362-364. Positions 362-365 are
+  four commits on position 361, `c32c57d12`, which microsoft/openvmm#4807 merged with position 360.
+  Positions 360 and 361 are two commits on position 359, `bd2b27a2e`, which microsoft/openvmm#4794
+  merged with positions 355-358. Positions 355-359 are five commits on position 354, `832d5bb48`,
+  which microsoft/openvmm#4775 merged with position 353. Positions 353 and 354 are two commits on
   position 352, `b92daa350`, which microsoft/openvmm#4773 merged with positions 350 and 351.
   Positions 350-352 are three commits on position 349, `d2338ea22`, which microsoft/openvmm#4769
   merged with position 348. Positions 348 and 349 are two commits on position 347, `57d0a18b3`,
@@ -25,10 +26,10 @@
   and 345 are two commits on position 343, `a12d9167f`, which microsoft/openvmm#4749 merged with
   positions 341 and 342. Positions 341-343 are three commits on position 340, `2b681564d`, which
   microsoft/openvmm#4735 merged with position 339. Positions 339 and 340 are two commits on
-  position 338, `8a0d945ed`, which microsoft/openvmm#4734 merged, and position 338 is one commit
-  on `79a501b63`, the head of the `feature/microvm/release/v2.3` branch of microsoft/openvmm. The
-  pin is 210 commits past the mapped tip on the same first-parent chain. Positions 158-333,
-  341-343, and 346-367 are not yet assigned to PRs; see
+  position 338, `8a0d945ed`, which microsoft/openvmm#4734 merged, and position 338 is one commit on
+  `79a501b63`, the head of the `feature/microvm/release/v2.3` branch of microsoft/openvmm. The pin
+  is 212 commits past the mapped tip on the same first-parent chain. Positions 158-333, 341-343,
+  and 346-369 are not yet assigned to PRs; see
   [Commits after the mapped tip](#commits-after-the-mapped-tip).
 - Upstream main: `22c0485be597f87a76771e1db03eaa823a685ffc` (2026-10-22), the fork base.
 
@@ -319,8 +320,8 @@ The physical branch is one first-parent chain:
   -> PR14 fixup [336] -> PR09 fixup [337]
   -> PR02 fixup [338] -> PR20 fixup [339] -> PR23 fixup [340]
   -> unassigned [341-343] -> PR18 fixups [344-345]
-  -> unassigned [346-367]
-  -> bcfc47cff (NVX pin)
+  -> unassigned [346-369]
+  -> 5e0ab772e (NVX pin)
 ```
 
 For upstream review, PR01-PR08 and PR14 can be rebased independently onto current upstream main,
@@ -342,8 +343,8 @@ PR18's position 111.
 
 ## Commits after the mapped tip
 
-The NVX pin extends the chain past position 157 without merges. Of the 210 later commits,
-positions 158-333, 341-343, and 346-367 are not yet classified or assigned to PRs, positions
+The NVX pin extends the chain past position 157 without merges. Of the 212 later commits,
+positions 158-333, 341-343, and 346-369 are not yet classified or assigned to PRs, positions
 334-337 are the fixups of the `feature/microvm/release/v2.3` rebase, position 338 is a PR02
 fixup, positions 339 and 340 are PR20 and PR23 fixups, and positions 344 and 345 are PR18
 fixups.
@@ -399,6 +400,7 @@ This table groups them by topic in chain order; ranges are inclusive, as in the
 | 360-361 | `c9ac93a63..c32c57d12` | 2 | CPU profile validation checks the CPU time bits, so a snapshot's host profile document must fix them too, and the catalog verifies each pinned profile once per process, before a partition uses it: its static data must form a valid profile whose canonical encoding is the encoding that snapshots embed, while the tests keep checking its digest (microsoft/openvmm#4807) |
 | 362-365 | `69ddc715b..e4c741e18` | 4 | The microVM's `E_CPU_SURFACE` errors name every CPUID difference rather than the first 16, each entry of a snapshot's effective CPUID record on one line with the registers in which it differs, and VP 0's non-zero CPUID entries outside the profile's tables together with the results that VP 0 does not observe; and the VM worker runs every CPU check of a partition, the comparison with the snapshot's record, the check of VP 0's CPUID, and the check that the backend supports the profile, even after one fails, and reports their failures together (microsoft/openvmm#4804) |
 | 366-367 | `e51ab72d3..bcfc47cff` | 2 | The restore's comparison of the effective CPUID with a snapshot's record names every difference of a record that the decoder admits although no OpenVMM writes it, each entry that the record lists more than once, each of its listings that differs, and a record out of order, together with the entries that differ; and its tests check each register, value, and mask that the error names (microsoft/openvmm#4818) |
+| 368-369 | `342887c99..5e0ab772e` | 2 | The VM time keeper maps a timeout beyond what the host clock can represent to the host clock's latest time: one more than about 584 years after the last start no longer panics the task that arms it, as one armed across a restore to a far VM time panicked the keeper's task at start (microsoft/nvx#1038), and one nearly half the ring after now, which VM time's circular order puts before the start, no longer arms the host timer in the past, which made the keeper spin (microsoft/openvmm#4820) |
 
 Some of these commits change mapped work rather than add to it. Positions 246-250 remove the
 legacy microVM clock paths and change files that PR10 and PR17 also change. Position 252 makes
@@ -420,6 +422,9 @@ snapshot guide, so they build on that fork-only code. Positions 362-365 change o
 checks of the VM worker's time ABI, which positions 159-269 also add, and the snapshot guide's
 description of them. Positions 366 and 367 change only the first of those checks, the
 comparison with a snapshot's record, its tests, and the snapshot guide's description of it.
+Positions 368 and 369 change only the VM time keeper of `vmcore`, whose `vmtime.rs` upstream main
+and the fork base have alike. Positions 043 and 301 change other parts of that file, and positions
+368 and 369 apply to upstream main as they are, so they can go upstream on their own.
 
 ## PR summary
 
