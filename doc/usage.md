@@ -530,8 +530,8 @@ python3 scripts/nvx.py record-guest-artifacts --components COMPONENTS
 Writes the guest artifact record, `guest-artifacts.json`, into the directory
 of the guest artifacts, `build/` by default. `--components` lists, separated
 by spaces, some of the `kernel`, `alpine`, `ubuntu`, and `azurelinux`
-components of the CI guest build; the CI debug kernel and the Ubuntu sandbox
-scratch template, which every run formats anew, are in no record. The record
+components of the CI guest build, whose `ubuntu` component also holds the
+sandbox scratch template; the CI debug kernel is in no record. The record
 holds the exact cache keys of those components' cache entries, from the JSON
 object of keys by name that `--keys` gives, and the SHA-256 of each of their
 files. It fails if a key or a file is missing. Each CI job that builds guest
@@ -807,7 +807,11 @@ hash seed, and ignores the caller's other `E2FSPROGS_*` and `MKE2FS_*`
 variables, so e2fsprogs 1.46.5 and 1.47.0 of Debian 12, Ubuntu 22.04 and
 24.04, and Azure Linux 3 format the same bytes, whose SHA-256
 `UbuntuBuildConstants.SCRATCH_TEMPLATE_SHA256` pins. It warns when
-`mkfs.ext4` formats other bytes.
+`mkfs.ext4` formats other bytes. The guest Docker build formats the template
+with the Ubuntu distro layer, in the pinned Debian image, for
+[`build-guest`](#build-guest) and for CI, which caches, records, and hands it
+over with the layer. On other systems than Linux, the command fails and names
+that build of every guest.
 
 ### `verify-guest-determinism`
 

@@ -1104,7 +1104,13 @@ def build_scratch_template(config: ScratchTemplateBuildConfig) -> None:
     """Format the sandbox scratch template at `config.output` with mkfs.ext4,
     and warn when its bytes are not those that
     `UbuntuBuildConstants.SCRATCH_TEMPLATE_SHA256` pins."""
-    _require_linux("build-scratch-template")
+    if sys.platform != "linux":
+        # build-guest without --native formats the template only with every
+        # guest, so name that build rather than _require_linux's.
+        raise ScriptError(
+            "build-scratch-template requires Linux; build the template, with "
+            "the Ubuntu distro layer, in Docker with `build-guest --guest all`"
+        )
     output = config.output.resolve()
     if output.exists() and not config.replace:
         raise ScriptError(

@@ -456,6 +456,7 @@ class DockerBuildConstants:
         UbuntuBuildConstants.PACKAGE_MANIFEST_NAME,
         UbuntuBuildConstants.DISTRO_NAME,
         UbuntuBuildConstants.DISTRO_MANIFEST_NAME,
+        UbuntuBuildConstants.SCRATCH_TEMPLATE_NAME,
         AzureLinuxBuildConstants.INITRAMFS_NAME,
         AzureLinuxBuildConstants.PACKAGE_MANIFEST_NAME,
     )

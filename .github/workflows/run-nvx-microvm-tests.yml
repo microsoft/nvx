@@ -127,13 +127,6 @@ jobs:
           name: guest-ubuntu-distro
           path: build
 
-      - name: Download Ubuntu sandbox scratch template
-        if: ${{ inputs.guests-and-sandboxes && !inputs.debug-kernel }}
-        uses: actions/download-artifact@v8
-        with:
-          name: guest-ubuntu-scratch
-          path: build
-
       - name: Download Azure Linux initramfs
         if: ${{ inputs.guests-and-sandboxes && !inputs.debug-kernel }}
         uses: actions/download-artifact@v8

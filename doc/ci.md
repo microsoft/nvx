@@ -376,7 +376,10 @@ before boot, with an error that names its length and the limit.
 
 Shared guest artifacts are built with Docker on a GitHub-hosted Ubuntu runner.
 The kernel, Alpine initramfs, Ubuntu initramfs, and Ubuntu EROFS layer use
-separate cache keys. Every guest image key includes the shared binary-build
+separate cache keys. The EROFS layer's entry also holds the sandbox scratch
+template, which the layer's Docker target formats in the pinned Debian image
+with [`build-scratch-template`](usage.md#build-scratch-template). Every guest
+image key includes the shared binary-build
 modules, the Dockerfile, and `.dockerignore`; the Rust builder image itself is
 pinned by digest. Every guest image key also ends with the path-aware digest
 of the Rust guest binaries' inputs that the guest package manifests record,
@@ -850,8 +853,7 @@ components that its steps read, and waits only for the jobs that upload them:
 | `guest-kernel` | `vmlinux`, `vmlinux.config`, `vmlinux.provenance.json` | `artifacts` | VMM tests, microVM tests, debug-kernel jobs, platform jobs |
 | `guest-alpine` | `initramfs.cpio.gz`, its `.packages.json`, `initramfs.provenance.json` | `artifacts` | VMM tests, microVM tests, debug-kernel jobs, platform jobs |
 | `guest-ubuntu` | `initramfs-ubuntu.cpio.gz` and its `.packages.json` | `distro-artifacts` | microVM guest and sandbox jobs, platform jobs |
-| `guest-ubuntu-distro` | `ubuntu-distro.erofs` and its `.manifest.json` | `distro-artifacts` | microVM guest and sandbox jobs, platform jobs |
-| `guest-ubuntu-scratch` | `ubuntu-smoke-scratch.ext4`, the sandbox scratch template | `distro-artifacts` | microVM guest and sandbox jobs |
+| `guest-ubuntu-distro` | `ubuntu-distro.erofs` and its `.manifest.json`, and `ubuntu-smoke-scratch.ext4`, the sandbox scratch template | `distro-artifacts` | microVM guest and sandbox jobs, platform jobs |
 | `guest-azurelinux` | `initramfs-azurelinux.cpio.gz` and its `.packages.json` | `distro-artifacts` | microVM guest and sandbox jobs, platform jobs |
 | `guest-debug-kernel` | `vmlinux-debug`, `vmlinux-debug.config`, `vmlinux-debug.provenance.json` | `debug-kernel` | debug-kernel jobs |
 
@@ -861,7 +863,9 @@ debug-kernel jobs run the Alpine scenarios on the debug kernel and qualify
 their runner, through the doctor's preflight (H3), with the kernel and the
 Alpine initramfs. The microVM default suites boot only those two, and the
 microVM guest and sandbox jobs boot every guest and run sandboxes from the
-Ubuntu distro layer over copies of the scratch template. The platform
+Ubuntu distro layer over copies of the scratch template, which comes with the
+layer: the layer's Docker target formats it, its cache entry holds it, and the
+Ubuntu record gives its digest, so a push reuses it with the layer. The platform
 jobs boot the kernel and the Alpine initramfs to qualify their runner and to
 benchmark, and package every guest image but the scratch template into their
 release. A missing artifact fails its download step, so no job runs without a

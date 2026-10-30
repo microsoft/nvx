@@ -60,7 +60,9 @@ outputs:
     description: Exact cache key for the Ubuntu initramfs artifacts
     value: ${{ steps.guest-cache-keys.outputs.ubuntu }}
   ubuntu-distro-cache-key:
-    description: Exact cache key for the Ubuntu EROFS distro artifacts
+    description: >-
+      Exact cache key for the Ubuntu EROFS distro artifacts and the sandbox
+      scratch template
     value: ${{ steps.guest-cache-keys.outputs.ubuntu-distro }}
   azurelinux-cache-key:
     description: Exact cache key for the Azure Linux initramfs artifacts
@@ -150,7 +152,7 @@ runs:
           echo "kernel-debug=linux-kernel-debug-v1-${KERNEL_VERSION}-${DEBUG_KERNEL_INPUT_HASH}-${patch_identity}"
           echo "alpine=alpine-image-v2-${ALPINE_VERSION}-${ALPINE_INPUT_HASH}-${rust_source_identity}"
           echo "ubuntu=ubuntu-initramfs-v2-${UBUNTU_VERSION}-${UBUNTU_INPUT_HASH}-${rust_source_identity}"
-          echo "ubuntu-distro=ubuntu-distro-v2-${UBUNTU_VERSION}-${UBUNTU_INPUT_HASH}-${rust_source_identity}"
+          echo "ubuntu-distro=ubuntu-distro-v3-${UBUNTU_VERSION}-${UBUNTU_INPUT_HASH}-${rust_source_identity}"
           echo "azurelinux=azurelinux-initramfs-v2-${AZURELINUX_VERSION}-${AZURELINUX_INPUT_HASH}-${rust_source_identity}"
         } >> "${GITHUB_OUTPUT}"
 
@@ -197,6 +199,7 @@ runs:
         path: |
           build/ubuntu-distro.erofs
           build/ubuntu-distro.erofs.manifest.json
+          build/ubuntu-smoke-scratch.ext4
         key: ${{ steps.guest-cache-keys.outputs.ubuntu-distro }}
         enableCrossOsArchive: true
 
@@ -418,6 +421,8 @@ runs:
         key: ${{ steps.guest-cache-keys.outputs.azurelinux }}
         enableCrossOsArchive: true
 
+    # The distro layer target also formats the sandbox scratch template, in the
+    # pinned image, so the template is cached and recorded with the layer.
     - name: Build Ubuntu distro layer (Docker)
       if: >-
         inputs.restore-only != 'true' &&
@@ -443,25 +448,12 @@ runs:
         path: |
           build/ubuntu-distro.erofs
           build/ubuntu-distro.erofs.manifest.json
+          build/ubuntu-smoke-scratch.ext4
         key: ${{ steps.guest-cache-keys.outputs.ubuntu-distro }}
         enableCrossOsArchive: true
 
-    - name: Prepare Ubuntu sandbox scratch template
-      if: steps.components.outputs.ubuntu == 'true'
-      shell: bash
-      run: |
-        set -euo pipefail
-        mkdir -p build
-        rm -f build/ubuntu-smoke-scratch.ext4
-        truncate --size 64M build/ubuntu-smoke-scratch.ext4
-        mkfs.ext4 -q -F -m 0 \
-          -U 4f3c8bf7-1959-47b4-8811-62b17bbddaf4 \
-          -E lazy_itable_init=0,lazy_journal_init=0 \
-          build/ubuntu-smoke-scratch.ext4
-
     # Uploaded beside the components' own artifacts, so that the dev push that
     # merges this run's pull request can check them before it reuses them.
-    # The scratch template, which every run formats anew, is in no record.
     - name: Record guest artifact keys and digests
       if: inputs.restore-only != 'true' && inputs.record-artifact != ''
       shell: bash

@@ -449,6 +449,7 @@ def _write_release_fixture(
     for path in (
         binary,
         *(build_dir / name for name in guest_names),
+        build_dir / UbuntuBuildConstants.SCRATCH_TEMPLATE_NAME,
         root / "LICENSE",
         root / "README.md",
         root / "THIRD_PARTY_NOTICES.md",
@@ -5523,7 +5524,10 @@ class GuestArtifactReuseTests(unittest.TestCase):
                 directory = Path(temporary)
                 for name in guest_artifact_reuse.component_files(components):
                     shutil.copyfile(self.template / name, directory / name)
-                (directory / "ubuntu-smoke-scratch.ext4").write_bytes(b"scratch")
+                # No record covers the CI debug kernel.
+                (directory / KernelBuildConstants.DEBUG_BINARY_NAME).write_bytes(
+                    b"debug kernel"
+                )
                 stdout = io.StringIO()
                 args = nvx.parse_args(
                     [
@@ -5566,7 +5570,11 @@ class GuestArtifactReuseTests(unittest.TestCase):
                         },
                     },
                 )
-                self.assertEqual(len(record["files"]), 6)
+                # The Ubuntu component holds the sandbox scratch template too.
+                self.assertEqual(
+                    len(record["files"]),
+                    {("kernel", "alpine"): 6, ("ubuntu", "azurelinux"): 7}[components],
+                )
                 self.assertNotIn("kernel-debug", record["keys"])
                 self.assertIn(guest_artifact_reuse.RECORD_NAME, stdout.getvalue())
 
@@ -6898,7 +6906,7 @@ class CiConfigurationTests(unittest.TestCase):
             )
 
         jobs: dict[str, dict[str, Any]] = load("ci.yml")["jobs"]
-        scratch = "ubuntu-smoke-scratch.ext4"
+        scratch = UbuntuBuildConstants.SCRATCH_TEMPLATE_NAME
         components = {
             "guest-kernel": {
                 KernelBuildConstants.BINARY_NAME,
@@ -6914,11 +6922,12 @@ class CiConfigurationTests(unittest.TestCase):
                 UbuntuBuildConstants.INITRAMFS_NAME,
                 UbuntuBuildConstants.PACKAGE_MANIFEST_NAME,
             },
+            # The sandbox scratch template is cached with the distro layer.
             "guest-ubuntu-distro": {
                 UbuntuBuildConstants.DISTRO_NAME,
                 UbuntuBuildConstants.DISTRO_MANIFEST_NAME,
+                scratch,
             },
-            "guest-ubuntu-scratch": {scratch},
             "guest-azurelinux": {
                 AzureLinuxBuildConstants.INITRAMFS_NAME,
                 AzureLinuxBuildConstants.PACKAGE_MANIFEST_NAME,
@@ -6932,7 +6941,6 @@ class CiConfigurationTests(unittest.TestCase):
             {
                 *DockerBuildConstants.ALL_GUEST_ARTIFACT_NAMES,
                 *DockerBuildConstants.DEBUG_KERNEL_ARTIFACT_NAMES,
-                scratch,
             },
         )
 
@@ -6960,7 +6968,7 @@ class CiConfigurationTests(unittest.TestCase):
         uploads = {
             "kernel": {"guest-kernel"},
             "alpine": {"guest-alpine"},
-            "ubuntu": {"guest-ubuntu", "guest-ubuntu-distro", "guest-ubuntu-scratch"},
+            "ubuntu": {"guest-ubuntu", "guest-ubuntu-distro"},
             "azurelinux": {"guest-azurelinux"},
             "debug-kernel": {"guest-debug-kernel"},
         }
@@ -9809,11 +9817,10 @@ python3() {
         self.assertEqual(build_workflow.count("overwrite: true"), 2)
         self.assertEqual(build_workflow.count("retention-days: 1"), 2)
         # The microVM workflow also downloads nvx-rs, which the benchmarks
-        # don't run, the Ubuntu sandbox scratch template and the debug kernel,
-        # which the platform jobs don't read, and on Windows the runtime
-        # adapter's guest agent.
+        # don't run, the debug kernel, which the platform jobs don't read, and
+        # on Windows the runtime adapter's guest agent.
         for consumer_workflow, download_count in (
-            (microvm_workflow, 11),
+            (microvm_workflow, 10),
             (platform_workflow, 7),
         ):
             self.assertIn("path: openvmm/target/release", consumer_workflow)
@@ -10039,7 +10046,7 @@ python3() {
                         cache_condition,
                     )
 
-    def test_guest_artifact_restore_only_leaves_restore_and_scratch_steps_active(self):
+    def test_guest_artifact_restore_only_leaves_restore_steps_active(self):
         action = (
             BuildConstants.REPO_ROOT
             / ".github"
@@ -10053,10 +10060,10 @@ python3() {
         ]
 
         self.assertTrue(restore_steps)
-        scratch = _composite_action_step(
-            action, "Prepare Ubuntu sandbox scratch template"
-        )
-        for step in (*restore_steps, scratch):
+        # The distro layer's cache entry holds the scratch template, which no
+        # step formats on its own any more.
+        self.assertNotIn("mkfs", action)
+        for step in restore_steps:
             try:
                 name = _yaml_scalar(step, "name")
             except AssertionError:
@@ -10448,8 +10455,7 @@ python3() {
     def test_reuse_downloads_the_artifacts_of_each_recorded_component(self):
         # The artifacts that reuse downloads for each component are those in
         # which the job that builds it hands its files over, and together they
-        # hold every file of the component; the scratch template, which every
-        # run formats anew, is in none.
+        # hold every file of the component; the debug kernel is in none.
         github = BuildConstants.REPO_ROOT / ".github"
         workflow = yaml.safe_load(
             (github / "workflows" / "ci.yml").read_text(encoding="utf-8")
@@ -10478,10 +10484,7 @@ python3() {
                     sorted(files),
                     sorted(release.GUEST_ARTIFACT_COMPONENTS[component]),
                 )
-        self.assertEqual(
-            set(uploads) - handed_over,
-            {"guest-ubuntu-scratch", "guest-debug-kernel"},
-        )
+        self.assertEqual(set(uploads) - handed_over, {"guest-debug-kernel"})
 
     def test_ci_runs_debug_kernel_on_kvm_for_prs_and_all_for_non_prs(self):
         workflow = (
@@ -16868,6 +16871,27 @@ class BuildTests(unittest.TestCase):
                 )
             self.assertEqual(stderr.getvalue(), "")
 
+    def test_scratch_template_names_where_else_to_get_it_off_linux(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary) / "scratch.ext4"
+            with (
+                patch.object(build.sys, "platform", "win32"),
+                patch.object(build, "_mkfs_ext4") as mkfs,
+                patch.object(build, "run_checked") as run_checked,
+                self.assertRaises(common.ScriptError) as raised,
+            ):
+                build.build_scratch_template(
+                    build_config.ScratchTemplateBuildConfig(output=output)
+                )
+            self.assertEqual(
+                str(raised.exception),
+                "build-scratch-template requires Linux; build the template, with "
+                "the Ubuntu distro layer, in Docker with `build-guest --guest all`",
+            )
+            mkfs.assert_not_called()
+            run_checked.assert_not_called()
+            self.assertEqual(list(Path(temporary).iterdir()), [])
+
     def test_scratch_template_leaves_no_output_when_mkfs_fails(self):
         with tempfile.TemporaryDirectory() as temporary:
             output = Path(temporary) / "scratch.ext4"
@@ -17609,7 +17633,7 @@ class BuildTests(unittest.TestCase):
         for key in (
             "alpine=alpine-image-v2-${ALPINE_VERSION}-${ALPINE_INPUT_HASH}",
             "ubuntu=ubuntu-initramfs-v2-${UBUNTU_VERSION}-${UBUNTU_INPUT_HASH}",
-            "ubuntu-distro=ubuntu-distro-v2-${UBUNTU_VERSION}-${UBUNTU_INPUT_HASH}",
+            "ubuntu-distro=ubuntu-distro-v3-${UBUNTU_VERSION}-${UBUNTU_INPUT_HASH}",
             "azurelinux=azurelinux-initramfs-v2-${AZURELINUX_VERSION}-${AZURELINUX_INPUT_HASH}",
         ):
             with self.subTest(key=key.split("=", 1)[0]):
@@ -17817,9 +17841,9 @@ class BuildTests(unittest.TestCase):
                 "debug-kernel": 3,
                 "alpine": 3,
                 "azurelinux": 3,
-                # The initramfs, the distro layer, their determinism check,
-                # and the sandbox scratch template.
-                "ubuntu": 8,
+                # The initramfs, the distro layer, which holds the sandbox
+                # scratch template, and their determinism check.
+                "ubuntu": 7,
             },
         )
 
@@ -17901,15 +17925,17 @@ class BuildTests(unittest.TestCase):
             # files of nvx-rs that the guest build reads, and the toolchain pin.
             self.assertNotIn("nvx-rs", assignment)
             self.assertNotIn("rust-toolchain.toml", assignment)
-        for prefix in (
-            "alpine-image",
-            "ubuntu-initramfs",
-            "ubuntu-distro",
-            "azurelinux-initramfs",
+        for prefix, version in (
+            ("alpine-image", 2),
+            ("ubuntu-initramfs", 2),
+            # The distro layer's entry also holds the sandbox scratch template.
+            ("ubuntu-distro", 3),
+            ("azurelinux-initramfs", 2),
         ):
             with self.subTest(cache=prefix):
-                self.assertIn(f"{prefix}-v2-", action)
-                self.assertNotIn(f"{prefix}-v1-", action)
+                self.assertIn(f"{prefix}-v{version}-", action)
+                for earlier in range(1, version):
+                    self.assertNotIn(f"{prefix}-v{earlier}-", action)
 
     def test_quality_checks_include_shared_identity_probe(self):
         action = (
@@ -18052,6 +18078,31 @@ class BuildTests(unittest.TestCase):
         ):
             with self.subTest(target=target):
                 self.assertIn("guest-binaries", stages_built_for(target))
+
+    def test_docker_distro_layer_targets_export_the_scratch_template(self):
+        # The template needs only the base image's mkfs.ext4, so it builds no
+        # guest binary, and it leaves the build with the distro layer.
+        dockerfile = (BuildConstants.REPO_ROOT / "docker" / "Dockerfile").read_text(
+            encoding="utf-8"
+        )
+        stage = dockerfile.split("\nFROM base AS ubuntu-scratch-template\n", 1)[
+            1
+        ].split("\nFROM ", 1)[0]
+        self.assertEqual(
+            stage.strip(), "RUN python3 scripts/nvx.py build-scratch-template"
+        )
+        name = UbuntuBuildConstants.SCRATCH_TEMPLATE_NAME
+        copy = f"COPY --from=ubuntu-scratch-template /repo/build/{name} /{name}"
+        self.assertEqual(dockerfile.count(copy), 2)
+        for target in (
+            "ubuntu-distro-layer-artifacts",
+            DockerBuildConstants.ALL_GUESTS_TARGET,
+        ):
+            with self.subTest(target=target):
+                section = dockerfile.split(f"\nFROM scratch AS {target}\n", 1)[1].split(
+                    "\nFROM ", 1
+                )[0]
+                self.assertIn(copy, section)
 
     def test_azurelinux_initramfs_uses_locked_busybox_applets(self):
         dockerfile = (BuildConstants.REPO_ROOT / "docker" / "Dockerfile").read_text(

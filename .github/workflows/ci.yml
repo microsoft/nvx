@@ -498,14 +498,7 @@ jobs:
           path: |
             build/ubuntu-distro.erofs
             build/ubuntu-distro.erofs.manifest.json
-          if-no-files-found: error
-          retention-days: 1
-
-      - name: Upload Ubuntu sandbox scratch template
-        uses: actions/upload-artifact@v7
-        with:
-          name: guest-ubuntu-scratch
-          path: build/ubuntu-smoke-scratch.ext4
+            build/ubuntu-smoke-scratch.ext4
           if-no-files-found: error
           retention-days: 1
 

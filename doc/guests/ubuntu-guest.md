@@ -178,8 +178,8 @@ the initramfs is missing instead of falling back to Alpine.
 
 ## Validation
 
-CI builds the Ubuntu artifacts when their inputs change and rebuilds both
-twice to compare their digests; locally,
+CI builds the Ubuntu artifacts, with the sandbox scratch template, when their
+inputs change and rebuilds them twice to compare their digests; locally,
 [`verify-guest-determinism`](../usage.md#verify-guest-determinism) does the
 same. The [microVM test workflow](../../.github/workflows/run-nvx-microvm-tests.yml)
 runs Ubuntu boot, identity, console, lifecycle, network, and filesystem
