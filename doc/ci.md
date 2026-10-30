@@ -881,9 +881,10 @@ Alpine initramfs. The microVM default suites boot only those two, and the
 microVM guest and sandbox jobs boot every guest and run sandboxes from the
 Ubuntu distro layer over copies of the scratch template, which comes with the
 layer: the layer's Docker target formats it, its cache entry holds it, and the
-Ubuntu record gives its digest, so a push reuses it with the layer. The microVM
-test workflow's own default, an unsharded default run, which no CI job selects,
-runs the public sandbox scenarios too, so it also downloads the layer. The
+Ubuntu record gives its digest, so a merge group or a push reuses it with the
+layer. The microVM test workflow's own default, an unsharded default run, which
+no CI job selects, runs the public sandbox scenarios too, so it also downloads
+the layer. The
 platform jobs boot the kernel and the Alpine initramfs to qualify their runner
 and to benchmark, and package every guest image, and the scratch template, into
 their release. A missing artifact fails its download step, so no job runs
@@ -931,7 +932,8 @@ to 21, 2026, when one job built every guest image, 50 of the 87 `dev` pushes
 that ran it built at least one image, and the job took a median of 5.4
 minutes, and at most 11.3, instead of 0.3, which delayed every job that waits
 for it. A push therefore reuses the components that its pull request's run
-already built, when they check out.
+already built, when they check out, and so does the pull request's
+[merge group](#merge-queue), which can't restore them either.
 
 `artifacts` and `distro-artifacts` each record their components. The last
 steps of
@@ -942,30 +944,32 @@ the components' cache entries and the SHA-256 of each of their files, and
 upload it for one day under the name that the action's `record-artifact` input
 gives: `kernel-alpine-record` for the kernel and the Alpine initramfs, and
 `ubuntu-azurelinux-record` for the Ubuntu and Azure Linux images. No job of the
-run downloads a record. On a push, after the cache restores and before any
-build, [`reuse-guest-artifacts`](usage.md#reuse-guest-artifacts) runs in each
-of the two jobs when a file of its components is missing. It takes the merged
-pull request's head from the second parent of the push's merge commit, and
-the latest `pull_request` run of `ci.yml` for that head whose head repository
-is `microsoft/nvx`, so never a fork's run. It downloads the job's record from
+run downloads a record. On a push or a merge group, after the cache restores
+and before any build, [`reuse-guest-artifacts`](usage.md#reuse-guest-artifacts)
+runs in each of the two jobs when a file of its components is missing. It
+takes the merged pull request's head from the second parent of the run's merge
+commit, which the queue builds as a push's, and the latest `pull_request` run
+of `ci.yml` for that head whose head repository is `microsoft/nvx`, so never a
+fork's run. It downloads the job's record from
 that run, unless the record has expired, which it does after one day, or lacks
 the SHA-256 digest that GitHub records at upload, and compares its keys with
-the push's own keys for the job's components, so the keys of the other job's
+the run's own keys for the job's components, so the keys of the other job's
 components never matter. Only when they are equal does it download the
 components' artifacts, `guest-kernel` and `guest-alpine`, or `guest-ubuntu`,
 `guest-ubuntu-distro`, and `guest-azurelinux`, under the same conditions. It
 installs their files only when each artifact matches its digest, every file
 matches the record, and the kernel and initramfs provenance, or the Ubuntu and
-Azure Linux manifests, match the files and the push's checkout, as
+Azure Linux manifests, match the files and the run's checkout, as
 [`package`](usage.md#package) requires. Then it replaces every file of the
 job's components, not only the missing ones, because a cache restore that fails
 partway can leave a truncated file behind and still report a miss; the files
 that the cache restored have the same keys. The job then skips the builds of
 its components and, in `distro-artifacts`, the Ubuntu determinism check, which
-the run that built the images passed, as for a cache hit. It still saves the
-components in its caches for later runs, records them, and uploads them as its
-own artifacts, which its consumers download as before, so no job depends on
-another run's artifact or on a cache. The debug kernel is never reused.
+the run that built the images passed, as for a cache hit. A push still saves
+the components in its caches for later runs, and either one records them and
+uploads them as its own artifacts, which its consumers download as before, so
+no job depends on another run's artifact or on a cache. The debug kernel is
+never reused.
 
 Every other outcome builds the components that missed the cache, as before: a
 merge commit without a same-repository pull request run, an expired record or
@@ -986,14 +990,14 @@ pull request once both guest artifact jobs succeed, beside the jobs that wait
 for them. It runs `reuse-guest-artifacts --dry-run` for the pull request's
 head and each job's components, record, and keys, which selects the run in
 progress, downloads the records and the artifacts that the two jobs just
-uploaded, checks them as a push would, and reports in the job summary whether
-a push would reuse them, without installing anything. A reason not to reuse
-fails nothing, but it warns, because a run's own artifacts should always check
-out. The change detector selects the rehearsal with the guest artifacts, and
-`Required status check` requires it to succeed for a same-repository pull
-request that builds them, so a pull request that breaks the reuse command
-can't merge. Its merge group doesn't rehearse the reuse again (see
-[Merge queue](#merge-queue)).
+uploaded, checks them as a merge group or a push would, and reports in the job
+summary whether those would reuse them, without installing anything. A reason
+not to reuse fails nothing, but it warns, because a run's own artifacts should
+always check out. The change detector selects the rehearsal with the guest
+artifacts, and `Required status check` requires it to succeed for a
+same-repository pull request that builds them, so a pull request that breaks
+the reuse command can't merge. Its merge group doesn't rehearse the reuse
+again, but reuses the artifacts for real (see [Merge queue](#merge-queue)).
 
 ## Run concurrency
 
@@ -1092,24 +1096,27 @@ its checks (see [Queue settings](#queue-settings)): it then merges no group
 while a group ahead of it fails.
 
 A group's run then checks what the run of a same-repository pull request
-checks, but the rehearsal of the
-[guest artifact reuse](#guest-artifact-reuse), which the pull request's run
-made: each suite runs only when one of its inputs changed, the platform jobs
-and the performance regression gate after them included, the debug kernel
-runs on KVM alone, and the OpenVMM VMM tests are restored from the
-[cache](#openvmm-vmm-test-cache) that `dev` pushes save. A group publishes no
-development release and persists no performance results, which the `dev`
-push of the merged commit does, and saves no cache: GitHub scopes a cache
-entry to the ref that saved it, and no other run can restore an entry of a
-group's branch, which GitHub deletes as soon as it merges or drops the group.
-A group's run can restore the entries of `dev` alone, not those of its pull
-request's runs. Each group's run has a concurrency group of its own, keyed by
-the run rather than the group's ref, so it neither waits for nor cancels
-another: a pull request that leaves the queue and returns to it on the same
-base gets its earlier group's ref again, and a group keyed by the ref would
-hold the new run until the replaced one ended. `Required status check` passes
-`merge_group` to [`check-required-ci`](usage.md#check-required-ci), which
-expects those jobs.
+checks, but the rehearsal of the [guest artifact reuse](#guest-artifact-reuse),
+which the pull request's run made: each suite runs only when one of its inputs
+changed, the platform jobs and the performance regression gate after them
+included, the debug kernel runs on KVM alone, and the OpenVMM VMM tests are
+restored from the [cache](#openvmm-vmm-test-cache) that `dev` pushes save. A
+group publishes no development release and persists no performance results,
+which the `dev` push of the merged commit does, and saves no cache: GitHub
+scopes a cache entry to the ref that saved it, and no other run can restore an
+entry of a group's branch, which GitHub deletes as soon as it merges or drops
+the group. A group's run can restore the entries of `dev` alone, not those of
+its pull request's runs, so, like the `dev` push that merges the pull request,
+it installs the guest artifacts that the pull request's run built instead of
+building them again, when they check out (see
+[Guest artifact reuse](#guest-artifact-reuse)); a pull request that changes
+the key of the OpenVMM VMM tests, though, builds them in its group too. Each
+group's run has a concurrency group of its own, keyed by the run rather than
+the group's ref, so it neither waits for nor cancels another: a pull request
+that leaves the queue and returns to it on the same base gets its earlier
+group's ref again, and a group keyed by the ref would hold the new run until
+the replaced one ended. `Required status check` passes `merge_group` to
+[`check-required-ci`](usage.md#check-required-ci), which expects those jobs.
 
 A merge group runs in the repository, with the repository's secrets, whatever
 repository its pull requests come from: GitHub builds the group's branch
@@ -1137,10 +1144,10 @@ timeout. The rule's settings:
   request's head into the group's base, `Merge pull request #NUMBER from
   OWNER/BRANCH`, and moves `dev` to the head of the last group that it merges,
   so each pull request keeps a merge commit of its own, whose second parent is
-  its head. The `dev` push's [guest artifact reuse](#guest-artifact-reuse)
-  finds the pull request's run through that parent; a squash or a rebase would
-  leave none, and every push would rebuild the guest artifacts that its pull
-  request changed.
+  its head. The [guest artifact reuse](#guest-artifact-reuse) of the group's
+  run and of the `dev` push finds the pull request's run through that parent;
+  a squash or a rebase would leave none, and both would rebuild every guest
+  artifact that the pull request changed.
 - **Require all queue entries to pass required checks:** on
   (`grouping_strategy: ALLGREEN`). Each group's run checks only its own pull
   request's change, so the queue must not merge a group while a group ahead of

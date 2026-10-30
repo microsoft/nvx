@@ -626,7 +626,8 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         "record-guest-artifacts",
         help=(
             "record the cache keys and the SHA-256 of each file of guest "
-            "artifact components, which a dev push checks before it reuses them"
+            "artifact components, which a merge group or a dev push checks "
+            "before it reuses them"
         ),
     )
     guest_record.add_argument(
@@ -684,7 +685,10 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     guest_reuse_head = guest_reuse.add_mutually_exclusive_group(required=True)
     guest_reuse_head.add_argument(
         "--commit",
-        help="the pushed merge commit, whose second parent is the pull request head",
+        help=(
+            "the pushed or queued merge commit, whose second parent is the pull "
+            "request head"
+        ),
     )
     guest_reuse_head.add_argument("--head-sha", help="the pull request head itself")
     guest_reuse.add_argument(

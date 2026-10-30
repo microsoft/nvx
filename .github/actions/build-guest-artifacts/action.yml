@@ -27,17 +27,18 @@ inputs:
     description: >-
       Name of the artifact in which to upload build/guest-artifacts.json, the
       record of the selected components' exact cache keys and of the SHA-256
-      of each of their files, so that the dev push that merges this run's
-      pull request can check them before it reuses them; "" records nothing
+      of each of their files, so that the merge group and the dev push that
+      merge this run's pull request can check them before they reuse them;
+      "" records nothing
     required: false
     default: ""
   reuse:
     description: >-
-      "true", in the run of a pushed merge commit, installs every file of the
-      selected components, when one missed the cache, from the artifacts of
-      the latest pull_request run of this workflow for the merged head, from
-      this repository and never a fork, once they check out against that
-      run's record-artifact record, and builds them otherwise
+      "true", in the run of a pushed or queued merge commit, installs every
+      file of the selected components, when one missed the cache, from the
+      artifacts of the latest pull_request run of this workflow for the merged
+      head, from this repository and never a fork, once they check out against
+      that run's record-artifact record, and builds them otherwise
     required: false
     default: "false"
 
@@ -214,12 +215,13 @@ runs:
         key: ${{ steps.guest-cache-keys.outputs.azurelinux }}
         enableCrossOsArchive: true
 
-    # A push can't restore the caches that its pull request's runs saved, so
-    # it installs the selected components, when one missed the cache, from the
-    # artifacts of the latest run for the merged head, from this repository
-    # and never a fork, when that run recorded these keys and the files match
-    # the record, their provenance, and this checkout. Any other outcome
-    # builds them below, and the saves cache what it installed.
+    # Neither a push nor a merge group can restore the caches that its pull
+    # request's runs saved, so each installs the selected components, when one
+    # missed the cache, from the artifacts of the latest run for the merged
+    # head, from this repository and never a fork, when that run recorded
+    # these keys and the files match the record, their provenance, and this
+    # checkout. Any other outcome builds them below, and a push's saves cache
+    # what it installed.
     - name: Reuse the merged pull request's guest artifacts
       id: reuse
       if: >-
@@ -452,8 +454,9 @@ runs:
         key: ${{ steps.guest-cache-keys.outputs.ubuntu-distro }}
         enableCrossOsArchive: true
 
-    # Uploaded beside the components' own artifacts, so that the dev push that
-    # merges this run's pull request can check them before it reuses them.
+    # Uploaded beside the components' own artifacts, so that the merge group
+    # and the dev push that merge this run's pull request can check them before
+    # they reuse them.
     - name: Record guest artifact keys and digests
       if: inputs.restore-only != 'true' && inputs.record-artifact != ''
       shell: bash

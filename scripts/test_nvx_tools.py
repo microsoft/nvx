@@ -6066,9 +6066,9 @@ class GuestArtifactReuseTests(unittest.TestCase):
                 self.assertEqual(outcome.level, "warning")
                 self.assertTrue(
                     outcome.detail.endswith(
-                        f"has no unexpired `{record}` artifact, so a push that "
-                        "merged this head would build the guest images that "
-                        "missed its cache."
+                        f"has no unexpired `{record}` artifact, so a merge group "
+                        "or a push that merged this head would build the guest "
+                        "images that missed its cache."
                     ),
                     outcome.detail,
                 )
@@ -10810,10 +10810,13 @@ python3() {
                     self.assertEqual(
                         job["permissions"], {"actions": "read", "contents": "read"}
                     )
-                    # Only pushes reuse; pull requests and full runs build what
-                    # misses the cache, as before.
+                    # Only pushes and merge groups reuse, since neither can
+                    # restore the pull request's caches; pull requests and full
+                    # runs build what misses the cache, as before.
                     self.assertEqual(
-                        arguments["reuse"], "${{ github.event_name == 'push' }}"
+                        arguments["reuse"],
+                        "${{ github.event_name == 'merge_group' || "
+                        "github.event_name == 'push' }}",
                     )
         self.assertEqual(reusing, {"artifacts", "distro-artifacts"})
 

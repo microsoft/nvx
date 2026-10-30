@@ -410,7 +410,8 @@ jobs:
       }}
     runs-on: ubuntu-latest
     timeout-minutes: 60
-    # A push reads its pull request's runs and downloads their artifacts.
+    # A push or a merge group reads its pull request's runs and downloads their
+    # artifacts.
     permissions:
       actions: read
       contents: read
@@ -423,8 +424,8 @@ jobs:
           persist-credentials: false
 
       # Full runs and merge groups build the guest artifacts that miss the
-      # cache without saving them. A push installs those that its pull
-      # request's latest run built instead, when they check out.
+      # cache without saving them. A push or a merge group installs those that
+      # its pull request's latest run built instead, when they check out.
       - name: Build guest artifacts
         id: guest-artifacts
         uses: ./.github/actions/build-guest-artifacts
@@ -432,7 +433,7 @@ jobs:
           components: kernel alpine
           save-cache: ${{ github.event_name == 'pull_request' || github.event_name == 'push' }}
           record-artifact: kernel-alpine-record
-          reuse: ${{ github.event_name == 'push' }}
+          reuse: ${{ github.event_name == 'merge_group' || github.event_name == 'push' }}
 
       # One artifact per component, so that each job downloads only the
       # components that it reads (doc/ci.md, "Guest artifact handoff").
@@ -476,7 +477,8 @@ jobs:
       }}
     runs-on: ubuntu-latest
     timeout-minutes: 60
-    # A push reads its pull request's runs and downloads their artifacts.
+    # A push or a merge group reads its pull request's runs and downloads their
+    # artifacts.
     permissions:
       actions: read
       contents: read
@@ -489,8 +491,8 @@ jobs:
           persist-credentials: false
 
       # Full runs and merge groups build the guest artifacts that miss the
-      # cache without saving them. A push installs those that its pull
-      # request's latest run built instead, when they check out.
+      # cache without saving them. A push or a merge group installs those that
+      # its pull request's latest run built instead, when they check out.
       - name: Build guest artifacts
         id: guest-artifacts
         uses: ./.github/actions/build-guest-artifacts
@@ -498,7 +500,7 @@ jobs:
           components: ubuntu azurelinux
           save-cache: ${{ github.event_name == 'pull_request' || github.event_name == 'push' }}
           record-artifact: ubuntu-azurelinux-record
-          reuse: ${{ github.event_name == 'push' }}
+          reuse: ${{ github.event_name == 'merge_group' || github.event_name == 'push' }}
 
       - name: Upload Ubuntu initramfs
         uses: actions/upload-artifact@v7
@@ -555,11 +557,11 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
-  # A dev push reuses the guest artifact components that the pull request it
-  # merges built (see build-guest-artifacts). A same-repository pull request
-  # rehearses that selection and check on the artifacts that its own run
-  # uploaded, beside the jobs that use them, and installs nothing; its merge
-  # group doesn't rehearse them again.
+  # A dev push and a merge group reuse the guest artifact components that the
+  # pull request that they merge built (see build-guest-artifacts). A
+  # same-repository pull request rehearses that selection and check on the
+  # artifacts that its own run uploaded, beside the jobs that use them, and
+  # installs nothing; its merge group doesn't rehearse them again.
   guest-artifact-reuse:
     name: Rehearse guest artifact reuse
     needs: [openvmm-changes, artifacts, distro-artifacts]

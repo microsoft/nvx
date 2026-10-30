@@ -427,7 +427,7 @@ is authorized for the organization when it enforces single sign-on.
 | `classify-ci-changes` | Select the CI suites that a list of changed files runs. |
 | `kernel-patch-identity` | Print the digest of the kernel patch paths and contents that keys the kernel cache. |
 | `guest-binary-source-identity` | Print the digest of the Rust guest binary source paths and contents that keys the guest image caches. |
-| `record-guest-artifacts` | Record the cache keys and the SHA-256 of each file of guest artifact components, which a `dev` push checks before it reuses them. |
+| `record-guest-artifacts` | Record the cache keys and the SHA-256 of each file of guest artifact components, which a merge group or a `dev` push checks before it reuses them. |
 | `reuse-guest-artifacts` | Install guest artifact components that missed the cache from the latest same-repository pull request run for the merged head. |
 | `check-required-ci` | Validate required GitHub Actions job results. |
 | `report-nightly-ci` | Open, update, or close the report of failed nightly CI runs. |
@@ -539,8 +539,9 @@ holds the exact cache keys of those components' cache entries, from the JSON
 object of keys by name that `--keys` gives, and the SHA-256 of each of their
 files. It fails if a key or a file is missing. Each CI job that builds guest
 images records them, and uploads the record beside the components' own
-artifacts, so that the `dev` push that merges the pull request can check them
-before it reuses them; see [Guest artifact reuse](ci.md#guest-artifact-reuse).
+artifacts, so that the merge group and the `dev` push that merge the pull
+request can check them before they reuse them; see
+[Guest artifact reuse](ci.md#guest-artifact-reuse).
 
 ### `reuse-guest-artifacts`
 
