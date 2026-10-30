@@ -30,9 +30,10 @@
 //! credentials, capabilities, hostname, and umask, and mounts its view and enters its working
 //! directory with the new mount API and `openat2`, through libc's `syscall`, as the entry's
 //! module describes, because libc does not know of that child; the agent's wait-status decoding,
-//! and the waits for one named child,
-//! keep the real-time signals that `nix`'s `Signal` cannot represent; a pidfd is opened with the
-//! `pidfd_open` system call, which neither `nix` nor musl wraps; a write to an execution's input
+//! the waits for one named child, and an execution's signal to its program's process group by the
+//! group's ID, before Linux 6.9, keep the real-time signals that `nix`'s `Signal` cannot represent;
+//! a pidfd is opened with the `pidfd_open` system call, and signals are sent through it with
+//! `pidfd_send_signal`, which neither `nix` nor musl wraps; a write to an execution's input
 //! takes back the `SIGPIPE` that a closed reader raises with `sigtimedwait`, once `sigpending`
 //! shows that no such signal was pending before, and `nix` wraps neither; and the agent's
 //! execution helper duplicates the descriptor that it inherits by number, which it cannot borrow
@@ -123,10 +124,11 @@ pub(crate) use process::forbid_system_calls;
 pub(crate) use process::set_command_name;
 pub(crate) use process::{
     ChildStatus, DirectStdout, ForkResult, ProcessId, Stdout, WaitTarget, current_process, detach,
-    exec, exit_immediately, fork, ignore_interrupt_and_hangup, kill_process, kill_process_group,
-    kill_through_pidfd, open_pidfd, process_exists, process_name, reap_any_nonblocking,
-    restore_sigpipe, take_inherited_descriptor, try_wait, wait, wait_named, write_port_diagnostic,
-    write_standard_error,
+    exec, exit_immediately, fork, ignore_interrupt_and_hangup, is_unreaped, kill_process,
+    kill_process_group, kill_through_pidfd, open_pidfd, process_exists, process_group_of,
+    process_name, reap_any_nonblocking, restore_sigpipe, signal_process_group,
+    signal_through_pidfd, take_inherited_descriptor, try_wait, wait, wait_named,
+    write_port_diagnostic, write_standard_error,
 };
 #[cfg(test)]
 pub(crate) use process::{continue_traced, deny_system_call, spawn_traced_child};

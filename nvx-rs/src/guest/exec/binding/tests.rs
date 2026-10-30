@@ -6,7 +6,8 @@
 //! descendant holds once an execution does not settle, due settlement checks while output drains
 //! slowly, statuses that the execution or the caller collects, which reach the runner ahead of
 //! queued output and of its timeout, even in a first call after it, and while the launch report
-//! is late, the bounded wait for a launch report that a process holds for good, the bounds on the
+//! is late, a signal that the program handles, which reaches the runner only as the program's
+//! end, the bounded wait for a launch report that a process holds for good, the bounds on the
 //! steps and on the writes of one call, output that flows while the caller hands over input
 //! before every call, and two executions in one loop, one of them with a stalled sink or a pipe
 //! writer that escaped its kill. The loop waits only for what the bindings and peers say that
@@ -963,6 +964,40 @@ fn a_caller_that_reaps_hands_the_program_s_status_over() {
     let outcome = finish(&mut side);
     assert_eq!(outcome.status(), Some(Status::Exited(6)));
     assert!(outcome.is_reusable());
+}
+
+#[test]
+fn a_signal_that_the_program_handles_reaches_the_runner_only_as_the_program_s_end() {
+    let temporary = tempfile::tempdir().unwrap();
+    let cgroup = fake_cgroup(temporary.path(), "0\n");
+    // The program handles `SIGTERM` by writing more than the windows hold, and exiting 0, and
+    // waits for a descendant in its process group, which the signal ends too, without dash's
+    // report of the signal that ended it. It exits 3 unless its handler runs.
+    let mut side = Side::start(
+        shell(
+            "trap 'seq 1 20000; exit 0' TERM; sleep 30 </dev/null >/dev/null 2>&1 & \
+             printf ready; wait $! 2>/dev/null; exit 3",
+        ),
+        false,
+        Options::new().cgroup(&cgroup, Scope::Execution),
+        limits(4096),
+        timers(),
+    );
+    drive(&mut [&mut side], |sides| sides[0].output[0] == b"ready");
+    let refused = side.binding.signal(nix::libc::SIGKILL).unwrap_err();
+    assert_eq!(refused.raw_os_error(), Some(nix::libc::EINVAL));
+    assert!(side.binding.signal(nix::libc::SIGTERM).unwrap());
+    let outcome = finish(&mut side);
+    let mut output = b"ready".to_vec();
+    output.extend(sequence(20_000));
+    assert_eq!(side.output, [output, Vec::new()]);
+    assert_eq!(Some(outcome), side.terminal);
+    assert_eq!(outcome.status(), Some(Status::Exited(0)));
+    assert_eq!(outcome.cause(), None);
+    assert!(!outcome.is_truncated(Stream::Stdout));
+    assert!(outcome.is_reusable());
+    assert!(side.failures.is_empty(), "{:?}", side.failures);
+    assert!(!side.binding.signal(nix::libc::SIGTERM).unwrap());
 }
 
 #[test]

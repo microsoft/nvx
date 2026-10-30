@@ -1428,3 +1428,384 @@ fn adopted_ends_are_pipe_ends_that_go_the_way_of_their_streams() {
         assert_eq!(sys::errno_of(&error), Errno::EINVAL);
     }
 }
+
+/// The signal with which these tests stop a program gracefully.
+const SIGTERM: i32 = nix::libc::SIGTERM;
+
+/// Spawns `command` with new pipes and no input, as the leader of a process group of its own if
+/// `leads`, and starts its execution with `options` as they are.
+fn start_leading(command: Command, leads: bool, options: Options) -> Execution {
+    let (pipes, ends) = Pipes::new(false).unwrap();
+    let mut command = command.stdout(ends.stdout).stderr(ends.stderr);
+    if leads {
+        command = command.new_process_group();
+    }
+    Execution::new(command.spawn().unwrap(), pipes, options).unwrap()
+}
+
+/// Waits until the program `id` has ended, and collects its status, as the caller's own
+/// collector does.
+fn collect_once_ended(id: u32) -> ExitStatus {
+    let process = ProcessId::from_positive(i64::from(id)).unwrap();
+    let started = Instant::now();
+    while !sys::has_exited(process).unwrap() {
+        assert!(started.elapsed() < PATIENCE, "the program ended in time");
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    Child::new(id).unwrap().wait().unwrap()
+}
+
+#[test]
+fn a_program_that_handles_a_signal_ends_with_its_own_status_and_all_of_its_output() {
+    // The program handles `SIGTERM`, starts a descendant in its process group, which the signal
+    // ends too, says that it is ready, and waits for the descendant, without dash's report of the
+    // signal that ended it. It exits 3 unless its handler runs.
+    let script = "trap 'printf bye; exit 0' TERM; sleep 30 </dev/null >/dev/null 2>&1 & \
+                  printf ready; wait $! 2>/dev/null; exit 3";
+    for (adopted, caller_reaps) in [(false, false), (false, true), (true, false), (true, true)] {
+        let mut options = Options::new().timeout(Duration::from_secs(3600));
+        if caller_reaps {
+            options = options.caller_reaps();
+        }
+        let mut execution = if adopted {
+            let (id, pipes) = start_own(script, true);
+            adopt(id, pipes, options)
+        } else {
+            start(shell(script), true, options)
+        };
+        let id = execution.id();
+        execution.grant(Stream::Stdout, MAX_EVENT_BYTES);
+        execution.grant(Stream::Stderr, MAX_EVENT_BYTES);
+        let mut record = Record::default();
+        record.drive_until(&mut execution, true, |record, _| {
+            record.output[0] == b"ready"
+        });
+        let deadline = execution.deadline();
+        assert!(deadline.is_some());
+        assert!(
+            execution.signal(SIGTERM).unwrap(),
+            "{adopted} {caller_reaps}"
+        );
+        // The signal ended neither the execution nor its timeout, and left the input open.
+        assert_eq!(execution.deadline(), deadline);
+        assert!(execution.input().is_some());
+        if caller_reaps {
+            let status = collect_once_ended(id);
+            assert!(execution.observe(id, status));
+        }
+        record.drive_until(&mut execution, true, |record, _| record.outcome.is_some());
+        assert_eq!(
+            record.output,
+            [b"readybye".to_vec(), Vec::new()],
+            "{adopted} {caller_reaps}"
+        );
+        let outcome = record.outcome.unwrap();
+        assert_eq!(outcome.status().code(), Some(0), "{adopted} {caller_reaps}");
+        assert_eq!(outcome.cause(), None);
+        assert!(record.kill_failures.is_empty());
+        // The program has ended, so the execution signals it no more.
+        assert!(!execution.signal(SIGTERM).unwrap());
+    }
+}
+
+#[test]
+fn a_program_that_ignores_a_signal_runs_until_the_caller_terminates_it() {
+    let mut execution = start(
+        shell("trap '' TERM; printf ready; exec sleep 30"),
+        true,
+        Options::new().timeout(Duration::from_secs(3600)),
+    );
+    let process = ProcessId::from_positive(i64::from(execution.id())).unwrap();
+    execution.grant(Stream::Stdout, MAX_EVENT_BYTES);
+    execution.grant(Stream::Stderr, MAX_EVENT_BYTES);
+    let mut record = Record::default();
+    record.drive_until(&mut execution, true, |record, _| {
+        record.output[0] == b"ready"
+    });
+    let deadline = execution.deadline();
+    for _ in 0..2 {
+        assert!(execution.signal(SIGTERM).unwrap());
+    }
+    std::thread::sleep(Duration::from_millis(200));
+    record.pump(&mut execution, true);
+    assert!(!sys::has_exited(process).unwrap());
+    assert!(execution.status().is_none());
+    assert_eq!(execution.deadline(), deadline);
+    assert!(execution.input().is_some());
+    // The caller's own deadline passed, so it ends the program, and the outcome says why.
+    assert!(execution.terminate());
+    record.drive_until(&mut execution, true, |record, _| record.outcome.is_some());
+    assert_eq!(record.output[0], b"ready");
+    let outcome = record.outcome.unwrap();
+    assert_eq!(outcome.cause(), Some(Cause::Terminated));
+    assert_eq!(signal_of(outcome.status()), Some(9));
+    assert!(record.kill_failures.is_empty());
+}
+
+#[test]
+fn a_signal_reaches_the_process_group_that_the_program_leads_if_the_options_say_so() {
+    let temporary = tempfile::tempdir().unwrap();
+    let file = temporary.path().join("descendant");
+    // The descendant starts before the program ignores `SIGTERM`, so the signal ends it alone.
+    let script = format!(
+        "sleep 30 </dev/null >/dev/null 2>&1 & echo $! >'{}'; trap '' TERM; echo started; \
+         exec sleep 30",
+        file.display()
+    );
+    // Whether the options name the group, and whether the execution signals it through the
+    // program's pidfd or, as before Linux 6.9, by its ID.
+    for (process_group, before_linux_6_9) in [(false, false), (true, false), (true, true)] {
+        super::BEFORE_LINUX_6_9.set(before_linux_6_9);
+        // The program leads a process group of its own either way.
+        let options = if process_group {
+            Options::new().process_group()
+        } else {
+            Options::new()
+        };
+        let mut execution = start_leading(shell(&script), true, options);
+        execution.grant(Stream::Stdout, MAX_EVENT_BYTES);
+        execution.grant(Stream::Stderr, MAX_EVENT_BYTES);
+        let mut record = Record::default();
+        record.drive_until(&mut execution, true, |record, _| {
+            record.output[0] == b"started\n"
+        });
+        let descendant = Descendant::open(&file);
+        assert!(execution.signal(SIGTERM).unwrap());
+        if process_group {
+            descendant.assert_ends();
+        } else {
+            descendant.assert_runs();
+        }
+        // The program ignores the signal, so it runs until the caller ends it.
+        assert!(execution.cancel());
+        record.drive_until(&mut execution, true, |record, _| record.outcome.is_some());
+        super::BEFORE_LINUX_6_9.set(false);
+        let outcome = record.outcome.unwrap();
+        assert_eq!(
+            outcome.cause(),
+            Some(Cause::Cancelled),
+            "{process_group} {before_linux_6_9}"
+        );
+        assert_eq!(signal_of(outcome.status()), Some(9));
+        assert!(record.kill_failures.is_empty());
+    }
+}
+
+#[test]
+fn a_signal_reaches_each_process_once() {
+    // The program handles `SIGTERM` once and exits: a second signal would run its handler again.
+    // Its handler also ends the descendant, which the group's signal may not reach, and it waits
+    // for the descendant without dash's report of the signal that ended it.
+    let script = "trap 'kill $! 2>/dev/null; printf bye; exit 0' TERM; \
+                  sleep 30 </dev/null >/dev/null 2>&1 & printf ready; \
+                  wait $! 2>/dev/null; exit 3";
+    // Whether the program leads its process group, whether the options name the group, what the
+    // first lookup of the program's group finds, if a test hook gives it, and what the execution
+    // sends through the program's pidfd. A program that leads its group receives the group's
+    // signal alone, with no signal 0 beforehand, which would need permission to signal it. One
+    // that the lookup found leading its group, but that left it before the group's signal, as the
+    // hook has it, receives a signal of its own after the group's.
+    let cases = [
+        (true, true, None, vec![(SIGTERM, true)]),
+        (false, true, None, vec![(SIGTERM, false), (SIGTERM, true)]),
+        (
+            false,
+            true,
+            Some(true),
+            vec![(SIGTERM, true), (SIGTERM, false)],
+        ),
+        (true, false, None, vec![(SIGTERM, false)]),
+    ];
+    for (leads, process_group, looked_up, sent) in cases {
+        let case = format!("{leads} {process_group} {looked_up:?}");
+        let options = if process_group {
+            Options::new().process_group()
+        } else {
+            Options::new()
+        };
+        let mut execution = start_leading(shell(script), leads, options);
+        execution.grant(Stream::Stdout, MAX_EVENT_BYTES);
+        execution.grant(Stream::Stderr, MAX_EVENT_BYTES);
+        let mut record = Record::default();
+        record.drive_until(&mut execution, true, |record, _| {
+            record.output[0] == b"ready"
+        });
+        super::SENT.take();
+        super::LEADS.set(looked_up);
+        assert!(execution.signal(SIGTERM).unwrap(), "{case}");
+        assert_eq!(super::SENT.take(), sent, "{case}");
+        record.drive_until(&mut execution, true, |record, _| record.outcome.is_some());
+        assert_eq!(record.output, [b"readybye".to_vec(), Vec::new()], "{case}");
+        let outcome = record.outcome.unwrap();
+        assert!(outcome.status().success(), "{case}");
+        assert_eq!(outcome.cause(), None);
+    }
+}
+
+#[test]
+fn a_signal_reaches_nothing_once_a_collector_took_the_program_s_status() {
+    // Whether the program was adopted, whether the caller reaps it, whether a signal to its group
+    // would go through its pidfd or, as before Linux 6.9, by the group's ID, and whether the
+    // lookup of the program's group finds a leader, as a test hook has it, as when a group leader
+    // took the program's ID since.
+    for case in 0..16 {
+        signal_once_a_collector_took_the_status(
+            case & 1 != 0,
+            case & 2 != 0,
+            case & 4 != 0,
+            case & 8 != 0,
+        );
+    }
+}
+
+/// Checks that a signal reaches nothing once a collector of the caller's took the status of a
+/// program, which may have been `adopted`, and whose status the caller may reap, that leaves a
+/// descendant in its process group, when a signal to the group would go as before Linux 6.9 or
+/// not, and when the lookup of the program's group finds a `leader` or not.
+fn signal_once_a_collector_took_the_status(
+    adopted: bool,
+    caller_reaps: bool,
+    before_linux_6_9: bool,
+    leader: bool,
+) {
+    let case = format!("{adopted} {caller_reaps} {before_linux_6_9} {leader}");
+    let temporary = tempfile::tempdir().unwrap();
+    let file = temporary.path().join("descendant");
+    let script = format!(
+        "sleep 30 </dev/null >/dev/null 2>&1 & echo $! >'{}'",
+        file.display()
+    );
+    super::BEFORE_LINUX_6_9.set(before_linux_6_9);
+    let mut options = Options::new();
+    if caller_reaps {
+        options = options.caller_reaps();
+    }
+    let mut execution = if adopted {
+        let (id, pipes) = start_own(&script, true);
+        adopt(id, pipes, options)
+    } else {
+        start(shell(&script), true, options)
+    };
+    let id = execution.id();
+    // A collector of the caller's takes the status before the execution looks for it, or before
+    // the caller hands it over. The program's ID may name another process from then on, and so
+    // may that of its process group once the descendant leaves it.
+    let status = collect_once_ended(id);
+    let descendant = Descendant::open(&file);
+    super::SENT.take();
+    for _ in 0..2 {
+        super::LEADS.set(leader.then_some(true));
+        assert!(!execution.signal(SIGTERM).unwrap(), "{case}");
+    }
+    // Nothing reached the program's process group, which the descendant still holds, and the
+    // signals changed nothing in the execution. A program that the lookup found leading its group
+    // got nothing at all, as the wait through its pidfd found its status taken.
+    let sent = super::SENT.take();
+    assert!(sent.iter().all(|&(_, group)| !group), "{case}");
+    assert!(!leader || sent.is_empty(), "{case}");
+    descendant.assert_runs();
+    assert!(execution.input().is_some());
+    // The execution learns of the program's end as ever: one that collects the status itself
+    // fails to, once, and closes the program's input.
+    execution.grant(Stream::Stdout, MAX_EVENT_BYTES);
+    execution.grant(Stream::Stderr, MAX_EVENT_BYTES);
+    let mut record = Record::default();
+    let mut buffer = [0u8; 64];
+    let mut failures = 0;
+    let started = Instant::now();
+    while record.closed.len() < 2 {
+        match execution.next_event(&mut buffer) {
+            Ok(Some(Event::Launch(report))) => record.launch = Some(report.unwrap()),
+            Ok(Some(Event::Closed(stream))) => record.closed.push(stream),
+            Ok(Some(event)) => panic!("{event:?}"),
+            Ok(None) => {
+                assert!(started.elapsed() < PATIENCE, "the output closed in time");
+                wait_any(&[&execution]);
+            }
+            Err(error) => {
+                assert_eq!(error.raw_os_error(), Some(Errno::ECHILD as i32));
+                failures += 1;
+            }
+        }
+    }
+    assert_eq!(failures, usize::from(!caller_reaps), "{case}");
+    assert_eq!(execution.input().is_none(), !caller_reaps, "{case}");
+    assert!(execution.observe(id, status));
+    assert!(execution.input().is_none());
+    assert!(!execution.signal(SIGTERM).unwrap());
+    record.drive_until(&mut execution, true, |record, _| record.outcome.is_some());
+    super::BEFORE_LINUX_6_9.set(false);
+    let outcome = record.outcome.unwrap();
+    assert!(outcome.status().success(), "{case}");
+    assert_eq!(outcome.cause(), None);
+    assert!(record.kill_failures.is_empty());
+}
+
+#[test]
+fn a_failed_group_lookup_is_an_error_that_sends_no_second_signal() {
+    // A seccomp filter lasts as long as the thread that installs it, and passes to the processes
+    // that the thread starts, so the test runs in a process of its own.
+    if crate::guest::managed_agent::isolate_process_test(
+        "NVX_EXEC_DENIED_GETPGID_TEST_CHILD",
+        "guest::exec::tests::a_failed_group_lookup_is_an_error_that_sends_no_second_signal",
+    ) {
+        return;
+    }
+    // The program leads its group, and ignores `SIGTERM`, so it runs until the test ends it.
+    let mut execution = start(
+        shell("trap '' TERM; printf ready; exec sleep 30"),
+        false,
+        Options::new(),
+    );
+    execution.grant(Stream::Stdout, MAX_EVENT_BYTES);
+    execution.grant(Stream::Stderr, MAX_EVENT_BYTES);
+    let mut record = Record::default();
+    record.drive_until(&mut execution, true, |record, _| {
+        record.output[0] == b"ready"
+    });
+    sys::deny_system_call(nix::libc::SYS_getpgid);
+    // A first lookup that fails sends nothing.
+    super::SENT.take();
+    let error = execution.signal(SIGTERM).unwrap_err();
+    assert_eq!(sys::errno_of(&error), Errno::EPERM);
+    assert!(super::SENT.take().is_empty());
+    // One that fails after the group's signal, where the hook answers the first, sends the program
+    // no signal of its own.
+    super::LEADS.set(Some(true));
+    let error = execution.signal(SIGTERM).unwrap_err();
+    assert_eq!(sys::errno_of(&error), Errno::EPERM);
+    assert_eq!(super::SENT.take(), [(SIGTERM, true)]);
+    // The kill needs no lookup.
+    assert!(execution.cancel());
+    record.drive_until(&mut execution, true, |record, _| record.outcome.is_some());
+    let outcome = record.outcome.unwrap();
+    assert_eq!(outcome.cause(), Some(Cause::Cancelled));
+    assert_eq!(signal_of(outcome.status()), Some(9));
+    assert!(record.kill_failures.is_empty());
+}
+
+#[test]
+fn a_kill_and_a_signal_that_the_kernel_refuses_are_errors_that_end_nothing() {
+    let mut execution = start(shell("exec sleep 30"), false, Options::new());
+    let process = ProcessId::from_positive(i64::from(execution.id())).unwrap();
+    // A kill stays with the execution's causes, and the kernel refuses a number that names no
+    // signal.
+    for signal in [nix::libc::SIGKILL, 65] {
+        let error = execution.signal(signal).unwrap_err();
+        assert_eq!(sys::errno_of(&error), Errno::EINVAL, "{signal}");
+    }
+    // The kernel refuses the execution's signals, as it does those that the caller may not send.
+    super::REFUSED.set(Some(Errno::EPERM));
+    let refused = execution.signal(SIGTERM);
+    super::REFUSED.set(None);
+    assert_eq!(sys::errno_of(&refused.unwrap_err()), Errno::EPERM);
+    // The program runs on, the execution has no cause yet, and no event reports the refusals.
+    std::thread::sleep(Duration::from_millis(100));
+    assert!(!sys::has_exited(process).unwrap());
+    assert!(execution.cancel());
+    let record = run(&mut execution);
+    assert!(record.kill_failures.is_empty());
+    let outcome = record.outcome.unwrap();
+    assert_eq!(outcome.cause(), Some(Cause::Cancelled));
+    assert_eq!(signal_of(outcome.status()), Some(9));
+}

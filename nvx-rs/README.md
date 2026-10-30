@@ -1145,6 +1145,15 @@ the caller asks, its process group, while no collector has taken its status,
 and, through the opened directory of a cgroup that the caller names, to that
 cgroup.
 
+`signal` sends the program a signal that the caller chooses, such as `SIGTERM`
+for a graceful stop, as container runtimes stop their workloads, to the same
+processes but the cgroup's, each of them once unless the program leaves its
+group meanwhile, while no collector has taken its status. It ends neither the
+program nor the execution: it records no cause, so a program that exits after it
+ends with its own status, and the caller ends one that outlives the caller's own
+deadline with `terminate` or `cancel`. It refuses `SIGKILL`, which only the
+execution's causes send.
+
 It closes the program's input once the program has ended. It waits for its
 program alone, by a pidfd, or takes the status from the caller's collector with
 `observe`; with `Options::caller_reaps`, that collector is the program's only
@@ -1167,6 +1176,9 @@ It feeds the execution's events back to the runner, statuses that a caller who
 reaps hands over with `observe` included, and never blocks: the caller polls its
 descriptors and its input writer until its deadline, and each call takes a
 bounded number of steps, so that no execution holds the caller's loop.
+
+The caller's own `signal` passes through to the execution, which it does not
+end: the runner sees only the program's end, once the program exits.
 
 A launch that failed reaches the runner with the number of the `LaunchStage`
 that failed, `LaunchStage::code`, or with 0, which numbers no stage, if the
