@@ -132,8 +132,8 @@
       "test_threads": 8,
       "seconds": {
         "multiarch::hibernate::openvmm_uefi_x64_guest_test_x64_hibernate_halts": 3.9,
-        "multiarch::ic::openvmm_uefi_x64_windows_datacenter_core_2022_x64_kvp_ic": 34.0,
         "multiarch::ic::openvmm_uefi_x64_windows_datacenter_core_2022_x64_timesync_ic": 32.3,
+        "multiarch::ic::openvmm_uefi_x64_windows_datacenter_core_2025_x64_kvp_ic": 57.4,
         "multiarch::openvmm_pcat_x64_freebsd_13_2_x64_boot_no_agent": 87.9,
         "multiarch::openvmm_pcat_x64_freebsd_13_2_x64_iso_boot_no_agent": 83.9,
         "multiarch::openvmm_pcat_x64_windows_datacenter_core_2022_x64_boot": 29.5,
@@ -163,16 +163,16 @@
       },
       "shards": [
         {
-          "seconds": 119.8,
+          "seconds": 128.4,
           "tests": [
             "multiarch::hibernate::openvmm_uefi_x64_guest_test_x64_hibernate_halts",
-            "multiarch::ic::openvmm_uefi_x64_windows_datacenter_core_2022_x64_kvp_ic",
             "multiarch::ic::openvmm_uefi_x64_windows_datacenter_core_2022_x64_timesync_ic",
             "multiarch::openvmm_pcat_x64_windows_datacenter_core_2022_x64_boot",
             "multiarch::openvmm_pcat_x64_windows_datacenter_core_2022_x64_boot_heavy",
             "multiarch::openvmm_uefi_x64_windows_datacenter_core_2022_x64_boot_heavy",
-            "multiarch::openvmm_uefi_x64_windows_datacenter_core_2022_x64_boot_nvme",
             "multiarch::openvmm_uefi_x64_windows_datacenter_core_2022_x64_secure_boot_mismatched_template",
+            "multiarch::pcie::openvmm_uefi_x64_windows_datacenter_core_2022_x64_pcie_root_emulation_single_segment",
+            "multiarch::pcie::openvmm_uefi_x64_windows_datacenter_core_2022_x64_pcie_switches",
             "multiarch::vmgs::openvmm_uefi_x64_ubuntu_2504_server_x64_invalid_boot_entries",
             "multiarch::vmgs::openvmm_uefi_x64_windows_datacenter_core_2022_x64_clear_vmgs",
             "multiarch::vmgs::openvmm_uefi_x64_windows_datacenter_core_2022_x64_default_boot",
@@ -183,20 +183,20 @@
           ]
         },
         {
-          "seconds": 123.9,
+          "seconds": 128.3,
           "tests": [
+            "multiarch::ic::openvmm_uefi_x64_windows_datacenter_core_2025_x64_kvp_ic",
             "multiarch::openvmm_pcat_x64_freebsd_13_2_x64_boot_no_agent",
             "multiarch::openvmm_pcat_x64_freebsd_13_2_x64_iso_boot_no_agent",
             "multiarch::openvmm_uefi_x64_frontpage",
             "multiarch::openvmm_uefi_x64_guest_test_x64_guest_test_uefi",
             "multiarch::openvmm_uefi_x64_ubuntu_2504_server_x64_secure_boot_mismatched_template",
             "multiarch::openvmm_uefi_x64_windows_datacenter_core_2022_x64_boot",
+            "multiarch::openvmm_uefi_x64_windows_datacenter_core_2022_x64_boot_nvme",
             "multiarch::openvmm_uefi_x64_windows_datacenter_core_2022_x64_secure_boot",
             "multiarch::pcie::openvmm_uefi_x64_windows_datacenter_core_2022_x64_pcie_hotplug",
             "multiarch::pcie::openvmm_uefi_x64_windows_datacenter_core_2022_x64_pcie_nvme_boot",
             "multiarch::pcie::openvmm_uefi_x64_windows_datacenter_core_2022_x64_pcie_root_emulation_multi_segment",
-            "multiarch::pcie::openvmm_uefi_x64_windows_datacenter_core_2022_x64_pcie_root_emulation_single_segment",
-            "multiarch::pcie::openvmm_uefi_x64_windows_datacenter_core_2022_x64_pcie_switches",
             "ttrpc::test_ttrpc_uefi_boot",
             "x86_64::openvmm_uefi_x64_windows_datacenter_core_2022_x64_battery_capacity"
           ]

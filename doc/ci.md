@@ -1562,10 +1562,10 @@ seconds from its tests' durations, and
 [`plan-openvmm-test-shards`](usage.md#plan-openvmm-test-shards) balances the
 shards' modeled times. Two shards of equal sums of durations would take 177
 and 175 seconds, because each would hold a heavy test that stalls its other
-tests. The plan instead puts both heavy tests with shorter tests in one shard,
-which takes 119.8 seconds, and the two FreeBSD tests, the longest at 87.9 and
-83.9 seconds, with the PCIe tests in the other, which takes 123.9. A test
-checks the model's test threads and the path of the JUnit report that
+tests. The first plan instead put both heavy tests with shorter tests in one
+shard, which took 119.8 seconds, and the two FreeBSD tests, the longest at
+87.9 and 83.9 seconds, with the PCIe tests in the other, which took 123.9. A
+test checks the model's test threads and the path of the JUnit report that
 `test-openvmm` reads against OpenVMM's pinned nextest configuration.
 
 A shard job spends a median 35 seconds beside its tests in the runs since

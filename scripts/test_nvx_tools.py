@@ -3079,7 +3079,7 @@ class CiTests(unittest.TestCase):
             ci.OPENVMM_KVM_TEST_FILTER,
         )
         self.assertIn(
-            "!test(windows_datacenter_core_2022_x64)",
+            "!test(windows_datacenter_core)",
             ci.OPENVMM_KVM_TEST_FILTER,
         )
         self.assertIn("!test(virtio_net_windows)", ci.OPENVMM_KVM_TEST_FILTER)
@@ -3112,7 +3112,7 @@ class CiTests(unittest.TestCase):
             ci.OPENVMM_MSHV_TEST_FILTER,
         )
         self.assertIn(
-            "!test(windows_datacenter_core_2022_x64)",
+            "!test(windows_datacenter_core)",
             ci.OPENVMM_MSHV_TEST_FILTER,
         )
         self.assertEqual(
@@ -3208,6 +3208,29 @@ class CiTests(unittest.TestCase):
                 " & !test(/^suite::boot_heavy$/)"
             ),
         )
+
+    def test_linux_filters_leave_out_every_windows_server_test(self):
+        # The Linux legs run Linux guests. A test's name holds the year of its
+        # Windows Server image, so a test that moves to another image, as the
+        # KVP IC test moved from 2022 to 2025 (#1035), must stay out of them.
+        windows_tests = [
+            test for test in ci.OPENVMM_WHP_TESTS if "windows_datacenter_core" in test
+        ]
+        self.assertIn(
+            "multiarch::ic::openvmm_uefi_x64_windows_datacenter_core_2025_x64_kvp_ic",
+            windows_tests,
+        )
+        for backend in ("kvm", "mshv"):
+            test_filter = ci.OPENVMM_TEST_FILTERS[backend]
+            for test in windows_tests:
+                with self.subTest(backend=backend, test=test):
+                    self.assertFalse(_nextest_filter_matches(test_filter, test))
+            for test in (
+                "multiarch::ic::openvmm_uefi_x64_ubuntu_2504_server_x64_timesync_ic",
+                *ci.OPENVMM_REQUIRED_MICROVM_TESTS,
+            ):
+                with self.subTest(backend=backend, test=test):
+                    self.assertTrue(_nextest_filter_matches(test_filter, test))
 
     def test_openvmm_tests_reject_unknown_backend(self):
         with self.assertRaisesRegex(common.ScriptError, "unsupported.*backend"):
@@ -4733,8 +4756,11 @@ class CiTests(unittest.TestCase):
 
 def _nextest_filter_matches(expression: str, test: str) -> bool:
     """Return whether a nextest filter that OpenVMM's test filters spell,
-    with test(/REGEX/), !, &, |, and parentheses, selects a test's name."""
-    tokens = re.findall(r"test\(/(?:[^/\\]|\\.)*/\)|[!&|()]", expression)
+    with test(/REGEX/), test(SUBSTRING), !, &, |, and parentheses, selects a
+    test's name."""
+    tokens = re.findall(
+        r"test\(/(?:[^/\\]|\\.)*/\)|test\([^/)][^)]*\)|[!&|()]", expression
+    )
     if "".join(tokens) != "".join(expression.split()):
         raise AssertionError(f"unsupported filter {expression!r}")
     position = 0
@@ -4756,7 +4782,10 @@ def _nextest_filter_matches(expression: str, test: str) -> bool:
             if take() != ")":
                 raise AssertionError(f"unbalanced filter {expression!r}")
             return value
-        return re.search(token[6:-2], test) is not None
+        if token.startswith("test(/"):
+            return re.search(token[6:-2], test) is not None
+        # Without slashes, test() matches a substring of the name.
+        return token[5:-1] in test
 
     def intersection() -> bool:
         value = primary()
