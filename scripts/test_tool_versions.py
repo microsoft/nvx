@@ -18,10 +18,14 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 from dataclasses import dataclass
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).parent))
+from powershell_testing import run_powershell  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SETUP = REPO_ROOT / "scripts" / "setup"
@@ -451,7 +455,7 @@ catch {
 def _run_powershell(
     powershell: str, script: str, environment: dict[str, str]
 ) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
+    return run_powershell(
         [
             powershell,
             "-NoProfile",
@@ -462,10 +466,6 @@ def _run_powershell(
             script,
         ],
         env={**os.environ, **environment},
-        capture_output=True,
-        text=True,
-        timeout=120,
-        check=False,
     )
 
 

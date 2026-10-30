@@ -91,6 +91,7 @@ from nvx_tools.time_abi import (  # noqa: E402
     HostCpu,
     cpu_profile_request_url,
 )
+from powershell_testing import run_powershell  # noqa: E402
 
 
 def _workflow_job(workflow: str, job_name: str) -> str:
@@ -12807,12 +12808,8 @@ $definition = $ast.Find({{
 Write-Output (Get-ExpectedRunnerLabels)
 Write-Output (Get-ExpectedRunnerLabels -BenchmarkRunner)
 """
-        result = subprocess.run(
-            ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", harness],
-            capture_output=True,
-            text=True,
-            timeout=30,
-            check=False,
+        result = run_powershell(
+            ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", harness]
         )
 
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -13351,7 +13348,7 @@ function python {
                 environment.pop("NVX_BENCHMARK_SCRATCH_DIR", None)
                 if scratch:
                     environment["NVX_BENCHMARK_SCRATCH_DIR"] = scratch
-                result = subprocess.run(
+                result = run_powershell(
                     [
                         "powershell.exe",
                         "-NoProfile",
@@ -13361,10 +13358,6 @@ function python {
                     ],
                     cwd=root,
                     env=environment,
-                    capture_output=True,
-                    text=True,
-                    timeout=30,
-                    check=False,
                 )
 
                 self.assertEqual(result.returncode, 0, result.stderr)
@@ -13412,7 +13405,7 @@ function python {
             environment["NVX_BENCHMARK_SCRATCH_DIR"] = temporary
 
             def run(script: str) -> subprocess.CompletedProcess[str]:
-                return subprocess.run(
+                return run_powershell(
                     [
                         "powershell.exe",
                         "-NoProfile",
@@ -13422,10 +13415,9 @@ function python {
                     ],
                     cwd=BuildConstants.REPO_ROOT,
                     env=environment,
-                    capture_output=True,
-                    text=True,
+                    # The save step queries the host's event logs for up to
+                    # 120 s each, so it gets longer than the shared limit.
                     timeout=300,
-                    check=False,
                 )
 
             recorded = run(record)
@@ -13463,13 +13455,9 @@ function python {
         self.assertIn(machine_lookup, prepare)
 
         def run_step(script: str, environment: dict[str, str]):
-            return subprocess.run(
+            return run_powershell(
                 ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script],
                 env=environment,
-                capture_output=True,
-                text=True,
-                timeout=30,
-                check=False,
             )
 
         with tempfile.TemporaryDirectory() as temporary:
@@ -13580,12 +13568,8 @@ $BenchmarkScratchDirectory = "H:\\explicit\\scratch"
 Write-Output (Get-BenchmarkScratchDirectory)
 """
 
-        result = subprocess.run(
-            ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", harness],
-            capture_output=True,
-            text=True,
-            timeout=30,
-            check=False,
+        result = run_powershell(
+            ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", harness]
         )
 
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -13798,18 +13782,14 @@ function python {
 """
         for failure_at in range(command_count + 1):
             with self.subTest(failure_at=failure_at):
-                result = subprocess.run(
+                result = run_powershell(
                     [
                         "powershell.exe",
                         "-NoProfile",
                         "-NonInteractive",
                         "-Command",
                         f"$FailureAt = {failure_at}\n{stub}\n{script}",
-                    ],
-                    capture_output=True,
-                    text=True,
-                    timeout=30,
-                    check=False,
+                    ]
                 )
                 self.assertEqual(
                     result.returncode, 37 if failure_at else 0, result.stderr
@@ -13896,7 +13876,7 @@ function python {
                     + ", ".join(str(status) for status in statuses)
                     + f")\n$BenchmarkStatus = {benchmark_status}\n"
                 )
-                result = subprocess.run(
+                result = run_powershell(
                     [
                         "powershell.exe",
                         "-NoProfile",
@@ -13905,10 +13885,6 @@ function python {
                         setup + stub + script,
                     ],
                     cwd=root,
-                    capture_output=True,
-                    text=True,
-                    timeout=30,
-                    check=False,
                 )
                 expected_status = benchmark_status or statuses[-1]
                 self.assertEqual(result.returncode, expected_status, result.stderr)
@@ -14538,7 +14514,7 @@ function python {
                         + ", ".join(str(status) for status in statuses)
                         + f")\n$BenchmarkStatus = {benchmark_status}\n"
                     )
-                    result = subprocess.run(
+                    result = run_powershell(
                         [
                             "powershell.exe",
                             "-NoProfile",
@@ -14547,10 +14523,6 @@ function python {
                             setup + stub + script,
                         ],
                         cwd=root,
-                        capture_output=True,
-                        text=True,
-                        timeout=30,
-                        check=False,
                     )
 
                     expected_status, lines, measured, published = (
