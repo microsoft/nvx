@@ -1298,15 +1298,15 @@ enum Required {
     Unwritable,
 }
 
-/// Returns why the file or directory that `file` holds is not private to `user`, if it is not: it
-/// must belong to the user, or to SYSTEM or the Administrators group, and its access control list
-/// must be as `required`.
+/// Returns why the file, directory, or other object that `object` holds open is not private to
+/// `user`, if it is not: it must belong to the user, or to SYSTEM or the Administrators group,
+/// and its access control list must be as `required`. The handle must have read-control access.
 fn privacy_problem(
-    file: &fs::File,
+    object: &impl AsRawHandle,
     user: &CurrentUser,
     required: Required,
 ) -> io::Result<Option<String>> {
-    let handle = file.as_raw_handle() as HANDLE;
+    let handle = object.as_raw_handle() as HANDLE;
     let information = OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION;
     let mut len = 0;
     // SAFETY: an empty buffer asks for the length that the descriptor needs.
@@ -1854,6 +1854,8 @@ pub(crate) fn claim_log(_file: &fs::File) -> io::Result<()> {
 
 /// The right to query a job object's information, which `winnt.h` defines.
 const JOB_OBJECT_QUERY: u32 = 0x0004;
+/// Every right to a job object, which `winnt.h` defines.
+const JOB_OBJECT_ALL_ACCESS: u32 = 0x001f_003f;
 
 /// Returns the name of the job object of the log `id`, NUL-terminated: in the namespace of this
 /// session, after the volume serial number and the file ID of the log, as [`opened_file_id`]
@@ -1864,25 +1866,59 @@ fn log_job_name(id: (u64, u128)) -> Vec<u16> {
     wide(format!(r"Local\nvx-log-{:016x}-{:032x}", id.0, id.1))
 }
 
+/// Returns the identity that names the job of the log that `log` holds open, as
+/// [`opened_file_id`] reads it, or `None` for a log that is not a file of a disk volume, such as
+/// `NUL` or a pipe, which has no file ID to name a job after, nor a claim of a store, and so has
+/// no job, as both a spawn and a claim check take it.
+fn log_job_id(log: &fs::File) -> io::Result<Option<(u64, u128)>> {
+    match opened_file_id(log) {
+        Ok(id) => Ok(Some(id)),
+        Err(error) if error.kind() == io::ErrorKind::Unsupported => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
 /// Creates the job object of the log that `log` holds open, in which [`spawn_detached`] starts
 /// the VMM that writes the log, so that the processes of the job are the log's claim, as
 /// [`log_claim_held`] describes. The job limits no resource, but it lets no process that the VMM
 /// starts break away from it: one that asks to, with `CREATE_BREAKAWAY_FROM_JOB`, fails with
-/// access denied, so that every process that the VMM starts joins it.
+/// access denied, so that every process that the VMM starts joins it. It belongs to the user, and
+/// its protected access control list allows the user alone, so that a claim check tells it from a
+/// job that another user creates under its name.
 ///
-/// Fails with [`io::ErrorKind::AlreadyExists`] if a job of that name exists already, as one of an
-/// earlier log of the same file ID, or of the same file before it was truncated, that a process
-/// still holds would: the VMM would share it.
-pub(crate) fn create_log_job(log: &fs::File) -> io::Result<OwnedHandle> {
-    let id = opened_file_id(log)?;
+/// Returns `None`, so that the VMM starts without a job, for a log that is not a file of a disk
+/// volume, such as `NUL` or a pipe, which has no file ID to name a job after, nor a claim of a
+/// store, and if a job that is not the user's takes the name: one that allows the user nothing,
+/// or that another user owns or may use. A claim check leaves such a job aside too. Fails with
+/// [`io::ErrorKind::AlreadyExists`] if a job of the user takes the name, as one of an earlier log
+/// of the same file ID, or of the same file before it was truncated, that a process still holds
+/// would: the VMM would share it.
+pub(crate) fn create_log_job(log: &fs::File) -> io::Result<Option<OwnedHandle>> {
+    let Some(id) = log_job_id(log)? else {
+        return Ok(None);
+    };
     let name = log_job_name(id);
-    // SAFETY: SetLastError has no preconditions.
-    unsafe { SetLastError(ERROR_SUCCESS) };
-    // SAFETY: the name is NUL-terminated, and no attributes ask for default security.
-    let handle = unsafe { CreateJobObjectW(ptr::null(), name.as_ptr()) };
-    let existed = last_error() == ERROR_ALREADY_EXISTS;
-    let job = owned(handle).ok_or_else(io::Error::last_os_error)?;
-    if existed {
+    let user = CurrentUser::get()?;
+    let (handle, error) =
+        with_owner_only_attributes(&user, JOB_OBJECT_ALL_ACCESS, 0, |attributes| {
+            // SAFETY: SetLastError has no preconditions.
+            unsafe { SetLastError(ERROR_SUCCESS) };
+            // SAFETY: the name is NUL-terminated, and the attributes hold a valid descriptor.
+            let handle = unsafe { CreateJobObjectW(attributes, name.as_ptr()) };
+            (handle, last_error())
+        })?;
+    // An existing job keeps its own descriptor, which may allow this user nothing.
+    let Some(job) = owned(handle) else {
+        return if error == ERROR_ACCESS_DENIED {
+            Ok(None)
+        } else {
+            Err(io::Error::from_raw_os_error(error as i32))
+        };
+    };
+    if error == ERROR_ALREADY_EXISTS {
+        if privacy_problem(&job, &user, Required::Private)?.is_some() {
+            return Ok(None);
+        }
         return Err(io::Error::new(
             io::ErrorKind::AlreadyExists,
             format!(
@@ -1893,22 +1929,26 @@ pub(crate) fn create_log_job(log: &fs::File) -> io::Result<OwnedHandle> {
             ),
         ));
     }
-    Ok(job)
+    Ok(Some(job))
 }
 
-/// Returns how many processes the job object of the log `id` holds, or `None` if no job of that
-/// name exists.
+/// Returns how many processes the job object of the log `id` holds, or `None` if no job of the
+/// user takes its name: none does, or one that is not the user's does, which allows the user
+/// nothing, or which another user owns or may use, as [`create_log_job`] says.
 fn log_job_processes(id: (u64, u128)) -> io::Result<Option<u32>> {
     let name = log_job_name(id);
     // SAFETY: the name is NUL-terminated.
-    let Some(job) = owned(unsafe { OpenJobObjectW(JOB_OBJECT_QUERY, 0, name.as_ptr()) }) else {
+    let opened = unsafe { OpenJobObjectW(JOB_OBJECT_QUERY | READ_CONTROL, 0, name.as_ptr()) };
+    let Some(job) = owned(opened) else {
         let error = io::Error::last_os_error();
-        return if error.raw_os_error() == Some(ERROR_FILE_NOT_FOUND as i32) {
-            Ok(None)
-        } else {
-            Err(error)
+        return match error.raw_os_error().map(|code| code as u32) {
+            Some(ERROR_FILE_NOT_FOUND | ERROR_ACCESS_DENIED) => Ok(None),
+            _ => Err(error),
         };
     };
+    if privacy_problem(&job, &CurrentUser::get()?, Required::Private)?.is_some() {
+        return Ok(None);
+    }
     // SAFETY: the structure is plain data for which all-zero bytes are valid.
     let mut accounting: JOBOBJECT_BASIC_ACCOUNTING_INFORMATION = unsafe { mem::zeroed() };
     // SAFETY: the handle is a job object open for querying, and the information has the size
@@ -1937,15 +1977,19 @@ fn log_job_processes(id: (u64, u128)) -> io::Result<Option<u32>> {
 /// while it holds processes, and the spawn closes its own: a process that another thread created
 /// while the VMM's spawn had the log's handles inheritable holds the log, and the job's handle with
 /// it, so the job can be opened by its name for as long as that process holds the log, and the
-/// process, which never joins the job, does not hold the claim.
+/// process, which never joins the job, does not hold the claim. A job under the name that is not
+/// the user's, as [`create_log_job`] tells it, is not the log's, and leaves the claim to the log's
+/// handles: another user cannot end a launch whose VMM still runs by creating an empty job under
+/// that name.
 ///
-/// Without the job, as for a VMM that no such process outlives, or that a launch of an earlier
-/// version started outside one, the claim is whether any process holds the log open. The log is
-/// opened first without access rights, which takes no part in sharing checks, to check its
-/// identity and to read the file ID that names its job from the same handle; an open that shares
-/// nothing then fails with a sharing violation while any process, such as a VMM that inherited
-/// the log, holds it. The identity is checked again on the exclusive handle, because a rename
-/// between the opens could have replaced the file.
+/// Without the user's job, as for a VMM that no such process outlives, that a launch of an earlier
+/// version started outside one, or whose job's name another user took, and for a log that is not
+/// a file of a disk volume, which has no job, the claim is whether any process holds the log
+/// open. The log is opened first without access rights, which takes no part in sharing checks, to
+/// check its identity and to read the file ID that names its job from the same handle; an open
+/// that shares nothing then fails with a sharing violation while any process, such as a VMM that
+/// inherited the log, holds it. The identity is checked again on the exclusive handle, because a
+/// rename between the opens could have replaced the file.
 pub(crate) fn log_claim_held(path: &Path, identity: (u64, u64)) -> io::Result<bool> {
     let replaced = || io::Error::other(format!("{} is not the claimed log", path.display()));
     let log = OpenOptions::new()
@@ -1955,7 +1999,9 @@ pub(crate) fn log_claim_held(path: &Path, identity: (u64, u64)) -> io::Result<bo
     if opened_file_identity(&log)? != identity {
         return Err(replaced());
     }
-    if let Some(processes) = log_job_processes(opened_file_id(&log)?)? {
+    if let Some(id) = log_job_id(&log)?
+        && let Some(processes) = log_job_processes(id)?
+    {
         return Ok(processes > 0);
     }
     drop(log);
@@ -2910,7 +2956,11 @@ mod tests {
             let log = directory.join("vmm.log");
             let file = fs::File::create(&log).unwrap();
             let identity = file_identity(&log).unwrap();
-            let job = in_job.then(|| create_log_job(&file).unwrap());
+            let job = in_job.then(|| {
+                create_log_job(&file)
+                    .unwrap()
+                    .expect("a log on a disk volume has a job")
+            });
             let arguments: Vec<OsString> = arguments.iter().map(OsString::from).collect();
             let (entered, in_window) = std::sync::mpsc::channel();
             let (release, released) = std::sync::mpsc::channel::<()>();
@@ -3067,12 +3117,97 @@ mod tests {
     fn a_log_has_one_job_at_a_time() {
         let directory = tempfile::tempdir().unwrap();
         let log = fs::File::create(directory.path().join("vmm.log")).unwrap();
-        let job = create_log_job(&log).unwrap();
+        let job = create_log_job(&log)
+            .unwrap()
+            .expect("a log on a disk volume has a job");
         let error = create_log_job(&log).unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::AlreadyExists, "{error}");
         // A job that no process holds is gone.
         drop(job);
-        drop(create_log_job(&log).unwrap());
+        assert!(create_log_job(&log).unwrap().is_some());
+    }
+
+    /// Creates a job object named `name`, NUL-terminated, whose security descriptor is `sddl`, in
+    /// the security descriptor definition language.
+    fn job_with_descriptor(name: &[u16], sddl: &str) -> OwnedHandle {
+        use windows_sys::Win32::Foundation::LocalFree;
+        use windows_sys::Win32::Security::Authorization::{
+            ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
+        };
+
+        let sddl = wide(sddl);
+        let mut descriptor = ptr::null_mut();
+        // SAFETY: the string is NUL-terminated, and the output pointer is valid.
+        let converted = unsafe {
+            ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                sddl.as_ptr(),
+                SDDL_REVISION_1,
+                &mut descriptor,
+                ptr::null_mut(),
+            )
+        };
+        assert_ne!(converted, 0, "{}", io::Error::last_os_error());
+        let attributes = SECURITY_ATTRIBUTES {
+            nLength: mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
+            lpSecurityDescriptor: descriptor,
+            bInheritHandle: 0,
+        };
+        // SAFETY: the name is NUL-terminated, and the attributes hold a valid descriptor.
+        let job = owned(unsafe { CreateJobObjectW(&attributes, name.as_ptr()) });
+        // SAFETY: the conversion allocated the descriptor, which nothing uses any more.
+        unsafe { LocalFree(descriptor) };
+        job.unwrap_or_else(|| panic!("cannot create a job: {}", io::Error::last_os_error()))
+    }
+
+    #[test]
+    fn a_job_that_is_not_the_users_under_the_name_of_a_logs_job_is_not_the_logs() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("vmm.log");
+        let log = fs::File::create(&path).unwrap();
+        let identity = file_identity(&path).unwrap();
+        let id = opened_file_id(&log).unwrap();
+        // As jobs of other users look to this one: one that allows it nothing, and one that allows
+        // every user, whose processes another user could choose.
+        for sddl in ["D:P", "D:P(A;;GA;;;WD)"] {
+            let other = job_with_descriptor(&log_job_name(id), sddl);
+            // A spawn starts the VMM without a job rather than in that one...
+            assert!(create_log_job(&log).unwrap().is_none(), "{sddl}");
+            // ...and the claim is the log's handles, which this test holds, whatever that job
+            // holds: none of its processes.
+            assert_eq!(log_job_processes(id).unwrap(), None, "{sddl}");
+            assert!(log_claim_held(&path, identity).unwrap(), "{sddl}");
+            drop(other);
+        }
+        drop(log);
+        assert!(!log_claim_held(&path, identity).unwrap());
+    }
+
+    #[test]
+    fn a_vmm_whose_log_is_no_file_of_a_disk_volume_starts_without_a_job() {
+        use crate::host::supervisor::{self, VmmCommand};
+        use crate::protocol::CAPABILITY_LEN;
+
+        let null = OpenOptions::new().write(true).open("NUL").unwrap();
+        assert!(create_log_job(&null).unwrap().is_none());
+        let (_reader, writer) = io::pipe().unwrap();
+        let pipe = fs::File::from(OwnedHandle::from(writer));
+        assert!(create_log_job(&pipe).unwrap().is_none());
+        // A pipe has an identity that a claim check can match, but no file ID: a claim check, as
+        // a spawn does, takes it for a log without a job.
+        assert!(opened_file_identity(&pipe).is_ok());
+        assert_eq!(log_job_id(&null).unwrap(), None);
+        assert_eq!(log_job_id(&pipe).unwrap(), None);
+        let system = std::env::var_os("SystemRoot").unwrap();
+        let cmd = Path::new(&system).join("System32").join("cmd.exe");
+        let command = VmmCommand::new(
+            cmd,
+            ["/c", "exit", "0"].map(OsString::from).to_vec(),
+            std::env::temp_dir(),
+        );
+        for log in [null, pipe] {
+            let launched = supervisor::spawn(&command, &[7; CAPABILITY_LEN], log).unwrap();
+            assert!(launched.kill_and_wait(), "the stand-in did not exit");
+        }
     }
 
     #[test]
