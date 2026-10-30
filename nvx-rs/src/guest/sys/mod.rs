@@ -124,10 +124,11 @@ pub(crate) use process::forbid_system_calls;
 pub(crate) use process::set_command_name;
 pub(crate) use process::{
     ChildStatus, DirectStdout, ForkResult, ProcessId, Stdout, WaitTarget, current_process, detach,
-    exec, exit_immediately, fork, ignore_interrupt_and_hangup, kill_process, kill_process_group,
-    kill_through_pidfd, open_pidfd, process_exists, process_name, reap_any_nonblocking,
-    restore_sigpipe, signal_process_group, signal_through_pidfd, take_inherited_descriptor,
-    try_wait, wait, wait_named, write_port_diagnostic, write_standard_error,
+    exec, exit_immediately, fork, ignore_interrupt_and_hangup, is_unreaped, kill_process,
+    kill_process_group, kill_through_pidfd, open_pidfd, process_exists, process_group_of,
+    process_name, reap_any_nonblocking, restore_sigpipe, signal_process_group,
+    signal_through_pidfd, take_inherited_descriptor, try_wait, wait, wait_named,
+    write_port_diagnostic, write_standard_error,
 };
 #[cfg(test)]
 pub(crate) use process::{continue_traced, deny_system_call, spawn_traced_child};

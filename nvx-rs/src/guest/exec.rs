@@ -68,6 +68,18 @@
 //! can hold it then. Ending the program ends neither stream: an execution ends once the caller
 //! has taken or discarded what remains in them, and normal completion loses no byte.
 //!
+//! A caller that stops the program gracefully, as a container runtime does, first
+//! [signals](Execution::signal) it, such as with `SIGTERM`, which reaches the program alone, or
+//! its process group too, as the execution's kill does, but not the processes of the cgroup, and
+//! each process once, unless the program leaves its group meanwhile. The signal ends neither the
+//! program nor the execution: the execution records no cause, keeps the program's input open, and
+//! leaves its timeout in place. The caller then drives the execution until a deadline of its own,
+//! such as the end of a grace period: a program that handles the signal and exits ends with its
+//! own status, and an outcome without a [cause](Outcome::cause), and loses no output. A program
+//! whose status is still unknown by then, as one that ignores the signal, the caller ends with
+//! [`terminate`](Execution::terminate) or [`cancel`](Execution::cancel), whose cause the outcome
+//! reports.
+//!
 //! ```no_run
 //! use nvx::guest::exec::{Event, Execution, Options, Pipes, Stream};
 //! use nvx::guest::spawn::Command;
@@ -260,10 +272,10 @@ impl Options {
 
     /// Ends the program's whole process group, whose leader the program is, as
     /// [`Command::new_process_group`](super::spawn::Command::new_process_group) makes it, not
-    /// the program alone. The execution signals the group through the program's pidfd, which
-    /// names it whatever later takes its ID. Before Linux 6.9, which cannot signal a group through
-    /// a pidfd, it signals the group by its ID instead, right after the program's own signal
-    /// found the program unreaped.
+    /// the program alone, and sends the group the program's [signals](Execution::signal) too. The
+    /// execution signals the group through the program's pidfd, which names it whatever later
+    /// takes its ID. Before Linux 6.9, which cannot signal a group through a pidfd, it signals the
+    /// group by its ID instead, right after the program's pidfd showed the program unreaped.
     pub fn process_group(mut self) -> Self {
         self.process_group = true;
         self
@@ -273,7 +285,9 @@ impl Options {
     /// ends the program, and once the program has ended while its output is still open. The
     /// handle holds the cgroup's directory, so that those kills reach this cgroup alone, even
     /// once another cgroup takes its path. [`Scope::Workload`] reaches every execution of the
-    /// workload, which a caller that runs several at once rarely wants.
+    /// workload, which a caller that runs several at once rarely wants. The program's
+    /// [signals](Execution::signal) do not reach the cgroup's processes, as `cgroup.kill` sends
+    /// only `SIGKILL`.
     pub fn cgroup(mut self, cgroup: &ExecutionCgroup, scope: Scope) -> Self {
         self.cgroup = Some((cgroup.clone(), scope));
         self
@@ -542,7 +556,8 @@ pub struct Execution {
     input: Option<FileDescriptor>,
     /// The stream that the execution reads first in its next step.
     turn: Stream,
-    /// Whether the program leads its own process group, which ending it kills whole.
+    /// Whether the program leads its own process group, which ending the program kills whole, and
+    /// which the program's signals reach.
     process_group: bool,
     /// The cgroup whose processes ending the program kills too, and the scope that it kills.
     cgroup: Option<(ExecutionCgroup, Scope)>,
@@ -771,6 +786,76 @@ impl Execution {
             output.discarding = true;
         }
         self.end(Cause::Disconnected);
+    }
+
+    /// Sends the program the signal numbered `signal`, such as `SIGTERM`, and returns whether the
+    /// program was unreaped. The signal reaches what the execution's kill reaches but the
+    /// processes of its [cgroup](Options::cgroup): the program alone, or its
+    /// [process group](Options::process_group) too, through the program's pidfd, or, before Linux
+    /// 6.9, the group by its ID, right after the pidfd showed the program unreaped.
+    ///
+    /// Each process receives the signal once, so that no handler runs twice for one call: a
+    /// program that leads its group receives the group's signal alone, once a wait through its
+    /// pidfd, which needs no permission to signal it, has shown it unreaped, and one that left its
+    /// group receives a signal of its own. A program that leaves its group while it is signalled
+    /// receives a signal of its own too, so that it never misses one, though the group's signal
+    /// may have reached it first.
+    ///
+    /// The signal ends neither the program nor the execution: the execution records no cause,
+    /// keeps the program's input open, and leaves its timeout in place, so a program that ends
+    /// after the signal ends with its own status, and its outcome reports no
+    /// [cause](Outcome::cause), as for a program that ended by itself. `SIGKILL` is `EINVAL`, and
+    /// sends nothing, as the execution ends its program with a cause, through
+    /// [`cancel`](Self::cancel) and [`terminate`](Self::terminate), so that its outcome tells why.
+    ///
+    /// Once a collector has taken the program's status, it sends nothing, and returns `false`, so
+    /// that it never reaches a process that took the program's ID, or its group's, since. Finding
+    /// the status taken changes nothing in the execution, which learns of the program's end as
+    /// ever: from its own collection of the status, or from the caller's
+    /// [`observe`](Self::observe). A signal that the kernel refuses to the program or to its
+    /// process group, such as one that the caller may not send, or a number that names no signal,
+    /// is an error, which no event reports. The group's signal fails only if the kernel refuses it
+    /// to every process of the group, as `kill` does. A lookup of the program's group that fails
+    /// other than because the program is gone is an error too: a first one sends nothing, and one
+    /// after the group's signal sends the program no signal of its own.
+    pub fn signal(&mut self, signal: i32) -> io::Result<bool> {
+        if signal == sys::Signal::SIGKILL as i32 {
+            return Err(Errno::EINVAL.into());
+        }
+        if !self.uncollected() {
+            return Ok(false);
+        }
+        let Some(pidfd) = self.child.pidfd() else {
+            return Ok(false);
+        };
+        // The program's group is looked up by the program's ID before the pidfd shows the program
+        // unreaped, which proves that the ID still named the program then.
+        let process = self.child.process();
+        if self.process_group && leads_its_group(process)? {
+            if !sys::is_unreaped(pidfd)? {
+                return Ok(false);
+            }
+            self.signal_group(pidfd, signal)?;
+            // The program may have left its group since the lookup, before the group's signal.
+            if !leads_its_group(process)? {
+                match signal_through_pidfd(pidfd, signal, false) {
+                    Ok(()) | Err(Errno::ESRCH) => {}
+                    Err(error) => return Err(error.into()),
+                }
+            }
+            return Ok(true);
+        }
+        let program = match signal_through_pidfd(pidfd, signal, false) {
+            Ok(()) => Ok(()),
+            Err(Errno::ESRCH) => return Ok(false),
+            Err(error) => Err(error),
+        };
+        let group = if self.process_group {
+            self.signal_group(pidfd, signal)
+        } else {
+            Ok(())
+        };
+        program.and(group).map(|()| true).map_err(io::Error::from)
     }
 
     /// Hands the execution the status that the caller's own collector collected for the process
@@ -1124,16 +1209,39 @@ fn arrived(report: &LaunchReport) -> bool {
     }
 }
 
+/// Returns whether `process` leads its process group, by a lookup by its ID, unless a test has
+/// given the lookup's next answer, as for a program that leaves its group right after it. A
+/// process that the lookup finds no more, as `ESRCH` tells, leads none; any other failure of the
+/// lookup is an error.
+fn leads_its_group(process: ProcessId) -> Result<bool, Errno> {
+    #[cfg(test)]
+    if let Some(leads) = LEADS.take() {
+        return Ok(leads);
+    }
+    match sys::process_group_of(process) {
+        Ok(group) => Ok(group == process),
+        Err(Errno::ESRCH) => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+
 /// Sends the signal numbered `signal` through `pidfd`, as [`sys::signal_through_pidfd`] does,
-/// unless a test has the kernel refuse this thread's signals through pidfds.
+/// unless a test has the kernel refuse this thread's signals through pidfds, or only those to
+/// process groups, as a kernel before Linux 6.9 does. A test sees what this thread sent.
 fn signal_through_pidfd(
     pidfd: BorrowedFd<'_>,
     signal: i32,
     process_group: bool,
 ) -> Result<(), Errno> {
     #[cfg(test)]
+    SENT.with_borrow_mut(|sent| sent.push((signal, process_group)));
+    #[cfg(test)]
     if let Some(error) = REFUSED.get() {
         return Err(error);
+    }
+    #[cfg(test)]
+    if process_group && BEFORE_LINUX_6_9.get() {
+        return Err(Errno::EINVAL);
     }
     sys::signal_through_pidfd(pidfd, signal, process_group)
 }
@@ -1142,6 +1250,17 @@ fn signal_through_pidfd(
 thread_local! {
     /// The error with which a test has the kernel refuse this thread's signals through pidfds.
     static REFUSED: std::cell::Cell<Option<Errno>> = const { std::cell::Cell::new(None) };
+    /// Whether a test has the kernel refuse this thread's signals to process groups through
+    /// pidfds, as a kernel before Linux 6.9 does.
+    static BEFORE_LINUX_6_9: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// The signals that this thread sent through pidfds, in order, each with whether it went to
+    /// a process group.
+    static SENT: std::cell::RefCell<Vec<(i32, bool)>> = const {
+        std::cell::RefCell::new(Vec::new())
+    };
+    /// The answer that a test has the next lookup of whether a program leads its process group
+    /// give on this thread.
+    static LEADS: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
 }
 
 #[cfg(test)]

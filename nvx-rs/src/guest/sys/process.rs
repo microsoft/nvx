@@ -366,6 +366,12 @@ pub(crate) fn kill_process(process: ProcessId) -> Result<(), Errno> {
     kill(process.0, Signal::SIGKILL)
 }
 
+/// Returns the ID of the process group to which `process` belongs. The lookup goes by
+/// `process`'s ID, which names `process` only while its status stays uncollected.
+pub(crate) fn process_group_of(process: ProcessId) -> Result<ProcessId, Errno> {
+    nix::unistd::getpgid(Some(process.0)).map(ProcessId)
+}
+
 /// One child that a wait names, which is all that it may collect.
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum WaitTarget<'a> {
@@ -433,6 +439,37 @@ pub(crate) fn wait_named(target: WaitTarget<'_>, block: bool) -> Result<Option<i
             _ if block => continue,
             _ => return Ok(None),
         }));
+    }
+}
+
+/// Returns whether the child to which `pidfd` refers is unreaped: whether it runs, or has ended
+/// with a status that no collector has taken yet, which the check leaves in place, as `WNOWAIT`
+/// makes it. Unlike a signal 0, the check needs no permission to signal the child. A child whose
+/// status a collector took, as the wait's `ECHILD` tells, is not.
+///
+/// libc is used for the same reason as in [`wait_named`], whose options the check shares.
+pub(crate) fn is_unreaped(pidfd: BorrowedFd<'_>) -> Result<bool, Errno> {
+    let options = nix::libc::WEXITED | nix::libc::WNOHANG | nix::libc::WNOWAIT | nix::libc::__WALL;
+    loop {
+        // SAFETY: zero is a valid initial representation for `siginfo_t`.
+        let mut information = unsafe { std::mem::zeroed::<nix::libc::siginfo_t>() };
+        // SAFETY: `information` is writable, and `WNOWAIT` leaves the child's status in place.
+        let result = unsafe {
+            nix::libc::waitid(
+                nix::libc::P_PIDFD,
+                pidfd.as_raw_fd() as nix::libc::id_t,
+                &mut information,
+                options,
+            )
+        };
+        if result == 0 {
+            return Ok(true);
+        }
+        match Errno::last() {
+            Errno::EINTR => {}
+            Errno::ECHILD => return Ok(false),
+            error => return Err(error),
+        }
     }
 }
 
@@ -853,6 +890,27 @@ mod tests {
     }
 
     #[test]
+    fn a_pidfd_shows_its_child_unreaped_until_its_status_is_collected() {
+        use std::os::unix::process::ExitStatusExt;
+
+        let mut child = std::process::Command::new("/bin/sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
+        let process = ProcessId::from_child(&child);
+        let pidfd = open_pidfd(process).unwrap();
+        assert_eq!(is_unreaped(pidfd.borrowed()), Ok(true));
+        kill_process(process).unwrap();
+        while !has_exited(process).unwrap() {
+            std::thread::yield_now();
+        }
+        // The check leaves the ended child's status for its collector.
+        assert_eq!(is_unreaped(pidfd.borrowed()), Ok(true));
+        assert_eq!(child.wait().unwrap().signal(), Some(nix::libc::SIGKILL));
+        assert_eq!(is_unreaped(pidfd.borrowed()), Ok(false));
+    }
+
+    #[test]
     fn a_real_time_signal_goes_through_a_pidfd_and_to_a_process_group() {
         use std::os::unix::process::{CommandExt, ExitStatusExt};
 
@@ -875,6 +933,7 @@ mod tests {
             .spawn()
             .unwrap();
         let process = ProcessId::from_child(&leader);
+        assert_eq!(process_group_of(process), Ok(process));
         assert_eq!(signal_process_group(process, 65), Err(Errno::EINVAL));
         assert_eq!(signal_process_group(process, 41), Ok(()));
         assert_eq!(leader.wait().unwrap().signal(), Some(41));
