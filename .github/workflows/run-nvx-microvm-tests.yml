@@ -45,7 +45,9 @@ on:
         description: >-
           Run only this shard, from 1 to shard-count, of the default suite,
           as scripts/nvx_tools/microvm_shards.json splits it for the backend
-          (doc/ci.md#microvm-test-shards); 0 runs all of it. Only for the
+          (doc/ci.md#microvm-test-shards); 0 runs all of a default run, the
+          public sandbox scenarios among them, which also read the Ubuntu
+          distro layer and the sandbox scratch template. Only for the
           default-suite jobs
         required: false
         type: number
@@ -91,9 +93,11 @@ jobs:
 
       # The guest artifacts that the steps below boot or read. Every job
       # qualifies its runner with the kernel and the Alpine initramfs, the
-      # default suite boots only those, and the debug-kernel jobs run only
-      # Alpine scenarios on the debug kernel, so only the guest and sandbox
-      # steps take the Ubuntu and Azure Linux artifacts.
+      # shards of the default suite boot only those, and the debug-kernel jobs
+      # run only Alpine scenarios on the debug kernel, so only the guest and
+      # sandbox steps take the Ubuntu and Azure Linux artifacts, and an
+      # unsharded default run the Ubuntu distro layer of its public sandbox
+      # scenarios.
       - name: Download guest kernel
         uses: actions/download-artifact@v8
         with:
@@ -122,6 +126,15 @@ jobs:
 
       - name: Download Ubuntu distro layer
         if: ${{ inputs.guests-and-sandboxes && !inputs.debug-kernel }}
+        uses: actions/download-artifact@v8
+        with:
+          name: guest-ubuntu-distro
+          path: build
+
+      # The layer, its manifest, and the sandbox scratch template, which the
+      # public sandbox scenarios of an unsharded default run read.
+      - name: Download Ubuntu distro layer for the whole default run
+        if: ${{ !inputs.guests-and-sandboxes && !inputs.debug-kernel && !inputs.shard }}
         uses: actions/download-artifact@v8
         with:
           name: guest-ubuntu-distro

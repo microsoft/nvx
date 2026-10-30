@@ -2785,15 +2785,12 @@ policy, not a broken probe.
 The scenarios use the fixtures of NVX's own layered scenarios, from NVX's
 artifacts: the Ubuntu EROFS image, `ubuntu-distro.erofs`, its manifest, which
 holds its UUID, and the scratch template, `ubuntu-smoke-scratch.ext4`, an
-empty ext4 file system that the guest-artifact build makes, of which each
-scenario boots a copy. Downloaded packages do not include the template, so make
-it beside the image as the guest-artifact build does:
-
-```bash
-truncate --size 64M ../../build/ubuntu-smoke-scratch.ext4
-mkfs.ext4 -q -F -m 0 -U 4f3c8bf7-1959-47b4-8811-62b17bbddaf4 \
-  -E lazy_itable_init=0,lazy_journal_init=0 ../../build/ubuntu-smoke-scratch.ext4
-```
+empty ext4 file system, of which each scenario boots a copy. Packages ship the
+template beside the image, so `nvx-rs download` installs both into `build/`,
+and the guest-artifact build makes it with the image;
+`python3 scripts/nvx.py build-scratch-template` formats it on Linux, with the
+parameters that the packages' template has
+([`build-scratch-template`](../../doc/usage.md#build-scratch-template)).
 
 A scenario of a GPT disk writes the disk from the template first: a protective
 MBR, and the primary and backup tables of 128 entries, with the first
@@ -3130,7 +3127,7 @@ hypervisor from `NVX_HYPERVISOR`, through
 `nvx::Hypervisor::from_env_or_default`, NVX's artifacts, with their install
 metadata and the fixtures, from `NVX_ARTIFACTS_DIR`, and the guest agent from
 `RUNTIME_ADAPTER_GUEST`. In a checkout where `nvx-rs download` installed NVX's
-artifacts, and with the scratch template, run them in this directory with:
+artifacts, the scratch template among them, run them in this directory with:
 
 ```bash
 cargo build --locked --release --features guest \

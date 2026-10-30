@@ -7063,11 +7063,10 @@ class CiConfigurationTests(unittest.TestCase):
             ):
                 if command == "test-microvm":
                     guest = re.search(r"--guest (\S+)", script)
-                    files.add(
-                        guests.guest_descriptor(
-                            guest.group(1) if guest else "alpine"
-                        ).initramfs_name
+                    descriptor = guests.guest_descriptor(
+                        guest.group(1) if guest else "alpine"
                     )
+                    files.add(descriptor.initramfs_name)
                     if "inputs.debug-kernel && '--debug-kernel'" in script:
                         debug = context["inputs.debug-kernel"] is True
                     else:
@@ -7081,7 +7080,16 @@ class CiConfigurationTests(unittest.TestCase):
                         else {KernelBuildConstants.BINARY_NAME}
                     )
                     scenarios = set(re.findall(r"--scenario (\S+)", script))
-                    if scenarios & PUBLIC_SANDBOX_SCENARIOS:
+                    if "inputs.shard && format('--shard" in script:
+                        sharded = bool(context["inputs.shard"])
+                    else:
+                        sharded = "--shard" in script
+                    # A default run of a guest that controls sandboxes runs
+                    # the public sandbox scenarios too, but no shard does.
+                    default_run = not (scenarios or debug or sharded)
+                    if scenarios & PUBLIC_SANDBOX_SCENARIOS or (
+                        default_run and descriptor.sandbox_control
+                    ):
                         files |= workload
                 else:
                     self.assertIn(command, commands)
@@ -7216,6 +7224,35 @@ class CiConfigurationTests(unittest.TestCase):
                 *ci.REQUIRED_CI_PLATFORM_JOBS,
             },
         )
+        # The microVM workflow's own default, an unsharded default run, which
+        # no job of ci.yml selects, runs the public sandbox scenarios too, so
+        # it downloads the Ubuntu distro layer that they read.
+        microvm = load("run-nvx-microvm-tests.yml")
+        microvm_inputs = microvm.get(True, microvm.get("on"))["workflow_call"]["inputs"]
+        microvm_steps = [
+            step
+            for definition in microvm["jobs"].values()
+            for step in definition["steps"]
+        ]
+        for system, backend in (("Linux", "kvm"), ("Windows", "whp")):
+            context: dict[str, object] = {
+                "runner.os": system,
+                **{
+                    f"inputs.{name}": definition.get("default", name)
+                    for name, definition in microvm_inputs.items()
+                },
+                "inputs.backend": backend,
+            }
+            with self.subTest(unsharded=system):
+                self.assertEqual(context["inputs.shard"], 0)
+                result = consume(microvm_steps, context)
+                assert result is not None
+                downloaded, read = result
+                self.assertEqual(
+                    downloaded,
+                    {name for name, files in components.items() if files & read},
+                )
+                self.assertIn("guest-ubuntu-distro", downloaded)
         # The VMM tests' build downloads no guest artifact, none of its steps
         # reads one, and it waits for no job that builds one.
         for job_name in ci.REQUIRED_CI_OPENVMM_TEST_BUILD_JOBS:
@@ -9816,10 +9853,11 @@ python3() {
         self.assertEqual(build_workflow.count("overwrite: true"), 2)
         self.assertEqual(build_workflow.count("retention-days: 1"), 2)
         # The microVM workflow also downloads nvx-rs, which the benchmarks
-        # don't run, the debug kernel, which the platform jobs don't read, and
+        # don't run, the debug kernel, which the platform jobs don't read, the
+        # Ubuntu distro layer a second time, for an unsharded default run, and
         # on Windows the runtime adapter's guest agent.
         for consumer_workflow, download_count in (
-            (microvm_workflow, 10),
+            (microvm_workflow, 11),
             (platform_workflow, 7),
         ):
             self.assertIn("path: openvmm/target/release", consumer_workflow)
@@ -10692,7 +10730,10 @@ python3() {
         def selected(backend: str, *, debug: bool, guests: bool | None) -> list[str]:
             # A selector of None stands for the single job that ran every step
             # before the split: it ignores the guests-and-sandboxes conjuncts.
+            # Only the default-suite jobs run a shard; the single job, the
+            # guest and sandbox jobs, and the debug-kernel jobs pass none.
             windows = backend == "whp"
+            sharded = guests is False and not debug
             values = {
                 "runner.os != 'Windows'": not windows,
                 "runner.os == 'Windows'": windows,
@@ -10701,6 +10742,7 @@ python3() {
                 "!inputs.debug-kernel": not debug,
                 "inputs.guests-and-sandboxes": guests is not False,
                 "!inputs.guests-and-sandboxes": guests is not True,
+                "!inputs.shard": not sharded,
             }
             chosen: list[str] = []
             for step in steps:

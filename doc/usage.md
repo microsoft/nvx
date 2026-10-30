@@ -1142,13 +1142,16 @@ python3 scripts/nvx.py test-microvm
 
 Runs NVX-owned Linux, SMP, virtio, sandbox, and snapshot correctness scenarios
 against the public OpenVMM CLI. Repeat `--scenario` to select a subset; without
-it, every scenario supported by the selected guest runs, except five that run
-only when named. `smp-lapic` repeats `smp` and also asserts that every CPU
+it, every scenario supported by the selected guest runs, except `smp-lapic`,
+which runs only when named: it repeats `smp` and also asserts that every CPU
 uses the one-shot counting LAPIC. `managed-exec-config`, `sandbox-lifecycle`,
-`sandbox-proxy-only`, and `sandbox-ram-upper` drive the public `nvx-rs sandbox`
-lifecycle commands (see [Run](run.md#managed-lifecycle)) and also require the
-guest-artifact build's Ubuntu layer and scratch template, which packages
-omit. Alpine remains the
+`sandbox-proxy-only`, and `sandbox-ram-upper`, the public sandbox scenarios,
+drive the public `nvx-rs sandbox` lifecycle commands (see
+[Run](run.md#managed-lifecycle)) and also read the Ubuntu distro layer, its
+manifest, and the sandbox scratch template, which
+[`download`](#download) installs and the guest-artifact build makes; a run
+that selects one of them fails before its first scenario when one of those
+files is missing. Alpine remains the
 default. Ubuntu and Azure Linux cannot act as sandbox control, so they reject
 the Alpine-control-only `sandbox-blocks` and `scratch-snapshot` scenarios and
 the sandbox-control-dependent `snapshot-tiers`, `platform-restore-processors`,
@@ -1161,7 +1164,9 @@ detectors the guest's time ABI watcher reports; without `--scenario`, it runs
 only the same-host restore scenarios `smp`, `smp-snapshot`,
 `restore-processors`, `restore-downtime`, and `snapshot-tiers`.
 `--shard INDEX/COUNT`, such as `1/2`, runs shard INDEX of the COUNT shards of
-the default Alpine suite on the default kernel, as
+the default Alpine suite on the default kernel, the scenarios of a run without
+`--scenario` but the public sandbox scenarios, which CI runs in its guest and
+sandbox jobs, as
 [`microvm_shards.json`](../scripts/nvx_tools/microvm_shards.json) splits it for
 the backend; CI runs each shard in a job of its own (see
 [MicroVM test shards](ci.md#microvm-test-shards)). It takes no `--scenario`,

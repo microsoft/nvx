@@ -35,16 +35,28 @@ class WorkloadArtifacts:
     scratch_template: Path
 
 
+def workload_artifact_paths() -> tuple[tuple[Path, str], ...]:
+    """Return the paths of the Ubuntu workload layer, its manifest, and the
+    sandbox scratch template, which the public scenarios read, each with its
+    description."""
+    distro = artifact_path(UbuntuBuildConstants.DISTRO_NAME)
+    return (
+        (distro, "Ubuntu workload layer"),
+        (
+            distro.with_name(UbuntuBuildConstants.DISTRO_MANIFEST_NAME),
+            "Ubuntu layer manifest",
+        ),
+        (
+            artifact_path(UbuntuBuildConstants.SCRATCH_TEMPLATE_NAME),
+            "sandbox scratch template",
+        ),
+    )
+
+
 def load_workload_artifacts() -> WorkloadArtifacts:
-    distro = require_file(
-        artifact_path(UbuntuBuildConstants.DISTRO_NAME), "Ubuntu workload layer"
-    )
-    manifest_path = require_file(
-        distro.with_name(UbuntuBuildConstants.DISTRO_MANIFEST_NAME),
-        "Ubuntu layer manifest",
-    )
-    scratch_template = require_file(
-        artifact_path("ubuntu-smoke-scratch.ext4"), "sandbox scratch template"
+    distro, manifest_path, scratch_template = (
+        require_file(path, description)
+        for path, description in workload_artifact_paths()
     )
     try:
         manifest: object = json.loads(manifest_path.read_text(encoding="utf-8"))

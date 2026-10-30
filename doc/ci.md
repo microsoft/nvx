@@ -737,7 +737,9 @@ twice as long as one of its jobs, still less than the unsharded suite.
 
 `nvx.py test-microvm --shard INDEX/COUNT` runs one of COUNT shards of the
 default Alpine suite on the default kernel, which holds the scenarios that
-`test-microvm` runs without `--scenario`. The partition is
+`test-microvm` runs without `--scenario` but the public sandbox scenarios,
+which the guest and sandbox jobs run beside the Ubuntu artifacts that they
+read. The partition is
 [`microvm_shards.json`](../scripts/nvx_tools/microvm_shards.json): for each
 backend, the median duration of every default scenario, the scenarios of each
 shard, and how long each shard takes. The backends differ too much for one
@@ -865,14 +867,17 @@ Alpine initramfs. The microVM default suites boot only those two, and the
 microVM guest and sandbox jobs boot every guest and run sandboxes from the
 Ubuntu distro layer over copies of the scratch template, which comes with the
 layer: the layer's Docker target formats it, its cache entry holds it, and the
-Ubuntu record gives its digest, so a push reuses it with the layer. The platform
-jobs boot the kernel and the Alpine initramfs to qualify their runner and to
-benchmark, and package every guest image, and the scratch template, into their
-release. A missing artifact fails its download step, so no job runs without a
-component that it reads. The microVM test jobs also set `NVX_AUTO_DOWNLOAD=0`,
-so that `nvx-rs` never replaces a missing artifact with a release's, as it does
-in a checkout without artifacts; see [`download`](usage.md#download). A test in
-`scripts/test_nvx_tools.py` maps each step of these jobs to the guest files
+Ubuntu record gives its digest, so a push reuses it with the layer. The microVM
+test workflow's own default, an unsharded default run, which no CI job selects,
+runs the public sandbox scenarios too, so it also downloads the layer. The
+platform jobs boot the kernel and the Alpine initramfs to qualify their runner
+and to benchmark, and package every guest image, and the scratch template, into
+their release. A missing artifact fails its download step, so no job runs
+without a component that it reads. The microVM test jobs also set
+`NVX_AUTO_DOWNLOAD=0`, so that `nvx-rs` never replaces a missing artifact with
+a release's, as it does in a checkout without artifacts; see
+[`download`](usage.md#download). A test in `scripts/test_nvx_tools.py` maps
+each step of these jobs, and of that unsharded default run, to the guest files
 that it reads, through the `nvx.py` command or local action that it runs and
 the `build/` paths that it names, and fails when a job lacks a component that a
 step reads, downloads one that none reads, or waits for a guest artifact job

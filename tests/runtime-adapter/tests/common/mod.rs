@@ -50,8 +50,8 @@ pub(crate) type Printed = BTreeMap<String, String>;
 /// The fixtures of the layered roots, those of NVX's own layered scenarios, among NVX's artifacts:
 ///
 /// - the Ubuntu EROFS image, `ubuntu-distro.erofs`, and its manifest, which holds its UUID;
-/// - the scratch template, [`SCRATCH_TEMPLATE`], an empty ext4 file system that NVX's CI makes
-///   with the guest artifacts, of which each test boots a copy.
+/// - the scratch template, [`SCRATCH_TEMPLATE`], an empty ext4 file system that NVX's packages
+///   ship with the guest artifacts, of which each test boots a copy.
 pub(crate) struct Fixtures {
     /// NVX's Ubuntu EROFS image.
     pub(crate) distro: PathBuf,
@@ -77,7 +77,7 @@ impl Fixtures {
             (&manifest, "the manifest of the Ubuntu EROFS image"),
             (
                 &scratch,
-                "the scratch template, an empty ext4 file system, which `mkfs.ext4` makes",
+                "the scratch template, an empty ext4 file system, which `nvx-rs download` installs",
             ),
         ] {
             assert!(path.is_file(), "{fixture} is missing: {}", path.display());

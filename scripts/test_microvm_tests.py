@@ -13149,7 +13149,7 @@ class MicrovmTests(unittest.TestCase):
             )
             lifecycle.assert_not_called()
 
-    def test_runner_runs_public_sandbox_scenarios_only_when_named(self):
+    def test_a_default_run_runs_the_public_sandbox_scenarios(self):
         def require(path: Path, _description: str) -> Path:
             return path
 
@@ -13178,18 +13178,57 @@ class MicrovmTests(unittest.TestCase):
                 patch.object(
                     microvm_tests, "run_managed_exec_configuration"
                 ) as managed_exec,
+                redirect_stdout(io.StringIO()),
             ):
                 self.assertEqual(microvm_tests.run(args), 0)
 
         guest_boot.assert_called_once()
-        lifecycle.assert_not_called()
-        proxy_only.assert_not_called()
-        ram_upper.assert_not_called()
-        managed_exec.assert_not_called()
+        lifecycle.assert_called_once()
+        proxy_only.assert_called_once()
+        ram_upper.assert_called_once()
+        managed_exec.assert_called_once()
         self.assertIn("sandbox-lifecycle", microvm_tests.SANDBOX_CONTROL_SCENARIOS)
         self.assertIn("sandbox-proxy-only", microvm_tests.SANDBOX_CONTROL_SCENARIOS)
         self.assertIn("sandbox-ram-upper", microvm_tests.SANDBOX_CONTROL_SCENARIOS)
         self.assertIn("sandbox-ram-upper", microvm_tests.PUBLIC_SANDBOX_SCENARIOS)
+
+    def test_public_sandbox_scenarios_need_their_artifacts_before_any_runs(self):
+        # Without the scratch template, a default run fails before its first
+        # scenario, and says where the template comes from.
+        template = microvm_tests.workload_artifact_paths()[-1][0]
+        self.assertEqual(template.name, "ubuntu-smoke-scratch.ext4")
+
+        def require(path: Path, description: str) -> Path:
+            if path == template:
+                raise common.ScriptError(f"{description} not found: {path}")
+            return path
+
+        with tempfile.TemporaryDirectory() as temporary:
+            args = nvx.parse_args(
+                ["test-microvm", "--backend", "kvm", "--output-dir", temporary]
+            )
+            with (
+                patch.object(microvm_tests, "validate_openvmm_test_backend"),
+                patch.object(
+                    microvm_tests,
+                    "MICROVM_TEST_SCENARIOS",
+                    ("guest-boot", "sandbox-lifecycle"),
+                ),
+                patch.object(microvm_tests, "require_file", side_effect=require),
+                patch.object(microvm_tests, "run_guest_boot") as guest_boot,
+                patch.object(microvm_tests, "run_sandbox_lifecycle") as lifecycle,
+                self.assertRaisesRegex(
+                    common.ScriptError,
+                    r"^sandbox scratch template not found: .*; sandbox-lifecycle "
+                    r"reads .*: install them with `nvx-rs download` .*"
+                    r"`build-scratch-template`",
+                ),
+            ):
+                microvm_tests.run(args)
+            self.assertFalse((Path(temporary) / microvm_durations.REPORT_NAME).exists())
+
+        guest_boot.assert_not_called()
+        lifecycle.assert_not_called()
 
     def test_managed_executions_enter_through_the_agent_not_the_container_helpers(self):
         root = Path(__file__).resolve().parent.parent
@@ -14177,11 +14216,18 @@ class MicrovmShardTests(unittest.TestCase):
             partition,
         )
 
-    def test_default_suite_is_the_suite_that_a_default_run_selects(self):
+    def test_a_default_run_selects_the_default_suite_and_the_public_scenarios(self):
+        # CI runs the public sandbox scenarios beside the Ubuntu artifacts that
+        # they read, in its guest and sandbox jobs, and the rest of a default
+        # run in the shards of the default suite.
         with tempfile.TemporaryDirectory() as temporary:
             selected = self._run_shard(Path(temporary), "--backend", "kvm")
-        self.assertEqual(selected, list(microvm_tests.default_suite()))
-        self.assertNotIn("managed-exec-config", selected)
+        self.assertEqual(selected, list(microvm_tests.MICROVM_TEST_SCENARIOS))
+        self.assertEqual(
+            set(selected) - set(microvm_tests.default_suite()),
+            microvm_tests.PUBLIC_SANDBOX_SCENARIOS,
+        )
+        self.assertIn("managed-exec-config", selected)
         self.assertNotIn("smp-lapic", selected)
 
     def test_shards_run_each_default_scenario_once_on_each_backend(self):

@@ -968,11 +968,11 @@ refuses a RAM upper beside a scratch block device. With either upper, the
 overlay keeps `metacopy=on` and `xino=on`, which `/sbin/nvx-sandbox-smoke`
 checks.
 
-The explicit `test-microvm --scenario sandbox-ram-upper --backend BACKEND`
-scenario is the acceptance for the RAM upper. Like the
+The `sandbox-ram-upper` scenario of `test-microvm --backend BACKEND` is the
+acceptance for the RAM upper. Like the
 [managed lifecycle](#managed-lifecycle) scenarios, it runs `nvx-rs sandbox` as
-subprocesses with the guest-artifact build's Ubuntu layer, so it also runs only
-when named, but it attaches no scratch image. It checks that `provision`
+subprocesses with the Ubuntu layer that `nvx-rs download` installs, but it
+attaches no scratch image. It checks that `provision`
 refuses `--upper ram` beside `--scratch`, and `start` refuses `--upper`, before
 either creates any state. A one-shot `run` of `/sbin/nvx-sandbox-smoke` must
 print an OpenVMM command with one sandbox block device, the read-only distro
@@ -1318,11 +1318,11 @@ sandbox that an earlier release provisioned, whose configuration records the
 network options rather than the typed policy; deprovision it and provision it
 again.
 
-The explicit `test-microvm --scenario sandbox-proxy-only --backend BACKEND`
-scenario is the acceptance for proxy-only networking. Like the
+The `sandbox-proxy-only` scenario of `test-microvm --backend BACKEND` is the
+acceptance for proxy-only networking. Like the
 [managed lifecycle](#managed-lifecycle) scenarios, it runs `nvx-rs sandbox` as
-subprocesses with the guest-artifact build's Ubuntu layer and scratch
-template, so it also runs only when named. It checks that `provision` refuses
+subprocesses with the Ubuntu layer and the sandbox scratch template that
+`nvx-rs download` installs. It checks that `provision` refuses
 a proxy beside `--network-egress allow`, and one at an address other than the
 gateway, before it creates any state. It then runs the same probes in two
 sandboxes, whose proxy is a test proxy on host loopback: a managed `exec`
@@ -1524,8 +1524,8 @@ most 1 MiB of combined standard output and standard error; the guest agent
 kills a workload that writes more, and `exec` exits with status 125 and reports
 the `output-limit` category.
 
-The explicit `test-microvm --scenario managed-exec-config --backend BACKEND`
-scenario is the authoritative acceptance for these public options. It invokes
+The `managed-exec-config` scenario of `test-microvm --backend BACKEND` is the
+authoritative acceptance for these public options. It invokes
 `nvx-rs sandbox provision`, `start`, `exec`, `stop`, and `deprovision`
 as subprocesses with an Alpine control guest and an Ubuntu workload layer. It
 checks sequential distinct CWD and exact-environment requests, an environment
@@ -1540,20 +1540,21 @@ It also checks public
 rejection of relative CWD and out-of-range `uint32`
 timeouts, timeout recovery, stdout/stderr forwarding, and typed exec outcome
 reports. It requires `build/ubuntu-distro.erofs`, its manifest, and the
-`build/ubuntu-smoke-scratch.ext4` template produced by the guest-artifact build.
-CI invokes it separately on every backend; it is not included in the default
-scenario set because downloaded packages do not include the scratch template.
+sandbox scratch template, `build/ubuntu-smoke-scratch.ext4`, which
+`nvx-rs download` installs and the guest-artifact build makes, and
+`test-microvm` fails before its first scenario when one of them is missing. A
+default run includes it, and CI runs it on every backend in the guest and
+sandbox job, which takes those Ubuntu artifacts.
 Empty environments are measured with `/usr/bin/env`, not a shell that can
 synthesize its own variables. The scenario retains bounded subprocess argument
 and status observations, typed exec outcomes, and OpenVMM logs. Inline
 environment values are redacted from the retained command observations.
 
-The explicit `test-microvm --scenario sandbox-lifecycle --backend BACKEND`
-scenario is the authoritative acceptance for the managed lifecycle itself. It
+The `sandbox-lifecycle` scenario of `test-microvm --backend BACKEND` is the
+authoritative acceptance for the managed lifecycle itself. It
 also runs the public commands as subprocesses against the real kernel, Alpine
 control initramfs, Ubuntu EROFS layer, and fresh copies of the same scratch
-template, so it has the same artifact requirements and also runs only when
-named. It checks that:
+template, so it has the same artifact requirements. It checks that:
 
 - `provision` rejects a root `--workload-user` before it creates any state, and
   the guest refuses an identity that the Ubuntu image lacks before a one-shot
