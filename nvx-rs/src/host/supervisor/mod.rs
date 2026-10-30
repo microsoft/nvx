@@ -77,13 +77,17 @@
 //!
 //! On Windows, the VMM's standard handles are inheritable while it is created too, and a process
 //! that another thread of the caller creates in that window without a list of handles, as
-//! `std::process::Command` creates one, inherits them all, and holds them until it exits: it holds
-//! the VMM's log, and so its launch's claim, after the VMM exits, and a recovery cannot end the
-//! launch until it does. Each spawn of a VMM holds a [`SpawnLock`] throughout that window, so a
-//! caller that launches VMMs spawns its other processes with [`spawn_command`], or under a lock of
-//! its own from [`lock_spawns`], and keeps them out of it. On Linux, the lock holds nothing: a
-//! process that another thread spawns holds the VMM's log only from its fork until its exec, and
-//! recovery checks a held claim again for long enough to see the claim released.
+//! `std::process::Command` creates one, inherits them all, and holds them until it exits: it could
+//! read the VMM's capability before the VMM does, and it holds the VMM's log, and the handles that
+//! the VMM is allowed. It holds no claim of the VMM's launch, though: [`spawn`] starts the VMM in a
+//! job object of its own, named after its log, whose processes decide the claim while such a
+//! process holds the log, so a recovery still ends the launch once the VMM exits; see
+//! [the store](crate::host::store#the-log-claim). Each spawn of a VMM holds a [`SpawnLock`]
+//! throughout that window, so a caller that launches VMMs spawns its other processes with
+//! [`spawn_command`], or under a lock of its own from [`lock_spawns`], and keeps them out of it. On
+//! Linux, the lock holds nothing: a process that another thread spawns holds the VMM's log only
+//! from its fork until its exec, and recovery checks a held claim again for long enough to see the
+//! claim released.
 //!
 //! # Exit waits and stops
 //!

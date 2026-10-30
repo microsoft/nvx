@@ -33,7 +33,7 @@ pub(crate) fn released(mut free: impl FnMut() -> bool) -> bool {
 /// `mklink /J`, quoting both paths, since `cmd` splits its arguments at commas and semicolons.
 ///
 /// `cmd` starts under a `SpawnLock`, so that it inherits no handle of a VMM that a concurrent test
-/// spawns, such as the VMM's log, whose claim it would hold until it exits.
+/// spawns, such as the VMM's log, which it would hold until it exits.
 #[cfg(windows)]
 pub(crate) fn junction(link: &Path, target: &Path) {
     use std::os::windows::process::CommandExt;

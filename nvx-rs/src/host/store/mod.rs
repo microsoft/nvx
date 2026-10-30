@@ -125,11 +125,13 @@
 //! The VMM inherits its launch's claim on the log, so the claim lasts as long as any process that
 //! holds the log open from the launch. On Linux it is an exclusive `flock` lock of the log's open
 //! file description, which the VMM shares through its standard output and error, and which only
-//! the last close of that description releases. On Windows it is the VMM's handles themselves:
-//! while any process holds the log open, an open of the log that shares nothing fails. A released
-//! claim proves that the launch has exited, even one that never recorded its VMM or published its
-//! endpoint. The claim relies on the VMM keeping its standard output and error until it exits, as
-//! OpenVMM does, and on the directory being on a local file system.
+//! the last close of that description releases. On Windows it is the processes of the job object
+//! of the log, in which the VMM runs, while that job is open, as described below, and otherwise
+//! the VMM's handles themselves: while any process holds the log open, an open of the log that
+//! shares nothing fails. A released claim proves that the launch has exited, even one that never
+//! recorded its VMM or published its endpoint. The claim relies on the VMM keeping its standard
+//! output and error until it exits, as OpenVMM does, and on the directory being on a local file
+//! system.
 //!
 //! On Linux, a process that another thread spawns while the log is open, such as another
 //! sandbox's VMM, also holds the claim, from its fork until it executes its program, which closes
@@ -138,11 +140,19 @@
 //!
 //! On Windows, a process that another thread creates while the VMM's spawn has the log's handles
 //! inheritable, with inheritance but without a list of handles, as `std::process::Command`
-//! creates one, inherits them, and holds the claim until it exits. Each spawn of a VMM holds a
+//! creates one, inherits them, and holds the log until it exits. Each spawn of a VMM holds a
 //! [`SpawnLock`](super::supervisor::SpawnLock) while the handles are inheritable, so a process
 //! that the caller spawns under one, as [`spawn_command`](super::supervisor::spawn_command) does,
-//! inherits none. A process that the caller spawns otherwise can still hold the log after the VMM
-//! has exited, and recovery then leaves the launch to a later recovery, after that process exits.
+//! inherits none. One that the caller spawns otherwise is no process of the launch, though, and
+//! does not hold the claim: [`spawn`](super::supervisor::spawn) starts the VMM in a job object of
+//! its own, named after the log, which every process that the VMM starts joins and no other
+//! process does, and keeps the job's handle inheritable for as long as the log's. Such a process
+//! therefore holds the job open for as long as it holds the log, and while the job is open, the
+//! claim is held only while the job holds a process. Recovery thus ends a launch whose VMM has
+//! exited, whatever such a process holds, if the recovery runs in the Windows session of the
+//! spawn: the job is named in that session's namespace, so a recovery from another session does
+//! not find it, and checks the log's handles, as for a VMM that an earlier version started outside
+//! a job, which such a process then holds until it exits.
 //!
 //! # Recovery
 //!

@@ -46,11 +46,13 @@ thread_local! {
 /// that window with inheritance but without a list of handles, as `std::process::Command` creates
 /// one, inherits every handle of this process that is inheritable then, the VMM's among them, and
 /// holds them until it exits. It could read the VMM's capability before the VMM does, and it
-/// holds the VMM's log, and so its launch's claim on the log, after the VMM has exited: a
-/// recovery that finds the VMM gone cannot end the launch then, and leaves it, with whatever it
-/// holds, to a recovery after that process exits. Each spawn of a VMM holds this lock throughout
-/// that window, so a process that the caller spawns under it, as [`spawn_command`] spawns one,
-/// inherits none of those handles, and one that the caller spawns otherwise still can.
+/// holds the VMM's log, and the handles that the VMM is allowed, such as the claim of a scratch
+/// image, after the VMM has exited. It holds no claim of the VMM's launch on the log, which the
+/// VMM's job then decides, as [the store](crate::host::store#the-log-claim) describes, so a
+/// recovery that finds the VMM gone still ends the launch. Each spawn of a VMM holds this lock
+/// throughout that window, so a process that the caller spawns under it, as [`spawn_command`]
+/// spawns one, inherits none of those handles, and one that the caller spawns otherwise still
+/// can.
 ///
 /// On other hosts it holds nothing. On Linux, a process that another thread spawns holds a copy
 /// of a VMM's log only from its fork until it executes its program, which closes the copy, and
@@ -97,8 +99,9 @@ impl Drop for SpawnLock {
 ///
 /// A caller that launches VMMs on Windows should spawn its other processes this way, or under a
 /// [`SpawnLock`] of its own: a process that it spawns otherwise while a VMM starts can hold the
-/// VMM's log, and so its launch's claim, until it exits, as [`SpawnLock`] describes. The lock
-/// lasts only until the process is created, not until it exits.
+/// VMM's handles until it exits, its capability's pipe, its log, and the handles that it allows,
+/// as [`SpawnLock`] describes. The lock lasts only until the process is created, not until it
+/// exits.
 pub fn spawn_command(command: &mut Command) -> io::Result<Child> {
     let _lock = lock_spawns();
     command.spawn()
