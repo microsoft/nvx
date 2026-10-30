@@ -1479,7 +1479,12 @@ the workload identity, OpenVMM closes the control endpoint and shuts down.
 `start` then waits up to `--timeout` seconds for OpenVMM to publish
 `outcome.json` and exit, and fails with the report's category and status, such
 as `guest-exit status 125`. It terminates OpenVMM only if OpenVMM outlives that
-wait. OpenVMM writes the report to a file of its own in the state directory,
+wait. An OpenVMM that exits before it serves the control endpoint, as one that
+refuses its configuration does, ends the start at once rather than after
+`--timeout`: the start fails with the report's category and status if OpenVMM
+published one, and otherwise with OpenVMM's exit status, as in
+`OpenVMM exited during startup with status 2`.
+OpenVMM writes the report to a file of its own in the state directory,
 `.tmp` and six ASCII letters or digits, before it publishes it: NVX removes
 such a file, which an OpenVMM that is terminated while it writes the report
 leaves, once no OpenVMM of the sandbox runs, and `deprovision` removes it with

@@ -1113,8 +1113,9 @@ fn refusals_of_a_running_sandbox(root: &Root) {
     operate(root, "deprovision", "state", &[]).assert_silent_success();
 }
 
-/// A start whose OpenVMM exits during the start fails with OpenVMM's status, keeps OpenVMM's log,
-/// and leaves no runtime state, so that the next start launches it again.
+/// A start whose OpenVMM exits during the start fails with OpenVMM's status as soon as OpenVMM
+/// exits, rather than at its timeout, keeps OpenVMM's log, and leaves no runtime state, so that
+/// the next start launches it again.
 fn failed_start(root: &Root) {
     let state = root.below("state");
     root.nvx_rs(&provision(
@@ -1123,12 +1124,18 @@ fn failed_start(root: &Root) {
     ))
     .assert_silent_success();
     for _ in 0..2 {
-        let outcome = operate(root, "start", "state", &["--timeout", "0.5"]);
+        let started = Instant::now();
+        let outcome = operate(root, "start", "state", &["--timeout", "60"]);
+        let elapsed = started.elapsed();
         assert_refused(
             root,
             &outcome,
             "exited",
             &["OpenVMM exited during startup", "status 5"],
+        );
+        assert!(
+            elapsed < Duration::from_secs(60),
+            "the start waited out its timeout: {elapsed:?}"
         );
         assert_eq!(
             entries(&state),
