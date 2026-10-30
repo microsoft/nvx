@@ -126,12 +126,14 @@
 - `dev` requires GitHub's merge queue. Merge a pull request by queueing it with
   `gh pr merge NUMBER`, which queues it once it can merge.
   `gh pr merge NUMBER --merge --admin` skips the queue and rebuilds every queued
-  group, so use it only when the queue itself is broken, and remove a queued
-  pull request from the queue first, since `gh pr merge` does nothing for one.
-  A merge group's run that `Cancel superseded merge group runs` cancelled
-  belongs to a group that the queue replaced or that its pull request left, so
-  check the pull request's queue outcome before treating it as a failure; see
-  [Merge queue](../doc/ci.md#merge-queue).
+  group, and bypasses `Required status check` too, so use it only when the
+  queue itself is broken and the pull request's `Required status check` passed
+  on its current head, and otherwise leave the merge to a maintainer. Remove a
+  queued pull request from the queue first, since `gh pr merge` does nothing
+  for one. A merge group's run that `Cancel superseded merge group runs`
+  cancelled belongs to a group that the queue replaced or that its pull request
+  left, so check the pull request's queue outcome before treating it as a
+  failure; see [Merge queue](../doc/ci.md#merge-queue).
 - Pull-request and merge-group runs must not publish development releases or
   record or persist performance history. Successful `dev` pushes publish their
   releases and record their results, which the nightly full run persists. Do

@@ -1385,9 +1385,11 @@ enables auto-merge before, which queues it then. With a queue, `gh pr merge`
 always queues through auto-merge, which the repository therefore allows.
 `gh pr merge NUMBER --merge --admin` merges a pull request past the queue, as a
 push outside it (see [Pushes outside the queue](#pushes-outside-the-queue)),
-for when the queue itself is broken. Like `gh pr merge` without `--admin`, it
-does nothing for a pull request in the queue, so remove such a pull request
-from the queue first, with **Remove from queue** on its page.
+for when the queue itself is broken. It bypasses `Required status check` too,
+so use it only for a pull request whose `Required status check` passed on its
+current head, and leave any other to a maintainer. Like `gh pr merge` without
+`--admin`, it does nothing for a pull request in the queue, so remove such a
+pull request from the queue first, with **Remove from queue** on its page.
 
 ### Pushes outside the queue
 
