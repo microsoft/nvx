@@ -317,7 +317,9 @@ storage activity during profiled snapshot captures, as
 the storage events of a failed Windows benchmark job, as
 [CI collection](benchmarks.md#ci-collection) describes. The `test_*.py` files
 beside `nvx.py` are the tooling's unit tests. They launch PowerShell through
-`powershell_testing.py`, which gives each launch a shared default time limit.
+`powershell_testing.py`, which gives each launch a shared default time limit
+and reports what a launch that outlasts its limit printed, at once on stderr
+and in the test's failure.
 
 The `setup/` scripts bootstrap development hosts and GitHub Actions runners
 using the [tool manifest](../scripts/setup/tool-versions.conf);

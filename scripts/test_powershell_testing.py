@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import ast
+import contextlib
+import io
 import subprocess
 import sys
 import unittest
@@ -76,6 +78,40 @@ class PowerShellLaunchTests(unittest.TestCase):
                 ),
             ],
         )
+
+    def test_a_launch_that_outlasts_its_limit_fails_with_what_it_printed(self):
+        program = r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"
+        command = [program, "-NoProfile", "-Command", "Start-Sleep 600"]
+        for name, timeout, stdout, stderr, printed in (
+            # On Windows, run() decodes what the child printed before the kill.
+            (
+                "text",
+                POWERSHELL_TIMEOUT,
+                "started\nwaiting\n",
+                "warning\n",
+                ("stdout:\nstarted\nwaiting", "stderr:\nwarning"),
+            ),
+            # Elsewhere, it leaves bytes, or None when nothing arrived.
+            ("bytes", 300, b"started\n", None, ("stdout:\nstarted", "stderr: nothing")),
+            ("nothing", 300, "", "", ("stdout: nothing", "stderr: nothing")),
+        ):
+            expired = subprocess.TimeoutExpired(command, timeout, stdout, stderr)
+            logged = io.StringIO()
+            with self.subTest(name=name):
+                with (
+                    patch.object(subprocess, "run", side_effect=expired),
+                    contextlib.redirect_stderr(logged),
+                    self.assertRaises(AssertionError) as raised,
+                ):
+                    run_powershell(command, timeout=timeout)
+
+                report = str(raised.exception)
+                self.assertIn(f"powershell.exe did not exit within {timeout} s", report)
+                for section in printed:
+                    self.assertIn(section, report)
+                self.assertIs(raised.exception.__cause__, expired)
+                # A job that its own time limit cancels keeps what reached stderr.
+                self.assertEqual(logged.getvalue(), f"\n{report}\n")
 
     def test_the_tests_launch_powershell_only_through_run_powershell(self):
         for source, launches in (

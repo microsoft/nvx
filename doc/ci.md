@@ -636,8 +636,11 @@ PowerShell, or PowerShell 7 where it is installed, give a launch 120 s by
 default, `POWERSHELL_TIMEOUT` in `scripts/powershell_testing.py`: a launch
 takes a few seconds at most, but a GitHub-hosted runner has held one up for
 more than 30 s (#1030). Only the storage events test, whose save step queries
-the host's event logs for up to 120 s each, gives its launches 300 s. Each job
-first builds the
+the host's event logs for up to 120 s each, gives its launches 300 s. A launch
+that outlasts its limit fails its test with what PowerShell printed until the
+test killed it, which the test also writes to stderr at once: unittest reports
+failures only once the run ends, which a job that reaches its own time limit
+never does. Each job first builds the
 `nvx-rs` executable that the microVM tests run, tests with it, and hands it to the
 microVM test and platform jobs of its operating system, as described above.
 Each also runs the ignored `nvx-rs` test `tests/openvmm_vectors.rs`, which
