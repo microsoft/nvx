@@ -105,6 +105,12 @@ impl FileDescriptor {
         nix::unistd::fsync(&self.0)
     }
 
+    /// Writes the modified data and metadata of the whole file system that holds the file to its
+    /// storage device, as `syncfs(2)` does.
+    pub(crate) fn sync_file_system(&self) -> Result<(), Errno> {
+        nix::unistd::syncfs(&self.0)
+    }
+
     /// Sets the file's permission bits to exactly `mode`, which the process's umask, unlike the
     /// mode that creates a file, does not narrow.
     pub(crate) fn set_mode(&self, mode: Mode) -> Result<(), Errno> {

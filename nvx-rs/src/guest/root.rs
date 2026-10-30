@@ -22,9 +22,9 @@
 //!   root's [`Mapper`], as [live shares and mappings](#live-shares-and-mappings) describes.
 //! - [`Root::teardown`] unmounts, in order, the live shares and mappings in reverse order, the
 //!   mounts of an aggregate live share and of the host export, the later first, the overlay, the
-//!   layers from the top down, and the upper. It attempts each, whatever failed before, and
-//!   reports every unmount that failed. A root that is dropped tears down the same way, but
-//!   ignores failures.
+//!   layers from the top down, and the upper, whose file system it syncs first if the upper is an
+//!   ext4 scratch. It attempts each, whatever failed before, and reports every sync or unmount
+//!   that failed. A root that is dropped tears down the same way, but ignores failures.
 //!
 //! A failure is an [`Error`] that names what failed. The operations need the guest's root user,
 //! in the guest's initial mount and cgroup namespaces. They never collect a child's status,
@@ -746,6 +746,14 @@ impl Root {
     /// moved one, and every one that failed is reported, with the mount that it leaves in place.
     /// A [`SourceRoot`](super::mappings::SourceRoot) of the export that the caller still holds
     /// keeps the export busy.
+    ///
+    /// The file system of an ext4 scratch is synced to the scratch device before the scratch is
+    /// unmounted. A mount namespace that copied the root's mounts, such as one that a process
+    /// entered while the root was mounted, keeps the overlay and the scratch mounted after this
+    /// namespace unmounts them, and the file system then writes nothing back until the last copy
+    /// goes, which may be after the VM powers off. So a teardown that succeeds leaves every write
+    /// to the root on the scratch device. A scratch whose sync fails is not unmounted, and the
+    /// failure is reported as its own.
     pub fn teardown(mut self) -> Result<(), TeardownError> {
         self.unmount()
     }
@@ -1107,6 +1115,7 @@ impl Root {
                 failures.push(Unmount {
                     mount,
                     path: self.path.join(target.strip_prefix("/").unwrap_or(target)),
+                    step: Step::Unmount,
                     error: share::io_error(failure.error()),
                 });
             }
@@ -1121,12 +1130,23 @@ impl Root {
         );
         mounts.extend(self.upper.take());
         for (mount, path) in mounts {
-            let unmounted =
-                sys::path_c_string(&path).and_then(|target| self.kernel.unmount(&target));
-            if let Err(error) = unmounted {
+            let target = sys::path_c_string(&path);
+            let synced = match (&mount, &target) {
+                (Mount::Scratch, Ok(target)) => self.kernel.sync_file_system(target),
+                _ => Ok(()),
+            };
+            let (step, outcome) = match synced {
+                Ok(()) => (
+                    Step::Unmount,
+                    target.and_then(|target| self.kernel.unmount(&target)),
+                ),
+                Err(error) => (Step::Sync, Err(error)),
+            };
+            if let Err(error) = outcome {
                 failures.push(Unmount {
                     mount,
                     path,
+                    step,
                     error: error.into(),
                 });
             }
@@ -1834,15 +1854,16 @@ impl fmt::Display for AssemblyError {
 
 impl std::error::Error for AssemblyError {}
 
-/// The unmounts of a teardown that failed, in the order in which they were attempted.
+/// The syncs and unmounts of a teardown that failed, in the order in which they were attempted.
 #[derive(Debug)]
 pub struct TeardownError {
-    /// The failed unmounts, which is never empty.
+    /// The failures, which is never empty.
     failures: Vec<Unmount>,
 }
 
 impl TeardownError {
-    /// Returns the failed unmounts, in the order in which they were attempted.
+    /// Returns the failures, each of a mount that stays in place, in the order in which they were
+    /// attempted.
     pub fn failures(&self) -> &[Unmount] {
         &self.failures
     }
@@ -1863,15 +1884,27 @@ impl fmt::Display for TeardownError {
 
 impl std::error::Error for TeardownError {}
 
-/// An unmount that failed, which left its mount in place.
+/// An unmount that failed, which left its mount in place, or the sync of an ext4 scratch's file
+/// system that failed before its unmount, which the teardown then skips.
 #[derive(Debug)]
 pub struct Unmount {
     /// The mount.
     mount: Mount,
     /// Its mount point.
     path: PathBuf,
+    /// The step that failed.
+    step: Step,
     /// The error.
     error: io::Error,
+}
+
+/// The step of a mount's teardown that failed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Step {
+    /// The sync of an ext4 scratch's file system, before its unmount.
+    Sync,
+    /// The unmount.
+    Unmount,
 }
 
 impl Unmount {
@@ -1885,7 +1918,7 @@ impl Unmount {
         &self.path
     }
 
-    /// Returns the error of its unmount.
+    /// Returns the error of its sync or of its unmount.
     pub fn error(&self) -> &io::Error {
         &self.error
     }
@@ -1893,10 +1926,10 @@ impl Unmount {
 
 impl fmt::Display for Unmount {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            formatter,
-            "failed to unmount {}: {}",
-            self.mount, self.error
-        )
+        let step = match self.step {
+            Step::Sync => "sync",
+            Step::Unmount => "unmount",
+        };
+        write!(formatter, "failed to {step} {}: {}", self.mount, self.error)
     }
 }

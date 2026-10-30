@@ -2202,6 +2202,74 @@ fn a_tmpfs_upper_is_unmounted_last_and_every_failure_reported() {
 }
 
 #[test]
+fn a_scratch_s_file_system_is_synced_right_before_its_unmount() {
+    // A copy of the root's mounts in another mount namespace keeps the scratch mounted, and its
+    // writes unsynced, after the teardown unmounts it here, so the teardown syncs it first.
+    let guest = Guest::new();
+    let root = guest.assemble(&guest.assembly()).unwrap();
+    let assembled = guest.kernel.calls().len();
+    root.teardown().unwrap();
+    let runtime = guest.text("run/nvx");
+    let expected = [
+        Call::Unmount(format!("{runtime}/rootfs")),
+        Call::Unmount(format!("{runtime}/layers/distro")),
+        Call::SyncFileSystem(format!("{runtime}/scratch")),
+        Call::Unmount(format!("{runtime}/scratch")),
+    ];
+    assert_eq!(&guest.kernel.calls()[assembled..], expected.as_slice());
+
+    // A tmpfs upper has no device to sync to.
+    let guest = Guest::new();
+    let assembly = Assembly {
+        upper: Upper::Tmpfs,
+        ..guest.assembly()
+    };
+    let root = guest.assemble(&assembly).unwrap();
+    let assembled = guest.kernel.calls().len();
+    root.teardown().unwrap();
+    let expected: Vec<Call> = below(
+        &guest.text("run/nvx"),
+        &["rootfs", "layers/distro", "tmpfs"],
+    )
+    .into_iter()
+    .map(Call::Unmount)
+    .collect();
+    assert_eq!(&guest.kernel.calls()[assembled..], expected.as_slice());
+}
+
+#[test]
+fn a_scratch_whose_sync_fails_stays_mounted_and_the_failure_is_reported() {
+    let guest = Guest::new();
+    let root = guest.assemble(&guest.assembly()).unwrap();
+    let scratch = guest.path("run/nvx/scratch");
+    guest
+        .kernel
+        .fail(Operation::SyncFileSystem, scratch.clone(), Errno::EIO);
+    let error = root.teardown().unwrap_err();
+    // The overlay and the layer go, and the scratch, whose writes may not be on its device,
+    // stays.
+    assert_eq!(
+        guest.kernel.unmounts(),
+        below(&guest.text("run/nvx"), &["rootfs", "layers/distro"])
+    );
+    assert!(guest.kernel.mount_at(&scratch).is_some());
+    let failed: Vec<(&Mount, &Path)> = error
+        .failures()
+        .iter()
+        .map(|failure| (failure.mount(), failure.path()))
+        .collect();
+    assert_eq!(failed, [(&Mount::Scratch, scratch.as_path())]);
+    assert_eq!(
+        error.failures()[0].error().raw_os_error(),
+        Some(Errno::EIO as i32)
+    );
+    assert_eq!(
+        error.to_string(),
+        format!("failed to sync the scratch: {}", os_error(Errno::EIO))
+    );
+}
+
+#[test]
 fn a_gpt_disk_that_differs_from_the_expected_identities_is_refused_before_any_mount() {
     let disk = GptDisk::new(b"configuration", 2);
     let partition = |number: u8| {

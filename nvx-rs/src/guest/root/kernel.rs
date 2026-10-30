@@ -3,11 +3,11 @@
 //! The operations read the kernel's text files and walk directories through the standard
 //! library, at the paths of a [`Paths`], so that a test relocates them to a temporary directory.
 //! What a test cannot do in a temporary directory, such as a mount, an unmount, a flush of a
-//! block device's buffers, a reread of a disk's partition table, or a read of a GPT disk's
-//! partition table at the geometry that its block device reports, and the writes to the kernel's
-//! control files, the check for a mount point, and the options of a mount, whose effects and
-//! answers a test simulates, go through a [`Kernel`], which also performs the mapper's operations
-//! for the root's live shares and mappings.
+//! block device's buffers, a sync of a mounted file system, a reread of a disk's partition table,
+//! or a read of a GPT disk's partition table at the geometry that its block device reports, and
+//! the writes to the kernel's control files, the check for a mount point, and the options of a
+//! mount, whose effects and answers a test simulates, go through a [`Kernel`], which also performs
+//! the mapper's operations for the root's live shares and mappings.
 
 use std::ffi::CStr;
 use std::fs::{self, File};
@@ -27,11 +27,11 @@ pub(crate) use crate::guest::mappings::SystemKernel;
 const MOUNT_TABLE: &str = "/proc/thread-self/mountinfo";
 
 /// The kernel's operations that the root operations perform, other than reads: mounts and
-/// unmounts, flushes of a block device's buffers, rereads of a disk's partition table, writes of
-/// a control file, and the sleeps between two polls for a block device; the check for a mount
-/// point and the options of a mount, which depend on them; since only a block device reports its
-/// geometry, the read of a GPT disk's partition table; and the mapper's operations, through which
-/// the root mounts its live shares and mappings.
+/// unmounts, flushes of a block device's buffers, syncs of a mounted file system, rereads of a
+/// disk's partition table, writes of a control file, and the sleeps between two polls for a block
+/// device; the check for a mount point and the options of a mount, which depend on them; since
+/// only a block device reports its geometry, the read of a GPT disk's partition table; and the
+/// mapper's operations, through which the root mounts its live shares and mappings.
 ///
 /// [`SystemKernel`] performs them. The tests' fake records the operations, simulates the effect
 /// of a cgroup's membership file and its own mounts, reads a GPT disk's table from a regular
@@ -53,6 +53,10 @@ pub(super) trait Kernel: MappingKernel + Send + Sync {
 
     /// Writes the dirty buffers of the block device `device`, then drops its cached ones.
     fn flush(&mut self, device: &CStr) -> Result<(), Errno>;
+
+    /// Writes the dirty data and metadata of the file system mounted at the mount point `target`
+    /// to its storage, as `syncfs(2)` does.
+    fn sync_file_system(&mut self, target: &CStr) -> Result<(), Errno>;
 
     /// Asks the kernel to reread the partition table of the disk whose whole-disk block device is
     /// `device`, as [`sys::reread_partition_table`] does.
@@ -109,6 +113,16 @@ impl Kernel for SystemKernel {
             Mode::empty(),
         )?;
         sys::flush_block_buffers(&descriptor)?;
+        descriptor.close()
+    }
+
+    fn sync_file_system(&mut self, target: &CStr) -> Result<(), Errno> {
+        let descriptor = sys::open(
+            target,
+            OpenFlags::O_RDONLY | OpenFlags::O_DIRECTORY | OpenFlags::O_CLOEXEC,
+            Mode::empty(),
+        )?;
+        descriptor.sync_file_system()?;
         descriptor.close()
     }
 
@@ -199,8 +213,8 @@ impl Default for Paths {
 #[cfg(test)]
 pub(crate) use fake::{Call, FakeKernel, Operation, attach_calls};
 
-/// The tests' kernel, which records each operation and performs no mount, unmount, flush, or
-/// reread.
+/// The tests' kernel, which records each operation and performs no mount, unmount, flush, sync,
+/// or reread.
 #[cfg(test)]
 mod fake {
     use std::ffi::{CStr, OsStr};
@@ -240,6 +254,8 @@ mod fake {
         Unmount,
         /// A flush of a block device's buffers, which the device names.
         Flush,
+        /// A sync of a mounted file system, which its mount point names.
+        SyncFileSystem,
         /// A reread of a disk's partition table, which the disk's block device names.
         Reread,
         /// A write of a control file, which its path names.
@@ -287,6 +303,8 @@ mod fake {
         Unmount(String),
         /// A flush of a block device's buffers.
         Flush(String),
+        /// A sync of the file system mounted at a mount point.
+        SyncFileSystem(String),
         /// A reread of the partition table of a disk, which its block device's node names.
         Reread(String),
         /// A read of the partition table of the GPT disk on a block device, which its node names.
@@ -400,8 +418,8 @@ mod fake {
         }
     }
 
-    /// A kernel that records each mount operation, performs no mount, unmount, flush, or reread
-    /// of a partition table, and fails the operations that a test chooses.
+    /// A kernel that records each mount operation, performs no mount, unmount, flush, sync, or
+    /// reread of a partition table, and fails the operations that a test chooses.
     ///
     /// A write of a control file writes the regular file at its path, which it creates if
     /// needed, except that a write of a process ID to a cgroup's `cgroup.procs` moves the ID
@@ -756,6 +774,11 @@ mod fake {
 
         fn flush(&mut self, device: &CStr) -> Result<(), Errno> {
             self.record(Call::Flush(text(device)), Operation::Flush, &path(device))
+        }
+
+        fn sync_file_system(&mut self, target: &CStr) -> Result<(), Errno> {
+            let call = Call::SyncFileSystem(text(target));
+            self.record(call, Operation::SyncFileSystem, &path(target))
         }
 
         fn reread_partitions(&mut self, device: &CStr) -> Result<(), Errno> {
