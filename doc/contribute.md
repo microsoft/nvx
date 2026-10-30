@@ -17,13 +17,18 @@ never in a public issue.
 4. Open a pull request against `dev` as a [draft or ready for
    review](#draft-or-ready).
 5. Address the review until the pull request meets the merge rules below.
+6. Queue the pull request, or ask a maintainer to, with
+   `gh pr merge NUMBER` or **Merge when ready** on its page.
 
-Branch rules on `dev` require one approving review, every review thread
+Branch rules on `dev` require a maintainer's approval of the pull request's
+most recent push, from someone other than its pusher, every review thread
 resolved, and a passing `Required status check`, the CI job that confirms
 that every job the change schedules succeeded. Copilot reviews every push,
-drafts included. Pull requests merge with a merge commit, so every commit on
-the branch lands in `dev`; give each one a subject that follows the
-[conventions](#commits-and-pull-requests).
+drafts included. Pull requests merge through GitHub's merge queue, which runs
+`Required status check` again on the pull request merged into the latest
+`dev` before it merges it (see [Merge queue](ci.md#merge-queue)), and with a
+merge commit, so every commit on the branch lands in `dev`; give each one a
+subject that follows the [conventions](#commits-and-pull-requests).
 
 CI runs the jobs that need the OpenVMM deploy key or a hypervisor runner,
 including the NVX CLI tests, only for pushes, merge groups, scheduled and

@@ -1065,24 +1065,24 @@ metric, but otherwise appends them and pushes a baseline update.
 
 ## Merge queue
 
-`dev` requires `Required status check`, but neither a merge queue nor pull
-requests that are up to date with `dev`, so a pull request's run tests its head
-merged into `dev` as `dev` was when the run started, and two pull requests that
-each pass can break `dev` together. That happened on October 25, 2026:
+`dev` requires `Required status check`, but not pull requests that are up to
+date with `dev`, so a pull request's run tests its head merged into `dev` as
+`dev` was when the run started, and two pull requests that each pass their runs
+can break `dev` together. That happened on October 25, 2026:
 [#825](https://github.com/microsoft/nvx/pull/825) added CLI tests that
 expected the old egress error messages, and
 [#828](https://github.com/microsoft/nvx/pull/828), merged 22 minutes later,
 changed them; each passed CI without the other, and the `nvx-rs` jobs failed
 in every `dev` run for about nine hours, until
 [#830](https://github.com/microsoft/nvx/pull/830) updated the tests
-([#895](https://github.com/microsoft/nvx/issues/895)). GitHub's merge queue
-closes that gap. It tests each queued pull request in a merge group: the merge
-of the pull request into the latest `dev` and the pull requests ahead of it in
-the queue, on a branch `gh-readonly-queue/dev/pr-NUMBER-BASE`. It merges a
-group only once the group's required check passes, by moving `dev` to the
-group's head, so it merges only commits that a run tested. When a
-group fails, it removes the pull request from the queue and rebuilds the
-groups behind it without it.
+([#895](https://github.com/microsoft/nvx/issues/895)). Since October 30, 2026,
+`dev` therefore requires GitHub's merge queue, which closes that gap. It tests
+each queued pull request in a merge group: the merge of the pull request into
+the latest `dev` and the pull requests ahead of it in the queue, on a branch
+`gh-readonly-queue/dev/pr-NUMBER-BASE`. It merges a group only once the
+group's required check passes, by moving `dev` to the group's head, so it
+merges only commits that a run tested. When a group fails, it removes the pull
+request from the queue and rebuilds the groups behind it without it.
 
 `ci.yml` therefore runs for the `merge_group` events of `dev`, whose
 `checks_requested` activity asks for a group's checks; without them, the queue
@@ -1132,14 +1132,14 @@ GitHub-hosted ones, and `check-required-ci` expects them whatever
 `--same-repository` says. Queueing a fork's pull request thus runs its code on
 the fleet before it merges, as the `dev` push that merged it did after, and
 that code includes the workflow: a group's run takes `ci.yml`, with its jobs'
-steps and the permissions of their tokens, from the group's head. `dev` keeps
-approvals across pushes, though (its ruleset's `dismiss_stale_reviews_on_push`
-and `require_last_push_approval` are off), so the code that the queue runs may
-postdate its review. Requiring the approval of the most recent push would make
-someone other than its pusher approve the code that a group runs with the
-repository's secrets, at the cost of another approval whenever a pull request's
-author pushes after its approval; an administrator who requires the queue
-should weigh it.
+steps and the permissions of their tokens, from the group's head. `dev`
+therefore requires the approval of a pull request's most recent push
+(`require_last_push_approval`), so that someone other than its pusher approves
+the code that a group runs with the repository's secrets, at the cost of
+another approval whenever a pull request's author pushes after its approval.
+The maintainers whom the review rule exempts can queue a pull request without
+any approval, though (see [Reviews and bypasses](#reviews-and-bypasses)), so
+the code that they queue is reviewed only when they wait for its review.
 
 ### Superseded merge groups
 
@@ -1193,11 +1193,11 @@ the queue.
 
 ### Queue settings
 
-An administrator requires the queue with a `merge_queue` rule in `dev`'s
-ruleset, but only once `ci.yml` on `dev` runs for merge groups: a group's run
-takes `ci.yml` from the group's head, and a `ci.yml` without the trigger
-reports no check, so the queue would hold every pull request until its
-timeout. The rule's settings:
+`dev`'s `Default Branch` ruleset requires the queue with a `merge_queue` rule,
+which an administrator added on October 30, 2026, once `ci.yml` on `dev` ran
+for merge groups: a group's run takes `ci.yml` from the group's head, and a
+`ci.yml` without the trigger reports no check, so the queue would have held
+every pull request until its timeout. The rule's settings:
 
 - **Merge method:** merge commits (`MERGE`), the only method that `dev`
   allows. The queue builds each group's head as the merge commit of its pull
@@ -1231,25 +1231,65 @@ timeout. The rule's settings:
   five, GitHub's default. When several groups pass together, the queue merges
   them in one push, which runs CI once for all of them.
 
+### Reviews and bypasses
+
+`dev`'s review rule has a ruleset of its own, `Default Branch reviews`: an
+approval from `@microsoft/nvx-maintainers` of the pull request's most recent
+push, every review thread resolved, and merge commits alone. `Default Branch`
+holds the queue, `Required status check`, and the rules against deleting `dev`
+or rewriting its history. The deploy key and two maintainers bypass
+`Default Branch` (`bypass_mode: always`): their pushes to `dev`, and their
+merges with `gh pr merge --merge --admin`, skip the queue, and GitHub records
+each bypass. `Default Branch reviews` exempts the two maintainers instead
+(`bypass_mode: exempt`): GitHub doesn't evaluate the review rule for them and
+records no bypass, so they can queue a pull request without waiting for its
+review, and it reaches `dev` through a merge group like any other. The deploy
+key, which pushes the performance history and the module diagrams to `dev`
+without a pull request, bypasses the review rule as before.
+
+The queue admits a pull request only when the review rule allows whoever queues
+it, and a bypass doesn't count. A test repository showed this on October 30,
+2026. Queueing an unapproved pull request failed with
+`Waiting on required approvals` whenever the review rule let the maintainer
+bypass it, with `always`, in the queue's ruleset or in one of its own, or with
+`pull_request`; where the queue's ruleset held the bypass,
+`gh pr merge --merge --admin` merged the pull request past the queue. Queueing
+succeeded, and the queue merged the pull request through a merge group, only
+when the review rule's ruleset exempted the maintainer. An exemption from a
+ruleset that also held the queue would exempt them from the queue too, so the
+review rule has a ruleset of its own. The exemption applies to whoever queues a
+pull request, not to its author.
+
+Queue a pull request with `gh pr merge NUMBER` or with **Merge when ready** on
+its page. Each adds the pull request to the queue once it can merge, and
+enables auto-merge before, which queues it then. With a queue, `gh pr merge`
+always queues through auto-merge, which the repository therefore allows.
+`gh pr merge NUMBER --merge --admin` merges a pull request past the queue, as a
+push outside it (see [Pushes outside the queue](#pushes-outside-the-queue)),
+for when the queue itself is broken. Like `gh pr merge` without `--admin`, it
+does nothing for a pull request in the queue, so remove such a pull request
+from the queue first, with **Remove from queue** on its page.
+
 ### Pushes outside the queue
 
 The queue isn't the only way into `dev`: the deploy key with which
 `Persist performance baseline` and the module diagrams workflow push, and two
-user accounts, bypass `dev`'s ruleset, whose `merge_queue` rule binds them no
-more than its other rules. From October 16 to 29, 2026, `dev` took 234
-baseline commits and 23 diagram commits beside its 272 merges. Each such push
-changes the base of every group in the queue, which the queue then rebuilds on
-the new tip (see [Superseded merge groups](#superseded-merge-groups)), so it
-costs every group the run that it had made so far. A baseline commit landed a
-median of 29.2 minutes after the merge whose run it records, 16.1 at the 10th
-percentile and 99.9 at the 90th, about as long as a group's run, and the merges
-came a median of 27.6 minutes apart, 148 of 271 within 30 minutes of the one
-before. On a busy day, the baseline commit of nearly every merge would thus
-rebuild the group that the queue builds next, which would then take about two
-runs to merge. Before an administrator requires the queue, the performance
-history's commits should therefore leave `dev`, for instance to a branch of
-their own from which the gate reads the history, or wait for the nightly full
-run, so that `dev` takes pushes outside the queue only rarely.
+user accounts, bypass `Default Branch`, whose `merge_queue` rule binds them no
+more than its other rules (see [Reviews and bypasses](#reviews-and-bypasses)).
+From October 16 to 29, 2026, `dev` took 234 baseline commits and 23 diagram
+commits beside its 272 merges. Each such push changes the base of every group
+in the queue, which the queue then rebuilds on the new tip (see
+[Superseded merge groups](#superseded-merge-groups)), so it costs every group
+the run that it had made so far. A baseline commit landed a median of 29.2
+minutes after the merge whose run it records, 16.1 at the 10th percentile and
+99.9 at the 90th, about as long as a group's run, and the merges came a median
+of 27.6 minutes apart, 148 of 271 within 30 minutes of the one before. On a
+busy day, the baseline commit of nearly every merge would thus rebuild the
+group that the queue builds next, which would then take about two runs to
+merge. The performance history's commits should therefore leave `dev`, for
+instance to a branch of their own from which the gate reads the history, or
+wait for the nightly full run, so that `dev` takes pushes outside the queue
+only rarely ([#1053](https://github.com/microsoft/nvx/issues/1053)).
 
 ### Cost
 
