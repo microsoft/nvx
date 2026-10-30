@@ -1399,7 +1399,10 @@ child, the export, or a mapping that fails latches the root.
 
 `Root::teardown`: the shares and mappings in reverse order, then the mounts of
 an aggregate and of the export, the later first, the overlay, the layers from
-the top down, and the upper, with every failed unmount reported.
+the top down, and the upper, with every failed sync or unmount reported. An
+ext4 scratch's file system is synced before its unmount, since a mount namespace
+that copied the root's mounts keeps them, unsynced, after this one unmounts
+them, and a scratch whose sync fails stays mounted.
 
 Each failure is a typed `Error`. The operations collect no child's status,
 change neither the caller's root nor its credentials, start no async runtime,
