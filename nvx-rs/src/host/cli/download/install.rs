@@ -3,8 +3,9 @@
 //! The package's OpenVMM executable goes to `openvmm/target/release/`, where its build puts it,
 //! and its guest artifacts and their build provenance go to `build/`, as `nvx.py download`
 //! installed them, and the known guest artifacts that the package does not declare, such as the
-//! Azure Linux guest that source-inclusive packages omit, go away. `nvx-rs` and its provenance
-//! stay as they are: the checkout builds `nvx-rs` itself.
+//! Azure Linux guest that source-inclusive packages omit, or the sandbox scratch template that
+//! packages built before it shipped lack, go away. `nvx-rs` and its provenance stay as they are:
+//! the checkout builds `nvx-rs` itself.
 //!
 //! The installation first moves each file of the package beside the file that it replaces, under
 //! a hidden name. It then moves each file that it replaces or removes aside, under another hidden
@@ -48,6 +49,10 @@ const PROVENANCE: [&str; 3] = [
     KERNEL_PROVENANCE_NAME,
     INITRAMFS_PROVENANCE_NAME,
 ];
+/// The field of a guest's section of a package's manifest that gives the SHA-256 digest of the
+/// guest's sandbox scratch template, and so declares it: packages built before the template
+/// shipped have the section without the field.
+const SCRATCH_TEMPLATE_FIELD: &str = "scratch_template_sha256";
 
 /// Returns the names of the guest artifacts of the kernel, which the `linux` section of a
 /// package's manifest declares: the kernel and its configuration.
@@ -59,26 +64,36 @@ fn kernel_names() -> Vec<String> {
 }
 
 /// Returns the names of the guest artifacts of `guest`, which the section of its name in a
-/// package's manifest declares: its initramfs and package manifest, and its distro layer and the
-/// layer's manifest, if it has one.
-fn guest_names(guest: Guest) -> Vec<String> {
+/// package's manifest declares: its initramfs and package manifest, its distro layer and the
+/// layer's manifest, if it has one, and, if `scratch_template`, its sandbox scratch template, if
+/// it has one.
+fn guest_names(guest: Guest, scratch_template: bool) -> Vec<String> {
     let mut names = vec![
         guest.initramfs_name().to_owned(),
         guest.package_manifest_name(),
     ];
     names.extend(guest.distro_layer_name().map(str::to_owned));
     names.extend(guest.distro_manifest_name());
+    if scratch_template {
+        names.extend(guest.scratch_template_name().map(str::to_owned));
+    }
+    names
+}
+
+/// Returns the names of the guest artifacts of the kernel and of every guest, with each guest's
+/// sandbox scratch template if `scratch_templates`.
+fn guest_artifact_names(scratch_templates: bool) -> Vec<String> {
+    let mut names = kernel_names();
+    for guest in Guest::ALL {
+        names.extend(guest_names(guest, scratch_templates));
+    }
     names
 }
 
 /// Returns the names of every guest artifact that a package may ship, as
-/// `ReleaseBuildConstants.GUEST_ARTIFACT_NAMES` of `nvx.py` named them.
+/// `ReleaseBuildConstants.GUEST_ARTIFACT_NAMES` of `nvx.py` names them.
 fn all_guest_names() -> Vec<String> {
-    let mut names = kernel_names();
-    for guest in Guest::ALL {
-        names.extend(guest_names(guest));
-    }
-    names
+    guest_artifact_names(true)
 }
 
 /// Returns each file of the checkout `dir` that installing a release writes or removes: the
@@ -170,7 +185,8 @@ pub(super) fn plan(package: &Path, dir: &ArtifactDir) -> Result<Plan> {
     let manifest = read_manifest(&package.join(MANIFEST_NAME))?;
     let names = match &manifest {
         Some(manifest) => declared_names(manifest)?,
-        None => all_guest_names(),
+        // A package without a manifest predates the sandbox scratch template.
+        None => guest_artifact_names(false),
     };
     let digests = read_digests(package)?;
     let item = |directory: &str, name: &str, destination: PathBuf, description: &str| {
@@ -256,16 +272,20 @@ fn read_manifest(path: &Path) -> Result<Option<Value>> {
 
 /// Returns the names of the guest artifacts that `manifest` declares, as
 /// `_packaged_guest_artifact_names` of `nvx.py` read them: those of the kernel for its `linux`
-/// section, and those of each guest for the section of the guest's name.
+/// section, and those of each guest for the section of the guest's name, with the guest's sandbox
+/// scratch template where that section gives its digest.
 fn declared_names(manifest: &Value) -> Result<Vec<String>> {
-    let declares = |section: &str| manifest.get(section).is_some_and(Value::is_object);
+    let section = |name: &str| manifest.get(name).filter(|section| section.is_object());
     let mut names = Vec::new();
-    if declares("linux") {
+    if section("linux").is_some() {
         names.extend(kernel_names());
     }
     for guest in Guest::ALL {
-        if declares(guest.name()) {
-            names.extend(guest_names(guest));
+        if let Some(section) = section(guest.name()) {
+            names.extend(guest_names(
+                guest,
+                section.get(SCRATCH_TEMPLATE_FIELD).is_some(),
+            ));
         }
     }
     if names.is_empty() {

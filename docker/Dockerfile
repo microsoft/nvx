@@ -77,6 +77,11 @@ RUN python3 scripts/nvx.py build-distro-layer \
         --guest ubuntu \
         --output build/ubuntu-distro.erofs
 
+# The sandbox scratch template needs only the base image's mkfs.ext4, so it
+# builds no guest binary.
+FROM base AS ubuntu-scratch-template
+RUN python3 scripts/nvx.py build-scratch-template
+
 FROM guest-base AS ubuntu-determinism
 COPY --from=guest-binaries /usr/local/cargo/ /usr/local/cargo/
 COPY --from=guest-binaries /usr/local/rustup/ /usr/local/rustup/
@@ -266,6 +271,7 @@ COPY --from=azurelinux-initramfs /tmp/initramfs-azurelinux.cpio.gz.packages.json
 FROM scratch AS ubuntu-distro-layer-artifacts
 COPY --from=ubuntu-distro-layer /repo/build/ubuntu-distro.erofs /ubuntu-distro.erofs
 COPY --from=ubuntu-distro-layer /repo/build/ubuntu-distro.erofs.manifest.json /ubuntu-distro.erofs.manifest.json
+COPY --from=ubuntu-scratch-template /repo/build/ubuntu-smoke-scratch.ext4 /ubuntu-smoke-scratch.ext4
 
 FROM scratch AS azurelinux-guest-artifacts
 COPY --from=kernel /repo/build/vmlinux /vmlinux
@@ -306,6 +312,7 @@ COPY --from=ubuntu-initramfs /repo/build/initramfs-ubuntu.cpio.gz /initramfs-ubu
 COPY --from=ubuntu-initramfs /repo/build/initramfs-ubuntu.cpio.gz.packages.json /initramfs-ubuntu.cpio.gz.packages.json
 COPY --from=ubuntu-distro-layer /repo/build/ubuntu-distro.erofs /ubuntu-distro.erofs
 COPY --from=ubuntu-distro-layer /repo/build/ubuntu-distro.erofs.manifest.json /ubuntu-distro.erofs.manifest.json
+COPY --from=ubuntu-scratch-template /repo/build/ubuntu-smoke-scratch.ext4 /ubuntu-smoke-scratch.ext4
 COPY --from=azurelinux-initramfs /tmp/initramfs-azurelinux.cpio.gz /initramfs-azurelinux.cpio.gz
 COPY --from=azurelinux-initramfs /tmp/initramfs-azurelinux.cpio.gz.packages.json /initramfs-azurelinux.cpio.gz.packages.json
 

@@ -351,9 +351,12 @@ the history with `git`. Update the checkout to install a newer release.
 
 `download` checks the size of the package, the names of its members, and every
 file against the package's `SHA256SUMS`, and then installs it: it replaces the
-packaged guest artifacts under `build/`, removes any known guest artifact that
-the release does not declare, such as the Azure Linux guest that
-source-inclusive packages omit, and installs the packaged OpenVMM at
+packaged guest artifacts under `build/`, among them the sandbox scratch
+template, `build/ubuntu-smoke-scratch.ext4`, that the sandbox scenarios of
+[`test-microvm`](#test-microvm) and the runtime adapter copy, removes any known
+guest artifact that the release does not declare, such as the Azure Linux
+guest that source-inclusive packages omit, or the template that releases built
+before it shipped lack, and installs the packaged OpenVMM at
 `openvmm/target/release/openvmm[.exe]`, executable, with the build provenance
 of the artifacts in `build/`. It installs everything or, if a step fails,
 nothing, and fails on a directory where the release has a file rather than
@@ -414,6 +417,7 @@ is authorized for the organization when it enforces single sign-on.
 | `build-kernel` | Build the pinned and patched Linux kernel natively. |
 | `build-initramfs` | Build the selected Alpine, Ubuntu, or Azure Linux initramfs. |
 | `build-distro-layer` | Build a deterministic Ubuntu EROFS distro layer. |
+| `build-scratch-template` | Format the reproducible ext4 sandbox scratch template. |
 | `verify-guest-determinism` | Rebuild Ubuntu guest artifacts twice and compare SHA-256 values. |
 | `build-openvmm` | Build the OpenVMM release binary. |
 | `record-openvmm-provenance` | Bind an existing OpenVMM binary to the pinned source revision. |
@@ -529,8 +533,8 @@ python3 scripts/nvx.py record-guest-artifacts --components COMPONENTS
 Writes the guest artifact record, `guest-artifacts.json`, into the directory
 of the guest artifacts, `build/` by default. `--components` lists, separated
 by spaces, some of the `kernel`, `alpine`, `ubuntu`, and `azurelinux`
-components of the CI guest build; the CI debug kernel and the Ubuntu sandbox
-scratch template, which every run formats anew, are in no record. The record
+components of the CI guest build, whose `ubuntu` component also holds the
+sandbox scratch template; the CI debug kernel is in no record. The record
 holds the exact cache keys of those components' cache entries, from the JSON
 object of keys by name that `--keys` gives, and the SHA-256 of each of their
 files. It fails if a key or a file is missing. Each CI job that builds guest
@@ -747,7 +751,8 @@ python3 scripts/nvx.py build-guest
 By default, builds the guest kernel and initramfs with Docker. `--native`
 builds the selected artifacts directly on Linux instead. Alpine is the
 default. Azure Linux does not support `--native` and always builds through
-Docker. `--guest all` also builds the Ubuntu EROFS distro layer.
+Docker. `--guest all` also builds the Ubuntu EROFS distro layer and the
+sandbox scratch template; see [`build-scratch-template`](#build-scratch-template).
 `--debug-kernel` also builds the CI debug kernel, `build/vmlinux-debug`; see
 [Build](build.md#ci-debug-kernel).
 
@@ -782,6 +787,36 @@ Builds the immutable Ubuntu EROFS `distro` layer directly on Linux. The default
 output is `build/ubuntu-distro.erofs`. Existing output or manifest files are
 rejected unless `--replace` is present.
 
+### `build-scratch-template`
+
+```text
+python3 scripts/nvx.py build-scratch-template
+    [--output PATH]
+    [--replace]
+```
+
+Formats the sandbox scratch template directly on Linux, with `mkfs.ext4` from
+e2fsprogs, which it finds on `PATH` or else in `/usr/sbin` or `/sbin`, where
+Debian keeps it out of an unprivileged user's `PATH`: an empty 64 MiB ext4
+file system, of which the sandbox scenarios boot a copy as their scratch. The
+default output is `build/ubuntu-smoke-scratch.ext4`. An existing output is
+rejected unless `--replace` is present. `UbuntuBuildConstants` in
+[`build_constants.py`](../scripts/nvx_tools/build_constants.py) defines the
+template once: its name, size, UUID, block size, inode size and count, and
+features, which the command passes to `mkfs.ext4` rather than leave them to
+`mke2fs.conf` and the defaults that distributions patch. The command also
+fixes the clock of `mkfs.ext4` with `E2FSPROGS_FAKE_TIME` and its directory
+hash seed, and ignores the caller's other `E2FSPROGS_*` and `MKE2FS_*`
+variables, so e2fsprogs 1.46.5 and 1.47.0 of Debian 12, Ubuntu 22.04 and
+24.04, and Azure Linux 3 format the same bytes, whose SHA-256
+`UbuntuBuildConstants.SCRATCH_TEMPLATE_SHA256` pins. It warns when
+`mkfs.ext4` formats other bytes. The guest Docker build formats the template
+with the Ubuntu distro layer, in the pinned Debian image, for
+[`build-guest`](#build-guest) and for CI, which caches, records, and hands it
+over with the layer. On other systems than Linux, the command fails and names
+that build of every guest and [`download`](#download), which installs the
+template.
+
 ### `verify-guest-determinism`
 
 ```text
@@ -790,9 +825,11 @@ python3 scripts/nvx.py verify-guest-determinism
     [--work-dir PATH]
 ```
 
-Currently supports only `--guest ubuntu`. It builds the Ubuntu initramfs and
-EROFS layer twice from separate roots and compares every artifact SHA-256. A
-mismatch reports the first differing normalized rootfs entry when one exists.
+Currently supports only `--guest ubuntu`. It builds the Ubuntu initramfs,
+EROFS layer, and sandbox scratch template twice from separate roots and
+compares every artifact SHA-256, and fails unless the template's is the one
+that `UbuntuBuildConstants.SCRATCH_TEMPLATE_SHA256` pins. A mismatch reports
+the first differing normalized rootfs entry when one exists.
 
 ### `build-openvmm`
 
@@ -1105,13 +1142,16 @@ python3 scripts/nvx.py test-microvm
 
 Runs NVX-owned Linux, SMP, virtio, sandbox, and snapshot correctness scenarios
 against the public OpenVMM CLI. Repeat `--scenario` to select a subset; without
-it, every scenario supported by the selected guest runs, except five that run
-only when named. `smp-lapic` repeats `smp` and also asserts that every CPU
+it, every scenario supported by the selected guest runs, except `smp-lapic`,
+which runs only when named: it repeats `smp` and also asserts that every CPU
 uses the one-shot counting LAPIC. `managed-exec-config`, `sandbox-lifecycle`,
-`sandbox-proxy-only`, and `sandbox-ram-upper` drive the public `nvx-rs sandbox`
-lifecycle commands (see [Run](run.md#managed-lifecycle)) and also require the
-guest-artifact build's Ubuntu layer and scratch template, which packages
-omit. Alpine remains the
+`sandbox-proxy-only`, and `sandbox-ram-upper`, the public sandbox scenarios,
+drive the public `nvx-rs sandbox` lifecycle commands (see
+[Run](run.md#managed-lifecycle)) and also read the Ubuntu distro layer, its
+manifest, and the sandbox scratch template, which
+[`download`](#download) installs and the guest-artifact build makes; a run
+that selects one of them fails before its first scenario when one of those
+files is missing. Alpine remains the
 default. Ubuntu and Azure Linux cannot act as sandbox control, so they reject
 the Alpine-control-only `sandbox-blocks` and `scratch-snapshot` scenarios and
 the sandbox-control-dependent `snapshot-tiers`, `platform-restore-processors`,
@@ -1124,7 +1164,9 @@ detectors the guest's time ABI watcher reports; without `--scenario`, it runs
 only the same-host restore scenarios `smp`, `smp-snapshot`,
 `restore-processors`, `restore-downtime`, and `snapshot-tiers`.
 `--shard INDEX/COUNT`, such as `1/2`, runs shard INDEX of the COUNT shards of
-the default Alpine suite on the default kernel, as
+the default Alpine suite on the default kernel, the scenarios of a run without
+`--scenario` but the public sandbox scenarios, which CI runs in its guest and
+sandbox jobs, as
 [`microvm_shards.json`](../scripts/nvx_tools/microvm_shards.json) splits it for
 the backend; CI runs each shard in a job of its own (see
 [MicroVM test shards](ci.md#microvm-test-shards)). It takes no `--scenario`,

@@ -61,8 +61,7 @@ from .ubuntu import converter_input_sha256, customization_files, package_lock_sh
 GITHUB_API_VERSION = "2022-11-28"
 # The guest artifact components that a package ships, as the `components`
 # input of the build-guest-artifacts action names them, and the files of each
-# in build/. The action formats the Ubuntu sandbox scratch template in every
-# run, and no package ships the CI debug kernel, so neither is one.
+# in build/. No package ships the CI debug kernel, so it is none.
 GUEST_ARTIFACT_COMPONENTS: Mapping[str, tuple[str, ...]] = {
     "kernel": (
         KernelBuildConstants.BINARY_NAME,
@@ -79,6 +78,7 @@ GUEST_ARTIFACT_COMPONENTS: Mapping[str, tuple[str, ...]] = {
         UbuntuBuildConstants.PACKAGE_MANIFEST_NAME,
         UbuntuBuildConstants.DISTRO_NAME,
         UbuntuBuildConstants.DISTRO_MANIFEST_NAME,
+        UbuntuBuildConstants.SCRATCH_TEMPLATE_NAME,
     ),
     "azurelinux": (
         AzureLinuxBuildConstants.INITRAMFS_NAME,
@@ -935,7 +935,8 @@ def validate_runtime_artifact_provenance() -> None:
 def validate_guest_artifacts(directory: Path, components: Collection[str]) -> None:
     """Check that the files of the guest artifact `components` in `directory`
     match their provenance and manifests and were built from this checkout's
-    sources, as `package` checks those in build/."""
+    sources, as `package` checks those in build/. The sandbox scratch template
+    has neither, so it need only be there."""
     unknown = sorted(set(components) - GUEST_ARTIFACT_COMPONENTS.keys())
     if unknown:
         raise ScriptError(f"unknown guest artifact component: {', '.join(unknown)}")
@@ -1048,6 +1049,9 @@ def _packaged_source_manifest(
     )
     ubuntu_section["distro_layer_manifest_sha256"] = sha256_file(
         release_root / "guest" / UbuntuBuildConstants.DISTRO_MANIFEST_NAME
+    )
+    ubuntu_section["scratch_template_sha256"] = sha256_file(
+        release_root / "guest" / UbuntuBuildConstants.SCRATCH_TEMPLATE_NAME
     )
     root_manifest["nvx_rs"] = {
         "executable_sha256": sha256_file(release_root / "bin" / nvx_rs_name),

@@ -307,6 +307,42 @@ class UbuntuBuildConstants:
     EROFS_FORMAT: Final = 1
     EROFS_COMPRESSION: Final = "lz4hc"
     EROFS_TIMESTAMP: Final = 0
+    # The sandbox scratch template: an empty ext4 file system, of which the
+    # sandbox scenarios boot a copy as their scratch. Every parameter that
+    # shapes its bytes is given to mkfs.ext4, rather than taken from
+    # mke2fs.conf and the defaults that distributions patch, and
+    # E2FSPROGS_FAKE_TIME and the hash seed replace its clock and its random
+    # seed, so e2fsprogs 1.46.5 and 1.47.0 of Debian 12, Ubuntu 22.04 and
+    # 24.04, and Azure Linux 3 format the bytes of SCRATCH_TEMPLATE_SHA256.
+    SCRATCH_TEMPLATE_NAME: Final = "ubuntu-smoke-scratch.ext4"
+    SCRATCH_TEMPLATE_SIZE: Final = 64 * 1024 * 1024
+    SCRATCH_TEMPLATE_UUID: Final = "4f3c8bf7-1959-47b4-8811-62b17bbddaf4"
+    SCRATCH_TEMPLATE_BLOCK_SIZE: Final = 4096
+    SCRATCH_TEMPLATE_INODE_SIZE: Final = 256
+    SCRATCH_TEMPLATE_INODES: Final = 16384
+    SCRATCH_TEMPLATE_RESERVED_PERCENT: Final = 0
+    SCRATCH_TEMPLATE_FEATURES: Final = (
+        "has_journal",
+        "ext_attr",
+        "resize_inode",
+        "dir_index",
+        "filetype",
+        "extent",
+        "64bit",
+        "flex_bg",
+        "sparse_super",
+        "large_file",
+        "huge_file",
+        "dir_nlink",
+        "extra_isize",
+        "metadata_csum",
+    )
+    # mke2fs writes this time, in seconds since the epoch, for its clock; it
+    # ignores 0.
+    SCRATCH_TEMPLATE_TIMESTAMP: Final = 1
+    SCRATCH_TEMPLATE_SHA256: Final = (
+        "1d0d8c8994eb023d34e03d1cc6f591b223dfd576c8b8c0e07ccb8b2293f05f5f"
+    )
     SOURCE_MANIFEST_FORMAT: Final = 1
     SOURCE_CACHE_DIRECTORY_NAME: Final = "ubuntu-source-indexes"
     PACKAGE_CACHE_DIRECTORY_NAME: Final = "ubuntu-packages"
@@ -420,6 +456,7 @@ class DockerBuildConstants:
         UbuntuBuildConstants.PACKAGE_MANIFEST_NAME,
         UbuntuBuildConstants.DISTRO_NAME,
         UbuntuBuildConstants.DISTRO_MANIFEST_NAME,
+        UbuntuBuildConstants.SCRATCH_TEMPLATE_NAME,
         AzureLinuxBuildConstants.INITRAMFS_NAME,
         AzureLinuxBuildConstants.PACKAGE_MANIFEST_NAME,
     )
@@ -473,6 +510,7 @@ class ReleaseBuildConstants:
         UbuntuBuildConstants.PACKAGE_MANIFEST_NAME,
         UbuntuBuildConstants.DISTRO_NAME,
         UbuntuBuildConstants.DISTRO_MANIFEST_NAME,
+        UbuntuBuildConstants.SCRATCH_TEMPLATE_NAME,
         AzureLinuxBuildConstants.INITRAMFS_NAME,
         AzureLinuxBuildConstants.PACKAGE_MANIFEST_NAME,
     )

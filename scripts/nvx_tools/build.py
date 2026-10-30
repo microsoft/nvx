@@ -23,6 +23,7 @@ from .build_config import (
     OpenVmmBackend,
     OpenVmmBuildConfig,
     OpenVmmPlatform,
+    ScratchTemplateBuildConfig,
 )
 from .build_constants import (
     AlpineBuildConstants,
@@ -1041,6 +1042,106 @@ def build_distro_layer(config: DistroLayerBuildConfig) -> None:
     print(f">> built {output} ({format_size(output.stat().st_size)})")
 
 
+def scratch_template_arguments(output: Path) -> list[str]:
+    """Return the arguments, after its name, of the mkfs.ext4 command that
+    formats the sandbox scratch template in `output`, a file of
+    `UbuntuBuildConstants.SCRATCH_TEMPLATE_SIZE` bytes."""
+    uuid = UbuntuBuildConstants.SCRATCH_TEMPLATE_UUID
+    return [
+        "-q",
+        "-F",
+        "-b",
+        str(UbuntuBuildConstants.SCRATCH_TEMPLATE_BLOCK_SIZE),
+        "-I",
+        str(UbuntuBuildConstants.SCRATCH_TEMPLATE_INODE_SIZE),
+        "-N",
+        str(UbuntuBuildConstants.SCRATCH_TEMPLATE_INODES),
+        "-m",
+        str(UbuntuBuildConstants.SCRATCH_TEMPLATE_RESERVED_PERCENT),
+        "-O",
+        ",".join(("none", *UbuntuBuildConstants.SCRATCH_TEMPLATE_FEATURES)),
+        "-U",
+        uuid,
+        "-E",
+        f"lazy_itable_init=0,lazy_journal_init=0,hash_seed={uuid}",
+        os.fspath(output),
+    ]
+
+
+def scratch_template_environment() -> dict[str, str]:
+    """Return the environment of mkfs.ext4 as it formats the scratch template:
+    this process's, without the variables that change what e2fsprogs writes,
+    and with its clock at `UbuntuBuildConstants.SCRATCH_TEMPLATE_TIMESTAMP`."""
+    environment = {
+        name: value
+        for name, value in os.environ.items()
+        if not name.startswith(("E2FSPROGS_", "MKE2FS_"))
+    }
+    environment["E2FSPROGS_FAKE_TIME"] = str(
+        UbuntuBuildConstants.SCRATCH_TEMPLATE_TIMESTAMP
+    )
+    return environment
+
+
+def _mkfs_ext4() -> str:
+    """Return mkfs.ext4 from PATH, or else from the system directories that
+    distributions such as Debian leave out of an unprivileged user's PATH."""
+    search = os.pathsep.join(
+        directory
+        for directory in (os.environ.get("PATH", ""), "/usr/sbin", "/sbin")
+        if directory
+    )
+    executable = shutil.which("mkfs.ext4", path=search)
+    if executable is None:
+        raise ScriptError(
+            "mkfs.ext4 was not found on PATH, in /usr/sbin, or in /sbin; "
+            "install e2fsprogs"
+        )
+    return executable
+
+
+def build_scratch_template(config: ScratchTemplateBuildConfig) -> None:
+    """Format the sandbox scratch template at `config.output` with mkfs.ext4,
+    and warn when its bytes are not those that
+    `UbuntuBuildConstants.SCRATCH_TEMPLATE_SHA256` pins."""
+    if sys.platform != "linux":
+        # build-guest without --native formats the template only with every
+        # guest, so name that build rather than _require_linux's.
+        raise ScriptError(
+            "build-scratch-template requires Linux; install the template with "
+            "`nvx-rs download`, or build it, with the Ubuntu distro layer, in "
+            "Docker with `build-guest --guest all`"
+        )
+    output = config.output.resolve()
+    if output.exists() and not config.replace:
+        raise ScriptError(
+            f"refusing to replace existing scratch template: {output}; pass --replace"
+        )
+    mkfs = _mkfs_ext4()
+    output.parent.mkdir(parents=True, exist_ok=True)
+    temporary = output.with_name(f"{output.name}.part")
+    temporary.unlink(missing_ok=True)
+    try:
+        with temporary.open("xb") as template:
+            template.truncate(UbuntuBuildConstants.SCRATCH_TEMPLATE_SIZE)
+        run_checked(
+            [mkfs, *scratch_template_arguments(temporary)],
+            env=scratch_template_environment(),
+        )
+        digest = sha256_file(temporary)
+        temporary.replace(output)
+    finally:
+        temporary.unlink(missing_ok=True)
+    if digest != UbuntuBuildConstants.SCRATCH_TEMPLATE_SHA256:
+        print(
+            f"!! {mkfs} formatted {output} with SHA-256 {digest}, not the "
+            f"{UbuntuBuildConstants.SCRATCH_TEMPLATE_SHA256} that "
+            "UbuntuBuildConstants.SCRATCH_TEMPLATE_SHA256 pins",
+            file=sys.stderr,
+        )
+    print(f">> built {output} ({format_size(output.stat().st_size)})")
+
+
 def verify_guest_determinism(work: Path, guest: str) -> None:
     _require_linux("verify-guest-determinism")
     descriptor = guest_descriptor(guest)
@@ -1053,6 +1154,7 @@ def verify_guest_determinism(work: Path, guest: str) -> None:
         descriptor.package_manifest_name,
         UbuntuBuildConstants.DISTRO_NAME,
         UbuntuBuildConstants.DISTRO_MANIFEST_NAME,
+        UbuntuBuildConstants.SCRATCH_TEMPLATE_NAME,
     )
     attempts: list[Path] = []
     digests: list[dict[str, str]] = []
@@ -1079,6 +1181,11 @@ def verify_guest_determinism(work: Path, guest: str) -> None:
                     / InitramfsBuildConstants.DETERMINISM_DISTRO_WORK_DIRECTORY_NAME
                 ),
                 output=attempt_root / UbuntuBuildConstants.DISTRO_NAME,
+            )
+        )
+        build_scratch_template(
+            ScratchTemplateBuildConfig(
+                output=attempt_root / UbuntuBuildConstants.SCRATCH_TEMPLATE_NAME
             )
         )
         attempts.append(attempt_root)
@@ -1114,7 +1221,16 @@ def verify_guest_determinism(work: Path, guest: str) -> None:
             f"Ubuntu guest artifacts are not deterministic: "
             f"{digests[0]!r} != {digests[1]!r}{diagnostic}"
         )
-    print(">> Ubuntu initramfs and EROFS artifacts are deterministic")
+    template_sha256 = digests[0][UbuntuBuildConstants.SCRATCH_TEMPLATE_NAME]
+    if template_sha256 != UbuntuBuildConstants.SCRATCH_TEMPLATE_SHA256:
+        raise ScriptError(
+            f"the scratch template is not reproducible: its SHA-256 is "
+            f"{template_sha256}, not the {UbuntuBuildConstants.SCRATCH_TEMPLATE_SHA256} "
+            "that UbuntuBuildConstants.SCRATCH_TEMPLATE_SHA256 pins"
+        )
+    print(
+        ">> Ubuntu initramfs, EROFS, and scratch template artifacts are deterministic"
+    )
 
 
 def build_kernel(config: KernelBuildConfig) -> None:

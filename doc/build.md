@@ -140,6 +140,7 @@ build/initramfs-ubuntu.cpio.gz
 build/initramfs-ubuntu.cpio.gz.packages.json
 build/ubuntu-distro.erofs
 build/ubuntu-distro.erofs.manifest.json
+build/ubuntu-smoke-scratch.ext4
 ```
 
 Prepare the Ubuntu sandbox layer separately on Linux without replacing an
@@ -159,7 +160,19 @@ maintainer scripts from the Ubuntu root. The Docker builder pins its Debian
 base image by digest and installs an exact `erofs-utils` version so clean EROFS
 builds use the same encoder.
 
-Check both Ubuntu outputs for deterministic rebuilds with:
+The sandbox scratch template, `build/ubuntu-smoke-scratch.ext4`, is the empty
+ext4 file system of which the sandbox scenarios boot a copy as their scratch.
+[`build-scratch-template`](usage.md#build-scratch-template) formats it on
+Linux with `mkfs.ext4` from `e2fsprogs`, with the parameters that
+`UbuntuBuildConstants` defines, so that the e2fsprogs releases of Debian,
+Ubuntu, and Azure Linux format the same bytes:
+
+```bash
+python3 scripts/nvx.py build-scratch-template
+```
+
+Check the Ubuntu outputs and the scratch template for deterministic rebuilds
+with:
 
 ```bash
 python3 scripts/nvx.py verify-guest-determinism --guest ubuntu
@@ -340,11 +353,12 @@ does not need the Azure Linux artifacts. Packaging stages and verifies a
 complete output before replacing an existing `dist/` version, which requires
 `--force`. Its `SOURCE-MANIFEST.json` records the package version and exact
 hashes for OpenVMM, Linux, the generated kernel config, each packaged guest
-initramfs and its package manifest, and the Ubuntu distro layer and its
-manifest. Its `nvx_rs` section records the `nvx-rs` executable's SHA-256, the
-digest of the `nvx-rs` sources that built it, and the build's Rust release,
-target, and features. Its `guest_rust` section pins Rust 1.95.0 and
-`x86_64-unknown-linux-musl`, and each guest's `guest_sources` includes
+initramfs and its package manifest, the Ubuntu distro layer and its manifest,
+and the sandbox scratch template, under `scratch_template_sha256` in its
+`ubuntu` section. Its `nvx_rs` section records the `nvx-rs` executable's
+SHA-256, the digest of the `nvx-rs` sources that built it, and the build's
+Rust release, target, and features. Its `guest_rust` section pins Rust 1.95.0
+and `x86_64-unknown-linux-musl`, and each guest's `guest_sources` includes
 `nvx-rs` and `rust-toolchain.toml`. The OpenVMM section advertises microVM ABI 2,
 control-session protocol 1, and contract
 `nvx-microvm-v2-control-v2`; product guest-agent metadata is intentionally not
@@ -363,6 +377,7 @@ guest/initramfs-ubuntu.cpio.gz
 guest/initramfs-ubuntu.cpio.gz.packages.json
 guest/ubuntu-distro.erofs
 guest/ubuntu-distro.erofs.manifest.json
+guest/ubuntu-smoke-scratch.ext4
 guest/initramfs-azurelinux.cpio.gz
 guest/initramfs-azurelinux.cpio.gz.packages.json
 provenance/openvmm.provenance.json

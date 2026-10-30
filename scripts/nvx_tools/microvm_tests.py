@@ -65,7 +65,7 @@ from .common import (
     sha256_file,
 )
 from .guests import GUEST_NAMES, GuestDescriptor, guest_descriptor
-from .managed_exec_tests import run_managed_exec_configuration
+from .managed_exec_tests import run_managed_exec_configuration, workload_artifact_paths
 from .microvm_durations import REPORT_NAME, DurationReport
 from .microvm_shards import configure_parser as configure_shards_parser
 from .microvm_shards import load_partition, shard_scenarios
@@ -160,9 +160,10 @@ SANDBOX_CONTROL_SCENARIOS = frozenset(
         "snapshot-tiers",
     )
 )
-# The public `nvx-rs sandbox` scenarios need the Ubuntu scratch template that
-# the guest-artifact build produces and packages omit, so they run only when
-# named.
+# The public `nvx-rs sandbox` scenarios, which also read the Ubuntu distro
+# layer and the sandbox scratch template that `nvx-rs download` installs. A
+# default run runs them, but CI runs them in its guest and sandbox jobs, which
+# take those Ubuntu artifacts, rather than in the shards of the default suite.
 PUBLIC_SANDBOX_SCENARIOS = frozenset(
     (
         "managed-exec-config",
@@ -504,7 +505,9 @@ OUTCOME_TEARDOWN_FIELDS = frozenset(
 
 def default_suite() -> tuple[str, ...]:
     """Return the default suite of the Alpine guest on the default kernel,
-    which CI runs in the shards of microvm_shards.json."""
+    which CI runs in the shards of microvm_shards.json: the scenarios of a
+    default run but the public sandbox scenarios, which CI runs in its guest
+    and sandbox jobs."""
     return tuple(
         scenario
         for scenario in MICROVM_TEST_SCENARIOS
@@ -528,10 +531,8 @@ def configure_parser(parser: argparse.ArgumentParser) -> None:
         action="append",
         choices=(*MICROVM_TEST_SCENARIOS, *MICROVM_EXPLICIT_SCENARIOS),
         help=(
-            "scenario to run; repeat to select multiple (default: all except "
-            "smp-lapic, managed-exec-config, sandbox-lifecycle, "
-            "sandbox-proxy-only, and sandbox-ram-upper, which run only when "
-            "named)"
+            "scenario to run; repeat to select multiple (default: all but "
+            "smp-lapic, which runs only when named)"
         ),
     )
     parser.add_argument(
@@ -549,8 +550,9 @@ def configure_parser(parser: argparse.ArgumentParser) -> None:
         metavar="INDEX/COUNT",
         help=(
             "run shard INDEX of the COUNT shards of the default Alpine suite on "
-            "the default kernel, as scripts/nvx_tools/microvm_shards.json splits "
-            "it for the backend, such as 1/2; COUNT must be its number of shards"
+            "the default kernel, without the public sandbox scenarios, as "
+            "scripts/nvx_tools/microvm_shards.json splits it for the backend, "
+            "such as 1/2; COUNT must be its number of shards"
         ),
     )
     parser.add_argument(
@@ -8876,10 +8878,7 @@ def run(args: argparse.Namespace) -> int:
     elif args.scenario is None:
         defaults = DEBUG_KERNEL_SCENARIOS if debug_kernel else MICROVM_TEST_SCENARIOS
         scenarios = tuple(
-            scenario
-            for scenario in defaults
-            if scenario not in unsupported_scenarios
-            and scenario not in PUBLIC_SANDBOX_SCENARIOS
+            scenario for scenario in defaults if scenario not in unsupported_scenarios
         )
     else:
         scenarios = tuple(dict.fromkeys(args.scenario))
@@ -8892,6 +8891,24 @@ def run(args: argparse.Namespace) -> int:
                 f"{guest_label} guest does not support correctness scenario(s): "
                 + ", ".join(sorted(unsupported))
             )
+    # A default run runs the public sandbox scenarios too, so their Ubuntu
+    # artifacts must be there before any scenario runs.
+    public = [
+        scenario for scenario in scenarios if scenario in PUBLIC_SANDBOX_SCENARIOS
+    ]
+    if public:
+        try:
+            for path, description in workload_artifact_paths():
+                require_file(path, description)
+        except ScriptError as error:
+            raise ScriptError(
+                f"{error}; {', '.join(public)} "
+                f"{'reads' if len(public) == 1 else 'read'} the Ubuntu distro "
+                "layer and the sandbox scratch template: install them with "
+                "`nvx-rs download` or build them with `build-guest --guest "
+                "all`, format the template alone with `build-scratch-template` "
+                "on Linux, or name other scenarios with --scenario"
+            ) from error
 
     with DurationReport(
         output_dir / REPORT_NAME,

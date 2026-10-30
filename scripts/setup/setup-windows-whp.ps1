@@ -206,6 +206,7 @@ $RequiredGuestArtifacts = @(
     "initramfs-ubuntu.cpio.gz.packages.json",
     "ubuntu-distro.erofs",
     "ubuntu-distro.erofs.manifest.json",
+    "ubuntu-smoke-scratch.ext4",
     "initramfs-azurelinux.cpio.gz",
     "initramfs-azurelinux.cpio.gz.packages.json"
 )
