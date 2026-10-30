@@ -583,6 +583,8 @@ mod tests {
     //! mappings' privileged tests cover the mount calls that need them.
 
     use std::os::unix::fs::PermissionsExt;
+    use std::sync::Barrier;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     use super::*;
     use crate::guest::sys::{open, path_c_string};
@@ -653,6 +655,37 @@ mod tests {
         assert_eq!(proc(c"proc/1/root", true).map(drop), Err(Errno::ELOOP));
         assert_eq!(proc(c"proc", false).map(drop), Err(Errno::EXDEV));
         proc(c"proc", true).unwrap();
+    }
+
+    #[test]
+    fn a_dot_dot_after_a_descent_is_refused_while_renames_race_it() {
+        let temporary = tempfile::tempdir().unwrap();
+        let base = temporary.path();
+        std::fs::create_dir(base.join("a")).unwrap();
+        std::fs::write(base.join("file"), b"file").unwrap();
+        let directory = path_descriptor(base);
+        let flags = OpenFlags::O_PATH;
+        let resolve = || open_beneath(&directory, c"a/../..", flags, Mode::empty(), true);
+        let (started, stop) = (Barrier::new(2), AtomicBool::new(false));
+        let unexpected = std::thread::scope(|scope| {
+            // Each rename advances the system's rename count, whose change since the lookup
+            // began fails the `..` after `a` with `EAGAIN`.
+            scope.spawn(|| {
+                started.wait();
+                let (file, renamed) = (base.join("file"), base.join("renamed"));
+                while !stop.load(Ordering::Relaxed) {
+                    std::fs::rename(&file, &renamed).unwrap();
+                    std::fs::rename(&renamed, &file).unwrap();
+                }
+            });
+            started.wait();
+            let unexpected = (0..10_000)
+                .map(|_| retried(resolve).map(drop))
+                .find(|result| *result != Err(Errno::EXDEV));
+            stop.store(true, Ordering::Relaxed);
+            unexpected
+        });
+        assert_eq!(unexpected, None);
     }
 
     /// Returns the mode, without its type, of the file at `name` below `base`.
