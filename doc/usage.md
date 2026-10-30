@@ -637,7 +637,7 @@ As in CI, a job that uses the guest artifacts or the OpenVMM binaries is
 enabled only when the flags enable the jobs that build them too. A merge group
 expects the jobs of a same-repository pull request, whatever
 `--same-repository` says, but the rehearsal of the guest artifact reuse, which
-its pull request's run made.
+its pull request's run made; see [Merge queue](ci.md#merge-queue).
 
 ### `report-nightly-ci`
 

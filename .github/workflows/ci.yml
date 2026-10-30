@@ -9,6 +9,13 @@ on:
       - synchronize
       - reopened
       - ready_for_review
+  # The merge queue's groups of dev report the required check on the commit
+  # that the queue merges (doc/ci.md#merge-queue).
+  merge_group:
+    types:
+      - checks_requested
+    branches:
+      - dev
   push:
     branches:
       - dev
@@ -17,11 +24,14 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: ci-${{ github.workflow }}-${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && format('full-{0}', github.run_id) || github.event.pull_request.number || github.ref }}
+  group: ci-${{ github.workflow }}-${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && format('full-{0}', github.run_id) || github.event_name == 'merge_group' && format('merge-group-{0}', github.run_id) || github.event.pull_request.number || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
   # dev pushes wait in order instead of cancelling the run that waits. GitHub
   # rejects queueing together with cancel-in-progress, so pull requests keep
-  # the single waiting run that a newer push replaces.
+  # the single waiting run that a newer push replaces. Each merge group's run
+  # has a group of its own: a pull request that returns to the queue on the
+  # same base gets its earlier group's ref again, whose run must not hold the
+  # new one.
   queue: ${{ github.event_name == 'pull_request' && 'single' || 'max' }}
 
 permissions:
@@ -45,7 +55,8 @@ jobs:
         with:
           persist-credentials: false
 
-      # Scheduled and manually dispatched full runs save no caches.
+      # Scheduled and manually dispatched full runs save no caches, and neither
+      # do merge groups, whose entries no other run could restore.
       - name: Check code quality
         uses: ./.github/actions/check-quality
         with:
@@ -300,15 +311,23 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      # `nvx.py classify-ci-changes` selects the suites for pushes and pull
-      # requests; this script selects the full matrix for full-run events and
-      # whenever it cannot classify changed files.
+      # `nvx.py classify-ci-changes` selects the suites for pushes, pull
+      # requests, and merge groups; this script selects the full matrix for
+      # full-run events and whenever it cannot classify changed files. A merge
+      # group compares its head, GITHUB_SHA, with the commit on which the
+      # queue built it: the latest dev, or the group of the pull request ahead
+      # of it, which checks that pull request's change.
       - name: Detect relevant changes
         id: changes
         shell: bash
         env:
           EVENT_NAME: ${{ github.event_name }}
-          BASE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+          BASE_SHA: >-
+            ${{
+              github.event_name == 'pull_request' && github.event.pull_request.base.sha ||
+              github.event_name == 'merge_group' && github.event.merge_group.base_sha ||
+              github.event.before
+            }}
           HEAD_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
         run: |
           set -euo pipefail
@@ -403,9 +422,9 @@ jobs:
         with:
           persist-credentials: false
 
-      # Full runs build the guest artifacts that miss the cache without saving
-      # them. A push installs those that its pull request's latest run built
-      # instead, when they check out.
+      # Full runs and merge groups build the guest artifacts that miss the
+      # cache without saving them. A push installs those that its pull
+      # request's latest run built instead, when they check out.
       - name: Build guest artifacts
         id: guest-artifacts
         uses: ./.github/actions/build-guest-artifacts
@@ -469,9 +488,9 @@ jobs:
         with:
           persist-credentials: false
 
-      # Full runs build the guest artifacts that miss the cache without saving
-      # them. A push installs those that its pull request's latest run built
-      # instead, when they check out.
+      # Full runs and merge groups build the guest artifacts that miss the
+      # cache without saving them. A push installs those that its pull
+      # request's latest run built instead, when they check out.
       - name: Build guest artifacts
         id: guest-artifacts
         uses: ./.github/actions/build-guest-artifacts
@@ -539,7 +558,8 @@ jobs:
   # A dev push reuses the guest artifact components that the pull request it
   # merges built (see build-guest-artifacts). A same-repository pull request
   # rehearses that selection and check on the artifacts that its own run
-  # uploaded, beside the jobs that use them, and installs nothing.
+  # uploaded, beside the jobs that use them, and installs nothing; its merge
+  # group doesn't rehearse them again.
   guest-artifact-reuse:
     name: Rehearse guest artifact reuse
     needs: [openvmm-changes, artifacts, distro-artifacts]
@@ -792,7 +812,10 @@ jobs:
       # build that the key does not cover shows within a day. A failed
       # restore only costs the build, like a miss.
       - name: Restore OpenVMM tests on Linux
-        if: github.event_name == 'pull_request' || github.event_name == 'push'
+        if: >-
+          github.event_name == 'pull_request' ||
+          github.event_name == 'merge_group' ||
+          github.event_name == 'push'
         continue-on-error: true
         uses: actions/cache/restore@v5
         env:
@@ -1086,7 +1109,10 @@ jobs:
         run: python scripts\nvx.py setup-cross-os-cache
 
       - name: Restore OpenVMM tests on Windows
-        if: github.event_name == 'pull_request' || github.event_name == 'push'
+        if: >-
+          github.event_name == 'pull_request' ||
+          github.event_name == 'merge_group' ||
+          github.event_name == 'push'
         continue-on-error: true
         uses: actions/cache/restore@v5
         with:
@@ -1803,8 +1829,8 @@ jobs:
     secrets:
       OPENVMM_DEPLOY_KEY: ${{ secrets.OPENVMM_DEPLOY_KEY }}
 
-  # Pull requests run the debug kernel on KVM only; dev pushes and full runs
-  # run every backend.
+  # Pull requests and merge groups run the debug kernel on KVM only; dev
+  # pushes and full runs run every backend.
   nvx-microvm-debug-kvm:
     name: NVX microVM tests / Linux / KVM / Debug kernel
     needs: [artifacts, debug-kernel, build-openvmm-linux-gnu, nvx-cli-linux, openvmm-changes]
@@ -1848,6 +1874,7 @@ jobs:
         always() &&
         !cancelled() &&
         github.event_name != 'pull_request' &&
+        github.event_name != 'merge_group' &&
         needs.artifacts.result == 'success' &&
         needs.debug-kernel.result == 'success' &&
         needs.build-openvmm-linux-gnu.result == 'success' &&
@@ -1876,6 +1903,7 @@ jobs:
         always() &&
         !cancelled() &&
         github.event_name != 'pull_request' &&
+        github.event_name != 'merge_group' &&
         needs.artifacts.result == 'success' &&
         needs.debug-kernel.result == 'success' &&
         needs.build-openvmm-windows-msvc.result == 'success' &&
@@ -1902,9 +1930,9 @@ jobs:
   # delay it and every workflow run measures its series on the same VM: the
   # pools mix CPU generations and VMs whose results differ by more than the
   # run-to-run noise (#383, #415). They also package the release, so a pull
-  # request runs them only when one of their inputs changed, but a dev push,
-  # which publishes the development release and records the history, runs
-  # them for every change but documentation.
+  # request or a merge group runs them only when one of their inputs changed,
+  # but a dev push, which publishes the development release and records the
+  # history, runs them for every change but documentation.
   platform-kvm:
     name: Platform / Linux / KVM / Virtual machine
     needs: [artifacts, distro-artifacts, build-openvmm-linux-gnu, nvx-cli-linux, openvmm-changes]
@@ -2146,8 +2174,14 @@ jobs:
     needs: [platform-kvm, platform-mshv, platform-whp]
     if: >-
       ${{
-        github.event_name == 'pull_request' &&
-        github.event.pull_request.draft == false &&
+        (
+          github.event_name == 'pull_request' ||
+          github.event_name == 'merge_group'
+        ) &&
+        (
+          github.event_name != 'pull_request' ||
+          github.event.pull_request.draft == false
+        ) &&
         !cancelled() &&
         needs.platform-kvm.result == 'success' &&
         needs.platform-mshv.result == 'success' &&

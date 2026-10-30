@@ -213,9 +213,9 @@ OPENVMM_UNIT_TEST_EXCLUDED_PACKAGES = (
 
 # The events whose runs check a change before it merges: a pull request, and
 # the merge group in which the merge queue tests it on the latest dev and the
-# pull requests ahead of it. Both run the platform jobs only when one of their
-# inputs changed, gate on their results, and run the debug kernel on KVM alone,
-# and neither publishes nor persists anything.
+# pull requests ahead of it (doc/ci.md#merge-queue). Both run the platform jobs
+# only when one of their inputs changed, gate on their results, and run the
+# debug kernel on KVM alone, and neither publishes nor persists anything.
 CI_PRE_MERGE_EVENTS = ("pull_request", "merge_group")
 # The events whose runs the change detector classifies, and those that run the
 # full matrix instead.
