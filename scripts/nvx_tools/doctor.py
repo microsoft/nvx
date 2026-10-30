@@ -20,6 +20,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -75,7 +76,17 @@ RUST_ESCAPE = re.compile(r"\\(u\{[0-9a-fA-F]{1,6}\}|.)")
 # H4's rate stability bounds (doc/ci.md, "Host qualification").
 RATE_UNCERTAINTY_PPM = 0.25
 RATE_AGREEMENT_PPM = 1.0
-RATE_TOLERANCE_PPM = 100.0
+# H4's limit is the guest's budget for the host's clock correction. The
+# guest's wall-clock discipline follows host UTC, so it applies that
+# correction on top of a restore's rate deviation, which the time ABI's
+# restore tolerance bounds, within Linux's frequency limit
+# (doc/design/3.2-clock-and-time.md, "Wall-clock discipline").
+GUEST_FREQUENCY_LIMIT_PPM = 500.0
+RESTORE_TOLERANCE_PPM = 250.0
+RATE_TOLERANCE_PPM = GUEST_FREQUENCY_LIMIT_PPM - RESTORE_TOLERANCE_PPM
+# H4 warns above the time ABI v1's limit, which bounded the TSC's error alone:
+# one run can't tell that error from the wander of the host's reference clock.
+RATE_WARNING_PPM = 100.0
 # chronyd's tracking report, `chronyc -c tracking`, has 14 comma-separated
 # fields, among them the reference's name (1), the frequency in ppm, positive
 # when the undisciplined clock runs fast (7), its skew in ppm (9), and the
@@ -83,6 +94,11 @@ RATE_TOLERANCE_PPM = 100.0
 CHRONY_TRACKING_FIELDS = 14
 CHRONY_UNSYNCHRONIZED = "Not synchronised"
 CHRONYC_TIMEOUT_SECONDS = 5.0
+# When chronyd's skew leaves H4's range straddling the limit, H4 re-reads
+# chronyd's estimate this often, for at most this long, and uses the first
+# estimate whose range is conclusive.
+CHRONY_REREAD_INTERVAL_SECONDS = 2.0
+CHRONY_REREAD_SECONDS = 60.0
 SKEW_PAIR_DURATION_MS = 5
 GUEST_VCPU_COUNTS = (8, 4, 2, 1)
 GUEST_MEMORY_MIB = 128
@@ -119,7 +135,13 @@ WINDOWS_PROCESSOR = re.compile(r"Family (\d+) Model (\d+) Stepping (\d+), (\S+)"
 # The registry key of the first processor's identity on Windows.
 WINDOWS_PROCESSOR_KEY = r"HARDWARE\DESCRIPTION\System\CentralProcessor\0"
 ADJTIMEX_TIME_ERROR = 5
+ADJTIMEX_STA_PLL = 0x0001
 ADJTIMEX_STA_UNSYNC = 0x0040
+# adjtimex's frequency is in ppm scaled by 2^16, and its tick is the
+# microseconds that the clock advances per USER_HZ tick, 100 per second, so
+# 10,000 leaves the clock's rate alone.
+ADJTIMEX_SCALED_PPM = 1 << 16
+ADJTIMEX_NOMINAL_TICK = 10_000
 # Every H7 failure to read the host's synchronization state starts with this
 # phrase; a clock that is not synchronized starts "host UTC is not
 # synchronized" instead.
@@ -132,6 +154,8 @@ class CheckResult:
     check: str
     passed: bool
     detail: str
+    # A concern that doesn't fail the check, which the detail also states.
+    warning: str = ""
 
     def line(self) -> str:
         status = "pass" if self.passed else "fail"
@@ -166,6 +190,11 @@ def host_clocksource() -> str:
 
 def _escape_markdown(text: str) -> str:
     return text.replace("|", "\\|").replace("\n", " ")
+
+
+def _annotation(text: str) -> str:
+    """Escape text for the message of a GitHub Actions workflow command."""
+    return text.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
 
 
 def probe_path(directory: Path) -> Path:
@@ -772,6 +801,160 @@ def chrony_frequency() -> ChronyFrequency | str:
     return ChronyFrequency(fields[1], ppm, skew_ppm)
 
 
+def reread_chrony_frequency(
+    conclusive: Callable[[ChronyFrequency], bool],
+) -> tuple[ChronyFrequency | None, float]:
+    """Re-read chronyd's frequency estimate until one is ``conclusive``.
+
+    Reads it every CHRONY_REREAD_INTERVAL_SECONDS for at most
+    CHRONY_REREAD_SECONDS, and returns the first conclusive estimate, or None,
+    with the seconds that the re-reads took.
+    """
+    start = time.monotonic()
+    while (
+        time.monotonic() - start + CHRONY_REREAD_INTERVAL_SECONDS
+        <= CHRONY_REREAD_SECONDS
+    ):
+        time.sleep(CHRONY_REREAD_INTERVAL_SECONDS)
+        estimate = chrony_frequency()
+        if isinstance(estimate, ChronyFrequency) and conclusive(estimate):
+            return estimate, time.monotonic() - start
+    return None, time.monotonic() - start
+
+
+class _Timex(ctypes.Structure):
+    """Linux's struct timex, as glibc declares it."""
+
+    _fields_ = [
+        ("modes", ctypes.c_uint),
+        ("offset", ctypes.c_long),
+        ("freq", ctypes.c_long),
+        ("maxerror", ctypes.c_long),
+        ("esterror", ctypes.c_long),
+        ("status", ctypes.c_int),
+        ("constant", ctypes.c_long),
+        ("precision", ctypes.c_long),
+        ("tolerance", ctypes.c_long),
+        ("time", ctypes.c_long * 2),  # struct timeval
+        ("tick", ctypes.c_long),
+        ("ppsfreq", ctypes.c_long),
+        ("jitter", ctypes.c_long),
+        ("shift", ctypes.c_int),
+        ("stabil", ctypes.c_long),
+        ("jitcnt", ctypes.c_long),
+        ("calcnt", ctypes.c_long),
+        ("errcnt", ctypes.c_long),
+        ("stbcnt", ctypes.c_long),
+        ("tai", ctypes.c_int),
+        ("padding", ctypes.c_int * 11),
+    ]
+
+
+def _adjtimex() -> tuple[int, _Timex]:
+    """Return adjtimex's clock state and struct timex without changing the
+    clock, or raise ScriptError naming why adjtimex can't."""
+    timex = _Timex()
+    try:
+        libc = ctypes.CDLL(None, use_errno=True)
+        state = int(libc.adjtimex(ctypes.byref(timex)))
+    except (AttributeError, OSError) as error:
+        raise ScriptError(f"adjtimex is unavailable: {error}") from error
+    if state < 0:
+        raise ScriptError(f"adjtimex failed: {os.strerror(ctypes.get_errno())}")
+    return state, timex
+
+
+@dataclass(frozen=True)
+class KernelFrequency:
+    """The frequency correction of the kernel's PLL in ppm, positive when it
+    speeds the clock up: adjtimex's frequency plus its tick's."""
+
+    ppm: float
+
+
+def kernel_frequency() -> KernelFrequency | str:
+    """Return a synchronized kernel PLL's frequency correction, or why there is
+    none.
+
+    A time service such as systemd-timesyncd or ntpd steers the clock through
+    the kernel's PLL, which keeps its frequency estimate in adjtimex's
+    frequency and slews offsets apart from it. chronyd keeps the PLL off and
+    slews through that frequency, which then carries its slews.
+    """
+    try:
+        state, timex = _adjtimex()
+    except ScriptError as error:
+        return str(error)
+    status = int(timex.status)
+    if state >= ADJTIMEX_TIME_ERROR or status & ADJTIMEX_STA_UNSYNC:
+        return (
+            f"the kernel clock is not synchronized (adjtimex state={state} "
+            f"status=0x{status:04x})"
+        )
+    if not status & ADJTIMEX_STA_PLL:
+        return f"the kernel PLL is off (adjtimex status=0x{status:04x})"
+    tick = int(timex.tick)
+    return KernelFrequency(
+        int(timex.freq) / ADJTIMEX_SCALED_PPM
+        + (tick - ADJTIMEX_NOMINAL_TICK) * 1e6 / ADJTIMEX_NOMINAL_TICK
+    )
+
+
+@dataclass(frozen=True)
+class BootCorrection:
+    """The time service's frequency correction averaged since boot: how fast
+    CLOCK_MONOTONIC_RAW ran against CLOCK_MONOTONIC, in ppm, as chronyd's
+    estimate says how fast it runs now, over ``seconds``."""
+
+    ppm: float
+    seconds: float
+
+
+def boot_correction() -> BootCorrection | None:
+    """Return the time service's frequency correction averaged since boot, or
+    None where the host has no CLOCK_MONOTONIC_RAW.
+
+    Both clocks exclude suspend, and after a small offset at boot only the
+    time service's gradual adjustments separate them, so their difference
+    over the uptime averages the reference's wander out without saved state.
+    Slews just after boot or a live migration bias it.
+    """
+    if sys.platform == "win32":
+        return None
+    raw = time.clock_gettime_ns(time.CLOCK_MONOTONIC_RAW)
+    monotonic = time.clock_gettime_ns(time.CLOCK_MONOTONIC)
+    if raw <= 0:
+        return None
+    return BootCorrection((raw - monotonic) / raw * 1e6, raw / 1e9)
+
+
+def _deviation_ppm(rate: float, declared_hz: int) -> float:
+    return (rate - declared_hz) / declared_hz * 1e6
+
+
+def _corrected_rate(raw_rate: float, ppm: float) -> float:
+    """Return the rate against true time of a rate against
+    CLOCK_MONOTONIC_RAW, which a time service estimates runs ``ppm`` fast."""
+    # chronyd sets the kernel's frequency to -ppm, so its estimate of true
+    # time runs at CLOCK_MONOTONIC_RAW's rate times (1 - ppm).
+    return raw_rate / (1 - ppm / 1e6)
+
+
+def _chrony_deviations(
+    raw_rate: float, declared_hz: int, chrony: ChronyFrequency
+) -> tuple[float, float]:
+    """Return the nearest and the farthest deviation from ``declared_hz`` of
+    the rates within chronyd's skew of its estimate."""
+    # chronyd's skew bounds the error of its frequency estimate, so the rate
+    # lies between the rates that the estimate's bounds give.
+    low, high = (
+        _deviation_ppm(_corrected_rate(raw_rate, chrony.ppm + bound), declared_hz)
+        for bound in (-chrony.skew_ppm, chrony.skew_ppm)
+    )
+    nearest = 0.0 if low <= 0 <= high else min(abs(low), abs(high))
+    return nearest, max(abs(low), abs(high))
+
+
 def check_rate(context: DoctorContext) -> CheckResult:
     clocksource = ""
     if not host_is_windows():
@@ -826,16 +1009,43 @@ def check_rate(context: DoctorContext) -> CheckResult:
     stable_rate = _window_rate(points, clock_hz)
     agreement_ppm = (max(rates) - min(rates)) / stable_rate * 1e6
     uncertainty_ppm = max(uncertainties_ppm)
+    declared = context.facts.get("native_tsc_hz") or context.facts.get("tsc_hz")
+    declared_hz = None if declared is None else int(declared)
     # Over the window, CLOCK_MONOTONIC also carries the slew with which
     # chronyd removes its current offset, which reaches hundreds of ppm for
     # seconds after its reference jumps (#768). chronyd's frequency estimate,
     # from its whole sample history, says instead how fast
     # CLOCK_MONOTONIC_RAW runs against the reference.
     chrony = None if host_is_windows() else chrony_frequency()
+    reread_problem = reread_evidence = ""
+    if isinstance(chrony, ChronyFrequency) and declared_hz is not None:
+
+        def conclusive(estimate: ChronyFrequency) -> bool:
+            nearest, farthest = _chrony_deviations(stable_rate, declared_hz, estimate)
+            return farthest <= RATE_TOLERANCE_PPM or nearest > RATE_TOLERANCE_PPM
+
+        if not conclusive(chrony):
+            # The reference's wander moves chronyd's estimate and its skew
+            # within seconds (#1008). Only the estimate changes, so the
+            # samples stand while H4 re-reads it.
+            estimate, seconds = reread_chrony_frequency(conclusive)
+            if estimate is None:
+                reread_problem = (
+                    f", and no re-read of chronyd's estimate in {seconds:.0f} s "
+                    "was conclusive"
+                )
+            else:
+                reread_evidence = (
+                    f"; chronyd's first estimate, {chrony.ppm:+.3f} ppm (skew "
+                    f"{chrony.skew_ppm:.3f} ppm), straddled the limit, so H4 "
+                    f"re-read it for {seconds:.0f} s (evidence)"
+                )
+                chrony = estimate
+    # Without chronyd's estimate, a kernel PLL that another time service
+    # drives keeps its own, apart from the offsets that it slews.
+    kernel = kernel_frequency() if isinstance(chrony, str) else None
     if isinstance(chrony, ChronyFrequency):
-        # chronyd sets the kernel's frequency to -ppm, so its estimate of true
-        # time runs at CLOCK_MONOTONIC_RAW's rate times (1 - ppm).
-        measured = stable_rate / (1 - chrony.ppm / 1e6)
+        measured = _corrected_rate(stable_rate, chrony.ppm)
         reference = (
             f"against {stability_clock['name']} corrected by chronyd's frequency "
             f"estimate of {chrony.ppm:+.3f} ppm (skew {chrony.skew_ppm:.3f} ppm, "
@@ -844,6 +1054,15 @@ def check_rate(context: DoctorContext) -> CheckResult:
         context.facts["rate_reference"] = (
             f"chronyd {chrony.ppm:+.3f} ppm (skew {chrony.skew_ppm:.3f} ppm)"
         )
+    elif isinstance(kernel, KernelFrequency):
+        # The PLL runs the kernel's clock at CLOCK_MONOTONIC_RAW's rate times
+        # (1 + ppm), as chronyd's estimate of -ppm would.
+        measured = _corrected_rate(stable_rate, -kernel.ppm)
+        reference = (
+            f"against {stability_clock['name']} corrected by the kernel PLL's "
+            f"frequency of {kernel.ppm:+.3f} ppm"
+        )
+        context.facts["rate_reference"] = f"kernel PLL {kernel.ppm:+.3f} ppm"
     else:
         measured = window_rate
         reference = f"against {rate_clock['name']}"
@@ -860,6 +1079,7 @@ def check_rate(context: DoctorContext) -> CheckResult:
         f"{uncertainty_ppm:.3f} ppm"
     )
     problems: list[str] = []
+    warning = ""
     if not MIN_TSC_HZ <= measured <= MAX_TSC_HZ:
         problems.append(f"[E_TSC_RATE_IMPLAUSIBLE] measured {measured:.0f} Hz")
     if uncertainty_ppm > RATE_UNCERTAINTY_PPM:
@@ -872,30 +1092,18 @@ def check_rate(context: DoctorContext) -> CheckResult:
             f"the TSC rate is unstable: interval rates differ by "
             f"{agreement_ppm:.3f} ppm > {RATE_AGREEMENT_PPM} ppm"
         )
-    declared = context.facts.get("native_tsc_hz") or context.facts.get("tsc_hz")
-    if declared is None:
+    if declared_hz is None:
         # validate-runner runs before the OpenVMM binary is available; the
         # VM jobs run H3 with H4 to compare against the backend's rate.
         detail += "; not compared with the backend's rate (H3 did not run)"
     else:
-        declared_hz = int(declared)
-
-        def deviation(rate: float) -> float:
-            return (rate - declared_hz) / declared_hz * 1e6
-
-        deviation_ppm = abs(deviation(measured))
+        deviation_ppm = abs(_deviation_ppm(measured, declared_hz))
         context.facts["rate_deviation_ppm"] = f"{deviation_ppm:.3f}"
         detail += f"; {deviation_ppm:.3f} ppm from the backend's {declared} Hz"
         if isinstance(chrony, ChronyFrequency):
-            # chronyd's skew bounds the error of its frequency estimate, so the
-            # rate lies between the rates that the estimate's bounds give, and
-            # passes only when that whole range lies within the limit.
-            low, high = (
-                deviation(stable_rate / (1 - (chrony.ppm + bound) / 1e6))
-                for bound in (-chrony.skew_ppm, chrony.skew_ppm)
-            )
-            nearest = 0.0 if low <= 0 <= high else min(abs(low), abs(high))
-            farthest = max(abs(low), abs(high))
+            # The rate passes only when the whole range within chronyd's skew
+            # lies within the limit.
+            nearest, farthest = _chrony_deviations(stable_rate, declared_hz, chrony)
             within = (
                 f", {nearest:.3f} to {farthest:.3f} ppm within chronyd's skew of "
                 f"{chrony.skew_ppm:.3f} ppm"
@@ -912,8 +1120,17 @@ def check_rate(context: DoctorContext) -> CheckResult:
             problems.append(
                 f"the measurement is inconclusive: the backend rate is "
                 f"{deviation_ppm:.3f} ppm from the measured rate{within}, which "
-                f"straddles the limit of {RATE_TOLERANCE_PPM:g} ppm"
+                f"straddles the limit of {RATE_TOLERANCE_PPM:g} ppm{reread_problem}"
             )
+        elif deviation_ppm > RATE_WARNING_PPM:
+            warning = (
+                f"the backend rate is {deviation_ppm:.3f} ppm from the measured "
+                f"rate, more than {RATE_WARNING_PPM:g} ppm: the host's clock "
+                f"correction uses {deviation_ppm / RATE_TOLERANCE_PPM:.0%} of the "
+                f"guest's {RATE_TOLERANCE_PPM:g} ppm budget, and one run can't "
+                "tell the TSC's error from the reference clock's wander"
+            )
+    detail += reread_evidence
     if isinstance(chrony, ChronyFrequency):
         detail += (
             f"; {window_rate:.0f} Hz against {rate_clock['name']}, which chronyd "
@@ -921,11 +1138,34 @@ def check_rate(context: DoctorContext) -> CheckResult:
         )
     elif chrony is not None:
         detail += f"; no chronyd frequency estimate: {chrony} (evidence)"
+        if isinstance(kernel, KernelFrequency):
+            detail += (
+                f"; {window_rate:.0f} Hz against {rate_clock['name']}, which the "
+                "kernel PLL also slews (evidence)"
+            )
+        elif kernel is not None:
+            detail += f"; no kernel PLL frequency: {kernel} (evidence)"
+    boot = None if host_is_windows() else boot_correction()
+    if boot is not None:
+        hours = boot.seconds / 3600
+        boot_rate = _corrected_rate(stable_rate, boot.ppm)
+        detail += (
+            f"; {boot_rate:.0f} Hz against {stability_clock['name']} corrected by "
+            f"the average correction since boot, {boot.ppm:+.3f} ppm over "
+            f"{hours:.1f} h"
+        )
+        if declared_hz is not None:
+            boot_deviation = abs(_deviation_ppm(boot_rate, declared_hz))
+            detail += f", {boot_deviation:.3f} ppm from the backend's rate"
+        detail += " (evidence)"
+        context.facts["boot_correction"] = f"{boot.ppm:+.3f} ppm over {hours:.1f} h"
     if clocksource:
         detail += f"; host clocksource {clocksource} (evidence)"
+    if warning:
+        detail = f"warning: {warning}; {detail}"
     if problems:
-        return CheckResult("H4", False, "; ".join(problems) + f"; {detail}")
-    return CheckResult("H4", True, detail)
+        return CheckResult("H4", False, "; ".join(problems) + f"; {detail}", warning)
+    return CheckResult("H4", True, detail, warning)
 
 
 def check_host_skew(context: DoctorContext) -> CheckResult:
@@ -1041,21 +1281,10 @@ def check_guest_warp(context: DoctorContext) -> CheckResult:
 def _linux_clock_state() -> tuple[int, int]:
     """Return adjtimex's clock state and status without changing the clock."""
     try:
-        libc = ctypes.CDLL(None, use_errno=True)
-        buffer = ctypes.create_string_buffer(256)
-        state = int(libc.adjtimex(buffer))
-    except (AttributeError, OSError) as error:
-        raise ScriptError(
-            f"{UTC_UNVERIFIED}: adjtimex is unavailable: {error}"
-        ) from error
-    if state < 0:
-        raise ScriptError(
-            f"{UTC_UNVERIFIED}: adjtimex failed: {os.strerror(ctypes.get_errno())}"
-        )
-    # struct timex: unsigned modes, then the long offset, freq, maxerror, and
-    # esterror fields, then the int status.
-    status = int.from_bytes(buffer.raw[40:44], sys.byteorder)
-    return state, status
+        state, timex = _adjtimex()
+    except ScriptError as error:
+        raise ScriptError(f"{UTC_UNVERIFIED}: {error}") from error
+    return state, int(timex.status)
 
 
 def _windows_time_source() -> tuple[bool, str]:
@@ -1150,6 +1379,12 @@ def run_checks(context: DoctorContext, checks: Sequence[str]) -> list[CheckResul
             result = CheckResult(check, False, first)
         results.append(result)
         print(result.line(), flush=True)
+        if result.warning and os.environ.get("GITHUB_ACTIONS") == "true":
+            print(
+                f"::warning title=Time ABI host qualification ({context.backend})::"
+                + _annotation(f"{check} {CHECK_TITLES[check]}: {result.warning}"),
+                flush=True,
+            )
     return results
 
 
@@ -1169,6 +1404,11 @@ def summary_markdown(
             f"{'pass' if result.passed else '**fail**'} | "
             f"{_escape_markdown(result.detail)} |"
         )
+    for result in results:
+        if result.warning:
+            lines.extend(
+                ("", f"**{result.check} warning:** {_escape_markdown(result.warning)}")
+            )
     reported = (
         ("generation", "Generation"),
         ("cpu", "CPU"),
@@ -1184,6 +1424,7 @@ def summary_markdown(
         ("rate_deviation_ppm", "Rate deviation from the backend (ppm)"),
         ("rate_agreement_ppm", "Interval rate agreement (ppm)"),
         ("rate_uncertainty_ppm", "Largest interval uncertainty (ppm)"),
+        ("boot_correction", "Average correction since boot (evidence)"),
         ("host_skew_ns", "Host skew (ns)"),
         ("guest_warp_ns", "Guest warp offset (ns)"),
         ("invariant_tsc", "Host invariant TSC (evidence)"),

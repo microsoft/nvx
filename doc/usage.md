@@ -1249,7 +1249,8 @@ python3 scripts/nvx.py doctor
 Qualifies this host for the [time ABI](design/3.2-clock-and-time.md).
 It runs the selected checks in order, prints one
 `NVX-DOCTOR: check=<id> status=<pass|fail> detail="..."` line per check, and
-exits with status 1 if any check fails. A check fails, and never passes, when
+exits with status 1 if any check fails. A check that passes with a warning
+starts its detail with `warning:`. A check fails, and never passes, when
 it can't read a fact it gates on. [CI](ci.md#host-qualification) describes each
 check and the subset that CI runs.
 
