@@ -1948,7 +1948,8 @@ fn run_launch_role(
     image: &Path,
     vmm: &Path,
 ) -> Option<ProcessRef> {
-    let output = Command::new(env::current_exe().unwrap())
+    let mut command = Command::new(env::current_exe().unwrap());
+    command
         .args(role("launch_role"))
         .env(ROLE_STORE, fixture.store.dir())
         .env(ROLE_GENERATION, fixture.generation.generation().to_string())
@@ -1957,7 +1958,11 @@ fn run_launch_role(
         .env(ROLE_CRASH, step)
         .env(ROLE_VMM, vmm)
         .stdin(Stdio::null())
-        .output()
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let output = supervisor::spawn_command(&mut command)
+        .unwrap()
+        .wait_with_output()
         .unwrap();
     let stdout = String::from_utf8_lossy(&output.stdout);
     let crashed = format!("{CRASHED}{step}");

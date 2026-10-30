@@ -333,15 +333,24 @@ impl Drop for SetOnDrop<'_> {
     }
 }
 
-/// Spawns processes through `std::process` until `done`, as other threads of an orchestrator do,
-/// and counts them in `spawned`. Returns, on Linux, those that held a descriptor of an object of
-/// `checked`, which no process but the VMM may inherit.
+/// What [`spawn_others`] checks that no other process holds: on Linux, the objects of the checked
+/// descriptors.
+#[cfg(target_os = "linux")]
+type Checked = PathBuf;
+/// What [`spawn_others`] checks that no other process holds: on Windows, the values of the checked
+/// handles, under which a process that inherited one would hold it.
+#[cfg(windows)]
+type Checked = usize;
+
+/// Spawns processes until `done`, as other threads of an orchestrator do, through `std::process`,
+/// and on Windows under a `SpawnLock`, as `supervisor::spawn_command` spawns them, and counts them
+/// in `spawned`. Returns those that held what `checked` names, which no process but the VMM may
+/// inherit.
 ///
 /// On Linux, each process lists its own descriptors once its program runs. The spawn returns
 /// before the exec has closed the descriptors that are close-on-exec, so a listing that this
 /// process took then could show descriptors that never reach the program.
-fn spawn_others(done: &AtomicBool, spawned: &AtomicUsize, checked: &[PathBuf]) -> Vec<String> {
-    #[cfg_attr(not(target_os = "linux"), allow(unused_mut))]
+fn spawn_others(done: &AtomicBool, spawned: &AtomicUsize, checked: &[Checked]) -> Vec<String> {
     let mut leaks = Vec::new();
     while !done.load(Ordering::SeqCst) {
         #[cfg(target_os = "linux")]
@@ -363,8 +372,13 @@ fn spawn_others(done: &AtomicBool, spawned: &AtomicUsize, checked: &[PathBuf]) -
         }
         #[cfg(windows)]
         {
-            let _ = checked;
-            let mut child = sleeper().spawn().unwrap();
+            let mut child = supervisor::spawn_command(&mut sleeper()).unwrap();
+            let pid = child.id();
+            for &value in checked {
+                if holds(pid, value, value) {
+                    leaks.push(format!("process {pid} held handle {value:#x}"));
+                }
+            }
             let _ = child.kill();
             child.wait().unwrap();
         }
@@ -499,7 +513,7 @@ fn a_prepared_launch_hands_the_vmm_its_checked_images_alone() {
     replace_images(&staged);
 
     #[cfg(target_os = "linux")]
-    let checked: Vec<PathBuf> = {
+    let checked: Vec<Checked> = {
         use std::os::fd::{AsFd, AsRawFd};
 
         prepared
@@ -509,7 +523,15 @@ fn a_prepared_launch_hands_the_vmm_its_checked_images_alone() {
             .collect()
     };
     #[cfg(windows)]
-    let checked: Vec<PathBuf> = Vec::new();
+    let checked: Vec<Checked> = {
+        use std::os::windows::io::{AsHandle, AsRawHandle};
+
+        prepared
+            .inherited()
+            .iter()
+            .map(|inherited| inherited.as_handle().as_raw_handle() as usize)
+            .collect()
+    };
     let mut vmm = VmmDirectory::new();
     let mut arguments = fixture_arguments("vmm_fixture");
     let blocks = block_arguments(&prepared);
@@ -809,12 +831,15 @@ fn rename_away_and_back(path: &Path) {
 /// Makes `link` a junction to the directory `target`, which needs no privilege.
 #[cfg(windows)]
 fn junction(link: &Path, target: &Path) {
-    let status = Command::new("cmd")
+    let mut command = Command::new("cmd");
+    command
         .args(["/C", "mklink", "/J"])
         .arg(link)
         .arg(target)
-        .stdout(Stdio::null())
-        .status()
+        .stdout(Stdio::null());
+    let status = supervisor::spawn_command(&mut command)
+        .unwrap()
+        .wait()
         .unwrap();
     assert!(status.success(), "cannot link {}", link.display());
 }

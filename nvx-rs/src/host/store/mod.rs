@@ -136,6 +136,14 @@
 //! its copy. Recovery therefore checks a held claim again for up to a second before it concludes
 //! that a process of the launch may still run.
 //!
+//! On Windows, a process that another thread creates while the VMM's spawn has the log's handles
+//! inheritable, with inheritance but without a list of handles, as `std::process::Command`
+//! creates one, inherits them, and holds the claim until it exits. Each spawn of a VMM holds a
+//! [`SpawnLock`](super::supervisor::SpawnLock) while the handles are inheritable, so a process
+//! that the caller spawns under one, as [`spawn_command`](super::supervisor::spawn_command) does,
+//! inherits none. A process that the caller spawns otherwise can still hold the log after the VMM
+//! has exited, and recovery then leaves the launch to a later recovery, after that process exits.
+//!
 //! # Recovery
 //!
 //! A caller that dies during a launch leaves its journal, and [`LockedStore::recover`] ends the

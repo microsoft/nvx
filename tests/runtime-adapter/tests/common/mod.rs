@@ -241,17 +241,18 @@ impl Sandbox {
         self.output = Some(output.clone());
         let (stdout, stderr) = (output.with_extension("out"), output.with_extension("err"));
         // Files, rather than pipes, take the output, so that nothing waits for a VMM that might
-        // hold them.
-        let child = Command::new(env!("CARGO_BIN_EXE_runtime-adapter-host"))
-            .arg(command)
+        // hold them. A test may launch a VM in its own process meanwhile, so the command starts
+        // under a `SpawnLock`, which keeps it from inheriting that VMM's log on Windows, and the
+        // log's claim with it, which would keep the test's launch from ending.
+        let mut host = Command::new(env!("CARGO_BIN_EXE_runtime-adapter-host"));
+        host.arg(command)
             .arg(&self.store)
             .args(options)
             .envs(environment.iter().copied())
             .stdin(Stdio::null())
             .stdout(File::create(&stdout).unwrap())
-            .stderr(File::create(&stderr).unwrap())
-            .spawn()
-            .unwrap();
+            .stderr(File::create(&stderr).unwrap());
+        let child = supervisor::spawn_command(&mut host).unwrap();
         Started {
             command: command.to_owned(),
             options: options.iter().map(|option| option.to_os_string()).collect(),

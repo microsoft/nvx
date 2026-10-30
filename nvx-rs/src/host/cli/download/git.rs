@@ -10,6 +10,7 @@ use std::process::{Command, Output, Stdio};
 use super::History;
 use crate::ErrorCode;
 use crate::host::cli::{Exit, Result};
+use crate::host::supervisor::spawn_command;
 
 /// The `git` of a checkout.
 pub(super) struct Git {
@@ -33,6 +34,8 @@ impl Git {
             .arg(&self.root)
             .args(arguments)
             .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
             .env_remove("GIT_DIR")
             .env_remove("GIT_WORK_TREE");
         if let Some(parent) = self.root.parent()
@@ -40,7 +43,7 @@ impl Git {
         {
             command.env("GIT_CEILING_DIRECTORIES", ceiling);
         }
-        command.output()
+        spawn_command(&mut command)?.wait_with_output()
     }
 }
 

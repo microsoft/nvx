@@ -23,6 +23,7 @@ use nvx::host::launch::{LaunchSpec, PROCESS_COMMAND_LINE_LIMIT};
 use nvx::host::process::{Process, ProcessRef};
 use nvx::host::sandbox::mount::aggregate_child_name;
 use nvx::host::store::{ArtifactIdentity, CallerFiles, IdentityPart, RuntimeIdentity};
+use nvx::host::supervisor::spawn_command;
 use nvx::protocol::{Workload, WorkloadEnvironment};
 use nvx::{Artifacts, ErrorKind, Hypervisor};
 use serde_json::{Value, json};
@@ -371,7 +372,8 @@ fn orchestrator_role() {
 fn a_restarted_orchestrator_reattaches_to_its_vm() {
     let directory = tempfile::tempdir().unwrap();
     let dir = directory.path().join("vm");
-    let status = Command::new(env::current_exe().unwrap())
+    let mut command = Command::new(env::current_exe().unwrap());
+    command
         .args([
             "--exact",
             "orchestrator_role",
@@ -381,9 +383,8 @@ fn a_restarted_orchestrator_reattaches_to_its_vm() {
         ])
         .current_dir(directory.path())
         .env(ORCHESTRATOR_INSTANCE, &dir)
-        .stdin(Stdio::null())
-        .status()
-        .unwrap();
+        .stdin(Stdio::null());
+    let status = spawn_command(&mut command).unwrap().wait().unwrap();
     assert!(status.success(), "the orchestrator failed: {status}");
 
     // The orchestrator restarts within the same host boot: it finds the VM that its earlier run
@@ -542,7 +543,8 @@ fn records_that_name_another_process_never_end_it() {
 /// processors and the backend of this host, and then `arguments`.
 fn run_microvm(directory: &Path, arguments: &[&str]) -> std::process::Output {
     let hypervisor = Hypervisor::platform_default().expect("tests run on Linux or Windows");
-    Command::new(env!("CARGO_BIN_EXE_nvx-fake-openvmm"))
+    let mut command = Command::new(env!("CARGO_BIN_EXE_nvx-fake-openvmm"));
+    command
         .args([
             "--single-process",
             "--machine",
@@ -554,7 +556,11 @@ fn run_microvm(directory: &Path, arguments: &[&str]) -> std::process::Output {
         .args(arguments)
         .current_dir(directory)
         .stdin(Stdio::null())
-        .output()
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    spawn_command(&mut command)
+        .unwrap()
+        .wait_with_output()
         .unwrap()
 }
 

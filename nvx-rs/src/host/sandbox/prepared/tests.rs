@@ -19,6 +19,8 @@ use crate::host::sandbox::{
     LayerRole, SandboxDistro, SandboxLaunch, SandboxLayer, SandboxSettings, SandboxUpper,
 };
 use crate::host::seal::{FileSeal, open_metadata_only};
+#[cfg(windows)]
+use crate::host::test_support::junction;
 use crate::protocol::root::RootImage;
 use crate::uuid::Uuid;
 
@@ -175,25 +177,6 @@ fn raw(object: &impl std::os::windows::io::AsHandle) -> usize {
     use std::os::windows::io::AsRawHandle;
 
     object.as_handle().as_raw_handle() as usize
-}
-
-/// Makes `link` a junction to the directory `target`, quoting both paths, since `cmd` splits its
-/// arguments at commas and semicolons.
-#[cfg(windows)]
-fn junction(link: &Path, target: &Path) {
-    use std::os::windows::process::CommandExt;
-    use std::process::{Command, Stdio};
-
-    let status = Command::new("cmd")
-        .raw_arg(format!(
-            "/C mklink /J \"{}\" \"{}\"",
-            link.display(),
-            target.display()
-        ))
-        .stdout(Stdio::null())
-        .status()
-        .unwrap();
-    assert!(status.success(), "cannot link {}", link.display());
 }
 
 #[test]
