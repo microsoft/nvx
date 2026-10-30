@@ -1395,10 +1395,10 @@ The queue isn't the only way into `dev`: the deploy key with which
 `Persist performance baselines` and the module diagrams workflow push, and two
 user accounts, bypass `Default Branch`, whose `merge_queue` rule binds them no
 more than its other rules (see [Reviews and bypasses](#reviews-and-bypasses)).
-From October 16 to 29, 2026, when each `dev` push committed its own performance
-results, `dev` took 234 baseline commits and 23 diagram commits beside its 272
-merges. Each such push changes the base of every group in the queue, which the
-queue then rebuilds on the new tip (see
+From October 16 to 29, 2026, when each `dev` push committed its performance
+results and its diagrams itself, `dev` took 234 baseline commits and 23 diagram
+commits beside its 272 merges. Each such push changes the base of every group
+in the queue, which the queue then rebuilds on the new tip (see
 [Superseded merge groups](#superseded-merge-groups)), so it costs every group
 the run that it had made so far. A baseline commit landed a median of 29.2
 minutes after the merge whose run it records, 16.1 at the 10th percentile and
@@ -1406,11 +1406,12 @@ minutes after the merge whose run it records, 16.1 at the 10th percentile and
 of 27.6 minutes apart, 148 of 271 within 30 minutes of the one before. On a
 busy day, the baseline commit of nearly every merge would thus have rebuilt the
 group that the queue built next, which would then have taken about two runs to
-merge. The performance history therefore reaches `dev` once a night, with the
-nightly full run, in at most one commit
+merge. The performance history and the module diagrams therefore reach `dev`
+once a night, with the nightly full run, in at most a commit each
 ([#1053](https://github.com/microsoft/nvx/issues/1053); see
-[Development releases and performance history](#development-releases-and-performance-history)),
-so that `dev` takes far fewer pushes outside the queue.
+[Development releases and performance history](#development-releases-and-performance-history)
+and [Module diagrams](#module-diagrams)), so that `dev` takes pushes outside
+the queue only rarely.
 
 ### Cost
 
@@ -2444,51 +2445,54 @@ own uses in place of those that the plain analysis moves to the modules that
 contain them, and stops at a cfg that depends on `test` in another way. Nobody
 edits the diagrams by hand:
 [`module-diagrams.yml`](../.github/workflows/module-diagrams.yml) draws them
-again after every push to `dev` that changes their inputs, `nvx-rs/`, the Rust
-pin, the script, the build constants that name the crate's targets, or the
-workflow, as the merge of such a pull request does, and commits them to `dev`
-when they change.
+again every night, with the nightly full run of CI, and commits them to `dev`
+when they changed, so that `dev` takes at most one push of them a night outside
+the merge queue (see [Pushes outside the queue](#pushes-outside-the-queue)).
+They follow a merge that changes their inputs, `nvx-rs/`, the Rust pin, the
+script, the build constants that name the crate's targets, or the workflow,
+within a day.
 
 Its `draw` job builds cargo-modules, at the release that the workflow pins,
 with the Rust release that `rust-toolchain.toml` pins, and restores the build
-from a cache that only `dev` pushes save. It runs on a fixed Ubuntu release,
-whose Graphviz release lays out the diagrams, and installs Liberation Sans, the
-font that they name first, with which Graphviz measures their labels, so that
-their layouts depend neither on the runner image's other fonts nor on its
-updates. It checks out, without credentials, the newest commit of the branch
-that a push or a dispatch names, rather than the commit that started the run,
-or a pull request's merge commit, draws the diagrams into `doc/modules`,
-summarizes the files that they change, and uploads them as
-`module-diagrams-<run-id>`. For a push to `dev`, or a manual dispatch on it,
+from a cache that only the runs of `dev` save. It runs on a fixed Ubuntu
+release, whose Graphviz release lays out the diagrams, and installs Liberation
+Sans, the font that they name first, with which Graphviz measures their labels,
+so that their layouts depend neither on the runner image's other fonts nor on
+its updates. It checks out, without credentials, the newest commit of the
+branch that a nightly run or a dispatch names, rather than the commit that
+started the run, or a pull request's merge commit, draws the diagrams into
+`doc/modules`, summarizes the files that they change, and uploads them as
+`module-diagrams-<run-id>`. For a nightly run, or a manual dispatch on `dev`,
 the `publish` job then checks out the newest `dev` with
 `PERFORMANCE_PERSIST_DEPLOY_KEY`, the deploy key with which the
 [performance history](#development-releases-and-performance-history) is
 persisted, since deploy keys may push to `dev` past its rules. It replaces
-`doc/modules` with the uploaded diagrams and, if that changes anything,
-commits it as `doc: update module diagrams (<sha>) [skip ci]`, where `<sha>`
-is the commit that the `draw` job drew, and pushes it, retrying up to three
-attempts in all on the newest `dev` when a push fails because `dev` moved. The
-job builds and runs nothing of the commit, refuses an upload that holds
-anything but the page and SVG files, and commits nothing outside
-`doc/modules`. `[skip ci]` keeps its commit, which changes only documentation,
-from starting the workflows of a push.
+`doc/modules` with the uploaded diagrams and, if that changes anything, commits
+it as `doc: update module diagrams (<sha>) [skip ci]`, where `<sha>` is the
+commit that the `draw` job drew, and pushes it, retrying up to three attempts
+in all on the newest `dev` when a push fails because `dev` moved. The job
+builds and runs nothing of the commit, refuses an upload that holds anything
+but the page and SVG files, and commits nothing outside `doc/modules`.
+`[skip ci]` keeps its commit, which changes only documentation, from starting
+the workflows of a push.
 
-Runs on `dev` wait for one another, and a newer push replaces the run that
-waits. Each run draws the newest `dev`, so whichever run commits last commits
-the diagrams of the newest `dev`, in whatever order the runs start. A rerun of
-the `publish` job alone, as of a run's failed jobs, reuses the drawing of its
-run, which a newer run may have replaced. So, on each attempt, the job compares
-the inputs, the paths that start the workflow, at the drawn commit and on the
-newest `dev`, and publishes nothing once `dev` has changed them: the push that
-changed them started a run that publishes their diagrams.
-A ready pull request that changes the inputs runs the `draw` job alone, so that
-a change that breaks the drawing fails before it merges, and its summary and
-artifact show the diagrams that its merge will commit. The workflow is not
-part of `Required status check`. To draw the diagrams locally, install
-cargo-modules and Graphviz, and run `python3 scripts/module_diagrams.py`, which
-writes them to `build/modules`, or with `--output` to another directory that
-holds nothing but an earlier run's diagrams. Leave `doc/modules` to CI: other
-Graphviz releases and fonts lay the diagrams out differently.
+Runs on `dev`, nightly or dispatched, wait for one another, and a newer one
+replaces the run that waits. Each run draws the newest `dev`, so whichever run
+commits last commits the diagrams of the newest `dev`, in whatever order the
+runs start. A rerun of the `publish` job alone, as of a run's failed jobs,
+reuses the drawing of its run, which a newer run may have replaced. So, on each
+attempt, the job compares the inputs, the paths that start the workflow for a
+pull request, at the drawn commit and on the newest `dev`, and publishes
+nothing once `dev` has changed them: the next run of `dev` draws and publishes
+their diagrams. A ready pull request that changes the inputs runs the `draw`
+job alone, so that a change that breaks the drawing fails before it merges, and
+its summary and artifact show the diagrams that `dev` takes the night after it
+merges. The workflow is not part of `Required status check`. To draw the
+diagrams locally, install cargo-modules and Graphviz, and run
+`python3 scripts/module_diagrams.py`, which writes them to `build/modules`, or
+with `--output` to another directory that holds nothing but an earlier run's
+diagrams. Leave `doc/modules` to CI: other Graphviz releases and fonts lay the
+diagrams out differently.
 
 ## Adversarial campaigns
 

@@ -1,21 +1,14 @@
 name: Module diagrams
 
 # Draws the module diagrams of the nvx crate, which doc/modules publishes, with
-# scripts/module_diagrams.py (doc/ci.md, "Module diagrams"). A push to dev that
-# changes their inputs, such as a merge, commits them to dev when they change. A
-# pull request that changes their inputs draws them without committing them, so
-# that a change that breaks the drawing fails before it merges, and uploads them
-# for review.
+# scripts/module_diagrams.py (doc/ci.md, "Module diagrams"). A nightly run of
+# dev commits them to dev when they changed, at the time of the nightly full
+# run of CI, so that dev takes at most one push of them a night outside the
+# merge queue, each of which rebuilds every queued merge group (doc/ci.md,
+# "Pushes outside the queue"). A pull request that changes their inputs draws
+# them without committing them, so that a change that breaks the drawing fails
+# before it merges, and uploads them for review.
 on:
-  push:
-    branches:
-      - dev
-    paths:
-      - nvx-rs/**
-      - rust-toolchain.toml
-      - scripts/module_diagrams.py
-      - scripts/nvx_tools/build_constants.py
-      - .github/workflows/module-diagrams.yml
   pull_request:
     branches:
       - dev
@@ -30,15 +23,17 @@ on:
       - scripts/module_diagrams.py
       - scripts/nvx_tools/build_constants.py
       - .github/workflows/module-diagrams.yml
+  schedule:
+    - cron: "17 5 * * *"
   workflow_dispatch:
 
 permissions:
   contents: read
 
-# Runs on dev wait for one another, and a newer push replaces the run that
-# waits. Each run draws the newest dev, so the run that commits last commits
-# the diagrams of the newest dev. A newer push to a pull request cancels its
-# older run.
+# Runs of dev, nightly or dispatched, wait for one another, and a newer one
+# replaces the run that waits. Each run draws the newest dev, so the run that
+# commits last commits the diagrams of the newest dev. A newer push to a pull
+# request cancels its older run.
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
@@ -58,9 +53,9 @@ jobs:
     outputs:
       sha: ${{ steps.draw.outputs.sha }}
     steps:
-      # A push or a dispatch draws the newest commit of its branch, rather than
-      # the commit that started it, so that whichever run commits last commits
-      # the diagrams of the newest dev.
+      # A nightly or dispatched run draws the newest commit of its branch,
+      # rather than the commit that started it, so that whichever run commits
+      # last commits the diagrams of the newest dev.
       - name: Checkout
         uses: actions/checkout@v5
         with:
@@ -103,10 +98,11 @@ jobs:
           cargo "+${RUST_TOOLCHAIN}" install --locked cargo-modules
           --version "${CARGO_MODULES_VERSION}" --root "${RUNNER_TEMP}/cargo-modules"
 
-      # Only dev pushes save the build, as they save the other caches.
+      # Only the runs of dev save the build, as dev pushes save the other
+      # caches.
       - name: Save cargo-modules
         if: >-
-          github.event_name == 'push' &&
+          github.event_name != 'pull_request' &&
           github.ref == 'refs/heads/dev' &&
           steps.restore-cargo-modules.outputs.cache-hit != 'true'
         uses: actions/cache/save@v5
@@ -184,7 +180,8 @@ jobs:
         env:
           DIAGRAMS: ${{ runner.temp }}/module-diagrams
           DRAWN: ${{ needs.draw.outputs.sha }}
-          # The inputs of the diagrams: the paths that start this workflow.
+          # The inputs of the diagrams: the paths that start the workflow for
+          # a pull request.
           INPUTS: >-
             nvx-rs rust-toolchain.toml scripts/module_diagrams.py
             scripts/nvx_tools/build_constants.py
@@ -211,12 +208,12 @@ jobs:
             git checkout -B module-diagrams origin/dev
             # A rerun of this job alone reuses the drawing of its run, which a
             # newer run may have replaced. Publish it only while dev holds the
-            # inputs that it was drawn from: the push that changed them started
-            # a run that publishes their diagrams.
+            # inputs that it was drawn from: the next run of dev draws and
+            # publishes the diagrams of newer inputs.
             status=0
             git diff --quiet "${DRAWN}" HEAD -- "${inputs[@]}" || status=$?
             if [[ "${status}" -eq 1 ]]; then
-              echo "::notice::dev changed the inputs of the diagrams since ${DRAWN}; the run of the newer commit publishes their diagrams"
+              echo "::notice::dev changed the inputs of the diagrams since ${DRAWN}; the next run of dev publishes their diagrams"
               exit 0
             elif [[ "${status}" -ne 0 ]]; then
               echo "::error::Cannot compare the inputs of the diagrams at ${DRAWN} with dev"
