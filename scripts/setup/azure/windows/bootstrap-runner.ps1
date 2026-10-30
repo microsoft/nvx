@@ -288,10 +288,11 @@ function Set-RunnerMetadataFirewall {
         throw "$failure No unique effective metadata rule is available."
     }
     $rule = $effectiveRules[0]
-    # Provider value 1 means enforced; the display strings are localized.
+    # Inactive profiles (5) are harmless when an active profile is enforced (1).
+    # Use provider values because the display strings are localized.
     $enforcement = @($rule.CimInstanceProperties['EnforcementStatus'].Value)
-    if ($rule.PrimaryStatus -ne 'OK' -or $enforcement.Count -eq 0 -or
-        @($enforcement | Where-Object { $_ -ne 1 }).Count -ne 0) {
+    if ($rule.PrimaryStatus -ne 'OK' -or $enforcement -notcontains 1 -or
+        @($enforcement | Where-Object { $_ -notin @(1, 5) }).Count -ne 0) {
         throw "$failure The effective metadata rule is not fully enforced."
     }
     $addressFilter = $rule | Get-NetFirewallAddressFilter
