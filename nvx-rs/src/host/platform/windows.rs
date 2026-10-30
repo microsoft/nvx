@@ -18,7 +18,7 @@ use windows_sys::Win32::Foundation::{
     ERROR_OPERATION_ABORTED, ERROR_PIPE_BUSY, ERROR_PIPE_CONNECTED, ERROR_PIPE_NOT_CONNECTED,
     ERROR_SHARING_VIOLATION, ERROR_SUCCESS, FILETIME, FreeLibrary, GENERIC_ALL, GENERIC_READ,
     GENERIC_WRITE, GetHandleInformation, GetLastError, HANDLE, HANDLE_FLAG_INHERIT,
-    INVALID_HANDLE_VALUE, SetHandleInformation, WAIT_OBJECT_0, WAIT_TIMEOUT,
+    INVALID_HANDLE_VALUE, SetHandleInformation, SetLastError, WAIT_OBJECT_0, WAIT_TIMEOUT,
 };
 use windows_sys::Win32::Security::{
     ACCESS_ALLOWED_ACE, ACE_HEADER, ACL, ACL_REVISION, ACL_SIZE_INFORMATION, AclSizeInformation,
@@ -46,6 +46,10 @@ use windows_sys::Win32::System::Console::{
 use windows_sys::Win32::System::IO::{
     CancelIoEx, DeviceIoControl, GetOverlappedResult, OVERLAPPED,
 };
+use windows_sys::Win32::System::JobObjects::{
+    CreateJobObjectW, JOBOBJECT_BASIC_ACCOUNTING_INFORMATION, JobObjectBasicAccountingInformation,
+    OpenJobObjectW, QueryInformationJobObject,
+};
 use windows_sys::Win32::System::LibraryLoader::{
     GetProcAddress, LOAD_LIBRARY_SEARCH_SYSTEM32, LoadLibraryExW,
 };
@@ -63,9 +67,9 @@ use windows_sys::Win32::System::Threading::{
     CREATE_UNICODE_ENVIRONMENT, CreateEventW, CreateProcessW, DeleteProcThreadAttributeList,
     EXTENDED_STARTUPINFO_PRESENT, GetCurrentProcess, GetProcessTimes, INFINITE,
     InitializeProcThreadAttributeList, LPPROC_THREAD_ATTRIBUTE_LIST, OpenProcess, OpenProcessToken,
-    PROC_THREAD_ATTRIBUTE_HANDLE_LIST, PROCESS_CREATION_FLAGS, PROCESS_INFORMATION,
-    PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE, PROCESS_TERMINATE, ResetEvent,
-    STARTF_USESTDHANDLES, STARTUPINFOEXW, TerminateProcess, UpdateProcThreadAttribute,
+    PROC_THREAD_ATTRIBUTE_HANDLE_LIST, PROC_THREAD_ATTRIBUTE_JOB_LIST, PROCESS_CREATION_FLAGS,
+    PROCESS_INFORMATION, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE, PROCESS_TERMINATE,
+    ResetEvent, STARTF_USESTDHANDLES, STARTUPINFOEXW, TerminateProcess, UpdateProcThreadAttribute,
     WaitForSingleObject,
 };
 use windows_sys::Win32::System::WindowsProgramming::QueryInterruptTimePrecise;
@@ -640,7 +644,8 @@ impl Drop for InheritableForSpawn {
     }
 }
 
-/// Starts OpenVMM without the caller's console so it outlives the caller.
+/// Starts OpenVMM without the caller's console so it outlives the caller, in the job object
+/// `job`, if any, which [`create_log_job`] creates for the log of its standard output.
 ///
 /// `std::process::Command` lets the child inherit every inheritable handle of the caller. A
 /// caller whose own standard output is a pipe, such as a phase process whose parent collects
@@ -659,6 +664,14 @@ impl Drop for InheritableForSpawn {
 /// under a `SpawnLock`, as [`spawn_command`](super::inherit::spawn_command) does; a process that
 /// it spawns with a handle list does not.
 ///
+/// OpenVMM starts in `job`, which the process attribute that names it assigns before OpenVMM
+/// runs, and which every process that OpenVMM starts then joins too, but no process that the
+/// caller spawns. The handle of `job` is inheritable for the whole window, from before the
+/// `stdio` handles until after the spawn closes them, so that a process that inherits the log in
+/// the window inherits the job too, and keeps it open while it holds the log: [`log_claim_held`]
+/// then decides the log's claim by the processes of the job, of which that process is none. The
+/// spawn closes its own handle of `job` before it returns.
+///
 /// Fails with [`io::ErrorKind::InvalidInput`] for a batch file, as [`refuse_batch_file`] says.
 pub(crate) fn spawn_detached(
     program: &Path,
@@ -667,6 +680,7 @@ pub(crate) fn spawn_detached(
     stdio: [OwnedHandle; 3],
     inherit: &[Inherited<'_>],
     breakaway_from_job: bool,
+    job: Option<OwnedHandle>,
 ) -> io::Result<LaunchedProcess> {
     let mut flags = CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW;
     if breakaway_from_job {
@@ -678,6 +692,7 @@ pub(crate) fn spawn_detached(
         Some(working_dir),
         stdio.map(Some),
         inherit,
+        job,
         flags,
     )
 }
@@ -702,7 +717,7 @@ pub(crate) fn spawn_foreground(
         standard_handle(STD_OUTPUT_HANDLE)?,
         standard_handle(STD_ERROR_HANDLE)?,
     ];
-    spawn_listed(program, arguments, None, stdio, inherit, 0)
+    spawn_listed(program, arguments, None, stdio, inherit, None, 0)
 }
 
 /// Returns a copy of the caller's standard handle `which`, or `None` if the caller has none, as
@@ -736,15 +751,16 @@ fn standard_handle(which: STD_HANDLE) -> io::Result<Option<OwnedHandle>> {
 
 /// Starts `program` with `arguments` in `working_dir`, or in the caller's working directory, with
 /// the creation flags `flags`, the handles `stdio` as its standard handles, a missing one null,
-/// and the caller's handles `inherit`, and no other handle of the caller, as [`spawn_detached`]
-/// describes. Fails with [`io::ErrorKind::InvalidInput`] for a batch file, as
-/// [`refuse_batch_file`] says.
+/// and the caller's handles `inherit`, and no other handle of the caller, in the job object
+/// `job`, if any, as [`spawn_detached`] describes. Fails with [`io::ErrorKind::InvalidInput`] for
+/// a batch file, as [`refuse_batch_file`] says.
 fn spawn_listed(
     program: &Path,
     arguments: &[OsString],
     working_dir: Option<&Path>,
     stdio: [Option<OwnedHandle>; 3],
     inherit: &[Inherited<'_>],
+    job: Option<OwnedHandle>,
     flags: PROCESS_CREATION_FLAGS,
 ) -> io::Result<LaunchedProcess> {
     refuse_batch_file(program)?;
@@ -752,9 +768,18 @@ fn spawn_listed(
     let mut command_line = command_line(program.as_os_str(), arguments)?;
     let directory = working_dir.map(wide);
     // No handle may be inheritable for this spawn outside the lock. Locals are dropped in the
-    // reverse of their order, so every return restores the handles `inherit`, and closes the
-    // `stdio` handles, which it moves here for that, before it releases the lock.
+    // reverse of their order, so every return restores the handles `inherit`, closes the `stdio`
+    // handles and then the job's, which it moves here for that, before it releases the lock.
     let lock = lock_spawns();
+    // The job's handle is inheritable before any other, and closes after them all.
+    let job = job;
+    if let Some(job) = &job {
+        // SAFETY: the handle is open and owned by `job`.
+        if unsafe { SetHandleInformation(raw(job), HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT) } == 0
+        {
+            return Err(io::Error::last_os_error());
+        }
+    }
     let stdio = stdio;
     let standard = stdio
         .each_ref()
@@ -778,37 +803,60 @@ fn spawn_listed(
         }
     }
     let inheritable = InheritableForSpawn::new(&handles[standard_handles..])?;
+    let jobs: Vec<HANDLE> = job.iter().map(raw).collect();
     // A list cannot be empty: a child that inherits no handle at all is created without one, and
     // without inheritance.
-    let mut attributes = if handles.is_empty() {
+    let lists = u32::from(!handles.is_empty()) + u32::from(!jobs.is_empty());
+    let mut attributes = if lists == 0 {
         None
     } else {
-        Some(AttributeList::new(1)?)
+        Some(AttributeList::new(lists)?)
     };
     // SAFETY: STARTUPINFOEXW is a plain C structure for which all-zero is a valid value.
     let mut startup: STARTUPINFOEXW = unsafe { mem::zeroed() };
     startup.StartupInfo.cb = mem::size_of::<STARTUPINFOEXW>() as u32;
     let mut flags = flags | CREATE_UNICODE_ENVIRONMENT;
     if let Some(attributes) = &mut attributes {
-        // SAFETY: the list has room for one attribute, and `handles` outlives CreateProcessW.
-        if unsafe {
-            UpdateProcThreadAttribute(
-                attributes.as_ptr(),
-                0,
-                PROC_THREAD_ATTRIBUTE_HANDLE_LIST as usize,
-                handles.as_ptr().cast(),
-                mem::size_of_val(handles.as_slice()),
-                ptr::null_mut(),
-                ptr::null(),
-            )
-        } == 0
-        {
-            return Err(io::Error::last_os_error());
+        if !handles.is_empty() {
+            // SAFETY: the list has room for this attribute, and `handles` outlives
+            // CreateProcessW.
+            if unsafe {
+                UpdateProcThreadAttribute(
+                    attributes.as_ptr(),
+                    0,
+                    PROC_THREAD_ATTRIBUTE_HANDLE_LIST as usize,
+                    handles.as_ptr().cast(),
+                    mem::size_of_val(handles.as_slice()),
+                    ptr::null_mut(),
+                    ptr::null(),
+                )
+            } == 0
+            {
+                return Err(io::Error::last_os_error());
+            }
+            startup.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
+            startup.StartupInfo.hStdInput = standard[0];
+            startup.StartupInfo.hStdOutput = standard[1];
+            startup.StartupInfo.hStdError = standard[2];
         }
-        startup.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
-        startup.StartupInfo.hStdInput = standard[0];
-        startup.StartupInfo.hStdOutput = standard[1];
-        startup.StartupInfo.hStdError = standard[2];
+        if !jobs.is_empty() {
+            // SAFETY: the list has room for this attribute, and `jobs`, whose handle `job` keeps
+            // open, outlives CreateProcessW.
+            if unsafe {
+                UpdateProcThreadAttribute(
+                    attributes.as_ptr(),
+                    0,
+                    PROC_THREAD_ATTRIBUTE_JOB_LIST as usize,
+                    jobs.as_ptr().cast(),
+                    mem::size_of_val(jobs.as_slice()),
+                    ptr::null_mut(),
+                    ptr::null(),
+                )
+            } == 0
+            {
+                return Err(io::Error::last_os_error());
+            }
+        }
         startup.lpAttributeList = attributes.as_ptr();
         flags |= EXTENDED_STARTUPINFO_PRESENT;
     }
@@ -824,7 +872,7 @@ fn spawn_listed(
             command_line.as_mut_ptr(),
             ptr::null(),
             ptr::null(),
-            i32::from(attributes.is_some()),
+            i32::from(!handles.is_empty()),
             flags,
             ptr::null(),
             directory
@@ -839,10 +887,11 @@ fn spawn_listed(
     } else {
         Ok(())
     };
-    // The child holds its own copies of the handles now, so the caller's need not be
-    // inheritable any longer, and the window closes.
+    // The child holds its own copies of the handles now, and is in its job, so the caller's need
+    // not be inheritable any longer, and the window closes.
     drop(inheritable);
     drop(stdio);
+    drop(job);
     drop(lock);
     created?;
     drop(owned(information.hThread));
@@ -1796,23 +1845,113 @@ fn handle_information(handle: HANDLE) -> io::Result<BY_HANDLE_FILE_INFORMATION> 
 
 /// Claims a launch's fresh log, which `file` holds open.
 ///
-/// On Windows the claim is the open handle itself, which the VMM inherits: while any process
-/// holds the log open, an open that shares nothing fails, so the claim needs no further step.
+/// On Windows the claim needs no further step: it is the job object of the log, in which
+/// [`spawn_detached`] starts the VMM, or else the log's handles that the VMM inherits, as
+/// [`log_claim_held`] describes.
 pub(crate) fn claim_log(_file: &fs::File) -> io::Result<()> {
     Ok(())
 }
 
-/// Returns whether a process still holds the claimed log at `path`, which must be the file
-/// `identity`: whether any process holds it open.
+/// The right to query a job object's information, which `winnt.h` defines.
+const JOB_OBJECT_QUERY: u32 = 0x0004;
+
+/// Returns the name of the job object of the log `identity`, NUL-terminated: in the namespace of
+/// this session, after the volume serial number and the file index of the log.
+fn log_job_name(identity: (u64, u64)) -> Vec<u16> {
+    wide(format!(
+        r"Local\nvx-log-{:016x}-{:016x}",
+        identity.0, identity.1
+    ))
+}
+
+/// Creates the job object of the log that `log` holds open, in which [`spawn_detached`] starts
+/// the VMM that writes the log, so that the processes of the job are the log's claim, as
+/// [`log_claim_held`] describes. The job limits no resource, but it lets no process that the VMM
+/// starts break away from it: one that asks to, with `CREATE_BREAKAWAY_FROM_JOB`, fails with
+/// access denied, so that every process that the VMM starts joins it.
 ///
-/// An open without access rights takes no part in sharing checks, so the identity is checked
-/// first; an open that shares nothing then fails with a sharing violation while any process,
-/// such as a VMM that inherited the log, holds it. The identity is checked again on the
-/// exclusive handle, because a rename between the opens could have replaced the file.
+/// Fails with [`io::ErrorKind::AlreadyExists`] if a job of that name exists already, as one of an
+/// earlier log of the same identity, or of the same file before it was truncated, that a process
+/// still holds would: the VMM would share it.
+pub(crate) fn create_log_job(log: &fs::File) -> io::Result<OwnedHandle> {
+    let identity = opened_file_identity(log)?;
+    let name = log_job_name(identity);
+    // SAFETY: SetLastError has no preconditions.
+    unsafe { SetLastError(ERROR_SUCCESS) };
+    // SAFETY: the name is NUL-terminated, and no attributes ask for default security.
+    let handle = unsafe { CreateJobObjectW(ptr::null(), name.as_ptr()) };
+    let existed = last_error() == ERROR_ALREADY_EXISTS;
+    let job = owned(handle).ok_or_else(io::Error::last_os_error)?;
+    if existed {
+        return Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            format!(
+                "the job object of the log {:016x}-{:016x} exists already, held by another spawn \
+                 with the same log file or by a process that inherited it in one; give each VMM \
+                 a log file of its own, created anew",
+                identity.0, identity.1
+            ),
+        ));
+    }
+    Ok(job)
+}
+
+/// Returns how many processes the job object of the log `identity` holds, or `None` if no job of
+/// that name exists.
+fn log_job_processes(identity: (u64, u64)) -> io::Result<Option<u32>> {
+    let name = log_job_name(identity);
+    // SAFETY: the name is NUL-terminated.
+    let Some(job) = owned(unsafe { OpenJobObjectW(JOB_OBJECT_QUERY, 0, name.as_ptr()) }) else {
+        let error = io::Error::last_os_error();
+        return if error.raw_os_error() == Some(ERROR_FILE_NOT_FOUND as i32) {
+            Ok(None)
+        } else {
+            Err(error)
+        };
+    };
+    // SAFETY: the structure is plain data for which all-zero bytes are valid.
+    let mut accounting: JOBOBJECT_BASIC_ACCOUNTING_INFORMATION = unsafe { mem::zeroed() };
+    // SAFETY: the handle is a job object open for querying, and the information has the size
+    // given.
+    if unsafe {
+        QueryInformationJobObject(
+            raw(&job),
+            JobObjectBasicAccountingInformation,
+            (&raw mut accounting).cast(),
+            mem::size_of_val(&accounting) as u32,
+            ptr::null_mut(),
+        )
+    } == 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(Some(accounting.ActiveProcesses))
+}
+
+/// Returns whether a process of its launch still holds the claimed log at `path`, which must be
+/// the file `identity`.
+///
+/// While the job object of the log can be opened by its name, the claim is its processes.
+/// [`spawn_detached`] starts the VMM in the job, every process that the VMM starts joins it, and
+/// no other process does. The job keeps its name while a process holds a handle to it, not merely
+/// while it holds processes, and the spawn closes its own: a process that another thread created
+/// while the VMM's spawn had the log's handles inheritable holds the log, and the job's handle with
+/// it, so the job can be opened by its name for as long as that process holds the log, and the
+/// process, which never joins the job, does not hold the claim.
+///
+/// Without the job, as for a VMM that no such process outlives, or that a launch of an earlier
+/// version started outside one, the claim is whether any process holds the log open. An open
+/// without access rights takes no part in sharing checks, so the identity is checked first; an
+/// open that shares nothing then fails with a sharing violation while any process, such as a VMM
+/// that inherited the log, holds it. The identity is checked again on the exclusive handle,
+/// because a rename between the opens could have replaced the file.
 pub(crate) fn log_claim_held(path: &Path, identity: (u64, u64)) -> io::Result<bool> {
     let replaced = || io::Error::other(format!("{} is not the claimed log", path.display()));
     if file_identity(path)? != identity {
         return Err(replaced());
+    }
+    if let Some(processes) = log_job_processes(identity)? {
+        return Ok(processes > 0);
     }
     let exclusive = OpenOptions::new()
         .read(true)
@@ -2374,6 +2513,7 @@ mod tests {
             [stdin.into(), stdout.into(), stderr.into()],
             &[],
             false,
+            None,
         )
         .unwrap();
 
@@ -2458,6 +2598,7 @@ mod tests {
             [stdin.into(), stdout.into(), stderr.into()],
             &[Inherited::new(&closed), Inherited::new(&kept)],
             false,
+            None,
         )
         .unwrap();
         let pid = child.id();
@@ -2515,6 +2656,7 @@ mod tests {
             [stdin.into(), stdout.into(), stderr.into()],
             &inherit,
             false,
+            None,
         )
         .unwrap();
         let value = |handle: &io::PipeWriter| handle.as_raw_handle() as HANDLE;
@@ -2600,6 +2742,7 @@ mod tests {
                 [stdin.into(), stdout.into(), stderr.into()],
                 &[],
                 false,
+                None,
             ));
         }
         std::thread::sleep(Duration::from_millis(500));
@@ -2634,6 +2777,7 @@ mod tests {
                             [stdin.into(), stdout.into(), stderr.into()],
                             &[Inherited::new(&shared)],
                             false,
+                            None,
                         )
                         .unwrap();
                         let held = holds(&child.process, value, &shared);
@@ -2665,6 +2809,7 @@ mod tests {
                 [stdin.into(), stdout.into(), stderr.into()],
                 inherit,
                 false,
+                None,
             )
         }
 
@@ -2716,7 +2861,7 @@ mod tests {
         command
     }
 
-    /// A spawn of a stand-in VMM, `cmd /c exit 0`, with a log as its standard output and error, as
+    /// A spawn of a stand-in VMM, with a log as its standard output and error, as
     /// `supervisor::spawn` passes the VMM its launch's log, that another thread runs and holds in
     /// its window, with the log's handles inheritable, until it is released.
     struct HeldSpawn {
@@ -2731,15 +2876,38 @@ mod tests {
     }
 
     impl HeldSpawn {
-        /// Starts the spawn, with its log in `directory`, and returns once it is in its window.
+        /// Starts the spawn of `cmd /c exit 0`, outside any job, with its log in `directory`, and
+        /// returns once it is in its window.
         fn start(directory: &Path) -> Self {
+            let system = std::env::var_os("SystemRoot").unwrap();
+            let cmd = Path::new(&system).join("System32").join("cmd.exe");
+            Self::start_with(directory, cmd, &["/c", "exit", "0"], false)
+        }
+
+        /// Starts the spawn of a stand-in that runs for a minute, `ping`, in the job of its log,
+        /// as `supervisor::spawn` starts the VMM, with its log in `directory`, and returns once it
+        /// is in its window.
+        fn start_in_job(directory: &Path) -> Self {
+            let system = std::env::var_os("SystemRoot").unwrap();
+            let ping = Path::new(&system).join("System32").join("PING.EXE");
+            Self::start_with(directory, ping, &["-n", "60", "127.0.0.1"], true)
+        }
+
+        /// Starts the spawn of `program` with `arguments`, in the job of its log if `in_job`, with
+        /// its log in `directory`, and returns once it is in its window.
+        fn start_with(
+            directory: &Path,
+            program: std::path::PathBuf,
+            arguments: &[&str],
+            in_job: bool,
+        ) -> Self {
             let log = directory.join("vmm.log");
             let file = fs::File::create(&log).unwrap();
             let identity = file_identity(&log).unwrap();
+            let job = in_job.then(|| create_log_job(&file).unwrap());
+            let arguments: Vec<OsString> = arguments.iter().map(OsString::from).collect();
             let (entered, in_window) = std::sync::mpsc::channel();
             let (release, released) = std::sync::mpsc::channel::<()>();
-            let system = std::env::var_os("SystemRoot").unwrap();
-            let cmd = Path::new(&system).join("System32").join("cmd.exe");
             let spawn = thread::spawn(move || {
                 IN_WINDOW.set(Some(Box::new(move || {
                     let _ = entered.send(());
@@ -2749,12 +2917,13 @@ mod tests {
                 let (stdin, _stdin_writer) = io::pipe()?;
                 let stderr = file.try_clone()?;
                 spawn_detached(
-                    &cmd,
-                    &["/c", "exit", "0"].map(OsString::from),
+                    &program,
+                    &arguments,
                     &std::env::temp_dir(),
                     [stdin.into(), file.into(), stderr.into()],
                     &[],
                     false,
+                    job,
                 )
             });
             in_window
@@ -2768,16 +2937,23 @@ mod tests {
             }
         }
 
+        /// Releases the spawn from its window, and returns the stand-in once it is created, with
+        /// the log and its identity.
+        fn stand_in(self) -> (LaunchedProcess, std::path::PathBuf, (u64, u64)) {
+            let _ = self.release.send(());
+            let stand_in = self.spawn.join().unwrap().unwrap();
+            (stand_in, self.log, self.identity)
+        }
+
         /// Releases the spawn from its window, and returns once the stand-in has exited, with the
         /// log and its identity.
         fn finish(self) -> (std::path::PathBuf, (u64, u64)) {
-            let _ = self.release.send(());
-            let stand_in = self.spawn.join().unwrap().unwrap();
+            let (stand_in, log, identity) = self.stand_in();
             assert!(
                 stand_in.terminate(WINDOW_TIMEOUT),
                 "the stand-in did not exit"
             );
-            (self.log, self.identity)
+            (log, identity)
         }
     }
 
@@ -2834,8 +3010,9 @@ mod tests {
         let other = sleeper().spawn().map(Running);
         let (log, identity) = held.finish();
         let mut other = other.unwrap();
-        // The process holds the log's claim after the stand-in has exited, for longer than a
-        // recovery checks a held claim again, as long as it runs.
+        // The stand-in ran outside a job, so the log's handles are its claim, which the process
+        // holds after the stand-in has exited, for longer than a recovery checks a held claim
+        // again, as long as it runs.
         let kept = !claim_released_within(&log, identity, Duration::from_secs(2));
         let running = other.0.try_wait().unwrap().is_none();
         drop(other);
@@ -2843,6 +3020,122 @@ mod tests {
         assert!(running, "the process spawned in the window exited early");
         assert!(kept, "a process spawned in the window did not hold the log");
         assert!(released, "the log stayed held after the process exited");
+    }
+
+    #[test]
+    fn a_process_spawned_in_the_window_of_a_vmm_in_its_logs_job_holds_the_log_but_not_its_claim() {
+        let directory = tempfile::tempdir().unwrap();
+        let held = HeldSpawn::start_in_job(directory.path());
+        // The process inherits the log in the window, and the job's handle with it, but does not
+        // join the job.
+        let other = sleeper().spawn().map(Running);
+        let (stand_in, log, identity) = held.stand_in();
+        let mut other = other.unwrap();
+        let held_while_running = log_claim_held(&log, identity).unwrap();
+        assert!(
+            stand_in.terminate(WINDOW_TIMEOUT),
+            "the stand-in did not exit"
+        );
+        // Once the stand-in has exited, the job holds no process, and the claim is released, while
+        // the process still holds the log.
+        let released = claim_released_within(&log, identity, WINDOW_TIMEOUT);
+        let holds = held_open(&log);
+        let running = other.0.try_wait().unwrap().is_none();
+        drop(other);
+        assert!(running, "the process spawned in the window exited early");
+        assert!(
+            held_while_running,
+            "the claim was released while the stand-in ran in its log's job"
+        );
+        assert!(
+            holds,
+            "the process spawned in the window did not hold the log"
+        );
+        assert!(
+            released,
+            "a process spawned in the window held the claim of a VMM in its log's job"
+        );
+    }
+
+    #[test]
+    fn a_log_has_one_job_at_a_time() {
+        let directory = tempfile::tempdir().unwrap();
+        let log = fs::File::create(directory.path().join("vmm.log")).unwrap();
+        let job = create_log_job(&log).unwrap();
+        let error = create_log_job(&log).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::AlreadyExists, "{error}");
+        // A job that no process holds is gone.
+        drop(job);
+        drop(create_log_job(&log).unwrap());
+    }
+
+    /// Returns whether any process holds the file at `path` open: an open that shares nothing
+    /// then fails with a sharing violation.
+    fn held_open(path: &Path) -> bool {
+        match OpenOptions::new().read(true).share_mode(0).open(path) {
+            Ok(_) => false,
+            Err(error) if error.raw_os_error() == Some(ERROR_SHARING_VIOLATION as i32) => true,
+            Err(error) => panic!("cannot open {}: {error}", path.display()),
+        }
+    }
+
+    #[test]
+    fn a_launch_whose_vmm_exited_ends_while_a_process_spawned_in_its_window_holds_its_log() {
+        use crate::host::store::{
+            ArtifactIdentity, LaunchId, Recovery, RuntimeIdentity, SandboxStore,
+        };
+        use crate::host::supervisor::{self, VmmCommand};
+        use crate::protocol::CAPABILITY_LEN;
+
+        let directory = tempfile::tempdir().unwrap();
+        let store = SandboxStore::create(directory.path().join("sandbox")).unwrap();
+        let artifact =
+            |digit: char| ArtifactIdentity::sha256(&digit.to_string().repeat(64)).unwrap();
+        let runtime = RuntimeIdentity::new(artifact('a'), artifact('b'), artifact('c'));
+        let capability = [7; CAPABILITY_LEN];
+        let mut locked = store.lock(None).unwrap();
+        let mut launch = locked
+            .begin_launch(&LaunchId::generate().unwrap(), &runtime, &capability)
+            .unwrap();
+        let system = std::env::var_os("SystemRoot").unwrap();
+        let cmd = Path::new(&system).join("System32").join("cmd.exe");
+        let command = VmmCommand::new(
+            cmd,
+            ["/c", "exit", "0"].map(OsString::from).to_vec(),
+            store.dir(),
+        );
+        // While the VMM is created, another part of the caller spawns a process without the
+        // spawn lock, as `std::process::Command` spawns one, which inherits the VMM's log.
+        let other = std::rc::Rc::new(std::cell::RefCell::new(None));
+        let spawned = std::rc::Rc::clone(&other);
+        IN_WINDOW.set(Some(Box::new(move || {
+            *spawned.borrow_mut() = Some(sleeper().spawn().map(Running));
+        })));
+        let launched = supervisor::spawn(&command, &capability, launch.take_log().unwrap());
+        IN_WINDOW.set(None);
+        let launched = launched.unwrap();
+        let mut other = other
+            .take()
+            .expect("no process was spawned in the window")
+            .unwrap();
+        let vmm = launch.record_process(&launched).unwrap();
+        launched.detach();
+        assert!(
+            vmm.wait(Instant::now() + WINDOW_TIMEOUT).unwrap(),
+            "the stand-in did not exit"
+        );
+        // The VMM has exited, so the launch ends, whatever the other process holds.
+        let ended = launch.abandon().unwrap();
+        let holds = held_open(&store.log_path());
+        let running = other.0.try_wait().unwrap().is_none();
+        drop(other);
+        assert!(running, "the process spawned in the window exited early");
+        assert!(
+            holds,
+            "the process spawned in the window did not hold the log"
+        );
+        assert_eq!(ended, Recovery::Exited);
+        assert!(store.journal().unwrap().is_none());
     }
 
     #[test]
@@ -2862,6 +3155,7 @@ mod tests {
             [stdin.into(), stdout.into(), stderr.into()],
             &[],
             false,
+            None,
         )
         .unwrap();
         let other = spawn_command(&mut sleeper()).map(Running).unwrap();
