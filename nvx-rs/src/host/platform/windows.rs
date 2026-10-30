@@ -2649,6 +2649,48 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_spawn_that_panics_in_its_window_restores_the_handles_and_lets_other_spawns_run() {
+        /// Spawns a stand-in VMM, `cmd /c exit 0`, that is allowed the handles `inherit`.
+        fn stand_in(inherit: &[Inherited<'_>]) -> io::Result<LaunchedProcess> {
+            let system = std::env::var_os("SystemRoot").unwrap();
+            let cmd = Path::new(&system).join("System32").join("cmd.exe");
+            let (stdin, _stdin_writer) = io::pipe()?;
+            let (_stdout_reader, stdout) = io::pipe()?;
+            let stderr = stdout.try_clone()?;
+            spawn_detached(
+                &cmd,
+                &["/c", "exit", "0"].map(OsString::from),
+                &std::env::temp_dir(),
+                [stdin.into(), stdout.into(), stderr.into()],
+                inherit,
+                false,
+            )
+        }
+
+        let (_shared_reader, shared) = io::pipe().unwrap();
+        // The panic unwinds out of the window with the handles inheritable and the lock held,
+        // which it poisons, and this thread lives on.
+        IN_WINDOW.set(Some(Box::new(|| panic!("a panic in the window"))));
+        let panicked = std::panic::catch_unwind(|| stand_in(&[Inherited::new(&shared)])).is_err();
+        IN_WINDOW.set(None);
+        assert!(panicked, "the spawn did not panic in its window");
+        assert!(
+            !inheritable(&shared),
+            "the spawn left the handle inheritable"
+        );
+        // Another thread's spawn takes the lock all the same.
+        let (sender, spawned) = std::sync::mpsc::channel();
+        thread::spawn(move || {
+            let _ = sender.send(stand_in(&[]));
+        });
+        let other = spawned
+            .recv_timeout(WINDOW_TIMEOUT)
+            .expect("a spawn after the panic did not take the lock")
+            .unwrap();
+        assert!(other.terminate(WINDOW_TIMEOUT), "the stand-in did not exit");
+    }
+
     /// The longest wait of the tests of a spawn's window.
     const WINDOW_TIMEOUT: Duration = Duration::from_secs(30);
 
