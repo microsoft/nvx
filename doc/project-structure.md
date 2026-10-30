@@ -11,7 +11,7 @@ are build products or caches and are not part of the tracked source tree. The
 | `.github/workflows` | CI, nightly failure report, module diagram, release verification, adversarial campaign, and Copilot environment workflows |
 | `.github/actions` | Reusable local CI actions |
 | `.github/skills` | Copilot agent skills for common development workflows |
-| `.github/agents` | Bounded Copilot strategist definitions |
+| `.github/agents` | Copilot custom agents: the bounded adversarial strategist and the issue fixer |
 | `.github/specula` | Incremental formal verification adapter and runner setup |
 | `doc` | User and contributor documentation |
 | `docker` | Reproducible guest build environment |
@@ -37,7 +37,7 @@ nvx/
 |-- .github/                     GitHub automation and Copilot customizations
 |   |-- ISSUE_TEMPLATE/          CPU profile request issue form
 |   |-- actions/                 Reusable local CI actions
-|   |-- agents/                  Bounded Copilot strategist definitions
+|   |-- agents/                  Copilot custom agents
 |   |-- skills/                  Copilot development workflow skills
 |   |-- specula/                 Incremental formal verification integration
 |   |-- workflows/               GitHub Actions workflows
@@ -204,9 +204,13 @@ The `actions/` directory contains the reusable implementations for validation,
 artifact builds, benchmarks, packaging, releases, and performance history
 management. The `skills/` directory defines Copilot agent skills for common
 development workflows, and `copilot-instructions.md` holds the repository-wide
-Copilot instructions. The `specula/` directory contains the adapter, tests, and
-dedicated runner setup for incremental formal verification of the pinned
-OpenVMM release.
+Copilot instructions. The `agents/` directory defines Copilot custom agents:
+`nvx-adversary`, the bounded strategist of
+[adversarial testing](adversarial-testing.md), and `nvx-issue-fixer`, which
+takes an issue from its reproduction on the configured hosts to a pull request
+with green CI and resolved review threads. The `specula/` directory contains
+the adapter, tests, and dedicated runner setup for incremental formal
+verification of the pinned OpenVMM release.
 
 ### `guest/`, `ubuntu/`, and `azurelinux/`
 
