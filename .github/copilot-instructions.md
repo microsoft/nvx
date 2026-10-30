@@ -8,9 +8,11 @@
 - `openvmm/` is a Git submodule that tracks the `feature/microvm/dev` branch of
   `microsoft/openvmm`. For OpenVMM source changes, work in the nested repository
   and follow [its instructions](../openvmm/.github/copilot-instructions.md). For
-  an NVX pin promotion, use the `nvx-openvmm-promote` skill and keep the
-  superproject change gitlink-only unless the task explicitly requires
-  coordinated NVX changes.
+  an NVX pin promotion, use the `nvx-openvmm-promote` skill: keep the gitlink
+  commit gitlink-only unless the task explicitly requires coordinated NVX
+  changes, and map the pinned commits in
+  [the OpenVMM upstream roadmap](../doc/openvmm-upstream-roadmap.md) in a
+  separate commit.
 - Preserve dirty state in both repositories. Do not reset, clean, switch, update,
   or synchronize the submodule over uncommitted work.
 
