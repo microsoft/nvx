@@ -14,6 +14,10 @@
 //! the streams that [hung up](crate::exec::Runner::output_hung_up), which no process holds any
 //! more.
 //!
+//! A [signal](Binding::signal) that the adapter sends the program itself, such as the first step
+//! of a graceful stop, passes through to the execution, which it does not end: the runner sees
+//! nothing of it until the program exits.
+//!
 //! A launch that failed reaches the runner as a [`LaunchFailure`] whose
 //! [stage](LaunchFailure::stage) is the [number](crate::guest::spawn::LaunchStage::code) of the
 //! [`LaunchStage`](crate::guest::spawn::LaunchStage) that failed, which
@@ -197,6 +201,14 @@ impl Binding {
     /// Ends the execution because the transport was lost: see [`Runner::disconnect`].
     pub fn disconnect(&mut self, now: Instant) {
         self.runner.disconnect(now);
+    }
+
+    /// Sends the program the signal numbered `signal`, without ending the execution, and returns
+    /// whether the program was unreaped, as [`Execution::signal`] does. The runner learns nothing
+    /// of the signal: it sees the program's end, with the program's own status, once the program
+    /// exits.
+    pub fn signal(&mut self, signal: i32) -> io::Result<bool> {
+        self.execution.signal(signal)
     }
 
     /// Hands the execution the status that the caller's own collector collected for the process

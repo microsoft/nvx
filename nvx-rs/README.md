@@ -1177,6 +1177,9 @@ reaps hands over with `observe` included, and never blocks: the caller polls its
 descriptors and its input writer until its deadline, and each call takes a
 bounded number of steps, so that no execution holds the caller's loop.
 
+The caller's own `signal` passes through to the execution, which it does not
+end: the runner sees only the program's end, once the program exits.
+
 A launch that failed reaches the runner with the number of the `LaunchStage`
 that failed, `LaunchStage::code`, or with 0, which numbers no stage, if the
 binding could not read the launch report.
