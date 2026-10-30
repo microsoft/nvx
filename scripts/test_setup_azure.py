@@ -2400,6 +2400,9 @@ foreach ($profile in $script:profiles) {
 }
 Set-RunnerMetadataFirewall
 Reset-Firewall
+$script:enforcement = [uint16[]]@(5, 1)
+Set-RunnerMetadataFirewall
+Reset-Firewall
 $script:ports.Protocol = 256
 Set-RunnerMetadataFirewall
 Reset-Firewall
@@ -2423,6 +2426,7 @@ foreach ($case in @('principal', 'address', 'extra-address', 'missing-address',
         'local-rules-disabled', 'local-rules-unknown', 'disabled-interface',
         'missing-profile', 'duplicate-profile', 'missing-effective',
         'duplicate-effective', 'unenforced', 'not-applicable', 'empty-enforcement',
+        'inactive-only', 'partially-unenforced', 'unknown-enforcement',
         'bad-status', 'effective-allow', 'effective-port')) {
     Reset-Firewall
     switch ($case) {
@@ -2467,6 +2471,9 @@ foreach ($case in @('principal', 'address', 'extra-address', 'missing-address',
         'unenforced' { $script:enforcement = [uint16[]]@(2) }
         'not-applicable' { $script:enforcement = [uint16[]]@(0) }
         'empty-enforcement' { $script:enforcement = [uint16[]]@() }
+        'inactive-only' { $script:enforcement = [uint16[]]@(5) }
+        'partially-unenforced' { $script:enforcement = [uint16[]]@(1, 2) }
+        'unknown-enforcement' { $script:enforcement = [uint16[]]@(1, 26) }
         'bad-status' { $script:primaryStatus = 'Error' }
         'effective-allow' { $script:effectiveAction = 'Allow' }
         'effective-port' {
