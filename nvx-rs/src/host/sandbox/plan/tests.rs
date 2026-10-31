@@ -1541,6 +1541,90 @@ fn adapter_plans_persist_without_settings_or_an_export() {
     assert!(error.contains("missing field `settings`"), "{error}");
 }
 
+/// Returns the length, in UTF-16 code units, of what an adapter's launch of `plan` with the
+/// user's command line `user` and `export`, if any, takes of the Windows command line as it is
+/// planned: the plan's arguments, those of the export, and the kernel command line.
+fn planned_units(plan: &SandboxPlan, user: &str, export: Option<&ExportPlan>) -> usize {
+    let mut arguments: Vec<OsString> = plan
+        .openvmm_arguments()
+        .unwrap()
+        .into_iter()
+        .map(OsString::from)
+        .collect();
+    arguments.extend(
+        export
+            .map(ExportPlan::openvmm_arguments)
+            .unwrap_or_default()
+            .into_iter()
+            .map(OsString::from),
+    );
+    arguments.push("--cmdline".into());
+    arguments.push(plan.kernel_command_line(user).unwrap().into());
+    let empty = std::ffi::OsStr::new("");
+    launch::process_command_line_units(empty, &arguments)
+        - launch::process_command_line_units(empty, &[])
+}
+
+#[test]
+fn adapter_launches_are_planned_with_room_for_the_rest_of_the_launch() {
+    use crate::host::launch::PROCESS_COMMAND_LINE_LIMIT;
+
+    let adapter = SandboxPlan::adapter(
+        SandboxDistro::new("/images/distro.img", RootImage::gpt(Some(uuid(GPT_GUID)))),
+        SandboxUpper::scratch("/sandboxes/one/scratch.ext4"),
+    )
+    .with_network(Some(proxy_network(Some(ProxyScheme::Http))));
+    let user = "nvx_sandbox=1";
+    adapter.check_adapter_launch(user, None).unwrap();
+    adapter
+        .check_adapter_launch(user, Some(&shares(false)))
+        .unwrap();
+    // An export whose hidden paths take what the reserve leaves the plan, exactly, and then one
+    // code unit more.
+    let hiding = |extra: usize| {
+        let mut export = shares(true);
+        let child = &mut export.children[0];
+        child.denied = (0..100)
+            .map(|index| format!("/host/work/{index:03}-{}", "d".repeat(240)).into())
+            .collect();
+        child
+            .denied
+            .push(format!("/host/work/last{}", "d".repeat(extra)).into());
+        child.denied_identities = vec![None; child.denied.len()];
+        export
+    };
+    let room = PROCESS_COMMAND_LINE_LIMIT - VmmLaunch::RESERVE;
+    let slack = room - planned_units(&adapter, user, Some(&hiding(0)));
+    let fitting = hiding(slack);
+    assert_eq!(planned_units(&adapter, user, Some(&fitting)), room);
+    adapter.check_adapter_launch(user, Some(&fitting)).unwrap();
+    let error = adapter
+        .check_adapter_launch(user, Some(&hiding(slack + 1)))
+        .unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::Unsupported);
+    let message = error.to_string();
+    assert!(
+        message.contains(&format!("would take {}", room + 1)),
+        "{message}"
+    );
+    assert!(
+        message.contains("with 2048 held in reserve for the rest of the launch"),
+        "{message}"
+    );
+    // The plan of NVX's sandbox profile is not an adapter's, and a kernel command line that the
+    // plan refuses fails the check as it fails the plan.
+    let profile = plan(images()[0], SandboxUpper::RAM, SandboxSettings::default());
+    let (kind, refused) = {
+        let error = profile.check_adapter_launch(user, None).unwrap_err();
+        (error.kind(), error.to_string())
+    };
+    assert_eq!(kind, ErrorKind::Unsupported);
+    assert!(refused.contains("NVX's sandbox profile"), "{refused}");
+    let error = adapter.check_adapter_launch("quiet\0", None).unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::Unsupported);
+    assert!(error.to_string().contains("NUL"), "{error}");
+}
+
 #[test]
 fn persisted_plans_that_break_the_form_or_the_checks_are_refused() {
     let (_, form) = persisted();

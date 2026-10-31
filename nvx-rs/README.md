@@ -413,6 +413,12 @@ every host, with the reserve that its caller keeps.
 provisions an instance, keeps 1024 code units for what may change before the
 instance starts, whose own check keeps none.
 
+`VmmLaunch::RESERVE`, 2048 code units, is what the planning of an adapter's
+launch keeps for the rest of the launch: the executable and the arguments that
+`VmmLaunch::arguments` renders besides the kernel command line, with paths of up
+to 260 code units, Windows' `MAX_PATH`, and the longer names by which a
+prepared launch gives OpenVMM the checked files of the plan's block devices.
+
 `kernel_parameters_problem` checks the extra kernel parameters as the guest's
 kernel reads them, with `nvx::protocol::cmdline`: trimmed, split at every byte
 that the kernel takes for whitespace, including the 0xa0 that ends the UTF-8
@@ -976,6 +982,11 @@ renders them as boot tokens.
 
 An adapter's plan renders the caller's tokens before those of its root, and
 refuses tokens that its root or OpenVMM's shares own.
+`SandboxPlan::check_adapter_launch` checks, as an adapter plans its launch, that
+the plan's arguments, those that export the adapter's shares, and the kernel
+command line leave `nvx::host::launch::VmmLaunch::RESERVE` of the limit of a
+Windows command line to the rest of the launch, so that planning refuses a plan
+whose network rules or mapped, hidden, or allowed paths leave it too little.
 
 `mount`: `SandboxMount` requests of live shares of host directories and files,
 their guest targets and the reserved ones, their access policies and owner, and

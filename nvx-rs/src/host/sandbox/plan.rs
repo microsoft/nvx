@@ -35,10 +35,12 @@
 //! one-shot lifecycle still renders them as boot tokens, from which the guest's shell binds them,
 //! as [`mount::boot_shares`] does. An adapter's plan renders its root and devices alone, and lets
 //! the adapter's own boot tokens through, as
-//! [`kernel_command_line`](SandboxPlan::kernel_command_line) says. The plan's arguments name the
-//! block devices by their paths; a
-//! launch renders them through a [`PreparedLaunch`](super::PreparedLaunch), which names the files
-//! that the checks of the images opened instead.
+//! [`kernel_command_line`](SandboxPlan::kernel_command_line) says, and
+//! [`check_adapter_launch`](SandboxPlan::check_adapter_launch) checks, as the adapter plans its
+//! launch, that what the plan renders leaves the rest of the launch room on a Windows command
+//! line. The plan's arguments name the block devices by their paths; a launch renders them
+//! through a [`PreparedLaunch`](super::PreparedLaunch), which names the files that the checks of
+//! the images opened instead.
 //!
 //! A plan is persistable. Its serde form, of version [`PLAN_VERSION`], requires every field and
 //! refuses unknown ones and other versions, and reading it checks the plan as
@@ -103,6 +105,7 @@
 
 mod form;
 
+use std::ffi::OsString;
 use std::fmt;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::path::{Path, PathBuf};
@@ -117,6 +120,7 @@ use super::{
 };
 use crate::error::Result;
 use crate::host::filesystem::{ExportPlan, ReservedTargets};
+use crate::host::launch::{self, VmmLaunch};
 use crate::host::network::{self, NetworkPolicy};
 use crate::host::paths;
 use crate::protocol::root::{
@@ -672,6 +676,42 @@ impl SandboxPlan {
     /// command line; the guest must read the plan's root from it, as for the sandbox profile.
     pub fn kernel_command_line(&self, user_command_line: &str) -> Result<String> {
         self.command_line(user_command_line, Delivery::MappingTable)
+    }
+
+    /// Checks, as an adapter plans its launch, that the part of OpenVMM's command line that it
+    /// knows then leaves [`VmmLaunch::RESERVE`] of
+    /// [`PROCESS_COMMAND_LINE_LIMIT`](crate::host::launch::PROCESS_COMMAND_LINE_LIMIT) to the rest
+    /// of the launch, which
+    /// [`PreparedLaunch::adapter_arguments`](super::PreparedLaunch::adapter_arguments) renders:
+    /// the plan's [arguments](Self::openvmm_arguments), with the paths of its block devices, those
+    /// that export `export`, the export of the host paths that the adapter shares with its guest's
+    /// root, if any, and the plan's [kernel command line](Self::kernel_command_line) with
+    /// `user_command_line`. So planning refuses a plan whose network rules, or mapped, hidden, or
+    /// allowed paths, leave the rest of the launch too little, before the adapter stages or
+    /// launches anything, and the launch's complete check refuses one whose inputs are longer than
+    /// the reserve foresees.
+    ///
+    /// Fails with [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported) for the plan of NVX's
+    /// sandbox profile, which its own start launches, as
+    /// [`openvmm_arguments`](Self::openvmm_arguments) and
+    /// [`kernel_command_line`](Self::kernel_command_line) fail, and if that part takes more.
+    pub fn check_adapter_launch(
+        &self,
+        user_command_line: &str,
+        export: Option<&ExportPlan>,
+    ) -> Result<()> {
+        self.require_adapter()?;
+        let mut arguments: Vec<OsString> = self
+            .openvmm_arguments()?
+            .into_iter()
+            .map(OsString::from)
+            .collect();
+        if let Some(export) = export {
+            arguments.extend(export.openvmm_arguments().into_iter().map(OsString::from));
+        }
+        arguments.push("--cmdline".into());
+        arguments.push(self.kernel_command_line(user_command_line)?.into());
+        launch::fit_arguments(&arguments, VmmLaunch::RESERVE)
     }
 
     /// Fails with [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported) for the plan of NVX's

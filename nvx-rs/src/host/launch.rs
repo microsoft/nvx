@@ -335,6 +335,22 @@ pub struct VmmLaunch<'a> {
 }
 
 impl VmmLaunch<'_> {
+    /// The part of [`PROCESS_COMMAND_LINE_LIMIT`] that the planning of an adapter's launch keeps
+    /// for the rest of the launch, in UTF-16 code units, as
+    /// [`SandboxPlan::check_adapter_launch`](super::sandbox::SandboxPlan::check_adapter_launch)
+    /// leaves it: what the plan does not render.
+    ///
+    /// It holds the rest of a launch whose OpenVMM executable, kernel, initramfs, endpoint, and
+    /// outcome report take up to 260 code units each, Windows' `MAX_PATH`: the executable and the
+    /// arguments that [`arguments`](Self::arguments) renders besides the kernel command line, the
+    /// longest memory and hypervisor included, and the names by which a
+    /// [`PreparedLaunch`](super::sandbox::PreparedLaunch) gives OpenVMM the checked files of the
+    /// plan's two block devices, which take up to 262 code units more each than the paths of the
+    /// plan: a quoted final path of up to `MAX_PATH` behind `\\?\` in place of a path of at least
+    /// 4. A launch whose inputs are longer may still not fit, which its complete check refuses
+    /// before OpenVMM starts.
+    pub const RESERVE: usize = 2048;
+
     /// Returns the arguments that name the launch's inputs, with the kernel command line
     /// `kernel_command_line`: the VM in one process, `--single-process`, on the hypervisor,
     /// `--hypervisor`, with the memory, `--memory {memory_mib}M`, the kernel, `--kernel`, the
@@ -490,6 +506,19 @@ pub fn fit_process_command_line(
         format!(", with {reserve} held in reserve")
     };
     fit("OpenVMM's command line", length, reserve, &held)
+}
+
+/// Fails with [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported) unless OpenVMM's
+/// `arguments`, which a plan renders, without the program and the rest of the launch, leave
+/// `reserve` code units of [`PROCESS_COMMAND_LINE_LIMIT`] to that rest.
+pub(crate) fn fit_arguments(arguments: &[OsString], reserve: usize) -> Result<()> {
+    let held = format!(", with {reserve} held in reserve for the rest of the launch");
+    fit(
+        "OpenVMM's arguments",
+        arguments_units(arguments),
+        reserve,
+        &held,
+    )
 }
 
 /// Fails with [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported), saying that `subject`
@@ -772,6 +801,17 @@ mod tests {
         assert_eq!(error.kind(), ErrorKind::Unsupported);
         // A reserve past the limit leaves no room for any command line.
         assert!(fit_process_command_line(OsStr::new("o"), &[], usize::MAX).is_err());
+        // The arguments alone, which a plan renders, take what they take on the command line.
+        let alone = process_command_line_units(OsStr::new(""), &arguments)
+            - process_command_line_units(OsStr::new(""), &[]);
+        let reserve = PROCESS_COMMAND_LINE_LIMIT - alone;
+        fit_arguments(&arguments, reserve).unwrap();
+        let held = fit_arguments(&arguments, reserve + 1).unwrap_err();
+        assert!(
+            held.to_string()
+                .contains("held in reserve for the rest of the launch"),
+            "{held}"
+        );
     }
 
     #[test]
@@ -831,6 +871,45 @@ mod tests {
         let own = launch.arguments(&spec.kernel_command_line().unwrap());
         assert_eq!(managed[6..6 + own.len()], own);
         assert_eq!(managed[4..6], ["--microvm-lifecycle", "managed"]);
+    }
+
+    #[test]
+    fn the_reserve_of_a_plan_holds_the_rest_of_a_launch_of_inputs_of_max_path() {
+        // Each input of `MAX_PATH` code units, with spaces, which the command line quotes.
+        let path = |name: &str| format!("C:\\{name} {}", "x".repeat(260 - 4 - name.len()));
+        let [openvmm, kernel, initrd, endpoint, report] =
+            ["openvmm", "vmlinux", "initrd", "control", "report"].map(path);
+        for input in [&openvmm, &kernel, &initrd, &endpoint, &report] {
+            assert_eq!(input.encode_utf16().count(), 260);
+        }
+        let launch = VmmLaunch {
+            openvmm: Path::new(&openvmm),
+            hypervisor: Hypervisor::Mshv,
+            memory_mib: u32::MAX,
+            kernel: Path::new(&kernel),
+            initrd: Path::new(&initrd),
+            endpoint: &endpoint,
+            report: Path::new(&report),
+        };
+        // The plan's options count the kernel command line, whatever it is: the rest is the
+        // program and the other arguments.
+        let kernel_command_line = "nvx_sandbox=1";
+        let own = launch.arguments(kernel_command_line);
+        let cmdline: Vec<OsString> = ["--cmdline", kernel_command_line]
+            .map(OsString::from)
+            .into();
+        let rest = process_command_line_units(launch.openvmm.as_os_str(), &own)
+            - arguments_units(&cmdline);
+        // A checked file's name that takes the most more than its path in the plan: a quoted
+        // final path of `MAX_PATH` behind `\\?\`, for a path of 4.
+        let named = |path: &str| arguments_units(&[OsString::from(format!("distro:file:{path}"))]);
+        let final_path = format!(r"\\?\{}", path("distro"));
+        let growth = named(&final_path) - named(r"C:\d");
+        assert_eq!(growth, 262);
+        assert!(
+            rest + 2 * growth <= VmmLaunch::RESERVE,
+            "{rest} + 2 * {growth}"
+        );
     }
 
     #[test]
