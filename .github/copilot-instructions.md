@@ -73,8 +73,9 @@
 - The session ends 59 minutes after it starts, setup included, on 4 vCPUs. Run the
   narrowest affected check first. Rebuild OpenVMM, which takes about 5 minutes and
   4 GB, only when the `openvmm` gitlink changed or the cached binary is missing,
-  and guest artifacts only when their inputs changed. Leave `test-openvmm-unit`,
-  `test-openvmm`, `build-guest --guest all`, `verify-guest-determinism`, and
+  and guest artifacts only when their inputs changed. Leave `test-openvmm-unit`
+  and `test-openvmm` to OpenVMM's own CI, whose results NVX CI checks for the
+  pin, and `build-guest --guest all`, `verify-guest-determinism`, and
   `benchmark` to CI.
 - `nvx-rs/target/release/nvx-rs run` and `nvx-rs/target/release/nvx-rs sandbox`
   run microVMs and sandboxes. Build `nvx-rs` there, in about a minute, with

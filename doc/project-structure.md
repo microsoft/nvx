@@ -121,7 +121,7 @@ nvx/
 |   |   |-- build.py             Artifact build workflows
 |   |   |-- build_config.py      Per-invocation build configuration
 |   |   |-- build_constants.py   Grouped build pins, paths, and fixed defaults
-|   |   |-- ci.py                CI change classification, required jobs, and OpenVMM tests
+|   |   |-- ci.py                CI change classification, required jobs, and local OpenVMM test runs
 |   |   |-- collect_alpine_sources.py Alpine source collection
 |   |   |-- collect_ubuntu_sources.py Ubuntu source collection
 |   |   |-- common.py            Shared process and configuration helpers
@@ -140,6 +140,7 @@ nvx/
 |   |   |-- microvm_tests.py     NVX microVM correctness tests
 |   |   |-- nightly_ci.py        Nightly CI failure report
 |   |   |-- nvx_rs.py            Finds and builds nvx-rs, and runs it for the microVM tests
+|   |   |-- openvmm_ci.py        Check that OpenVMM's own CI passed the pinned revision
 |   |   |-- openvmm_process.py   Foreground OpenVMM process control for tests
 |   |   |-- performance.py       CI performance collection, persistence, and gates
 |   |   |-- performance_history.py Nightly persistence of the results that dev pushes recorded

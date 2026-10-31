@@ -52,6 +52,7 @@ runs:
         echo "path=${cache_tools}" >> "${GITHUB_OUTPUT}"
 
     - name: Restore OpenVMM inputs on Linux
+      id: restore-openvmm-inputs-linux
       if: runner.os != 'Windows'
       uses: actions/cache/restore@v5
       env:
@@ -65,6 +66,7 @@ runs:
           openvmm-inputs-v1-${{ runner.os }}-${{ runner.arch }}-
 
     - name: Restore OpenVMM inputs on Windows
+      id: restore-openvmm-inputs-windows
       if: runner.os == 'Windows'
       uses: actions/cache/restore@v5
       with:
@@ -192,3 +194,70 @@ runs:
           build/openvmm.provenance.json
           ${{ inputs.binary-path }}
         key: openvmm-binary-v6-${{ inputs.backend }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml') }}-${{ steps.openvmm.outputs.sha }}
+
+    # No other job builds OpenVMM, since OpenVMM's own CI runs its tests
+    # (doc/ci.md#openvmm-ci), so a dev push whose build missed the binary
+    # cache saves the inputs and the Cargo cache that the builds restore.
+    - name: Save OpenVMM inputs on Linux
+      if: >-
+        success() &&
+        github.event_name == 'push' &&
+        github.ref == 'refs/heads/dev' &&
+        runner.os != 'Windows' &&
+        steps.restore-openvmm-binary-linux.outputs.cache-hit != 'true' &&
+        steps.restore-openvmm-inputs-linux.outputs.cache-hit != 'true'
+      uses: actions/cache/save@v5
+      env:
+        PATH: ${{ steps.cache-tools-linux.outputs.path }}
+      with:
+        path: |
+          openvmm/flowey-persist/flowey_lib_common__download_gh_release
+          openvmm/flowey-persist/flowey_lib_common__cache
+        key: openvmm-inputs-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.openvmm.outputs.sha }}
+
+    - name: Save OpenVMM inputs on Windows
+      if: >-
+        success() &&
+        github.event_name == 'push' &&
+        github.ref == 'refs/heads/dev' &&
+        runner.os == 'Windows' &&
+        steps.restore-openvmm-binary-windows.outputs.cache-hit != 'true' &&
+        steps.restore-openvmm-inputs-windows.outputs.cache-hit != 'true'
+      uses: actions/cache/save@v5
+      with:
+        path: |
+          openvmm/flowey-persist/flowey_lib_common__download_gh_release
+          openvmm/flowey-persist/flowey_lib_common__cache
+        key: openvmm-inputs-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.openvmm.outputs.sha }}
+
+    - name: Save shared Cargo cache on Linux
+      if: >-
+        success() &&
+        github.event_name == 'push' &&
+        github.ref == 'refs/heads/dev' &&
+        runner.os != 'Windows' &&
+        steps.restore-openvmm-binary-linux.outputs.cache-hit != 'true' &&
+        steps.restore-cargo-linux.outputs.cache-hit != 'true'
+      uses: actions/cache/save@v5
+      env:
+        PATH: ${{ steps.cache-tools-linux.outputs.path }}
+      with:
+        path: |
+          ${{ format('{0}/cargo-home/registry', runner.temp) }}
+          ${{ format('{0}/cargo-home/git', runner.temp) }}
+        key: openvmm-cargo-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('openvmm/Cargo.lock') }}
+
+    - name: Save shared Cargo cache on Windows
+      if: >-
+        success() &&
+        github.event_name == 'push' &&
+        github.ref == 'refs/heads/dev' &&
+        runner.os == 'Windows' &&
+        steps.restore-openvmm-binary-windows.outputs.cache-hit != 'true' &&
+        steps.restore-cargo-windows.outputs.cache-hit != 'true'
+      uses: actions/cache/save@v5
+      with:
+        path: |
+          ${{ format('{0}/cargo-home/registry', runner.temp) }}
+          ${{ format('{0}/cargo-home/git', runner.temp) }}
+        key: openvmm-cargo-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('openvmm/Cargo.lock') }}
