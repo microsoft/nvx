@@ -433,6 +433,7 @@ is authorized for the organization when it enforces single sign-on.
 | `report-nightly-ci` | Open, update, or close the report of failed nightly CI runs. |
 | `cancel-superseded-merge-groups` | Cancel the CI runs of the merge groups that the merge queue replaced. |
 | `persist-recorded-performance` | Persist the performance results that the CI runs of `dev` pushes recorded, in `dev`'s first-parent order. |
+| `check-openvmm-ci` | Check that OpenVMM's own CI passed the pinned OpenVMM revision. |
 | `check-static-elf` | Check that executables are static ELF files without an interpreter or an executable stack. |
 | `test-openvmm-unit` | Run the OpenVMM workspace unit and documentation tests. |
 | `build-openvmm-tests` | Build OpenVMM Petri VMM tests without running them. |
@@ -744,6 +745,37 @@ with each run, `--summary` writes the outcome to a Markdown file, and
 `--message` writes the message of the commit of the persisted results to a
 file, when the command persisted any. It exits with status 1 when it refused a
 run's results or stopped, after persisting the others.
+
+### `check-openvmm-ci`
+
+```text
+python3 scripts/nvx.py check-openvmm-ci
+    [--revision SHA]
+    [--wait-minutes MINUTES]
+    [--summary PATH]
+```
+
+Checks that OpenVMM's own CI passed the OpenVMM revision that the checkout's
+index pins, or the full commit SHA that `--revision` names.
+It reads the runs of the OpenVMM PR
+and OpenVMM CI workflows of `microsoft/openvmm` whose head is the revision,
+with the latest attempt of each of their jobs, and requires each job that
+covers NVX's use of OpenVMM, the x86-64 Linux and Windows unit tests and the
+VMM tests on KVM, MSHV, and Windows, to have passed in at least one of those
+runs. It ignores the runs of a pull request from a fork, which run the fork's
+copy of the workflows, and the workflows' other jobs. A job is pending while a
+run that has not finished may still pass it, failed when every run that ran it
+finished it without passing, and missing when no run will run it. With
+`--wait-minutes`, the command looks again every five minutes while a job is
+pending and none failed or is missing, for at most that long; by default it
+looks once. While it may still wait, it also looks again, with a GitHub
+warning, after a look that failed, as when GitHub's API is briefly unavailable,
+but a third failure in a row ends it. It prints each job's verdict with the job
+that decided it, appends the verdicts as a table to the Markdown file that
+`--summary` names, such as `$GITHUB_STEP_SUMMARY`, and fails, with a GitHub
+error for each, unless every job passed. It reads a token from `GH_TOKEN` or
+`GITHUB_TOKEN` when one is set; the repository is public, so it needs none, but
+GitHub allows fewer requests without one.
 
 ### `check-static-elf`
 

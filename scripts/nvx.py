@@ -99,6 +99,7 @@ from nvx_tools.microvm_tests import (
     configure_shard_parser as configure_microvm_shard_parser,
 )
 from nvx_tools.nightly_ci import configure_parser as configure_nightly_ci_parser
+from nvx_tools.openvmm_ci import configure_parser as configure_openvmm_ci_parser
 from nvx_tools.openvmm_test_shards import (
     configure_parser as configure_openvmm_test_shard_parser,
 )
@@ -759,6 +760,12 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help="persist the performance results that the CI runs of dev pushes recorded",
     )
     configure_performance_history_parser(recorded_performance)
+
+    openvmm_ci = subparsers.add_parser(
+        "check-openvmm-ci",
+        help="check that OpenVMM's own CI passed the pinned OpenVMM revision",
+    )
+    configure_openvmm_ci_parser(openvmm_ci)
 
     static_elf = subparsers.add_parser(
         "check-static-elf",
