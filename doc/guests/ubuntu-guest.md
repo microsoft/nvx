@@ -42,7 +42,8 @@ what Ubuntu userland needs on this machine:
   sandbox uses.
 
 Its [patches](../../kernel/patches) add the xe9 early and interactive consoles
-and the shared virtio-mmio interrupt status. The
+and the shared virtio-mmio interrupt status, and keep the HVC console from
+losing input that its interrupt and its polling thread read concurrently. The
 [kernel configuration](../../kernel/config-microvm) omits PCI, user
 namespaces, fanotify, and SquashFS. It enables module support only so that
 strict module memory protection keeps runtime code read-only; NVX ships no

@@ -1,0 +1,47 @@
+From: NVX maintainers
+Subject: [PATCH] tty: hvc: push the flip buffer under hp->lock
+
+__hvc_poll() reads characters from the backend and inserts them into the
+tty flip buffer under hp->lock, but pushes the flip buffer only after it
+releases the lock. A backend that both interrupts and is polled by khvcd,
+such as virtio-console, has two producers of the same flip buffer: the
+hvc_poll() of its interrupt handler, and khvcd. The push commits the fill
+of the tail buffer (tail->commit = tail->used). Pushed after the unlock,
+one producer can commit a stale fill after the other one filled the same
+tail further, committed it, and linked a new tail. flush_to_ldisc() then
+takes the tail as read up to its stale commit and frees it, dropping the
+characters past that commit: whole N_INBUF reads, up to a flip buffer of
+input, lost without a trace. A reader that waits for a byte count, such as
+a framed protocol on the tty, then waits forever.
+
+Push the flip buffer before releasing hp->lock, which serializes the
+producers. tty_flip_buffer_push() may be called in atomic context.
+
+--- a/drivers/tty/hvc/hvc_console.c
++++ b/drivers/tty/hvc/hvc_console.c
+@@ -745,15 +745,23 @@
+ 		tty_wakeup(tty);
+ 	}
+  bail:
+-	spin_unlock_irqrestore(&hp->lock, flags);
+-
+ 	if (read_total) {
+ 		/* Activity is occurring, so reset the polling backoff value to
+ 		   a minimum for performance. */
+ 		timeout = MIN_TIMEOUT;
+ 
++		/*
++		 * Push while hp->lock still serializes this poll with the other
++		 * producer of the flip buffer, the console's interrupt or khvcd.
++		 * The push commits the tail's fill. Pushed after the unlock, a
++		 * stale fill can be committed after the other producer filled the
++		 * tail further, committed it, and linked a new tail, and
++		 * flush_to_ldisc() then frees the tail without the characters
++		 * past the stale commit.
++		 */
+ 		tty_flip_buffer_push(&hp->port);
+ 	}
++	spin_unlock_irqrestore(&hp->lock, flags);
+ 	tty_kref_put(tty);
+ 
+ 	return poll_mask;
