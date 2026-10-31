@@ -243,6 +243,28 @@ forward whose host port another socket holds, the option on a platform
 snapshot captured with plain deny-all egress, which leaves host loopback
 allowed, and the option on a cold boot, and no restore may change the
 template.
+The `untiered-network-policy` scenario covers a NIC template without a tier, a
+snapshot without sandbox blocks, as the non-sandbox mode captures one, whose
+NIC was captured with the complete deny-all policy. It restores the template
+with `--restore-network-policy` four times: under the template's own deny-all,
+under egress rules that admit DNS over IPv4 and one host service, with
+explicit host loopback and a forward under egress rules that admit DNS over
+IPv6 alone, and with private-network ingress and allowed egress. The
+template's guest learned no DNS server and runs no announcer of its listeners,
+so each restore's repair applies those of the restore's policy, which restore
+packet version 6 carries, before it acknowledges the restore: the guest's
+resolver must name exactly the policy's DNS server, and no gateway without
+one, and the announcer must run exactly when the policy publishes the guest's
+listeners. Each restore must reach through its gateway exactly the
+host-loopback services that its policy admits, which must receive no other
+request, and the host must reach the guest's server through the forward and
+through the port that the policy publishes: on host loopback alone, which no
+other host address reaches, or to the host's private networks, through a host
+address other than loopback. It must find the server on no host loopback port
+without a publication. Before the guest runs, OpenVMM must refuse a restore
+that keeps the template's policy but passes another, and one that passes
+private-network ingress without the option, and no restore may change the
+template.
 The `platform-filesystem` scenario covers a share that a platform restore
 attaches to the filesystem slot that the capture left dormant, as a clone's
 export does. It captures a platform snapshot without `--mount` and restores it
@@ -695,7 +717,7 @@ compares the submodule's control-session protocol vectors, and the lines of its
 platform allowlist of kernel command-line tokens, with the copies that the
 protocol and template tests read in the `nvx-rs` job, which cannot check out
 OpenVMM, and the versions of OpenVMM's snapshot format, saved-state schema,
-time ABI, and restore packet with those of `nvx::contract`;
+time ABI, and restore packets with those of `nvx::contract`;
 see [OpenVMM's vectors](../nvx-rs/tests/vectors/README.md#openvmms-vectors).
 The ignored test `tests/openvmm_cpu_profiles.rs` likewise compares the
 submodule's built-in CPU profiles with the copy of their identities from which

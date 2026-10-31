@@ -181,6 +181,16 @@ fn test_packet(arguments: &[&[u8]], out: &mut dyn Write) -> Result<(), CommandEr
     for (start, length) in packet.ranges {
         let _ = write!(out, " range={start}:{length}");
     }
+    if let Some(network) = packet.network {
+        let dns_server = network
+            .dns_server()
+            .map_or_else(|| "-".to_owned(), |server| server.to_string());
+        let _ = write!(
+            out,
+            " dns={dns_server} announce={}",
+            u8::from(network.announces_listeners())
+        );
+    }
     let _ = writeln!(out);
     Ok(())
 }

@@ -442,7 +442,7 @@ IPv6-only, and a UDP socket on `::` unless the guest sets
 admit them to OpenVMM, for example an inbound rule for `openvmm.exe` on
 Windows. Snapshot capture rejects ingress `allow`, because the published
 listeners are live host attachments, and so does a restore, unless it
-installs a new policy on a [NIC template](#platform-nic-templates).
+installs a new policy on a [NIC template](#networked-snapshots).
 
 ### Host-loopback access
 
@@ -493,7 +493,7 @@ OpenVMM presents host peers at addresses inside the guest's network, and a
 `/30` holds only the gateway and the guest, so OpenVMM rejects explicit
 `allow` on a `/30` before it starts, as the NVX Rust API and `nvx-rs sandbox`
 do, and also at a restore that installs a new policy on a
-[NIC template](#platform-nic-templates) captured on one.
+[NIC template](#networked-snapshots) captured on one.
 
 Repeat `--host-loopback-forward tcp:HOST_PORT:GUEST_PORT` or its UDP form, at
 most 64 times, to publish further localhost ports at guest ports of your
@@ -507,7 +507,7 @@ egress policy, but the egress policy filters UDP replies, so forwarded UDP
 ports need an egress policy that lets them out. Snapshot capture rejects
 explicit `--host-loopback allow`, because its listeners are live host
 attachments, and so does a restore, unless it installs a new policy on a
-[NIC template](#platform-nic-templates).
+[NIC template](#networked-snapshots).
 
 ### Networked snapshots
 
@@ -528,14 +528,54 @@ nvx-rs/target/release/nvx-rs run \
 The restore fails unless its policy matches the captured one: the default
 egress, the same rules, whether `--network-egress-allow` and
 `--network-egress-deny` give them or a policy file compiles to them,
-`--host-loopback`, and `--network-proxy`. A restore therefore cannot change
-the policy, and, like a capture, it rejects `--network-ingress allow`, explicit
-`--host-loopback allow`, and `--host-loopback-forward`, whose published ports
-are live host attachments. The restored guest keeps the network configuration
-that its boot applied, such as its DNS server; flows from before the capture
-do not survive the restore, and new traffic opens fresh ones. A snapshot
-captured without `--net` takes no network option at restore. Only a
-[platform NIC template](#platform-nic-templates) takes a new policy at restore.
+`--host-loopback`, and `--network-proxy`. Such a restore therefore cannot
+change the policy, and, like a capture, it rejects `--network-ingress allow`,
+explicit `--host-loopback allow`, and `--host-loopback-forward`, whose
+published ports are live host attachments. The restored guest keeps the
+network configuration that its boot applied, such as its DNS server; flows
+from before the capture do not survive the restore, and new traffic opens
+fresh ones. A snapshot captured without `--net` takes no network option at
+restore.
+
+A snapshot whose NIC was captured with a complete deny-all policy,
+`--network-egress deny` and `--host-loopback deny` without egress rules,
+`--network-proxy`, or ingress, is a NIC template, whose restore may install a
+policy of its own instead: pass `--restore-network-policy` with the network
+options of the new policy, which may include `--network-ingress allow`,
+explicit `--host-loopback allow`, and forwards, for example:
+
+```bash
+nvx-rs/target/release/nvx-rs run \
+  --restore-snapshot /var/lib/nvx/template \
+  --restore-network-policy \
+  --network-profile portable \
+  --network-egress deny \
+  --network-egress-allow 10.0.0.1/32:udp:53 \
+  --network-egress-allow 0.0.0.0/0:tcp:443 \
+  --host-loopback allow \
+  --host-loopback-forward tcp:18080:8080
+```
+
+OpenVMM validates the new policy as it validates a cold boot's, binds it to
+the NIC's captured addresses, which the restored guest keeps, and installs it,
+with its forwards, before any vCPU runs; a forward whose host port is busy
+fails the restore. A restore without connectivity passes the template's own
+deny-all. The template's guest booted under the deny-all, which names no DNS
+server and starts no `nvx-ingress`, so OpenVMM hands the guest the DNS server
+of the new policy, and whether to announce its listeners, in version 6 of the
+restore packet (see
+[Restore Packet](design/5.5-restore-protocol.md#555-restore-packet)). Before
+the host releases its input, the guest's repair names that server in
+`/etc/resolv.conf` and starts `nvx-ingress`, as the guest's init does at a
+cold boot under that policy; a failure of either fails the restore, and so
+does a guest that reads restore packet version 5 alone. Such a snapshot may
+hold a workload that has already run, but under the deny-all that workload had
+no connectivity, so nothing in the snapshot depends on the policy, and the
+restore grants it connectivity that it never had. OpenVMM rejects the option
+for a cold boot, for a snapshot without a NIC or whose NIC was captured with
+any other policy, and for a `workload-start` or `instance-checkpoint`
+snapshot, and `nvx-rs run` rejects it without `--restore-snapshot`. A
+[platform NIC template](#platform-nic-templates) takes the option too.
 
 ### Platform NIC templates
 
@@ -565,12 +605,13 @@ to the NIC's captured addresses, which the clone keeps, and installs it, with
 its forwards, before any vCPU runs; a forward whose host port is busy fails
 the restore. A clone without connectivity passes the template's own deny-all.
 The guest keeps its captured kernel command line, which under a deny-all
-policy names no DNS server and starts no `nvx-ingress`, so it learns its DNS
-server and whether to report its listeners from its host after the restore.
-OpenVMM rejects the option for a cold boot, for a snapshot of another tier or
-without a NIC, and for a NIC captured with any other policy, and every other
-[networked restore](#networked-snapshots) requires the captured policy.
-`nvx-rs run` does not pass the option.
+policy names no DNS server and starts no `nvx-ingress`, so a clone learns its
+DNS server and whether to report its listeners from its activation after the
+restore, and its restore packet stays version 5. OpenVMM rejects the option
+for a cold boot, for a `workload-start` or `instance-checkpoint` snapshot or
+one without a NIC, and for a NIC captured with any other policy, and every
+restore without it requires the captured policy, as
+[Networked snapshots](#networked-snapshots) describes.
 
 ### Platform filesystem exports
 

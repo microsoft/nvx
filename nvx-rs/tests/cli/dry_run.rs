@@ -997,6 +997,37 @@ fn run_dry_runs() -> Vec<DryRun> {
                 .with("--network-egress-deny", COMPILED_DENY),
         )
         .with_file("policy.json", POLICY),
+        // With `--restore-network-policy`, a restore installs the policy of its network options
+        // in place of a NIC template's deny-all, ingress, explicit host loopback, and forwards
+        // included, which OpenVMM admits only with the option.
+        dry_run(
+            "run: restore that replaces the network policy",
+            run(&[
+                "--restore-snapshot",
+                "{root/snapshot}",
+                "--restore-network-policy",
+                "--network-profile",
+                "portable",
+                "--network-egress",
+                "deny",
+                "--network-egress-allow",
+                "10.0.0.1/32:udp:53",
+                "--network-ingress",
+                "allow",
+                "--host-loopback",
+                "allow",
+                "--host-loopback-forward",
+                "tcp:8080:80",
+            ]),
+            restore()
+                .flag("--restore-network-policy")
+                .with("--network-profile", ["portable"])
+                .with("--network-egress", ["deny"])
+                .with("--network-egress-allow", ["10.0.0.1/32:udp:53"])
+                .with("--network-ingress", ["allow"])
+                .with("--host-loopback", ["allow"])
+                .with("--host-loopback-forward", ["tcp:8080:80"]),
+        ),
         dry_run(
             "run: host loopback forward",
             run(&["--host-loopback-forward", "tcp:8080:80"]),

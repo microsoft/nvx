@@ -193,7 +193,7 @@ pub(super) fn run_inherited(gateway: &CStr) -> Result<(), Error> {
 /// Parses `text` as the C program's `inet_pton(AF_INET, ...)` did: as four decimal octets of at
 /// most three digits each, without leading zeros, which is the form that the standard library
 /// accepts.
-fn parse_gateway(text: &CStr) -> Option<Ipv4Addr> {
+pub(super) fn parse_gateway(text: &CStr) -> Option<Ipv4Addr> {
     text.to_str().ok()?.parse().ok()
 }
 

@@ -1071,7 +1071,10 @@ fn parse(program: &str, arguments: &[String]) -> Result<Options, String> {
     let mut iterator = arguments.iter();
     while let Some(argument) = iterator.next() {
         let name = argument.as_str();
-        if name == "--single-process" || name == "--microvm-control-auth-stdin" {
+        if name == "--single-process"
+            || name == "--microvm-control-auth-stdin"
+            || (run && name == "--restore-network-policy")
+        {
             flags.insert(name);
         } else if VALUED.contains(&name)
             || ((run || capture) && RUN_VALUED.contains(&name))
@@ -1382,6 +1385,28 @@ fn parse(program: &str, arguments: &[String]) -> Result<Options, String> {
     }
     if !net && restore.is_none() && values.contains_key("--network-profile") {
         return Err("--network-profile portable requires --net or --restore-snapshot".to_owned());
+    }
+    // A restore installs a policy of its own, which may publish the guest's listeners and forward
+    // host ports, only with `--restore-network-policy`, which OpenVMM admits for a NIC template;
+    // every other restore keeps the snapshot's policy, which never has them. A forward requires
+    // explicit host loopback, which such a restore refuses first, as OpenVMM does.
+    let replaces_policy = flags.contains("--restore-network-policy");
+    if replaces_policy && restore.is_none() {
+        return Err("--restore-network-policy requires --restore-snapshot".to_owned());
+    }
+    if restore.is_some() && !replaces_policy {
+        let allow = |name: &str| values.get(name).map(Vec::as_slice) == Some(&["allow"][..]);
+        for (refused, option) in [
+            (allow("--host-loopback"), "--host-loopback allow"),
+            (allow("--network-ingress"), "--network-ingress allow"),
+        ] {
+            if refused {
+                return Err(format!(
+                    "microVM snapshots do not support {option}, whose published guest listeners \
+                     are live host attachments, except at a restore with --restore-network-policy"
+                ));
+            }
+        }
     }
     let knob = |name: &str| {
         tokens
@@ -2814,6 +2839,27 @@ mod tests {
         assert_eq!(options.network.mode, "rules");
         assert_eq!(options.network.allow, 1);
         assert_eq!(options.network.host_loopback, "deny");
+        // A restore that replaces the policy of a NIC template may publish the guest's listeners
+        // and forward host ports.
+        let replaced = run_with(&[
+            "--restore-snapshot",
+            "{dir}/snapshot",
+            "--restore-network-policy",
+            "--network-profile",
+            "portable",
+            "--network-egress",
+            "allow",
+            "--network-ingress",
+            "allow",
+            "--host-loopback",
+            "allow",
+            "--host-loopback-forward",
+            "tcp:3000:8080",
+        ]);
+        let (_temporary, options) = parse_run(&replaced);
+        let options = options.unwrap();
+        assert_eq!(options.network.mode, "allow-all");
+        assert_eq!(options.network.host_loopback, "allow");
     }
 
     #[test]
@@ -2861,6 +2907,34 @@ mod tests {
             (
                 boot(&["--network-profile", "portable"]),
                 "--network-profile portable requires --net or --restore-snapshot",
+            ),
+            (
+                boot(&["--restore-network-policy"]),
+                "--restore-network-policy requires --restore-snapshot",
+            ),
+            (
+                restore(&[
+                    "--network-profile",
+                    "portable",
+                    "--network-ingress",
+                    "allow",
+                ]),
+                "microVM snapshots do not support --network-ingress allow, whose published guest \
+                 listeners are live host attachments, except at a restore with \
+                 --restore-network-policy",
+            ),
+            (
+                restore(&[
+                    "--network-profile",
+                    "portable",
+                    "--host-loopback",
+                    "allow",
+                    "--host-loopback-forward",
+                    "tcp:3000:8080",
+                ]),
+                "microVM snapshots do not support --host-loopback allow, whose published guest \
+                 listeners are live host attachments, except at a restore with \
+                 --restore-network-policy",
             ),
             (
                 boot(&["--restore-processors", "2"]),

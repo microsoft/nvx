@@ -221,8 +221,9 @@ fn capture_request(arguments: &[&[u8]]) -> Option<CaptureRequest> {
 
 /// Requests a capture, and repairs a restore, which it prints: `0` when the VM continued, or
 /// `1` or `2`, for a restore that it left unfinished or finished, then the restore packet's
-/// flags, online VP count, range count, and new generation ID, and each range's start and
-/// length.
+/// flags, online VP count, range count, and new generation ID, the DNS server of its network
+/// settings, or `-` for none, `1` if they ask the guest to announce its listeners, or else `0`,
+/// and each range's start and length.
 fn cmd_capture(
     abi: TimeAbi,
     arguments: &[&[u8]],
@@ -241,13 +242,19 @@ fn cmd_capture(
         Ok(CaptureOutcome::Restored(restore)) => restore,
         Err(error) => return Err(time_failure(err, error)),
     };
+    let network = restore.network();
+    let dns_server = network
+        .and_then(|network| network.dns_server())
+        .map_or_else(|| "-".to_owned(), |server| server.to_string());
     let mut line = format!(
-        "{} {} {} {} {}",
+        "{} {} {} {} {} {} {}",
         if restore.finished() { 2 } else { 1 },
         restore.flags(),
         restore.online_vp_count(),
         restore.memory_ranges().len(),
-        restore.generation_id()
+        restore.generation_id(),
+        dns_server,
+        u8::from(network.is_some_and(|network| network.announces_listeners())),
     );
     for range in restore.memory_ranges() {
         let _ = write!(line, " {} {}", range.start(), range.length());

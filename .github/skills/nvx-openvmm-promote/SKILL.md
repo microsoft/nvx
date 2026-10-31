@@ -92,7 +92,7 @@ git diff --check
 `nvx-rs` reads copies of what it needs from OpenVMM, because the `nvx-rs` CI job cannot
 check out the submodule: the control-session protocol vectors, excerpts of OpenVMM's
 sources, and, in `nvx::contract`, the versions of OpenVMM's snapshot format, saved-state
-schema, time ABI, and restore packet. Compare them with the revision's, as the NVX CLI
+schema, time ABI, and restore packets. Compare them with the revision's, as the NVX CLI
 jobs do:
 
 ```console

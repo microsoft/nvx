@@ -141,6 +141,7 @@ MICROVM_TEST_SCENARIOS = (
     "structured-outcome",
     "time-abi-conformance",
     "time-host-correction",
+    "untiered-network-policy",
     "virtio-net",
     "workload-identity",
 )
@@ -399,6 +400,41 @@ PLATFORM_NETWORK_NOT_TEMPLATE_REJECTION = b"is not a complete deny-all"
 PLATFORM_NETWORK_GUEST_MARKERS = (
     PLATFORM_POST_RESTORE_MARKER,
     PLATFORM_NETWORK_LISTENING_MARKER,
+    RESTORE_MARKER,
+)
+# A NIC template without a tier is a snapshot without sandbox blocks whose NIC
+# was captured with the complete deny-all policy. Each restore installs a
+# policy of its own, and its guest's repair applies the DNS server and the
+# listener announcement of that policy, which the restore packet carries.
+UNTIERED_POST_RESTORE_MARKER = b"NVX-POST-RESTORE-OK: tier=legacy"
+UNTIERED_NETWORK_FAILURE_MARKER = b"NVX-UNTIERED-NETWORK-FAIL"
+UNTIERED_NETWORK_LISTENING_MARKER = b"NVX-UNTIERED-NETWORK-LISTENING"
+UNTIERED_NETWORK_CHECKED = b"NVX-UNTIERED-NETWORK-CHECKED"
+UNTIERED_NETWORK_REPORT_PREFIX = b"NVX-UNTIERED-NETWORK-REPORT "
+UNTIERED_NETWORK_INBOUND_PREFIX = b"NVX-UNTIERED-NETWORK-INBOUND "
+# The template's NIC is on the directional network, whose documentation range
+# no host address shares: an ingress listener refuses peers inside the guest's
+# own subnets, so a host address there would not reach the port that
+# private-network ingress publishes.
+UNTIERED_NETWORK_CIDR = DIRECTIONAL_NETWORK_CIDR
+UNTIERED_NETWORK_GATEWAY_IPV4 = DIRECTIONAL_NETWORK_GATEWAY_IPV4
+# The gateway's IPv6 address, which a policy that admits DNS over IPv6 alone
+# names as the guest's DNS server.
+UNTIERED_NETWORK_GATEWAY_IPV6 = DIRECTIONAL_NETWORK_GATEWAY_IPV6
+# The most clients that the guest's server answers, as many as a restore's
+# host reaches it through: its forward and its published port.
+UNTIERED_NETWORK_MAX_CLIENTS = 2
+# The restores of the NIC template that OpenVMM refuses before the guest runs,
+# and why.
+UNTIERED_NETWORK_REJECTED = (
+    ("kept-policy", b"restore-time egress policy does not match the snapshot"),
+    ("ingress", b"microVM snapshots do not support --network-ingress allow"),
+)
+# Lines that only a restored guest prints, so that a refused restore prints
+# none of them.
+UNTIERED_NETWORK_GUEST_MARKERS = (
+    UNTIERED_POST_RESTORE_MARKER,
+    UNTIERED_NETWORK_LISTENING_MARKER,
     RESTORE_MARKER,
 )
 # A platform restore attaches a host directory to the filesystem slot that the
@@ -6593,6 +6629,451 @@ def run_platform_network_policy(
             raise RuntimeError("a refused restore reached a host service")
 
 
+def untiered_network_policy_script(
+    *, allowed_port: int, other_port: int, guest_port: int
+) -> str:
+    """Return the checks that each restore of the NIC template without a tier
+    runs: it reports the nameservers of its resolver, whether the announcer of
+    its listeners runs, and whether it reaches the host services at
+    ``allowed_port`` and ``other_port`` of the gateway, then serves the host at
+    ``guest_port`` until the host releases it."""
+    return _render_script(
+        "untiered-network-policy.sh.in",
+        GATEWAY_IPV4=UNTIERED_NETWORK_GATEWAY_IPV4,
+        ALLOWED_PORT=str(allowed_port),
+        OTHER_PORT=str(other_port),
+        GUEST_PORT=str(guest_port),
+        MAX_CLIENTS=str(UNTIERED_NETWORK_MAX_CLIENTS),
+        PROBE_TIMEOUT=str(PLATFORM_NETWORK_PROBE_TIMEOUT_SECONDS),
+    )
+
+
+@dataclass(frozen=True)
+class UntieredNetworkRestore:
+    """A restore of the NIC template without a tier: the policy that it
+    installs; the DNS server that its guest learns from the restore packet;
+    whether its guest reaches the allowed and the other host service; and how
+    the host reaches the guest's server: through a forward, and through the
+    port that the policy publishes on host loopback, ``host-loopback``, or to
+    the host's private networks, ``private-networks``, for which the guest
+    announces its listeners."""
+
+    name: str
+    policy: tuple[str, ...]
+    dns_server: str | None
+    allowed: bool
+    other: bool
+    forward: bool
+    publication: str | None
+
+    @property
+    def announces(self) -> bool:
+        """Return whether the guest announces its listeners: whether the
+        policy publishes them."""
+        return self.publication is not None
+
+    @property
+    def network_settings(self) -> bool:
+        """Return whether the guest's repair applies network settings, after
+        which it reports the restore's completion."""
+        return self.dns_server is not None or self.announces
+
+    @property
+    def exchanges(self) -> int:
+        """Return how many lines the host exchanges with the guest's server:
+        one through the forward, and one through the published port."""
+        return int(self.forward) + int(self.announces)
+
+
+def untiered_network_restores(
+    *, allowed_port: int, host_port: int, guest_port: int
+) -> tuple[UntieredNetworkRestore, ...]:
+    """Return the restores of the NIC template without a tier: one under the
+    template's own deny-all, which names no DNS server and publishes nothing;
+    egress rules that admit DNS over IPv4 and the allowed service; explicit
+    host loopback with a forward from ``host_port`` to ``guest_port``, under
+    egress rules that admit DNS over IPv6 alone; and private-network ingress
+    with allowed egress."""
+    gateway = UNTIERED_NETWORK_GATEWAY_IPV4
+    return (
+        UntieredNetworkRestore(
+            "deny-all",
+            PLATFORM_NETWORK_TEMPLATE_POLICY,
+            dns_server=None,
+            allowed=False,
+            other=False,
+            forward=False,
+            publication=None,
+        ),
+        UntieredNetworkRestore(
+            "egress-dns",
+            (
+                "--network-egress",
+                "deny",
+                "--network-egress-allow",
+                f"{gateway}/32:udp:53",
+                "--network-egress-allow",
+                f"{gateway}/32:tcp:{allowed_port}",
+            ),
+            dns_server=gateway,
+            allowed=True,
+            other=False,
+            forward=False,
+            publication=None,
+        ),
+        UntieredNetworkRestore(
+            "host-loopback",
+            (
+                "--network-egress",
+                "deny",
+                "--network-egress-allow",
+                f"{UNTIERED_NETWORK_GATEWAY_IPV6}/128:udp:53",
+                "--host-loopback",
+                "allow",
+                "--host-loopback-forward",
+                f"tcp:{host_port}:{guest_port}",
+            ),
+            dns_server=UNTIERED_NETWORK_GATEWAY_IPV6,
+            allowed=False,
+            other=False,
+            forward=True,
+            publication="host-loopback",
+        ),
+        UntieredNetworkRestore(
+            "private-ingress",
+            (
+                "--network-egress",
+                "allow",
+                "--network-ingress",
+                "allow",
+                "--host-loopback",
+                "allow",
+            ),
+            dns_server=gateway,
+            allowed=True,
+            other=True,
+            forward=False,
+            publication="private-networks",
+        ),
+    )
+
+
+def _untiered_network_report(output: bytes, context: str) -> dict[str, str]:
+    """Return the fields of the one line in ``output`` in which a restored
+    guest reported its resolver, its announcer, and its probes."""
+    reports = [
+        line
+        for line in _output_lines(output)
+        if line.startswith(UNTIERED_NETWORK_REPORT_PREFIX)
+    ]
+    if len(reports) != 1:
+        raise RuntimeError(f"{context} printed {len(reports)} network reports, not 1")
+    fields: dict[str, str] = {}
+    text = reports[0].removeprefix(UNTIERED_NETWORK_REPORT_PREFIX)
+    for field in text.decode("ascii", "replace").split():
+        key, separator, value = field.partition("=")
+        if not separator or key in fields:
+            raise RuntimeError(f"{context} printed a malformed report: {reports[0]!r}")
+        fields[key] = value
+    if set(fields) != {"resolver", "announcer", "allowed", "other"}:
+        raise RuntimeError(f"{context} printed a malformed report: {reports[0]!r}")
+    return fields
+
+
+def _check_untiered_network_report(
+    restore: UntieredNetworkRestore, report: dict[str, str], context: str
+) -> None:
+    """Check that ``report``, the guest's, has the resolver, the announcer,
+    and the probes that ``restore``'s policy gives it. Without a DNS server,
+    the resolver keeps what the guest's image names, which is no gateway."""
+    resolver = report["resolver"]
+    nameservers = [] if resolver == "none" else resolver.split(",")
+    if restore.dns_server is not None:
+        if nameservers != [restore.dns_server]:
+            raise RuntimeError(
+                f"{context}: the guest's resolver names {resolver}, not "
+                f"{restore.dns_server}"
+            )
+    elif {UNTIERED_NETWORK_GATEWAY_IPV4, UNTIERED_NETWORK_GATEWAY_IPV6}.intersection(
+        nameservers
+    ):
+        raise RuntimeError(
+            f"{context}: the guest's resolver names {resolver}, although the "
+            "policy names no DNS server"
+        )
+    expected = {
+        "announcer": "running" if restore.announces else "none",
+        "allowed": "reached" if restore.allowed else "denied",
+        "other": "reached" if restore.other else "denied",
+    }
+    for key, value in expected.items():
+        if report[key] != value:
+            raise RuntimeError(f"{context}: the guest reported {key}={report[key]}")
+
+
+def _accepts_tcp(address: str, port: int) -> bool:
+    """Return whether a TCP connection to ``address:port`` completes."""
+    try:
+        connection = socket.create_connection((address, port), timeout=1)
+    except OSError:
+        return False
+    connection.close()
+    return True
+
+
+def _untiered_network_exchanges(
+    restore: UntieredNetworkRestore,
+    *,
+    host_port: int,
+    guest_port: int,
+    timeout: float,
+) -> int:
+    """Exchange a line with the guest's server through each way that
+    ``restore``'s policy gives the host, and return how many it exchanged.
+
+    The forward binds ``host_port`` on host loopback before the guest runs. A
+    published port is ``guest_port``, which the gateway publishes once the
+    guest's announcer has announced the server: on host loopback alone, which
+    no other host address reaches, or on every host address, through one of
+    which, other than loopback, the host reaches it as a peer on its private
+    networks would. Without an announcer, nothing publishes the guest's port.
+    """
+    exchanges = 0
+    if restore.forward:
+        _host_loopback_tcp_exchange("127.0.0.1", host_port, timeout)
+        exchanges += 1
+    if restore.publication == "host-loopback":
+        _wait_until(
+            lambda: _holds_loopback(socket.AF_INET, socket.SOCK_STREAM, guest_port),
+            timeout,
+            f"guest port {guest_port} was not published on host loopback",
+        )
+        for address in _host_ipv4_addresses():
+            if _accepts_tcp(address, guest_port):
+                raise RuntimeError(
+                    f"host-loopback access published guest port {guest_port} on "
+                    f"{address}"
+                )
+        _host_loopback_tcp_exchange("127.0.0.1", guest_port, timeout)
+        exchanges += 1
+    elif restore.publication == "private-networks":
+        addresses = _host_ipv4_addresses()
+        if not addresses:
+            raise RuntimeError(
+                "the host has no known IPv4 address other than loopback, through "
+                "which to reach the port that private-network ingress publishes"
+            )
+        # A wildcard bind fails over a loopback-only listener too, so only the
+        # exchange through another address shows the port's publication to
+        # the host's private networks.
+        _wait_until(
+            lambda: _publishes(guest_port, socket.SOCK_STREAM),
+            timeout,
+            f"guest port {guest_port} was not published to the host",
+        )
+        _host_loopback_tcp_exchange(addresses[0], guest_port, timeout)
+        exchanges += 1
+    elif _holds_loopback(socket.AF_INET, socket.SOCK_STREAM, guest_port):
+        raise RuntimeError(f"guest port {guest_port} was published without ingress")
+    return exchanges
+
+
+def _run_untiered_network_restore(
+    command: list[str],
+    restore: UntieredNetworkRestore,
+    *,
+    services: tuple[_HostLoopbackService, _HostLoopbackService],
+    host_port: int,
+    guest_port: int,
+    timeout: float,
+    log_path: Path,
+) -> None:
+    """Restore the NIC template with ``command``, which installs
+    ``restore``'s policy, exchange lines with its guest's server while the
+    guest serves the host, and check what the guest reports, whether its
+    repair applied network settings, and the requests that the allowed and the
+    other host service in ``services`` received."""
+    context = f"untiered network policy restore {restore.name}"
+    try:
+        with OpenvmmProcess(command, log_path) as process:
+            process.wait_for_line(UNTIERED_NETWORK_LISTENING_MARKER, timeout)
+            exchanges = _untiered_network_exchanges(
+                restore, host_port=host_port, guest_port=guest_port, timeout=timeout
+            )
+            process.send_line(f"{UNTIERED_NETWORK_CHECKED.decode()} {exchanges}")
+            result = process.wait(timeout)
+    except Exception as error:
+        failures = [
+            line.decode("utf-8", "replace")
+            for line in _output_lines(
+                log_path.read_bytes() if log_path.is_file() else b""
+            )
+            if line.startswith(UNTIERED_NETWORK_FAILURE_MARKER)
+        ]
+        raise RuntimeError(
+            f"{context} failed{f': {failures[0]}' if failures else ''}; see {log_path}"
+        ) from error
+    if result.returncode != 0:
+        raise RuntimeError(f"{context} exited with {result.returncode}")
+    _check_untiered_network_report(
+        restore, _untiered_network_report(result.output, context), context
+    )
+    for marker in (
+        UNTIERED_NETWORK_INBOUND_PREFIX + str(restore.exchanges).encode(),
+        RESTORE_MARKER,
+    ):
+        if not contains_output_line(result.output, marker):
+            raise RuntimeError(f"{context} did not report {marker.decode()!r}")
+    # A restore without network settings to apply finishes quietly, as a plain
+    # restore without a tier does.
+    if (
+        contains_output_line(result.output, UNTIERED_POST_RESTORE_MARKER)
+        != restore.network_settings
+    ):
+        raise RuntimeError(
+            f"{context}: the guest's repair "
+            f"{'did not report' if restore.network_settings else 'reported'} "
+            f"{UNTIERED_POST_RESTORE_MARKER.decode()!r}"
+        )
+    requests = tuple(service.take_requests() for service in services)
+    expected = (int(restore.allowed), int(restore.other))
+    if requests != expected:
+        raise RuntimeError(
+            f"{context}: the allowed and other host services received "
+            f"{requests} requests, not {expected}"
+        )
+
+
+def run_untiered_network_policy(
+    executable: Path,
+    kernel: Path,
+    initrd: Path,
+    backend: str,
+    *,
+    memory_mib: int,
+    timeout: float,
+    output_dir: Path,
+) -> None:
+    """Restore one NIC template without a tier with four network policies.
+
+    The template is a snapshot without sandbox blocks, as the non-sandbox
+    mode captures one, whose NIC was captured with a complete deny-all
+    policy, so its guest learned no DNS server and announces no listeners.
+    Each restore installs another policy with ``--restore-network-policy``:
+    the template's deny-all; egress rules that admit DNS over IPv4 and one
+    host service; explicit host loopback with a forward, under egress rules
+    that admit DNS over IPv6 alone; and private-network ingress with allowed
+    egress. Each restore's guest must name the DNS server of its policy in its
+    resolver, and no gateway without one, run the announcer of its listeners
+    exactly when its policy publishes them, and reach exactly the host
+    services that its policy admits, which must receive no other request. The
+    host must reach the guest's server through the forward, and through the
+    port that the policy publishes: on host loopback alone, which no other
+    host address reaches, or to the host's private networks, through a host
+    address other than loopback. It must find the server on no host loopback
+    port without a publication. OpenVMM must refuse, before the guest runs, a
+    restore that keeps the template's policy but passes another, and one that
+    passes private-network ingress without the option. No restore may change
+    the template.
+    """
+    with ExitStack() as stack:
+        services = (
+            _HostLoopbackService("allowed", timeout),
+            _HostLoopbackService("other", timeout),
+        )
+        for service in services:
+            stack.callback(service.close)
+        allowed, other = services
+        guest_port = _host_loopback_publication_port()
+        _, host_port = _available_tcp_address()
+        while host_port == guest_port:
+            _, host_port = _available_tcp_address()
+        restores = untiered_network_restores(
+            allowed_port=allowed.port, host_port=host_port, guest_port=guest_port
+        )
+        root = Path(
+            stack.enter_context(
+                tempfile.TemporaryDirectory(prefix="nvx-untiered-network-policy-")
+            )
+        )
+        template = root / "template"
+        capture_snapshot(
+            [
+                *workload_boot_command(
+                    executable,
+                    backend,
+                    kernel,
+                    initrd,
+                    memory_mib,
+                    "",
+                    network=UNTIERED_NETWORK_CIDR,
+                ),
+                *PLATFORM_NETWORK_TEMPLATE_POLICY,
+                "--snapshot-destination",
+                str(template),
+            ],
+            template,
+            timeout=timeout,
+            processors=1,
+            post_restore_script=untiered_network_policy_script(
+                allowed_port=allowed.port,
+                other_port=other.port,
+                guest_port=guest_port,
+            ),
+            log_path=output_dir / "untiered-network-policy-capture.log",
+        )
+        fingerprint = _snapshot_fingerprint(template)
+
+        def restore_command(*arguments: str) -> list[str]:
+            return [
+                *snapshot_restore_command(
+                    executable, backend, template, network_profile="portable"
+                ),
+                *arguments,
+            ]
+
+        def check_template(context: str) -> None:
+            if _snapshot_fingerprint(template) != fingerprint:
+                raise RuntimeError(f"{context} modified the NIC template")
+            errors = [error for service in services for error in service.errors]
+            if errors:
+                raise RuntimeError(f"a host service failed by {context}") from errors[0]
+
+        check_template("the capture")
+        # The template's guest probed nothing before its capture.
+        if any(service.take_requests() for service in services):
+            raise RuntimeError("the NIC template's capture reached a host service")
+        for restore in restores:
+            _run_untiered_network_restore(
+                restore_command("--restore-network-policy", *restore.policy),
+                restore,
+                services=services,
+                host_port=host_port,
+                guest_port=guest_port,
+                timeout=timeout,
+                log_path=output_dir / f"untiered-network-policy-{restore.name}.log",
+            )
+            check_template(f"restore {restore.name}")
+
+        rejected_commands = {
+            "kept-policy": restore_command("--network-egress", "allow"),
+            "ingress": restore_command(
+                *PLATFORM_NETWORK_TEMPLATE_POLICY, "--network-ingress", "allow"
+            ),
+        }
+        for name, reason in UNTIERED_NETWORK_REJECTED:
+            _expect_process_failure(
+                rejected_commands[name],
+                output_dir / f"untiered-network-policy-rejected-{name}.log",
+                timeout,
+                reason,
+                forbidden_markers=UNTIERED_NETWORK_GUEST_MARKERS,
+            )
+        check_template("a refused restore")
+        if any(service.take_requests() for service in services):
+            raise RuntimeError("a refused restore reached a host service")
+
+
 def run_platform_filesystem(
     executable: Path,
     kernel: Path,
@@ -10057,6 +10538,21 @@ def _run_scenarios(
             f"OpenVMM/{args.backend}",
         )
         run_platform_network_policy(
+            executable,
+            kernel,
+            initrd,
+            args.backend,
+            memory_mib=args.memory_mib,
+            timeout=args.timeout,
+            output_dir=output_dir,
+        )
+    if "untiered-network-policy" in scenarios:
+        report.start(
+            "untiered-network-policy",
+            "Running microVM untiered-snapshot network policy replacement on "
+            f"OpenVMM/{args.backend}",
+        )
+        run_untiered_network_policy(
             executable,
             kernel,
             initrd,

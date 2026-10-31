@@ -1,8 +1,10 @@
 //! Pure decoders, parsers, and arithmetic of the guest time ABI.
 
 use std::fmt::{self, Display, Write as _};
+use std::net::IpAddr;
 use std::ops::RangeInclusive;
 
+use super::api::RestoreNetwork;
 use super::cpu_mask::CpuMask;
 use super::events::ViolationCode;
 use super::state::HostClockStatus;
@@ -39,6 +41,28 @@ const PACKET_VERSION: u8 = {
     assert!(version <= u8::MAX as u64);
     version as u8
 };
+/// The version of a restore packet that carries network settings,
+/// [`RESTORE_PACKET_NETWORK_VERSION`](crate::contract::RESTORE_PACKET_NETWORK_VERSION):
+/// [`PACKET_VERSION`]'s packet, whose reserved byte is the network byte, and whose DNS server
+/// follows the entropy.
+const PACKET_NETWORK_VERSION: u8 = {
+    let version = crate::contract::RESTORE_PACKET_NETWORK_VERSION;
+    assert!(version <= u8::MAX as u64);
+    version as u8
+};
+/// The bits of the network byte that give the DNS server's address family.
+const PACKET_DNS_MASK: u8 = 0x03;
+/// The network byte's DNS server family of an IPv4 server.
+const PACKET_DNS_IPV4: u8 = 0x01;
+/// The network byte's DNS server family of an IPv6 server.
+const PACKET_DNS_IPV6: u8 = 0x02;
+/// The network byte's bit that asks the guest to announce its listeners.
+const PACKET_ANNOUNCE_LISTENERS: u8 = 0x04;
+/// Mask of the network byte's bits that version six defines.
+const PACKET_NETWORK_KNOWN: u8 = PACKET_DNS_MASK | PACKET_ANNOUNCE_LISTENERS;
+/// Encoded length of the DNS server of a packet that carries network settings: an IPv6 address,
+/// or an IPv4 address and twelve zero bytes.
+pub(crate) const PACKET_DNS_SIZE: usize = 16;
 /// Restore flag indicating that the downtime came from the host's UTC clock.
 const PACKET_DOWNTIME_UTC: u8 = 0x01;
 /// Restore flag indicating that memory ranges follow.
@@ -151,7 +175,7 @@ pub(crate) enum PacketError {
     IncompleteHeader,
     /// The magic number is not `OVR`.
     Magic([u8; 3]),
-    /// The version is not the time ABI's.
+    /// The version is neither [`PACKET_VERSION`] nor [`PACKET_NETWORK_VERSION`].
     Version(u8),
     /// The flags set reserved bits.
     ReservedFlags(u8),
@@ -159,18 +183,25 @@ pub(crate) enum PacketError {
     OnlineVpCount(u8),
     /// Memory ranges follow, but the flags select no memory target.
     RangesWithoutTarget(u8),
-    /// The reserved byte is not zero.
+    /// The reserved byte of a packet without network settings is not zero.
     ReservedByte(u8),
+    /// The network byte sets reserved bits, or names no DNS server family that version six
+    /// defines.
+    NetworkByte(u8),
     /// The generation is zero.
     ZeroGeneration,
     /// The rate deviation exceeds 250 ppm.
     RateDeviation(i32),
     /// The downtime exceeds 30 days.
     Downtime(u64),
-    /// The packet ends before the memory ranges and the entropy that its header gives.
+    /// The packet ends before the memory ranges, the entropy, and the DNS server that its header
+    /// gives.
     IncompleteBody,
     /// The memory range at this index is empty, or ends past the address space.
     Range(usize),
+    /// The DNS server is unspecified, pads an IPv4 address with a byte that is not zero, or is
+    /// not zero when the network byte names no DNS server.
+    DnsServer,
 }
 
 impl Display for PacketError {
@@ -195,6 +226,10 @@ impl Display for PacketError {
                 "restore packet has {count} memory ranges without a memory target"
             ),
             Self::ReservedByte(byte) => write!(formatter, "restore packet reserved byte is {byte}"),
+            Self::NetworkByte(byte) => write!(
+                formatter,
+                "restore packet network byte 0x{byte:02x} is invalid"
+            ),
             Self::ZeroGeneration => formatter.write_str("restore packet generation is 0"),
             Self::RateDeviation(deviation) => write!(
                 formatter,
@@ -206,13 +241,15 @@ impl Display for PacketError {
             ),
             Self::IncompleteBody => formatter.write_str("restore packet body is incomplete"),
             Self::Range(index) => write!(formatter, "restore memory range {index} is invalid"),
+            Self::DnsServer => formatter.write_str("restore packet DNS server is invalid"),
         }
     }
 }
 
 impl std::error::Error for PacketError {}
 
-/// The validated header of a restore packet.
+/// The validated header of a restore packet: of [`PACKET_VERSION`], or of
+/// [`PACKET_NETWORK_VERSION`], which carries network settings.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct PacketHeader {
     /// Packet behavior flags.
@@ -221,6 +258,9 @@ pub(crate) struct PacketHeader {
     pub(crate) online_vp_count: u8,
     /// Number of following memory ranges.
     pub(crate) range_count: u8,
+    /// The network byte of a packet that carries network settings, or `None` for one that
+    /// carries none.
+    pub(crate) network: Option<u8>,
     /// New VM generation.
     pub(crate) generation: u32,
     /// Host rate deviation in signed scaled parts per million.
@@ -239,6 +279,7 @@ impl PacketHeader {
             flags,
             online_vp_count,
             range_count,
+            network: (version == PACKET_NETWORK_VERSION).then_some(reserved),
             generation: fields.u32()?,
             rate_deviation: fields.i32()?,
             downtime_ns: fields.u64()?,
@@ -246,7 +287,7 @@ impl PacketHeader {
         if magic != PACKET_MAGIC {
             return Err(PacketError::Magic(magic));
         }
-        if version != PACKET_VERSION {
+        if version != PACKET_VERSION && version != PACKET_NETWORK_VERSION {
             return Err(PacketError::Version(version));
         }
         if flags & !PACKET_KNOWN_FLAGS != 0 {
@@ -258,8 +299,15 @@ impl PacketHeader {
         if !header.memory_target() && range_count != 0 {
             return Err(PacketError::RangesWithoutTarget(range_count));
         }
-        if reserved != 0 {
-            return Err(PacketError::ReservedByte(reserved));
+        match header.network {
+            None if reserved != 0 => return Err(PacketError::ReservedByte(reserved)),
+            Some(network)
+                if network & !PACKET_NETWORK_KNOWN != 0
+                    || network & PACKET_DNS_MASK == PACKET_DNS_MASK =>
+            {
+                return Err(PacketError::NetworkByte(network));
+            }
+            _ => {}
         }
         if header.generation == 0 {
             return Err(PacketError::ZeroGeneration);
@@ -275,7 +323,18 @@ impl PacketHeader {
 
     /// Returns the length of the body that follows the header.
     pub(crate) fn body_size(&self) -> usize {
-        usize::from(self.range_count) * PACKET_RANGE_SIZE + PACKET_ENTROPY_SIZE
+        let dns = if self.network.is_some() {
+            PACKET_DNS_SIZE
+        } else {
+            0
+        };
+        usize::from(self.range_count) * PACKET_RANGE_SIZE + PACKET_ENTROPY_SIZE + dns
+    }
+
+    /// Returns whether the packet asks the guest to apply network settings: a DNS server, or the
+    /// announcement of its listeners.
+    pub(crate) const fn network_repair(&self) -> bool {
+        matches!(self.network, Some(network) if network != 0)
     }
 
     /// Returns whether the host measured the downtime with its UTC clock, rather than with its
@@ -307,10 +366,13 @@ pub(crate) struct RestorePacket {
     /// Fresh entropy, which starts with the new VM generation ID, decoded straight into the
     /// seed's allocation.
     pub(crate) entropy: Seed,
+    /// The network settings of a packet that carries them.
+    pub(crate) network: Option<RestoreNetwork>,
 }
 
 impl RestorePacket {
-    /// Decodes and validates the memory ranges and entropy that follow `header` in `body`.
+    /// Decodes and validates the memory ranges, the entropy, and the DNS server that follow
+    /// `header` in `body`.
     pub(crate) fn parse(header: PacketHeader, body: &[u8]) -> Result<Self, PacketError> {
         let mut fields = Fields::new(body, PacketError::IncompleteBody);
         let ranges = (0..usize::from(header.range_count))
@@ -322,10 +384,19 @@ impl RestorePacket {
                 Ok((start, length))
             })
             .collect::<Result<_, _>>()?;
+        let entropy = fields.chunk()?;
+        let network = match header.network {
+            Some(network) => Some(RestoreNetwork::new(
+                parse_dns_server(network, fields.bytes()?)?,
+                network & PACKET_ANNOUNCE_LISTENERS != 0,
+            )),
+            None => None,
+        };
         Ok(Self {
             header,
             ranges,
-            entropy: Seed::copy_from(fields.chunk()?),
+            entropy: Seed::copy_from(entropy),
+            network,
         })
     }
 
@@ -333,6 +404,30 @@ impl RestorePacket {
     pub(crate) fn generation_id(&self) -> &[u8] {
         &self.entropy.bytes()[..GENERATION_ID_SIZE]
     }
+}
+
+/// Decodes the DNS server whose family the `network` byte of a restore packet names, from its
+/// encoded `address`: none, which must be zero, an IPv4 address and twelve zero bytes, or an IPv6
+/// address, neither unspecified.
+fn parse_dns_server(
+    network: u8,
+    address: [u8; PACKET_DNS_SIZE],
+) -> Result<Option<IpAddr>, PacketError> {
+    let server = match network & PACKET_DNS_MASK {
+        PACKET_DNS_IPV4 => match address.split_first_chunk::<4>() {
+            Some((ipv4, padding)) if padding.iter().all(|&byte| byte == 0) => {
+                Some(IpAddr::from(*ipv4))
+            }
+            _ => return Err(PacketError::DnsServer),
+        },
+        PACKET_DNS_IPV6 => Some(IpAddr::from(address)),
+        _ if address == [0; PACKET_DNS_SIZE] => None,
+        _ => return Err(PacketError::DnsServer),
+    };
+    if server.is_some_and(|server| server.is_unspecified()) {
+        return Err(PacketError::DnsServer);
+    }
+    Ok(server)
 }
 
 /// Why a host time sample is invalid. Its `Display` is the sample's diagnostic.
@@ -1228,6 +1323,95 @@ mod tests {
         bytes[40..44].copy_from_slice(&66_u32.to_le_bytes());
         bytes[44..48].copy_from_slice(&u32::MAX.to_le_bytes());
         bytes
+    }
+
+    /// Returns a valid packet header of version 6 without memory ranges, of generation 1, with
+    /// the network byte `network`.
+    fn network_header(network: u8) -> [u8; PACKET_HEADER_SIZE] {
+        let mut bytes = valid_header();
+        bytes[3] = PACKET_NETWORK_VERSION;
+        bytes[7] = network;
+        bytes
+    }
+
+    #[test]
+    fn version_6_packets_carry_their_network_settings() {
+        let entropy: Vec<u8> = (0..64).collect();
+        let ipv6: std::net::Ipv6Addr = "fd00::a00:1".parse().unwrap();
+        for (network, dns_server, expected) in [
+            (
+                0x05,
+                [10, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                RestoreNetwork::new(Some(IpAddr::from([10, 0, 0, 1])), true),
+            ),
+            (
+                0x02,
+                ipv6.octets(),
+                RestoreNetwork::new(Some(IpAddr::V6(ipv6)), false),
+            ),
+            (0x04, [0; 16], RestoreNetwork::new(None, true)),
+            (0x00, [0; 16], RestoreNetwork::new(None, false)),
+        ] {
+            let header = PacketHeader::parse(&network_header(network)).unwrap();
+            assert_eq!(header.network, Some(network));
+            assert_eq!(header.network_repair(), network != 0);
+            assert_eq!(header.body_size(), PACKET_ENTROPY_SIZE + PACKET_DNS_SIZE);
+            let body = [entropy.as_slice(), &dns_server].concat();
+            let packet = RestorePacket::parse(header, &body).unwrap();
+            assert_eq!(packet.entropy.bytes().as_slice(), entropy);
+            assert_eq!(packet.network, Some(expected), "{network:#04x}");
+            assert_eq!(
+                RestorePacket::parse(header, &body[1..]).unwrap_err(),
+                PacketError::IncompleteBody
+            );
+        }
+
+        // Version 5 has no network byte, and no DNS server after its entropy.
+        let header = PacketHeader::parse(&valid_header()).unwrap();
+        assert_eq!(header.network, None);
+        assert!(!header.network_repair());
+        let packet = RestorePacket::parse(header, &entropy).unwrap();
+        assert_eq!(packet.network, None);
+    }
+
+    #[test]
+    fn version_6_refuses_malformed_network_settings() {
+        for (network, error) in [
+            (0x08, "restore packet network byte 0x08 is invalid"),
+            (0x03, "restore packet network byte 0x03 is invalid"),
+        ] {
+            let error_text = PacketHeader::parse(&network_header(network))
+                .unwrap_err()
+                .to_string();
+            assert_eq!(error_text, error);
+        }
+        let mut bytes = valid_header();
+        bytes[7] = 1;
+        assert_eq!(
+            PacketHeader::parse(&bytes),
+            Err(PacketError::ReservedByte(1))
+        );
+        bytes[3] = 7;
+        assert_eq!(PacketHeader::parse(&bytes), Err(PacketError::Version(7)));
+
+        let ipv4 = [10, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        let mut padded = ipv4;
+        padded[15] = 1;
+        for (network, dns_server) in [
+            // A nonzero byte after an IPv4 server.
+            (0x01, padded),
+            // A server that the network byte does not name.
+            (0x00, ipv4),
+            // Unspecified servers.
+            (0x01, [0; 16]),
+            (0x02, [0; 16]),
+        ] {
+            let header = PacketHeader::parse(&network_header(network)).unwrap();
+            let body = [&[0; PACKET_ENTROPY_SIZE][..], &dns_server].concat();
+            let error = RestorePacket::parse(header, &body).unwrap_err();
+            assert_eq!(error, PacketError::DnsServer, "{network:#04x}");
+            assert_eq!(error.to_string(), "restore packet DNS server is invalid");
+        }
     }
 
     #[test]

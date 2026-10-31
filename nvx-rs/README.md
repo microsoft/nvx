@@ -2053,7 +2053,11 @@ status.
   the addressing of its NIC from the snapshot, as OpenVMM does, so it refuses
   `--net`, and passes `--network-profile` alone, which OpenVMM requires, with
   the network policy that the snapshot was captured with, to restore a
-  snapshot that has a NIC.
+  snapshot that has a NIC, or, with `--restore-network-policy`, which needs
+  `--restore-snapshot`, with a policy of its own, which OpenVMM installs on a
+  NIC template in place of the complete deny-all policy that the template was
+  captured with, and whose DNS server and listener announcements the guest
+  then applies; OpenVMM checks the snapshot and the new policy.
 - One directory `--mount` is OpenVMM's `--mount`. Several, or a shared file,
   are the children of an aggregate at `/run/nvx/shares`, whose guest targets
   must be absolute, must not overlap, and must survive the kernel command line,
@@ -2329,6 +2333,10 @@ guest agents of NVX advertise bits 0, 4, and 6 in sandbox mode.
   OpenVMM requires to restore a snapshot that has a NIC. `nvx.py run` took the
   two only together, so it could not restore such a snapshot: OpenVMM refused
   its `--net`, or required the `--network-profile` that it omitted.
+- `run --restore-network-policy`, which `nvx.py run` lacked, passes OpenVMM's
+  `--restore-network-policy`, so that a restore of a NIC template installs the
+  policy of its network options; see
+  [Networked snapshots](../doc/run.md#networked-snapshots).
 
 ### Test hooks
 
@@ -2342,7 +2350,9 @@ boot, or the restore of a snapshot directory, prints that it booted or restored
 the microVM, writes an outcome report if asked, and exits with status 0, and a
 restore whose snapshot directory is missing fails with status 1. Like OpenVMM,
 it refuses with status 2 a restore with `--net`, whose NIC keeps the addressing
-that its snapshot saved, and a cold boot with `--network-profile` alone. Kernel
+that its snapshot saved, a cold boot with `--network-profile` alone or with
+`--restore-network-policy`, and a restore with `--network-ingress allow` or
+explicit `--host-loopback allow` without `--restore-network-policy`. Kernel
 command-line tokens make it fail: `fake_exit_on_start=STATUS`,
 `fake_exit_status=STATUS`, `fake_guest_features=MASK`, and
 `fake_legacy_guest=1`, among others; see `nvx::testing::fake_openvmm`. Like
@@ -2609,7 +2619,7 @@ disk's block device.
 | `nvx-exit [CODE]` | Stops the VM with an 8-bit exit code through OpenVMM's control port 0x604 (x86_64) |
 | `nvx-device-io file ...`, `nvx-device-io network ...`, `nvx-device-io map PATH TEXT` | The benchmark helper that measures file and UDP round-trip I/O and prints one JSON line, and reports a file benchmark's progress on stderr; `map` writes TEXT at the start of a file through a shared mapping and holds the dirty mapping until its standard input ends, for the microVM scenarios (x86_64) |
 | `nvx-managed-agent CONTROL_TTY ROOTFS HOSTNAME UID GID USER HOME` | Serves the managed control session and supervises sequential workloads; `--exec-config-fd FD -- WORKLOAD ...` is the direct agent's internal launch helper |
-| `nvx-ingress [inherit] GATEWAY_IPV4` | Announces reachable TCP listeners and settled UDP sockets to the portable-network gateway, from a privileged source port that it binds, or, with `inherit`, from its standard input, a socket that a clone's application bound to one; `test DIRECTORY` runs synthetic procfs snapshots |
+| `nvx-ingress [inherit\|start] GATEWAY_IPV4` | Announces reachable TCP listeners and settled UDP sockets to the portable-network gateway, from a privileged source port that it binds, or, with `inherit`, from its standard input, a socket that a clone's application bound to one; `start` starts `inherit` as `Announcer::start` does and exits once it runs, or with status 1 if it does not start, for a guest agent that cannot hold the announcer; `test DIRECTORY` runs synthetic procfs snapshots |
 | `nvx-time [--report-only] COMMAND` | Enforces NVX time ABI v2: runs its conformance checks, repairs the wall clock after a restore, publishes the time state, and runs the discipline and violation-watcher daemon; `test NAME ...` runs its decoder and process test hooks (x86_64) |
 | `nvx-time-probe latency\|warp\|clock ...` | Diagnoses clock-read latency, cross-CPU TSC warp and offset, the clocks, CPUID, clock events, kernel messages, and optionally MSRs (x86_64) |
 
@@ -2728,7 +2738,7 @@ NVX_BUNDLE=skip cargo test --locked --all-features --lib -- \
 `tests/openvmm_vectors.rs` is an ignored test that compares the copies of
 OpenVMM's vectors in `tests/vectors/openvmm/` with the files of the OpenVMM
 submodule, which the `nvx-rs` job cannot check out, and the versions of
-OpenVMM's snapshot format, saved-state schema, time ABI, and restore packet in
+OpenVMM's snapshot format, saved-state schema, time ABI, and restore packets in
 `nvx::contract` with the submodule's. The NVX CLI jobs run it once they check
 the submodule out, and so does an OpenVMM pin promotion; see
 [OpenVMM's vectors](tests/vectors/README.md#openvmms-vectors).

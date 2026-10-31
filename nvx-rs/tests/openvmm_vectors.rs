@@ -39,7 +39,7 @@ const EXCERPTS: [(&str, &str); 3] = [
 /// The versions of `nvx::contract` that are OpenVMM's: for each, the file of the OpenVMM
 /// submodule that defines OpenVMM's, the start of the line that defines it, up to its value, and
 /// the version of `nvx::contract`.
-const VERSIONS: [(&str, &str, u64); 4] = [
+const VERSIONS: [(&str, &str, u64); 5] = [
     (
         "openvmm/openvmm_helpers/src/snapshot.rs",
         "pub const MANIFEST_VERSION: u32 = ",
@@ -59,6 +59,11 @@ const VERSIONS: [(&str, &str, u64); 4] = [
         "vm/devices/chipset_resources/src/microvm_time.rs",
         "pub const RESTORE_PACKET_VERSION: u8 = ",
         contract::RESTORE_PACKET_VERSION,
+    ),
+    (
+        "vm/devices/chipset_resources/src/microvm_time.rs",
+        "pub const RESTORE_PACKET_NETWORK_VERSION: u8 = ",
+        contract::RESTORE_PACKET_NETWORK_VERSION,
     ),
 ];
 

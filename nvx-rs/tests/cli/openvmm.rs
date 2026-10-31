@@ -11,7 +11,11 @@ use serde_json::{Value, json};
 use crate::harness::{HYPERVISOR, Root, is_hex};
 
 /// The options of OpenVMM that take no value.
-const FLAGS: [&str; 2] = ["--single-process", "--microvm-control-auth-stdin"];
+const FLAGS: [&str; 3] = [
+    "--single-process",
+    "--microvm-control-auth-stdin",
+    "--restore-network-policy",
+];
 
 /// The kernel command-line tokens with which the sandbox profile selects itself and attaches the
 /// distro layer of the tests on the first sandbox block device and the scratch disk on the

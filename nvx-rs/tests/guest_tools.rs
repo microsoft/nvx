@@ -1047,13 +1047,16 @@ fn ingress_test_mode_preserves_udp_settling_between_snapshots() {
 
 #[test]
 fn ingress_rejects_bad_invocations_and_test_snapshots() {
-    let usage = b"usage: nvx-ingress [inherit] GATEWAY_IPV4\n".to_vec();
+    let usage = b"usage: nvx-ingress [inherit|start] GATEWAY_IPV4\n".to_vec();
     for arguments in [
         &[][..],
         &["not-an-ipv4-address"],
         &["inherit"],
         &["inherit", "not-an-ipv4-address"],
         &["inherit", "127.0.0.1", "extra"],
+        &["start"],
+        &["start", "not-an-ipv4-address"],
+        &["start", "127.0.0.1", "extra"],
     ] {
         assert_eq!(
             run("nvx-ingress", arguments),
@@ -1145,6 +1148,36 @@ fn ingress_inherits_only_an_ipv4_datagram_socket_bound_to_a_privileged_source_po
             "nvx-ingress: inherited socket: {}\n",
             Errno::ENOTSOCK.desc()
         ),
+    );
+}
+
+#[test]
+fn ingress_start_fails_when_the_announcer_does_not_start() {
+    // `start` exits only once the announcer's socket is bound to a privileged source port and
+    // /sbin/nvx-ingress runs on it, so that a guest agent learns of a failure before it
+    // acknowledges a restore. Off an NVX guest, the announcer cannot start: without root, the
+    // socket cannot be bound to such a port, and with it, the program does not exist.
+    if Path::new("/sbin/nvx-ingress").exists() {
+        return;
+    }
+    let (status, stdout, stderr) = run_within(
+        "nvx-ingress",
+        ["start", "127.0.0.1"],
+        Duration::from_secs(10),
+    );
+    assert_eq!((status, stdout), (Some(1), Vec::new()));
+    let stderr = String::from_utf8(stderr).unwrap();
+    assert!(
+        [
+            "nvx-ingress: the announcer's socket cannot be bound to a privileged source port: ",
+            "nvx-ingress: no privileged source port, from 1023 down to 512, is free",
+            "nvx-ingress: /sbin/nvx-ingress did not start: the exec launch stage failed: ",
+        ]
+        .iter()
+        .any(|prefix| stderr.starts_with(prefix))
+            && stderr.ends_with('\n')
+            && stderr.lines().count() == 1,
+        "{stderr}"
     );
 }
 
@@ -1819,6 +1852,108 @@ fn time_test_mode_checks_packet_and_sample_boundaries() {
             output.1.starts_with(b"error "),
             "sample case {index}: {:?}",
             String::from_utf8_lossy(&output.1)
+        );
+    }
+}
+
+/// Returns `packet`, a version 5 packet of [`time_packet`], as version 6, with the network byte
+/// `network` and, after its entropy, the DNS server record `dns_server`.
+#[cfg(target_arch = "x86_64")]
+fn time_network_packet(mut packet: Vec<u8>, network: u8, dns_server: [u8; 16]) -> Vec<u8> {
+    packet[3] = 6;
+    packet[7] = network;
+    packet.extend_from_slice(&dns_server);
+    packet
+}
+
+#[test]
+#[cfg(target_arch = "x86_64")]
+fn time_test_mode_decodes_the_network_settings_of_version_6() {
+    let directory = tempfile::tempdir().unwrap();
+    let previous = "ffffffffffffffffffffffffffffffff";
+    let base = time_packet(0x04, 0, &[], 1, 0, 0);
+    let ipv4 = [10, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+    let ipv6 = "fd00::a00:1"
+        .parse::<std::net::Ipv6Addr>()
+        .unwrap()
+        .octets();
+    for (index, (network, dns_server, expected)) in [
+        (0x05, ipv4, " dns=10.0.0.1 announce=1\n"),
+        (0x02, ipv6, " dns=fd00::a00:1 announce=0\n"),
+        (0x04, [0; 16], " dns=- announce=1\n"),
+        (0x00, [0; 16], " dns=- announce=0\n"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let packet = time_network_packet(base.clone(), network, dns_server);
+        let output = run_time_packet(
+            directory.path(),
+            &format!("network-{index}"),
+            &packet,
+            "0",
+            previous,
+        );
+        let text = String::from_utf8_lossy(&output.1);
+        assert_eq!(output.0, Some(0), "case {index}: {text:?}");
+        assert!(
+            text.starts_with("ok flags=4 ") && text.ends_with(expected),
+            "case {index}: {text:?}"
+        );
+    }
+    // A version 5 packet carries no network settings, and prints none.
+    assert!(
+        run_time_packet(directory.path(), "version-5", &base, "0", previous)
+            .1
+            .ends_with(b" generation_id=000102030405060708090a0b0c0d0e0f\n")
+    );
+
+    let mut padded = ipv4;
+    padded[4] = 1;
+    let mut version_7 = time_network_packet(base.clone(), 0x05, ipv4);
+    version_7[3] = 7;
+    for (index, (packet, error)) in [
+        (
+            time_network_packet(base.clone(), 0x08, [0; 16]),
+            "restore packet network byte 0x08 is invalid",
+        ),
+        (
+            time_network_packet(base.clone(), 0x03, ipv4),
+            "restore packet network byte 0x03 is invalid",
+        ),
+        (
+            time_network_packet(base.clone(), 0x01, padded),
+            "restore packet DNS server is invalid",
+        ),
+        (
+            time_network_packet(base.clone(), 0x00, ipv4),
+            "restore packet DNS server is invalid",
+        ),
+        (
+            time_network_packet(base.clone(), 0x01, [0; 16]),
+            "restore packet DNS server is invalid",
+        ),
+        (
+            time_network_packet(base.clone(), 0x02, [0; 16]),
+            "restore packet DNS server is invalid",
+        ),
+        (version_7, "restore packet version is 7"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let output = run_time_packet(
+            directory.path(),
+            &format!("network-rejected-{index}"),
+            &packet,
+            "0",
+            previous,
+        );
+        assert_eq!(output.0, Some(0));
+        assert_eq!(
+            String::from_utf8_lossy(&output.1),
+            format!("error G_REPAIR_PACKET {error}\n"),
+            "case {index}"
         );
     }
 }

@@ -113,7 +113,7 @@ check out the OpenVMM submodule, whose deploy key fork pull requests lack. They
 read the copies instead, and the ignored test `tests/openvmm_vectors.rs`
 compares the copies with the submodule's files, and finds each excerpt among
 the lines of its file. It also checks that the versions of OpenVMM's snapshot
-format, saved-state schema, time ABI, and restore packet in `nvx::contract` are
+format, saved-state schema, time ABI, and restore packets in `nvx::contract` are
 the submodule's. The NVX CLI jobs, which check out the submodule, run it, and
 so does an OpenVMM pin promotion, from the repository's root:
 
