@@ -4302,6 +4302,7 @@ mod clones {
                 activation,
                 template(),
                 Some(acknowledged),
+                None,
             );
             (root, worked)
         })
@@ -5063,6 +5064,7 @@ mod clones {
                 activation,
                 gatewayless,
                 Some(acknowledged),
+                None,
             );
             (root, worked)
         });
@@ -5102,6 +5104,8 @@ mod clones {
         host.run_until(|host| !host.replies.is_empty());
         let facts = reported(&host.replies.remove(0));
         assert_eq!(facts.get("acknowledged"), Some("yes"));
+        // Its template delayed no repair.
+        assert_eq!(facts.get("repair-delay"), Some("none"));
         assert_eq!(facts.get("execution"), Some("none"));
         let events = ["reset", "message", "ready", "started"].map(|name| after(&facts, name));
         assert!(events.is_sorted(), "{facts:?}");

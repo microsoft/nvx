@@ -15,6 +15,8 @@
 //! - `acknowledged`: `yes` once the repair acknowledged the restore, and `none` for a restore
 //!   whose host did not gate its input until the acknowledgement, whose repair acknowledged
 //!   nothing;
+//! - `repair-delay`: how long, in microseconds, the worker waited before the repair, as the
+//!   template's `template::REPAIR_DELAY_FILE` asked, for tests, and `none` without the file;
 //! - `reset`: when the clone took the reset that the restore queued;
 //! - `message`: when the host's first message came, which must be the clone's `Activate`;
 //! - `ready`: when the clone was ready, once the record applied;
@@ -153,12 +155,14 @@ struct Applied {
 
 impl CloneState {
     /// Returns the state of the clone whose activation is `activation`, in its transport
-    /// bootstrap, whose template captured `template`, and whose repair acknowledged the restore at
+    /// bootstrap, whose template captured `template`, whose worker waited `repair_delay` before
+    /// the repair, if the template set a delay, and whose repair acknowledged the restore at
     /// `acknowledged`, if it did.
     pub(super) fn new(
         activation: Activation<Admission>,
         template: RootTemplate,
         acknowledged: Option<Instant>,
+        repair_delay: Option<Duration>,
     ) -> Self {
         Self {
             activation,
@@ -167,6 +171,7 @@ impl CloneState {
             order: None,
             timeline: Timeline {
                 acknowledged,
+                repair_delay,
                 ..Timeline::default()
             },
         }
@@ -374,6 +379,8 @@ fn ready(activation: ReadyActivation) -> Message {
 struct Timeline {
     /// When the repair acknowledged the restore, if it did.
     acknowledged: Option<Instant>,
+    /// How long the worker waited before the repair, if the template set a delay.
+    repair_delay: Option<Duration>,
     /// When the clone took the reset that the restore queued.
     reset: Option<Instant>,
     /// When the host's first message came.
@@ -414,6 +421,10 @@ impl Timeline {
             "none"
         };
         facts.push("acknowledged", acknowledged);
+        let repair_delay = self
+            .repair_delay
+            .map_or("none".to_owned(), |delay| delay.as_micros().to_string());
+        facts.push("repair-delay", repair_delay);
         let events = [
             ("reset", self.reset),
             ("message", self.message),
@@ -714,6 +725,7 @@ mod tests {
         let after = |micros| acknowledged + Duration::from_micros(micros);
         let timeline = Timeline {
             acknowledged: Some(acknowledged),
+            repair_delay: None,
             reset: Some(after(10)),
             message: Some(after(250)),
             ready: Some(after(4_000)),
@@ -723,6 +735,7 @@ mod tests {
         let mut expected = Facts::new();
         let facts = [
             ("acknowledged", "yes"),
+            ("repair-delay", "none"),
             ("reset", "10"),
             ("message", "250"),
             ("ready", "4000"),
@@ -766,5 +779,12 @@ mod tests {
         assert_eq!(facts.get("acknowledged"), Some("none"));
         assert_eq!(facts.get("reset"), Some("unknown"));
         assert_eq!(facts.get("execution"), Some("none"));
+
+        // A template that delayed the repair of its clones, for tests.
+        let delayed = Timeline {
+            repair_delay: Some(Duration::from_millis(8_000)),
+            ..timeline
+        };
+        assert_eq!(delayed.facts().get("repair-delay"), Some("8000000"));
     }
 }

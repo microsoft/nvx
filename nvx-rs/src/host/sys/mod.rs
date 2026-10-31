@@ -39,7 +39,7 @@ pub(crate) use process::{
 };
 #[cfg(target_os = "linux")]
 pub(crate) use socket::{
-    connect_nonblocking, peer_pid, send_nonblocking, wait_readable, wait_writable,
+    connect_nonblocking, peer_pid, send_nonblocking, unread_by_peer, wait_readable, wait_writable,
 };
 
 /// Returns the effective user and group IDs of this process.

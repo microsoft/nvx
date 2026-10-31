@@ -245,13 +245,15 @@ arguments, itself, at any time once the clone is ready, executions running or
 not, with when the events of the clone's activation and order happened, in
 microseconds after the repair's acknowledgement of the restore: whether the
 repair acknowledged the restore, `acknowledged`, `yes`, or `none` for a restore
-whose host did not gate its input until the acknowledgement; and when the clone
-took the reset that the restore queued, `reset`, when the host's first message
-came, `message`, which must be the clone's `Activate`, when the clone was
-ready, `ready`, when its sandbox started, `started`, and when the start of the
-host's first execution came, `execution`. Each event is `none` until it
-happened, `before` if it happened before the acknowledgement, and `unknown`
-without one. The worker of a VM that boots cold runs no such probe.
+whose host did not gate its input until the acknowledgement; how long the worker
+waited before the repair, `repair-delay`, in microseconds, as its template's
+[repair delay](#template-mode) asked, for tests, or `none` without one; and
+when the clone took the reset that the restore queued, `reset`, when the host's
+first message came, `message`, which must be the clone's `Activate`, when the
+clone was ready, `ready`, when its sandbox started, `started`, and when the
+start of the host's first execution came, `execution`. Each event is `none`
+until it happened, `before` if it happened before the acknowledgement, and
+`unknown` without one. The worker of a VM that boots cold runs no such probe.
 
 The probes of `worker::mapping` inspect the mappings beneath the root, and map
 from the host export, as an adapter maps the host paths of its sandboxes. `map`
@@ -794,6 +796,22 @@ the ABI fails the repair, rather than stopping the VM, and the worker ends the
 VM with the failure's status. A failure of the deferred time work stops the VM
 with the time ABI's own status, since the daemon enforces the ABI.
 
+For tests, a template may delay the repair of each of its clones: once
+`template::boot` took a template's command line, the worker reads
+`template::REPAIR_DELAY_FILE`, `/etc/runtime-adapter-repair-delay`, which the
+initramfs of the template's capture holds when the host program's creation
+asks for a delay, and which `template::parse_repair_delay` takes as a positive
+number of milliseconds, of at most `template::MAX_REPAIR_DELAY`, 30 seconds,
+in decimal digits, with or without a newline. Each clone of the template then
+waits that long before its repair, so that its restore stays unacknowledged,
+and OpenVMM gates the host's input, while the host's attachment reaches
+OpenVMM. The snapshot holds the delay, which the worker read before the
+capture. The kernel command line cannot carry it: OpenVMM's capture of a
+platform snapshot refuses a parameter that the tier's allowlist does not hold,
+as `template::boot` does. A template without the file delays nothing, and a
+file that the worker cannot read, or that holds anything else, ends the
+template's VM with status 20, before the capture.
+
 Once it repaired a clone, the worker activates it, on the same tty, with
 `worker::work_clone`, through the clone's `nvx::guest::clone::Activation`,
 whose deadline ends `worker::activation::ACTIVATION_TIMEOUT`, 120 seconds,
@@ -898,7 +916,7 @@ ends with one of these statuses, after a diagnostic on standard error:
 | 1 | The control tty cannot be opened or put in raw mode, the attachment or the acknowledgement of the broker's reset cannot be sent, or the broker closes the session or sends anything but a reset first, or, in a clone, its session failed or the broker closed it |
 | 13 | The bootstrap of the guest for the template's root failed, before the attachment |
 | 15 | In a clone, the root's teardown failed once the host stopped the worker |
-| 20 | The kernel command line names the platform tier, but holds another parameter, a double quote, `--`, or a gateway that OpenVMM does not render, or the worker cannot read it |
+| 20 | The kernel command line names the platform tier, but holds another parameter, a double quote, `--`, or a gateway that OpenVMM does not render, or the worker cannot read it, or the template's repair delay file holds no delay, or the worker cannot read it |
 | 21 | The fence of workload admission cannot be closed |
 | 22 | Something is mounted from the template's devices or from an overlay, or the mount table cannot be checked |
 | 23 | The time ABI's boot checks did not complete |
@@ -1110,7 +1128,10 @@ archive, in the `newc` format, which Linux unpacks over the first:
   `runtime-adapter-guest init /dev/hvc2 layered`, which names the control tty
   itself, since `/init` passes NVX's init agent none;
 - a symbolic link from `/sbin/nvx-init-agent` to that script, so that NVX's
-  init agent never assembles the root in the adapter's VMs.
+  init agent never assembles the root in the adapter's VMs;
+- for the capture of a template whose clones delay their repair, for tests, the
+  delay's file, `/etc/runtime-adapter-repair-delay`, in the `/etc` directory of
+  NVX's initramfs; see [Template mode](#template-mode).
 
 Linux removes a file whose type an archive changes before it creates the new
 one, so each link replaces NVX's agent without writing to its file, which could
@@ -1416,13 +1437,23 @@ command's options choose of the template, and `Request::capture` returns NVX's
   processors, those online at boot, 1 unless the command names more, the
   fewest that the template's clones take, the RAM and its capacity, the
   geometries of the placeholder and of the dormant scratch, as OpenVMM presents
-  a sandbox block device, which `capture::geometry` gives, and the network, as
-  the capture attaches its NIC, which no network's policy changes;
+  a sandbox block device, which `capture::geometry` gives, the network, as
+  the capture attaches its NIC, which no network's policy changes, and, for a
+  template whose clones delay their repair, for tests, the delay, in
+  milliseconds, as its one invariant setting,
+  `runtime-adapter.repair-delay-ms`, so that the class is one of its own;
 - NVX's artifacts, with the initramfs that puts the guest agent in place of
-  NVX's agents, which the command writes into a directory of its own in the
+  NVX's agents, and holds the file of the delay of each clone's repair, if the
+  template has one, which the command writes into a directory of its own in the
   system's temporary directory, private to the current user, as a launch
   writes it into the sandbox's private store, and removes once the creation
   returns.
+
+For tests, `create` and `refresh` take that delay from the variable
+`RUNTIME_ADAPTER_REPAIR_DELAY`, `capture::REPAIR_DELAY_VARIABLE`: a positive
+number of milliseconds, of at most 30000, in decimal digits. Any other value is
+a usage error, before the command creates anything, and without the variable,
+the template delays nothing; see [Template mode](#template-mode).
 
 NVX's store launches the capture's VM from the capture's transaction, in the
 class's slot, whose VMM listens there, beside the snapshot's destination, as
@@ -1769,7 +1800,10 @@ Each command of `runtime-adapter-host` but `stage`, `list`, `inspect`, and
   an EROFS file system, `erofs`, or a GPT disk, `gpt`, of which the guest
   expects the identity UUID, and the ext4 scratch image PATH, if given. It
   verifies and binds the images before it takes the sandbox's lock, which it
-  holds while it records them, and prints nothing.
+  holds while it records them, and prints how many bytes it read through the
+  operating system's read calls, the cache's included, `read-bytes=BYTES`, as
+  `nvx::host::process::own_bytes_read` counts them, as it exits: a staging
+  that hashes the image reads it whole.
 - `launch STORE --guest-agent PATH [--hypervisor NAME] [LAYERED]` launches a VM
   in the sandbox store STORE, which it creates if needed, with the guest agent
   PATH, a static `x86_64-unknown-linux-musl` build of `runtime-adapter-guest`,
@@ -1902,7 +1936,10 @@ Each command of `runtime-adapter-host` but `stage`, `list`, `inspect`, and
   Once the restore sequence sent the clone's mapping table, if it has one, and
   started the clone's sandbox, it exchanges a `Ping`
   and the longest `Echo` with the guest agent, commits the launch, and exits,
-  leaving the VM running, and the sandbox holding the lease. A clone that
+  leaving the VM running, and the sandbox holding the lease, once it printed
+  how many bytes it read through the operating system's read calls,
+  `read-bytes=BYTES`, as `stage` prints them: a start never hashes, nor copies,
+  the clone's images. A clone that
   fails, such as one whose activation failed before it was ready, and whose VM
   ended with the status of the failure's class, from 50 to 58, ends as
   [Clones](#clones) describes, with the record of its failure. A selection
@@ -2066,7 +2103,9 @@ unless the teardown ended with 4, 8, or 9, which `run` then exits with, after
 the diagnostic. A
 value of `RUNTIME_ADAPTER_HOST_TIME` that is not a host's time is a
 usage error, as is a value of `RUNTIME_ADAPTER_STEP_HOOK` that sets no step
-hook, or that sets one at another step than `checked` for a start, with
+hook, or that sets one at another step than `checked` for a start, and a value
+of `RUNTIME_ADAPTER_REPAIR_DELAY` that sets no delay of a template's clones'
+repair, for `create` and `refresh`, with
 status 2. Without arguments, the program reports the contract that it was
 built against.
 
@@ -2108,7 +2147,10 @@ parameter outside the allowlist at its start, in its middle, or at its end, or
 within a platform token's value, after a vertical tab or the byte 0xa0, which
 the kernel takes for whitespace and a split at ASCII whitespace does not, for a
 platform token that the no-break space's first byte leaves without UTF-8 text,
-for a double quote, and for `--`. In the host-only configuration, those of
+for a double quote, and for `--`, and the file of a template's delay of its
+clones' repair: a positive number of milliseconds, of at most 30 seconds, with
+or without a newline, and the contents that it refuses. In the host-only
+configuration, those of
 `generations` check which generations an eviction retires: those of the served
 generation's class that it supersedes, and, whatever their class, the
 tombstones that interrupted retirements left alone, but not those of the
@@ -2139,8 +2181,9 @@ of the session, and keeps the session, active in the broker's first epoch, and
 that no capture runs once the attachment cannot be written, the broker closes
 the stream or sends anything but a reset first, or the acknowledgement cannot
 be sent. Those of `worker::activation` check the status of
-each class of a clone's activation's failures, and that the activation's
-timeout covers the wait for both block devices.
+each class of a clone's activation's failures, that the activation's
+timeout covers the wait for both block devices, and the facts of the
+`activation` probe, the delay of the repair, if any, among them.
 
 `tests/guest_session.rs` checks, in the guest-only configuration, that the
 guest agent serves the control session with the adapter's own framing. A test
@@ -2431,7 +2474,8 @@ for every execution, each of which a test may fail. The tests cover:
 - the `activation` probe, which the worker answers itself, with no root
   operation, executions running or not: the restore's reset, the host's first
   message, the clone's `Ready`, and its start, in that order, after the
-  repair's acknowledgement, and the start of the first execution after them;
+  repair's acknowledgement, and the start of the first execution after them,
+  and no delay of the repair, which the clone's template did not ask for;
 - the mapping table of the record's export, which the host sends in parts once
   the clone is ready, and which the worker applies in order, from the export
   that the application mounted, before it starts the sandbox, and the endpoint
@@ -2493,10 +2537,12 @@ configuration, on Linux and Windows:
 
 - the archive that puts the guest agent in place of NVX's agents: its entries,
   their owners and modes, both launchers, and the padding of its headers and
-  data, for guest agents of every length modulo 4;
+  data, for guest agents of every length modulo 4, and a template's, which
+  holds the file of the delay of its clones' repair after the launchers, for
+  delays of every length modulo 4;
 - the copy of NVX's initramfs, which stays as it is, of every length modulo 4,
-  with the archive after it at a multiple of 4 bytes, and the files that a
-  failure names;
+  with the archive after it at a multiple of 4 bytes, a template's with the
+  delay's file, and the files that a failure names;
 - the runtime identity of a checkout and of a release, which differs from
   NVX's in the initramfs alone, another build of the guest agent, which differs
   in the initramfs too, and missing install metadata, which fails as NVX
@@ -2512,8 +2558,10 @@ Windows:
   images, which it does not;
 - the record of the staged images, as written and read, and the forms that a
   reader refuses;
-- `runtime-adapter-host stage`, which records the staged images, a staging that
-  fails, which leaves them, and a staging that replaces them.
+- `runtime-adapter-host stage`, which records the staged images, and prints the
+  bytes that it read, at least the image's length once it hashed the image, a
+  staging that fails, which leaves them, and prints nothing, and a staging that
+  replaces them.
 
 `tests/layered_launch.rs` checks, in the host-only configuration, on Linux and
 Windows:
@@ -2582,11 +2630,16 @@ and Windows:
   those online at boot, which the request names, 1 by default, whatever the
   capacity, and which name the class, the RAM and its capacity, the geometries
   that OpenVMM presents, of 512-byte logical blocks, and the network, which
-  names the class: a class without it is another;
+  names the class: a class without it is another, as is the class of a
+  template whose clones delay their repair, whose one invariant setting is the
+  delay;
 - `runtime-adapter-host create` with a network that the plan refuses, or that
   it cannot read, which it refuses with status 1 before it needs NVX's
   artifacts or creates the store, and with one that the plan takes, or none,
-  which goes on to need NVX's artifacts.
+  which goes on to need NVX's artifacts;
+- `create` and `refresh` with a value of `RUNTIME_ADAPTER_REPAIR_DELAY` that
+  sets no delay, which they refuse as a usage error, with status 2, before
+  they create anything.
 
 `tests/template_operations.rs` checks the template operations, in the
 host-only configuration, on Linux and Windows, without a hypervisor:
@@ -2892,8 +2945,9 @@ directory that the starts authorize:
 | `clones_at_once_keep_their_own_uppers_and_machine_ids` | Three at once: over a scratch image and in RAM, each with a generated machine ID, and in RAM with the image's own; two executions in each, as user ID 0, that write a marker in the root, and try to write `/etc/machine-id` | In every execution, the hostname `runtime-adapter`, and no marker of another clone; a generated machine ID that differs between the clones, the same in each execution of a clone, held by one bind that is read-only, `nosuid`, and `nodev`, and that the write cannot change; with the image's own machine ID, none, since the image has none, no bind, and in the later execution, the ID that the first wrote; then each stop releases its lease |
 | `a_clone_whose_view_cannot_be_set_ends_before_it_is_ready` | Of a template of the EROFS image, a GPT disk whose layer holds a regular file `etc`, with the image's own machine ID, then with a generated one | The first started, with the disk's root; then status 8, since no bind can hold the machine ID below a file, and the record of a failure of the request, at the activation, once the VM exited, by the evidence of invalid settings, with the guest's status 55; nothing quarantined, and the lease released, with the records |
 | `a_clone_runs_its_executions_as_its_workload_identity_once_it_is_ready` | Over a scratch image, as nobody | An execution that runs as nobody, one that names an identity refused with `EINVAL`, and the first execution after the clone's start |
+| `openvmm_reads_none_of_the_host_s_input_until_the_repair_acknowledges_the_restore` | Of a template whose clones wait 8 seconds before their repair, in RAM, which the host starts through NVX's public API, with the host program's clone order, over transports that watch their attachments, each of which they write a byte at a time; then a reattach through NVX's public API | The template's key, which names the delay; the attachment written within half the delay of the launch, the broker's first answer, and the attachment of the host, only after the delay; on Linux, `SIOCOUTQ` at the control socket risen by the same step with each byte that the host wrote, then as the write left it at every record before then, and zero once the broker answered, while a listener of the test's own process sees it fall once it read the first byte of such an attachment, and on Windows no record, since a named pipe tells its writer nothing; then the reattach's attachment answered within a quarter of the delay, and on Linux read whole by then; the guest's `repair-delay` of 8 seconds, and the events of its activation in order; and a stop that releases the lease |
 | `a_generation_is_eligible_by_the_clock_of_its_capture` | At the host's time, then with clock fixtures: UTC a day behind, another boot an hour after the capture by UTC, and the restore window passed by each clock, or UTC before the capture | The host's monotonic clock on the boot of the capture, whatever UTC says, UTC after a reboot, with the fixture's downtime, and, outside the window, status 10, with the record of the store's refusal of the selection, `expired` once the window passed, and `ineligible`, by the evidence `early`, before the capture, without a lease |
-| `a_clone_reads_no_more_of_its_disks_than_its_root_needs` | Over a scratch image, and in RAM | Less than an eighth of each disk read once the clone is ready, and each disk's whole length once the guest read it to its end |
+| `a_clone_reads_no_more_of_its_disks_than_its_root_needs` | Over a scratch image, and in RAM | Less than an eighth of each disk read once the clone is ready, by the guest's statistics, and each disk's whole length once the guest read it to its end; on the host, the staging's count of the bytes that it read at least the image's length, which it hashed, the start's less than an eighth of it, and the VMM's less than an eighth of the disks whose files back the clone's, those of the image and of a scratch image, once the clone is ready; then, once the guest read each disk to its end, the VMM's count raised by at least what the guest asked of those files on Windows, and by less than an eighth of it on Linux, whose `rchar` misses OpenVMM's reads through io_uring |
 | `a_clone_s_time_settles_after_it_is_ready` | In RAM | The time daemon's restore check `ok`, after the restore's generation, without a violation, after a downtime that the host's monotonic clock measured, and a clone that still serves |
 | `each_command_reattaches_to_the_clone_from_a_new_process` | Over a scratch image, then `reattach`, `probe`, `exec`, and `reattach` again, each from a new process | The launch's records, committed, with the clone's VM and no failure; each command `live`, with the clone's VMM, in a new session of the same broker, in a later epoch; the events of the activation as they were; an execution as nobody; and a stop that releases the lease, with the records |
 | `a_host_program_of_another_runtime_ends_the_clone_through_its_verified_identity` | In RAM, then a `reattach` with another guest agent's build | Status 8, `reattached=failed`, without a session, and the record of a failure of the host, at the reattach, by the evidence of the runtime's mismatch, once NVX terminated the VMM, which quarantines nothing; the lease released, with the records; then another clone that starts and stops |
@@ -2930,6 +2984,39 @@ them. A
 clone's start names its network by a file that the test writes in the
 template's directory.
 
+Two of the scenarios check from the host what the guest cannot tell it, and
+each backend observes part of it alone:
+
+- That OpenVMM reads none of the host's input until the clone's repair
+  acknowledges its restore, which NVX's restore sequence relies on, and which
+  the guest's `activation` probe cannot show, since its worker serves the
+  session only once its repair returned, so input that OpenVMM let through
+  early would wait in the guest. On Linux, `SIOCOUTQ` of the host's end of the
+  control socket shows that the attachment waited there, unread, until the
+  repair could acknowledge the restore. `SIOCOUTQ` charges each buffer of the
+  socket's writes until the reader read it whole, and a read of part of a
+  buffer leaves it as it was, so the host writes the attachment a byte at a
+  time, a buffer for each byte, whose charge falls as soon as OpenVMM reads any
+  byte. The kernel charges the same for each byte's buffer, so the charge rises
+  by the same step with each byte that the host writes, while OpenVMM reads
+  none. A named pipe tells its writer nothing of what its reader has not read,
+  so on Windows the check is the timing alone: the broker, which answers a host
+  that it authenticated at once, answered only after the delay.
+- That a clone's restore reads no large content of its disks. The host
+  program's own count of the bytes that it read, and the VMM's, which
+  `nvx::host::process::Process::bytes_read` reads through its process, count
+  every read call, the cache's included, and on Linux those of the children
+  that the process reaped, but no file that the process maps, so they leave
+  out the memory of the snapshot, which OpenVMM maps copy-on-write.
+  On Windows, OpenVMM reads the clone's disks with `ReadFile`, which
+  `ReadTransferCount` counts, so the guest's read of each disk to its end
+  raises the VMM's count by at least what it asked of the disks' files. On
+  Linux, OpenVMM reads them through io_uring, which `rchar` does not count, so
+  the VMM's count covers its read calls alone, as a hash or a copy of an image
+  through them would show, and not its reads of the disks: the scenario checks
+  that the guest's read of each disk to its end raises it by less than an
+  eighth of what the guest asked.
+
 A test that fails keeps its template's directory, with the template store and
 the platform's image, as long as it keeps the directory of a clone that leases
 the template, whose VM might still run.
@@ -2955,7 +3042,8 @@ layered roots, captures of templates, and the starts and runs of their clones.
 
 | Target | Scenario | Proves |
 | --- | --- | --- |
-| `template_capture` | `a_capture_takes_its_class_and_inputs_from_the_request` | A capture's request: the plan of the placeholder over RAM, with the request's network, the placeholder's binding, the policy revision, the artifacts, and the class, which the network names |
+| `template_capture` | `a_capture_takes_its_class_and_inputs_from_the_request` | A capture's request: the plan of the placeholder over RAM, with the request's network, the placeholder's binding, the policy revision, the artifacts, and the class, which the network names, and the delay of a template's clones' repair, as its invariant setting |
+| `template_capture` | `the_host_program_refuses_a_repair_delay_that_it_cannot_read` | `create` and `refresh` refuse a value of `RUNTIME_ADAPTER_REPAIR_DELAY` that sets no delay with status 2 before they create anything |
 | `template_capture` | `the_host_program_refuses_a_template_before_it_creates_anything` | `create` refuses a network that the plan refuses, or that it cannot read, with status 1 before it needs NVX's artifacts or creates the store |
 | `template_operations` | `a_refresh_refuses_a_template_before_it_creates_anything` | `refresh` refuses a network that the plan refuses with status 1 before it needs NVX's artifacts or creates the store, as `create` does |
 | `template_operations` | `an_empty_template_store_lists_no_generation` | `list` of a store without generations prints none, and `inspect` and `remove` of a generation that it never published fail with status 1, and tombstone nothing |
@@ -3000,7 +3088,7 @@ layered roots, captures of templates, and the starts and runs of their clones.
 | `host_session` | `the_host_sends_nothing_more_to_a_guest_agent_of_another_build_or_whose_root_failed` | The host sends nothing more to a guest agent of another build, or whose root failed |
 | `staged_images` | `a_launch_takes_the_bindings_that_the_store_stages_for_its_images` | A launch takes the bindings that the store staged for its images, and not those of other images |
 | `staged_images` | `staging_verifies_the_image_and_binds_the_scratch` | Staging verifies an image against the manifest beside it, refuses another image's, stages a GPT disk over RAM, and refuses images that no launch could attach |
-| `staged_images` | `the_host_program_stages_images_in_the_store` | `stage` records the staged images, a staging that fails leaves them, and another replaces them |
+| `staged_images` | `the_host_program_stages_images_in_the_store` | `stage` records the staged images, and prints the bytes that it read, the image's once it hashed it, a staging that fails leaves them, and another replaces them |
 | `staged_images` | `the_store_records_the_staged_images` | The record of the staged images, as written and read, and the forms that a reader refuses |
 | `layered_launch` | `a_launch_claims_its_scratch_image_until_it_releases_its_checked_files` | A launch claims its scratch image, which a second launch waits for, then fails to take, until the first releases its checked files |
 | `layered_launch` | `a_launch_reads_only_the_networks_that_the_plan_takes` | A launch refuses the network files that the plan refuses, each for the plan's reason |
@@ -3078,7 +3166,7 @@ layered roots, captures of templates, and the starts and runs of their clones.
 | `vm_clone` | `a_clone_binds_the_resolver_of_its_policy_s_dns_server_read_only` | A clone of a network with egress allowed binds a resolver file that names the gateway's DNS server read-only at `/etc/resolv.conf`, and a TCP connection to the server's DNS port opens, which the gateway's DNS proxy accepts; one whose resolver cannot be bound ends with status 57 |
 | `vm_clone` | `a_clone_maps_an_aggregate_of_directories_and_files_beneath_its_root_before_its_sandbox_starts` | A clone maps an aggregate of host directories and files beneath its root before its sandbox starts, each with its access, a hidden file, and a hidden directory that shows a file again, and writes reach the host's directories and file through the writable ones alone |
 | `vm_clone` | `a_clone_of_a_template_with_a_nic_maps_its_export_beside_its_resolver` | A clone of a template with a NIC maps its export below the binds of its machine ID and of its resolver configuration |
-| `vm_clone` | `a_clone_reads_no_more_of_its_disks_than_its_root_needs` | A clone's restore reads less than an eighth of each disk, before the guest reads each to its end |
+| `vm_clone` | `a_clone_reads_no_more_of_its_disks_than_its_root_needs` | A clone's restore reads less than an eighth of each disk, before the guest reads each to its end, by the guest's statistics, and as the host counts the reads of the start, which hashes and copies nothing, and of the VMM, whose count on Windows rises by what the guest asked of the disks' files, and on Linux, where it misses io_uring's reads, does not |
 | `vm_clone` | `a_clone_refuses_a_scratch_image_whose_upper_an_earlier_clone_used` | A scratch image whose upper an earlier clone used ends the clone before it is ready, with status 54 |
 | `vm_clone` | `a_clone_runs_its_executions_as_its_workload_identity_once_it_is_ready` | A clone runs its executions as its record's workload identity once it is ready, and refuses one that names an identity with `EINVAL` |
 | `vm_clone` | `a_clone_s_executions_find_the_proxy_of_its_policy` | The executions of a clone of a proxy-only network find its proxy's URL in their environment, and the clone keeps the image's own `/etc/resolv.conf` |
@@ -3108,6 +3196,7 @@ layered roots, captures of templates, and the starts and runs of their clones.
 | `vm_clone` | `one_generation_serves_clones_of_each_upper_and_memory_target` | One generation serves clones over a scratch image and in RAM, at each memory target up to its capacity, each with its own lease, and leaves its snapshot unchanged |
 | `vm_clone` | `one_generation_serves_clones_of_either_format_over_either_upper` | A template of a GPT placeholder serves EROFS and GPT clones of other layouts, shorter than the placeholder, at its length, over either upper, those in RAM with no scratch file, and a first partition over its bound ends a clone with status 54 |
 | `vm_clone` | `one_template_serves_the_clones_of_every_network_policy_at_its_guest_s_address` | One template with a NIC serves the clones of every network policy at its guest's address, whose restores install their own policies on its NIC, which lets through what each allows, publishes the guest's listeners, through the clone's announcer, and forwards ports where it says, and NVX's plan refuses another address, or no NIC, with status 8 before any VMM starts |
+| `vm_clone` | `openvmm_reads_none_of_the_host_s_input_until_the_repair_acknowledges_the_restore` | OpenVMM reads none of the host's attachment until the repair of a clone, whose template delays it, acknowledges the restore: the broker answers it only after the delay, and on Linux, where the host writes it a byte at a time, `SIOCOUTQ` rises with each byte and stays as the write left it until then, while a reattach's is answered at once |
 | `vm_clone` | `the_lease_of_a_start_that_ended_before_its_record_is_released_through_its_template_store` | The lease of a start that ended before it recorded its clone is released only through its own template store, which `--template` names |
 
 ### Running the VM tests

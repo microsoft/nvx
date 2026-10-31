@@ -9,7 +9,8 @@
 //!   identity UUID, and the scratch image the ext4 image PATH, if given. Staging verifies the
 //!   image explicitly, which hashes the image only when a manifest is beside it, binds the scratch
 //!   image without reading it, and records both bindings in STORE, in place of those staged
-//!   earlier; see `runtime_adapter::staged::Staged`. It needs no artifacts, and prints nothing.
+//!   earlier; see `runtime_adapter::staged::Staged`. It needs no artifacts, and prints the bytes
+//!   that it read as it exits, `read-bytes`.
 //! - `runtime-adapter-host launch STORE --guest-agent PATH [--hypervisor NAME] [LAYERED]` launches
 //!   a VM in the sandbox store STORE, which it creates if needed, through NVX's supervisor, with
 //!   the guest agent PATH, a static `x86_64-unknown-linux-musl` build of `runtime-adapter-guest`,
@@ -195,8 +196,8 @@
 //!   table, nor `Start`, and ends the clone, whose guest the clone order asks to stop, which tears
 //!   down the root, and which then fails as below. Once every mapping applied, the sequence
 //!   starts the clone's sandbox, and the command exchanges a `Ping` and the longest `Echo` with
-//!   the guest agent, commits the launch, and exits, leaving the VM running, and the sandbox
-//!   holding the lease, which a stop releases.
+//!   the guest agent, commits the launch, prints the bytes that it read, `read-bytes`, and exits,
+//!   leaving the VM running, and the sandbox holding the lease, which a stop releases.
 //!   A clone that fails, from its plan to its commit, fails with NVX's
 //!   `nvx::host::template::CloneFailure`, which attributes the failure by its evidence, and records
 //!   it in STORE from the clone's launch on: the command prints the failure's record, releases the
@@ -395,7 +396,10 @@
 //! - `length.state` and `length.memory`: the lengths of the snapshot's saved state and of its RAM,
 //!   in bytes;
 //! - `removed`: what `remove` did: `retired`, once the generation is gone, or `draining`, once it
-//!   tombstoned the generation, which the leases that it reports keep.
+//!   tombstoned the generation, which the leases that it reports keep;
+//! - `read-bytes`: how many bytes `stage`, or a `start` that started its clone, read through the
+//!   operating system's read calls, the cache's included, as it exits, as
+//!   `nvx::host::process::own_bytes_read` counts them.
 //!
 //! Values escape `\`, newlines, and carriage returns as `\\`, `\n`, and `\r`, and each byte of a
 //! program's output that is not part of UTF-8 text as `\xHH`, with two hexadecimal digits.
@@ -409,7 +413,11 @@
 //! `run` take the host's time, at which the store checks the generation's eligibility, from the
 //! variable `RUNTIME_ADAPTER_HOST_TIME`, if it is set, as a clock fixture, such as another boot's;
 //! see
-//! `runtime_adapter::clone::HOST_TIME_VARIABLE`.
+//! `runtime_adapter::clone::HOST_TIME_VARIABLE`. `create` and `refresh` take the delay of the
+//! repair of each clone of the template that a capture makes from the variable
+//! `RUNTIME_ADAPTER_REPAIR_DELAY`, in milliseconds, if it is set, which they write into the
+//! capture's initramfs, and name as the class's invariant setting; see
+//! `runtime_adapter::capture::REPAIR_DELAY_VARIABLE`.
 //!
 //! They exit with 0 once they did what they were asked, `exec` once every execution finished,
 //! whatever its outcome, and `run` once its execution finished so, and the clone stopped, as
@@ -426,7 +434,8 @@
 //! or 9, as when the clone's VM exited during the execution, which `run` then exits with, after
 //! the diagnostic. Anything else is a usage error, with status 2, as is a value of
 //! `RUNTIME_ADAPTER_STEP_HOOK` that sets no step hook, or a step hook of a start at another step
-//! than `checked`, or a value of `RUNTIME_ADAPTER_HOST_TIME` that is not a host's time.
+//! than `checked`, a value of `RUNTIME_ADAPTER_HOST_TIME` that is not a host's time, or a value of
+//! `RUNTIME_ADAPTER_REPAIR_DELAY` that sets no delay.
 
 use std::env;
 use std::error::Error;
@@ -462,7 +471,7 @@ use nvx::{ErrorCode, ErrorKind, Hypervisor};
 use runtime_adapter::GUEST_BUILD;
 use runtime_adapter::capture::{
     DEFAULT_BOOT_PROCESSORS, DEFAULT_CPU_PROFILE, DEFAULT_PROCESSORS, DEFAULT_SCRATCH_LENGTH,
-    Request,
+    Request, repair_delay_from_env,
 };
 use runtime_adapter::clone::{CloneRecord, host_time_from_env};
 use runtime_adapter::exec::{self, AccountMode, HostExecution, Start};
@@ -852,6 +861,8 @@ struct Template {
     scratch_length: u64,
     /// The file of the template's network, if it has one.
     network: Option<PathBuf>,
+    /// The delay of each clone's repair, for tests, if `RUNTIME_ADAPTER_REPAIR_DELAY` sets one.
+    repair_delay: Option<Duration>,
 }
 
 /// How `create` and `refresh` serve a template.
@@ -1000,9 +1011,10 @@ fn main() -> ExitCode {
             format,
             identity,
             scratch,
-        } => {
-            stage(&store, &distro, format, identity, scratch.as_deref()).map(|()| ExitCode::SUCCESS)
-        }
+        } => stage(&store, &distro, format, identity, scratch.as_deref()).map(|()| {
+            print_read_bytes();
+            ExitCode::SUCCESS
+        }),
         Command::Launch {
             store,
             guest_agent,
@@ -1233,6 +1245,7 @@ fn parse(arguments: Vec<OsString>) -> Result<Command, String> {
                     memory_capacity: options.memory_capacity.unwrap_or(memory),
                     scratch_length: options.scratch_length.unwrap_or(DEFAULT_SCRATCH_LENGTH),
                     network: options.network,
+                    repair_delay: repair_delay_from_env()?,
                 }),
                 serving: if name == "refresh" {
                     Serving::Refresh
@@ -1794,6 +1807,19 @@ fn stage(
     staged.write(store.dir()).map_err(|error| describe(&error))
 }
 
+/// Prints how many bytes this process has read through the operating system's read calls,
+/// `nvx::host::process::own_bytes_read`, as `read-bytes=BYTES`, as `stage`, or a `start` that
+/// started its clone, exits, so that a test can tell how much of its files the command read. A
+/// count that cannot be read is left out, after a diagnostic on standard error.
+fn print_read_bytes() {
+    match nvx::host::process::own_bytes_read() {
+        Ok(read) => println!("read-bytes={read}"),
+        Err(error) => {
+            eprintln!("runtime-adapter-host: cannot count the bytes that it read: {error}");
+        }
+    }
+}
+
 /// Launches a VM of the guest agent `guest_agent` in the sandbox store `store`, on `hypervisor`
 /// or else the one that `nvx::Hypervisor::from_env_or_default` selects, with the guest agent's
 /// build `guest_build`, and with the layered root `layered`, if any. The step hook `hook`, if any,
@@ -1874,9 +1900,11 @@ fn launch(
     let command = |endpoint: &str| -> nvx::Result<VmmCommand<'_>> {
         // The launch has checked that no VM of the sandbox runs, which could still read the
         // initramfs of an earlier launch.
-        initramfs::write(&runtime.artifacts.initrd, guest_agent, &initramfs).map_err(|error| {
-            nvx::Error::io("cannot write the initramfs of the guest agent").with_source(error)
-        })?;
+        initramfs::write(&runtime.artifacts.initrd, guest_agent, None, &initramfs).map_err(
+            |error| {
+                nvx::Error::io("cannot write the initramfs of the guest agent").with_source(error)
+            },
+        )?;
         let outcome = store.outcome_path();
         let (arguments, kernel_command_line) = match layered.as_ref().zip(prepared.as_ref()) {
             Some((layered, prepared)) => (
@@ -2145,6 +2173,7 @@ fn create(
         memory_capacity: template.memory_capacity,
         scratch_length: template.scratch_length,
         network,
+        repair_delay: template.repair_delay,
     };
     // The placeholder is staged as `stage` stages an image: its explicit verification may hash it,
     // which no capture does.
@@ -2154,8 +2183,13 @@ fn create(
     // launch's VM boots it from the sandbox's store, so that no one else may change it first.
     let directory = TemporaryDirectory::new(CAPTURE_DIRECTORY_PREFIX)?;
     let initramfs = directory.path().join(INITRAMFS_NAME);
-    initramfs::write(&runtime.artifacts.initrd, guest_agent, &initramfs)
-        .map_err(|error| format!("cannot write the initramfs of the guest agent: {error}"))?;
+    initramfs::write(
+        &runtime.artifacts.initrd,
+        guest_agent,
+        template.repair_delay,
+        &initramfs,
+    )
+    .map_err(|error| format!("cannot write the initramfs of the guest agent: {error}"))?;
     // The capture creates the dormant scratch in the store, on the file system of its directory,
     // or, before the store exists, of its parent's.
     let store = absolute(store).map_err(|error| describe(&error))?;
@@ -2403,7 +2437,10 @@ fn start(
     // lock, as once a launch committed.
     Ok(
         match start_clone(store, guest_build, clone, planned, time, hook)? {
-            Ok(_running) => ExitCode::SUCCESS,
+            Ok(_running) => {
+                print_read_bytes();
+                ExitCode::SUCCESS
+            }
             Err(status) => status,
         },
     )

@@ -188,6 +188,53 @@ impl ProcessHandle {
             result => super::unless_exited(result, || pidfd.wait_exit(Duration::ZERO)),
         }
     }
+
+    /// Returns how many bytes process `pid`, which the handle holds, and which started at
+    /// `start_time`, has read through read calls: the `rchar` of its `/proc/<pid>/io`.
+    ///
+    /// The file is opened before the process's identity is checked, so a process that still runs
+    /// with that start time held the ID when the file was opened, and the count is its own, with
+    /// or without a pidfd. Fails with [`io::ErrorKind::NotFound`] once the process has exited.
+    pub(crate) fn bytes_read(&self, pid: u32, start_time: u64) -> io::Result<u64> {
+        let path = format!("/proc/{pid}/io");
+        let exited = || io::Error::new(io::ErrorKind::NotFound, format!("process {pid} exited"));
+        let gone = |error: &io::Error| {
+            error.kind() == io::ErrorKind::NotFound
+                || error.raw_os_error() == Some(Errno::ESRCH as i32)
+        };
+        let mut file = match File::open(&path) {
+            Ok(file) => file,
+            Err(error) if gone(&error) => return Err(exited()),
+            Err(error) => return Err(error),
+        };
+        if process_start_time(pid)? != Some(start_time) {
+            return Err(exited());
+        }
+        let mut text = String::new();
+        match file.read_to_string(&mut text) {
+            Ok(_) => read_count(&path, &text),
+            Err(error) if gone(&error) => Err(exited()),
+            Err(error) => Err(error),
+        }
+    }
+}
+
+/// Returns how many bytes this process has read through read calls: the `rchar` of
+/// `/proc/self/io`.
+pub(crate) fn own_bytes_read() -> io::Result<u64> {
+    let path = "/proc/self/io";
+    read_count(path, &fs::read_to_string(path)?)
+}
+
+/// Returns the `rchar` count of the text `text` of the file at `path`, a process's `/proc` file
+/// `io`: the bytes that the process, and the children that it reaped, passed to read calls, from
+/// any file, whether the page cache served them or not, which counts no read through io_uring nor
+/// a file's mapped pages.
+fn read_count(path: &str, text: &str) -> io::Result<u64> {
+    text.lines()
+        .find_map(|line| line.strip_prefix("rchar:"))
+        .and_then(|count| count.trim().parse().ok())
+        .ok_or_else(|| io::Error::other(format!("{path} has no rchar count")))
 }
 
 /// Opens the process `pid` if it still runs with the start time `start_time`, and returns `None`
@@ -1102,6 +1149,10 @@ impl Transport for UnixTransport {
         }
         Ok(())
     }
+
+    fn unread(&self) -> io::Result<Option<usize>> {
+        sys::unread_by_peer(&self.stream).map(Some)
+    }
 }
 
 #[cfg(test)]
@@ -1216,5 +1267,49 @@ mod tests {
         );
         drop(client);
         assert_eq!(receive_all(&mut listener), b"");
+    }
+
+    #[test]
+    fn a_unix_transport_reports_what_its_peer_has_not_read() {
+        let (stream, mut peer) = UnixStream::pair().unwrap();
+        let mut transport = UnixTransport { stream };
+        assert_eq!(transport.unread().unwrap(), Some(0));
+        let data = b"an attachment";
+        transport.write_all(data, None).unwrap();
+        // The kernel charges the socket for the write's buffer, more than its bytes, until the
+        // peer read it whole: a read of a prefix leaves the charge as it was.
+        let queued = transport.unread().unwrap().unwrap();
+        assert!(queued >= data.len(), "{queued}");
+        let mut received = [0; 6];
+        peer.read_exact(&mut received).unwrap();
+        assert_eq!(transport.unread().unwrap(), Some(queued));
+        let mut rest = vec![0; data.len() - received.len()];
+        peer.read_exact(&mut rest).unwrap();
+        assert_eq!(transport.unread().unwrap(), Some(0));
+
+        // Writes of a byte each queue a buffer each, which the kernel charges the same for, and
+        // which the peer's read of any prefix frees.
+        let charges = data
+            .chunks(1)
+            .map(|byte| {
+                transport.write_all(byte, None).unwrap();
+                transport.unread().unwrap().unwrap()
+            })
+            .collect::<Vec<_>>();
+        let step = charges[0];
+        assert!(step > 0, "{charges:?}");
+        assert!(
+            charges
+                .iter()
+                .enumerate()
+                .all(|(index, charge)| *charge == (index + 1) * step),
+            "{charges:?}"
+        );
+        peer.read_exact(&mut received[..1]).unwrap();
+        let queued = charges[charges.len() - 1];
+        assert_eq!(transport.unread().unwrap(), Some(queued - step));
+        let mut rest = vec![0; data.len() - 1];
+        peer.read_exact(&mut rest).unwrap();
+        assert_eq!(transport.unread().unwrap(), Some(0));
     }
 }

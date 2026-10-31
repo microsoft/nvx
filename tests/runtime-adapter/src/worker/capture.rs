@@ -32,7 +32,9 @@
 //! worker repairs the restore next, with `nvx::guest::clone::repair`, behind its fence, which
 //! stays closed: the repair activates the restore's memory target, reseeds the kernel's random
 //! number generator, and finishes the restore, with the acknowledgement that the host awaits,
-//! which hands the deferred time work to the time daemon. NVX's `/init` started the daemon in the
+//! which hands the deferred time work to the time daemon. For tests, a template whose initramfs
+//! holds `template::REPAIR_DELAY_FILE` has the worker of each of its clones wait that long first,
+//! while OpenVMM gates the host's input. NVX's `/init` started the daemon in the
 //! template, with the time ABI's boot step, before the worker, so the snapshot holds it, and PID 1
 //! collects its status. A repair that failed ends the clone with the
 //! [status](nvx::guest::clone::RepairError::status) of its failure, which `nvx::protocol::status`
@@ -55,7 +57,8 @@ use std::fmt;
 use std::io::{self, Read, Write};
 use std::net::Ipv4Addr;
 use std::path::{Path, PathBuf};
-use std::time::Instant;
+use std::thread;
+use std::time::{Duration, Instant};
 
 use nvx::guest::clone::{
     self, Activation, AdmissionFence, CaptureBarrier, CaptureCause, CaptureError,
@@ -310,10 +313,11 @@ enum Capture {
 
 /// Captures the template's VM on its control tty at `tty`, with the root operations `operations`,
 /// whose NIC's IPv4 gateway is `gateway`, if it has a NIC, as its kernel command line names it,
-/// as the [module documentation](self) describes, and returns how the worker ended: once the
-/// bootstrap failed, or the capture ended without a snapshot, or failed, or in a clone, which a
-/// restore of the snapshot started, once its repair failed, or the session that the worker served
-/// once it repaired the clone ended.
+/// and in each clone of which the worker waits `repair_delay` before the repair, if the template
+/// sets a delay, for tests, as the [module documentation](self) describes, and returns how the
+/// worker ended: once the bootstrap failed, or the capture ended without a snapshot, or failed,
+/// or in a clone, which a restore of the snapshot started, once its repair failed, or the session
+/// that the worker served once it repaired the clone ended.
 ///
 /// It opens the tty through [`guest::on_terminal_within`], as the worker of a VM that boots cold
 /// does, and fails as that does if the tty cannot be opened or put in raw mode. It fails with
@@ -326,6 +330,7 @@ pub fn capture_on_terminal(
     tty: &Path,
     operations: &mut dyn RootOperations,
     gateway: Option<Ipv4Addr>,
+    repair_delay: Option<Duration>,
 ) -> Result<Templated, ServeError> {
     guest::on_terminal_within(tty, |terminal| {
         let config = template_config();
@@ -349,6 +354,10 @@ pub fn capture_on_terminal(
                 Ok(Captured::Restored(restored)) => {
                     // The repair runs behind the fence, which stays closed.
                     let (restore, fence) = restored.into_parts();
+                    // Until the repair acknowledges the restore, OpenVMM reads no host input.
+                    if let Some(delay) = repair_delay {
+                        thread::sleep(delay);
+                    }
                     match clone::repair(restore) {
                         Ok(repaired) => Capture::Repaired { repaired, fence },
                         Err(error) => Capture::Ended(Templated::Unrepaired(error)),
@@ -372,6 +381,7 @@ pub fn capture_on_terminal(
             activation,
             template,
             acknowledged,
+            repair_delay,
         )?;
         // A clone that ends before it is ready, or whose activation failed, ends even if the tty
         // sends nothing.

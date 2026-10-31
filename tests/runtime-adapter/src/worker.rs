@@ -586,7 +586,8 @@ pub fn work<S: Read + Write + AsFd>(
 /// assembly that the template captured, with which the worker [applies](RootOperations::apply)
 /// the record of the host's `Activate`. `acknowledged` is when the repair acknowledged the
 /// restore, `nvx::guest::clone::Repaired::acknowledged_at`, if it did, from which the
-/// `activation::ACTIVATION_PROBE` reports the events of the clone.
+/// `activation::ACTIVATION_PROBE` reports the events of the clone, with `repair_delay`, how long
+/// the worker waited before the repair, for tests, if the template set a delay.
 ///
 /// It ends as [`work`] does, and with [`Worked::Unactivated`] once the activation failed, or
 /// [`Worked::Abandoned`] once the broker closed the stream before the clone was ready, after which
@@ -600,8 +601,9 @@ pub fn work_clone<S: Read + Write + AsFd>(
     activation: Activation<Admission>,
     template: RootTemplate,
     acknowledged: Option<Instant>,
+    repair_delay: Option<Duration>,
 ) -> Result<Worked, ServeError> {
-    let state = CloneState::new(activation, template, acknowledged);
+    let state = CloneState::new(activation, template, acknowledged, repair_delay);
     serve(
         Connection::resume(stream, session)?,
         operations,

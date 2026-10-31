@@ -22,16 +22,22 @@
 //!   block device, which [`geometry`] gives;
 //! - the network, of which the class takes the NIC alone, at the guest's address, under the
 //!   complete deny-all policy, whatever the network's own, which each clone's restore replaces
-//!   with the clone's, and no other invariant setting.
+//!   with the clone's;
+//! - for tests, the delay of each clone's repair, if [`REPAIR_DELAY_VARIABLE`] sets one, as the
+//!   invariant setting [`REPAIR_DELAY_SETTING`], and no other invariant setting, so that a
+//!   template whose clones delay their repair is of a class of its own.
 //!
 //! The capture's VM boots NVX's kernel with the initramfs of the adapter's VMs, which puts the
-//! guest agent in place of NVX's agents; see [`crate::initramfs`]. NVX gives it the kernel command
+//! guest agent in place of NVX's agents, and holds the file of the delay of each clone's repair,
+//! if any; see [`crate::initramfs`]. NVX gives it the kernel command
 //! line `nvx_sandbox=1`, with which NVX's `/init` hands it to the guest agent's PID 1 of a layered
 //! root, and for a template whose processors are not all online at boot, `maxcpus=` with those
 //! that are, and OpenVMM adds the platform tier's tokens, `nvx_snapshot_tier=platform` among them:
 //! the worker then captures the VM before it assembles any root, and the capture ends the VM.
 
+use std::env;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use nvx::host::artifacts::Artifacts;
 use nvx::host::sandbox::distro::{DISTRO_POLICY_REVISION, DistroBinding};
@@ -44,6 +50,17 @@ use nvx::{Hypervisor, Result};
 
 use crate::layered::plan;
 use crate::runtime::Runtime;
+use crate::template::{MAX_REPAIR_DELAY, parse_repair_delay};
+
+/// The variable from which `runtime-adapter-host create` and `refresh` take the delay of the
+/// repair of each clone of the template that a capture makes, for tests: a positive number of
+/// milliseconds, of at most `template::MAX_REPAIR_DELAY`, as `template::parse_repair_delay`
+/// reads the file of the delay that the capture's initramfs holds.
+pub const REPAIR_DELAY_VARIABLE: &str = "RUNTIME_ADAPTER_REPAIR_DELAY";
+
+/// The invariant setting of the class of a template whose clones delay their repair, for tests,
+/// which holds the delay, in milliseconds.
+pub const REPAIR_DELAY_SETTING: &str = "runtime-adapter.repair-delay-ms";
 
 /// The CPU profile of a template, unless the host program names another: `auto`, which OpenVMM's
 /// `--cpu-profile` takes for the built-in profile of the host's CPU, and which OpenVMM also
@@ -99,6 +116,8 @@ pub struct Request {
     /// The network at whose guest's address the template has its fixed NIC, under the complete
     /// deny-all policy, or `None` for a template without a NIC.
     pub network: Option<SandboxNetwork>,
+    /// How long each clone of the template delays its repair, for tests, or `None` for no delay.
+    pub repair_delay: Option<Duration>,
 }
 
 impl Request {
@@ -118,8 +137,9 @@ impl Request {
     /// Returns NVX's capture of the template that this requests, with the placeholder's binding
     /// `binding`, the runtime of the adapter's VMs `runtime`, with the guest agent's build
     /// `guest_build`, and the initramfs `initramfs`, which puts that guest agent in place of NVX's
-    /// agents, and whose dormant scratch is on the file system of the directory `scratch`, the
-    /// template store's, as the [module documentation](self) describes.
+    /// agents, and holds the file of the delay of each clone's repair, if this requests one, and
+    /// whose dormant scratch is on the file system of the directory `scratch`, the template
+    /// store's, as the [module documentation](self) describes.
     ///
     /// Fails as [`plan`](Self::plan) and [`geometry`] do, and with
     /// [`ErrorKind::Unsupported`](nvx::ErrorKind::Unsupported) if the guest agent's build is not
@@ -134,6 +154,12 @@ impl Request {
         scratch: &Path,
     ) -> Result<Capture> {
         let adapter = self.plan()?;
+        let invariants = match self.repair_delay {
+            None => Invariants::new(),
+            Some(delay) => {
+                Invariants::new().with(REPAIR_DELAY_SETTING, &delay.as_millis().to_string())?
+            }
+        };
         let class = CaptureClass {
             runtime: runtime.identity.clone(),
             guest_build: ArtifactIdentity::new(format!("runtime-adapter-guest/{guest_build}"))?,
@@ -146,7 +172,7 @@ impl Request {
             distro: geometry(adapter.distro().path(), binding.image().length())?,
             scratch: geometry(scratch, self.scratch_length)?,
             network: self.network.clone(),
-            invariants: Invariants::new(),
+            invariants,
         };
         Ok(Capture {
             class,
@@ -159,6 +185,29 @@ impl Request {
                 initramfs,
             ),
         })
+    }
+}
+
+/// Returns the delay of each clone's repair that [`REPAIR_DELAY_VARIABLE`] sets, for tests, or
+/// `None` without the variable, or says why its value is not one: a positive number of
+/// milliseconds, in decimal digits, of at most [`MAX_REPAIR_DELAY`].
+pub fn repair_delay_from_env() -> std::result::Result<Option<Duration>, String> {
+    let Some(value) = env::var_os(REPAIR_DELAY_VARIABLE) else {
+        return Ok(None);
+    };
+    let delay = value.to_str().and_then(|text| {
+        // The file's newline is no part of the variable.
+        (!text.ends_with('\n'))
+            .then(|| parse_repair_delay(text.as_bytes()))
+            .flatten()
+    });
+    match delay {
+        Some(delay) => Ok(Some(delay)),
+        None => Err(format!(
+            "{REPAIR_DELAY_VARIABLE} takes a positive number of milliseconds, of at most {}, \
+             not {value:?}",
+            MAX_REPAIR_DELAY.as_millis()
+        )),
     }
 }
 

@@ -523,6 +523,18 @@ and a process whose identity this user cannot check, such as another user's,
 makes `Process::open` fail rather than report an exit. Linux hosts without
 pidfds poll the reference instead, and cannot terminate the process.
 
+`Process::bytes_read` reports how many bytes the process has read through the
+operating system's read calls, whether the host's cache served them or not:
+`rchar` of `/proc/<pid>/io` on Linux, which it reads only while the process
+still runs with its reference's identity, and the `ReadTransferCount` of
+`GetProcessIoCounters` on Windows. `own_bytes_read` reports the calling
+process's. Neither counts what a process maps from a file, as OpenVMM maps the
+memory of a snapshot that it restores, nor, on Linux, what it reads through
+io_uring, as OpenVMM reads a sandbox's block devices. On Linux, the count also
+holds what the process's children read once it reaped them, as the kernel
+accounts them to their parent, while Windows counts the process's own reads
+alone.
+
 ### `nvx::host::supervisor`
 
 The supervisor of a sandbox's VMM, beneath the CLI, `Instance`, and external
@@ -937,6 +949,15 @@ tampering; see [Distro bindings](#distro-bindings).
 The authenticated control session, which carries NVX's control protocol, `NVXC`,
 one frame per DATA record of a `HostConnection`; Linux and Windows primitives;
 and OpenVMM's outcome report.
+
+A `Transport` to an OpenVMM control endpoint reads and writes with deadlines,
+and tells, through `Transport::unread`, what the endpoint has not read yet of
+what it wrote, where the platform tells: on Linux, what `SIOCOUTQ` reports of
+its Unix socket, the kernel's charge for the buffers of each write until
+OpenVMM read each whole, which a read of part of a buffer leaves as it was, and
+which is zero once OpenVMM read everything. A named pipe tells its writer
+nothing of the kind, so on Windows, and for a transport that does not tell, it
+is `None`.
 
 ### `nvx::host::sandbox`
 

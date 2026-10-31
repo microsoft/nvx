@@ -82,6 +82,22 @@
 //! - A clone runs its executions as its record's workload identity, once it is ready: the repair
 //!   acknowledged the restore before the clone took its reset, the host's first message came
 //!   after that, and the clone's Ready, its start, and its first execution came in that order.
+//! - OpenVMM reads none of the host's input until the clone's repair acknowledges its restore, as
+//!   the host sees it: a template whose initramfs delays each clone's repair, for tests, holds a
+//!   clone's restore unacknowledged for that long, and is of a class of its own, whose key names
+//!   the delay. The host starts a clone of it through NVX's public API, with the host program's
+//!   clone order, over transports that watch the session's attachment: the host writes the
+//!   attachment well before the repair can acknowledge the restore, but the broker, which answers
+//!   a host that it authenticated at once, answers only after the delay, and then attaches the
+//!   host. On Linux, the host writes the attachment a byte at a time, which the kernel queues in
+//!   a buffer for each byte, and charges the same for, so that what `SIOCOUTQ` reports of it falls
+//!   as soon as OpenVMM reads any byte: it rises by the same step with each byte that the host
+//!   writes, stays as the write left it until the delay passed, and is zero once the broker
+//!   answered, while a listener of the test's own process, which reads the first byte of such an
+//!   attachment, shows that it would fall. A named pipe tells its writer nothing of the kind, so
+//!   on Windows the check is the timing alone. A reattach once the clone is ready, which no gate
+//!   holds, gets its answer within a fraction of the delay, as the positive control, and the guest
+//!   reports that it waited the delay before its repair.
 //! - Each command after the start reattaches to the clone from a new process: the clone answers
 //!   the Activate of its record again, in a new session of the same broker, with its Ready, without
 //!   activating again, and serves the command.
@@ -117,7 +133,15 @@
 //!   which clock fixtures stand for. It refuses the selection of a generation that is no longer
 //!   eligible, as expired, or not yet, as ineligible, without a lease, with the refusal's record.
 //! - A clone reads no more of its disks on its restore than its root needs, which a read of each
-//!   disk to its end shows the guest's statistics count.
+//!   disk to its end shows the guest's statistics count. The host's processes count the bytes
+//!   that their read calls read, the cache's included, as `nvx::host::process` tells them: the
+//!   staging of the clone's images, which hashes the image, counts at least its length, while the
+//!   start reads less than an eighth of it, and the clone's VMM less than an eighth of the disks
+//!   whose files it reads, once the clone is ready. Its count rises by what the guest's read of
+//!   each disk to its end asked of those files on Windows, where OpenVMM reads them with
+//!   `ReadFile`, but not on Linux, where OpenVMM reads them through io_uring, which `rchar` does
+//!   not count: there, the VMM's count covers its read calls alone. Neither counts the memory of
+//!   the snapshot, which OpenVMM maps.
 //! - A clone's time settles after it is ready, with no violation, after the downtime that the
 //!   host's monotonic clock measured.
 //! - A template without a NIC serves clones without a network, and of a network that lets nothing
@@ -191,8 +215,8 @@ use std::net::{
 };
 use std::num::NonZeroU64;
 use std::path::{Path, PathBuf};
-use std::sync::LazyLock;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, LazyLock, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
@@ -210,19 +234,23 @@ use nvx::host::store::{CallerFiles, LOG_NAME, SandboxStore};
 use nvx::host::template::{
     CAPTURE_RECORD_NAME, CloneControl, ClonePlan, CloneRecords, Evidence, GENERATIONS_NAME,
     Generation, HostTime, KEY_NAME, Lease, MAX_DOWNTIME_NS, MEMORY_BLOCK_SIZE, Outcome, Progress,
-    RestoreDeadlines, SNAPSHOT_NAME, Stage, Store, Teardown,
+    ReattachedClone, RestoreDeadlines, SNAPSHOT_NAME, Stage, Store, Teardown, reattach_clone,
 };
 use nvx::protocol::root::ImageFormat;
 use nvx::protocol::status;
 use nvx::protocol::{CAPABILITY_LEN, HostMap};
 use nvx::uuid::Uuid;
 use runtime_adapter::GUEST_BUILD;
-use runtime_adapter::capture::DEFAULT_SCRATCH_LENGTH;
-use runtime_adapter::clone::{CLONE_HOSTNAME, HOST_TIME_VARIABLE, Request, host_time_text};
+use runtime_adapter::capture::{
+    DEFAULT_SCRATCH_LENGTH, REPAIR_DELAY_SETTING, REPAIR_DELAY_VARIABLE,
+};
+use runtime_adapter::clone::{
+    CLONE_HOSTNAME, CloneRecord, HOST_TIME_VARIABLE, Request, host_time_text,
+};
 use runtime_adapter::exec::{HostMessage, Start};
 use runtime_adapter::frame::Message;
 use runtime_adapter::hook::{Action, STEP_HOOK, Step, StepHook};
-use runtime_adapter::host::Client;
+use runtime_adapter::host::{Client, CloneOrder, OrderError};
 use runtime_adapter::layered::PROXY_VARIABLES;
 use runtime_adapter::root::DEFAULT_RUNTIME;
 use runtime_adapter::runtime::Runtime;
@@ -259,6 +287,18 @@ const STRANGER: &str = "4242:4242";
 const SECTOR: u64 = 512;
 /// How long a clone's time may take to settle once the clone is ready.
 const TIME_SETTLEMENT: Duration = Duration::from_secs(30);
+/// How long each clone of the template of the scenario of OpenVMM's gate of the host's input
+/// waits before its repair: long enough for the host's attachment, which a restore of a fraction
+/// of a second lets the host write, to reach OpenVMM well before the repair acknowledges the
+/// clone's restore, even on a host that other scenarios load.
+const REPAIR_DELAY: Duration = Duration::from_secs(8);
+/// How often a watched attachment records what the broker has not read of it, while it awaits
+/// the broker's answer, on a host whose transport tells.
+const UNREAD_INTERVAL: Duration = Duration::from_millis(50);
+/// Whether the count of the bytes that a clone's VMM read, `Process::bytes_read`, counts its
+/// reads of the clone's disks: on Windows, OpenVMM reads them with `ReadFile`, which
+/// `ReadTransferCount` counts, and on Linux through io_uring, which `rchar` does not count.
+const VMM_COUNTS_DISK_READS: bool = cfg!(windows);
 /// Nanoseconds in an hour.
 const HOUR_NS: u64 = 3_600_000_000_000;
 /// The error number with which the guest refuses an execution that names an identity in a
@@ -942,7 +982,15 @@ impl Template {
             boot.iter()
                 .flat_map(|boot| ["--boot-processors", boot.as_str()]),
         );
-        Self::captured(name, None, None, &options)
+        Self::captured(name, None, None, &options, &[])
+    }
+
+    /// Creates the sandbox of the scenario `name`, stages the platform's copy of the image, and
+    /// captures the template of the image, as [`create`](Self::create) does, each of whose clones
+    /// waits `delay` before its repair, as [`REPAIR_DELAY_VARIABLE`] asks of the capture.
+    fn delayed(name: &str, delay: Duration) -> Self {
+        let delay = OsString::from(delay.as_millis().to_string());
+        Self::captured(name, None, None, &[], &[(REPAIR_DELAY_VARIABLE, &delay)])
     }
 
     /// Creates the sandbox of the scenario `name`, stages the platform's copy of the image, and
@@ -950,15 +998,17 @@ impl Template {
     /// than the image, and of the image otherwise, with the network `network`, if any, with the
     /// guest at [`GUEST_NETWORK`].
     fn capture(name: &str, placeholder: Option<&Disk>, network: Option<Network>) -> Self {
-        Self::captured(name, placeholder, network, &[])
+        Self::captured(name, placeholder, network, &[], &[])
     }
 
-    /// Captures the template as [`capture`](Self::capture) does, with the options `extra` too.
+    /// Captures the template as [`capture`](Self::capture) does, with the options `extra` too, and
+    /// the variables `environment`.
     fn captured(
         name: &str,
         placeholder: Option<&Disk>,
         network: Option<Network>,
         extra: &[&str],
+        environment: &[(&str, &OsStr)],
     ) -> Self {
         let mut sandbox = Sandbox::new(name);
         let fixtures = Fixtures::find();
@@ -990,7 +1040,7 @@ impl Template {
             options.extend([OsStr::new("--network"), network.as_os_str()]);
         }
         options.extend(extra.iter().map(OsStr::new));
-        let created = sandbox.create(&options, 0);
+        let created = sandbox.create_with(&options, environment, 0);
         assert_eq!(created["created"], "captured", "{created:?}");
         assert_eq!(created["generation"], GENERATION.to_string(), "{created:?}");
         Self {
@@ -1118,10 +1168,11 @@ impl Template {
         execution: &[&str],
         status: i32,
     ) -> Cloned {
-        let (sandbox, started) = self.begin_in(name, command, start, execution);
+        let (sandbox, staged, started) = self.begin_in(name, command, start, execution);
         let started = sandbox.finish(started, status);
         Cloned {
             sandbox,
+            staged,
             started,
             ran: command == "run",
         }
@@ -1129,17 +1180,17 @@ impl Template {
 
     /// Begins the host program's `command`, `start` or `run`, of a clone in a new sandbox of the
     /// scenario `name`, as `start` asks, with the arguments `execution` after the start's options,
-    /// and returns the sandbox, with the command, which may still run. Before a start, the
-    /// sandbox's store stages the clone's images, unless `start` says otherwise. A start that
-    /// `start` asks to act at `checked` pauses there, through the step hook, until the scenario
-    /// acted.
+    /// and returns the sandbox, what its staging printed, if it staged, and the command, which may
+    /// still run. Before a start, the sandbox's store stages the clone's images, unless `start`
+    /// says otherwise. A start that `start` asks to act at `checked` pauses there, through the
+    /// step hook, until the scenario acted.
     fn begin_in(
         &self,
         name: &str,
         command: &str,
         start: &StartOf<'_>,
         execution: &[&str],
-    ) -> (Sandbox, Started) {
+    ) -> (Sandbox, Option<Printed>, Started) {
         let mut sandbox = Sandbox::new(name);
         let (distro, identity) = match start.image {
             None => (erofs(&self.image), self.identity.as_str()),
@@ -1172,6 +1223,7 @@ impl Template {
         };
         let identity = OsStr::new(identity);
         let run = command == "run";
+        let mut staged = None;
         if !run && !start.unstaged {
             let mut staging = vec![
                 OsStr::new("--distro"),
@@ -1182,7 +1234,7 @@ impl Template {
             if start.upper != Upper::Ram {
                 staging.extend([OsStr::new("--upper"), &upper]);
             }
-            sandbox.run("stage", &staging, 0);
+            staged = Some(sandbox.run("stage", &staging, 0));
         }
         let generation = GENERATION.to_string();
         let mut options = vec![
@@ -1222,7 +1274,7 @@ impl Template {
             act();
             fs::remove_file(&pause).unwrap();
         }
-        (sandbox, started)
+        (sandbox, staged, started)
     }
 }
 
@@ -1312,6 +1364,8 @@ struct StartOf<'a> {
 struct Cloned {
     /// The clone's sandbox.
     sandbox: Sandbox,
+    /// What the staging of the clone's images printed, before a start that staged them.
+    staged: Option<Printed>,
     /// What the start, or the run, printed.
     started: Printed,
     /// Whether a run, whose preflight staged the clone's images, rather than a start, started
@@ -2305,21 +2359,7 @@ fn refuses_early(template: &Template, early: Message) {
     let store = template.store();
     let artifacts = env::var_os(Artifacts::ENV_DIR).unwrap();
     let runtime = Runtime::from_dir(artifacts, GUEST_BUILD).unwrap();
-    let request = Request {
-        distro: template.image.clone(),
-        format: ImageFormat::Erofs,
-        identity: Uuid::parse(&template.identity).unwrap(),
-        scratch: None,
-        processors: None,
-        memory: None,
-        workload_identity: None,
-        overlay_mode: None,
-        scratch_journal: None,
-        first_partition_bound: None,
-        machine_id: MachineIdMode::Image,
-        sharing: HostFsSharing::default(),
-        network: None,
-    };
+    let request = in_ram(template);
     let plan = request.plan().unwrap();
     let staged = Staged::read(&sandbox.store).unwrap().unwrap();
     let key = store.read_key(&template.generation()).unwrap();
@@ -2387,6 +2427,220 @@ fn refuses_early(template: &Template, early: Message) {
     assert_eq!(released.map(|lease| lease.id()), Some(acquired.lease.id()));
     assert!(CloneRecords::read(&acquired.locked).unwrap().is_none());
     assert!(template.leases().is_empty());
+}
+
+/// Returns the request of a clone of `template` in RAM, of the platform's image, which the
+/// template's processors online at boot and RAM serve, without a setting of its own, as a start
+/// without options makes it.
+fn in_ram(template: &Template) -> Request {
+    Request {
+        distro: template.image.clone(),
+        format: ImageFormat::Erofs,
+        identity: Uuid::parse(&template.identity).unwrap(),
+        scratch: None,
+        processors: None,
+        memory: None,
+        workload_identity: None,
+        overlay_mode: None,
+        scratch_journal: None,
+        first_partition_bound: None,
+        machine_id: MachineIdMode::Image,
+        sharing: HostFsSharing::default(),
+        network: None,
+    }
+}
+
+/// What the host saw of an attachment of a session to a clone's control endpoint, through a
+/// [`WatchedTransport`].
+#[derive(Clone, Debug, Default)]
+struct Attachment {
+    /// When the host had written the attachment, the first bytes of the session.
+    written: Option<Instant>,
+    /// What the broker had not read of what the host wrote, as the transport tells it, or `None`
+    /// where it does not, before the host wrote the attachment, and once it had written each of
+    /// the attachment's bytes, which it writes one at a time.
+    writing: Vec<Option<usize>>,
+    /// What the broker had not read of what the host wrote, as the transport tells it, or `None`
+    /// where it does not, and when: once the host wrote the attachment, every
+    /// [`UNREAD_INTERVAL`] while it awaited the broker's answer, and once the answer came.
+    unread: Vec<(Instant, Option<usize>)>,
+    /// When the broker's first answer came.
+    answered: Option<Instant>,
+    /// When the broker attached the host, if it did.
+    attached: Option<Instant>,
+}
+
+/// A transport to a clone's control endpoint that records what the host saw of the attachment
+/// that it writes first, as an [`Attachment`], and writes it a byte at a time. On Linux, the
+/// kernel then queues a buffer for each byte, and charges the same for each until the broker read
+/// it, so what `SIOCOUTQ` reports of the attachment rises by the same step with each byte that the
+/// broker has not read, and falls as soon as the broker reads any byte, while a buffer that the
+/// broker read in part would leave it as it was.
+struct WatchedTransport {
+    /// The transport that NVX connected.
+    transport: Box<dyn Transport>,
+    /// What the host saw of the attachment.
+    attachment: Arc<Mutex<Attachment>>,
+}
+
+impl WatchedTransport {
+    /// Records what the broker has not read of what the host wrote, now.
+    fn record_unread(&self) -> io::Result<()> {
+        let unread = self.transport.unread()?;
+        let mut attachment = self.attachment.lock().unwrap();
+        attachment.unread.push((Instant::now(), unread));
+        Ok(())
+    }
+}
+
+impl Transport for WatchedTransport {
+    fn read(&mut self, buffer: &mut [u8], timeout: Option<Duration>) -> io::Result<usize> {
+        let (awaiting, tells) = {
+            let attachment = self.attachment.lock().unwrap();
+            let awaiting = attachment.written.is_some() && attachment.answered.is_none();
+            let tells = attachment.unread.iter().any(|(_, unread)| unread.is_some());
+            (awaiting, tells)
+        };
+        if !awaiting {
+            return self.transport.read(buffer, timeout);
+        }
+        // Until the broker answers, a transport that tells what the broker has not read is asked
+        // between waits of at most `UNREAD_INTERVAL`, until the read's own timeout.
+        let deadline = timeout.map(|timeout| Instant::now() + timeout);
+        let read = loop {
+            let left = deadline.map(|deadline| deadline.saturating_duration_since(Instant::now()));
+            let wait = if tells {
+                Some(left.map_or(UNREAD_INTERVAL, |left| left.min(UNREAD_INTERVAL)))
+            } else {
+                left
+            };
+            match self.transport.read(buffer, wait) {
+                Err(error)
+                    if error.kind() == io::ErrorKind::TimedOut
+                        && tells
+                        && left.is_none_or(|left| left > UNREAD_INTERVAL) =>
+                {
+                    self.record_unread()?;
+                }
+                read => break read,
+            }
+        };
+        if let Ok(1..) = read {
+            self.attachment.lock().unwrap().answered = Some(Instant::now());
+            self.record_unread()?;
+        }
+        read
+    }
+
+    fn write_all(&mut self, data: &[u8], timeout: Option<Duration>) -> io::Result<()> {
+        let first = self.attachment.lock().unwrap().written.is_none();
+        if !first {
+            return self.transport.write_all(data, timeout);
+        }
+        // The attachment goes out a byte at a time, each in a write of its own, which the kernel
+        // queues in a buffer of its own on Linux, and charges for until the broker read the
+        // buffer whole: `SIOCOUTQ` rises with each byte that the broker has not read, and falls as
+        // soon as the broker reads any byte of it.
+        let deadline = timeout.map(|timeout| Instant::now() + timeout);
+        let mut writing = vec![self.transport.unread()?];
+        for byte in data.chunks(1) {
+            let left = deadline.map(|deadline| deadline.saturating_duration_since(Instant::now()));
+            self.transport.write_all(byte, left)?;
+            writing.push(self.transport.unread()?);
+        }
+        {
+            let mut attachment = self.attachment.lock().unwrap();
+            attachment.written = Some(Instant::now());
+            attachment.writing = writing;
+        }
+        self.record_unread()
+    }
+
+    fn unread(&self) -> io::Result<Option<usize>> {
+        self.transport.unread()
+    }
+}
+
+/// The adapter's framing of a clone's control session, the host program's own clone order, over
+/// transports that watch their attachments, as [`WatchedTransport`]s.
+struct Watched {
+    /// The host program's clone order.
+    order: CloneOrder<'static>,
+    /// What the host saw of the attachment of each session, in order.
+    attachments: Vec<Arc<Mutex<Attachment>>>,
+}
+
+impl Watched {
+    /// Returns the framing of the host program's clone order, of the guest agent's build that the
+    /// host ships, which has attached no session yet.
+    fn new() -> Self {
+        Self {
+            order: CloneOrder { build: GUEST_BUILD },
+            attachments: Vec::new(),
+        }
+    }
+
+    /// Returns what the host saw of the attachment of the framing's one session.
+    fn attachment(&self) -> Attachment {
+        let [attachment] = self.attachments.as_slice() else {
+            panic!("the host attached {} sessions", self.attachments.len());
+        };
+        attachment.lock().unwrap().clone()
+    }
+}
+
+impl CloneControl for Watched {
+    type Session = Client;
+    type Error = OrderError;
+
+    fn attach(
+        &mut self,
+        transport: Box<dyn Transport>,
+        capability: &[u8; CAPABILITY_LEN],
+        deadline: Instant,
+    ) -> Result<Client, OrderError> {
+        let attachment = Arc::new(Mutex::new(Attachment::default()));
+        self.attachments.push(Arc::clone(&attachment));
+        let watched = WatchedTransport {
+            transport,
+            attachment: Arc::clone(&attachment),
+        };
+        let attached = self.order.attach(Box::new(watched), capability, deadline);
+        if attached.is_ok() {
+            attachment.lock().unwrap().attached = Some(Instant::now());
+        }
+        attached
+    }
+
+    fn activate(
+        &mut self,
+        session: &mut Client,
+        record: &[u8],
+        deadline: Instant,
+    ) -> Result<Option<ReadyActivation>, OrderError> {
+        self.order.activate(session, record, deadline)
+    }
+
+    fn map(
+        &mut self,
+        session: &mut Client,
+        table: &[HostMap],
+        deadline: Instant,
+    ) -> Result<(), OrderError> {
+        self.order.map(session, table, deadline)
+    }
+
+    fn start(&mut self, session: &mut Client, deadline: Instant) -> Result<(), OrderError> {
+        self.order.start(session, deadline)
+    }
+
+    fn lost(&self, error: &OrderError) -> bool {
+        self.order.lost(error)
+    }
+
+    fn refused(&self, error: &OrderError) -> bool {
+        self.order.refused(error)
+    }
 }
 
 /// Returns the limits of the executions of the scenarios that the host starts itself.
@@ -3074,6 +3328,255 @@ fn a_clone_runs_its_executions_as_its_workload_identity_once_it_is_ready() {
     cloned.stop();
 }
 
+/// Checks what the host saw, through its transport, of what the broker had not read of
+/// `attachment` once the broker answered: on Linux, as `SIOCOUTQ` reports it, nothing, since the
+/// broker read the attachment whole first. A named pipe tells its writer nothing of the kind, so
+/// on Windows the transport told nothing at all.
+fn assert_read_once_answered(attachment: &Attachment) {
+    let unread = &attachment.unread;
+    if !cfg!(target_os = "linux") {
+        assert!(
+            attachment.writing.iter().all(Option::is_none)
+                && unread.iter().all(|(_, unread)| unread.is_none()),
+            "{attachment:?}"
+        );
+        return;
+    }
+    let answered = attachment.answered.expect("the broker answered");
+    let last = unread
+        .last()
+        .expect("the host recorded what the broker read");
+    assert!(last.0 >= answered && last.1 == Some(0), "{attachment:?}");
+}
+
+/// Returns what the host saw of `attachment` once it had written it, on Linux, and checks that
+/// the broker read none of it meanwhile: the host wrote it a byte at a time, which the kernel
+/// charges the same for, so what `SIOCOUTQ` reported rose by the same step with each byte, from
+/// what it reported before the write.
+fn charge_once_written(attachment: &Attachment) -> usize {
+    let writing = attachment
+        .writing
+        .iter()
+        .map(|unread| unread.expect("the transport tells what the broker has not read"))
+        .collect::<Vec<_>>();
+    let [before, first, ..] = writing[..] else {
+        panic!("the host wrote no attachment: {attachment:?}");
+    };
+    let step = first.saturating_sub(before);
+    assert!(step > 0, "{attachment:?}");
+    assert!(
+        writing
+            .iter()
+            .enumerate()
+            .all(|(bytes, unread)| *unread == before + bytes * step),
+        "{attachment:?}"
+    );
+    writing[writing.len() - 1]
+}
+
+/// Checks, on Linux, that the records of a [`WatchedTransport`] show the read of a prefix of its
+/// attachment, as they would show OpenVMM's: NVX connects the transport, as it connects one to a
+/// control endpoint, to a listener of this process at `socket`, which plays the broker, and reads
+/// the first byte of the attachment that the transport writes, then the rest. What `SIOCOUTQ`
+/// reports rises by the same step with each byte that the transport writes, falls once the
+/// listener read the first byte, and is zero once it read the rest.
+#[cfg(target_os = "linux")]
+fn assert_a_prefix_read_shows(socket: &Path) {
+    let listener = std::os::unix::net::UnixListener::bind(socket).unwrap();
+    let pid = std::process::id();
+    let start_time = nvx::host::platform::process_start_time(pid)
+        .unwrap()
+        .unwrap();
+    let endpoint = socket.to_str().unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let transport = nvx::host::session::connect(endpoint, pid, start_time, deadline).unwrap();
+    let (mut broker, _) = listener.accept().unwrap();
+    let attachment = Arc::new(Mutex::new(Attachment::default()));
+    let mut watched = WatchedTransport {
+        transport,
+        attachment: Arc::clone(&attachment),
+    };
+    let sent = [0x5a; 64];
+    watched
+        .write_all(&sent, Some(Duration::from_secs(10)))
+        .unwrap();
+    let whole = charge_once_written(&attachment.lock().unwrap());
+    let mut received = [0; 64];
+    broker.read_exact(&mut received[..1]).unwrap();
+    watched.record_unread().unwrap();
+    broker.read_exact(&mut received[1..]).unwrap();
+    watched.record_unread().unwrap();
+    let unread = attachment
+        .lock()
+        .unwrap()
+        .unread
+        .iter()
+        .map(|(_, unread)| *unread)
+        .collect::<Vec<_>>();
+    let [Some(written), Some(prefix), Some(rest)] = unread[..] else {
+        panic!("{unread:?}");
+    };
+    assert!(
+        written == whole && 0 < prefix && prefix < whole && rest == 0,
+        "{whole}: {unread:?}"
+    );
+    assert_eq!(received, sent);
+}
+
+#[test]
+#[ignore = "boots VMs; see the module documentation for what they need"]
+fn openvmm_reads_none_of_the_host_s_input_until_the_repair_acknowledges_the_restore() {
+    // A template whose clones wait before their repair, of a class of its own.
+    let template = Template::delayed("cl-gate", REPAIR_DELAY);
+    let store = template.store();
+    let key = store.read_key(&template.generation()).unwrap();
+    let delay = REPAIR_DELAY.as_millis().to_string();
+    assert_eq!(
+        key.invariants().get(REPAIR_DELAY_SETTING),
+        Some(delay.as_str())
+    );
+
+    // The host starts a clone in RAM through NVX's public API, as the host program starts one,
+    // with the record that the host program's later commands read, and the host program's clone
+    // order, over transports that watch their attachments.
+    let mut sandbox = Sandbox::new("cl-g");
+    template.stage(&mut sandbox);
+    let artifacts = env::var_os(Artifacts::ENV_DIR).unwrap();
+    let runtime = Runtime::from_dir(artifacts, GUEST_BUILD).unwrap();
+    let request = in_ram(&template);
+    let plan = request.plan().unwrap();
+    let staged = Staged::read(&sandbox.store).unwrap().unwrap();
+    let bindings = staged.bindings(&plan);
+    let clone = request
+        .clone_request(
+            plan.clone(),
+            None,
+            &bindings,
+            key.processors(),
+            key.memory(),
+        )
+        .unwrap();
+    let now = HostTime::now().unwrap();
+    let mut acquired = store
+        .acquire(GENERATION, &sandbox.store, &CallerFiles::none(), &now, None)
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let planned = ClonePlan::new(&store, &mut acquired, &clone, deadline).unwrap();
+    let record = CloneRecord {
+        template: template.dir(),
+        generation: GENERATION,
+        kernel_command_line: planned.key().command_line(),
+        plan: &plan,
+        bindings: &bindings,
+    };
+    record.write(&sandbox.store).unwrap();
+    // The clone's VMM starts after this, and its guest waits the delay once the restored VM runs,
+    // so the repair acknowledges the restore no sooner than the delay after it.
+    let launched = Instant::now();
+    let earliest = launched + REPAIR_DELAY;
+    let restoring = planned
+        .launch(&mut acquired, &runtime.artifacts.openvmm, &runtime.identity)
+        .unwrap();
+    let pid = restoring.starting().process().reference().pid;
+    let mut gated = Watched::new();
+    let activated = restoring
+        .activate(&mut gated, RestoreDeadlines::default())
+        .unwrap();
+    let (vmm, session) = activated.start(&mut gated).unwrap().commit().unwrap();
+    drop(session);
+
+    // The host wrote its attachment once the restore was ready, well before the repair could
+    // acknowledge the restore, but the broker, which answers a host that it authenticated at
+    // once, answered only after then, and then attached the host.
+    let attachment = gated.attachment();
+    let written = attachment.written.expect("the host wrote its attachment");
+    let answered = attachment.answered.expect("the broker answered");
+    assert!(
+        written + REPAIR_DELAY / 2 <= earliest,
+        "the host wrote its attachment {:?} after the launch, too late to see the gate: \
+         {attachment:?}",
+        written - launched
+    );
+    assert!(
+        answered >= earliest,
+        "the broker answered {:?} after the launch, before the repair could acknowledge the \
+         restore: {attachment:?}",
+        answered - launched
+    );
+    assert!(
+        attachment
+            .attached
+            .is_some_and(|attached| attached >= answered),
+        "{attachment:?}"
+    );
+    // On Linux, OpenVMM read none of the attachment until then: what `SIOCOUTQ` reports of it,
+    // which falls as soon as OpenVMM reads any byte of it, rose by the same step with each byte
+    // that the host wrote, and stayed as the write left it until the repair could acknowledge the
+    // restore, and OpenVMM had read it whole once the broker answered. A listener of this process
+    // shows that the records would show the read of a prefix.
+    if cfg!(target_os = "linux") {
+        let charge = charge_once_written(&attachment);
+        let held = attachment
+            .unread
+            .iter()
+            .filter(|(at, _)| *at < earliest)
+            .collect::<Vec<_>>();
+        assert!(!held.is_empty(), "{attachment:?}");
+        assert!(
+            held.iter().all(|(_, unread)| *unread == Some(charge)),
+            "{attachment:?}"
+        );
+    }
+    assert_read_once_answered(&attachment);
+    #[cfg(target_os = "linux")]
+    assert_a_prefix_read_shows(&sandbox.root.join("prefix.sock"));
+
+    // Once the repair acknowledged the restore, OpenVMM reads the host's input at once: the
+    // broker answers the attachment of a reattach, which no gate holds, within a fraction of the
+    // delay, and on Linux, OpenVMM read it whole by then.
+    let mut open = Watched::new();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let reattached = reattach_clone(
+        &mut acquired.locked,
+        &runtime.identity,
+        &mut open,
+        deadline,
+        Duration::from_secs(10),
+    )
+    .unwrap();
+    let ReattachedClone::Live { vmm: held, session } = reattached else {
+        panic!("the reattach did not find the clone running");
+    };
+    drop(session);
+    drop(held);
+    let attachment = open.attachment();
+    let written = attachment.written.expect("the host wrote its attachment");
+    let answered = attachment.answered.expect("the broker answered");
+    assert!(answered - written < REPAIR_DELAY / 4, "{attachment:?}");
+    assert_read_once_answered(&attachment);
+    drop(vmm);
+    let lease = acquired.lease.id().to_string();
+    drop(acquired);
+
+    // The guest waited the delay before its repair, which acknowledged the restore before the
+    // clone took its reset and the host's first message.
+    let started = Printed::from([
+        ("pid".to_owned(), pid.to_string()),
+        ("lease".to_owned(), lease),
+    ]);
+    let mut cloned = Cloned {
+        sandbox,
+        staged: None,
+        started,
+        ran: false,
+    };
+    let facts = cloned.probe(&["activation"]);
+    let delay = REPAIR_DELAY.as_micros().to_string();
+    assert_eq!(facts["activation.repair-delay"], delay, "{facts:?}");
+    assert_timeline(&facts);
+    cloned.stop();
+}
+
 #[test]
 #[ignore = "boots VMs; see the module documentation for what they need"]
 fn a_generation_is_eligible_by_the_clock_of_its_capture() {
@@ -3167,10 +3670,35 @@ fn a_generation_is_eligible_by_the_clock_of_its_capture() {
     }
 }
 
+/// Returns the bytes that a command of the host program read through its read calls, as it
+/// printed them in `printed` as it exited.
+fn read_bytes(printed: &Printed) -> u64 {
+    printed
+        .get("read-bytes")
+        .and_then(|bytes| bytes.parse().ok())
+        .unwrap_or_else(|| panic!("{printed:?}"))
+}
+
+/// Returns the names of the disks of a clone whose files its VMM reads, from the `disks` fact of
+/// its `devices` probe, `NAME:SECTORS:ACCESS` each: its image's, read-only, and its scratch
+/// device, writable, unless its upper is in RAM, whose scratch no file backs.
+fn backed_disks(fact: &str, upper: Upper<'_>) -> Vec<String> {
+    fact.split(' ')
+        .filter_map(|disk| {
+            let parts = disk.split(':').collect::<Vec<_>>();
+            let &[name, _, access] = parts.as_slice() else {
+                panic!("{disk:?} in {fact:?}");
+            };
+            (access == "ro" || upper != Upper::Ram).then(|| name.to_owned())
+        })
+        .collect()
+}
+
 #[test]
 #[ignore = "boots VMs; see the module documentation for what they need"]
 fn a_clone_reads_no_more_of_its_disks_than_its_root_needs() {
     let template = Template::create("cl-reads");
+    let image = fs::metadata(&template.image).unwrap().len();
     for upper in [Upper::Scratch, Upper::Ram] {
         let start = StartOf {
             upper,
@@ -3178,8 +3706,25 @@ fn a_clone_reads_no_more_of_its_disks_than_its_root_needs() {
         };
         let mut cloned = template.start("cl-d", start, 0);
         cloned.assert_started();
+        // The host's processes count the bytes that their read calls read, the cache's included:
+        // the staging hashed the image, which its count shows, while the start read less than an
+        // eighth of it. The clone's VMM, which the start left running, is counted below.
+        let staged = cloned
+            .staged
+            .as_ref()
+            .expect("the clone's images were staged");
+        assert!(read_bytes(staged) >= image, "{upper:?}: {staged:?}");
+        let started = read_bytes(&cloned.started);
+        assert!(
+            started * 8 < image,
+            "{upper:?}: the start read {started} bytes"
+        );
+        let vmm = cloned.sandbox.vmm().expect("the clone's VMM runs");
+        let ready = vmm.bytes_read().unwrap();
+
         let facts = cloned.probe(&["devices", "reads"]);
         let sizes = disks(&facts["devices.disks"]);
+        let backed = backed_disks(&facts["devices.disks"], upper);
         let restored = disks(&facts["reads.disks"]);
         assert_eq!(
             sizes.keys().collect::<Vec<_>>(),
@@ -3192,10 +3737,7 @@ fn a_clone_reads_no_more_of_its_disks_than_its_root_needs() {
             .map(|sectors| sectors * SECTOR)
             .collect::<Vec<_>>();
         lengths.sort_unstable();
-        let mut expected = [
-            fs::metadata(&template.image).unwrap().len(),
-            DEFAULT_SCRATCH_LENGTH,
-        ];
+        let mut expected = [image, DEFAULT_SCRATCH_LENGTH];
         expected.sort_unstable();
         assert_eq!(lengths, expected, "{facts:?}");
         for (disk, sectors) in &sizes {
@@ -3205,6 +3747,12 @@ fn a_clone_reads_no_more_of_its_disks_than_its_root_needs() {
                 restored[disk]
             );
         }
+        // Nor did the VMM read more than an eighth of the disks whose files it reads by then.
+        let length = backed.iter().map(|disk| sizes[disk] * SECTOR).sum::<u64>();
+        assert!(
+            ready * 8 < length,
+            "{upper:?}: the VMM read {ready} bytes once the clone was ready, of disks of {length}"
+        );
 
         // A read of each disk to its end, which the statistics count.
         let facts = cloned.probe(&["read-disks"]);
@@ -3224,6 +3772,27 @@ fn a_clone_reads_no_more_of_its_disks_than_its_root_needs() {
                 after[disk]
             );
         }
+        // The VMM read from the disks' files what the guest's reads asked of them, which the
+        // VMM's count shows on Windows, but not on Linux, where OpenVMM reads them through
+        // io_uring, which `rchar` misses: there, the count covers the VMM's read calls alone.
+        let asked = backed
+            .iter()
+            .map(|disk| (after[disk] - restored[disk]) * SECTOR)
+            .sum::<u64>();
+        let counted = vmm.bytes_read().unwrap() - ready;
+        if VMM_COUNTS_DISK_READS {
+            assert!(
+                counted >= asked,
+                "{upper:?}: the VMM counted {counted} bytes for the {asked} that the guest read"
+            );
+        } else {
+            assert!(
+                counted * 8 < asked,
+                "{upper:?}: the VMM's read calls read {counted} bytes for the {asked} that the \
+                 guest read"
+            );
+        }
+        drop(vmm);
         cloned.stop();
     }
     assert_payload(&template, false);
@@ -4792,7 +5361,7 @@ fn a_run_whose_clone_s_vm_exits_during_its_execution_ends_with_the_clone_s_failu
     // while the clone's VMM ends without a word of its guest, as a crash of the VMM would end it.
     let script = "printf running > /srv/data/running; exec sleep 600";
     let execution = ["--identity", "0:0", "--", "/bin/sh", "-c", script];
-    let (sandbox, mut running) = template.begin_in("cl-rl", "run", &start, &execution);
+    let (sandbox, _, mut running) = template.begin_in("cl-rl", "run", &start, &execution);
     let marker = export.path("running");
     assert_eq!(sandbox.paused(&mut running, &marker), "running");
     let vmm = sandbox.vmm().expect("the clone's VMM runs");

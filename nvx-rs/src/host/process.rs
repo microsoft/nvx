@@ -15,6 +15,10 @@
 //! Linux 5.3 or in sandboxes that refuse them, check the reference at a short interval instead,
 //! until the deadline of the wait, and cannot terminate a process that they cannot hold.
 //!
+//! [`Process::bytes_read`] reports how many bytes the process has read through the operating
+//! system's read calls, and [`own_bytes_read`] how many the calling process has, so that a caller
+//! can tell how much of its files a VMM, or the caller itself, read.
+//!
 //! The [`supervisor`](super::supervisor) launches OpenVMM, and its
 //! [`Launched::process`](super::supervisor::Launched::process) holds the child that it started
 //! through a handle of its own.
@@ -240,6 +244,27 @@ impl Process {
         self.handle.kill(self.reference.pid)
     }
 
+    /// Returns how many bytes the process has read through the operating system's read calls,
+    /// from files, pipes, sockets, and devices alike, whether the host's cache served them or not:
+    /// the `rchar` of `/proc/<pid>/io` on Linux, and the `ReadTransferCount` of
+    /// `GetProcessIoCounters` on Windows. Neither counts what the process reads otherwise: the
+    /// pages that it maps from a file, as OpenVMM maps the memory of a snapshot that it restores,
+    /// nor, on Linux, what it reads through io_uring, as OpenVMM reads a sandbox's block devices.
+    /// On Linux, the count also holds what the process's children read, once the process reaped
+    /// them, as the kernel accounts them to their parent, while Windows counts the process's own
+    /// reads alone.
+    ///
+    /// On Linux, the count is read from the process's `/proc` file, which is opened before the
+    /// process's identity is checked, so that the count is the process's own, and the read fails
+    /// with [`io::ErrorKind::NotFound`] once the process has exited. On Windows, the handle keeps
+    /// the count of a process that exited. Fails with [`io::ErrorKind::PermissionDenied`] when
+    /// this user may not read the process's counters, and with [`io::ErrorKind::Unsupported`] on
+    /// hosts other than Linux and Windows.
+    pub fn bytes_read(&self) -> io::Result<u64> {
+        self.handle
+            .bytes_read(self.reference.pid, self.reference.start_time)
+    }
+
     /// Closes the process's handle that has the value of this process's handle `ours`, which the
     /// process inherited from this one, and never uses, as a VMM never uses the guards of the
     /// checked files that it inherits on Windows.
@@ -264,6 +289,15 @@ impl fmt::Debug for Process {
             .field("wait_method", &self.wait_method())
             .finish_non_exhaustive()
     }
+}
+
+/// Returns how many bytes the calling process has read through the operating system's read
+/// calls, as [`Process::bytes_read`] counts them: on Linux, with what the children that it reaped
+/// read.
+///
+/// Fails with [`io::ErrorKind::Unsupported`] on hosts other than Linux and Windows.
+pub fn own_bytes_read() -> io::Result<u64> {
+    platform::own_bytes_read()
 }
 
 /// Checks `reference` against the boot that `current_boot` returns, and during the same boot,
@@ -545,6 +579,85 @@ mod reference_tests {
                 .wait(Instant::now() + Duration::from_secs(10))
                 .unwrap()
         );
+    }
+
+    /// Returns a command that reads the first line of the file at `path`, prints `read`, then
+    /// waits for a line of its standard input, which reaches its end once the test closes it, and
+    /// exits. The shell reads the line itself, through read calls of its own.
+    #[cfg(windows)]
+    fn reader(path: &std::path::Path) -> std::process::Command {
+        use std::os::windows::process::CommandExt;
+
+        let mut command = std::process::Command::new("cmd");
+        // `cmd` takes the rest of its command line as it is, the quotes around the path included.
+        command.args(["/d", "/q", "/c"]).raw_arg(format!(
+            "set /p line=<\"{}\" & echo read & set /p wait=",
+            path.display()
+        ));
+        command
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped());
+        command
+    }
+
+    /// Returns a command that reads the first line of the file at `path`, prints `read`, then
+    /// waits for a line of its standard input, which reaches its end once the test closes it, and
+    /// exits. The shell reads the line itself, through read calls of its own.
+    #[cfg(target_os = "linux")]
+    fn reader(path: &std::path::Path) -> std::process::Command {
+        let mut command = std::process::Command::new("sh");
+        command
+            .args(["-c", "read -r line < \"$0\"; echo read; read -r wait"])
+            .arg(path)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped());
+        command
+    }
+
+    #[cfg(any(target_os = "linux", windows))]
+    #[test]
+    fn processes_count_the_bytes_that_their_read_calls_read() {
+        use std::io::{BufRead, BufReader, Write};
+
+        // A line short enough for `set /p`, which reads at most 1023 characters of one.
+        const LINE: usize = 512;
+        let path = std::env::temp_dir().join(format!("nvx-bytes-read-{}", std::process::id()));
+        let mut contents = vec![b'x'; LINE];
+        contents.push(b'\n');
+        std::fs::write(&path, &contents).unwrap();
+
+        // This process counts what it reads, and what other tests' threads read meanwhile.
+        let before = own_bytes_read().unwrap();
+        let read = std::fs::read(&path).unwrap();
+        assert!(own_bytes_read().unwrap() >= before + read.len() as u64);
+
+        // Another process counts what it read once it says so, while it runs.
+        let mut child = platform::inherit::spawn_command(&mut reader(&path)).unwrap();
+        let mut said = String::new();
+        let stdout = child.stdout.take().unwrap();
+        BufReader::new(stdout).read_line(&mut said).unwrap();
+        let reference = ProcessRef {
+            pid: child.id(),
+            start_time: platform::process_start_time(child.id()).unwrap().unwrap(),
+            boot: BootId::current().unwrap(),
+        };
+        let process = Process::open(&reference).unwrap().unwrap();
+        let counted = process.bytes_read();
+        let mut stdin = child.stdin.take().unwrap();
+        stdin.write_all(b"x\n").unwrap();
+        drop(stdin);
+        child.wait().unwrap();
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(said.trim_end(), "read");
+        assert!(counted.unwrap() >= LINE as u64);
+        // Once the process exited, Linux keeps no count of it, and Windows keeps its count in the
+        // handle.
+        let exited = process.bytes_read();
+        if cfg!(windows) {
+            assert!(exited.unwrap() >= LINE as u64);
+        } else {
+            assert_eq!(exited.unwrap_err().kind(), io::ErrorKind::NotFound);
+        }
     }
 }
 

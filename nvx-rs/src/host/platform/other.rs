@@ -56,6 +56,16 @@ impl ProcessHandle {
     pub(crate) fn kill(&self, _pid: u32) -> io::Result<()> {
         match *self {}
     }
+
+    /// Never called: no handle exists.
+    pub(crate) fn bytes_read(&self, _pid: u32, _start_time: u64) -> io::Result<u64> {
+        match *self {}
+    }
+}
+
+/// Fails: this host has no read counters that NVX reads.
+pub(crate) fn own_bytes_read() -> io::Result<u64> {
+    Err(unsupported())
 }
 
 /// Reports every process as gone, as [`process_start_time`] does.
