@@ -821,7 +821,8 @@ fn output_beyond_the_guest_limit_breaks_the_protocol() {
             format!("managed guest exceeded the {MAX_OUTPUT_BYTES}-byte output limit")
         )
     );
-    drop(session);
+    // The guest may still be sending its exit record, which the host never reads, and a send
+    // fails once the session is gone, so the session ends after the guest.
     worker.join().unwrap();
 }
 
